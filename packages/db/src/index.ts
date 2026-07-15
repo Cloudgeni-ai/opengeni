@@ -13479,10 +13479,10 @@ export async function recordWarmingSandboxCreated(
     resumeState?: Record<string, unknown> | null;
     leaseTtlMs: number;
     /** The still-WARMING lease must keep the warming budget after create() returns:
-     *  the spawner has yet to run display-stack setup, port expose, and
-     *  commitWarmingToWarm, which can exceed the 90s turn TTL and trip the
-     *  warming-death (c2) drain now that instance_id is set. Defaults to leaseTtlMs
-     *  for legacy callers/tests. */
+     *  provider manifest hydration and commitWarmingToWarm can exceed the 90s turn
+     *  TTL and trip the warming-death (c2) drain now that instance_id is set.
+     *  Desktop/display work is not part of warming; it is initialized lazily by
+     *  viewer attach or actual computer-use. Defaults to leaseTtlMs for callers. */
     warmingLeaseTtlMs?: number;
   },
 ): Promise<{ recorded: boolean; lease: LeaseSnapshot | null }> {

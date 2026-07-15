@@ -8,11 +8,9 @@
 //      the SOLE double-spawn guard (P1.1).
 //   2. establishSandboxSessionFromEnvelope — resume the one box BY ID (warm
 //      reattach, R4-safe) or cold-restore from snapshot on a provider NotFound.
-//   3. (spawner) ensureDisplayStack + exposeStreamPort, then commitWarmingToWarm
-//      (the lease_epoch++ fence + folds the resume envelope onto the lease). The
-//      ATTACHED/REARMED path RE-ensures the display stack too (idempotent) so a
-//      computer-use turn always finds a live :0 even on a box first warmed by a
-//      non-desktop op or after a snapshot rollover dropped the X stack.
+//   3. (spawner) commitWarmingToWarm (the lease_epoch++ fence + folds the resume
+//      envelope onto the lease). Optional desktop work is deliberately absent:
+//      the viewer and the first actual computer-use action initialize :0 lazily.
 //   4. the caller injects {client, session, sessionState} NON-OWNED into the run
 //      (the SDK never reaps it — the keystone), runs, then in `finally` calls the
 //      returned `release()` and drops the in-memory handle. NEVER provider-delete
@@ -38,22 +36,12 @@ import {
 } from "@opengeni/db";
 import {
   establishSandboxSessionFromEnvelope,
-  ensureDisplayStack as ensureDisplayStackOnBox,
-  desktopCapableBackend,
   serializeEstablishedSandboxEnvelope,
   deletePriorPersistedSnapshot,
-  DisplayStackError,
-  DisplayStackUnsupportedError,
-  buildStreamUrl,
-  StreamPortUnavailableError,
   tagModalSandbox,
   type EstablishedSandboxSession,
-  type ExposedPortEndpoint,
   type RuntimeMetricsHooks,
 } from "@opengeni/runtime";
-import { DESKTOP_STREAM_PORT } from "@opengeni/contracts";
-
-export { DESKTOP_STREAM_PORT };
 
 // Re-exported for callers that just want the ack-kind union.
 export type ResumeHolderKind = LeaseHolderKind;
@@ -448,9 +436,9 @@ export async function resumeBoxForTurn(
   // HOLDER-LIVENESS loop: touch OUR holder row every 10s from the moment it is
   // registered until release. The dead-worker turn-holder reap judges liveness
   // by last_heartbeat_at, and the full turn heartbeat (heartbeatLeaseHolder in
-  // agent-turn) only starts AFTER this function returns — while waitForWarm,
-  // establish/cold-restore, and the display stack can legitimately run for
-  // many minutes in here, COMPOUNDING past any fixed reap horizon. With this
+  // agent-turn) only starts AFTER this function returns — while waitForWarm and
+  // establish/cold-restore can legitimately run for many minutes in here,
+  // COMPOUNDING past any fixed reap horizon. With this
   // loop no live holder is ever silent for more than one tick, so the reap
   // horizon is pure defense-in-depth, not a tuned guess about path lengths.
   // Epoch-free by design (touch only refreshes our own row's timestamp);
@@ -477,7 +465,7 @@ export async function resumeBoxForTurn(
   }
 
   // SPAWNER: we won the cold->warming CAS. Establish (cold-restore/create),
-  // expose the stream port, then commit warm (lease_epoch++).
+  // then commit warm (lease_epoch++). Optional desktop setup is lazy.
   if (acquired.role === "spawner") {
     const expectedEpoch = acquired.lease.leaseEpoch;
     let createdEstablished: EstablishedSandboxSession | null = null;
@@ -513,7 +501,7 @@ export async function resumeBoxForTurn(
             resumeBackendId: created.backendId,
             resumeState: resumeEnvelope,
             leaseTtlMs,
-            // Keep the warming budget after create(): display-stack + port +
+            // Keep the warming budget after create(): manifest setup and
             // commitWarmingToWarm still run, and can exceed the 90s turn TTL.
             warmingLeaseTtlMs: settings.sandboxWarmingTimeoutMs,
           });
@@ -530,8 +518,6 @@ export async function resumeBoxForTurn(
         },
       });
       createdEstablished = established;
-      await ensureDisplayStack(settings, established);
-      const endpoint = await exposeStreamPort(settings, established);
       // Fold the LIVE box into a re-resumable envelope and persist it as the
       // lease's resume_state — exactly like the API-direct paths (channel-a.ts /
       // viewer.ts). Without this the turn committed the ORIGINAL session manifest
@@ -547,7 +533,9 @@ export async function resumeBoxForTurn(
         sandboxGroupId: ids.sandboxGroupId,
         expectedEpoch,
         instanceId: established.instanceId,
-        dataPlaneUrl: endpoint?.url ?? null,
+        // Viewer attach resolves and records the tunnel URL lazily. A headless
+        // turn must not touch the optional desktop data plane.
+        dataPlaneUrl: null,
         resumeBackendId: established.backendId,
         resumeState: resumeEnvelope,
         leaseTtlMs,
@@ -617,16 +605,6 @@ export async function resumeBoxForTurn(
       ...(ids.environment ? { environment: ids.environment } : {}),
       ...(services.sandboxMetrics ? { metrics: services.sandboxMetrics } : {}),
     });
-    // Re-ensure the desktop display stack on the ATTACHED/REARMED path too — NOT
-    // just the spawner path. A turn attaching to a warm box whose :0 was never
-    // brought up (the box was first warmed by a Channel-A op, or a snapshot
-    // rollover dropped the X stack) would otherwise drive computer-use against a
-    // dead display: scrot yields an empty PNG, the SDK builds `image_url: ''`,
-    // and the model rejects the turn with "400 Invalid input[N].output.image_url".
-    // ensureDisplayStack is idempotent + flock-guarded (cheap no-op when up) and
-    // NO-OPs when the desktop tier is off or the backend is headless-only, so the
-    // headless turn path stays byte-for-byte unchanged.
-    await ensureDisplayStack(settings, established);
     return { established, leaseEpoch, release };
   } catch (error) {
     await release();
@@ -772,129 +750,4 @@ async function waitForWarm(
     // still warming — keep polling.
   }
   throw new SandboxWarmingTimeoutError(ids.backend, settings.sandboxWarmingTimeoutMs);
-}
-
-// ============================================================================
-// Channel-B display-stack launch (P4.1 — ensureDisplayStack is now real).
-//
-// Idempotent + callable by ANY worker on the resumed handle (and by the API on a
-// viewer op). When the desktop tier is OFF (sandboxDesktopEnabled=false) or the
-// backend is headless-only, this is a NO-OP — the HEADLESS ROLLOVER branch (I5),
-// so the headless turn path is byte-for-byte unchanged. When the tier is ON for
-// a desktop-capable backend, it execs the canonical opengeni-desktop-up under an
-// in-box flock (re-establishes after a rollover; safe to call N times).
-// `exposeStreamPort` real body remains a P4.2 concern.
-// ============================================================================
-
-/**
- * Ensure the desktop display stack (Xvfb -> XFCE -> x11vnc ->
- * websockify:6080 -> noVNC) is up on the live box. Idempotent: the lock-free
- * pre-check + the in-box flock + the up-script's per-stage PID guards make a
- * second call a cheap no-op. NO-OP when the desktop tier is disabled or the
- * backend cannot serve a desktop (degradation is a value: a headless-only session
- * simply skips the stack). Delegates to the agent-loop-free leaf
- * (@opengeni/runtime/sandbox display-stack).
- *
- * BEST-EFFORT — NEVER fails the turn. The display stack powers the OPTIONAL
- * Channel-B desktop / computer-use surface; it is NOT load-bearing for the
- * agent's work. A `DisplayStackError` (a real stage failure, OR — the regression
- * this guards — a timeout-derived exit -1 when a viewer attach already holds /
- * contends the up-script's flock and the turn's ensure waits ~45s and times out)
- * is CAUGHT + logged and swallowed, so a slow/contended/failed stack degrades to
- * Channel-A-only rather than killing the turn. The fast lock-free pre-check
- * upstream means the already-up case resolves in milliseconds and never reaches
- * this catch in the first place. `DisplayStackUnsupportedError` (a box that can't
- * run commands at all) is likewise swallowed.
- */
-export async function ensureDisplayStack(
-  settings: Settings,
-  established: EstablishedSandboxSession,
-): Promise<void> {
-  // Headless rollover branch (I5): the tier is off OR the backend is
-  // headless-only -> no display stack. Behavior-preserving for the headless path.
-  // This is ALSO the "is the desktop relevant to this turn?" gate: we only touch
-  // the box when the desktop tier is enabled for a desktop-capable backend.
-  if (!settings.sandboxDesktopEnabled) {
-    return;
-  }
-  if (!desktopCapableBackend(established.backendId)) {
-    return;
-  }
-  try {
-    await ensureDisplayStackOnBox(established.session);
-  } catch (error) {
-    // The desktop is a value-add, not load-bearing for the agent's work, so NO
-    // display-stack failure may fail the turn:
-    //  - DisplayStackUnsupportedError: the box genuinely can't run commands ->
-    //    Channel-A-only.
-    //  - DisplayStackError: a stage failure OR a contended-lock timeout (exit -1)
-    //    after a viewer attach already brought the stack up / is mid-launch. The
-    //    pre-check makes the already-up case fast; if we still time out or a stage
-    //    really failed, degrade — don't die.
-    if (error instanceof DisplayStackUnsupportedError || error instanceof DisplayStackError) {
-      console.warn(
-        `[sandbox-resume] ensureDisplayStack degraded to Channel-A-only (turn continues): ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
-      return;
-    }
-    // An unexpected non-display error (e.g. the session blew up entirely) still
-    // propagates — that is not a desktop-surface degradation.
-    throw error;
-  }
-}
-
-// The structural slice of a provider session we need to resolve the tunnel.
-type PortResolvableSession = {
-  resolveExposedPort?: (port: number) => Promise<ExposedPortEndpoint>;
-};
-
-/**
- * Resolve the desktop tunnel URL (resolveExposedPort(6080)) and assemble the
- * direct-to-provider WS URL, recorded on the lease as `data_plane_url` at
- * commit. The per-viewer scoped token is minted at viewer-attach time (the
- * handshake), NOT here — the spawner records only the box-scoped tunnel URL so
- * the lease carries a fresh value across a rollover. P4.2 productionizes the
- * P4.1 stub.
- *
- * Returns null (degradation is a value, NEVER a throw):
- *   - the desktop tier is off (sandboxDesktopEnabled=false), or
- *   - the backend is headless-only (no desktop), or
- *   - the provider session cannot resolve the port (no resolveExposedPort), or
- *   - the tunnel lookup transiently failed.
- * In every null case the lease's data_plane_url stays null and the next
- * API-direct viewer op re-mints it; the turn never fails on a desktop hiccup.
- */
-export async function exposeStreamPort(
-  settings: Settings,
-  established: EstablishedSandboxSession,
-): Promise<{ url: string; expiresAt: Date } | null> {
-  // Headless rollover branch (I5): tier !== desktop -> no stream port to expose.
-  if (!settings.sandboxDesktopEnabled) {
-    return null;
-  }
-  if (!desktopCapableBackend(established.backendId)) {
-    return null;
-  }
-  const session = established.session as PortResolvableSession;
-  if (typeof session?.resolveExposedPort !== "function") {
-    return null;
-  }
-  try {
-    const endpoint = await session.resolveExposedPort(DESKTOP_STREAM_PORT);
-    const url = buildStreamUrl(endpoint);
-    // The provider tunnel URL is box-lifetime-valid (Modal raw TLS) or
-    // provider-TTL-signed (Daytona/Blaxel); the per-viewer token's TTL bounds the
-    // viewer's freshness. We record only the URL on the lease; expiresAt here is a
-    // soft hint (the box's idle horizon), not a hard token expiry.
-    return { url, expiresAt: new Date(Date.now() + settings.sandboxLeaseTtlMs) };
-  } catch (error) {
-    // Degradation is a value: a transient resolve failure leaves data_plane_url
-    // null and the next viewer op re-mints. Never fail the turn on a desktop op.
-    if (error instanceof StreamPortUnavailableError) {
-      return null;
-    }
-    return null;
-  }
 }

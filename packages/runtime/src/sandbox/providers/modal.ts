@@ -6,7 +6,14 @@ import { SandboxConfigError } from "../errors";
 import type { ProviderRegistration } from "./types";
 
 const MODAL_ORPHAN_SWEEP_LIMIT = 50;
-const MODAL_UNATTRIBUTED_ORPHAN_GRACE_MS = 30 * 60_000;
+// A provider box is invisible to the lease until Modal create + manifest
+// materialization returns and the creation callback records its instance id.
+// Production baseline (2026-07-15, all 8 turn workers): 155/155 completed creates
+// finished under 10s (154 under 2.5s). Two minutes is a 12x observed-max buffer,
+// while avoiding the former 30-minute retention of boxes abandoned by a rolling
+// worker restart. The live-instance guard below remains authoritative: once a box
+// is recorded by any lease, age and missing/stale tags can never terminate it.
+const MODAL_UNATTRIBUTED_ORPHAN_GRACE_MS = 2 * 60_000;
 
 export type ModalSandboxAttribution = {
   leaseId: string;

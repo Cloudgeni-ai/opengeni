@@ -45,7 +45,7 @@ import { sandboxCommandExitCode, sandboxCommandOutput, sandboxCommandStillRunnin
 // command body from Modal's execCommand banner ("…Output:\n<body>"). Imported from
 // the agent-loop-free leaf (importing a pure parser FROM the leaf is allowed — the
 // leaf boundary only forbids the leaf importing the agent loop, not the reverse).
-import { stripExecBanner } from "./sandbox";
+import { ensureDisplayStack, stripExecBanner } from "./sandbox";
 
 // `requireBoundSession` lives in @openai/agents-core/sandbox/capabilities/base
 // but is NOT re-exported from the public @openai/agents/sandbox barrel, so we
@@ -111,6 +111,14 @@ export type SandboxComputerOptions = {
   // exposed mainly so tests can shrink it (a real caller wants the full budget).
   screenshotWarmupBudgetMs?: number;
   screenshotRetryDelayMs?: number;
+  /**
+   * One turn-scoped preparation hook, invoked by the first real computer action.
+   * The agent may advertise computer-use on every turn, but merely advertising the
+   * tool must not boot Xvfb/XFCE or start a recording. The runtime capability owns
+   * this hook and uses it to bring up :0 (and optionally notify the worker) only
+   * after the model actually chooses a computer tool.
+   */
+  prepare?: (session: SandboxSessionLike) => Promise<void>;
 };
 
 // X keysym map for keypress(): model key names → xdotool keysyms.
@@ -233,7 +241,7 @@ export class ComputerActionError extends Error {
 export class SandboxComputer implements Computer {
   readonly environment = "ubuntu" as const;
   readonly dimensions: [number, number];
-  private session: ComputerSession;
+  private session: ComputerSession & SandboxSessionLike;
   private readonly display: string;
   private readonly runAs?: string;
   private readonly typeDelayMs: number;
@@ -241,9 +249,12 @@ export class SandboxComputer implements Computer {
   private readonly tmp: string;
   private readonly screenshotWarmupBudgetMs: number;
   private readonly screenshotRetryDelayMs: number;
+  private readonly prepare: ((session: SandboxSessionLike) => Promise<void>) | undefined;
+  private prepared = false;
+  private preparation: Promise<void> | null = null;
 
   constructor(session: SandboxSessionLike, opts: SandboxComputerOptions = {}) {
-    this.session = session as unknown as ComputerSession;
+    this.session = session as ComputerSession & SandboxSessionLike;
     this.display = opts.display ?? DEFAULT_DISPLAY;
     this.dimensions = opts.dimensions ?? DEFAULT_DIMENSIONS;
     if (opts.runAs !== undefined) {
@@ -254,17 +265,42 @@ export class SandboxComputer implements Computer {
     this.tmp = opts.screenshotTmpDir ?? "/tmp";
     this.screenshotWarmupBudgetMs = opts.screenshotWarmupBudgetMs ?? SCREENSHOT_WARMUP_BUDGET_MS;
     this.screenshotRetryDelayMs = opts.screenshotRetryDelayMs ?? SCREENSHOT_RETRY_DELAY_MS;
+    this.prepare = opts.prepare;
   }
 
   /** Rebind to a freshly resumed-by-id session after a box rollover / re-establish. */
   rebind(session: SandboxSessionLike) {
-    this.session = session as unknown as ComputerSession;
+    this.session = session as ComputerSession & SandboxSessionLike;
+    this.prepared = false;
+    this.preparation = null;
+  }
+
+  private async prepareOnce(): Promise<void> {
+    if (this.prepared) return;
+    if (!this.prepare) {
+      // No lazy hook means the caller handed us an already-ready display, which
+      // is the historical direct-construction behavior used by embedders/tests.
+      this.prepared = true;
+      return;
+    }
+    this.preparation ??= this.prepare(this.session);
+    try {
+      await this.preparation;
+      this.prepared = true;
+    } catch (error) {
+      // A viewer may have contended the display flock or a provider operation may
+      // have failed transiently. Let a later computer call retry; never cache a
+      // rejected preparation as the permanent state of the turn.
+      this.preparation = null;
+      throw error;
+    }
   }
 
   // The single command primitive. Dual-paths exec/execCommand (F1), then uses the
   // established string-aware parsers (F2/F3): exitCode from the preamble, and
   // "still running" → a retriable failure. Returns the command OUTPUT body.
   private async x(cmd: string): Promise<string> {
+    await this.prepareOnce();
     const args = {
       cmd: `DISPLAY=${this.display} ${cmd}`,
       ...(this.runAs ? { runAs: this.runAs } : {}),
@@ -365,7 +401,12 @@ export class SandboxComputer implements Computer {
       } finally {
         // Best-effort cleanup on every attempt (success OR failure); never mask the
         // screenshot result.
-        await this.x(`rm -f ${f}`).catch(() => undefined);
+        // If preparation itself failed, scrot never ran and no file exists. Do
+        // not route cleanup through x(), because that would retry the expensive
+        // display preparation merely to delete a nonexistent path.
+        if (this.prepared) {
+          await this.x(`rm -f ${f}`).catch(() => undefined);
+        }
       }
       // Stop once the warm-up budget is spent — the NEXT sleep would push us past it.
       if (Date.now() + this.screenshotRetryDelayMs >= deadline) {
@@ -1183,6 +1224,8 @@ export type ComputerUseArgs = {
   // legacy sniff behaviour is preserved byte-for-byte (back-compat for any embedder
   // that constructs the capability without threading a mode).
   toolMode?: ComputerToolMode;
+  /** Called after the display is ready on the first actual computer action. */
+  onReady?: (session: SandboxSessionLike) => Promise<void>;
 };
 
 export function computerUse(args: ComputerUseArgs = {}): ComputerUseCapability {
@@ -1231,6 +1274,14 @@ export class ComputerUseCapability extends Capability {
           ...(this.args.display ? { display: this.args.display } : {}),
           // The SDK base exposes the bound runAs as a protected field.
           ...(typeof this._runAs === "string" ? { runAs: this._runAs } : {}),
+          // Crucially lazy: tool registration does no provider work. The first
+          // click/type/screenshot boots the display, then lets the worker start
+          // any computer-use-only recording. One SandboxComputer instance caches
+          // this for the rest of the turn.
+          prepare: async (preparedSession) => {
+            await ensureDisplayStack(preparedSession);
+            await this.args.onReady?.(preparedSession);
+          },
         });
     // HARDENING: when the caller declares an EXPLICIT toolMode, obey it and NEVER
     // consult `supportsStructuredToolOutputTransport` — tool selection must not

@@ -837,7 +837,7 @@ export async function ensureTurnModalRegistryImage(
 }
 
 /**
- * Decide whether to start on-turn desktop recording for THIS turn.
+ * Decide whether the first actual computer action may start a proof recording.
  *
  * On-turn recording runs ffmpeg/x11grab INSIDE the box and reads the .mp4 back
  * out of the box's /tmp — plumbing that exists only for OpenGeni-operated cloud
@@ -856,10 +856,9 @@ export async function ensureTurnModalRegistryImage(
  * correctly skips; a machine-home turn that degraded back to its cloud group box
  * (swap-away / flag-off) resolves to undefined and records as before.
  *
- * EDGE — mid-turn swap: this is evaluated ONCE at turn start (the box is only filmed
- * for the duration of one turn). A swap AFTER the recording starts is deliberately
- * ignored — a partial-turn recording already has defined failure semantics, so we do
- * not add machinery to stop/restart it mid-turn.
+ * EDGE — mid-turn swap: this is evaluated once when computer-use first runs. A swap
+ * after recording starts is deliberately ignored; the partial recording already has
+ * defined failure semantics, so there is no stop/restart machinery.
  */
 export function shouldStartOnTurnRecording(params: {
   recordingEnabled: boolean;
@@ -1308,11 +1307,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // the atomic DB throttle discard the fresher one). Interval throttling
     // itself lives in maybePersistWarmWorkspaceSnapshot / persistWarmSnapshot.
     let snapshotInFlight: Promise<void> | null = null;
-    // P4.3 on-turn recording: when the desktop tier + recording are enabled and
-    // the box is desktop-capable, the turn films the SAME :0 the agent's
-    // computer-use drives, finalized to storage in this activity's `finally`
-    // (read+PUT in-process — never a Temporal payload, F10). null otherwise.
+    // Computer-use-only recording. Ordinary shell/filesystem turns leave this
+    // null; the first actual computer action starts it after :0 is ready.
     let activeRecording: ActiveRecording | null = null;
+    let computerUseRecordingStart: Promise<void> | null = null;
     // P4.3 recording gate: flips true the first time a computer-use/desktop tool
     // ACTUALLY executes this turn (an SDK `computer_call` item streams through). A
     // plain text turn ("hey"/"continue") never flips it, so finalize discards the
@@ -1463,12 +1461,16 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       sandbox: ResumedTurnSandbox,
       effectiveBackend: Settings["sandboxBackend"] | undefined,
     ): Promise<void> => {
-      // P4.3 on-turn recording. The box's :0 display stack was brought up by
-      // resumeBoxForTurn (spawner path) / is up from a prior turn; film it for
-      // the duration of this turn so the human can watch the agent work and the
-      // agent's computer-use proofs are captured. Best-effort: a recording start
-      // failure NEVER fails the turn (the desktop is a value-add). Finalized in
-      // `finally` (read+PUT in this same activity — never a Temporal payload).
+      if (activeRecording) {
+        return;
+      }
+      if (computerUseRecordingStart) {
+        await computerUseRecordingStart;
+        return;
+      }
+      // Called only by the runtime's first-computer-action hook. Plain sandbox
+      // operations never start ffmpeg and never boot a display merely to record
+      // an unused desktop. Recording failure never fails the computer action.
       if (
         shouldStartOnTurnRecording({
           recordingEnabled: settings.recordingEnabled,
@@ -1480,26 +1482,32 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           effectiveBackend,
         })
       ) {
-        try {
-          const begun = await beginRecording({
-            settings,
-            db,
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            turnId: turnId!,
-            recordingId: randomUUID(),
-            mode: "on-turn",
-            session: sandbox.established.session,
-            runAs: sandboxRunAs(settings),
-            reason: null,
-          });
-          activeRecording = begun.active;
-          await publish?.([{ type: "recording.started", payload: begun.started }]);
-        } catch (recordingError) {
-          activeRecording = null;
-          console.error("on-turn recording start failed (turn outcome unaffected)", recordingError);
-        }
+        computerUseRecordingStart = (async () => {
+          try {
+            const begun = await beginRecording({
+              settings,
+              db,
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              turnId: turnId!,
+              recordingId: randomUUID(),
+              mode: "on-turn",
+              session: sandbox.established.session,
+              runAs: sandboxRunAs(settings),
+              reason: null,
+            });
+            activeRecording = begun.active;
+            await publish?.([{ type: "recording.started", payload: begun.started }]);
+          } catch (recordingError) {
+            activeRecording = null;
+            console.error(
+              "computer-use recording start failed (action outcome unaffected)",
+              recordingError,
+            );
+          }
+        })();
+        await computerUseRecordingStart;
       }
     };
     // Dual-write of conversation truth (issue #35): completed items are
@@ -3109,10 +3117,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         }
       }
 
-      if (resolvedSandbox) {
-        await maybeStartOnTurnRecording(resolvedSandbox, activeSandboxBackend);
-      }
-
       const fileResourceDownloads = await sandboxFileDownloadsForRun(
         runSettings,
         db,
@@ -3272,6 +3276,15 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               computerToolMode: computerToolModeForTurn(null),
               promptCacheKey: input.sessionId,
             }),
+        // Lazy computer-use seam: runtime first brings up :0 only after the model
+        // selects a computer tool, then this hook begins the optional proof
+        // recording. Shell/filesystem turns never invoke either operation.
+        onComputerUseReady: async () => {
+          if (!resolvedSandbox) {
+            throw new Error("Computer-use display became ready without a resolved sandbox");
+          }
+          await maybeStartOnTurnRecording(resolvedSandbox, activeSandboxBackend);
+        },
         ...(packRuntime.skills.length > 0 ? { packSkills: packRuntime.skills } : {}),
         ...(workspaceAgentInstructions ? { instructionsTemplate: workspaceAgentInstructions } : {}),
         ...(workspaceMemory ? { workspaceMemory } : {}),
@@ -3375,10 +3388,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             // recursion that HANGS the turn — caught live on staging 2026-07-08). The SDK
             // already holds the proxy directly (injected as lazyOwnedSandbox.session), so it
             // gets per-op routing; the worker-side handle (resolvedSandbox: release,
-            // heartbeat, on-turn recording) wants the real box, unproxied.
+            // heartbeat, computer-use recording) wants the real box, unproxied.
             resolvedSandbox = provisioned;
             startLeaseHeartbeat(provisioned, activeSandboxBackend ?? groupBoxBackend);
-            await maybeStartOnTurnRecording(provisioned, activeSandboxBackend);
             return provisioned;
           },
           {
@@ -5228,7 +5240,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       if (leaseHeartbeatTimer) {
         clearInterval(leaseHeartbeatTimer);
       }
-      // P4.3: finalize the on-turn recording BEFORE releasing the box handle
+      // Finalize the computer-use recording BEFORE releasing the box handle
       // (the read+PUT needs the live session). read bytes → storage PUT →
       // updateRecording(available) → publish recording.available; the box file is
       // deleted only after the PUT confirms (F9). Best-effort: a finalize failure

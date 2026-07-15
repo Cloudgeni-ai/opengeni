@@ -158,6 +158,9 @@ function makeMockSession(
 
   const run = (cmd: string): string => {
     execCalls.push(cmd);
+    if (cmd.includes("opengeni-desktop-up")) {
+      return formatted("OPENGENI_DESKTOP_UP port=6080 geometry=1280x800 dpi=96");
+    }
     const body = readBody(cmd);
     if (body !== null) return formatted(body);
     if (opts.stillRunning) return stillRunningStr;
@@ -1190,5 +1193,61 @@ describe("buildAgentCapabilities computer-use gating (P4.3)", () => {
     // Structured image (codex sees it), NOT the text data-URL string.
     expect(out.type).toBe("image");
     expect(out.image?.mediaType).toBe("image/png");
+  });
+});
+
+describe("lazy computer-use preparation", () => {
+  test("advertising tools is side-effect free; first action starts :0 once, then invokes onReady", async () => {
+    const settings = testSettings({
+      sandboxBackend: "modal",
+      sandboxDesktopEnabled: true,
+      computerUseEnabled: true,
+    });
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const { session, execCalls } = makeMockSession({ pngBytes: png });
+    const readySessions: unknown[] = [];
+    const caps = buildAgentCapabilities(settings, [], {
+      computerToolMode: "function-image",
+      onComputerUseReady: async (readySession) => {
+        expect(execCalls.some((cmd) => cmd.includes("opengeni-desktop-up"))).toBe(true);
+        readySessions.push(readySession);
+      },
+    });
+    const cap = caps.find(
+      (candidate) => (candidate as { type?: string }).type === "computer-use",
+    ) as unknown as ComputerUseCapability;
+    cap.bind(session as never).bindModel("responses", structuredModel());
+
+    const tools = cap.tools();
+    expect(execCalls).toHaveLength(0);
+    expect(readySessions).toHaveLength(0);
+
+    const screenshot = toolsByName(tools).computer_screenshot;
+    await invokeTool(screenshot, {});
+    await invokeTool(screenshot, {});
+
+    expect(execCalls.filter((cmd) => cmd.includes("opengeni-desktop-up"))).toHaveLength(1);
+    expect(readySessions).toEqual([session]);
+  });
+
+  test("a failed preparation retries on the next action without re-running cleanup preparation", async () => {
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const { session, execCalls } = makeMockSession({ pngBytes: png });
+    let attempts = 0;
+    const computer = new SandboxComputer(session, {
+      screenshotWarmupBudgetMs: 1,
+      screenshotRetryDelayMs: 1,
+      prepare: async () => {
+        attempts += 1;
+        if (attempts === 1) throw new Error("display startup failed");
+      },
+    });
+
+    await expect(computer.screenshot()).rejects.toThrow("display startup failed");
+    expect(attempts).toBe(1);
+    expect(execCalls).toHaveLength(0);
+
+    expect(await computer.screenshot()).not.toBe("");
+    expect(attempts).toBe(2);
   });
 });
