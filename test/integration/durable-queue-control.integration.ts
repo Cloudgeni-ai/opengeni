@@ -12,7 +12,7 @@ import {
   enqueueSessionMessageAtomically,
   getSession,
   getSessionQueueSnapshot,
-  listPendingSessionSystemUpdates,
+  listOutstandingSessionSystemUpdates,
   listSessionEvents,
   listSessionSystemUpdatesForTurn,
   listSessionTurns,
@@ -157,7 +157,7 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
           true,
         );
         expect(
-          await listPendingSessionSystemUpdates(dbClient.db, grant.workspaceId, session.id),
+          await listOutstandingSessionSystemUpdates(dbClient.db, grant.workspaceId, session.id),
         ).toHaveLength(100);
         const urgent = await postUserMessageTurn({
           db: dbClient.db,

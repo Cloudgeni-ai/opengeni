@@ -30,7 +30,7 @@ import {
   getWorkspaceEnvironmentValuesForRun,
   listSessionEvents,
   listScheduledTasks,
-  listPendingSessionSystemUpdates,
+  listOutstandingSessionSystemUpdates,
   listSessionTurns,
   listSessionMcpServersForRun,
   listUsageEvents,
@@ -5990,7 +5990,7 @@ describe("API component integration", () => {
         .sort(),
     ).toEqual(beforeInternalTurnIds);
     expect(
-      await listPendingSessionSystemUpdates(dbClient.db, grant.workspaceId, created.id),
+      await listOutstandingSessionSystemUpdates(dbClient.db, grant.workspaceId, created.id),
     ).toEqual([
       expect.objectContaining({
         id: internal.updateId,

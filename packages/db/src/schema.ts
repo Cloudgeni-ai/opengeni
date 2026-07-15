@@ -1103,6 +1103,10 @@ export const sessionSystemUpdates = pgTable(
     summary: text("summary").notNull(),
     payload: jsonb("payload").$type<Record<string, unknown>>().notNull().default({}),
     lineage: jsonb("lineage").$type<Record<string, unknown>>().notNull().default({}),
+    // pending: eligible to start/attach to an inference; deferred: preserved
+    // after a failed internal-only inference but dormant until a real prompt or
+    // a genuinely new pending update arrives; delivered/cancelled/failed are
+    // terminal for that delivery attempt.
     state: text("state").notNull().default("pending"),
     deliveredTurnId: uuid("delivered_turn_id").references(() => sessionTurns.id, {
       onDelete: "set null",

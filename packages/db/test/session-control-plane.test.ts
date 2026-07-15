@@ -14,13 +14,16 @@ import {
   claimSessionWorkForAttempt,
   createDb,
   createSession,
+  createSessionGoal,
   enqueueSessionMessageAtomically,
   getSessionQueueSnapshot,
   getBillingBalance,
   getActiveSessionHistoryItems,
   getSession,
   getSessionTurn,
-  listPendingSessionSystemUpdates,
+  listEnrollableSessions,
+  listOutstandingSessionSystemUpdates,
+  listSessionSystemUpdatesForTurn,
   listUsageEvents,
   isSessionCompactionRequested,
   peekSessionWork,
@@ -715,11 +718,202 @@ describe("clean session control plane", () => {
     expect(first.reason).toBe("added");
     expect(duplicate.reason).toBe("duplicate");
     expect(
-      await listPendingSessionSystemUpdates(client.db, grant.workspaceId!, session.id),
+      await listOutstandingSessionSystemUpdates(client.db, grant.workspaceId!, session.id),
     ).toHaveLength(1);
     expect(
       (await getSessionQueueSnapshot(client.db, grant.workspaceId!, session.id))?.items,
     ).toHaveLength(0);
+  });
+
+  test("failed internal-only inference defers updates until a real prompt", async () => {
+    const { grant, session } = await fixture();
+    const update = await addSessionSystemUpdate(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      kind: "child_session_update",
+      classification: "success",
+      sourceId: crypto.randomUUID(),
+      dedupeKey: `child-${crypto.randomUUID()}`,
+      summary: "Child completed",
+      payload: { status: "completed" },
+    });
+    if (!update.added) throw new Error("system update was not inserted");
+
+    const failedAttemptId = crypto.randomUUID();
+    const internalTurn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId: failedAttemptId },
+    );
+    expect(internalTurn).toMatchObject({ source: "system", status: "running" });
+    await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      turnId: internalTurn!.id,
+      triggerEventId: internalTurn!.triggerEventId,
+      attemptId: failedAttemptId,
+      childCompletionParentWakeEnabled: false,
+      turnStatus: "failed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [
+        { type: "turn.failed", payload: { error: "provider unavailable" } },
+        { type: "session.status.changed", payload: { status: "idle" } },
+      ],
+    });
+
+    expect(
+      await listOutstandingSessionSystemUpdates(client.db, grant.workspaceId!, session.id),
+    ).toMatchObject([{ id: update.update.id, state: "deferred", deliveredTurnId: null }]);
+    expect(await peekSessionWork(client.db, grant.workspaceId!, session.id)).toEqual({
+      kind: "idle",
+    });
+    expect(
+      (await listEnrollableSessions(client.db, 10_000)).some(
+        (entry) => entry.sessionId === session.id,
+      ),
+    ).toBe(false);
+
+    const prompt = await send(grant, session.id, "Use the child result now");
+    const promptTurn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+    );
+    expect(promptTurn?.id).toBe(prompt.turn.id);
+    expect(
+      await listSessionSystemUpdatesForTurn(
+        client.db,
+        grant.workspaceId!,
+        session.id,
+        promptTurn!.id,
+      ),
+    ).toMatchObject([{ id: update.update.id, state: "delivered" }]);
+  });
+
+  test("a new internal update collapses deferred updates into one inference", async () => {
+    const { grant, session } = await fixture();
+    const first = await addSessionSystemUpdate(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      kind: "child_session_update",
+      classification: "failure",
+      sourceId: crypto.randomUUID(),
+      dedupeKey: `child-${crypto.randomUUID()}`,
+      summary: "First child failed",
+      payload: { status: "failed" },
+    });
+    if (!first.added) throw new Error("first system update was not inserted");
+    const failedAttemptId = crypto.randomUUID();
+    const failedTurn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId: failedAttemptId },
+    );
+    await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      turnId: failedTurn!.id,
+      triggerEventId: failedTurn!.triggerEventId,
+      attemptId: failedAttemptId,
+      childCompletionParentWakeEnabled: false,
+      turnStatus: "failed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [{ type: "turn.failed", payload: { error: "provider unavailable" } }],
+    });
+
+    const second = await addSessionSystemUpdate(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      kind: "child_session_update",
+      classification: "success",
+      sourceId: crypto.randomUUID(),
+      dedupeKey: `child-${crypto.randomUUID()}`,
+      summary: "Second child completed",
+      payload: { status: "completed" },
+    });
+    if (!second.added) throw new Error("second system update was not inserted");
+    const retryTurn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+    );
+    expect(retryTurn).toMatchObject({ source: "system", metadata: { internalUpdateCount: 2 } });
+    expect(
+      (
+        await listSessionSystemUpdatesForTurn(
+          client.db,
+          grant.workspaceId!,
+          session.id,
+          retryTurn!.id,
+        )
+      ).map((entry) => entry.id),
+    ).toEqual(expect.arrayContaining([first.update.id, second.update.id]));
+  });
+
+  test("a failed goal-continuation notice is terminal instead of replayable", async () => {
+    const { grant, session } = await fixture();
+    const goal = await createSessionGoal(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      text: "Finish the task",
+      createdBy: "api",
+    });
+    const update = await addSessionSystemUpdate(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      kind: "lifecycle_event",
+      classification: "info",
+      sourceId: goal.id,
+      dedupeKey: `goal-continuation:${goal.id}:${goal.version}:1`,
+      summary: "Continue the goal",
+      payload: {
+        type: "goal_continuation",
+        goalId: goal.id,
+        goalVersion: goal.version,
+        autoContinuation: 1,
+      },
+    });
+    if (!update.added) throw new Error("goal update was not inserted");
+    const attemptId = crypto.randomUUID();
+    const turn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId },
+    );
+    await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      turnId: turn!.id,
+      triggerEventId: turn!.triggerEventId,
+      attemptId,
+      childCompletionParentWakeEnabled: false,
+      turnStatus: "failed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [{ type: "turn.failed", payload: { error: "policy blocked" } }],
+    });
+    const [stored] = await withWorkspaceRls(client.db, grant.workspaceId!, async (db) =>
+      db
+        .select({ state: schema.sessionSystemUpdates.state })
+        .from(schema.sessionSystemUpdates)
+        .where(eq(schema.sessionSystemUpdates.id, update.update.id)),
+    );
+    expect(stored?.state).toBe("failed");
+    expect(
+      await listOutstandingSessionSystemUpdates(client.db, grant.workspaceId!, session.id),
+    ).toEqual([]);
   });
 
   test("idle manual compaction is a born-running maintenance execution, never queue work", async () => {
@@ -777,7 +971,7 @@ describe("clean session control plane", () => {
     );
     expect(claimedCompaction?.source).toBe("compaction");
     expect(
-      await listPendingSessionSystemUpdates(
+      await listOutstandingSessionSystemUpdates(
         client.db,
         updateCase.grant.workspaceId!,
         updateCase.session.id,

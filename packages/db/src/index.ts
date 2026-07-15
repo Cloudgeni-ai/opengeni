@@ -17685,7 +17685,7 @@ export async function claimSessionWorkForAttempt(
               and(
                 eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
                 eq(schema.sessionSystemUpdates.sessionId, sessionId),
-                eq(schema.sessionSystemUpdates.state, "pending"),
+                inArray(schema.sessionSystemUpdates.state, ["pending", "deferred"]),
               ),
             )
             .orderBy(
@@ -18983,8 +18983,15 @@ export async function applySessionTurnSettlement(
           turn,
         );
       }
-      if (["failed", "cancelled", "superseded"].includes(input.turnStatus)) {
-        await rependSessionSystemUpdatesForTurnTx(
+      if (input.turnStatus === "failed") {
+        await deferFailedSessionSystemUpdatesForTurnTx(
+          tx as unknown as Database,
+          workspaceId,
+          input.sessionId,
+          input.turnId,
+        );
+      } else if (["cancelled", "superseded"].includes(input.turnStatus)) {
+        await requeueInterruptedSessionSystemUpdatesForTurnTx(
           tx as unknown as Database,
           workspaceId,
           input.sessionId,
@@ -19244,7 +19251,7 @@ export async function settleCodexCredentialLeaseLoss(
             ),
           );
         if (!input.checkpointDurable) {
-          await rependSessionSystemUpdatesForTurnTx(
+          await deferFailedSessionSystemUpdatesForTurnTx(
             tx as unknown as Database,
             input.workspaceId,
             input.sessionId,
@@ -20941,7 +20948,7 @@ export async function addSessionSystemUpdate(
   return await addSessionSystemUpdateWithSourceMutation(db, input, async () => undefined);
 }
 
-async function rependSessionSystemUpdatesForTurnTx(
+async function requeueInterruptedSessionSystemUpdatesForTurnTx(
   tx: Database,
   workspaceId: string,
   sessionId: string,
@@ -20950,6 +20957,36 @@ async function rependSessionSystemUpdatesForTurnTx(
   await tx
     .update(schema.sessionSystemUpdates)
     .set({ state: "pending", deliveredTurnId: null, deliveredAt: null })
+    .where(
+      and(
+        eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
+        eq(schema.sessionSystemUpdates.sessionId, sessionId),
+        eq(schema.sessionSystemUpdates.deliveredTurnId, turnId),
+        eq(schema.sessionSystemUpdates.state, "delivered"),
+      ),
+    );
+}
+
+/**
+ * A failed internal-only inference must not manufacture another inference by
+ * making its inputs immediately runnable again. Preserve ordinary internal
+ * updates as deferred input for the next real prompt/new update. Goal
+ * continuation notices are derivable from the durable goal and become terminal
+ * so the goal evaluator can pause or synthesize the next valid continuation.
+ */
+async function deferFailedSessionSystemUpdatesForTurnTx(
+  tx: Database,
+  workspaceId: string,
+  sessionId: string,
+  turnId: string,
+): Promise<void> {
+  await tx
+    .update(schema.sessionSystemUpdates)
+    .set({
+      state: sql`case when ${schema.sessionSystemUpdates.payload} ->> 'type' = 'goal_continuation' then 'failed' else 'deferred' end`,
+      deliveredTurnId: null,
+      deliveredAt: null,
+    })
     .where(
       and(
         eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
@@ -21105,7 +21142,7 @@ export async function addSessionSystemUpdateWithSourceMutation(
   );
 }
 
-export async function listPendingSessionSystemUpdates(
+export async function listOutstandingSessionSystemUpdates(
   db: Database,
   workspaceId: string,
   sessionId: string,
@@ -21118,7 +21155,7 @@ export async function listPendingSessionSystemUpdates(
         and(
           eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
           eq(schema.sessionSystemUpdates.sessionId, sessionId),
-          eq(schema.sessionSystemUpdates.state, "pending"),
+          inArray(schema.sessionSystemUpdates.state, ["pending", "deferred"]),
         ),
       )
       .orderBy(asc(schema.sessionSystemUpdates.createdAt), asc(schema.sessionSystemUpdates.id));
@@ -22309,7 +22346,7 @@ export async function enqueueSessionMessageAtomically(
               updatedAt: now,
             })
             .where(eq(schema.sessionTurns.id, currentTurn.id));
-          await rependSessionSystemUpdatesForTurnTx(
+          await requeueInterruptedSessionSystemUpdatesForTurnTx(
             tx as unknown as Database,
             input.workspaceId,
             session.id,
