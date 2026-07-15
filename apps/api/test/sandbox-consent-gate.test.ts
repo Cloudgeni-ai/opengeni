@@ -71,12 +71,18 @@ const settings = testSettings({
   sandboxDesktopEnabled: true,
   streamTokenSecret: "p32-stream-token-secret",
   sandboxOwnershipEnabled: true,
-  sandboxLeaseTtlMs: 5_000,
-  sandboxViewerHolderTtlMs: 5_000,
+  // This suite proves consent and holder semantics, not lease expiry. Keep the
+  // seeded warm lease comfortably alive under a loaded repository-wide CI run;
+  // a 5s TTL made the final attach nondeterministically become a cold spawner.
+  sandboxLeaseTtlMs: 60_000,
+  sandboxViewerHolderTtlMs: 60_000,
   sandboxIdleGraceMs: 500,
 });
 
-async function freshWorkspace(): Promise<{ accountId: string; workspaceId: string }> {
+async function freshWorkspace(): Promise<{
+  accountId: string;
+  workspaceId: string;
+}> {
   const [a] = await admin<{ id: string }[]>`
     insert into managed_accounts (name) values ('acct') returning id`;
   const [w] = await admin<{ id: string }[]>`
@@ -217,7 +223,12 @@ async function soloSession(): Promise<{
     sandboxBackend: BACKEND,
   });
   await seedWarmBox(accountId, workspaceId, session.id, session.sandboxGroupId);
-  return { accountId, workspaceId, sessionId: session.id, sandboxGroupId: session.sandboxGroupId };
+  return {
+    accountId,
+    workspaceId,
+    sessionId: session.id,
+    sandboxGroupId: session.sandboxGroupId,
+  };
 }
 
 describe("P3.2 consent gate — un-redacted acknowledgment (solo box)", () => {
@@ -351,7 +362,13 @@ describe("P3.2 consent gate — shared-exposure (group >1 session)", () => {
     });
     expect(b.sandboxGroupId).toBe(a.sandboxGroupId);
     await seedWarmBox(accountId, workspaceId, a.id, a.sandboxGroupId);
-    return { accountId, workspaceId, a: a.id, b: b.id, sandboxGroupId: a.sandboxGroupId };
+    return {
+      accountId,
+      workspaceId,
+      a: a.id,
+      b: b.id,
+      sandboxGroupId: a.sandboxGroupId,
+    };
   }
 
   test("a shared box → 409 shared_acknowledgment_required even after a bare un-redacted ack; shared ack unblocks", async () => {
@@ -377,7 +394,10 @@ describe("P3.2 consent gate — shared-exposure (group >1 session)", () => {
     await app.request(url(workspaceId, a, "/stream-capabilities/acknowledge"), {
       method: "POST",
       headers: { authorization: auth, "content-type": "application/json" },
-      body: JSON.stringify({ acknowledgeUnredacted: true, acknowledgeShared: false }),
+      body: JSON.stringify({
+        acknowledgeUnredacted: true,
+        acknowledgeShared: false,
+      }),
     });
     const blockedShared = await app.request(url(workspaceId, a, "/viewers"), {
       method: "POST",
@@ -391,7 +411,10 @@ describe("P3.2 consent gate — shared-exposure (group >1 session)", () => {
     await app.request(url(workspaceId, a, "/stream-capabilities/acknowledge"), {
       method: "POST",
       headers: { authorization: auth, "content-type": "application/json" },
-      body: JSON.stringify({ acknowledgeUnredacted: true, acknowledgeShared: true }),
+      body: JSON.stringify({
+        acknowledgeUnredacted: true,
+        acknowledgeShared: true,
+      }),
     });
     const allowed = await app.request(url(workspaceId, a, "/viewers"), {
       method: "POST",
@@ -608,7 +631,10 @@ describe("P3.2 route auth (stream:view / stream:acknowledge)", () => {
       url(workspaceId, sessionId, "/stream-capabilities/acknowledge"),
       {
         method: "POST",
-        headers: { authorization: viewOnly, "content-type": "application/json" },
+        headers: {
+          authorization: viewOnly,
+          "content-type": "application/json",
+        },
         body: JSON.stringify({ acknowledgeUnredacted: true }),
       },
     );
