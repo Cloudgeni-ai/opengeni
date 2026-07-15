@@ -5227,11 +5227,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           db,
           objectStorage,
           settings,
-          publish: publish
-            ? async (events) => {
-                await publish!(events);
-              }
-            : null,
+          publish: async (events) => {
+            await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, events);
+          },
           session: setupBoxSession as ChannelASession,
           leaseEpoch: resolvedSandbox.leaseEpoch,
           sandboxGroupId,

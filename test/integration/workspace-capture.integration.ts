@@ -396,7 +396,7 @@ describe("workspace capture — B-suite (real docker turns)", () => {
         expectedEpoch: leaseEpoch,
         stats: degradedStats,
       });
-      expect(degraded).toEqual({ revision: degradedRevision });
+      expect(degraded).toMatchObject({ revision: degradedRevision });
       const afterDegraded = await captureRows(session.id);
       const degradedRow = afterDegraded.at(-1)!;
       expect(degradedRow.state).toBe("failed");

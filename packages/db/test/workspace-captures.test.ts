@@ -7,6 +7,8 @@ import {
   createDb,
   createSession,
   insertFailedWorkspaceCapture,
+  insertWorkspaceCapture,
+  listSessionEvents,
   latestWorkspaceCapture,
   type Database,
   type DbClient,
@@ -49,8 +51,8 @@ async function freshWorkspace(): Promise<{ accountId: string; workspaceId: strin
   return { accountId: account!.id, workspaceId: workspace!.id };
 }
 
-describe("workspace capture degraded revisions (real PostgreSQL + FORCE RLS)", () => {
-  test("failed discovery marker is epoch-fenced, monotonic, and blob-free", async () => {
+describe("workspace capture revisions (real PostgreSQL + FORCE RLS)", () => {
+  test("capture rows and announcements commit together behind the lease epoch fence", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const session = await createSession(db, {
@@ -99,9 +101,27 @@ describe("workspace capture degraded revisions (real PostgreSQL + FORCE RLS)", (
         expectedEpoch: liveEpoch + 1,
       }),
     ).toBeNull();
-    expect(await insertFailedWorkspaceCapture(db, { ...input, expectedEpoch: liveEpoch })).toEqual({
-      revision: 0,
+    const captureCommit = await insertFailedWorkspaceCapture(db, {
+      ...input,
+      expectedEpoch: liveEpoch,
     });
+    expect(captureCommit).not.toBeNull();
+    expect(captureCommit!.revision).toBe(0);
+    expect(captureCommit!.events).toEqual([
+      expect.objectContaining({
+        type: "workspace.revision.degraded",
+        turnId: null,
+        turnGeneration: null,
+        turnAttemptId: null,
+        turnAssociation: null,
+        clientEventId: "opengeni:workspace-capture:0",
+        payload: expect.objectContaining({
+          revision: 0,
+          leaseEpoch: liveEpoch,
+          reason: "repository_discovery_timed_out",
+        }),
+      }),
+    ]);
 
     const latest = await latestWorkspaceCapture(db, workspace.workspaceId, session.id);
     expect(latest).toMatchObject({
@@ -117,5 +137,61 @@ describe("workspace capture degraded revisions (real PostgreSQL + FORCE RLS)", (
     const [count] = await admin<{ count: number }[]>`
       select count(*)::int as count from workspace_captures where session_id = ${session.id}`;
     expect(count?.count).toBe(1);
+    const events = await listSessionEvents(db, workspace.workspaceId, session.id);
+    expect(events.filter((event) => event.type === "workspace.revision.degraded")).toEqual(
+      captureCommit!.events,
+    );
+
+    const capturedAt = new Date("2026-07-15T16:40:22.580Z");
+    const availableCommit = await insertWorkspaceCapture(db, {
+      ...workspace,
+      sessionId: session.id,
+      turnId: null,
+      sandboxGroupId,
+      expectedEpoch: liveEpoch,
+      revision: 1,
+      manifestKey: "workspace/manifests/1.json",
+      treeIndexKey: "workspace/trees/1.json",
+      blobKeys: ["workspace/blobs/sha256/content"],
+      sizeBytes: 123,
+      stats: {
+        fingerprint: "capture-1",
+        discoveredRepoCount: 1,
+        changedFileCount: 1,
+        durationMs: 850,
+      },
+      capturedAt,
+    });
+    expect(availableCommit).not.toBeNull();
+    expect(availableCommit!.events).toEqual([
+      expect.objectContaining({
+        sequence: captureCommit!.events[0]!.sequence + 1,
+        type: "workspace.revision.captured",
+        turnId: null,
+        turnGeneration: null,
+        turnAttemptId: null,
+        turnAssociation: null,
+        clientEventId: "opengeni:workspace-capture:1",
+        payload: expect.objectContaining({
+          revision: 1,
+          capturedAt: capturedAt.toISOString(),
+          leaseEpoch: liveEpoch,
+          stats: expect.objectContaining({ fingerprint: "capture-1" }),
+        }),
+      }),
+    ]);
+    expect(await latestWorkspaceCapture(db, workspace.workspaceId, session.id)).toMatchObject({
+      revision: 1,
+      state: "available",
+      manifestKey: "workspace/manifests/1.json",
+      treeIndexKey: "workspace/trees/1.json",
+      blobKeys: ["workspace/blobs/sha256/content"],
+      sizeBytes: 123,
+    });
+    expect(
+      (await listSessionEvents(db, workspace.workspaceId, session.id)).filter((event) =>
+        event.type.startsWith("workspace.revision."),
+      ),
+    ).toEqual([...captureCommit!.events, ...availableCommit!.events]);
   }, 60_000);
 });
