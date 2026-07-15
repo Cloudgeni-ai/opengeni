@@ -281,6 +281,12 @@ type RelationProofAccumulator = {
   preservedIdentity: ReturnType<typeof createHash>;
 };
 
+const PROOF_GC_ROW_INTERVAL = 131_072;
+
+function collectProofGarbage(): void {
+  if (typeof Bun !== "undefined") Bun.gc(true);
+}
+
 function updateProofHash(hash: ReturnType<typeof createHash>, value: unknown): void {
   const serialized = stableJson(value);
   hash.update(String(Buffer.byteLength(serialized, "utf8")));
@@ -312,6 +318,7 @@ async function captureRelationProofs(
     (reference?.sessions ?? []).map((session) => [session.id, referenceProof(session).maxOrdinal]),
   );
   const accumulators = new Map<string, RelationProofAccumulator>();
+  let rowsSinceGarbageCollection = 0;
   for await (const rows of sql.unsafe<Row[]>(query).cursor(2_048)) {
     for (const row of rows) {
       const sessionId = stringValue(row.session_id, "relation.session_id");
@@ -334,7 +341,16 @@ async function captureRelationProofs(
       }
       accumulators.set(sessionId, accumulator);
     }
+    rowsSinceGarbageCollection += rows.length;
+    if (rowsSinceGarbageCollection >= PROOF_GC_ROW_INTERVAL) {
+      // Bun's adaptive heap threshold does not observe a Kubernetes cgroup
+      // limit soon enough for multi-million-row cursors. Bound the transient
+      // row/string heap before the kernel has to enforce the pod limit.
+      collectProofGarbage();
+      rowsSinceGarbageCollection = 0;
+    }
   }
+  collectProofGarbage();
 
   const proofs = new Map<string, CutoverRelationProof>();
   const sessionIds = new Set([
