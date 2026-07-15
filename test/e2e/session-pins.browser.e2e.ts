@@ -127,11 +127,22 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     await pageA.goto(targetUrl);
     // Pin from the ordinary list-row action, not just the header. The header
     // must reconcile from the same server-authoritative member relation.
-    await pageA.getByRole("button", { name: /^Actions for Master pin target/ }).click();
-    await pageA.getByRole("menuitem", { name: "Pin", exact: true }).click();
+    const targetActions = pageA.getByRole("button", { name: /^Actions for Master pin target/ });
+    await targetActions.focus();
+    await pageA.keyboard.press("Enter");
+    const pinMenuItem = pageA.getByRole("menuitem", { name: "Pin", exact: true });
+    await pinMenuItem.waitFor();
+    await pinMenuItem.focus();
+    await pageA.keyboard.press("Enter");
     await pageA.getByRole("button", { name: "Unpin session" }).waitFor();
     const pinnedA = pageA.getByRole("group", { name: "Pinned" });
     await pinnedA.getByRole("button", { name: /^Open Master pin target/ }).waitFor();
+    await pageA.waitForFunction(() =>
+      document.activeElement?.getAttribute("aria-label")?.startsWith("Actions for Master"),
+    );
+    expect(
+      await pageA.evaluate(() => document.activeElement?.getAttribute("aria-label")),
+    ).toStartWith("Actions for Master pin target");
 
     // A genuinely separate browser context represents another device: it owns
     // independent document, cache, BroadcastChannel, and focus state, while the
