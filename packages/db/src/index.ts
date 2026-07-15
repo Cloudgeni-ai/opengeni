@@ -13079,7 +13079,9 @@ export interface AcquireLeaseInput {
   // singleton group). The lease is per-group, not per-session.
   sandboxGroupId: string;
   kind: LeaseHolderKind;
-  holderId: string; // session_turns.id (turn) | viewer connection id (viewer)
+  // Globally unique durable turn-attempt id (turn) | viewer connection id
+  // (viewer). A workflow-local activity id is not a valid turn holder id.
+  holderId: string;
   subjectId?: string | null; // the attributing session within the group
   backend: string; // sessions.sandbox_backend
   os?: string; // default 'linux'

@@ -32,6 +32,7 @@ import {
   resolveActiveSandboxBackend,
   shouldStartOnTurnRecording,
 } from "../src/activities/agent-turn";
+import { sandboxLeaseHolderIdForAttempt } from "../src/sandbox-resume";
 import { settingsWithPackSandboxImage } from "../src/activities/packs";
 
 // Item shapes mirror the SDK history representation persisted into
@@ -479,6 +480,29 @@ describe("model usage source key (re-dispatch charge stability)", () => {
         positionalKey: "aggregate",
       }),
     ).toBe("aggregate");
+  });
+});
+
+describe("sandbox lease holder identity", () => {
+  test("does not collide when sibling workflows reuse the same Temporal activity id", () => {
+    const siblingAttemptA = sandboxLeaseHolderIdForAttempt("11111111-1111-4111-8111-111111111111");
+    const siblingAttemptB = sandboxLeaseHolderIdForAttempt("22222222-2222-4222-8222-222222222222");
+
+    expect(siblingAttemptA).not.toBe(siblingAttemptB);
+    expect(siblingAttemptA).toBe("turn-attempt:11111111-1111-4111-8111-111111111111");
+  });
+
+  test("is stable for an activity retry of the same durable attempt", () => {
+    const attemptId = "33333333-3333-4333-8333-333333333333";
+    expect(sandboxLeaseHolderIdForAttempt(attemptId)).toBe(
+      sandboxLeaseHolderIdForAttempt(attemptId),
+    );
+  });
+
+  test("rejects a missing durable attempt identity", () => {
+    expect(() => sandboxLeaseHolderIdForAttempt("  ")).toThrow(
+      "Sandbox lease holder requires a turn attempt id",
+    );
   });
 });
 
