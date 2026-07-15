@@ -1,11 +1,35 @@
 import { proxyActivities } from "@temporalio/workflow";
 import type * as activities from "../activities";
 
-type ControlActivities = Omit<typeof activities, "runAgentTurn">;
+type WorkflowControlActivities = Pick<
+  typeof activities,
+  | "dispatchScheduledTaskRun"
+  | "failSessionAttempt"
+  | "getCodexCapacityWait"
+  | "markSessionIdle"
+  | "maybeContinueGoal"
+  | "peekSessionWork"
+  | "reconcileCodexCapacityWait"
+  | "recoverDispatch"
+  | "settleSessionControl"
+>;
 
-export const activity = proxyActivities<ControlActivities>({
-  startToCloseTimeout: "30 days",
-  retry: { maximumAttempts: 1 },
+/**
+ * Session/schedule workflow control activities are bounded, idempotent database
+ * and provider-metadata operations. They must not inherit the agent turn's
+ * 30-day attempt: Temporal cannot otherwise detect that the pod which accepted
+ * a non-heartbeating control activity disappeared, leaving the workflow pinned
+ * to a dead worker for the full 30 days. A bounded attempt plus an unbounded
+ * Temporal retry keeps the durable workflow alive across rollout, node loss, or
+ * transient database/network failure; retries re-run on a healthy control pod.
+ */
+export const activity = proxyActivities<WorkflowControlActivities>({
+  startToCloseTimeout: "2 minutes",
+  retry: {
+    initialInterval: "1 second",
+    backoffCoefficient: 2,
+    maximumInterval: "30 seconds",
+  },
 });
 
 export function turnTaskQueue(baseTaskQueue: string): string {
