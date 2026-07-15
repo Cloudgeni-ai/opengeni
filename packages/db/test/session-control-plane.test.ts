@@ -1159,6 +1159,115 @@ describe("clean session control plane", () => {
     });
   });
 
+  test("attempt writes run concurrently across sessions while workspace control stays exclusive", async () => {
+    const { grant, session: firstSession } = await fixture();
+    const secondSession = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      initialMessage: "second session",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    await send(grant, firstSession.id, "first session work");
+    await send(grant, secondSession.id, "second session work");
+    const firstAttemptId = crypto.randomUUID();
+    const secondAttemptId = crypto.randomUUID();
+    const firstTurn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      firstSession.id,
+      `session-${firstSession.id}`,
+      { attemptId: firstAttemptId },
+    );
+    const secondTurn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      secondSession.id,
+      `session-${secondSession.id}`,
+      { attemptId: secondAttemptId },
+    );
+    if (!firstTurn || !secondTurn) throw new Error("both test turns must be running");
+
+    let releaseFirstWrite!: () => void;
+    const firstWriteReleased = new Promise<void>((resolve) => {
+      releaseFirstWrite = resolve;
+    });
+    let firstWriteAdmitted!: () => void;
+    const firstWriteAdmission = new Promise<void>((resolve) => {
+      firstWriteAdmitted = resolve;
+    });
+    const heldFirstWrite = withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
+      await db.transaction(async (tx) => {
+        await tx
+          .select({ id: schema.workspaces.id })
+          .from(schema.workspaces)
+          .where(eq(schema.workspaces.id, grant.workspaceId!))
+          .for("share")
+          .limit(1);
+        await tx
+          .select({ id: schema.sessions.id })
+          .from(schema.sessions)
+          .where(eq(schema.sessions.id, firstSession.id))
+          .for("update")
+          .limit(1);
+        await tx
+          .select({ id: schema.sessionTurns.id })
+          .from(schema.sessionTurns)
+          .where(eq(schema.sessionTurns.id, firstTurn.id))
+          .for("update")
+          .limit(1);
+        firstWriteAdmitted();
+        await firstWriteReleased;
+      });
+    });
+    await firstWriteAdmission;
+
+    const appendTimedOut = Symbol("append timed out behind another session");
+    const secondAppend = appendSessionEventsForTurnAttempt(
+      client.db,
+      grant.workspaceId!,
+      secondSession.id,
+      secondTurn.id,
+      secondTurn.executionGeneration,
+      secondAttemptId,
+      [{ type: "agent.message.delta", payload: { text: "independent" } }],
+    );
+    const appendResult = await Promise.race([
+      secondAppend,
+      Bun.sleep(2_000).then(() => appendTimedOut),
+    ]);
+
+    let pauseSettled = false;
+    const pause = (async () => {
+      const result = await setWorkspaceInferenceControl(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        actor: grant.subjectId,
+        state: "paused",
+        reason: "concurrency test",
+        clientEventId: `workspace-pause-${crypto.randomUUID()}`,
+        expectedState: "active",
+        expectedGeneration: 0,
+        exceptSessionIds: [],
+      });
+      pauseSettled = true;
+      return result;
+    })();
+    await Bun.sleep(100);
+
+    try {
+      expect(appendResult).not.toBe(appendTimedOut);
+      expect(appendResult).toMatchObject({ accepted: true });
+      expect(pauseSettled).toBe(false);
+    } finally {
+      releaseFirstWrite();
+      await heldFirstWrite;
+    }
+    expect(await pause).toMatchObject({ state: "paused", generation: 1 });
+  });
+
   test("a replaced attempt cannot compact history or overwrite its token signal", async () => {
     const { grant, session } = await fixture();
     await send(grant, session.id, "build it");
