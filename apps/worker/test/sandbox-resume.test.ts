@@ -38,6 +38,7 @@ import {
   type SharedTestDatabase,
   testSettings,
 } from "@opengeni/testing";
+import { establishSandboxSessionFromEnvelope } from "@opengeni/runtime";
 import {
   resumeBoxForTurn,
   sandboxLeaseHolderIdForAttempt,
@@ -583,6 +584,92 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
       select resume_state #>> '{sessionState,workspaceArchive}' as archive
       from sandbox_leases where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
     expect(archiveRow?.archive).toBeNull();
+  }, 60_000);
+
+  test("(F3-b) a successfully hydrated archive remains on the committed live lease", async () => {
+    if (!available) return;
+    const settings = settingsFor(true);
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+
+    const seed = await establishSandboxSessionFromEnvelope(settings, null, {
+      sessionId: groupId,
+      recovery: "create-or-restore",
+      backendOverride: "local",
+    });
+    let archiveBytes: Uint8Array;
+    try {
+      const persist = (seed.session as { persistWorkspace?: () => Promise<Uint8Array> })
+        .persistWorkspace;
+      if (typeof persist !== "function") {
+        throw new Error("Local sandbox test session cannot persist /workspace");
+      }
+      archiveBytes = await persist.call(seed.session);
+    } finally {
+      await dropSession(seed);
+    }
+
+    const currentArchive = Buffer.from(archiveBytes).toString("base64");
+    const previousArchive = Buffer.from("previous-valid-archive-pointer").toString("base64");
+    const archiveAt = "2030-03-04T05:06:07.000Z";
+    const archiveEnvelopeJson = JSON.stringify({
+      backendId: "unix_local",
+      sessionState: {
+        workspaceArchive: currentArchive,
+        workspaceArchivePrev: previousArchive,
+        workspaceArchiveAt: archiveAt,
+      },
+    });
+    await admin.unsafe(
+      `
+      insert into sandbox_leases (
+        account_id, workspace_id, sandbox_group_id, liveness, refcount,
+        turn_holders, viewer_holders, backend, lease_epoch,
+        resume_backend_id, resume_state, expires_at
+      ) values (
+        $1, $2, $3, 'cold', 0, 0, 0,
+        'local', 8, 'unix_local',
+        $4::text::jsonb,
+        now() + interval '60s'
+      )`,
+      [accountId, workspaceId, groupId, archiveEnvelopeJson],
+    );
+
+    const resumed = await resumeBoxForTurn(
+      { db, settings },
+      {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        sessionId: groupId,
+        backend: "local",
+        os: "linux",
+      },
+      "turn",
+      sandboxLeaseHolderIdForAttempt("activity-f3-valid-archive"),
+    );
+    try {
+      expect(resumed.established.origin).toBe("restored");
+      const [archiveRow] = await admin<
+        {
+          current_archive: string | null;
+          previous_archive: string | null;
+          archive_at: string | null;
+        }[]
+      >`
+        select resume_state #>> '{sessionState,workspaceArchive}' as current_archive,
+               resume_state #>> '{sessionState,workspaceArchivePrev}' as previous_archive,
+               resume_state #>> '{sessionState,workspaceArchiveAt}' as archive_at
+        from sandbox_leases
+        where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
+      expect(archiveRow).toEqual({
+        current_archive: currentArchive,
+        previous_archive: previousArchive,
+        archive_at: archiveAt,
+      });
+    } finally {
+      await resumed.release();
+      await dropSession(resumed.established);
+    }
   }, 60_000);
 
   test("(4) FLAG-OFF: the gate condition is false -> resumeBoxForTurn is NEVER invoked, so NO lease row is materialized", async () => {

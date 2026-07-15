@@ -321,23 +321,36 @@ function recordSandboxWarmingTimeout(
   }
 }
 
-function workspaceArchiveFromEnvelope(
+function workspaceArchiveFieldsFromEnvelope(
   envelope: Record<string, unknown> | null | undefined,
-): string | null {
+): Record<string, string> | null {
   const sessionState =
     envelope && typeof envelope.sessionState === "object" && envelope.sessionState !== null
       ? (envelope.sessionState as Record<string, unknown>)
       : null;
   const archive = sessionState?.workspaceArchive;
-  return typeof archive === "string" && archive.length > 0 ? archive : null;
+  if (typeof archive !== "string" || archive.length === 0) {
+    return null;
+  }
+  const previous = sessionState?.workspaceArchivePrev;
+  const capturedAt = sessionState?.workspaceArchiveAt;
+  return {
+    workspaceArchive: archive,
+    ...(typeof previous === "string" && previous.length > 0
+      ? { workspaceArchivePrev: previous }
+      : {}),
+    ...(typeof capturedAt === "string" && capturedAt.length > 0
+      ? { workspaceArchiveAt: capturedAt }
+      : {}),
+  };
 }
 
-function preserveWorkspaceArchiveOnInterimResumeState(
+function preserveWorkspaceArchivesOnResumeState(
   resumeState: Record<string, unknown> | null,
   archiveSource: Record<string, unknown> | null,
 ): Record<string, unknown> | null {
-  const archive = workspaceArchiveFromEnvelope(archiveSource);
-  if (!archive) {
+  const archiveFields = workspaceArchiveFieldsFromEnvelope(archiveSource);
+  if (!archiveFields) {
     return resumeState;
   }
   const existingSessionState =
@@ -351,7 +364,7 @@ function preserveWorkspaceArchiveOnInterimResumeState(
       : {}),
     sessionState: {
       ...existingSessionState,
-      workspaceArchive: archive,
+      ...archiveFields,
     },
   };
 }
@@ -584,7 +597,7 @@ export async function resumeBoxForTurn(
         ...(services.sandboxMetrics ? { metrics: services.sandboxMetrics } : {}),
         onSandboxCreated: async (created) => {
           createdEstablished = created;
-          const resumeEnvelope = preserveWorkspaceArchiveOnInterimResumeState(
+          const resumeEnvelope = preserveWorkspaceArchivesOnResumeState(
             (await serializeEstablishedSandboxEnvelope(created)) ?? null,
             spawnEnvelope,
           );
@@ -626,8 +639,20 @@ export async function resumeBoxForTurn(
       // terminal, the desktop viewer, the reaper) cold-restored a FRESH rival box
       // and never saw the turn's live box. Fall back to the session envelope only
       // when the client cannot serialize live state.
+      const serializedResumeEnvelope =
+        (await serializeEstablishedSandboxEnvelope(established)) ?? envelope;
+      // A successful cold hydrate has already proved this archive usable and the
+      // replacement box now contains its files. Keep the current + fallback
+      // archive pointers on the committed live envelope until a later warm
+      // snapshot replaces them. Without this merge, serialization publishes only
+      // the new provider id; a second provider loss before the snapshot cadence
+      // fires would retire the lease with no archive and recreate an empty box.
+      // A failed hydrate falls back to a clean box with origin="created", so its
+      // unusable archive is deliberately cleared by the unmerged serialized state.
       const resumeEnvelope =
-        (await serializeEstablishedSandboxEnvelope(established)) ?? envelope ?? null;
+        established.origin === "restored"
+          ? preserveWorkspaceArchivesOnResumeState(serializedResumeEnvelope, spawnEnvelope)
+          : serializedResumeEnvelope;
       const committed = await commitWarmingToWarm(db, {
         accountId: ids.accountId,
         workspaceId: ids.workspaceId,
