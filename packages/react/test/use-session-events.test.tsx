@@ -79,12 +79,12 @@ describe("useSessionEvents", () => {
     }, undefined);
     await flush(20);
 
-    expect(listCalls).toEqual([{ before: Number.MAX_SAFE_INTEGER, limit: 5000, compact: true }]);
-    expect(hook.result.current.events).toHaveLength(1200);
-    expect(hook.result.current.events[0]?.sequence).toBe(1);
-    expect(hook.result.current.hasOlder).toBe(false);
+    expect(listCalls).toEqual([{ before: Number.MAX_SAFE_INTEGER, limit: 1000, compact: true }]);
+    expect(hook.result.current.events).toHaveLength(1000);
+    expect(hook.result.current.events[0]?.sequence).toBe(201);
+    expect(hook.result.current.hasOlder).toBe(true);
     expect(streamCalls).toEqual([1200]);
-    expect(lengths.filter((length) => length === 1200)).toHaveLength(1);
+    expect(lengths.filter((length) => length === 1000)).toHaveLength(1);
 
     await hook.unmount();
   });
@@ -113,19 +113,18 @@ describe("useSessionEvents", () => {
     // TRIMMED to the oldest user message rather than fetching further down.
     // loadOlder's `before` cursor is the trimmed top, so the fragment is
     // refetched with its own turn.
-    expect(listCalls).toEqual([{ before: Number.MAX_SAFE_INTEGER, limit: 5000, compact: true }]);
+    expect(listCalls).toEqual([{ before: Number.MAX_SAFE_INTEGER, limit: 1000, compact: true }]);
     expect(hook.result.current.events[0]?.type).toBe("user.message");
-    expect(hook.result.current.events[0]?.sequence).toBe(5102);
+    expect(hook.result.current.events[0]?.sequence).toBe(6103);
     expect(hook.result.current.hasOlder).toBe(true);
 
     const more = await hook.result.current.loadOlder();
     await flush(20);
-    // The older window starts exactly below the kept window (before: 5102 —
-    // no overlap, no gap), recovers the trimmed fragment, and runs to the log
-    // start within the older fetch cap, so nothing older remains.
+    // The older window starts exactly below the kept window and reaches the log
+    // start within the older two-fetch cap.
     expect(more).toBe(false);
-    expect(listCalls[1]).toEqual({ before: 5102, limit: 5000, compact: true });
-    expect(listCalls[2]).toEqual({ before: 102, limit: 5000, compact: true });
+    expect(listCalls[1]).toEqual({ before: 6103, limit: 5000, compact: true });
+    expect(listCalls[2]).toEqual({ before: 1103, limit: 5000, compact: true });
     expect(hook.result.current.events[0]?.type).toBe("session.created");
     expect(hook.result.current.events[0]?.sequence).toBe(1);
     expect(hook.result.current.hasOlder).toBe(false);
@@ -147,7 +146,7 @@ describe("useSessionEvents", () => {
     const { client, listCalls } = scriptedClient({
       store,
       listEvents: async (options) => {
-        if (options.before === 1001) {
+        if (options.before === 5001) {
           await new Promise<void>((resolve) => {
             releaseOlder = resolve;
           });
@@ -164,7 +163,7 @@ describe("useSessionEvents", () => {
     const first = hook.result.current.loadOlder();
     const second = hook.result.current.loadOlder();
     await flush();
-    expect(listCalls.filter((call) => call.before === 1001)).toHaveLength(1);
+    expect(listCalls.filter((call) => call.before === 5001)).toHaveLength(1);
     releaseOlder();
     const [firstResult, secondResult] = await Promise.all([first, second]);
     await flush(20);
@@ -230,10 +229,10 @@ describe("useSessionEvents", () => {
     await flush(20);
 
     // First paint is exactly ONE fetch — deeper history is the sentinel's job.
-    expect(hook.result.current.events).toHaveLength(5000);
-    expect(hook.result.current.events[0]?.sequence).toBe(35_001);
+    expect(hook.result.current.events).toHaveLength(1000);
+    expect(hook.result.current.events[0]?.sequence).toBe(39_001);
     expect(hook.result.current.hasOlder).toBe(true);
-    expect(listCalls).toEqual([{ before: Number.MAX_SAFE_INTEGER, limit: 5000, compact: true }]);
+    expect(listCalls).toEqual([{ before: Number.MAX_SAFE_INTEGER, limit: 1000, compact: true }]);
 
     await hook.unmount();
   });
@@ -253,7 +252,7 @@ describe("useSessionEvents", () => {
     );
     await flush(20);
 
-    expect(listCalls).toEqual([{ before: Number.MAX_SAFE_INTEGER, limit: 5000, compact: true }]);
+    expect(listCalls).toEqual([{ before: Number.MAX_SAFE_INTEGER, limit: 1000, compact: true }]);
     expect(hook.result.current.events.map((item) => item.sequence)).toEqual([1, 10]);
     expect(streamCalls).toEqual([99]);
 
@@ -304,7 +303,7 @@ describe("useSessionEvents", () => {
 
     expect(more).toBe(false);
     expect(calls).toEqual([
-      { before: Number.MAX_SAFE_INTEGER, limit: 5000, compact: true },
+      { before: Number.MAX_SAFE_INTEGER, limit: 1000, compact: true },
       { before: 8, limit: 5000, compact: true },
       { before: 6, limit: 5000, compact: true },
       { before: 4, limit: 5000, compact: true },
@@ -344,9 +343,9 @@ describe("useSessionEvents", () => {
     );
     await flush(20);
 
-    expect(listCalls).toEqual([{ before: Number.MAX_SAFE_INTEGER, limit: 5000, compact: true }]);
-    expect(hook.result.current.events).toHaveLength(5000);
-    expect(hook.result.current.events[0]?.sequence).toBe(15_001);
+    expect(listCalls).toEqual([{ before: Number.MAX_SAFE_INTEGER, limit: 1000, compact: true }]);
+    expect(hook.result.current.events).toHaveLength(1000);
+    expect(hook.result.current.events[0]?.sequence).toBe(19_001);
     expect(hook.result.current.hasOlder).toBe(true);
 
     await hook.unmount();

@@ -41,7 +41,8 @@ export type UseSessionEventsResult = {
   error: Error | null;
 };
 
-const TAIL_PAGE_SIZE = 5000;
+const INITIAL_TAIL_PAGE_SIZE = 1000;
+const OLDER_PAGE_SIZE = 5000;
 const INITIAL_FETCH_CAP = 1;
 const OLDER_GROUP_TARGET = 32;
 const OLDER_FETCH_CAP = 2;
@@ -133,7 +134,7 @@ export function useSessionEvents(
           // reader actually scrolls up (the sentinel drives loadOlder).
           const window = await loadEventWindow(client, workspaceId, sessionId, {
             before: Number.MAX_SAFE_INTEGER,
-            pageSize: TAIL_PAGE_SIZE,
+            pageSize: INITIAL_TAIL_PAGE_SIZE,
             targetGroups: Number.POSITIVE_INFINITY,
             maxFetches: INITIAL_FETCH_CAP,
             signal: controller.signal,
@@ -201,7 +202,7 @@ export function useSessionEvents(
     try {
       const window = await loadEventWindow(client, workspaceId, sessionId, {
         before,
-        pageSize: TAIL_PAGE_SIZE,
+        pageSize: OLDER_PAGE_SIZE,
         targetGroups: OLDER_GROUP_TARGET,
         maxFetches: OLDER_FETCH_CAP,
       });
