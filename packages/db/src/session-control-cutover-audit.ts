@@ -344,7 +344,16 @@ async function captureRelationProofs(
       }
       return field;
     });
-    const accumulator = accumulators.get(sessionId) ?? newProofAccumulator();
+    let accumulator = accumulators.get(sessionId);
+    if (!accumulator) {
+      accumulator = newProofAccumulator();
+      // Bun can represent a split substring as a view into the COPY chunk that
+      // produced it. A Map key then pins that entire network chunk for the life
+      // of the audit. Flatten the one durable key per session into independent
+      // storage; transient lookup strings remain collectable with their chunk.
+      const durableSessionId = Buffer.from(sessionId, "utf8").toString("utf8");
+      accumulators.set(durableSessionId, accumulator);
+    }
     accumulator.count += 1;
     accumulator.maxOrdinal = Math.max(accumulator.maxOrdinal ?? ordinal, ordinal);
     updateProofHash(accumulator.stable, stableFields);
@@ -358,7 +367,6 @@ async function captureRelationProofs(
       updateProofHash(accumulator.preservedStable, stableFields);
       updateProofHash(accumulator.preservedIdentity, [id]);
     }
-    accumulators.set(sessionId, accumulator);
   };
 
   for await (const chunk of stream) {
