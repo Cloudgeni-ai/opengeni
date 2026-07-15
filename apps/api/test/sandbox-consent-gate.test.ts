@@ -69,13 +69,14 @@ const settings = testSettings({
   delegationSecret: DELEGATION_SECRET,
   sandboxBackend: BACKEND,
   sandboxDesktopEnabled: true,
+  // This suite proves desktop consent and holder semantics. Its warm lease is
+  // deliberately provider-free, so an unrelated terminal capability probe must
+  // not retire that fake descriptor and turn the attach into a Modal cold-create.
+  sandboxTerminalEnabled: false,
   streamTokenSecret: "p32-stream-token-secret",
   sandboxOwnershipEnabled: true,
-  // This suite proves consent and holder semantics, not lease expiry. Keep the
-  // seeded warm lease comfortably alive under a loaded repository-wide CI run;
-  // a 5s TTL made the final attach nondeterministically become a cold spawner.
-  sandboxLeaseTtlMs: 60_000,
-  sandboxViewerHolderTtlMs: 60_000,
+  sandboxLeaseTtlMs: 5_000,
+  sandboxViewerHolderTtlMs: 5_000,
   sandboxIdleGraceMs: 500,
 });
 
