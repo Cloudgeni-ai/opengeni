@@ -1365,6 +1365,19 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         await publish(lifecycleEvents).catch(() => undefined);
       }
     };
+    const publishSandboxLost = async (input: { instanceId: string }): Promise<void> => {
+      if (!publish) return;
+      await publish([
+        {
+          type: "sandbox.box.lost",
+          payload: { sandboxId: input.instanceId },
+        },
+      ]).catch((publishError) => {
+        // The lease transition is already authoritative. A fenced/failed audit
+        // append must not prevent the same logical turn from recovering.
+        console.error("sandbox box lost event publish failed", publishError);
+      });
+    };
     const startLeaseHeartbeat = (
       sandbox: ResumedTurnSandbox,
       warmBackend: Settings["sandboxBackend"] | undefined,
@@ -3047,6 +3060,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               db,
               settings,
               sandboxMetrics: runtimeMetricsHooksForObservability(observability),
+              onSandboxLost: publishSandboxLost,
             },
             {
               accountId: input.accountId,
@@ -3346,6 +3360,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 db,
                 settings,
                 sandboxMetrics: runtimeMetricsHooksForObservability(observability),
+                onSandboxLost: publishSandboxLost,
               },
               {
                 accountId: input.accountId,

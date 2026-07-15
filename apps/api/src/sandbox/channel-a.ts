@@ -32,6 +32,7 @@ import {
   failWarmingToCold,
   getSandboxSessionEnvelope,
   loadWorkspaceEnvironmentForRun,
+  markWarmLeaseInstanceLost,
   readLease,
   releaseLeaseHolder,
   type Database,
@@ -42,6 +43,8 @@ import { HTTPException } from "hono/http-exception";
 
 import {
   establishSandboxSessionFromEnvelope,
+  isProviderSandboxNotFoundError,
+  SandboxResumeStateUnavailableError,
   serializeEstablishedSandboxEnvelope,
   SandboxChannelAService,
   ChannelAConflictError,
@@ -182,6 +185,7 @@ export async function withChannelA<T>(
       try {
         established = await establishSandboxSessionFromEnvelope(settings, spawnEnvelope, {
           sessionId: session.id,
+          recovery: "create-or-restore",
           backendOverride: session.sandboxBackend,
           environment,
         });
@@ -218,13 +222,50 @@ export async function withChannelA<T>(
       // ATTACHED / REARMED: the box is live. Read the lease to get the
       // authoritative resume_state, then resume by id for this op.
       const live = await readLease(db, workspaceId, sandboxGroupId);
-      if (live) leaseSnapshot = live;
-      const resumeEnvelope = leaseSnapshot.resumeState ?? envelope;
-      established = await establishSandboxSessionFromEnvelope(settings, resumeEnvelope, {
-        sessionId: session.id,
-        backendOverride: session.sandboxBackend,
-        environment,
-      });
+      if (
+        !live ||
+        live.liveness !== "warm" ||
+        live.leaseEpoch !== acquired.lease.leaseEpoch ||
+        live.instanceId === null
+      ) {
+        throw new HTTPException(409, {
+          message: `sandbox lease is not attachable; retry`,
+        });
+      }
+      leaseSnapshot = live;
+      try {
+        established = await establishSandboxSessionFromEnvelope(settings, live.resumeState, {
+          sessionId: session.id,
+          recovery: "resume-only",
+          backendOverride: session.sandboxBackend,
+          environment,
+        });
+      } catch (error) {
+        if (
+          !(error instanceof SandboxResumeStateUnavailableError) &&
+          !isProviderSandboxNotFoundError(session.sandboxBackend, error)
+        ) {
+          throw error;
+        }
+        const marked = await markWarmLeaseInstanceLost(db, {
+          accountId,
+          workspaceId,
+          sandboxGroupId,
+          expectedEpoch: live.leaseEpoch,
+          expectedInstanceId: live.instanceId,
+        });
+        if (marked.status === "marked") {
+          await appendAndPublishEvents(db, bus, workspaceId, session.id, [
+            {
+              type: "sandbox.box.lost",
+              payload: { sandboxId: live.instanceId },
+            },
+          ]);
+        }
+        throw new HTTPException(409, {
+          message: `sandbox instance was lost; retry to restore it`,
+        });
+      }
     }
 
     const emit = async (events: { type: string; payload: unknown }[]): Promise<void> => {

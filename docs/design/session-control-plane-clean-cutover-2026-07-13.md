@@ -264,6 +264,38 @@ wake ordering. Round 31 restored first-class attempt ownership, found the cutove
 for `requires_action` workflows, and specified the durable usage-classification boundary.
 All three ended `SHIP-TO-IMPLEMENT`; later rounds explicitly corrected earlier mistakes.
 
+### 3.7 Why one dead shared sandbox produced dozens of live containers
+
+The first production remediation correctly replaced workflow-local activity IDs with
+globally unique turn-attempt lease holders. Under resumed load, the holder invariant was
+healthy—174 turn holders mapped to 174 distinct attempt identities with no refcount
+mismatch—but one shared group still produced 70 provider-loss observations and roughly
+70 fresh Modal containers in minutes.
+
+All affected sessions held the same warm lease and the same dead provider instance. The
+runtime helper used by both the elected lease spawner and ordinary attached callers
+automatically created a replacement after provider NotFound. Each attached turn therefore
+created its own untracked replacement, while none owned the warming lease transition or
+could commit the replacement. The authoritative lease stayed warm and continued pointing
+at the original dead instance, so every retry repeated the fan-out.
+
+Creation authority is now explicit and has no compatibility fallback:
+
+1. only the caller that wins the database `cold -> warming` transition uses
+   `create-or-restore`;
+2. attached turns, Channel-A operations, and desktop/terminal stream resolution use
+   `resume-only` and can never call provider create;
+3. the first attached observer that proves the exact warm `(epoch, instance)` missing
+   atomically transitions that lease to cold, advances the epoch, clears dead identity
+   and tunnel data, and preserves only the durable workspace archives;
+4. concurrent observers become stale no-ops, release their holders, and recover/retry;
+5. the next ordinary admission elects exactly one replacement spawner; and
+6. only the winning loss transition emits the durable `sandbox.box.lost` evidence.
+
+A real-Postgres concurrency proof drives ten observers against one dead warm instance:
+exactly one marks it cold, nine classify stale, then exactly one admission becomes the
+replacement spawner while nine attach. No attached path creates a provider box.
+
 ## 4. Locked product semantics
 
 ### 4.1 Prompt queue
@@ -411,6 +443,13 @@ context. They are never prompt queue rows.
   many updates arrived.
 - Additional updates coalesce into the same pending bundle rather than creating twenty
   sequential machine turns.
+- A failed ordinary update-only inference moves its attached updates to `deferred`: they
+  remain outstanding model context but are not independently eligible to manufacture the
+  same continuation again. An exact duplicate of a deferred update does not wake the
+  session. The next genuinely new pending update or human inference attaches both pending
+  and deferred updates in one bundle.
+- A failed goal-continuation update is terminal `failed`; cancellation or supersession
+  returns attached updates to `pending` because that attempt did not adjudicate them.
 - Updates wait for the next fresh inference; they are never injected into a live
   inference. Important failure/action-required state is visible in the UI immediately.
 - If a human prompt is waiting, that prompt claims first and carries the update bundle.

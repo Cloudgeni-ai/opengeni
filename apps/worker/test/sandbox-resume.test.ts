@@ -27,6 +27,7 @@ import {
   commitWarmingToWarm,
   createDb,
   heartbeatLeaseHolder,
+  markWarmLeaseInstanceLost,
   readLease,
   SandboxImageConflictError,
   type Database,
@@ -234,6 +235,112 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
     // both released -> draining.
     const row = await readRow(workspaceId, groupId);
     expect(row?.liveness).toBe("draining");
+  }, 60_000);
+
+  test("(2b) concurrent observers of one missing warm instance elect exactly one replacement owner", async () => {
+    if (!available) return;
+    const settings = settingsFor(true);
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    const oldInstanceId = "box-dead";
+    const oldEpoch = 7;
+    const archive = Buffer.from("durable-workspace").toString("base64");
+    const resumeState = JSON.stringify({
+      backendId: "unix_local",
+      sessionState: {
+        providerState: { instanceId: oldInstanceId },
+        workspaceArchive: archive,
+      },
+    });
+    const [lease] = await admin<{ id: string }[]>`
+      insert into sandbox_leases (
+        account_id, workspace_id, sandbox_group_id, liveness, refcount,
+        turn_holders, viewer_holders, instance_id, backend, lease_epoch,
+        resume_backend_id, resume_state, expires_at
+      ) values (
+        ${accountId}, ${workspaceId}, ${groupId}, 'warm', 10,
+        10, 0, ${oldInstanceId}, 'local', ${oldEpoch},
+        'unix_local', ${resumeState}::text::jsonb, now() + interval '60 seconds'
+      ) returning id`;
+    for (let index = 0; index < 10; index += 1) {
+      await admin`
+        insert into sandbox_lease_holders (
+          account_id, workspace_id, lease_id, kind, holder_id, last_heartbeat_at
+        ) values (
+          ${accountId}, ${workspaceId}, ${lease!.id}, 'turn',
+          ${sandboxLeaseHolderIdForAttempt(`observer-${index}`)}, now()
+        )`;
+    }
+
+    const marks = await Promise.all(
+      Array.from({ length: 10 }, () =>
+        markWarmLeaseInstanceLost(db, {
+          accountId,
+          workspaceId,
+          sandboxGroupId: groupId,
+          expectedEpoch: oldEpoch,
+          expectedInstanceId: oldInstanceId,
+        }),
+      ),
+    );
+    expect(marks.filter((result) => result.status === "marked")).toHaveLength(1);
+    expect(marks.filter((result) => result.status === "stale")).toHaveLength(9);
+
+    const [retired] = await admin<
+      {
+        liveness: string;
+        lease_epoch: number;
+        instance_id: string | null;
+        refcount: number;
+        archive: string | null;
+        dead_id: string | null;
+      }[]
+    >`
+      select liveness, lease_epoch, instance_id, refcount,
+             resume_state #>> '{sessionState,workspaceArchive}' as archive,
+             resume_state #>> '{sessionState,providerState,instanceId}' as dead_id
+      from sandbox_leases
+      where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
+    expect(retired).toMatchObject({
+      liveness: "cold",
+      lease_epoch: oldEpoch + 1,
+      instance_id: null,
+      refcount: 10,
+      archive,
+      dead_id: null,
+    });
+
+    const admissions = await Promise.all(
+      Array.from({ length: 10 }, (_, index) =>
+        acquireLease(db, {
+          accountId,
+          workspaceId,
+          sandboxGroupId: groupId,
+          kind: "turn",
+          holderId: sandboxLeaseHolderIdForAttempt(`replacement-${index}`),
+          backend: "local",
+          leaseTtlMs: settings.sandboxLeaseTtlMs,
+          warmingLeaseTtlMs: settings.sandboxWarmingTimeoutMs,
+        }),
+      ),
+    );
+    expect(admissions.filter((result) => result.role === "spawner")).toHaveLength(1);
+    expect(admissions.filter((result) => result.role === "attached")).toHaveLength(9);
+    const winner = admissions.find((result) => result.role === "spawner")!;
+    const committed = await commitWarmingToWarm(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: winner.lease.leaseEpoch,
+      instanceId: "box-replacement",
+      resumeBackendId: "unix_local",
+      resumeState: {
+        backendId: "unix_local",
+        sessionState: { providerState: { instanceId: "box-replacement" } },
+      },
+      leaseTtlMs: settings.sandboxLeaseTtlMs,
+    });
+    expect(committed.committed).toBe(true);
+    expect(committed.lease?.instanceId).toBe("box-replacement");
   }, 60_000);
 
   test("(3) epoch fence on the HEARTBEAT path: a re-establish bumps lease_epoch -> the stale holder's heartbeat is rejected (self-evicts)", async () => {

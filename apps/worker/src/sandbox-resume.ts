@@ -6,8 +6,9 @@
 //
 //   1. acquireLease (group-keyed) under the DB FOR UPDATE + cold->warming CAS —
 //      the SOLE double-spawn guard (P1.1).
-//   2. establishSandboxSessionFromEnvelope — resume the one box BY ID (warm
-//      reattach, R4-safe) or cold-restore from snapshot on a provider NotFound.
+//   2. The cold->warming winner may create/restore. Every attached caller is
+//      resume-only; a missing provider box retires the exact warm epoch and
+//      re-enters admission instead of creating a rival.
 //   3. (spawner) commitWarmingToWarm (the lease_epoch++ fence + folds the resume
 //      envelope onto the lease). Optional desktop work is deliberately absent:
 //      the viewer and the first actual computer-use action initialize :0 lazily.
@@ -25,6 +26,7 @@ import {
   commitWarmingToWarm,
   failWarmingToCold,
   getSandboxSessionEnvelope,
+  markWarmLeaseInstanceLost,
   persistWarmSnapshot,
   readLease,
   recordWarmingSandboxCreated,
@@ -36,6 +38,8 @@ import {
 } from "@opengeni/db";
 import {
   establishSandboxSessionFromEnvelope,
+  isProviderSandboxNotFoundError,
+  SandboxResumeStateUnavailableError,
   serializeEstablishedSandboxEnvelope,
   deletePriorPersistedSnapshot,
   tagModalSandbox,
@@ -68,6 +72,12 @@ export type SandboxResumeServices = {
   db: Database;
   settings: Settings;
   sandboxMetrics?: RuntimeMetricsHooks;
+  /** Called only by the observer that wins the exact warm->cold loss CAS. */
+  onSandboxLost?: (input: {
+    sandboxGroupId: string;
+    instanceId: string;
+    leaseEpoch: number;
+  }) => Promise<void>;
 };
 
 export type ResumeBoxIds = {
@@ -135,6 +145,20 @@ export class SandboxWarmingTimeoutError extends Error {
       `Sandbox backend "${backend}" capacity or creation timed out after ${Math.ceil(timeoutMs / 1000)}s while warming the sandbox lease. Please try again; if this persists, sandbox capacity may be exhausted.`,
     );
     this.name = "SandboxWarmingTimeoutError";
+  }
+}
+
+/** The exact attached caller that won warm->cold after proving the provider
+ * instance gone. It is a lease supersession (the same logical turn recovers),
+ * plus the lost id needed for one durable observability event. */
+export class SandboxLeaseInstanceLostError extends SandboxLeaseSupersededError {
+  constructor(
+    sandboxGroupId: string,
+    leaseEpoch: number,
+    public readonly lostInstanceId: string,
+  ) {
+    super(sandboxGroupId, leaseEpoch);
+    this.name = "SandboxLeaseInstanceLostError";
   }
 }
 
@@ -554,6 +578,7 @@ export async function resumeBoxForTurn(
       const spawnEnvelope = acquired.lease.resumeState ?? envelope;
       const established = await establishSandboxSessionFromEnvelope(settings, spawnEnvelope, {
         sessionId: ids.sessionId,
+        recovery: "create-or-restore",
         backendOverride: ids.backend as never,
         ...(ids.environment ? { environment: ids.environment } : {}),
         ...(services.sandboxMetrics ? { metrics: services.sandboxMetrics } : {}),
@@ -673,14 +698,54 @@ export async function resumeBoxForTurn(
     // manifest into a rival. Fall back to the session envelope only when the
     // lease carries no resume_state (matches channel-a.ts's attached branch).
     const live = await readLease(db, ids.workspaceId, ids.sandboxGroupId);
-    const envelope =
-      live?.resumeState ?? (await getSandboxSessionEnvelope(db, ids.workspaceId, ids.sessionId));
-    const established = await establishSandboxSessionFromEnvelope(settings, envelope, {
-      sessionId: ids.sessionId,
-      backendOverride: ids.backend as never,
-      ...(ids.environment ? { environment: ids.environment } : {}),
-      ...(services.sandboxMetrics ? { metrics: services.sandboxMetrics } : {}),
-    });
+    if (
+      !live ||
+      live.liveness !== "warm" ||
+      live.leaseEpoch !== leaseEpoch ||
+      live.instanceId === null
+    ) {
+      throw new SandboxLeaseSupersededError(ids.sandboxGroupId, live?.leaseEpoch ?? leaseEpoch);
+    }
+    let established: EstablishedSandboxSession;
+    try {
+      established = await establishSandboxSessionFromEnvelope(settings, live.resumeState, {
+        sessionId: ids.sessionId,
+        recovery: "resume-only",
+        backendOverride: ids.backend as never,
+        ...(ids.environment ? { environment: ids.environment } : {}),
+        ...(services.sandboxMetrics ? { metrics: services.sandboxMetrics } : {}),
+      });
+    } catch (error) {
+      if (
+        !(error instanceof SandboxResumeStateUnavailableError) &&
+        !isProviderSandboxNotFoundError(ids.backend, error)
+      ) {
+        throw error;
+      }
+      const marked = await markWarmLeaseInstanceLost(db, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sandboxGroupId: ids.sandboxGroupId,
+        expectedEpoch: leaseEpoch,
+        expectedInstanceId: live.instanceId,
+      });
+      if (marked.status === "marked") {
+        await services.onSandboxLost?.({
+          sandboxGroupId: ids.sandboxGroupId,
+          instanceId: live.instanceId,
+          leaseEpoch: marked.lease.leaseEpoch,
+        });
+        throw new SandboxLeaseInstanceLostError(
+          ids.sandboxGroupId,
+          marked.lease.leaseEpoch,
+          live.instanceId,
+        );
+      }
+      throw new SandboxLeaseSupersededError(
+        ids.sandboxGroupId,
+        marked.lease?.leaseEpoch ?? leaseEpoch,
+      );
+    }
     return { established, leaseEpoch, release };
   } catch (error) {
     await release();

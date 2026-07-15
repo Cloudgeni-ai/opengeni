@@ -37,6 +37,7 @@ import {
   getSandboxSessionEnvelope,
   heartbeatLeaseHolder,
   loadWorkspaceEnvironmentForRun,
+  markWarmLeaseInstanceLost,
   readLease,
   recordLeaseDataPlaneUrl,
   recordLeaseTerminalDataPlaneUrl,
@@ -56,6 +57,8 @@ import {
   ensureDisplayStack,
   ensureTerminalServer,
   establishSandboxSessionFromEnvelope,
+  isProviderSandboxNotFoundError,
+  SandboxResumeStateUnavailableError,
   exposeStreamPort,
   desktopCapableBackend,
   NatsControlRpc,
@@ -235,6 +238,7 @@ export async function attachViewer(
       const spawnEnvelope = acquired.lease.resumeState ?? envelope;
       established = await establishSandboxSessionFromEnvelope(settings, spawnEnvelope, {
         sessionId: session.id,
+        recovery: "create-or-restore",
         backendOverride: session.sandboxBackend,
         environment,
       });
@@ -393,6 +397,44 @@ async function dropEstablishedHandle(
   // Intentionally a no-op beyond dropping the reference: terminating the box here
   // is wrong (see above). The lease owns lifecycle; the reaper owns teardown.
   void established;
+}
+
+/** A stream resolver is an attached observer, never a box creator. If its
+ * resume-only call proves the exact warm provider instance gone, retire that
+ * epoch atomically so the next ordinary attach elects one replacement owner. */
+async function retireMissingWarmLease(
+  services: ViewerServices,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    session: Session;
+    lease: LeaseSnapshot;
+  },
+  error: unknown,
+): Promise<boolean> {
+  if (
+    input.lease.instanceId === null ||
+    (!(error instanceof SandboxResumeStateUnavailableError) &&
+      !isProviderSandboxNotFoundError(input.session.sandboxBackend, error))
+  ) {
+    return false;
+  }
+  const marked = await markWarmLeaseInstanceLost(services.db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sandboxGroupId: input.session.sandboxGroupId,
+    expectedEpoch: input.lease.leaseEpoch,
+    expectedInstanceId: input.lease.instanceId,
+  });
+  if (marked.status === "marked" && services.bus) {
+    await appendAndPublishEvents(services.db, services.bus, input.workspaceId, input.session.id, [
+      {
+        type: "sandbox.box.lost",
+        payload: { sandboxId: input.lease.instanceId },
+      },
+    ]);
+  }
+  return true;
 }
 
 // ============================================================================
@@ -580,23 +622,28 @@ export async function mintDesktopStream(
     };
   }
 
-  // Resume the LIVE box by id. The lease's resume_state is authoritative (it is
-  // the box the lease currently fences); fall back to the session envelope only
-  // when the lease has none (a freshly-warmed lease always has it).
-  const envelope =
-    lease.resumeState ?? (await getSandboxSessionEnvelope(db, workspaceId, session.id));
+  // Resume the LIVE box by id from the authoritative lease descriptor. An
+  // attached stream resolver has no creation authority and never substitutes a
+  // per-session envelope for missing lease state.
+  const envelope = lease.resumeState;
   let established: EstablishedSandboxSession | undefined;
   try {
     // On a cold-restore (the lease's box is gone) this create() must carry the
     // SAME stable run-env the turn declares, so a later turn finds no env delta.
     const environment = await sessionAttachEnvironment(services, workspaceId, session);
-    established = input.establish
-      ? await input.establish(envelope)
-      : await establishSandboxSessionFromEnvelope(settings, envelope, {
-          sessionId: session.id,
-          backendOverride: session.sandboxBackend,
-          environment,
-        });
+    try {
+      established = input.establish
+        ? await input.establish(envelope)
+        : await establishSandboxSessionFromEnvelope(settings, envelope, {
+            sessionId: session.id,
+            recovery: "resume-only",
+            backendOverride: session.sandboxBackend,
+            environment,
+          });
+    } catch (error) {
+      await retireMissingWarmLease(services, { accountId, workspaceId, session, lease }, error);
+      return null;
+    }
 
     // Idempotent display stack (flock-guarded; a no-op when already up). A box
     // that genuinely can't run the stack degrades to transport:null, not a throw.
@@ -813,20 +860,25 @@ export async function mintTerminalStream(
 
   // Resume the LIVE box by id (lease.resume_state authoritative), ensure ttyd, and
   // resolve the 7681 tunnel + mint the scoped token, IN-PROCESS.
-  const envelope =
-    lease.resumeState ?? (await getSandboxSessionEnvelope(db, workspaceId, session.id));
+  const envelope = lease.resumeState;
   let established: EstablishedSandboxSession | undefined;
   try {
     // On a cold-restore this create() must carry the SAME stable run-env the turn
     // declares, so a later turn finds no manifest-env delta.
     const environment = await sessionAttachEnvironment(services, workspaceId, session);
-    established = input.establish
-      ? await input.establish(envelope)
-      : await establishSandboxSessionFromEnvelope(settings, envelope, {
-          sessionId: session.id,
-          backendOverride: session.sandboxBackend,
-          environment,
-        });
+    try {
+      established = input.establish
+        ? await input.establish(envelope)
+        : await establishSandboxSessionFromEnvelope(settings, envelope, {
+            sessionId: session.id,
+            recovery: "resume-only",
+            backendOverride: session.sandboxBackend,
+            environment,
+          });
+    } catch (error) {
+      await retireMissingWarmLease(services, { accountId, workspaceId, session, lease }, error);
+      return null;
+    }
 
     // Idempotent ttyd launch (flock-guarded; a no-op when already up). A box that
     // genuinely can't run it degrades to the sse-events firehose, not a throw.

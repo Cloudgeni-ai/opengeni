@@ -17,6 +17,19 @@ export class SandboxConfigError extends Error {
   }
 }
 
+/** A resume-only caller was handed a warm lease without a provider identity it
+ * can resume. The lease-aware caller must retire that exact epoch and re-enter
+ * admission; silently creating here would bypass the single-spawner guard. */
+export class SandboxResumeStateUnavailableError extends Error {
+  readonly backend: SandboxBackend | string;
+
+  constructor(backend: SandboxBackend | string) {
+    super(`Sandbox lease for backend "${backend}" has no resumable provider identity`);
+    this.name = "SandboxResumeStateUnavailableError";
+    this.backend = backend;
+  }
+}
+
 // Thrown by a provider's build() when its SDK client class is genuinely not
 // available in the installed @openai/agents-extensions. Per the P0.3 ruling we
 // NEVER fake a build body; if a provider cannot be constructed we register the

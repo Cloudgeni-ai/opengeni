@@ -13511,6 +13511,92 @@ export async function recordWarmingSandboxCreated(
   );
 }
 
+export type MarkWarmLeaseInstanceLostResult =
+  | { status: "marked"; lease: LeaseSnapshot }
+  | { status: "stale"; lease: LeaseSnapshot | null };
+
+/**
+ * Atomically retire one exact warm provider instance after a resume-only caller
+ * receives a provider NotFound. The epoch + instance predicates are the
+ * ownership fence: concurrent attached callers may all observe the same missing
+ * box, but only the first one transitions the lease to cold and advances its
+ * epoch. The next ordinary acquire elects one cold->warming spawner.
+ *
+ * Holders remain intact because their logical work/viewer interest still exists.
+ * Only live provider identity is cleared. A persisted workspace archive is
+ * reduced to the same minimal cold envelope used by the drain/failure paths, so
+ * the elected replacement can hydrate it without carrying the dead box id.
+ */
+export async function markWarmLeaseInstanceLost(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sandboxGroupId: string;
+    expectedEpoch: number;
+    expectedInstanceId: string;
+  },
+): Promise<MarkWarmLeaseInstanceLostResult> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (txRaw) => {
+        const tx = txRaw as unknown as Database;
+        const currentRows = await tx.execute<LeaseRow>(sql`
+          select * from sandbox_leases
+          where workspace_id = ${input.workspaceId}
+            and sandbox_group_id = ${input.sandboxGroupId}
+          for update
+        `);
+        const current = currentRows[0];
+        if (
+          !current ||
+          current.liveness !== "warm" ||
+          Number(current.lease_epoch) !== input.expectedEpoch ||
+          current.instance_id !== input.expectedInstanceId
+        ) {
+          return {
+            status: "stale" as const,
+            lease: current ? mapLeaseRow(current) : null,
+          };
+        }
+
+        const updatedRows = await tx.execute<LeaseRow>(sql`
+          update sandbox_leases set
+            liveness = 'cold',
+            instance_id = null,
+            data_plane_url = null,
+            terminal_data_plane_url = null,
+            lease_epoch = lease_epoch + 1,
+            resume_state = case
+              when (resume_state #>> '{sessionState,workspaceArchive}') is not null
+                then jsonb_build_object(
+                  'backendId', coalesce(resume_state ->> 'backendId', to_jsonb(resume_backend_id) #>> '{}'),
+                  'sessionState', jsonb_strip_nulls(jsonb_build_object(
+                    'workspaceArchive', resume_state #> '{sessionState,workspaceArchive}',
+                    'workspaceArchivePrev', resume_state #> '{sessionState,workspaceArchivePrev}',
+                    'workspaceArchiveAt', resume_state #> '{sessionState,workspaceArchiveAt}')))
+              else null
+            end,
+            resume_backend_id = case
+              when (resume_state #>> '{sessionState,workspaceArchive}') is not null
+                then resume_backend_id
+              else null
+            end,
+            updated_at = now()
+          where id = ${current.id}
+          returning *
+        `);
+        const updated = updatedRows[0];
+        if (!updated) {
+          throw new Error(`Warm sandbox lease vanished while retiring instance ${current.id}`);
+        }
+        return { status: "marked" as const, lease: mapLeaseRow(updated) };
+      }),
+  );
+}
+
 // §4.3 — caught spawn failure: warming -> cold (W3). Holders are intentionally
 // left intact — the arrival that triggered the spawn still wants a box, so the
 // next acquireLease re-CAS cold->warming.

@@ -214,6 +214,7 @@ async function expectFreshMaterializationHasTool(
   try {
     established = await establishSandboxSessionFromEnvelope(runSettings, null, {
       sessionId: `rig-verification-materialize-${crypto.randomUUID()}`,
+      recovery: "create-or-restore",
       environment: {},
     });
     await runRigSetupHook(established.session as never, {
