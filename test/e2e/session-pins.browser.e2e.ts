@@ -292,6 +292,115 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     await deviceA.close();
   }, 150_000);
 
+  test("restores row-actions focus after a failed unpin while allowing authoritative GET", async () => {
+    const context = await configuredContext(browser, {
+      viewport: { width: 1280, height: 800 },
+      extraHTTPHeaders: ownerHeaders,
+    });
+    const page = await context.newPage();
+    try {
+      await page.goto(webBaseUrl);
+      const workspaceId = await workspaceFromPage(page);
+      const target = await createSessionThroughApi(
+        page,
+        apiBaseUrl,
+        workspaceId,
+        "Failed row-menu rollback target",
+      );
+      await setSessionPinThroughApi(page, apiBaseUrl, workspaceId, target, true);
+      await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions/${target.id}`);
+      const actions = page.getByRole("button", { name: /^Actions for Failed row-menu rollback/ });
+      await actions.focus();
+      await page.keyboard.press("Enter");
+      const unpin = page.getByRole("menuitem", { name: "Unpin", exact: true });
+      await unpin.waitFor();
+      await unpin.focus();
+
+      let putAttempts = 0;
+      let authoritativeGets = 0;
+      const pinUrl = `${apiBaseUrl}/v1/workspaces/${workspaceId}/sessions/${target.id}/pin`;
+      await page.route(pinUrl, async (route) => {
+        if (route.request().method() === "PUT") {
+          putAttempts += 1;
+          await route.fulfill({
+            status: 500,
+            contentType: "application/json",
+            body: JSON.stringify({ error: "synthetic row-menu failure" }),
+          });
+          return;
+        }
+        await route.continue();
+      });
+      const sessionUrl = `${apiBaseUrl}/v1/workspaces/${workspaceId}/sessions/${target.id}`;
+      await page.route(sessionUrl, async (route) => {
+        if (route.request().method() === "GET") authoritativeGets += 1;
+        await route.continue();
+      });
+
+      await page.keyboard.press("Enter");
+      await page.getByText("Couldn't unpin session", { exact: true }).waitFor();
+      await page.getByRole("button", { name: "Unpin session" }).waitFor();
+      await page.waitForFunction(
+        (sessionId) => document.activeElement?.getAttribute("data-session-actions") === sessionId,
+        target.id,
+      );
+      expect(putAttempts).toBe(1);
+      expect(authoritativeGets).toBeGreaterThan(0);
+      expect(
+        await page.evaluate(() => document.activeElement?.getAttribute("data-session-actions")),
+      ).toBe(target.id);
+    } finally {
+      await context.close();
+    }
+  }, 90_000);
+
+  test("keeps loaded continuation rows visible across a first-page poll", async () => {
+    const context = await configuredContext(browser, {
+      viewport: { width: 1280, height: 800 },
+      extraHTTPHeaders: ownerHeaders,
+    });
+    const page = await context.newPage();
+    try {
+      await page.goto(webBaseUrl);
+      const workspaceId = await workspaceFromPage(page);
+      const sentinel = await createSessionThroughApi(
+        page,
+        apiBaseUrl,
+        workspaceId,
+        "Loaded continuation sentinel",
+      );
+      await Bun.sleep(25);
+      for (let index = 0; index < 50; index += 1) {
+        await createSessionThroughApi(
+          page,
+          apiBaseUrl,
+          workspaceId,
+          `Continuation page filler ${index + 1}`,
+        );
+      }
+
+      await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions`);
+      const loadOlder = page.getByRole("button", { name: "Load older sessions" });
+      await loadOlder.waitFor({ timeout: 15_000 });
+      await loadOlder.click();
+      await page
+        .getByRole("button", { name: /^Open Loaded continuation sentinel/ })
+        .waitFor({ timeout: 15_000 });
+
+      await createSessionThroughApi(page, apiBaseUrl, workspaceId, "Poll-only newest session");
+      await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+      await page
+        .getByRole("button", { name: /^Open Poll-only newest session/ })
+        .waitFor({ timeout: 15_000 });
+      await page
+        .getByRole("button", { name: /^Open Loaded continuation sentinel/ })
+        .waitFor({ timeout: 15_000 });
+      expect(sentinel.id).toBeTruthy();
+    } finally {
+      await context.close();
+    }
+  }, 120_000);
+
   test("renders one truthful queue, goal, and agents stack above the composer", async () => {
     const desktop = await configuredContext(browser, {
       viewport: { width: 1280, height: 800 },

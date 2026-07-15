@@ -235,6 +235,13 @@ export type CreateDbOptions = {
   userLookup?: UserLookup;
   /** postgres-js pool size; defaults to today's `10`. */
   max?: number;
+  /**
+   * Connection-local default transaction isolation sent in the postgres-js
+   * startup parameters. This is intentionally not a role/database default:
+   * tests and embedded callers can exercise a different ambient isolation
+   * without mutating a shared PostgreSQL role or affecting other connections.
+   */
+  isolationLevel?: postgres.ConnectionParameters["default_transaction_isolation"];
 };
 
 /**
@@ -298,6 +305,7 @@ export function createDb(databaseUrl: string, options: CreateDbOptions = {}): Db
     connection: {
       application_name: "opengeni",
       ...(options.searchPath ? { search_path: options.searchPath } : {}),
+      ...(options.isolationLevel ? { default_transaction_isolation: options.isolationLevel } : {}),
     },
   });
   const db = drizzle(client, { schema });

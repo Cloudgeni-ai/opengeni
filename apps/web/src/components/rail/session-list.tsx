@@ -43,7 +43,13 @@ import { pinLiveAnnouncement } from "@/lib/pin-live-announcement";
 import { SESSION_TITLE_MAX_LENGTH, useInlineRename } from "@/lib/session-rename";
 import { applySessionPinProjection, subscribeToSessionPinChanges } from "@/lib/session-pins";
 import {
+  sessionFocusAttribute,
+  shouldRestoreSessionFocus,
+  type SessionFocusTarget,
+} from "@/lib/session-focus";
+import {
   buildRailForest,
+  compareSessionActivity,
   groupSessionsForRail,
   relativeTimeLabel,
   visibleForestRows,
@@ -53,7 +59,7 @@ import { cn } from "@/lib/utils";
 import type { Session } from "@/types";
 
 type RenameFn = (workspaceId: string, sessionId: string, title: string) => Promise<Session | null>;
-type PinFocusTarget = "row" | "actions";
+type PinFocusTarget = SessionFocusTarget;
 type PinFn = (
   session: Session,
   pinned: boolean,
@@ -86,10 +92,10 @@ export function SessionList() {
   // Ordinary rows page independently of the complete pinned section. The
   // polled hook owns page one; additional pages are appended and deduplicated.
   // A filter change starts a fresh cursor chain rather than mixing snapshots.
-  // The server cursor carries the first page's short-lived snapshot identity.
-  // If a poll replaces that snapshot, any continuation loaded from the old
-  // activity order is stale even when workspace/search are unchanged.
-  const paginationKey = `${sessionPageKey(rail.workspaceId, search)}\u0000${nextCursor ?? "complete"}`;
+  // The continuation generation is keyed ONLY to workspace/search: polling
+  // page one rotates the server's short-lived snapshot, but must not discard
+  // older pages the user already loaded from the prior snapshot.
+  const paginationKey = sessionPageKey(rail.workspaceId, search);
   const paginationIdentity = useRef({ key: paginationKey, generation: 0 });
   paginationIdentity.current = advanceSessionPageIdentity(
     paginationIdentity.current,
@@ -121,7 +127,7 @@ export function SessionList() {
   const pinning = useRef(new Set<string>());
   const listRef = useRef<HTMLDivElement>(null);
   const pendingPinFocus = useRef<PendingPinFocus | null>(null);
-  const allSessions = useMemo(() => {
+  const serverSessions = useMemo(() => {
     const source = new Map<string, Session>();
     // Precedence is extra page < current first page < current pinned section;
     // a row that became pinned since it was loaded as an old ordinary page must
@@ -129,9 +135,13 @@ export function SessionList() {
     for (const session of [...extraSessions, ...sessions, ...pinned]) {
       source.set(session.id, session);
     }
+    return [...source.values()];
+  }, [pinned, sessions, extraSessions]);
+  const allSessions = useMemo(() => {
+    const source = new Map(serverSessions.map((session) => [session.id, session]));
     for (const [id, override] of pinOverrides) source.set(id, override.session);
     return [...source.values()];
-  }, [pinned, sessions, extraSessions, pinOverrides]);
+  }, [pinOverrides, serverSessions]);
   const pinnedSessions = useMemo(
     () => allSessions.filter((session) => Boolean(session.pinned)),
     [allSessions],
@@ -150,10 +160,14 @@ export function SessionList() {
   // disagreeing. Preserve the route/SSE-owned lifecycle and content fields.
   useEffect(() => {
     if (!openSessionId || openSessionWorkspaceId !== rail.workspaceId) return;
-    const projected = allSessions.find((candidate) => candidate.id === openSessionId);
+    // Do not feed the rail's short-lived optimistic override into the route
+    // header. A same-version optimistic timestamp can make a later failed
+    // rollback look non-exact, causing its authoritative lower revision to be
+    // rejected as stale and leaving the header pinned forever.
+    const projected = serverSessions.find((candidate) => candidate.id === openSessionId);
     if (!projected) return;
     setContextSession((current) => applySessionPinProjection(current, projected));
-  }, [allSessions, openSessionId, openSessionWorkspaceId, rail.workspaceId, setContextSession]);
+  }, [openSessionId, openSessionWorkspaceId, rail.workspaceId, serverSessions, setContextSession]);
 
   const activeSessionId = useRouterState({
     select: (state): string | null => {
@@ -239,21 +253,63 @@ export function SessionList() {
     const pending = pendingPinFocus.current;
     const root = listRef.current;
     if (!pending || !root) return;
+    const operation = pending.operation;
+    let cancelled = false;
+    let frame: number | null = null;
+    let timeout: ReturnType<typeof setTimeout> | null = null;
+    const restore = () => {
+      if (cancelled) return;
+      const current = pendingPinFocus.current;
+      if (!current || current.operation !== operation) return;
+      const attribute = sessionFocusAttribute(current.target);
+      const destination = [...root.querySelectorAll<HTMLElement>(`[${attribute}]`)].find(
+        (element) => element.getAttribute(attribute) === current.sessionId,
+      );
+      if (
+        destination &&
+        shouldRestoreSessionFocus(
+          document.activeElement as HTMLElement | null,
+          destination,
+          current.sessionId,
+          document.body,
+        )
+      ) {
+        try {
+          destination.focus({ preventScroll: true });
+        } catch {
+          // A concurrent query transition can remove the destination between
+          // the connectivity check and focus(). The next fenced attempt is the
+          // only safe recovery; never fall back to an unrelated element.
+        }
+      }
+    };
+    const finish = () => {
+      restore();
+      const current = pendingPinFocus.current;
+      if (current?.operation === operation && current.settled) {
+        pendingPinFocus.current = null;
+      }
+    };
 
-    const attribute = pending.target === "actions" ? "data-session-actions" : "data-session-row";
-    const destination = [...root.querySelectorAll<HTMLElement>(`[${attribute}]`)].find(
-      (element) => element.getAttribute(attribute) === pending.sessionId,
-    );
-    const active = document.activeElement as HTMLElement | null;
-    const focusWasDisplaced =
-      !active || active === document.body || Boolean(active.closest('[role="menu"]'));
-    if (destination && focusWasDisplaced) {
-      destination.focus({ preventScroll: true });
-    }
+    // Layout handles the optimistic/rollback commit. The microtask lets
+    // Radix finish its close bookkeeping, and rAF handles the post-animation
+    // remount; every attempt is fenced to this exact operation.
+    restore();
+    queueMicrotask(() => {
+      restore();
+      if (cancelled) return;
+      if (typeof window.requestAnimationFrame === "function") {
+        frame = window.requestAnimationFrame(finish);
+      } else {
+        timeout = setTimeout(finish, 0);
+      }
+    });
 
-    // Keep the request alive through the optimistic and authoritative renders.
-    // The final override removal is the last possible rollback/remount.
-    if (pending.settled) pendingPinFocus.current = null;
+    return () => {
+      cancelled = true;
+      if (frame !== null) window.cancelAnimationFrame(frame);
+      if (timeout !== null) clearTimeout(timeout);
+    };
   }, [flat]);
 
   const onPin = useCallback<PinFn>(
@@ -901,6 +957,7 @@ function SessionRow(props: {
       </ContextMenuTrigger>
       <ContextMenuContent
         className="min-w-40"
+        data-session-menu={props.session.id}
         onCloseAutoFocus={(event) => {
           if (!contextPinSelection.current) return;
           // The original trigger is about to be unmounted by the optimistic
@@ -976,6 +1033,7 @@ function RowActionsMenu({
       <DropdownMenuContent
         align="end"
         className="min-w-40"
+        data-session-menu={session.id}
         onClick={(event) => event.stopPropagation()}
         onCloseAutoFocus={(event) => {
           if (!pinSelection.current) return;

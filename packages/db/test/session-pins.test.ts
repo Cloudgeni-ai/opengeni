@@ -912,7 +912,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     }
   }, 60_000);
 
-  test("forces read committed when the app role defaults to repeatable read", async () => {
+  test("forces read committed over a connection-local repeatable-read default", async () => {
     if (!available || !shared) return;
     const workspace = await freshWorkspace();
     const subjectId = "user:explicit-read-committed";
@@ -922,10 +922,6 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
 
     const triggerFunction = "ope26_test_read_committed_guard";
     const triggerName = "ope26_test_read_committed_snapshot_guard";
-    const [database] = await admin<{ name: string }[]>`select current_database() as name`;
-    if (!database) {
-      throw new Error("session-pins test database is unavailable");
-    }
     let ambientClient: DbClient | null = null;
     const failures: unknown[] = [];
     try {
@@ -947,15 +943,14 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
             and new.subject_id = '${subjectId}'
           ) execute function ${triggerFunction}();
       `);
-      await admin`
-        alter role opengeni_app in database ${admin(database.name)}
-        set default_transaction_isolation = 'repeatable read'`;
-
-      // Role defaults apply when a new backend authenticates. The direct query
-      // proves this connection inherited REPEATABLE READ; the snapshot trigger
-      // then proves listSessionsForSubject overrides it inside the real
-      // transaction instead of relying on deployment defaults.
-      ambientClient = createDb(shared.appUrl, { max: 1 });
+      // The startup parameter applies only to this postgres-js pool. The
+      // direct query proves this connection inherited REPEATABLE READ; the
+      // snapshot trigger then proves listSessionsForSubject overrides it
+      // inside the real transaction without mutating a shared role default.
+      ambientClient = createDb(shared.appUrl, {
+        max: 1,
+        isolationLevel: "repeatable read",
+      });
       const ambient = await ambientClient.db.execute<{ default_transaction_isolation: string }>(
         sql`show default_transaction_isolation`,
       );
@@ -972,9 +967,6 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     } finally {
       await ambientClient?.close().catch(() => undefined);
       const cleanup = await Promise.allSettled([
-        admin`
-          alter role opengeni_app in database ${admin(database.name)}
-          reset default_transaction_isolation`,
         admin.unsafe(`
           drop trigger if exists ${triggerName} on session_list_snapshots;
           drop function if exists ${triggerFunction}();

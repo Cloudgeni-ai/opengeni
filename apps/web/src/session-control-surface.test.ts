@@ -39,6 +39,14 @@ describe("session control surface architecture", () => {
     expect(list).toContain("pinLiveAnnouncement");
   });
 
+  test("keeps rail optimistic pin overrides out of the header projection", async () => {
+    const list = await source("components/rail/session-list.tsx");
+    expect(list).toContain("const serverSessions = useMemo");
+    expect(list).toContain("const projected = serverSessions.find");
+    expect(list).toContain("const paginationKey = sessionPageKey(rail.workspaceId, search);");
+    expect(list).not.toContain("const paginationKey = `${sessionPageKey");
+  });
+
   test("the retired client-side queue model is gone", async () => {
     expect(await Bun.file(`${import.meta.dir}/lib/queue.ts`).exists()).toBe(false);
   });
