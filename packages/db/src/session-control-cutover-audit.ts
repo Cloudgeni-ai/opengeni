@@ -281,8 +281,6 @@ type RelationProofAccumulator = {
   preservedIdentity: ReturnType<typeof createHash>;
 };
 
-const PROOF_GC_ROW_INTERVAL = 131_072;
-
 function collectProofGarbage(): void {
   if (typeof Bun !== "undefined") Bun.gc(true);
 }
@@ -318,7 +316,6 @@ async function captureRelationProofs(
     (reference?.sessions ?? []).map((session) => [session.id, referenceProof(session).maxOrdinal]),
   );
   const accumulators = new Map<string, RelationProofAccumulator>();
-  let rowsSinceGarbageCollection = 0;
   await sql.unsafe<Row[]>(query).cursor(2_048, (rows) => {
     for (const row of rows) {
       const sessionId = stringValue(row.session_id, "relation.session_id");
@@ -341,15 +338,11 @@ async function captureRelationProofs(
       }
       accumulators.set(sessionId, accumulator);
     }
-    rowsSinceGarbageCollection += rows.length;
-    if (rowsSinceGarbageCollection >= PROOF_GC_ROW_INTERVAL) {
-      // The callback cursor lets postgres.js release each portal Result before
-      // requesting the next batch. Its async iterator retains a promise chain
-      // that grows across multi-million-row relations under Bun. Explicit GC
-      // also keeps Bun's adaptive heap below the Kubernetes cgroup limit.
-      collectProofGarbage();
-      rowsSinceGarbageCollection = 0;
-    }
+    // The callback cursor makes the previous portal Result unreachable before
+    // this callback receives the next batch. Collect at that exact ownership
+    // boundary: a row-count interval is not a memory bound when event payload
+    // sizes vary, and Bun does not observe the pod's cgroup limit soon enough.
+    collectProofGarbage();
   });
   collectProofGarbage();
 
