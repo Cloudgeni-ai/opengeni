@@ -725,31 +725,54 @@ export class SandboxChannelAService {
   async detectReposDetailed(): Promise<RepositoryDiscoveryResult> {
     try {
       const discovery = [
-        "set -o pipefail; find . -xdev",
+        "find . -xdev",
         "\\( -name .git \\( -type d -o -type f \\) -print -prune \\)",
         "-o \\( -type d \\( -name node_modules -o -name .cache -o -name .local",
         "-o -name dist -o -name build -o -name target -o -name .venv",
         "-o -name __pycache__ -o -name .next \\) -prune \\)",
         "2>/dev/null",
-        `| awk 'NR <= ${REPOSITORY_DISCOVERY_LIMIT} { print } NR == ${
-          REPOSITORY_DISCOVERY_LIMIT + 1
-        } { print "${REPOSITORY_DISCOVERY_TRUNCATED_SENTINEL}" }'`,
       ].join(" ");
       // The status trailer is necessary for providers whose only structural
       // surface is `execCommand`: that fallback has stdout but no numeric exit
       // code. Without the trailer a timed-out discovery could look like a
       // successful authoritative zero-repo result.
+      //
+      // Do not use GNU `timeout` here. Connected Machines include macOS, whose
+      // stock userland does not provide it. The watchdog kills `find` directly
+      // after the wall-clock budget and records whether that kill won the race.
+      // Its stdio is detached so cancelling a fast discovery cannot leave the
+      // watchdog's `sleep` holding the provider output pipe open.
       const command = [
-        `timeout 15s bash -lc ${shellQuote(discovery)}`,
+        'results_file=$(mktemp "${TMPDIR:-/tmp}/opengeni-repository-discovery.XXXXXX") || exit 70',
+        'timeout_file="${results_file}.timed-out"',
+        "discovery_pid=",
+        "watchdog_pid=",
+        'cleanup() { if [ -n "$discovery_pid" ]; then kill "$discovery_pid" 2>/dev/null || true; fi; if [ -n "$watchdog_pid" ]; then kill "$watchdog_pid" 2>/dev/null || true; fi; rm -f "$results_file" "$timeout_file"; }',
+        "abort() { trap - EXIT; cleanup; exit 143; }",
+        "trap cleanup EXIT",
+        "trap abort HUP INT TERM",
+        `${discovery} > "$results_file" &`,
+        "discovery_pid=$!",
+        '(sleeper_pid=; stop_watchdog() { if [ -n "$sleeper_pid" ]; then kill "$sleeper_pid" 2>/dev/null || true; wait "$sleeper_pid" 2>/dev/null || true; fi; exit 0; }; trap stop_watchdog HUP INT TERM; sleep 15 & sleeper_pid=$!; wait "$sleeper_pid"; sleeper_pid=; if kill -TERM "$discovery_pid" 2>/dev/null; then : > "$timeout_file"; fi) </dev/null >/dev/null 2>&1 &',
+        "watchdog_pid=$!",
+        'wait "$discovery_pid"',
         "status=$?",
+        "discovery_pid=",
+        'kill "$watchdog_pid" 2>/dev/null || true',
+        'wait "$watchdog_pid" 2>/dev/null || true',
+        "watchdog_pid=",
+        'if [ "$status" -ne 0 ] && [ -f "$timeout_file" ]; then status=124; fi',
+        `if [ "$status" -eq 0 ]; then awk 'NR <= ${REPOSITORY_DISCOVERY_LIMIT} { print } NR == ${
+          REPOSITORY_DISCOVERY_LIMIT + 1
+        } { print "${REPOSITORY_DISCOVERY_TRUNCATED_SENTINEL}" }' "$results_file"; fi`,
         `printf '\\n${REPOSITORY_DISCOVERY_STATUS_PREFIX}%s\\n' "$status"`,
         'exit "$status"',
-      ].join("; ");
+      ].join("\n");
       const { stdout } = await this.run({
         cmd: `bash -lc ${shellQuote(command)}`,
         workdir: this.workspaceRoot || undefined,
         yieldTimeMs: 20_000,
-        // At most 256 Linux paths (PATH_MAX each) plus the status trailer. This
+        // At most 256 Unix paths (PATH_MAX each) plus the status trailer. This
         // prevents a provider's ordinary output cap from dropping the trailer
         // and making a partial list look complete.
         maxOutputTokens: 300_000,
@@ -760,7 +783,7 @@ export class SandboxChannelAService {
       const embeddedStatus = statusLine
         ? Number.parseInt(statusLine.slice(REPOSITORY_DISCOVERY_STATUS_PREFIX.length), 10)
         : null;
-      // The command always prints this trailer after `timeout` returns. Missing
+      // The command always prints this trailer after discovery settles. Missing
       // means provider-side output truncation or an outer-shell failure, neither
       // of which is authoritative discovery even if exec reports exit 0.
       const status = Number.isInteger(embeddedStatus) ? embeddedStatus : null;

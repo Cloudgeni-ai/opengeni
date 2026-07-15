@@ -501,6 +501,29 @@ describe("P4.4 SandboxChannelAService — Git (real local box)", () => {
     });
   });
 
+  test("repository discovery does not depend on GNU timeout", async () => {
+    let command = "";
+    const svc = new SandboxChannelAService({
+      session: {
+        exec: async (args) => {
+          command = args.cmd;
+          return {
+            stdout: "__OPENGENI_REPOSITORY_DISCOVERY_STATUS__:0\n",
+            stderr: "",
+            exitCode: 0,
+          };
+        },
+      },
+    });
+
+    expect(await svc.detectReposDetailed()).toEqual({
+      repos: [],
+      complete: true,
+      degradedReason: null,
+    });
+    expect(command).not.toMatch(/(^|[;&|()\s])timeout([;&|()\s]|$)/);
+  });
+
   test("repository discovery fails closed when its command cannot complete", async () => {
     const svc = new SandboxChannelAService({
       session: {
@@ -514,6 +537,23 @@ describe("P4.4 SandboxChannelAService — Git (real local box)", () => {
     });
     // Capability negotiation keeps its historical best-effort compact shape.
     expect(await svc.detectRepos()).toEqual([]);
+  });
+
+  test("repository discovery reports an explicit wall-clock timeout", async () => {
+    const svc = new SandboxChannelAService({
+      session: {
+        exec: async () => ({
+          stdout: "__OPENGENI_REPOSITORY_DISCOVERY_STATUS__:124\n",
+          stderr: "",
+          exitCode: 124,
+        }),
+      },
+    });
+    expect(await svc.detectReposDetailed()).toEqual({
+      repos: [],
+      complete: false,
+      degradedReason: "command_timed_out",
+    });
   });
 
   test("repository discovery reports an explicit result-limit degradation", async () => {
