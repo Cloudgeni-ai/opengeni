@@ -421,6 +421,11 @@ describe("P3.2 consent gate — shared-exposure (group >1 session)", () => {
       headers: { authorization: auth, "content-type": "application/json" },
       body: JSON.stringify({ desktop: true }),
     });
+    if (allowed.status !== 201) {
+      throw new Error(
+        `expected viewer attach 201, received ${allowed.status}: ${await allowed.text()}`,
+      );
+    }
     expect(allowed.status).toBe(201);
   }, 60_000);
 
