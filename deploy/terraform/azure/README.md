@@ -55,6 +55,26 @@ object_storage = {
 
 External mode means Terraform does not create that dependency. The Helm values or secret manager integration must still provide the runtime values expected by OpenGeni, such as `OPENGENI_OBJECT_STORAGE_AZURE_CONNECTION_STRING` for Azure Blob.
 
+## Managed PostgreSQL Capacity
+
+Keep non-secret production capacity separate from the credential-bearing `postgres`
+object. This lets private deployment automation pin the live capacity without
+copying or rewriting the administrator password:
+
+```hcl
+managed_postgres_capacity = {
+  sku_name          = "GP_Standard_D4ds_v5"
+  storage_mb        = 131072
+  storage_tier      = "P10"
+  auto_grow_enabled = true
+}
+```
+
+When set, this policy is authoritative for managed PostgreSQL compute and
+storage. When omitted, the existing `postgres.sku_name` and
+`postgres.storage_mb` behavior is unchanged and provider defaults apply to
+storage tier and autogrow.
+
 ## Resource Records
 
 Before applying this module, decide where the operator will keep exact resource
