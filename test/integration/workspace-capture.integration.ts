@@ -22,6 +22,7 @@ import {
   createDb,
   dbSql,
   deleteWorkspaceCaptureRows,
+  insertFailedWorkspaceCapture,
   insertWorkspaceCapture,
   planWorkspaceCaptureGc,
 } from "@opengeni/db";
@@ -57,6 +58,7 @@ afterAll(async () => {
 type CaptureRow = {
   id: string;
   revision: number;
+  state: string;
   manifest_key: string | null;
   tree_index_key: string | null;
   blob_keys: string[];
@@ -69,7 +71,7 @@ type CaptureRow = {
 
 async function captureRows(sessionId: string): Promise<CaptureRow[]> {
   const rows = await db.execute<CaptureRow>(dbSql`
-    select id, revision::int as revision, manifest_key, tree_index_key, blob_keys,
+    select id, revision::int as revision, state, manifest_key, tree_index_key, blob_keys,
            size_bytes::int as size_bytes, stats, account_id, workspace_id, session_id
     from workspace_captures where session_id = ${sessionId} order by revision`);
   return rows as unknown as CaptureRow[];
@@ -328,7 +330,7 @@ describe("workspace capture — B-suite (real docker turns)", () => {
   );
 
   test(
-    "B7: fenced insert writes only under the live lease epoch (supersession → zero rows)",
+    "B7: available and degraded inserts write only under the live lease epoch",
     async () => {
       const workspaceId = await resolveWorkspaceId();
       const session = await seedSessionWithBash(client, workspaceId, {
@@ -349,14 +351,14 @@ describe("workspace capture — B-suite (real docker turns)", () => {
       select lease_epoch::int as lease_epoch from sandbox_leases where sandbox_group_id = ${sandboxGroupId} limit 1`);
       const leaseEpoch = (leaseRows as unknown as Array<{ lease_epoch: number }>)[0]!.lease_epoch;
 
-      const nextRevision = seed!.revision + 1;
+      const degradedRevision = seed!.revision + 1;
       const args = {
         accountId: account_id,
         workspaceId: workspace_id,
         sessionId: session_id,
         turnId: null,
         sandboxGroupId,
-        revision: nextRevision,
+        revision: degradedRevision,
         manifestKey: "m",
         treeIndexKey: "t",
         blobKeys: [] as string[],
@@ -375,10 +377,43 @@ describe("workspace capture — B-suite (real docker turns)", () => {
           sandboxGroupId: "00000000-0000-0000-0000-000000000000",
         }),
       ).toBeNull();
-      // The correct epoch commits and assigns the revision.
-      const ok = await insertWorkspaceCapture(db, { ...args, expectedEpoch: leaseEpoch });
+
+      // Degraded markers obey the same fence and never create capture blobs.
+      const degradedStats = {
+        degradedReason: "repository_discovery_timed_out",
+        discoveredRepoCount: 0,
+        durationMs: 15_000,
+      };
+      expect(
+        await insertFailedWorkspaceCapture(db, {
+          ...args,
+          expectedEpoch: leaseEpoch + 9999,
+          stats: degradedStats,
+        }),
+      ).toBeNull();
+      const degraded = await insertFailedWorkspaceCapture(db, {
+        ...args,
+        expectedEpoch: leaseEpoch,
+        stats: degradedStats,
+      });
+      expect(degraded).toEqual({ revision: degradedRevision });
+      const afterDegraded = await captureRows(session.id);
+      const degradedRow = afterDegraded.at(-1)!;
+      expect(degradedRow.state).toBe("failed");
+      expect(degradedRow.manifest_key).toBeNull();
+      expect(degradedRow.tree_index_key).toBeNull();
+      expect(degradedRow.blob_keys).toEqual([]);
+      expect(degradedRow.stats.degradedReason).toBe("repository_discovery_timed_out");
+
+      // The correct epoch also commits an ordinary available revision after it.
+      const availableRevision = degradedRevision + 1;
+      const ok = await insertWorkspaceCapture(db, {
+        ...args,
+        expectedEpoch: leaseEpoch,
+        revision: availableRevision,
+      });
       expect(ok).not.toBeNull();
-      expect(ok!.revision).toBe(nextRevision);
+      expect(ok!.revision).toBe(availableRevision);
     },
     TURN_TIMEOUT * 2,
   );

@@ -216,6 +216,34 @@ describe("serveWorkspaceCapture (manifest response)", () => {
     expect(res).toEqual({ available: false });
   });
 
+  test("failed repository discovery returns explicit degraded metadata", async () => {
+    const res = await serveWorkspaceCapture(
+      makeRow({
+        state: "failed",
+        manifestKey: null,
+        treeIndexKey: null,
+        stats: { degradedReason: "repository_discovery_timed_out" },
+      }),
+      fakeStorage({}),
+    );
+    expect(res).toEqual({
+      available: false,
+      degradedReason: "repository_discovery_timed_out",
+      revision: 3,
+      capturedAt: "2026-07-08T00:00:00.000Z",
+      turnId: "turn-1",
+      leaseEpoch: 5,
+    });
+  });
+
+  test("failed row without a known discovery reason does not invent one", async () => {
+    const res = await serveWorkspaceCapture(
+      makeRow({ state: "failed", manifestKey: null, treeIndexKey: null, stats: {} }),
+      fakeStorage({}),
+    );
+    expect(res).toEqual({ available: false });
+  });
+
   test("manifest blob GC'd out from under the row → {available:false}", async () => {
     const res = await serveWorkspaceCapture(makeRow(), fakeStorage({})); // no MANIFEST_KEY
     expect(res).toEqual({ available: false });

@@ -12,7 +12,11 @@ import { fileURLToPath } from "node:url";
 import { createObservability } from "@opengeni/observability";
 import { testSettings } from "@opengeni/testing";
 import { computeWorkspaceCaptureGcPlan, type Database } from "@opengeni/db";
-import { WorkspaceCaptureManifest, WorkspaceRevisionCapturedPayload } from "@opengeni/contracts";
+import {
+  WorkspaceCaptureManifest,
+  WorkspaceRevisionCapturedPayload,
+  WorkspaceRevisionDegradedPayload,
+} from "@opengeni/contracts";
 import type { ObjectStorage } from "@opengeni/storage";
 import type { ChannelASession } from "@opengeni/runtime/sandbox";
 import {
@@ -361,6 +365,18 @@ describe("workspace-capture — manifest & event serialization", () => {
       },
     };
     expect(() => WorkspaceRevisionCapturedPayload.parse(payload)).not.toThrow();
+  });
+
+  test("the degraded announce payload parses under the contract (metadata only)", () => {
+    expect(() =>
+      WorkspaceRevisionDegradedPayload.parse({
+        revision: 4,
+        turnId: "t2",
+        capturedAt: new Date().toISOString(),
+        leaseEpoch: 8,
+        reason: "repository_discovery_result_limit_exceeded",
+      }),
+    ).not.toThrow();
   });
 });
 

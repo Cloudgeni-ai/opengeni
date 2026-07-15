@@ -1,14 +1,17 @@
 import type {
   GetWorkspaceCaptureResponse,
   SessionEvent,
+  WorkspaceCaptureDegradedReason,
   WorkspaceCaptureManifest,
   WorkspaceRevisionCapturedPayload,
+  WorkspaceRevisionDegradedPayload,
 } from "@opengeni/sdk";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useOpenGeni, type ClientOverride } from "../provider";
 
 /** The announce event M1 emits at turn end (metadata only, never content). */
 const REVISION_CAPTURED = "workspace.revision.captured";
+const REVISION_DEGRADED = "workspace.revision.degraded";
 
 export type UseWorkspaceCaptureOptions = ClientOverride & {
   /** Live event log (usually `useSessionEvents().events`) — a
@@ -28,6 +31,10 @@ export type UseWorkspaceCaptureResult = {
   capturedAt: string | null;
   /** Whether a capture is available at all (the `{available:false}` discriminator). */
   available: boolean;
+  /** Why the newest durable revision is unavailable. null means no capture has
+   *  been attempted yet; a value means capture explicitly failed closed and
+   *  consumers must use the live box rather than trust an incomplete snapshot. */
+  degradedReason: WorkspaceCaptureDegradedReason | null;
   /** The changed-file count from the capture's stats, resolved on the FIRST GET
    *  (from the response's top-level `stats`, before any manifest-URL hop). null
    *  until that first resolve; 0 when no capture exists. This is the pre-paint
@@ -63,6 +70,7 @@ export function useWorkspaceCapture(
 
   const [capture, setCapture] = useState<WorkspaceCaptureManifest | null>(null);
   const [available, setAvailable] = useState(false);
+  const [degradedReason, setDegradedReason] = useState<WorkspaceCaptureDegradedReason | null>(null);
   // Resolved from the FIRST GET's top-level stats (before any manifest-URL hop),
   // so the dock can pick its default tab as early as possible. null until then.
   const [fileCount, setFileCount] = useState<number | null>(null);
@@ -91,8 +99,10 @@ export function useWorkspaceCapture(
         setCapture(null);
         setAvailable(false);
         setFileCount(0);
+        setDegradedReason(res.degradedReason ?? null);
         return;
       }
+      setDegradedReason(null);
       // Resolve the changed-file count immediately from the response's stats — the
       // default-tab signal must not wait on a >2MB manifest-URL hop.
       setFileCount(res.stats.fileCount);
@@ -133,6 +143,7 @@ export function useWorkspaceCapture(
     if (!enabled) {
       setCapture(null);
       setAvailable(false);
+      setDegradedReason(null);
       setFileCount(null);
       setAnnouncedRevision(null);
       return;
@@ -153,6 +164,11 @@ export function useWorkspaceCapture(
       if (event.sequence <= lastSeqRef.current) continue;
       if (event.type === REVISION_CAPTURED) {
         const payload = event.payload as WorkspaceRevisionCapturedPayload | null;
+        if (payload && typeof payload === "object" && typeof payload.revision === "number") {
+          newest = newest === null ? payload.revision : Math.max(newest, payload.revision);
+        }
+      } else if (event.type === REVISION_DEGRADED) {
+        const payload = event.payload as WorkspaceRevisionDegradedPayload | null;
         if (payload && typeof payload === "object" && typeof payload.revision === "number") {
           newest = newest === null ? payload.revision : Math.max(newest, payload.revision);
         }
@@ -182,6 +198,7 @@ export function useWorkspaceCapture(
     revision: loadedRevision,
     capturedAt: capture?.capturedAt ?? null,
     available,
+    degradedReason,
     fileCount,
     isStale,
     loading,

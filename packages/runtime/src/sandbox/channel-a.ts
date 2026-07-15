@@ -155,6 +155,20 @@ export type SandboxChannelAServiceOptions = {
   runAs?: string;
 };
 
+export const REPOSITORY_DISCOVERY_LIMIT = 256;
+export type RepositoryDiscoveryDegradedReason =
+  | "command_failed"
+  | "command_timed_out"
+  | "result_limit_exceeded";
+export type RepositoryDiscoveryResult = {
+  repos: string[];
+  complete: boolean;
+  degradedReason: RepositoryDiscoveryDegradedReason | null;
+};
+
+const REPOSITORY_DISCOVERY_TRUNCATED_SENTINEL = "__OPENGENI_REPOSITORY_DISCOVERY_TRUNCATED__";
+const REPOSITORY_DISCOVERY_STATUS_PREFIX = "__OPENGENI_REPOSITORY_DISCOVERY_STATUS__:";
+
 const NUL = String.fromCharCode(0); // \0 NUL — find/porcelain/numstat -z separator
 const US = String.fromCharCode(0x1f); // \x1f unit sep — git-log field separator
 const RS = String.fromCharCode(0x1e); // \x1e record sep — git-log record separator
@@ -693,21 +707,117 @@ export class SandboxChannelAService {
     return { commit, files: diff.files, blob: null, revision: this.revision };
   }
 
-  /** Detect repo roots within the workspace (for the Git.repos capability). */
-  async detectRepos(): Promise<string[]> {
+  /**
+   * Detect repo roots within every supported workspace layout.
+   *
+   * The platform seeds GitHub repositories at
+   * `repos/<owner>/<repo>`, which puts the `.git` marker at depth four from the
+   * workspace root. Do not reintroduce a fixed maxdepth here. Traversal is
+   * bounded instead by pruning known machine/build residue, a wall-clock
+   * timeout, and a result limit. `.git` may be either a directory (ordinary
+   * clone/submodule) or a file (linked worktree).
+   *
+   * Callers that persist an authoritative snapshot must use this detailed
+   * result and surface an incomplete discovery. The compact `detectRepos()`
+   * wrapper remains for capability negotiation, where the best available list
+   * is preferable to failing the whole capabilities document.
+   */
+  async detectReposDetailed(): Promise<RepositoryDiscoveryResult> {
     try {
+      const discovery = [
+        "find . -xdev",
+        "\\( -name .git \\( -type d -o -type f \\) -print -prune \\)",
+        "-o \\( -type d \\( -name node_modules -o -name .cache -o -name .local",
+        "-o -name dist -o -name build -o -name target -o -name .venv",
+        "-o -name __pycache__ -o -name .next \\) -prune \\)",
+        "2>/dev/null",
+      ].join(" ");
+      // The status trailer is necessary for providers whose only structural
+      // surface is `execCommand`: that fallback has stdout but no numeric exit
+      // code. Without the trailer a timed-out discovery could look like a
+      // successful authoritative zero-repo result.
+      //
+      // Do not use GNU `timeout` here. Connected Machines include macOS, whose
+      // stock userland does not provide it. The watchdog kills `find` directly
+      // after the wall-clock budget and records whether that kill won the race.
+      // Its stdio is detached so cancelling a fast discovery cannot leave the
+      // watchdog's `sleep` holding the provider output pipe open.
+      const command = [
+        'results_file=$(mktemp "${TMPDIR:-/tmp}/opengeni-repository-discovery.XXXXXX") || exit 70',
+        'timeout_file="${results_file}.timed-out"',
+        "discovery_pid=",
+        "watchdog_pid=",
+        'cleanup() { if [ -n "$discovery_pid" ]; then kill "$discovery_pid" 2>/dev/null || true; fi; if [ -n "$watchdog_pid" ]; then kill "$watchdog_pid" 2>/dev/null || true; fi; rm -f "$results_file" "$timeout_file"; }',
+        "abort() { trap - EXIT; cleanup; exit 143; }",
+        "trap cleanup EXIT",
+        "trap abort HUP INT TERM",
+        `${discovery} > "$results_file" &`,
+        "discovery_pid=$!",
+        '(sleeper_pid=; stop_watchdog() { if [ -n "$sleeper_pid" ]; then kill "$sleeper_pid" 2>/dev/null || true; wait "$sleeper_pid" 2>/dev/null || true; fi; exit 0; }; trap stop_watchdog HUP INT TERM; sleep 15 & sleeper_pid=$!; wait "$sleeper_pid"; sleeper_pid=; if kill -TERM "$discovery_pid" 2>/dev/null; then : > "$timeout_file"; fi) </dev/null >/dev/null 2>&1 &',
+        "watchdog_pid=$!",
+        'wait "$discovery_pid"',
+        "status=$?",
+        "discovery_pid=",
+        'kill "$watchdog_pid" 2>/dev/null || true',
+        'wait "$watchdog_pid" 2>/dev/null || true',
+        "watchdog_pid=",
+        'if [ "$status" -ne 0 ] && [ -f "$timeout_file" ]; then status=124; fi',
+        `if [ "$status" -eq 0 ]; then awk 'NR <= ${REPOSITORY_DISCOVERY_LIMIT} { print } NR == ${
+          REPOSITORY_DISCOVERY_LIMIT + 1
+        } { print "${REPOSITORY_DISCOVERY_TRUNCATED_SENTINEL}" }' "$results_file"; fi`,
+        `printf '\\n${REPOSITORY_DISCOVERY_STATUS_PREFIX}%s\\n' "$status"`,
+        'exit "$status"',
+      ].join("\n");
       const { stdout } = await this.run({
-        cmd: `find . -maxdepth 3 -name .git -type d 2>/dev/null`,
+        cmd: `bash -lc ${shellQuote(command)}`,
         workdir: this.workspaceRoot || undefined,
+        yieldTimeMs: 20_000,
+        // At most 256 Unix paths (PATH_MAX each) plus the status trailer. This
+        // prevents a provider's ordinary output cap from dropping the trailer
+        // and making a partial list look complete.
+        maxOutputTokens: 300_000,
       });
-      return stdout
+      const statusLine = stdout
+        .split("\n")
+        .find((line) => line.startsWith(REPOSITORY_DISCOVERY_STATUS_PREFIX));
+      const embeddedStatus = statusLine
+        ? Number.parseInt(statusLine.slice(REPOSITORY_DISCOVERY_STATUS_PREFIX.length), 10)
+        : null;
+      // The command always prints this trailer after discovery settles. Missing
+      // means provider-side output truncation or an outer-shell failure, neither
+      // of which is authoritative discovery even if exec reports exit 0.
+      const status = Number.isInteger(embeddedStatus) ? embeddedStatus : null;
+      if (status === 124) {
+        return { repos: [], complete: false, degradedReason: "command_timed_out" };
+      }
+      if (status !== 0) {
+        return { repos: [], complete: false, degradedReason: "command_failed" };
+      }
+      const lines = stdout
         .split("\n")
         .map((l) => l.trim())
-        .filter(Boolean)
-        .map((g) => dirnameAbs(stripDotSlash(g, "")) || "");
+        .filter((line) => Boolean(line) && !line.startsWith(REPOSITORY_DISCOVERY_STATUS_PREFIX));
+      const truncated = lines.includes(REPOSITORY_DISCOVERY_TRUNCATED_SENTINEL);
+      const repos = [
+        ...new Set(
+          lines
+            .filter((line) => line !== REPOSITORY_DISCOVERY_TRUNCATED_SENTINEL)
+            .map((gitMarker) => dirnameAbs(stripDotSlash(gitMarker, "")) || ""),
+        ),
+      ].sort();
+      return {
+        repos,
+        complete: !truncated,
+        degradedReason: truncated ? "result_limit_exceeded" : null,
+      };
     } catch {
-      return [];
+      return { repos: [], complete: false, degradedReason: "command_failed" };
     }
+  }
+
+  /** Detect repo roots within the workspace (for the Git.repos capability). */
+  async detectRepos(): Promise<string[]> {
+    return (await this.detectReposDetailed()).repos;
   }
 
   // ════════════════════════ Terminal exec + PTY (A2) ════════════════════════

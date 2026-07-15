@@ -13,6 +13,7 @@
 import {
   GetWorkspaceCaptureFileResponse,
   GetWorkspaceCaptureResponse,
+  WorkspaceCaptureDegradedReason,
   WorkspaceCaptureManifest,
   WorkspaceCaptureStats,
 } from "@opengeni/contracts";
@@ -83,9 +84,27 @@ export async function serveWorkspaceCapture(
   row: WorkspaceCaptureRow | null,
   storage: CaptureStoragePort,
 ): Promise<GetWorkspaceCaptureResponse> {
-  if (!row || row.state !== "available" || !row.manifestKey) {
+  if (!row) {
     return { available: false };
   }
+  if (row.state === "failed") {
+    const reason = WorkspaceCaptureDegradedReason.safeParse(row.stats.degradedReason);
+    if (!reason.success) {
+      // `failed` was reserved before repository-discovery markers existed. Do
+      // not invent a cause for an older or malformed row; plain unavailable is
+      // the only truthful backwards-compatible response.
+      return { available: false };
+    }
+    return GetWorkspaceCaptureResponse.parse({
+      available: false,
+      degradedReason: reason.data,
+      revision: row.revision,
+      capturedAt: row.capturedAt,
+      turnId: row.turnId,
+      leaseEpoch: row.leaseEpoch,
+    });
+  }
+  if (row.state !== "available" || !row.manifestKey) return { available: false };
   const stats = WorkspaceCaptureStats.safeParse(row.stats);
   if (!stats.success) {
     // A row with malformed stats (or a synthetic/partial row) degrades to the

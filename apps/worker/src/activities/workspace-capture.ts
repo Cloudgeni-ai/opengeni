@@ -32,6 +32,7 @@ import type { Settings } from "@opengeni/config";
 import type { Database } from "@opengeni/db";
 import {
   deleteWorkspaceCaptureRows,
+  insertFailedWorkspaceCapture,
   insertWorkspaceCapture,
   latestWorkspaceCapture,
   planWorkspaceCaptureGc,
@@ -42,13 +43,18 @@ import type { Observability } from "@opengeni/observability";
 // setupBoxSession here (NOT the routing veneer) guarantees a mid-turn
 // sandbox_swap can never re-route capture execs onto a user's machine — the same
 // reason the snapshot uses setupBoxSession (dossier §7.3).
-import { SandboxChannelAService, type ChannelASession } from "@opengeni/runtime/sandbox";
+import {
+  SandboxChannelAService,
+  type ChannelASession,
+  type RepositoryDiscoveryDegradedReason,
+} from "@opengeni/runtime/sandbox";
 import type {
   FsTreeNode,
   GitFileStatus,
   GitFileStatusCode,
   SessionEventType,
   WorkspaceCaptureFile,
+  WorkspaceCaptureDegradedReason,
   WorkspaceCaptureManifest,
   WorkspaceCaptureRepo,
   WorkspaceCaptureStats,
@@ -257,8 +263,68 @@ async function runCapture(
   // Reads only — no emitter (we publish the announce ourselves after commit).
   const svc = new SandboxChannelAService({ session: input.session, leaseEpoch: input.leaseEpoch });
 
+  // Resolve the previous revision before discovery so even a failed discovery
+  // can commit a monotonic, explicit degraded marker. That marker becomes the
+  // newest read result and prevents an older successful capture from being
+  // mistaken for the current turn's authoritative workspace state.
+  const prev = await latestWorkspaceCapture(input.db, input.workspaceId, input.sessionId);
+  const revision = (prev?.revision ?? -1) + 1;
+
   // ── 1. per-repo status + diff, union the touched set ──────────────────────
-  const repoRoots = await svc.detectRepos();
+  const discovery = await svc.detectReposDetailed();
+  if (!discovery.complete) {
+    const capturedAt = new Date().toISOString();
+    const reason = captureDegradedReason(discovery.degradedReason);
+    const inserted = await insertFailedWorkspaceCapture(input.db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      sandboxGroupId: input.sandboxGroupId,
+      expectedEpoch: input.leaseEpoch,
+      revision,
+      stats: {
+        degradedReason: reason,
+        discoveredRepoCount: discovery.repos.length,
+        durationMs: Date.now() - startedAt,
+      },
+    });
+    if (!inserted) {
+      observability.incrementCounter({
+        name: "opengeni_workspace_capture_total",
+        labels: { result: "superseded" },
+      });
+      return;
+    }
+    observability.warn("workspace capture degraded — repository discovery incomplete", {
+      "opengeni.session_id": input.sessionId,
+      "opengeni.turn_id": input.turnId ?? "",
+      "workspace_capture.degraded_reason": reason,
+      "workspace_capture.discovered_repo_count": discovery.repos.length,
+    });
+    observability.incrementCounter({
+      name: "opengeni_workspace_capture_total",
+      labels: { result: "degraded_repository_discovery" },
+    });
+    if (input.publish) {
+      await input
+        .publish([
+          {
+            type: "workspace.revision.degraded",
+            payload: {
+              revision: inserted.revision,
+              turnId: input.turnId,
+              capturedAt,
+              leaseEpoch: input.leaseEpoch,
+              reason,
+            },
+          },
+        ])
+        .catch(() => undefined);
+    }
+    return;
+  }
+  const repoRoots = discovery.repos;
   const repos: WorkspaceCaptureRepo[] = [];
   // workspace-relative path → touched-file descriptor
   const touched = new Map<string, { status: GitFileStatusCode; deleted: boolean }>();
@@ -346,9 +412,6 @@ async function runCapture(
   // changed" holds even with a persistently dirty tree, and content-addressed
   // blobs already dedupe storage. (Deviation from the dossier's literal "clean"
   // wording — same intent, strictly better; recorded in PROGRESS.)
-  const prev = await latestWorkspaceCapture(input.db, input.workspaceId, input.sessionId);
-  const revision = (prev?.revision ?? -1) + 1;
-
   // ── 3. after-images of touched files (size-gated), content-addressed ───────
   const files: WorkspaceCaptureFile[] = [];
   const blobKeys = new Set<string>();
@@ -608,6 +671,20 @@ async function runCapture(
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
+
+function captureDegradedReason(
+  reason: RepositoryDiscoveryDegradedReason | null,
+): WorkspaceCaptureDegradedReason {
+  switch (reason) {
+    case "command_timed_out":
+      return "repository_discovery_timed_out";
+    case "result_limit_exceeded":
+      return "repository_discovery_result_limit_exceeded";
+    case "command_failed":
+    default:
+      return "repository_discovery_command_failed";
+  }
+}
 
 function statusCodeOf(f: GitFileStatus): GitFileStatusCode {
   return f.worktree ?? f.index ?? "modified";

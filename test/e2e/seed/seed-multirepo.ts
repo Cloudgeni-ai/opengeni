@@ -1,6 +1,6 @@
 // seed-multirepo — two git repos under the workspace root with mixed edits
 // (staged, unstaged, untracked, deleted). Exercises per-repo diff discovery
-// (detectRepos: find -maxdepth 3 -name .git) and grouped Changes rendering.
+// (bounded nested discovery of .git directories/files) and grouped Changes rendering.
 import { runSeed, seedSessionWithBash } from "./harness";
 
 const BASH = String.raw`
