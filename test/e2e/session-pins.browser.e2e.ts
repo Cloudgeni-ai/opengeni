@@ -564,7 +564,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
           headers: { authorization: `Bearer ${token}` },
         },
       );
-      await waitForDatabaseQueryWait(barrier, "workspace_memberships");
+      await waitForDatabaseQueryWait(barrier, "pg_advisory_xact_lock_shared");
       await barrier`select pg_advisory_unlock(${barrierClass}, ${removalLock})`;
       expect(await removalPromise).toBe(true);
 
@@ -685,7 +685,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
           body: JSON.stringify({ pinned: true, expectedVersion: 0 }),
         },
       );
-      await waitForDatabaseQueryWait(barrier, "workspace_memberships");
+      await waitForDatabaseQueryWait(barrier, "pg_advisory_xact_lock");
       await barrier`select pg_advisory_unlock(${barrierClass}, ${removalLock})`;
       expect(await removalPromise).toBe(true);
 

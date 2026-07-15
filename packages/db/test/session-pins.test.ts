@@ -82,6 +82,27 @@ async function waitForAdvisoryWait(
   throw new Error(`timed out waiting for advisory lock ${classId}/${objectId}`);
 }
 
+async function waitForAdvisoryWaitCount(
+  connection: postgres.Sql,
+  classId: number,
+  objectId: number,
+  minimum: number,
+): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const [row] = await connection<{ waiting: number }[]>`
+      select count(*)::int as waiting
+      from pg_locks
+      where locktype = 'advisory'
+        and classid = ${classId}
+        and objid = ${objectId}
+        and not granted`;
+    if ((row?.waiting ?? 0) >= minimum) return;
+    await Bun.sleep(10);
+  }
+  throw new Error(`timed out waiting for ${minimum} advisory locks on ${classId}/${objectId}`);
+}
+
 async function waitForDatabaseQueryWait(
   connection: postgres.Sql,
   queryFragment: string,
@@ -792,7 +813,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     }
   }, 60_000);
 
-  test("rejects a paused authorized listing after removal wins the membership lock", async () => {
+  test("rejects a paused authorized listing after removal wins the personal-state fence", async () => {
     if (!available || !shared) return;
     const workspace = await freshWorkspace();
     const subjectId = "user:removal-first";
@@ -843,18 +864,17 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       removalPromise = removeWorkspaceMember(removalClient.db, workspace.workspaceId, subjectId);
       await waitForAdvisoryWait(admin, barrierClass, removalLock);
 
-      // Start listing while removal owns the membership lock. The query must
-      // reach the row-lock wait before removal commits, establishing the
-      // listing transaction's repeatable-read snapshot first.
+      // Start listing while removal owns the personal-state fence. The list must
+      // wait on its shared counterpart before checking membership.
       listingPromise = listSessionsForSubject(listingClient.db, workspace.workspaceId, {
         subjectId,
         limit: 1,
       });
-      await waitForDatabaseQueryWait(admin, "workspace_memberships");
+      await waitForDatabaseQueryWait(admin, "pg_advisory_xact_lock_shared");
 
       // The stale authorization is intentionally held while removal owns the
-      // membership lock. Release the native barrier, wait for removal to
-      // commit, then assert the one bounded retry observes no membership.
+      // personal-state fence. Release the native barrier, wait for removal to
+      // commit, then assert the waiting list observes no membership.
       await barrier`select pg_advisory_unlock(${barrierClass}, ${removalLock})`;
       expect(await removalPromise).toBe(true);
       await expect(listingPromise).rejects.toBeInstanceOf(SessionListAccessError);
@@ -892,7 +912,114 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     }
   }, 60_000);
 
-  test("rejects a stale pin mutation after removal wins the membership lock", async () => {
+  test("retries two serialization failures before returning a real list page", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const subjectId = "user:list-serialization-retry";
+    await grantMember(workspace, subjectId);
+    const target = await session({ ...workspace, message: "serialization retry target" });
+
+    const transaction = db.transaction.bind(db);
+    let attempts = 0;
+    const retryingDb = new Proxy(db, {
+      get(targetDb, property, receiver) {
+        if (property === "transaction") {
+          return async (...args: Parameters<typeof transaction>) => {
+            attempts += 1;
+            if (attempts <= 2) {
+              throw Object.assign(new Error("synthetic PostgreSQL serialization failure"), {
+                code: "40001",
+              });
+            }
+            return await transaction(...args);
+          };
+        }
+        const value = Reflect.get(targetDb, property, receiver) as unknown;
+        return typeof value === "function" ? value.bind(targetDb) : value;
+      },
+    });
+
+    const page = await listSessionsForSubject(retryingDb, workspace.workspaceId, {
+      subjectId,
+      limit: 10,
+    });
+
+    expect(attempts).toBe(3);
+    expect(page.pinned).toEqual([]);
+    expect(page.sessions.map((row) => row.id)).toEqual([target.id]);
+  });
+
+  test("allows concurrent list readers through the shared personal-state fence", async () => {
+    if (!available || !shared) return;
+    const workspace = await freshWorkspace();
+    const subjectId = "user:concurrent-list-readers";
+    await grantMember(workspace, subjectId);
+    await session({ ...workspace, message: "concurrent list first" });
+    await session({ ...workspace, message: "concurrent list second" });
+
+    const barrier = postgres(shared.adminUrl, { max: 1 });
+    const firstClient = createDb(shared.appUrl, { max: 1 });
+    const secondClient = createDb(shared.appUrl, { max: 1 });
+    const barrierClass = 81326032;
+    const snapshotLock = 1;
+    const triggerFunction = "ope26_test_concurrent_list_barrier";
+    const triggerName = "ope26_test_concurrent_list_snapshot_barrier";
+    let firstListing: Promise<Awaited<ReturnType<typeof listSessionsForSubject>>> | null = null;
+    let secondListing: Promise<Awaited<ReturnType<typeof listSessionsForSubject>>> | null = null;
+    try {
+      await barrier.unsafe(`
+        create function ${triggerFunction}() returns trigger
+        language plpgsql as $$
+        begin
+          perform pg_advisory_xact_lock(${barrierClass}, ${snapshotLock});
+          return new;
+        end
+        $$;
+        create trigger ${triggerName}
+          before insert on session_list_snapshots
+          for each row when (
+            new.workspace_id = '${workspace.workspaceId}'::uuid
+            and new.subject_id = '${subjectId}'
+          ) execute function ${triggerFunction}();
+      `);
+      await barrier`select pg_advisory_lock(${barrierClass}, ${snapshotLock})`;
+
+      firstListing = listSessionsForSubject(firstClient.db, workspace.workspaceId, {
+        subjectId,
+        limit: 1,
+      });
+      await waitForAdvisoryWaitCount(barrier, barrierClass, snapshotLock, 1);
+
+      secondListing = listSessionsForSubject(secondClient.db, workspace.workspaceId, {
+        subjectId,
+        limit: 1,
+      });
+      // Both transactions must pass the compatible personal-state fence and
+      // reach the snapshot barrier. A membership row lock made the second reader
+      // wait on the first reader's tuple instead, then abort with 40001.
+      await waitForAdvisoryWaitCount(barrier, barrierClass, snapshotLock, 2);
+
+      await barrier`select pg_advisory_unlock(${barrierClass}, ${snapshotLock})`;
+      const [first, second] = await Promise.all([firstListing, secondListing]);
+      expect(first.nextCursor).toBeTruthy();
+      expect(second.nextCursor).toBeTruthy();
+      expect(first.sessions.map((row) => row.id)).toEqual(second.sessions.map((row) => row.id));
+    } finally {
+      await barrier`select pg_advisory_unlock_all()`.catch(() => undefined);
+      await barrier
+        .unsafe(`
+        drop trigger if exists ${triggerName} on session_list_snapshots;
+        drop function if exists ${triggerFunction}();
+      `)
+        .catch(() => undefined);
+      await barrier.end().catch(() => undefined);
+      await Promise.allSettled([firstListing, secondListing].filter(Boolean));
+      await firstClient.close().catch(() => undefined);
+      await secondClient.close().catch(() => undefined);
+    }
+  }, 60_000);
+
+  test("rejects a stale pin mutation after removal wins the personal-state fence", async () => {
     if (!available || !shared) return;
     const workspace = await freshWorkspace();
     const foreign = await freshWorkspace();
@@ -955,7 +1082,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
         sessionId: target.id,
         pinned: true,
       });
-      await waitForDatabaseQueryWait(admin, "workspace_memberships");
+      await waitForDatabaseQueryWait(admin, "pg_advisory_xact_lock");
 
       await barrier`select pg_advisory_unlock(${barrierClass}, ${removalLock})`;
       expect(await removalPromise).toBe(true);
@@ -1008,7 +1135,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     }
   }, 60_000);
 
-  test("lets removal clean a pin committed while it waits on the membership lock", async () => {
+  test("lets removal clean a pin committed while it waits on the personal-state fence", async () => {
     if (!available || !shared) return;
     const workspace = await freshWorkspace();
     const subjectId = "user:pin-mutation-first";
@@ -1053,7 +1180,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       // Pin mutation owns membership first; removal waits, then cleans the
       // committed pin after the insert barrier is released.
       removalPromise = removeWorkspaceMember(removalClient.db, workspace.workspaceId, subjectId);
-      await waitForDatabaseQueryWait(admin, "workspace_memberships");
+      await waitForDatabaseQueryWait(admin, "pg_advisory_xact_lock");
 
       await barrier`select pg_advisory_unlock(${barrierClass}, ${pinInsertLock})`;
       expect(await pinPromise).not.toBeNull();

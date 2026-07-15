@@ -931,9 +931,13 @@ export async function removeWorkspaceMember(
   // FORCE RLS permits deleting only that member's personal rows, and make the
   // cleanup + membership removal one transaction.
   return await withWorkspaceSubjectRls(db, workspaceId, subjectId, async (scopedDb) => {
-    // Lock the membership before cleanup so concurrent removals preserve the
-    // previous one-winner/one-no-op behavior while snapshots are still visible
-    // to the subject-scoped FORCE-RLS policy.
+    await lockSessionPersonalStateExclusive(scopedDb, workspaceId, subjectId);
+    // Exclusively lock the membership before cleanup so concurrent removals
+    // preserve the previous one-winner/one-no-op behavior while snapshots are
+    // still visible to the subject-scoped FORCE-RLS policy. Session listing takes
+    // the shared counterpart of this subject fence; pin mutation takes the same
+    // exclusive fence. Removal therefore waits for readers/writers, then cleans
+    // every personal row before deleting the membership.
     const [membership] = await scopedDb
       .select({ id: schema.workspaceMemberships.id })
       .from(schema.workspaceMemberships)
@@ -10567,6 +10571,30 @@ function isPostgresSerializationFailure(error: unknown): boolean {
   return false;
 }
 
+function sessionPersonalStateLockKey(workspaceId: string, subjectId: string): string {
+  return `session-personal-state:${workspaceId}:${subjectId}`;
+}
+
+async function lockSessionPersonalStateShared(
+  db: Database,
+  workspaceId: string,
+  subjectId: string,
+): Promise<void> {
+  await db.execute(
+    sql`select pg_advisory_xact_lock_shared(hashtextextended(${sessionPersonalStateLockKey(workspaceId, subjectId)}, 0))`,
+  );
+}
+
+async function lockSessionPersonalStateExclusive(
+  db: Database,
+  workspaceId: string,
+  subjectId: string,
+): Promise<void> {
+  await db.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(${sessionPersonalStateLockKey(workspaceId, subjectId)}, 0))`,
+  );
+}
+
 type SessionPinRow = Pick<
   typeof schema.sessionPins.$inferSelect,
   "pinned" | "pinnedAt" | "version"
@@ -10614,6 +10642,7 @@ function sessionFilters(
 }
 
 const SESSION_LIST_SNAPSHOT_TTL_MS = 10 * 60 * 1000;
+const SESSION_LIST_SERIALIZATION_MAX_ATTEMPTS = 3;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function sessionParentFilter(parentSessionId: string | null | undefined): string {
@@ -10700,36 +10729,33 @@ export async function listSessionsForSubject(
   options: ListSessionsForSubjectOptions,
 ): Promise<SessionListResponse> {
   const limit = Math.max(1, options.limit ?? 50);
-  let membershipCheckSerializationFailure = false;
   const listInTransaction = async (): Promise<SessionListResponse> => {
-    membershipCheckSerializationFailure = false;
     return await withWorkspaceSubjectRls(
       db,
       workspaceId,
       options.subjectId,
       async (tx) => {
+        // READ COMMITTED is deliberate: if removal already owns the exclusive
+        // advisory fence, this transaction waits before checking membership and
+        // then observes the committed deletion in a fresh statement snapshot.
+        // The shared fence keeps every personal pin row stable across the page's
+        // ordinary/pinned queries while allowing concurrent list readers.
+        await lockSessionPersonalStateShared(tx, workspaceId, options.subjectId);
         // Authorization is resolved before this helper by the API, but that
-        // grant can be stale by the time this transaction starts. Lock the live
-        // membership before touching snapshots so removal and listing serialize:
-        // listing first lets removal clean its committed snapshot, while removal
-        // first makes listing observe the missing membership and do no writes.
-        let membership: { id: string } | undefined;
-        try {
-          [membership] = await tx
-            .select({ id: schema.workspaceMemberships.id })
-            .from(schema.workspaceMemberships)
-            .where(
-              and(
-                eq(schema.workspaceMemberships.workspaceId, workspaceId),
-                eq(schema.workspaceMemberships.subjectId, options.subjectId),
-              ),
-            )
-            .for("update")
-            .limit(1);
-        } catch (error) {
-          membershipCheckSerializationFailure = isPostgresSerializationFailure(error);
-          throw error;
-        }
+        // grant can be stale by the time this transaction starts. The subject
+        // fence above makes removal and listing deterministic: listing first lets
+        // removal clean its committed snapshot, while removal first makes this
+        // fresh membership read observe the deletion and do no writes.
+        const [membership] = await tx
+          .select({ id: schema.workspaceMemberships.id })
+          .from(schema.workspaceMemberships)
+          .where(
+            and(
+              eq(schema.workspaceMemberships.workspaceId, workspaceId),
+              eq(schema.workspaceMemberships.subjectId, options.subjectId),
+            ),
+          )
+          .limit(1);
         // A missing membership only means "denied" for user subjects — people
         // are authorized exclusively through memberships, so absence here is a
         // removal that the route-level grant hasn't observed yet. Non-user
@@ -10893,21 +10919,30 @@ export async function listSessionsForSubject(
           nextCursor,
         };
       },
-      { isolationLevel: "repeatable read" },
+      undefined,
     );
   };
 
-  try {
-    return await listInTransaction();
-  } catch (error) {
-    if (!membershipCheckSerializationFailure || !isPostgresSerializationFailure(error)) {
-      throw error;
+  for (let attempt = 1; attempt <= SESSION_LIST_SERIALIZATION_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      return await listInTransaction();
+    } catch (error) {
+      if (
+        !isPostgresSerializationFailure(error) ||
+        attempt === SESSION_LIST_SERIALIZATION_MAX_ATTEMPTS
+      ) {
+        throw error;
+      }
+      // A 40001 invalidates the complete transaction, not only the statement
+      // that happens to surface it. Every list-side write is part of that
+      // rolled-back transaction, so retry the whole operation after a short
+      // bounded yield without an unbounded request loop or partially committed
+      // snapshot.
+      await new Promise((resolve) => setTimeout(resolve, attempt * 10));
     }
-    // PostgreSQL has already aborted and rolled back the first transaction.
-    // Retry exactly once so the fresh snapshot can observe a membership that
-    // removal committed while the listing was waiting on its row lock.
-    return await listInTransaction();
   }
+
+  throw new Error("unreachable session list retry state");
 }
 
 /** Read a session with the caller subject's personal pin projection. */
@@ -10941,8 +10976,9 @@ export async function getSessionForSubject(
 
 /**
  * Idempotently set a member's pin without mutating the session's lifecycle or
- * activity timestamps. A transaction advisory lock serializes same-subject,
- * same-session actions across API replicas; expectedVersion rejects stale tabs.
+ * activity timestamps. A subject-scoped transaction advisory lock serializes
+ * personal pin mutations across API replicas and fences list projections;
+ * expectedVersion rejects stale tabs.
  */
 export async function setSessionPin(
   db: Database,
@@ -10960,9 +10996,10 @@ export async function setSessionPin(
     input.subjectId,
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
-        // Serialize with removeWorkspaceMember(), which locks this row before
-        // cleaning personal state and deleting the membership. A stale API
-        // grant must not be able to recreate a pin after removal commits.
+        // An exclusive subject fence keeps list projections stable and
+        // serializes with member removal before changing personal state. A stale
+        // API grant cannot recreate a pin after removal commits.
+        await lockSessionPersonalStateExclusive(tx, input.workspaceId, input.subjectId);
         const [membership] = await tx
           .select({ id: schema.workspaceMemberships.id })
           .from(schema.workspaceMemberships)
@@ -10972,14 +11009,10 @@ export async function setSessionPin(
               eq(schema.workspaceMemberships.subjectId, input.subjectId),
             ),
           )
-          .for("update")
           .limit(1);
         if (!membership) {
           throw new SessionPinAccessError();
         }
-        await tx.execute(
-          sql`select pg_advisory_xact_lock(hashtextextended(${`session-pin:${input.workspaceId}:${input.subjectId}:${input.sessionId}`}, 0))`,
-        );
         const [session] = await tx
           .select()
           .from(schema.sessions)
