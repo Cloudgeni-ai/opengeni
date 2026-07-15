@@ -10919,7 +10919,7 @@ export async function listSessionsForSubject(
           nextCursor,
         };
       },
-      undefined,
+      { isolationLevel: "read committed" },
     );
   };
 

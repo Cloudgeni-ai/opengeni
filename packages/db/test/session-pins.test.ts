@@ -912,6 +912,64 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     }
   }, 60_000);
 
+  test("forces read committed when the app role defaults to repeatable read", async () => {
+    if (!available || !shared) return;
+    const workspace = await freshWorkspace();
+    const subjectId = "user:explicit-read-committed";
+    await grantMember(workspace, subjectId);
+    await session({ ...workspace, message: "explicit isolation first" });
+    await session({ ...workspace, message: "explicit isolation second" });
+
+    const triggerFunction = "ope26_test_read_committed_guard";
+    const triggerName = "ope26_test_read_committed_snapshot_guard";
+    let ambientClient: DbClient | null = null;
+    try {
+      await admin.unsafe(`
+        create function ${triggerFunction}() returns trigger
+        language plpgsql as $$
+        begin
+          if current_setting('transaction_isolation') <> 'read committed' then
+            raise exception 'session listing isolation must be read committed, got %',
+              current_setting('transaction_isolation');
+          end if;
+          return new;
+        end
+        $$;
+        create trigger ${triggerName}
+          before insert on session_list_snapshots
+          for each row when (
+            new.workspace_id = '${workspace.workspaceId}'::uuid
+            and new.subject_id = '${subjectId}'
+          ) execute function ${triggerFunction}();
+        alter role opengeni_app set default_transaction_isolation = 'repeatable read';
+      `);
+
+      // Role defaults apply when a new backend authenticates. The direct query
+      // proves this connection inherited REPEATABLE READ; the snapshot trigger
+      // then proves listSessionsForSubject overrides it inside the real
+      // transaction instead of relying on deployment defaults.
+      ambientClient = createDb(shared.appUrl, { max: 1 });
+      const ambient = await ambientClient.db.execute<{ default_transaction_isolation: string }>(
+        sql`show default_transaction_isolation`,
+      );
+      expect(ambient).toEqual([{ default_transaction_isolation: "repeatable read" }]);
+
+      const page = await listSessionsForSubject(ambientClient.db, workspace.workspaceId, {
+        subjectId,
+        limit: 1,
+      });
+      expect(page.sessions).toHaveLength(1);
+      expect(page.nextCursor).toBeTruthy();
+    } finally {
+      await ambientClient?.close().catch(() => undefined);
+      await admin.unsafe(`
+        alter role opengeni_app reset default_transaction_isolation;
+        drop trigger if exists ${triggerName} on session_list_snapshots;
+        drop function if exists ${triggerFunction}();
+      `);
+    }
+  }, 60_000);
+
   test("retries two serialization failures before returning a real list page", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
