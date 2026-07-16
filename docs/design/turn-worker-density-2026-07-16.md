@@ -62,9 +62,10 @@ paths outside the deterministic baseline:
   capture operation actually settles. A 60-second caller timeout therefore
   remains observable while an in-flight provider operation drains.
 - Recording finalize stats and size-gates the artifact on the sandbox, then
-  uses curl in that sandbox to PUT directly to the scoped URL. Codex's
-  first-party `computer_*` function transport and the hosted `computer_call`
-  transport share the same exact computer-use gate.
+  uses curl in that sandbox to PUT directly to the scoped URL. The runtime's
+  `onComputerUseReady` execution callback is the sole computer-use gate for
+  every model transport; no transport-specific stream-event detector owns
+  recording truth.
 - Recording preparation is bounded and happens before every attempt-closing
   settlement, including approval suspension. The existing locked turn
   settlement atomically commits the exact recording row and its
@@ -74,6 +75,14 @@ paths outside the deterministic baseline:
   accepted `recording.started` receipt and emits no authoritative event.
 - The old worker-buffered recording API and its live-test path are removed, not
   retained as a fallback.
+
+The first production Codex canary after the atomic-settlement cutover exposed
+an ordering defect: the function-call stream event arrived before asynchronous
+ffmpeg startup completed, so a guard requiring an already-active recording
+missed the action and settlement discarded the row. The correction records
+computer use synchronously in `onComputerUseReady` before awaiting ffmpeg.
+This callback is the actual execution boundary, unlike a model stream item,
+and the ordering is enforced by the desktop-gating regression test.
 
 ## Reproducible gates
 
