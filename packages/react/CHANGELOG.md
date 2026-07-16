@@ -1,5 +1,11 @@
 # @opengeni/react
 
+## 0.14.0
+
+### Minor Changes
+
+- dc79905: Harden the workspace dock with persistent tab state, authoritative live-versus-capture defaults, accessible mobile navigation, guarded-file routing, and deterministic browser acceptance coverage.
+
 ## 0.13.0
 
 ### Patch Changes
