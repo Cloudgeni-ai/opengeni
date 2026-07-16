@@ -103,6 +103,12 @@ export function SessionList() {
   });
   const { sessions, nextCursor, loading, error, refresh } = rootPage;
   const pinned = hierarchyMode ? globalPinPage.pinned : rootPage.pinned;
+  // The hierarchy and its global pinned shortcuts come from separate queries.
+  // Every invalidation must refresh both or a pin changed in another tab/device
+  // can disappear from the shortcut section until the next polling interval.
+  const refreshSessionPages = useCallback(async () => {
+    await Promise.all([refresh(), ...(hierarchyMode ? [globalPinPage.refresh()] : [])]);
+  }, [globalPinPage.refresh, hierarchyMode, refresh]);
   // Ordinary rows page independently of the complete pinned section. The
   // polled hook owns page one; additional pages are appended and deduplicated.
   // A filter change starts a fresh cursor chain rather than mixing snapshots.
@@ -551,7 +557,7 @@ export function SessionList() {
             });
           });
         }
-        await Promise.all([refresh(), globalPinPage.refresh()]);
+        await refreshSessionPages();
         const label = target.title?.trim() || target.initialMessage?.trim() || "Untitled session";
         setAnnouncement(
           updated
@@ -569,7 +575,7 @@ export function SessionList() {
         });
       }
     },
-    [context, globalPinPage.refresh, refresh],
+    [context, refreshSessionPages],
   );
 
   const loadMore = useCallback(async () => {
@@ -637,11 +643,11 @@ export function SessionList() {
   // Cross-tab invalidation and lifecycle reconciliation. Cross-device changes
   // arrive on the 15s poll; returning to a tab or reconnecting refreshes now.
   useEffect(
-    () => subscribeToSessionPinChanges(rail.workspaceId, () => void refresh()),
-    [rail.workspaceId, refresh],
+    () => subscribeToSessionPinChanges(rail.workspaceId, () => void refreshSessionPages()),
+    [rail.workspaceId, refreshSessionPages],
   );
   useEffect(() => {
-    const reconcile = () => void refresh();
+    const reconcile = () => void refreshSessionPages();
     const onVisibility = () => {
       if (document.visibilityState === "visible") reconcile();
     };
@@ -653,7 +659,7 @@ export function SessionList() {
       window.removeEventListener("online", reconcile);
       document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, [refresh]);
+  }, [refreshSessionPages]);
 
   const listRef = useRef<HTMLDivElement>(null);
   const [focusedSessionId, setFocusedSessionId] = useState<string | null>(null);
@@ -1276,7 +1282,7 @@ function SessionRow(props: {
             <span className="flex min-w-0 flex-1 flex-col pr-1 leading-tight">
               <span className="truncate">{title}</span>
               {rail.isMobile ? (
-                <span className="mt-0.5 truncate text-2xs font-normal text-fg-subtle">
+                <span className="mt-0.5 truncate text-2xs font-normal text-fg-muted">
                   {[stateLabel, depthLabel, descendantLabel, relativeTime]
                     .filter(Boolean)
                     .join(" · ")}

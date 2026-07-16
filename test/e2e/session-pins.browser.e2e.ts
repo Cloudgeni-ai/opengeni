@@ -437,6 +437,12 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       );
       await setSessionPinThroughApi(page, apiBaseUrl, workspaceId, extra, true);
     }
+    // The stress rows above are test fixtures inserted through raw fetches,
+    // intentionally bypassing the application's mutation invalidation. Start
+    // the responsive assertion from a fresh server projection instead of
+    // racing the rail's 15-second background reconciliation interval.
+    await page.reload();
+    await page.getByRole("button", { name: "Unpin session" }).waitFor();
 
     for (const theme of ["light", "dark"] as const) {
       await setTheme(page, theme);
@@ -458,6 +464,10 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       expect(await page.getByRole("dialog").getAttribute("aria-label")).toBe("Session navigation");
       const targetRow = navigation.getByRole("button", { name: /^Open Mobile pin/ });
       await targetRow.waitFor();
+      // The active route row can render from its point read before the pinned
+      // page arrives. Wait for one seeded shortcut so this assertion measures
+      // the loaded global pin section rather than that intermediate state.
+      await navigation.getByRole("button", { name: /^Open Pinned mobile stress 7/ }).waitFor();
       expect(await navigation.getByRole("group", { name: "Pinned" }).count()).toBe(1);
       expect(
         await navigation.getByRole("button", { name: /^Open Pinned mobile stress/ }).count(),
