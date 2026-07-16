@@ -6,6 +6,7 @@ import {
   applyCreditLedgerEntry,
   applyContextCompaction,
   applySessionTurnSettlement,
+  abandonRecordingForTurnAttempt,
   appendSessionEvents,
   appendSessionHistoryItems,
   appendSessionEventsForTurnAttempt,
@@ -25,6 +26,8 @@ import {
   listSessionSystemUpdatesForTurn,
   listUsageEvents,
   isSessionCompactionRequested,
+  insertRecording,
+  getRecording,
   peekSessionWork,
   recoverSessionDispatch,
   reparkOrphanedSessionTurn,
@@ -2191,5 +2194,336 @@ describe("clean session control plane", () => {
           .where(eq(schema.sessions.id, session.id)),
     );
     expect(row?.status).toBe("paused");
+  });
+
+  test("atomically commits an available recording before terminal turn events", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "record this turn");
+    const attemptId = crypto.randomUUID();
+    const turn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId },
+    );
+    if (!turn) throw new Error("recording turn was not claimed");
+    const recordingId = crypto.randomUUID();
+    await insertRecording(client.db, {
+      id: recordingId,
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      turnId: turn.id,
+      mode: "on-turn",
+      codec: "h264-mp4",
+      width: 1280,
+      height: 800,
+    });
+
+    const settled = await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      turnId: turn.id,
+      triggerEventId: turn.triggerEventId,
+      attemptId,
+      childCompletionParentWakeEnabled: false,
+      turnStatus: "completed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      recording: {
+        action: "available",
+        recordingId,
+        storageKey: `recordings/${recordingId}.mp4`,
+        sizeBytes: 42_000,
+        durationSeconds: 3,
+        producerId: "recording-test",
+        producerSeq: 1,
+      },
+      events: [{ type: "turn.completed", payload: { output: "done" } }],
+    });
+    expect(settled).toMatchObject({ action: "settled", recordingMutationApplied: true });
+    if (settled.action !== "settled") throw new Error("recording settlement became stale");
+    expect(settled.events.map((event) => event.type)).toEqual([
+      "recording.available",
+      "turn.completed",
+    ]);
+    expect(settled.events[0]).toMatchObject({
+      turnId: turn.id,
+      turnGeneration: turn.executionGeneration,
+      turnAttemptId: attemptId,
+      payload: {
+        recordingId,
+        storageKey: `recordings/${recordingId}.mp4`,
+        sizeBytes: 42_000,
+        dimensions: [1280, 800],
+      },
+    });
+    expect(await getRecording(client.db, grant.workspaceId!, recordingId)).toMatchObject({
+      state: "available",
+      storageKey: `recordings/${recordingId}.mp4`,
+      sizeBytes: 42_000,
+    });
+  });
+
+  test("settles recording failure with turn truth and discards approval-suspension phantoms", async () => {
+    const failed = await fixture();
+    await send(failed.grant, failed.session.id, "fail recording upload");
+    const failedAttemptId = crypto.randomUUID();
+    const failedTurn = await claimTestSessionWork(
+      client.db,
+      failed.grant.workspaceId!,
+      failed.session.id,
+      `session-${failed.session.id}`,
+      { attemptId: failedAttemptId },
+    );
+    if (!failedTurn) throw new Error("failed-recording turn was not claimed");
+    const failedRecordingId = crypto.randomUUID();
+    await insertRecording(client.db, {
+      id: failedRecordingId,
+      accountId: failed.grant.accountId,
+      workspaceId: failed.grant.workspaceId!,
+      sessionId: failed.session.id,
+      turnId: failedTurn.id,
+      mode: "on-turn",
+      codec: "h264-mp4",
+      width: 1280,
+      height: 800,
+    });
+    const failedSettlement = await applySessionTurnSettlement(
+      client.db,
+      failed.grant.workspaceId!,
+      {
+        sessionId: failed.session.id,
+        turnId: failedTurn.id,
+        triggerEventId: failedTurn.triggerEventId,
+        attemptId: failedAttemptId,
+        childCompletionParentWakeEnabled: false,
+        turnStatus: "completed",
+        sessionStatus: "idle",
+        activeTurnId: null,
+        recording: {
+          action: "failed",
+          recordingId: failedRecordingId,
+          reason: "upload-failed",
+          detail: "bounded upload timeout",
+        },
+        events: [{ type: "turn.completed", payload: { output: "done anyway" } }],
+      },
+    );
+    expect(failedSettlement).toMatchObject({
+      action: "settled",
+      recordingMutationApplied: true,
+    });
+    if (failedSettlement.action === "settled") {
+      expect(failedSettlement.events.map((event) => event.type)).toEqual([
+        "recording.failed",
+        "turn.completed",
+      ]);
+    }
+    expect(
+      await getRecording(client.db, failed.grant.workspaceId!, failedRecordingId),
+    ).toMatchObject({ state: "failed", reason: "bounded upload timeout" });
+
+    const approval = await fixture();
+    await send(approval.grant, approval.session.id, "request approval without computer use");
+    const approvalAttemptId = crypto.randomUUID();
+    const approvalTurn = await claimTestSessionWork(
+      client.db,
+      approval.grant.workspaceId!,
+      approval.session.id,
+      `session-${approval.session.id}`,
+      { attemptId: approvalAttemptId },
+    );
+    if (!approvalTurn) throw new Error("approval turn was not claimed");
+    const discardedRecordingId = crypto.randomUUID();
+    await insertRecording(client.db, {
+      id: discardedRecordingId,
+      accountId: approval.grant.accountId,
+      workspaceId: approval.grant.workspaceId!,
+      sessionId: approval.session.id,
+      turnId: approvalTurn.id,
+      mode: "on-turn",
+      codec: "h264-mp4",
+      width: 1280,
+      height: 800,
+    });
+    const suspended = await applySessionTurnSettlement(client.db, approval.grant.workspaceId!, {
+      sessionId: approval.session.id,
+      turnId: approvalTurn.id,
+      triggerEventId: approvalTurn.triggerEventId,
+      attemptId: approvalAttemptId,
+      childCompletionParentWakeEnabled: false,
+      turnStatus: "requires_action",
+      sessionStatus: "requires_action",
+      activeTurnId: approvalTurn.id,
+      recording: { action: "discard", recordingId: discardedRecordingId },
+      events: [{ type: "session.requiresAction", payload: { approvals: [] } }],
+    });
+    expect(suspended).toMatchObject({ action: "settled", recordingMutationApplied: true });
+    expect(await getRecording(client.db, approval.grant.workspaceId!, discardedRecordingId)).toBe(
+      null,
+    );
+    if (suspended.action === "settled") {
+      expect(suspended.events.map((event) => event.type)).toEqual(["session.requiresAction"]);
+    }
+  });
+
+  test("a stale attempt cannot mutate recording truth and cleanup requires its exact start receipt", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "race recording settlement");
+    const attemptId = crypto.randomUUID();
+    const turn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId },
+    );
+    if (!turn) throw new Error("stale-recording turn was not claimed");
+    const recordingId = crypto.randomUUID();
+    await insertRecording(client.db, {
+      id: recordingId,
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      turnId: turn.id,
+      mode: "on-turn",
+      codec: "h264-mp4",
+      width: 1280,
+      height: 800,
+    });
+    const wrongAttemptId = crypto.randomUUID();
+    expect(
+      await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+        sessionId: session.id,
+        turnId: turn.id,
+        triggerEventId: turn.triggerEventId,
+        attemptId: wrongAttemptId,
+        childCompletionParentWakeEnabled: false,
+        turnStatus: "completed",
+        sessionStatus: "idle",
+        activeTurnId: null,
+        recording: {
+          action: "available",
+          recordingId,
+          storageKey: "recordings/stale.mp4",
+          sizeBytes: 1,
+          durationSeconds: 1,
+        },
+        events: [{ type: "turn.completed", payload: {} }],
+      }),
+    ).toEqual({
+      action: "stale",
+      events: [],
+      turnStatus: "running",
+      activeTurnId: turn.id,
+    });
+    expect(await getRecording(client.db, grant.workspaceId!, recordingId)).toMatchObject({
+      state: "recording",
+      storageKey: null,
+    });
+    expect(
+      await abandonRecordingForTurnAttempt(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn.id,
+        executionGeneration: turn.executionGeneration,
+        attemptId: wrongAttemptId,
+        recordingId,
+        disposition: "failed",
+        reason: "wrong owner",
+      }),
+    ).toBe(false);
+    await appendSessionEventsForTurnAttempt(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      turn.id,
+      turn.executionGeneration,
+      attemptId,
+      [
+        {
+          type: "recording.started",
+          payload: {
+            recordingId,
+            turnId: turn.id,
+            mode: "on-turn",
+            codec: "h264-mp4",
+            dimensions: [1280, 800],
+            framerate: 15,
+            startedAt: new Date().toISOString(),
+            reason: null,
+          },
+        },
+      ],
+    );
+    expect(
+      await abandonRecordingForTurnAttempt(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn.id,
+        executionGeneration: turn.executionGeneration,
+        attemptId,
+        recordingId,
+        disposition: "failed",
+        reason: "exact owner cleanup",
+      }),
+    ).toBe(true);
+    expect(await getRecording(client.db, grant.workspaceId!, recordingId)).toMatchObject({
+      state: "failed",
+      reason: "exact owner cleanup",
+    });
+
+    const discardId = crypto.randomUUID();
+    await insertRecording(client.db, {
+      id: discardId,
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      turnId: turn.id,
+      mode: "on-turn",
+      codec: "h264-mp4",
+      width: 1280,
+      height: 800,
+    });
+    await appendSessionEventsForTurnAttempt(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      turn.id,
+      turn.executionGeneration,
+      attemptId,
+      [
+        {
+          type: "recording.started",
+          payload: {
+            recordingId: discardId,
+            turnId: turn.id,
+            mode: "on-turn",
+            codec: "h264-mp4",
+            dimensions: [1280, 800],
+            framerate: 15,
+            startedAt: new Date().toISOString(),
+            reason: null,
+          },
+        },
+      ],
+    );
+    expect(
+      await abandonRecordingForTurnAttempt(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn.id,
+        executionGeneration: turn.executionGeneration,
+        attemptId,
+        recordingId: discardId,
+        disposition: "discard",
+        reason: "no computer use",
+      }),
+    ).toBe(true);
+    expect(await getRecording(client.db, grant.workspaceId!, discardId)).toBeNull();
   });
 });

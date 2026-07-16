@@ -62,8 +62,16 @@ paths outside the deterministic baseline:
   capture operation actually settles. A 60-second caller timeout therefore
   remains observable while an in-flight provider operation drains.
 - Recording finalize stats and size-gates the artifact on the sandbox, then
-  uses curl in that sandbox to PUT directly to the scoped URL. Artifact deletion
-  still occurs only after the PUT and the `available` database commit.
+  uses curl in that sandbox to PUT directly to the scoped URL. Codex's
+  first-party `computer_*` function transport and the hosted `computer_call`
+  transport share the same exact computer-use gate.
+- Recording preparation is bounded and happens before every attempt-closing
+  settlement, including approval suspension. The existing locked turn
+  settlement atomically commits the exact recording row and its
+  `recording.available` / `recording.failed` event under the same attempt fence
+  as terminal turn truth. Artifact deletion occurs only after that transaction
+  succeeds. A stale or aborted attempt can close only the recording named by its
+  accepted `recording.started` receipt and emits no authoritative event.
 - The old worker-buffered recording API and its live-test path are removed, not
   retained as a fallback.
 
