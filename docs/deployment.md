@@ -163,6 +163,24 @@ Image builds default to `linux/amd64`, matching the Azure AKS reference node poo
 
 For production Helm releases, pin API, worker, web, and migration images by digest as well as tag. The chart renders images as `repository:tag@sha256:...` when `image.digest` is set, which keeps tags readable while making the deployed artifact immutable.
 
+## Verified public release
+
+Merging a changesets Version PR only commits package versions and changelogs; it
+does not publish packages or release images. Public release is an explicit
+dispatch of `.github/workflows/release.yml` from a ref pinned to the exact
+accepted source SHA. The dispatch fails closed unless it receives retained
+staging, production, and 72-hour production-canary evidence URLs, the sanitized
+acceptance bundle SHA-256, and an explicit confirmation that there are zero
+known defects, skipped/late cycles, or unverified acceptance rows. The selected
+dispatch ref, `source_sha`, checked-out commit, and a commit reachable from
+`main` must all identify the same revision.
+
+The dispatch re-runs the package typecheck, builds, SDK parity test, and publish
+closure guard; npm publication must actually occur before release images are
+built. It retains a `verified-release-receipt-<sha>` artifact binding the source,
+evidence, bundle digest, and published package versions. Ordinary pushes to
+`main` can open/update the Version PR but cannot publish.
+
 The sandbox image remains separate:
 
 ```bash

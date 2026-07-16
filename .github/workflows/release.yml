@@ -1,13 +1,15 @@
 name: Release
 
-# On every push to main, the changesets action opens/updates a "Version
-# Packages" PR collecting the pending changesets. When that PR is merged (the
-# package.json versions + CHANGELOGs land on main), the same action runs the
-# publish step and pushes the publishable @opengeni/* closure to npm.
+# A push to main may open/update the changesets Version PR, but it can NEVER
+# publish. Publication is a separate, explicit workflow_dispatch after the
+# exact source revision has passed staging, production, and the production
+# canary window described in docs/workbench-acceptance.md. The dispatch is bound
+# to the selected git ref and records the retained acceptance evidence.
 #
-# The GHCR image job runs ONLY when that publish actually happens (the changesets
-# `published` output is 'true'), and tags images with the published release
-# version — so ordinary pushes to main no longer rebuild/re-push the image tags.
+# The GHCR image job runs ONLY after that explicit npm publication succeeds and
+# tags images from the same evidence-bound source revision. Ordinary pushes to
+# main therefore neither publish packages nor rebuild/re-push release image
+# tags.
 #
 # REQUIRED REPO/ORG SETUP. This workflow is DORMANT until activated, so it does
 # not run — or red-fail — on pushes to main until you opt in:
@@ -26,44 +28,67 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact 40-character source SHA that passed acceptance; dispatch this workflow from that same ref.
+        required: true
+        type: string
+      staging_evidence_url:
+        description: Retained staging acceptance/soak evidence URL for this exact SHA and image digests.
+        required: true
+        type: string
+      production_evidence_url:
+        description: Retained production promotion and immediate acceptance evidence URL.
+        required: true
+        type: string
+      production_canary_evidence_url:
+        description: Retained 72-hour zero-failure production canary evidence URL.
+        required: true
+        type: string
+      acceptance_bundle_sha256:
+        description: SHA-256 of the complete sanitized acceptance bundle.
+        required: true
+        type: string
+      confirm_zero_gaps:
+        description: Confirm zero known defects, skipped checks, failed/late canary cycles, and unverified acceptance rows.
+        required: true
+        default: false
+        type: boolean
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ github.event_name }}
   cancel-in-progress: false
 
 permissions:
   contents: read
 
 jobs:
-  release:
-    name: Version or publish packages
+  version:
+    name: Open or update Version PR
     runs-on: ubuntu-latest
     # Dormant until opted in: skips cleanly (no red) on pushes to main until the
     # repo variable RELEASE_ENABLED is set to 'true'. See the header for setup.
-    if: ${{ vars.RELEASE_ENABLED == 'true' }}
+    if: ${{ github.event_name == 'push' && vars.RELEASE_ENABLED == 'true' }}
     permissions:
-      id-token: write # npm provenance (OIDC)
-      contents: write # changesets opens the Version PR / pushes tags
+      contents: write # changesets commits package versions to its release branch
       pull-requests: write # changesets opens/updates the Version PR
-      packages: write
-    outputs:
-      published: ${{ steps.changesets.outputs.published }}
-      publishedPackages: ${{ steps.changesets.outputs.publishedPackages }}
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: latest
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      # ---- Release gate: nothing publishes unless these are green. ----
+      # ---- Version-PR gate. This job has no npm publication command. ----
       - name: Typecheck
         run: bun run typecheck
 
@@ -76,22 +101,10 @@ jobs:
       - name: Publish closure guard
         run: bun scripts/publish-closure-guard.ts
 
-      # ---- Version PR (normal push) or publish (Version PR merge). ----
-      # Publishing uses npm (not bun) because bun publish cannot emit npm
-      # provenance. The publish command is guarded so a missing NPM_TOKEN does
-      # not fail the run — changesets only publishes on the Version PR merge.
-      - name: Set up Node for npm publish
-        uses: actions/setup-node@v7.0.0
-        with:
-          node-version: 24
-          registry-url: https://registry.npmjs.org
-
-      - name: Create Version PR or publish
-        id: changesets
-        uses: changesets/action@v1
+      - name: Create or update Version PR
+        uses: changesets/action@a45c4d594aa4e2c509dc14a9f2b3b67ba3780d0d # v1
         with:
           version: bun run changeset:version
-          publish: bun run release:publish
           commit: "chore: version packages"
           title: "chore: version packages"
         env:
@@ -99,30 +112,186 @@ jobs:
           # opened even if the org keeps "Actions may create PRs" disabled;
           # falls back to the default token when the org setting is enabled.
           GITHUB_TOKEN: ${{ secrets.RELEASE_PAT || secrets.GITHUB_TOKEN }}
+
+  publish:
+    name: Publish verified release
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' && vars.RELEASE_ENABLED == 'true' }}
+    permissions:
+      id-token: write # npm provenance (OIDC)
+      contents: write # changesets creates and pushes immutable package tags
+    outputs:
+      published: ${{ steps.changesets.outputs.published }}
+      publishedPackages: ${{ steps.changesets.outputs.publishedPackages }}
+      sourceSha: ${{ steps.preflight.outputs.source_sha }}
+    steps:
+      - name: Check out evidence-bound source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate release identity and acceptance receipts
+        id: preflight
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          STAGING_EVIDENCE_URL: ${{ inputs.staging_evidence_url }}
+          PRODUCTION_EVIDENCE_URL: ${{ inputs.production_evidence_url }}
+          PRODUCTION_CANARY_EVIDENCE_URL: ${{ inputs.production_canary_evidence_url }}
+          ACCEPTANCE_BUNDLE_SHA256: ${{ inputs.acceptance_bundle_sha256 }}
+          CONFIRM_ZERO_GAPS: ${{ inputs.confirm_zero_gaps }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "source_sha must be a 40-character lowercase git SHA" >&2
+            exit 1
+          }
+          [ "$(git rev-parse HEAD)" = "$SOURCE_SHA" ] || {
+            echo "checked-out source does not match source_sha" >&2
+            exit 1
+          }
+          [ "$GITHUB_SHA" = "$SOURCE_SHA" ] || {
+            echo "dispatch ref must resolve to source_sha; select the pinned release-candidate ref" >&2
+            exit 1
+          }
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$SOURCE_SHA" origin/main || {
+            echo "source_sha must be reachable from origin/main" >&2
+            exit 1
+          }
+          [ "$CONFIRM_ZERO_GAPS" = "true" ] || {
+            echo "confirm_zero_gaps must be explicitly true" >&2
+            exit 1
+          }
+          [[ "$ACCEPTANCE_BUNDLE_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
+            echo "acceptance_bundle_sha256 must be a lowercase SHA-256" >&2
+            exit 1
+          }
+          for value in \
+            "$STAGING_EVIDENCE_URL" \
+            "$PRODUCTION_EVIDENCE_URL" \
+            "$PRODUCTION_CANARY_EVIDENCE_URL"; do
+            [[ "$value" =~ ^https://[^[:space:]]+$ ]] || {
+              echo "every evidence URL must be an absolute HTTPS URL" >&2
+              exit 1
+            }
+          done
+          if find .changeset -maxdepth 1 -type f -name '*.md' ! -name README.md -print -quit | grep -q .; then
+            echo "pending changesets remain; merge the generated Version PR before release acceptance" >&2
+            exit 1
+          fi
+          echo "source_sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # Re-run deterministic package gates at the exact accepted source before
+      # bytes leave the repository. Live acceptance is bound above, not replaced.
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Build publishable packages
+        run: bun run build:packages
+
+      - name: SDK contract-parity test
+        run: cd packages/sdk && bun test test/contract-parity.test.ts
+
+      - name: Publish closure guard
+        run: bun scripts/publish-closure-guard.ts
+
+      - name: Set up Node for npm publish
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - name: Publish evidence-bound packages
+        id: changesets
+        uses: changesets/action@a45c4d594aa4e2c509dc14a9f2b3b67ba3780d0d # v1
+        with:
+          version: bun run changeset:version
+          publish: bun run release:publish
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PAT || secrets.GITHUB_TOKEN }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_CONFIG_PROVENANCE: "true"
+
+      - name: Require a real publication and write release receipt
+        env:
+          PUBLISHED: ${{ steps.changesets.outputs.published }}
+          PUBLISHED_PACKAGES: ${{ steps.changesets.outputs.publishedPackages }}
+          SOURCE_SHA: ${{ steps.preflight.outputs.source_sha }}
+          STAGING_EVIDENCE_URL: ${{ inputs.staging_evidence_url }}
+          PRODUCTION_EVIDENCE_URL: ${{ inputs.production_evidence_url }}
+          PRODUCTION_CANARY_EVIDENCE_URL: ${{ inputs.production_canary_evidence_url }}
+          ACCEPTANCE_BUNDLE_SHA256: ${{ inputs.acceptance_bundle_sha256 }}
+        run: |
+          set -euo pipefail
+          [ "$PUBLISHED" = "true" ] || {
+            echo "no package was published; refusing to mint release images" >&2
+            exit 1
+          }
+          mkdir -p evidence
+          jq -e 'type == "array" and length > 0' <<<"$PUBLISHED_PACKAGES" >/dev/null
+          jq -n \
+            --arg sourceSha "$SOURCE_SHA" \
+            --arg stagingEvidenceUrl "$STAGING_EVIDENCE_URL" \
+            --arg productionEvidenceUrl "$PRODUCTION_EVIDENCE_URL" \
+            --arg productionCanaryEvidenceUrl "$PRODUCTION_CANARY_EVIDENCE_URL" \
+            --arg acceptanceBundleSha256 "$ACCEPTANCE_BUNDLE_SHA256" \
+            --argjson publishedPackages "$PUBLISHED_PACKAGES" \
+            '{
+              schemaVersion: 1,
+              sourceSha: $sourceSha,
+              acceptance: {
+                stagingEvidenceUrl: $stagingEvidenceUrl,
+                productionEvidenceUrl: $productionEvidenceUrl,
+                productionCanaryEvidenceUrl: $productionCanaryEvidenceUrl,
+                bundleSha256: $acceptanceBundleSha256,
+                zeroKnownDefectsAndGapsConfirmed: true
+              },
+              publishedPackages: $publishedPackages
+            }' > evidence/verified-release.json
+
+      - name: Upload verified release receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: verified-release-receipt-${{ steps.preflight.outputs.source_sha }}
+          path: evidence/verified-release.json
+          if-no-files-found: error
+          retention-days: 90
 
   images:
     name: Build and push GHCR images
     runs-on: ubuntu-latest
-    # GHCR publishing is the self-host load-bearing piece and is independent of
-    # the npm token. It runs ONLY when the release job actually published a
-    # release (i.e. a "Version Packages" PR merge produced new npm versions), so
-    # ordinary pushes to main no longer re-push the image tags + latest. The
-    # `published` output comes from the changesets/action.
-    needs: release
-    if: needs.release.outputs.published == 'true'
+    # GHCR publishing is the self-host load-bearing piece. It runs ONLY after the
+    # evidence-bound manual release job actually publishes new npm versions, so
+    # ordinary pushes and Version-PR merges never re-push image tags or latest.
+    # The `published` output comes from the changesets/action.
+    needs: publish
+    if: needs.publish.outputs.published == 'true'
     permissions:
       contents: read
-      packages: write
+      packages: write # publish the accepted chart and release images to GHCR
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ needs.publish.outputs.sourceSha }}
+          persist-credentials: false
 
       - name: Resolve image version
         id: meta
         env:
-          PUBLISHED_PACKAGES: ${{ needs.release.outputs.publishedPackages }}
+          PUBLISHED_PACKAGES: ${{ needs.publish.outputs.publishedPackages }}
+          SOURCE_SHA: ${{ needs.publish.outputs.sourceSha }}
         run: |
           # Tag images with the PUBLISHED release version, not the Chart.yaml
           # appVersion. The sdk + react packages are version-linked, so any of
@@ -135,16 +304,16 @@ jobs:
             version="$(grep -E '^appVersion:' deploy/helm/opengeni/Chart.yaml | sed -E 's/appVersion:[[:space:]]*"?([^"]+)"?/\1/')"
           fi
           echo "version=${version}" >> "$GITHUB_OUTPUT"
-          echo "sha=${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+          echo "sha=${SOURCE_SHA::12}" >> "$GITHUB_OUTPUT"
 
       - name: Set up Helm
-        uses: azure/setup-helm@v5
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
 
       - name: Log in to GHCR
-        uses: docker/login-action@v4.4.0
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -153,12 +322,13 @@ jobs:
       - name: Package and push Helm chart
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USERNAME: ${{ github.actor }}
           RELEASE_VERSION: ${{ steps.meta.outputs.version }}
           REPOSITORY_OWNER: ${{ github.repository_owner }}
         run: |
           org="$(printf '%s' "$REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
           echo "$GHCR_TOKEN" | helm registry login ghcr.io \
-            --username "${{ github.actor }}" \
+            --username "$GHCR_USERNAME" \
             --password-stdin
           mkdir -p .release/charts
           helm package deploy/helm/opengeni \
@@ -175,13 +345,9 @@ jobs:
       # fails the bake loud (no unverifiable binary ships). GitHub Releases stays the
       # public archive + self-update + install.sh fallback.
       - name: Install the Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo (agent bake)
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: agent
-          key: bake-musl
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal --no-self-update
+          rustup default 1.97.1
 
       - name: Bake + sign the per-SHA agent binaries
         env:
@@ -189,7 +355,7 @@ jobs:
         run: scripts/bake-agent.sh
 
       - name: Build and push API image
-        uses: docker/build-push-action@v7.3.0
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           file: docker/opengeni.Dockerfile
@@ -204,7 +370,7 @@ jobs:
             ghcr.io/cloudgeni-ai/opengeni-api:latest
 
       - name: Build and push worker image
-        uses: docker/build-push-action@v7.3.0
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           file: docker/opengeni.Dockerfile
@@ -219,7 +385,7 @@ jobs:
             ghcr.io/cloudgeni-ai/opengeni-worker:latest
 
       - name: Build and push web image
-        uses: docker/build-push-action@v7.3.0
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           file: docker/opengeni.Dockerfile
@@ -242,7 +408,7 @@ jobs:
       # (the ops-repo deploy passes it as the `relay_digest` input).
       - name: Build and push relay image
         id: build-relay
-        uses: docker/build-push-action@v7.3.0
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: agent
           file: agent/crates/opengeni-relay/Dockerfile
@@ -254,4 +420,6 @@ jobs:
             ghcr.io/cloudgeni-ai/opengeni-relay:latest
 
       - name: Surface relay image digest
-        run: echo "relay image digest = ${{ steps.build-relay.outputs.digest }}"
+        env:
+          RELAY_IMAGE_DIGEST: ${{ steps.build-relay.outputs.digest }}
+        run: echo "relay image digest = $RELAY_IMAGE_DIGEST"
