@@ -7,6 +7,8 @@ import { buildTimeline, type TimelineItem } from "../src/timeline";
 
 registerDom();
 
+const SECOND_SESSION_ID = "33333333-3333-4333-8333-333333333333";
+
 function event(
   sequence: number,
   type: SessionEvent["type"] = "user.message",
@@ -86,6 +88,56 @@ describe("useSessionEvents", () => {
     expect(streamCalls).toEqual([1200]);
     expect(lengths.filter((length) => length === 1000)).toHaveLength(1);
 
+    await hook.unmount();
+  });
+
+  test("a session switch never exposes the previous session's event log during render", async () => {
+    let resolveSecond!: (events: SessionEvent[]) => void;
+    const secondPage = new Promise<SessionEvent[]>((resolve) => {
+      resolveSecond = resolve;
+    });
+    const firstEvent = event(1);
+    const secondEvent: SessionEvent = {
+      ...event(1),
+      id: "evt-second-1",
+      sessionId: SECOND_SESSION_ID,
+    };
+    const client = fakeClient({
+      listEvents: async (_workspaceId, sessionId) =>
+        sessionId === SESSION_ID ? [firstEvent] : await secondPage,
+      streamEvents: () =>
+        (async function* () {
+          // Keep the stream contract without yielding additional events.
+        })(),
+    });
+    const observed: Array<{ sessionId: string; eventSessionIds: string[] }> = [];
+    const hook = await renderHook(
+      (props: { sessionId: string }) => {
+        const result = useSessionEvents(props.sessionId, { client, workspaceId: WORKSPACE_ID });
+        observed.push({
+          sessionId: props.sessionId,
+          eventSessionIds: result.events.map((item) => item.sessionId),
+        });
+        return result;
+      },
+      { sessionId: SESSION_ID },
+    );
+    await flush(20);
+    expect(hook.result.current.events.map((item) => item.sessionId)).toEqual([SESSION_ID]);
+
+    observed.length = 0;
+    await hook.rerender({ sessionId: SECOND_SESSION_ID });
+    expect(
+      observed
+        .filter(({ sessionId }) => sessionId === SECOND_SESSION_ID)
+        .flatMap(({ eventSessionIds }) => eventSessionIds),
+    ).not.toContain(SESSION_ID);
+    expect(hook.result.current.events).toEqual([]);
+    expect(hook.result.current.lastSequence).toBe(0);
+
+    resolveSecond([secondEvent]);
+    await flush(20);
+    expect(hook.result.current.events.map((item) => item.sessionId)).toEqual([SECOND_SESSION_ID]);
     await hook.unmount();
   });
 

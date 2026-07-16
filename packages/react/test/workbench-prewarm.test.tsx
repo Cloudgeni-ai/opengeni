@@ -33,6 +33,7 @@ import {
 registerDom();
 
 const EMPTY_MACHINES = { activeSandboxId: null, activeEpoch: 0, machines: [] };
+const SECOND_SESSION_ID = "33333333-3333-4333-8333-333333333333";
 
 /** The composite dock hook's sub-hooks resolve the client from context, so it
  *  must run under a provider (unlike the leaf hooks). This renders it there and
@@ -215,7 +216,8 @@ describe("workbench prewarm gating (Refinement 1)", () => {
     expect(spy.attachCalls).toBe(0);
     // Reach the Files tab's onEditIntent (the editor's first-keystroke signal).
     const filesTab = hook.result.current.tabs.find((t) => t.id === WORKBENCH_TAB_FILES);
-    const onEditIntent = (filesTab?.content as ReactElement<{ onEditIntent: () => void }>).props
+    expect(filesTab).toBeDefined();
+    const onEditIntent = (filesTab!.content as ReactElement<{ onEditIntent: () => void }>).props
       .onEditIntent;
     expect(typeof onEditIntent).toBe("function");
     await act(async () => {
@@ -245,6 +247,43 @@ describe("workbench prewarm gating (Refinement 1)", () => {
     await flush(60);
     expect(spy.attachCalls).toBe(1);
     await hook.unmount();
+  });
+
+  test("switching sessions clears prior warm intent instead of prewarming the new session", async () => {
+    const { client, spy } = coldClient();
+    const result = { current: undefined as unknown as UseSandboxWorkspaceTabsResult };
+    function Harness({ sessionId }: { sessionId: string }) {
+      result.current = useSandboxWorkspaceTabs({ sessionId, events: [] });
+      return null;
+    }
+    const rendered = await renderComponent(
+      withProvider(client, <Harness sessionId={SESSION_ID} />),
+    );
+    await flush(60);
+    const firstFiles = result.current.tabs.find((tab) => tab.id === WORKBENCH_TAB_FILES);
+    expect(firstFiles).toBeDefined();
+    const firstEditIntent = (firstFiles!.content as ReactElement<{ onEditIntent: () => void }>)
+      .props.onEditIntent;
+    await act(async () => {
+      firstEditIntent();
+    });
+    await flush(60);
+    expect(spy.attachCalls).toBe(1);
+
+    await rendered.rerender(withProvider(client, <Harness sessionId={SECOND_SESSION_ID} />));
+    await flush(60);
+    expect(spy.attachCalls).toBe(1);
+
+    const secondFiles = result.current.tabs.find((tab) => tab.id === WORKBENCH_TAB_FILES);
+    expect(secondFiles).toBeDefined();
+    const secondEditIntent = (secondFiles!.content as ReactElement<{ onEditIntent: () => void }>)
+      .props.onEditIntent;
+    await act(async () => {
+      secondEditIntent();
+    });
+    await flush(60);
+    expect(spy.attachCalls).toBe(2);
+    await rendered.unmount();
   });
 });
 
@@ -312,6 +351,28 @@ describe("capture-driven default tab (Refinement 2)", () => {
     expect(hook.result.current.defaultTab).toBe(WORKBENCH_TAB_CHANGES);
     await hook.unmount();
   });
+
+  test("the capture-driven default is latched independently for each session", async () => {
+    const { client } = coldClient({
+      getWorkspaceCapture: async (_workspaceId, sessionId) =>
+        captureAvailable(fakeManifest(sessionId === SESSION_ID ? 2 : 0)),
+    });
+    const result = { current: undefined as unknown as UseSandboxWorkspaceTabsResult };
+    function Harness({ sessionId }: { sessionId: string }) {
+      result.current = useSandboxWorkspaceTabs({ sessionId, events: [] });
+      return null;
+    }
+    const rendered = await renderComponent(
+      withProvider(client, <Harness sessionId={SESSION_ID} />),
+    );
+    await flush();
+    expect(result.current.defaultTab).toBe(WORKBENCH_TAB_CHANGES);
+
+    await rendered.rerender(withProvider(client, <Harness sessionId={SECOND_SESSION_ID} />));
+    await flush();
+    expect(result.current.defaultTab).toBe(WORKBENCH_TAB_FILES);
+    await rendered.unmount();
+  });
 });
 
 // ── Refinement 2: no post-paint content switch (component level) ──────────────
@@ -368,6 +429,37 @@ describe("SandboxWorkspace capture-driven default renders with no content switch
     );
     await flush();
     expect(selectedTabText(rendered.container)).toContain("Files");
+    await rendered.unmount();
+  });
+
+  test("a tab selection from the previous session does not override the new session default", async () => {
+    const { client } = coldClient({
+      getWorkspaceCapture: async () => captureAvailable(fakeManifest(2)),
+    });
+    const workspace = (sessionId: string) =>
+      withProvider(
+        client,
+        <SandboxWorkspace
+          sessionId={sessionId}
+          events={[]}
+          primary={<div>chat</div>}
+          autoSaveId="og.test.prewarm.session-tab"
+        />,
+      );
+    const rendered = await renderComponent(workspace(SESSION_ID));
+    await flush();
+    const filesTab = [...rendered.container.querySelectorAll<HTMLElement>('[role="tab"]')].find(
+      (element) => element.textContent?.includes("Files"),
+    );
+    expect(filesTab).toBeDefined();
+    await act(async () => {
+      filesTab!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(selectedTabText(rendered.container)).toContain("Files");
+
+    await rendered.rerender(workspace(SECOND_SESSION_ID));
+    await flush();
+    expect(selectedTabText(rendered.container)).toContain("Changes");
     await rendered.unmount();
   });
 });

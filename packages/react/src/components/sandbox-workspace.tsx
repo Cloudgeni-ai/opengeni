@@ -13,7 +13,7 @@
 // (no `sonner` import), and every surface renders with package primitives + og
 // tokens only. `apps/web` consumes this through the exact public surface an
 // external embedder (cloudgeni #1577) uses — that is criterion F1.
-import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Popover } from "radix-ui";
 import type { SessionEvent } from "@opengeni/sdk";
 import { CpuIcon, LaptopIcon, RefreshCwIcon } from "lucide-react";
@@ -152,6 +152,17 @@ export type UseSandboxWorkspaceTabsResult = {
   machine: WorkspaceMachine;
 };
 
+type SessionWarmIntents = {
+  sessionId: string;
+  watchDesktop: boolean;
+  warmTerminal: boolean;
+  warmEdit: boolean;
+};
+
+function emptyWarmIntents(sessionId: string): SessionWarmIntents {
+  return { sessionId, watchDesktop: false, warmTerminal: false, warmEdit: false };
+}
+
 /**
  * Build the workbench tabs + the machine-chip model for one session. This is the
  * dock "brain": capability negotiation, capture-backed cold reads, prewarm
@@ -169,9 +180,21 @@ export function useSandboxWorkspaceTabs(
   // capture glance): desktop watch consent, terminal engagement (`onActivate`), and
   // the first wake-on-edit keystroke in the Files editor. Browsing capture-served
   // Changes/Files warms nothing — that is the whole point of Refinement 1.
-  const [watchDesktop, setWatchDesktop] = useState(false);
-  const [warmTerminal, setWarmTerminal] = useState(false);
-  const [warmEdit, setWarmEdit] = useState(false);
+  const [storedWarmIntents, setStoredWarmIntents] = useState<SessionWarmIntents>(() =>
+    emptyWarmIntents(sessionId),
+  );
+  const warmIntents =
+    storedWarmIntents.sessionId === sessionId ? storedWarmIntents : emptyWarmIntents(sessionId);
+  const { watchDesktop, warmTerminal, warmEdit } = warmIntents;
+  const requestWarmIntent = useCallback(
+    (intent: Exclude<keyof SessionWarmIntents, "sessionId">) => {
+      setStoredWarmIntents((previous) => {
+        const current = previous.sessionId === sessionId ? previous : emptyWarmIntents(sessionId);
+        return current[intent] ? current : { ...current, [intent]: true };
+      });
+    },
+    [sessionId],
+  );
 
   // The session's machine fleet + the active-sandbox pointer. Drives the header
   // chip (which machine + its connection state). Polls slowly — ambient context.
@@ -221,26 +244,33 @@ export function useSandboxWorkspaceTabs(
   // freshly-warm box's surfaces fill in.
   const provisioning = sandboxProvisionInFlight(events);
   const renegotiate = caps.renegotiate;
-  const provisioningRef = useRef(provisioning);
+  const provisioningRef = useRef({ sessionId, provisioning });
   useEffect(() => {
-    if (provisioningRef.current && !provisioning) {
+    const previous = provisioningRef.current;
+    if (previous.sessionId === sessionId && previous.provisioning && !provisioning) {
       renegotiate();
     }
-    provisioningRef.current = provisioning;
-  }, [provisioning, renegotiate]);
+    provisioningRef.current = { sessionId, provisioning };
+  }, [sessionId, provisioning, renegotiate]);
 
   // The cold-paint data source: the latest turn-end capture, fetched with a single
   // api round-trip on mount (no machine). Feeds the Files tree + the Changes/Git
   // diff when the box is not warm; a warm box always wins (live path unchanged).
   const captureState = useWorkspaceCapture(sessionId, { events });
   const captureAvailable = captureState.available;
-  const notifiedCaptureDegradedReason = useRef<string | null>(null);
+  const notifiedCaptureDegradedReason = useRef<{ sessionId: string; reason: string | null }>({
+    sessionId,
+    reason: null,
+  });
+  if (notifiedCaptureDegradedReason.current.sessionId !== sessionId) {
+    notifiedCaptureDegradedReason.current = { sessionId, reason: null };
+  }
   useEffect(() => {
     const reason = captureState.degradedReason;
-    if (!reason || notifiedCaptureDegradedReason.current === reason) return;
-    notifiedCaptureDegradedReason.current = reason;
+    if (!reason || notifiedCaptureDegradedReason.current.reason === reason) return;
+    notifiedCaptureDegradedReason.current = { sessionId, reason };
     onNotify?.({ kind: "error", message: captureDegradedMessage(reason) });
-  }, [captureState.degradedReason, onNotify]);
+  }, [sessionId, captureState.degradedReason, onNotify]);
 
   const files = useSandboxFiles(sessionId, {
     events,
@@ -288,7 +318,7 @@ export function useSandboxWorkspaceTabs(
         acknowledgeUnredacted: true,
         acknowledgeShared: shared,
       });
-      setWatchDesktop(true);
+      requestWarmIntent("watchDesktop");
       caps.renegotiate();
     } catch (error) {
       onNotify?.({
@@ -301,7 +331,7 @@ export function useSandboxWorkspaceTabs(
   // Re-warm WITHOUT re-acknowledging: the consent was already recorded, only the
   // box drained back to cold. Idempotent — the viewer auto-warm de-dupes.
   function rewarmDesktop() {
-    if (!watchDesktop) setWatchDesktop(true);
+    if (!watchDesktop) requestWarmIntent("watchDesktop");
     caps.renegotiate();
   }
 
@@ -326,17 +356,23 @@ export function useSandboxWorkspaceTabs(
   // first CONTENT paint (both bodies show a connecting/loading state until the
   // capture lands) — means the first real content is the correct tab, no switch. A
   // pure embedder that never preloads events now gets the right default for free.
-  const defaultTabRef = useRef<string | null>(null);
-  if (defaultTabRef.current === null) {
+  const defaultTabRef = useRef<{ sessionId: string; value: string | null }>({
+    sessionId,
+    value: null,
+  });
+  if (defaultTabRef.current.sessionId !== sessionId) {
+    defaultTabRef.current = { sessionId, value: null };
+  }
+  if (defaultTabRef.current.value === null) {
     if (initialTab) {
-      defaultTabRef.current = initialTab;
+      defaultTabRef.current.value = initialTab;
     } else if (captureState.fileCount !== null) {
-      defaultTabRef.current =
+      defaultTabRef.current.value =
         captureState.fileCount > 0 ? WORKBENCH_TAB_CHANGES : WORKBENCH_TAB_FILES;
     }
   }
   // null only during the brief pre-first-resolve window (no host override yet).
-  const defaultTab = defaultTabRef.current;
+  const defaultTab = defaultTabRef.current.value;
 
   const tabs = useMemo(() => {
     const list: WorkspaceTab[] = [];
@@ -373,7 +409,7 @@ export function useSandboxWorkspaceTabs(
           editable={filesEditable}
           // The first keystroke in the editor is the wake-on-edit INTENT: warm the
           // box (even cold) so the write lands fast. Opening/reading files does not.
-          onEditIntent={() => setWarmEdit(true)}
+          onEditIntent={() => requestWarmIntent("warmEdit")}
           className="h-full"
         />
       ),
@@ -389,7 +425,7 @@ export function useSandboxWorkspaceTabs(
             <SandboxTerminal
               result={terminal}
               terminalCapability={capabilities?.Terminal ?? null}
-              onActivate={() => setWarmTerminal(true)}
+              onActivate={() => requestWarmIntent("warmTerminal")}
               showHeader
               shell={capabilities?.Terminal.shell ?? undefined}
               liveness={liveness}
@@ -442,6 +478,7 @@ export function useSandboxWorkspaceTabs(
     caps.state,
     caps.error,
     caps.viewerCapReached,
+    requestWarmIntent,
   ]);
 
   return {
@@ -525,17 +562,24 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
   // we pass no controlled tab, so the dock renders its own first-tab fallback
   // (Changes) — whose body is a connecting/loading state until the capture lands,
   // so committing the real default at first-resolve produces no CONTENT switch.
-  const [selectedTab, setSelectedTab] = useState<string | null>(null);
-  const activeTab = selectedTab ?? defaultTab ?? undefined;
-
   const tabs: WorkspaceTab[] = [...(leadingTabs ?? []), ...workbenchTabs, ...(trailingTabs ?? [])];
+  const [storedSelection, setStoredSelection] = useState<{
+    sessionId: string;
+    tab: string;
+  } | null>(null);
+  const selectedTab = storedSelection?.sessionId === sessionId ? storedSelection.tab : null;
+  const activeTab = selectedTab ?? defaultTab ?? tabs[0]?.id;
+  const selectTab = useCallback(
+    (tab: string) => setStoredSelection({ sessionId, tab }),
+    [sessionId],
+  );
 
   return (
     <WorkspaceDock
       primary={primary}
       tabs={tabs}
       {...(activeTab !== undefined ? { activeTab } : {})}
-      onActiveTabChange={setSelectedTab}
+      onActiveTabChange={selectTab}
       headerAccessory={
         <MachineStateChip
           chip={machine.chip}

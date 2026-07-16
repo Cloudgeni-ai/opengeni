@@ -62,24 +62,57 @@ function repoForPath(
   return null;
 }
 
+/** Full diff equality for identity preservation. Hunk count/count summaries are
+ *  not sufficient: an edit can replace text without changing either shape. */
+function sameFileDiff(a: GitFileDiff, b: GitFileDiff): boolean {
+  if (
+    a.path !== b.path ||
+    a.oldPath !== b.oldPath ||
+    a.status !== b.status ||
+    a.isBinary !== b.isBinary ||
+    a.isImage !== b.isImage ||
+    a.additions !== b.additions ||
+    a.deletions !== b.deletions ||
+    a.truncated !== b.truncated ||
+    a.hunks.length !== b.hunks.length
+  )
+    return false;
+
+  return a.hunks.every((hunk, hunkIndex) => {
+    const other = b.hunks[hunkIndex];
+    if (
+      !other ||
+      hunk.oldStart !== other.oldStart ||
+      hunk.oldLines !== other.oldLines ||
+      hunk.newStart !== other.newStart ||
+      hunk.newLines !== other.newLines ||
+      hunk.header !== other.header ||
+      hunk.lines.length !== other.lines.length
+    )
+      return false;
+    return hunk.lines.every((line, lineIndex) => {
+      const otherLine = other.lines[lineIndex];
+      return (
+        otherLine !== undefined &&
+        line.type === otherLine.type &&
+        line.oldNo === otherLine.oldNo &&
+        line.newNo === otherLine.newNo &&
+        line.text === otherLine.text
+      );
+    });
+  });
+}
+
 /** Merge a freshly-served diff over the current one, preserving the identity of
- *  unchanged per-file entries (same path/status/counts/hunk-count) so a cold→warm
- *  reconcile does NOT remount unchanged file sections — no-flicker (§12-D1). */
+ *  genuinely unchanged per-file entries so a cold→warm reconcile does NOT
+ *  remount unchanged file sections — no-flicker (§12-D1). */
 function mergeDiffs(current: GitFileDiff[], next: GitFileDiff[]): GitFileDiff[] {
   if (current.length === 0) return next;
   const byPath = new Map(current.map((d) => [d.path, d] as const));
   let changed = current.length !== next.length;
   const merged = next.map((file, index) => {
     const existing = byPath.get(file.path);
-    if (
-      existing &&
-      existing.status === file.status &&
-      existing.additions === file.additions &&
-      existing.deletions === file.deletions &&
-      existing.isBinary === file.isBinary &&
-      existing.truncated === file.truncated &&
-      existing.hunks.length === file.hunks.length
-    ) {
+    if (existing && sameFileDiff(existing, file)) {
       if (current[index] !== existing) changed = true;
       return existing;
     }
@@ -116,13 +149,19 @@ export function useSandboxGit(
   const [source, setSource] = useState<"live" | "capture" | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<Error | null>(null);
+  // Live requests and event cursors are identity-scoped. The refs deliberately
+  // survive renders, so they must be fenced/reset when that identity changes.
+  const refreshGenerationRef = useRef(0);
+  const lastChangeRef = useRef(0);
 
   const refresh = useCallback(async () => {
     if (!sessionId) return;
+    const generation = (refreshGenerationRef.current += 1);
     setLoading(true);
     setError(null);
     try {
       const status = await client.gitStatus(workspaceId, sessionId, { path: repoPath });
+      if (refreshGenerationRef.current !== generation) return;
       setIsRepo(status.isRepo);
       setBranch(status.head);
       setAhead(status.ahead);
@@ -133,13 +172,15 @@ export function useSandboxGit(
         return;
       }
       const result = await client.gitDiff(workspaceId, sessionId, { path: repoPath, staged });
+      if (refreshGenerationRef.current !== generation) return;
       // Merge in place so the cold→warm swap keeps unchanged file sections mounted.
       setDiff((prev) => mergeDiffs(prev, result.files));
       setSource("live");
     } catch (cause) {
+      if (refreshGenerationRef.current !== generation) return;
       setError(cause instanceof Error ? cause : new Error(String(cause)));
     } finally {
-      setLoading(false);
+      if (refreshGenerationRef.current === generation) setLoading(false);
     }
   }, [client, workspaceId, sessionId, repoPath, staged]);
 
@@ -174,30 +215,44 @@ export function useSandboxGit(
   const captureRef = useRef<WorkspaceCaptureManifest | null>(capture);
   captureRef.current = capture;
   const captureRevision = capture?.revision ?? null;
+  const identityKey = `${workspaceId}\u0000${sessionId ?? ""}\u0000${repoPath}\u0000${staged}`;
+  const previousIdentityRef = useRef(identityKey);
   useEffect(() => {
-    if (!enabled) {
+    // A liveness/capture source change supersedes any older live request. Only a
+    // true data-identity change clears rendered state and the event high-water mark.
+    refreshGenerationRef.current += 1;
+    const identityChanged = previousIdentityRef.current !== identityKey;
+    previousIdentityRef.current = identityKey;
+    if (identityChanged || !enabled) {
+      lastChangeRef.current = 0;
       setDiff([]);
       setIsRepo(false);
       setBranch(null);
+      setAhead(0);
+      setBehind(0);
       setSource(null);
+      setLoading(false);
+      setError(null);
+    }
+    if (!enabled) {
       return;
     }
     if (isLive) {
       void refresh();
-      return;
-    }
-    if (captureRevision !== null && captureRef.current) {
+    } else if (captureRevision !== null && captureRef.current) {
       seedFromCapture(captureRef.current);
-      return;
+    } else {
+      void refresh();
     }
-    void refresh();
-  }, [enabled, isLive, captureRevision, refresh, seedFromCapture]);
+    return () => {
+      refreshGenerationRef.current += 1;
+    };
+  }, [enabled, isLive, captureRevision, identityKey, refresh, seedFromCapture]);
 
   // git.changed → re-fetch the LIVE diff. A git.changed only originates from a
   // live box, so this both keeps warm sessions fresh and folds a cold box that
   // just came up (unchanged from the pre-capture behavior).
   const events = options.events;
-  const lastChangeRef = useRef(0);
   useEffect(() => {
     if (!enabled || !events) return;
     let latest = lastChangeRef.current;

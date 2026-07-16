@@ -28,6 +28,7 @@ import { deriveMachineChip } from "../src/hooks/use-machine-chip";
 registerDom();
 
 const ctx = { workspaceId: WORKSPACE_ID };
+const SECOND_SESSION_ID = "33333333-3333-4333-8333-333333333333";
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -196,8 +197,10 @@ describe("useWorkspaceCapture", () => {
     const manifest = fakeManifest({ revision: 5 });
     const originalFetch = globalThis.fetch;
     let fetched: string | null = null;
-    globalThis.fetch = (async (url: string) => {
+    let fetchSignal: AbortSignal | null = null;
+    globalThis.fetch = (async (url: string, init?: RequestInit) => {
       fetched = String(url);
+      fetchSignal = init?.signal ?? null;
       return { ok: true, status: 200, json: async () => manifest } as unknown as Response;
     }) as typeof fetch;
     try {
@@ -223,6 +226,7 @@ describe("useWorkspaceCapture", () => {
       );
       await flush();
       expect(fetched as string | null).toBe("https://blob.example/manifest.json");
+      expect(fetchSignal).not.toBeNull();
       expect(hook.result.current.revision).toBe(5);
       expect(hook.result.current.capture?.files[0]?.path).toBe("src/app.py");
       await hook.unmount();
@@ -309,6 +313,118 @@ describe("useWorkspaceCapture", () => {
     expect(hook.result.current.available).toBe(false);
     expect(hook.result.current.capture).toBeNull();
     expect(hook.result.current.degradedReason).toBe("repository_discovery_command_failed");
+    await hook.unmount();
+  });
+
+  test("disabling the hook fences an older in-flight capture response", async () => {
+    let resolveRequest!: (response: GetWorkspaceCaptureResponse) => void;
+    const request = new Promise<GetWorkspaceCaptureResponse>((resolve) => {
+      resolveRequest = resolve;
+    });
+    const client = fakeClient({ getWorkspaceCapture: async () => await request });
+    const hook = await renderHook(
+      (props: { sessionId: string | null }) =>
+        useWorkspaceCapture(props.sessionId, { ...ctx, client }),
+      { sessionId: SESSION_ID as string | null },
+    );
+
+    await hook.rerender({ sessionId: null });
+    resolveRequest(captureAvailable(fakeManifest({ revision: 99 })));
+    await flush();
+
+    expect(hook.result.current.available).toBe(false);
+    expect(hook.result.current.capture).toBeNull();
+    expect(hook.result.current.revision).toBeNull();
+    await hook.unmount();
+  });
+
+  test("a session change resets the capture announcement sequence cursor", async () => {
+    const responses = new Map<string, WorkspaceCaptureManifest>([
+      [SESSION_ID, fakeManifest({ revision: 50 })],
+      [SECOND_SESSION_ID, fakeManifest({ revision: 1 })],
+    ]);
+    const client = fakeClient({
+      getWorkspaceCapture: async (_workspaceId, sessionId) =>
+        captureAvailable(responses.get(sessionId)!),
+    });
+    const hook = await renderHook(
+      (props: { sessionId: string; events: SessionEvent[] }) =>
+        useWorkspaceCapture(props.sessionId, { ...ctx, client, events: props.events }),
+      {
+        sessionId: SESSION_ID,
+        events: [
+          fakeEvent(50, "workspace.revision.captured", {
+            revision: 50,
+            turnId: "turn-50",
+            capturedAt: "2026-07-08T12:00:00.000Z",
+            leaseEpoch: 1,
+            stats: fakeManifest().stats,
+          }),
+        ],
+      },
+    );
+    await flush();
+    expect(hook.result.current.revision).toBe(50);
+
+    await hook.rerender({ sessionId: SECOND_SESSION_ID, events: [] });
+    await flush();
+    expect(hook.result.current.revision).toBe(1);
+
+    responses.set(SECOND_SESSION_ID, fakeManifest({ revision: 2 }));
+    await hook.rerender({
+      sessionId: SECOND_SESSION_ID,
+      events: [
+        fakeEvent(1, "workspace.revision.captured", {
+          revision: 2,
+          turnId: "turn-2",
+          capturedAt: "2026-07-08T12:01:00.000Z",
+          leaseEpoch: 1,
+          stats: fakeManifest().stats,
+        }),
+      ],
+    });
+    await flush();
+
+    expect(hook.result.current.revision).toBe(2);
+    expect(hook.result.current.isStale).toBe(false);
+    await hook.unmount();
+  });
+
+  test("a session switch never exposes the previous session's capture during render", async () => {
+    let resolveSecond!: (response: GetWorkspaceCaptureResponse) => void;
+    const secondRequest = new Promise<GetWorkspaceCaptureResponse>((resolve) => {
+      resolveSecond = resolve;
+    });
+    const client = fakeClient({
+      getWorkspaceCapture: async (_workspaceId, sessionId) =>
+        sessionId === SESSION_ID
+          ? captureAvailable(fakeManifest({ revision: 10 }))
+          : await secondRequest,
+    });
+    const observed: Array<{ sessionId: string; revision: number | null }> = [];
+    const hook = await renderHook(
+      (props: { sessionId: string }) => {
+        const state = useWorkspaceCapture(props.sessionId, { ...ctx, client });
+        observed.push({ sessionId: props.sessionId, revision: state.revision });
+        return state;
+      },
+      { sessionId: SESSION_ID },
+    );
+    await flush();
+    expect(hook.result.current.revision).toBe(10);
+
+    observed.length = 0;
+    await hook.rerender({ sessionId: SECOND_SESSION_ID });
+    expect(
+      observed
+        .filter(({ sessionId }) => sessionId === SECOND_SESSION_ID)
+        .map(({ revision }) => revision),
+    ).not.toContain(10);
+    expect(hook.result.current.capture).toBeNull();
+
+    resolveSecond(captureAvailable(fakeManifest({ revision: 1 })));
+    await flush();
+    expect(hook.result.current.revision).toBe(1);
     await hook.unmount();
   });
 });
@@ -483,6 +599,205 @@ describe("useSandboxFiles — capture source", () => {
     expect(hook.result.current.source).toBe("live");
     await hook.unmount();
   });
+
+  test("a session change resets the filesystem event sequence cursor", async () => {
+    const fileBySession = new Map([
+      [SESSION_ID, "first.ts"],
+      [SECOND_SESSION_ID, "second-old.ts"],
+    ]);
+    const client = fakeClient({
+      gitStatus: async () => ({
+        isRepo: false,
+        head: null,
+        detached: false,
+        upstream: null,
+        ahead: 0,
+        behind: 0,
+        files: [],
+        revision: 0,
+      }),
+      fsList: async (_workspaceId, sessionId) => {
+        const file = fileBySession.get(sessionId)!;
+        return {
+          root: treeDir("", "", [treeFile(file, file, 1)]),
+          revision: 0,
+          truncated: false,
+        };
+      },
+    });
+    const hook = await renderHook(
+      (props: { sessionId: string; events: SessionEvent[] }) =>
+        useSandboxFiles(props.sessionId, {
+          ...ctx,
+          client,
+          events: props.events,
+          liveness: "warm",
+        }),
+      { sessionId: SESSION_ID, events: [fakeEvent(50, "session.title_set")] },
+    );
+    await flush();
+
+    await hook.rerender({ sessionId: SECOND_SESSION_ID, events: [] });
+    await flush();
+    expect(hook.result.current.tree.map((node) => node.path)).toEqual(["second-old.ts"]);
+
+    fileBySession.set(SECOND_SESSION_ID, "second-new.ts");
+    await hook.rerender({
+      sessionId: SECOND_SESSION_ID,
+      events: [
+        fakeEvent(1, "fs.changed", {
+          revision: 1,
+          source: "agent",
+          changes: [{ path: "second-new.ts" }],
+        }),
+      ],
+    });
+    await flush(200);
+
+    expect(hook.result.current.tree.map((node) => node.path)).toEqual(["second-new.ts"]);
+    await hook.unmount();
+  });
+
+  test("a late filesystem response from the previous session cannot replace the new tree", async () => {
+    let resolveFirst!: (value: { root: FsTreeNode; revision: number; truncated: boolean }) => void;
+    const firstList = new Promise<{
+      root: FsTreeNode;
+      revision: number;
+      truncated: boolean;
+    }>((resolve) => {
+      resolveFirst = resolve;
+    });
+    const client = fakeClient({
+      gitStatus: async () => ({
+        isRepo: false,
+        head: null,
+        detached: false,
+        upstream: null,
+        ahead: 0,
+        behind: 0,
+        files: [],
+        revision: 0,
+      }),
+      fsList: async (_workspaceId, sessionId) => {
+        if (sessionId === SESSION_ID) return await firstList;
+        return {
+          root: treeDir("", "", [treeFile("second.ts", "second.ts", 1)]),
+          revision: 0,
+          truncated: false,
+        };
+      },
+    });
+    const hook = await renderHook(
+      (props: { sessionId: string }) =>
+        useSandboxFiles(props.sessionId, { ...ctx, client, liveness: "warm" }),
+      { sessionId: SESSION_ID },
+    );
+    await flush();
+
+    await hook.rerender({ sessionId: SECOND_SESSION_ID });
+    await flush();
+    expect(hook.result.current.tree.map((node) => node.path)).toEqual(["second.ts"]);
+
+    resolveFirst({
+      root: treeDir("", "", [treeFile("first-late.ts", "first-late.ts", 1)]),
+      revision: 0,
+      truncated: false,
+    });
+    await flush();
+
+    expect(hook.result.current.tree.map((node) => node.path)).toEqual(["second.ts"]);
+    expect(hook.result.current.source).toBe("live");
+    await hook.unmount();
+  });
+
+  test("a newer capture updates truncated-directory metadata without remounting siblings", async () => {
+    const client = fakeClient({});
+    const first = fakeManifest({
+      revision: 1,
+      treeIndex: treeDir("", "", [
+        { ...treeDir("vendor", "vendor"), truncated: true },
+        treeFile("stable.ts", "stable.ts", 1),
+      ]),
+    });
+    const hook = await renderHook(
+      (props: { capture: WorkspaceCaptureManifest }) =>
+        useSandboxFiles(SESSION_ID, {
+          ...ctx,
+          client,
+          liveness: "cold",
+          capture: props.capture,
+        }),
+      { capture: first },
+    );
+    await flush();
+    const stableBefore = hook.result.current.tree.find((node) => node.path === "stable.ts");
+    expect(hook.result.current.tree.find((node) => node.path === "vendor")?.truncated).toBe(true);
+
+    await hook.rerender({
+      capture: fakeManifest({
+        revision: 2,
+        treeIndex: treeDir("", "", [
+          treeDir("vendor", "vendor"),
+          treeFile("stable.ts", "stable.ts", 1),
+        ]),
+      }),
+    });
+    await flush();
+
+    expect(hook.result.current.tree.find((node) => node.path === "vendor")?.truncated).toBeFalsy();
+    expect(hook.result.current.tree.find((node) => node.path === "stable.ts")).toBe(stableBefore);
+    await hook.unmount();
+  });
+
+  test("a clean git status removes stale file-tree modification tints", async () => {
+    let dirty = true;
+    const client = fakeClient({
+      gitStatus: async () => ({
+        isRepo: true,
+        head: "main",
+        detached: false,
+        upstream: null,
+        ahead: 0,
+        behind: 0,
+        files: dirty
+          ? [
+              {
+                path: "app.ts",
+                index: null,
+                worktree: "modified" as const,
+                oldPath: null,
+                isConflicted: false,
+              },
+            ]
+          : [],
+        revision: 0,
+      }),
+      fsList: async () => ({
+        root: treeDir("", "", [treeFile("app.ts", "app.ts", 1)]),
+        revision: 0,
+        truncated: false,
+      }),
+    });
+    const hook = await renderHook(
+      (props: { events: SessionEvent[] }) =>
+        useSandboxFiles(SESSION_ID, {
+          ...ctx,
+          client,
+          events: props.events,
+          liveness: "warm",
+        }),
+      { events: [] as SessionEvent[] },
+    );
+    await flush();
+    expect(hook.result.current.tree[0]?.status).toBe("modified");
+
+    dirty = false;
+    await hook.rerender({ events: [fakeEvent(1, "git.changed")] });
+    await flush(200);
+
+    expect(hook.result.current.tree[0]?.status).toBeUndefined();
+    await hook.unmount();
+  });
 });
 
 // ── use-sandbox-git: source selection + no-flicker ─────────────────────────────
@@ -589,6 +904,141 @@ describe("useSandboxGit — capture source", () => {
     expect(gitDiffCalls).toBeGreaterThan(0);
     expect(hook.result.current.source).toBe("live");
     expect(hook.result.current.diff.map((d) => d.path)).toEqual(["live-only.py"]);
+    await hook.unmount();
+  });
+
+  test("a session change resets the git event sequence cursor", async () => {
+    const pathBySession = new Map([
+      [SESSION_ID, "first.ts"],
+      [SECOND_SESSION_ID, "second-old.ts"],
+    ]);
+    const client = fakeClient({
+      gitStatus: async () => ({
+        isRepo: true,
+        head: "main",
+        detached: false,
+        upstream: null,
+        ahead: 0,
+        behind: 0,
+        files: [],
+        revision: 0,
+      }),
+      gitDiff: async (_workspaceId, sessionId) => ({
+        files: [fakeDiff({ path: pathBySession.get(sessionId)! })],
+        revision: 0,
+      }),
+    });
+    const hook = await renderHook(
+      (props: { sessionId: string; events: SessionEvent[] }) =>
+        useSandboxGit(props.sessionId, {
+          ...ctx,
+          client,
+          events: props.events,
+          liveness: "warm",
+        }),
+      { sessionId: SESSION_ID, events: [fakeEvent(50, "git.changed")] },
+    );
+    await flush();
+
+    await hook.rerender({ sessionId: SECOND_SESSION_ID, events: [] });
+    await flush();
+    expect(hook.result.current.diff.map((file) => file.path)).toEqual(["second-old.ts"]);
+
+    pathBySession.set(SECOND_SESSION_ID, "second-new.ts");
+    await hook.rerender({
+      sessionId: SECOND_SESSION_ID,
+      events: [fakeEvent(1, "git.changed")],
+    });
+    await flush();
+
+    expect(hook.result.current.diff.map((file) => file.path)).toEqual(["second-new.ts"]);
+    await hook.unmount();
+  });
+
+  test("a same-shape git refresh replaces changed hunk content", async () => {
+    let lineText = "old line";
+    const client = fakeClient({
+      gitStatus: async () => ({
+        isRepo: true,
+        head: "main",
+        detached: false,
+        upstream: null,
+        ahead: 0,
+        behind: 0,
+        files: [],
+        revision: 0,
+      }),
+      gitDiff: async () => ({
+        files: [
+          fakeDiff({
+            hunks: [
+              {
+                oldStart: 1,
+                oldLines: 1,
+                newStart: 1,
+                newLines: 2,
+                header: "@@ -1 +1,2 @@",
+                lines: [{ type: "add", oldNo: null, newNo: 2, text: lineText }],
+              },
+            ],
+          }),
+        ],
+        revision: 0,
+      }),
+    });
+    const hook = await renderHook(
+      (props: { events: SessionEvent[] }) =>
+        useSandboxGit(SESSION_ID, { ...ctx, client, events: props.events, liveness: "warm" }),
+      { events: [] as SessionEvent[] },
+    );
+    await flush();
+    expect(hook.result.current.diff[0]?.hunks[0]?.lines[0]?.text).toBe("old line");
+
+    lineText = "new line";
+    await hook.rerender({ events: [fakeEvent(1, "git.changed")] });
+    await flush();
+
+    expect(hook.result.current.diff[0]?.hunks[0]?.lines[0]?.text).toBe("new line");
+    await hook.unmount();
+  });
+
+  test("a late git response from the previous session cannot replace the new diff", async () => {
+    let resolveFirst!: (value: { files: GitFileDiff[]; revision: number }) => void;
+    const firstDiff = new Promise<{ files: GitFileDiff[]; revision: number }>((resolve) => {
+      resolveFirst = resolve;
+    });
+    const client = fakeClient({
+      gitStatus: async () => ({
+        isRepo: true,
+        head: "main",
+        detached: false,
+        upstream: null,
+        ahead: 0,
+        behind: 0,
+        files: [],
+        revision: 0,
+      }),
+      gitDiff: async (_workspaceId, sessionId) => {
+        if (sessionId === SESSION_ID) return await firstDiff;
+        return { files: [fakeDiff({ path: "second.ts" })], revision: 0 };
+      },
+    });
+    const hook = await renderHook(
+      (props: { sessionId: string }) =>
+        useSandboxGit(props.sessionId, { ...ctx, client, liveness: "warm" }),
+      { sessionId: SESSION_ID },
+    );
+    await flush();
+
+    await hook.rerender({ sessionId: SECOND_SESSION_ID });
+    await flush();
+    expect(hook.result.current.diff.map((file) => file.path)).toEqual(["second.ts"]);
+
+    resolveFirst({ files: [fakeDiff({ path: "first-late.ts" })], revision: 0 });
+    await flush();
+
+    expect(hook.result.current.diff.map((file) => file.path)).toEqual(["second.ts"]);
+    expect(hook.result.current.source).toBe("live");
     await hook.unmount();
   });
 });

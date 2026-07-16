@@ -250,7 +250,8 @@ function sameNodeShallow(a: FileTreeNode, b: FileTreeNode): boolean {
     a.kind === b.kind &&
     a.name === b.name &&
     (a.size ?? null) === (b.size ?? null) &&
-    (a.status ?? undefined) === (b.status ?? undefined)
+    (a.status ?? undefined) === (b.status ?? undefined) &&
+    (a.truncated ?? false) === (b.truncated ?? false)
   );
 }
 
@@ -317,6 +318,14 @@ export function useSandboxFiles(
   // Which source the tree currently reflects — "capture" (cold paint) or "live".
   const [source, setSource] = useState<"live" | "capture" | null>(null);
   const statusRef = useRef<Map<string, FileTreeStatus>>(new Map());
+  // Async reads, event cursors, and debounced work are scoped to the hook's
+  // workspace/session/root identity. These refs are reset/fenced at that boundary.
+  const refreshGenerationRef = useRef(0);
+  const identityGenerationRef = useRef(0);
+  const lastSeqRef = useRef(0);
+  const pendingParentsRef = useRef<Set<string>>(new Set());
+  const pendingGitRef = useRef(false);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // ── Self-emitted fs.changed de-dupe ───────────────────────────────────────
   // Every one of OUR mutations emits an `fs.changed` event back on the live log
@@ -335,12 +344,10 @@ export function useSandboxFiles(
   // Overlay the git-status tint onto the tree. IDENTITY-PRESERVING: a node whose
   // tint and children are unchanged is returned by reference (not rebuilt), so a
   // re-tint or a cold→warm reconcile does NOT remount unchanged rows — the
-  // no-flicker constraint (dossier §3 #6 / §12-D1). The `overlay.size === 0`
-  // short-circuit keeps the pre-existing "empty overlay leaves tints as-is"
-  // behavior (an empty status set does not strip prior tints).
+  // no-flicker constraint (dossier §3 #6 / §12-D1). An empty overlay is still
+  // meaningful: it strips stale tints after the repository becomes clean.
   const applyStatus = useCallback((nodes: FileTreeNode[]): FileTreeNode[] => {
     const overlay = statusRef.current;
-    if (overlay.size === 0) return nodes;
     const walk = (list: FileTreeNode[]): FileTreeNode[] => {
       let changed = false;
       const out = list.map((node) => {
@@ -365,6 +372,7 @@ export function useSandboxFiles(
 
   const refresh = useCallback(async () => {
     if (!sessionId) return;
+    const generation = (refreshGenerationRef.current += 1);
     setLoading(true);
     setError(null);
     try {
@@ -372,6 +380,7 @@ export function useSandboxFiles(
       // returns isRepo:false), then the tree, so the first paint is tinted.
       try {
         const status = await client.gitStatus(workspaceId, sessionId, { path: rootPath });
+        if (refreshGenerationRef.current !== generation) return;
         const overlay = new Map<string, FileTreeStatus>();
         for (const file of status.files) {
           const code = file.worktree ?? file.index;
@@ -380,9 +389,11 @@ export function useSandboxFiles(
         }
         statusRef.current = overlay;
       } catch {
+        if (refreshGenerationRef.current !== generation) return;
         statusRef.current = new Map();
       }
       const listed = await client.fsList(workspaceId, sessionId, { path: rootPath, depth: 1 });
+      if (refreshGenerationRef.current !== generation) return;
       const children = (listed.root.children ?? []).map(fsNodeToTree);
       // Merge rather than replace so an explicit refresh / cold→warm re-list folds
       // in new entries WITHOUT collapsing the dirs the user already expanded (and,
@@ -394,9 +405,10 @@ export function useSandboxFiles(
       // Live data is now serving — flip the source off the capture snapshot.
       setSource("live");
     } catch (cause) {
+      if (refreshGenerationRef.current !== generation) return;
       setError(cause instanceof Error ? cause : new Error(String(cause)));
     } finally {
-      setLoading(false);
+      if (refreshGenerationRef.current === generation) setLoading(false);
     }
   }, [client, workspaceId, sessionId, rootPath, applyStatus]);
 
@@ -427,6 +439,7 @@ export function useSandboxFiles(
   const expand = useCallback(
     async (path: string) => {
       if (!sessionId) return;
+      const identityGeneration = identityGenerationRef.current;
       // Mark this node as expanding so the FileBrowser can render a spinner while
       // the (often 2-3s) Channel-A fs/list is in flight — the tree never looks
       // frozen on a click.
@@ -437,17 +450,21 @@ export function useSandboxFiles(
       });
       try {
         const listed = await client.fsList(workspaceId, sessionId, { path, depth: 1 });
+        if (identityGenerationRef.current !== identityGeneration) return;
         const children = (listed.root.children ?? []).map(fsNodeToTree);
         setTree((prev) => applyStatus(replaceChildren(prev, path, children)));
       } catch (cause) {
+        if (identityGenerationRef.current !== identityGeneration) return;
         setError(cause instanceof Error ? cause : new Error(String(cause)));
       } finally {
-        setExpandingPaths((prev) => {
-          if (!prev.has(path)) return prev;
-          const next = new Set(prev);
-          next.delete(path);
-          return next;
-        });
+        if (identityGenerationRef.current === identityGeneration) {
+          setExpandingPaths((prev) => {
+            if (!prev.has(path)) return prev;
+            const next = new Set(prev);
+            next.delete(path);
+            return next;
+          });
+        }
       }
     },
     [client, workspaceId, sessionId, applyStatus],
@@ -471,11 +488,13 @@ export function useSandboxFiles(
   const reconcilePath = useCallback(
     async (path: string) => {
       if (!sessionId) return;
+      const identityGeneration = identityGenerationRef.current;
       // Skip parents that aren't currently loaded/expanded in the tree (nothing
       // visible to update; they re-list fresh on the next expand).
       if (!parentIsLoaded(treeRef.current, path)) return;
       try {
         const listed = await client.fsList(workspaceId, sessionId, { path, depth: 1 });
+        if (identityGenerationRef.current !== identityGeneration) return;
         const children = (listed.root.children ?? []).map(fsNodeToTree);
         if (path === "") setTree((prev) => applyStatus(mergeRootChildren(prev, children)));
         else
@@ -508,11 +527,13 @@ export function useSandboxFiles(
       op: () => Promise<T>,
       reconcileParents: string[],
     ): Promise<T> => {
+      const identityGeneration = identityGenerationRef.current;
       // Snapshot the pre-op tree from the ref (StrictMode-safe — see treeRef).
       const snapshot = treeRef.current;
       setTree(applyStatus(apply(snapshot)));
       try {
         const res = await op();
+        if (identityGenerationRef.current !== identityGeneration) return res;
         // Remember the revision WE caused so the matching fs.changed echo is
         // ignored by the event effect (no self-triggered refresh).
         if (res && typeof res === "object" && "revision" in res) {
@@ -521,10 +542,14 @@ export function useSandboxFiles(
         }
         // Reconcile loaded parents to fold the server's real metadata. Sequential
         // and best-effort — purely cosmetic over the already-correct optimistic UI.
-        for (const parent of reconcileParents) await reconcilePath(parent);
+        for (const parent of reconcileParents) {
+          if (identityGenerationRef.current !== identityGeneration) return res;
+          await reconcilePath(parent);
+        }
         return res;
       } catch (cause) {
         const err = cause instanceof Error ? cause : new Error(String(cause));
+        if (identityGenerationRef.current !== identityGeneration) throw err;
         // Revert the optimistic edit to the exact pre-op tree.
         setTree(applyStatus(snapshot));
         setError(err);
@@ -639,30 +664,57 @@ export function useSandboxFiles(
   const captureRef = useRef<WorkspaceCaptureManifest | null>(capture);
   captureRef.current = capture;
   const captureRevision = capture?.revision ?? null;
+  const identityKey = `${workspaceId}\u0000${sessionId ?? ""}\u0000${rootPath}`;
+  const previousIdentityRef = useRef(identityKey);
   useEffect(() => {
-    if (!enabled) {
+    // Any source-selection change supersedes an older root refresh. A true data
+    // identity change additionally fences all other async tree work and resets
+    // event/debounce state before the event-folding effect runs.
+    refreshGenerationRef.current += 1;
+    const identityChanged = previousIdentityRef.current !== identityKey;
+    previousIdentityRef.current = identityKey;
+    if (identityChanged || !enabled) {
+      identityGenerationRef.current += 1;
+      lastSeqRef.current = 0;
+      pendingParentsRef.current = new Set();
+      pendingGitRef.current = false;
+      if (debounceRef.current) {
+        clearTimeout(debounceRef.current);
+        debounceRef.current = null;
+      }
+      ownRevisionsRef.current = new Set();
+      statusRef.current = new Map();
+      treeRef.current = [];
       setTree([]);
+      setExpandingPaths(new Set());
       setSource(null);
+      setLoading(false);
+      setError(null);
+    }
+    if (!enabled) {
       return;
     }
     if (isLive) {
       void refresh();
-      return;
-    }
-    if (captureRevision !== null && captureRef.current) {
+    } else if (captureRevision !== null && captureRef.current) {
       seedFromCapture(captureRef.current);
-      return;
+    } else {
+      void refresh();
     }
-    void refresh();
-  }, [enabled, isLive, captureRevision, refresh, seedFromCapture]);
+    return () => {
+      refreshGenerationRef.current += 1;
+    };
+  }, [enabled, isLive, captureRevision, identityKey, refresh, seedFromCapture]);
 
   // Re-pull JUST the git-status overlay and re-tint the existing tree in place —
   // no fs re-list, no collapse. This is all a `git.changed` (commit/stage/checkout)
   // needs: the tree SHAPE is unchanged, only the tints move.
   const refreshGitOverlay = useCallback(async () => {
     if (!sessionId) return;
+    const identityGeneration = identityGenerationRef.current;
     try {
       const status = await client.gitStatus(workspaceId, sessionId, { path: rootPath });
+      if (identityGenerationRef.current !== identityGeneration) return;
       const overlay = new Map<string, FileTreeStatus>();
       for (const file of status.files) {
         const code = file.worktree ?? file.index;
@@ -687,10 +739,6 @@ export function useSandboxFiles(
   //     preserved). Bursts are debounced into a single reconcile pass.
   //   • A git.changed just re-tints (refreshes the status overlay) — no fs re-list.
   const events = options.events;
-  const lastSeqRef = useRef(0);
-  const pendingParentsRef = useRef<Set<string>>(new Set());
-  const pendingGitRef = useRef(false);
-  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     if (!enabled || !events) return;
@@ -731,8 +779,10 @@ export function useSandboxFiles(
     if (!sawNew) return;
 
     if (debounceRef.current) clearTimeout(debounceRef.current);
+    const identityGeneration = identityGenerationRef.current;
     debounceRef.current = setTimeout(() => {
       debounceRef.current = null;
+      if (identityGenerationRef.current !== identityGeneration) return;
       const parents = pendingParentsRef.current;
       pendingParentsRef.current = new Set();
       const wantGit = pendingGitRef.current;
@@ -741,13 +791,18 @@ export function useSandboxFiles(
       // so the freshly-listed nodes get the correct overlay.
       void (async () => {
         if (wantGit) await refreshGitOverlay();
-        for (const parent of parents) await reconcilePath(parent);
+        if (identityGenerationRef.current !== identityGeneration) return;
+        for (const parent of parents) {
+          if (identityGenerationRef.current !== identityGeneration) return;
+          await reconcilePath(parent);
+        }
       })();
     }, 150);
   }, [enabled, events, reconcilePath, refreshGitOverlay]);
 
   useEffect(
     () => () => {
+      identityGenerationRef.current += 1;
       if (debounceRef.current) clearTimeout(debounceRef.current);
     },
     [],
