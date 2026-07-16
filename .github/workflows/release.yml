@@ -81,9 +81,9 @@ jobs:
       # provenance. The publish command is guarded so a missing NPM_TOKEN does
       # not fail the run — changesets only publishes on the Version PR merge.
       - name: Set up Node for npm publish
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7.0.0
         with:
-          node-version: 20
+          node-version: 24
           registry-url: https://registry.npmjs.org
 
       - name: Create Version PR or publish
