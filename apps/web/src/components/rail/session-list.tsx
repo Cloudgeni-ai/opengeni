@@ -8,6 +8,7 @@ import { useRouterState } from "@tanstack/react-router";
 import {
   ChevronRightIcon,
   EllipsisIcon,
+  LocateFixedIcon,
   MessagesSquareIcon,
   PencilIcon,
   PinIcon,
@@ -40,6 +41,13 @@ import {
   sessionPageKey,
 } from "@/lib/session-pagination";
 import { SESSION_TITLE_MAX_LENGTH, useInlineRename } from "@/lib/session-rename";
+import {
+  MAX_VISUAL_TREE_DEPTH,
+  defaultExpandedAncestors,
+  sessionAncestorPath,
+  sessionStateLabel,
+  visualTreeDepth,
+} from "@/lib/session-rail";
 import { applySessionPinProjection, subscribeToSessionPinChanges } from "@/lib/session-pins";
 import {
   SESSION_GROUP_LABELS,
@@ -210,7 +218,10 @@ export function SessionList() {
       buildRailForest(
         hierarchyMode
           ? allSessions
-          : allSessions.map((session) => ({ ...session, parentSessionId: null })),
+          : allSessions.map((session) => ({
+              ...session,
+              parentSessionId: null,
+            })),
       ),
     [allSessions, hierarchyMode],
   );
@@ -381,9 +392,10 @@ export function SessionList() {
       );
   }, [allSessions, nodesById, pinnedSessions]);
 
-  // Which parents are expanded. Children start collapsed (the rail stays quiet);
-  // the active session's ancestors auto-expand so a deep child is never hidden.
-  const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
+  // Manual state is separate from the small derived active-path expansion.
+  // Polls can therefore never reopen a branch the user explicitly collapsed.
+  const [manualExpanded, setManualExpanded] = useState<ReadonlySet<string>>(() => new Set());
+  const [manualCollapsed, setManualCollapsed] = useState<ReadonlySet<string>>(() => new Set());
   const parentOf = useMemo(() => {
     const map = new Map<string, string>();
     const byId = new Set(allSessions.map((session) => session.id));
@@ -394,26 +406,22 @@ export function SessionList() {
     }
     return map;
   }, [allSessions]);
+  const activeAncestorIds = useMemo(
+    () => sessionAncestorPath(activeSessionId, parentOf),
+    [activeSessionId, parentOf],
+  );
+  const autoExpanded = useMemo(
+    () => defaultExpandedAncestors(activeAncestorIds, manualCollapsed),
+    [activeAncestorIds, manualCollapsed],
+  );
+  const expanded = useMemo(
+    () => new Set([...manualExpanded, ...autoExpanded]),
+    [autoExpanded, manualExpanded],
+  );
   useEffect(() => {
-    if (!activeSessionId) {
-      return;
-    }
-    setExpanded((current) => {
-      const next = new Set(current);
-      let cursor = parentOf.get(activeSessionId);
-      let added = false;
-      const seen = new Set<string>();
-      while (cursor && !seen.has(cursor)) {
-        seen.add(cursor);
-        if (!next.has(cursor)) {
-          next.add(cursor);
-          added = true;
-        }
-        cursor = parentOf.get(cursor);
-      }
-      return added ? next : current;
-    });
-  }, [activeSessionId, parentOf]);
+    setManualExpanded(new Set());
+    setManualCollapsed(new Set());
+  }, [rail.workspaceId]);
   const loadChildPage = useCallback(
     async (parentSessionId: string, cursor?: string): Promise<void> => {
       const epoch = childLoadEpoch.current;
@@ -468,9 +476,15 @@ export function SessionList() {
   const toggleExpand = useCallback(
     (sessionId: string) => {
       const opening = !expanded.has(sessionId);
-      setExpanded((current) => {
+      setManualExpanded((current) => {
         const next = new Set(current);
-        if (next.has(sessionId)) next.delete(sessionId);
+        if (opening) next.add(sessionId);
+        else next.delete(sessionId);
+        return next;
+      });
+      setManualCollapsed((current) => {
+        const next = new Set(current);
+        if (opening) next.delete(sessionId);
         else next.add(sessionId);
         return next;
       });
@@ -483,6 +497,14 @@ export function SessionList() {
     },
     [childPages, expanded, hierarchyMode, loadChildPage, nodesById],
   );
+  const revealActivePath = useCallback(() => {
+    setManualExpanded((current) => new Set([...current, ...activeAncestorIds]));
+    setManualCollapsed((current) => {
+      const next = new Set(current);
+      for (const sessionId of activeAncestorIds) next.delete(sessionId);
+      return next;
+    });
+  }, [activeAncestorIds]);
 
   const visibleRows = useMemo(() => {
     const seen = new Set<string>();
@@ -523,7 +545,10 @@ export function SessionList() {
         if (updated) {
           setPinOverrides((current) => {
             if (current.get(target.id)?.operation !== operation) return current;
-            return new Map(current).set(target.id, { session: updated, operation });
+            return new Map(current).set(target.id, {
+              session: updated,
+              operation,
+            });
           });
         }
         await Promise.all([refresh(), globalPinPage.refresh()]);
@@ -806,6 +831,7 @@ export function SessionList() {
                 onFocusSession={setFocusedSessionId}
                 expanded={expanded}
                 onToggleExpand={toggleExpand}
+                onRevealActivePath={revealActivePath}
                 childPages={childPages}
                 onLoadMoreChildren={loadChildPage}
                 onSelect={rail.openSession}
@@ -815,7 +841,7 @@ export function SessionList() {
             ) : null}
             {forest.running.length > 0 ? (
               <SessionGroup
-                label="Running"
+                label="Active"
                 nodes={forest.running}
                 flat={flat}
                 activeSessionId={activeSessionId}
@@ -823,6 +849,7 @@ export function SessionList() {
                 onFocusSession={setFocusedSessionId}
                 expanded={expanded}
                 onToggleExpand={toggleExpand}
+                onRevealActivePath={revealActivePath}
                 childPages={childPages}
                 onLoadMoreChildren={loadChildPage}
                 onSelect={rail.openSession}
@@ -841,6 +868,7 @@ export function SessionList() {
                 onFocusSession={setFocusedSessionId}
                 expanded={expanded}
                 onToggleExpand={toggleExpand}
+                onRevealActivePath={revealActivePath}
                 childPages={childPages}
                 onLoadMoreChildren={loadChildPage}
                 onSelect={rail.openSession}
@@ -885,6 +913,7 @@ function SessionGroup(props: {
   onFocusSession: (sessionId: string) => void;
   expanded: ReadonlySet<string>;
   onToggleExpand: (sessionId: string) => void;
+  onRevealActivePath: () => void;
   childPages: ReadonlyMap<string, ChildPageState>;
   onLoadMoreChildren: (sessionId: string, cursor?: string) => Promise<void>;
   onSelect: (sessionId: string) => void;
@@ -915,6 +944,7 @@ function SessionGroup(props: {
             onFocusSession={props.onFocusSession}
             expanded={props.expanded}
             onToggleExpand={props.onToggleExpand}
+            onRevealActivePath={props.onRevealActivePath}
             childPages={props.childPages}
             onLoadMoreChildren={props.onLoadMoreChildren}
             onSelect={props.onSelect}
@@ -927,12 +957,15 @@ function SessionGroup(props: {
   );
 }
 
-/** True when the URL-active session lives anywhere inside this node's subtree. */
-function subtreeContains(node: SessionTreeNode, id: string | null): boolean {
-  if (!id) {
-    return false;
+/** Loaded node path from this ancestor to the URL-active session. */
+function descendantPath(node: SessionTreeNode, id: string | null): SessionTreeNode[] | null {
+  if (!id) return null;
+  if (node.session.id === id) return [node];
+  for (const child of node.children) {
+    const path = descendantPath(child, id);
+    if (path) return [node, ...path];
   }
-  return node.children.some((child) => child.session.id === id || subtreeContains(child, id));
+  return null;
 }
 
 /** A node plus, when expanded, its spawned children rendered one level deeper. */
@@ -945,6 +978,7 @@ function SessionTreeRow(props: {
   onFocusSession: (sessionId: string) => void;
   expanded: ReadonlySet<string>;
   onToggleExpand: (sessionId: string) => void;
+  onRevealActivePath: () => void;
   childPages: ReadonlyMap<string, ChildPageState>;
   onLoadMoreChildren: (sessionId: string, cursor?: string) => Promise<void>;
   onSelect: (sessionId: string) => void;
@@ -965,12 +999,13 @@ function SessionTreeRow(props: {
   );
   const isExpanded = props.expanded.has(node.session.id);
   const childPage = props.childPages.get(node.session.id);
-  // Manual collapse always wins (auto-expand runs only on navigation) — but the
-  // OPEN session must never vanish from the rail: a collapsed ancestor hiding
-  // the URL-active session carries the active accent in its place, file-tree
-  // style, so orientation survives any collapse state.
-  const representsHiddenActive =
-    !isExpanded && hasChildren && subtreeContains(node, props.activeSessionId);
+  // Keep the current session findable without exploding a ten-level chain.
+  // The first collapsed ancestor gets one compact shortcut to the current leaf.
+  const hiddenActivePath = !isExpanded ? descendantPath(node, props.activeSessionId) : null;
+  const hiddenActiveSession =
+    hiddenActivePath && hiddenActivePath.length > 1
+      ? hiddenActivePath[hiddenActivePath.length - 1]!.session
+      : null;
   return (
     <>
       <SessionRow
@@ -982,13 +1017,21 @@ function SessionTreeRow(props: {
         expanded={isExpanded}
         hasActiveDescendant={node.hasActiveDescendant || treeHasActiveDescendant}
         onToggleExpand={() => props.onToggleExpand(node.session.id)}
-        active={node.session.id === props.activeSessionId || representsHiddenActive}
+        active={node.session.id === props.activeSessionId}
         focused={index >= 0 && index === props.focusIndex}
         onFocus={() => props.onFocusSession(node.session.id)}
         onSelect={props.onSelect}
         onRename={props.onRename}
         onPin={props.onPin}
       />
+      {hiddenActiveSession ? (
+        <ActivePathShortcut
+          session={hiddenActiveSession}
+          depth={props.depth + 1}
+          hiddenLevels={hiddenActivePath!.length - 1}
+          onReveal={props.onRevealActivePath}
+        />
+      ) : null}
       {childCount > 0 && isExpanded
         ? node.children.map((child) => (
             <SessionTreeRow
@@ -1001,6 +1044,7 @@ function SessionTreeRow(props: {
               onFocusSession={props.onFocusSession}
               expanded={props.expanded}
               onToggleExpand={props.onToggleExpand}
+              onRevealActivePath={props.onRevealActivePath}
               childPages={props.childPages}
               onLoadMoreChildren={props.onLoadMoreChildren}
               onSelect={props.onSelect}
@@ -1032,6 +1076,49 @@ function SessionTreeRow(props: {
   );
 }
 
+function ActivePathShortcut({
+  session,
+  depth,
+  hiddenLevels,
+  onReveal,
+}: {
+  session: Session;
+  depth: number;
+  hiddenLevels: number;
+  onReveal: () => void;
+}) {
+  const rail = useRail();
+  const app = useAppContext();
+  const title = session.title?.trim() || session.initialMessage?.trim() || "Untitled session";
+  const workspace = app.workspaces.find((candidate) => candidate.id === session.workspaceId);
+  const state = sessionStateLabel(session, workspace);
+  const style = { paddingLeft: 10 + visualTreeDepth(depth) * 12 };
+  return (
+    <div role="listitem" className="min-w-0" style={style}>
+      <button
+        type="button"
+        onClick={onReveal}
+        aria-label={`Show ${hiddenLevels}-level path to current session ${title}`}
+        className={cn(
+          "group flex h-9 w-full min-w-0 items-center gap-2 rounded-md border border-brand/20 bg-brand/5 px-2 text-left text-xs text-fg outline-none hover:border-brand/35 hover:bg-brand/10 focus-visible:ring-2 focus-visible:ring-ring/40",
+          rail.isMobile && "h-12",
+        )}
+      >
+        <LocateFixedIcon className="size-3.5 shrink-0 text-brand" />
+        <span className="flex min-w-0 flex-1 flex-col leading-tight">
+          <span className="truncate font-medium">
+            <span className="text-brand">Current</span> · {title}
+          </span>
+          <span className="mt-0.5 truncate text-2xs font-normal text-fg-subtle">
+            {hiddenLevels} level{hiddenLevels === 1 ? "" : "s"} deeper · {state}
+          </span>
+        </span>
+        <span className="shrink-0 text-2xs font-medium text-brand">Show path</span>
+      </button>
+    </div>
+  );
+}
+
 function TreeLoadRow({
   depth,
   text,
@@ -1041,7 +1128,7 @@ function TreeLoadRow({
   text: string;
   onClick?: () => void;
 }) {
-  const style = { paddingLeft: 26 + depth * 14 };
+  const style = { paddingLeft: 26 + visualTreeDepth(depth) * 12 };
   return onClick ? (
     <button
       type="button"
@@ -1086,11 +1173,14 @@ function SessionRow(props: {
   const workspace = app.workspaces.find((candidate) => candidate.id === props.session.workspaceId);
   const stateLabel = sessionStateLabel(props.session, workspace);
   const descendantLabel = sessionDescendantLabel(props.session);
+  const depthLabel = props.depth > MAX_VISUAL_TREE_DEPTH ? `Level ${props.depth + 1}` : null;
+  const relativeTime = relativeTimeLabel(props.session.updatedAt);
   // Indent nested rows; the leading affordance is a chevron for parents, else a
   // spacer of the same width — reserved at every depth (root included) so every
   // status dot sits in one column and the left edge is even whether a row is a
   // leaf or a parent.
-  const indentStyle = props.depth > 0 ? { paddingLeft: props.depth * 14 } : undefined;
+  const indentStyle =
+    props.depth > 0 ? { paddingLeft: visualTreeDepth(props.depth) * 12 } : undefined;
 
   const rowClassName = cn(
     "group relative flex h-8 w-full items-center gap-1.5 rounded-md py-1 pl-2.5 pr-1.5 text-left text-sm transition-colors pointer-coarse:h-11 pointer-coarse:py-0",
@@ -1163,7 +1253,7 @@ function SessionRow(props: {
   return (
     <ContextMenu>
       <ContextMenuTrigger asChild>
-        <div role="listitem" title={title} className={rowClassName}>
+        <div role="listitem" title={`${title} — ${stateLabel}`} className={rowClassName}>
           <ActiveAccent active={props.active} />
           {lead}
           <button
@@ -1172,7 +1262,7 @@ function SessionRow(props: {
             data-session-focus
             tabIndex={props.focused ? 0 : -1}
             aria-current={props.active ? "page" : undefined}
-            aria-label={`Open ${title}. ${props.session.status}${
+            aria-label={`Open ${title}. ${stateLabel}${
               props.session.pinned ? ". Pinned" : ""
             }${hasChildren ? `. ${props.childCount} spawned sessions` : ""}`}
             onFocus={props.onFocus}
@@ -1180,21 +1270,23 @@ function SessionRow(props: {
             className="flex h-full min-w-0 flex-1 items-center gap-1.5 rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:ring-offset-1 focus-visible:ring-offset-surface"
           >
             <RailStatusDot status={props.session.status} />
-            <span className="sr-only">{props.session.status}. </span>
+            <span className="sr-only">{stateLabel}. </span>
             {/* min-w-0 + truncate: the title must always ellipsis, never butt the
                 rail border. */}
             <span className="flex min-w-0 flex-1 flex-col pr-1 leading-tight">
               <span className="truncate">{title}</span>
               {rail.isMobile ? (
                 <span className="mt-0.5 truncate text-2xs font-normal text-fg-subtle">
-                  {[stateLabel, descendantLabel].filter(Boolean).join(" · ")}
+                  {[stateLabel, depthLabel, descendantLabel, relativeTime]
+                    .filter(Boolean)
+                    .join(" · ")}
                 </span>
               ) : null}
             </span>
             {/* A collapsed parent with a live child shows a quiet pulsing dot so
                 the activity isn't hidden with the subtree; the count badge sits
                 beside it. Both stay visible on hover (the time yields instead). */}
-            {hasChildren ? (
+            {!rail.isMobile && hasChildren ? (
               <span className="flex shrink-0 items-center gap-1 text-2xs tabular-nums text-fg-muted">
                 {!props.expanded && props.hasActiveDescendant ? (
                   <span className="relative inline-flex size-1.5 rounded-full bg-status-running">
@@ -1209,9 +1301,11 @@ function SessionRow(props: {
             {/* Relative time is visible at rest (the list is grouped by recency),
                 and steps aside on hover/focus so the rename overflow can slot in.
                 On coarse pointers there is no hover, so the time stays visible. */}
-            <span className="shrink-0 text-2xs tabular-nums text-fg transition-opacity group-hover:opacity-0 group-focus-within:opacity-0 pointer-coarse:group-hover:opacity-100">
-              {relativeTimeLabel(props.session.updatedAt)}
-            </span>
+            {!rail.isMobile ? (
+              <span className="shrink-0 text-2xs tabular-nums text-fg transition-opacity group-hover:opacity-0 group-focus-within:opacity-0 pointer-coarse:group-hover:opacity-100">
+                {relativeTime}
+              </span>
+            ) : null}
           </button>
           <RowActionsMenu
             session={props.session}
@@ -1235,38 +1329,6 @@ function SessionRow(props: {
       </ContextMenuContent>
     </ContextMenu>
   );
-}
-
-function sessionStateLabel(
-  session: Session,
-  workspace: { inferenceState?: "active" | "paused"; inferenceGeneration?: number } | undefined,
-): string {
-  if (session.controlState === "paused") return "Paused";
-  if (
-    workspace?.inferenceState === "paused" &&
-    session.workspaceRunExceptionGeneration !== workspace.inferenceGeneration
-  ) {
-    return "Paused by workspace";
-  }
-  if (workspace?.inferenceState === "paused") return "Running by exception";
-  switch (session.status) {
-    case "requires_action":
-      return "Needs you";
-    case "waiting_capacity":
-      return "Waiting for capacity";
-    case "recovering":
-      return "Recovering";
-    case "running":
-      return "Running";
-    case "queued":
-      return "Queued";
-    case "failed":
-      return "Failed";
-    case "cancelled":
-      return "Cancelled";
-    default:
-      return "Idle";
-  }
 }
 
 function sessionDescendantLabel(session: Session): string | null {
@@ -1357,8 +1419,8 @@ function RowActionsMenu({
  * failed, and idle/terminal states fall back to cancelled.
  */
 function RailStatusDot({ status }: { status: Session["status"] }) {
-  const running = status === "running" || status === "queued";
-  const needsAttention = status === "requires_action";
+  const running = status === "running" || status === "queued" || status === "recovering";
+  const needsAttention = status === "requires_action" || status === "waiting_capacity";
   const failed = status === "failed";
   const tone = running
     ? "bg-status-running"

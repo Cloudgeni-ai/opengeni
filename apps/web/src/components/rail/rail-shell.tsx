@@ -219,7 +219,9 @@ function RailResizeHandle({
 
 export function RailShell({ children }: { children: ReactNode }) {
   const rail = useRail();
-  const pathname = useRouterState({ select: (state) => state.location.pathname });
+  const pathname = useRouterState({
+    select: (state) => state.location.pathname,
+  });
   // Focus returns here when the mobile drawer closes (D9.1): the drawer is a
   // controlled Sheet with no in-tree trigger, so radix can't restore focus on
   // its own — we point it back at the hamburger that opened it.
@@ -368,7 +370,9 @@ export function RailShell({ children }: { children: ReactNode }) {
 function CanvasTopStrip({ hamburgerRef }: { hamburgerRef: RefObject<HTMLButtonElement | null> }) {
   const rail = useRail();
   const context = useAppContext();
-  const pathname = useRouterState({ select: (state) => state.location.pathname });
+  const pathname = useRouterState({
+    select: (state) => state.location.pathname,
+  });
   const isSessionRoute = /\/sessions\/[^/]+/.test(pathname);
   const showSessionActions = Boolean(context.session) && isSessionRoute;
   // A lineage read for the header's "spawned by" breadcrumb (disabled when there
@@ -376,7 +380,9 @@ function CanvasTopStrip({ hamburgerRef }: { hamburgerRef: RefObject<HTMLButtonEl
   // spawn events can't trigger a refresh here; a modest poll keeps the ancestor
   // link honest without threading the stream into the rail. (The child-agents
   // count moved to the composer pill, which reads lineage off the live feed.)
-  const lineage = useSessionLineage(context.session?.id ?? null, { pollIntervalMs: 30_000 });
+  const lineage = useSessionLineage(context.session?.id ?? null, {
+    pollIntervalMs: 30_000,
+  });
   const ancestors = lineage.lineage?.ancestors ?? [];
   const parentSession = ancestors.length > 0 ? ancestors[ancestors.length - 1]! : null;
 
@@ -392,7 +398,13 @@ function CanvasTopStrip({ hamburgerRef }: { hamburgerRef: RefObject<HTMLButtonEl
       variant="ghost"
       size="icon-sm"
       aria-label="Open navigation"
-      onClick={() => rail.setDrawerOpen(true)}
+      onClick={() => {
+        // On phones the workspace inspector is also a full-screen surface.
+        // Make the two overlays mutually exclusive instead of stacking one
+        // modal beneath another and trapping the navigation out of sight.
+        context.setInspectorOpen(false);
+        rail.setDrawerOpen(true);
+      }}
       className="pointer-coarse:size-11"
     >
       <MenuIcon className="size-4" />
@@ -413,7 +425,10 @@ function CanvasTopStrip({ hamburgerRef }: { hamburgerRef: RefObject<HTMLButtonEl
         keyAuthRequired={context.keyAuthRequired}
         onForgetAccessKey={context.forgetAccessKey}
         inspectorOpen={context.inspectorOpen}
-        onToggleInspector={() => context.setInspectorOpen((open) => !open)}
+        onToggleInspector={() => {
+          if (!context.inspectorOpen && rail.isMobile) rail.setDrawerOpen(false);
+          context.setInspectorOpen((open) => !open);
+        }}
         onRename={context.updateSessionTitle}
         onPin={(target, pinned) =>
           context.updateSessionPin(target.workspaceId, target.id, pinned, target.pinVersion ?? 0)

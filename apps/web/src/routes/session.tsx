@@ -19,7 +19,7 @@ import {
   type UserMessageItem,
 } from "@opengeni/react";
 import { Link, useNavigate } from "@tanstack/react-router";
-import { CheckIcon, Loader2Icon, MessagesSquareIcon, XIcon } from "lucide-react";
+import { CheckIcon, Loader2Icon, MenuIcon, MessagesSquareIcon, XIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -35,6 +35,7 @@ import {
   UserMessageBody,
 } from "@/components/session/banners";
 import { ComposerAgentsPill } from "@/components/session/composer-agents-pill";
+import { useRail } from "@/components/rail/rail-context";
 import { GoalSurface } from "@/components/session/goal-surface";
 import { SessionInspector } from "@/components/session/inspector";
 import { QueueSurface } from "@/components/session/queue-surface";
@@ -63,6 +64,7 @@ export function SessionRoute({
   sessionId: string;
 }) {
   const context = useAppContext();
+  const rail = useRail();
   const navigate = useNavigate();
 
   // Session record + live event log via @opengeni/react. Fresh opens load a
@@ -159,7 +161,9 @@ export function SessionRoute({
   );
   useEffect(() => {
     if (streamError && !isApiErrorStatus(streamError, 404)) {
-      toast.error("Event stream disconnected", { description: streamError.message });
+      toast.error("Event stream disconnected", {
+        description: streamError.message,
+      });
     }
   }, [streamError]);
   useEffect(() => {
@@ -184,9 +188,13 @@ export function SessionRoute({
     oauthReturnHandled.current = true;
     window.history.replaceState(null, "", window.location.pathname);
     if (outcome === "success") {
-      toast.success("Reconnected", { description: "Send your message again to continue." });
+      toast.success("Reconnected", {
+        description: "Send your message again to continue.",
+      });
     } else {
-      toast.error("Reconnect failed", { description: params.get("reason") ?? undefined });
+      toast.error("Reconnect failed", {
+        description: params.get("reason") ?? undefined,
+      });
     }
   }, []);
 
@@ -301,7 +309,10 @@ export function SessionRoute({
   // "running" count doesn't go stale on CHILD-side status changes that emit no
   // event on this parent's feed. Must sit above the loading/error early-returns
   // — it's a hook, so it has to run unconditionally on every render.
-  const lineage = useSessionLineage(sessionId, { events, pollIntervalMs: 30_000 });
+  const lineage = useSessionLineage(sessionId, {
+    events,
+    pollIntervalMs: 30_000,
+  });
   const agentNodes = lineage.lineage?.children ?? [];
 
   if (loading || !session) {
@@ -365,7 +376,10 @@ export function SessionRoute({
         })
       }
       onNewSession={() =>
-        void navigate({ to: "/workspaces/$workspaceId/sessions", params: { workspaceId } })
+        void navigate({
+          to: "/workspaces/$workspaceId/sessions",
+          params: { workspaceId },
+        })
       }
       onApprove={(approvalId) => approve(approvalId, "approve")}
       onReject={(approvalId) => approve(approvalId, "reject")}
@@ -386,13 +400,20 @@ export function SessionRoute({
         primary={chatPane}
         dockCollapsed={!context.inspectorOpen}
         onDockCollapsedChange={(collapsed) => context.setInspectorOpen(!collapsed)}
+        onOpenNavigation={() => {
+          context.setInspectorOpen(false);
+          rail.setDrawerOpen(true);
+        }}
       />
     </div>
   );
 
   async function approve(approvalId: string, decision: "approve" | "reject") {
     try {
-      await context.client.sendApprovalDecision(workspaceId, sessionId, { approvalId, decision });
+      await context.client.sendApprovalDecision(workspaceId, sessionId, {
+        approvalId,
+        decision,
+      });
     } catch (error) {
       toast.error("Couldn't submit the decision", {
         description: error instanceof Error ? error.message : String(error),
@@ -416,6 +437,7 @@ function SessionDock(props: {
   primary: React.ReactNode;
   dockCollapsed: boolean;
   onDockCollapsedChange: (collapsed: boolean) => void;
+  onOpenNavigation: () => void;
 }) {
   // The workbench (Changes | Files | Terminal | Desktop + machine chip) lives in
   // the package now; the app injects Debug around it. Agents remain in the one
@@ -441,6 +463,18 @@ function SessionDock(props: {
       trailingTabs={[debugTab]}
       collapsed={props.dockCollapsed}
       onCollapsedChange={props.onDockCollapsedChange}
+      mobileLeadingControl={
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-sm"
+          aria-label="Open navigation"
+          onClick={props.onOpenNavigation}
+          className="pointer-coarse:size-10"
+        >
+          <MenuIcon className="size-4" />
+        </Button>
+      }
     />
   );
 }
@@ -500,7 +534,10 @@ function SessionChatPane(props: {
       setApprovalPending((current) => ({ ...current, [approvalId]: decision }));
       try {
         await (decision === "approve" ? props.onApprove(approvalId) : props.onReject(approvalId));
-        setApprovalSettled((current) => ({ ...current, [approvalId]: decision }));
+        setApprovalSettled((current) => ({
+          ...current,
+          [approvalId]: decision,
+        }));
       } catch {
         // The route already surfaced a toast; leave the buttons live to retry.
       } finally {

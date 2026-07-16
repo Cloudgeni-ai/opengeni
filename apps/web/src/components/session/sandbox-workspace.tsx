@@ -37,6 +37,7 @@ export function SessionWorkspace(props: {
   initialTab?: string;
   collapsed: boolean;
   onCollapsedChange: (collapsed: boolean) => void;
+  mobileLeadingControl?: ReactNode;
 }) {
   return (
     <SandboxWorkspace
@@ -49,6 +50,7 @@ export function SessionWorkspace(props: {
       {...(props.initialTab ? { initialTab: props.initialTab } : {})}
       collapsed={props.collapsed}
       onCollapsedChange={props.onCollapsedChange}
+      {...(props.mobileLeadingControl ? { mobileLeadingControl: props.mobileLeadingControl } : {})}
       autoSaveId="og.session.dock"
       onNotify={notify}
     />
