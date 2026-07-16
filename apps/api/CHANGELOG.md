@@ -1,5 +1,82 @@
 # @opengeni/api-router
 
+## 0.5.4
+
+### Patch Changes
+
+- 0805620: Make active-sandbox pointer swaps establishment-safe. A swap or create-time seed to a target no turn can establish (a non-group Modal sibling, or an unknown backend kind) is now rejected before the epoch-fenced pointer commit with a typed rejection `code`, leaving the pointer and epoch untouched. At turn start a persisted pointer whose target is structurally unestablishable (a deleted sandbox row, a Modal sibling, or an enrollment-less selfhosted row) is reset to the session home under the epoch fence and announced with a new `session.route.reconciled` event, honoring a concurrent higher-epoch swap rather than clobbering it. A null pointer resolves to the session home backend, and the routing proxy's per-op cache is keyed on the full `(activeEpoch, activeSandboxId)` tuple so a clear-to-null re-lands the next op on home rather than a stale swapped-to session. Adds the optional `SwapActiveSandboxResponse.code` discriminant and the `session.route.reconciled` session event type to the public contracts and SDK wire types.
+- faf1487: Add workspace-local, holder-fenced Codex subscription leases with deterministic
+  fairness across worker replicas, explicit allocator eligibility, and
+  failure-classified same-turn failover. All-exhausted active goals now persist one
+  generation- and policy-fenced capacity waiter, wake from authoritative reset
+  timers or revisioned capacity mutations, survive Temporal restart and
+  continue-as-new, and enqueue at most one normal continuation without synthetic
+  user messages, full-turn replay, provider/model rewriting, or automatic
+  entitlement redemption.
+
+  Expose a generic accepted-turn policy-scope and per-scope unavailable-diagnostic
+  seam for future named pools while resolving exact live/frozen same-turn reuse
+  before membership filtering. Preserve manual versus policy pin semantics and
+  session-sharded cache affinity without moving an in-flight lease or the legacy
+  workspace pointer for policy homes.
+
+- b804fd4: Add provider-neutral git credential contracts and runtime sandbox token-file seeding for GitHub, GitLab, and Azure DevOps. Sandboxes now provision `gh`, `glab`, and `az` wrappers that read current token files at invocation time without storing token values in manifests.
+- e4d3569: Add per-member workspace session pins with stable pinned-first listing, subject-scoped FORCE-RLS persistence, snapshot-backed activity pagination, optimistic OCC-safe pin/unpin updates, and accessible responsive web controls.
+- 5942493: Repair missing file-upload usage records on idempotent finalize retries, reclaim abandoned direct-upload objects through a fenced Temporal cleanup schedule, and preserve accessible provider-backed image previews across reloads.
+- a5f58f9: Make "stop" mean stop, and stop the child-completion flood from outrunning it.
+
+  - **Stop drains the queue.** A non-steer interrupt now cancels the active turn AND all queued turns, emitting one `turn.queue_drained` summary event. Steer still promotes exactly one steered message.
+  - **A user-paused goal is sacred.** A machine child-completion turn can no longer re-activate a goal the user paused (`goal_set` is refused for such callers), and the wake text drops the "resume it now" nudge when the manager's own goal is user-paused. The caller is classified by its own signed turn identity (a new `turnId` claim on the first-party MCP token), not the session's live active pointer — so the guard cannot be raced into refusing a legitimate human `goal_set`.
+  - **Child-completion notifications coalesce.** N spawned workers reaching terminal states now fold into ONE queued digest turn (one model run) instead of N turns, so the flood can no longer outrun a human's stop button. Each worker still gets its own result card.
+  - **Human messages preempt machine notifications.** A person's message jumps ahead of any queued child-completion notification turns (behind the running turn and earlier human turns) — it never waits behind a flood of "worker FAILED" notices.
+  - **Child-completion suppression opt-in.** A new first-party `set_child_notifications_mode` tool lets a manager switch spawned-worker completions to `passive`: they appear as timeline cards only and never queue a turn or a model run. `digest` remains the default.
+  - **Honest steering copy.** The composer no longer claims steer "injects this message now"; it cancels the current step and runs the message next while the goal continues, and the stop button says it clears queued messages and pauses the goal.
+
+- Updated dependencies [332ac15]
+- Updated dependencies [ad4502a]
+- Updated dependencies [ec508d4]
+- Updated dependencies [58c78c6]
+- Updated dependencies [477b2bb]
+- Updated dependencies [477b2bb]
+- Updated dependencies [04d7595]
+- Updated dependencies [0805620]
+- Updated dependencies [1132866]
+- Updated dependencies [faf1487]
+- Updated dependencies [13d0889]
+- Updated dependencies [832f84c]
+- Updated dependencies [b125213]
+- Updated dependencies [b804fd4]
+- Updated dependencies [37ade2c]
+- Updated dependencies [4a25bfc]
+- Updated dependencies [4a25bfc]
+- Updated dependencies [3148404]
+- Updated dependencies [a0cb58f]
+- Updated dependencies [3584f26]
+- Updated dependencies [e4d3569]
+- Updated dependencies [63f9113]
+- Updated dependencies [f4a25d9]
+- Updated dependencies [810542f]
+- Updated dependencies [5942493]
+- Updated dependencies [726cf2c]
+- Updated dependencies [0f10413]
+- Updated dependencies [3148404]
+- Updated dependencies [1d57c33]
+- Updated dependencies [a5f58f9]
+- Updated dependencies [8fef500]
+- Updated dependencies [27a114c]
+- Updated dependencies [9d4283d]
+  - @opengeni/core@0.4.7
+  - @opengeni/db@0.7.0
+  - @opengeni/config@0.5.0
+  - @opengeni/runtime@0.7.0
+  - @opengeni/codex@0.2.2
+  - @opengeni/contracts@0.10.0
+  - @opengeni/documents@0.2.9
+  - @opengeni/events@0.3.0
+  - @opengeni/github@0.2.9
+  - @opengeni/storage@0.2.9
+  - @opengeni/agent-proto@0.3.0
+
 ## 0.5.3
 
 ### Patch Changes
