@@ -218,6 +218,9 @@ jobs:
   images:
     name: Workload image builds
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -225,11 +228,39 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
+      - name: Log in to GHCR
+        uses: docker/login-action@v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Build API image
-        run: docker build --platform linux/amd64 -f docker/opengeni.Dockerfile --target api -t opengeni-api:ci .
+        uses: docker/build-push-action@v7.3.0
+        with:
+          context: .
+          file: docker/opengeni.Dockerfile
+          target: api
+          platforms: linux/amd64
+          push: false
+          tags: opengeni-api:ci
 
       - name: Build worker image
-        run: docker build --platform linux/amd64 -f docker/opengeni.Dockerfile --target worker -t opengeni-worker:ci .
+        uses: docker/build-push-action@v7.3.0
+        with:
+          context: .
+          file: docker/opengeni.Dockerfile
+          target: worker
+          platforms: linux/amd64
+          push: false
+          tags: opengeni-worker:ci
 
       - name: Build web image
-        run: docker build --platform linux/amd64 -f docker/opengeni.Dockerfile --target web -t opengeni-web:ci .
+        uses: docker/build-push-action@v7.3.0
+        with:
+          context: .
+          file: docker/opengeni.Dockerfile
+          target: web
+          platforms: linux/amd64
+          push: false
+          tags: opengeni-web:ci
