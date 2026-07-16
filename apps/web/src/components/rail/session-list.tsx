@@ -49,7 +49,6 @@ import {
 } from "@/lib/session-focus";
 import {
   buildRailForest,
-  compareSessionActivity,
   groupSessionsForRail,
   relativeTimeLabel,
   visibleForestRows,
