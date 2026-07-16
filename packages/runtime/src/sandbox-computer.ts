@@ -353,7 +353,7 @@ export class SandboxComputer implements Computer {
     // path against the /workspace root and THROWS for /tmp ("Sandbox path
     // /tmp/og-shot-*.png escapes the workspace root"), so the scrot could never be
     // read → empty frame → `image_url: ''` → the model 400s. The base64-over-exec
-    // mechanism (mirroring recording.ts readRecordingBytes + channel-a
+    // mechanism (mirroring Channel A's bounded file reads
     // fsReadViaExec) is /tmp-readable and binary-safe. We do NOT use execCommand's
     // body via the `this.x()` parser — that drops the execCommand string body; the
     // banner is stripped explicitly here so the base64 payload survives intact.

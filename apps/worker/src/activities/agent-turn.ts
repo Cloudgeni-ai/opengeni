@@ -5259,12 +5259,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       if (leaseHeartbeatTimer) {
         clearInterval(leaseHeartbeatTimer);
       }
-      // Finalize the computer-use recording BEFORE releasing the box handle
-      // (the read+PUT needs the live session). read bytes → storage PUT →
-      // updateRecording(available) → publish recording.available; the box file is
-      // deleted only after the PUT confirms (F9). Best-effort: a finalize failure
-      // emits recording.failed and never masks the turn outcome (F10: the bytes
-      // never become a Temporal payload — read+PUT happen here in-process).
+      // Finalize the computer-use recording BEFORE releasing the box handle: the
+      // live session uploads its /tmp artifact directly to a scoped storage URL,
+      // then updateRecording(available) → publish recording.available. The box
+      // file is deleted only after the PUT confirms (F9). Best-effort: a finalize
+      // failure emits recording.failed and never masks the turn outcome. Recording
+      // bytes enter neither worker memory nor a Temporal payload (F10).
       const recordingToFinalize = activeRecording as ActiveRecording | null;
       if (recordingToFinalize && resolvedSandbox) {
         try {

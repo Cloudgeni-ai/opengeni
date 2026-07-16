@@ -68,7 +68,10 @@ What is still MISSING or UNDER-SPECIFIED to ship the full vision. Each gap names
 
 **F1. `LeaseRow`/`mapLeaseRow` is referenced ~15× but the integration spec only says "defined once in db" — the dual-shape problem (raw snake_case vs Drizzle camelCase from `readLease`) is noted (lease M2) but the resolution isn't in any module as code.** **Belongs in: lease module.**
 
-**F2. The recording byte-transfer shape violates Temporal payload limits (recording F10/crosscut).** `readRecordingBytes` returns a 256MB `Uint8Array` through an activity result. CR14 says "inside the owner activity, never serialized" but **no module specifies that the finalize activity does read+PUT in one invocation on the owning worker** vs. the cross-queue routing every other owner call uses. This is a genuine architectural tension (owner methods route via per-session queue; this one must NOT serialize its result). **Belongs in: recording module + owner module.**
+**F2. Resolved: recording bytes bypass both Temporal and worker memory.** Finalize
+stats and size-gates the artifact on the live sandbox, mints one short-lived
+write-only storage URL, and runs the PUT from that sandbox. Only metadata returns
+to the turn activity. See `docs/design/turn-worker-density-2026-07-16.md`.
 
 **F3. `durationSeconds`/`sizeBytes` on `RecordingAvailablePayload` are never computed (recording F14).** No `ffprobe` call, no wall-time tracking. **Belongs in: recording module.**
 

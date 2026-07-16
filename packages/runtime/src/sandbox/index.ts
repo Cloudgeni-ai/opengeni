@@ -138,11 +138,12 @@ export {
 } from "./stream-port";
 
 // P4.3 recording loop — plain functions over a live session handle (no agent
-// loop); finalize reads bytes + PUTs to storage in the holding process (F10).
+// loop); finalize uploads box -> object storage without buffering in the worker.
 export {
   startRecording,
   stopRecording,
-  readRecordingBytes,
+  inspectRecordingArtifact,
+  uploadRecordingArtifact,
   deleteRecordingArtifacts,
   recordingStorageKey,
   contentTypeForCodec,
@@ -153,7 +154,7 @@ export {
   type RecordingContentType,
   type StartRecordingInput,
   type RecordingProcess,
-  type FinalizeRecordingResult,
+  type RecordingArtifactMetadata,
 } from "./recording";
 
 // P4.4 Channel-A structured services — the provider-agnostic SandboxChannelAService
