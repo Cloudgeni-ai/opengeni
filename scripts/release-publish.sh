@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Publish the @opengeni/* npm closure with provenance.
 #
-# Invoked by changesets/action ONLY when a "Version Packages" PR is merged (i.e.
-# there are released versions to publish). It is intentionally guarded so a
-# missing NPM_TOKEN does not red-fail the workflow: self-hosters fork this repo
-# without the @opengeni npm org, and GHCR image publishing must still succeed.
+# Invoked by changesets/action ONLY from the explicit, evidence-bound publication
+# dispatch in .github/workflows/release.yml. A missing npm credential is a hard
+# release failure: ordinary pushes and Version-PR automation never invoke this
+# script, and release images must not be minted after a skipped publication.
 #
 # Publishing goes through `changeset publish`, which runs `npm publish` per
 # package and honors each package.json `publishConfig` ({ access: "public",
@@ -13,9 +13,9 @@
 set -euo pipefail
 
 if [[ -z "${NODE_AUTH_TOKEN:-}" ]]; then
-  echo "release:publish — NPM_TOKEN/NODE_AUTH_TOKEN is not set; skipping npm publish."
-  echo "Set the NPM_TOKEN repo secret and create the @opengeni npm org to enable publishing."
-  exit 0
+  echo "release:publish — NPM_TOKEN/NODE_AUTH_TOKEN is required for an explicit release." >&2
+  echo "Set the NPM_TOKEN repo secret and create the @opengeni npm org before dispatching." >&2
+  exit 1
 fi
 
 export OPENGENI_RELEASE=1
