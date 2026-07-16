@@ -49,6 +49,15 @@ worker:
               periodSeconds: 300
 
 web:
+  # One steady production web pod is sufficient at the current request rate.
+  # Surge by one during a rollout so that the single serving pod is never
+  # removed before its replacement is ready.
+  replicaCount: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
   image:
     tag: "RELEASE_TAG"
     digest: "sha256:WEB_IMAGE_DIGEST"
