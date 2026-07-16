@@ -673,7 +673,7 @@ function MachineStateChip({
         <button
           type="button"
           aria-label={`Machine: ${chip.label}`}
-          className="inline-flex items-center gap-1.5 rounded-og-sm px-2 py-1 text-og-xs font-medium text-og-fg-muted transition-colors hover:bg-og-surface-2 hover:text-og-fg pointer-coarse:min-h-9"
+          className="inline-flex min-h-7 items-center gap-1.5 rounded-og-sm px-2 py-1 text-og-xs font-medium text-og-fg-muted transition-colors hover:bg-og-surface-2 hover:text-og-fg max-[1023px]:min-h-11 pointer-coarse:min-h-11"
         >
           <span
             className={cn("size-1.5 shrink-0 rounded-full", chipDotClass(chip.state))}
@@ -682,11 +682,12 @@ function MachineStateChip({
           <span className="max-w-[11rem] truncate">{chip.label}</span>
         </button>
       </Popover.Trigger>
-      <Popover.Portal>
+      <Popover.Portal forceMount>
         <Popover.Content
+          forceMount
           align="end"
           sideOffset={6}
-          className="z-50 w-64 rounded-og-md border border-og-border bg-og-surface-1 p-3 text-og-sm text-og-fg shadow-lg outline-none"
+          className="z-50 w-64 rounded-og-md border border-og-border bg-og-surface-1 p-3 text-og-sm text-og-fg shadow-lg outline-none data-[state=closed]:hidden"
         >
           <div className="flex min-w-0 items-center gap-1.5">
             <MachineKindIcon kind={activeMachine?.kind} />

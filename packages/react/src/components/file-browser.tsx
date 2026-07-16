@@ -13,6 +13,7 @@ import {
   type ReactNode,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -57,6 +58,7 @@ const STATUS_TINT: Record<NonNullable<FileTreeNode["status"]>, string> = {
   renamed: "text-og-accent",
   untracked: "text-og-fg-subtle",
 };
+const useBrowserLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
 
 /** Parent dir of a workspace-relative POSIX path ("" for a root entry). */
 function parentOf(path: string): string {
@@ -143,8 +145,24 @@ export function FileBrowser({
   const [dragOver, setDragOver] = useState<string | null>(null);
   const [menu, setMenu] = useState<ContextMenuState | null>(null);
   const [busy, setBusy] = useState(false);
+  const [coarsePointer, setCoarsePointer] = useState(false);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const vlistRef = useRef<VListHandle>(null);
+
+  useBrowserLayoutEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;
+    const query = window.matchMedia("(pointer: coarse)");
+    const update = () => setCoarsePointer(query.matches);
+    update();
+    if (typeof query.addEventListener === "function") {
+      query.addEventListener("change", update);
+      return () => query.removeEventListener("change", update);
+    }
+    if (typeof query.addListener === "function") {
+      query.addListener(update);
+      return () => query.removeListener(update);
+    }
+  }, []);
 
   // The keyboard cursor: an explicitly-navigated node falls back to the
   // externally-selected file so arrow keys pick up where the preview pane is.
@@ -551,7 +569,7 @@ export function FileBrowser({
               setMenu({ node, x: e.clientX, y: e.clientY });
             }}
             className={cn(
-              "group relative flex w-full items-center gap-1 truncate rounded-og-sm px-1 py-0.5 text-left text-og-sm pointer-coarse:min-h-10",
+              "group relative flex min-h-7 w-full items-center gap-1 truncate rounded-og-sm px-1 py-0.5 text-left text-og-sm pointer-coarse:min-h-11",
               "hover:bg-og-surface-2",
               isSelected && "bg-og-surface-2",
               isCursor && "outline outline-1 -outline-offset-1 outline-og-accent",
@@ -762,7 +780,7 @@ export function FileBrowser({
           <VList
             ref={vlistRef}
             className="min-h-0 flex-1"
-            itemSize={24}
+            itemSize={coarsePointer ? 44 : 28}
             ssrCount={Math.min(32, renderItems.length)}
           >
             {renderItems.map((item) => (
@@ -808,7 +826,7 @@ function ToolbarButton({
       onClick={onClick}
       disabled={disabled}
       className={cn(
-        "inline-flex items-center justify-center rounded-og-sm p-1 text-og-fg-muted pointer-coarse:min-h-10 pointer-coarse:min-w-10",
+        "inline-flex size-7 items-center justify-center rounded-og-sm p-1 text-og-fg-muted max-[1023px]:size-11 pointer-coarse:min-h-11 pointer-coarse:min-w-11",
         "hover:bg-og-surface-2 hover:text-og-fg",
         "disabled:cursor-not-allowed disabled:opacity-40",
       )}

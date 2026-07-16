@@ -7,6 +7,7 @@
    -------------------------------------------------------------------------- */
 import { describe, expect, test } from "bun:test";
 import type { GitFileDiff } from "@opengeni/sdk";
+import { act } from "react";
 import { registerDom, renderComponent, flush } from "./render-hook";
 import { fakeFileDiff } from "./sandbox-fixtures";
 import { WorkbenchChanges, buildRail } from "../src/components/workbench-changes";
@@ -30,12 +31,14 @@ function manyFiles(n: number, dir = "src"): GitFileDiff[] {
 async function drivePane(pane: HTMLElement, scrollTop: number, viewport = 600) {
   Object.defineProperty(pane, "clientHeight", { value: viewport, configurable: true });
   pane.scrollTop = scrollTop;
-  pane.dispatchEvent(new Event("scroll"));
+  await act(async () => {
+    pane.dispatchEvent(new Event("scroll"));
+  });
   await flush(60);
 }
 
-function mountedIndices(container: HTMLElement): number[] {
-  return Array.from(container.querySelectorAll("[data-diff-section]"))
+function mountedIndices(root: HTMLElement): number[] {
+  return Array.from(root.querySelectorAll("[data-diff-section]"))
     .map((el) => Number(el.getAttribute("data-diff-index")))
     .sort((a, b) => a - b);
 }
@@ -76,6 +79,64 @@ describe("WorkbenchChanges — windowing (D2)", () => {
 });
 
 describe("WorkbenchChanges — rail, badge, guard", () => {
+  test("a compact surface replaces the cramped rail with a full-width file picker", async () => {
+    const original = globalThis.ResizeObserver;
+    class CompactResizeObserver {
+      constructor(private readonly callback: ResizeObserverCallback) {}
+      observe(target: Element) {
+        if (!target.hasAttribute("data-workbench-changes-layout")) return;
+        this.callback(
+          [{ target, contentRect: { width: 390 } } as ResizeObserverEntry],
+          this as unknown as ResizeObserver,
+        );
+      }
+      disconnect() {}
+      unobserve() {}
+    }
+    Object.defineProperty(globalThis, "ResizeObserver", {
+      configurable: true,
+      writable: true,
+      value: CompactResizeObserver,
+    });
+    try {
+      const r = await renderComponent(
+        <WorkbenchChanges diff={manyFiles(3)} source="live" capturedAt={null} />,
+      );
+      await flush();
+      const root = container(r).querySelector<HTMLElement>("[data-workbench-changes-layout]");
+      const picker = container(r).querySelector<HTMLSelectElement>("[data-compact-file-picker]");
+      expect(root?.dataset.workbenchChangesLayout).toBe("compact");
+      expect(picker).not.toBeNull();
+      expect(picker?.options).toHaveLength(3);
+      expect(container(r).querySelector("[data-rail-file]")).toBeNull();
+
+      await act(async () => {
+        picker!.value = "2";
+        picker!.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+      await flush();
+      expect(picker!.value).toBe("2");
+      expect(container(r).textContent).toContain("src/file-002.ts");
+
+      await r.rerender(
+        <WorkbenchChanges diff={manyFiles(3).reverse()} source="live" capturedAt={null} />,
+      );
+      await flush();
+      const reorderedPicker = container(r).querySelector<HTMLSelectElement>(
+        "[data-compact-file-picker]",
+      );
+      expect(reorderedPicker?.value).toBe("0");
+      expect(container(r).textContent).toContain("src/file-002.ts");
+      await r.unmount();
+    } finally {
+      Object.defineProperty(globalThis, "ResizeObserver", {
+        configurable: true,
+        writable: true,
+        value: original,
+      });
+    }
+  });
+
   test("buildRail groups by top-level dir past the threshold, flat below it", async () => {
     const flat = buildRail(manyFiles(5));
     expect(flat.rows.every((row) => row.kind === "file")).toBe(true);

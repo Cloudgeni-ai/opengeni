@@ -1,4 +1,13 @@
-import { type ReactNode, useCallback, useEffect, useLayoutEffect, useState } from "react";
+import {
+  type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import {
   ChevronsLeftRightIcon,
   Maximize2Icon,
@@ -123,9 +132,11 @@ export function WorkspaceDock({
     id: autoSaveId,
   } as Parameters<typeof useDefaultLayout>[0]);
 
-  const current = activeTab ?? internalTab;
-  const tabIds = tabs.map((tab) => tab.id).join("\u0000");
+  const requestedTab = activeTab ?? internalTab;
+  const tabIds = tabs.map((tab) => tab.id);
   const firstTabId = tabs[0]?.id ?? "";
+  const requestedTabIsValid = tabIds.includes(requestedTab);
+  const current = requestedTabIsValid ? requestedTab : firstTabId;
   const setTab = useCallback(
     (id: string) => {
       setInternalTab(id);
@@ -155,12 +166,12 @@ export function WorkspaceDock({
 
   // Keep the active tab valid if the available tabs change.
   useEffect(() => {
-    if (firstTabId && !tabs.some((t) => t.id === current)) {
+    if (firstTabId && !requestedTabIsValid) {
       setTab(firstTabId);
     }
     // Depend on tab identity, not the tab content objects. Session live events
     // rebuild tab JSX frequently; only id changes can invalidate the active tab.
-  }, [tabIds, firstTabId, current, setTab]);
+  }, [firstTabId, requestedTabIsValid, setTab]);
 
   const collapse = useCallback(() => {
     dockPanelRef.current?.collapse();
@@ -332,7 +343,7 @@ function ChromeButton({
       onClick={onClick}
       title={title}
       aria-label={label}
-      className="inline-flex items-center justify-center rounded-og-sm p-1 transition-colors hover:bg-og-surface-2 hover:text-og-fg pointer-coarse:size-10"
+      className="inline-flex size-7 items-center justify-center rounded-og-sm p-1 transition-colors hover:bg-og-surface-2 hover:text-og-fg max-[1023px]:size-11 pointer-coarse:size-11"
     >
       {children}
     </button>
@@ -358,6 +369,30 @@ function DockChrome({
   controls: ReactNode;
 }) {
   const active = tabs.find((t) => t.id === current) ?? tabs[0];
+  const activeIndex = tabs.findIndex((tab) => tab.id === active?.id);
+  const tabsetId = useId();
+  const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const panelId = `${tabsetId}-panel`;
+
+  const activateTab = (index: number) => {
+    const tab = tabs[index];
+    if (!tab) return;
+    onTab(tab.id);
+    tabRefs.current[index]?.focus();
+  };
+
+  const onTabKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>, index: number) => {
+    if (tabs.length === 0) return;
+    let nextIndex: number | null = null;
+    if (event.key === "ArrowRight") nextIndex = (index + 1) % tabs.length;
+    else if (event.key === "ArrowLeft") nextIndex = (index - 1 + tabs.length) % tabs.length;
+    else if (event.key === "Home") nextIndex = 0;
+    else if (event.key === "End") nextIndex = tabs.length - 1;
+    if (nextIndex === null) return;
+    event.preventDefault();
+    activateTab(nextIndex);
+  };
+
   return (
     <>
       <div className="flex shrink-0 items-center gap-2 border-b border-og-border px-1.5 py-1">
@@ -368,16 +403,24 @@ function DockChrome({
         <div
           className="flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
           role="tablist"
+          aria-orientation="horizontal"
         >
-          {tabs.map((tab) => (
+          {tabs.map((tab, index) => (
             <button
               key={tab.id}
+              ref={(node) => {
+                tabRefs.current[index] = node;
+              }}
+              id={`${tabsetId}-tab-${index}`}
               type="button"
               role="tab"
               aria-selected={tab.id === current}
+              aria-controls={panelId}
+              tabIndex={tab.id === current ? 0 : -1}
               onClick={() => onTab(tab.id)}
+              onKeyDown={(event) => onTabKeyDown(event, index)}
               className={cn(
-                "flex shrink-0 items-center gap-1 rounded-og-sm px-2 py-1 text-og-xs font-medium transition-colors pointer-coarse:min-h-10",
+                "flex min-h-7 shrink-0 items-center gap-1 rounded-og-sm px-2 py-1 text-og-xs font-medium transition-colors max-[1023px]:min-h-11 max-[1023px]:min-w-11 pointer-coarse:min-h-11 pointer-coarse:min-w-11",
                 tab.id === current
                   ? "bg-og-accent-soft text-og-fg"
                   : "text-og-fg-subtle hover:text-og-fg",
@@ -391,7 +434,13 @@ function DockChrome({
         {accessory ? <div className="flex shrink-0 items-center">{accessory}</div> : null}
         <div className="flex shrink-0 items-center gap-0.5 text-og-fg-subtle">{controls}</div>
       </div>
-      <div className="min-h-0 min-w-0 flex-1 overflow-hidden" role="tabpanel">
+      <div
+        id={panelId}
+        aria-label={activeIndex < 0 ? "Workspace" : undefined}
+        aria-labelledby={activeIndex >= 0 ? `${tabsetId}-tab-${activeIndex}` : undefined}
+        className="min-h-0 min-w-0 flex-1 overflow-hidden"
+        role="tabpanel"
+      >
         {active?.content}
       </div>
     </>

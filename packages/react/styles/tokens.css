@@ -45,7 +45,7 @@
   --og-color-border-strong: oklch(0.42 0.016 260);
   --og-color-fg: oklch(0.955 0.005 260);
   --og-color-fg-muted: oklch(0.73 0.012 260);
-  --og-color-fg-subtle: oklch(0.56 0.013 260);
+  --og-color-fg-subtle: oklch(0.62 0.013 260);
 
   /* Accent — one brand hue, used sparingly ----------------------------------- */
   --og-color-accent: oklch(0.72 0.15 255);
@@ -92,7 +92,7 @@
   --og-color-border-strong: oklch(0.8 0.01 260);
   --og-color-fg: oklch(0.21 0.015 260);
   --og-color-fg-muted: oklch(0.46 0.014 260);
-  --og-color-fg-subtle: oklch(0.6 0.012 260);
+  --og-color-fg-subtle: oklch(0.5 0.012 260);
 
   --og-color-accent: oklch(0.55 0.18 255);
   --og-color-accent-strong: oklch(0.48 0.19 255);

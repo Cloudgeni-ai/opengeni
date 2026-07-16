@@ -6,7 +6,11 @@ const testArgs = [
   "--max-concurrency=1",
   ...(requestedTestArgs.length > 0
     ? requestedTestArgs
-    : ["./test/e2e/browser.e2e.ts", "./test/e2e/session-pins.browser.e2e.ts"]),
+    : [
+        "./test/e2e/browser.e2e.ts",
+        "./test/e2e/session-pins.browser.e2e.ts",
+        "./test/e2e/workbench.browser.e2e.ts",
+      ]),
 ];
 const first = spawnSync("bun", testArgs, {
   encoding: "utf8",
