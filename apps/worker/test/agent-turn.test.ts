@@ -21,6 +21,7 @@ import {
   ensureTurnModalRegistryImage,
   filterUnmaterializedSandboxFileDownloads,
   historyRowsToAppend,
+  isComputerUseStreamEvent,
   isLazySandboxProvisionRetryable,
   isTransientProviderError,
   isWorkerShutdownCancellation,
@@ -941,6 +942,42 @@ describe("on-turn recording gate (selfhosted machines have no in-box capture plu
 
   test("headless / non-desktop established backend: skips (existing static feasibility gate holds)", () => {
     expect(shouldStartOnTurnRecording({ ...base, establishedBackendId: "none" })).toBe(false);
+  });
+});
+
+describe("on-turn recording computer-use protocol gate", () => {
+  const event = (rawItem: Record<string, unknown>) => ({
+    type: "run_item_stream_event",
+    item: { type: "tool_call_item", rawItem },
+  });
+
+  test("recognizes the hosted Responses computer_call", () => {
+    expect(isComputerUseStreamEvent(event({ type: "computer_call" }))).toBe(true);
+  });
+
+  test("recognizes every first-party function-transport computer tool", () => {
+    for (const name of [
+      "computer_screenshot",
+      "computer_click",
+      "computer_double_click",
+      "computer_move",
+      "computer_scroll",
+      "computer_type",
+      "computer_keypress",
+      "computer_drag",
+    ]) {
+      expect(isComputerUseStreamEvent(event({ type: "function_call", name }))).toBe(true);
+    }
+  });
+
+  test("does not treat ordinary or similarly named function tools as computer use", () => {
+    expect(isComputerUseStreamEvent(event({ type: "function_call", name: "exec_command" }))).toBe(
+      false,
+    );
+    expect(
+      isComputerUseStreamEvent(event({ type: "function_call", name: "computer_screenshot_extra" })),
+    ).toBe(false);
+    expect(isComputerUseStreamEvent(event({ type: "computer_call_output" }))).toBe(false);
   });
 });
 

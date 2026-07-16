@@ -3877,12 +3877,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 );
               }
             }
-            // Recording gate: a computer-use tool actually ran when an SDK
-            // `tool_call_item` whose rawItem.type is "computer_call" streams through
-            // (screenshot/click/type/scroll/etc. — the first computer action proves
-            // the desktop was driven). Match the raw SDK event (ground truth) BEFORE
+            // Recording gate: a computer-use tool actually ran when its SDK
+            // `tool_call_item` streams through. Hosted Responses emits a raw
+            // `computer_call`; Codex/chat transports emit one of the first-party
+            // `computer_*` function calls. Match both protocol shapes BEFORE
             // normalization. Only meaningful when a recording is live.
-            if (activeRecording && !didComputerUse && isComputerCallStreamEvent(next.value)) {
+            if (activeRecording && !didComputerUse && isComputerUseStreamEvent(next.value)) {
               didComputerUse = true;
             }
             const pendingToolCall = pendingToolCallFromSdkEvent(next.value);
@@ -5666,26 +5666,47 @@ const CODEX_USAGE_LIMIT_MAX_RESUME_MS = 60 * 60_000; // 1h
 
 /**
  * Recognize an SDK stream event that represents a COMPUTER-USE tool call actually
- * executing — a `run_item_stream_event` carrying a `tool_call_item` whose
- * underlying raw item is a `computer_call` (the @openai/agents computer tool's
- * action: screenshot/click/type/scroll/drag/keypress/move/wait/…). This is the
- * same shape `normalizeSdkEvent` reads (`event.item.rawItem`), matched here against
- * the raw SDK type rather than a tool NAME so it is robust to the computer tool's
- * configured name. Drives the on-turn recording gate (no computer-use → discard).
+ * executing. Hosted Responses emits `computer_call`; function transports emit one
+ * of OpenGeni's exact first-party `computer_*` names. Both are authoritative wire
+ * identities selected by `computerToolModeForTurn`. Drives the on-turn recording
+ * gate (no computer-use → discard).
  */
-function isComputerCallStreamEvent(event: unknown): boolean {
+export function isComputerUseStreamEvent(event: unknown): boolean {
   if (!event || typeof event !== "object") {
     return false;
   }
   if ((event as { type?: unknown }).type !== "run_item_stream_event") {
     return false;
   }
-  const item = (event as { item?: { type?: unknown; rawItem?: { type?: unknown } } }).item;
+  const item = (
+    event as {
+      item?: { type?: unknown; rawItem?: { type?: unknown; name?: unknown } };
+    }
+  ).item;
   if (!item || item.type !== "tool_call_item") {
     return false;
   }
-  return item.rawItem?.type === "computer_call";
+  const raw = item.rawItem;
+  if (raw?.type === "computer_call") {
+    return true;
+  }
+  return (
+    raw?.type === "function_call" &&
+    typeof raw.name === "string" &&
+    FUNCTION_COMPUTER_TOOL_NAMES.has(raw.name)
+  );
 }
+
+const FUNCTION_COMPUTER_TOOL_NAMES = new Set([
+  "computer_screenshot",
+  "computer_click",
+  "computer_double_click",
+  "computer_move",
+  "computer_scroll",
+  "computer_type",
+  "computer_keypress",
+  "computer_drag",
+]);
 
 function pendingToolCallFromSdkEvent(event: unknown): {
   callId: string;
