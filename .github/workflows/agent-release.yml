@@ -350,7 +350,7 @@ jobs:
           if command -v sha256sum >/dev/null 2>&1; then sha256sum "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256"; else shasum -a 256 "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256"; fi
 
       - name: Upload artifact bundle
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: ${{ matrix.asset }}
           # The `.minisig` is only produced when the minisign key is present; the

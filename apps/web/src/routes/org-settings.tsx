@@ -14,7 +14,7 @@ import {
   SettingsIcon,
   UsersIcon,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
 import { LoadErrorState, PageHeader } from "@/components/common";
@@ -64,25 +64,7 @@ export function OrgSettingsRoute({
     enabled: canReadBilling && Boolean(accountId),
   });
 
-  useEffect(() => {
-    if (!workspaceId) {
-      return;
-    }
-    void refresh();
-  }, [workspaceId, accountId]);
-
-  // Confirm the Stripe checkout outcome the /billing return redirect forwarded
-  // here. Credits post via the asynchronous webhook, so success is phrased as
-  // "shortly" rather than implying the balance already reflects the top-up.
-  useEffect(() => {
-    if (checkout === "success") {
-      toast.success("Payment received", { description: "Your credits will appear shortly." });
-    } else if (checkout === "cancelled") {
-      toast("Checkout cancelled", { description: "No charge was made." });
-    }
-  }, [checkout]);
-
-  async function refreshBilling() {
+  const refreshBilling = useCallback(async () => {
     if (!accountId || !canReadBilling) {
       setBilling(null);
       setBillingError(null);
@@ -98,9 +80,9 @@ export function OrgSettingsRoute({
     } finally {
       setBillingLoading(false);
     }
-  }
+  }, [accountId, canReadBilling, client]);
 
-  async function refreshEntitlements() {
+  const refreshEntitlements = useCallback(async () => {
     if (!accountId || !canReadBilling) {
       setEntitlements(null);
       setEntitlementsError(null);
@@ -113,11 +95,29 @@ export function OrgSettingsRoute({
       setEntitlements(null);
       setEntitlementsError(error instanceof Error ? error : new Error(String(error)));
     }
-  }
+  }, [accountId, canReadBilling, client]);
 
-  async function refresh() {
+  const refresh = useCallback(async () => {
     await Promise.all([refreshBilling(), refreshEntitlements()]);
-  }
+  }, [refreshBilling, refreshEntitlements]);
+
+  useEffect(() => {
+    if (!workspaceId) {
+      return;
+    }
+    void refresh();
+  }, [workspaceId, refresh]);
+
+  // Confirm the Stripe checkout outcome the /billing return redirect forwarded
+  // here. Credits post via the asynchronous webhook, so success is phrased as
+  // "shortly" rather than implying the balance already reflects the top-up.
+  useEffect(() => {
+    if (checkout === "success") {
+      toast.success("Payment received", { description: "Your credits will appear shortly." });
+    } else if (checkout === "cancelled") {
+      toast("Checkout cancelled", { description: "No charge was made." });
+    }
+  }, [checkout]);
 
   async function startCheckout(amountUsd: number) {
     setBusy(true);

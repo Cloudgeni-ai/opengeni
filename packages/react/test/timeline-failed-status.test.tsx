@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { registerDom, renderComponent, flush } from "./render-hook";
+import { actRun, registerDom, renderComponent, flush } from "./render-hook";
 import {
   defaultToolRegistry,
   ActivityRail,
@@ -396,7 +396,7 @@ describe("ComputerCallRenderer — failed status (flagged fix)", () => {
 
     // Expand the row.
     const trigger = r.container.querySelector('[role="button"]') as HTMLElement | null;
-    trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await actRun(() => trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true })));
     await flush();
 
     const text = r.container.textContent ?? "";

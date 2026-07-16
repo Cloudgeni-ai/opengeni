@@ -263,11 +263,11 @@ describe("MultiProviderModelProvider — routes a model NAME to its provider (th
   // provider. Without this router that hit the built-in (Azure) client, so a
   // Fireworks model 404'd ("deployment does not exist"). The router resolves
   // names back to their provider regardless of path.
-  const FIREWORKS_MODEL = "accounts/fireworks/models/glm-5p2";
+  const routedFireworksModel = "accounts/fireworks/models/glm-5p2";
 
   test("routes a registry model name to a chat-completions Model (NOT the built-in)", async () => {
     const provider = new MultiProviderModelProvider(multiProviderSettings());
-    const model = await provider.getModel(FIREWORKS_MODEL);
+    const model = await provider.getModel(routedFireworksModel);
     expect(model).toBeInstanceOf(OpenAIChatCompletionsModel);
     expect(model).not.toBeInstanceOf(OpenAIResponsesModel);
   });

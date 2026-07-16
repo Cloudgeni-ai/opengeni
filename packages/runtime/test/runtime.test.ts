@@ -309,7 +309,7 @@ describe("runtime event normalization", () => {
     } as any);
 
     expect(event?.type).toBe("agent.toolCall.created");
-    expect((event?.payload as { id: string }).id).toBe("call-1");
+    expect((event?.payload as { id?: string } | undefined)?.id).toBe("call-1");
   });
 
   test("compacts a codex computer_screenshot Uint8Array output to a data-URL string in the event", () => {

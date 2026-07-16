@@ -143,8 +143,11 @@ describe("real Docker rig verification e2e", () => {
     const stored = await getRigChange(db.db, workspaceId, change.id);
     expect(stored?.status).toBe("rejected");
     expect(
-      (stored?.verification as { commandResult?: { exitCode?: number | null; output?: string } })
-        .commandResult?.exitCode,
+      (
+        stored?.verification as
+          | { commandResult?: { exitCode?: number | null; output?: string } }
+          | undefined
+      )?.commandResult?.exitCode,
     ).toBe(1);
   }, 300_000);
 

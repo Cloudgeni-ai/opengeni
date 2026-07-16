@@ -44,21 +44,21 @@ export function useVariableSets(options: UseVariableSetsOptions = {}): UseVariab
     async () => await client.listVariableSets(workspaceId),
     [client, workspaceId],
   );
-  const state = usePolledValue(load, {
+  const { data, loading, error, refresh } = usePolledValue(load, {
     pollIntervalMs: options.pollIntervalMs,
     enabled: options.enabled,
   });
-  const mutation = useMutationRunner();
+  const { run, mutating, mutationError, clearMutationError } = useMutationRunner();
 
   const create = useCallback(
     async (request: CreateVariableSetRequest): Promise<VariableSet | null> => {
-      const result = await mutation.run(() => client.createVariableSet(workspaceId, request));
+      const result = await run(() => client.createVariableSet(workspaceId, request));
       if (result) {
-        await state.refresh();
+        await refresh();
       }
       return result;
     },
-    [client, workspaceId, mutation.run, state.refresh],
+    [client, workspaceId, run, refresh],
   );
 
   const update = useCallback(
@@ -66,29 +66,27 @@ export function useVariableSets(options: UseVariableSetsOptions = {}): UseVariab
       variableSetId: string,
       request: UpdateVariableSetRequest,
     ): Promise<VariableSet | null> => {
-      const result = await mutation.run(() =>
-        client.updateVariableSet(workspaceId, variableSetId, request),
-      );
+      const result = await run(() => client.updateVariableSet(workspaceId, variableSetId, request));
       if (result) {
-        await state.refresh();
+        await refresh();
       }
       return result;
     },
-    [client, workspaceId, mutation.run, state.refresh],
+    [client, workspaceId, run, refresh],
   );
 
   const remove = useCallback(
     async (variableSetId: string): Promise<boolean> => {
-      const result = await mutation.run(async () => {
+      const result = await run(async () => {
         await client.deleteVariableSet(workspaceId, variableSetId);
         return true;
       });
       if (result) {
-        await state.refresh();
+        await refresh();
       }
       return result === true;
     },
-    [client, workspaceId, mutation.run, state.refresh],
+    [client, workspaceId, run, refresh],
   );
 
   const setVariable = useCallback(
@@ -97,44 +95,44 @@ export function useVariableSets(options: UseVariableSetsOptions = {}): UseVariab
       name: string,
       value: string,
     ): Promise<VariableSetVariableMetadata | null> => {
-      const result = await mutation.run(() =>
+      const result = await run(() =>
         client.setVariableSetVariable(workspaceId, variableSetId, name, value),
       );
       if (result) {
-        await state.refresh();
+        await refresh();
       }
       return result;
     },
-    [client, workspaceId, mutation.run, state.refresh],
+    [client, workspaceId, run, refresh],
   );
 
   const deleteVariable = useCallback(
     async (variableSetId: string, name: string): Promise<boolean> => {
-      const result = await mutation.run(async () => {
+      const result = await run(async () => {
         await client.deleteVariableSetVariable(workspaceId, variableSetId, name);
         return true;
       });
       if (result) {
-        await state.refresh();
+        await refresh();
       }
       return result === true;
     },
-    [client, workspaceId, mutation.run, state.refresh],
+    [client, workspaceId, run, refresh],
   );
 
   return {
-    variableSets: state.data ?? [],
-    loading: state.loading,
-    error: state.error,
-    refresh: state.refresh,
+    variableSets: data ?? [],
+    loading,
+    error,
+    refresh,
     create,
     update,
     remove,
     setVariable,
     deleteVariable,
-    mutating: mutation.mutating,
-    mutationError: mutation.mutationError,
-    clearMutationError: mutation.clearMutationError,
+    mutating,
+    mutationError,
+    clearMutationError,
   };
 }
 

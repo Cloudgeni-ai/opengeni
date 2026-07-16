@@ -60,7 +60,7 @@ export function useGoal(
   const [goal, setGoal] = useState<SessionGoal | null>(null);
   const [loading, setLoading] = useState(enabled);
   const [error, setError] = useState<Error | null>(null);
-  const mutation = useMutationRunner();
+  const { run, mutating, mutationError, clearMutationError } = useMutationRunner();
   const generation = useRef(0);
   const targetKeyRef = useRef<string | null>(null);
 
@@ -134,7 +134,7 @@ export function useGoal(
       if (!sessionId) {
         return null;
       }
-      const result = await mutation.run(() =>
+      const result = await run(() =>
         client.updateGoal(workspaceId, sessionId, {
           status: "paused",
           ...(rationale !== undefined ? { rationale } : {}),
@@ -145,21 +145,19 @@ export function useGoal(
       }
       return result;
     },
-    [client, workspaceId, sessionId, mutation.run],
+    [client, workspaceId, sessionId, run],
   );
 
   const resume = useCallback(async (): Promise<SessionGoal | null> => {
     if (!sessionId) {
       return null;
     }
-    const result = await mutation.run(() =>
-      client.updateGoal(workspaceId, sessionId, { status: "active" }),
-    );
+    const result = await run(() => client.updateGoal(workspaceId, sessionId, { status: "active" }));
     if (result) {
       setGoal(result);
     }
     return result;
-  }, [client, workspaceId, sessionId, mutation.run]);
+  }, [client, workspaceId, sessionId, run]);
 
   const clearGoal = useCallback(async (): Promise<void> => {
     if (!sessionId) {
@@ -170,7 +168,7 @@ export function useGoal(
     // a failed one leaves the pill up so its mutationError renders. And invalidate
     // any in-flight load first so a slower getGoal started before the delete can't
     // commit and repopulate the just-cleared goal.
-    const ok = await mutation.run(async () => {
+    const ok = await run(async () => {
       await client.deleteGoal(workspaceId, sessionId);
       return true as const;
     });
@@ -179,7 +177,7 @@ export function useGoal(
       setGoal(null);
       setError(null);
     }
-  }, [client, workspaceId, sessionId, mutation.run]);
+  }, [client, workspaceId, sessionId, run]);
 
   return {
     goal,
@@ -193,8 +191,8 @@ export function useGoal(
     resume,
     clearGoal,
     deleteGoal: clearGoal,
-    updating: mutation.mutating,
-    mutationError: mutation.mutationError,
-    clearMutationError: mutation.clearMutationError,
+    updating: mutating,
+    mutationError,
+    clearMutationError,
   };
 }

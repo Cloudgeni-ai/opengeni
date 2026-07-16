@@ -99,18 +99,36 @@ export type UseMachineChipOptions = DeriveMachineChipInput;
  * "as of" label to tick.
  */
 export function useMachineChip(input: UseMachineChipOptions): MachineChip {
+  const {
+    liveness,
+    capabilitiesState,
+    activeMachineState,
+    activeIsSelfhosted,
+    wantsWarm,
+    capturedAt,
+    now,
+  } = input;
   return useMemo(
-    () => deriveMachineChip(input),
+    () =>
+      deriveMachineChip({
+        liveness,
+        capabilitiesState,
+        activeMachineState,
+        activeIsSelfhosted,
+        wantsWarm,
+        capturedAt,
+        now,
+      }),
     // Depend on the primitive fields (not the object identity) so a caller passing
     // a fresh object each render doesn't recompute needlessly.
     [
-      input.liveness,
-      input.capabilitiesState,
-      input.activeMachineState,
-      input.activeIsSelfhosted,
-      input.wantsWarm,
-      input.capturedAt,
-      input.now,
+      liveness,
+      capabilitiesState,
+      activeMachineState,
+      activeIsSelfhosted,
+      wantsWarm,
+      capturedAt,
+      now,
     ],
   );
 }

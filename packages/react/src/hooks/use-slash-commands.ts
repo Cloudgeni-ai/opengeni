@@ -200,11 +200,11 @@ export function useSlashCommands(options: UseSlashCommandsOptions): UseSlashComm
   // exact-match heuristic) and a pointer click (which has ALREADY chosen the
   // command — the clicked row — and must not re-resolve to a near-match).
   const runResolved = useCallback(
-    async (command: SlashCommand, options?: { explicit?: boolean }): Promise<void> => {
+    async (command: SlashCommand, executionOptions?: { explicit?: boolean }): Promise<void> => {
       if (!parsed) {
         return;
       }
-      const explicit = options?.explicit ?? false;
+      const explicit = executionOptions?.explicit ?? false;
       // Token-vs-command equality is case-insensitive (matching the registry's
       // matchCommand/filterCommands), so a fully-typed "/Clear" counts as having
       // named `clear` and runs rather than autocompleting.

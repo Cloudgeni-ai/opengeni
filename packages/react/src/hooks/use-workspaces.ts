@@ -27,43 +27,43 @@ export type UseWorkspacesResult = {
 export function useWorkspaces(options: UseWorkspacesOptions = {}): UseWorkspacesResult {
   const client = useOpenGeniClient(options);
   const load = useCallback(async () => await client.listWorkspaces(), [client]);
-  const state = usePolledValue(load, {
+  const { data, loading, error, refresh } = usePolledValue(load, {
     pollIntervalMs: options.pollIntervalMs,
     enabled: options.enabled,
   });
-  const mutation = useMutationRunner();
+  const { run, mutating, mutationError, clearMutationError } = useMutationRunner();
 
   const create = useCallback(
     async (request: CreateWorkspaceRequest): Promise<Workspace | null> => {
-      const result = await mutation.run(() => client.createWorkspace(request));
+      const result = await run(() => client.createWorkspace(request));
       if (result) {
-        await state.refresh();
+        await refresh();
       }
       return result;
     },
-    [client, mutation.run, state.refresh],
+    [client, run, refresh],
   );
 
   const update = useCallback(
     async (workspaceId: string, request: UpdateWorkspaceRequest): Promise<Workspace | null> => {
-      const result = await mutation.run(() => client.updateWorkspace(workspaceId, request));
+      const result = await run(() => client.updateWorkspace(workspaceId, request));
       if (result) {
-        await state.refresh();
+        await refresh();
       }
       return result;
     },
-    [client, mutation.run, state.refresh],
+    [client, run, refresh],
   );
 
   return {
-    workspaces: state.data ?? [],
-    loading: state.loading,
-    error: state.error,
-    refresh: state.refresh,
+    workspaces: data ?? [],
+    loading,
+    error,
+    refresh,
     create,
     update,
-    mutating: mutation.mutating,
-    mutationError: mutation.mutationError,
-    clearMutationError: mutation.clearMutationError,
+    mutating,
+    mutationError,
+    clearMutationError,
   };
 }

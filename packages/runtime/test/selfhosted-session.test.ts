@@ -101,17 +101,17 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
   test("readFile of a missing path surfaces an OS NotFound (not a box-gone NotFound)", async () => {
     const mock = new MockAgentResponder();
     const session = sessionWith(mock);
-    let err: unknown;
+    let missingPathError: unknown;
     try {
       await session.readFile({ path: "/tmp/does-not-exist" });
     } catch (e) {
-      err = e;
+      missingPathError = e;
     }
-    expect(err).toBeInstanceOf(SelfhostedControlError);
-    expect((err as SelfhostedControlError).code).toBe(ErrorCode.ERROR_CODE_NOT_FOUND);
-    expect((err as SelfhostedControlError).osNotFound).toBe(true);
+    expect(missingPathError).toBeInstanceOf(SelfhostedControlError);
+    expect((missingPathError as SelfhostedControlError).code).toBe(ErrorCode.ERROR_CODE_NOT_FOUND);
+    expect((missingPathError as SelfhostedControlError).osNotFound).toBe(true);
     // crucially: an OS NotFound does NOT flip the provider-NotFound discriminator.
-    expect(isSelfhostedProviderNotFoundError(err)).toBe(false);
+    expect(isSelfhostedProviderNotFoundError(missingPathError)).toBe(false);
   });
 
   test("resolveExposedPort returns the relay URL shape + the M8b channel-key routing query", async () => {
@@ -465,15 +465,15 @@ describe("AgentError → runtime reason mapping (the M3 ruling)", () => {
 
   test("an offline mock surfaces agent_offline on exec (never a NotFound)", async () => {
     const mock = new MockAgentResponder({ online: false });
-    let err: unknown;
+    let offlineError: unknown;
     try {
       await sessionWith(mock).exec({ cmd: "true" });
     } catch (e) {
-      err = e;
+      offlineError = e;
     }
-    expect(err).toBeInstanceOf(SelfhostedControlError);
-    expect((err as SelfhostedControlError).reason).toBe("agent_offline");
-    expect(isProviderSandboxNotFoundError("selfhosted", err)).toBe(false);
+    expect(offlineError).toBeInstanceOf(SelfhostedControlError);
+    expect((offlineError as SelfhostedControlError).reason).toBe("agent_offline");
+    expect(isProviderSandboxNotFoundError("selfhosted", offlineError)).toBe(false);
   });
 });
 

@@ -256,7 +256,7 @@ function apiPath(path: string): string {
   return `http://127.0.0.1:${apiPort}/v1/workspaces/${workspaceId}${path}`;
 }
 
-function stackEnv(services: TestServices, apiPort: number): Record<string, string> {
+function stackEnv(services: TestServices, localApiPort: number): Record<string, string> {
   return {
     OPENGENI_ENVIRONMENT: "test",
     OPENGENI_DATABASE_URL: services.databaseUrl,
@@ -265,7 +265,7 @@ function stackEnv(services: TestServices, apiPort: number): Record<string, strin
     OPENGENI_TEMPORAL_NAMESPACE: "default",
     OPENGENI_TEMPORAL_TASK_QUEUE: `channel-a-e2e-${crypto.randomUUID()}`,
     OPENGENI_API_HOST: "127.0.0.1",
-    OPENGENI_API_PORT: String(apiPort),
+    OPENGENI_API_PORT: String(localApiPort),
     OPENGENI_PRODUCT_ACCESS_MODE: "local",
     OPENGENI_OPENAI_API_KEY: "test",
     OPENGENI_OPENAI_MODEL: "scripted-model",

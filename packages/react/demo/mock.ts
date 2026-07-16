@@ -123,7 +123,8 @@ class SessionBus {
     };
     this.listeners.add(listener);
     try {
-      while (!signal?.aborted) {
+      while (true) {
+        if (signal?.aborted) break;
         const next = queue.shift();
         if (next) {
           yield next;

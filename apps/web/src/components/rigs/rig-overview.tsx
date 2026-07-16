@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
 import { MetaChip } from "@/components/ui/meta-chip";
 import { Notice } from "@/components/ui/notice";
 import { formatTimestamp } from "@/lib/format";
+import { withOccurrenceKeys } from "@/lib/react-key";
 import { rigActorLabel, rigCheckHealthView, versionHasChecks } from "@/lib/rig-status";
 import type { Rig, RigChange, RigChangeVerification } from "@/types";
 
@@ -143,11 +144,11 @@ export function RigOverview({
         ) : (
           <div className="grid gap-1">
             <p className="text-xs text-fg-subtle">Not verified yet. The declared checks:</p>
-            {active.checks.map((check, index) => (
-              <div
-                key={`${check.name}-${index}`}
-                className="rounded-md border border-border/70 bg-bg/25 px-2.5 py-1.5"
-              >
+            {withOccurrenceKeys(
+              active.checks,
+              (check) => `${check.name}\u0000${check.command}`,
+            ).map(({ key, item: check }) => (
+              <div key={key} className="rounded-md border border-border/70 bg-bg/25 px-2.5 py-1.5">
                 <div className="truncate text-xs font-medium">{check.name}</div>
                 <div className="truncate font-mono text-2xs text-fg-subtle">{check.command}</div>
               </div>

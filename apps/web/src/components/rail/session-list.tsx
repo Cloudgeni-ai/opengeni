@@ -102,13 +102,14 @@ export function SessionList() {
     enabled: hierarchyMode,
   });
   const { sessions, nextCursor, loading, error, refresh } = rootPage;
-  const pinned = hierarchyMode ? globalPinPage.pinned : rootPage.pinned;
+  const { pinned: globalPinned, refresh: refreshGlobalPins } = globalPinPage;
+  const pinned = hierarchyMode ? globalPinned : rootPage.pinned;
   // The hierarchy and its global pinned shortcuts come from separate queries.
   // Every invalidation must refresh both or a pin changed in another tab/device
   // can disappear from the shortcut section until the next polling interval.
   const refreshSessionPages = useCallback(async () => {
-    await Promise.all([refresh(), ...(hierarchyMode ? [globalPinPage.refresh()] : [])]);
-  }, [globalPinPage.refresh, hierarchyMode, refresh]);
+    await Promise.all([refresh(), ...(hierarchyMode ? [refreshGlobalPins()] : [])]);
+  }, [hierarchyMode, refresh, refreshGlobalPins]);
   // Ordinary rows page independently of the complete pinned section. The
   // polled hook owns page one; additional pages are appended and deduplicated.
   // A filter change starts a fresh cursor chain rather than mixing snapshots.
@@ -337,9 +338,9 @@ export function SessionList() {
         (left, right) => sessionActivityTime(right.session) - sessionActivityTime(left.session),
       )) {
       const group = recencyGroupFor(sessionActivityTime(node.session));
-      const sessions = buckets.get(group) ?? [];
-      sessions.push(node);
-      buckets.set(group, sessions);
+      const groupSessions = buckets.get(group) ?? [];
+      groupSessions.push(node);
+      buckets.set(group, groupSessions);
     }
     return {
       running,
@@ -1523,10 +1524,17 @@ export function CollapsedSessionsButton() {
 }
 
 function SessionListSkeleton() {
+  const skeletonRows = [
+    "session-skeleton-1",
+    "session-skeleton-2",
+    "session-skeleton-3",
+    "session-skeleton-4",
+    "session-skeleton-5",
+  ];
   return (
     <div className="grid gap-1 px-1 pt-2">
-      {Array.from({ length: 5 }).map((_, index) => (
-        <div key={index} className="flex h-8 items-center gap-2 px-1">
+      {skeletonRows.map((rowKey) => (
+        <div key={rowKey} className="flex h-8 items-center gap-2 px-1">
           <span className="size-1.5 shrink-0 rounded-full bg-surface-3" />
           <span className="h-3 flex-1 animate-pulse rounded bg-surface-2" />
         </div>

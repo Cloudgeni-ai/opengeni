@@ -89,6 +89,15 @@ export async function flush(ms = 0): Promise<void> {
   });
 }
 
+/** Run a user interaction or hook mutation and all of its state updates in `act`. */
+export async function actRun<T>(run: () => T | Promise<T>): Promise<T> {
+  let result!: T;
+  await act(async () => {
+    result = await run();
+  });
+  return result;
+}
+
 export type RenderedComponent = {
   /** The mount container — query it with `.querySelector` etc. */
   container: HTMLElement;

@@ -22,15 +22,15 @@ describe("integrations.sh catalog import normalization", () => {
     expect(normalized.quarantined[0]?.row.domain).toBe("activepieces.com");
     expect(normalized.quarantined[0]?.reason).toContain("manual confirmation");
 
-    const accessOwl = normalized.rows.find((row) => row.domain === "accessowl.com");
+    const accessOwl = normalized.rows.find((candidate) => candidate.domain === "accessowl.com");
     expect(accessOwl?.tier).toBe("verified");
     expect(accessOwl?.authKind).toBe("oauth2");
 
-    const acko = normalized.rows.find((row) => row.domain === "acko.com");
+    const acko = normalized.rows.find((candidate) => candidate.domain === "acko.com");
     expect(acko?.tier).toBe("community");
     expect(acko?.authKind).toBe("none");
 
-    const bump = normalized.rows.filter((row) => row.domain === "bump.sh");
+    const bump = normalized.rows.filter((candidate) => candidate.domain === "bump.sh");
     expect(bump).toHaveLength(1);
     expect(bump[0]?.mcpUrl).toBe("https://developers.bump.sh/doc/portal/mcp");
     expect(

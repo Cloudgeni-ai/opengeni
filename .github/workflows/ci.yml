@@ -20,7 +20,7 @@ jobs:
           bun-version: latest
 
       - name: Cache Bun dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@v6.1.0
         with:
           path: ~/.bun/install/cache
           key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
@@ -46,6 +46,9 @@ jobs:
           OPENGENI_REQUIRE_REAL_DB: "1"
         run: bun test
 
+      - name: React warning-free test gate
+        run: bun run test:react:clean
+
       - name: Install pinned Playwright Chromium runtime
         run: bunx playwright install --with-deps chromium
 
@@ -60,7 +63,7 @@ jobs:
 
       - name: Upload OPE-26 visual evidence
         if: ${{ always() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: ope26-session-pin-visual-evidence
           if-no-files-found: error
@@ -73,7 +76,7 @@ jobs:
 
       - name: Upload workbench visual evidence
         if: ${{ always() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: workbench-visual-evidence
           if-no-files-found: error
@@ -114,6 +117,9 @@ jobs:
       - name: Build React demo harness
         run: cd packages/react && bun run demo:build
 
+      - name: Web bundle budget
+        run: bun run --cwd apps/web build
+
   deployment:
     name: Deployment artifacts
     runs-on: ubuntu-latest
@@ -127,7 +133,7 @@ jobs:
           bun-version: latest
 
       - name: Cache Bun dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@v6.1.0
         with:
           path: ~/.bun/install/cache
           key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}

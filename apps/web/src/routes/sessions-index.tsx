@@ -74,13 +74,14 @@ export function SessionsIndexRoute({ workspaceId }: { workspaceId: string }) {
   const context = useAppContext();
   const navigate = useNavigate();
   const attachments = useDraftAttachments(workspaceId);
+  const { resetSessionView } = context;
   const [message, setMessage] = useState("");
   const [optionsOpen, setOptionsOpen] = useState(false);
   const [draft, setDraft] = useState<SessionDraft>(() => emptySessionDraft());
 
   useEffect(() => {
-    context.resetSessionView();
-  }, [workspaceId]);
+    resetSessionView();
+  }, [resetSessionView, workspaceId]);
 
   const computeReady = isSessionDraftComputeReady(draft);
 

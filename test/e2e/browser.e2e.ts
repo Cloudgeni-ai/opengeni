@@ -270,9 +270,13 @@ describe("browser e2e", () => {
       .slice(1);
     const resourceCount = async () =>
       await page.evaluate(
-        async ({ apiPort, workspaceId, sessionId }) => {
+        async ({
+          apiPort: browserApiPort,
+          workspaceId: targetWorkspaceId,
+          sessionId: targetSessionId,
+        }) => {
           const response = await fetch(
-            `http://127.0.0.1:${apiPort}/v1/workspaces/${workspaceId}/sessions/${sessionId}`,
+            `http://127.0.0.1:${browserApiPort}/v1/workspaces/${targetWorkspaceId}/sessions/${targetSessionId}`,
           );
           const session = (await response.json()) as { resources?: Array<{ kind?: string }> };
           return session.resources?.filter((resource) => resource.kind === "file").length ?? 0;

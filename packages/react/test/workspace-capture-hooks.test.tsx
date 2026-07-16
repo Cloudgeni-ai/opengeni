@@ -16,7 +16,7 @@ import type {
   WorkspaceCaptureManifest,
   WorkspaceCaptureRepo,
 } from "@opengeni/sdk";
-import { registerDom, renderHook, flush } from "./render-hook";
+import { actRun, registerDom, renderHook, flush } from "./render-hook";
 import { fakeClient, SESSION_ID, WORKSPACE_ID } from "./fake-client";
 import { fakeEvent } from "./sandbox-fixtures";
 import { useWorkspaceCapture } from "../src/hooks/use-workspace-capture";
@@ -1081,7 +1081,7 @@ describe("useWorkspaceEdit", () => {
     await flush();
     expect(hook.result.current.state).toBe("viewing-cold");
 
-    hook.result.current.edit("hello world\n");
+    await actRun(() => hook.result.current.edit("hello world\n"));
     await flush();
     // Cold edit buffers and signals the host to warm ONCE.
     expect(hook.result.current.state).toBe("buffering");
@@ -1129,7 +1129,7 @@ describe("useWorkspaceEdit", () => {
       { liveness: "cold" },
     );
     await flush();
-    hook.result.current.edit("my local edit\n");
+    await actRun(() => hook.result.current.edit("my local edit\n"));
     await flush();
     await hook.rerender({ liveness: "warm" });
     await flush();
@@ -1139,7 +1139,7 @@ describe("useWorkspaceEdit", () => {
     expect(hook.result.current.conflict?.base).toBe("hello\n");
     expect(hook.result.current.conflict?.live).toBe("AGENT CHANGED THIS\n");
     // The user chooses "overwrite" → force flush (last-writer-wins).
-    await hook.result.current.overwrite();
+    await actRun(() => hook.result.current.overwrite());
     await flush();
     expect(hook.result.current.state).toBe("flushed");
     expect(writes.length).toBe(1);
@@ -1166,7 +1166,7 @@ describe("useWorkspaceEdit", () => {
     await flush();
     expect(hook.result.current.state).toBe("readonly-offline");
     expect(hook.result.current.readOnly).toBe(true);
-    hook.result.current.edit("nope");
+    await actRun(() => hook.result.current.edit("nope"));
     await flush();
     expect(hook.result.current.buffer).toBeNull();
     expect(hook.result.current.wantsWarm).toBe(false);
@@ -1189,7 +1189,7 @@ describe("useWorkspaceEdit", () => {
       { warming: false },
     );
     await flush();
-    hook.result.current.edit("edit");
+    await actRun(() => hook.result.current.edit("edit"));
     await flush();
     expect(hook.result.current.state).toBe("buffering");
     await hook.rerender({ warming: true });

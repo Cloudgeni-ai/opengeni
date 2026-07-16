@@ -5,7 +5,7 @@
    -------------------------------------------------------------------------- */
 import { describe, expect, test } from "bun:test";
 import { OpenGeniApiError, type SessionEvent } from "@opengeni/sdk";
-import { registerDom, renderHook, flush } from "./render-hook";
+import { actRun, registerDom, renderHook, flush } from "./render-hook";
 import { fakeClient, SESSION_ID, WORKSPACE_ID } from "./fake-client";
 import {
   fakeAttachResponse,
@@ -535,7 +535,7 @@ describe("useSandboxFiles", () => {
     await flush();
     expect(hook.result.current.tree.map((n) => n.name)).toEqual(["src", "README.md"]);
     // Lazy expand "src".
-    await hook.result.current.expand("src");
+    await actRun(() => hook.result.current.expand("src"));
     await flush();
     const src = hook.result.current.tree.find((n) => n.path === "src");
     expect(src?.children?.[0]?.name).toBe("app.ts");
@@ -693,12 +693,12 @@ describe("useSandboxFiles", () => {
     );
     await flush();
     // Expand src so it has loaded children we must NOT lose.
-    await hook.result.current.expand("src");
+    await actRun(() => hook.result.current.expand("src"));
     await flush();
     expect(hook.result.current.tree.find((n) => n.path === "src")?.children?.length).toBe(1);
     const rootListsBefore = rootLists;
 
-    await hook.result.current.createFile("src/new.ts");
+    await actRun(() => hook.result.current.createFile("src/new.ts"));
     await flush();
     const src = hook.result.current.tree.find((n) => n.path === "src");
     // The new file is spliced in (optimistic) AND the existing app.ts survives —
@@ -761,7 +761,7 @@ describe("useSandboxFiles", () => {
       undefined,
     );
     await flush();
-    await hook.result.current.createFile("b.ts").catch(() => {});
+    await actRun(() => hook.result.current.createFile("b.ts").catch(() => {}));
     await flush();
     // The optimistic b.ts was rolled back — only the original a.ts remains.
     expect(hook.result.current.tree.map((n) => n.name)).toEqual(["a.ts"]);
@@ -918,7 +918,7 @@ describe("useSandboxFiles", () => {
       { events: [] as SessionEvent[] },
     );
     await flush();
-    await hook.result.current.expand("src");
+    await actRun(() => hook.result.current.expand("src"));
     await flush();
     listPaths.length = 0;
     // The AGENT writes src/added.ts → reconcile ONLY "src" (not a root re-list).
