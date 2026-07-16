@@ -2,7 +2,8 @@ import { describe, expect, test } from "bun:test";
 import {
   startRecording,
   stopRecording,
-  readRecordingBytes,
+  inspectRecordingArtifact,
+  uploadRecordingArtifact,
   deleteRecordingArtifacts,
   recordingStorageKey,
   contentTypeForCodec,
@@ -12,19 +13,18 @@ import {
 } from "../src/sandbox/recording";
 
 // A mock session recording every command, mimicking the Modal execCommand
-// (formatted-string-with-banner) contract. The recording loop reads bytes via a
-// DIRECT `base64 <path>` exec (NOT readFile), so the mock answers stat + base64
-// over the same exec channel.
+// (formatted-string-with-banner) contract. It answers the metadata stat and the
+// direct curl upload over the same command channel.
 function makeMockSession(
-  opts: { fileBytes?: Uint8Array | null; statSize?: number | "MISSING" } = {},
+  opts: {
+    fileBytes?: Uint8Array | null;
+    statSize?: number | "MISSING";
+    uploadOutput?: string;
+  } = {},
 ) {
   const execCalls: string[] = [];
-  const base64Calls: string[] = [];
+  const uploadCalls: string[] = [];
   const fmt = (body: string) => `Chunk ID: a\nProcess exited with code 0\nOutput:\n${body}`;
-  const bytesFor = () =>
-    opts.fileBytes === null
-      ? new Uint8Array()
-      : (opts.fileBytes ?? new Uint8Array([1, 2, 3, 4, 5]));
   const session: Record<string, unknown> = {
     execCommand: async (args: { cmd: string }) => {
       execCalls.push(args.cmd);
@@ -32,19 +32,14 @@ function makeMockSession(
         const size = opts.statSize === undefined ? (opts.fileBytes?.length ?? 0) : opts.statSize;
         return fmt(String(size));
       }
-      if (args.cmd.includes("base64 ")) {
-        base64Calls.push(args.cmd);
-        // base64 typically wraps at 76 cols + a trailing newline; the reader
-        // strips all whitespace, so emit a realistic wrapped body.
-        const b64 = Buffer.from(bytesFor())
-          .toString("base64")
-          .replace(/(.{4})/g, "$1\n");
-        return fmt(b64 + "\n");
+      if (args.cmd.includes("curl ")) {
+        uploadCalls.push(args.cmd);
+        return fmt(opts.uploadOutput ?? "OPENGENI_RECORDING_UPLOAD_OK\n");
       }
       return fmt("");
     },
   };
-  return { session, execCalls, base64Calls };
+  return { session, execCalls, uploadCalls };
 }
 
 describe("recording loop (P4.3)", () => {
@@ -88,9 +83,9 @@ describe("recording loop (P4.3)", () => {
     expect(execCalls[0]).toContain("/tmp/og-rec-rec-3.pid");
   });
 
-  test("readRecordingBytes reads the /tmp artifact via a DIRECT base64 exec (not readFile), computes duration, and does NOT delete the box file (F9)", async () => {
+  test("inspectRecordingArtifact size-gates on the box without reading bytes into the worker", async () => {
     const bytes = new Uint8Array([10, 20, 30]);
-    const { session, execCalls, base64Calls } = makeMockSession({ fileBytes: bytes });
+    const { session, execCalls } = makeMockSession({ fileBytes: bytes });
     const proc: RecordingProcess = {
       recordingId: "rec-4",
       codec: "h264-mp4",
@@ -101,27 +96,17 @@ describe("recording loop (P4.3)", () => {
       startedAt: Date.now() - 5_000,
       display: ":0",
     };
-    const result = await readRecordingBytes(session, proc, 268_435_456);
-    expect(result.bytes).toEqual(bytes);
+    const result = await inspectRecordingArtifact(session, proc, 268_435_456);
     expect(result.contentType).toBe("video/mp4");
     expect(result.sizeBytes).toBe(3);
     expect(result.durationSeconds).toBeGreaterThanOrEqual(4); // ~5s wall clock (F14)
-    // The byte transfer runs `base64 <absolute /tmp path>` over exec — the /tmp
-    // path is NEVER routed through the workspace-root-scoped readFile (which would
-    // reject it with "escapes the workspace root").
-    expect(base64Calls.some((c) => c.includes("base64 /tmp/og-rec-rec-4.mp4"))).toBe(true);
-    expect("readFile" in session).toBe(false);
-    // F9: the read did NOT delete the box file (no rm in the exec calls).
+    expect(execCalls.some((call) => call.includes("base64 "))).toBe(false);
     expect(execCalls.some((c) => c.includes("rm -f"))).toBe(false);
   });
 
-  test("a /tmp artifact path is read with an absolute path that would escape the workspace-root readFile guard", async () => {
-    // Regression for the finalize-path bug: the recording lives OUTSIDE the
-    // workspace root (/tmp), on purpose (never the user's git tree). The byte read
-    // must use raw exec, which accepts absolute paths, rather than readFile, which
-    // resolves against the manifest root and 400s on anything outside it.
+  test("uploadRecordingArtifact streams the absolute /tmp artifact directly to the scoped URL", async () => {
     const bytes = new Uint8Array([7, 7, 7, 7]);
-    const { session, base64Calls } = makeMockSession({ fileBytes: bytes });
+    const { session, uploadCalls } = makeMockSession({ fileBytes: bytes });
     const proc: RecordingProcess = {
       recordingId: "rec-tmp",
       codec: "vp9-webm",
@@ -132,9 +117,22 @@ describe("recording loop (P4.3)", () => {
       startedAt: Date.now(),
       display: ":0",
     };
-    const result = await readRecordingBytes(session, proc, 268_435_456);
-    expect(result.bytes).toEqual(bytes);
-    expect(base64Calls[0]).toContain("/tmp/og-rec-rec-tmp.webm");
+    const result = await uploadRecordingArtifact(session, proc, {
+      url: "https://storage.example/upload?sig=secret",
+      requiredHeaders: {
+        "content-type": "video/webm",
+        "x-ms-blob-type": "BlockBlob",
+      },
+      maxBytes: 268_435_456,
+    });
+    expect(result.sizeBytes).toBe(4);
+    expect(uploadCalls).toHaveLength(1);
+    expect(uploadCalls[0]).toContain("--upload-file");
+    expect(uploadCalls[0]).toContain("/tmp/og-rec-rec-tmp.webm");
+    expect(uploadCalls[0]).toContain("content-type: video/webm");
+    expect(uploadCalls[0]).toContain("x-ms-blob-type: BlockBlob");
+    expect(uploadCalls[0]).toContain("https://storage.example/upload?sig=secret");
+    expect(uploadCalls[0]).not.toContain("base64");
   });
 
   test("F8: an oversize file fails max-bytes-exceeded (never uploads a truncated video)", async () => {
@@ -149,9 +147,29 @@ describe("recording loop (P4.3)", () => {
       startedAt: Date.now(),
       display: ":0",
     };
-    await expect(readRecordingBytes(session, proc, 1000)).rejects.toMatchObject({
+    await expect(inspectRecordingArtifact(session, proc, 1000)).rejects.toMatchObject({
       reason: "max-bytes-exceeded",
     });
+  });
+
+  test("an upload transport without the success marker fails closed", async () => {
+    const { session } = makeMockSession({ fileBytes: new Uint8Array([1]), uploadOutput: "" });
+    const proc: RecordingProcess = {
+      recordingId: "rec-upload-failed",
+      codec: "h264-mp4",
+      boxPath: "/tmp/og-rec-rec-upload-failed.mp4",
+      pidFile: "/tmp/p",
+      dimensions: [1280, 800],
+      framerate: 15,
+      startedAt: Date.now(),
+      display: ":0",
+    };
+    await expect(
+      uploadRecordingArtifact(session, proc, {
+        url: "https://storage.example/upload",
+        requiredHeaders: { "content-type": "video/mp4" },
+      }),
+    ).rejects.toThrow("did not confirm success");
   });
 
   test("a missing box file fails box-death", async () => {
@@ -166,7 +184,9 @@ describe("recording loop (P4.3)", () => {
       startedAt: Date.now(),
       display: ":0",
     };
-    await expect(readRecordingBytes(session, proc)).rejects.toMatchObject({ reason: "box-death" });
+    await expect(inspectRecordingArtifact(session, proc)).rejects.toMatchObject({
+      reason: "box-death",
+    });
   });
 
   test("a session without exec/execCommand fails RecordingUnavailableError", async () => {
@@ -180,10 +200,10 @@ describe("recording loop (P4.3)", () => {
       startedAt: Date.now(),
       display: ":0",
     };
-    // No exec and no execCommand: the box cannot run the stat/base64 read at all.
-    await expect(
-      readRecordingBytes({ readFile: async () => new Uint8Array() }, proc),
-    ).rejects.toBeInstanceOf(RecordingUnavailableError);
+    // No exec and no execCommand: the box cannot inspect or upload the artifact.
+    await expect(inspectRecordingArtifact({}, proc)).rejects.toBeInstanceOf(
+      RecordingUnavailableError,
+    );
   });
 
   test("deleteRecordingArtifacts removes the file, pid, and log (called only post-PUT, F9)", async () => {

@@ -1,6 +1,6 @@
 // @opengeni/runtime/sandbox — the recording loop (P4.3).
 //
-// ffmpeg x11grab on :0 → mp4/webm artifact on the box → read bytes → PUT to
+// ffmpeg x11grab on :0 → mp4/webm artifact on the box → direct scoped PUT to
 // object storage → recording.available. The "agent films itself proving the fix"
 // loop: ffmpeg reads exactly the :0 framebuffer the agent's computer-use draws to
 // and the human watches over Channel B (zero projection).
@@ -9,22 +9,16 @@
 // Temporal, NO worker RPC, NO actor. They live in the agent-loop-free leaf so the
 // SAME process that already holds the resumed-by-id box (the agent turn's own
 // activity for an on-turn recording, or the API in-process for an off-turn/manual
-// finalize) reads the bytes and PUTs them straight to storage. The bytes go
-// box → process memory → storage PUT and are NEVER serialized as a Temporal
-// activity result — the 256 MB-vs-payload-limit concern dissolves (F10).
+// finalize) authorizes a direct box-to-storage upload. Recording bytes never
+// enter worker memory or a Temporal payload (F10).
 //
 // ── Adversarial-review fixes folded in (module 05 §Adversarial) ──────────────
 //   F1  exec is OPTIONAL on Modal (only execCommand) — every command dual-paths.
-//   F3  exec/execCommand YIELDS — the SIGINT-and-wait loop is bounded well under
-//       the yield window; a direct `base64` exec does the byte transfer.
-//   F8  the byte read does NOT assume any over-limit behavior — we cap the ffmpeg
-//       file by size on the box first (stat) and fail `max-bytes-exceeded` rather
-//       than silently uploading a truncated video.
-//   FR  the byte transfer is a DIRECT exec (`base64 <abs-path>`), NOT readFile:
-//       the recording lives at an absolute /tmp path (never the user's workspace
-//       /git tree), and readFile rejects paths outside the manifest workspace
-//       root ("escapes the workspace root"). The base64 exec passes
-//       maxOutputTokens:null so a large recording is never truncated.
+//   F3  exec/execCommand YIELDS — the stop and direct-upload commands are bounded.
+//   F8  size is gated on the box first (stat); over-limit artifacts fail instead
+//       of being uploaded partially.
+//   FR  curl reads the absolute /tmp artifact in the box and sends it directly to
+//       the short-lived scoped URL. No workspace-root read API is involved.
 //   F9  the box file is deleted ONLY after the storage PUT confirms — never
 //       before (so a failed upload leaves the bytes recoverable for a retry).
 //   F12 ffmpeg/x11vnc backgrounding does not block the yield (nohup … & echo $!).
@@ -59,7 +53,7 @@ export class RecordingUnavailableError extends Error {
     this.name = "RecordingUnavailableError";
   }
 }
-/** ffmpeg failed, the file is missing, or the byte read failed. */
+/** ffmpeg failed, the file is missing, or the artifact is over its size limit. */
 export class RecordingError extends Error {
   constructor(
     message: string,
@@ -71,8 +65,7 @@ export class RecordingError extends Error {
 }
 
 // The structural slice of a provider session the recording loop drives. exec and
-// execCommand are optional (Modal has only execCommand — F1); readFile present on
-// every desktop-capable provider.
+// execCommand are optional (Modal has only execCommand — F1).
 type ExecResultLike = {
   output?: string;
   stdout?: string;
@@ -93,11 +86,6 @@ type RecordingSession = {
     yieldTimeMs?: number;
     maxOutputTokens?: number;
   }) => Promise<string>;
-  readFile?: (args: {
-    path: string;
-    runAs?: string;
-    maxBytes?: number;
-  }) => Promise<string | Uint8Array>;
 };
 
 function shq(s: string): string {
@@ -111,8 +99,7 @@ function resultOutput(result: ExecResultLike | string): string {
     .join("\n");
 }
 
-// Default per-command output cap (tokens). The byte-read path overrides this to
-// `null` (no truncation) so a base64-encoded recording is never clipped.
+// Default per-command output cap (tokens). Recording transfer does not use stdout.
 const DEFAULT_MAX_OUTPUT_TOKENS = 4_000;
 
 async function run(
@@ -120,16 +107,14 @@ async function run(
   cmd: string,
   runAs?: string,
   yieldTimeMs = EXEC_YIELD_MS,
-  maxOutputTokens: number | null = DEFAULT_MAX_OUTPUT_TOKENS,
+  maxOutputTokens = DEFAULT_MAX_OUTPUT_TOKENS,
 ): Promise<string> {
-  // `maxOutputTokens: null` disables the provider's output truncation entirely
-  // (SDK truncateOutput returns the raw text when the cap is nullish).
-  const args = { cmd, ...(runAs ? { runAs } : {}), yieldTimeMs, maxOutputTokens } as {
+  const args: {
     cmd: string;
     runAs?: string;
     yieldTimeMs?: number;
     maxOutputTokens?: number;
-  };
+  } = { cmd, ...(runAs ? { runAs } : {}), yieldTimeMs, maxOutputTokens };
   if (typeof session.exec === "function") {
     return resultOutput(await session.exec(args));
   }
@@ -231,49 +216,28 @@ export async function stopRecording(session: unknown, proc: RecordingProcess): P
   await run(s, `bash -lc ${shq(wait)}`, proc.runAs, STOP_YIELD_MS).catch(() => undefined);
 }
 
-export type FinalizeRecordingResult = {
-  bytes: Uint8Array;
+export type RecordingArtifactMetadata = {
   contentType: RecordingContentType;
   sizeBytes: number;
   durationSeconds: number;
 };
 
 /**
- * Read the finalized recording bytes off the box.
- *
- * TRANSPORT: the bytes are read via a DIRECT exec (`base64 <path>` over stdout),
- * NOT via session.readFile(). The recording artifact lives at an absolute /tmp
- * path on purpose — recordings must never be written inside the user's workspace
- * /git tree — but session.readFile() resolves every path against the manifest
- * workspace root and rejects anything outside it ("Sandbox path … escapes the
- * workspace root"), which fataled finalize. Raw exec runs unrestricted shell, so
- * `base64` reads the /tmp file directly; we decode the base64 back to bytes here.
- * The byte-read exec passes `maxOutputTokens: null` so the provider never
- * truncates a large recording's base64.
- *
- * F8: we DO NOT assume any over-limit behavior. First `stat` the file size on the
- * box; if it exceeds maxBytes, fail `max-bytes-exceeded` (never upload a truncated
- * video). Otherwise read the raw bytes.
- *
- * F9: this does NOT delete the box file. The caller deletes it (deleteRecordingArtifacts)
- * ONLY after the storage PUT + `available` commit — so a failed upload leaves the
- * bytes recoverable on the box for a retry.
- *
- * F14: duration is wall-clock (now − startedAt), a close approximation of the
- * SIGINT-flushed video length.
+ * Inspect and size-gate the finalized recording while it is still on the box.
+ * No recording bytes cross into the worker process.
  */
-export async function readRecordingBytes(
+export async function inspectRecordingArtifact(
   session: unknown,
   proc: RecordingProcess,
   maxBytes = DEFAULT_MAX_BYTES,
-): Promise<FinalizeRecordingResult> {
+): Promise<RecordingArtifactMetadata> {
   const s = session as RecordingSession;
   if (typeof s.exec !== "function" && typeof s.execCommand !== "function") {
     throw new RecordingUnavailableError(
       "session cannot run commands (no exec/execCommand) — recording finalize unavailable",
     );
   }
-  // F8: size-gate on the box before reading into memory.
+  // F8: size-gate on the box before authorizing the upload.
   const sizeOut = (
     await run(
       s,
@@ -297,34 +261,55 @@ export async function readRecordingBytes(
   if (size > maxBytes) {
     throw new RecordingError(`recording ${size}B exceeds max ${maxBytes}B`, "max-bytes-exceeded");
   }
-  // Read the bytes via a DIRECT exec (base64, no output truncation), so the
-  // absolute /tmp path is NOT run through the workspace-root-scoped readFile guard.
-  const STOP_YIELD = 60_000; // a large recording's base64 read may take longer than the default exec yield.
-  const encoded = stripExecBanner(
-    await run(s, `bash -lc ${shq(`base64 ${proc.boxPath}`)}`, proc.runAs, STOP_YIELD, null),
-  );
-  const base64 = encoded.replace(/\s+/g, "");
-  if (base64.length === 0) {
-    throw new RecordingError(`recording read returned 0 bytes: ${proc.boxPath}`, "ffmpeg-error");
-  }
-  let bytes: Uint8Array;
-  try {
-    bytes = Uint8Array.from(Buffer.from(base64, "base64"));
-  } catch (error) {
-    throw new RecordingError(
-      `recording base64 decode failed: ${error instanceof Error ? error.message : String(error)}`,
-      "ffmpeg-error",
-    );
-  }
-  if (bytes.length === 0) {
-    throw new RecordingError(`recording read returned 0 bytes: ${proc.boxPath}`, "ffmpeg-error");
-  }
   return {
-    bytes,
     contentType: contentTypeForCodec(proc.codec),
-    sizeBytes: bytes.length,
+    sizeBytes: size,
     durationSeconds: Math.max(0, Math.round((Date.now() - proc.startedAt) / 1000)),
   };
+}
+
+const RECORDING_UPLOAD_OK = "OPENGENI_RECORDING_UPLOAD_OK";
+const RECORDING_UPLOAD_MAX_SECONDS = 300;
+const RECORDING_UPLOAD_YIELD_MS = (RECORDING_UPLOAD_MAX_SECONDS + 10) * 1_000;
+
+/**
+ * Upload the finalized artifact directly from the sandbox to a scoped object-
+ * storage URL. The worker carries only the short URL/headers and metadata; it
+ * never materializes a base64 string or Uint8Array for a recording that may be
+ * hundreds of megabytes. curl's success marker makes an exec transport that
+ * returns non-zero command output instead of throwing still fail closed.
+ */
+export async function uploadRecordingArtifact(
+  session: unknown,
+  proc: RecordingProcess,
+  input: {
+    url: string;
+    requiredHeaders: Record<string, string>;
+    maxBytes?: number;
+  },
+): Promise<RecordingArtifactMetadata> {
+  const metadata = await inspectRecordingArtifact(session, proc, input.maxBytes);
+  const headers = Object.entries(input.requiredHeaders)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([name, value]) => `--header ${shq(`${name}: ${value}`)}`)
+    .join(" ");
+  const upload = [
+    "set -euo pipefail",
+    `curl --fail --silent --show-error --connect-timeout 20 --max-time ${RECORDING_UPLOAD_MAX_SECONDS} --request PUT ${headers} --upload-file ${shq(proc.boxPath)} ${shq(input.url)}`,
+    `printf '${RECORDING_UPLOAD_OK}\\n'`,
+  ].join("; ");
+  const output = stripExecBanner(
+    await run(
+      session as RecordingSession,
+      `bash -lc ${shq(upload)}`,
+      proc.runAs,
+      RECORDING_UPLOAD_YIELD_MS,
+    ),
+  );
+  if (!output.includes(RECORDING_UPLOAD_OK)) {
+    throw new Error("recording upload did not confirm success");
+  }
+  return metadata;
 }
 
 /**

@@ -1,9 +1,9 @@
 // apps/worker/src/activities/recording.ts — the recording finalize helper (P4.3).
 //
 // The "agent films itself proving the fix" finalize loop, run IN the process that
-// already holds the resumed-by-id box (the agent turn's own activity). The bytes
-// go box → process memory → object-storage PUT and are NEVER serialized as a
-// Temporal activity result (F10): read + PUT happen in ONE invocation here.
+// already holds the resumed-by-id box (the agent turn's own activity). A scoped
+// upload URL sends bytes box → object storage; the worker never buffers the
+// recording and no bytes enter a Temporal payload.
 //
 // Ordering invariant (F9): the box file is deleted ONLY after the storage PUT
 // confirms and the `available` row commits — so a failed upload leaves the bytes
@@ -21,11 +21,11 @@ import type {
 import {
   contentTypeForCodec,
   deleteRecordingArtifacts,
-  readRecordingBytes,
   RecordingError,
   recordingStorageKey,
   startRecording as startRecordingOnBox,
   stopRecording as stopRecordingOnBox,
+  uploadRecordingArtifact,
   type RecordingProcess,
 } from "@opengeni/runtime";
 import type { ObjectStorage } from "@opengeni/storage";
@@ -114,7 +114,7 @@ export type FinalizeOutcome =
   | { ok: false; reason: RecordingFailedReason; detail: string | null };
 
 /**
- * Stop ffmpeg, read the bytes off the box, PUT them to storage, commit `available`,
+ * Stop ffmpeg, upload directly from the box, commit `available`,
  * and (only then) delete the box file (F9). Returns the available payload, or a
  * failure reason. NEVER throws — finalize runs in a turn `finally` and must not
  * mask the turn outcome.
@@ -157,42 +157,33 @@ export async function finalizeRecording(args: {
     // 1. SIGINT ffmpeg and wait for the clean trailer.
     await stopRecordingOnBox(args.session, active.proc);
 
-    // 2. Read bytes off the box (size-gated; no eager delete — F8/F9).
-    const finalized = await readRecordingBytes(
-      args.session,
-      active.proc,
-      settings.recordingMaxBytes,
-    );
-
     if (!objectStorage) {
       return await fail("upload-failed", "object storage is not configured");
     }
 
-    // 3. PUT to storage (the byte transfer stays IN this process — F10).
-    //
-    // SERVER-SIDE authenticated direct PUT, NOT presign+fetch. The worker holds the
-    // storage creds, so a presigned URL buys nothing — and on a split public/
-    // internal endpoint topology (a PUBLIC `objectStorageEndpoint` with no in-cluster
-    // route, the preview case) the presigned URL points at the public host and the
-    // fetch PUT 401s. `putObject` sends the bytes straight to the backend over the
-    // configured (in-cluster) endpoint with the in-process SDK client. Browser
-    // uploads keep using `createPutUrl`; this is the trusted-server twin.
+    // 2. Mint one short-lived write URL, then upload DIRECTLY from the box. This
+    // keeps worker memory independent of recording size.
     const key = recordingStorageKey(args.workspaceId, args.sessionId, active.recordingId, codec);
+    let finalized: Awaited<ReturnType<typeof uploadRecordingArtifact>>;
     try {
-      // `.slice()` detaches a fresh ArrayBuffer from the box read.
-      await objectStorage.putObject({
+      const upload = await objectStorage.createPutUrl({
         key,
-        contentType: finalized.contentType,
-        body: finalized.bytes.slice(),
+        contentType: contentTypeForCodec(codec),
+      });
+      finalized = await uploadRecordingArtifact(args.session, active.proc, {
+        url: upload.url,
+        requiredHeaders: upload.requiredHeaders,
+        maxBytes: settings.recordingMaxBytes,
       });
     } catch (uploadError) {
+      if (uploadError instanceof RecordingError) throw uploadError;
       return await fail(
         "upload-failed",
         uploadError instanceof Error ? uploadError.message : String(uploadError),
       );
     }
 
-    // 4. Commit `available` with the artifact ref.
+    // 3. Commit `available` with the artifact ref.
     await updateRecording(db, {
       accountId: args.accountId,
       workspaceId: args.workspaceId,
@@ -203,7 +194,7 @@ export async function finalizeRecording(args: {
       durationSeconds: finalized.durationSeconds,
     });
 
-    // 5. ONLY NOW delete the box artifacts (F9 — never before a confirmed PUT).
+    // 4. ONLY NOW delete the box artifacts (F9 — never before a confirmed PUT).
     await deleteRecordingArtifacts(args.session, active.proc);
 
     const available: RecordingAvailablePayload = {

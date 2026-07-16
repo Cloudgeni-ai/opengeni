@@ -8,8 +8,8 @@
 //      to a deterministic coord (read back from the REAL X server — the XTEST
 //      proof) + open xterm + TYPE A NONCE; screenshot via SandboxComputer
 //      (readFile of the scrot PNG — NOT banner-wrapped execCommand, the F2 fix).
-//   4. stop + finalize the recording (read bytes off the box → assert a non-empty
-//      mp4 → the recording.available outcome with the artifact ref).
+//   4. stop + finalize the recording (direct box → object-storage PUT → assert a
+//      non-empty mp4 → the recording.available outcome with the artifact ref).
 //   5. save the produced recording to docs/.../evidence/P4.3-agent-drives-desktop.mp4.
 //   6. terminate the box in finally (the lease owns lifecycle in prod; here we do).
 //
@@ -27,14 +27,17 @@ import { describe, expect, test } from "bun:test";
 import { createRequire } from "node:module";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { getSettings } from "@opengeni/config";
 import {
   SandboxComputer,
+  deleteRecordingArtifacts,
   startRecording,
   stopRecording,
-  readRecordingBytes,
+  uploadRecordingArtifact,
   recordingStorageKey,
   contentTypeForCodec,
 } from "@opengeni/runtime";
+import { createObjectStorage } from "@opengeni/storage";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 const EVIDENCE = join(
@@ -63,6 +66,8 @@ describe.if(LIVE)("P4.3 — agent drives + records the desktop (GATED LIVE Modal
 
       const modal = new ModalClient({ logLevel: "info" });
       const app = await modal.apps.fromName(APP_NAME, { createIfMissing: true });
+      const objectStorage = createObjectStorage(getSettings());
+      if (!objectStorage) throw new Error("P4.3 live proof requires configured object storage");
 
       // Build the lean desktop image (the same productionized-superset apt layer the
       // P4.1 live regression uses): Xvfb + WM + x11vnc + websockify + xdotool + scrot
@@ -157,6 +162,7 @@ describe.if(LIVE)("P4.3 — agent drives + records the desktop (GATED LIVE Modal
       };
 
       let terminated = false;
+      let storageKey: string | null = null;
       const terminate = async () => {
         if (terminated) return;
         terminated = true;
@@ -210,36 +216,50 @@ describe.if(LIVE)("P4.3 — agent drives + records the desktop (GATED LIVE Modal
         await computer.move(200, 300);
         await new Promise((r) => setTimeout(r, 1500));
 
-        // 4) Stop + finalize the recording. The bytes are read off the box IN THIS
-        // PROCESS (never a Temporal payload, F10).
+        // 4) Stop + finalize the recording. The box uploads directly to the
+        // short-lived scoped URL; the recording bytes never enter worker memory
+        // or a Temporal payload (F10).
         await stopRecording(session, proc);
-        const finalized = await readRecordingBytes(session, proc, 256 * 1024 * 1024);
-        expect(finalized.bytes.length).toBeGreaterThan(1000); // a non-empty mp4
+        storageKey = recordingStorageKey("live-ws", "live-sess", recordingId, "h264-mp4");
+        const upload = await objectStorage.createPutUrl({
+          key: storageKey,
+          contentType: contentTypeForCodec("h264-mp4"),
+        });
+        const finalized = await uploadRecordingArtifact(session, proc, {
+          url: upload.url,
+          requiredHeaders: upload.requiredHeaders,
+          maxBytes: 256 * 1024 * 1024,
+        });
+        expect(finalized.sizeBytes).toBeGreaterThan(1000); // a non-empty mp4
         expect(finalized.contentType).toBe("video/mp4");
-        expect(finalized.sizeBytes).toBe(finalized.bytes.length);
+        const stored = await objectStorage.getObjectBytes(storageKey);
+        if (!stored) throw new Error(`Recording upload missing from storage: ${storageKey}`);
+        const bytes = stored.bytes;
+        expect(finalized.sizeBytes).toBe(bytes.length);
         // ffmpeg mp4: ISO-BMFF — bytes 4..8 are the 'ftyp' box type.
-        expect(Buffer.from(finalized.bytes.subarray(4, 8)).toString("latin1")).toBe("ftyp");
+        expect(Buffer.from(bytes.subarray(4, 8)).toString("latin1")).toBe("ftyp");
+        await deleteRecordingArtifacts(session, proc);
 
         // The recording.available artifact ref the event would carry (the storage
         // key the finalize activity PUTs to; here we assert the shape + persist
         // the bytes as the prove-it evidence).
-        const storageKey = recordingStorageKey("live-ws", "live-sess", recordingId, "h264-mp4");
         expect(storageKey).toBe(`recordings/live-ws/live-sess/${recordingId}.mp4`);
         expect(contentTypeForCodec("h264-mp4")).toBe("video/mp4");
 
         // 5) Save the produced recording as the first prove-it artifact.
         await mkdir(dirname(EVIDENCE), { recursive: true });
-        await writeFile(EVIDENCE, finalized.bytes);
+        await writeFile(EVIDENCE, bytes);
         const stat = Bun.file(EVIDENCE);
         expect(await stat.exists()).toBe(true);
-        expect(await stat.size).toBe(finalized.bytes.length);
+        expect(await stat.size).toBe(bytes.length);
 
         // eslint-disable-next-line no-console
         console.log(
-          `[P4.3 LIVE] agent drove :0 + filmed itself — mp4 ${finalized.bytes.length}B ` +
+          `[P4.3 LIVE] agent drove :0 + filmed itself — mp4 ${bytes.length}B ` +
             `(${finalized.durationSeconds}s) → ${EVIDENCE}; recording.available ref=${storageKey}; nonce=${nonce}`,
         );
       } finally {
+        if (storageKey) await objectStorage.deleteObject(storageKey).catch(() => undefined);
         // 6) Terminate the box (the lease owns lifecycle in prod; here we do).
         await terminate();
       }
