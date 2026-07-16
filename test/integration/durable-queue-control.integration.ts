@@ -29,6 +29,10 @@ import {
 } from "@opengeni/testing";
 import { createActivityTestHarness } from "../../apps/worker/src/activities";
 import { currentActivityContext } from "../../apps/worker/src/activities/streaming";
+import {
+  CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES,
+  TURN_WORKER_MAX_CONCURRENT_TURNS,
+} from "../../apps/worker/src/concurrency";
 import { turnTaskQueue } from "../../apps/worker/src/workflows/activities";
 
 type RequiredServices = Pick<
@@ -603,14 +607,14 @@ async function integrationWorker(
       taskQueue,
       workflowsPath: new URL("../../apps/worker/src/workflows.ts", import.meta.url).pathname,
       activities: controlActivities,
-      maxConcurrentActivityTaskExecutions: 32,
+      maxConcurrentActivityTaskExecutions: CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES,
     }),
     Worker.create({
       connection: temporalConnection,
       namespace: "default",
       taskQueue: turnTaskQueue(taskQueue),
       activities: { runAgentTurn },
-      maxConcurrentActivityTaskExecutions: 8,
+      maxConcurrentActivityTaskExecutions: TURN_WORKER_MAX_CONCURRENT_TURNS,
     }),
   ]);
   return {

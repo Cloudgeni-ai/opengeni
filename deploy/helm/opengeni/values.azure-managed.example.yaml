@@ -17,9 +17,9 @@ worker:
   turns:
     replicaCount: 4
     # Turn pods hold the in-flight model history and sandbox clients. The
-    # per-pod activity cap is enforced by the worker process; these limits cover
-    # the measured transient serialization peak without granting control work
-    # the same oversized footprint.
+    # worker process enforces an explicit activity cap; these requests and
+    # limits provide headroom for the temporary 16-turn density while OPE-52
+    # measures the final concurrency/resource optimum.
     resources:
       requests:
         cpu: 500m
