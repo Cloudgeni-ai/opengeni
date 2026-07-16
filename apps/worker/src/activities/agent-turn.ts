@@ -1317,11 +1317,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // null; the first actual computer action starts it after :0 is ready.
     let activeRecording: ActiveRecording | null = null;
     let computerUseRecordingStart: Promise<void> | null = null;
-    // P4.3 recording gate: flips true the first time a computer-use/desktop tool
-    // ACTUALLY executes this turn (an SDK `computer_call` item streams through). A
-    // plain text turn ("hey"/"continue") never flips it, so finalize discards the
-    // recording with NO storage PUT and NO recording.failed — a clean no-op (a
-    // static frame of an untouched desktop is not worth uploading).
+    // P4.3 recording gate: flips true in `onComputerUseReady`, the runtime's
+    // execution-time callback for the first real computer action. It must flip
+    // BEFORE awaiting recording startup: the SDK tool-call stream item can arrive
+    // before ffmpeg has finished starting. A plain text turn ("hey"/"continue")
+    // never invokes the callback, so settlement performs no storage PUT.
     let didComputerUse = false;
     const abandonActiveRecording = async (
       reason: string,
@@ -3394,6 +3394,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           if (!resolvedSandbox) {
             throw new Error("Computer-use display became ready without a resolved sandbox");
           }
+          // This callback is the authoritative execution boundary. Record the
+          // action before async ffmpeg startup so transport-event ordering cannot
+          // make settlement misclassify a real computer turn as unused.
+          didComputerUse = true;
           await maybeStartOnTurnRecording(resolvedSandbox, activeSandboxBackend);
         },
         ...(packRuntime.skills.length > 0 ? { packSkills: packRuntime.skills } : {}),
@@ -3968,14 +3972,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   serializedRunState,
                 );
               }
-            }
-            // Recording gate: a computer-use tool actually ran when its SDK
-            // `tool_call_item` streams through. Hosted Responses emits a raw
-            // `computer_call`; Codex/chat transports emit one of the first-party
-            // `computer_*` function calls. Match both protocol shapes BEFORE
-            // normalization. Only meaningful when a recording is live.
-            if (activeRecording && !didComputerUse && isComputerUseStreamEvent(next.value)) {
-              didComputerUse = true;
             }
             const pendingToolCall = pendingToolCallFromSdkEvent(next.value);
             if (pendingToolCall) {
@@ -5701,50 +5697,6 @@ export function codexUsageLimitFailurePayload(
 // open indefinitely for a goal-bearing session; cap the continuation hold so the
 // goal re-evaluates at most this far out (it will re-pause if still capped).
 const CODEX_USAGE_LIMIT_MAX_RESUME_MS = 60 * 60_000; // 1h
-
-/**
- * Recognize an SDK stream event that represents a COMPUTER-USE tool call actually
- * executing. Hosted Responses emits `computer_call`; function transports emit one
- * of OpenGeni's exact first-party `computer_*` names. Both are authoritative wire
- * identities selected by `computerToolModeForTurn`. Drives the on-turn recording
- * gate (no computer-use → discard).
- */
-export function isComputerUseStreamEvent(event: unknown): boolean {
-  if (!event || typeof event !== "object") {
-    return false;
-  }
-  if ((event as { type?: unknown }).type !== "run_item_stream_event") {
-    return false;
-  }
-  const item = (
-    event as {
-      item?: { type?: unknown; rawItem?: { type?: unknown; name?: unknown } };
-    }
-  ).item;
-  if (!item || item.type !== "tool_call_item") {
-    return false;
-  }
-  const raw = item.rawItem;
-  if (raw?.type === "computer_call") {
-    return true;
-  }
-  return (
-    raw?.type === "function_call" &&
-    typeof raw.name === "string" &&
-    FUNCTION_COMPUTER_TOOL_NAMES.has(raw.name)
-  );
-}
-
-const FUNCTION_COMPUTER_TOOL_NAMES = new Set([
-  "computer_screenshot",
-  "computer_click",
-  "computer_double_click",
-  "computer_move",
-  "computer_scroll",
-  "computer_type",
-  "computer_keypress",
-  "computer_drag",
-]);
 
 function pendingToolCallFromSdkEvent(event: unknown): {
   callId: string;

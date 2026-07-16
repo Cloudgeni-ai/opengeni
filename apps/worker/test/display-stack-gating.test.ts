@@ -29,6 +29,9 @@ describe("turn sandbox resume is desktop-free", () => {
     const eagerCalls = agentTurnSource.match(/await maybeStartOnTurnRecording\(/g) ?? [];
     expect(eagerCalls).toHaveLength(1);
     const callback = agentTurnSource.slice(agentTurnSource.indexOf("onComputerUseReady: async"));
-    expect(callback.indexOf("await maybeStartOnTurnRecording(")).toBeGreaterThan(0);
+    const observation = callback.indexOf("didComputerUse = true");
+    const recordingStart = callback.indexOf("await maybeStartOnTurnRecording(");
+    expect(observation).toBeGreaterThan(0);
+    expect(recordingStart).toBeGreaterThan(observation);
   });
 });
