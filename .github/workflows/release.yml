@@ -34,6 +34,10 @@ on:
         description: Exact 40-character source SHA that passed acceptance; dispatch this workflow from that same ref.
         required: true
         type: string
+      expected_packages:
+        description: Exact comma-separated package set, for example @opengeni/react@0.14.0.
+        required: true
+        type: string
       staging_evidence_url:
         description: Retained staging acceptance/soak evidence URL for this exact SHA and image digests.
         required: true
@@ -121,8 +125,8 @@ jobs:
       id-token: write # npm provenance (OIDC)
       contents: write # changesets creates and pushes immutable package tags
     outputs:
-      published: ${{ steps.changesets.outputs.published }}
-      publishedPackages: ${{ steps.changesets.outputs.publishedPackages }}
+      releaseReady: ${{ steps.registry.outputs.release_ready }}
+      verifiedPackages: ${{ steps.registry.outputs.verified_packages }}
       sourceSha: ${{ steps.preflight.outputs.source_sha }}
     steps:
       - name: Check out evidence-bound source
@@ -206,13 +210,62 @@ jobs:
       - name: Publish closure guard
         run: bun scripts/publish-closure-guard.ts
 
+      - name: Plan exact package publication
+        id: package-plan
+        env:
+          OPENGENI_RELEASE_SOURCE_SHA: ${{ steps.preflight.outputs.source_sha }}
+          OPENGENI_EXPECTED_PACKAGES: ${{ inputs.expected_packages }}
+          OPENGENI_RELEASE_PACKAGE_PHASE: plan
+          OPENGENI_RELEASE_PACKAGE_RECEIPT: evidence/release-packages-plan.json
+        run: bun scripts/verify-release-packages.ts
+
+      - name: Write pre-publication release plan
+        env:
+          SOURCE_SHA: ${{ steps.preflight.outputs.source_sha }}
+          STAGING_EVIDENCE_URL: ${{ inputs.staging_evidence_url }}
+          PRODUCTION_EVIDENCE_URL: ${{ inputs.production_evidence_url }}
+          PRODUCTION_CANARY_EVIDENCE_URL: ${{ inputs.production_canary_evidence_url }}
+          ACCEPTANCE_BUNDLE_SHA256: ${{ inputs.acceptance_bundle_sha256 }}
+        run: |
+          jq -n \
+            --arg sourceSha "$SOURCE_SHA" \
+            --arg stagingEvidenceUrl "$STAGING_EVIDENCE_URL" \
+            --arg productionEvidenceUrl "$PRODUCTION_EVIDENCE_URL" \
+            --arg productionCanaryEvidenceUrl "$PRODUCTION_CANARY_EVIDENCE_URL" \
+            --arg acceptanceBundleSha256 "$ACCEPTANCE_BUNDLE_SHA256" \
+            --slurpfile packagePlan evidence/release-packages-plan.json \
+            '{
+              schemaVersion: 1,
+              sourceSha: $sourceSha,
+              acceptance: {
+                stagingEvidenceUrl: $stagingEvidenceUrl,
+                productionEvidenceUrl: $productionEvidenceUrl,
+                productionCanaryEvidenceUrl: $productionCanaryEvidenceUrl,
+                bundleSha256: $acceptanceBundleSha256,
+                zeroKnownDefectsAndGapsConfirmed: true
+              },
+              packagePlan: $packagePlan[0]
+            }' > evidence/verified-release-plan.json
+
+      # Persist the intended destructive boundary before npm can be mutated. A
+      # later dispatch can reconcile an interrupted publish by gitHead+integrity.
+      - name: Upload pre-publication release plan
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: verified-release-plan-${{ steps.preflight.outputs.source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence/verified-release-plan.json
+          if-no-files-found: error
+          retention-days: 90
+
       - name: Set up Node for npm publish
+        if: steps.package-plan.outputs.needs_publish == 'true'
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
 
       - name: Publish evidence-bound packages
+        if: steps.package-plan.outputs.needs_publish == 'true'
         id: changesets
         uses: changesets/action@a45c4d594aa4e2c509dc14a9f2b3b67ba3780d0d # v1
         with:
@@ -223,10 +276,18 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_CONFIG_PROVENANCE: "true"
 
-      - name: Require a real publication and write release receipt
+      - name: Reconcile registry package identity
+        id: registry
         env:
-          PUBLISHED: ${{ steps.changesets.outputs.published }}
-          PUBLISHED_PACKAGES: ${{ steps.changesets.outputs.publishedPackages }}
+          OPENGENI_RELEASE_SOURCE_SHA: ${{ steps.preflight.outputs.source_sha }}
+          OPENGENI_EXPECTED_PACKAGES: ${{ inputs.expected_packages }}
+          OPENGENI_RELEASE_PACKAGE_PHASE: verify
+          OPENGENI_RELEASE_PACKAGE_RECEIPT: evidence/release-packages-verified.json
+        run: bun scripts/verify-release-packages.ts
+
+      - name: Write verified release receipt
+        env:
+          VERIFIED_PACKAGES: ${{ steps.registry.outputs.verified_packages }}
           SOURCE_SHA: ${{ steps.preflight.outputs.source_sha }}
           STAGING_EVIDENCE_URL: ${{ inputs.staging_evidence_url }}
           PRODUCTION_EVIDENCE_URL: ${{ inputs.production_evidence_url }}
@@ -234,19 +295,16 @@ jobs:
           ACCEPTANCE_BUNDLE_SHA256: ${{ inputs.acceptance_bundle_sha256 }}
         run: |
           set -euo pipefail
-          [ "$PUBLISHED" = "true" ] || {
-            echo "no package was published; refusing to mint release images" >&2
-            exit 1
-          }
           mkdir -p evidence
-          jq -e 'type == "array" and length > 0' <<<"$PUBLISHED_PACKAGES" >/dev/null
+          jq -e 'type == "array" and length > 0 and all(.[]; .state == "published" and (.integrity | startswith("sha512-")))' \
+            <<<"$VERIFIED_PACKAGES" >/dev/null
           jq -n \
             --arg sourceSha "$SOURCE_SHA" \
             --arg stagingEvidenceUrl "$STAGING_EVIDENCE_URL" \
             --arg productionEvidenceUrl "$PRODUCTION_EVIDENCE_URL" \
             --arg productionCanaryEvidenceUrl "$PRODUCTION_CANARY_EVIDENCE_URL" \
             --arg acceptanceBundleSha256 "$ACCEPTANCE_BUNDLE_SHA256" \
-            --argjson publishedPackages "$PUBLISHED_PACKAGES" \
+            --argjson publishedPackages "$VERIFIED_PACKAGES" \
             '{
               schemaVersion: 1,
               sourceSha: $sourceSha,
@@ -274,9 +332,10 @@ jobs:
     # GHCR publishing is the self-host load-bearing piece. It runs ONLY after the
     # evidence-bound manual release job actually publishes new npm versions, so
     # ordinary pushes and Version-PR merges never re-push image tags or latest.
-    # The `published` output comes from the changesets/action.
+    # Registry identity is reconciled by gitHead+integrity, making an interrupted
+    # publish safely resumable without accepting a colliding package version.
     needs: publish
-    if: needs.publish.outputs.published == 'true'
+    if: needs.publish.outputs.releaseReady == 'true'
     permissions:
       contents: read
       packages: write # publish the accepted chart and release images to GHCR
@@ -290,7 +349,7 @@ jobs:
       - name: Resolve image version
         id: meta
         env:
-          PUBLISHED_PACKAGES: ${{ needs.publish.outputs.publishedPackages }}
+          PUBLISHED_PACKAGES: ${{ needs.publish.outputs.verifiedPackages }}
           SOURCE_SHA: ${{ needs.publish.outputs.sourceSha }}
         run: |
           # Tag images with the PUBLISHED release version, not the Chart.yaml
