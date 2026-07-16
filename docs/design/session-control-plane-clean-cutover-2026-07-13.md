@@ -840,8 +840,9 @@ Store the report durably in the private release evidence location. Do not print 
    - **control worker**: workflow tasks and every short/control/recovery activity, never
      `runAgentTurn`, with explicit workflow/activity/cache caps;
    - **turn worker**: derived `<control-task-queue>-turns`, only `runAgentTurn`, explicit
-     fixed concurrency eight per pod, its own resources, HPA, PDB, service, readiness,
-     liveness, and termination grace.
+     fixed concurrency sixteen per pod, its own resources, HPA, PDB, service, readiness,
+     liveness, and termination grace. Sixteen is the evidence-informed temporary density;
+     OPE-52 owns the controlled concurrency/resource sweep that will select the final value.
 
    Both roles use one Worker per process. No same-process dual Worker, SDK default slot
    count, resource tuner, semaphore, activity alias, or dual-routing fallback ships.

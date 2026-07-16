@@ -35,6 +35,11 @@ import {
   SESSION_WORKFLOW_WAKE_DISPATCHER_SCHEDULE_ID,
   SESSION_WORKFLOW_WAKE_DISPATCHER_WORKFLOW_TYPE,
 } from "./workflow-wake-contract";
+import {
+  CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES,
+  CONTROL_WORKER_MAX_CONCURRENT_WORKFLOW_TASKS,
+  TURN_WORKER_MAX_CONCURRENT_TURNS,
+} from "./concurrency";
 
 // The deterministic id of the ONE global reaper Schedule. A single id means
 // create() is idempotent across every worker in the pool: the first worker to
@@ -106,11 +111,14 @@ export async function createOpenGeniWorker(options: WorkerOptions): Promise<{
       ? {
           workflowsPath:
             options.workflowsPath ?? new URL("../src/workflows.ts", import.meta.url).pathname,
-          maxConcurrentWorkflowTaskExecutions: 40,
+          maxConcurrentWorkflowTaskExecutions: CONTROL_WORKER_MAX_CONCURRENT_WORKFLOW_TASKS,
         }
       : {}),
     activities,
-    maxConcurrentActivityTaskExecutions: options.role === "turn" ? 8 : 32,
+    maxConcurrentActivityTaskExecutions:
+      options.role === "turn"
+        ? TURN_WORKER_MAX_CONCURRENT_TURNS
+        : CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES,
     // GRACEFUL DEPLOY SHUTDOWN (with the SIGTERM handler in startWorker):
     // after shutdown() stops polling, in-flight activities get this long to
     // finish naturally; the rest are then CANCELLED with WORKER_SHUTDOWN —
@@ -458,8 +466,12 @@ export async function startWorker() {
       role,
       temporalTaskQueue:
         role === "control" ? settings.temporalTaskQueue : turnTaskQueue(settings.temporalTaskQueue),
-      maxConcurrentActivityTaskExecutions: role === "turn" ? 8 : 32,
-      maxConcurrentWorkflowTaskExecutions: role === "control" ? 40 : 0,
+      maxConcurrentActivityTaskExecutions:
+        role === "turn"
+          ? TURN_WORKER_MAX_CONCURRENT_TURNS
+          : CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES,
+      maxConcurrentWorkflowTaskExecutions:
+        role === "control" ? CONTROL_WORKER_MAX_CONCURRENT_WORKFLOW_TASKS : 0,
       httpPort: settings.workerHttpPort,
     });
     // GRACEFUL DEPLOY SHUTDOWN — the missing link that made every deploy a
