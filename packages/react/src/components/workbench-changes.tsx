@@ -1,5 +1,5 @@
 import type { GitFileDiff } from "@opengeni/sdk";
-import { FileWarningIcon, HistoryIcon } from "lucide-react";
+import { ArrowUpRightIcon, FileWarningIcon, HistoryIcon } from "lucide-react";
 import {
   type ReactNode,
   useCallback,
@@ -77,6 +77,8 @@ export type WorkbenchChangesProps = {
   /** The capture's turn revision, for the "as of turn N" badge. */
   captureRevision?: number | null | undefined;
   themeType?: "dark" | "light" | undefined;
+  /** Route a guarded binary/oversize file into the live Files surface. */
+  onOpenFile?: ((path: string) => void) | undefined;
   className?: string | undefined;
 };
 
@@ -137,6 +139,7 @@ export function WorkbenchChanges({
   capturedAt,
   captureRevision,
   themeType,
+  onOpenFile,
   className,
 }: WorkbenchChangesProps) {
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -211,7 +214,9 @@ export function WorkbenchChanges({
   // Track which section is at the top of the pane so the rail highlights it.
   const onPaneScroll = useCallback(() => {
     const el = windowed.scrollRef.current;
-    if (!el) return;
+    if (!el) {
+      return;
+    }
     const top = el.scrollTop;
     const offsets = windowed.offsets;
     let idx = 0;
@@ -240,13 +245,23 @@ export function WorkbenchChanges({
       data-workbench-changes-layout={compact ? "compact" : "rail"}
     >
       {/* Summary + source badge + layout toggle. */}
-      <div className="flex shrink-0 items-center justify-between gap-2 border-b border-og-border px-3 py-1.5">
-        <span className="min-w-0 truncate text-og-xs text-og-fg-muted">
+      <div
+        className={cn(
+          "flex shrink-0 items-center justify-between gap-2 border-b border-og-border px-3 py-1.5",
+          compact && source === "capture" && "flex-col items-stretch gap-1.5 py-2",
+        )}
+      >
+        <span data-contrast-audited className="min-w-0 text-og-xs text-og-fg-muted">
           {diff.length} {diff.length === 1 ? "file" : "files"} changed
           <span className="ml-2 text-og-status-idle">+{additions}</span>
           <span className="ml-1 text-og-status-failed">−{deletions}</span>
         </span>
-        <div className="flex shrink-0 items-center gap-2">
+        <div
+          className={cn(
+            "flex shrink-0 items-center gap-2",
+            compact && source === "capture" && "self-start",
+          )}
+        >
           {compact ? null : <LayoutToggle layout={layout} onChange={setLayout} />}
           <SourceBadge source={source} capturedAt={capturedAt} label={sourceBadge} />
         </div>
@@ -271,21 +286,26 @@ export function WorkbenchChanges({
             >
               {orderedFiles.map((file, index) => (
                 <option key={file.path} value={index}>
-                  {STATUS_LETTER[file.status]} · {file.path} · +{file.additions} −{file.deletions}
+                  {STATUS_LETTER[file.status]} · {file.path}
                 </option>
               ))}
             </select>
           </div>
           <div className="min-h-0 min-w-0 flex-1 overflow-auto" data-opengeni-changes-pane>
             {activeFile ? (
-              <DiffSection file={activeFile} layout="unified" themeType={resolvedTheme} />
+              <DiffSection
+                file={activeFile}
+                layout="unified"
+                themeType={resolvedTheme}
+                {...(onOpenFile ? { onOpenFile } : {})}
+              />
             ) : null}
           </div>
         </div>
       ) : (
         <div className="flex min-h-0 flex-1">
           {/* File rail — virtualized (virtua): a dense change set is fine. */}
-          <div className="w-[240px] shrink-0 border-r border-og-border">
+          <div className="w-[clamp(12rem,28%,15rem)] shrink-0 border-r border-og-border bg-og-surface-1/35">
             <VList
               className="h-full"
               itemSize={coarsePointer ? 44 : 28}
@@ -332,7 +352,12 @@ export function WorkbenchChanges({
                     top={windowed.offsets[index] ?? 0}
                     onMeasure={windowed.measure}
                   >
-                    <DiffSection file={file} layout={layout} themeType={resolvedTheme} />
+                    <DiffSection
+                      file={file}
+                      layout={layout}
+                      themeType={resolvedTheme}
+                      {...(onOpenFile ? { onOpenFile } : {})}
+                    />
                   </MeasuredSection>
                 );
               })}
@@ -377,13 +402,13 @@ function SourceBadge({
   );
 }
 
-/** "live" · "as of turn 7 · 14:32" · "as of 14:32" (no revision). */
+/** "Live diff" · "as of turn 7 · 14:32" · "as of 14:32" (no revision). */
 function describeSource(
   source: "live" | "capture" | null,
   capturedAt: string | null,
   revision: number | null,
 ): string {
-  if (source !== "capture" || !capturedAt) return "live";
+  if (source !== "capture" || !capturedAt) return "Live diff";
   const time = formatAsOf(capturedAt, Date.now());
   return revision !== null ? `as of turn ${revision} · ${time}` : `as of ${time}`;
 }
@@ -409,9 +434,10 @@ function RailFileRow({
       title={file.path}
       data-rail-file
       className={cn(
-        "flex min-h-7 w-full items-center gap-1.5 truncate px-2 py-0.5 text-left text-og-sm hover:bg-og-surface-2 pointer-coarse:min-h-11",
+        "relative flex min-h-7 w-full items-center gap-1.5 truncate px-2 py-0.5 text-left text-og-sm transition-colors hover:bg-og-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-og-accent pointer-coarse:min-h-11",
         grouped && "pl-3",
-        active && "bg-og-surface-2",
+        active &&
+          "bg-og-accent-soft text-og-fg before:absolute before:inset-y-1 before:left-0 before:w-0.5 before:rounded-r-full before:bg-og-accent",
       )}
     >
       <span
@@ -468,10 +494,12 @@ function DiffSection({
   file,
   layout,
   themeType,
+  onOpenFile,
 }: {
   file: GitFileDiff;
   layout: "unified" | "split";
   themeType: "dark" | "light";
+  onOpenFile?: ((path: string) => void) | undefined;
 }) {
   // The guard files (binary / over-cap) get a minimal header + "open live" body
   // since Pierre has nothing to render; real diffs use Pierre's own sticky file
@@ -489,12 +517,12 @@ function DiffSection({
             <span className="text-og-status-failed">−{file.deletions}</span>
           </span>
         </header>
-        <GuardBody file={file} />
+        <GuardBody file={file} {...(onOpenFile ? { onOpenFile } : {})} />
       </section>
     );
   }
   return (
-    <section className="border-b border-og-border pb-2">
+    <section data-pierre-section className="border-b border-og-border pb-2">
       <PierreDiff diff={[file]} layout={layout} themeType={themeType} className="px-1" />
     </section>
   );
@@ -502,12 +530,28 @@ function DiffSection({
 
 /** The per-file guard: a binary file or an over-cap diff opens live rather than
  *  inlining a body we don't (fully) have. */
-function GuardBody({ file }: { file: GitFileDiff }) {
+function GuardBody({
+  file,
+  onOpenFile,
+}: {
+  file: GitFileDiff;
+  onOpenFile?: ((path: string) => void) | undefined;
+}) {
   const reason = file.isBinary ? "Binary file" : "Diff too large to show here";
   return (
-    <div className="flex items-center gap-2 px-3 py-3 text-og-sm text-og-fg-subtle">
-      <FileWarningIcon className="size-3.5 shrink-0" />
-      <span className="min-w-0">{reason} — open it on the machine to view.</span>
+    <div className="flex flex-wrap items-center gap-2 px-3 py-3 text-og-sm text-og-fg-subtle">
+      <FileWarningIcon className="size-3.5 shrink-0" aria-hidden />
+      <span className="min-w-0 flex-1">{reason}.</span>
+      {onOpenFile ? (
+        <button
+          type="button"
+          onClick={() => onOpenFile(file.path)}
+          className="inline-flex min-h-8 shrink-0 items-center gap-1.5 rounded-og-sm border border-og-border px-2 py-1 text-og-xs font-medium text-og-fg-muted transition-colors hover:border-og-border-strong hover:bg-og-surface-2 hover:text-og-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-og-accent pointer-coarse:min-h-11"
+        >
+          Open in Files
+          <ArrowUpRightIcon className="size-3.5" aria-hidden />
+        </button>
+      ) : null}
     </div>
   );
 }
@@ -527,7 +571,7 @@ function LayoutToggle({
           type="button"
           onClick={() => onChange(value)}
           className={cn(
-            "min-h-7 rounded-og-xs px-1.5 py-0.5 text-2xs capitalize pointer-coarse:min-h-11",
+            "min-h-7 rounded-og-xs px-1.5 py-0.5 text-2xs capitalize focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-og-accent pointer-coarse:min-h-11",
             layout === value
               ? "bg-og-accent-soft text-og-fg"
               : "text-og-fg-subtle hover:text-og-fg",

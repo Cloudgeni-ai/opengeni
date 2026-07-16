@@ -7,11 +7,9 @@
    attaches a viewer. This closes a live prod cost (box-hours burned to serve reads
    the capture already answers for free).
 
-   Refinement 2 — the default tab is decided from the workbench's OWN capture fetch
-   (`fileCount`) at first-resolve, with no embedder events-at-mount contract, and
-   with no post-paint CONTENT switch (the dock's first-tab fallback body is a
-   loader until the capture lands, so the committed default is the first real
-   content).
+   Refinement 2 — the default tab is decided from the first authoritative source:
+   capture stats when present, otherwise live Git. No embedder events-at-mount
+   contract is required and the choice latches before real content paints.
    -------------------------------------------------------------------------- */
 import { describe, expect, test } from "bun:test";
 import { act, type ReactElement, type ReactNode } from "react";
@@ -19,7 +17,12 @@ import type { GetWorkspaceCaptureResponse, WorkspaceCaptureManifest } from "@ope
 import { registerDom, renderComponent, flush } from "./render-hook";
 import { fakeClient, SESSION_ID, WORKSPACE_ID } from "./fake-client";
 import type { SessionClientLike } from "../src/client";
-import { fakeAttachResponse, fakeColdCapabilities } from "./sandbox-fixtures";
+import {
+  fakeAttachResponse,
+  fakeCapabilities,
+  fakeColdCapabilities,
+  fakeFileDiff,
+} from "./sandbox-fixtures";
 import { OpenGeniProvider } from "../src/provider";
 import {
   useSandboxWorkspaceTabs,
@@ -249,6 +252,29 @@ describe("workbench prewarm gating (Refinement 1)", () => {
     await hook.unmount();
   });
 
+  test("opening a guarded file is explicit live-file intent and warms a cold box", async () => {
+    const opened: string[] = [];
+    const { client, spy } = coldClient();
+    const hook = await renderTabsHook(client, {
+      sessionId: SESSION_ID,
+      events: [],
+      onOpenFile: (path) => opened.push(path),
+    });
+    await flush(60);
+    expect(spy.attachCalls).toBe(0);
+    const changes = hook.result.current.tabs.find((tab) => tab.id === WORKBENCH_TAB_CHANGES);
+    expect(changes).toBeDefined();
+    const onOpenFile = (changes!.content as ReactElement<{ onOpenFile: (path: string) => void }>)
+      .props.onOpenFile;
+    await act(async () => {
+      onOpenFile("large/output.json");
+    });
+    await flush(60);
+    expect(opened).toEqual(["large/output.json"]);
+    expect(spy.attachCalls).toBe(1);
+    await hook.unmount();
+  });
+
   test("switching sessions clears prior warm intent instead of prewarming the new session", async () => {
     const { client, spy } = coldClient();
     const result = { current: undefined as unknown as UseSandboxWorkspaceTabsResult };
@@ -316,6 +342,137 @@ describe("capture-driven default tab (Refinement 2)", () => {
     const hook = await renderTabsHook(client, { sessionId: SESSION_ID, events: [] });
     await flush();
     expect(hook.result.current.defaultTab).toBe(WORKBENCH_TAB_FILES);
+    await hook.unmount();
+  });
+
+  test("warm live changes with no capture → default Changes from authoritative Git", async () => {
+    const diff = [fakeFileDiff({ path: "src/live-change.ts" })];
+    const { client } = coldClient({
+      getStreamCapabilities: async () => fakeCapabilities(),
+      getWorkspaceCapture: async () => ({ available: false }),
+      gitStatus: async () => ({
+        isRepo: true,
+        head: "main",
+        detached: false,
+        upstream: "origin/main",
+        ahead: 0,
+        behind: 0,
+        files: [],
+        revision: 1,
+      }),
+      gitDiff: async () => ({ files: diff, revision: 1 }),
+    });
+    const hook = await renderTabsHook(client, { sessionId: SESSION_ID, events: [] });
+    await flush();
+    expect(hook.result.current.defaultTab).toBe(WORKBENCH_TAB_CHANGES);
+    await hook.unmount();
+  });
+
+  test("warm clean workspace with no capture → default Files after live Git resolves", async () => {
+    const { client } = coldClient({
+      getStreamCapabilities: async () => fakeCapabilities(),
+      getWorkspaceCapture: async () => ({ available: false }),
+      gitStatus: async () => ({
+        isRepo: true,
+        head: "main",
+        detached: false,
+        upstream: "origin/main",
+        ahead: 0,
+        behind: 0,
+        files: [],
+        revision: 1,
+      }),
+      gitDiff: async () => ({ files: [], revision: 1 }),
+    });
+    const hook = await renderTabsHook(client, { sessionId: SESSION_ID, events: [] });
+    await flush();
+    expect(hook.result.current.defaultTab).toBe(WORKBENCH_TAB_FILES);
+    await hook.unmount();
+  });
+
+  test("warm live Git outranks an empty prior capture", async () => {
+    const { client } = coldClient({
+      getStreamCapabilities: async () => fakeCapabilities(),
+      getWorkspaceCapture: async () => captureAvailable(fakeManifest(0)),
+      gitStatus: async () => ({
+        isRepo: true,
+        head: "main",
+        detached: false,
+        upstream: "origin/main",
+        ahead: 0,
+        behind: 0,
+        files: [],
+        revision: 2,
+      }),
+      gitDiff: async () => ({ files: [fakeFileDiff()], revision: 2 }),
+    });
+    const hook = await renderTabsHook(client, { sessionId: SESSION_ID, events: [] });
+    await flush();
+    expect(hook.result.current.defaultTab).toBe(WORKBENCH_TAB_CHANGES);
+    await hook.unmount();
+  });
+
+  test("a fast empty capture cannot latch Files before warm capability negotiation", async () => {
+    let resolveCapabilities: (value: ReturnType<typeof fakeCapabilities>) => void = () => {};
+    const capabilitiesPromise = new Promise<ReturnType<typeof fakeCapabilities>>((resolve) => {
+      resolveCapabilities = resolve;
+    });
+    const { client } = coldClient({
+      getStreamCapabilities: () => capabilitiesPromise,
+      getWorkspaceCapture: async () => captureAvailable(fakeManifest(0)),
+      gitStatus: async () => ({
+        isRepo: true,
+        head: "main",
+        detached: false,
+        upstream: "origin/main",
+        ahead: 0,
+        behind: 0,
+        files: [],
+        revision: 2,
+      }),
+      gitDiff: async () => ({ files: [fakeFileDiff()], revision: 2 }),
+    });
+    const hook = await renderTabsHook(client, { sessionId: SESSION_ID, events: [] });
+    await flush();
+    expect(hook.result.current.defaultTab).toBeNull();
+    await act(async () => resolveCapabilities(fakeCapabilities()));
+    await flush();
+    expect(hook.result.current.defaultTab).toBe(WORKBENCH_TAB_CHANGES);
+    await hook.unmount();
+  });
+
+  test("warm clean Git outranks a changed prior capture", async () => {
+    const { client } = coldClient({
+      getStreamCapabilities: async () => fakeCapabilities(),
+      getWorkspaceCapture: async () => captureAvailable(fakeManifest(2)),
+      gitStatus: async () => ({
+        isRepo: true,
+        head: "main",
+        detached: false,
+        upstream: "origin/main",
+        ahead: 0,
+        behind: 0,
+        files: [],
+        revision: 2,
+      }),
+      gitDiff: async () => ({ files: [], revision: 2 }),
+    });
+    const hook = await renderTabsHook(client, { sessionId: SESSION_ID, events: [] });
+    await flush();
+    expect(hook.result.current.defaultTab).toBe(WORKBENCH_TAB_FILES);
+    await hook.unmount();
+  });
+
+  test("capability failure with no capture → default Changes for the truthful retry state", async () => {
+    const { client } = coldClient({
+      getStreamCapabilities: async () => {
+        throw new Error("sandbox unreachable");
+      },
+      getWorkspaceCapture: async () => ({ available: false }),
+    });
+    const hook = await renderTabsHook(client, { sessionId: SESSION_ID, events: [] });
+    await flush();
+    expect(hook.result.current.defaultTab).toBe(WORKBENCH_TAB_CHANGES);
     await hook.unmount();
   });
 

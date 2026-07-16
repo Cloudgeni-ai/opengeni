@@ -181,16 +181,17 @@ describe("WorkbenchChanges — rail, badge, guard", () => {
     await r.unmount();
   });
 
-  test("source badge reads 'live' for the live source", async () => {
+  test("source badge reads 'Live diff' for the live source", async () => {
     const r = await renderComponent(
       <WorkbenchChanges diff={manyFiles(3)} source="live" capturedAt={null} />,
     );
     await flush();
-    expect(container(r).textContent).toContain("live");
+    expect(container(r).textContent).toContain("Live diff");
     await r.unmount();
   });
 
   test("a binary file's section shows the open-live guard, not a diff body", async () => {
+    const openedPaths: string[] = [];
     const diff = [
       fakeFileDiff({
         path: "assets/logo.png",
@@ -201,11 +202,25 @@ describe("WorkbenchChanges — rail, badge, guard", () => {
       }),
     ];
     const r = await renderComponent(
-      <WorkbenchChanges diff={diff} source="live" capturedAt={null} />,
+      <WorkbenchChanges
+        diff={diff}
+        source="live"
+        capturedAt={null}
+        onOpenFile={(path) => {
+          openedPaths.push(path);
+        }}
+      />,
     );
     await flush();
     expect(container(r).textContent).toContain("Binary file");
-    expect(container(r).textContent).toContain("open it on the machine");
+    const open = [...container(r).querySelectorAll("button")].find((button) =>
+      button.textContent?.includes("Open in Files"),
+    );
+    expect(open).toBeDefined();
+    await act(async () => {
+      open!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(openedPaths).toEqual(["assets/logo.png"]);
     await r.unmount();
   });
 

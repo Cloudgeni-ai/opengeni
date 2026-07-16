@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { act, type ReactNode, useState } from "react";
 import { WorkspaceDock } from "../src/components/workspace-dock";
-import { registerDom, renderComponent } from "./render-hook";
+import { flush, registerDom, renderComponent } from "./render-hook";
 
 registerDom();
 
@@ -27,7 +27,11 @@ function ControlledDock(props: {
   return (
     <WorkspaceDock
       autoSaveId="og.test.workspace-dock"
-      primary={<div>Chat pane</div>}
+      primary={
+        <button type="button" aria-label="Host open workspace" onClick={() => setCollapsed(false)}>
+          Chat pane
+        </button>
+      }
       tabs={[{ id: "run", label: "Run", content: <div>Run content</div> }]}
       collapsed={collapsed}
       onCollapsedChange={(next) => {
@@ -76,17 +80,26 @@ describe("WorkspaceDock", () => {
     );
 
     const tabs = Array.from(rendered.container.querySelectorAll<HTMLButtonElement>('[role="tab"]'));
-    const panel = rendered.container.querySelector<HTMLElement>('[role="tabpanel"]');
+    const panelFor = (tab: HTMLButtonElement | undefined) =>
+      tab
+        ? rendered.container.querySelector<HTMLElement>(
+            `[id="${tab.getAttribute("aria-controls")}"]`,
+          )
+        : null;
     expect(tabs.map((tab) => tab.tabIndex)).toEqual([0, -1, -1]);
-    expect(tabs[0]?.getAttribute("aria-controls")).toBe(panel?.id);
-    expect(panel?.getAttribute("aria-labelledby")).toBe(tabs[0]?.id);
+    expect(new Set(tabs.map((tab) => tab.getAttribute("aria-controls"))).size).toBe(3);
+    for (const tab of tabs) {
+      expect(panelFor(tab)?.getAttribute("aria-labelledby")).toBe(tab.id);
+    }
+    expect(panelFor(tabs[0])?.hidden).toBe(false);
 
     tabs[0]?.focus();
     await press(tabs[0] ?? null, "ArrowRight");
     expect(document.activeElement).toBe(tabs[1] ?? null);
     expect(rendered.container.textContent ?? "").toContain("Files content");
     expect(tabs.map((tab) => tab.tabIndex)).toEqual([-1, 0, -1]);
-    expect(panel?.getAttribute("aria-labelledby")).toBe(tabs[1]?.id);
+    expect(panelFor(tabs[0])?.hidden).toBe(true);
+    expect(panelFor(tabs[1])?.hidden).toBe(false);
 
     await press(tabs[1] ?? null, "End");
     expect(document.activeElement).toBe(tabs[2] ?? null);
@@ -95,6 +108,53 @@ describe("WorkspaceDock", () => {
     await press(tabs[2] ?? null, "ArrowRight");
     expect(document.activeElement).toBe(tabs[0] ?? null);
     expect(rendered.container.textContent ?? "").toContain("Changes content");
+
+    await rendered.unmount();
+  });
+
+  test("a visited tab stays mounted so file/editor/terminal state survives navigation", async () => {
+    function StatefulFiles() {
+      const [count, setCount] = useState(0);
+      return (
+        <button type="button" onClick={() => setCount((value) => value + 1)}>
+          File state {count}
+        </button>
+      );
+    }
+    const rendered = await renderComponent(
+      <WorkspaceDock
+        autoSaveId="og.test.workspace-dock-preserve-tabs"
+        primary={<div>Chat pane</div>}
+        tabs={[
+          { id: "changes", label: "Changes", content: <div>Changes content</div> },
+          { id: "files", label: "Files", content: <StatefulFiles /> },
+        ]}
+      />,
+    );
+    const findTab = (label: string) =>
+      [...rendered.container.querySelectorAll('[role="tab"]')].find(
+        (tab) => tab.textContent === label,
+      ) ?? null;
+
+    await click(findTab("Files"));
+    await click(
+      [...rendered.container.querySelectorAll("button")].find((button) =>
+        button.textContent?.startsWith("File state"),
+      ) ?? null,
+    );
+    expect(rendered.container.textContent ?? "").toContain("File state 1");
+    await click(findTab("Changes"));
+    await click(findTab("Files"));
+    expect(rendered.container.textContent ?? "").toContain("File state 1");
+
+    await click(rendered.container.querySelector('[title="Collapse"]'));
+    await click(rendered.container.querySelector('[title="Open workspace"]'));
+    expect(rendered.container.textContent ?? "").toContain("File state 1");
+
+    await click(rendered.container.querySelector('[title="Maximize"]'));
+    expect(rendered.container.querySelector('[title="Restore (Esc)"]')).not.toBeNull();
+    await click(rendered.container.querySelector('[title="Restore (Esc)"]'));
+    expect(rendered.container.textContent ?? "").toContain("File state 1");
 
     await rendered.unmount();
   });
@@ -156,13 +216,20 @@ describe("WorkspaceDock", () => {
     expect(rendered.container.textContent ?? "").toContain("Run content");
 
     await click(rendered.container.querySelector('[title="Collapse"]'));
+    await flush(20);
 
-    expect(rendered.container.textContent ?? "").not.toContain("Run content");
+    expect(
+      rendered.container.querySelector("[data-workspace-surface]")?.getAttribute("aria-hidden"),
+    ).toBe("true");
     expect(rendered.container.querySelector('[title="Open workspace"]')).not.toBeNull();
+    expect(document.activeElement?.getAttribute("title")).toBe("Open workspace");
 
     await click(rendered.container.querySelector('[title="Open workspace"]'));
 
     expect(rendered.container.textContent ?? "").toContain("Run content");
+    expect(
+      rendered.container.querySelector("[data-workspace-surface]")?.getAttribute("aria-hidden"),
+    ).toBeNull();
 
     await rendered.unmount();
   });
@@ -189,9 +256,54 @@ describe("WorkspaceDock", () => {
       await click(rendered.container.querySelector('[aria-label="Close workspace"]'));
       expect(changes.at(-1)).toBe(true);
       expect(
-        rendered.container.querySelector('[role="dialog"][aria-label="Workspace"]'),
+        rendered.container.querySelector('[role="dialog"][aria-label="Workspace"]:not([hidden])'),
       ).toBeNull();
+      expect(
+        rendered.container.querySelector('[role="dialog"][aria-label="Workspace"][hidden]'),
+      ).not.toBeNull();
 
+      const hostOpen = rendered.container.querySelector<HTMLElement>(
+        '[aria-label="Host open workspace"]',
+      );
+      hostOpen?.focus();
+      await click(hostOpen);
+      await flush(20);
+      expect(
+        rendered.container.querySelector('[role="dialog"][aria-label="Workspace"]:not([hidden])'),
+      ).not.toBeNull();
+      expect(document.activeElement?.getAttribute("role")).toBe("tab");
+
+      await click(rendered.container.querySelector('[aria-label="Close workspace"]'));
+      await flush(20);
+      expect(document.activeElement).toBe(hostOpen ?? null);
+
+      await rendered.unmount();
+    });
+  });
+
+  test("an uncontrolled phone overlay always provides a focusable reopen affordance", async () => {
+    await withNarrowViewport(async () => {
+      const rendered = await renderComponent(
+        <WorkspaceDock
+          autoSaveId="og.test.workspace-dock-mobile-uncontrolled"
+          primary={<div>Chat pane</div>}
+          tabs={[{ id: "files", label: "Files", content: <div>Files content</div> }]}
+        />,
+      );
+      expect(
+        rendered.container.querySelector('[role="dialog"][aria-label="Workspace"]:not([hidden])'),
+      ).not.toBeNull();
+
+      await click(rendered.container.querySelector('[aria-label="Close workspace"]'));
+      await flush(20);
+      const reopen = rendered.container.querySelector<HTMLElement>('[title="Open workspace"]');
+      expect(reopen).not.toBeNull();
+      expect(document.activeElement).toBe(reopen ?? null);
+
+      await click(reopen);
+      expect(
+        rendered.container.querySelector('[role="dialog"][aria-label="Workspace"]:not([hidden])'),
+      ).not.toBeNull();
       await rendered.unmount();
     });
   });
