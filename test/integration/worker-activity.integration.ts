@@ -43,6 +43,7 @@ import {
   recordUsageEvent,
   requireScheduledTask,
   saveRunState,
+  setWorkspaceInferenceControl,
   sumUsageQuantity,
   updateScheduledTask,
   withWorkspaceRls,
@@ -2103,6 +2104,7 @@ describe("worker activities integration", () => {
 
   test("dispatches scheduled tasks into new sessions as typed internal updates", async () => {
     const grant = await testGrant(dbClient.db);
+    const workflowWakes: unknown[] = [];
     const task = await createOwnedScheduledTask(dbClient.db, grant, {
       name: "scheduled-new-session",
       status: "active",
@@ -2126,6 +2128,9 @@ describe("worker activities integration", () => {
       }),
       db: dbClient.db,
       bus,
+      wakeSessionWorkflow: async (input) => {
+        workflowWakes.push(input);
+      },
       runtime: createProductionAgentRuntime({ model: new ScriptedModel([{ outputText: "ok" }]) }),
     });
 
@@ -2137,6 +2142,15 @@ describe("worker activities integration", () => {
 
     expect(result.action).toBe("start");
     expect(result.workflowId).toBe(`session-${result.sessionId}`);
+    expect(workflowWakes).toEqual([
+      {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: result.sessionId,
+        workflowId: result.workflowId,
+        wakeRevision: result.workflowWakeRevision,
+      },
+    ]);
     const session = await getSession(dbClient.db, grant.workspaceId, result.sessionId);
     expect(session?.metadata).toMatchObject({ scheduledTaskId: task.id, source: "test" });
     expect(session?.tools).toEqual([{ kind: "mcp", id: "docs" }]);
@@ -2165,6 +2179,68 @@ describe("worker activities integration", () => {
       status: "dispatched",
       sessionId: result.sessionId,
       triggerEventId: result.triggerEventId,
+    });
+  });
+
+  test("scheduled dispatch and its retry remain inert while the workspace is paused", async () => {
+    const grant = await testGrant(dbClient.db);
+    await setWorkspaceInferenceControl(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      actor: grant.subjectId,
+      state: "paused",
+      reason: "test",
+      clientEventId: `pause:${crypto.randomUUID()}`,
+      expectedState: "active",
+      expectedGeneration: 0,
+    });
+    const task = await createOwnedScheduledTask(dbClient.db, grant, {
+      name: "paused-scheduled-session",
+      status: "active",
+      schedule: { type: "interval", everySeconds: 3600 },
+      temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
+      runMode: "new_session_per_run",
+      overlapPolicy: "allow_concurrent",
+      agentConfig: { prompt: "wait for resume", resources: [], tools: [], metadata: {} },
+      metadata: {},
+    });
+    const workflowWakes: unknown[] = [];
+    const activities = createWorkerActivities({
+      settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl }),
+      db: dbClient.db,
+      bus,
+      wakeSessionWorkflow: async (input) => {
+        workflowWakes.push(input);
+      },
+      runtime: createProductionAgentRuntime({ model: new ScriptedModel([{ outputText: "ok" }]) }),
+    });
+    const producerKey = `paused-fire:${crypto.randomUUID()}`;
+
+    const first = await activities.dispatchScheduledTaskRun({
+      workspaceId: grant.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled",
+      producerKey,
+    });
+    const retry = await activities.dispatchScheduledTaskRun({
+      workspaceId: grant.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled",
+      producerKey,
+    });
+
+    expect(first.workflowWakeRevision).toBeNull();
+    expect(retry).toMatchObject({ sessionId: first.sessionId, workflowWakeRevision: null });
+    expect(workflowWakes).toHaveLength(0);
+    expect(await getSession(dbClient.db, grant.workspaceId, first.sessionId)).toMatchObject({
+      status: "paused",
+    });
+    const events = await listSessionEvents(dbClient.db, grant.workspaceId, first.sessionId, 0, 10);
+    expect(events.find((event) => event.type === "session.created")?.payload).toMatchObject({
+      status: "paused",
+    });
+    expect(events.find((event) => event.type === "session.status.changed")?.payload).toMatchObject({
+      status: "paused",
     });
   });
 

@@ -245,12 +245,14 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
               sessionId: wake.sessionId,
               workflowId: wake.workflowId,
               wakeRevision: wake.wakeRevision,
+              workflowWakeRevision: wake.workflowWakeRevision,
             })
           : workflowClient.wakeSessionWorkflow({
               accountId: wake.accountId,
               workspaceId: wake.workspaceId,
               sessionId: wake.sessionId,
               workflowId: wake.workflowId,
+              wakeRevision: wake.workflowWakeRevision,
             }),
       ),
     );
@@ -333,9 +335,14 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: `session goal is ${existing.status}; only paused goals can be resumed`,
       });
     }
-    const { goal, changed } = await setSessionGoalStatus(db, workspaceId, sessionId, {
-      status: "active",
-    });
+    const { goal, changed, workflowWakeRevision } = await setSessionGoalStatus(
+      db,
+      workspaceId,
+      sessionId,
+      {
+        status: "active",
+      },
+    );
     // `changed` guards the racing-PATCH case: both requests can pass the
     // status pre-check, but only the transition winner emits and wakes.
     if (changed) {
@@ -351,14 +358,18 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
           },
         },
       ]);
-      // signalWithStart restarts a completed workflow whose first claim finds no
-      // queued turn, so maybeContinueGoal fires — resume works on an idle session.
-      await workflowClient.wakeSessionWorkflow({
-        accountId: grant.accountId,
-        workspaceId,
-        sessionId,
-        workflowId: workflowIdForSession(sessionId),
-      });
+      // signalWithStart restarts an eligible idle workflow so maybeContinueGoal
+      // fires. A closed workspace/session gate keeps the resumed goal durable
+      // and inert until that gate's own Resume mutation commits its wake.
+      if (workflowWakeRevision !== null) {
+        await workflowClient.wakeSessionWorkflow({
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId,
+          workflowId: workflowIdForSession(sessionId),
+          wakeRevision: workflowWakeRevision,
+        });
+      }
     }
     return c.json(goal);
   });
@@ -434,12 +445,13 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     // /compact sets one durable request. The worker clears it only in the same
     // fenced transaction that installs replacement history, so failed or stale
     // attempts cannot lose the request.
-    await requestSessionCompaction(db, workspaceId, sessionId);
+    const requested = await requestSessionCompaction(db, workspaceId, sessionId);
     await workflowClient.wakeSessionWorkflow({
       accountId: grant.accountId,
       workspaceId,
       sessionId,
-      workflowId: workflowIdForSession(sessionId),
+      workflowId: requested.temporalWorkflowId,
+      wakeRevision: requested.wakeRevision,
     });
     return c.json({ status: "pending", message: "Compaction will run at the next safe boundary." });
   });
@@ -515,11 +527,15 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       );
       await bus.publish(workspaceId, sessionId, result.events);
       if (result.shouldWake) {
+        if (result.workflowWakeRevision === null) {
+          throw new Error("Queue continuation has no workflow wake revision");
+        }
         await workflowClient.wakeSessionWorkflow({
           accountId: grant.accountId,
           workspaceId,
           sessionId,
           workflowId: workflowIdForSession(sessionId),
+          wakeRevision: result.workflowWakeRevision,
         });
       }
       return c.json(result);
@@ -561,19 +577,27 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     await bus.publish(workspaceId, sessionId, result.events);
     const workflowId = workflowIdForSession(sessionId);
     if (result.shouldSignalControl) {
+      if (result.workflowWakeRevision === null) {
+        throw new Error("Session control has no workflow wake revision");
+      }
       await workflowClient.signalSessionControl({
         accountId: grant.accountId,
         workspaceId,
         sessionId,
         eventId: result.event.id,
         workflowId,
+        workflowWakeRevision: result.workflowWakeRevision,
       });
     } else if (result.shouldWake) {
+      if (result.workflowWakeRevision === null) {
+        throw new Error("Session resume has no workflow wake revision");
+      }
       await workflowClient.wakeSessionWorkflow({
         accountId: grant.accountId,
         workspaceId,
         sessionId,
         workflowId,
+        wakeRevision: result.workflowWakeRevision,
       });
     }
     return c.json(
@@ -664,6 +688,7 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
         sessionId,
         eventId: accepted.event.id,
         workflowId,
+        workflowWakeRevision: accepted.workflowWakeRevision,
       });
       return c.json(accepted.event, 202);
     }

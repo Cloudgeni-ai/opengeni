@@ -21,7 +21,6 @@ import {
   getActiveSessionHistoryItems,
   getSession,
   getSessionTurn,
-  listEnrollableSessions,
   listOutstandingSessionSystemUpdates,
   listSessionSystemUpdatesForTurn,
   listUsageEvents,
@@ -770,12 +769,6 @@ describe("clean session control plane", () => {
     expect(await peekSessionWork(client.db, grant.workspaceId!, session.id)).toEqual({
       kind: "idle",
     });
-    expect(
-      (await listEnrollableSessions(client.db, 10_000)).some(
-        (entry) => entry.sessionId === session.id,
-      ),
-    ).toBe(false);
-
     const prompt = await send(grant, session.id, "Use the child result now");
     const promptTurn = await claimTestSessionWork(
       client.db,

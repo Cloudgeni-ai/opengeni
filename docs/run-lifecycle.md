@@ -168,6 +168,15 @@ into a failed session transitions it failed → queued, restarts the session
 workflow (signalWithStart), and the next turn runs from the stored items.
 Only `cancelled` — an explicit user act — is terminal.
 
+Every transaction that creates or re-enables workflow work also increments the
+session's durable wake revision. A successful `signalWithStart` acknowledges
+that exact revision; a bounded dispatcher retries only due unacknowledged rows.
+Temporal is therefore a nudge, never the work ledger, and a commit/signal crash
+cannot strand the prompt. Repaired wakes inspect the current pending control so
+a live Pause/Steer still reaches the control handler. The workflow records a
+monotonic signal generation before its final activity chain and refuses to
+return when a signal arrived during that chain, closing the completion race.
+
 ## Goals — what makes long runs continue
 
 Agents stop prematurely. A **goal** flips the default so that finishing a turn

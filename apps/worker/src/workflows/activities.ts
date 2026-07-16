@@ -4,10 +4,10 @@ import type * as activities from "../activities";
 type WorkflowControlActivities = Pick<
   typeof activities,
   | "dispatchScheduledTaskRun"
+  | "enqueueGoalRetryWake"
   | "failSessionAttempt"
   | "getCodexCapacityWait"
   | "markSessionIdle"
-  | "maybeContinueGoal"
   | "peekSessionWork"
   | "reconcileCodexCapacityWait"
   | "recoverDispatch"
@@ -29,6 +29,19 @@ export const activity = proxyActivities<WorkflowControlActivities>({
     initialInterval: "1 second",
     backoffCoefficient: 2,
     maximumInterval: "30 seconds",
+  },
+});
+
+/** Goal continuation is advisory at an idle boundary. A transient failure gets
+ * a short retry window, then records an explicit delayed outbox wake instead
+ * of relying on an unrelated future mutation. */
+export const goalActivity = proxyActivities<Pick<typeof activities, "maybeContinueGoal">>({
+  startToCloseTimeout: "30 seconds",
+  retry: {
+    initialInterval: "1 second",
+    backoffCoefficient: 2,
+    maximumInterval: "5 seconds",
+    maximumAttempts: 3,
   },
 });
 

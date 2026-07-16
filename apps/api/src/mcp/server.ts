@@ -1420,11 +1420,15 @@ function registerWorkspaceOrchestrationTools(
             await deps.bus.publish(grant.workspaceId, targetSessionId, result.events);
           }
           if (result.shouldWake) {
+            if (result.workflowWakeRevision === null) {
+              throw new Error("Internal update has no workflow wake revision");
+            }
             await deps.workflowClient.wakeSessionWorkflow({
               accountId: grant.accountId,
               workspaceId: grant.workspaceId,
               sessionId: targetSessionId,
               workflowId: result.temporalWorkflowId ?? workflowIdForSession(targetSessionId),
+              wakeRevision: result.workflowWakeRevision,
             });
           }
           return json({
@@ -1471,12 +1475,16 @@ function registerWorkspaceOrchestrationTools(
         });
         await deps.bus.publish(grant.workspaceId, sessionId, controlled.events);
         if (controlled.shouldSignalControl) {
+          if (controlled.workflowWakeRevision === null) {
+            throw new Error("Session control has no workflow wake revision");
+          }
           await deps.workflowClient.signalSessionControl({
             accountId: grant.accountId,
             workspaceId: grant.workspaceId,
             sessionId,
             eventId: controlled.event.id,
             workflowId: workflowIdForSession(sessionId),
+            workflowWakeRevision: controlled.workflowWakeRevision,
           });
         }
         return json({

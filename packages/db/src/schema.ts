@@ -741,6 +741,7 @@ export const sessionListSnapshots = pgTable(
       table.subjectId,
       table.expiresAt,
     ),
+    expiryReaper: index("session_list_snapshots_expiry_reaper_idx").on(table.expiresAt, table.id),
   }),
 );
 
@@ -1212,6 +1213,53 @@ export const sessionSystemUpdateOutbox = pgTable(
       table.dedupeKey,
     ),
     pending: index("session_system_update_outbox_pending_idx").on(table.status, table.createdAt),
+  }),
+);
+
+/**
+ * Transactional delivery ledger for session-workflow wakeups. Postgres owns
+ * work eligibility; Temporal signals are only nudges. One coalescing row per
+ * session makes a committed mutation repairable without periodically scanning
+ * every session that happens to look runnable.
+ */
+export const sessionWorkflowWakeOutbox = pgTable(
+  "session_workflow_wake_outbox",
+  {
+    sessionId: uuid("session_id").primaryKey(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    temporalWorkflowId: text("temporal_workflow_id").notNull(),
+    wakeRevision: bigint("wake_revision", { mode: "number" }).notNull().default(1),
+    deliveredRevision: bigint("delivered_revision", { mode: "number" }).notNull().default(0),
+    reason: text("reason").notNull(),
+    attempts: integer("attempts").notNull().default(0),
+    nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }).notNull().defaultNow(),
+    lastError: text("last_error"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    revisionValid: check(
+      "session_workflow_wake_outbox_revision_check",
+      sql`${table.wakeRevision} > 0 and ${table.deliveredRevision} >= 0 and ${table.deliveredRevision} <= ${table.wakeRevision}`,
+    ),
+    workspaceAccount: foreignKey({
+      name: "session_workflow_wake_outbox_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    workspaceSessionFk: foreignKey({
+      name: "session_workflow_wake_outbox_workspace_session_fk",
+      columns: [table.workspaceId, table.sessionId],
+      foreignColumns: [sessions.workspaceId, sessions.id],
+    }).onDelete("cascade"),
+    workspaceSession: uniqueIndex("session_workflow_wake_outbox_workspace_session_uq").on(
+      table.workspaceId,
+      table.sessionId,
+    ),
+    pending: index("session_workflow_wake_outbox_pending_idx")
+      .on(table.nextAttemptAt, table.updatedAt, table.sessionId)
+      .where(sql`${table.wakeRevision} > ${table.deliveredRevision}`),
   }),
 );
 

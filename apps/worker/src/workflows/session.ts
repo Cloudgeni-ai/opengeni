@@ -11,7 +11,12 @@ import {
   workflowInfo,
 } from "@temporalio/workflow";
 import type * as activities from "../activities";
-import { activity, turnActivityForTaskQueue, workflowFailureMessage } from "./activities";
+import {
+  activity,
+  goalActivity,
+  turnActivityForTaskQueue,
+  workflowFailureMessage,
+} from "./activities";
 
 /**
  * Deterministic backstop for continueAsNew. A session workflow is long-lived
@@ -116,6 +121,8 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
   let controlEventId: string | null = null;
   let wakeups = 0;
   let capacityWakeups = 0;
+  let signalVersion = 0;
+  let nonControlSignalVersion = 0;
   // Turns dispatched on THIS run (reset to 0 by continueAsNew). The backstop
   // for the history-overflow guard below; bounded growth is what makes a
   // weeks-long session survivable.
@@ -123,18 +130,27 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
   let capacityChecksThisRun = 0;
 
   setHandler(userMessage, () => {
+    signalVersion += 1;
+    nonControlSignalVersion += 1;
     wakeups += 1;
   });
   setHandler(queueChanged, () => {
+    signalVersion += 1;
+    nonControlSignalVersion += 1;
     wakeups += 1;
   });
   setHandler(approvalDecision, () => {
+    signalVersion += 1;
+    nonControlSignalVersion += 1;
     approvalWakeups += 1;
   });
   setHandler(sessionControl, (eventId) => {
+    signalVersion += 1;
     controlEventId = eventId;
   });
   setHandler(codexCapacityChanged, () => {
+    signalVersion += 1;
+    nonControlSignalVersion += 1;
     capacityWakeups += 1;
   });
 
@@ -251,6 +267,11 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
         });
       }
     }
+    // Capture before the final activity chain of this cycle. Temporal may
+    // accept a signal while an activity completion and workflow completion
+    // race; every terminal return below must observe that arrival and loop.
+    const closeSignalVersion = signalVersion;
+    const closeNonControlSignalVersion = nonControlSignalVersion;
     const workflowId = workflowInfo().workflowId;
     const peek = await activity.peekSessionWork({
       workspaceId: input.workspaceId,
@@ -265,7 +286,37 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
         workflowId,
       });
       if (controlEventId === peek.controlEventId) controlEventId = null;
-      if (settlement.action === "paused") return;
+      if (settlement.action === "paused") {
+        // The matching sessionControl signal is consumed by this exact durable
+        // settlement. It must not manufacture a second loop; only later work
+        // or a different control keeps the workflow alive.
+        if (nonControlSignalVersion !== closeNonControlSignalVersion || controlEventId !== null) {
+          continue;
+        }
+        return;
+      }
+      continue;
+    }
+    // A duplicate/repaired control signal may arrive after its durable fence
+    // already settled. Explicitly classify it through the same settlement
+    // activity and clear the in-memory signal so it cannot pin this workflow
+    // run forever or block continue-as-new.
+    if (controlEventId !== null) {
+      const signaledControlEventId = controlEventId;
+      const settlement = await activity.settleSessionControl({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        triggerEventId: signaledControlEventId,
+        workflowId,
+      });
+      if (controlEventId === signaledControlEventId) controlEventId = null;
+      if (settlement.action === "paused") {
+        if (nonControlSignalVersion !== closeNonControlSignalVersion || controlEventId !== null) {
+          continue;
+        }
+        return;
+      }
       continue;
     }
     if (peek.kind === "capacity-wait") {
@@ -274,14 +325,20 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
     }
     if (peek.kind === "approval-wait") {
       const seenApprovalWakeups = approvalWakeups;
-      await condition(() => controlEventId !== null || approvalWakeups !== seenApprovalWakeups);
+      const seenWakeups = wakeups;
+      await condition(
+        () =>
+          controlEventId !== null ||
+          approvalWakeups !== seenApprovalWakeups ||
+          wakeups !== seenWakeups,
+      );
       continue;
     }
     if (peek.kind === "idle") {
       if (controlEventId === null) {
         let continuation: activities.MaybeContinueGoalResult = { action: "none" };
         try {
-          continuation = await activity.maybeContinueGoal({
+          continuation = await goalActivity.maybeContinueGoal({
             accountId: input.accountId,
             workspaceId: input.workspaceId,
             sessionId: input.sessionId,
@@ -289,6 +346,12 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
           });
         } catch (error) {
           if (isCancellation(error)) throw error;
+          await activity.enqueueGoalRetryWake({
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            workflowId,
+          });
         }
         if (continuation.action === "continue" || continuation.action === "queue") continue;
       }
@@ -311,11 +374,7 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,
       });
-      if (
-        controlEventId !== null ||
-        wakeups !== seenWakeups ||
-        approvalWakeups !== seenApprovalWakeups
-      ) {
+      if (signalVersion !== closeSignalVersion) {
         continue;
       }
       return;
@@ -325,7 +384,10 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       peek.kind === "approval-pending"
         ? ({ kind: "approval", triggerEventId: peek.triggerEventId } as const)
         : ({ kind: "next" } as const);
-    if (!(await runTurn(input.accountId, input.workspaceId, input.sessionId, trigger))) return;
+    if (!(await runTurn(input.accountId, input.workspaceId, input.sessionId, trigger))) {
+      if (signalVersion !== closeSignalVersion) continue;
+      return;
+    }
   }
 
   async function runTurn(

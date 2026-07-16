@@ -17,13 +17,15 @@ import type { ObjectStorage } from "@opengeni/storage";
 // its workflow run complete, so a plain signal would not start one — this must
 // signalWithStart. Injected (not built from the worker's NativeConnection)
 // because the worker package owns only the worker runtime, not a client; an
-// undefined signaler degrades to "DB wake recorded, no workflow nudge" (the
-// turn is still claimed on the parent's next natural wake).
+// missing signaler leaves the committed outbox revision for the global repair
+// sweep; production workers always inject this dependency.
 export type WakeSessionWorkflowSignal = (input: {
   accountId: string;
   workspaceId: string;
   sessionId: string;
   workflowId: string;
+  wakeRevision: number;
+  controlEventId?: string;
 }) => Promise<void>;
 
 export type SignalCodexCapacityWorkflow = (input: {
@@ -43,7 +45,7 @@ export type ActivityServices = {
   documentServices: DocumentServices;
   observability: Observability;
   wakeSessionWorkflow: WakeSessionWorkflowSignal | null;
-  /** Revision-carrying capacity nudge; queue wake remains the back-compat fallback. */
+  /** Revision-carrying capacity nudge; generic outbox repair is also sufficient. */
   signalCodexCapacityWorkflow?: SignalCodexCapacityWorkflow | null;
   // §7.5 P3 — host-entitlements port, the WORKER half of the same seam the API
   // edge exposes on `AppDependencies`. When set, `ensureRunAllowed` (turn-entry
@@ -189,6 +191,7 @@ export type DispatchScheduledTaskRunResult = {
   sessionId: string;
   triggerEventId: string;
   workflowId: string;
+  workflowWakeRevision: number | null;
 };
 
 export type IndexDocumentInput = {

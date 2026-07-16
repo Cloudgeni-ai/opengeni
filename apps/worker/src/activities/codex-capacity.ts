@@ -63,6 +63,7 @@ export async function signalCodexCapacityWakeTargets(
               workspaceId: target.workspaceId,
               sessionId: target.sessionId,
               workflowId: target.workflowId,
+              wakeRevision: target.workflowWakeRevision,
             })
           : Promise.resolve(),
     ),

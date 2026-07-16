@@ -6,7 +6,7 @@ import {
   startupRetryOptions,
   type Settings,
 } from "@opengeni/config";
-import { createDb } from "@opengeni/db";
+import { createDb, markSessionWorkflowWakeDelivered, type Database } from "@opengeni/db";
 import { createNatsEventBus } from "@opengeni/events";
 import {
   createObservability,
@@ -30,6 +30,11 @@ import type { SignalCodexCapacityWorkflow, WakeSessionWorkflowSignal } from "./a
 import { turnTaskQueue } from "./workflows/activities";
 import { dbReadyCheck, natsReadyCheck, startWorkerHttpServer } from "./http";
 import { observabilityEventLogger } from "./observability-metrics";
+import {
+  SESSION_WORKFLOW_WAKE_DISPATCHER_PERIOD_MS,
+  SESSION_WORKFLOW_WAKE_DISPATCHER_SCHEDULE_ID,
+  SESSION_WORKFLOW_WAKE_DISPATCHER_WORKFLOW_TYPE,
+} from "./workflow-wake-contract";
 
 // The deterministic id of the ONE global reaper Schedule. A single id means
 // create() is idempotent across every worker in the pool: the first worker to
@@ -39,7 +44,6 @@ import { observabilityEventLogger } from "./observability-metrics";
 const SANDBOX_REAPER_SCHEDULE_ID = "opengeni-sandbox-lease-reaper";
 export const FILE_UPLOAD_REAPER_SCHEDULE_ID = "opengeni-file-upload-reaper";
 export const FILE_UPLOAD_REAPER_PERIOD_MS = 15 * 60 * 1_000;
-
 export type OpenGeniWorkerRole = "control" | "turn";
 
 export type WorkerOptions = {
@@ -127,7 +131,10 @@ export async function createOpenGeniWorker(options: WorkerOptions): Promise<{
 // idled and let its run finish, so a plain signal would not start one).
 // Separate from the worker's NativeConnection: the @temporalio/client
 // Connection is what exposes workflow.signalWithStart.
-export async function createWorkerWorkflowSignaler(settings: Settings): Promise<{
+export async function createWorkerWorkflowSignaler(
+  settings: Settings,
+  db: Database,
+): Promise<{
   wakeSessionWorkflow: WakeSessionWorkflowSignal;
   signalCodexCapacityWorkflow: SignalCodexCapacityWorkflow;
   check: () => Promise<void>;
@@ -136,13 +143,38 @@ export async function createWorkerWorkflowSignaler(settings: Settings): Promise<
   const connection = await Connection.connect({ address: settings.temporalHost });
   const temporal = new TemporalClient({ connection, namespace: settings.temporalNamespace });
   return {
-    wakeSessionWorkflow: async ({ accountId, workspaceId, sessionId, workflowId }) => {
-      await temporal.workflow.signalWithStart("sessionWorkflow", {
-        taskQueue: settings.temporalTaskQueue,
-        workflowId,
-        workflowIdReusePolicy: "ALLOW_DUPLICATE",
-        args: [{ accountId, workspaceId, sessionId }],
-        signal: "queueChanged",
+    wakeSessionWorkflow: async ({
+      accountId,
+      workspaceId,
+      sessionId,
+      workflowId,
+      wakeRevision,
+      controlEventId,
+    }) => {
+      if (controlEventId) {
+        await temporal.workflow.signalWithStart("sessionWorkflow", {
+          taskQueue: settings.temporalTaskQueue,
+          workflowId,
+          workflowIdReusePolicy: "ALLOW_DUPLICATE",
+          args: [{ accountId, workspaceId, sessionId }],
+          signal: "sessionControl",
+          signalArgs: [controlEventId],
+        });
+      } else {
+        await temporal.workflow.signalWithStart("sessionWorkflow", {
+          taskQueue: settings.temporalTaskQueue,
+          workflowId,
+          workflowIdReusePolicy: "ALLOW_DUPLICATE",
+          args: [{ accountId, workspaceId, sessionId }],
+          signal: "queueChanged",
+        });
+      }
+      await markSessionWorkflowWakeDelivered(db, {
+        accountId,
+        workspaceId,
+        sessionId,
+        temporalWorkflowId: workflowId,
+        wakeRevision,
       });
     },
     signalCodexCapacityWorkflow: async ({
@@ -160,6 +192,9 @@ export async function createWorkerWorkflowSignaler(settings: Settings): Promise<
         signal: "codexCapacityChanged",
         signalArgs: [wakeRevision],
       });
+      // A typed capacity signal cannot acknowledge the generic outbox row:
+      // another producer may have advanced it with a Pause/Steer that requires
+      // sessionControl. The global dispatcher owns that acknowledgement.
     },
     check: async () => {
       await connection.workflowService.getSystemInfo({});
@@ -291,6 +326,50 @@ export async function registerFileUploadReaperSchedule(
   }
 }
 
+/**
+ * Register the one repair cadence for committed workflow-wake revisions. The
+ * activity only reads the transactional outbox and sends revision-scoped
+ * signals; it is independent of sandbox ownership and child-agent features.
+ */
+export async function registerSessionWorkflowWakeDispatcherSchedule(
+  settings: Settings,
+  observability: Observability,
+): Promise<{ registered: boolean; close: () => Promise<void> }> {
+  const connection = await Connection.connect({ address: settings.temporalHost });
+  const temporal = new TemporalClient({ connection, namespace: settings.temporalNamespace });
+  try {
+    await temporal.schedule.create({
+      scheduleId: SESSION_WORKFLOW_WAKE_DISPATCHER_SCHEDULE_ID,
+      spec: { intervals: [{ every: SESSION_WORKFLOW_WAKE_DISPATCHER_PERIOD_MS }] },
+      action: {
+        type: "startWorkflow",
+        workflowType: SESSION_WORKFLOW_WAKE_DISPATCHER_WORKFLOW_TYPE,
+        taskQueue: settings.temporalTaskQueue,
+        args: [],
+      },
+      policies: {
+        overlap: ScheduleOverlapPolicy.SKIP,
+        catchupWindow: "1m",
+        pauseOnFailure: false,
+      },
+    });
+    observability.info("Registered the session-workflow wake dispatcher Schedule", {
+      scheduleId: SESSION_WORKFLOW_WAKE_DISPATCHER_SCHEDULE_ID,
+      periodMs: SESSION_WORKFLOW_WAKE_DISPATCHER_PERIOD_MS,
+    });
+    return { registered: true, close: async () => connection.close() };
+  } catch (error) {
+    if (error instanceof ScheduleAlreadyRunning) {
+      observability.info("Session-workflow wake dispatcher Schedule already registered", {
+        scheduleId: SESSION_WORKFLOW_WAKE_DISPATCHER_SCHEDULE_ID,
+      });
+      return { registered: false, close: async () => connection.close() };
+    }
+    await connection.close().catch(() => undefined);
+    throw error;
+  }
+}
+
 export async function startWorker() {
   const role = process.env.OPENGENI_WORKER_ROLE;
   if (role !== "control" && role !== "turn") {
@@ -314,6 +393,9 @@ export async function startWorker() {
   let fileUploadReaperSchedule:
     | Awaited<ReturnType<typeof registerFileUploadReaperSchedule>>
     | undefined;
+  let workflowWakeDispatcherSchedule:
+    | Awaited<ReturnType<typeof registerSessionWorkflowWakeDispatcherSchedule>>
+    | undefined;
   let httpServer: ReturnType<typeof startWorkerHttpServer> | undefined;
   try {
     bus = await retryStartupDependency(
@@ -330,7 +412,7 @@ export async function startWorker() {
     );
     signaler = await retryStartupDependency(
       "Temporal client",
-      () => createWorkerWorkflowSignaler(settings),
+      () => createWorkerWorkflowSignaler(settings, dbClient.db),
       { ...retryOptions, onRetry },
     );
     workerBundle = await createOpenGeniWorker({
@@ -364,6 +446,11 @@ export async function startWorker() {
       fileUploadReaperSchedule = await retryStartupDependency(
         "Temporal schedule (file upload reaper)",
         () => registerFileUploadReaperSchedule(settings, observability),
+        { ...retryOptions, onRetry },
+      );
+      workflowWakeDispatcherSchedule = await retryStartupDependency(
+        "Temporal schedule (session-workflow wake dispatcher)",
+        () => registerSessionWorkflowWakeDispatcherSchedule(settings, observability),
         { ...retryOptions, onRetry },
       );
     }
@@ -412,6 +499,7 @@ export async function startWorker() {
       signaler?.close(),
       reaperSchedule?.close(),
       fileUploadReaperSchedule?.close(),
+      workflowWakeDispatcherSchedule?.close(),
       bus?.close(),
       dbClient.close(),
     ]);

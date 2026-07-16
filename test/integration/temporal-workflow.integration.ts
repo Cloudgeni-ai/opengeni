@@ -10,25 +10,32 @@ import { turnTaskQueue } from "../../apps/worker/src/workflows/activities";
 // ApplicationFailure via ensureApplicationFailure), so the worker-death tests
 // produce the REAL failure shape: the mock turn activity hangs without ever
 // heartbeating and the Temporal server closes it with a heartbeat timeout
-// (the session workflow's proxy sets heartbeatTimeout to 30s), delivering an
+// (the session workflow's proxy sets heartbeatTimeout to 2 minutes), delivering an
 // ActivityFailure whose cause is a TimeoutFailure with timeoutType HEARTBEAT
-// — exactly what a SIGKILLed worker produces. The hang resolves on the
-// worker-shutdown cancellation so the test worker can drain at the end.
+// — exactly what a SIGKILLed worker produces. The hang rejects on the late
+// worker cancellation so ignored local completion cannot mutate fake durable
+// state, while still allowing the test worker to drain at the end.
 async function hangWithoutHeartbeating(): Promise<{ status: string }> {
-  await new Promise<void>((resolve) => {
+  await new Promise<void>((_resolve, reject) => {
     const signal = currentActivityContext()?.cancellationSignal;
     if (!signal || signal.aborted) {
-      resolve();
+      reject(new Error("simulated dead worker activity cancelled after timeout"));
       return;
     }
-    signal.addEventListener("abort", () => resolve(), { once: true });
+    signal.addEventListener(
+      "abort",
+      () => reject(new Error("simulated dead worker activity cancelled after timeout")),
+      { once: true },
+    );
   });
-  return { status: "cancelled" };
+  throw new Error("unreachable simulated dead worker completion");
 }
 
 // Generous bound for the server to detect a missed-heartbeat activity
-// (30s heartbeat window + detection slack) plus the rest of the test.
-const workerDeathTestTimeoutMs = 180_000;
+// (2-minute heartbeat window + server detection slack) plus the rest of the
+// test. This timeout does not change runtime behavior; it only prevents a slow
+// CI host from killing the real heartbeat proof just before recovery settles.
+const workerDeathTestTimeoutMs = 240_000;
 
 const temporalWorkflowTestTimeoutMs = 30_000;
 
@@ -448,6 +455,72 @@ describe("Temporal workflow integration", () => {
   );
 
   test(
+    "a resume wake racing the final paused settlement cannot be closed into the old run",
+    async () => {
+      const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+      const scope = workflowScope();
+      let pendingControl = true;
+      let resumedWork = false;
+      let turnRuns = 0;
+      let releaseSettlement!: () => void;
+      const settlementRelease = new Promise<void>((resolve) => {
+        releaseSettlement = resolve;
+      });
+      let settlementEntered!: () => void;
+      const entered = new Promise<void>((resolve) => {
+        settlementEntered = resolve;
+      });
+      const worker = await testWorker(nativeConnection, taskQueue, {
+        peekSessionWork: async () => {
+          if (pendingControl) {
+            return { kind: "fence-settle", controlEventId: "pause-event" } as const;
+          }
+          return resumedWork && turnRuns === 0
+            ? ({ kind: "runnable" } as const)
+            : ({ kind: "idle" } as const);
+        },
+        settleSessionControl: async () => {
+          settlementEntered();
+          await settlementRelease;
+          pendingControl = false;
+          return { action: "paused" as const };
+        },
+        runAgentTurn: async (input: { attemptId: string }) => {
+          turnRuns += 1;
+          return {
+            status: "idle" as const,
+            turnId: "resumed-turn",
+            attemptId: input.attemptId,
+          };
+        },
+        markSessionIdle: async () => undefined,
+        failSessionAttempt: async () => undefined,
+      });
+      const run = worker.run();
+      try {
+        const client = new Client({ connection });
+        const handle = await client.workflow.start("sessionWorkflow", {
+          taskQueue,
+          workflowId: `wf-${crypto.randomUUID()}`,
+          args: [{ ...scope, sessionId: crypto.randomUUID() }],
+        });
+        await entered;
+        resumedWork = true;
+        await handle.signal("queueChanged");
+        releaseSettlement();
+        await waitFor(() => turnRuns === 1);
+        await handle.result();
+        expect(turnRuns).toBe(1);
+      } finally {
+        releaseSettlement();
+        worker.shutdown();
+        await run;
+      }
+    },
+    temporalWorkflowTestTimeoutMs,
+  );
+
+  test(
     "Steer during an active run supersedes the active attempt and continues queued work",
     async () => {
       const taskQueue = `workflow-test-${crypto.randomUUID()}`;
@@ -701,6 +774,7 @@ describe("Temporal workflow integration", () => {
       const scope = workflowScope();
       const sessionId = crypto.randomUUID();
       const idleMarks: unknown[] = [];
+      const goalRetryWakes: unknown[] = [];
       const queuedTurns = [queuedTurn("event-1")];
       const runs: unknown[] = [];
       const admission = createTurnAdmission(queuedTurns, async (input) => {
@@ -717,6 +791,9 @@ describe("Temporal workflow integration", () => {
         maybeContinueGoal: async () => {
           throw new Error("goal store unavailable");
         },
+        enqueueGoalRetryWake: async (input: unknown) => {
+          goalRetryWakes.push(input);
+        },
       });
       const run = worker.run();
       try {
@@ -728,6 +805,14 @@ describe("Temporal workflow integration", () => {
         });
         await handle.result();
         expect(runs).toHaveLength(1);
+        expect(goalRetryWakes).toEqual([
+          {
+            accountId: scope.accountId,
+            workspaceId: scope.workspaceId,
+            sessionId,
+            workflowId: expect.any(String),
+          },
+        ]);
         expect(idleMarks).toEqual([{ workspaceId: scope.workspaceId, sessionId }]);
       } finally {
         worker.shutdown();
@@ -791,25 +876,18 @@ describe("Temporal workflow integration", () => {
   );
 
   test(
-    "scheduled task fire workflow starts a session child workflow",
+    "scheduled task fire workflow delegates one durable dispatch activity",
     async () => {
       const taskQueue = `workflow-test-${crypto.randomUUID()}`;
       const scope = workflowScope();
       const dispatches: unknown[] = [];
-      const runs: unknown[] = [];
-      const queuedTurns: Array<{ id: string; triggerEventId: string }> = [];
       const sessionId = crypto.randomUUID();
       const triggerEventId = crypto.randomUUID();
       const childWorkflowId = `session-${sessionId}`;
-      const admission = createTurnAdmission(queuedTurns, async (_input, turn) => {
-        runs.push(turn);
-        return { status: "idle" };
-      });
       const worker = await testWorker(nativeConnection, taskQueue, {
-        ...admission.activities,
+        runAgentTurn: async () => ({ status: "idle" }),
         dispatchScheduledTaskRun: async (input: unknown) => {
           dispatches.push(input);
-          queuedTurns.push(queuedTurn(triggerEventId));
           return {
             action: "start",
             accountId: scope.accountId,
@@ -817,11 +895,9 @@ describe("Temporal workflow integration", () => {
             sessionId,
             triggerEventId,
             workflowId: childWorkflowId,
+            workflowWakeRevision: 1,
           };
         },
-        markSessionIdle: async () => undefined,
-        failSessionAttempt: async () => undefined,
-        settleSessionControl: async () => undefined,
       });
       const run = worker.run();
       try {
@@ -832,17 +908,11 @@ describe("Temporal workflow integration", () => {
           args: [{ ...scope, taskId: crypto.randomUUID(), triggerType: "scheduled" }],
         });
         await handle.result();
-        await waitFor(() => runs.length === 1);
-        const followUpEventId = crypto.randomUUID();
-        queuedTurns.push(queuedTurn(followUpEventId));
-        await client.workflow.getHandle(childWorkflowId).signal("userMessage", followUpEventId);
-        await waitFor(() => runs.length === 2);
         expect(dispatches).toHaveLength(1);
         expect(dispatches[0]).toMatchObject({
           workspaceId: scope.workspaceId,
           triggerType: "scheduled",
         });
-        expect(runs[0]).toEqual(expect.objectContaining({ triggerEventId }));
       } finally {
         worker.shutdown();
         await run;
@@ -852,23 +922,54 @@ describe("Temporal workflow integration", () => {
   );
 
   test(
-    "scheduled task fire workflow signals a reusable session workflow",
+    "workflow-wake dispatcher delegates one bounded canonical outbox sweep",
+    async () => {
+      const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+      let dispatches = 0;
+      const expected = {
+        claimed: 4,
+        delivered: 4,
+        failed: 0,
+        exhaustedBatchLimit: false,
+      };
+      const worker = await testWorker(nativeConnection, taskQueue, {
+        runAgentTurn: async () => ({ status: "idle" }),
+        dispatchSessionWorkflowWakes: async () => {
+          dispatches += 1;
+          return expected;
+        },
+      });
+      const run = worker.run();
+      try {
+        const client = new Client({ connection });
+        const handle = await client.workflow.start("sessionWorkflowWakeDispatcherWorkflow", {
+          taskQueue,
+          workflowId: `wake-dispatch-${crypto.randomUUID()}`,
+          args: [],
+        });
+        expect(await handle.result()).toEqual(expected);
+        expect(dispatches).toBe(1);
+      } finally {
+        worker.shutdown();
+        await run;
+      }
+    },
+    temporalWorkflowTestTimeoutMs,
+  );
+
+  test(
+    "scheduled task fire workflow delegates reusable delivery to the activity",
     async () => {
       const taskQueue = `workflow-test-${crypto.randomUUID()}`;
       const scope = workflowScope();
-      const calls: string[] = [];
+      const dispatches: unknown[] = [];
       const sessionId = crypto.randomUUID();
       const workflowId = `session-${sessionId}`;
       const triggerEventId = crypto.randomUUID();
-      const queuedTurns = [queuedTurn("event-1")];
-      const admission = createTurnAdmission(queuedTurns, async (_input, turn) => {
-        calls.push(turn.triggerEventId);
-        return { status: "idle" };
-      });
       const worker = await testWorker(nativeConnection, taskQueue, {
-        ...admission.activities,
-        dispatchScheduledTaskRun: async () => {
-          queuedTurns.push(queuedTurn(triggerEventId));
+        runAgentTurn: async () => ({ status: "idle" }),
+        dispatchScheduledTaskRun: async (input: unknown) => {
+          dispatches.push(input);
           return {
             action: "signal",
             accountId: scope.accountId,
@@ -876,29 +977,24 @@ describe("Temporal workflow integration", () => {
             sessionId,
             triggerEventId,
             workflowId,
+            workflowWakeRevision: 1,
           };
         },
-        markSessionIdle: async () => undefined,
-        failSessionAttempt: async () => undefined,
-        settleSessionControl: async () => undefined,
       });
       const run = worker.run();
       try {
         const client = new Client({ connection });
-        await client.workflow.start("sessionWorkflow", {
-          taskQueue,
-          workflowId,
-          args: [{ ...scope, sessionId, initialEventId: "event-1" }],
-        });
-        await waitFor(() => calls.length === 1);
         const fire = await client.workflow.start("scheduledTaskFireWorkflow", {
           taskQueue,
           workflowId: `scheduled-fire-${crypto.randomUUID()}`,
           args: [{ ...scope, taskId: crypto.randomUUID(), triggerType: "manual" }],
         });
         await fire.result();
-        await waitFor(() => calls.length === 2);
-        expect(calls[1]).toBe(triggerEventId);
+        expect(dispatches).toHaveLength(1);
+        expect(dispatches[0]).toMatchObject({
+          workspaceId: scope.workspaceId,
+          triggerType: "manual",
+        });
       } finally {
         worker.shutdown();
         await run;
@@ -1542,6 +1638,7 @@ async function testWorker(
   activities: Record<string, (...args: any[]) => Promise<unknown>>,
 ): Promise<{ run: () => Promise<void>; shutdown: () => void }> {
   const defaults = {
+    enqueueGoalRetryWake: async () => undefined,
     maybeContinueGoal: async () => ({ action: "none" }),
     getCodexCapacityWait: async () => null,
     reconcileCodexCapacityWait: async () => ({ action: "stale" }),

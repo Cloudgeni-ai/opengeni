@@ -135,12 +135,14 @@ async function signalCodexCapacityTargets(
             sessionId: target.sessionId,
             workflowId: target.workflowId,
             wakeRevision: target.wakeRevision,
+            workflowWakeRevision: target.workflowWakeRevision,
           })
         : deps.workflowClient.wakeSessionWorkflow({
             accountId: target.accountId,
             workspaceId: target.workspaceId,
             sessionId: target.sessionId,
             workflowId: target.workflowId,
+            wakeRevision: target.workflowWakeRevision,
           }),
     ),
   );
