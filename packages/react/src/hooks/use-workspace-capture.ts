@@ -12,6 +12,7 @@ import { useOpenGeni, type ClientOverride } from "../provider";
 /** The announce event M1 emits at turn end (metadata only, never content). */
 const REVISION_CAPTURED = "workspace.revision.captured";
 const REVISION_DEGRADED = "workspace.revision.degraded";
+const MANIFEST_FETCH_TIMEOUT_MS = 15_000;
 
 export type UseWorkspaceCaptureOptions = ClientOverride & {
   /** Live event log (usually `useSessionEvents().events`) — a
@@ -67,6 +68,7 @@ export function useWorkspaceCapture(
 ): UseWorkspaceCaptureResult {
   const { client, workspaceId } = useOpenGeni(options);
   const enabled = (options.enabled ?? true) && Boolean(sessionId);
+  const identityKey = `${workspaceId}\u0000${sessionId ?? ""}`;
 
   const [capture, setCapture] = useState<WorkspaceCaptureManifest | null>(null);
   const [available, setAvailable] = useState(false);
@@ -79,14 +81,22 @@ export function useWorkspaceCapture(
   // The highest revision ANNOUNCED on the event log — compared against the loaded
   // manifest's revision to compute `isStale` and to gate refreshes.
   const [announcedRevision, setAnnouncedRevision] = useState<number | null>(null);
+  // State updates are asynchronous, so the previous session's capture still
+  // exists during the first render after an identity switch. Tag it and hide it
+  // synchronously until the new identity's request owns the state.
+  const [stateIdentity, setStateIdentity] = useState(identityKey);
 
   // A generation counter fences a slow in-flight fetch against a newer one (or an
   // identity change) so a stale response can never overwrite fresher state.
   const generationRef = useRef(0);
+  // Event sequence numbers are scoped to a session. Keeping this cursor across an
+  // identity switch would discard the new session's low-numbered announcements.
+  const lastSeqRef = useRef(0);
 
   const refresh = useCallback(async () => {
     if (!sessionId) return;
     const generation = (generationRef.current += 1);
+    setStateIdentity(identityKey);
     setLoading(true);
     setError(null);
     try {
@@ -110,7 +120,9 @@ export function useWorkspaceCapture(
       // manifest is the <200ms common case; a >2MB manifest is a signed URL hop.
       let manifest = res.manifest;
       if (!manifest && res.manifestUrl) {
-        const response = await fetch(res.manifestUrl.url);
+        const response = await fetch(res.manifestUrl.url, {
+          signal: AbortSignal.timeout(MANIFEST_FETCH_TIMEOUT_MS),
+        });
         if (generationRef.current !== generation) return;
         if (!response.ok)
           throw new Error(`workspace capture manifest fetch failed: ${response.status}`);
@@ -136,19 +148,28 @@ export function useWorkspaceCapture(
     } finally {
       if (generationRef.current === generation) setLoading(false);
     }
-  }, [client, workspaceId, sessionId]);
+  }, [client, workspaceId, sessionId, identityKey]);
 
   // Mount fetch + reset on identity change.
   useEffect(() => {
+    // Invalidate a request started for the previous identity before clearing its
+    // state. The cleanup also fences a response that arrives after unmount.
+    generationRef.current += 1;
+    lastSeqRef.current = 0;
+    setCapture(null);
+    setAvailable(false);
+    setDegradedReason(null);
+    setFileCount(null);
+    setAnnouncedRevision(null);
+    setError(null);
     if (!enabled) {
-      setCapture(null);
-      setAvailable(false);
-      setDegradedReason(null);
-      setFileCount(null);
-      setAnnouncedRevision(null);
+      setLoading(false);
       return;
     }
     void refresh();
+    return () => {
+      generationRef.current += 1;
+    };
   }, [enabled, refresh]);
 
   // Fold `workspace.revision.captured` announcements. A revision NEWER than the one
@@ -156,7 +177,6 @@ export function useWorkspaceCapture(
   // background. The event is announce-only (metadata) — we still re-fetch the
   // manifest, since the payload carries no content.
   const events = options.events;
-  const lastSeqRef = useRef(0);
   useEffect(() => {
     if (!enabled || !events) return;
     let newest: number | null = null;
@@ -181,28 +201,33 @@ export function useWorkspaceCapture(
   }, [enabled, events]);
 
   // A newer announced revision than the loaded manifest → refresh in the background.
-  const loadedRevision = capture?.revision ?? null;
+  const identityMatches = enabled && stateIdentity === identityKey;
+  const visibleCapture = identityMatches ? capture : null;
+  const visibleAnnouncedRevision = identityMatches ? announcedRevision : null;
+  const loadedRevision = visibleCapture?.revision ?? null;
   useEffect(() => {
     if (!enabled) return;
-    if (announcedRevision === null) return;
-    if (loadedRevision !== null && announcedRevision <= loadedRevision) return;
+    if (visibleAnnouncedRevision === null) return;
+    if (loadedRevision !== null && visibleAnnouncedRevision <= loadedRevision) return;
     // A newer capture exists than the one we hold (or we hold none) — pull it.
     void refresh();
-  }, [enabled, announcedRevision, loadedRevision, refresh]);
+  }, [enabled, visibleAnnouncedRevision, loadedRevision, refresh]);
 
   const isStale =
-    loadedRevision !== null && announcedRevision !== null && announcedRevision > loadedRevision;
+    loadedRevision !== null &&
+    visibleAnnouncedRevision !== null &&
+    visibleAnnouncedRevision > loadedRevision;
 
   return {
-    capture,
+    capture: visibleCapture,
     revision: loadedRevision,
-    capturedAt: capture?.capturedAt ?? null,
-    available,
-    degradedReason,
-    fileCount,
+    capturedAt: visibleCapture?.capturedAt ?? null,
+    available: identityMatches && available,
+    degradedReason: identityMatches ? degradedReason : null,
+    fileCount: identityMatches ? fileCount : null,
     isStale,
-    loading,
-    error,
+    loading: identityMatches && loading,
+    error: identityMatches ? error : null,
     refresh,
   };
 }

@@ -47,6 +47,7 @@ const INITIAL_FETCH_CAP = 1;
 const OLDER_GROUP_TARGET = 32;
 const OLDER_FETCH_CAP = 2;
 const BOUNDARY_PAGE_CAP = 4;
+const EMPTY_EVENTS: SessionEvent[] = [];
 
 /**
  * Live-stream a session's event log with replay-by-sequence, reconnect, and
@@ -62,6 +63,7 @@ export function useSessionEvents(
   const after = options.after ?? 0;
   const replay = options.replay ?? "windowed";
   const fullReplay = replay === "full" || after !== 0;
+  const streamKey = `${workspaceId}\u0000${sessionId ?? ""}\u0000${after}\u0000${fullReplay ? "full" : "windowed"}`;
 
   const [events, setEvents] = useState<SessionEvent[]>([]);
   const [connectionState, setConnectionState] = useState<SessionEventsConnectionState>("idle");
@@ -75,14 +77,17 @@ export function useSessionEvents(
   const loadingOlderRef = useRef(false);
   const streamKeyRef = useRef<string | null>(null);
   const generationRef = useRef(0);
+  // Effects reset state after commit. Tag the state so the first render for a
+  // new stream identity cannot expose the previous session's event log.
+  const [stateStreamKey, setStateStreamKey] = useState(streamKey);
 
   useEffect(() => {
     // Reset the accumulated log only when the stream identity changes —
     // pausing via `enabled: false` keeps the timeline visible.
-    const streamKey = `${workspaceId}\u0000${sessionId ?? ""}\u0000${after}\u0000${fullReplay ? "full" : "windowed"}`;
     if (streamKeyRef.current !== streamKey) {
       streamKeyRef.current = streamKey;
       generationRef.current += 1;
+      setStateStreamKey(streamKey);
       setEvents([]);
       setError(null);
       setHasOlder(false);
@@ -184,7 +189,7 @@ export function useSessionEvents(
         clearTimeout(flushTimer);
       }
     };
-  }, [client, workspaceId, sessionId, after, enabled, fullReplay]);
+  }, [client, workspaceId, sessionId, after, enabled, fullReplay, streamKey]);
 
   const loadOlder = useCallback(async (): Promise<boolean> => {
     if (!sessionId || fullReplay || loadingOlderRef.current || !hasOlderRef.current) {
@@ -231,20 +236,22 @@ export function useSessionEvents(
     }
   }, [client, workspaceId, sessionId, fullReplay]);
 
-  const timeline = useMemo(() => buildTimeline(events), [events]);
-  const sessionStatus = useMemo(() => sessionStatusFromEvents(events), [events]);
+  const identityMatches = stateStreamKey === streamKey;
+  const visibleEvents = identityMatches ? events : EMPTY_EVENTS;
+  const timeline = useMemo(() => buildTimeline(visibleEvents), [visibleEvents]);
+  const sessionStatus = useMemo(() => sessionStatusFromEvents(visibleEvents), [visibleEvents]);
 
   return {
-    events,
+    events: visibleEvents,
     timeline,
     sessionStatus,
-    connectionState,
-    lastSequence: lastSequenceRef.current,
-    initialLoading: fullReplay ? false : initialLoading,
-    hasOlder: fullReplay ? false : hasOlder,
-    loadingOlder: fullReplay ? false : loadingOlder,
+    connectionState: identityMatches ? connectionState : "idle",
+    lastSequence: identityMatches ? lastSequenceRef.current : after,
+    initialLoading: fullReplay ? false : identityMatches ? initialLoading : true,
+    hasOlder: fullReplay || !identityMatches ? false : hasOlder,
+    loadingOlder: fullReplay || !identityMatches ? false : loadingOlder,
     loadOlder,
-    error,
+    error: identityMatches ? error : null,
   };
 }
 
