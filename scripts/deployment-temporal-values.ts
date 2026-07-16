@@ -92,12 +92,12 @@ schema:
 ${tlsCaMount ? `admintools:\n${tlsCaMount}` : ""}`;
 }
 
-function parseArgs(values: string[]): Args {
+function parseArgs(rawArgs: string[]): Args {
   const out: Args = { out: null };
-  for (let index = 0; index < values.length; index += 1) {
-    const value = values[index];
+  for (let index = 0; index < rawArgs.length; index += 1) {
+    const value = rawArgs[index];
     if (value === "--out") {
-      const next = values[index + 1];
+      const next = rawArgs[index + 1];
       if (!next) {
         throw new Error("--out requires a value");
       }

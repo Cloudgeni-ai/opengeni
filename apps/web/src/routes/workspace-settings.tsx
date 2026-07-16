@@ -20,7 +20,7 @@ import {
   UserPlusIcon,
   UsersIcon,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 
 import { CodexSubscriptionsCard } from "@/components/codex-connection";
@@ -113,14 +113,7 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
     setNameDraft(activeWorkspace?.name ?? "");
   }, [activeWorkspace?.id, activeWorkspace?.name]);
 
-  useEffect(() => {
-    if (!workspaceId) {
-      return;
-    }
-    void refreshApiKeys();
-  }, [workspaceId]);
-
-  async function refreshApiKeys() {
+  const refreshApiKeys = useCallback(async () => {
     if (!canManageApiKeys) {
       setApiKeys([]);
       setApiKeysError(null);
@@ -136,7 +129,14 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
     } finally {
       setApiKeysLoaded(true);
     }
-  }
+  }, [canManageApiKeys, client, workspaceId]);
+
+  useEffect(() => {
+    if (!workspaceId) {
+      return;
+    }
+    void refreshApiKeys();
+  }, [refreshApiKeys, workspaceId]);
 
   async function submitRename() {
     const name = nameDraft.trim();
@@ -491,11 +491,7 @@ function MembersSection({ workspaceId, canManage }: { workspaceId: string; canMa
   // section above and are excluded here.
   const userMembers = members.filter((member) => member.subjectId.startsWith("user:"));
 
-  useEffect(() => {
-    void refresh();
-  }, [workspaceId]);
-
-  async function refresh() {
+  const refresh = useCallback(async () => {
     try {
       setMembers(await client.listWorkspaceMembers(workspaceId));
       setError(null);
@@ -505,7 +501,11 @@ function MembersSection({ workspaceId, canManage }: { workspaceId: string; canMa
     } finally {
       setLoaded(true);
     }
-  }
+  }, [client, workspaceId]);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
 
   async function addMember() {
     const trimmed = email.trim();

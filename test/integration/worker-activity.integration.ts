@@ -2595,7 +2595,7 @@ describe("worker activities integration", () => {
     expect(serialized).not.toContain(secret);
     expect(serialized).toContain("[redacted:LEAKED_TOKEN]");
     const completed = events.find((event) => event.type === "agent.message.completed");
-    expect((completed?.payload as { text: string }).text).toBe(
+    expect((completed?.payload as { text?: string } | undefined)?.text).toBe(
       "the token is [redacted:LEAKED_TOKEN] end",
     );
   });

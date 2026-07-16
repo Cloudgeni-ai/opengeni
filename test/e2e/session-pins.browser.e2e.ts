@@ -779,17 +779,25 @@ async function createSessionThroughApi(
   } = {},
 ): Promise<BrowserSession> {
   return await page.evaluate(
-    async ({ apiBaseUrl, workspaceId, initialMessage, options }) => {
-      const response = await fetch(`${apiBaseUrl}/v1/workspaces/${workspaceId}/sessions`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          initialMessage,
-          model: "scripted-model",
-          sandboxBackend: "none",
-          ...options,
-        }),
-      });
+    async ({
+      apiBaseUrl: browserApiBaseUrl,
+      workspaceId: targetWorkspaceId,
+      initialMessage: sessionMessage,
+      options: sessionOptions,
+    }) => {
+      const response = await fetch(
+        `${browserApiBaseUrl}/v1/workspaces/${targetWorkspaceId}/sessions`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            initialMessage: sessionMessage,
+            model: "scripted-model",
+            sandboxBackend: "none",
+            ...sessionOptions,
+          }),
+        },
+      );
       if (!response.ok) {
         throw new Error(`session create failed: ${response.status} ${await response.text()}`);
       }
@@ -807,13 +815,21 @@ async function setSessionPinThroughApi(
   pinned: boolean,
 ): Promise<BrowserSession> {
   return await page.evaluate(
-    async ({ apiBaseUrl, workspaceId, session, pinned }) => {
+    async ({
+      apiBaseUrl: browserApiBaseUrl,
+      workspaceId: targetWorkspaceId,
+      session: targetSession,
+      pinned: nextPinned,
+    }) => {
       const response = await fetch(
-        `${apiBaseUrl}/v1/workspaces/${workspaceId}/sessions/${session.id}/pin`,
+        `${browserApiBaseUrl}/v1/workspaces/${targetWorkspaceId}/sessions/${targetSession.id}/pin`,
         {
           method: "PUT",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ pinned, expectedVersion: session.pinVersion ?? 0 }),
+          body: JSON.stringify({
+            pinned: nextPinned,
+            expectedVersion: targetSession.pinVersion ?? 0,
+          }),
         },
       );
       if (!response.ok) {
@@ -832,12 +848,16 @@ async function listPageFromBrowser(
   options: { limit: number; cursor?: string; search?: string },
 ): Promise<BrowserSessionPage> {
   return await page.evaluate(
-    async ({ apiBaseUrl, workspaceId, options }) => {
-      const query = new URLSearchParams({ view: "page", limit: String(options.limit) });
-      if (options.cursor) query.set("cursor", options.cursor);
-      if (options.search) query.set("search", options.search);
+    async ({
+      apiBaseUrl: browserApiBaseUrl,
+      workspaceId: targetWorkspaceId,
+      options: pageOptions,
+    }) => {
+      const query = new URLSearchParams({ view: "page", limit: String(pageOptions.limit) });
+      if (pageOptions.cursor) query.set("cursor", pageOptions.cursor);
+      if (pageOptions.search) query.set("search", pageOptions.search);
       const response = await fetch(
-        `${apiBaseUrl}/v1/workspaces/${workspaceId}/sessions?${query.toString()}`,
+        `${browserApiBaseUrl}/v1/workspaces/${targetWorkspaceId}/sessions?${query.toString()}`,
       );
       if (!response.ok) {
         throw new Error(`session page failed: ${response.status} ${await response.text()}`);

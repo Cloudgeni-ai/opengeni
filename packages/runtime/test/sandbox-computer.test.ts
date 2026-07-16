@@ -27,8 +27,12 @@ import {
 // constructor name (supportsStructuredToolOutputTransport): a name containing
 // "ChatCompletions" (and an UNBOUND model) → text/function transport; anything else
 // → structured/hosted. These two fakes make the branch explicit in the tests.
-class OpenAIResponsesModel {}
-class OpenAIChatCompletionsModel {}
+class OpenAIResponsesModel {
+  readonly transport = "responses";
+}
+class OpenAIChatCompletionsModel {
+  readonly transport = "chat-completions";
+}
 /** A structured-transport model instance → ComputerUseCapability emits the HOSTED tool. */
 const structuredModel = (): never => new OpenAIResponsesModel() as never;
 /** A ChatCompletions-family instance → ComputerUseCapability emits the FUNCTION tools. */

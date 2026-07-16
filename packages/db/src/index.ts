@@ -3381,6 +3381,7 @@ export async function loadConnectionCredentialForBroker(
     } catch (error) {
       throw new Error(
         `connection credential could not be decrypted for ${row.id}: ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error },
       );
     }
     if (!credential || typeof credential !== "object" || Array.isArray(credential)) {
@@ -3885,7 +3886,7 @@ export async function updateKnowledgeMemory(
         nextTextHash,
         memoryId,
       );
-      throw new Error(visibleTextHashConflictMessage(duplicate));
+      throw new Error(visibleTextHashConflictMessage(duplicate), { cause: error });
     }
     if (!row) {
       throw new Error(`Knowledge memory not found: ${memoryId}`);
@@ -6778,7 +6779,9 @@ export async function loadVariableSetForRun(
       values[name] = decryptEnvironmentValue(key, encrypted);
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
-      throw new Error(`failed to decrypt variable set variable ${name}: ${reason}`);
+      throw new Error(`failed to decrypt variable set variable ${name}: ${reason}`, {
+        cause: error,
+      });
     }
   }
   return {
@@ -6971,7 +6974,10 @@ export async function loadCodexCredentialForRun(
       };
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
-      throw new Error(`failed to decrypt codex credential for workspace ${workspaceId}: ${reason}`);
+      throw new Error(
+        `failed to decrypt codex credential for workspace ${workspaceId}: ${reason}`,
+        { cause: error },
+      );
     }
     return {
       id: row.id,

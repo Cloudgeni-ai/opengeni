@@ -1308,7 +1308,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       establishSandboxSessionFromEnvelope,
       serializeEstablishedSandboxEnvelope,
     } = await import("@opengeni/runtime");
-    const client = createSandboxClientForBackend("modal", settings) as {
+    const modalClient = createSandboxClientForBackend("modal", settings) as {
       backendId: string;
       delete?: (state: unknown) => Promise<unknown>;
       serializeSessionState?: (state: unknown) => Promise<Record<string, unknown>>;
@@ -1346,8 +1346,8 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     } finally {
       // Defensive: ensure the box is gone even if the reaper path didn't run it.
       try {
-        if (established && client.delete) {
-          await client.delete(established.sessionState);
+        if (established && modalClient.delete) {
+          await modalClient.delete(established.sessionState);
         }
       } catch {
         /* already terminated */

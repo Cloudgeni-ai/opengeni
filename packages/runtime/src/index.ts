@@ -5276,6 +5276,7 @@ export async function runRigSetupHook(
     });
     throw new Error(
       `Rig setup failed for rig "${rigSetup.rigName}" (version ${rigSetup.versionId}): ${message}`,
+      { cause: error },
     );
   }
   const output = sandboxCommandOutput(result);

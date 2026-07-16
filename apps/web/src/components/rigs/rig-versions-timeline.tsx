@@ -12,6 +12,7 @@ import { MetaChip } from "@/components/ui/meta-chip";
 import { StatusDot } from "@/components/ui/status-dot";
 import { formatTimestamp } from "@/lib/format";
 import { rigActorLabel } from "@/lib/rig-status";
+import { withOccurrenceKeys } from "@/lib/react-key";
 import { cn } from "@/lib/utils";
 import type { RigVersion } from "@/types";
 
@@ -173,9 +174,12 @@ function VersionRow({
               <span className="text-xs text-fg-subtle">None declared</span>
             ) : (
               <div className="grid gap-1">
-                {version.checks.map((check, index) => (
+                {withOccurrenceKeys(
+                  version.checks,
+                  (check) => `${check.name}\u0000${check.command}`,
+                ).map(({ key, item: check }) => (
                   <div
-                    key={`${check.name}-${index}`}
+                    key={key}
                     className="rounded-md border border-border/70 bg-bg/25 px-2.5 py-1.5"
                   >
                     <div className="truncate text-xs font-medium">{check.name}</div>

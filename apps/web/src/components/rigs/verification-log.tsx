@@ -7,6 +7,7 @@ import { useState } from "react";
 
 import { StatusDot } from "@/components/ui/status-dot";
 import { formatTimestamp } from "@/lib/format";
+import { withOccurrenceKeys } from "@/lib/react-key";
 import { cn } from "@/lib/utils";
 import type { RigChangeVerification, RigCheckResult } from "@/types";
 
@@ -40,8 +41,12 @@ export function VerificationLog({ verification }: { verification: RigChangeVerif
       {checkResults.length > 0 ? (
         <div className="grid gap-1.5">
           <div className="text-2xs font-medium uppercase tracking-wide text-fg-subtle">Checks</div>
-          {checkResults.map((result, index) => (
-            <CheckResultRow key={`${result.name}-${index}`} result={result} />
+          {withOccurrenceKeys(
+            checkResults,
+            (result) =>
+              `${result.name}\u0000${result.command}\u0000${result.exitCode}\u0000${result.output}`,
+          ).map(({ key, item: result }) => (
+            <CheckResultRow key={key} result={result} />
           ))}
         </div>
       ) : null}

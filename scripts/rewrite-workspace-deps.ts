@@ -73,13 +73,13 @@ if (restore && stripDevDependencies) {
 function resolveWorkspaceSpec(
   depName: string,
   spec: string,
-  versions: Map<string, string>,
+  versionByPackage: Map<string, string>,
 ): string {
   if (!spec.startsWith("workspace:")) {
     return spec;
   }
   const rest = spec.slice("workspace:".length);
-  const version = versions.get(depName);
+  const version = versionByPackage.get(depName);
   if (!version) {
     throw new Error(
       `Cannot rewrite "${depName}": "${spec}" — no workspace package named "${depName}" with a version was found.`,

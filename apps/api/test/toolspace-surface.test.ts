@@ -197,13 +197,17 @@ describe("prepareToolspaceMcpSurface", () => {
     // Second call: active turn still present, budget now exhausted.
     const exhausted = await tool.call({ query: "again" });
     expect(exhausted.isError).toBe(true);
-    expect((exhausted.content?.[0] as { text: string }).text).toContain("budget exhausted");
+    expect((exhausted.content?.[0] as { text?: string } | undefined)?.text).toContain(
+      "budget exhausted",
+    );
 
     // Clear the active turn: the message flips to the no-active-turn variant.
     await admin`update sessions set active_turn_id = null where id = ${sessionId}`;
     const noTurn = await tool.call({ query: "later" });
     expect(noTurn.isError).toBe(true);
-    expect((noTurn.content?.[0] as { text: string }).text).toContain("no active turn");
+    expect((noTurn.content?.[0] as { text?: string } | undefined)?.text).toContain(
+      "no active turn",
+    );
     await surface!.close();
   }, 60_000);
 
@@ -237,7 +241,7 @@ describe("prepareToolspaceMcpSurface", () => {
     server.close();
     const result = await tool.call({ query: "boom" });
     expect(result.isError).toBe(true);
-    const text = (result.content?.[0] as { text: string }).text;
+    const text = (result.content?.[0] as { text?: string } | undefined)?.text;
     expect(text).toBe("upstream tool failed: flaky__search_documents");
     await surface!.close();
   }, 60_000);

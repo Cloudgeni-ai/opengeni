@@ -30,7 +30,7 @@
     "catalog:refresh": "bun scripts/refresh-integrations-catalog.ts",
     "catalog:import": "set -a; [ -f .env ] && . ./.env; set +a; bun scripts/import-integrations-catalog.ts",
     "typecheck": "bun scripts/typecheck.ts",
-    "lint": "oxlint",
+    "lint": "oxlint --deny-warnings .",
     "format": "oxfmt",
     "format:check": "oxfmt --check",
     "test": "bun test",

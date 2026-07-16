@@ -15,7 +15,7 @@ import {
   WrenchIcon,
   ZapIcon,
 } from "lucide-react";
-import { useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
 import { LoadErrorState, PageHeader } from "@/components/common";
@@ -68,15 +68,11 @@ export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
   // as an error with retry — never as the "No scheduled tasks." empty state.
   const tasksView = listViewState({ loading, error: loadError, count: tasks.length });
 
-  useEffect(() => {
-    void refresh();
-  }, [workspaceId]);
-
   // Handles its own failures (error state + toast) so a post-mutation reload
   // error can never masquerade as a failed mutation in the callers' catch
   // blocks. The toast still fires because a failed refresh with tasks already
   // on screen keeps rendering the stale list.
-  async function refresh() {
+  const refresh = useCallback(async () => {
     setLoading(true);
     try {
       const next = await client.listScheduledTasks(workspaceId);
@@ -106,7 +102,11 @@ export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
     } finally {
       setLoading(false);
     }
-  }
+  }, [client, workspaceId]);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
 
   // Retry a single task's run history after a failed load, without reloading
   // the whole list.

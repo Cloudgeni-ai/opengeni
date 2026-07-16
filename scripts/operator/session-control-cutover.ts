@@ -120,6 +120,7 @@ function parseJson<T>(text: string, source: string): T {
   } catch (error) {
     throw new Error(
       `${source} contains malformed JSON: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
     );
   }
 }
@@ -1260,31 +1261,31 @@ async function productionCodexCanary(args: ParsedArgs): Promise<void> {
     ) {
       throw new Error("canary did not produce exactly one authoritative Codex usage source");
     }
-    const usage = currentUsage[0]!;
+    const usageRecord = currentUsage[0]!;
     const duplicateUsage = await sql<Array<{ count: number }>>`
       select count(*)::integer as count from session_events
       where workspace_id = ${candidate.workspace_id}
         and session_id = ${sessionId}
         and type = 'agent.model.usage'
-        and payload ->> 'sourceKey' = ${usage.source_key}
+        and payload ->> 'sourceKey' = ${usageRecord.source_key}
         and turn_association = 'duplicate'
-        and duplicate_of_event_id = ${usage.id}`;
+        and duplicate_of_event_id = ${usageRecord.id}`;
     const billingMarkers = await sql<Array<{ count: number }>>`
       select count(*)::integer as count from usage_events
       where workspace_id = ${candidate.workspace_id}
         and event_type = 'model.cost'
         and quantity = 0
-        and source_resource_id = ${`${usage.turn_id}:${usage.source_key}`}`;
+        and source_resource_id = ${`${usageRecord.turn_id}:${usageRecord.source_key}`}`;
     const creditDebits = await sql<Array<{ count: number }>>`
       select count(*)::integer as count from credit_ledger_entries
       where workspace_id = ${candidate.workspace_id}
         and source_type = 'model_response'
-        and source_id = ${`${usage.turn_id}:${usage.source_key}`}`;
+        and source_id = ${`${usageRecord.turn_id}:${usageRecord.source_key}`}`;
     const startedAttempts = await sql<Array<{ count: number }>>`
       select count(*)::integer as count from session_events
       where workspace_id = ${candidate.workspace_id}
         and session_id = ${sessionId}
-        and turn_id = ${usage.turn_id}
+        and turn_id = ${usageRecord.turn_id}
         and type = 'turn.started'
         and turn_attempt_id is not null
         and turn_association = 'current'`;
@@ -1311,7 +1312,7 @@ async function productionCodexCanary(args: ParsedArgs): Promise<void> {
       createIdempotencyKey: idempotencyKey,
       createAttempts,
       turnStateSamples,
-      usageSourceKey: usage.source_key,
+      usageSourceKey: usageRecord.source_key,
       classifiedDuplicateUsageCount: Number(duplicateUsage[0]?.count ?? 0),
       zeroCostBillingMarkerCount: Number(billingMarkers[0]?.count ?? 0),
       creditDebitCount: Number(creditDebits[0]?.count ?? 0),

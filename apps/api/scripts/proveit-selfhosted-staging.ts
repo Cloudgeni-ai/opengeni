@@ -643,8 +643,8 @@ async function main() {
       } finally {
         await client.close();
       }
-      const sh = listResult.sandboxes?.find((s: any) => s.id === selfhostedSandboxId);
-      if (sh && sh.liveness === "online") {
+      const selfhosted = listResult.sandboxes?.find((s: any) => s.id === selfhostedSandboxId);
+      if (selfhosted && selfhosted.liveness === "online") {
         online = true;
         break;
       }

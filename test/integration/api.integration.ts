@@ -1825,21 +1825,22 @@ describe("API component integration", () => {
     });
     expect(
       usage
-        .filter((event) => event.eventType === "agent_run.created")
+        .filter((usageEvent) => usageEvent.eventType === "agent_run.created")
         .filter(
-          (event) =>
-            event.sourceResourceId === session.id || turnIds.has(event.sourceResourceId ?? ""),
+          (usageEvent) =>
+            usageEvent.sourceResourceId === session.id ||
+            turnIds.has(usageEvent.sourceResourceId ?? ""),
         ),
     ).toHaveLength(3);
   });
 
   test("revives a failed session on a new user message but keeps cancelled terminal", async () => {
-    const workflow = new FakeWorkflowClient();
+    const workflowClient = new FakeWorkflowClient();
     const app = createApp({
       settings: testSettings({ databaseUrl: services.databaseUrl }),
       db: dbClient.db,
       bus: new MemoryEventBus(),
-      workflowClient: workflow,
+      workflowClient,
     });
     const workspaceId = await defaultWorkspaceId(app);
     const created = await app.request(workspacePath(workspaceId, "/sessions"), {
@@ -1853,7 +1854,7 @@ describe("API component integration", () => {
     // cleared), the status change is on the timeline, and the workflow is
     // woken via signalWithStart exactly as for idle sessions.
     await setSessionStatus(dbClient.db, workspaceId, session.id, "failed", null);
-    const wakeupsBefore = workflow.wakeups.length;
+    const wakeupsBefore = workflowClient.wakeups.length;
     const revived = await app.request(
       workspacePath(workspaceId, `/sessions/${session.id}/events`),
       {
@@ -1866,10 +1867,12 @@ describe("API component integration", () => {
     const afterRevival = await requireSession(dbClient.db, workspaceId, session.id);
     expect(afterRevival.status).toBe("queued");
     expect(afterRevival.activeTurnId).toBeNull();
-    expect(workflow.wakeups.length).toBe(wakeupsBefore + 1);
+    expect(workflowClient.wakeups.length).toBe(wakeupsBefore + 1);
     const events = await listSessionEvents(dbClient.db, workspaceId, session.id, 0, 100);
     const statusChanges = events.filter((event) => event.type === "session.status.changed");
-    expect((statusChanges.at(-1)?.payload as { status?: string }).status).toBe("queued");
+    expect((statusChanges.at(-1)?.payload as { status?: string } | undefined)?.status).toBe(
+      "queued",
+    );
 
     // Cancelled stays terminal: an explicit user act, not a failure.
     await setSessionStatus(dbClient.db, workspaceId, session.id, "cancelled", null);
@@ -2696,12 +2699,12 @@ describe("API component integration", () => {
   });
 
   test("a retried manual trigger (same triggerId) charges once and starts one run", async () => {
-    const workflow = new FakeWorkflowClient();
+    const workflowClient = new FakeWorkflowClient();
     const app = createApp({
       settings: testSettings({ databaseUrl: services.databaseUrl }),
       db: dbClient.db,
       bus: new MemoryEventBus(),
-      workflowClient: workflow,
+      workflowClient,
     });
     const workspaceId = await defaultWorkspaceId(app);
     const created = await app.request(workspacePath(workspaceId, "/scheduled-tasks"), {
@@ -2735,7 +2738,7 @@ describe("API component integration", () => {
     // Both calls derive the SAME usage idempotency key AND the SAME workflowId
     // from the shared token, so the charge dedupes and the duplicate workflow
     // start collapses (deterministic id + REJECT_DUPLICATE at the worker).
-    const triggers = workflow.triggers as Array<{
+    const triggers = workflowClient.triggers as Array<{
       agentRunUsageIdempotencyKey?: string;
       triggerWorkflowId?: string;
     }>;
@@ -2760,7 +2763,7 @@ describe("API component integration", () => {
     // second charge.
     const third = await triggerWith("retry-token-2");
     expect(third.status).toBe(202);
-    const allTriggers = workflow.triggers as Array<{
+    const allTriggers = workflowClient.triggers as Array<{
       agentRunUsageIdempotencyKey?: string;
       triggerWorkflowId?: string;
     }>;
@@ -2771,12 +2774,12 @@ describe("API component integration", () => {
   });
 
   test("a manual trigger without a triggerId stays a distinct run each time", async () => {
-    const workflow = new FakeWorkflowClient();
+    const workflowClient = new FakeWorkflowClient();
     const app = createApp({
       settings: testSettings({ databaseUrl: services.databaseUrl }),
       db: dbClient.db,
       bus: new MemoryEventBus(),
-      workflowClient: workflow,
+      workflowClient,
     });
     const workspaceId = await defaultWorkspaceId(app);
     const created = await app.request(workspacePath(workspaceId, "/scheduled-tasks"), {
@@ -2801,7 +2804,7 @@ describe("API component integration", () => {
     });
     expect(a.status).toBe(202);
     expect(b.status).toBe(202);
-    const triggers = workflow.triggers as Array<{
+    const triggers = workflowClient.triggers as Array<{
       agentRunUsageIdempotencyKey?: string;
       triggerWorkflowId?: string;
     }>;
@@ -4008,9 +4011,13 @@ describe("API component integration", () => {
       type: "agent.message.delta",
       payload: { coalescedUntil: latestSequence },
     });
-    expect((compactEvents[4]?.payload as { text?: string }).text?.startsWith("bulk-0")).toBe(true);
     expect(
-      (compactEvents[4]?.payload as { text?: string }).text?.endsWith(`bulk-${bulkEventCount - 1}`),
+      (compactEvents[4]?.payload as { text?: string } | undefined)?.text?.startsWith("bulk-0"),
+    ).toBe(true);
+    expect(
+      (compactEvents[4]?.payload as { text?: string } | undefined)?.text?.endsWith(
+        `bulk-${bulkEventCount - 1}`,
+      ),
     ).toBe(true);
 
     const compactNewest = await app.request(
@@ -4023,9 +4030,9 @@ describe("API component integration", () => {
     const compactNewestEvents = (await compactNewest.json()) as SessionEvent[];
     expect(compactNewestEvents).toHaveLength(1);
     expect(compactNewestEvents[0]?.sequence).toBe(latestSequence - 2);
-    expect((compactNewestEvents[0]?.payload as { coalescedUntil?: number }).coalescedUntil).toBe(
-      latestSequence,
-    );
+    expect(
+      (compactNewestEvents[0]?.payload as { coalescedUntil?: number } | undefined)?.coalescedUntil,
+    ).toBe(latestSequence);
 
     const compactOlder = await app.request(
       workspacePath(
@@ -4037,10 +4044,12 @@ describe("API component integration", () => {
     const compactOlderEvents = (await compactOlder.json()) as SessionEvent[];
     expect(compactOlderEvents).toHaveLength(1);
     const compactPageChunks = [
-      ...(((compactOlderEvents[0]?.payload as { text?: string }).text ?? "").match(/bulk-\d+/g) ??
-        []),
-      ...(((compactNewestEvents[0]?.payload as { text?: string }).text ?? "").match(/bulk-\d+/g) ??
-        []),
+      ...(((compactOlderEvents[0]?.payload as { text?: string } | undefined)?.text ?? "").match(
+        /bulk-\d+/g,
+      ) ?? []),
+      ...(((compactNewestEvents[0]?.payload as { text?: string } | undefined)?.text ?? "").match(
+        /bulk-\d+/g,
+      ) ?? []),
     ];
     expect(compactPageChunks).toEqual(
       Array.from({ length: 6 }, (_, offset) => `bulk-${bulkEventCount - 6 + offset}`),
@@ -5299,7 +5308,7 @@ describe("API component integration", () => {
         preview: "Staging deploys from main only, via opengeni-ops.",
       });
       expect(
-        ((saveEvents[0]?.payload as { preview?: string }).preview ?? "").length,
+        ((saveEvents[0]?.payload as { preview?: string } | undefined)?.preview ?? "").length,
       ).toBeLessThanOrEqual(120);
 
       const search = JSON.parse(
@@ -6586,7 +6595,7 @@ describe("API component integration", () => {
             subjectId?: string;
             raw?: { serverId?: string; toolName?: string };
           }
-        ).origin,
+        )?.origin,
       ).toBe("toolspace");
       expect(
         (
@@ -6595,10 +6604,14 @@ describe("API component integration", () => {
             subjectId?: string;
             raw?: { serverId?: string; toolName?: string };
           }
-        ).subjectId,
+        )?.subjectId,
       ).toBe("sandbox:run-proxy");
       expect(
-        (toolspaceEvents[0]?.payload as { raw?: { serverId?: string; toolName?: string } }).raw,
+        (
+          toolspaceEvents[0]?.payload as
+            | { raw?: { serverId?: string; toolName?: string } }
+            | undefined
+        )?.raw,
       ).toEqual({
         type: "toolspace_call",
         serverId: "crm",

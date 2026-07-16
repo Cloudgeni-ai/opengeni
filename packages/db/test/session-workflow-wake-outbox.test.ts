@@ -62,12 +62,12 @@ async function fixture() {
 
 type WakeFixture = Awaited<ReturnType<typeof fixture>>;
 
-async function send(fixture: WakeFixture, text: string, clientEventId = crypto.randomUUID()) {
+async function send(wakeFixture: WakeFixture, text: string, clientEventId = crypto.randomUUID()) {
   return await enqueueSessionMessageAtomically(client.db, {
-    accountId: fixture.grant.accountId,
-    workspaceId: fixture.grant.workspaceId!,
-    sessionId: fixture.session.id,
-    actor: fixture.grant.subjectId,
+    accountId: wakeFixture.grant.accountId,
+    workspaceId: wakeFixture.grant.workspaceId!,
+    sessionId: wakeFixture.session.id,
+    actor: wakeFixture.grant.subjectId,
     origin: "human",
     text,
     resources: [],

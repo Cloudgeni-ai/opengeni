@@ -218,7 +218,10 @@ describe("Temporal workflow integration", () => {
         });
         await handle.result();
         expect(runs).toHaveLength(2);
-        expect(runs.map((run) => run.trigger)).toEqual([{ kind: "next" }, { kind: "next" }]);
+        expect(runs.map((attempt) => attempt.trigger)).toEqual([
+          { kind: "next" },
+          { kind: "next" },
+        ]);
         expect(failures).toHaveLength(0);
       } finally {
         worker.shutdown();
@@ -269,7 +272,10 @@ describe("Temporal workflow integration", () => {
         });
         await handle.result();
         expect(runs).toHaveLength(2);
-        expect(runs.map((run) => run.trigger)).toEqual([{ kind: "next" }, { kind: "next" }]);
+        expect(runs.map((attempt) => attempt.trigger)).toEqual([
+          { kind: "next" },
+          { kind: "next" },
+        ]);
         expect(recoveries).toEqual([
           expect.objectContaining({
             attemptId: runs[0]!.attemptId,
@@ -540,7 +546,8 @@ describe("Temporal workflow integration", () => {
       const admission = createTurnAdmission(queuedTurns, async (_input, turn) => {
         runs.push(turn);
         if (runs.length === 1) {
-          while (!allowFirstRunToFinish) {
+          while (true) {
+            if (allowFirstRunToFinish) break;
             await Bun.sleep(10);
           }
         }

@@ -142,22 +142,23 @@ export function SessionRoute({
       session && (session.status === "failed" || creditExhausted)
         ? summarizeSessionFailure(events, session.status)
         : null,
-    [events, session?.status, creditExhausted],
+    [events, session, creditExhausted],
   );
 
   // Keep the workspace header (title, status badge, connection pill) in sync.
+  const { setSession: setContextSession, setConnectionState: setContextConnectionState } = context;
   useEffect(() => {
-    context.setSession(session);
-  }, [session]);
+    setContextSession(session);
+  }, [session, setContextSession]);
   useEffect(() => {
-    context.setConnectionState(connectionState);
-  }, [connectionState]);
+    setContextConnectionState(connectionState);
+  }, [connectionState, setContextConnectionState]);
   useEffect(
     () => () => {
-      context.setSession(null);
-      context.setConnectionState("idle");
+      setContextSession(null);
+      setContextConnectionState("idle");
     },
-    [],
+    [setContextConnectionState, setContextSession],
   );
   useEffect(() => {
     if (streamError && !isApiErrorStatus(streamError, 404)) {

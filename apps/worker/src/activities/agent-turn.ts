@@ -1394,12 +1394,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         await publish(lifecycleEvents).catch(() => undefined);
       }
     };
-    const publishSandboxLost = async (input: { instanceId: string }): Promise<void> => {
+    const publishSandboxLost = async (lostSandbox: { instanceId: string }): Promise<void> => {
       if (!publish) return;
       await publish([
         {
           type: "sandbox.box.lost",
-          payload: { sandboxId: input.instanceId },
+          payload: { sandboxId: lostSandbox.instanceId },
         },
       ]).catch((publishError) => {
         // The lease transition is already authoritative. A fenced/failed audit

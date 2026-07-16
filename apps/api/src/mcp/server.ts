@@ -276,7 +276,9 @@ export function buildOpenGeniMcpServer(
           });
         } catch (error) {
           if (error instanceof GitHubAppConfigurationError) {
-            throw new Error(`GitHub App is not configured: ${error.missing.join(", ")}`);
+            throw new Error(`GitHub App is not configured: ${error.missing.join(", ")}`, {
+              cause: error,
+            });
           }
           throw error;
         }
@@ -1080,7 +1082,7 @@ async function beginMcpRigVerificationAttempt(
       error instanceof RigChangeAlreadyVerifyingError ||
       error instanceof RigChangeTransitionError
     ) {
-      throw new Error(error.message);
+      throw new Error(error.message, { cause: error });
     }
     throw error;
   }

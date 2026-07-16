@@ -180,6 +180,10 @@ with a warm cache. Reports include p50, p75, p95, p99, and worst observation.
 | Main-thread long tasks | No workbench task > 50 ms during ordinary interaction |
 | Memory | No monotonic growth across 100 session switches, 100 file opens, or 20 terminal attach/detach cycles |
 | Network | No duplicate identity-equivalent fetch and no request left alive after its identity is obsolete |
+| Initial web asset graph | ≤ 750 KiB raw and ≤ 210 KiB gzip, including HTML, CSS, and recursive static imports |
+| Direct session asset graph | ≤ 1,900 KiB raw and ≤ 540 KiB gzip before optional editor/diff/terminal chunks |
+| Lazy JavaScript chunk | ≤ 800 KiB raw and ≤ 240 KiB gzip |
+| CSS asset | ≤ 30 KiB gzip |
 
 Measure representative high-, mid-, and low-end desktop hardware plus current
 iOS and Android devices. Include a 4× CPU slowdown and constrained-network run.

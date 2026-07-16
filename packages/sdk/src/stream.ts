@@ -66,7 +66,8 @@ export async function* streamSessionEvents(
   let delayMs = baseDelayMs;
   let everConnected = false;
 
-  while (!signal?.aborted) {
+  while (true) {
+    if (signal?.aborted) break;
     options.onStateChange?.(everConnected || failedAttempts > 0 ? "reconnecting" : "connecting");
     const cursorAtOpen = cursor;
     try {

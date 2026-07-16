@@ -39,11 +39,11 @@ export class MemoryEventBus implements EventBus {
   }
 
   async request(
-    subject: string,
+    requestSubject: string,
     payload: Uint8Array,
     _opts: { timeoutMs: number },
   ): Promise<RequestReply> {
-    const handler = this.responders.get(subject);
+    const handler = this.responders.get(requestSubject);
     if (!handler) {
       // No responder on the subject — model the NATS 503 NoResponders the real
       // transport surfaces, so a consumer's offline mapping is exercised in-memory.
@@ -51,15 +51,15 @@ export class MemoryEventBus implements EventBus {
       error.code = "503";
       throw error;
     }
-    const data = await handler(payload, subject);
+    const data = await handler(payload, requestSubject);
     return { data };
   }
 
-  subscribeRequests(subject: string, handler: RequestHandler): () => void {
-    this.responders.set(subject, handler);
+  subscribeRequests(requestSubject: string, handler: RequestHandler): () => void {
+    this.responders.set(requestSubject, handler);
     return () => {
-      if (this.responders.get(subject) === handler) {
-        this.responders.delete(subject);
+      if (this.responders.get(requestSubject) === handler) {
+        this.responders.delete(requestSubject);
       }
     };
   }
@@ -80,20 +80,20 @@ export class MemoryEventBus implements EventBus {
    *  `agent.<ws>.<id>.events`), delivering it to every subscriber whose pattern
    *  matches (`agent.*.*.events` ↔ the concrete subject). Mirrors NATS wildcard
    *  delivery so an ingestion test can drive a heartbeat without a real broker. */
-  async emitAgentEvent(subject: string, payload: Uint8Array): Promise<void> {
+  async emitAgentEvent(eventSubject: string, payload: Uint8Array): Promise<void> {
     const matching: Array<(payload: Uint8Array, subject: string) => void | Promise<void>> = [];
     for (const [pattern, subscribers] of this.agentEventSubscribers) {
-      if (subjectMatches(pattern, subject)) {
+      if (subjectMatches(pattern, eventSubject)) {
         matching.push(...subscribers);
       }
     }
-    await Promise.all(matching.map((handler) => handler(payload, subject)));
+    await Promise.all(matching.map((handler) => handler(payload, eventSubject)));
   }
 
   getRequestConnection(): RequestConnection {
     return {
-      request: (subject, payload, opts) =>
-        this.request(subject, payload, { timeoutMs: opts.timeout }),
+      request: (requestSubject, payload, opts) =>
+        this.request(requestSubject, payload, { timeoutMs: opts.timeout }),
     };
   }
 
@@ -102,9 +102,9 @@ export class MemoryEventBus implements EventBus {
 
 /** NATS-style subject wildcard match: `*` matches exactly one token. Used by the
  *  in-memory bus to mirror `agent.*.*.events` ↔ `agent.<ws>.<id>.events`. */
-function subjectMatches(pattern: string, subject: string): boolean {
+function subjectMatches(pattern: string, candidateSubject: string): boolean {
   const p = pattern.split(".");
-  const s = subject.split(".");
+  const s = candidateSubject.split(".");
   if (p.length !== s.length) {
     return false;
   }
