@@ -27,12 +27,27 @@ import {
   SESSION_WORKFLOW_WAKE_DISPATCHER_SCHEDULE_ID,
   SESSION_WORKFLOW_WAKE_DISPATCHER_WORKFLOW_TYPE,
 } from "../../apps/worker/src/workflow-wake-contract";
+import {
+  CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES,
+  CONTROL_WORKER_MAX_CONCURRENT_WORKFLOW_TASKS,
+  TURN_WORKER_MAX_CONCURRENT_TURNS,
+} from "../../apps/worker/src/concurrency";
 
 type ParsedArgs = {
   command: string;
   values: Map<string, string>;
   flags: Set<string>;
 };
+
+export function workerTopologyEvidence() {
+  return {
+    roles: ["control", "turn"] as const,
+    turnTaskQueueSuffix: "-turns",
+    controlActivityConcurrencyPerPod: CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES,
+    controlWorkflowConcurrencyPerPod: CONTROL_WORKER_MAX_CONCURRENT_WORKFLOW_TASKS,
+    turnActivityConcurrencyPerPod: TURN_WORKER_MAX_CONCURRENT_TURNS,
+  };
+}
 
 function parseArgs(argv: string[]): ParsedArgs {
   const [command = "help", ...rest] = argv;
@@ -1422,13 +1437,7 @@ async function preflight(args: ParsedArgs): Promise<void> {
     capturedAt: new Date().toISOString(),
     sourceSha: bakedSourceSha,
     migrations,
-    workerTopology: {
-      roles: ["control", "turn"],
-      turnTaskQueueSuffix: "-turns",
-      controlActivityConcurrencyPerPod: 32,
-      controlWorkflowConcurrencyPerPod: 40,
-      turnActivityConcurrencyPerPod: 8,
-    },
+    workerTopology: workerTopologyEvidence(),
     validationModelPolicy: {
       allowedPrefix: "codex/",
       azureModelTokensAllowed: false,
