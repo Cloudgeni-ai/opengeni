@@ -1,5 +1,46 @@
 # @opengeni/events
 
+## 0.3.0
+
+### Minor Changes
+
+- a0cb58f: Streaming exec to Connected Machines over the op-stream protocol (server half).
+  When a runner advertises the `op_stream` capability (persisted from its connect
+  Hello onto the enrollment) and `OPENGENI_AGENT_OP_STREAM_ENABLED` is on
+  (default off), selfhosted exec streams as sequenced, acked, credit-flowed
+  frames: no reply-size wall (retention-bounded, typed on overflow), blip-proof
+  collection (re-attach + replay, blake3-verified byte-exact), and idempotent
+  starts keyed by a durable per-tool-call op id so a re-dispatched turn attaches
+  to the already-running command instead of re-running it. The legacy monolithic
+  exec remains the permanent fallback wire form. The events bus gains an
+  op-stream subscribe/publish accessor on the same managed NATS connection.
+
+### Patch Changes
+
+- 0805620: Make active-sandbox pointer swaps establishment-safe. A swap or create-time seed to a target no turn can establish (a non-group Modal sibling, or an unknown backend kind) is now rejected before the epoch-fenced pointer commit with a typed rejection `code`, leaving the pointer and epoch untouched. At turn start a persisted pointer whose target is structurally unestablishable (a deleted sandbox row, a Modal sibling, or an enrollment-less selfhosted row) is reset to the session home under the epoch fence and announced with a new `session.route.reconciled` event, honoring a concurrent higher-epoch swap rather than clobbering it. A null pointer resolves to the session home backend, and the routing proxy's per-op cache is keyed on the full `(activeEpoch, activeSandboxId)` tuple so a clear-to-null re-lands the next op on home rather than a stale swapped-to session. Adds the optional `SwapActiveSandboxResponse.code` discriminant and the `session.route.reconciled` session event type to the public contracts and SDK wire types.
+- b804fd4: Add provider-neutral git credential contracts and runtime sandbox token-file seeding for GitHub, GitLab, and Azure DevOps. Sandboxes now provision `gh`, `glab`, and `az` wrappers that read current token files at invocation time without storing token values in manifests.
+- 8fef500: Instrument the token-streaming pipeline with SLIs so "streaming is sluggish" resolves to a number and its layer is attributable. New worker Prometheus series: `opengeni_stream_ttft_seconds{provider}` (time from a model (re)start to its first streamed content delta, re-armed after every non-content event so a post-tool response measures the model's restart, not our tool time), `opengeni_stream_inter_delta_gap_seconds{provider,class}` (gap between consecutive same-class deltas, reset across boundaries), `opengeni_stream_batch_flush_events` + `opengeni_stream_batch_flush_duration_seconds` (the runtime batcher's coalescing shape), `opengeni_session_event_append_seconds` (durable DB write path) and `opengeni_session_event_publish_seconds` (best-effort NATS delivery path) split so a p99 climb points at Postgres vs. NATS, plus `opengeni_model_input_tokens{provider}` and `opengeni_context_compactions_total{trigger}` (the context-pressure pair that makes "compaction never firing while contexts run hot" queryable). All labels are bounded — never a session id or raw user-supplied model string. `appendAndPublishEvents` gains an optional timing observer (no new dependency on the observability package) and `createRuntimeBatcher` an optional `onFlush` hook; both fire on success and failure.
+- Updated dependencies [332ac15]
+- Updated dependencies [ad4502a]
+- Updated dependencies [477b2bb]
+- Updated dependencies [04d7595]
+- Updated dependencies [0805620]
+- Updated dependencies [faf1487]
+- Updated dependencies [13d0889]
+- Updated dependencies [b125213]
+- Updated dependencies [b804fd4]
+- Updated dependencies [4a25bfc]
+- Updated dependencies [4a25bfc]
+- Updated dependencies [3148404]
+- Updated dependencies [a0cb58f]
+- Updated dependencies [e4d3569]
+- Updated dependencies [810542f]
+- Updated dependencies [5942493]
+- Updated dependencies [a5f58f9]
+- Updated dependencies [9d4283d]
+  - @opengeni/db@0.7.0
+  - @opengeni/contracts@0.10.0
+
 ## 0.2.8
 
 ### Patch Changes
