@@ -7,6 +7,10 @@ backend embedding guide in `docs/embedding.md`, and it is the exact surface
 `apps/web` itself consumes (see `apps/web/src/components/session/sandbox-workspace.tsx`),
 so an external embedder and the first-party app run the same code path.
 
+Shipping that code path is not acceptance by itself. The required live,
+performance, accessibility, identity-race, browser/device, and visual evidence
+is defined by [`workbench-acceptance.md`](workbench-acceptance.md).
+
 Everything ships from `@opengeni/react`. The whole dock "brain" — capability
 negotiation, capture-backed cold reads, tab construction, prewarm, and the
 machine chip — lives in `packages/react/src/components/sandbox-workspace.tsx`; you
