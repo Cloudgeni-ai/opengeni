@@ -11,7 +11,9 @@ import { DesktopViewer } from "../src/components/desktop-viewer";
 import { DiffView } from "../src/components/diff-view";
 import { PierreDiff } from "../src/components/pierre-diff";
 import { FileBrowser } from "../src/components/file-browser";
+import { SandboxFiles } from "../src/components/sandbox-files";
 import type { UseSandboxFilesResult } from "../src/hooks/use-sandbox-files";
+import type { UseSandboxGitResult } from "../src/hooks/use-sandbox-git";
 
 registerDom();
 
@@ -51,6 +53,35 @@ function filesResult(overrides: Partial<UseSandboxFilesResult> = {}): UseSandbox
   };
 }
 
+function gitResult(): UseSandboxGitResult {
+  return {
+    diff: [],
+    branch: "main",
+    isRepo: true,
+    ahead: 0,
+    behind: 0,
+    refresh: async () => {},
+    source: "capture",
+    capturedAt: "2026-07-16T12:00:00.000Z",
+    loading: false,
+    error: null,
+  };
+}
+
+function selectedFile(container: HTMLElement): string | null {
+  return container.querySelector("[data-opengeni-selected-file]")?.textContent ?? null;
+}
+
+function fileButton(container: HTMLElement, name: string): HTMLButtonElement {
+  const button = Array.from(
+    container.querySelectorAll<HTMLButtonElement>("[role=treeitem] button"),
+  ).find((candidate) => candidate.textContent?.includes(name));
+  if (!button) {
+    throw new Error(`Missing file button: ${name}`);
+  }
+  return button;
+}
+
 describe("FileBrowser", () => {
   test("renders the tree from useSandboxFiles data", async () => {
     const r = await renderComponent(<FileBrowser result={filesResult()} />);
@@ -80,6 +111,61 @@ describe("FileBrowser", () => {
     );
     await flush();
     expect(r.container.textContent).toContain("nothing here");
+    await r.unmount();
+  });
+});
+
+describe("SandboxFiles guarded-file routing", () => {
+  test("manual navigation consumes a pending cold request and wins after warm-up", async () => {
+    const files = filesResult();
+    const git = gitResult();
+    const r = await renderComponent(
+      <SandboxFiles
+        files={files}
+        git={git}
+        requestedPath="src/app.ts"
+        requestedPathRequestId={1}
+        requestedPathReady={false}
+      />,
+    );
+    await flush();
+
+    await actRun(() => fileButton(r.container, "README.md").click());
+    expect(selectedFile(r.container)).toBe("README.md");
+
+    await r.rerender(
+      <SandboxFiles
+        files={files}
+        git={git}
+        requestedPath="src/app.ts"
+        requestedPathRequestId={1}
+        requestedPathReady={true}
+      />,
+    );
+    await flush();
+    expect(selectedFile(r.container)).toBe("README.md");
+    await r.unmount();
+  });
+
+  test("a new request identity deliberately reopens the same guarded path", async () => {
+    const files = filesResult();
+    const git = gitResult();
+    const r = await renderComponent(
+      <SandboxFiles files={files} git={git} requestedPath="README.md" requestedPathRequestId={1} />,
+    );
+    await flush();
+    expect(selectedFile(r.container)).toBe("README.md");
+
+    await actRun(() => fileButton(r.container, "src").click());
+    await flush();
+    await actRun(() => fileButton(r.container, "app.ts").click());
+    expect(selectedFile(r.container)).toBe("src/app.ts");
+
+    await r.rerender(
+      <SandboxFiles files={files} git={git} requestedPath="README.md" requestedPathRequestId={2} />,
+    );
+    await flush();
+    expect(selectedFile(r.container)).toBe("README.md");
     await r.unmount();
   });
 });

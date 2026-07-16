@@ -145,6 +145,9 @@ export type UseSandboxWorkspaceTabsOptions = ClientOverride & {
   /** File requested by a Changes guard. The Files surface defers the read until
    *  the sandbox is live, then reveals this path. */
   requestedFilePath?: string | null | undefined;
+  /** Unique identity for `requestedFilePath`, including repeated requests for the
+   *  same path. */
+  requestedFileRequestId?: string | number | null | undefined;
   /** Route a guarded diff into the host's Files tab. */
   onOpenFile?: ((path: string) => void) | undefined;
 };
@@ -185,7 +188,8 @@ export function useSandboxWorkspaceTabs(
   options: UseSandboxWorkspaceTabsOptions,
 ): UseSandboxWorkspaceTabsResult {
   const { client, workspaceId } = useOpenGeni(options);
-  const { sessionId, events, onNotify, requestedFilePath, onOpenFile } = options;
+  const { sessionId, events, onNotify, requestedFilePath, requestedFileRequestId, onOpenFile } =
+    options;
   const initialTab = options.initialTab ?? null;
 
   // The three box-warming INTENTS, each off by default and each
@@ -476,6 +480,9 @@ export function useSandboxWorkspaceTabs(
           {...(requestedFilePath
             ? {
                 requestedPath: requestedFilePath,
+                ...(requestedFileRequestId !== null && requestedFileRequestId !== undefined
+                  ? { requestedPathRequestId: requestedFileRequestId }
+                  : {}),
                 requestedPathReady: liveness === "warm" || liveness === "draining",
               }
             : {})}
@@ -542,6 +549,7 @@ export function useSandboxWorkspaceTabs(
     watchDesktop,
     warmTerminal,
     requestedFilePath,
+    requestedFileRequestId,
     onOpenFile,
     liveness,
     sessionId,
@@ -630,10 +638,13 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
   const [requestedFile, setRequestedFile] = useState<{
     sessionId: string;
     path: string;
+    requestId: number;
   } | null>(null);
+  const nextFileRequestId = useRef(0);
   const openFile = useCallback(
     (path: string) => {
-      setRequestedFile({ sessionId, path });
+      nextFileRequestId.current += 1;
+      setRequestedFile({ sessionId, path, requestId: nextFileRequestId.current });
       setStoredSelection({ sessionId, tab: WORKBENCH_TAB_FILES });
     },
     [sessionId],
@@ -651,6 +662,7 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
     ...(initialTab ? { initialTab } : {}),
     ...(onNotify ? { onNotify } : {}),
     requestedFilePath: requestedFile?.sessionId === sessionId ? requestedFile.path : null,
+    requestedFileRequestId: requestedFile?.sessionId === sessionId ? requestedFile.requestId : null,
     onOpenFile: openFile,
   });
 

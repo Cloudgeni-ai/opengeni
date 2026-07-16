@@ -30,6 +30,10 @@ export type SandboxFilesProps = {
   onEditIntent?: (() => void) | undefined;
   /** A guarded diff path routed here by the parent workspace. */
   requestedPath?: string | undefined;
+  /** Identity for one guarded-file request. Increment this when the same path is
+   *  deliberately requested again; it also lets a pending request be consumed
+   *  without overriding later manual tree navigation. Defaults to the path. */
+  requestedPathRequestId?: string | number | undefined;
   /** False while the parent is waking a cold sandbox for `requestedPath`. */
   requestedPathReady?: boolean | undefined;
   themeType?: "dark" | "light" | undefined;
@@ -51,6 +55,7 @@ export function SandboxFiles({
   editable = true,
   onEditIntent,
   requestedPath,
+  requestedPathRequestId,
   requestedPathReady = true,
   themeType,
   className,
@@ -59,12 +64,28 @@ export function SandboxFiles({
   // View vs Edit for the selected file. Resets to View on every new selection so
   // opening a file never lands you in a stale dirty editor for a different path.
   const [editMode, setEditMode] = useState(false);
+  const pendingRequestRef = useRef<string | number | null>(null);
+  const handledRequestRef = useRef<string | number | null>(null);
+  const requestKey = requestedPath ? (requestedPathRequestId ?? requestedPath) : null;
 
   useEffect(() => {
-    if (!requestedPath || !requestedPathReady) return;
+    if (!requestedPath || requestKey === null) {
+      pendingRequestRef.current = null;
+      handledRequestRef.current = null;
+      return;
+    }
+    if (handledRequestRef.current === requestKey) {
+      return;
+    }
+    if (!requestedPathReady) {
+      pendingRequestRef.current = requestKey;
+      return;
+    }
+    handledRequestRef.current = requestKey;
+    pendingRequestRef.current = null;
     setSelected(requestedPath);
     setEditMode(false);
-  }, [requestedPath, requestedPathReady]);
+  }, [requestKey, requestedPath, requestedPathReady]);
 
   // Side-by-side (tree left, viewer right) once the surface is wide enough;
   // stacked (tree over viewer) on a narrow dock. Tracked off the container so it
@@ -93,8 +114,14 @@ export function SandboxFiles({
   const fileView = useFileView(viewPath, files.readFile);
 
   // Selecting a (different) file always returns to View — never drop the user into
-  // an editor whose buffer belongs to the previously-selected path.
+  // an editor whose buffer belongs to the previously-selected path. Manual
+  // navigation also consumes a pending guarded-file request: a late cold→warm
+  // transition must never pull the user away from the file they chose meanwhile.
   const selectFile = useCallback((path: string) => {
+    if (pendingRequestRef.current !== null) {
+      handledRequestRef.current = pendingRequestRef.current;
+      pendingRequestRef.current = null;
+    }
     setSelected(path);
     setEditMode(false);
   }, []);
@@ -159,7 +186,10 @@ export function SandboxFiles({
           )}
         >
           <div className="flex shrink-0 items-center justify-between gap-2 border-b border-og-border bg-og-surface-1 px-2 py-1">
-            <span className="min-w-0 truncate font-og-mono text-og-xs text-og-fg-muted">
+            <span
+              data-opengeni-selected-file
+              className="min-w-0 truncate font-og-mono text-og-xs text-og-fg-muted"
+            >
               {selected ?? "No file selected"}
             </span>
             {/* View/Edit toggle — only for a real, fully-loaded text file the editor
