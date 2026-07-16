@@ -1004,16 +1004,22 @@ describe("OPE-21 atomic Codex credential allocation", () => {
     expect(settled.action).toBe("recovering");
     if (settled.action !== "recovering") throw new Error("expected lease-loss requeue");
     const [row] = await admin<
-      { turn_status: string; session_status: string; active_turn_id: string | null }[]
+      {
+        turn_status: string;
+        session_status: string;
+        active_turn_id: string | null;
+        active_attempt_id: string | null;
+      }[]
     >`
       select t.status as turn_status, s.status as session_status,
-             s.active_turn_id
+             s.active_turn_id, t.active_attempt_id
       from session_turns t join sessions s on s.id = t.session_id
       where t.id = ${turnId}`;
     expect(row).toEqual({
       turn_status: "recovering",
       session_status: "recovering",
       active_turn_id: turnId,
+      active_attempt_id: null,
     });
     expect(settled.events.map((event) => event.type)).toEqual([
       "turn.recovery.requested",
@@ -1073,13 +1079,23 @@ describe("OPE-21 atomic Codex credential allocation", () => {
       "session.status.changed",
     ]);
     const [row] = await admin<
-      { turn_status: string; session_status: string; active_turn_id: string | null }[]
+      {
+        turn_status: string;
+        session_status: string;
+        active_turn_id: string | null;
+        active_attempt_id: string | null;
+      }[]
     >`
       select t.status as turn_status, s.status as session_status,
-             s.active_turn_id
+             s.active_turn_id, t.active_attempt_id
       from session_turns t join sessions s on s.id = t.session_id
       where t.id = ${turnId}`;
-    expect(row).toEqual({ turn_status: "failed", session_status: "failed", active_turn_id: null });
+    expect(row).toEqual({
+      turn_status: "failed",
+      session_status: "failed",
+      active_turn_id: null,
+      active_attempt_id: null,
+    });
 
     const duplicate = await settleCodexCredentialLeaseLoss(dbB, {
       accountId: ws!.accountId,

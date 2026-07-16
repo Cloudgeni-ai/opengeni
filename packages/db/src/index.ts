@@ -8146,6 +8146,7 @@ export async function armCodexCapacityWait(
     workspaceId: string;
     sessionId: string;
     turnId: string;
+    attemptId: string;
     workflowId: string;
     goalId: string;
     goalVersion: number;
@@ -8261,6 +8262,7 @@ export async function armCodexCapacityWait(
           goal.status !== "active" ||
           goal.version !== input.goalVersion ||
           turn.status !== "running" ||
+          turn.activeAttemptId !== input.attemptId ||
           !leaseFenceValid ||
           codexCapacityControlGenerationFromTurnMetadata(turn.metadata) !== controlGeneration ||
           codexCapacityPolicyHashFromTurnMetadata(turn.metadata) !== policyHash
@@ -8316,6 +8318,17 @@ export async function armCodexCapacityWait(
           throw new Error("Codex capacity wait arm returned no waiter row");
         }
 
+        let sequence = session.lastSequence;
+        const closedTools = await closePendingSessionToolCallsTx(tx, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+          reason: "codex_capacity_wait",
+          sequence,
+          now,
+        });
+        sequence = closedTools.sequence;
         const inserted = await tx
           .insert(schema.sessionEvents)
           .values([
@@ -8323,7 +8336,7 @@ export async function armCodexCapacityWait(
               accountId: input.accountId,
               workspaceId: input.workspaceId,
               sessionId: input.sessionId,
-              sequence: session.lastSequence + 1,
+              sequence: ++sequence,
               type: "turn.failed",
               payload: sanitizeEventPayload({
                 ...input.failurePayload,
@@ -8334,13 +8347,16 @@ export async function armCodexCapacityWait(
                 capacityWaitGeneration: waiterRow.generation,
               }),
               turnId: input.turnId,
+              turnGeneration: turn.executionGeneration,
+              turnAttemptId: input.attemptId,
+              turnAssociation: "current",
               occurredAt: now,
             },
             {
               accountId: input.accountId,
               workspaceId: input.workspaceId,
               sessionId: input.sessionId,
-              sequence: session.lastSequence + 2,
+              sequence: ++sequence,
               type: "codex.capacity.waiting",
               payload: sanitizeEventPayload({
                 waiterId: waiterRow.id,
@@ -8354,23 +8370,35 @@ export async function armCodexCapacityWait(
                 nextCheckAt: nextCheckAt.toISOString(),
               }),
               turnId: input.turnId,
+              turnGeneration: turn.executionGeneration,
+              turnAttemptId: input.attemptId,
+              turnAssociation: "current",
               occurredAt: now,
             },
             {
               accountId: input.accountId,
               workspaceId: input.workspaceId,
               sessionId: input.sessionId,
-              sequence: session.lastSequence + 3,
+              sequence: ++sequence,
               type: "session.status.changed",
               payload: { status: "idle", reason: "codex_capacity" },
               turnId: input.turnId,
+              turnGeneration: turn.executionGeneration,
+              turnAttemptId: input.attemptId,
+              turnAssociation: "current",
               occurredAt: now,
             },
           ])
           .returning();
         await tx
           .update(schema.sessionTurns)
-          .set({ status: "failed", finishedAt: now, updatedAt: now })
+          .set({
+            status: "failed",
+            activeAttemptId: null,
+            version: turn.version + 1,
+            finishedAt: now,
+            updatedAt: now,
+          })
           .where(
             and(
               eq(schema.sessionTurns.workspaceId, input.workspaceId),
@@ -8383,7 +8411,7 @@ export async function armCodexCapacityWait(
           .set({
             status: "idle",
             activeTurnId: null,
-            lastSequence: session.lastSequence + 3,
+            lastSequence: sequence,
             updatedAt: now,
           })
           .where(
@@ -8402,7 +8430,7 @@ export async function armCodexCapacityWait(
         return {
           action: "waiting",
           waiter: mapCodexCapacityWaiter(waiterRow),
-          events: inserted.map(mapEvent),
+          events: [...closedTools.events, ...inserted.map(mapEvent)],
         } as const;
       }),
   );
@@ -19788,6 +19816,7 @@ export async function settleCodexCredentialLeaseLoss(
                 }
               : {
                   status: "failed",
+                  activeAttemptId: null,
                   finishedAt: now,
                   updatedAt: now,
                 },
@@ -20420,6 +20449,170 @@ export type ReparkOrphanedSessionTurnInput = {
   attemptId: string | null;
   reason: string;
 };
+
+export type RepairDetachedCodexCapacityAttemptInput = {
+  sessionId: string;
+  turnId: string;
+  attemptId: string;
+  reason: string;
+};
+
+export type RepairDetachedCodexCapacityAttemptResult =
+  | { action: "repaired"; closedToolCalls: number; events: SessionEvent[] }
+  | {
+      action: "stale";
+      events: [];
+      turnStatus: SessionTurnStatus | null;
+      activeTurnId: string | null;
+      activeAttemptId: string | null;
+    };
+
+/**
+ * Repair the exact historical residue left by the pre-cutover Codex-capacity
+ * settlement: the turn is already terminal and detached, but still carries its
+ * former attempt owner. This is deliberately an operator-only transition. It
+ * refuses any live pointer, lease, pending control owner, non-capacity failure,
+ * or changed attempt and truthfully closes unresolved tool receipts before
+ * clearing the stale owner.
+ */
+export async function repairDetachedCodexCapacityAttempt(
+  db: Database,
+  workspaceId: string,
+  input: RepairDetachedCodexCapacityAttemptInput,
+): Promise<RepairDetachedCodexCapacityAttemptResult> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    return await scopedDb.transaction(async (tx) => {
+      const [workspace] = await tx
+        .select({ id: schema.workspaces.id })
+        .from(schema.workspaces)
+        .where(eq(schema.workspaces.id, workspaceId))
+        .for("update")
+        .limit(1);
+      const [session] = await tx
+        .select()
+        .from(schema.sessions)
+        .where(
+          and(
+            eq(schema.sessions.workspaceId, workspaceId),
+            eq(schema.sessions.id, input.sessionId),
+          ),
+        )
+        .for("update")
+        .limit(1);
+      const [turn] = await tx
+        .select()
+        .from(schema.sessionTurns)
+        .where(
+          and(
+            eq(schema.sessionTurns.workspaceId, workspaceId),
+            eq(schema.sessionTurns.sessionId, input.sessionId),
+            eq(schema.sessionTurns.id, input.turnId),
+          ),
+        )
+        .for("update")
+        .limit(1);
+      const [lease] = await tx
+        .select({ id: schema.codexCredentialLeases.id })
+        .from(schema.codexCredentialLeases)
+        .where(
+          and(
+            eq(schema.codexCredentialLeases.workspaceId, workspaceId),
+            eq(schema.codexCredentialLeases.turnId, input.turnId),
+          ),
+        )
+        .for("update")
+        .limit(1);
+      const [failure] = await tx
+        .select({ id: schema.sessionEvents.id, occurredAt: schema.sessionEvents.occurredAt })
+        .from(schema.sessionEvents)
+        .where(
+          and(
+            eq(schema.sessionEvents.workspaceId, workspaceId),
+            eq(schema.sessionEvents.sessionId, input.sessionId),
+            eq(schema.sessionEvents.turnId, input.turnId),
+            eq(schema.sessionEvents.type, "turn.failed"),
+            sql`${schema.sessionEvents.payload} ->> 'code' = 'codex_usage_limit_reached'`,
+            sql`(${schema.sessionEvents.turnAttemptId} is null or ${schema.sessionEvents.turnAttemptId} = ${input.attemptId}::uuid)`,
+          ),
+        )
+        .orderBy(desc(schema.sessionEvents.sequence))
+        .limit(1);
+      const turnStatus = (turn?.status as SessionTurnStatus | undefined) ?? null;
+      const failureMatchesTerminalWrite =
+        failure !== undefined &&
+        turn?.finishedAt !== null &&
+        turn?.finishedAt !== undefined &&
+        Math.abs(failure.occurredAt.getTime() - turn.finishedAt.getTime()) <= 5_000;
+      if (
+        !workspace ||
+        !session ||
+        !turn ||
+        turnStatus !== "failed" ||
+        turn.activeAttemptId !== input.attemptId ||
+        session.activeTurnId !== null ||
+        (session.status !== "idle" && session.status !== "paused") ||
+        session.pendingControlExpectedAttemptId === input.attemptId ||
+        lease !== undefined ||
+        !failureMatchesTerminalWrite
+      ) {
+        return {
+          action: "stale" as const,
+          events: [] as [],
+          turnStatus,
+          activeTurnId: session?.activeTurnId ?? null,
+          activeAttemptId: turn?.activeAttemptId ?? null,
+        };
+      }
+
+      const now = new Date();
+      const closedTools = await closePendingSessionToolCallsTx(tx as unknown as Database, {
+        accountId: session.accountId,
+        workspaceId,
+        sessionId: input.sessionId,
+        turnId: input.turnId,
+        reason: input.reason,
+        sequence: session.lastSequence,
+        now,
+      });
+      const [updated] = await tx
+        .update(schema.sessionTurns)
+        .set({
+          activeAttemptId: null,
+          version: turn.version + 1,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(schema.sessionTurns.workspaceId, workspaceId),
+            eq(schema.sessionTurns.sessionId, input.sessionId),
+            eq(schema.sessionTurns.id, input.turnId),
+            eq(schema.sessionTurns.status, "failed"),
+            eq(schema.sessionTurns.activeAttemptId, input.attemptId),
+          ),
+        )
+        .returning({ id: schema.sessionTurns.id });
+      if (!updated) {
+        throw new Error(`Detached capacity turn changed while locked: ${input.turnId}`);
+      }
+      if (closedTools.sequence !== session.lastSequence) {
+        await tx
+          .update(schema.sessions)
+          .set({ lastSequence: closedTools.sequence, updatedAt: now })
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, workspaceId),
+              eq(schema.sessions.id, input.sessionId),
+            ),
+          );
+      }
+      return {
+        action: "repaired" as const,
+        closedToolCalls: closedTools.closed,
+        events: closedTools.events,
+      };
+    });
+  });
+}
 
 export type ReparkOrphanedSessionTurnResult =
   | {
