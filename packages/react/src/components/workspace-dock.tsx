@@ -155,7 +155,7 @@ export function WorkspaceDock({
 
   // Keep the active tab valid if the available tabs change.
   useEffect(() => {
-    if (firstTabId && !tabs.some((t) => t.id === current)) {
+    if (firstTabId && !tabIds.includes(current)) {
       setTab(firstTabId);
     }
     // Depend on tab identity, not the tab content objects. Session live events
@@ -332,7 +332,7 @@ function ChromeButton({
       onClick={onClick}
       title={title}
       aria-label={label}
-      className="inline-flex items-center justify-center rounded-og-sm p-1 transition-colors hover:bg-og-surface-2 hover:text-og-fg pointer-coarse:size-10"
+      className="inline-flex items-center justify-center rounded-og-sm p-1 transition-colors hover:bg-og-surface-2 hover:text-og-fg max-[1023px]:size-11 pointer-coarse:size-11"
     >
       {children}
     </button>
@@ -377,7 +377,7 @@ function DockChrome({
               aria-selected={tab.id === current}
               onClick={() => onTab(tab.id)}
               className={cn(
-                "flex shrink-0 items-center gap-1 rounded-og-sm px-2 py-1 text-og-xs font-medium transition-colors pointer-coarse:min-h-10",
+                "flex shrink-0 items-center gap-1 rounded-og-sm px-2 py-1 text-og-xs font-medium transition-colors max-[1023px]:min-h-11 max-[1023px]:min-w-11 pointer-coarse:min-h-11 pointer-coarse:min-w-11",
                 tab.id === current
                   ? "bg-og-accent-soft text-og-fg"
                   : "text-og-fg-subtle hover:text-og-fg",

@@ -673,7 +673,7 @@ function MachineStateChip({
         <button
           type="button"
           aria-label={`Machine: ${chip.label}`}
-          className="inline-flex items-center gap-1.5 rounded-og-sm px-2 py-1 text-og-xs font-medium text-og-fg-muted transition-colors hover:bg-og-surface-2 hover:text-og-fg pointer-coarse:min-h-9"
+          className="inline-flex items-center gap-1.5 rounded-og-sm px-2 py-1 text-og-xs font-medium text-og-fg-muted transition-colors hover:bg-og-surface-2 hover:text-og-fg max-[1023px]:min-h-11 pointer-coarse:min-h-11"
         >
           <span
             className={cn("size-1.5 shrink-0 rounded-full", chipDotClass(chip.state))}

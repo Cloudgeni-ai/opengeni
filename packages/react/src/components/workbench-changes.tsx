@@ -1,6 +1,15 @@
 import type { GitFileDiff } from "@opengeni/sdk";
 import { FileWarningIcon, HistoryIcon } from "lucide-react";
-import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { VList } from "virtua";
 import { cn } from "../lib/cn";
 import { useThemeType } from "../lib/use-theme-type";
@@ -31,6 +40,8 @@ const OVERSCAN = 2;
 const HEADER_PX = 30;
 const LINE_PX = 18;
 const GUARD_BODY_PX = 52;
+const COMPACT_SURFACE_PX = 560;
+const useChangesLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
 
 const STATUS_TINT: Record<GitFileDiff["status"], string> = {
   added: "text-og-status-idle",
@@ -128,12 +139,49 @@ export function WorkbenchChanges({
   themeType,
   className,
 }: WorkbenchChangesProps) {
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const [compact, setCompact] = useState(false);
+  const [coarsePointer, setCoarsePointer] = useState(false);
   const resolvedTheme = useThemeType(themeType);
   const [layout, setLayout] = useState<"unified" | "split">("unified");
-  const [activeIndex, setActiveIndex] = useState(0);
+  const [activePath, setActivePath] = useState<string | null>(null);
+  const pickerId = useId();
 
   const { orderedFiles, rows } = useMemo(() => buildRail(diff), [diff]);
   const grouped = diff.length > GROUP_THRESHOLD;
+  const selectedIndex = orderedFiles.findIndex((file) => file.path === activePath);
+  const activeIndex = selectedIndex >= 0 ? selectedIndex : 0;
+
+  useChangesLayoutEffect(() => {
+    const root = rootRef.current;
+    if (!root || typeof ResizeObserver === "undefined") return;
+    const update = (width: number) => {
+      // DOM test environments report a zero geometry. Keep the deterministic
+      // desktop/SSR branch until the observer has a real measurement.
+      if (width > 0) setCompact(width < COMPACT_SURFACE_PX);
+    };
+    update(root.getBoundingClientRect().width);
+    const observer = new ResizeObserver((entries) => {
+      update(entries[0]?.contentRect.width ?? root.getBoundingClientRect().width);
+    });
+    observer.observe(root);
+    return () => observer.disconnect();
+  }, []);
+
+  useChangesLayoutEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;
+    const query = window.matchMedia("(pointer: coarse)");
+    const update = () => setCoarsePointer(query.matches);
+    update();
+    if (typeof query.addEventListener === "function") {
+      query.addEventListener("change", update);
+      return () => query.removeEventListener("change", update);
+    }
+    if (typeof query.addListener === "function") {
+      query.addListener(update);
+      return () => query.removeListener(update);
+    }
+  }, []);
 
   const additions = useMemo(() => diff.reduce((sum, f) => sum + f.additions, 0), [diff]);
   const deletions = useMemo(() => diff.reduce((sum, f) => sum + f.deletions, 0), [diff]);
@@ -154,10 +202,10 @@ export function WorkbenchChanges({
 
   const jumpTo = useCallback(
     (index: number) => {
-      setActiveIndex(index);
+      setActivePath(orderedFiles[index]?.path ?? null);
       windowed.scrollToIndex(index);
     },
-    [windowed],
+    [orderedFiles, windowed],
   );
 
   // Track which section is at the top of the pane so the rail highlights it.
@@ -171,8 +219,9 @@ export function WorkbenchChanges({
       if ((offsets[i] ?? 0) <= top + 4) idx = i;
       else break;
     }
-    setActiveIndex((prev) => (prev === idx ? prev : idx));
-  }, [windowed, orderedFiles.length]);
+    const nextPath = orderedFiles[idx]?.path ?? null;
+    setActivePath((previous) => (previous === nextPath ? previous : nextPath));
+  }, [windowed, orderedFiles]);
 
   useEffect(() => {
     const el = windowed.scrollRef.current;
@@ -182,9 +231,14 @@ export function WorkbenchChanges({
   }, [windowed.scrollRef, onPaneScroll]);
 
   const sourceBadge = describeSource(source, capturedAt, captureRevision ?? null);
+  const activeFile = orderedFiles[activeIndex] ?? orderedFiles[0];
 
   return (
-    <div className={cn("flex h-full min-h-0 min-w-0 flex-col", className)}>
+    <div
+      ref={rootRef}
+      className={cn("flex h-full min-h-0 min-w-0 flex-col", className)}
+      data-workbench-changes-layout={compact ? "compact" : "rail"}
+    >
       {/* Summary + source badge + layout toggle. */}
       <div className="flex shrink-0 items-center justify-between gap-2 border-b border-og-border px-3 py-1.5">
         <span className="min-w-0 truncate text-og-xs text-og-fg-muted">
@@ -193,63 +247,99 @@ export function WorkbenchChanges({
           <span className="ml-1 text-og-status-failed">−{deletions}</span>
         </span>
         <div className="flex shrink-0 items-center gap-2">
-          <LayoutToggle layout={layout} onChange={setLayout} />
+          {compact ? null : <LayoutToggle layout={layout} onChange={setLayout} />}
           <SourceBadge source={source} capturedAt={capturedAt} label={sourceBadge} />
         </div>
       </div>
 
-      <div className="flex min-h-0 flex-1">
-        {/* File rail — virtualized (virtua): a dense change set is fine. */}
-        <div className="w-[240px] shrink-0 border-r border-og-border max-[560px]:w-[168px]">
-          <VList className="h-full" itemSize={26} ssrCount={Math.min(30, rows.length)}>
-            {rows.map((row) =>
-              row.kind === "group" ? (
-                <div
-                  key={`g:${row.label}`}
-                  data-rail-group
-                  className="flex items-center gap-1.5 px-2 pb-0.5 pt-2 text-2xs font-medium uppercase tracking-wide text-og-fg-subtle"
-                >
-                  <span className="min-w-0 truncate">{row.label}</span>
-                  <span className="shrink-0 opacity-70">{row.count}</span>
-                </div>
-              ) : (
-                <RailFileRow
-                  key={row.file.path}
-                  file={row.file}
-                  grouped={grouped}
-                  active={row.index === activeIndex}
-                  onClick={() => jumpTo(row.index)}
-                />
-              ),
-            )}
-          </VList>
-        </div>
-
-        {/* Diff pane — windowed file sections. Only the sections inside the
-            visible window ± overscan are in the DOM; the container reserves the
-            full scroll height so scrolling + the rail-jump stay accurate. */}
-        <div
-          ref={windowed.scrollRef}
-          className="min-h-0 min-w-0 flex-1 overflow-auto"
-          data-opengeni-changes-pane
-        >
-          <div style={{ position: "relative", height: windowed.totalHeight }}>
-            {orderedFiles.map((file, index) => {
-              if (index < windowed.range.start || index >= windowed.range.end) return null;
-              return (
-                <MeasuredSection
-                  key={file.path}
-                  index={index}
-                  top={windowed.offsets[index] ?? 0}
-                  onMeasure={windowed.measure}
-                >
-                  <DiffSection file={file} layout={layout} themeType={resolvedTheme} />
-                </MeasuredSection>
-              );
-            })}
+      {compact ? (
+        <div className="flex min-h-0 flex-1 flex-col">
+          <div className="shrink-0 border-b border-og-border bg-og-surface-1 p-2">
+            <label className="sr-only" htmlFor={pickerId}>
+              Changed file
+            </label>
+            <select
+              id={pickerId}
+              aria-label="Changed file"
+              value={activeIndex}
+              onChange={(event) => {
+                const index = Number(event.currentTarget.value);
+                setActivePath(orderedFiles[index]?.path ?? null);
+              }}
+              data-compact-file-picker
+              className="h-11 w-full rounded-og-md border border-og-border bg-og-bg px-3 font-og-mono text-og-sm text-og-fg outline-none transition-colors focus:border-og-accent focus:ring-2 focus:ring-og-accent-soft"
+            >
+              {orderedFiles.map((file, index) => (
+                <option key={file.path} value={index}>
+                  {STATUS_LETTER[file.status]} · {file.path} · +{file.additions} −{file.deletions}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="min-h-0 min-w-0 flex-1 overflow-auto" data-opengeni-changes-pane>
+            {activeFile ? (
+              <DiffSection file={activeFile} layout="unified" themeType={resolvedTheme} />
+            ) : null}
           </div>
         </div>
-      </div>
+      ) : (
+        <div className="flex min-h-0 flex-1">
+          {/* File rail — virtualized (virtua): a dense change set is fine. */}
+          <div className="w-[240px] shrink-0 border-r border-og-border">
+            <VList
+              className="h-full"
+              itemSize={coarsePointer ? 44 : 26}
+              ssrCount={Math.min(30, rows.length)}
+            >
+              {rows.map((row) =>
+                row.kind === "group" ? (
+                  <div
+                    key={`g:${row.label}`}
+                    data-rail-group
+                    className="flex items-center gap-1.5 px-2 pb-0.5 pt-2 text-2xs font-medium uppercase tracking-wide text-og-fg-subtle"
+                  >
+                    <span className="min-w-0 truncate">{row.label}</span>
+                    <span className="shrink-0 opacity-70">{row.count}</span>
+                  </div>
+                ) : (
+                  <RailFileRow
+                    key={row.file.path}
+                    file={row.file}
+                    grouped={grouped}
+                    active={row.index === activeIndex}
+                    onClick={() => jumpTo(row.index)}
+                  />
+                ),
+              )}
+            </VList>
+          </div>
+
+          {/* Diff pane — windowed file sections. Only the sections inside the
+            visible window ± overscan are in the DOM; the container reserves the
+            full scroll height so scrolling + the rail-jump stay accurate. */}
+          <div
+            ref={windowed.scrollRef}
+            className="min-h-0 min-w-0 flex-1 overflow-auto"
+            data-opengeni-changes-pane
+          >
+            <div style={{ position: "relative", height: windowed.totalHeight }}>
+              {orderedFiles.map((file, index) => {
+                if (index < windowed.range.start || index >= windowed.range.end) return null;
+                return (
+                  <MeasuredSection
+                    key={file.path}
+                    index={index}
+                    top={windowed.offsets[index] ?? 0}
+                    onMeasure={windowed.measure}
+                  >
+                    <DiffSection file={file} layout={layout} themeType={resolvedTheme} />
+                  </MeasuredSection>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -319,7 +409,7 @@ function RailFileRow({
       title={file.path}
       data-rail-file
       className={cn(
-        "flex w-full items-center gap-1.5 truncate px-2 py-0.5 text-left text-og-sm hover:bg-og-surface-2 pointer-coarse:min-h-10",
+        "flex w-full items-center gap-1.5 truncate px-2 py-0.5 text-left text-og-sm hover:bg-og-surface-2 pointer-coarse:min-h-11",
         grouped && "pl-3",
         active && "bg-og-surface-2",
       )}
@@ -437,7 +527,7 @@ function LayoutToggle({
           type="button"
           onClick={() => onChange(value)}
           className={cn(
-            "rounded-og-xs px-1.5 py-0.5 text-2xs capitalize pointer-coarse:min-h-10",
+            "rounded-og-xs px-1.5 py-0.5 text-2xs capitalize pointer-coarse:min-h-11",
             layout === value
               ? "bg-og-accent-soft text-og-fg"
               : "text-og-fg-subtle hover:text-og-fg",
