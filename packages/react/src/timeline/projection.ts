@@ -419,50 +419,16 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
       }
 
       case "turn.recovery.requested": {
-        closeStreamingTail();
-        const rawReason = typeof payload.reason === "string" ? payload.reason : null;
-        const reason = rawReason?.replaceAll("_", " ") ?? null;
-        items.push({
-          kind: "notice",
-          id: event.id,
-          tone: "waiting",
-          text:
-            rawReason === "workspace_pause"
-              ? "Resuming paused work."
-              : reason
-                ? `Resuming this turn after ${reason}.`
-                : "Resuming this turn.",
-          occurredAt: event.occurredAt,
-        });
+        // Recovery requests are durable control-plane evidence, not a user
+        // message or proof that recovery succeeded. Live state already exposes
+        // a genuinely recovering session; keep the raw event in Debug/audit.
         break;
       }
 
       case "turn.event.rejected_late": {
-        const rejectedType =
-          typeof payload.rejectedType === "string" ? payload.rejectedType : "unknown event";
-        // Workspace revision events are cache announcements and rejected
-        // reasoning deltas are discarded stream fragments. Both remain durable
-        // in Debug/audit evidence, but neither is a user-visible failed action.
-        if (
-          rejectedType === "workspace.revision.captured" ||
-          rejectedType === "workspace.revision.degraded" ||
-          rejectedType === "agent.reasoning.delta"
-        ) {
-          break;
-        }
-        closeStreamingTail();
-        const reason =
-          typeof payload.reason === "string"
-            ? payload.reason.replaceAll("_", " ")
-            : "attempt fence";
-        items.push({
-          kind: "notice",
-          id: event.id,
-          tone: "cancelled",
-          text: `Late ${rejectedType} evidence was rejected by the ${reason} and did not change the current turn.`,
-          details: { label: "Inspect rejected evidence", value: payload },
-          occurredAt: event.occurredAt,
-        });
+        // Attempt-fence rejections prove stale callbacks did not alter current
+        // truth. They are useful diagnostics but never actionable chat content,
+        // regardless of the rejected event type. Debug/audit retains the event.
         break;
       }
 

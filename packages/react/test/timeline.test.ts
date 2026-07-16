@@ -727,46 +727,33 @@ describe("buildTimeline", () => {
     ]);
   });
 
-  test("shows same-turn recovery without pretending it is queued work", () => {
+  test("hides same-turn recovery control evidence from the user timeline", () => {
     reset();
     const items = buildTimeline([event("turn.recovery.requested", { reason: "worker_shutdown" })]);
-    expect(items).toEqual([
-      expect.objectContaining({
-        kind: "notice",
-        tone: "waiting",
-        text: "Resuming this turn after worker shutdown.",
-      }),
-    ]);
+    expect(items).toEqual([]);
   });
 
-  test("uses compact copy when workspace-paused work resumes", () => {
+  test("hides workspace recovery control evidence from the user timeline", () => {
     reset();
     const items = buildTimeline([event("turn.recovery.requested", { reason: "workspace_pause" })]);
-    expect(items).toEqual([
-      expect.objectContaining({
-        kind: "notice",
-        tone: "waiting",
-        text: "Resuming paused work.",
-      }),
-    ]);
+    expect(items).toEqual([]);
   });
 
-  test("keeps rejected zombie evidence visible and inspectable", () => {
+  test("hides all rejected attempt evidence from the user timeline", () => {
     reset();
-    const payload = {
-      rejectedType: "agent.toolCall.output",
-      rejectedPayload: { id: "call-1", output: "finished too late" },
-      reason: "attempt_changed",
-    };
-    const items = buildTimeline([event("turn.event.rejected_late", payload)]);
-    expect(items).toEqual([
-      expect.objectContaining({
-        kind: "notice",
-        tone: "cancelled",
-        text: expect.stringContaining("Late agent.toolCall.output evidence was rejected"),
-        details: { label: "Inspect rejected evidence", value: payload },
+    const items = buildTimeline([
+      event("turn.event.rejected_late", {
+        rejectedType: "agent.toolCall.output",
+        rejectedPayload: { id: "call-1", output: "finished too late" },
+        reason: "attempt_changed",
+      }),
+      event("turn.event.rejected_late", {
+        rejectedType: "agent.model.usage",
+        rejectedPayload: { inputTokens: 10, outputTokens: 5 },
+        reason: "session_paused",
       }),
     ]);
+    expect(items).toEqual([]);
   });
 
   test("hides rejected workspace revision bookkeeping from the user timeline", () => {
