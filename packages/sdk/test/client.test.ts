@@ -241,6 +241,24 @@ describe("OpenGeniClient", () => {
     await expect(
       client.listSessionPage(WORKSPACE_ID, { search: "unsupported-on-legacy" }),
     ).rejects.toThrow("does not support session search");
+    await expect(
+      client.listSessions(WORKSPACE_ID, { search: "unsupported-on-legacy" }),
+    ).rejects.toThrow("does not support session search");
+  });
+
+  test("listSessions search flattens the pin-aware page without losing section order", async () => {
+    const pinned = { id: "pinned" } as unknown as import("../src/types").Session;
+    const ordinary = { id: "ordinary" } as unknown as import("../src/types").Session;
+    const { client, requests } = makeClient(() =>
+      jsonResponse({ pinned: [pinned], sessions: [ordinary], nextCursor: "next" }),
+    );
+
+    await expect(client.listSessions(WORKSPACE_ID, { search: "  exact match  " })).resolves.toEqual(
+      [pinned, ordinary],
+    );
+    expect(requests[0]!.url).toBe(
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions?view=page&search=exact+match`,
+    );
   });
 
   test("streamEvents consumes the SSE endpoint end to end through fetch", async () => {

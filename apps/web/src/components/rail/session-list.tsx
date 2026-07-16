@@ -14,7 +14,7 @@ import {
   PlusIcon,
   SearchIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { useRail } from "@/components/rail/rail-context";
 import { Button } from "@/components/ui/button";
@@ -39,8 +39,14 @@ import {
   mergeSessionContinuation,
   sessionPageKey,
 } from "@/lib/session-pagination";
+import { pinLiveAnnouncement } from "@/lib/pin-live-announcement";
 import { SESSION_TITLE_MAX_LENGTH, useInlineRename } from "@/lib/session-rename";
 import { applySessionPinProjection, subscribeToSessionPinChanges } from "@/lib/session-pins";
+import {
+  sessionFocusAttribute,
+  shouldRestoreSessionFocus,
+  type SessionFocusTarget,
+} from "@/lib/session-focus";
 import {
   buildRailForest,
   groupSessionsForRail,
@@ -52,8 +58,19 @@ import { cn } from "@/lib/utils";
 import type { Session } from "@/types";
 
 type RenameFn = (workspaceId: string, sessionId: string, title: string) => Promise<Session | null>;
-type PinFn = (session: Session, pinned: boolean) => Promise<Session | null>;
+type PinFocusTarget = SessionFocusTarget;
+type PinFn = (
+  session: Session,
+  pinned: boolean,
+  restoreFocusTo?: PinFocusTarget,
+) => Promise<Session | null>;
 type PinOverride = { session: Session; operation: number };
+type PendingPinFocus = {
+  sessionId: string;
+  operation: number;
+  target: PinFocusTarget;
+  settled: boolean;
+};
 
 export function SessionList() {
   const rail = useRail();
@@ -74,10 +91,10 @@ export function SessionList() {
   // Ordinary rows page independently of the complete pinned section. The
   // polled hook owns page one; additional pages are appended and deduplicated.
   // A filter change starts a fresh cursor chain rather than mixing snapshots.
-  // The server cursor carries the first page's short-lived snapshot identity.
-  // If a poll replaces that snapshot, any continuation loaded from the old
-  // activity order is stale even when workspace/search are unchanged.
-  const paginationKey = `${sessionPageKey(rail.workspaceId, search)}\u0000${nextCursor ?? "complete"}`;
+  // The continuation generation is keyed ONLY to workspace/search: polling
+  // page one rotates the server's short-lived snapshot, but must not discard
+  // older pages the user already loaded from the prior snapshot.
+  const paginationKey = sessionPageKey(rail.workspaceId, search);
   const paginationIdentity = useRef({ key: paginationKey, generation: 0 });
   paginationIdentity.current = advanceSessionPageIdentity(
     paginationIdentity.current,
@@ -94,6 +111,11 @@ export function SessionList() {
   const loadMoreAttempt = useRef(0);
   const loadMoreError = activeContinuation.failed;
   const [announcement, setAnnouncement] = useState("");
+  const pinAnnouncementSequence = useRef(0);
+  const announcePinResult = useCallback((message: string) => {
+    pinAnnouncementSequence.current += 1;
+    setAnnouncement(pinLiveAnnouncement(message, pinAnnouncementSequence.current));
+  }, []);
   // Short-lived optimistic projections only. The page returned by the server
   // remains canonical; after each mutation we replace the projection with that
   // returned row and refresh once to reconcile tabs/devices/offline recovery.
@@ -102,7 +124,9 @@ export function SessionList() {
   );
   const pinOperation = useRef(0);
   const pinning = useRef(new Set<string>());
-  const allSessions = useMemo(() => {
+  const listRef = useRef<HTMLDivElement>(null);
+  const pendingPinFocus = useRef<PendingPinFocus | null>(null);
+  const serverSessions = useMemo(() => {
     const source = new Map<string, Session>();
     // Precedence is extra page < current first page < current pinned section;
     // a row that became pinned since it was loaded as an old ordinary page must
@@ -110,9 +134,13 @@ export function SessionList() {
     for (const session of [...extraSessions, ...sessions, ...pinned]) {
       source.set(session.id, session);
     }
+    return [...source.values()];
+  }, [pinned, sessions, extraSessions]);
+  const allSessions = useMemo(() => {
+    const source = new Map(serverSessions.map((session) => [session.id, session]));
     for (const [id, override] of pinOverrides) source.set(id, override.session);
     return [...source.values()];
-  }, [pinned, sessions, extraSessions, pinOverrides]);
+  }, [pinOverrides, serverSessions]);
   const pinnedSessions = useMemo(
     () => allSessions.filter((session) => Boolean(session.pinned)),
     [allSessions],
@@ -131,10 +159,14 @@ export function SessionList() {
   // disagreeing. Preserve the route/SSE-owned lifecycle and content fields.
   useEffect(() => {
     if (!openSessionId || openSessionWorkspaceId !== rail.workspaceId) return;
-    const projected = allSessions.find((candidate) => candidate.id === openSessionId);
+    // Do not feed the rail's short-lived optimistic override into the route
+    // header. A same-version optimistic timestamp can make a later failed
+    // rollback look non-exact, causing its authoritative lower revision to be
+    // rejected as stale and leaving the header pinned forever.
+    const projected = serverSessions.find((candidate) => candidate.id === openSessionId);
     if (!projected) return;
     setContextSession((current) => applySessionPinProjection(current, projected));
-  }, [allSessions, openSessionId, openSessionWorkspaceId, rail.workspaceId, setContextSession]);
+  }, [openSessionId, openSessionWorkspaceId, rail.workspaceId, serverSessions, setContextSession]);
 
   const activeSessionId = useRouterState({
     select: (state): string | null => {
@@ -216,13 +248,86 @@ export function SessionList() {
   );
   const flat = useMemo<Session[]>(() => visibleRows.map((row) => row.node.session), [visibleRows]);
 
+  useLayoutEffect(() => {
+    const pending = pendingPinFocus.current;
+    const root = listRef.current;
+    if (!pending || !root) return;
+    const operation = pending.operation;
+    let cancelled = false;
+    let frame: number | null = null;
+    let timeout: ReturnType<typeof setTimeout> | null = null;
+    const restore = () => {
+      if (cancelled) return;
+      const current = pendingPinFocus.current;
+      if (!current || current.operation !== operation) return;
+      const attribute = sessionFocusAttribute(current.target);
+      const destination = [...root.querySelectorAll<HTMLElement>(`[${attribute}]`)].find(
+        (element) => element.getAttribute(attribute) === current.sessionId,
+      );
+      if (
+        destination &&
+        shouldRestoreSessionFocus(
+          document.activeElement as HTMLElement | null,
+          destination,
+          current.sessionId,
+          document.body,
+        )
+      ) {
+        try {
+          destination.focus({ preventScroll: true });
+        } catch {
+          // A concurrent query transition can remove the destination between
+          // the connectivity check and focus(). The next fenced attempt is the
+          // only safe recovery; never fall back to an unrelated element.
+        }
+      }
+    };
+    const finish = () => {
+      restore();
+      const current = pendingPinFocus.current;
+      if (current?.operation === operation && current.settled) {
+        pendingPinFocus.current = null;
+      }
+    };
+
+    // Layout handles the optimistic/rollback commit. The microtask lets
+    // Radix finish its close bookkeeping, and rAF handles the post-animation
+    // remount; every attempt is fenced to this exact operation.
+    restore();
+    queueMicrotask(() => {
+      restore();
+      if (cancelled) return;
+      if (typeof window.requestAnimationFrame === "function") {
+        frame = window.requestAnimationFrame(finish);
+      } else {
+        timeout = setTimeout(finish, 0);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+      if (frame !== null) window.cancelAnimationFrame(frame);
+      if (timeout !== null) clearTimeout(timeout);
+    };
+  }, [flat]);
+
   const onPin = useCallback<PinFn>(
-    async (target, nextPinned) => {
+    async (target, nextPinned, restoreFocusTo = "row") => {
       if (pinning.current.has(target.id)) {
         return target;
       }
       pinning.current.add(target.id);
       const operation = ++pinOperation.current;
+      // An optimistic pin moves the row between different group subtrees. That
+      // remounts the Radix menu trigger before Radix can restore keyboard focus.
+      // Keep the intended destination through the whole request so a failed
+      // mutation that rolls the row back also restores focus after its remount.
+      pendingPinFocus.current = {
+        sessionId: target.id,
+        operation,
+        target: restoreFocusTo,
+        settled: false,
+      };
       const optimistic: Session = {
         ...target,
         pinned: nextPinned,
@@ -247,7 +352,7 @@ export function SessionList() {
         }
         await refresh();
         const label = target.title?.trim() || target.initialMessage?.trim() || "Untitled session";
-        setAnnouncement(
+        announcePinResult(
           updated
             ? `${nextPinned ? "Pinned" : "Unpinned"} ${label}.`
             : `${label} was not ${nextPinned ? "pinned" : "unpinned"}. Server state refreshed.`,
@@ -255,6 +360,10 @@ export function SessionList() {
         return updated;
       } finally {
         pinning.current.delete(target.id);
+        const pending = pendingPinFocus.current;
+        if (pending?.sessionId === target.id && pending.operation === operation) {
+          pending.settled = true;
+        }
         setPinOverrides((current) => {
           if (current.get(target.id)?.operation !== operation) return current;
           const next = new Map(current);
@@ -263,7 +372,7 @@ export function SessionList() {
         });
       }
     },
-    [context, refresh],
+    [announcePinResult, context, refresh],
   );
 
   const loadMore = useCallback(async () => {
@@ -340,7 +449,6 @@ export function SessionList() {
     };
   }, [refresh]);
 
-  const listRef = useRef<HTMLDivElement>(null);
   const [focusedSessionId, setFocusedSessionId] = useState<string | null>(null);
   const focusIndex = useMemo(() => {
     const preferredId = focusedSessionId ?? activeSessionId;
@@ -719,6 +827,7 @@ function SessionRow(props: {
   const title =
     props.session.title?.trim() || props.session.initialMessage?.trim() || "Untitled session";
   const rename = useInlineRename(props.session, props.onRename);
+  const contextPinSelection = useRef(false);
   const hasChildren = props.childCount > 0;
   // Indent nested rows; the leading affordance is a chevron for parents, else a
   // spacer of the same width — reserved at every depth (root included) so every
@@ -803,6 +912,7 @@ function SessionRow(props: {
             type="button"
             data-session-index={props.index}
             data-session-focus
+            data-session-row={props.session.id}
             tabIndex={props.focused ? 0 : -1}
             aria-current={props.active ? "page" : undefined}
             aria-label={`Open ${title}. ${props.session.status}${
@@ -844,14 +954,27 @@ function SessionRow(props: {
           />
         </div>
       </ContextMenuTrigger>
-      <ContextMenuContent className="min-w-40">
+      <ContextMenuContent
+        className="min-w-40"
+        data-session-menu={props.session.id}
+        onCloseAutoFocus={(event) => {
+          if (!contextPinSelection.current) return;
+          // The original trigger is about to be unmounted by the optimistic
+          // group move. SessionList restores the corresponding remounted row.
+          event.preventDefault();
+          contextPinSelection.current = false;
+        }}
+      >
         <ContextMenuItem className="pointer-coarse:min-h-11" onSelect={rename.startEditing}>
           <PencilIcon className="size-4" />
           Rename
         </ContextMenuItem>
         <ContextMenuItem
           className="pointer-coarse:min-h-11"
-          onSelect={() => void props.onPin(props.session, !props.session.pinned)}
+          onSelect={() => {
+            contextPinSelection.current = true;
+            void props.onPin(props.session, !props.session.pinned, "row");
+          }}
         >
           <PinIcon className={props.session.pinned ? "size-4 fill-current" : "size-4"} />
           {props.session.pinned ? "Unpin" : "Pin"}
@@ -888,6 +1011,7 @@ function RowActionsMenu({
   onRename: () => void;
   onPin: PinFn;
 }) {
+  const pinSelection = useRef(false);
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -898,6 +1022,7 @@ function RowActionsMenu({
           aria-label={`Actions for ${
             session.title?.trim() || session.initialMessage?.trim() || "Untitled session"
           }`}
+          data-session-actions={session.id}
           onClick={(event) => event.stopPropagation()}
           className="shrink-0 text-fg-subtle opacity-0 transition-opacity hover:text-fg focus-visible:opacity-100 group-hover:opacity-100 data-[state=open]:opacity-100 pointer-coarse:size-11 pointer-coarse:opacity-100"
         >
@@ -907,7 +1032,15 @@ function RowActionsMenu({
       <DropdownMenuContent
         align="end"
         className="min-w-40"
+        data-session-menu={session.id}
         onClick={(event) => event.stopPropagation()}
+        onCloseAutoFocus={(event) => {
+          if (!pinSelection.current) return;
+          // The optimistic projection remounts the trigger under another
+          // SessionGroup; the list-level focus owner targets that new node.
+          event.preventDefault();
+          pinSelection.current = false;
+        }}
       >
         <DropdownMenuItem
           className="pointer-coarse:min-h-11"
@@ -921,7 +1054,10 @@ function RowActionsMenu({
         </DropdownMenuItem>
         <DropdownMenuItem
           className="pointer-coarse:min-h-11"
-          onSelect={() => void onPin(session, !session.pinned)}
+          onSelect={() => {
+            pinSelection.current = true;
+            void onPin(session, !session.pinned, "actions");
+          }}
           onClick={(event) => event.stopPropagation()}
         >
           <PinIcon className={session.pinned ? "size-4 fill-current" : "size-4"} />
