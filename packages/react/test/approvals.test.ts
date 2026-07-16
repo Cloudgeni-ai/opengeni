@@ -28,8 +28,8 @@ function reset(): void {
 
 const requiresAction = (approvals: unknown[], turnId = "turn-1") =>
   event("session.requiresAction", { approvals }, { turnId });
-const decision = (approvalId: string, decision: "approve" | "reject" = "approve") =>
-  event("user.approvalDecision", { approvalId, decision }, { turnId: null });
+const decision = (approvalId: string, decisionType: "approve" | "reject" = "approve") =>
+  event("user.approvalDecision", { approvalId, decision: decisionType }, { turnId: null });
 
 describe("approvalsFromRequiresAction", () => {
   test("maps id/name/arguments and falls back to callId, rawItem.callId, then index", () => {

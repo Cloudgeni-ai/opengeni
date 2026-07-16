@@ -103,15 +103,20 @@ export function useMachines(options: UseMachinesOptions = {}): UseMachinesResult
     return await machinesClient.listMachines(workspaceId, sessionId ? { sessionId } : undefined);
   }, [machinesClient, workspaceId, sessionId]);
 
-  const state = usePolledValue(load, {
+  const {
+    data: loadedData,
+    loading,
+    error,
+    refresh,
+  } = usePolledValue(load, {
     pollIntervalMs: options.pollIntervalMs,
     enabled: options.enabled,
   });
-  const mutation = useMutationRunner();
+  const { run, mutating, mutationError, clearMutationError } = useMutationRunner();
   // The sandbox id of the in-flight attach (drives the per-card spinner).
   const [attachingSandboxId, setAttachingSandboxId] = useState<string | null>(null);
 
-  const data = state.data ?? EMPTY;
+  const data = loadedData ?? EMPTY;
   // The swap is session-scoped: a host adapter (`attachMachine`) wins; otherwise
   // the default `swapActiveSandbox` path is wired whenever a sessionId is in
   // scope. Either way attach needs a sessionId to point at.
@@ -130,15 +135,15 @@ export function useMachines(options: UseMachinesOptions = {}): UseMachinesResult
           : null;
       if (!runSwap) return false;
       setAttachingSandboxId(sandboxId);
-      const result = await mutation.run(async () => {
+      const result = await run(async () => {
         await runSwap();
         return true;
       });
       setAttachingSandboxId(null);
-      if (result) await state.refresh();
+      if (result) await refresh();
       return result === true;
     },
-    [machinesClient, workspaceId, sessionId, mutation.run, state.refresh],
+    [machinesClient, workspaceId, sessionId, run, refresh],
   );
 
   const fetchSeries = useCallback(
@@ -156,15 +161,15 @@ export function useMachines(options: UseMachinesOptions = {}): UseMachinesResult
     machines: data.machines,
     activeSandboxId: data.activeSandboxId,
     activeEpoch: data.activeEpoch,
-    loading: state.loading,
-    error: state.error,
-    refresh: state.refresh,
+    loading,
+    error,
+    refresh,
     attach,
     canAttach,
     fetchSeries,
-    attaching: mutation.mutating,
+    attaching: mutating,
     attachingSandboxId,
-    mutationError: mutation.mutationError,
-    clearMutationError: mutation.clearMutationError,
+    mutationError,
+    clearMutationError,
   };
 }

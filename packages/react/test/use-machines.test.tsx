@@ -5,7 +5,7 @@
    it reads only the structural client, so an adapter works in any frontend.
    -------------------------------------------------------------------------- */
 import { describe, expect, test } from "bun:test";
-import { registerDom, renderHook, flush } from "./render-hook";
+import { actRun, registerDom, renderHook, flush } from "./render-hook";
 import { fakeClient, WORKSPACE_ID } from "./fake-client";
 import { useMachines, type MachinesClientLike } from "../src/hooks/use-machines";
 import type { MachinesResponse, MachineView } from "../src/types/machines";
@@ -76,7 +76,7 @@ describe("useMachines", () => {
     );
     await flush();
     expect(hook.result.current.canAttach).toBe(true);
-    const ok = await hook.result.current.attach("sh-1");
+    const ok = await actRun(() => hook.result.current.attach("sh-1"));
     await flush();
     expect(ok).toBe(true);
     expect(swappedTo).toEqual([{ sessionId: "sess-1", target: "sh-1" }]);
@@ -103,7 +103,7 @@ describe("useMachines", () => {
       undefined,
     );
     await flush();
-    const ok = await hook.result.current.attach("sh-1");
+    const ok = await actRun(() => hook.result.current.attach("sh-1"));
     await flush();
     expect(ok).toBe(true);
     expect(attachedTo).toEqual([{ sessionId: "sess-2", sandboxId: "sh-1" }]);
@@ -121,7 +121,7 @@ describe("useMachines", () => {
     );
     await flush();
     expect(hook.result.current.canAttach).toBe(false);
-    const ok = await hook.result.current.attach("sh-1");
+    const ok = await actRun(() => hook.result.current.attach("sh-1"));
     expect(ok).toBe(false);
     await hook.unmount();
   });

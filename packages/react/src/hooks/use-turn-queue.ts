@@ -55,7 +55,7 @@ export function useTurnQueue(
   const [snapshot, setSnapshot] = useState<SessionQueueSnapshot | null>(null);
   const [loading, setLoading] = useState(enabled);
   const [error, setError] = useState<Error | null>(null);
-  const mutation = useMutationRunner();
+  const { run, mutating, mutationError, clearMutationError } = useMutationRunner();
   const generation = useRef(0);
   const targetKeyRef = useRef<string | null>(null);
   const snapshotRef = useRef<SessionQueueSnapshot | null>(null);
@@ -121,7 +121,7 @@ export function useTurnQueue(
       const current = snapshotRef.current;
       const item = current?.items.find((turn) => turn.id === turnId);
       if (!current || !item) return false;
-      const result = await mutation.run(() =>
+      const result = await run(() =>
         client.cancelQueueItem(workspaceId, sessionId, turnId, {
           expectedQueueVersion: current.version,
           expectedItemVersion: item.version,
@@ -134,7 +134,7 @@ export function useTurnQueue(
       replaceSnapshot(result.snapshot);
       return true;
     },
-    [client, workspaceId, sessionId, mutation.run, load, replaceSnapshot],
+    [client, workspaceId, sessionId, run, load, replaceSnapshot],
   );
 
   return {
@@ -149,8 +149,8 @@ export function useTurnQueue(
     error,
     refresh: load,
     removeTurn,
-    mutating: mutation.mutating,
-    mutationError: mutation.mutationError,
-    clearMutationError: mutation.clearMutationError,
+    mutating,
+    mutationError,
+    clearMutationError,
   };
 }

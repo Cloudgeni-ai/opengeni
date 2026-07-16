@@ -34,7 +34,9 @@ jobs:
         run: bun run typecheck
 
       - name: Lint
-        run: bun run lint
+        run: |
+          bun run lint
+          bunx oxlint --deny-warnings packages/react
 
       - name: Format check
         run: bun run format:check
@@ -45,6 +47,9 @@ jobs:
           # Never turn a missing Docker/PostgreSQL runner into green skipped tests.
           OPENGENI_REQUIRE_REAL_DB: "1"
         run: bun test
+
+      - name: React warning-free test gate
+        run: bun run test:react:clean
 
       - name: Install pinned Playwright Chromium runtime
         run: bunx playwright install --with-deps chromium

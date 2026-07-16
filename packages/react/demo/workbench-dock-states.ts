@@ -165,9 +165,11 @@ function diffDense(count: number): GitFileDiff[] {
     "docs",
   ];
   return Array.from({ length: count }, (_, i) => {
-    const dir = dirs[i % dirs.length];
+    const directory = dirs[i % dirs.length];
     const size = 1 + (i % 5);
-    return file(`${dir}/module-${String(i).padStart(3, "0")}.ts`, size * 2, size, [hunk(1, size)]);
+    return file(`${directory}/module-${String(i).padStart(3, "0")}.ts`, size * 2, size, [
+      hunk(1, size),
+    ]);
   });
 }
 

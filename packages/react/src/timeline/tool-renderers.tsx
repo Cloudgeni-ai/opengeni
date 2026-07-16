@@ -692,6 +692,13 @@ function WebSearchRenderer({ item }: ToolRendererProps) {
   const results = Array.isArray(rawResults)
     ? (rawResults as unknown[]).filter((r): r is WebSearchResult => !!r && typeof r === "object")
     : undefined;
+  const resultOccurrences = new Map<string, number>();
+  const keyedResults = results?.map((result) => {
+    const contentKey = `${result.domain}\u0000${result.title}\u0000${result.snippet}`;
+    const occurrence = (resultOccurrences.get(contentKey) ?? 0) + 1;
+    resultOccurrences.set(contentKey, occurrence);
+    return { key: `${contentKey}\u0000${occurrence}`, result };
+  });
 
   if (running) {
     return (
@@ -716,10 +723,10 @@ function WebSearchRenderer({ item }: ToolRendererProps) {
       failed={item.status === "failed"}
       cancelled={item.status === "cancelled"}
     >
-      {results && results.length ? (
+      {keyedResults && keyedResults.length ? (
         <ul className="flex flex-col gap-2">
-          {results.map((result, index) => (
-            <li key={index} className="flex gap-2.5">
+          {keyedResults.map(({ key, result }) => (
+            <li key={key} className="flex gap-2.5">
               <GlobeIcon className="mt-0.5 size-3.5 shrink-0 text-og-fg-subtle" />
               <div className="min-w-0">
                 <p className="truncate text-og-base text-og-fg">

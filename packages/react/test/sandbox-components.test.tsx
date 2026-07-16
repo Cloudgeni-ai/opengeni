@@ -5,7 +5,7 @@
    -------------------------------------------------------------------------- */
 import { describe, expect, test } from "bun:test";
 import type { DesktopRfbFactory, DesktopRfbLike } from "@opengeni/sdk";
-import { registerDom, renderComponent, flush } from "./render-hook";
+import { actRun, registerDom, renderComponent, flush } from "./render-hook";
 import { fakeCapabilities, fakeFileDiff, fakeHeadlessCapabilities } from "./sandbox-fixtures";
 import { DesktopViewer } from "../src/components/desktop-viewer";
 import { DiffView } from "../src/components/diff-view";
@@ -182,6 +182,7 @@ describe("DesktopViewer", () => {
 
   test("an un-acknowledged desktop renders the consent gate (and accept fires)", async () => {
     let accepted = false;
+    const { factory } = fakeRfb();
     const cap = fakeCapabilities({
       DesktopStream: {
         ...fakeCapabilities().DesktopStream,
@@ -195,13 +196,14 @@ describe("DesktopViewer", () => {
         onAcknowledge={() => {
           accepted = true;
         }}
+        rfbFactory={factory}
       />,
     );
     await flush();
     expect(r.container.textContent).toContain("un-redacted");
     const button = r.container.querySelector("button");
     expect(button).not.toBeNull();
-    button!.click();
+    await actRun(() => button!.click());
     await flush();
     expect(accepted).toBe(true);
     await r.unmount();

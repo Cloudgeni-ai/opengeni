@@ -29,30 +29,40 @@ export function useSessionControl(
   options: UseSessionControlOptions = {},
 ): UseSessionControlResult {
   const { client, workspaceId } = useOpenGeni(options);
-  const controlMutation = useMutationRunner();
-  const approvalMutation = useMutationRunner();
+  const {
+    run: runControl,
+    mutating: controlling,
+    mutationError: controlError,
+    clearMutationError: clearControlError,
+  } = useMutationRunner();
+  const {
+    run: runApproval,
+    mutating: responding,
+    mutationError: approvalError,
+    clearMutationError: clearApprovalError,
+  } = useMutationRunner();
 
   const pause = useCallback(
     async (reason?: string): Promise<SessionEvent | null> => {
       if (!sessionId) {
         return null;
       }
-      return await controlMutation.run(() =>
+      return await runControl(() =>
         client.pauseSession(workspaceId, sessionId, reason !== undefined ? { reason } : {}),
       );
     },
-    [client, workspaceId, sessionId, controlMutation.run],
+    [client, workspaceId, sessionId, runControl],
   );
 
   const resume = useCallback(
     async (reason?: string): Promise<SessionEvent | null> => {
       if (!sessionId) return null;
-      const result = await controlMutation.run(() =>
+      const result = await runControl(() =>
         client.resumeSession(workspaceId, sessionId, reason !== undefined ? { reason } : {}),
       );
       return result?.event ?? null;
     },
-    [client, workspaceId, sessionId, controlMutation.run],
+    [client, workspaceId, sessionId, runControl],
   );
 
   const decide = useCallback(
@@ -64,7 +74,7 @@ export function useSessionControl(
       if (!sessionId) {
         return null;
       }
-      return await approvalMutation.run(() =>
+      return await runApproval(() =>
         client.sendApprovalDecision(workspaceId, sessionId, {
           approvalId,
           decision,
@@ -72,7 +82,7 @@ export function useSessionControl(
         }),
       );
     },
-    [client, workspaceId, sessionId, approvalMutation.run],
+    [client, workspaceId, sessionId, runApproval],
   );
 
   const approve = useCallback(
@@ -84,19 +94,19 @@ export function useSessionControl(
     [decide],
   );
 
-  const error = approvalMutation.mutationError ?? controlMutation.mutationError;
+  const error = approvalError ?? controlError;
   const clearError = useCallback(() => {
-    controlMutation.clearMutationError();
-    approvalMutation.clearMutationError();
-  }, [controlMutation.clearMutationError, approvalMutation.clearMutationError]);
+    clearControlError();
+    clearApprovalError();
+  }, [clearControlError, clearApprovalError]);
 
   return {
     pause,
     resume,
-    controlling: controlMutation.mutating,
+    controlling,
     approve,
     reject,
-    responding: approvalMutation.mutating,
+    responding,
     error,
     clearError,
   };

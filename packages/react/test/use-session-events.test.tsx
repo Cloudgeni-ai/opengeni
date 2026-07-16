@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { SessionEvent } from "@opengeni/sdk";
-import { registerDom, renderHook, flush } from "./render-hook";
+import { actRun, registerDom, renderHook, flush } from "./render-hook";
 import { fakeClient, SESSION_ID, WORKSPACE_ID } from "./fake-client";
 import { useSessionEvents } from "../src/hooks/use-session-events";
 import { buildTimeline, type TimelineItem } from "../src/timeline";
@@ -170,7 +170,7 @@ describe("useSessionEvents", () => {
     expect(hook.result.current.events[0]?.sequence).toBe(6103);
     expect(hook.result.current.hasOlder).toBe(true);
 
-    const more = await hook.result.current.loadOlder();
+    const more = await actRun(() => hook.result.current.loadOlder());
     await flush(20);
     // The older window starts exactly below the kept window and reaches the log
     // start within the older two-fetch cap.
@@ -212,12 +212,18 @@ describe("useSessionEvents", () => {
     );
     await flush(20);
 
-    const first = hook.result.current.loadOlder();
-    const second = hook.result.current.loadOlder();
+    let first!: Promise<boolean>;
+    let second!: Promise<boolean>;
+    await actRun(() => {
+      first = hook.result.current.loadOlder();
+      second = hook.result.current.loadOlder();
+    });
     await flush();
     expect(listCalls.filter((call) => call.before === 5001)).toHaveLength(1);
-    releaseOlder();
-    const [firstResult, secondResult] = await Promise.all([first, second]);
+    const [firstResult, secondResult] = await actRun(async () => {
+      releaseOlder();
+      return await Promise.all([first, second]);
+    });
     await flush(20);
 
     expect(firstResult).toBe(false);
@@ -345,12 +351,12 @@ describe("useSessionEvents", () => {
     expect(hook.result.current.hasOlder).toBe(true);
     expect(hook.result.current.lastSequence).toBe(9);
 
-    const first = await hook.result.current.loadOlder();
+    const first = await actRun(() => hook.result.current.loadOlder());
     await flush(20);
     expect(first).toBe(true);
     expect(hook.result.current.events.map((item) => item.sequence)).toEqual([4, 6, 8]);
 
-    const more = await hook.result.current.loadOlder();
+    const more = await actRun(() => hook.result.current.loadOlder());
     await flush(20);
 
     expect(more).toBe(false);

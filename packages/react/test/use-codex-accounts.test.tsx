@@ -5,7 +5,7 @@
    structural CodexAccountsClientLike surface.
    -------------------------------------------------------------------------- */
 import { describe, expect, test } from "bun:test";
-import { registerDom, renderHook, flush } from "./render-hook";
+import { actRun, registerDom, renderHook, flush } from "./render-hook";
 import { fakeClient, WORKSPACE_ID } from "./fake-client";
 import { useCodexAccounts, type CodexAccountsClientLike } from "../src/hooks/use-codex-accounts";
 import type { CodexAccount, CodexAccountsResponse, CodexUsageWindow } from "@opengeni/sdk";
@@ -61,6 +61,7 @@ describe("useCodexAccounts — cached usage + refreshUsage", () => {
     await flush();
     expect(hook.result.current.accounts[0]?.fiveHour?.remaining).toBe(60);
     expect(hook.result.current.accounts[0]?.weekly?.percent).toBe(12);
+    await hook.unmount();
   });
 
   test("refreshUsage() calls the batched refresh then re-reads accounts with the fresh windows", async () => {
@@ -84,12 +85,11 @@ describe("useCodexAccounts — cached usage + refreshUsage", () => {
 
     let returned: boolean | undefined;
     await flush();
-    await (async () => {
-      returned = await hook.result.current.refreshUsage();
-    })();
+    returned = await actRun(() => hook.result.current.refreshUsage());
     await flush();
     expect(returned).toBe(true);
     expect(hook.result.current.accounts[0]?.fiveHour?.percent).toBe(55);
+    await hook.unmount();
   });
 
   test("refreshUsage() is a no-op (false) when the client can't refresh usage", async () => {
@@ -103,10 +103,9 @@ describe("useCodexAccounts — cached usage + refreshUsage", () => {
     );
     await flush();
     let returned: boolean | undefined;
-    await (async () => {
-      returned = await hook.result.current.refreshUsage();
-    })();
+    returned = await actRun(() => hook.result.current.refreshUsage());
     await flush();
     expect(returned).toBe(false);
+    await hook.unmount();
   });
 });

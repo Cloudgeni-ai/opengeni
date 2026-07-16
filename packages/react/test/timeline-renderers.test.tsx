@@ -487,7 +487,9 @@ describe("ApplyPatchRenderer — multi-file with one malformed op", () => {
 
     // Expand the disclosure to see the body content.
     const trigger = r.container.querySelector('[role="button"]') as HTMLElement | null;
-    trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await act(async () => {
+      trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
     await flush();
 
     const bodyText = r.container.textContent ?? "";
@@ -589,7 +591,9 @@ describe("WebSearchRenderer — null/undefined entries in results array", () => 
 
     // Expand the disclosure to see the body.
     const trigger = r.container.querySelector('[role="button"]') as HTMLElement | null;
-    trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await act(async () => {
+      trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
     await flush();
 
     const text = r.container.textContent ?? "";
@@ -614,7 +618,9 @@ describe("WebSearchRenderer — null/undefined entries in results array", () => 
 
     // Expand.
     const trigger = r.container.querySelector('[role="button"]') as HTMLElement | null;
-    trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await act(async () => {
+      trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
     await flush();
 
     const text = r.container.textContent ?? "";
@@ -664,7 +670,9 @@ describe("ExecRenderer — failed status with non-empty output", () => {
 
     // Expand.
     const trigger = r.container.querySelector('[role="button"]') as HTMLElement | null;
-    trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await act(async () => {
+      trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
     await flush();
 
     const text = r.container.textContent ?? "";
@@ -819,7 +827,9 @@ describe("ViewImageRenderer — running state (in-flight affordance)", () => {
 
     // Expand the row to see the body note.
     const trigger = r.container.querySelector('[role="button"]') as HTMLElement | null;
-    trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await act(async () => {
+      trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
     await flush();
 
     const text = r.container.textContent ?? "";

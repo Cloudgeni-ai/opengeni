@@ -5,7 +5,7 @@
    (mounted `[role=treeitem]` counts), not proxy metrics.
    -------------------------------------------------------------------------- */
 import { describe, expect, test } from "bun:test";
-import { registerDom, renderComponent, flush } from "./render-hook";
+import { actRun, registerDom, renderComponent, flush } from "./render-hook";
 import { FileBrowser } from "../src/components/file-browser";
 import type { FileTreeNode, UseSandboxFilesResult } from "../src/hooks/use-sandbox-files";
 
@@ -72,7 +72,7 @@ describe("FileBrowser virtualization", () => {
       (b) => b.textContent?.includes("node_modules"),
     ) as HTMLButtonElement | undefined;
     expect(dirButton).toBeTruthy();
-    dirButton!.click();
+    await actRun(() => dirButton!.click());
     await flush();
     expect(r.container.textContent).toContain("contents on machine");
     await r.unmount();
@@ -89,7 +89,7 @@ describe("FileBrowser virtualization", () => {
     const dirButton = r.container.querySelector(
       '[role="treeitem"] button',
     ) as HTMLButtonElement | null;
-    dirButton?.click();
+    await actRun(() => dirButton?.click());
     await flush();
     expect(r.container.textContent).not.toContain("contents on machine");
     await r.unmount();
