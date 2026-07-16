@@ -44,7 +44,11 @@ describe("workbench browser acceptance", () => {
         {
           cwd: `${repoRoot}/packages/react`,
           ready: async () =>
-            (await fetch(`${baseUrl}/workbench-dock.html`).catch(() => null))?.ok === true,
+            (
+              await fetch(`${baseUrl}/workbench-dock.html`, {
+                signal: AbortSignal.timeout(2_000),
+              }).catch(() => null)
+            )?.ok === true,
           timeoutMs: 45_000,
         },
       );
@@ -83,6 +87,7 @@ describe("workbench browser acceptance", () => {
           const response = await page.goto(dockUrl(baseUrl, state, theme), {
             waitUntil: "networkidle",
           });
+          await waitForWorkbenchVisualReady(page);
           const audit = await page.evaluate(() => {
             const visible = (element: Element) => {
               const style = getComputedStyle(element);
@@ -110,16 +115,33 @@ describe("workbench browser acceptance", () => {
                 };
               })
               .filter((target) => target.width < 44 || target.height < 44);
+            const tablist = document.querySelector('[role="tablist"]');
+            const tablistRect = tablist?.getBoundingClientRect();
+            const clippedTabs = tablistRect
+              ? Array.from(tablist.querySelectorAll<HTMLElement>('[role="tab"]'))
+                  .filter(visible)
+                  .map((tab) => ({
+                    label: tab.textContent?.trim() ?? "",
+                    rect: tab.getBoundingClientRect(),
+                  }))
+                  .filter(
+                    ({ rect }) =>
+                      rect.left < tablistRect.left - 1 || rect.right > tablistRect.right + 1,
+                  )
+                  .map(({ label }) => label)
+              : [];
             return {
               overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
               undersized,
+              clippedTabs,
             };
           });
           if (
             response?.status() !== 200 ||
             problems.length > 0 ||
             audit.overflow ||
-            audit.undersized.length
+            audit.undersized.length ||
+            audit.clippedTabs.length
           ) {
             failures.push({
               viewport: viewport.width,
@@ -168,6 +190,7 @@ describe("workbench browser acceptance", () => {
       });
       const page = await context.newPage();
       await page.goto(dockUrl(baseUrl, state, theme, tab), { waitUntil: "networkidle" });
+      await waitForWorkbenchVisualReady(page);
       const report = await new AxeBuilder({ page })
         .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"])
         .analyze();
@@ -180,7 +203,7 @@ describe("workbench browser acceptance", () => {
             if (rule.id === "color-contrast") {
               return (
                 !target.includes("data-line-number-content") &&
-                !target.includes("truncate.text-og-fg-muted")
+                !target.includes("data-contrast-audited")
               );
             }
             return true;
@@ -238,9 +261,101 @@ describe("workbench browser acceptance", () => {
     expect(await tabs.nth(3).getAttribute("aria-selected")).toBe("true");
     await page.keyboard.press("ArrowRight");
     expect(await tabs.nth(0).getAttribute("aria-selected")).toBe("true");
+
+    const dialog = page.locator('[role="dialog"][aria-label="Workspace"]');
+    const dialogHandle = await dialog.elementHandle();
+    await page.getByRole("button", { name: "Close workspace" }).click();
+    await expectEventually(async () => page.locator('[title="Open workspace"]:focus').count());
+    expect(await dialog.getAttribute("hidden")).not.toBeNull();
+    expect(await dialogHandle?.evaluate((element) => element.isConnected)).toBe(true);
+    await page.getByTitle("Open workspace").click();
+    expect(await dialog.getAttribute("hidden")).toBeNull();
+    expect(await dialogHandle?.evaluate((element) => element.isConnected)).toBe(true);
+    await context.close();
+  });
+
+  test("desktop maximize and collapse preserve one viewport-correct mounted surface", async () => {
+    const context = await browser.newContext({ viewport: { width: 1440, height: 960 } });
+    const page = await context.newPage();
+    await page.goto(dockUrl(baseUrl, "warm-live", "dark", "changes"), {
+      waitUntil: "networkidle",
+    });
+    await waitForWorkbenchVisualReady(page);
+    const surface = page.locator("[data-workspace-surface]");
+    const surfaceHandle = await surface.elementHandle();
+
+    await page.getByTitle("Maximize").click();
+    const rect = await surface.boundingBox();
+    expect(rect).not.toBeNull();
+    expect(Math.round(rect?.x ?? -1)).toBe(0);
+    expect(Math.round(rect?.y ?? -1)).toBe(0);
+    expect(Math.round(rect?.width ?? -1)).toBe(1440);
+    expect(Math.round(rect?.height ?? -1)).toBe(960);
+    expect(await surfaceHandle?.evaluate((element) => element.isConnected)).toBe(true);
+
+    await page.getByTitle("Restore (Esc)").click();
+    await page.getByTitle("Collapse").click();
+    await expectEventually(async () => page.locator('[title="Open workspace"]:focus').count());
+    expect(await surface.getAttribute("aria-hidden")).toBe("true");
+    expect(await surfaceHandle?.evaluate((element) => element.isConnected)).toBe(true);
+    await page.getByTitle("Open workspace").click();
+    expect(await surface.getAttribute("aria-hidden")).toBeNull();
+    expect(await surfaceHandle?.evaluate((element) => element.isConnected)).toBe(true);
+    await context.close();
+  });
+
+  test("a guarded diff opens the requested path in Files on mobile", async () => {
+    const context = await browser.newContext({
+      viewport: { width: 390, height: 844 },
+      isMobile: true,
+      hasTouch: true,
+    });
+    const page = await context.newPage();
+    await page.goto(dockUrl(baseUrl, "guard", "dark", "changes"), {
+      waitUntil: "networkidle",
+    });
+    await page.locator("[data-compact-file-picker]").selectOption({ index: 1 });
+    await page.getByRole("button", { name: "Open in Files" }).click();
+
+    expect(await page.getByRole("tab", { name: "Files" }).getAttribute("aria-selected")).toBe(
+      "true",
+    );
+    await expectEventually(async () =>
+      page
+        .locator('[role="tabpanel"]:not([hidden])')
+        .getByText("assets/logo.png", { exact: true })
+        .count(),
+    );
     await context.close();
   });
 });
+
+async function expectEventually(check: () => Promise<number>): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    if ((await check()) > 0) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  expect(await check()).toBeGreaterThan(0);
+}
+
+async function waitForWorkbenchVisualReady(page: Page): Promise<void> {
+  await page.waitForFunction(
+    () =>
+      Array.from(document.querySelectorAll<HTMLElement>("[data-pierre-section]")).every(
+        (section) => {
+          const container = section.querySelector("diffs-container");
+          return Boolean(
+            container?.shadowRoot &&
+            container.shadowRoot.childElementCount > 0 &&
+            container.getBoundingClientRect().height > 40,
+          );
+        },
+      ),
+    undefined,
+    { timeout: 5_000 },
+  );
+}
 
 function dockUrl(
   baseUrl: string,
@@ -306,9 +421,8 @@ async function manualAccessibilityAudit(page: Page): Promise<{
         ratios.push(contrast(getComputedStyle(lineNumber).color, opaqueBackground(lineNumber)));
       }
     }
-    const summary = document.querySelector(".truncate.text-og-fg-muted.text-og-xs");
-    if (summary) {
-      ratios.push(contrast(getComputedStyle(summary).color, opaqueBackground(summary)));
+    for (const audited of document.querySelectorAll("[data-contrast-audited]")) {
+      ratios.push(contrast(getComputedStyle(audited).color, opaqueBackground(audited)));
     }
     return {
       missingAriaControls,

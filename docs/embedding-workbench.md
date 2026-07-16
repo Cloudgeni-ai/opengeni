@@ -117,7 +117,7 @@ authoritative-looking empty capture; consumers keep live files authoritative.
 | `primary` | the pane shown beside the dock (your chat/timeline). |
 | `onNotify` | host-routed `{ kind: "error" \| "info"; message }` — the package has no toast dependency, so you decide how errors surface. |
 | `leadingTabs` / `trailingTabs` | your own `WorkspaceTab[]` injected before / after the workbench tabs (this is how `apps/web` adds its Run and Debug tabs). |
-| `initialTab` | override the default landing tab. Omit it and the workbench decides **Changes when the session has changes, else Files** — pre-paint, from local capture stats, so there is never a post-render switch. |
+| `initialTab` | override the default landing tab. Omit it and the workbench decides **Changes when the session has changes, else Files** from the authoritative source: instant capture stats while cold/offline, live Git while warm. The choice latches before real content paints, so later edits never steal the current tab. |
 | `collapsed` / `onCollapsedChange` | drive the dock open/closed from your own toolbar. |
 
 The machine-state chip (live / waking… / offline — as of `<time>`) is rendered in

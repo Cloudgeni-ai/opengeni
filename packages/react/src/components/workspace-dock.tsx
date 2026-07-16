@@ -113,6 +113,9 @@ export function WorkspaceDock({
   className,
 }: WorkspaceDockProps) {
   const narrow = useIsNarrow(DOCK_OVERLAY_BREAKPOINT);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const reopenRef = useRef<HTMLButtonElement | null>(null);
+  const returnFocusRef = useRef<HTMLElement | null>(null);
   const dockPanelRef = usePanelRef();
   const [internalCollapsed, setInternalCollapsed] = useState(false);
   const [maximized, setMaximized] = useState(false);
@@ -124,6 +127,7 @@ export function WorkspaceDock({
   // bug). Standalone (uncontrolled) usage keeps the built-in collapse button
   // and the thin re-open rail as its only affordances.
   const hostControlled = collapsedProp !== undefined;
+  const previousCollapsedRef = useRef(collapsed);
 
   // Persisted layout (width split) keyed by autoSaveId.
   const { defaultLayout, onLayoutChanged } = useDefaultLayout({
@@ -164,6 +168,44 @@ export function WorkspaceDock({
     }
   }, [collapsedProp, dockPanelRef]);
 
+  // Treat the narrow overlay like a real modal: remember the external opener,
+  // move focus into the selected tab, and restore it on close. The standalone
+  // desktop dock instead focuses its newly-visible reopen rail after collapse.
+  useEffect(() => {
+    const previous = previousCollapsedRef.current;
+    previousCollapsedRef.current = collapsed;
+    if (previous === collapsed) return;
+
+    if (!collapsed) {
+      const active = document.activeElement;
+      const workspaceSurface = rootRef.current?.querySelector<HTMLElement>(
+        narrow ? '[role="dialog"]' : "[data-workspace-surface]",
+      );
+      if (active instanceof HTMLElement && !workspaceSurface?.contains(active)) {
+        returnFocusRef.current = active;
+      }
+      if (narrow) {
+        const frame = requestAnimationFrame(() => {
+          rootRef.current
+            ?.querySelector<HTMLElement>('[role="dialog"] [role="tab"][aria-selected="true"]')
+            ?.focus();
+        });
+        return () => cancelAnimationFrame(frame);
+      }
+      return;
+    }
+
+    const frame = requestAnimationFrame(() => {
+      if (!hostControlled) {
+        reopenRef.current?.focus();
+        return;
+      }
+      const target = returnFocusRef.current;
+      if (target?.isConnected) target.focus();
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [collapsed, hostControlled, narrow]);
+
   // Keep the active tab valid if the available tabs change.
   useEffect(() => {
     if (firstTabId && !requestedTabIsValid) {
@@ -200,33 +242,45 @@ export function WorkspaceDock({
   // driven by the same `collapsed` contract (collapsed → hidden).
   if (narrow) {
     return (
-      <div className={cn("relative flex h-full min-h-0 w-full min-w-0", className)}>
+      <div ref={rootRef} className={cn("relative flex h-full min-h-0 w-full min-w-0", className)}>
         <div className="min-h-0 min-w-0 flex-1">{primary}</div>
-        {!collapsed && (
-          <div
-            role="dialog"
-            aria-modal="true"
-            aria-label="Workspace"
-            className="fixed inset-0 z-40 flex flex-col bg-og-bg"
-            style={{
-              paddingTop: "env(safe-area-inset-top)",
-              paddingBottom: "env(safe-area-inset-bottom)",
-            }}
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Workspace"
+          className="fixed inset-0 z-40 flex flex-col bg-og-bg"
+          hidden={collapsed}
+          style={{
+            paddingTop: "env(safe-area-inset-top)",
+            paddingBottom: "env(safe-area-inset-bottom)",
+          }}
+        >
+          <DockChrome
+            tabs={tabs}
+            current={current}
+            onTab={setTab}
+            leading={mobileLeadingControl}
+            accessory={headerAccessory}
+            controls={
+              <ChromeButton onClick={collapse} title="Close workspace" label="Close workspace">
+                <XIcon className="size-4" />
+              </ChromeButton>
+            }
+          />
+        </div>
+        {collapsed && !hostControlled ? (
+          <button
+            ref={reopenRef}
+            type="button"
+            onClick={expand}
+            title="Open workspace"
+            aria-label="Open workspace"
+            className="absolute right-3 top-3 z-30 inline-flex size-11 items-center justify-center rounded-og-md border border-og-border bg-og-surface-1 text-og-fg-muted shadow-lg transition-colors hover:border-og-border-strong hover:text-og-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-og-accent"
+            style={{ marginTop: "env(safe-area-inset-top)" }}
           >
-            <DockChrome
-              tabs={tabs}
-              current={current}
-              onTab={setTab}
-              leading={mobileLeadingControl}
-              accessory={headerAccessory}
-              controls={
-                <ChromeButton onClick={collapse} title="Close workspace" label="Close workspace">
-                  <XIcon className="size-4" />
-                </ChromeButton>
-              }
-            />
-          </div>
-        )}
+            <ChevronsLeftRightIcon className="size-4" aria-hidden />
+          </button>
+        ) : null}
       </div>
     );
   }
@@ -261,7 +315,7 @@ export function WorkspaceDock({
   );
 
   return (
-    <div className={cn("relative flex h-full min-h-0 w-full min-w-0", className)}>
+    <div ref={rootRef} className={cn("relative flex h-full min-h-0 w-full min-w-0", className)}>
       <Group
         orientation="horizontal"
         className="min-h-0 flex-1"
@@ -296,13 +350,19 @@ export function WorkspaceDock({
           }}
           className="min-h-0 min-w-0"
         >
-          {/* Hidden behind the overlay while maximized (avoids double-mounting
-              the surfaces). */}
-          {!collapsed && !maximized && (
-            <div className="flex h-full min-h-0 min-w-0 flex-col border-l border-og-border bg-og-bg">
-              {dockChrome}
-            </div>
-          )}
+          {/* One persistent mount across normal, collapsed, and maximized modes:
+              layout changes must never destroy an editor buffer or terminal view. */}
+          <div
+            data-workspace-surface
+            aria-hidden={collapsed ? true : undefined}
+            className={cn(
+              "flex h-full min-h-0 min-w-0 flex-col bg-og-bg",
+              maximized ? "fixed inset-0 z-40" : "border-l border-og-border",
+              collapsed && "invisible pointer-events-none",
+            )}
+          >
+            {dockChrome}
+          </div>
         </Panel>
       </Group>
 
@@ -310,6 +370,7 @@ export function WorkspaceDock({
           when the host controls collapse — its own toggle is the one way in. */}
       {collapsed && !maximized && !hostControlled && (
         <button
+          ref={reopenRef}
           type="button"
           onClick={expand}
           title="Open workspace"
@@ -318,9 +379,6 @@ export function WorkspaceDock({
           <ChevronsLeftRightIcon className="size-3.5" />
         </button>
       )}
-
-      {/* Maximize overlay: full-workspace surface above everything. */}
-      {maximized && <div className="fixed inset-0 z-40 flex flex-col bg-og-bg">{dockChrome}</div>}
     </div>
   );
 }
@@ -343,7 +401,7 @@ function ChromeButton({
       onClick={onClick}
       title={title}
       aria-label={label}
-      className="inline-flex size-7 items-center justify-center rounded-og-sm p-1 transition-colors hover:bg-og-surface-2 hover:text-og-fg max-[1023px]:size-11 pointer-coarse:size-11"
+      className="inline-flex size-7 items-center justify-center rounded-og-sm p-1 transition-colors hover:bg-og-surface-2 hover:text-og-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-og-accent max-[1023px]:size-11 pointer-coarse:size-11"
     >
       {children}
     </button>
@@ -369,14 +427,26 @@ function DockChrome({
   controls: ReactNode;
 }) {
   const active = tabs.find((t) => t.id === current) ?? tabs[0];
-  const activeIndex = tabs.findIndex((tab) => tab.id === active?.id);
   const tabsetId = useId();
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
-  const panelId = `${tabsetId}-panel`;
+  const [visitedTabs, setVisitedTabs] = useState<Set<string>>(() => new Set());
+  const activeId = active?.id ?? "";
+
+  useEffect(() => {
+    if (!activeId) return;
+    setVisitedTabs((previous) => {
+      if (previous.has(activeId)) return previous;
+      const next = new Set(previous);
+      next.add(activeId);
+      return next;
+    });
+  }, [activeId]);
 
   const activateTab = (index: number) => {
     const tab = tabs[index];
-    if (!tab) return;
+    if (!tab) {
+      return;
+    }
     onTab(tab.id);
     tabRefs.current[index]?.focus();
   };
@@ -395,13 +465,21 @@ function DockChrome({
 
   return (
     <>
-      <div className="flex shrink-0 items-center gap-2 border-b border-og-border px-1.5 py-1">
-        {leading ? <div className="flex shrink-0 items-center">{leading}</div> : null}
+      <div className="grid shrink-0 grid-cols-[auto_minmax(0,1fr)_auto_auto] items-center gap-x-2 border-b border-og-border px-1.5 py-1 max-[1023px]:grid-cols-[auto_minmax(0,1fr)_auto] max-[1023px]:gap-y-0 max-[1023px]:px-2 max-[1023px]:pb-1 max-[1023px]:pt-0">
+        <div className="flex min-w-0 shrink-0 items-center max-[1023px]:min-h-11">
+          {leading ?? (
+            <span className="hidden truncate px-1 text-og-sm font-semibold text-og-fg max-[1023px]:inline">
+              Workspace
+            </span>
+          )}
+        </div>
         {/* The tab list scrolls horizontally when it can't fit — it must never
             grow into or overlap the chrome controls (they stay shrink-0). The
-            scrollbar is hidden to keep the strip calm. */}
+            scrollbar is hidden to keep the strip calm. On the narrow overlay it
+            owns a full second row, so status/close chrome can never squeeze the
+            canonical workspace navigation out of view. */}
         <div
-          className="flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+          className="flex min-w-0 items-center gap-0.5 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden max-[1023px]:col-span-3 max-[1023px]:row-start-2 max-[1023px]:w-full"
           role="tablist"
           aria-orientation="horizontal"
         >
@@ -415,12 +493,12 @@ function DockChrome({
               type="button"
               role="tab"
               aria-selected={tab.id === current}
-              aria-controls={panelId}
+              aria-controls={`${tabsetId}-panel-${index}`}
               tabIndex={tab.id === current ? 0 : -1}
               onClick={() => onTab(tab.id)}
               onKeyDown={(event) => onTabKeyDown(event, index)}
               className={cn(
-                "flex min-h-7 shrink-0 items-center gap-1 rounded-og-sm px-2 py-1 text-og-xs font-medium transition-colors max-[1023px]:min-h-11 max-[1023px]:min-w-11 pointer-coarse:min-h-11 pointer-coarse:min-w-11",
+                "flex min-h-7 shrink-0 items-center justify-center gap-1 rounded-og-sm px-2 py-1 text-og-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-og-accent max-[1023px]:min-h-11 max-[1023px]:min-w-11 pointer-coarse:min-h-11 pointer-coarse:min-w-11",
                 tab.id === current
                   ? "bg-og-accent-soft text-og-fg"
                   : "text-og-fg-subtle hover:text-og-fg",
@@ -431,17 +509,30 @@ function DockChrome({
             </button>
           ))}
         </div>
-        {accessory ? <div className="flex shrink-0 items-center">{accessory}</div> : null}
+        <div className="flex min-w-0 shrink-0 items-center justify-self-end">{accessory}</div>
         <div className="flex shrink-0 items-center gap-0.5 text-og-fg-subtle">{controls}</div>
       </div>
-      <div
-        id={panelId}
-        aria-label={activeIndex < 0 ? "Workspace" : undefined}
-        aria-labelledby={activeIndex >= 0 ? `${tabsetId}-tab-${activeIndex}` : undefined}
-        className="min-h-0 min-w-0 flex-1 overflow-hidden"
-        role="tabpanel"
-      >
-        {active?.content}
+      <div className="min-h-0 min-w-0 flex-1 overflow-hidden">
+        {tabs.length > 0 ? (
+          tabs.map((tab, index) => {
+            const selected = tab.id === activeId;
+            const shouldMount = selected || visitedTabs.has(tab.id);
+            return (
+              <div
+                key={tab.id}
+                id={`${tabsetId}-panel-${index}`}
+                aria-labelledby={`${tabsetId}-tab-${index}`}
+                className="h-full min-h-0 min-w-0 overflow-hidden"
+                hidden={!selected}
+                role="tabpanel"
+              >
+                {shouldMount ? tab.content : null}
+              </div>
+            );
+          })
+        ) : (
+          <div className="h-full min-h-0 min-w-0" aria-label="Workspace" role="tabpanel" />
+        )}
       </div>
     </>
   );

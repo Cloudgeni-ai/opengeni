@@ -16,7 +16,14 @@
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Popover } from "radix-ui";
 import type { SessionEvent } from "@opengeni/sdk";
-import { CpuIcon, LaptopIcon, RefreshCwIcon } from "lucide-react";
+import {
+  CircleCheckIcon,
+  CpuIcon,
+  LaptopIcon,
+  LoaderCircleIcon,
+  RefreshCwIcon,
+  TriangleAlertIcon,
+} from "lucide-react";
 
 import { type ClientOverride, useOpenGeni } from "../provider";
 import { cn } from "../lib/cn";
@@ -62,11 +69,9 @@ function captureDegradedMessage(reason: string): string {
  * "changes exist → Changes, else Files" needs zero machine round-trips. A host
  * `override` (e.g. a landing "run" tab) wins when supplied.
  *
- * NOTE: the dock no longer uses this for its default tab — `<SandboxWorkspace>`
- * now derives the default from its OWN capture fetch (`useWorkspaceCapture`'s
- * `fileCount`), so a pure embedder needs no events-at-mount contract (Refinement
- * 2). This remains exported as a standalone helper for hosts that already hold
- * the event log and want the same decision without the capture fetch.
+ * `<SandboxWorkspace>` uses this only as an optional early hint after its own
+ * capture GET reports no durable capture. A pure embedder needs no events-at-mount
+ * contract: it falls through to authoritative live Git instead.
  */
 export function initialWorkspaceTab(
   events: SessionEvent[] | undefined,
@@ -131,22 +136,25 @@ export type UseSandboxWorkspaceTabsOptions = ClientOverride & {
   sessionId: string;
   /** Live event log (usually `useSessionEvents().events`). */
   events: SessionEvent[];
-  /** Override the capture-driven default tab (e.g. a host landing tab id). When
-   *  omitted the workbench picks Changes-vs-Files from its own capture fetch. */
+  /** Override the source-driven default tab (e.g. a host landing tab id). When
+   *  omitted the workbench picks Changes-vs-Files from capture or live Git. */
   initialTab?: string | null | undefined;
   /** Host-routed notifications (mutation errors, desktop-consent failures). The
    *  package never imports a toast library — the host decides how to surface. */
   onNotify?: ((notification: WorkspaceNotification) => void) | undefined;
+  /** File requested by a Changes guard. The Files surface defers the read until
+   *  the sandbox is live, then reveals this path. */
+  requestedFilePath?: string | null | undefined;
+  /** Route a guarded diff into the host's Files tab. */
+  onOpenFile?: ((path: string) => void) | undefined;
 };
 
 export type UseSandboxWorkspaceTabsResult = {
   /** Changes | Files | Terminal | Desktop (capability-gated where noted). */
   tabs: WorkspaceTab[];
-  /** The capture-driven default tab: Changes when the session has changes, else
-   *  Files (a host `initialTab` overrides). null during the brief window before the
-   *  capture GET first resolves (and no host override was given) — consumers render
-   *  their dock's own first-tab fallback until it latches, which it does ONCE, so it
-   *  never causes a post-render switch. */
+  /** The source-driven default tab: Changes when the first authoritative capture
+   *  or live Git result has changes, else Files (a host `initialTab` overrides).
+   *  null while that source resolves; the choice latches once. */
   defaultTab: string | null;
   /** The machine-state model for the dock-header chip. */
   machine: WorkspaceMachine;
@@ -156,7 +164,7 @@ type SessionWarmIntents = {
   sessionId: string;
   watchDesktop: boolean;
   warmTerminal: boolean;
-  warmEdit: boolean;
+  warmFiles: boolean;
 };
 
 function emptyWarmIntents(sessionId: string): SessionWarmIntents {
@@ -164,7 +172,7 @@ function emptyWarmIntents(sessionId: string): SessionWarmIntents {
     sessionId,
     watchDesktop: false,
     warmTerminal: false,
-    warmEdit: false,
+    warmFiles: false,
   };
 }
 
@@ -177,20 +185,20 @@ export function useSandboxWorkspaceTabs(
   options: UseSandboxWorkspaceTabsOptions,
 ): UseSandboxWorkspaceTabsResult {
   const { client, workspaceId } = useOpenGeni(options);
-  const { sessionId, events, onNotify } = options;
+  const { sessionId, events, onNotify, requestedFilePath, onOpenFile } = options;
   const initialTab = options.initialTab ?? null;
 
-  // The three — and only three — box-warming INTENTS, each off by default and each
+  // The three box-warming INTENTS, each off by default and each
   // flipped true by a genuine user action (never on mount, never on a passive
   // capture glance): desktop watch consent, terminal engagement (`onActivate`), and
-  // the first wake-on-edit keystroke in the Files editor. Browsing capture-served
+  // a deliberate live-file open/edit in Files. Browsing capture-served
   // Changes/Files warms nothing — that is the whole point of Refinement 1.
   const [storedWarmIntents, setStoredWarmIntents] = useState<SessionWarmIntents>(() =>
     emptyWarmIntents(sessionId),
   );
   const warmIntents =
     storedWarmIntents.sessionId === sessionId ? storedWarmIntents : emptyWarmIntents(sessionId);
-  const { watchDesktop, warmTerminal, warmEdit } = warmIntents;
+  const { watchDesktop, warmTerminal, warmFiles } = warmIntents;
   const requestWarmIntent = useCallback(
     (intent: Exclude<keyof SessionWarmIntents, "sessionId">) => {
       setStoredWarmIntents((previous) => {
@@ -217,9 +225,9 @@ export function useSandboxWorkspaceTabs(
     events,
     attachDesktop: watchDesktop,
     attachTerminal: warmTerminal,
-    // Edit intent only — NOT "the Files tab is open". A cold edit warms the box
-    // (that is the wake); a cold glance at the tree/diff does not.
-    attachFiles: warmEdit,
+    // Explicit live-file intent only — NOT "the Files tab is open". A cold edit
+    // or guarded-file open wakes the box; a glance at the tree/diff does not.
+    attachFiles: warmFiles,
   });
   const capabilities = caps.capabilities;
   const liveness = capabilities?.liveness;
@@ -363,18 +371,18 @@ export function useSandboxWorkspaceTabs(
     capabilitiesState: caps.state,
     activeMachineState: activeMachine?.state ?? null,
     activeIsSelfhosted: activeMachine?.kind === "selfhosted",
-    wantsWarm: warmTerminal || watchDesktop || warmEdit,
+    wantsWarm: warmTerminal || watchDesktop || warmFiles,
     capturedAt: captureState.capturedAt,
   });
 
-  // The pre-paint default tab, decided from the workbench's OWN capture fetch — no
-  // embedder events-at-mount contract (Refinement 2). A host `initialTab` wins
-  // immediately; otherwise the default stays null until the capture GET first
-  // resolves, then latches Changes (changes exist) or Files, ONCE — live data can
-  // never switch it afterward. Committing at first-resolve — before the tab body's
-  // first CONTENT paint (both bodies show a connecting/loading state until the
-  // capture lands) — means the first real content is the correct tab, no switch. A
-  // pure embedder that never preloads events now gets the right default for free.
+  // The pre-paint default tab is decided from the first AUTHORITATIVE workspace
+  // source. A capture wins immediately on the cold/offline fast path; a warm box
+  // waits for live Git so a prior snapshot can never outrank the current tree.
+  // When the GET says no capture exists, `fileCount: 0` does NOT itself mean the
+  // working tree is clean. A captured-revision announce can
+  // resolve Changes earlier, but a pure embedder with no event preload still gets
+  // the correct live default. The choice latches once so later edits never steal
+  // the user's current tab.
   const defaultTabRef = useRef<{ sessionId: string; value: string | null }>({
     sessionId,
     value: null,
@@ -382,12 +390,42 @@ export function useSandboxWorkspaceTabs(
   if (defaultTabRef.current.sessionId !== sessionId) {
     defaultTabRef.current = { sessionId, value: null };
   }
+  const liveWorkspaceExpected = liveness === "warm" || liveness === "draining";
+  const captureIsAuthoritative =
+    !liveWorkspaceExpected && (liveness !== undefined || caps.error !== null);
+  const captureUnavailable = captureState.fileCount === 0 || captureState.error !== null;
   if (defaultTabRef.current.value === null) {
     if (initialTab) {
       defaultTabRef.current.value = initialTab;
-    } else if (captureState.fileCount !== null) {
+    } else if (git.source === "live") {
+      defaultTabRef.current.value =
+        git.diff.length > 0 ? WORKBENCH_TAB_CHANGES : WORKBENCH_TAB_FILES;
+    } else if (
+      captureIsAuthoritative &&
+      captureState.fileCount !== null &&
+      captureState.available
+    ) {
       defaultTabRef.current.value =
         captureState.fileCount > 0 ? WORKBENCH_TAB_CHANGES : WORKBENCH_TAB_FILES;
+    } else if (
+      captureIsAuthoritative &&
+      captureUnavailable &&
+      initialWorkspaceTab(events) === WORKBENCH_TAB_CHANGES
+    ) {
+      defaultTabRef.current.value = WORKBENCH_TAB_CHANGES;
+    } else if (captureState.available && git.error && captureState.fileCount !== null) {
+      // A warm live read failed but the durable capture is intact: retain an
+      // immediate, deterministic review surface instead of hanging unresolved.
+      defaultTabRef.current.value =
+        captureState.fileCount > 0 ? WORKBENCH_TAB_CHANGES : WORKBENCH_TAB_FILES;
+    } else if (captureUnavailable && caps.error) {
+      // The Changes surface owns the truthful sandbox-unavailable state + retry.
+      // Files would misleadingly describe this as a missing filesystem.
+      defaultTabRef.current.value = WORKBENCH_TAB_CHANGES;
+    } else if (captureUnavailable && git.error) {
+      // No capture and live Git failed: Files is the least surprising fallback
+      // and preserves the established no-capture degraded behavior.
+      defaultTabRef.current.value = WORKBENCH_TAB_FILES;
     }
   }
   // null only during the brief pre-first-resolve window (no host override yet).
@@ -411,6 +449,14 @@ export function useSandboxWorkspaceTabs(
           capabilitiesState={caps.state}
           capabilitiesError={caps.error}
           onRetry={caps.renegotiate}
+          {...(onOpenFile
+            ? {
+                onOpenFile: (path: string) => {
+                  requestWarmIntent("warmFiles");
+                  onOpenFile(path);
+                },
+              }
+            : {})}
         />
       ),
     });
@@ -421,14 +467,21 @@ export function useSandboxWorkspaceTabs(
       label: "Files",
       content: (
         <SandboxFiles
+          key={sessionId}
           files={files}
           git={git}
           stagedGit={stagedGit}
           fileSystemAvailable={fileSystemOn || captureAvailable}
           editable={filesEditable}
-          // The first keystroke in the editor is the wake-on-edit INTENT: warm the
-          // box (even cold) so the write lands fast. Opening/reading files does not.
-          onEditIntent={() => requestWarmIntent("warmEdit")}
+          {...(requestedFilePath
+            ? {
+                requestedPath: requestedFilePath,
+                requestedPathReady: liveness === "warm" || liveness === "draining",
+              }
+            : {})}
+          // Ordinary capture browsing does not warm a box. The first edit — or an
+          // explicit guarded-file open from Changes — is deliberate live-file intent.
+          onEditIntent={() => requestWarmIntent("warmFiles")}
           className="h-full"
         />
       ),
@@ -488,6 +541,10 @@ export function useSandboxWorkspaceTabs(
     dirtyCount,
     watchDesktop,
     warmTerminal,
+    requestedFilePath,
+    onOpenFile,
+    liveness,
+    sessionId,
     files,
     git,
     stagedGit,
@@ -524,7 +581,7 @@ export type SandboxWorkspaceProps = ClientOverride & {
   /** Host tabs injected AFTER the workbench tabs (e.g. a "Debug" tab). */
   trailingTabs?: WorkspaceTab[] | undefined;
   /** Override the pre-paint default tab (e.g. a host landing tab id). When
-   *  omitted the workbench decides Changes-vs-Files from local capture stats. */
+   *  omitted the workbench decides from capture, then live Git when no capture exists. */
   initialTab?: string | undefined;
   /** Host-routed notifications (no toast dependency in the package). */
   onNotify?: ((notification: WorkspaceNotification) => void) | undefined;
@@ -566,6 +623,22 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
     className,
   } = props;
 
+  const [storedSelection, setStoredSelection] = useState<{
+    sessionId: string;
+    tab: string;
+  } | null>(null);
+  const [requestedFile, setRequestedFile] = useState<{
+    sessionId: string;
+    path: string;
+  } | null>(null);
+  const openFile = useCallback(
+    (path: string) => {
+      setRequestedFile({ sessionId, path });
+      setStoredSelection({ sessionId, tab: WORKBENCH_TAB_FILES });
+    },
+    [sessionId],
+  );
+
   const {
     tabs: workbenchTabs,
     machine,
@@ -577,18 +650,16 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
     events,
     ...(initialTab ? { initialTab } : {}),
     ...(onNotify ? { onNotify } : {}),
+    requestedFilePath: requestedFile?.sessionId === sessionId ? requestedFile.path : null,
+    onOpenFile: openFile,
   });
 
-  // A user's tab click wins forever; before that we follow the capture-driven
+  // A user's tab click wins forever; before that we follow the source-driven
   // default. While it is still resolving (null, pure-embedder pre-first-resolve)
   // we pass no controlled tab, so the dock renders its own first-tab fallback
   // (Changes) — whose body is a connecting/loading state until the capture lands,
   // so committing the real default at first-resolve produces no CONTENT switch.
   const tabs: WorkspaceTab[] = [...(leadingTabs ?? []), ...workbenchTabs, ...(trailingTabs ?? [])];
-  const [storedSelection, setStoredSelection] = useState<{
-    sessionId: string;
-    tab: string;
-  } | null>(null);
   const selectedTab = storedSelection?.sessionId === sessionId ? storedSelection.tab : null;
   const activeTab = selectedTab ?? defaultTab ?? tabs[0]?.id;
   const selectTab = useCallback(
@@ -645,7 +716,7 @@ function MachineKindIcon({
 
 function chipDotClass(state: MachineChip["state"]): string {
   if (state === "live") return "bg-og-status-running";
-  if (state === "waking") return "bg-og-status-idle animate-pulse";
+  if (state === "waking") return "bg-og-status-idle animate-pulse motion-reduce:animate-none";
   return "bg-og-fg-subtle";
 }
 
@@ -673,7 +744,7 @@ function MachineStateChip({
         <button
           type="button"
           aria-label={`Machine: ${chip.label}`}
-          className="inline-flex min-h-7 items-center gap-1.5 rounded-og-sm px-2 py-1 text-og-xs font-medium text-og-fg-muted transition-colors hover:bg-og-surface-2 hover:text-og-fg max-[1023px]:min-h-11 pointer-coarse:min-h-11"
+          className="inline-flex min-h-7 items-center gap-1.5 rounded-og-sm px-2 py-1 text-og-xs font-medium text-og-fg-muted transition-colors hover:bg-og-surface-2 hover:text-og-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-og-accent max-[1023px]:min-h-11 pointer-coarse:min-h-11"
         >
           <span
             className={cn("size-1.5 shrink-0 rounded-full", chipDotClass(chip.state))}
@@ -740,7 +811,7 @@ function DockActionButton({ onClick, children }: { onClick: () => void; children
     <button
       type="button"
       onClick={onClick}
-      className="inline-flex items-center gap-1.5 rounded-og-sm border border-og-border px-2 py-1 text-og-xs font-medium text-og-fg-muted transition-colors hover:border-og-border-strong hover:text-og-fg pointer-coarse:min-h-9"
+      className="inline-flex items-center gap-1.5 rounded-og-sm border border-og-border px-2 py-1 text-og-xs font-medium text-og-fg-muted transition-colors hover:border-og-border-strong hover:text-og-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-og-accent max-[1023px]:min-h-11 pointer-coarse:min-h-11"
     >
       {children}
     </button>
@@ -760,6 +831,7 @@ function ChangesTabBody({
   capabilitiesState,
   capabilitiesError,
   onRetry,
+  onOpenFile,
 }: {
   git: UseSandboxGitResult;
   captureAvailable: boolean;
@@ -767,6 +839,7 @@ function ChangesTabBody({
   capabilitiesState: string;
   capabilitiesError: Error | null;
   onRetry: () => void;
+  onOpenFile?: ((path: string) => void) | undefined;
 }) {
   const diff = git.diff;
 
@@ -777,13 +850,14 @@ function ChangesTabBody({
         source={git.source}
         capturedAt={git.capturedAt}
         captureRevision={captureRevision}
+        {...(onOpenFile ? { onOpenFile } : {})}
       />
     );
   }
 
   if (capabilitiesError && !captureAvailable) {
     return (
-      <CenteredState>
+      <CenteredState icon={<TriangleAlertIcon className="size-5" aria-hidden />} tone="danger">
         <p className="text-og-sm font-medium text-og-fg">Sandbox unavailable</p>
         <p className="text-og-sm leading-5 text-og-fg-muted">
           {capabilitiesError.message || "Couldn't reach the sandbox for this session."}
@@ -798,26 +872,74 @@ function ChangesTabBody({
 
   if ((capabilitiesState === "negotiating" || capabilitiesState === "cold") && !captureAvailable) {
     return (
-      <CenteredState>
-        <p className="text-og-sm text-og-fg-muted">Connecting sandbox…</p>
+      <CenteredState
+        icon={
+          <LoaderCircleIcon
+            className="size-5 animate-spin motion-reduce:animate-none"
+            aria-hidden
+          />
+        }
+      >
+        <p className="text-og-sm font-medium text-og-fg">Connecting workspace</p>
+        <p className="text-og-sm leading-5 text-og-fg-subtle">
+          Looking for the latest files and changes…
+        </p>
+      </CenteredState>
+    );
+  }
+
+  if (git.loading && git.source === null) {
+    return (
+      <CenteredState
+        icon={
+          <LoaderCircleIcon
+            className="size-5 animate-spin motion-reduce:animate-none"
+            aria-hidden
+          />
+        }
+      >
+        <p className="text-og-sm font-medium text-og-fg">Loading workspace</p>
+        <p className="text-og-sm leading-5 text-og-fg-subtle">Reading the current working tree…</p>
       </CenteredState>
     );
   }
 
   return (
-    <CenteredState>
-      <p className="text-og-sm font-medium text-og-fg">No changes yet</p>
+    <CenteredState icon={<CircleCheckIcon className="size-5" aria-hidden />} tone="success">
+      <p className="text-og-sm font-medium text-og-fg">Working tree is clean</p>
       <p className="text-og-sm leading-5 text-og-fg-subtle">
-        File edits from this session's turns show up here.
+        File edits from future turns will appear here.
       </p>
     </CenteredState>
   );
 }
 
-function CenteredState({ children }: { children: ReactNode }) {
+function CenteredState({
+  children,
+  icon,
+  tone = "neutral",
+}: {
+  children: ReactNode;
+  icon?: ReactNode | undefined;
+  tone?: "neutral" | "success" | "danger";
+}) {
   return (
     <div className="grid h-full place-items-center p-6 text-center">
-      <div className="flex max-w-sm flex-col items-center gap-2.5">{children}</div>
+      <div className="flex max-w-sm flex-col items-center gap-2.5">
+        {icon ? (
+          <span
+            className={cn(
+              "grid size-10 place-items-center rounded-og-lg border bg-og-surface-1 shadow-sm",
+              tone === "success" && "border-og-status-idle/30 text-og-status-idle",
+              tone === "danger" && "border-og-status-failed/30 text-og-status-failed",
+              tone === "neutral" && "border-og-border text-og-fg-muted",
+            )}
+          >
+            {icon}
+          </span>
+        ) : null}
+        {children}
+      </div>
     </div>
   );
 }

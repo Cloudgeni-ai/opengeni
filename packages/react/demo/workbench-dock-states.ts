@@ -460,7 +460,13 @@ const statusReview = status([
     isConflicted: false,
   },
 ]);
-const statusClean = status([]);
+const statusClean: GitStatusResponse = {
+  ...status([]),
+  head: "main",
+  upstream: "origin/main",
+  ahead: 0,
+  behind: 0,
+};
 
 // ── the state matrix ─────────────────────────────────────────────────────────
 

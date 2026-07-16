@@ -1,4 +1,5 @@
 import type { FsReadResponse } from "@opengeni/sdk";
+import { FileCode2Icon, FileWarningIcon, LoaderCircleIcon } from "lucide-react";
 import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { cn } from "../lib/cn";
 import { useThemeType } from "../lib/use-theme-type";
@@ -27,6 +28,10 @@ export type SandboxFilesProps = {
    *  dock warms the box on this so the save lands fast; opening/reading never fires
    *  it. Browsing the tree/diff must not warm a box. */
   onEditIntent?: (() => void) | undefined;
+  /** A guarded diff path routed here by the parent workspace. */
+  requestedPath?: string | undefined;
+  /** False while the parent is waking a cold sandbox for `requestedPath`. */
+  requestedPathReady?: boolean | undefined;
   themeType?: "dark" | "light" | undefined;
   className?: string | undefined;
 };
@@ -45,6 +50,8 @@ export function SandboxFiles({
   usePierre = true,
   editable = true,
   onEditIntent,
+  requestedPath,
+  requestedPathReady = true,
   themeType,
   className,
 }: SandboxFilesProps) {
@@ -52,6 +59,12 @@ export function SandboxFiles({
   // View vs Edit for the selected file. Resets to View on every new selection so
   // opening a file never lands you in a stale dirty editor for a different path.
   const [editMode, setEditMode] = useState(false);
+
+  useEffect(() => {
+    if (!requestedPath || !requestedPathReady) return;
+    setSelected(requestedPath);
+    setEditMode(false);
+  }, [requestedPath, requestedPathReady]);
 
   // Side-by-side (tree left, viewer right) once the surface is wide enough;
   // stacked (tree over viewer) on a narrow dock. Tracked off the container so it
@@ -101,7 +114,15 @@ export function SandboxFiles({
   const showEditor = canEdit && editMode;
 
   if (!fileSystemAvailable) {
-    return <Notice className={className}>This sandbox does not expose a file system.</Notice>;
+    return (
+      <Notice
+        className={className}
+        icon={<FileWarningIcon className="size-5" aria-hidden />}
+        title="Files unavailable"
+      >
+        This sandbox does not expose a file system.
+      </Notice>
+    );
   }
 
   return (
@@ -206,9 +227,23 @@ export function SandboxFiles({
               ) : (
                 <Notice>Loading {viewPath}…</Notice>
               )
+            ) : // Nothing selected — the tree shows the whole workspace; pick a file.
+            requestedPath && !requestedPathReady ? (
+              <Notice
+                icon={
+                  <LoaderCircleIcon
+                    className="size-5 animate-spin motion-reduce:animate-none"
+                    aria-hidden
+                  />
+                }
+                title="Waking sandbox"
+              >
+                Opening {requestedPath} when the live workspace is ready…
+              </Notice>
             ) : (
-              // Nothing selected — the tree shows the whole workspace; pick a file.
-              <Notice>Select a file in the tree to view it.</Notice>
+              <Notice icon={<FileCode2Icon className="size-5" aria-hidden />} title="Choose a file">
+                Select a file in the tree to preview it.
+              </Notice>
             )}
           </div>
         </div>
@@ -238,7 +273,9 @@ function GitHeader({ git, dirtyCount }: { git: UseSandboxGitResult; dirtyCount: 
         </span>
       )}
       {dirty && (
-        <span className="ml-auto shrink-0 text-og-xs text-og-fg-subtle">{dirtyCount} changed</span>
+        <span data-contrast-audited className="ml-auto shrink-0 text-og-xs text-og-fg-subtle">
+          {dirtyCount} changed
+        </span>
       )}
     </div>
   );
@@ -261,7 +298,7 @@ function Segmented({
           type="button"
           onClick={() => onChange(opt.value)}
           className={cn(
-            "min-h-7 rounded-og-xs px-1.5 py-0.5 text-og-xs max-[1023px]:min-h-11 pointer-coarse:min-h-11",
+            "min-h-7 rounded-og-xs px-1.5 py-0.5 text-og-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-og-accent max-[1023px]:min-h-11 pointer-coarse:min-h-11",
             opt.value === value
               ? "bg-og-accent-soft text-og-fg"
               : "text-og-fg-subtle hover:text-og-fg",
@@ -375,7 +412,17 @@ function decodeBase64Utf8(b64: string): string {
   return b64;
 }
 
-function Notice({ children, className }: { children: ReactNode; className?: string | undefined }) {
+function Notice({
+  children,
+  className,
+  icon,
+  title,
+}: {
+  children: ReactNode;
+  className?: string | undefined;
+  icon?: ReactNode | undefined;
+  title?: string | undefined;
+}) {
   return (
     <div
       className={cn(
@@ -383,7 +430,15 @@ function Notice({ children, className }: { children: ReactNode; className?: stri
         className,
       )}
     >
-      {children}
+      <div className="flex max-w-sm flex-col items-center gap-2.5">
+        {icon ? (
+          <span className="grid size-10 place-items-center rounded-og-lg border border-og-border bg-og-surface-1 text-og-fg-muted shadow-sm">
+            {icon}
+          </span>
+        ) : null}
+        {title ? <p className="font-medium text-og-fg">{title}</p> : null}
+        <div className="leading-5">{children}</div>
+      </div>
     </div>
   );
 }
