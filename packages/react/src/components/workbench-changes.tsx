@@ -288,7 +288,7 @@ export function WorkbenchChanges({
           <div className="w-[240px] shrink-0 border-r border-og-border">
             <VList
               className="h-full"
-              itemSize={coarsePointer ? 44 : 26}
+              itemSize={coarsePointer ? 44 : 28}
               ssrCount={Math.min(30, rows.length)}
             >
               {rows.map((row) =>
@@ -299,7 +299,7 @@ export function WorkbenchChanges({
                     className="flex items-center gap-1.5 px-2 pb-0.5 pt-2 text-2xs font-medium uppercase tracking-wide text-og-fg-subtle"
                   >
                     <span className="min-w-0 truncate">{row.label}</span>
-                    <span className="shrink-0 opacity-70">{row.count}</span>
+                    <span className="shrink-0">{row.count}</span>
                   </div>
                 ) : (
                   <RailFileRow
@@ -409,7 +409,7 @@ function RailFileRow({
       title={file.path}
       data-rail-file
       className={cn(
-        "flex w-full items-center gap-1.5 truncate px-2 py-0.5 text-left text-og-sm hover:bg-og-surface-2 pointer-coarse:min-h-11",
+        "flex min-h-7 w-full items-center gap-1.5 truncate px-2 py-0.5 text-left text-og-sm hover:bg-og-surface-2 pointer-coarse:min-h-11",
         grouped && "pl-3",
         active && "bg-og-surface-2",
       )}
@@ -527,7 +527,7 @@ function LayoutToggle({
           type="button"
           onClick={() => onChange(value)}
           className={cn(
-            "rounded-og-xs px-1.5 py-0.5 text-2xs capitalize pointer-coarse:min-h-11",
+            "min-h-7 rounded-og-xs px-1.5 py-0.5 text-2xs capitalize pointer-coarse:min-h-11",
             layout === value
               ? "bg-og-accent-soft text-og-fg"
               : "text-og-fg-subtle hover:text-og-fg",

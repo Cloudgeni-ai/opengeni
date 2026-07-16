@@ -106,7 +106,14 @@ export function PierreDiff({
     diffStyle: layout,
     overflow,
     stickyHeader: true,
-    ...(theme ? { theme } : { theme: { dark: "github-dark", light: "github-light" } }),
+    ...(theme
+      ? { theme }
+      : {
+          theme: {
+            dark: "github-dark-high-contrast",
+            light: "github-light-high-contrast",
+          },
+        }),
     themeType: themeType ?? "dark",
   };
 
@@ -119,6 +126,18 @@ export function PierreDiff({
     "--diffs-light-bg": "var(--og-color-bg)",
     "--diffs-bg-buffer-override": "var(--og-color-surface-1)",
     "--diffs-bg-separator-override": "var(--og-color-surface-1)",
+    "--diffs-addition-color-override": "var(--og-color-status-idle)",
+    "--diffs-deletion-color-override": "var(--og-color-status-failed)",
+    "--diffs-fg-number-addition-override": "var(--og-color-status-idle)",
+    "--diffs-fg-number-deletion-override": "var(--og-color-status-failed)",
+    "--diffs-bg-addition-override":
+      "color-mix(in oklch, var(--og-color-status-idle) 12%, var(--og-color-bg))",
+    "--diffs-bg-deletion-override":
+      "color-mix(in oklch, var(--og-color-status-failed) 12%, var(--og-color-bg))",
+    "--diffs-bg-addition-emphasis-override":
+      "color-mix(in oklch, var(--og-color-status-idle) 22%, var(--og-color-bg))",
+    "--diffs-bg-deletion-emphasis-override":
+      "color-mix(in oklch, var(--og-color-status-failed) 22%, var(--og-color-bg))",
     "--diffs-font-size": "var(--og-code-font-size)",
     "--diffs-line-height": "var(--og-code-line-height)",
   } as CSSProperties;
@@ -164,6 +183,8 @@ function PlainPatch({ diff }: { diff: GitFileDiff[] }) {
             .split("\n")
             .map((line, index) => (
               <span
+                // Patch line position is the stable identity in this immutable plain-text fallback.
+                // oxlint-disable-next-line react/no-array-index-key
                 key={index}
                 className={cn(
                   "block",

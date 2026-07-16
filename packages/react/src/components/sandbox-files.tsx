@@ -261,7 +261,7 @@ function Segmented({
           type="button"
           onClick={() => onChange(opt.value)}
           className={cn(
-            "rounded-og-xs px-1.5 py-0.5 text-og-xs max-[1023px]:min-h-11 pointer-coarse:min-h-11",
+            "min-h-7 rounded-og-xs px-1.5 py-0.5 text-og-xs max-[1023px]:min-h-11 pointer-coarse:min-h-11",
             opt.value === value
               ? "bg-og-accent-soft text-og-fg"
               : "text-og-fg-subtle hover:text-og-fg",

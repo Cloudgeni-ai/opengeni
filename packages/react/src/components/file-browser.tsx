@@ -569,7 +569,7 @@ export function FileBrowser({
               setMenu({ node, x: e.clientX, y: e.clientY });
             }}
             className={cn(
-              "group relative flex w-full items-center gap-1 truncate rounded-og-sm px-1 py-0.5 text-left text-og-sm pointer-coarse:min-h-11",
+              "group relative flex min-h-7 w-full items-center gap-1 truncate rounded-og-sm px-1 py-0.5 text-left text-og-sm pointer-coarse:min-h-11",
               "hover:bg-og-surface-2",
               isSelected && "bg-og-surface-2",
               isCursor && "outline outline-1 -outline-offset-1 outline-og-accent",
@@ -780,7 +780,7 @@ export function FileBrowser({
           <VList
             ref={vlistRef}
             className="min-h-0 flex-1"
-            itemSize={coarsePointer ? 44 : 24}
+            itemSize={coarsePointer ? 44 : 28}
             ssrCount={Math.min(32, renderItems.length)}
           >
             {renderItems.map((item) => (
@@ -826,7 +826,7 @@ function ToolbarButton({
       onClick={onClick}
       disabled={disabled}
       className={cn(
-        "inline-flex items-center justify-center rounded-og-sm p-1 text-og-fg-muted max-[1023px]:size-11 pointer-coarse:min-h-11 pointer-coarse:min-w-11",
+        "inline-flex size-7 items-center justify-center rounded-og-sm p-1 text-og-fg-muted max-[1023px]:size-11 pointer-coarse:min-h-11 pointer-coarse:min-w-11",
         "hover:bg-og-surface-2 hover:text-og-fg",
         "disabled:cursor-not-allowed disabled:opacity-40",
       )}
