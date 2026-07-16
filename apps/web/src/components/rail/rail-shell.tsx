@@ -5,7 +5,7 @@
 // from the brand, switcher, workspace nav, session list, and footer sections.
 import { useSessionLineage } from "@opengeni/react";
 import { Link, useRouterState } from "@tanstack/react-router";
-import { MenuIcon } from "lucide-react";
+import { MenuIcon, MessagesSquareIcon, Settings2Icon, XIcon } from "lucide-react";
 
 import { BrandMark } from "@/components/brand-mark";
 import {
@@ -32,7 +32,7 @@ import { SessionSandboxSwitcher } from "@/components/session/sandbox-switcher";
 import { CodexAccountIndicator } from "@/components/session/codex-account-indicator";
 import { WorkspaceNav } from "@/components/rail/workspace-nav";
 import { Button } from "@/components/ui/button";
-import { Sheet, SheetContent } from "@/components/ui/sheet";
+import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@/components/ui/sheet";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { useAppContext } from "@/context";
 import { cn } from "@/lib/utils";
@@ -40,12 +40,24 @@ import { cn } from "@/lib/utils";
 /** The rail body — shared between the fixed desktop column and the mobile drawer. */
 function RailBody() {
   const rail = useRail();
+  const [mobileSection, setMobileSection] = useState<"sessions" | "workspace">("sessions");
+  const sessionsTabRef = useRef<HTMLButtonElement>(null);
+  const workspaceTabRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (rail.drawerOpen) setMobileSection("sessions");
+  }, [rail.drawerOpen]);
+  const moveMobileTab = (section: "sessions" | "workspace") => {
+    setMobileSection(section);
+    window.requestAnimationFrame(() =>
+      (section === "sessions" ? sessionsTabRef : workspaceTabRef).current?.focus(),
+    );
+  };
   return (
     <div className="flex h-full min-h-0 flex-col bg-surface/40 pt-[env(safe-area-inset-top)]">
       {/* Brand */}
       <div
         className={cn(
-          "flex h-12 shrink-0 items-center",
+          "flex h-12 shrink-0 items-center gap-2",
           rail.collapsed ? "justify-center px-2" : "px-3",
         )}
       >
@@ -60,21 +72,110 @@ function RailBody() {
           </span>
           {!rail.collapsed ? <span className="truncate">OpenGeni</span> : null}
         </Link>
+        {rail.isMobile ? (
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            aria-label="Close navigation"
+            onClick={() => rail.setDrawerOpen(false)}
+            className="ml-auto pointer-coarse:size-11"
+          >
+            <XIcon className="size-4" />
+          </Button>
+        ) : null}
       </div>
 
       <SwitcherBlock />
 
-      {/* Sessions — the product's primary object — sit directly under the
-          switcher (D4.1); the secondary workspace-config group drops below. */}
-      <div className="mt-2 flex min-h-0 flex-1 flex-col">
-        {rail.collapsed ? <CollapsedSessionsButton /> : <SessionList />}
-      </div>
-
-      <div className="my-2 border-t border-border" />
-
-      <WorkspaceNav />
-
-      <RailFooter />
+      {rail.isMobile ? (
+        <>
+          <div
+            role="tablist"
+            aria-label="Navigation section"
+            onKeyDown={(event) => {
+              if (event.key === "ArrowLeft" || event.key === "Home") {
+                event.preventDefault();
+                moveMobileTab("sessions");
+              } else if (event.key === "ArrowRight" || event.key === "End") {
+                event.preventDefault();
+                moveMobileTab("workspace");
+              }
+            }}
+            className="mx-3 mt-3 grid shrink-0 grid-cols-2 rounded-lg bg-surface-2/70 p-1"
+          >
+            <button
+              ref={sessionsTabRef}
+              id="mobile-nav-tab-sessions"
+              type="button"
+              role="tab"
+              aria-selected={mobileSection === "sessions"}
+              aria-controls="mobile-nav-panel-sessions"
+              tabIndex={mobileSection === "sessions" ? 0 : -1}
+              onClick={() => setMobileSection("sessions")}
+              className={cn(
+                "flex h-10 items-center justify-center gap-2 rounded-md text-sm font-medium transition-colors",
+                mobileSection === "sessions"
+                  ? "bg-surface-3 text-fg shadow-sm"
+                  : "text-fg-muted hover:text-fg",
+              )}
+            >
+              <MessagesSquareIcon className="size-4" />
+              Sessions
+            </button>
+            <button
+              ref={workspaceTabRef}
+              id="mobile-nav-tab-workspace"
+              type="button"
+              role="tab"
+              aria-selected={mobileSection === "workspace"}
+              aria-controls="mobile-nav-panel-workspace"
+              tabIndex={mobileSection === "workspace" ? 0 : -1}
+              onClick={() => setMobileSection("workspace")}
+              className={cn(
+                "flex h-10 items-center justify-center gap-2 rounded-md text-sm font-medium transition-colors",
+                mobileSection === "workspace"
+                  ? "bg-surface-3 text-fg shadow-sm"
+                  : "text-fg-muted hover:text-fg",
+              )}
+            >
+              <Settings2Icon className="size-4" />
+              Workspace
+            </button>
+          </div>
+          {mobileSection === "sessions" ? (
+            <div
+              id="mobile-nav-panel-sessions"
+              role="tabpanel"
+              aria-labelledby="mobile-nav-tab-sessions"
+              className="mt-2 flex min-h-0 flex-1 flex-col"
+            >
+              <SessionList />
+            </div>
+          ) : (
+            <div
+              id="mobile-nav-panel-workspace"
+              role="tabpanel"
+              aria-labelledby="mobile-nav-tab-workspace"
+              className="mt-2 flex min-h-0 flex-1 flex-col overflow-y-auto border-t border-border pt-2"
+            >
+              <WorkspaceNav />
+              <RailFooter />
+            </div>
+          )}
+        </>
+      ) : (
+        <>
+          {/* Sessions are the primary object. Workspace administration remains
+              secondary on desktop and becomes its own screen on phones. */}
+          <div className="mt-2 flex min-h-0 flex-1 flex-col">
+            {rail.collapsed ? <CollapsedSessionsButton /> : <SessionList />}
+          </div>
+          <div className="my-2 border-t border-border" />
+          <WorkspaceNav />
+          <RailFooter />
+        </>
+      )}
     </div>
   );
 }
@@ -232,12 +333,16 @@ export function RailShell({ children }: { children: ReactNode }) {
               side="left"
               showCloseButton={false}
               aria-label="Session navigation"
-              className="w-[260px] max-w-[85vw] gap-0 p-0"
+              className="w-screen max-w-none gap-0 p-0 sm:w-[380px] sm:max-w-[90vw]"
               onCloseAutoFocus={(event) => {
                 event.preventDefault();
                 hamburgerRef.current?.focus();
               }}
             >
+              <SheetTitle className="sr-only">Session navigation</SheetTitle>
+              <SheetDescription className="sr-only">
+                Browse workspace sessions or open workspace settings.
+              </SheetDescription>
               <nav aria-label="Primary" className="h-full">
                 <RailBody />
               </nav>

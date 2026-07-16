@@ -10584,6 +10584,97 @@ function mapSessionPin(
     : { pinned: false, pinnedAt: null, pinVersion: 0 };
 }
 
+type SessionTreeStats = NonNullable<Session["treeStats"]>;
+
+type SessionTreeStatsRow = {
+  rootId: string;
+  directChildren: number | string;
+  totalDescendants: number | string;
+  runningDescendants: number | string;
+  queuedDescendants: number | string;
+  attentionDescendants: number | string;
+  pausedDescendants: number | string;
+  failedDescendants: number | string;
+};
+
+/**
+ * Return complete descendant aggregates for the bounded set of rows being
+ * painted in the session rail. Parent links are immutable, so one recursive
+ * read inside the list transaction gives the client stable, authoritative
+ * expand affordances without loading the workspace's entire session table.
+ */
+async function sessionTreeStatsForSessions(
+  db: Database,
+  workspaceId: string,
+  rootIds: string[],
+): Promise<Map<string, SessionTreeStats>> {
+  if (rootIds.length === 0) return new Map();
+  const rows = await rawRows<SessionTreeStatsRow>(
+    db,
+    sql`
+      with recursive descendants(root_id, id, status, depth, path) as (
+        select
+          root.id,
+          root.id,
+          root.status,
+          0,
+          array[root.id]
+        from ${schema.sessions} root
+        where root.workspace_id = ${workspaceId}
+          and ${inArray(sql`root.id`, rootIds)}
+
+        union all
+
+        select
+          descendants.root_id,
+          child.id,
+          child.status,
+          descendants.depth + 1,
+          descendants.path || child.id
+        from ${schema.sessions} child
+        join descendants on child.parent_session_id = descendants.id
+        where child.workspace_id = ${workspaceId}
+          and not child.id = any(descendants.path)
+      )
+      select
+        root_id as "rootId",
+        count(*) filter (where depth = 1)::int as "directChildren",
+        count(*) filter (where depth > 0)::int as "totalDescendants",
+        count(*) filter (
+          where depth > 0 and status in ('running', 'recovering')
+        )::int as "runningDescendants",
+        count(*) filter (
+          where depth > 0 and status in ('queued', 'waiting_capacity')
+        )::int as "queuedDescendants",
+        count(*) filter (
+          where depth > 0 and status = 'requires_action'
+        )::int as "attentionDescendants",
+        count(*) filter (
+          where depth > 0 and status = 'paused'
+        )::int as "pausedDescendants",
+        count(*) filter (
+          where depth > 0 and status = 'failed'
+        )::int as "failedDescendants"
+      from descendants
+      group by root_id
+    `,
+  );
+  return new Map(
+    rows.map((row) => [
+      row.rootId,
+      {
+        directChildren: Number(row.directChildren),
+        totalDescendants: Number(row.totalDescendants),
+        runningDescendants: Number(row.runningDescendants),
+        queuedDescendants: Number(row.queuedDescendants),
+        attentionDescendants: Number(row.attentionDescendants),
+        pausedDescendants: Number(row.pausedDescendants),
+        failedDescendants: Number(row.failedDescendants),
+      },
+    ]),
+  );
+}
+
 function sessionFilters(
   options: Pick<ListSessionsForSubjectOptions, "parentSessionId" | "search">,
 ): SQL[] {
@@ -10883,13 +10974,24 @@ export async function listSessionsForSubject(
           ...pageRows.map((row) => row.session.id),
         ];
         const mcpServers = await sessionMcpServerMetadataForSessions(tx, workspaceId, ids);
+        const treeStats = await sessionTreeStatsForSessions(tx, workspaceId, ids);
+        const mapListSession = (
+          row: (typeof pinnedRows)[number] | (typeof pageRows)[number],
+        ): Session => ({
+          ...mapSession(row.session, mcpServers.get(row.session.id) ?? [], mapSessionPin(row.pin)),
+          treeStats: treeStats.get(row.session.id) ?? {
+            directChildren: 0,
+            totalDescendants: 0,
+            runningDescendants: 0,
+            queuedDescendants: 0,
+            attentionDescendants: 0,
+            pausedDescendants: 0,
+            failedDescendants: 0,
+          },
+        });
         return {
-          pinned: pinnedRows.map((row) =>
-            mapSession(row.session, mcpServers.get(row.session.id) ?? [], mapSessionPin(row.pin)),
-          ),
-          sessions: pageRows.map((row) =>
-            mapSession(row.session, mcpServers.get(row.session.id) ?? [], mapSessionPin(row.pin)),
-          ),
+          pinned: pinnedRows.map(mapListSession),
+          sessions: pageRows.map(mapListSession),
           nextCursor,
         };
       },

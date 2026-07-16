@@ -3145,6 +3145,22 @@ export const Session = z.object({
   pinnedAt: z.string().nullable().default(null),
   /** Optimistic pin-state revision; zero represents an absent pin relation. */
   pinVersion: z.number().int().nonnegative().default(0),
+  /**
+   * Server-authoritative hierarchy summary populated on session-list reads.
+   * Detail reads may omit it. The rail uses this instead of guessing a tree
+   * from whichever global recency page happened to be loaded.
+   */
+  treeStats: z
+    .object({
+      directChildren: z.number().int().nonnegative(),
+      totalDescendants: z.number().int().nonnegative(),
+      runningDescendants: z.number().int().nonnegative(),
+      queuedDescendants: z.number().int().nonnegative(),
+      attentionDescendants: z.number().int().nonnegative(),
+      pausedDescendants: z.number().int().nonnegative(),
+      failedDescendants: z.number().int().nonnegative(),
+    })
+    .optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });

@@ -223,6 +223,25 @@ describe("rail session grouping", () => {
     expect(forest.running[0]?.hasActiveDescendant).toBe(true);
   });
 
+  test("buildRailForest trusts server descendant activity before children are loaded", () => {
+    const manager = railSession({
+      id: "manager-summary",
+      status: "idle",
+      updatedAt: "2026-06-01T10:00:00.000Z",
+      treeStats: {
+        directChildren: 2,
+        totalDescendants: 7,
+        runningDescendants: 1,
+        queuedDescendants: 2,
+        attentionDescendants: 0,
+        pausedDescendants: 3,
+        failedDescendants: 0,
+      },
+    });
+    const forest = buildRailForest([manager], NOW);
+    expect(forest.running.map((node) => node.session.id)).toEqual(["manager-summary"]);
+  });
+
   test("visibleForestRows expands only where the set says so", () => {
     const forest = buildRailForest(
       [

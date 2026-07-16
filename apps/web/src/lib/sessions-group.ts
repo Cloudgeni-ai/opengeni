@@ -129,7 +129,11 @@ export type SessionForest = {
 
 /** Whether the node's own status, or any descendant, is in a live state. */
 export function nodeIsActive(node: SessionTreeNode): boolean {
-  return isRunningStatus(node.session.status) || node.hasActiveDescendant;
+  const stats = node.session.treeStats;
+  const summarizedActive = Boolean(
+    stats && stats.runningDescendants + stats.queuedDescendants + stats.attentionDescendants > 0,
+  );
+  return isRunningStatus(node.session.status) || node.hasActiveDescendant || summarizedActive;
 }
 
 /**
