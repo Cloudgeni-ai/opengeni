@@ -5,6 +5,7 @@ import type { EventBus } from "@opengeni/events";
 import {
   notifyParentOfChildTerminal,
   reconcilePendingParentSystemUpdates,
+  reconcilePendingSessionWorkflowWakes,
   type NotifyServices,
 } from "../src/activities/parent-wake";
 
@@ -41,22 +42,21 @@ test("disabled child-completion wakes return before every parent side effect", a
   expect(error).not.toHaveBeenCalled();
 });
 
-test("disabled child-completion wakes preserve generic workflow repair without claiming outboxes", async () => {
+test("workflow-wake repair is independent of disabled child-completion delivery", async () => {
   const wakeSessionWorkflow = mock(async () => undefined);
-  const listEnrollableSessions = mock(async () => [
+  const claimPendingSessionWorkflowWakes = mock(async () => [
     {
       accountId: "11111111-1111-4111-8111-111111111111",
       workspaceId: "22222222-2222-4222-8222-222222222222",
       sessionId: "33333333-3333-4333-8333-333333333333",
       temporalWorkflowId: "session-33333333-3333-4333-8333-333333333333",
+      wakeRevision: 7,
+      controlEventId: null,
     },
   ]);
-  const claimPendingSessionSystemUpdateOutbox = mock(async () => {
-    throw new Error("disabled reaper claimed a child-completion outbox");
-  });
   const db = {} as Database;
 
-  const result = await reconcilePendingParentSystemUpdates(
+  const result = await reconcilePendingSessionWorkflowWakes(
     {
       db,
       bus: { publish: async () => undefined } as unknown as EventBus,
@@ -68,16 +68,38 @@ test("disabled child-completion wakes preserve generic workflow repair without c
       wakeSessionWorkflow,
     },
     17,
-    { claimPendingSessionSystemUpdateOutbox, listEnrollableSessions },
+    { claimPendingSessionWorkflowWakes },
   );
 
-  expect(result).toEqual({ claimed: 0, delivered: 0, failed: 0, wakeRepairs: 1 });
-  expect(listEnrollableSessions).toHaveBeenCalledWith(db, 17);
+  expect(result).toEqual({ claimed: 1, delivered: 1, failed: 0 });
+  expect(claimPendingSessionWorkflowWakes).toHaveBeenCalledWith(db, 17);
   expect(wakeSessionWorkflow).toHaveBeenCalledWith({
     accountId: "11111111-1111-4111-8111-111111111111",
     workspaceId: "22222222-2222-4222-8222-222222222222",
     sessionId: "33333333-3333-4333-8333-333333333333",
     workflowId: "session-33333333-3333-4333-8333-333333333333",
+    wakeRevision: 7,
   });
+});
+
+test("disabled child-completion delivery never claims its own outbox", async () => {
+  const claimPendingSessionSystemUpdateOutbox = mock(async () => {
+    throw new Error("disabled reaper claimed a child-completion outbox");
+  });
+  const result = await reconcilePendingParentSystemUpdates(
+    {
+      db: {} as Database,
+      bus: { publish: async () => undefined } as unknown as EventBus,
+      settings: { childCompletionParentWakeEnabled: false } as Settings,
+      observability: {
+        info: () => undefined,
+        error: () => undefined,
+      } as unknown as NotifyServices["observability"],
+      wakeSessionWorkflow: null,
+    },
+    17,
+    { claimPendingSessionSystemUpdateOutbox },
+  );
+  expect(result).toEqual({ claimed: 0, delivered: 0, failed: 0 });
   expect(claimPendingSessionSystemUpdateOutbox).not.toHaveBeenCalled();
 });

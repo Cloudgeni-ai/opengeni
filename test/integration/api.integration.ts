@@ -413,7 +413,9 @@ describe("API component integration", () => {
         headers: { "content-type": "application/json" },
       });
 
-    // Sequential double-submit: same key twice -> one session, no second start.
+    // Sequential double-submit: one session and one durable start state. The
+    // retry re-delivers the same wake revision so an ambiguous first response
+    // can repair a lost signal without duplicating the turn.
     const seqKey = `route-seq-${crypto.randomUUID()}`;
     const wakeupsBefore = workflow.wakeups.length;
     const firstResp = await create(seqKey);
@@ -423,8 +425,7 @@ describe("API component integration", () => {
     expect(secondResp.status).toBe(202);
     const secondSession = (await secondResp.json()) as { id: string };
     expect(secondSession.id).toBe(firstSession.id);
-    // Only the winner ran the start flow: one wakeup, one event batch.
-    expect(workflow.wakeups.length).toBe(wakeupsBefore + 1);
+    expect(workflow.wakeups.length).toBe(wakeupsBefore + 2);
     const seqEvents = await listSessionEvents(dbClient.db, workspaceId, firstSession.id);
     expect(seqEvents.map((event) => event.type)).toEqual([
       "session.created",
@@ -445,8 +446,9 @@ describe("API component integration", () => {
     );
     const uniqueRaceIds = new Set(raceSessions);
     expect(uniqueRaceIds.size).toBe(1);
-    // Exactly one create won the start flow despite the race.
-    expect(workflow.wakeups.length).toBe(wakeupsBeforeRace + 1);
+    // Every retry may safely re-deliver the same revision; durable state still
+    // contains exactly one session, first turn, and event batch.
+    expect(workflow.wakeups.length).toBe(wakeupsBeforeRace + 6);
     const rows = await withWorkspaceCount(dbClient.db, workspaceId, raceKey);
     expect(rows).toBe(1);
 

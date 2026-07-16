@@ -594,9 +594,13 @@ reconciliation error. The cutover asserts that no active such rows exist.
 - Active/inactive structured history rows, including plaintext context-summary marker.
 - Attempt-scoped authoritative and rejected-late events.
 
-One shared runnable-predicate module is used by claim, wake, Send/Steer admission,
-workspace Resume/exception wake selection, repair scan, and UI state. Duplicated boolean
-implementations are forbidden.
+One shared runnable-predicate module is used by claim, Send/Steer admission, workspace
+Resume/exception wake selection, and UI state. Wake delivery is not reconstructed from
+that predicate: every work-producing transaction increments the one coalescing
+`session_workflow_wake_outbox` revision for its session. Direct signalling is a latency
+optimization; bounded `SKIP LOCKED` delivery repairs committed revisions that were not
+acknowledged. Duplicated eligibility implementations and periodic runnable-session scans
+are forbidden.
 
 ### 7.2 Delete in the same release
 
@@ -766,7 +770,7 @@ Azure infrastructure access is allowed, but Azure model-token use is prohibited.
 6. Merge the reviewed public implementation to `main`; pin the exact public revision in
    the private production workflow.
 7. Produce a preflight report with image digests, the exact ordered migration list
-   (`0057` and `0058`) and per-file checksums, expected schema, production
+   (`0057`, `0058`, `0061`, and `0062`) and per-file checksums, expected schema, production
    namespace/context, worker roles/caps, and proof that no Azure model endpoint is
    configured for the validation calls. The former single-migration field is deleted;
    no compatibility request shape is accepted.
@@ -795,13 +799,16 @@ Store the report durably in the private release evidence location. Do not print 
 1. Enable a single production maintenance/admission gate that rejects new Send/Steer/
    Resume/manual-compact/goal-start claims with a truthful retry response while leaving
    reads available.
-2. Pause Temporal Schedules. Drain the old worker deployment to zero and allow its
-   existing 120-second termination grace to checkpoint current attempts. The drain
+2. Pause Temporal Schedules. The same idempotent operator pass creates the new dedicated
+   workflow-wake dispatcher Schedule in the paused state when it does not exist, records
+   it in the run-owned pause receipt, and therefore prevents the new control deployment
+   from waking the seeded fleet before the canary. Drain the old worker deployment to
+   zero and allow its existing 120-second termination grace to checkpoint current attempts. The drain
    receipt must prove zero controller, ready, available, and updated worker replicas.
 3. Inspect and terminate every running `session-*` Temporal workflow. Postgres is the
    durable recovery truth; no old history may replay changed activity routing. The
    termination receipt must prove no matching workflow remains running.
-4. Apply the exact ordered migrations while all workers and session workflows remain
+4. Apply the exact ordered migrations while all API writers, workers, and session workflows remain
    stopped. `0057` is already recorded in the failed first cutover and therefore no-ops;
    `0058` adds the final event columns and workflow-enrollment contract required by the
    current operator code.
@@ -810,11 +817,15 @@ Store the report durably in the private release evidence location. Do not print 
    - reclassifies existing duplicate usage rows while retaining the earliest event as
      current evidence;
    - creates the partial uniqueness index for current turn/source usage; and
-   - installs the enrollable-session scan that includes queued, recovering,
-     waiting-capacity, requires-action, pending-update, active-goal, and stale-control-
-     fence sessions.
+   - historically installed the enrollable-session scan used during the first cutover.
+
+   `0061` supersedes and drops that scan. It creates the per-session revisioned workflow
+   wake outbox and seeds already-committed eligible work exactly once while all old
+   writers are stopped. `0062` moves expired session-list snapshot cleanup out of
+   serializable API reads into one bounded global reaper operation.
 5. Run the distinct evidence-writing `repark-orphaned-turns` operator action. It refuses
-   unless workflow termination is complete and both migrations are present. Under database
+   unless workflow termination is complete and the complete four-migration cutover schema
+   is present. Under database
    locks it changes orphaned
    `running` turns to `recovering`, exact-matching either the registered attempt or the
    null-owner residue created when an old worker ran after the partially applied `0057`,
@@ -834,6 +845,10 @@ Store the report durably in the private release evidence location. Do not print 
 
    Both roles use one Worker per process. No same-process dual Worker, SDK default slot
    count, resource tuner, semaphore, activity alias, or dual-routing fallback ships.
+   Control workers also register one dedicated 10-second workflow-wake repair Schedule.
+   Its bounded activity reads only committed outbox revisions and invokes the same
+   revision-scoped signal/acknowledgement path as immediate delivery. Wake repair is not
+   coupled to sandbox cleanup, child-agent settings, or a runnable-session scan.
 8. Start turn workers before control workers, then prove both deployments are fully ready
    on the reviewed digest and expose the configured role/cap in startup evidence.
 9. Run the production Codex canary **before** waking the backlog. It calls the internal API
@@ -849,11 +864,14 @@ Store the report durably in the private release evidence location. Do not print 
     - the billing ledger contains its one idempotent zero-cost Codex marker and no credit
       debit; and
     - no Azure model deployment/token endpoint was invoked.
-11. Wake v2 replaces wake v1. Scan the enrollable set once, signal-with-start every
-    workflow (bounded signal concurrency is acceptable because signals are cheap), and
-    verify enrollment rather than waiting for all work to finish:
-    - every initially enrollable session has a running expected workflow or became
-      durably ineligible/terminal through authoritative progress;
+11. Invoke the canonical `sessionWorkflowWakeDispatcherWorkflow` through the
+    `wake-outbox` operator while ordinary Temporal Schedules remain paused. Drain the
+    one-time seeded wake revisions plus revisions written by every new producer
+    transaction, and verify delivery rather than waiting for all work to finish:
+    - baseline and final outbox proofs stream deterministic rows through
+      length-delimited SHA-256 hashes; the operator never materializes the fleet in memory;
+    - every initially captured revision is acknowledged; acknowledgement occurs only
+      after Temporal accepts the session's revision-scoped `signalWithStart`;
     - approval and capacity waiters remain truthfully waiting with live workflows;
     - stale control fences are settled;
     - turn starts/progress reach the configured global turn capacity when enough runnable
@@ -861,7 +879,7 @@ Store the report durably in the private release evidence location. Do not print 
     - a stability window longer than the heartbeat timeout shows ready workers and no new
       heartbeat-timeout recovery storm.
 
-    Claimable rows need not reach zero: a prompt/recovery waiting behind bounded turn
+    Runnable work need not reach zero: a prompt/recovery waiting behind bounded turn
     capacity deliberately remains queued/recovering and truthful while its workflow is
     enrolled. Maintenance never waits days for long agents to drain.
 12. Capture final state, reconcile every baseline fate, usage uniqueness, enrollment, and
@@ -985,7 +1003,7 @@ new fake user message, regress its goal, or remain owned by the old revision.
   process.
 - deterministic derived turn queue for production and randomized integration test queues.
 - generalized enrollment repair for runnable, approval-wait, capacity-wait, updates,
-  goals, and stale fences; enrollment/progress proof does not require backlog drain.
+  goals, and stale fences; wake-delivery/progress proof does not require backlog drain.
 - old Temporal workflows cannot execute after code deletion.
 - private workflow enforces one public revision, exact ordered migration hashes,
   repark/canary-before-wake ordering, worker roles/capacity, baseline/final reconciliation,
@@ -1009,7 +1027,8 @@ temporary runtime fallback.
    dirty queue-removal work, retain atomic settlement/generation/capacity/audit fixes.
 2. **Schema and state model**: new prompt/current/update/workspace-generation concepts,
    shared runnable predicate, one-way 0057 migration, classified current/duplicate/late
-   usage evidence and enrollable-session 0058 migration, removal of legacy schema.
+   usage evidence, transactional revisioned wake outbox in 0061, and removal of the
+   superseded enrollment scan.
 3. **Send/Steer/Pause/Resume APIs**: one transaction per control, delete-only queue,
    remove aliases and alternate mutation APIs.
 4. **Worker claim loop and admission**: split control/turn task queues and deployments;
@@ -1026,7 +1045,7 @@ temporary runtime fallback.
    fan-out state rewriting.
 8. **React/SDK cleanup**: one composer queue, exact server order, compact goal/agents,
    one Pause control, precise sandbox lifecycle UI.
-9. **Private ops clean cutover**: exact 0057+0058 migration list; maintenance drain;
+9. **Private ops clean cutover**: exact 0057+0058+0061+0062 migration list; maintenance drain;
    workflow termination; evidence-writing repark; split-worker deployment; ambiguity-safe
    canary before fleet wake; enrollment/progress wake v2; final reconciliation.
 10. **Review and production proof**: Fable implementation review, UBS, complete local

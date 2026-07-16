@@ -10,8 +10,19 @@ import {
 import { createDb, reparkOrphanedSessionTurn } from "@opengeni/db";
 import { getSettings } from "@opengeni/config";
 import { createObjectStorage } from "@opengeni/storage";
-import { Client as TemporalClient, Connection } from "@temporalio/client";
+import {
+  Client as TemporalClient,
+  Connection,
+  ScheduleAlreadyRunning,
+  ScheduleOverlapPolicy,
+  WorkflowExecutionAlreadyStartedError,
+} from "@temporalio/client";
 import postgres from "postgres";
+import {
+  SESSION_WORKFLOW_WAKE_DISPATCHER_PERIOD_MS,
+  SESSION_WORKFLOW_WAKE_DISPATCHER_SCHEDULE_ID,
+  SESSION_WORKFLOW_WAKE_DISPATCHER_WORKFLOW_TYPE,
+} from "../../apps/worker/src/workflow-wake-contract";
 
 type ParsedArgs = {
   command: string;
@@ -198,35 +209,6 @@ async function reconcile(args: ParsedArgs): Promise<void> {
   );
 }
 
-type Enrollable = {
-  account_id: string;
-  workspace_id: string;
-  session_id: string;
-  temporal_workflow_id: string;
-};
-
-type EnrollmentState = {
-  session_id: string;
-  approval_waiting: boolean;
-  capacity_waiting: boolean;
-  control_pending: boolean;
-  runnable: boolean;
-};
-
-export function countBoundedWakeProgress(
-  initiallyRunnableSessionIds: Iterable<string>,
-  ...proofSets: Array<Iterable<string>>
-): number {
-  const initiallyRunnable = new Set(initiallyRunnableSessionIds);
-  const proven = new Set<string>();
-  for (const proofSet of proofSets) {
-    for (const sessionId of proofSet) {
-      if (initiallyRunnable.has(sessionId)) proven.add(sessionId);
-    }
-  }
-  return proven.size;
-}
-
 function integerArg(
   args: ParsedArgs,
   name: string,
@@ -242,55 +224,115 @@ function integerArg(
   return parsed;
 }
 
-async function runningSessionWorkflowIds(temporal: TemporalClient): Promise<Set<string>> {
-  const running = new Set<string>();
-  for await (const execution of temporal.workflow.list({
-    query: "ExecutionStatus='Running'",
-  })) {
-    if (execution.workflowId.startsWith("session-")) running.add(execution.workflowId);
+type WakeOutboxRow = {
+  session_id: string;
+  attempts: number;
+  last_error: string | null;
+};
+
+type WakeOutboxProof = { count: number; sha256: string };
+
+function updateLengthDelimitedHash(hash: ReturnType<typeof createHash>, fields: string[]): void {
+  hash.update(String(fields.length));
+  hash.update(":");
+  for (const field of fields) {
+    hash.update(String(Buffer.byteLength(field, "utf8")));
+    hash.update(":");
+    hash.update(field);
   }
-  return running;
 }
 
-async function enrollmentStates(
+async function captureWakeOutboxProof(
   sql: postgres.Sql,
-  sessionIds: string[],
-): Promise<EnrollmentState[]> {
-  if (sessionIds.length === 0) return [];
-  return (await sql.unsafe<EnrollmentState[]>(
-    `select s.id as session_id,
-       exists (
-         select 1 from session_turns t
-         where t.workspace_id = s.workspace_id and t.session_id = s.id
-           and t.status = 'requires_action'
-       ) as approval_waiting,
-       exists (
-         select 1 from session_turns t
-         where t.workspace_id = s.workspace_id and t.session_id = s.id
-           and t.status = 'waiting_capacity'
-       ) as capacity_waiting,
-       (s.pending_control_event_id is not null) as control_pending,
-       exists (
-         select 1 from session_turns t
-         where t.workspace_id = s.workspace_id and t.session_id = s.id
-           and t.status in ('queued', 'recovering')
-       ) as runnable
-     from sessions s where s.id = any($1::uuid[]) order by s.id`,
-    [sessionIds],
-  )) as unknown as EnrollmentState[];
+  onlyPending: boolean,
+): Promise<WakeOutboxProof> {
+  const hash = createHash("sha256");
+  let count = 0;
+  const stream = await sql
+    .unsafe(
+      `copy (
+         select session_id::text, wake_revision::text, delivered_revision::text
+         from session_workflow_wake_outbox
+         ${onlyPending ? "where wake_revision > delivered_revision" : ""}
+         order by session_id
+       ) to stdout`,
+    )
+    .readable();
+  let pending = "";
+  for await (const chunk of stream) {
+    pending += Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
+    for (;;) {
+      const newline = pending.indexOf("\n");
+      if (newline === -1) break;
+      const line = pending.slice(0, newline);
+      pending = pending.slice(newline + 1);
+      const fields = line.split("\t");
+      if (fields.length !== 3) throw new Error("malformed workflow-wake COPY proof row");
+      updateLengthDelimitedHash(hash, fields);
+      count += 1;
+    }
+  }
+  if (pending.length > 0) {
+    const fields = pending.split("\t");
+    if (fields.length !== 3) throw new Error("malformed trailing workflow-wake COPY proof row");
+    updateLengthDelimitedHash(hash, fields);
+    count += 1;
+  }
+  return { count, sha256: hash.digest("hex") };
 }
 
-async function wake(args: ParsedArgs): Promise<void> {
+async function pendingWakeOutboxSummary(sql: postgres.Sql): Promise<{
+  count: number;
+  errorSamples: WakeOutboxRow[];
+}> {
+  const [counts, samples] = await Promise.all([
+    sql<Array<{ count: number }>>`
+      select count(*)::integer as count
+      from session_workflow_wake_outbox
+      where wake_revision > delivered_revision`,
+    sql<Array<WakeOutboxRow>>`
+      select session_id::text, attempts, last_error
+      from session_workflow_wake_outbox
+      where wake_revision > delivered_revision and last_error is not null
+      order by attempts desc, session_id
+      limit 100`,
+  ]);
+  return { count: Number(counts[0]?.count ?? 0), errorSamples: samples };
+}
+
+async function executeWakeDispatcher(
+  temporal: TemporalClient,
+  taskQueue: string,
+  workflowId: string,
+): Promise<unknown> {
+  try {
+    const handle = await temporal.workflow.start("sessionWorkflowWakeDispatcherWorkflow", {
+      taskQueue,
+      workflowId,
+      workflowIdReusePolicy: "REJECT_DUPLICATE",
+      args: [],
+    });
+    return await handle.result();
+  } catch (error) {
+    if (!(error instanceof WorkflowExecutionAlreadyStartedError)) throw error;
+    return await temporal.workflow.getHandle(workflowId).result();
+  }
+}
+
+async function wakeOutbox(args: ParsedArgs): Promise<void> {
   const output = required(args, "--output");
+  const runId = safeRunId(required(args, "--run-id"));
   const execute = args.flags.has("--execute");
-  const turnCapacity = integerArg(args, "--turn-capacity", {
-    min: 1,
-    max: 10_000,
-  });
+  const turnCapacity = integerArg(args, "--turn-capacity", { min: 1, max: 10_000 });
   const stabilitySeconds = integerArg(args, "--stability-seconds", {
     defaultValue: 150,
     min: 121,
     max: 900,
+  });
+  const timeoutSeconds = integerArg(args, "--timeout-seconds", {
+    defaultValue: 900,
+    min: stabilitySeconds,
+    max: 3_600,
   });
   const sampleSeconds = integerArg(args, "--sample-seconds", {
     defaultValue: 5,
@@ -303,227 +345,133 @@ async function wake(args: ParsedArgs): Promise<void> {
     prepare: false,
     idle_timeout: 5,
     connect_timeout: 15,
-    connection: { application_name: "opengeni-cutover-wake-repair" },
+    connection: { application_name: "opengeni-cutover-wake-outbox" },
   });
   let connection: Connection | null = null;
   try {
-    const rows = (await sql.unsafe<Enrollable[]>(
-      "select * from opengeni_private.list_enrollable_sessions(10000)",
-    )) as unknown as Enrollable[];
-    if (rows.length === 10_000) {
-      throw new Error(
-        "claimable-session scan reached its hard limit; refusing a partial wake repair",
-      );
-    }
-    const ordered = [...rows].sort((a, b) => a.session_id.localeCompare(b.session_id));
+    const baselinePendingProof = await captureWakeOutboxProof(sql, true);
+    const initialRecoveryRows = await sql<Array<{ count: number }>>`
+      select count(*)::integer as count from session_events
+      where type = 'turn.recovery.requested'
+        and payload ->> 'reason' = 'worker_death'`;
+    const initialHeartbeatRecoveries = Number(initialRecoveryRows[0]?.count ?? 0);
     const failures: Array<{ sessionId: string; error: string }> = [];
-    const woken: string[] = [];
-    const enrollmentProof: Array<{
-      sessionId: string;
-      workflowId: string;
-      outcome: "running-workflow" | "authoritative-progress";
-    }> = [];
+    const dispatcherResults: Array<{ workflowId: string; result: unknown }> = [];
     const samples: Array<{
       capturedAt: string;
+      pendingRevisions: number;
       runningTurns: number;
       recoveringTurns: number;
       heartbeatRecoveries: number;
     }> = [];
-    const initialStates = await enrollmentStates(
-      sql,
-      ordered.map((row) => row.session_id),
-    );
+    let temporal: TemporalClient | null = null;
     if (execute) {
-      connection = await Connection.connect({
-        address: temporalSettingsValue.address,
-      });
-      const temporal = new TemporalClient({
+      connection = await Connection.connect({ address: temporalSettingsValue.address });
+      temporal = new TemporalClient({
         connection,
         namespace: temporalSettingsValue.namespace,
       });
-      const queue = [...ordered];
-      const workers = Array.from({ length: Math.min(20, Math.max(1, queue.length)) }, async () => {
-        for (;;) {
-          const row = queue.shift();
-          if (!row) return;
-          try {
-            await temporal.workflow.signalWithStart("sessionWorkflow", {
-              taskQueue: temporalSettingsValue.taskQueue,
-              workflowId: row.temporal_workflow_id,
-              workflowIdReusePolicy: "ALLOW_DUPLICATE",
-              args: [
-                {
-                  accountId: row.account_id,
-                  workspaceId: row.workspace_id,
-                  sessionId: row.session_id,
-                },
-              ],
-              signal: "queueChanged",
-            });
-            woken.push(row.session_id);
-          } catch (error) {
-            failures.push({
-              sessionId: row.session_id,
-              error: error instanceof Error ? error.message : String(error),
-            });
-          }
-        }
+    }
+    const deadline = Date.now() + timeoutSeconds * 1_000;
+    let stableSince: number | null = null;
+    let dispatchIteration = 0;
+    for (;;) {
+      const [pendingSummary, countRows] = await Promise.all([
+        pendingWakeOutboxSummary(sql),
+        sql<
+          Array<{
+            running_turns: number;
+            recovering_turns: number;
+            heartbeat_recoveries: number;
+          }>
+        >`
+          select
+            (select count(*)::integer from session_turns where status = 'running') as running_turns,
+            (select count(*)::integer from session_turns where status = 'recovering') as recovering_turns,
+            (select count(*)::integer from session_events
+             where type = 'turn.recovery.requested'
+               and payload ->> 'reason' = 'worker_death') as heartbeat_recoveries`,
+      ]);
+      const counts = countRows[0];
+      const runningTurns = Number(counts?.running_turns ?? 0);
+      const recoveringTurns = Number(counts?.recovering_turns ?? 0);
+      const heartbeatRecoveries = Number(counts?.heartbeat_recoveries ?? 0);
+      samples.push({
+        capturedAt: new Date().toISOString(),
+        pendingRevisions: pendingSummary.count,
+        runningTurns,
+        recoveringTurns,
+        heartbeatRecoveries,
       });
-      await Promise.all(workers);
-      if (failures.length === 0) {
-        const initialRecoveryRows = await sql<Array<{ count: number }>>`
-          select count(*)::integer as count from session_events
-          where type = 'turn.recovery.requested'
-            and payload ->> 'reason' = 'worker_death'`;
-        const initialHeartbeatRecoveries = Number(initialRecoveryRows[0]?.count ?? 0);
-        const deadline = Date.now() + stabilitySeconds * 1_000;
-        let maxRunningTurns = 0;
-        const sampledRunningSessionIds = new Set<string>();
-        while (Date.now() <= deadline) {
-          const [[counts], runningSessions] = await Promise.all([
-            sql<
-              Array<{
-                running_turns: number;
-                recovering_turns: number;
-                heartbeat_recoveries: number;
-              }>
-            >`
-            select
-              (select count(*)::integer from session_turns where status = 'running') as running_turns,
-              (select count(*)::integer from session_turns where status = 'recovering') as recovering_turns,
-              (select count(*)::integer from session_events
-               where type = 'turn.recovery.requested'
-                 and payload ->> 'reason' = 'worker_death') as heartbeat_recoveries`,
-            sql<Array<{ session_id: string }>>`
-              select distinct session_id::text as session_id
-              from session_turns where status = 'running'`,
-          ]);
-          for (const running of runningSessions) {
-            sampledRunningSessionIds.add(running.session_id);
-          }
-          const runningTurns = Number(counts?.running_turns ?? 0);
-          const recoveringTurns = Number(counts?.recovering_turns ?? 0);
-          const heartbeatRecoveries = Number(counts?.heartbeat_recoveries ?? 0);
-          maxRunningTurns = Math.max(maxRunningTurns, runningTurns);
-          samples.push({
-            capturedAt: new Date().toISOString(),
-            runningTurns,
-            recoveringTurns,
-            heartbeatRecoveries,
-          });
-          if (runningTurns > turnCapacity) {
-            throw new Error(
-              `database reports ${runningTurns} running turns above configured capacity ${turnCapacity}`,
-            );
-          }
-          if (heartbeatRecoveries > initialHeartbeatRecoveries) {
-            throw new Error(
-              "new heartbeat-timeout recovery appeared during the wake stability window",
-            );
-          }
-          if (Date.now() >= deadline) break;
-          await Bun.sleep(sampleSeconds * 1_000);
-        }
-
-        const remainingRows = (await sql.unsafe<Enrollable[]>(
-          "select * from opengeni_private.list_enrollable_sessions(10000)",
-        )) as unknown as Enrollable[];
-        if (remainingRows.length === 10_000) {
-          throw new Error("post-wake enrollable scan reached its hard limit");
-        }
-        const remaining = new Set(remainingRows.map((row) => row.session_id));
-        const runningWorkflows = await runningSessionWorkflowIds(temporal);
-        for (const row of ordered) {
-          if (runningWorkflows.has(row.temporal_workflow_id)) {
-            enrollmentProof.push({
-              sessionId: row.session_id,
-              workflowId: row.temporal_workflow_id,
-              outcome: "running-workflow",
-            });
-          } else if (!remaining.has(row.session_id)) {
-            enrollmentProof.push({
-              sessionId: row.session_id,
-              workflowId: row.temporal_workflow_id,
-              outcome: "authoritative-progress",
-            });
-          } else {
-            failures.push({
-              sessionId: row.session_id,
-              error: "session remains enrollable without a running workflow",
-            });
-          }
-        }
-        const finalStates = await enrollmentStates(
-          sql,
-          ordered.map((row) => row.session_id),
+      if (runningTurns > turnCapacity) {
+        throw new Error(
+          `database reports ${runningTurns} running turns above configured capacity ${turnCapacity}`,
         );
-        const finalBySession = new Map(finalStates.map((state) => [state.session_id, state]));
-        for (const initial of initialStates) {
-          const current = finalBySession.get(initial.session_id);
-          const workflowId = ordered.find(
-            (row) => row.session_id === initial.session_id,
-          )?.temporal_workflow_id;
-          if (
-            current &&
-            (current.approval_waiting || current.capacity_waiting) &&
-            (!workflowId || !runningWorkflows.has(workflowId))
-          ) {
-            failures.push({
-              sessionId: initial.session_id,
-              error: "approval/capacity wait remains without a running workflow",
-            });
-          }
-          if (initial.control_pending && current?.control_pending) {
-            failures.push({
-              sessionId: initial.session_id,
-              error: "pending control fence did not settle during the stability window",
-            });
-          }
-        }
-        const initiallyRunnableSessionIds = initialStates
-          .filter((state) => state.runnable)
-          .map((state) => state.session_id);
-        const authoritativeProgressSessionIds = enrollmentProof
-          .filter((proof) => proof.outcome === "authoritative-progress")
-          .map((proof) => proof.sessionId);
-        const waitingSessionIds = finalStates
-          .filter((state) => state.approval_waiting || state.capacity_waiting)
-          .map((state) => state.session_id);
-        const initiallyRunnable = initiallyRunnableSessionIds.length;
-        const expectedProgress = Math.min(turnCapacity, initiallyRunnable);
-        const observedProgress = countBoundedWakeProgress(
-          initiallyRunnableSessionIds,
-          sampledRunningSessionIds,
-          authoritativeProgressSessionIds,
-          waitingSessionIds,
-        );
-        if (observedProgress < expectedProgress) {
-          throw new Error(
-            `wake proved progress for ${observedProgress} session(s), below expected bounded progress ${expectedProgress}`,
-          );
-        }
       }
+      if (heartbeatRecoveries > initialHeartbeatRecoveries) {
+        throw new Error("new heartbeat-timeout recovery appeared during wake delivery");
+      }
+      if (!execute) break;
+      if (pendingSummary.count === 0) {
+        stableSince ??= Date.now();
+        if (Date.now() - stableSince >= stabilitySeconds * 1_000) break;
+      } else {
+        stableSince = null;
+        const workflowId = `session-wake-cutover-${runId}-${dispatchIteration}`;
+        const result = await executeWakeDispatcher(
+          temporal!,
+          temporalSettingsValue.taskQueue,
+          workflowId,
+        );
+        dispatcherResults.push({ workflowId, result });
+        dispatchIteration += 1;
+      }
+      if (Date.now() >= deadline) {
+        for (const row of pendingSummary.errorSamples) {
+          failures.push({
+            sessionId: row.session_id,
+            error: row.last_error ?? "workflow wake was not acknowledged before the deadline",
+          });
+        }
+        if (pendingSummary.count > failures.length) {
+          failures.push({
+            sessionId: "<additional-pending-revisions>",
+            error: `${pendingSummary.count - failures.length} additional workflow wakes remained pending`,
+          });
+        }
+        break;
+      }
+      await Bun.sleep(sampleSeconds * 1_000);
+    }
+    const finalPendingProof = await captureWakeOutboxProof(sql, true);
+    if (execute && finalPendingProof.count > 0) {
+      failures.push({
+        sessionId: "<post-stability-race>",
+        error: `${finalPendingProof.count} workflow wake(s) appeared after the last stable sample`,
+      });
     }
     const draft = {
-      contractVersion: "opengeni/session-control-cutover-wake/v2",
+      contractVersion: "opengeni/session-control-cutover-wake-outbox/v1",
+      runId,
       executed: execute,
       capturedAt: new Date().toISOString(),
       turnCapacity,
       stabilitySeconds,
-      enrollableSessionIds: ordered.map((row) => row.session_id),
-      workflowIds: ordered.map((row) => row.temporal_workflow_id),
-      wokenSessionIds: woken.sort(),
-      enrollmentProof: enrollmentProof.sort((a, b) => a.sessionId.localeCompare(b.sessionId)),
+      timeoutSeconds,
+      baselinePendingProof,
+      finalPendingProof,
+      finalAllProof: await captureWakeOutboxProof(sql, false),
+      dispatcherResults,
       samples,
       failures: failures.sort((a, b) => a.sessionId.localeCompare(b.sessionId)),
     };
     const receipt = { ...draft, sha256: sha256(draft) };
     await writeJson(output, receipt);
     if (failures.length > 0) {
-      throw new Error(`wake repair failed for ${failures.length} session(s)`);
+      throw new Error(`workflow-wake delivery failed for ${failures.length} session(s)`);
     }
     process.stderr.write(
-      `[cutover-wake] ${execute ? "enrolled" : "found"} ${ordered.length} sessions, sha256 ${receipt.sha256}\n`,
+      `[cutover-wake-outbox] ${execute ? "delivered" : "found"} ${baselinePendingProof.count} revision(s), sha256 ${receipt.sha256}\n`,
     );
   } finally {
     await connection?.close().catch(() => undefined);
@@ -576,6 +524,28 @@ async function temporalSchedules(args: ParsedArgs): Promise<void> {
       connection,
       namespace: settings.namespace,
     });
+    if (action === "pause") {
+      try {
+        await temporal.schedule.create({
+          scheduleId: SESSION_WORKFLOW_WAKE_DISPATCHER_SCHEDULE_ID,
+          spec: { intervals: [{ every: SESSION_WORKFLOW_WAKE_DISPATCHER_PERIOD_MS }] },
+          action: {
+            type: "startWorkflow",
+            workflowType: SESSION_WORKFLOW_WAKE_DISPATCHER_WORKFLOW_TYPE,
+            taskQueue: settings.taskQueue,
+            args: [],
+          },
+          policies: {
+            overlap: ScheduleOverlapPolicy.SKIP,
+            catchupWindow: "1m",
+            pauseOnFailure: false,
+          },
+          state: { paused: true, note },
+        });
+      } catch (error) {
+        if (!(error instanceof ScheduleAlreadyRunning)) throw error;
+      }
+    }
     let expectedResumeIds: Set<string> | null = null;
     if (action === "resume") {
       const pauseArtifact = await readJson<SchedulePauseArtifact>(required(args, "--input"));
@@ -800,14 +770,21 @@ async function reparkOrphanedTurns(args: ParsedArgs): Promise<void> {
     }
     const migrations = await sql<Array<{ name: string }>>`
       select name from schema_migrations
-      where name in ('0057_durable_queue_control.sql', '0058_turn_admission_usage_enrollment.sql')
+      where name in (
+        '0057_durable_queue_control.sql',
+        '0058_turn_admission_usage_enrollment.sql',
+        '0061_session_workflow_wake_outbox.sql',
+        '0062_session_list_snapshot_reaper.sql'
+      )
       order by name`;
     const migrationNames = new Set(migrations.map((row) => row.name));
     if (
       !migrationNames.has("0057_durable_queue_control.sql") ||
-      !migrationNames.has("0058_turn_admission_usage_enrollment.sql")
+      !migrationNames.has("0058_turn_admission_usage_enrollment.sql") ||
+      !migrationNames.has("0061_session_workflow_wake_outbox.sql") ||
+      !migrationNames.has("0062_session_list_snapshot_reaper.sql")
     ) {
-      throw new Error("repark requires the complete ordered 0057+0058 schema");
+      throw new Error("repark requires the complete ordered 0057+0058+0061+0062 schema");
     }
     const rows = (await sql.unsafe<OrphanedRunningTurn[]>(
       `select workspace_id, session_id, id as turn_id, active_attempt_id
@@ -1273,6 +1250,8 @@ async function preflight(args: ParsedArgs): Promise<void> {
   const migrationPaths = [
     "packages/db/drizzle/0057_durable_queue_control.sql",
     "packages/db/drizzle/0058_turn_admission_usage_enrollment.sql",
+    "packages/db/drizzle/0061_session_workflow_wake_outbox.sql",
+    "packages/db/drizzle/0062_session_list_snapshot_reaper.sql",
   ] as const;
   const migrations = await Promise.all(
     migrationPaths.map(async (path) => ({
@@ -1346,14 +1325,14 @@ function usage(): void {
   bun run operator:session-control-cutover capture --phase baseline --output FILE [--allow-empty-baseline]
   bun run operator:session-control-cutover capture --phase migrated|final --baseline FILE --output FILE
   bun run operator:session-control-cutover reconcile --baseline FILE --observed FILE --mode migration|final-fate --output FILE
-  bun run operator:session-control-cutover wake --turn-capacity N --output FILE [--execute] [--stability-seconds N]
+  bun run operator:session-control-cutover wake-outbox --run-id ID --turn-capacity N --output FILE [--execute] [--stability-seconds N]
   bun run operator:session-control-cutover temporal-schedules --action pause|resume|inspect --run-id ID [--input FILE] --output FILE
   bun run operator:session-control-cutover temporal-workflows --action inspect|terminate --run-id ID --output FILE [--execute]
   bun run operator:session-control-cutover repark-orphaned-turns --run-id ID --output FILE [--execute]
   bun run operator:session-control-cutover canary --run-id ID --workspace-id UUID --model codex/MODEL --api-base-url URL --output FILE [--timeout-seconds N]
   bun run operator:session-control-cutover maintenance-server
 
-capture, repark, canary, and wake require OPENGENI_MIGRATIONS_DATABASE_URL. repark and wake also require the production Temporal settings.
+capture, repark, canary, and wake-outbox require OPENGENI_MIGRATIONS_DATABASE_URL. repark and wake-outbox also require the production Temporal settings.
 `);
 }
 
@@ -1363,7 +1342,7 @@ if (import.meta.main) {
     if (args.command === "preflight") await preflight(args);
     else if (args.command === "capture") await capture(args);
     else if (args.command === "reconcile") await reconcile(args);
-    else if (args.command === "wake") await wake(args);
+    else if (args.command === "wake-outbox") await wakeOutbox(args);
     else if (args.command === "temporal-schedules") await temporalSchedules(args);
     else if (args.command === "temporal-workflows") await temporalWorkflows(args);
     else if (args.command === "repark-orphaned-turns") await reparkOrphanedTurns(args);

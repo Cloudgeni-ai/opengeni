@@ -13,6 +13,7 @@ import { createGoalActivities } from "./activities/goals";
 import { createSandboxLeaseActivities } from "./activities/sandbox-lease";
 import { createScheduledTaskActivities } from "./activities/scheduled-tasks";
 import { createSessionStateActivities } from "./activities/session-state";
+import { createWorkflowWakeActivities } from "./activities/workflow-wake";
 import { createRigVerificationActivities } from "./activities/rig-verification";
 import type { ActivityDependencies, ActivityServices } from "./activities/types";
 import {
@@ -125,6 +126,7 @@ function controlActivities(services: () => Promise<ActivityServices>) {
     ...createCodexCapacityActivities(services),
     ...createRigVerificationActivities(services),
     ...createFileUploadReaperActivities(services),
+    ...createWorkflowWakeActivities(services),
     // P1.3: the SOLE liveness/GC/cost-stop driver. Only reapSandboxLeases — no
     // *ForViewer activities, no ownerHeartbeat, no resolveOwnerTaskQueue.
     ...createSandboxLeaseActivities(services),
@@ -156,10 +158,12 @@ export const recoverDispatch = defaultControlActivities.recoverDispatch;
 export const peekSessionWork = defaultControlActivities.peekSessionWork;
 export const markSessionIdle = defaultControlActivities.markSessionIdle;
 export const dispatchScheduledTaskRun = defaultControlActivities.dispatchScheduledTaskRun;
+export const enqueueGoalRetryWake = defaultControlActivities.enqueueGoalRetryWake;
 export const maybeContinueGoal = defaultControlActivities.maybeContinueGoal;
 export const getCodexCapacityWait = defaultControlActivities.getCodexCapacityWait;
 export const reconcileCodexCapacityWait = defaultControlActivities.reconcileCodexCapacityWait;
 export const reapSandboxLeases = defaultControlActivities.reapSandboxLeases;
 export const reapExpiredFileUploads = defaultControlActivities.reapExpiredFileUploads;
+export const dispatchSessionWorkflowWakes = defaultControlActivities.dispatchSessionWorkflowWakes;
 export const verifyRigChange = defaultControlActivities.verifyRigChange;
 export const verifyRigVersion = defaultControlActivities.verifyRigVersion;

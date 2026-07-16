@@ -12,6 +12,7 @@ import {
 } from "@opengeni/contracts";
 import {
   addSessionSystemUpdate,
+  enqueueSessionWorkflowWakeIfRunnable,
   evaluateGoalContinuation,
   getBillingBalance,
   getLatestStartedSessionTurn,
@@ -27,6 +28,20 @@ import { appendAndPublishEvents } from "@opengeni/events";
 import type { ActivityServices, MaybeContinueGoalInput, MaybeContinueGoalResult } from "./types";
 
 export function createGoalActivities(services: () => Promise<ActivityServices>) {
+  async function enqueueGoalRetryWake(input: MaybeContinueGoalInput): Promise<void> {
+    const { db } = await services();
+    await enqueueSessionWorkflowWakeIfRunnable(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      temporalWorkflowId: input.workflowId,
+      reason: "goal_retry",
+      // A permanently invalid goal must not become a tight workflow loop. One
+      // durable retry after a short delay preserves liveness without scanning.
+      notBefore: new Date(Date.now() + 30_000),
+    });
+  }
+
   async function maybeContinueGoal(
     input: MaybeContinueGoalInput,
   ): Promise<MaybeContinueGoalResult> {
@@ -181,6 +196,7 @@ export function createGoalActivities(services: () => Promise<ActivityServices>) 
   }
 
   return {
+    enqueueGoalRetryWake,
     maybeContinueGoal,
   };
 }

@@ -11,7 +11,7 @@ import type {
   ScheduledTaskOverlapPolicy,
   ScheduledTaskScheduleSpec,
 } from "@opengeni/contracts";
-import { createDb } from "@opengeni/db";
+import { createDb, markSessionWorkflowWakeDelivered, type Database } from "@opengeni/db";
 import { createNatsEventBus, type ResponderConnection } from "@opengeni/events";
 import { createObservability, logStartupDependencyRetry } from "@opengeni/observability";
 import {
@@ -54,6 +54,7 @@ const TEMPORAL_MONTHS = [
 
 export async function createTemporalWorkflowClient(
   settings: ReturnType<typeof getSettings>,
+  db: Database,
 ): Promise<{
   client: SessionWorkflowClient;
   documentIndexer: DocumentIndexClient;
@@ -68,16 +69,7 @@ export async function createTemporalWorkflowClient(
     signalUserMessage: async ({ eventId, workflowId }) => {
       await temporal.workflow.getHandle(workflowId).signal("userMessage", eventId);
     },
-    wakeSessionWorkflow: async ({ accountId, workspaceId, sessionId, workflowId }) => {
-      await temporal.workflow.signalWithStart("sessionWorkflow", {
-        taskQueue: settings.temporalTaskQueue,
-        workflowId,
-        workflowIdReusePolicy: "ALLOW_DUPLICATE",
-        args: [{ accountId, workspaceId, sessionId }],
-        signal: "queueChanged",
-      });
-    },
-    signalCodexCapacity: async ({
+    wakeSessionWorkflow: async ({
       accountId,
       workspaceId,
       sessionId,
@@ -89,11 +81,48 @@ export async function createTemporalWorkflowClient(
         workflowId,
         workflowIdReusePolicy: "ALLOW_DUPLICATE",
         args: [{ accountId, workspaceId, sessionId }],
+        signal: "queueChanged",
+      });
+      await markSessionWorkflowWakeDelivered(db, {
+        accountId,
+        workspaceId,
+        sessionId,
+        temporalWorkflowId: workflowId,
+        wakeRevision,
+      });
+    },
+    signalCodexCapacity: async ({
+      accountId,
+      workspaceId,
+      sessionId,
+      workflowId,
+      wakeRevision,
+      workflowWakeRevision,
+    }) => {
+      await temporal.workflow.signalWithStart("sessionWorkflow", {
+        taskQueue: settings.temporalTaskQueue,
+        workflowId,
+        workflowIdReusePolicy: "ALLOW_DUPLICATE",
+        args: [{ accountId, workspaceId, sessionId }],
         signal: "codexCapacityChanged",
         signalArgs: [wakeRevision],
       });
+      await markSessionWorkflowWakeDelivered(db, {
+        accountId,
+        workspaceId,
+        sessionId,
+        temporalWorkflowId: workflowId,
+        wakeRevision: workflowWakeRevision,
+      });
     },
-    signalApprovalDecision: async ({ accountId, workspaceId, sessionId, eventId, workflowId }) => {
+    signalApprovalDecision: async ({
+      accountId,
+      workspaceId,
+      sessionId,
+      eventId,
+      workflowId,
+      workflowWakeRevision,
+    }) => {
       await temporal.workflow.signalWithStart("sessionWorkflow", {
         taskQueue: settings.temporalTaskQueue,
         workflowId,
@@ -102,8 +131,22 @@ export async function createTemporalWorkflowClient(
         signal: "approvalDecision",
         signalArgs: [eventId],
       });
+      await markSessionWorkflowWakeDelivered(db, {
+        accountId,
+        workspaceId,
+        sessionId,
+        temporalWorkflowId: workflowId,
+        wakeRevision: workflowWakeRevision,
+      });
     },
-    signalSessionControl: async ({ accountId, workspaceId, sessionId, eventId, workflowId }) => {
+    signalSessionControl: async ({
+      accountId,
+      workspaceId,
+      sessionId,
+      eventId,
+      workflowId,
+      workflowWakeRevision,
+    }) => {
       // Start-or-signal: a control sent after the prior workflow returned idle
       // starts a fresh run with the durable control already buffered.
       await temporal.workflow.signalWithStart("sessionWorkflow", {
@@ -113,6 +156,13 @@ export async function createTemporalWorkflowClient(
         args: [{ accountId, workspaceId, sessionId }],
         signal: "sessionControl",
         signalArgs: [eventId],
+      });
+      await markSessionWorkflowWakeDelivered(db, {
+        accountId,
+        workspaceId,
+        sessionId,
+        temporalWorkflowId: workflowId,
+        wakeRevision: workflowWakeRevision,
       });
     },
     syncScheduledTask: async ({ task }) => {
@@ -243,7 +293,7 @@ export async function startApi() {
     );
     workflowClient = await retryStartupDependency(
       "Temporal",
-      () => createTemporalWorkflowClient(settings),
+      () => createTemporalWorkflowClient(settings, dbClient.db),
       {
         ...retryOptions,
         onRetry,

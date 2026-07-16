@@ -4,6 +4,7 @@ import {
   createScheduledTaskRun,
   createSession,
   createSessionGoal,
+  enqueueSessionWorkflowWakeIfRunnable,
   getBillingBalance,
   getRig,
   getVariableSet,
@@ -37,7 +38,7 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
     dispatchScheduledTaskRun: async (
       input: DispatchScheduledTaskRunInput,
     ): Promise<DispatchScheduledTaskRunResult> => {
-      const { settings, db, bus } = await services();
+      const { settings, db, bus, wakeSessionWorkflow } = await services();
       const task = await requireScheduledTask(db, input.workspaceId, input.taskId);
       // The scheduled task's model can be codex/<slug>; resolve it here so the
       // admission gate can skip the credit/cost gates for a codex-billed run
@@ -90,14 +91,33 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
           idempotencyKey:
             input.agentRunUsageIdempotencyKey ?? `usage:agent_run.created:scheduled:${run.id}`,
         });
-        return {
+        const workflowId = workflowIdForSession(run.sessionId);
+        const workflowWakeRevision = await enqueueSessionWorkflowWakeIfRunnable(db, {
+          accountId: task.accountId,
+          workspaceId: task.workspaceId,
+          sessionId: run.sessionId,
+          temporalWorkflowId: workflowId,
+          reason: "scheduled_retry",
+        });
+        const result = {
           action: task.runMode === "new_session_per_run" ? "start" : "signal",
           accountId: task.accountId,
           workspaceId: task.workspaceId,
           sessionId: run.sessionId,
           triggerEventId: run.triggerEventId,
-          workflowId: workflowIdForSession(run.sessionId),
-        };
+          workflowId,
+          workflowWakeRevision,
+        } as const;
+        if (wakeSessionWorkflow && workflowWakeRevision !== null) {
+          await wakeSessionWorkflow({
+            accountId: result.accountId,
+            workspaceId: result.workspaceId,
+            sessionId: result.sessionId,
+            workflowId: result.workflowId,
+            wakeRevision: workflowWakeRevision,
+          });
+        }
+        return result;
       }
       let result: DispatchScheduledTaskRunResult;
       try {
@@ -172,7 +192,7 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
             {
               type: "session.created",
               payload: {
-                status: "queued",
+                status: session.status,
                 scheduledTaskId: task.id,
                 scheduledTaskRunId: run.id,
                 // Names/ids only; never values.
@@ -196,7 +216,7 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
                   },
                 ]
               : []),
-            { type: "session.status.changed", payload: { status: "queued" } },
+            { type: "session.status.changed", payload: { status: session.status } },
           ]);
           const scheduledUpdate = await addSessionSystemUpdateWithSourceMutation(
             db,
@@ -247,6 +267,7 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
             sessionId: session.id,
             triggerEventId: scheduledUpdate.wakeEventId,
             workflowId,
+            workflowWakeRevision: scheduledUpdate.workflowWakeRevision,
           };
         } else {
           const session = await requireSession(db, task.workspaceId, task.reusableSessionId);
@@ -349,6 +370,7 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
             sessionId: session.id,
             triggerEventId: bundled.wakeEventId,
             workflowId: workflowIdForSession(session.id),
+            workflowWakeRevision: bundled.workflowWakeRevision,
           };
         }
       } catch (error) {
@@ -371,6 +393,15 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
         idempotencyKey:
           input.agentRunUsageIdempotencyKey ?? `usage:agent_run.created:scheduled:${run.id}`,
       });
+      if (wakeSessionWorkflow && result.workflowWakeRevision !== null) {
+        await wakeSessionWorkflow({
+          accountId: result.accountId,
+          workspaceId: result.workspaceId,
+          sessionId: result.sessionId,
+          workflowId: result.workflowId,
+          wakeRevision: result.workflowWakeRevision,
+        });
+      }
       return result;
     },
   };

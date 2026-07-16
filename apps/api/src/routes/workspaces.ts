@@ -190,14 +190,16 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         sessionId: control.sessionId,
         eventId: control.eventId,
         workflowId: control.workflowId,
+        workflowWakeRevision: control.workflowWakeRevision,
       });
     }
-    for (const sessionId of result.wakeSessionIds) {
+    for (const wake of result.wakeSessions) {
       await deps.workflowClient.wakeSessionWorkflow({
-        accountId: grant.accountId,
+        accountId: wake.accountId,
         workspaceId,
-        sessionId,
-        workflowId: `session-${sessionId}`,
+        sessionId: wake.sessionId,
+        workflowId: wake.workflowId,
+        wakeRevision: wake.workflowWakeRevision,
       });
     }
     return c.json(

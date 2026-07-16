@@ -7981,6 +7981,7 @@ export type CodexCapacityWakeTarget = {
   waiterId: string;
   generation: number;
   wakeRevision: number;
+  workflowWakeRevision: number;
 };
 
 export type CodexCapacityMutationResult<T> = {
@@ -8475,9 +8476,16 @@ export async function withCodexCapacityMutation<T>(
             ),
           )
           .returning();
-        return {
-          result: mutation.result,
-          wakeTargets: rows.map((row) => ({
+        const wakeTargets: CodexCapacityWakeTarget[] = [];
+        for (const row of rows) {
+          const workflowWakeRevision = await enqueueSessionWorkflowWakeInTransaction(tx, {
+            accountId: row.accountId,
+            workspaceId: row.workspaceId,
+            sessionId: row.sessionId,
+            temporalWorkflowId: row.workflowId,
+            reason: "codex_capacity",
+          });
+          wakeTargets.push({
             accountId: row.accountId,
             workspaceId: row.workspaceId,
             sessionId: row.sessionId,
@@ -8485,7 +8493,12 @@ export async function withCodexCapacityMutation<T>(
             waiterId: row.id,
             generation: row.generation,
             wakeRevision: row.wakeRevision,
-          })),
+            workflowWakeRevision,
+          });
+        }
+        return {
+          result: mutation.result,
+          wakeTargets,
         };
       }),
   );
@@ -8497,8 +8510,18 @@ export async function listPendingCodexCapacityWakeTargets(
 ): Promise<CodexCapacityWakeTarget[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const rows = await scopedDb
-      .select()
+      .select({
+        waiter: schema.codexCapacityWaiters,
+        workflowWakeRevision: schema.sessionWorkflowWakeOutbox.wakeRevision,
+      })
       .from(schema.codexCapacityWaiters)
+      .innerJoin(
+        schema.sessionWorkflowWakeOutbox,
+        and(
+          eq(schema.sessionWorkflowWakeOutbox.workspaceId, schema.codexCapacityWaiters.workspaceId),
+          eq(schema.sessionWorkflowWakeOutbox.sessionId, schema.codexCapacityWaiters.sessionId),
+        ),
+      )
       .where(
         and(
           eq(schema.codexCapacityWaiters.workspaceId, workspaceId),
@@ -8506,7 +8529,7 @@ export async function listPendingCodexCapacityWakeTargets(
           sql`${schema.codexCapacityWaiters.wakeRevision} > ${schema.codexCapacityWaiters.observedWakeRevision}`,
         ),
       );
-    return rows.map((row) => ({
+    return rows.map(({ waiter: row, workflowWakeRevision }) => ({
       accountId: row.accountId,
       workspaceId: row.workspaceId,
       sessionId: row.sessionId,
@@ -8514,6 +8537,7 @@ export async function listPendingCodexCapacityWakeTargets(
       waiterId: row.id,
       generation: row.generation,
       wakeRevision: row.wakeRevision,
+      workflowWakeRevision,
     }));
   });
 }
@@ -10625,6 +10649,15 @@ export function decodeSessionListCursor(value: string): SessionListCursor | null
   }
 }
 
+/** Bounded global TTL cleanup, isolated from serializable member list reads. */
+export async function reapExpiredSessionListSnapshots(db: Database, limit = 500): Promise<number> {
+  const rows = await rawRows<{ deleted_count: number | string }>(
+    db,
+    sql`select opengeni_private.reap_expired_session_list_snapshots(${limit}) as deleted_count`,
+  );
+  return Number(rows[0]?.deleted_count ?? 0);
+}
+
 /**
  * Server-authoritative member-specific page. Pinned rows are returned separately
  * and omitted from ordinary pages, so list pagination cannot duplicate a
@@ -10686,9 +10719,6 @@ export async function listSessionsForSubject(
         const parentFilter = sessionParentFilter(options.parentSessionId);
         const searchFilter = sessionSearchFilter(options.search);
         const now = new Date();
-        await tx
-          .delete(schema.sessionListSnapshots)
-          .where(lt(schema.sessionListSnapshots.expiresAt, now));
 
         let pageIds: string[];
         let nextCursor: string | null = null;
@@ -12506,12 +12536,31 @@ export async function requestSessionCompaction(
   db: Database,
   workspaceId: string,
   sessionId: string,
-): Promise<void> {
-  await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+): Promise<{ wakeRevision: number; temporalWorkflowId: string }> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [session] = await scopedDb
+      .select({
+        accountId: schema.sessions.accountId,
+        temporalWorkflowId: schema.sessions.temporalWorkflowId,
+      })
+      .from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
+      .for("update")
+      .limit(1);
+    if (!session) throw new Error(`Session not found: ${sessionId}`);
     await scopedDb
       .update(schema.sessions)
       .set({ compactRequested: true, updatedAt: new Date() })
       .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)));
+    const temporalWorkflowId = session.temporalWorkflowId ?? `session-${sessionId}`;
+    const wakeRevision = await enqueueSessionWorkflowWakeInTransaction(scopedDb, {
+      accountId: session.accountId,
+      workspaceId,
+      sessionId,
+      temporalWorkflowId,
+      reason: "compaction_requested",
+    });
+    return { wakeRevision, temporalWorkflowId };
   });
 }
 
@@ -17368,8 +17417,22 @@ export async function setSessionGoalStatus(
     rationale?: string;
     pausedReason?: string;
   },
-): Promise<{ goal: SessionGoal; changed: boolean }> {
+): Promise<{ goal: SessionGoal; changed: boolean; workflowWakeRevision: number | null }> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [workspace] = await scopedDb
+      .select()
+      .from(schema.workspaces)
+      .where(eq(schema.workspaces.id, workspaceId))
+      .for("update")
+      .limit(1);
+    const [session] = await scopedDb
+      .select()
+      .from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
+      .for("update")
+      .limit(1);
+    if (!workspace) throw new Error(`Workspace not found: ${workspaceId}`);
+    if (!session) throw new Error(`Session not found: ${sessionId}`);
     const [existing] = await scopedDb
       .select()
       .from(schema.sessionGoals)
@@ -17385,7 +17448,7 @@ export async function setSessionGoalStatus(
       throw new Error(`Session goal not found: ${sessionId}`);
     }
     if (existing.status === input.status) {
-      return { goal: mapSessionGoal(existing), changed: false };
+      return { goal: mapSessionGoal(existing), changed: false, workflowWakeRevision: null };
     }
     if (existing.status === "completed") {
       throw new Error("session goal is completed; set a new goal to continue");
@@ -17426,7 +17489,23 @@ export async function setSessionGoalStatus(
     if (!row) {
       throw new Error(`Session goal not found: ${sessionId}`);
     }
-    return { goal: mapSessionGoal(row), changed: true };
+    let workflowWakeRevision: number | null = null;
+    if (
+      input.status === "active" &&
+      session.status !== "cancelled" &&
+      session.activeTurnId === null &&
+      session.pendingControlEventId === null &&
+      sessionInferenceGateOpen(workspace, session)
+    ) {
+      workflowWakeRevision = await enqueueSessionWorkflowWakeInTransaction(scopedDb, {
+        accountId: session.accountId,
+        workspaceId,
+        sessionId,
+        temporalWorkflowId: session.temporalWorkflowId ?? `session-${sessionId}`,
+        reason: "goal_resumed",
+      });
+    }
+    return { goal: mapSessionGoal(row), changed: true, workflowWakeRevision };
   });
 }
 
@@ -17742,6 +17821,300 @@ function mapSessionGoal(row: typeof schema.sessionGoals.$inferSelect): SessionGo
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
+}
+
+export type InitializeSessionStartInput = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  clientEventId?: string;
+  reasoningEffortFallback: ReasoningEffort;
+  createdEventPayload: Record<string, unknown>;
+  goal?: {
+    text: string;
+    successCriteria?: string | null;
+    maxAutoContinuations?: number | null;
+  } | null;
+};
+
+export type InitializeSessionStartResult = {
+  events: SessionEvent[];
+  turn: SessionTurn | null;
+  temporalWorkflowId: string;
+  workflowWakeRevision: number | null;
+};
+
+/**
+ * Install a newly created session's complete first runnable unit atomically.
+ * The canonical user event, optional goal, queued turn, public status, and
+ * workflow wake revision either all commit or all roll back. Retrying the same
+ * create repairs any pre-transaction partial state and emits only missing
+ * records; it never creates a second initial turn.
+ */
+export async function initializeSessionStartAtomically(
+  db: Database,
+  input: InitializeSessionStartInput,
+): Promise<InitializeSessionStartResult> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        const [workspace] = await tx
+          .select()
+          .from(schema.workspaces)
+          .where(eq(schema.workspaces.id, input.workspaceId))
+          .for("update")
+          .limit(1);
+        const [session] = await tx
+          .select()
+          .from(schema.sessions)
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, input.workspaceId),
+              eq(schema.sessions.id, input.sessionId),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (!workspace || !session) throw new Error(`Session not found: ${input.sessionId}`);
+
+        const temporalWorkflowId = session.temporalWorkflowId ?? `session-${session.id}`;
+        if (session.status === "cancelled") {
+          return {
+            events: [],
+            turn: null,
+            temporalWorkflowId,
+            workflowWakeRevision: null,
+          };
+        }
+
+        let [goal] = await tx
+          .select()
+          .from(schema.sessionGoals)
+          .where(
+            and(
+              eq(schema.sessionGoals.workspaceId, input.workspaceId),
+              eq(schema.sessionGoals.sessionId, session.id),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (!goal && input.goal) {
+          [goal] = await tx
+            .insert(schema.sessionGoals)
+            .values({
+              accountId: session.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: session.id,
+              text: input.goal.text,
+              successCriteria: input.goal.successCriteria ?? null,
+              maxAutoContinuations: input.goal.maxAutoContinuations ?? null,
+              createdBy: "api",
+            })
+            .returning();
+          if (!goal) throw new Error("Failed to create initial session goal");
+        }
+
+        let [userEvent] = await tx
+          .select()
+          .from(schema.sessionEvents)
+          .where(
+            and(
+              eq(schema.sessionEvents.workspaceId, input.workspaceId),
+              eq(schema.sessionEvents.sessionId, session.id),
+              eq(schema.sessionEvents.type, "user.message"),
+            ),
+          )
+          .orderBy(asc(schema.sessionEvents.sequence))
+          .limit(1);
+        let sequence = session.lastSequence;
+        const insertedEvents: Array<typeof schema.sessionEvents.$inferSelect> = [];
+        const workspaceAllowsRun =
+          workspace.inferenceState === "active" ||
+          session.workspaceRunExceptionGeneration === workspace.inferenceGeneration;
+        const runnable = session.controlState === "active" && workspaceAllowsRun;
+        const publicQueuedStatus: SessionStatus = runnable ? "queued" : "paused";
+
+        if (!userEvent) {
+          const initialPayload = {
+            text: session.initialMessage,
+            ...(session.resources.length ? { resources: session.resources } : {}),
+            ...(session.tools.length ? { tools: session.tools } : {}),
+          };
+          const rows = await tx
+            .insert(schema.sessionEvents)
+            .values([
+              {
+                accountId: session.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: session.id,
+                sequence: ++sequence,
+                type: "session.created",
+                payload: sanitizeEventPayload({
+                  ...input.createdEventPayload,
+                  status: publicQueuedStatus,
+                }),
+              },
+              ...(goal
+                ? [
+                    {
+                      accountId: session.accountId,
+                      workspaceId: input.workspaceId,
+                      sessionId: session.id,
+                      sequence: ++sequence,
+                      type: "goal.set" as const,
+                      payload: sanitizeEventPayload({
+                        goalId: goal.id,
+                        text: goal.text,
+                        ...(goal.successCriteria ? { successCriteria: goal.successCriteria } : {}),
+                        version: goal.version,
+                        actor: "api",
+                        replaced: false,
+                      }),
+                    },
+                  ]
+                : []),
+              {
+                accountId: session.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: session.id,
+                sequence: ++sequence,
+                type: "user.message",
+                payload: sanitizeEventPayload(initialPayload),
+                clientEventId: input.clientEventId ?? `session-initial:${session.id}`,
+              },
+              {
+                accountId: session.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: session.id,
+                sequence: ++sequence,
+                type: "session.status.changed",
+                payload: sanitizeEventPayload({ status: publicQueuedStatus }),
+              },
+            ])
+            .returning();
+          insertedEvents.push(...rows);
+          userEvent = rows.find((event) => event.type === "user.message");
+          if (!userEvent) throw new Error("Failed to create initial user event");
+        }
+
+        let [turn] = await tx
+          .select()
+          .from(schema.sessionTurns)
+          .where(
+            and(
+              eq(schema.sessionTurns.workspaceId, input.workspaceId),
+              eq(schema.sessionTurns.sessionId, session.id),
+              eq(schema.sessionTurns.triggerEventId, userEvent.id),
+            ),
+          )
+          .orderBy(asc(schema.sessionTurns.createdAt))
+          .limit(1);
+        let insertedTurn = false;
+        let queueTailPosition = Number(session.queueTailPosition);
+        if (!turn) {
+          queueTailPosition += 1;
+          [turn] = await tx
+            .insert(schema.sessionTurns)
+            .values({
+              accountId: session.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: session.id,
+              triggerEventId: userEvent.id,
+              temporalWorkflowId,
+              status: "queued",
+              source: "user",
+              position: queueTailPosition,
+              prompt: session.initialMessage,
+              resources: session.resources,
+              tools: session.tools,
+              model: session.model,
+              reasoningEffort: reasoningEffortForMetadata(
+                session.metadata,
+                input.reasoningEffortFallback,
+              ),
+              sandboxBackend: session.sandboxBackend,
+              sandboxOs: session.sandboxOs,
+              metadata: {},
+              lineage: {},
+            })
+            .returning();
+          if (!turn) throw new Error("Failed to create initial session turn");
+          insertedTurn = true;
+        }
+
+        const [queuedEvent] = await tx
+          .select({ id: schema.sessionEvents.id })
+          .from(schema.sessionEvents)
+          .where(
+            and(
+              eq(schema.sessionEvents.workspaceId, input.workspaceId),
+              eq(schema.sessionEvents.sessionId, session.id),
+              eq(schema.sessionEvents.turnId, turn.id),
+              eq(schema.sessionEvents.type, "turn.queued"),
+            ),
+          )
+          .limit(1);
+        if (!queuedEvent) {
+          const [event] = await tx
+            .insert(schema.sessionEvents)
+            .values({
+              accountId: session.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: session.id,
+              turnId: turn.id,
+              sequence: ++sequence,
+              type: "turn.queued",
+              payload: sanitizeEventPayload({
+                turnId: turn.id,
+                triggerEventId: userEvent.id,
+                source: turn.source,
+              }),
+            })
+            .returning();
+          if (!event) throw new Error("Failed to create initial turn event");
+          insertedEvents.push(event);
+        }
+
+        const turnNeedsWake = turn.status === "queued" && runnable;
+        await tx
+          .update(schema.sessions)
+          .set({
+            temporalWorkflowId,
+            lastSequence: sequence,
+            ...(insertedTurn
+              ? {
+                  queueVersion: session.queueVersion + 1,
+                  queueTailPosition,
+                }
+              : {}),
+            ...(turn.status === "queued" ? { status: publicQueuedStatus } : {}),
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, input.workspaceId),
+              eq(schema.sessions.id, session.id),
+            ),
+          );
+        const workflowWakeRevision = turnNeedsWake
+          ? await enqueueSessionWorkflowWakeInTransaction(tx as unknown as Database, {
+              accountId: session.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: session.id,
+              temporalWorkflowId,
+              reason: "initial_session",
+            })
+          : null;
+        return {
+          events: insertedEvents.map(mapEvent),
+          turn: mapSessionTurn(turn),
+          temporalWorkflowId,
+          workflowWakeRevision,
+        };
+      }),
+  );
 }
 
 export async function enqueueSessionTurn(
@@ -20689,7 +21062,7 @@ export async function cancelQueuedSessionTurnWithVersion(
   expectedItemVersion: number,
   actor: string,
   reason?: string | null,
-): Promise<SessionQueueMutationResponse> {
+): Promise<SessionQueueMutationResponse & { workflowWakeRevision: number | null }> {
   return await withWorkspaceRls(
     db,
     workspaceId,
@@ -20795,6 +21168,16 @@ export async function cancelQueuedSessionTurnWithVersion(
           targetId: turnId,
           metadata: { reason: reason ?? null },
         });
+        const shouldWake = queueCanWake(workspace, nextSession!, remainingQueued > 0);
+        const workflowWakeRevision = shouldWake
+          ? await enqueueSessionWorkflowWakeInTransaction(tx as unknown as Database, {
+              accountId: session.accountId,
+              workspaceId,
+              sessionId,
+              temporalWorkflowId: session.temporalWorkflowId ?? `session-${session.id}`,
+              reason: "queue_cancelled_next_prompt",
+            })
+          : null;
         return {
           snapshot: await getSessionQueueSnapshotTx(
             tx as unknown as Database,
@@ -20802,7 +21185,8 @@ export async function cancelQueuedSessionTurnWithVersion(
             nextSession!,
           ),
           events: eventRows.map(mapEvent),
-          shouldWake: queueCanWake(workspace, nextSession!, remainingQueued > 0),
+          shouldWake,
+          workflowWakeRevision,
         };
       }),
   );
@@ -20965,30 +21349,220 @@ export async function claimPendingSessionSystemUpdateOutbox(
   return rows.map(mapSystemUpdateOutboxRow);
 }
 
-export type EnrollableSession = {
+export type SessionWorkflowWake = {
   accountId: string;
   workspaceId: string;
   sessionId: string;
   temporalWorkflowId: string;
+  wakeRevision: number;
+  controlEventId: string | null;
 };
 
-/** Bounded repair scan for every durable state that requires a session workflow. */
-export async function listEnrollableSessions(
+/**
+ * Record a new workflow nudge in the same transaction as the state mutation
+ * that made it necessary. Concurrent producers serialize on the one
+ * per-session row and each receive the exact committed revision they own.
+ */
+export async function enqueueSessionWorkflowWakeInTransaction(
+  tx: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    temporalWorkflowId: string;
+    reason: string;
+    notBefore?: Date;
+  },
+): Promise<number> {
+  const now = new Date();
+  const nextAttemptAt = input.notBefore ?? now;
+  const [row] = await tx
+    .insert(schema.sessionWorkflowWakeOutbox)
+    .values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      temporalWorkflowId: input.temporalWorkflowId,
+      reason: input.reason,
+      nextAttemptAt,
+    })
+    .onConflictDoUpdate({
+      target: schema.sessionWorkflowWakeOutbox.sessionId,
+      set: {
+        temporalWorkflowId: input.temporalWorkflowId,
+        wakeRevision: sql`${schema.sessionWorkflowWakeOutbox.wakeRevision} + 1`,
+        reason: input.reason,
+        attempts: 0,
+        nextAttemptAt,
+        lastError: null,
+        updatedAt: now,
+      },
+    })
+    .returning({ wakeRevision: schema.sessionWorkflowWakeOutbox.wakeRevision });
+  if (!row) throw new Error(`Failed to enqueue workflow wake for session ${input.sessionId}`);
+  return row.wakeRevision;
+}
+
+/** Standalone transactional producer for operations not already in a DB txn. */
+export async function enqueueSessionWorkflowWake(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    temporalWorkflowId: string;
+    reason: string;
+    notBefore?: Date;
+  },
+): Promise<number> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => await enqueueSessionWorkflowWakeInTransaction(scopedDb, input),
+  );
+}
+
+/**
+ * Re-deliver already-committed session work only when admission currently
+ * allows this session to run. The workspace-then-session lock order matches
+ * every Pause/Resume producer, so a retry cannot race around either gate.
+ */
+export async function enqueueSessionWorkflowWakeIfRunnable(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    temporalWorkflowId: string;
+    reason: string;
+    notBefore?: Date;
+  },
+): Promise<number | null> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        const [workspace] = await tx
+          .select()
+          .from(schema.workspaces)
+          .where(eq(schema.workspaces.id, input.workspaceId))
+          .for("update")
+          .limit(1);
+        const [session] = await tx
+          .select()
+          .from(schema.sessions)
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, input.workspaceId),
+              eq(schema.sessions.id, input.sessionId),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (!workspace || !session) throw new Error(`Session not found: ${input.sessionId}`);
+        const runnable =
+          session.status !== "cancelled" &&
+          session.activeTurnId === null &&
+          session.controlState === "active" &&
+          session.pendingControlEventId === null &&
+          (workspace.inferenceState === "active" ||
+            session.workspaceRunExceptionGeneration === workspace.inferenceGeneration);
+        return runnable
+          ? await enqueueSessionWorkflowWakeInTransaction(tx as unknown as Database, input)
+          : null;
+      }),
+  );
+}
+
+/** Claim only explicit, undelivered wake revisions; never infer work by scan. */
+export async function claimPendingSessionWorkflowWakes(
   db: Database,
   limit = 100,
-): Promise<EnrollableSession[]> {
+): Promise<SessionWorkflowWake[]> {
   const rows = await rawRows<{
     account_id: string;
     workspace_id: string;
     session_id: string;
     temporal_workflow_id: string;
-  }>(db, sql`select * from opengeni_private.list_enrollable_sessions(${limit})`);
+    wake_revision: number | string;
+    control_event_id: string | null;
+  }>(db, sql`select * from opengeni_private.claim_session_workflow_wakes(${limit})`);
   return rows.map((row) => ({
     accountId: row.account_id,
     workspaceId: row.workspace_id,
     sessionId: row.session_id,
     temporalWorkflowId: row.temporal_workflow_id,
+    wakeRevision: Number(row.wake_revision),
+    controlEventId: row.control_event_id,
   }));
+}
+
+/**
+ * Acknowledge an immediate post-commit signal. An older sender may advance only
+ * its own revision; it cannot clear a claim or failure state belonging to a
+ * newer revision.
+ */
+export async function markSessionWorkflowWakeDelivered(
+  db: Database,
+  input: Omit<SessionWorkflowWake, "controlEventId">,
+): Promise<void> {
+  await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const [row] = await scopedDb
+        .update(schema.sessionWorkflowWakeOutbox)
+        .set({
+          deliveredRevision: sql`greatest(${schema.sessionWorkflowWakeOutbox.deliveredRevision}, ${input.wakeRevision})`,
+          attempts: sql`case when ${schema.sessionWorkflowWakeOutbox.wakeRevision} = ${input.wakeRevision} then 0 else ${schema.sessionWorkflowWakeOutbox.attempts} end`,
+          lastError: sql`case when ${schema.sessionWorkflowWakeOutbox.wakeRevision} = ${input.wakeRevision} then null else ${schema.sessionWorkflowWakeOutbox.lastError} end`,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(schema.sessionWorkflowWakeOutbox.workspaceId, input.workspaceId),
+            eq(schema.sessionWorkflowWakeOutbox.sessionId, input.sessionId),
+            gte(schema.sessionWorkflowWakeOutbox.wakeRevision, input.wakeRevision),
+          ),
+        )
+        .returning({ sessionId: schema.sessionWorkflowWakeOutbox.sessionId });
+      if (!row) {
+        throw new Error(
+          `Workflow wake revision ${input.wakeRevision} is not current for session ${input.sessionId}`,
+        );
+      }
+    },
+  );
+}
+
+/** Record delivery failure; the claim already scheduled the bounded retry. */
+export async function markSessionWorkflowWakeFailed(
+  db: Database,
+  input: SessionWorkflowWake,
+  error: string,
+): Promise<boolean> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const [row] = await scopedDb
+        .update(schema.sessionWorkflowWakeOutbox)
+        .set({
+          lastError: error.slice(0, 500),
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(schema.sessionWorkflowWakeOutbox.sessionId, input.sessionId),
+            eq(schema.sessionWorkflowWakeOutbox.workspaceId, input.workspaceId),
+            eq(schema.sessionWorkflowWakeOutbox.wakeRevision, input.wakeRevision),
+          ),
+        )
+        .returning({ sessionId: schema.sessionWorkflowWakeOutbox.sessionId });
+      return row !== undefined;
+    },
+  );
 }
 
 export async function getOrCreateSessionSystemUpdateOutbox(
@@ -21126,6 +21700,7 @@ export type AddSessionSystemUpdateResult =
       reason: "added" | "duplicate";
       update: SessionSystemUpdate;
       shouldWake: boolean;
+      workflowWakeRevision: number | null;
       wakeEventId: string;
       temporalWorkflowId: string | null;
       events: SessionEvent[];
@@ -21279,6 +21854,7 @@ export async function addSessionSystemUpdateWithSourceMutation(
             reason: "duplicate",
             update: mapSessionSystemUpdate(existing),
             shouldWake: false,
+            workflowWakeRevision: null,
             wakeEventId: pendingEvent.id,
             temporalWorkflowId: session.temporalWorkflowId,
             events: [],
@@ -21311,6 +21887,15 @@ export async function addSessionSystemUpdateWithSourceMutation(
           session.controlState === "active" &&
           (workspace.inferenceState === "active" ||
             session.workspaceRunExceptionGeneration === workspace.inferenceGeneration);
+        const workflowWakeRevision = shouldWake
+          ? await enqueueSessionWorkflowWakeInTransaction(tx as unknown as Database, {
+              accountId: session.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: session.id,
+              temporalWorkflowId: session.temporalWorkflowId ?? `session-${session.id}`,
+              reason: "system_update",
+            })
+          : null;
         await tx
           .update(schema.sessions)
           .set({
@@ -21324,6 +21909,7 @@ export async function addSessionSystemUpdateWithSourceMutation(
           reason: "added",
           update: mapSessionSystemUpdate(inserted),
           shouldWake,
+          workflowWakeRevision,
           wakeEventId: event.id,
           temporalWorkflowId: session.temporalWorkflowId,
           events: event ? [mapEvent(event)] : [],
@@ -21431,6 +22017,7 @@ export type RequestSessionControlResult = {
   deliveryEventId: string | null;
   shouldSignalControl: boolean;
   shouldWake: boolean;
+  workflowWakeRevision: number | null;
 };
 
 export async function requestSessionControl(
@@ -21498,6 +22085,7 @@ export async function requestSessionControl(
               expectedAttemptId: string | null;
               shouldSignalControl: boolean;
               shouldWake: boolean;
+              workflowWakeRevision?: number | null;
             };
             const [event] = await tx
               .select()
@@ -21505,6 +22093,16 @@ export async function requestSessionControl(
               .where(eq(schema.sessionEvents.id, stored.eventId))
               .limit(1);
             if (!event) throw new Error(`Control event not found: ${stored.eventId}`);
+            const needsDelivery = stored.shouldSignalControl || stored.shouldWake;
+            const workflowWakeRevision = needsDelivery
+              ? await enqueueSessionWorkflowWakeInTransaction(tx as unknown as Database, {
+                  accountId: session.accountId,
+                  workspaceId: input.workspaceId,
+                  sessionId: session.id,
+                  temporalWorkflowId: session.temporalWorkflowId ?? `session-${session.id}`,
+                  reason: stored.shouldSignalControl ? "session_control" : "session_resume",
+                })
+              : null;
             return {
               operationId: duplicate.id,
               event: mapEvent(event),
@@ -21517,6 +22115,7 @@ export async function requestSessionControl(
               deliveryEventId: stored.shouldSignalControl ? stored.eventId : null,
               shouldSignalControl: stored.shouldSignalControl,
               shouldWake: stored.shouldWake,
+              workflowWakeRevision,
             };
           }
         }
@@ -21627,6 +22226,16 @@ export async function requestSessionControl(
           currentTurn?.status === "recovering" ||
           Boolean(queuedPrompt || pendingUpdate || (goal && goal.status !== "completed"));
         const shouldWake = input.mode === "resume" && hasWorkspacePermission && resumeWork;
+        const workflowWakeRevision =
+          shouldSignalControl || shouldWake
+            ? await enqueueSessionWorkflowWakeInTransaction(tx as unknown as Database, {
+                accountId: session.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: session.id,
+                temporalWorkflowId: session.temporalWorkflowId ?? `session-${session.id}`,
+                reason: shouldSignalControl ? "session_control" : "session_resume",
+              })
+            : null;
         const nextStatus: SessionStatus =
           input.mode === "pause" || !hasWorkspacePermission
             ? "paused"
@@ -21739,6 +22348,7 @@ export async function requestSessionControl(
           expectedAttemptId,
           shouldSignalControl,
           shouldWake,
+          workflowWakeRevision,
         };
         await tx.insert(schema.runtimeControlOperations).values({
           id: operationId,
@@ -21773,6 +22383,7 @@ export async function requestSessionControl(
           deliveryEventId: shouldSignalControl ? event.id : null,
           shouldSignalControl,
           shouldWake,
+          workflowWakeRevision,
         };
       }),
   );
@@ -21921,6 +22532,15 @@ export type DurableSessionControlRequest = {
   workflowId: string;
   eventId: string;
   events: SessionEvent[];
+  workflowWakeRevision: number;
+};
+
+export type DurableSessionWakeRequest = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  workflowId: string;
+  workflowWakeRevision: number;
 };
 
 export async function setWorkspaceInferenceControl(
@@ -21943,7 +22563,7 @@ export async function setWorkspaceInferenceControl(
   affectedSessionIds: string[];
   exceptionSessionIds: string[];
   controls: DurableSessionControlRequest[];
-  wakeSessionIds: string[];
+  wakeSessions: DurableSessionWakeRequest[];
   broadcasts: Array<{ sessionId: string; events: SessionEvent[] }>;
 }> {
   return await withRlsContext(
@@ -21980,15 +22600,83 @@ export async function setWorkspaceInferenceControl(
             affectedSessionIds: string[];
             exceptionSessionIds: string[];
             wakeSessionIds: string[];
+            controls: Array<{ sessionId: string; eventId: string; workflowId: string }>;
           };
+          const controls: DurableSessionControlRequest[] = [];
+          const wakeSessions: DurableSessionWakeRequest[] = [];
+          for (const storedControl of stored.controls) {
+            const [row] = await tx
+              .select()
+              .from(schema.sessions)
+              .where(
+                and(
+                  eq(schema.sessions.workspaceId, input.workspaceId),
+                  eq(schema.sessions.id, storedControl.sessionId),
+                ),
+              )
+              .for("update")
+              .limit(1);
+            if (!row) continue;
+            const workflowWakeRevision = await enqueueSessionWorkflowWakeInTransaction(
+              tx as unknown as Database,
+              {
+                accountId: row.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: row.id,
+                temporalWorkflowId: storedControl.workflowId,
+                reason: "workspace_control",
+              },
+            );
+            controls.push({
+              accountId: row.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: row.id,
+              workflowId: storedControl.workflowId,
+              eventId: storedControl.eventId,
+              events: [],
+              workflowWakeRevision,
+            });
+          }
+          for (const sessionId of stored.wakeSessionIds) {
+            const [row] = await tx
+              .select()
+              .from(schema.sessions)
+              .where(
+                and(
+                  eq(schema.sessions.workspaceId, input.workspaceId),
+                  eq(schema.sessions.id, sessionId),
+                ),
+              )
+              .for("update")
+              .limit(1);
+            if (!row) continue;
+            const workflowId = row.temporalWorkflowId ?? `session-${row.id}`;
+            const workflowWakeRevision = await enqueueSessionWorkflowWakeInTransaction(
+              tx as unknown as Database,
+              {
+                accountId: row.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: row.id,
+                temporalWorkflowId: workflowId,
+                reason: "workspace_resume",
+              },
+            );
+            wakeSessions.push({
+              accountId: row.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: row.id,
+              workflowId,
+              workflowWakeRevision,
+            });
+          }
           return {
             operationId: duplicate.id,
             state: stored.state,
             generation: stored.generation,
             affectedSessionIds: stored.affectedSessionIds,
             exceptionSessionIds: stored.exceptionSessionIds,
-            controls: [],
-            wakeSessionIds: stored.wakeSessionIds,
+            controls,
+            wakeSessions,
             broadcasts: [],
           };
         }
@@ -22049,6 +22737,7 @@ export async function setWorkspaceInferenceControl(
         }
 
         const controls: DurableSessionControlRequest[] = [];
+        const wakeSessions: DurableSessionWakeRequest[] = [];
         const broadcasts: Array<{ sessionId: string; events: SessionEvent[] }> = [];
         const affectedSessionIds: string[] = [];
         for (const session of sessions) {
@@ -22116,7 +22805,7 @@ export async function setWorkspaceInferenceControl(
                     select 1 from session_goals g
                     where g.workspace_id = ${input.workspaceId}
                       and g.session_id = ${session.id} and g.status = 'active'
-                  )
+                  ) or ${session.compactRequested}
                 ) as runnable`,
               );
               nextSessionStatus = work?.runnable ? "queued" : "idle";
@@ -22220,28 +22909,61 @@ export async function setWorkspaceInferenceControl(
             .where(eq(schema.sessions.id, session.id));
           const mapped = [...closedToolEvents, ...eventRows.map(mapEvent)];
           broadcasts.push({ sessionId: session.id, events: mapped });
-          if (shouldInterrupt && turn) {
+          const workflowId = session.temporalWorkflowId ?? `session-${session.id}`;
+          const directControlEventId = shouldInterrupt
+            ? event.id
+            : clearOldWorkspacePause
+              ? null
+              : session.pendingControlEventId;
+          const needsOrdinaryWake =
+            directControlEventId === null &&
+            workspaceAllowsSession &&
+            session.controlState === "active" &&
+            ["queued", "recovering", "waiting_capacity", "requires_action"].includes(
+              nextSessionStatus,
+            );
+          if (directControlEventId) {
+            const workflowWakeRevision = await enqueueSessionWorkflowWakeInTransaction(
+              tx as unknown as Database,
+              {
+                accountId: session.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: session.id,
+                temporalWorkflowId: workflowId,
+                reason: "workspace_control",
+              },
+            );
             controls.push({
               accountId: session.accountId,
               workspaceId: input.workspaceId,
               sessionId: session.id,
-              workflowId: session.temporalWorkflowId ?? `session-${session.id}`,
-              eventId: event.id,
+              workflowId,
+              eventId: directControlEventId,
               events: mapped,
+              workflowWakeRevision,
+            });
+          } else if (needsOrdinaryWake) {
+            const workflowWakeRevision = await enqueueSessionWorkflowWakeInTransaction(
+              tx as unknown as Database,
+              {
+                accountId: session.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: session.id,
+                temporalWorkflowId: workflowId,
+                reason: input.state === "active" ? "workspace_resume" : "workspace_exception",
+              },
+            );
+            wakeSessions.push({
+              accountId: session.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: session.id,
+              workflowId,
+              workflowWakeRevision,
             });
           }
         }
 
-        const wakeSessionIds =
-          input.state === "active"
-            ? (
-                await rawRows<{ session_id: string }>(
-                  tx as unknown as Database,
-                  sql`select session_id from opengeni_private.list_enrollable_sessions(10000)
-                      where workspace_id = ${input.workspaceId}`,
-                )
-              ).map((row) => row.session_id)
-            : exceptionSessionIds;
+        const wakeSessionIds = wakeSessions.map((entry) => entry.sessionId);
         const storedResult = {
           operationId,
           state: input.state,
@@ -22249,6 +22971,11 @@ export async function setWorkspaceInferenceControl(
           affectedSessionIds,
           exceptionSessionIds,
           wakeSessionIds,
+          controls: controls.map((entry) => ({
+            sessionId: entry.sessionId,
+            eventId: entry.eventId,
+            workflowId: entry.workflowId,
+          })),
         };
         await tx.insert(schema.runtimeControlOperations).values({
           id: operationId,
@@ -22278,7 +23005,7 @@ export async function setWorkspaceInferenceControl(
           affectedSessionIds,
           exceptionSessionIds,
           controls,
-          wakeSessionIds,
+          wakeSessions,
           broadcasts,
         };
       }),
@@ -22292,6 +23019,7 @@ export type EnqueueSessionMessageResult = {
   controlEvent: SessionEvent | null;
   shouldSignalControl: boolean;
   shouldWake: boolean;
+  workflowWakeRevision: number | null;
   temporalWorkflowId: string;
   missingMcpServerIds: string[];
 };
@@ -22393,15 +23121,27 @@ export async function enqueueSessionMessageAtomically(
               .limit(1);
             const shouldSignalControl =
               control !== undefined && session.pendingControlEventId === control.id;
+            const shouldWake =
+              !shouldSignalControl &&
+              queueCanWake(workspace, session, existingTurn.status === "queued");
+            const workflowWakeRevision =
+              shouldSignalControl || shouldWake
+                ? await enqueueSessionWorkflowWakeInTransaction(tx as unknown as Database, {
+                    accountId: session.accountId,
+                    workspaceId: input.workspaceId,
+                    sessionId: session.id,
+                    temporalWorkflowId: session.temporalWorkflowId ?? `session-${session.id}`,
+                    reason: shouldSignalControl ? "session_control" : "human_prompt",
+                  })
+                : null;
             return {
               accepted: mapEvent(existingEvent),
               turn: mapSessionTurn(existingTurn),
               events: [],
               controlEvent: control ? mapEvent(control) : null,
               shouldSignalControl,
-              shouldWake:
-                !shouldSignalControl &&
-                queueCanWake(workspace, session, existingTurn.status === "queued"),
+              shouldWake,
+              workflowWakeRevision,
               temporalWorkflowId: session.temporalWorkflowId ?? `session-${session.id}`,
               missingMcpServerIds: [],
             };
@@ -22596,6 +23336,16 @@ export async function enqueueSessionMessageAtomically(
         const runnable = workspaceAllowsRun && session.controlState === "active";
         const hasCurrentAfter = currentTurn !== undefined && !atHead;
         const shouldWake = runnable && !hasCurrentAfter && !shouldSignalControl;
+        const workflowWakeRevision =
+          shouldSignalControl || shouldWake
+            ? await enqueueSessionWorkflowWakeInTransaction(tx as unknown as Database, {
+                accountId: session.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: session.id,
+                temporalWorkflowId: workflowId,
+                reason: shouldSignalControl ? "session_control" : "human_prompt",
+              })
+            : null;
         const nextStatus: SessionStatus = !runnable
           ? "paused"
           : hasCurrentAfter
@@ -22664,6 +23414,7 @@ export async function enqueueSessionMessageAtomically(
             : null,
           shouldSignalControl,
           shouldWake,
+          workflowWakeRevision,
           temporalWorkflowId: workflowId,
           missingMcpServerIds: [],
         };
@@ -22740,7 +23491,12 @@ export async function appendSessionEvents(
 }
 
 export type AcceptSessionApprovalDecisionResult =
-  | { action: "accepted"; event: SessionEvent; events: SessionEvent[] }
+  | {
+      action: "accepted";
+      event: SessionEvent;
+      events: SessionEvent[];
+      workflowWakeRevision: number;
+    }
   | { action: "conflict"; sessionStatus: SessionStatus };
 
 /**
@@ -22797,7 +23553,22 @@ export async function acceptSessionApprovalDecision(
             if (existing.type !== "user.approvalDecision") {
               throw new Error("clientEventId belongs to a different session event");
             }
-            return { action: "accepted", event: mapEvent(existing), events: [] } as const;
+            const workflowWakeRevision = await enqueueSessionWorkflowWakeInTransaction(
+              tx as unknown as Database,
+              {
+                accountId: session.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: session.id,
+                temporalWorkflowId: session.temporalWorkflowId ?? `session-${session.id}`,
+                reason: "approval_decision",
+              },
+            );
+            return {
+              action: "accepted",
+              event: mapEvent(existing),
+              events: [],
+              workflowWakeRevision,
+            } as const;
           }
         }
         const [turn] = session.activeTurnId
@@ -22867,8 +23638,23 @@ export async function acceptSessionApprovalDecision(
           .update(schema.sessions)
           .set({ lastSequence: session.lastSequence + 1, updatedAt: new Date() })
           .where(eq(schema.sessions.id, session.id));
+        const workflowWakeRevision = await enqueueSessionWorkflowWakeInTransaction(
+          tx as unknown as Database,
+          {
+            accountId: session.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: session.id,
+            temporalWorkflowId: session.temporalWorkflowId ?? `session-${session.id}`,
+            reason: "approval_decision",
+          },
+        );
         const mapped = mapEvent(event);
-        return { action: "accepted", event: mapped, events: [mapped] } as const;
+        return {
+          action: "accepted",
+          event: mapped,
+          events: [mapped],
+          workflowWakeRevision,
+        } as const;
       }),
   );
 }

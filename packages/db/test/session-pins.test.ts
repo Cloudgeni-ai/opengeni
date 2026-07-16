@@ -10,6 +10,7 @@ import {
   grantWorkspaceAccess,
   listSessionsForSubject,
   removeWorkspaceMember,
+  reapExpiredSessionListSnapshots,
   SessionListAccessError,
   SessionPinAccessError,
   SessionPinVersionConflictError,
@@ -126,6 +127,29 @@ afterAll(async () => {
 });
 
 describe("session pins (real PostgreSQL + FORCE RLS)", () => {
+  test("reaps expired list snapshots outside request transactions", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    await grantMember(workspace, "user:reaper");
+    await session({ ...workspace, message: "one" });
+    await session({ ...workspace, message: "two" });
+    const page = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId: "user:reaper",
+      limit: 1,
+    });
+    const cursor = decodeSessionListCursor(page.nextCursor!);
+    expect(cursor).not.toBeNull();
+    await admin`
+      update session_list_snapshots
+      set expires_at = now() - interval '1 second'
+      where id = ${cursor!.snapshotId}`;
+
+    expect(await reapExpiredSessionListSnapshots(db, 5000)).toBeGreaterThanOrEqual(1);
+    const [remaining] = await admin<{ present: boolean }[]>`
+      select exists(select 1 from session_list_snapshots where id = ${cursor!.snapshotId}) as present`;
+    expect(remaining?.present).toBe(false);
+  });
+
   test("runs as the non-superuser app role with FORCE RLS enabled", async () => {
     if (!available) return;
     const [role] = await admin<{ rolsuper: boolean; rolbypassrls: boolean }[]>`

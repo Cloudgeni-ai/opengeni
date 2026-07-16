@@ -19,6 +19,8 @@ export type SessionWorkflowClient = {
     workspaceId: string;
     sessionId: string;
     workflowId: string;
+    wakeRevision: number;
+    controlEventId?: string;
   }) => Promise<void>;
   // Dedicated, revision-carrying nudge for a durable Codex capacity waiter.
   // Optional for embedded/back-compat clients: callers may fall back to the
@@ -29,6 +31,7 @@ export type SessionWorkflowClient = {
     sessionId: string;
     workflowId: string;
     wakeRevision: number;
+    workflowWakeRevision: number;
   }) => Promise<void>;
   signalApprovalDecision: (input: {
     accountId: string;
@@ -36,6 +39,7 @@ export type SessionWorkflowClient = {
     sessionId: string;
     eventId: string;
     workflowId: string;
+    workflowWakeRevision: number;
   }) => Promise<void>;
   // A durable Pause/Steer control must reach the workflow even when its previous
   // run returned idle. signalWithStart either delivers to the live workflow or
@@ -46,6 +50,7 @@ export type SessionWorkflowClient = {
     sessionId: string;
     eventId: string;
     workflowId: string;
+    workflowWakeRevision: number;
   }) => Promise<void>;
   syncScheduledTask: (input: { task: ScheduledTask }) => Promise<void>;
   deleteScheduledTaskSchedule: (input: { temporalScheduleId: string }) => Promise<void>;

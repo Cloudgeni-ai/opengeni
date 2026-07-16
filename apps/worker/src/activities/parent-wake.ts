@@ -5,8 +5,9 @@ import {
   getSessionGoal,
   addSessionSystemUpdateWithSourceMutation,
   claimPendingSessionSystemUpdateOutbox,
+  claimPendingSessionWorkflowWakes,
   getOrCreateSessionSystemUpdateOutbox,
-  listEnrollableSessions,
+  markSessionWorkflowWakeFailed,
   markSessionSystemUpdateOutboxDeliveredInTransaction,
   markSessionSystemUpdateOutboxFailed,
   type Database,
@@ -25,7 +26,10 @@ export type NotifyServices = {
 
 export type ReconcileParentSystemUpdateOverrides = Partial<{
   claimPendingSessionSystemUpdateOutbox: typeof claimPendingSessionSystemUpdateOutbox;
-  listEnrollableSessions: typeof listEnrollableSessions;
+}>;
+
+export type ReconcileSessionWorkflowWakeOverrides = Partial<{
+  claimPendingSessionWorkflowWakes: typeof claimPendingSessionWorkflowWakes;
 }>;
 
 /**
@@ -142,11 +146,15 @@ async function deliverParentSystemUpdateOutbox(
       await svc.bus.publish(outbox.workspaceId, outbox.targetSessionId, result.events);
     }
     if (result.shouldWake && svc.wakeSessionWorkflow) {
+      if (result.workflowWakeRevision === null) {
+        throw new Error("Runnable system update has no workflow wake revision");
+      }
       await svc.wakeSessionWorkflow({
         accountId: outbox.accountId,
         workspaceId: outbox.workspaceId,
         sessionId: outbox.targetSessionId,
         workflowId: result.temporalWorkflowId ?? `session-${outbox.targetSessionId}`,
+        wakeRevision: result.workflowWakeRevision,
       });
     }
     svc.observability.info("Woke parent session on worker completion", {
@@ -168,28 +176,15 @@ export async function reconcilePendingParentSystemUpdates(
   svc: NotifyServices,
   limit = 100,
   overrides: ReconcileParentSystemUpdateOverrides = {},
-): Promise<{ claimed: number; delivered: number; failed: number; wakeRepairs: number }> {
+): Promise<{ claimed: number; delivered: number; failed: number }> {
   const claimPendingSessionSystemUpdateOutboxFn =
     overrides.claimPendingSessionSystemUpdateOutbox ?? claimPendingSessionSystemUpdateOutbox;
-  const listEnrollableSessionsFn = overrides.listEnrollableSessions ?? listEnrollableSessions;
-  let wakeRepairs = 0;
-  if (svc.wakeSessionWorkflow) {
-    const repairs = await listEnrollableSessionsFn(svc.db, limit);
-    for (const repair of repairs) {
-      await svc.wakeSessionWorkflow({
-        accountId: repair.accountId,
-        workspaceId: repair.workspaceId,
-        sessionId: repair.sessionId,
-        workflowId: repair.temporalWorkflowId,
-      });
-      wakeRepairs += 1;
-    }
-  }
-  // Keep generic workflow wake repair active, but do not claim or deliver the
-  // child-terminal outbox while completion wakes are disabled. Atomic terminal
-  // producers use the same setting, so no new backlog is manufactured either.
+  // Do not claim or deliver the child-terminal outbox while completion wakes
+  // are disabled. Atomic terminal producers use the same setting, so no new
+  // backlog is manufactured either. Session-workflow wake repair is owned by
+  // its dedicated dispatcher and never depends on sandbox or child settings.
   if (!svc.settings.childCompletionParentWakeEnabled) {
-    return { claimed: 0, delivered: 0, failed: 0, wakeRepairs };
+    return { claimed: 0, delivered: 0, failed: 0 };
   }
   const rows = await claimPendingSessionSystemUpdateOutboxFn(svc.db, limit);
   let delivered = 0;
@@ -202,7 +197,49 @@ export async function reconcilePendingParentSystemUpdates(
       failed += 1;
     }
   }
-  return { claimed: rows.length, delivered, failed, wakeRepairs };
+  return { claimed: rows.length, delivered, failed };
+}
+
+export async function reconcilePendingSessionWorkflowWakes(
+  svc: NotifyServices,
+  limit = 1_000,
+  overrides: ReconcileSessionWorkflowWakeOverrides = {},
+): Promise<{ claimed: number; delivered: number; failed: number }> {
+  const claimPendingSessionWorkflowWakesFn =
+    overrides.claimPendingSessionWorkflowWakes ?? claimPendingSessionWorkflowWakes;
+  if (!svc.wakeSessionWorkflow) {
+    return { claimed: 0, delivered: 0, failed: 0 };
+  }
+  const repairs = await claimPendingSessionWorkflowWakesFn(svc.db, limit);
+  let delivered = 0;
+  let failed = 0;
+  const queue = [...repairs];
+  const workers = Array.from({ length: Math.min(20, queue.length) }, async () => {
+    for (;;) {
+      const repair = queue.shift();
+      if (!repair) return;
+      try {
+        await svc.wakeSessionWorkflow!({
+          accountId: repair.accountId,
+          workspaceId: repair.workspaceId,
+          sessionId: repair.sessionId,
+          workflowId: repair.temporalWorkflowId,
+          wakeRevision: repair.wakeRevision,
+          ...(repair.controlEventId ? { controlEventId: repair.controlEventId } : {}),
+        });
+        delivered += 1;
+      } catch (error) {
+        failed += 1;
+        await markSessionWorkflowWakeFailed(
+          svc.db,
+          repair,
+          error instanceof Error ? error.message : String(error),
+        ).catch(() => undefined);
+      }
+    }
+  });
+  await Promise.all(workers);
+  return { claimed: repairs.length, delivered, failed };
 }
 
 function childCompletionPayload(
