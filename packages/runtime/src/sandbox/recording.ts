@@ -270,7 +270,6 @@ export async function inspectRecordingArtifact(
 
 const RECORDING_UPLOAD_OK = "OPENGENI_RECORDING_UPLOAD_OK";
 const RECORDING_UPLOAD_MAX_SECONDS = 300;
-const RECORDING_UPLOAD_YIELD_MS = (RECORDING_UPLOAD_MAX_SECONDS + 10) * 1_000;
 
 /**
  * Upload the finalized artifact directly from the sandbox to a scoped object-
@@ -286,8 +285,13 @@ export async function uploadRecordingArtifact(
     url: string;
     requiredHeaders: Record<string, string>;
     maxBytes?: number;
+    maxSeconds?: number;
   },
 ): Promise<RecordingArtifactMetadata> {
+  const maxSeconds = input.maxSeconds ?? RECORDING_UPLOAD_MAX_SECONDS;
+  if (!Number.isSafeInteger(maxSeconds) || maxSeconds <= 0 || maxSeconds > 300) {
+    throw new Error("recording upload maxSeconds must be an integer between 1 and 300");
+  }
   const metadata = await inspectRecordingArtifact(session, proc, input.maxBytes);
   const headers = Object.entries(input.requiredHeaders)
     .sort(([left], [right]) => left.localeCompare(right))
@@ -295,7 +299,7 @@ export async function uploadRecordingArtifact(
     .join(" ");
   const upload = [
     "set -euo pipefail",
-    `curl --fail --silent --show-error --connect-timeout 20 --max-time ${RECORDING_UPLOAD_MAX_SECONDS} --request PUT ${headers} --upload-file ${shq(proc.boxPath)} ${shq(input.url)}`,
+    `curl --fail --silent --show-error --connect-timeout 20 --max-time ${maxSeconds} --request PUT ${headers} --upload-file ${shq(proc.boxPath)} ${shq(input.url)}`,
     `printf '${RECORDING_UPLOAD_OK}\\n'`,
   ].join("; ");
   const output = stripExecBanner(
@@ -303,7 +307,7 @@ export async function uploadRecordingArtifact(
       session as RecordingSession,
       `bash -lc ${shq(upload)}`,
       proc.runAs,
-      RECORDING_UPLOAD_YIELD_MS,
+      (maxSeconds + 10) * 1_000,
     ),
   );
   if (!output.includes(RECORDING_UPLOAD_OK)) {

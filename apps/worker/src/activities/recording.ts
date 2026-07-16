@@ -11,9 +11,8 @@
 
 import type { Settings } from "@opengeni/config";
 import type { Database } from "@opengeni/db";
-import { deleteRecording, updateRecording } from "@opengeni/db";
+import { deleteRecording } from "@opengeni/db";
 import type {
-  RecordingAvailablePayload,
   RecordingCodec,
   RecordingFailedReason,
   RecordingStartedPayload,
@@ -41,6 +40,27 @@ export type ActiveRecording = {
   dimensions: [number, number];
   framerate: number;
 };
+
+export const RECORDING_SETTLEMENT_PREP_TIMEOUT_MS = 100_000;
+const RECORDING_SETTLEMENT_UPLOAD_MAX_SECONDS = 45;
+
+export async function withRecordingPreparationTimeout(
+  preparation: Promise<PreparedRecordingSettlement>,
+  timeoutResult: PreparedRecordingSettlement,
+  timeoutMs = RECORDING_SETTLEMENT_PREP_TIMEOUT_MS,
+): Promise<PreparedRecordingSettlement> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      preparation,
+      new Promise<PreparedRecordingSettlement>((resolve) => {
+        timer = setTimeout(() => resolve(timeoutResult), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 
 /**
  * Insert the recording row, launch ffmpeg on the box, and return the live handle.
@@ -80,14 +100,24 @@ export async function beginRecording(args: {
       reason: scrubFreeText(args.reason),
     }),
   );
-  const proc = await startRecordingOnBox(args.session, {
-    recordingId: args.recordingId,
-    codec,
-    framerate,
-    maxSeconds: settings.recordingMaxSeconds,
-    dimensions,
-    ...(args.runAs ? { runAs: args.runAs } : {}),
-  });
+  let proc: RecordingProcess;
+  try {
+    proc = await startRecordingOnBox(args.session, {
+      recordingId: args.recordingId,
+      codec,
+      framerate,
+      maxSeconds: settings.recordingMaxSeconds,
+      dimensions,
+      ...(args.runAs ? { runAs: args.runAs } : {}),
+    });
+  } catch (error) {
+    await deleteRecording(db, {
+      accountId: args.accountId,
+      workspaceId: args.workspaceId,
+      recordingId: args.recordingId,
+    }).catch(() => undefined);
+    throw error;
+  }
   const active: ActiveRecording = {
     recordingId: args.recordingId,
     turnId: args.turnId,
@@ -109,120 +139,116 @@ export async function beginRecording(args: {
   return { active, started };
 }
 
-export type FinalizeOutcome =
-  | { ok: true; available: RecordingAvailablePayload }
-  | { ok: false; reason: RecordingFailedReason; detail: string | null };
+export type PreparedRecordingSettlement =
+  | {
+      mutation: {
+        action: "available";
+        recordingId: string;
+        storageKey: string;
+        sizeBytes: number;
+        durationSeconds: number;
+      };
+      deleteArtifactsAfterCommit: true;
+    }
+  | {
+      mutation: {
+        action: "failed";
+        recordingId: string;
+        reason: RecordingFailedReason;
+        detail: string | null;
+      };
+      deleteArtifactsAfterCommit: false;
+    }
+  | {
+      mutation: { action: "discard"; recordingId: string };
+      deleteArtifactsAfterCommit: true;
+    };
 
 /**
- * Stop ffmpeg, upload directly from the box, commit `available`,
- * and (only then) delete the box file (F9). Returns the available payload, or a
- * failure reason. NEVER throws — finalize runs in a turn `finally` and must not
- * mask the turn outcome.
+ * Prepare an on-turn recording for the attempt-closing settlement. This performs
+ * only bounded box/storage work; it does not mutate canonical database state and
+ * never deletes the box artifact. The caller folds the returned mutation into the
+ * exact attempt-fenced turn settlement, then deletes artifacts only after commit.
+ * NEVER throws and never prevents turn truth from settling.
  */
-export async function finalizeRecording(args: {
+export async function prepareRecordingForSettlement(args: {
   settings: Settings;
-  db: Database;
   objectStorage: ObjectStorage | null;
-  accountId: string;
   workspaceId: string;
   sessionId: string;
   active: ActiveRecording;
   session: unknown;
-  runAs?: string | undefined;
-}): Promise<FinalizeOutcome> {
-  const { settings, db, objectStorage, active } = args;
-  const codec = settings.recordingDefaultCodec as RecordingCodec;
-  const fail = async (
+  didComputerUse: boolean;
+}): Promise<PreparedRecordingSettlement> {
+  const { settings, objectStorage, active } = args;
+  const codec = active.proc.codec;
+  const fail = (
     reason: RecordingFailedReason,
     detail: string | null,
-  ): Promise<FinalizeOutcome> => {
-    await updateRecording(db, {
-      accountId: args.accountId,
-      workspaceId: args.workspaceId,
-      recordingId: active.recordingId,
-      state: "failed",
-      reason: scrubFreeText(detail),
-    }).catch(() => undefined);
-    return { ok: false, reason, detail: scrubFreeText(detail) };
+  ): PreparedRecordingSettlement => {
+    return {
+      mutation: {
+        action: "failed",
+        recordingId: active.recordingId,
+        reason,
+        detail: scrubFreeText(detail),
+      },
+      deleteArtifactsAfterCommit: false,
+    };
   };
 
-  try {
-    await updateRecording(db, {
-      accountId: args.accountId,
-      workspaceId: args.workspaceId,
-      recordingId: active.recordingId,
-      state: "finalizing",
-    }).catch(() => undefined);
-
-    // 1. SIGINT ffmpeg and wait for the clean trailer.
-    await stopRecordingOnBox(args.session, active.proc);
-
-    if (!objectStorage) {
-      return await fail("upload-failed", "object storage is not configured");
-    }
-
-    // 2. Mint one short-lived write URL, then upload DIRECTLY from the box. This
-    // keeps worker memory independent of recording size.
-    const key = recordingStorageKey(args.workspaceId, args.sessionId, active.recordingId, codec);
-    let finalized: Awaited<ReturnType<typeof uploadRecordingArtifact>>;
+  const prepare = async (): Promise<PreparedRecordingSettlement> => {
     try {
+      await stopRecordingOnBox(args.session, active.proc);
+      if (!args.didComputerUse) {
+        return {
+          mutation: { action: "discard", recordingId: active.recordingId },
+          deleteArtifactsAfterCommit: true,
+        };
+      }
+      if (!objectStorage) {
+        return fail("upload-failed", "object storage is not configured");
+      }
+      const key = recordingStorageKey(args.workspaceId, args.sessionId, active.recordingId, codec);
       const upload = await objectStorage.createPutUrl({
         key,
         contentType: contentTypeForCodec(codec),
       });
-      finalized = await uploadRecordingArtifact(args.session, active.proc, {
+      const finalized = await uploadRecordingArtifact(args.session, active.proc, {
         url: upload.url,
         requiredHeaders: upload.requiredHeaders,
         maxBytes: settings.recordingMaxBytes,
+        maxSeconds: RECORDING_SETTLEMENT_UPLOAD_MAX_SECONDS,
       });
-    } catch (uploadError) {
-      if (uploadError instanceof RecordingError) throw uploadError;
-      return await fail(
-        "upload-failed",
-        uploadError instanceof Error ? uploadError.message : String(uploadError),
-      );
+      return {
+        mutation: {
+          action: "available",
+          recordingId: active.recordingId,
+          storageKey: key,
+          sizeBytes: finalized.sizeBytes,
+          durationSeconds: finalized.durationSeconds,
+        },
+        deleteArtifactsAfterCommit: true,
+      };
+    } catch (error) {
+      const reason: RecordingFailedReason =
+        error instanceof RecordingError ? error.reason : "upload-failed";
+      return fail(reason, error instanceof Error ? error.message : String(error));
     }
+  };
 
-    // 3. Commit `available` with the artifact ref.
-    await updateRecording(db, {
-      accountId: args.accountId,
-      workspaceId: args.workspaceId,
-      recordingId: active.recordingId,
-      state: "available",
-      storageKey: key,
-      sizeBytes: finalized.sizeBytes,
-      durationSeconds: finalized.durationSeconds,
-    });
-
-    // 4. ONLY NOW delete the box artifacts (F9 — never before a confirmed PUT).
-    await deleteRecordingArtifacts(args.session, active.proc);
-
-    const available: RecordingAvailablePayload = {
-      recordingId: active.recordingId,
-      turnId: active.turnId,
-      codec,
-      contentType: contentTypeForCodec(codec),
-      storageKey: key,
-      durationSeconds: finalized.durationSeconds,
-      sizeBytes: finalized.sizeBytes,
-      dimensions: active.dimensions,
-    };
-    return { ok: true, available };
-  } catch (error) {
-    const reason: RecordingFailedReason =
-      error instanceof RecordingError ? error.reason : "ffmpeg-error";
-    return await fail(reason, error instanceof Error ? error.message : String(error));
-  }
+  return await withRecordingPreparationTimeout(
+    prepare(),
+    fail("upload-failed", "recording settlement preparation timed out"),
+  );
 }
 
 /**
- * Discard an on-turn recording that captured NO computer-use activity (a plain
- * text turn): stop ffmpeg on the box, delete the box artifacts, and remove the
- * recording row entirely. NO storage PUT and NO `recording.failed` — a clean
- * no-op. NEVER throws (it runs in the turn `finally` and must not mask the turn
- * outcome). Returns nothing; the caller emits no recording event for a discard.
+ * Compensate a start whose fenced `recording.started` event was rejected. Since
+ * no canonical event was admitted, this exact recording id must leave no row,
+ * process, or box artifact behind.
  */
-export async function discardRecording(args: {
+export async function discardUnpublishedRecording(args: {
   db: Database;
   accountId: string;
   workspaceId: string;
@@ -231,14 +257,9 @@ export async function discardRecording(args: {
 }): Promise<void> {
   const { db, active } = args;
   try {
-    // Stop ffmpeg cleanly, then delete the partial artifact off the box. Both are
-    // best-effort: a stuck box must not strand the discard (the box rides the
-    // provider idle-timeout regardless).
     await stopRecordingOnBox(args.session, active.proc).catch(() => undefined);
     await deleteRecordingArtifacts(args.session, active.proc).catch(() => undefined);
   } finally {
-    // Remove the phantom row inserted at beginRecording so a no-activity turn
-    // leaves no recording trace at all.
     await deleteRecording(db, {
       accountId: args.accountId,
       workspaceId: args.workspaceId,

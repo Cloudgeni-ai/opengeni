@@ -124,6 +124,7 @@ describe("recording loop (P4.3)", () => {
         "x-ms-blob-type": "BlockBlob",
       },
       maxBytes: 268_435_456,
+      maxSeconds: 45,
     });
     expect(result.sizeBytes).toBe(4);
     expect(uploadCalls).toHaveLength(1);
@@ -132,6 +133,7 @@ describe("recording loop (P4.3)", () => {
     expect(uploadCalls[0]).toContain("content-type: video/webm");
     expect(uploadCalls[0]).toContain("x-ms-blob-type: BlockBlob");
     expect(uploadCalls[0]).toContain("https://storage.example/upload?sig=secret");
+    expect(uploadCalls[0]).toContain("--max-time 45");
     expect(uploadCalls[0]).not.toContain("base64");
   });
 

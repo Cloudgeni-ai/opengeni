@@ -59,11 +59,13 @@ import {
   SandboxImageConflictError,
   buildConnectionTokenResolver,
   getEnrollment,
+  abandonRecordingForTurnAttempt,
   type AppendEventInput,
   type ActiveSandboxPointer,
   type SandboxRecord,
   type CodexCredentialLeaseResult,
   type CodexCredentialLeaseSelectionContext,
+  type SessionTurnRecordingSettlement,
 } from "@opengeni/db";
 import { appendAndPublishTurnEventsFenced, publishDurableSessionEvents } from "@opengeni/events";
 import {
@@ -96,6 +98,8 @@ import {
   type BackendUnresolvableCode,
   type EstablishedSandboxSession,
   type GitCredentialTokenWriterSession,
+  deleteRecordingArtifacts,
+  stopRecording as stopRecordingOnBox,
 } from "@opengeni/runtime";
 import {
   builtinProviderId,
@@ -210,8 +214,8 @@ import {
 } from "../observability-metrics";
 import {
   beginRecording,
-  discardRecording,
-  finalizeRecording,
+  discardUnpublishedRecording,
+  prepareRecordingForSettlement,
   type ActiveRecording,
 } from "./recording";
 import { captureWorkspaceRevision } from "./workspace-capture";
@@ -1319,6 +1323,31 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // recording with NO storage PUT and NO recording.failed — a clean no-op (a
     // static frame of an untouched desktop is not worth uploading).
     let didComputerUse = false;
+    const abandonActiveRecording = async (
+      reason: string,
+      disposition: "failed" | "discard" = "failed",
+    ): Promise<void> => {
+      const recording = activeRecording as ActiveRecording | null;
+      if (!recording) return;
+      activeRecording = null;
+      if (resolvedSandbox) {
+        await stopRecordingOnBox(resolvedSandbox.established.session, recording.proc).catch(
+          () => undefined,
+        );
+      }
+      if (!turnId || executionGeneration <= 0) return;
+      await abandonRecordingForTurnAttempt(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId,
+        executionGeneration,
+        attemptId: input.attemptId,
+        recordingId: recording.recordingId,
+        disposition,
+        reason,
+      }).catch(() => undefined);
+    };
     let batcher: ReturnType<typeof createRuntimeBatcher> | null = null;
     const flushRuntimeBatcher = async () => {
       const current = batcher as ReturnType<typeof createRuntimeBatcher> | null;
@@ -1498,8 +1527,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         })
       ) {
         computerUseRecordingStart = (async () => {
+          let begun: Awaited<ReturnType<typeof beginRecording>> | null = null;
           try {
-            const begun = await beginRecording({
+            begun = await beginRecording({
               settings,
               db,
               accountId: input.accountId,
@@ -1512,10 +1542,22 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               runAs: sandboxRunAs(settings),
               reason: null,
             });
+            if (!publish) {
+              throw new Error("recording started before the turn event publisher was ready");
+            }
+            await publish([{ type: "recording.started", payload: begun.started }]);
             activeRecording = begun.active;
-            await publish?.([{ type: "recording.started", payload: begun.started }]);
           } catch (recordingError) {
             activeRecording = null;
+            if (begun) {
+              await discardUnpublishedRecording({
+                db,
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                active: begun.active,
+                session: sandbox.established.session,
+              });
+            }
             console.error(
               "computer-use recording start failed (action outcome unaffected)",
               recordingError,
@@ -1790,6 +1832,36 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         return appended;
       };
       settle = async (inputSettlement) => {
+        const attemptClosing = ["completed", "failed", "cancelled", "requires_action"].includes(
+          inputSettlement.turnStatus,
+        );
+        const recordingForSettlement =
+          attemptClosing && activeRecording && resolvedSandbox
+            ? (activeRecording as ActiveRecording)
+            : null;
+        const preparedRecording = recordingForSettlement
+          ? await prepareRecordingForSettlement({
+              settings,
+              objectStorage,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              active: recordingForSettlement,
+              session: resolvedSandbox!.established.session,
+              didComputerUse,
+            })
+          : null;
+        let recordingMutation: SessionTurnRecordingSettlement | undefined;
+        if (preparedRecording) {
+          const mutation = preparedRecording.mutation;
+          recordingMutation =
+            mutation.action === "discard"
+              ? mutation
+              : {
+                  ...mutation,
+                  producerId,
+                  producerSeq: ++producerSeq,
+                };
+        }
         const inputs = inputSettlement.events.map((event) => ({
           ...event,
           payload: redact(event.payload),
@@ -1807,11 +1879,31 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           sessionStatus: inputSettlement.sessionStatus,
           activeTurnId: inputSettlement.activeTurnId,
           events: inputs,
+          ...(recordingMutation ? { recording: recordingMutation } : {}),
         });
         if (result.action === "stale") {
+          if (recordingForSettlement) {
+            await abandonActiveRecording(
+              "recording settlement lost attempt ownership",
+              preparedRecording?.mutation.action === "discard" ? "discard" : "failed",
+            );
+          }
           activityStatus = "cancelled";
           turnMetricOutcome = "cancelled";
           return false;
+        }
+        if (recordingForSettlement && preparedRecording) {
+          if (result.recordingMutationApplied) {
+            activeRecording = null;
+            if (preparedRecording.deleteArtifactsAfterCommit) {
+              await deleteRecordingArtifacts(
+                resolvedSandbox!.established.session,
+                recordingForSettlement.proc,
+              );
+            }
+          } else {
+            await abandonActiveRecording("recording row was unavailable during turn settlement");
+          }
         }
         await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, result.events);
         activityContext?.heartbeat({
@@ -5203,8 +5295,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // Workbench v2 turn-end workspace capture (dossier §10.1) — runs FIRST in
       // the turn-end finally, while the box is MAXIMALLY ALIVE. The agent's last
       // tool ran before this finally, so /workspace is already final; capture is
-      // FS-equivalent whether it runs before or after recording-finalize / the
-      // warm snapshot (neither mutates workspace files). Running it here — BEFORE
+      // FS-equivalent to the already-settled recording preparation and the warm
+      // snapshot (neither mutates workspace files). Running it here — BEFORE
       // preparedTools.close() (which tears down tools / computer-use / the display
       // stack and is what starts the Modal box exiting a few seconds later) —
       // gives capture the full live-box margin instead of racing the teardown
@@ -5259,68 +5351,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       if (leaseHeartbeatTimer) {
         clearInterval(leaseHeartbeatTimer);
       }
-      // Finalize the computer-use recording BEFORE releasing the box handle: the
-      // live session uploads its /tmp artifact directly to a scoped storage URL,
-      // then updateRecording(available) → publish recording.available. The box
-      // file is deleted only after the PUT confirms (F9). Best-effort: a finalize
-      // failure emits recording.failed and never masks the turn outcome. Recording
-      // bytes enter neither worker memory nor a Temporal payload (F10).
-      const recordingToFinalize = activeRecording as ActiveRecording | null;
-      if (recordingToFinalize && resolvedSandbox) {
-        try {
-          if (!didComputerUse) {
-            // Recording gate (P4.3): the turn never drove the desktop (a plain text
-            // turn), so the film is a static frame of an untouched screen. DISCARD
-            // it — stop ffmpeg, delete the box artifact, drop the row — with NO
-            // storage PUT and NO recording.failed (a clean no-op, not a failure).
-            await discardRecording({
-              db,
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              active: recordingToFinalize,
-              session: resolvedSandbox.established.session,
-            });
-          } else {
-            const outcome = await finalizeRecording({
-              settings,
-              db,
-              objectStorage,
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-              active: recordingToFinalize,
-              session: resolvedSandbox.established.session,
-              runAs: sandboxRunAs(settings),
-            });
-            if (publish) {
-              await publish(
-                outcome.ok
-                  ? [
-                      {
-                        type: "recording.available",
-                        payload: outcome.available,
-                      },
-                    ]
-                  : [
-                      {
-                        type: "recording.failed",
-                        payload: {
-                          recordingId: recordingToFinalize.recordingId,
-                          turnId: recordingToFinalize.turnId,
-                          reason: outcome.reason,
-                          detail: outcome.detail,
-                        },
-                      },
-                    ],
-              );
-            }
-          }
-        } catch (finalizeError) {
-          console.error("recording finalize failed (turn outcome unaffected)", finalizeError);
-        } finally {
-          activeRecording = null;
-        }
-      }
+      // A recording normally closes inside the attempt-fenced turn settlement.
+      // Reaching finally with one still active means settlement threw, never ran,
+      // or lost ownership. Stop ffmpeg and mark only this exact attempt-owned row
+      // failed; publish no event and leave the artifact recoverable on the box.
+      await abandonActiveRecording(
+        "activity ended without recording settlement",
+        didComputerUse ? "failed" : "discard",
+      );
       if (resolvedSandbox) {
         // TURN-END mid-session snapshot (sandbox-file-persistence): fold the
         // turn's finished /workspace onto the lease before releasing the holder,

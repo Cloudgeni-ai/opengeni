@@ -12934,6 +12934,85 @@ export async function deleteRecording(
   );
 }
 
+/**
+ * Close an attempt-owned recording that could not reach the atomic turn
+ * settlement. The accepted recording.started event is the durable ownership
+ * receipt: cleanup is allowed only for the exact turn generation and attempt
+ * that created this recording id. No timeline event is emitted from this
+ * hygiene path.
+ */
+export async function abandonRecordingForTurnAttempt(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    executionGeneration: number;
+    attemptId: string;
+    recordingId: string;
+    disposition: "failed" | "discard";
+    reason: string;
+  },
+): Promise<boolean> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        const [recording] = await tx
+          .select({ id: schema.sessionRecordings.id })
+          .from(schema.sessionRecordings)
+          .where(
+            and(
+              eq(schema.sessionRecordings.accountId, input.accountId),
+              eq(schema.sessionRecordings.workspaceId, input.workspaceId),
+              eq(schema.sessionRecordings.sessionId, input.sessionId),
+              eq(schema.sessionRecordings.turnId, input.turnId),
+              eq(schema.sessionRecordings.id, input.recordingId),
+              eq(schema.sessionRecordings.mode, "on-turn"),
+              inArray(schema.sessionRecordings.state, ["recording", "finalizing"]),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (!recording) return false;
+        const [started] = await tx
+          .select({ id: schema.sessionEvents.id })
+          .from(schema.sessionEvents)
+          .where(
+            and(
+              eq(schema.sessionEvents.workspaceId, input.workspaceId),
+              eq(schema.sessionEvents.sessionId, input.sessionId),
+              eq(schema.sessionEvents.turnId, input.turnId),
+              eq(schema.sessionEvents.turnGeneration, input.executionGeneration),
+              eq(schema.sessionEvents.turnAttemptId, input.attemptId),
+              eq(schema.sessionEvents.turnAssociation, "current"),
+              eq(schema.sessionEvents.type, "recording.started"),
+              eq(sql<string>`${schema.sessionEvents.payload} ->> 'recordingId'`, input.recordingId),
+            ),
+          )
+          .limit(1);
+        if (!started) return false;
+        if (input.disposition === "discard") {
+          await tx
+            .delete(schema.sessionRecordings)
+            .where(eq(schema.sessionRecordings.id, recording.id));
+        } else {
+          await tx
+            .update(schema.sessionRecordings)
+            .set({
+              state: "failed",
+              reason: input.reason.slice(0, 2_000),
+              finalizedAt: new Date(),
+            })
+            .where(eq(schema.sessionRecordings.id, recording.id));
+        }
+        return true;
+      }),
+  );
+}
+
 export async function getRecording(
   db: Database,
   workspaceId: string,
@@ -19481,6 +19560,27 @@ async function isNewerApprovalTrigger(
   );
 }
 
+type SessionTurnRecordingSettlementBase = {
+  recordingId: string;
+  producerId?: string | null;
+  producerSeq?: number | null;
+  occurredAt?: Date;
+};
+
+export type SessionTurnRecordingSettlement =
+  | (SessionTurnRecordingSettlementBase & {
+      action: "available";
+      storageKey: string;
+      sizeBytes: number;
+      durationSeconds: number;
+    })
+  | (SessionTurnRecordingSettlementBase & {
+      action: "failed";
+      reason: string;
+      detail: string | null;
+    })
+  | (SessionTurnRecordingSettlementBase & { action: "discard" });
+
 export type ApplySessionTurnSettlementInput = {
   sessionId: string;
   turnId: string;
@@ -19492,10 +19592,11 @@ export type ApplySessionTurnSettlementInput = {
   sessionStatus: SessionStatus;
   activeTurnId: string | null;
   events: AppendEventInput[];
+  recording?: SessionTurnRecordingSettlement;
 };
 
 export type ApplySessionTurnSettlementResult =
-  | { action: "settled"; events: SessionEvent[] }
+  | { action: "settled"; events: SessionEvent[]; recordingMutationApplied: boolean }
   | {
       action: "stale";
       events: [];
@@ -19566,6 +19667,93 @@ export async function applySessionTurnSettlement(
         };
       }
 
+      let recordingEvent: AppendEventInput | null = null;
+      let recordingMutationApplied = false;
+      if (input.recording) {
+        const [recording] = await tx
+          .select()
+          .from(schema.sessionRecordings)
+          .where(
+            and(
+              eq(schema.sessionRecordings.accountId, session.accountId),
+              eq(schema.sessionRecordings.workspaceId, workspaceId),
+              eq(schema.sessionRecordings.sessionId, input.sessionId),
+              eq(schema.sessionRecordings.turnId, input.turnId),
+              eq(schema.sessionRecordings.id, input.recording.recordingId),
+              eq(schema.sessionRecordings.mode, "on-turn"),
+              inArray(schema.sessionRecordings.state, ["recording", "finalizing"]),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (recording) {
+          const recordingInput = input.recording;
+          if (recordingInput.action === "discard") {
+            await tx
+              .delete(schema.sessionRecordings)
+              .where(eq(schema.sessionRecordings.id, recording.id));
+          } else if (recordingInput.action === "available") {
+            await tx
+              .update(schema.sessionRecordings)
+              .set({
+                state: "available",
+                storageKey: recordingInput.storageKey,
+                sizeBytes: recordingInput.sizeBytes,
+                durationSeconds: recordingInput.durationSeconds,
+                reason: null,
+                finalizedAt: new Date(),
+              })
+              .where(eq(schema.sessionRecordings.id, recording.id));
+            recordingEvent = {
+              type: "recording.available",
+              payload: {
+                recordingId: recording.id,
+                turnId: input.turnId,
+                codec: recording.codec,
+                contentType: recording.codec === "vp9-webm" ? "video/webm" : "video/mp4",
+                storageKey: recordingInput.storageKey,
+                durationSeconds: recordingInput.durationSeconds,
+                sizeBytes: recordingInput.sizeBytes,
+                dimensions: [recording.width, recording.height],
+              },
+              ...(recordingInput.producerId != null
+                ? { producerId: recordingInput.producerId }
+                : {}),
+              ...(recordingInput.producerSeq != null
+                ? { producerSeq: recordingInput.producerSeq }
+                : {}),
+              ...(recordingInput.occurredAt ? { occurredAt: recordingInput.occurredAt } : {}),
+            };
+          } else {
+            await tx
+              .update(schema.sessionRecordings)
+              .set({
+                state: "failed",
+                reason: recordingInput.detail,
+                finalizedAt: new Date(),
+              })
+              .where(eq(schema.sessionRecordings.id, recording.id));
+            recordingEvent = {
+              type: "recording.failed",
+              payload: {
+                recordingId: recording.id,
+                turnId: input.turnId,
+                reason: recordingInput.reason,
+                detail: recordingInput.detail,
+              },
+              ...(recordingInput.producerId != null
+                ? { producerId: recordingInput.producerId }
+                : {}),
+              ...(recordingInput.producerSeq != null
+                ? { producerSeq: recordingInput.producerSeq }
+                : {}),
+              ...(recordingInput.occurredAt ? { occurredAt: recordingInput.occurredAt } : {}),
+            };
+          }
+          recordingMutationApplied = true;
+        }
+      }
+
       let effectiveSessionStatus = input.sessionStatus;
       if (input.sessionStatus === "idle" && input.activeTurnId === null) {
         const [waitingPrompt] = await tx
@@ -19597,7 +19785,8 @@ export async function applySessionTurnSettlement(
           })
         : { sequence, events: [] as SessionEvent[], closed: 0 };
       sequence = closedTools.sequence;
-      const values = input.events.map((event) => {
+      const settlementEvents = recordingEvent ? [recordingEvent, ...input.events] : input.events;
+      const values = settlementEvents.map((event) => {
         const payload =
           event.payload && typeof event.payload === "object"
             ? (event.payload as Record<string, unknown>)
@@ -19709,6 +19898,7 @@ export async function applySessionTurnSettlement(
       return {
         action: "settled" as const,
         events: [...closedTools.events, ...inserted.map(mapEvent)],
+        recordingMutationApplied,
       };
     });
   });
