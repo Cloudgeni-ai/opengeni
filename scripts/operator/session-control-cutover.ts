@@ -7,7 +7,11 @@ import {
   type CutoverPhase,
   type SessionControlCutoverSnapshot,
 } from "@opengeni/db/session-control-cutover-audit";
-import { createDb, reparkOrphanedSessionTurn } from "@opengeni/db";
+import {
+  createDb,
+  repairDetachedCodexCapacityAttempt,
+  reparkOrphanedSessionTurn,
+} from "@opengeni/db";
 import { getSettings } from "@opengeni/config";
 import { createObjectStorage } from "@opengeni/storage";
 import {
@@ -733,6 +737,28 @@ type OrphanedRunningTurn = {
   active_attempt_id: string | null;
 };
 
+type DetachedTerminalAttempt = {
+  workspace_id: string;
+  session_id: string;
+  turn_id: string;
+  active_attempt_id: string;
+};
+
+async function listRunningSessionWorkflows(
+  temporal: TemporalClient,
+): Promise<Array<{ workflowId: string; runId: string }>> {
+  const running: Array<{ workflowId: string; runId: string }> = [];
+  for await (const execution of temporal.workflow.list({ query: "ExecutionStatus='Running'" })) {
+    if (execution.workflowId.startsWith("session-")) {
+      running.push({ workflowId: execution.workflowId, runId: execution.runId });
+    }
+  }
+  return running.sort(
+    (left, right) =>
+      left.workflowId.localeCompare(right.workflowId) || left.runId.localeCompare(right.runId),
+  );
+}
+
 async function reparkOrphanedTurns(args: ParsedArgs): Promise<void> {
   const output = required(args, "--output");
   const runId = safeRunId(required(args, "--run-id"));
@@ -752,17 +778,7 @@ async function reparkOrphanedTurns(args: ParsedArgs): Promise<void> {
       connection,
       namespace: settings.namespace,
     });
-    const runningWorkflows: Array<{ workflowId: string; runId: string }> = [];
-    for await (const execution of temporal.workflow.list({
-      query: "ExecutionStatus='Running'",
-    })) {
-      if (execution.workflowId.startsWith("session-")) {
-        runningWorkflows.push({
-          workflowId: execution.workflowId,
-          runId: execution.runId,
-        });
-      }
-    }
+    const runningWorkflows = await listRunningSessionWorkflows(temporal);
     if (runningWorkflows.length > 0) {
       throw new Error(
         `refusing to repark while ${runningWorkflows.length} session workflow(s) remain running`,
@@ -850,6 +866,114 @@ async function reparkOrphanedTurns(args: ParsedArgs): Promise<void> {
     process.stderr.write(
       `[cutover-repark] ${execute ? "reparked" : "found"} ${rows.length} orphaned running turn(s), sha256 ${artifact.sha256}\n`,
     );
+  } finally {
+    await client.close().catch(() => undefined);
+    await sql.end({ timeout: 2 }).catch(() => undefined);
+    await connection.close().catch(() => undefined);
+  }
+}
+
+async function repairDetachedCapacityAttempts(args: ParsedArgs): Promise<void> {
+  const output = required(args, "--output");
+  const runId = safeRunId(required(args, "--run-id"));
+  const execute = args.flags.has("--execute");
+  const settings = temporalSettings();
+  const connection = await Connection.connect({ address: settings.address });
+  const sql = postgres(migrationDatabaseUrl(), {
+    max: 1,
+    prepare: false,
+    idle_timeout: 5,
+    connect_timeout: 15,
+    connection: { application_name: "opengeni-cutover-terminal-owner-repair" },
+  });
+  const client = createDb(migrationDatabaseUrl(), { max: 1 });
+  try {
+    const temporal = new TemporalClient({ connection, namespace: settings.namespace });
+    const runningWorkflows = await listRunningSessionWorkflows(temporal);
+    if (runningWorkflows.length > 0) {
+      throw new Error(
+        `refusing detached-owner repair while ${runningWorkflows.length} session workflow(s) remain running`,
+      );
+    }
+    const rows = (await sql.unsafe<DetachedTerminalAttempt[]>(
+      `select workspace_id, session_id, id as turn_id, active_attempt_id
+       from session_turns
+       where status <> 'running' and active_attempt_id is not null
+       order by workspace_id, session_id, id`,
+    )) as unknown as DetachedTerminalAttempt[];
+    const repairs: Array<{
+      workspaceId: string;
+      sessionId: string;
+      turnId: string;
+      attemptId: string;
+      closedToolCalls: number;
+      eventIds: string[];
+    }> = [];
+    const refused: Array<{
+      workspaceId: string;
+      sessionId: string;
+      turnId: string;
+      attemptId: string;
+      observed: Awaited<ReturnType<typeof repairDetachedCodexCapacityAttempt>>;
+    }> = [];
+    if (execute) {
+      for (const row of rows) {
+        const result = await repairDetachedCodexCapacityAttempt(client.db, row.workspace_id, {
+          sessionId: row.session_id,
+          turnId: row.turn_id,
+          attemptId: row.active_attempt_id,
+          reason: `production_cutover:${runId}:detached_capacity_attempt`,
+        });
+        if (result.action !== "repaired") {
+          refused.push({
+            workspaceId: row.workspace_id,
+            sessionId: row.session_id,
+            turnId: row.turn_id,
+            attemptId: row.active_attempt_id,
+            observed: result,
+          });
+          continue;
+        }
+        repairs.push({
+          workspaceId: row.workspace_id,
+          sessionId: row.session_id,
+          turnId: row.turn_id,
+          attemptId: row.active_attempt_id,
+          closedToolCalls: result.closedToolCalls,
+          eventIds: result.events.map((event) => event.id),
+        });
+      }
+    }
+    const remaining = await sql<Array<{ turn_id: string }>>`
+      select id as turn_id from session_turns
+      where status <> 'running' and active_attempt_id is not null
+      order by id`;
+    const draft = {
+      contractVersion: "opengeni/session-control-cutover-terminal-owner-repair/v1",
+      runId,
+      executed: execute,
+      capturedAt: new Date().toISOString(),
+      runningSessionWorkflowCount: runningWorkflows.length,
+      candidateTurns: rows.map((row) => ({
+        workspaceId: row.workspace_id,
+        sessionId: row.session_id,
+        turnId: row.turn_id,
+        attemptId: row.active_attempt_id,
+      })),
+      repairs,
+      refused,
+      remainingTurnIds: remaining.map((row) => row.turn_id),
+    };
+    const artifact = { ...draft, sha256: sha256(draft) };
+    await writeJson(output, artifact);
+    process.stderr.write(
+      `[cutover-terminal-owner-repair] ${execute ? "repaired" : "found"} ${rows.length} detached attempt owner(s), sha256 ${artifact.sha256}\n`,
+    );
+    if (execute && (refused.length > 0 || remaining.length > 0)) {
+      throw new Error(
+        `${refused.length} detached terminal turn(s) were refused and ${remaining.length} detached attempt owner(s) remain; partial audit written to ${output}`,
+      );
+    }
   } finally {
     await client.close().catch(() => undefined);
     await sql.end({ timeout: 2 }).catch(() => undefined);
@@ -1329,6 +1453,7 @@ function usage(): void {
   bun run operator:session-control-cutover temporal-schedules --action pause|resume|inspect --run-id ID [--input FILE] --output FILE
   bun run operator:session-control-cutover temporal-workflows --action inspect|terminate --run-id ID --output FILE [--execute]
   bun run operator:session-control-cutover repark-orphaned-turns --run-id ID --output FILE [--execute]
+  bun run operator:session-control-cutover repair-detached-capacity-attempts --run-id ID --output FILE [--execute]
   bun run operator:session-control-cutover canary --run-id ID --workspace-id UUID --model codex/MODEL --api-base-url URL --output FILE [--timeout-seconds N]
   bun run operator:session-control-cutover maintenance-server
 
@@ -1346,6 +1471,8 @@ if (import.meta.main) {
     else if (args.command === "temporal-schedules") await temporalSchedules(args);
     else if (args.command === "temporal-workflows") await temporalWorkflows(args);
     else if (args.command === "repark-orphaned-turns") await reparkOrphanedTurns(args);
+    else if (args.command === "repair-detached-capacity-attempts")
+      await repairDetachedCapacityAttempts(args);
     else if (args.command === "canary") await productionCodexCanary(args);
     else if (args.command === "maintenance-server") await maintenanceServer();
     else if (args.command === "help" || args.flags.has("--help")) usage();

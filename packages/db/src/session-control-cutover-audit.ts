@@ -309,7 +309,7 @@ function newProofAccumulator(): RelationProofAccumulator {
 
 async function captureRelationProofs(
   sql: postgres.Sql,
-  copyQuery: string,
+  cursorQuery: string,
   expectedFieldCount: number,
   stableFieldIndexes: readonly number[],
   reference: SessionControlCutoverSnapshot | undefined,
@@ -319,28 +319,28 @@ async function captureRelationProofs(
     (reference?.sessions ?? []).map((session) => [session.id, referenceProof(session).maxOrdinal]),
   );
   const accumulators = new Map<string, RelationProofAccumulator>();
-  const stream = await sql.unsafe(copyQuery).readable();
-  let pending = "";
-  let bytesSinceGarbageCollection = 0;
+  let rowsSinceGarbageCollection = 0;
 
-  const consumeLine = (line: string): void => {
-    const fields = line.split("\t");
+  const consumeFields = (fields: unknown): void => {
+    if (!Array.isArray(fields) || fields.some((field) => typeof field !== "string")) {
+      throw new Error("relation proof cursor row contains invalid fields");
+    }
     if (fields.length !== expectedFieldCount) {
       throw new Error(
-        `relation proof COPY row has ${fields.length} fields; expected ${expectedFieldCount}`,
+        `relation proof cursor row has ${fields.length} fields; expected ${expectedFieldCount}`,
       );
     }
     const sessionId = fields[0];
     const id = fields[1];
     const ordinalText = fields[2];
     if (!sessionId || !id || !ordinalText) {
-      throw new Error("relation proof COPY row is missing its identity or ordinal");
+      throw new Error("relation proof cursor row is missing its identity or ordinal");
     }
     const ordinal = numberValue(ordinalText, "relation.ordinal");
     const stableFields = stableFieldIndexes.map((index) => {
       const field = fields[index];
       if (field === undefined) {
-        throw new Error(`relation proof COPY row is missing stable field ${index}`);
+        throw new Error(`relation proof cursor row is missing stable field ${index}`);
       }
       return field;
     });
@@ -369,27 +369,20 @@ async function captureRelationProofs(
     }
   };
 
-  for await (const chunk of stream) {
-    const text = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
-    pending += text;
-    let start = 0;
-    for (;;) {
-      const newline = pending.indexOf("\n", start);
-      if (newline === -1) break;
-      consumeLine(pending.slice(start, newline));
-      start = newline + 1;
+  const cursor = sql.unsafe<Array<{ fields: string[] }>>(cursorQuery).cursor(10_000);
+  for await (const rows of cursor) {
+    for (const row of rows) {
+      consumeFields(row.fields);
     }
-    pending = pending.slice(start);
-    bytesSinceGarbageCollection += Buffer.byteLength(text, "utf8");
-    if (bytesSinceGarbageCollection >= 8 * 1_024 * 1_024) {
-      // COPY applies stream backpressure and exposes only bounded byte chunks.
-      // Collecting on bytes, rather than decoded row count, therefore bounds
-      // transient proof allocations independently of production cardinality.
+    rowsSinceGarbageCollection += rows.length;
+    if (rowsSinceGarbageCollection >= 100_000) {
+      // The server cursor and fixed batch size bound live row materialization.
+      // Periodic collection bounds transient decoding allocations independently
+      // of production cardinality without depending on COPY stream termination.
       collectProofGarbage();
-      bytesSinceGarbageCollection = 0;
+      rowsSinceGarbageCollection = 0;
     }
   }
-  if (pending.length > 0) consumeLine(pending);
   collectProofGarbage();
 
   const proofs = new Map<string, CutoverRelationProof>();
@@ -551,10 +544,15 @@ export async function captureSessionControlCutoverSnapshot(
   );
   const historyProofs = await captureRelationProofs(
     sql,
-    `copy (
-       select session_id, id, position, turn_id, active, producer_codex_credential_id
-       from session_history_items order by session_id, position, id
-     ) to stdout with (format text)`,
+    `select array[
+       session_id::text,
+       id::text,
+       position::text,
+       coalesce(turn_id::text, E'\\\\N'),
+       case when active then 't' else 'f' end,
+       coalesce(producer_codex_credential_id::text, E'\\\\N')
+     ] as fields
+     from session_history_items order by session_id, position, id`,
     6,
     [1, 3, 2, 4, 5],
     reference,
@@ -562,10 +560,13 @@ export async function captureSessionControlCutoverSnapshot(
   );
   const eventProofs = await captureRelationProofs(
     sql,
-    `copy (
-       select session_id, id, sequence, turn_id
-       from session_events order by session_id, sequence, id
-     ) to stdout with (format text)`,
+    `select array[
+       session_id::text,
+       id::text,
+       sequence::text,
+       coalesce(turn_id::text, E'\\\\N')
+     ] as fields
+     from session_events order by session_id, sequence, id`,
     4,
     [1, 3, 2],
     reference,
@@ -908,9 +909,10 @@ function compareRelationProof(
   }
   if (mode === "migration") {
     if (
-      after.count !== before.count ||
-      after.stableSha256 !== before.stableSha256 ||
-      after.identitySha256 !== before.identitySha256
+      after.count < before.count ||
+      after.preservedCount !== before.count ||
+      after.preservedStableSha256 !== before.stableSha256 ||
+      after.preservedIdentitySha256 !== before.identitySha256
     ) {
       errors.push(`${sessionId}: ${name} changed during migration`);
     }
@@ -921,6 +923,80 @@ function compareRelationProof(
     after.preservedIdentitySha256 !== before.identitySha256
   ) {
     errors.push(`${sessionId}: baseline ${name} identities were not preserved`);
+  }
+}
+
+function comparePendingToolCalls(
+  errors: string[],
+  sessionId: string,
+  before: CutoverPendingToolCall[],
+  after: CutoverPendingToolCall[],
+  beforeTurns: CutoverTurn[],
+  afterTurns: CutoverTurn[],
+  mode: "migration" | "final-fate",
+): void {
+  const beforeById = new Map(before.map((call) => [call.id, call]));
+  const afterById = new Map(after.map((call) => [call.id, call]));
+  const beforeTurnsById = new Map(beforeTurns.map((turn) => [turn.id, turn]));
+  const afterTurnsById = new Map(afterTurns.map((turn) => [turn.id, turn]));
+  for (const call of before) {
+    const observed = afterById.get(call.id);
+    if (observed) {
+      if (mode === "migration" && stableJson(call) !== stableJson(observed)) {
+        errors.push(`${sessionId}: pending tool call ${call.id} changed during migration`);
+      }
+      continue;
+    }
+    const beforeTurn = beforeTurnsById.get(call.turnId);
+    const afterTurn = afterTurnsById.get(call.turnId);
+    const wasClosedByAttemptSettlement =
+      beforeTurn?.activeAttemptId !== null &&
+      beforeTurn?.activeAttemptId !== undefined &&
+      afterTurn?.activeAttemptId === null &&
+      afterTurn.status !== "running" &&
+      afterTurn.status !== "requires_action";
+    if (!wasClosedByAttemptSettlement) {
+      errors.push(`${sessionId}: pending tool call ${call.id} disappeared without settlement`);
+    }
+  }
+  for (const call of after) {
+    if (mode === "migration" && !beforeById.has(call.id)) {
+      errors.push(`${sessionId}: unexpected pending tool call ${call.id} appeared during cutover`);
+    }
+  }
+}
+
+function compareMigrationSystemUpdates(
+  errors: string[],
+  session: CutoverSession,
+  observed: CutoverSession,
+): void {
+  const beforeById = new Map(session.systemUpdates.map((update) => [update.id, update]));
+  const expectedMigratedTurnIds = new Set(
+    session.turns
+      .filter(
+        (turn) =>
+          turn.status === "queued" &&
+          !turn.hasStartedEvidence &&
+          (turn.source === "scheduled_task" || turn.source === "system"),
+      )
+      .map((turn) => turn.id),
+  );
+  for (const update of session.systemUpdates) {
+    const next = observed.systemUpdates.find((candidate) => candidate.id === update.id);
+    if (!next) errors.push(`${session.id}: missing system update ${update.id}`);
+    else if (stableJson(update) !== stableJson(next)) {
+      errors.push(`${session.id}: system update ${update.id} changed during migration`);
+    }
+  }
+  for (const update of observed.systemUpdates) {
+    if (beforeById.has(update.id)) continue;
+    if (
+      !expectedMigratedTurnIds.has(update.sourceId) ||
+      update.dedupeKey !== `migrated-turn:${update.sourceId}`
+    ) {
+      errors.push(`${session.id}: unexpected system update ${update.id} appeared during migration`);
+    }
   }
 }
 
@@ -1083,6 +1159,18 @@ export function reconcileSessionControlCutover(
       session.sandboxLeases,
       next.sandboxLeases,
       mode === "migration",
+    );
+    if (mode === "migration") {
+      compareMigrationSystemUpdates(errors, session, next);
+    }
+    comparePendingToolCalls(
+      errors,
+      session.id,
+      session.pendingToolCalls,
+      next.pendingToolCalls,
+      session.turns,
+      next.turns,
+      mode,
     );
 
     for (const turn of session.turns) {

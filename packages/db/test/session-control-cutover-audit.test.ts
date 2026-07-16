@@ -208,6 +208,54 @@ describe("session-control production cutover audit", () => {
       expect(migrated0057Result.errors).toEqual([]);
       expect(migrated0057Result.ok).toBe(true);
 
+      // A historical capacity settlement could leave one terminal owner while
+      // tool receipts from several activity attempts accumulated on the same
+      // logical turn. The repair closes the whole turn lineage, not only the
+      // receipt whose attempt happens to match the retained owner.
+      const capacitySessionId = crypto.randomUUID();
+      const capacityTurnId = crypto.randomUUID();
+      const capacityAttemptId = crypto.randomUUID();
+      const previousCapacityAttemptId = crypto.randomUUID();
+      await sql`
+          insert into sessions (
+            id, account_id, workspace_id, status, initial_message, model,
+            sandbox_backend, sandbox_group_id, temporal_workflow_id, last_sequence
+          ) values (
+            ${capacitySessionId}, ${accountId}, ${workspaceId}, 'idle', 'capacity residue',
+            'codex/gpt-5.6-sol', 'modal', ${capacitySessionId},
+            ${`session-${capacitySessionId}`}, 1
+          )`;
+      await sql`
+          insert into session_turns (
+            id, account_id, workspace_id, session_id, trigger_event_id,
+            temporal_workflow_id, status, source, position, prompt, model,
+            reasoning_effort, sandbox_backend, started_at, finished_at,
+            execution_generation, active_attempt_id
+          ) values (
+            ${capacityTurnId}, ${accountId}, ${workspaceId}, ${capacitySessionId},
+            ${crypto.randomUUID()}, ${`session-${capacitySessionId}`}, 'failed', 'user', 1,
+            'capacity residue', 'codex/gpt-5.6-sol', 'high', 'modal', now(), now(),
+            4, ${capacityAttemptId}
+          )`;
+      await sql`
+          insert into session_events (
+            account_id, workspace_id, session_id, turn_id, sequence, type, payload
+          ) values (
+            ${accountId}, ${workspaceId}, ${capacitySessionId}, ${capacityTurnId}, 1,
+            'turn.failed', ${sql.json({ code: "codex_usage_limit_reached" })}
+          )`;
+      await sql`
+          insert into session_pending_tool_calls (
+            account_id, workspace_id, session_id, turn_id, execution_generation,
+            attempt_id, call_id, call_type, call_item
+          ) values
+            (${accountId}, ${workspaceId}, ${capacitySessionId}, ${capacityTurnId}, 3,
+             ${previousCapacityAttemptId}, 'previous-attempt-call', 'function_call',
+             ${sql.json({ type: "function_call", callId: "previous-attempt-call" })}),
+            (${accountId}, ${workspaceId}, ${capacitySessionId}, ${capacityTurnId}, 4,
+             ${capacityAttemptId}, 'current-attempt-call', 'function_call',
+             ${sql.json({ type: "function_call", callId: "current-attempt-call" })})`;
+
       const usageEventIds = [crypto.randomUUID(), crypto.randomUUID(), crypto.randomUUID()];
       await sql`
           insert into session_events (
@@ -231,6 +279,31 @@ describe("session-control production cutover audit", () => {
       await sql`
           insert into schema_migrations (name)
           values ('0058_turn_admission_usage_enrollment.sql') on conflict do nothing`;
+
+      await sql`delete from session_pending_tool_calls where turn_id = ${capacityTurnId}`;
+      await sql`
+          update session_turns set active_attempt_id = null where id = ${capacityTurnId}`;
+      await sql`
+          insert into session_events (
+            account_id, workspace_id, session_id, turn_id, turn_generation,
+            turn_attempt_id, turn_association, sequence, type, payload
+          ) values
+            (${accountId}, ${workspaceId}, ${capacitySessionId}, ${capacityTurnId}, 3,
+             ${previousCapacityAttemptId}, 'current', 2, 'agent.toolCall.output',
+             ${sql.json({ recovery: { outcome: "unknown" } })}),
+            (${accountId}, ${workspaceId}, ${capacitySessionId}, ${capacityTurnId}, 4,
+             ${capacityAttemptId}, 'current', 3, 'agent.toolCall.output',
+             ${sql.json({ recovery: { outcome: "unknown" } })})`;
+      await sql`
+          insert into session_history_items (
+            account_id, workspace_id, session_id, turn_id, position, item
+          ) values
+            (${accountId}, ${workspaceId}, ${capacitySessionId}, ${capacityTurnId}, 1,
+             ${sql.json({ type: "function_call_result", status: "incomplete" })}),
+            (${accountId}, ${workspaceId}, ${capacitySessionId}, ${capacityTurnId}, 2,
+             ${sql.json({ type: "function_call_result", status: "incomplete" })})`;
+      await sql`
+          update sessions set last_sequence = 3 where id = ${capacitySessionId}`;
 
       const classifiedUsage = await sql<
         Array<{
@@ -272,6 +345,23 @@ describe("session-control production cutover audit", () => {
         [sessionId, recoverySessionId].sort(),
       );
 
+      // Maintenance repair is allowed to append explicit evidence/model truth,
+      // but the complete baseline prefix must remain byte-for-byte preserved.
+      await sql`
+          insert into session_events (
+            account_id, workspace_id, session_id, turn_id, sequence, type, payload
+          ) values (
+            ${accountId}, ${workspaceId}, ${sessionId}, ${runningTurnId}, 38,
+            'agent.toolCall.output', ${sql.json({ recovery: { outcome: "unknown" } })}
+          )`;
+      await sql`
+          insert into session_history_items (
+            account_id, workspace_id, session_id, turn_id, position, item
+          ) values (
+            ${accountId}, ${workspaceId}, ${sessionId}, ${runningTurnId}, 2,
+            ${sql.json({ type: "function_call_result", status: "incomplete" })}
+          )`;
+
       const migrated = await captureSessionControlCutoverSnapshot(
         sql,
         "migrated",
@@ -281,6 +371,9 @@ describe("session-control production cutover audit", () => {
       const result = reconcileSessionControlCutover(remediationBaseline, migrated, "migration");
       expect(result.errors).toEqual([]);
       expect(result.ok).toBe(true);
+      expect(
+        migrated.sessions.find((session) => session.id === capacitySessionId)?.pendingToolCalls,
+      ).toEqual([]);
 
       const main = migrated.sessions.find((session) => session.id === sessionId);
       if (!main) throw new Error("migrated session is missing");
@@ -296,7 +389,7 @@ describe("session-control production cutover audit", () => {
       const damaged = structuredClone(migrated);
       const damagedMain = damaged.sessions.find((session) => session.id === sessionId);
       if (!damagedMain) throw new Error("migrated session is missing");
-      damagedMain.historyProof.stableSha256 = "0".repeat(64);
+      damagedMain.historyProof.preservedStableSha256 = "0".repeat(64);
       const rejected = reconcileSessionControlCutover(remediationBaseline, damaged, "migration");
       expect(rejected.ok).toBe(false);
       expect(rejected.errors.some((error) => error.includes("history changed"))).toBe(true);
@@ -305,14 +398,14 @@ describe("session-control production cutover audit", () => {
           insert into session_events (
             account_id, workspace_id, session_id, turn_id, sequence, type, payload
           ) values (
-            ${accountId}, ${workspaceId}, ${sessionId}, ${queuedUserTurnId}, 38,
+            ${accountId}, ${workspaceId}, ${sessionId}, ${queuedUserTurnId}, 39,
             'agent.message', ${sql.json({ text: "POST_CUTOVER_EVENT" })}
           )`;
       await sql`
           insert into session_history_items (
             account_id, workspace_id, session_id, turn_id, position, item
           ) values (
-            ${accountId}, ${workspaceId}, ${sessionId}, ${queuedUserTurnId}, 2,
+            ${accountId}, ${workspaceId}, ${sessionId}, ${queuedUserTurnId}, 3,
             ${sql.json({ role: "assistant", content: "POST_CUTOVER_HISTORY" })}
           )`;
       const final = await captureSessionControlCutoverSnapshot(
@@ -324,7 +417,7 @@ describe("session-control production cutover audit", () => {
       const finalResult = reconcileSessionControlCutover(remediationBaseline, final, "final-fate");
       expect(finalResult.errors).toEqual([]);
       expect(finalResult.ok).toBe(true);
-      expect(final.sessions.find((session) => session.id === sessionId)?.eventProof.count).toBe(5);
+      expect(final.sessions.find((session) => session.id === sessionId)?.eventProof.count).toBe(6);
     } finally {
       await sql.end().catch(() => undefined);
     }

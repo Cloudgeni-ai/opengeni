@@ -18,6 +18,8 @@ import {
   getCodexCapacityWaitForSession,
   listPendingCodexCapacityWakeTargets,
   reconcileCodexCapacityWait,
+  registerPendingSessionToolCall,
+  repairDetachedCodexCapacityAttempt,
   setSessionCodexPin,
   updateCodexRotationSettings,
   upsertCodexSubscriptionCredential,
@@ -50,6 +52,7 @@ type Workspace = { accountId: string; workspaceId: string };
 type CapacityScenario = Workspace & {
   sessionId: string;
   turnId: string;
+  attemptId: string;
   goalId: string;
   workflowId: string;
 };
@@ -107,6 +110,7 @@ async function connectCredential(ws: Workspace, allocatorEnabled = false): Promi
 async function seedScenario(ws: Workspace): Promise<CapacityScenario> {
   const sessionId = crypto.randomUUID();
   const turnId = crypto.randomUUID();
+  const attemptId = crypto.randomUUID();
   const goalId = crypto.randomUUID();
   const workflowId = `session-${sessionId}`;
   await admin`
@@ -121,11 +125,13 @@ async function seedScenario(ws: Workspace): Promise<CapacityScenario> {
     insert into session_turns (
       id, account_id, workspace_id, session_id, trigger_event_id,
       temporal_workflow_id, status, position, prompt, model,
-      reasoning_effort, sandbox_backend, resources, tools, metadata
+      reasoning_effort, sandbox_backend, resources, tools, metadata,
+      execution_generation, active_attempt_id
     ) values (
       ${turnId}, ${ws.accountId}, ${ws.workspaceId}, ${sessionId}, ${crypto.randomUUID()},
       ${workflowId}, 'running', 1, 'capacity test', 'codex/gpt-5.6-sol',
-      'xhigh', 'modal', '[]'::jsonb, '[]'::jsonb, '{}'::jsonb
+      'xhigh', 'modal', '[]'::jsonb, '[]'::jsonb, '{}'::jsonb,
+      1, ${attemptId}
     )`;
   await admin`update sessions set active_turn_id = ${turnId} where id = ${sessionId}`;
   await admin`
@@ -136,7 +142,7 @@ async function seedScenario(ws: Workspace): Promise<CapacityScenario> {
       ${goalId}, ${ws.accountId}, ${ws.workspaceId}, ${sessionId}, 'active',
       'finish the capacity test', 'resume exactly once', 1, 20
     )`;
-  return { ...ws, sessionId, turnId, goalId, workflowId };
+  return { ...ws, sessionId, turnId, attemptId, goalId, workflowId };
 }
 
 async function arm(scenario: CapacityScenario, resetAt: Date | null = null) {
@@ -145,6 +151,7 @@ async function arm(scenario: CapacityScenario, resetAt: Date | null = null) {
     workspaceId: scenario.workspaceId,
     sessionId: scenario.sessionId,
     turnId: scenario.turnId,
+    attemptId: scenario.attemptId,
     workflowId: scenario.workflowId,
     goalId: scenario.goalId,
     goalVersion: 1,
@@ -224,40 +231,156 @@ describe("OPE-21 durable Codex capacity waits", () => {
     const ws = await freshWorkspace();
     await connectCredential(ws, false);
     const scenario = await seedScenario(ws);
+    await registerPendingSessionToolCall(dbA, {
+      accountId: scenario.accountId,
+      workspaceId: scenario.workspaceId,
+      sessionId: scenario.sessionId,
+      turnId: scenario.turnId,
+      executionGeneration: 1,
+      attemptId: scenario.attemptId,
+      callId: "capacity-call",
+      callType: "function_call",
+      callItem: {
+        type: "function_call",
+        name: "external_mutation",
+        callId: "capacity-call",
+        status: "in_progress",
+        arguments: "{}",
+      },
+    });
     const armed = await arm(scenario);
     expect(armed.action).toBe("waiting");
     if (armed.action !== "waiting") throw new Error("expected waiter");
     expect(armed.events.map((event) => event.type)).toEqual([
+      "agent.toolCall.output",
       "turn.failed",
       "codex.capacity.waiting",
       "session.status.changed",
     ]);
+    expect(armed.events.every((event) => event.turnAttemptId === scenario.attemptId)).toBe(true);
     expect(armed.waiter.observedWakeRevision).toBe(armed.waiter.wakeRevision);
     const [state] = await admin<
       {
         session_status: string;
         active_turn_id: string | null;
         turn_status: string;
+        active_attempt_id: string | null;
         last_sequence: number;
       }[]
     >`
       select s.status as session_status, s.active_turn_id, t.status as turn_status,
-             s.last_sequence
+             t.active_attempt_id, s.last_sequence
       from sessions s join session_turns t on t.id = ${scenario.turnId}
       where s.id = ${scenario.sessionId}`;
     expect(state).toEqual({
       session_status: "idle",
       active_turn_id: null,
       turn_status: "failed",
-      last_sequence: 3,
+      active_attempt_id: null,
+      last_sequence: 4,
     });
+    const [closed] = await admin<{ pending: number; history: number }[]>`
+      select
+        (select count(*)::int from session_pending_tool_calls
+         where turn_id = ${scenario.turnId}) as pending,
+        (select count(*)::int from session_history_items
+         where turn_id = ${scenario.turnId}) as history`;
+    expect(closed).toEqual({ pending: 0, history: 2 });
 
     const duplicate = await arm(scenario);
     expect(duplicate.action).toBe("waiting");
     expect(duplicate.events).toHaveLength(0);
     const [eventCount] = await admin<{ count: number }[]>`
       select count(*)::int as count from session_events where session_id = ${scenario.sessionId}`;
-    expect(eventCount?.count).toBe(3);
+    expect(eventCount?.count).toBe(4);
+  });
+
+  test("operator repair clears only detached legacy capacity owners and closes tool receipts", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const scenario = await seedScenario(ws);
+    await registerPendingSessionToolCall(dbA, {
+      accountId: scenario.accountId,
+      workspaceId: scenario.workspaceId,
+      sessionId: scenario.sessionId,
+      turnId: scenario.turnId,
+      executionGeneration: 1,
+      attemptId: scenario.attemptId,
+      callId: "legacy-capacity-call",
+      callType: "function_call",
+      callItem: {
+        type: "function_call",
+        name: "external_mutation",
+        callId: "legacy-capacity-call",
+        status: "in_progress",
+        arguments: "{}",
+      },
+    });
+    const previousAttemptId = crypto.randomUUID();
+    await admin`
+      insert into session_pending_tool_calls (
+        account_id, workspace_id, session_id, turn_id, execution_generation,
+        attempt_id, call_id, call_type, call_item
+      ) values (
+        ${scenario.accountId}, ${scenario.workspaceId}, ${scenario.sessionId}, ${scenario.turnId},
+        0, ${previousAttemptId}, 'older-legacy-capacity-call', 'function_call',
+        ${admin.json({
+          type: "function_call",
+          name: "older_external_mutation",
+          callId: "older-legacy-capacity-call",
+          status: "in_progress",
+          arguments: "{}",
+        })}
+      )`;
+    await admin.begin(async (tx) => {
+      await tx`
+        insert into session_events (
+          account_id, workspace_id, session_id, turn_id, sequence, type, payload
+        ) values (
+          ${scenario.accountId}, ${scenario.workspaceId}, ${scenario.sessionId},
+          ${scenario.turnId}, 1, 'turn.failed',
+          ${tx.json({ code: "codex_usage_limit_reached", retryable: false })}
+        )`;
+      await tx`
+        update session_turns set status='failed', finished_at=now(), updated_at=now()
+        where id=${scenario.turnId}`;
+      await tx`
+        update sessions set status='idle', active_turn_id=null, last_sequence=1, updated_at=now()
+        where id=${scenario.sessionId}`;
+    });
+
+    const repaired = await repairDetachedCodexCapacityAttempt(dbA, scenario.workspaceId, {
+      sessionId: scenario.sessionId,
+      turnId: scenario.turnId,
+      attemptId: scenario.attemptId,
+      reason: "production_cutover:test",
+    });
+    expect(repaired.action).toBe("repaired");
+    if (repaired.action !== "repaired") throw new Error("expected detached-owner repair");
+    expect(repaired.closedToolCalls).toBe(2);
+    expect(repaired.events.map((event) => event.type)).toEqual([
+      "agent.toolCall.output",
+      "agent.toolCall.output",
+    ]);
+    expect(new Set(repaired.events.map((event) => event.turnAttemptId))).toEqual(
+      new Set([scenario.attemptId, previousAttemptId]),
+    );
+    const [state] = await admin<
+      { active_attempt_id: string | null; last_sequence: number; pending: number }[]
+    >`
+      select t.active_attempt_id, s.last_sequence,
+        (select count(*)::int from session_pending_tool_calls p where p.turn_id=t.id) pending
+      from session_turns t join sessions s on s.id=t.session_id
+      where t.id=${scenario.turnId}`;
+    expect(state).toEqual({ active_attempt_id: null, last_sequence: 3, pending: 0 });
+    expect(
+      await repairDetachedCodexCapacityAttempt(dbA, scenario.workspaceId, {
+        sessionId: scenario.sessionId,
+        turnId: scenario.turnId,
+        attemptId: scenario.attemptId,
+        reason: "production_cutover:test",
+      }),
+    ).toMatchObject({ action: "stale", events: [], activeAttemptId: null });
   });
 
   test("claim locks session before the pending internal update", async () => {
@@ -337,6 +460,17 @@ describe("OPE-21 durable Codex capacity waits", () => {
       (
         await armCodexCapacityWait(dbA, {
           ...input,
+          attemptId: crypto.randomUUID(),
+          leaseFence: { holderId: "current-holder", generation: 4 },
+          expectedRedispatches: 0,
+        })
+      ).action,
+    ).toBe("stale");
+    expect(
+      (
+        await armCodexCapacityWait(dbA, {
+          ...input,
+          attemptId: scenario.attemptId,
           leaseFence: { holderId: "stale-holder", generation: 3 },
           expectedRedispatches: 0,
         })
@@ -346,6 +480,7 @@ describe("OPE-21 durable Codex capacity waits", () => {
       (
         await armCodexCapacityWait(dbA, {
           ...input,
+          attemptId: scenario.attemptId,
           leaseFence: { holderId: "current-holder", generation: 4 },
           expectedRedispatches: 1,
         })
@@ -353,6 +488,7 @@ describe("OPE-21 durable Codex capacity waits", () => {
     ).toBe("stale");
     const armed = await armCodexCapacityWait(dbA, {
       ...input,
+      attemptId: scenario.attemptId,
       leaseFence: { holderId: "current-holder", generation: 4 },
       expectedRedispatches: 0,
     });
