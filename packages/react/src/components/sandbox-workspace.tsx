@@ -160,7 +160,12 @@ type SessionWarmIntents = {
 };
 
 function emptyWarmIntents(sessionId: string): SessionWarmIntents {
-  return { sessionId, watchDesktop: false, warmTerminal: false, warmEdit: false };
+  return {
+    sessionId,
+    watchDesktop: false,
+    warmTerminal: false,
+    warmEdit: false,
+  };
 }
 
 /**
@@ -198,7 +203,11 @@ export function useSandboxWorkspaceTabs(
 
   // The session's machine fleet + the active-sandbox pointer. Drives the header
   // chip (which machine + its connection state). Polls slowly — ambient context.
-  const machines = useMachines({ workspaceId, sessionId, pollIntervalMs: 8000 });
+  const machines = useMachines({
+    workspaceId,
+    sessionId,
+    pollIntervalMs: 8000,
+  });
   const activeMachine: MachineView | null =
     machines.machines.find((m) => m.sandboxId === machines.activeSandboxId) ??
     machines.machines.find((m) => m.active) ??
@@ -231,7 +240,11 @@ export function useSandboxWorkspaceTabs(
   const ptyWsLive =
     capabilities?.Terminal.transport === "pty-ws" && Boolean(capabilities?.Terminal.url);
   const ptyCapable = (capabilities?.Terminal.ptyCapable ?? false) && !ptyWsLive;
-  const terminal = useSandboxTerminal(sessionId, { events, interactive: ptyCapable, liveness });
+  const terminal = useSandboxTerminal(sessionId, {
+    events,
+    interactive: ptyCapable,
+    liveness,
+  });
   const desktopAdvertised =
     (capabilities?.DesktopStream.transport ?? null) !== null ||
     capabilities?.DesktopStream.reason === "lease_cold";
@@ -258,7 +271,10 @@ export function useSandboxWorkspaceTabs(
   // diff when the box is not warm; a warm box always wins (live path unchanged).
   const captureState = useWorkspaceCapture(sessionId, { events });
   const captureAvailable = captureState.available;
-  const notifiedCaptureDegradedReason = useRef<{ sessionId: string; reason: string | null }>({
+  const notifiedCaptureDegradedReason = useRef<{
+    sessionId: string;
+    reason: string | null;
+  }>({
     sessionId,
     reason: null,
   });
@@ -280,7 +296,10 @@ export function useSandboxWorkspaceTabs(
     // A reverted optimistic mutation (e.g. a 409 rename collision) surfaces as a
     // host notification — the tree silently rolls back, the user sees why.
     onMutationError: (error, op) =>
-      onNotify?.({ kind: "error", message: `Could not ${op}: ${error.message}` }),
+      onNotify?.({
+        kind: "error",
+        message: `Could not ${op}: ${error.message}`,
+      }),
   });
   const git = useSandboxGit(sessionId, {
     events,
@@ -512,6 +531,8 @@ export type SandboxWorkspaceProps = ClientOverride & {
   /** Controlled collapsed state for hosts with their own dock toggle. */
   collapsed?: boolean | undefined;
   onCollapsedChange?: ((collapsed: boolean) => void) | undefined;
+  /** Host navigation shown only in the phone workspace overlay header. */
+  mobileLeadingControl?: ReactNode | undefined;
   autoSaveId?: string | undefined;
   defaultSize?: number | undefined;
   minSize?: number | undefined;
@@ -537,6 +558,7 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
     onNotify,
     collapsed,
     onCollapsedChange,
+    mobileLeadingControl,
     autoSaveId,
     defaultSize,
     minSize,
@@ -588,6 +610,7 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
           onRetry={() => void machine.refresh()}
         />
       }
+      {...(mobileLeadingControl !== undefined ? { mobileLeadingControl } : {})}
       {...(collapsed !== undefined ? { collapsed } : {})}
       {...(onCollapsedChange ? { onCollapsedChange } : {})}
       {...(autoSaveId !== undefined ? { autoSaveId } : {})}

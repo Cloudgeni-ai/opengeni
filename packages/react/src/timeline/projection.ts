@@ -420,15 +420,18 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
 
       case "turn.recovery.requested": {
         closeStreamingTail();
-        const reason =
-          typeof payload.reason === "string" ? payload.reason.replaceAll("_", " ") : null;
+        const rawReason = typeof payload.reason === "string" ? payload.reason : null;
+        const reason = rawReason?.replaceAll("_", " ") ?? null;
         items.push({
           kind: "notice",
           id: event.id,
           tone: "waiting",
-          text: reason
-            ? `The current turn is recovering after ${reason}. No new prompt was queued.`
-            : "The current turn is recovering. No new prompt was queued.",
+          text:
+            rawReason === "workspace_pause"
+              ? "Resuming paused work."
+              : reason
+                ? `Resuming this turn after ${reason}.`
+                : "Resuming this turn.",
           occurredAt: event.occurredAt,
         });
         break;
@@ -437,14 +440,13 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
       case "turn.event.rejected_late": {
         const rejectedType =
           typeof payload.rejectedType === "string" ? payload.rejectedType : "unknown event";
-        // Workspace revision events are session-scoped cache announcements, not
-        // user/agent turn evidence. Older servers could route them through the
-        // attempt fence after the turn settled; retain that audit row durably,
-        // but never present harmless internal bookkeeping as a user-visible
-        // failed action.
+        // Workspace revision events are cache announcements and rejected
+        // reasoning deltas are discarded stream fragments. Both remain durable
+        // in Debug/audit evidence, but neither is a user-visible failed action.
         if (
           rejectedType === "workspace.revision.captured" ||
-          rejectedType === "workspace.revision.degraded"
+          rejectedType === "workspace.revision.degraded" ||
+          rejectedType === "agent.reasoning.delta"
         ) {
           break;
         }

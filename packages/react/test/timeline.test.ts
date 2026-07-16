@@ -734,7 +734,19 @@ describe("buildTimeline", () => {
       expect.objectContaining({
         kind: "notice",
         tone: "waiting",
-        text: "The current turn is recovering after worker shutdown. No new prompt was queued.",
+        text: "Resuming this turn after worker shutdown.",
+      }),
+    ]);
+  });
+
+  test("uses compact copy when workspace-paused work resumes", () => {
+    reset();
+    const items = buildTimeline([event("turn.recovery.requested", { reason: "workspace_pause" })]);
+    expect(items).toEqual([
+      expect.objectContaining({
+        kind: "notice",
+        tone: "waiting",
+        text: "Resuming paused work.",
       }),
     ]);
   });
@@ -769,6 +781,18 @@ describe("buildTimeline", () => {
         rejectedType: "workspace.revision.degraded",
         rejectedPayload: { revision: 4 },
         reason: "active_turn_changed",
+      }),
+    ]);
+    expect(items).toEqual([]);
+  });
+
+  test("hides rejected late reasoning fragments from the user timeline", () => {
+    reset();
+    const items = buildTimeline([
+      event("turn.event.rejected_late", {
+        rejectedType: "agent.reasoning.delta",
+        rejectedPayload: { text: "**internal discarded fragment**" },
+        reason: "workspace_paused",
       }),
     ]);
     expect(items).toEqual([]);

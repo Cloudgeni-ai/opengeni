@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { act, useState } from "react";
+import { act, type ReactNode, useState } from "react";
 import { WorkspaceDock } from "../src/components/workspace-dock";
 import { registerDom, renderComponent } from "./render-hook";
 
@@ -12,7 +12,10 @@ async function click(element: Element | null): Promise<void> {
   });
 }
 
-function ControlledDock(props: { onCollapsedChange: (collapsed: boolean) => void }) {
+function ControlledDock(props: {
+  onCollapsedChange: (collapsed: boolean) => void;
+  mobileLeadingControl?: ReactNode;
+}) {
   const [collapsed, setCollapsed] = useState(false);
   return (
     <WorkspaceDock
@@ -24,6 +27,7 @@ function ControlledDock(props: { onCollapsedChange: (collapsed: boolean) => void
         props.onCollapsedChange(next);
         setCollapsed(next);
       }}
+      mobileLeadingControl={props.mobileLeadingControl}
     />
   );
 }
@@ -92,7 +96,10 @@ describe("WorkspaceDock", () => {
     await withNarrowViewport(async () => {
       const changes: boolean[] = [];
       const rendered = await renderComponent(
-        <ControlledDock onCollapsedChange={(collapsed) => changes.push(collapsed)} />,
+        <ControlledDock
+          onCollapsedChange={(collapsed) => changes.push(collapsed)}
+          mobileLeadingControl={<button aria-label="Open navigation">Menu</button>}
+        />,
       );
 
       // No drag splitter renders on a phone-width viewport.
@@ -101,6 +108,7 @@ describe("WorkspaceDock", () => {
       const overlay = rendered.container.querySelector('[role="dialog"][aria-label="Workspace"]');
       expect(overlay).not.toBeNull();
       expect(overlay?.textContent ?? "").toContain("Run content");
+      expect(overlay?.querySelector('[aria-label="Open navigation"]')).not.toBeNull();
 
       // The overlay's own close control drives the same collapsed contract.
       await click(rendered.container.querySelector('[aria-label="Close workspace"]'));

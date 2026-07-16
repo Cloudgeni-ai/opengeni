@@ -37,7 +37,12 @@ async function freshWorkspace(): Promise<{ accountId: string; workspaceId: strin
   return { accountId: account!.id, workspaceId: workspace!.id };
 }
 
-async function session(input: { accountId: string; workspaceId: string; message: string }) {
+async function session(input: {
+  accountId: string;
+  workspaceId: string;
+  message: string;
+  parentSessionId?: string;
+}) {
   return await createSession(db, {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
@@ -46,6 +51,7 @@ async function session(input: { accountId: string; workspaceId: string; message:
     metadata: {},
     model: "test-model",
     sandboxBackend: "none",
+    ...(input.parentSessionId ? { parentSessionId: input.parentSessionId } : {}),
   });
 }
 
@@ -127,6 +133,63 @@ afterAll(async () => {
 });
 
 describe("session pins (real PostgreSQL + FORCE RLS)", () => {
+  test("lists server-authoritative descendant summaries for roots and lazy child pages", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const subjectId = "user:tree-stats";
+    await grantMember(workspace, subjectId);
+    const root = await session({ ...workspace, message: "root" });
+    const child = await session({
+      ...workspace,
+      message: "child",
+      parentSessionId: root.id,
+    });
+    const grandchild = await session({
+      ...workspace,
+      message: "grandchild",
+      parentSessionId: child.id,
+    });
+    await session({ ...workspace, message: "unrelated root" });
+    await admin`
+      update sessions
+      set status = case
+        when id = ${child.id} then 'running'
+        when id = ${grandchild.id} then 'requires_action'
+        else status
+      end
+      where id in (${child.id}, ${grandchild.id})`;
+
+    const roots = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId,
+      parentSessionId: null,
+    });
+    expect(roots.sessions.find((row) => row.id === root.id)?.treeStats).toEqual({
+      directChildren: 1,
+      totalDescendants: 2,
+      runningDescendants: 1,
+      queuedDescendants: 0,
+      attentionDescendants: 1,
+      pausedDescendants: 0,
+      failedDescendants: 0,
+    });
+    expect(roots.sessions.some((row) => row.id === child.id)).toBe(false);
+
+    const children = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId,
+      parentSessionId: root.id,
+    });
+    expect(children.sessions.map((row) => row.id)).toEqual([child.id]);
+    expect(children.sessions[0]?.treeStats).toEqual({
+      directChildren: 1,
+      totalDescendants: 1,
+      runningDescendants: 0,
+      queuedDescendants: 0,
+      attentionDescendants: 1,
+      pausedDescendants: 0,
+      failedDescendants: 0,
+    });
+  });
+
   test("reaps expired list snapshots outside request transactions", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();

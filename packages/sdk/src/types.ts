@@ -417,6 +417,18 @@ export type Session = {
   pinnedAt?: string | null;
   /** Optimistic pin-state revision; zero represents an absent pin relation. */
   pinVersion?: number;
+  /** Server-authoritative descendant counts populated by session-list reads. */
+  treeStats?:
+    | {
+        directChildren: number;
+        totalDescendants: number;
+        runningDescendants: number;
+        queuedDescendants: number;
+        attentionDescendants: number;
+        pausedDescendants: number;
+        failedDescendants: number;
+      }
+    | undefined;
   createdAt: string;
   updatedAt: string;
 };

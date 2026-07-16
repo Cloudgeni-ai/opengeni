@@ -32,6 +32,9 @@ export type WorkspaceDockProps = {
    *  maximize/collapse controls (e.g. the machine-state chip). Renders in both
    *  the docked header and the full-screen overlay header. */
   headerAccessory?: ReactNode | undefined;
+  /** Optional host navigation shown at the start of the phone overlay header.
+   *  It is intentionally absent from desktop dock chrome. */
+  mobileLeadingControl?: ReactNode | undefined;
   /** Persisted layout id (localStorage key) for react-resizable-panels. */
   autoSaveId?: string | undefined;
   /** Default dock width as a percent of the session area. */
@@ -93,6 +96,7 @@ export function WorkspaceDock({
   collapsed: collapsedProp,
   onCollapsedChange,
   headerAccessory,
+  mobileLeadingControl,
   autoSaveId = "og.session.dock",
   defaultSize = 34,
   minSize = 22,
@@ -202,6 +206,7 @@ export function WorkspaceDock({
               tabs={tabs}
               current={current}
               onTab={setTab}
+              leading={mobileLeadingControl}
               accessory={headerAccessory}
               controls={
                 <ChromeButton onClick={collapse} title="Close workspace" label="Close workspace">
@@ -338,12 +343,15 @@ function DockChrome({
   tabs,
   current,
   onTab,
+  leading,
   accessory,
   controls,
 }: {
   tabs: WorkspaceTab[];
   current: string;
   onTab: (id: string) => void;
+  /** Host navigation at the start of mobile overlay chrome. */
+  leading?: ReactNode | undefined;
   /** A status accessory (machine chip) between the tab strip and the controls. */
   accessory?: ReactNode | undefined;
   /** Right-aligned chrome controls (maximize / collapse, or the overlay close). */
@@ -353,6 +361,7 @@ function DockChrome({
   return (
     <>
       <div className="flex shrink-0 items-center gap-2 border-b border-og-border px-1.5 py-1">
+        {leading ? <div className="flex shrink-0 items-center">{leading}</div> : null}
         {/* The tab list scrolls horizontally when it can't fit — it must never
             grow into or overlap the chrome controls (they stay shrink-0). The
             scrollbar is hidden to keep the strip calm. */}
