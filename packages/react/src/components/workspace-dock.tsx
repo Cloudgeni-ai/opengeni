@@ -132,9 +132,11 @@ export function WorkspaceDock({
     id: autoSaveId,
   } as Parameters<typeof useDefaultLayout>[0]);
 
-  const current = activeTab ?? internalTab;
-  const tabIds = tabs.map((tab) => tab.id).join("\u0000");
+  const requestedTab = activeTab ?? internalTab;
+  const tabIds = tabs.map((tab) => tab.id);
   const firstTabId = tabs[0]?.id ?? "";
+  const requestedTabIsValid = tabIds.includes(requestedTab);
+  const current = requestedTabIsValid ? requestedTab : firstTabId;
   const setTab = useCallback(
     (id: string) => {
       setInternalTab(id);
@@ -164,12 +166,12 @@ export function WorkspaceDock({
 
   // Keep the active tab valid if the available tabs change.
   useEffect(() => {
-    if (firstTabId && !tabIds.includes(current)) {
+    if (firstTabId && !requestedTabIsValid) {
       setTab(firstTabId);
     }
     // Depend on tab identity, not the tab content objects. Session live events
     // rebuild tab JSX frequently; only id changes can invalidate the active tab.
-  }, [tabIds, firstTabId, current, setTab]);
+  }, [firstTabId, requestedTabIsValid, setTab]);
 
   const collapse = useCallback(() => {
     dockPanelRef.current?.collapse();
@@ -367,10 +369,7 @@ function DockChrome({
   controls: ReactNode;
 }) {
   const active = tabs.find((t) => t.id === current) ?? tabs[0];
-  const activeIndex = Math.max(
-    0,
-    tabs.findIndex((tab) => tab.id === active?.id),
-  );
+  const activeIndex = tabs.findIndex((tab) => tab.id === active?.id);
   const tabsetId = useId();
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const panelId = `${tabsetId}-panel`;
@@ -383,6 +382,7 @@ function DockChrome({
   };
 
   const onTabKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>, index: number) => {
+    if (tabs.length === 0) return;
     let nextIndex: number | null = null;
     if (event.key === "ArrowRight") nextIndex = (index + 1) % tabs.length;
     else if (event.key === "ArrowLeft") nextIndex = (index - 1 + tabs.length) % tabs.length;
@@ -436,7 +436,8 @@ function DockChrome({
       </div>
       <div
         id={panelId}
-        aria-labelledby={`${tabsetId}-tab-${activeIndex}`}
+        aria-label={activeIndex < 0 ? "Workspace" : undefined}
+        aria-labelledby={activeIndex >= 0 ? `${tabsetId}-tab-${activeIndex}` : undefined}
         className="min-h-0 min-w-0 flex-1 overflow-hidden"
         role="tabpanel"
       >

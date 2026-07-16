@@ -99,6 +99,37 @@ describe("WorkspaceDock", () => {
     await rendered.unmount();
   });
 
+  test("invalid and empty tab sets never produce substring matches or dangling ARIA", async () => {
+    const rendered = await renderComponent(
+      <WorkspaceDock
+        activeTab="file"
+        autoSaveId="og.test.workspace-dock-invalid-tab"
+        primary={<div>Chat pane</div>}
+        tabs={[
+          { id: "files", label: "Files", content: <div>Files content</div> },
+          { id: "terminal", label: "Terminal", content: <div>Terminal content</div> },
+        ]}
+      />,
+    );
+    const first = rendered.container.querySelector<HTMLElement>('[role="tab"]');
+    expect(first?.getAttribute("aria-selected")).toBe("true");
+    expect(rendered.container.textContent ?? "").toContain("Files content");
+
+    await rendered.rerender(
+      <WorkspaceDock
+        autoSaveId="og.test.workspace-dock-empty-tabs"
+        primary={<div>Chat pane</div>}
+        tabs={[]}
+      />,
+    );
+    expect(rendered.container.querySelector('[role="tab"]')).toBeNull();
+    const panel = rendered.container.querySelector<HTMLElement>('[role="tabpanel"]');
+    expect(panel?.getAttribute("aria-labelledby")).toBeNull();
+    expect(panel?.getAttribute("aria-label")).toBe("Workspace");
+
+    await rendered.unmount();
+  });
+
   test("a host-controlled dock offers no built-in open/close controls", async () => {
     // The host's own toggle is the ONE open/close affordance: no chrome
     // Collapse button (it duplicated the host toggle) and no re-open rail.
