@@ -148,17 +148,34 @@ export function v4aToGitFileDiff(op: ApplyPatchOperation): GitFileDiff {
           // `@@ -0,0 +1,N @@` from the range fields once newLines is counted — a
           // pre-baked partial header (e.g. `@@ +1 @@`) renders zero lines in a
           // generic unified-diff parser.
-          cur = { oldStart: 0, oldLines: 0, newStart: 1, newLines: 0, header: "", lines: [] };
+          cur = {
+            oldStart: 0,
+            oldLines: 0,
+            newStart: 1,
+            newLines: 0,
+            header: "",
+            lines: [],
+          };
           hunks.push(cur);
           oldNo = 0;
           newNo = 1;
         }
         if (raw.startsWith("+")) {
-          cur.lines.push({ type: "add", oldNo: null, newNo: newNo++, text: raw.slice(1) });
+          cur.lines.push({
+            type: "add",
+            oldNo: null,
+            newNo: newNo++,
+            text: raw.slice(1),
+          });
           cur.newLines += 1;
           additions += 1;
         } else if (raw.startsWith("-")) {
-          cur.lines.push({ type: "del", oldNo: oldNo++, newNo: null, text: raw.slice(1) });
+          cur.lines.push({
+            type: "del",
+            oldNo: oldNo++,
+            newNo: null,
+            text: raw.slice(1),
+          });
           cur.oldLines += 1;
           deletions += 1;
         } else {
@@ -200,7 +217,10 @@ export function v4aToGitFileDiff(op: ApplyPatchOperation): GitFileDiff {
  * renderer and the turn-summary facet counter never drift.
  */
 export function applyPatchOps(raw: unknown): ApplyPatchOperation[] {
-  const r = (raw ?? {}) as { operation?: ApplyPatchOperation; operations?: ApplyPatchOperation[] };
+  const r = (raw ?? {}) as {
+    operation?: ApplyPatchOperation;
+    operations?: ApplyPatchOperation[];
+  };
   if (Array.isArray(r.operations)) {
     return r.operations;
   }
@@ -264,7 +284,21 @@ export function tailPeek(text: string): string {
  * into a flat `{ text, isError }`. Non-MCP outputs pass through as their string
  * form.
  */
-export function unwrapMcpOutput(output: unknown): { text: string; isError: boolean } {
+export function unwrapMcpOutput(output: unknown): {
+  text: string;
+  isError: boolean;
+} {
+  // Managed MCP events persist a normalized single text part as
+  // `{ type: "text", text }`; accept it alongside the SDK-native content array.
+  if (
+    output &&
+    typeof output === "object" &&
+    (output as { type?: unknown }).type === "text" &&
+    typeof (output as { text?: unknown }).text === "string"
+  ) {
+    const record = output as { text: string; isError?: unknown };
+    return { text: record.text, isError: Boolean(record.isError) };
+  }
   if (output && typeof output === "object" && "content" in output) {
     const record = output as { content?: unknown; isError?: unknown };
     const isError = Boolean(record.isError);
@@ -273,7 +307,10 @@ export function unwrapMcpOutput(output: unknown): { text: string; isError: boole
         (part): part is { type: string; text: string } =>
           !!part && typeof part === "object" && (part as { type?: unknown }).type === "text",
       );
-      return { text: textPart ? String(textPart.text) : JSON.stringify(output), isError };
+      return {
+        text: textPart ? String(textPart.text) : JSON.stringify(output),
+        isError,
+      };
     }
     return { text: JSON.stringify(output), isError };
   }
