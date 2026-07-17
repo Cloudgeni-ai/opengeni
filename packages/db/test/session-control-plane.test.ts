@@ -166,7 +166,13 @@ describe("clean session control plane", () => {
       turnId: turn!.id,
       triggerEventId: turn!.triggerEventId,
       attemptId,
-      reason: "worker_shutdown",
+      reason: "provider_unavailable",
+      detail: {
+        code: "provider_unavailable",
+        retryable: true,
+        error: "503 upstream connection termination",
+        continueDelayMs: 60_000,
+      },
     });
     expect(recovery.action).toBe("recovering");
     expect(recovery.events.map((event) => event.type)).toEqual([
@@ -180,7 +186,17 @@ describe("clean session control plane", () => {
       turnAttemptId: attemptId,
       payload: {
         id: "call-interrupted",
-        recovery: { interrupted: true, outcome: "unknown", reason: "worker_shutdown" },
+        recovery: { interrupted: true, outcome: "unknown", reason: "provider_unavailable" },
+      },
+    });
+    expect(recovery.events[1]).toMatchObject({
+      type: "turn.recovery.requested",
+      payload: {
+        reason: "provider_unavailable",
+        code: "provider_unavailable",
+        retryable: true,
+        error: "503 upstream connection termination",
+        continueDelayMs: 60_000,
       },
     });
     const history = await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id);

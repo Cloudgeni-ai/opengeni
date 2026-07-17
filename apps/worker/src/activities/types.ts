@@ -206,9 +206,8 @@ type ClaimedRunAgentTurnResult = {
   status: "idle" | "requires_action" | "failed" | "cancelled" | "recovering";
   turnId: string;
   attemptId: string;
-  // Provider backpressure pacing: when set on an idle result, the session
-  // workflow holds the loop this long before admitting the next turn (an
-  // active goal's continuation would otherwise immediately re-hit the limit).
+  // Provider backpressure pacing: when set on an idle or recovering result, the
+  // session workflow holds the loop this long before admitting the next attempt.
   continueDelayMs?: number;
   // Multi-account rotation all-capped idle: every connected Codex subscription is
   // rate-limited/cooling. This is a MANDATORY hold — session.ts must wait

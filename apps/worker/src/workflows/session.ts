@@ -54,7 +54,7 @@ export function continuationHoldMs(
   result: { status: string; continueDelayMs?: number; idleUntilReset?: boolean },
   floorMs: number,
 ): number {
-  if (result.status !== "idle") {
+  if (result.status !== "idle" && result.status !== "recovering") {
     return 0;
   }
   const delay = result.continueDelayMs ?? 0;
@@ -503,10 +503,6 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       return outcome.result.status === "cancelled";
     }
 
-    if (outcome.result.status === "recovering") {
-      return true;
-    }
-
     if (outcome.result.capacityWait) {
       await waitForCodexCapacity(outcome.result.capacityWait, capacityWaitEntryBaseline);
       return true;
@@ -520,8 +516,8 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
 
     const holdMs = continuationHoldMs(outcome.result, ROTATION_IDLE_FLOOR_MS);
     if (holdMs > 0) {
-      // Provider backpressure / rotation all-capped idle: hold the loop so an active
-      // goal's continuation does not immediately re-enter the same rate-limit window.
+      // Provider recovery / rotation all-capped idle: hold the loop so the same
+      // turn or an active goal does not immediately re-enter the same rate-limit window.
       // A rotation all-capped idle is a MANDATORY hold (idleUntilReset) — a 0/elapsed
       // delay can never skip it (invariant 4: NO THRASH). A control or user signal
       // ends the wait early and is handled by the main loop.

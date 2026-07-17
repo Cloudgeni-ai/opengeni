@@ -898,7 +898,7 @@ describe("worker activities integration", () => {
     );
   });
 
-  test("an MCP stream timeout after a successful tool output checkpoints once and continues the active goal", async () => {
+  test("an MCP stream timeout after a successful tool output checkpoints once and recovers the same turn", async () => {
     const grant = await testGrant(dbClient.db);
     const session = await createOwnedSession(dbClient.db, grant, {
       initialMessage: "continue after transient MCP transport loss",
@@ -1000,18 +1000,22 @@ describe("worker activities integration", () => {
         trigger: { kind: "next" },
         workflowId: "workflow-mcp-timeout-after-output",
       }),
-    ).resolves.toMatchObject({ status: "idle", continueDelayMs: PROVIDER_BACKPRESSURE_DELAY_MS });
+    ).resolves.toMatchObject({
+      status: "recovering",
+      continueDelayMs: PROVIDER_BACKPRESSURE_DELAY_MS,
+    });
 
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100);
     const outputIndex = events.findIndex((event) => event.type === "agent.toolCall.output");
-    const failedIndex = events.findIndex((event) => event.type === "turn.failed");
+    const recoveryIndex = events.findIndex((event) => event.type === "turn.recovery.requested");
     expect(outputIndex).toBeGreaterThanOrEqual(0);
-    expect(failedIndex).toBeGreaterThan(outputIndex);
-    expect(events[failedIndex]?.payload).toMatchObject({
+    expect(recoveryIndex).toBeGreaterThan(outputIndex);
+    expect(events[recoveryIndex]?.payload).toMatchObject({
       code: "mcp_transport_timeout",
       retryable: true,
-      recovery: "goal_continuation",
+      continueDelayMs: PROVIDER_BACKPRESSURE_DELAY_MS,
     });
+    expect(events.some((event) => event.type === "turn.failed")).toBe(false);
     expect(events.filter((event) => event.type === "agent.toolCall.output")).toHaveLength(1);
     const activeHistory = await getActiveSessionHistoryItems(
       dbClient.db,
@@ -1025,7 +1029,15 @@ describe("worker activities integration", () => {
           (row.item as Record<string, unknown>).callId === callId,
       ),
     ).toHaveLength(1);
-    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("idle");
+    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe(
+      "recovering",
+    );
+    expect(
+      (await listSessionTurns(dbClient.db, grant.workspaceId, session.id)).at(-1),
+    ).toMatchObject({
+      status: "recovering",
+      activeAttemptId: null,
+    });
     expect((await getSessionGoal(dbClient.db, grant.workspaceId, session.id))?.status).toBe(
       "active",
     );
