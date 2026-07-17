@@ -1,5 +1,16 @@
 # @opengeni/worker-bundle
 
+## 0.7.3
+
+### Patch Changes
+
+- ea52b39: Recover retryable provider failures as new fenced attempts of the same accepted turn, independent of goal state, while preserving durable tool history and pause controls.
+- Updated dependencies [ea52b39]
+  - @opengeni/db@0.7.1
+  - @opengeni/core@0.4.8
+  - @opengeni/documents@0.2.10
+  - @opengeni/events@0.3.1
+
 ## 0.7.2
 
 ### Patch Changes
