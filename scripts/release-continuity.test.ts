@@ -62,6 +62,11 @@ describe("release continuity", () => {
         sourceRevision,
       );
       expect(captured.exitCode, captured.stderr).toBe(0);
+      expect(JSON.parse(await readFile(manifest, "utf8"))).toMatchObject({
+        schemaVersion: 3,
+        digestAlgorithm: "postgres-jsonb-row-sha256-chunked-v1",
+        phase: "legacy",
+      });
 
       await sql.unsafe(
         await readFile(

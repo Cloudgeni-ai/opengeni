@@ -7,7 +7,7 @@ import postgres, { type Sql } from "postgres";
 type Phase = "legacy" | "canonical";
 type Digest = { rows: number; sha256: string };
 type Manifest = {
-  schemaVersion: 2;
+  schemaVersion: 3;
   digestAlgorithm: typeof DIGEST_ALGORITHM;
   phase: Phase;
   capturedAt: string;
@@ -16,8 +16,8 @@ type Manifest = {
   categories: Record<string, Digest>;
 };
 
-const DIGEST_ALGORITHM = "postgres-jsonb-row-sha256-length-framed-v1" as const;
-const GC_INTERVAL_ROWS = 50_000;
+const DIGEST_ALGORITHM = "postgres-jsonb-row-sha256-chunked-v1" as const;
+const DIGEST_CHUNK_ROWS = 10_000;
 
 const mode = stringArgument("--mode");
 if (mode !== "capture" && mode !== "verify") {
@@ -62,7 +62,7 @@ async function capture(sql: Sql, path: string): Promise<void> {
   const cutoff = capturedAt.toISOString();
   const categories = await digestCategories(sql, phase, cutoff);
   const manifest: Manifest = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     digestAlgorithm: DIGEST_ALGORITHM,
     phase,
     capturedAt: cutoff,
@@ -78,7 +78,7 @@ async function capture(sql: Sql, path: string): Promise<void> {
 
 async function verify(sql: Sql, path: string): Promise<void> {
   const manifest = JSON.parse(await readFile(path, "utf8")) as Manifest;
-  if (manifest.schemaVersion !== 2 || manifest.digestAlgorithm !== DIGEST_ALGORITHM) {
+  if (manifest.schemaVersion !== 3 || manifest.digestAlgorithm !== DIGEST_ALGORITHM) {
     throw new Error("Unsupported continuity manifest");
   }
   const phase = await schemaPhase(sql);
@@ -315,52 +315,65 @@ async function streamDigest(sql: Sql, query: Query): Promise<Digest> {
   const hash = createHash("sha256");
   const frame = Buffer.allocUnsafe(40);
   let rows = 0;
-  let nextCollectionAt = GC_INTERVAL_ROWS;
+  let chunks = 0;
   const source = inlineQueryParameters(query);
-  // Hash each serialized row in PostgreSQL and stream only its fixed-size
-  // digest plus original byte length. Large history/event payloads therefore
-  // never enter the operator process, while the outer digest remains ordered
-  // and length-framed. Every category projects its globally unique `id`, so
-  // the outermost ORDER BY is both deterministic and migration-stable.
+  // PostgreSQL serializes and hashes every row, then folds deterministic
+  // groups into bounded chunk digests. Only one digest per 10,000 rows crosses
+  // into the operator process, so neither payload size nor table cardinality
+  // can grow client memory. Every category projects its globally unique `id`,
+  // making both row order and chunk boundaries migration-stable.
   const hashedQuery = `
-    select octet_length(encoded.payload)::bigint as row_bytes,
-           encode(sha256(encoded.payload), 'hex') as row_sha256
-    from (${source}) source
-    cross join lateral (
-      select convert_to(to_jsonb(source)::text, 'UTF8') as payload
-    ) encoded
-    order by source.id
+    with serialized as (
+      select source.id,
+             octet_length(encoded.payload)::bigint as row_bytes,
+             sha256(encoded.payload) as row_sha256,
+             ((row_number() over (order by source.id) - 1) / ${DIGEST_CHUNK_ROWS})::bigint
+               as chunk_index
+      from (${source}) source
+      cross join lateral (
+        select convert_to(to_jsonb(source)::text, 'UTF8') as payload
+      ) encoded
+    ), chunked as (
+      select chunk_index,
+             count(*)::bigint as chunk_rows,
+             sha256(
+               string_agg(int8send(row_bytes) || row_sha256, ''::bytea order by id)
+             ) as chunk_sha256
+      from serialized
+      group by chunk_index
+    )
+    select chunk_index,
+           chunk_rows,
+           encode(chunk_sha256, 'hex') as chunk_sha256
+    from chunked
+    order by chunk_index
   `;
   await sql
-    .unsafe<{ row_bytes: number | string; row_sha256: string }[]>(hashedQuery)
-    .cursor(1_000, (batch) => {
+    .unsafe<{ chunk_index: number | string; chunk_rows: number | string; chunk_sha256: string }[]>(
+      hashedQuery,
+    )
+    .cursor(100, (batch) => {
       for (const row of batch) {
-        const byteLength = Number(row.row_bytes);
-        if (!Number.isSafeInteger(byteLength) || byteLength < 0) {
-          throw new Error(`Invalid continuity row byte length: ${row.row_bytes}`);
+        const chunkIndex = Number(row.chunk_index);
+        const chunkRows = Number(row.chunk_rows);
+        if (chunkIndex !== chunks) {
+          throw new Error(
+            `Invalid continuity chunk index: expected ${chunks}, got ${row.chunk_index}`,
+          );
         }
-        if (!/^[0-9a-f]{64}$/u.test(row.row_sha256)) {
-          throw new Error("Invalid continuity row digest returned by PostgreSQL");
+        if (!Number.isSafeInteger(chunkRows) || chunkRows <= 0 || chunkRows > DIGEST_CHUNK_ROWS) {
+          throw new Error(`Invalid continuity chunk row count: ${row.chunk_rows}`);
         }
-        frame.writeBigUInt64BE(BigInt(byteLength), 0);
-        if (frame.write(row.row_sha256, 8, 32, "hex") !== 32) {
-          throw new Error("Continuity row digest was not exactly 32 bytes");
+        if (!/^[0-9a-f]{64}$/u.test(row.chunk_sha256)) {
+          throw new Error("Invalid continuity chunk digest returned by PostgreSQL");
         }
-        // `Hash.update()` consumes synchronously, so this single frame can be
-        // reused for every row instead of retaining allocation pressure from
-        // tens of millions of short-lived Buffer objects.
+        frame.writeBigUInt64BE(BigInt(chunkRows), 0);
+        if (frame.write(row.chunk_sha256, 8, 32, "hex") !== 32) {
+          throw new Error("Continuity chunk digest was not exactly 32 bytes");
+        }
         hash.update(frame);
-        rows += 1;
-      }
-      // Postgres.js necessarily creates one short-lived digest string per
-      // row. Bun otherwise lets that garbage accumulate across a category
-      // with millions of rows before performing a major collection, which
-      // makes the operator's RSS depend on table cardinality. Collect only at
-      // cursor batch boundaries, after earlier batches are unreachable, so
-      // memory stays bounded without affecting the digest stream.
-      if (rows >= nextCollectionAt) {
-        Bun.gc(true);
-        nextCollectionAt = rows + GC_INTERVAL_ROWS;
+        rows += chunkRows;
+        chunks += 1;
       }
     });
   return { rows, sha256: hash.digest("hex") };
