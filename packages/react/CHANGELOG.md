@@ -1,5 +1,18 @@
 # @opengeni/react
 
+## 0.15.0
+
+### Minor Changes
+
+- f42cd4a: Replace the old queue and interruption surface with one revisioned prompt queue, durable composer drafts, atomic Steer, recursive Pause/Resume, workspace control invalidation, stale-client contract fencing, and a shared accessible queue UI for first- and third-party consumers. Remove the obsolete passive child-notification setting so every child terminal result follows the one bounded, coalescible internal-update contract.
+- 0399277: Add a per-machine telemetry detail view and upgrade the machine cards. The card now leads with a fused health verdict (connection + resource pressure + sample freshness), previews a CPU trend, and shows live freshness; opening a card reveals full metric history (CPU, memory, disk, load, GPU) over 15m/1h/6h/24h with threshold guides and a hover crosshair — rendering the downsampled series the API already served but nothing consumed. Resource meters now read as a coherent green/amber/red traffic-light aligned with the health verdict, and load average renders neutral (it is not core-normalized) with the run queue carrying the real saturation signal.
+
+### Patch Changes
+
+- 215d01d: Render normalized persisted MCP text outputs in custom timeline tool cards.
+- Updated dependencies [f42cd4a]
+  - @opengeni/sdk@0.15.0
+
 ## 0.14.0
 
 ### Minor Changes

@@ -1,5 +1,11 @@
 # @opengeni/db
 
+## 0.7.1
+
+### Patch Changes
+
+- ea52b39: Recover retryable provider failures as new fenced attempts of the same accepted turn, independent of goal state, while preserving durable tool history and pause controls.
+
 ## 0.7.0
 
 ### Minor Changes
