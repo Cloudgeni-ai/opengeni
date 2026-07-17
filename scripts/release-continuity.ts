@@ -148,7 +148,7 @@ async function digestCategories(
 ): Promise<Record<string, Digest>> {
   const common: Record<string, Query> = {
     sessions_immutable: {
-      text: `select id::text, account_id::text, workspace_id::text,
+      text: `select id, account_id::text, workspace_id::text,
                     parent_session_id::text, initial_message, title, title_source, instructions,
                     resources, tools, metadata - 'childNotificationsMode' as metadata,
                     model, sandbox_backend, sandbox_os,
@@ -161,7 +161,7 @@ async function digestCategories(
              from sessions`,
     },
     turns_immutable: {
-      text: `select id::text, account_id::text, workspace_id::text, session_id::text,
+      text: `select id, account_id::text, workspace_id::text, session_id::text,
                     trigger_event_id::text, temporal_workflow_id, status, source, position::text,
                     prompt, resources, tools, model, reasoning_effort, sandbox_backend,
                     sandbox_os, metadata, version, execution_generation, lineage,
@@ -170,19 +170,19 @@ async function digestCategories(
              from session_turns`,
     },
     conversation_history: {
-      text: `select id::text, account_id::text, workspace_id::text, session_id::text,
+      text: `select id, account_id::text, workspace_id::text, session_id::text,
                     turn_id::text, position::text, item, active,
                     producer_codex_credential_id::text, created_at
              from session_history_items`,
     },
     approval_run_states: {
-      text: `select id::text, account_id::text, workspace_id::text, session_id::text,
+      text: `select id, account_id::text, workspace_id::text, session_id::text,
                     turn_id::text, state_version, serialized_run_state, pending_approvals,
                     frozen_codex_credential_id::text, created_at
              from agent_run_states`,
     },
     capacity_waiters: {
-      text: `select id::text, account_id::text, workspace_id::text, session_id::text,
+      text: `select id, account_id::text, workspace_id::text, session_id::text,
                     goal_id::text, blocked_turn_id::text, workflow_id, generation, status,
                     goal_version, policy_hash, earliest_reset_at, next_check_at, reset_kind,
                     refresh_attempt, wake_revision, observed_wake_revision, last_wake_reason,
@@ -190,26 +190,26 @@ async function digestCategories(
              from codex_capacity_waiters`,
     },
     internal_update_identities: {
-      text: `select id::text, account_id::text, workspace_id::text, session_id::text,
+      text: `select id, account_id::text, workspace_id::text, session_id::text,
                     classification, summary, state, delivered_turn_id::text,
                     delivered_at, created_at
              from session_system_updates`,
     },
     internal_update_outbox_identities: {
-      text: `select id::text, account_id::text, workspace_id::text,
+      text: `select id, account_id::text, workspace_id::text,
                     source_session_id::text, target_session_id::text,
                     classification, summary, status, attempts, update_id::text,
                     last_error, delivered_at, created_at
              from session_system_update_outbox`,
     },
     pre_cutover_events: {
-      text: `select id::text, account_id::text, workspace_id::text, session_id::text,
+      text: `select id, account_id::text, workspace_id::text, session_id::text,
                     turn_id::text, sequence, type, client_event_id, payload, occurred_at, created_at
              from session_events where created_at <= $1::timestamptz`,
       parameters: [cutoff],
     },
     pre_cutover_audit: {
-      text: `select id::text, account_id::text, workspace_id::text, subject_id,
+      text: `select id, account_id::text, workspace_id::text, subject_id,
                     action, target_type, target_id, metadata, occurred_at
              from audit_events where occurred_at <= $1::timestamptz`,
       parameters: [cutoff],
@@ -230,7 +230,7 @@ async function digestCategories(
 function legacyProjectionQueries(): Record<string, Query> {
   return {
     lifecycle_fates: {
-      text: `select session.id::text,
+      text: `select session.id,
                     case
                       when session.status <> 'paused' then session.status
                       when active_turn.status is not null then active_turn.status
@@ -258,7 +258,7 @@ function legacyProjectionQueries(): Record<string, Query> {
               and active_turn.id = session.active_turn_id`,
     },
     legacy_blocked_fates: {
-      text: `select session.id::text
+      text: `select session.id
              from sessions session
              join workspaces workspace on workspace.id = session.workspace_id
              where session.control_state = 'paused'
@@ -271,10 +271,10 @@ function legacyProjectionQueries(): Record<string, Query> {
 function canonicalProjectionQueries(): Record<string, Query> {
   return {
     lifecycle_fates: {
-      text: `select id::text, status from sessions`,
+      text: `select id, status from sessions`,
     },
     legacy_blocked_fates: {
-      text: `select session.id::text
+      text: `select session.id
              from sessions session
              join workspace_inference_controls control
                on control.workspace_id = session.workspace_id
@@ -303,7 +303,7 @@ function projectedGoalQuery(legacy: boolean): string {
          limit 1
        ), false)`
     : "false";
-  return `select goal.id::text, goal.session_id::text, goal.text, goal.success_criteria,
+  return `select goal.id, goal.session_id::text, goal.text, goal.success_criteria,
                  goal.evidence,
                  case when ${converted} then 'active' else goal.status end as status,
                  case when ${converted} then null else goal.rationale end as rationale,
@@ -330,13 +330,13 @@ async function streamDigest(sql: Sql, query: Query): Promise<Digest> {
   const hash = createHash("sha256");
   const frame = Buffer.allocUnsafe(40);
   let rows = 0;
-  let chunks = 0;
   const source = inlineQueryParameters(query);
-  // PostgreSQL serializes and hashes every row, then folds deterministic
-  // groups into bounded chunk digests. Only one digest per 10,000 rows crosses
-  // into the operator process, so neither payload size nor table cardinality
-  // can grow client memory. Every category projects its globally unique `id`,
-  // making both row order and chunk boundaries migration-stable.
+  // UUID values serialize to the same JSON strings and have the same total
+  // order as their canonical lowercase text form. Keeping the native type lets
+  // PostgreSQL feed the window from each primary-key index instead of sorting a
+  // text-cast table. Every row is still serialized and SHA-256 hashed exactly
+  // once; deterministic 10,000-row chunk frames keep aggregate and client
+  // memory bounded independently of table cardinality.
   const hashedQuery = `
     with serialized as (
       select source.id,
@@ -363,6 +363,7 @@ async function streamDigest(sql: Sql, query: Query): Promise<Digest> {
     from chunked
     order by chunk_index
   `;
+  let chunks = 0;
   await sql
     .unsafe<{ chunk_index: number | string; chunk_rows: number | string; chunk_sha256: string }[]>(
       hashedQuery,

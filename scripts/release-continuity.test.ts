@@ -39,6 +39,28 @@ describe("release continuity", () => {
       for (const migration of migrations.filter((file) => file < "0063_")) {
         await sql.unsafe(await readFile(join(migrationDirectory, migration), "utf8"));
       }
+      const [uuidContract] = await sql<
+        Array<{ ordersIdentically: boolean; serializesIdentically: boolean }>
+      >`
+        with ids(id) as (
+          values
+            ('00000000-0000-0000-0000-000000000000'::uuid),
+            ('0fffffff-ffff-ffff-ffff-ffffffffffff'::uuid),
+            ('10000000-0000-0000-0000-000000000000'::uuid),
+            ('7fffffff-ffff-ffff-ffff-ffffffffffff'::uuid),
+            ('80000000-0000-0000-0000-000000000000'::uuid),
+            ('ffffffff-ffff-ffff-ffff-ffffffffffff'::uuid)
+        )
+        select
+          array_agg(id::text order by id) = array_agg(id::text order by id::text)
+            as "ordersIdentically",
+          bool_and(to_jsonb(id) = to_jsonb(id::text)) as "serializesIdentically"
+        from ids
+      `;
+      expect(uuidContract).toEqual({
+        ordersIdentically: true,
+        serializesIdentically: true,
+      });
       const [{ accountId } = { accountId: "" }] = await sql<{ accountId: string }[]>`
         insert into managed_accounts (name) values ('continuity') returning id as "accountId"`;
       const [{ workspaceId } = { workspaceId: "" }] = await sql<{ workspaceId: string }[]>`
