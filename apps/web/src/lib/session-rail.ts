@@ -3,10 +3,6 @@ import type { Session } from "@/types";
 export const DEFAULT_VISIBLE_TREE_LEVELS = 3;
 export const MAX_VISUAL_TREE_DEPTH = 3;
 
-type WorkspaceInference =
-  | { inferenceState?: "active" | "paused"; inferenceGeneration?: number }
-  | undefined;
-
 export function sessionStatusLabel(status: Session["status"]): string {
   switch (status) {
     case "requires_action":
@@ -19,8 +15,6 @@ export function sessionStatusLabel(status: Session["status"]): string {
       return "Running";
     case "queued":
       return "Queued";
-    case "paused":
-      return "Paused";
     case "failed":
       return "Failed";
     case "cancelled":
@@ -31,34 +25,26 @@ export function sessionStatusLabel(status: Session["status"]): string {
 }
 
 /** Honest user-facing state: lifecycle first, then the effective pause policy. */
-export function sessionStateLabel(session: Session, workspace: WorkspaceInference): string {
+export function sessionStateLabel(session: Session): string {
   const lifecycle = sessionStatusLabel(session.status);
-  const transitionActive = session.status === "running" || session.status === "recovering";
   const attentionOrTerminal =
     session.status === "requires_action" ||
     session.status === "failed" ||
     session.status === "cancelled";
 
-  if (session.controlState === "paused") {
-    if (transitionActive) return "Pausing…";
-    return attentionOrTerminal ? `${lifecycle} · Session paused` : "Paused";
+  const control = session.effectiveControl;
+  if (control.state !== "paused") {
+    return control.override ? `${lifecycle} · Resumed workstream` : lifecycle;
   }
-
-  if (workspace?.inferenceState !== "paused") return lifecycle;
-
-  const hasWorkspaceException =
-    workspace.inferenceGeneration !== undefined &&
-    session.workspaceRunExceptionGeneration === workspace.inferenceGeneration;
-  if (!hasWorkspaceException) {
-    if (transitionActive) return "Pausing…";
-    return attentionOrTerminal ? `${lifecycle} · Workspace paused` : "Paused by workspace";
-  }
-
-  const exceptionLabel =
-    session.status === "idle" || session.status === "paused"
-      ? "Allowed while paused"
-      : "Workspace exception";
-  return `${lifecycle} · ${exceptionLabel}`;
+  if (control.settlement) return "Pausing…";
+  const blocker = control.primaryBlocker;
+  const pause =
+    blocker?.kind === "workspace"
+      ? "Workspace paused"
+      : control.directState === "paused" || blocker?.sessionId === session.id
+        ? "Paused here"
+        : `Paused by ${blocker?.displayName ?? "parent"}`;
+  return attentionOrTerminal ? `${lifecycle} · ${pause}` : pause;
 }
 
 /** Root-to-parent path for the URL-active session, guarded against corrupt cycles. */

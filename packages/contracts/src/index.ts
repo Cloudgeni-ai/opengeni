@@ -7,7 +7,6 @@ export const SessionStatus = z.enum([
   "requires_action",
   "recovering",
   "waiting_capacity",
-  "paused",
   "failed",
   "cancelled",
 ]);
@@ -553,11 +552,13 @@ export const Workspace = z.object({
   // validated by WorkspaceSettingsSchema; unknown keys are preserved across
   // PATCH merges so newer settings survive an older server.
   settings: z.record(z.string(), z.unknown()),
-  inferenceState: z.enum(["active", "paused"]),
-  inferenceGeneration: z.number().int().nonnegative(),
-  inferenceReason: z.string().nullable(),
-  inferenceChangedBy: z.string().nullable(),
-  inferenceChangedAt: z.string().nullable(),
+  inferenceControl: z.object({
+    state: z.enum(["active", "paused"]),
+    revision: z.number().int().nonnegative(),
+    reason: z.string().nullable(),
+    changedBy: z.string().nullable(),
+    changedAt: z.string().nullable(),
+  }),
   // Workspace default rig used by session/scheduled-task create fallback.
   defaultRigId: z.string().uuid().nullable(),
   createdAt: z.string(),
@@ -652,6 +653,10 @@ export const DelegatedAccessTokenPayload = z.object({
   // sacred-pause guard must know if the CALLER is a machine child-notification
   // turn, and the active pointer can flip to another turn mid-check.
   turnId: z.string().uuid().optional(),
+  // Exact execution owner. Agent control commands are accepted only while this
+  // attempt still owns the signed turn.
+  attemptId: z.string().uuid().optional(),
+  executionGeneration: z.number().int().positive().optional(),
   exp: z.number().int().positive(),
 });
 export type DelegatedAccessTokenPayload = z.infer<typeof DelegatedAccessTokenPayload>;
@@ -1874,6 +1879,7 @@ export const SessionTurnStatus = z.enum([
   "failed",
   "cancelled",
   "superseded",
+  "withdrawn_for_edit",
 ]);
 export type SessionTurnStatus = z.infer<typeof SessionTurnStatus>;
 
@@ -2058,70 +2064,226 @@ export const SessionTurn = z.object({
 });
 export type SessionTurn = z.infer<typeof SessionTurn>;
 
+export const EffectiveControlBlocker = z.object({
+  kind: z.enum(["session", "workspace"]),
+  sessionId: z.string().uuid().optional(),
+  displayName: z.string().min(1),
+  actor: z.string().nullable(),
+  reason: z.string().nullable(),
+  changedAt: z.string().nullable(),
+  revision: z.number().int().nonnegative(),
+});
+export type EffectiveControlBlocker = z.infer<typeof EffectiveControlBlocker>;
+
+export const EffectiveControlResumeOption = z.object({
+  scope: z.enum(["selected", "session", "workspace"]),
+  targetId: z.string().uuid().optional(),
+  selectedStateAfter: SessionControlState,
+  remainingPrimaryBlocker: EffectiveControlBlocker.optional(),
+  impactCopy: z.string().min(1),
+});
+export type EffectiveControlResumeOption = z.infer<typeof EffectiveControlResumeOption>;
+
+export const EffectiveSessionControl = z.object({
+  state: SessionControlState,
+  controlVersion: z.number().int().nonnegative(),
+  controlEtag: z.string().min(1),
+  directState: SessionControlState,
+  primaryBlocker: EffectiveControlBlocker.nullable(),
+  additionalBlockerCount: z.number().int().nonnegative(),
+  blockers: z.array(EffectiveControlBlocker),
+  resumeOptions: z.array(EffectiveControlResumeOption),
+  override: z
+    .object({ rootSessionId: z.string().uuid(), revision: z.number().int().nonnegative() })
+    .nullable(),
+  settlement: z
+    .object({ state: z.literal("stopping"), attemptCount: z.number().int().positive() })
+    .nullable(),
+});
+export type EffectiveSessionControl = z.infer<typeof EffectiveSessionControl>;
+
+export const SessionCommandReceipt = z.object({
+  id: z.string().uuid(),
+  action: z.string().min(1),
+  operationKey: z.string().min(1),
+  targetSessionId: z.string().uuid().nullable(),
+  targetTurnId: z.string().uuid().nullable(),
+  appliedControlRevision: z.number().int().nonnegative().nullable(),
+  appliedQueueVersion: z.number().int().nonnegative().nullable(),
+  appliedTurnVersion: z.number().int().positive().nullable(),
+  appliedDraftRevision: z.number().int().positive().nullable(),
+  createdAt: z.string(),
+});
+export type SessionCommandReceipt = z.infer<typeof SessionCommandReceipt>;
+
+export const ComposerDraft = z.object({
+  revision: z.number().int().nonnegative(),
+  text: z.string(),
+  resources: z.array(ResourceRef),
+  tools: z.array(ToolRef),
+  model: z.string().min(1),
+  reasoningEffort: ReasoningEffort,
+  sourceTurnId: z.string().uuid().nullable(),
+  sourceTurnVersion: z.number().int().positive().nullable(),
+  updatedAt: z.string().nullable(),
+});
+export type ComposerDraft = z.infer<typeof ComposerDraft>;
+
 export const SessionQueueSnapshot = z.object({
   version: z.number().int().nonnegative(),
-  controlState: SessionControlState,
-  controlGeneration: z.number().int().nonnegative(),
-  workspaceInferenceState: WorkspaceInferenceState,
-  workspaceInferenceGeneration: z.number().int().nonnegative(),
-  workspaceRunExceptionGeneration: z.number().int().nonnegative().nullable(),
+  effectiveControl: EffectiveSessionControl,
   items: z.array(SessionTurn),
 });
 export type SessionQueueSnapshot = z.infer<typeof SessionQueueSnapshot>;
 
-export const CancelSessionQueueItemRequest = z.object({
+const SessionOperationKey = z.string().min(1);
+
+export const MoveSessionQueueItemRequest = z.object({
+  clientEventId: SessionOperationKey,
   expectedQueueVersion: z.number().int().nonnegative(),
-  expectedItemVersion: z.number().int().positive(),
+  beforeTurnId: z.string().uuid().nullable(),
+});
+export type MoveSessionQueueItemRequest = z.infer<typeof MoveSessionQueueItemRequest>;
+
+export const EditSessionQueueItemRequest = z.object({
+  clientEventId: SessionOperationKey,
+  expectedTurnVersion: z.number().int().positive(),
+  expectedDraftRevision: z.number().int().nonnegative(),
+  replaceDraft: z.boolean(),
+});
+export type EditSessionQueueItemRequest = z.infer<typeof EditSessionQueueItemRequest>;
+
+export const SteerSessionQueueItemRequest = z.object({
+  clientEventId: SessionOperationKey,
+  expectedTurnVersion: z.number().int().positive(),
+  controlEtag: z.string().min(1).optional(),
+});
+export type SteerSessionQueueItemRequest = z.infer<typeof SteerSessionQueueItemRequest>;
+
+export const DeleteSessionQueueItemRequest = z.object({
+  clientEventId: SessionOperationKey,
+  expectedTurnVersion: z.number().int().positive(),
   reason: z.string().min(1).optional(),
 });
-export type CancelSessionQueueItemRequest = z.infer<typeof CancelSessionQueueItemRequest>;
+export type DeleteSessionQueueItemRequest = z.infer<typeof DeleteSessionQueueItemRequest>;
+
+export const SaveComposerDraftRequest = ComposerDraft.pick({
+  text: true,
+  resources: true,
+  tools: true,
+  model: true,
+  reasoningEffort: true,
+}).extend({ expectedRevision: z.number().int().nonnegative() });
+export type SaveComposerDraftRequest = z.infer<typeof SaveComposerDraftRequest>;
 
 export const SessionControlRequest = z.object({
-  mode: z.enum(["pause", "resume"]),
+  action: z.enum(["pause", "resume"]),
   reason: z.string().min(1).optional(),
-  clientEventId: z.string().min(1).optional(),
-  expectedControlState: SessionControlState.optional(),
-  expectedControlGeneration: z.number().int().nonnegative().optional(),
-  expectedWorkspaceInferenceGeneration: z.number().int().nonnegative().optional(),
+  clientEventId: SessionOperationKey,
+  expectedControlEtag: z.string().min(1).optional(),
 });
 export type SessionControlRequest = z.infer<typeof SessionControlRequest>;
 
 export const WorkspaceInferenceControlRequest = z.object({
-  state: WorkspaceInferenceState,
-  reason: z.string().min(1),
-  clientEventId: z.string().min(1),
-  expectedState: WorkspaceInferenceState,
-  expectedGeneration: z.number().int().nonnegative(),
-  exceptSessionIds: z.array(z.string().uuid()).default([]),
+  action: z.enum(["pause", "resume"]),
+  reason: z.string().min(1).optional(),
+  clientEventId: SessionOperationKey,
+  expectedRevision: z.number().int().nonnegative().optional(),
 });
 export type WorkspaceInferenceControlRequest = z.infer<typeof WorkspaceInferenceControlRequest>;
 
 export const WorkspaceInferenceControlResponse = z.object({
-  operationId: z.string().uuid(),
-  state: WorkspaceInferenceState,
-  generation: z.number().int().nonnegative(),
-  affectedSessionIds: z.array(z.string().uuid()),
-  controlSessionIds: z.array(z.string().uuid()),
-  exceptionSessionIds: z.array(z.string().uuid()),
+  receipt: SessionCommandReceipt,
+  state: SessionControlState,
+  revision: z.number().int().nonnegative(),
+  interruptionCount: z.number().int().nonnegative(),
+  wakeCount: z.number().int().nonnegative(),
 });
 export type WorkspaceInferenceControlResponse = z.infer<typeof WorkspaceInferenceControlResponse>;
+
+/**
+ * One durable workspace-wide invalidation for one committed control revision.
+ * It is not conversation history and never becomes queue work; clients use it
+ * only to refetch authoritative workspace/session projections.
+ */
+export const WorkspaceControlEvent = z.object({
+  id: z.string().uuid(),
+  workspaceId: z.string().uuid(),
+  sequence: z.number().int().positive(),
+  revision: z.number().int().positive(),
+  type: z.literal("workspace.control.changed"),
+  scope: z.enum(["workspace", "session"]),
+  rootSessionId: z.string().uuid().nullable(),
+  action: z.enum(["pause", "resume"]),
+  automatic: z.boolean(),
+  reason: z.string().nullable(),
+  actor: z.string().min(1),
+  occurredAt: z.string(),
+});
+export type WorkspaceControlEvent = z.infer<typeof WorkspaceControlEvent>;
 
 export const SystemUpdateClassification = z.enum(["success", "failure", "action_required", "info"]);
 export type SystemUpdateClassification = z.infer<typeof SystemUpdateClassification>;
 
 export const SessionSystemUpdateKind = z.enum([
-  "child_session_update",
-  "scheduled_wake",
-  "lifecycle_event",
-  "runtime_notice",
+  "scheduled_occurrence",
+  "goal_continuation",
+  "agent_message",
+  "agent_steer_instruction",
+  "child_terminal_result",
 ]);
 export type SessionSystemUpdateKind = z.infer<typeof SessionSystemUpdateKind>;
+
+export const SessionSystemUpdatePayload = z.discriminatedUnion("type", [
+  z
+    .object({
+      type: z.literal("scheduled_occurrence"),
+      text: z.string().min(1),
+      scheduledTaskId: z.string().uuid(),
+      scheduledTaskRunId: z.string().uuid(),
+      resources: z.array(ResourceRef).optional(),
+      tools: z.array(ToolRef).optional(),
+    })
+    .passthrough(),
+  z
+    .object({
+      type: z.literal("goal_continuation"),
+      goalId: z.string().uuid(),
+      goalVersion: z.number().int().positive(),
+      prompt: z.string().min(1),
+      reason: z.string().optional(),
+    })
+    .passthrough(),
+  z
+    .object({
+      type: z.literal("agent_message"),
+      text: z.string().min(1),
+      operationId: z.string().uuid(),
+    })
+    .passthrough(),
+  z
+    .object({
+      type: z.literal("agent_steer_instruction"),
+      instruction: z.string().min(1),
+      operationId: z.string().uuid(),
+    })
+    .passthrough(),
+  z
+    .object({
+      type: z.literal("child_terminal_result"),
+      childSessionId: z.string().uuid(),
+      status: z.enum(["idle", "failed"]),
+    })
+    .passthrough(),
+]);
+export type SessionSystemUpdatePayload = z.infer<typeof SessionSystemUpdatePayload>;
 
 export const SessionSystemUpdateState = z.enum([
   "pending",
   "deferred",
   "delivered",
   "cancelled",
+  "superseded",
   "failed",
 ]);
 export type SessionSystemUpdateState = z.infer<typeof SessionSystemUpdateState>;
@@ -2134,7 +2296,7 @@ export const SessionSystemUpdate = z.object({
   sourceId: z.string(),
   dedupeKey: z.string(),
   summary: z.string(),
-  payload: z.record(z.string(), z.unknown()),
+  payload: SessionSystemUpdatePayload,
   lineage: z.record(z.string(), z.unknown()),
   state: SessionSystemUpdateState,
   deliveredTurnId: z.string().uuid().nullable(),
@@ -3126,12 +3288,7 @@ export const Session = z.object({
   queueVersion: z.number().int().nonnegative(),
   queueHeadPosition: z.number().int(),
   queueTailPosition: z.number().int(),
-  controlState: SessionControlState,
-  controlGeneration: z.number().int().nonnegative(),
-  controlReason: z.string().nullable(),
-  controlChangedBy: z.string().nullable(),
-  controlChangedAt: z.string().nullable(),
-  workspaceRunExceptionGeneration: z.number().int().nonnegative().nullable(),
+  effectiveControl: EffectiveSessionControl,
   lastSequence: z.number().int().nonnegative(),
   // Multi-account Codex (P1). codexPinnedCredentialId: the account this session is
   // manually PINNED to (null ⇒ follow the workspace active pointer).
@@ -3252,6 +3409,7 @@ export const SessionEventType = z.enum([
   "session.control.steer_requested",
   "workspace.inference.paused",
   "workspace.inference.resumed",
+  "session.queue.changed",
   "session.queue.prompt.cancelled",
   "session.queue.history",
   // A terminal/stale activity callback is retained as an audit wrapper rather
@@ -4077,23 +4235,17 @@ export const SessionEvent = z.object({
 export type SessionEvent = z.infer<typeof SessionEvent>;
 
 export const SessionQueueMutationResponse = z.object({
+  receipt: SessionCommandReceipt,
   snapshot: SessionQueueSnapshot,
-  events: z.array(SessionEvent),
-  shouldWake: z.boolean(),
+  draft: ComposerDraft.optional(),
 });
 export type SessionQueueMutationResponse = z.infer<typeof SessionQueueMutationResponse>;
 
 export const SessionControlResponse = z.object({
-  operationId: z.string().uuid(),
-  event: SessionEvent,
-  controlState: SessionControlState,
-  controlGeneration: z.number().int().nonnegative(),
-  expectedActiveTurnId: z.string().uuid().nullable(),
-  expectedExecutionGeneration: z.number().int().nonnegative().nullable(),
-  expectedAttemptId: z.string().uuid().nullable(),
-  deliveryEventId: z.string().uuid().nullable(),
-  shouldSignalControl: z.boolean(),
-  shouldWake: z.boolean(),
+  receipt: SessionCommandReceipt,
+  effectiveControl: EffectiveSessionControl,
+  interruptionCount: z.number().int().nonnegative(),
+  wakeCount: z.number().int().nonnegative(),
 });
 export type SessionControlResponse = z.infer<typeof SessionControlResponse>;
 
@@ -4184,6 +4336,8 @@ export const ClientSessionEvent = z.discriminatedUnion("type", [
       tools: z.array(ToolRef).default([]),
       model: z.string().min(1).optional(),
       reasoningEffort: ReasoningEffort.optional(),
+      controlEtag: z.string().min(1).optional(),
+      expectedDraftRevision: z.number().int().nonnegative().optional(),
       // Header-value rotation only. URL/name/tool settings are immutable after
       // session create; persisted events expose metadata, never header values.
       mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
@@ -4208,8 +4362,8 @@ export const SteerSessionMessageRequest = z.object({
   model: z.string().min(1).optional(),
   reasoningEffort: ReasoningEffort.optional(),
   clientEventId: z.string().min(1).optional(),
-  expectedControlGeneration: z.number().int().nonnegative().optional(),
-  expectedWorkspaceInferenceGeneration: z.number().int().nonnegative().optional(),
+  controlEtag: z.string().min(1).optional(),
+  expectedDraftRevision: z.number().int().nonnegative().optional(),
   mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
 });
 export type SteerSessionMessageRequest = z.infer<typeof SteerSessionMessageRequest>;
@@ -4853,8 +5007,20 @@ export const ClientModel = z.object({
 });
 export type ClientModel = z.infer<typeof ClientModel>;
 
+/**
+ * Exact public HTTP protocol revision spoken by this release train.
+ *
+ * This is deliberately independent from a deployment SHA: API and web may roll
+ * at different instants, while incompatible request shapes must never cross
+ * that rollout boundary. Mutating clients send this value in
+ * `x-opengeni-api-contract`; the API rejects any other value before routing.
+ */
+export const OPENGENI_API_CONTRACT_REVISION = "2026-07-session-control-v1" as const;
+export const OPENGENI_API_CONTRACT_HEADER = "x-opengeni-api-contract" as const;
+
 export const ClientConfig = z.object({
   deploymentRevision: z.string(),
+  apiContractRevision: z.literal(OPENGENI_API_CONTRACT_REVISION),
   // Release-train version of the server (absent on dev/source builds). The
   // compatibility policy lives in docs/architecture.md — clients within the
   // same major are supported; evolution is additive within a major.

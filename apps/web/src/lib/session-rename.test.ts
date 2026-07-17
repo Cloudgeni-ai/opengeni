@@ -55,12 +55,18 @@ function session(patch: Partial<Session> = {}): Session {
     queueVersion: patch.queueVersion ?? 0,
     queueHeadPosition: patch.queueHeadPosition ?? 0,
     queueTailPosition: patch.queueTailPosition ?? 0,
-    controlState: patch.controlState ?? "active",
-    controlGeneration: patch.controlGeneration ?? 0,
-    controlReason: patch.controlReason ?? null,
-    controlChangedBy: patch.controlChangedBy ?? null,
-    controlChangedAt: patch.controlChangedAt ?? null,
-    workspaceRunExceptionGeneration: patch.workspaceRunExceptionGeneration ?? null,
+    effectiveControl: patch.effectiveControl ?? {
+      state: "active",
+      controlVersion: 0,
+      controlEtag: "active-0",
+      directState: "active",
+      primaryBlocker: null,
+      additionalBlockerCount: 0,
+      blockers: [],
+      resumeOptions: [],
+      override: null,
+      settlement: null,
+    },
   };
 }
 

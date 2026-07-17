@@ -1,9 +1,13 @@
-import { OpenGeniApiError } from "./errors";
+import { OpenGeniApiContractMismatchError, OpenGeniApiError } from "./errors";
 import {
   streamSessionEvents,
   type SessionEventStreamTransport,
   type StreamSessionEventsOptions,
 } from "./stream";
+import {
+  streamWorkspaceControlEvents,
+  type WorkspaceControlStreamTransport,
+} from "./workspace-control-stream";
 import type {
   AccessContext,
   AddWorkspaceMemberRequest,
@@ -90,8 +94,15 @@ import type {
   SessionMcpCredentialUpdateInput,
   SessionQueueSnapshot,
   SessionQueueMutationResponse,
+  ComposerDraft,
+  DeleteSessionQueueItemRequest,
+  EditSessionQueueItemRequest,
+  MoveSessionQueueItemRequest,
+  SaveComposerDraftRequest,
+  SteerSessionQueueItemRequest,
   SessionControlResponse,
   WorkspaceInferenceControlResponse,
+  WorkspaceControlEvent,
   SessionTurn,
   // Stream surfacing (Phase 5): capability negotiation + viewer lifecycle + config.
   SessionCapabilities,
@@ -161,6 +172,7 @@ import type {
   OAuthStartRequest,
   OAuthStartResponse,
 } from "./types";
+import { OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION } from "./types";
 
 export type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
@@ -182,8 +194,8 @@ export type SendMessageInput = {
   model?: string;
   reasoningEffort?: ReasoningEffort;
   clientEventId?: string;
-  expectedControlGeneration?: number;
-  expectedWorkspaceInferenceGeneration?: number;
+  controlEtag?: string;
+  expectedDraftRevision?: number;
   mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[];
 };
 
@@ -276,7 +288,7 @@ export class OpenGeniClient {
       search?: string;
     } = {},
   ): Promise<SessionListResponse> {
-    const response = await this.requestJson<SessionListResponse | Session[]>(
+    return await this.requestJson<SessionListResponse>(
       "GET",
       `/v1/workspaces/${workspaceId}/sessions`,
       undefined,
@@ -294,23 +306,6 @@ export class OpenGeniClient {
           : {}),
       },
     );
-    if (Array.isArray(response)) {
-      // Rolling/same-major compatibility: an older API ignores `view=page` and
-      // returns the historical array. That is an honest one-page projection;
-      // never pretend it honored a cursor supplied directly by a caller.
-      if (options.cursor) {
-        throw new Error("The connected OpenGeni API does not support stable session-page cursors");
-      }
-      // Older APIs ignore unknown query parameters. Treating their unfiltered
-      // array as a successful search would be worse than an explicit rolling-
-      // upgrade error (and client-side filtering cannot recover matches beyond
-      // the old endpoint's bounded first page).
-      if (options.search?.trim()) {
-        throw new Error("The connected OpenGeni API does not support session search");
-      }
-      return { pinned: [], sessions: response, nextCursor: null };
-    }
-    return response;
   }
 
   /** Set this authenticated member's personal workspace pin for a session. */
@@ -551,14 +546,14 @@ export class OpenGeniClient {
   async pauseSession(
     workspaceId: string,
     sessionId: string,
-    options: { reason?: string; clientEventId?: string } = {},
-  ): Promise<SessionEvent> {
-    return (
-      await this.controlSession(workspaceId, sessionId, {
-        mode: "pause",
-        ...options,
-      })
-    ).event;
+    options: { reason?: string; clientEventId?: string; expectedControlEtag?: string } = {},
+  ): Promise<SessionControlResponse> {
+    return await this.controlSession(workspaceId, sessionId, {
+      action: "pause",
+      clientEventId: options.clientEventId ?? crypto.randomUUID(),
+      ...(options.reason ? { reason: options.reason } : {}),
+      ...(options.expectedControlEtag ? { expectedControlEtag: options.expectedControlEtag } : {}),
+    });
   }
 
   async sendApprovalDecision(
@@ -619,6 +614,7 @@ export class OpenGeniClient {
       headers: { ...this.headers(), Accept: "text/event-stream" },
       ...(options.signal ? { signal: options.signal } : {}),
     });
+    assertApiContractResponse(response);
     if (!response.ok) {
       throw new OpenGeniApiError(response.status, await safeText(response));
     }
@@ -637,15 +633,73 @@ export class OpenGeniClient {
     );
   }
 
-  async cancelQueueItem(
+  async moveQueueItem(
     workspaceId: string,
     sessionId: string,
     turnId: string,
-    request: { expectedQueueVersion: number; expectedItemVersion: number; reason?: string },
+    request: MoveSessionQueueItemRequest,
   ): Promise<SessionQueueMutationResponse> {
     return await this.requestJson<SessionQueueMutationResponse>(
       "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/queue/${turnId}/cancel`,
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/queue/${turnId}/move`,
+      request,
+    );
+  }
+
+  async editQueueItem(
+    workspaceId: string,
+    sessionId: string,
+    turnId: string,
+    request: EditSessionQueueItemRequest,
+  ): Promise<SessionQueueMutationResponse> {
+    return await this.requestJson<SessionQueueMutationResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/queue/${turnId}/edit`,
+      request,
+    );
+  }
+
+  async steerQueueItem(
+    workspaceId: string,
+    sessionId: string,
+    turnId: string,
+    request: SteerSessionQueueItemRequest,
+  ): Promise<SessionQueueMutationResponse> {
+    return await this.requestJson<SessionQueueMutationResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/queue/${turnId}/steer`,
+      request,
+    );
+  }
+
+  async deleteQueueItem(
+    workspaceId: string,
+    sessionId: string,
+    turnId: string,
+    request: DeleteSessionQueueItemRequest,
+  ): Promise<SessionQueueMutationResponse> {
+    return await this.requestJson<SessionQueueMutationResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/queue/${turnId}/delete`,
+      request,
+    );
+  }
+
+  async getComposerDraft(workspaceId: string, sessionId: string): Promise<ComposerDraft> {
+    return await this.requestJson<ComposerDraft>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/composer-draft`,
+    );
+  }
+
+  async saveComposerDraft(
+    workspaceId: string,
+    sessionId: string,
+    request: SaveComposerDraftRequest,
+  ): Promise<ComposerDraft> {
+    return await this.requestJson<ComposerDraft>(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/composer-draft`,
       request,
     );
   }
@@ -654,12 +708,10 @@ export class OpenGeniClient {
     workspaceId: string,
     sessionId: string,
     request: {
-      mode: "pause" | "resume";
+      action: "pause" | "resume";
       reason?: string;
-      clientEventId?: string;
-      expectedControlState?: "active" | "paused";
-      expectedControlGeneration?: number;
-      expectedWorkspaceInferenceGeneration?: number;
+      clientEventId: string;
+      expectedControlEtag?: string;
     },
   ): Promise<SessionControlResponse> {
     return await this.requestJson<SessionControlResponse>(
@@ -672,20 +724,23 @@ export class OpenGeniClient {
   async resumeSession(
     workspaceId: string,
     sessionId: string,
-    options: { reason?: string; clientEventId?: string } = {},
+    options: { reason?: string; clientEventId?: string; expectedControlEtag?: string } = {},
   ): Promise<SessionControlResponse> {
-    return await this.controlSession(workspaceId, sessionId, { mode: "resume", ...options });
+    return await this.controlSession(workspaceId, sessionId, {
+      action: "resume",
+      clientEventId: options.clientEventId ?? crypto.randomUUID(),
+      ...(options.reason ? { reason: options.reason } : {}),
+      ...(options.expectedControlEtag ? { expectedControlEtag: options.expectedControlEtag } : {}),
+    });
   }
 
   async setWorkspaceInferenceState(
     workspaceId: string,
     request: {
-      state: "active" | "paused";
-      reason: string;
+      action: "pause" | "resume";
+      reason?: string;
       clientEventId: string;
-      expectedState: "active" | "paused";
-      expectedGeneration: number;
-      exceptSessionIds?: string[];
+      expectedRevision?: number;
     },
   ): Promise<WorkspaceInferenceControlResponse> {
     return await this.requestJson<WorkspaceInferenceControlResponse>(
@@ -695,16 +750,58 @@ export class OpenGeniClient {
     );
   }
 
-  /** Cancel a queued turn before it is claimed. Returns the cancelled turn. */
-  async deleteQueuedTurn(
+  async listWorkspaceControlEvents(
     workspaceId: string,
-    sessionId: string,
-    turnId: string,
-  ): Promise<SessionTurn> {
-    return await this.requestJson<SessionTurn>(
-      "DELETE",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/turns/${turnId}`,
+    options: { after?: number; limit?: number } = {},
+  ): Promise<WorkspaceControlEvent[]> {
+    return await this.requestJson<WorkspaceControlEvent[]>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/control-events`,
+      undefined,
+      {
+        ...(options.after !== undefined ? { after: String(options.after) } : {}),
+        ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
+      },
     );
+  }
+
+  streamWorkspaceControlEvents(
+    workspaceId: string,
+    options: StreamSessionEventsOptions = {},
+  ): AsyncGenerator<WorkspaceControlEvent, void, void> {
+    return streamWorkspaceControlEvents(this.workspaceControlStreamTransport(workspaceId), options);
+  }
+
+  workspaceControlStreamTransport(workspaceId: string): WorkspaceControlStreamTransport {
+    return {
+      openStream: async (after, signal) =>
+        await this.openWorkspaceControlEventStream(workspaceId, {
+          after,
+          ...(signal ? { signal } : {}),
+        }),
+    };
+  }
+
+  async openWorkspaceControlEventStream(
+    workspaceId: string,
+    options: { after?: number; signal?: AbortSignal } = {},
+  ): Promise<ReadableStream<Uint8Array>> {
+    const response = await this.fetchImpl(
+      this.url(`/v1/workspaces/${workspaceId}/control-events/stream`, {
+        after: String(options.after ?? 0),
+      }),
+      {
+        method: "GET",
+        headers: { ...this.headers(), Accept: "text/event-stream" },
+        ...(options.signal ? { signal: options.signal } : {}),
+      },
+    );
+    assertApiContractResponse(response);
+    if (!response.ok) throw new OpenGeniApiError(response.status, await safeText(response));
+    if (!response.body) {
+      throw new OpenGeniApiError(response.status, "SSE response did not include a readable body");
+    }
+    return response.body;
   }
 
   /**
@@ -1121,7 +1218,14 @@ export class OpenGeniClient {
    * knowledge of the host setup; safe to call before any auth is established.
    */
   async getClientConfig(): Promise<ClientConfig> {
-    return await this.requestJson<ClientConfig>("GET", "/v1/config/client");
+    const config = await this.requestJson<ClientConfig>("GET", "/v1/config/client");
+    if (config.apiContractRevision !== OPENGENI_API_CONTRACT_REVISION) {
+      throw new OpenGeniApiContractMismatchError(
+        OPENGENI_API_CONTRACT_REVISION,
+        String(config.apiContractRevision || "(missing)"),
+      );
+    }
+    return config;
   }
 
   /** The caller's access context: subject, account + workspace grants, defaults. */
@@ -2058,6 +2162,7 @@ export class OpenGeniClient {
     return {
       ...(this.options.apiKey ? { Authorization: `Bearer ${this.options.apiKey}` } : {}),
       ...extra,
+      [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
     };
   }
 
@@ -2208,6 +2313,7 @@ export class OpenGeniClient {
       },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
+    assertApiContractResponse(response);
     if (!response.ok) {
       throw new OpenGeniApiError(response.status, await safeText(response));
     }
@@ -2225,9 +2331,17 @@ export class OpenGeniClient {
       },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
+    assertApiContractResponse(response);
     if (!response.ok) {
       throw new OpenGeniApiError(response.status, await safeText(response));
     }
+  }
+}
+
+function assertApiContractResponse(response: Response): void {
+  const actual = response.headers.get(OPENGENI_API_CONTRACT_HEADER);
+  if (actual && actual !== OPENGENI_API_CONTRACT_REVISION) {
+    throw new OpenGeniApiContractMismatchError(OPENGENI_API_CONTRACT_REVISION, actual);
   }
 }
 

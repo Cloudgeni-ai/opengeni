@@ -51,7 +51,11 @@ const ROTATION_IDLE_FLOOR_MS = 60_000; // 60s
  * Pure + exported so the boundedness contract is unit-testable without a workflow env.
  */
 export function continuationHoldMs(
-  result: { status: string; continueDelayMs?: number; idleUntilReset?: boolean },
+  result: {
+    status: string;
+    continueDelayMs?: number;
+    idleUntilReset?: boolean;
+  },
   floorMs: number,
 ): number {
   if (result.status !== "idle" && result.status !== "recovering") {
@@ -97,7 +101,7 @@ function workerDeathFailure(
 export const userMessage = defineSignal<[string]>("userMessage");
 export const queueChanged = defineSignal("queueChanged");
 export const approvalDecision = defineSignal<[string]>("approvalDecision");
-export const sessionControl = defineSignal<[string]>("sessionControl");
+export const sessionControl = defineSignal("sessionControl");
 export const codexCapacityChanged = defineSignal<[number]>("codexCapacityChanged");
 
 export type SessionWorkflowInput = {
@@ -118,7 +122,7 @@ export type SessionWorkflowInput = {
 export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void> {
   const turnActivity = turnActivityForTaskQueue(workflowInfo().taskQueue);
   let approvalWakeups = 0;
-  let controlEventId: string | null = null;
+  let interruptionWakeups = 0;
   let wakeups = 0;
   let capacityWakeups = 0;
   let signalVersion = 0;
@@ -144,9 +148,9 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
     nonControlSignalVersion += 1;
     approvalWakeups += 1;
   });
-  setHandler(sessionControl, (eventId) => {
+  setHandler(sessionControl, () => {
     signalVersion += 1;
-    controlEventId = eventId;
+    interruptionWakeups += 1;
   });
   setHandler(codexCapacityChanged, () => {
     signalVersion += 1;
@@ -161,14 +165,12 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
     let current = initial;
     let firstEntryBaseline = entryBaseline;
     for (;;) {
-      if (controlEventId !== null) {
-        return;
-      }
       // Signals can land after the waiter commit but before runAgentTurn returns.
       // Compare the first wait against pre-dispatch counters so they cannot be
       // baselined away; later iterations use their normal local snapshot.
       const seenWakeups = firstEntryBaseline?.wakeups ?? wakeups;
       const seenCapacityWakeups = firstEntryBaseline?.capacityWakeups ?? capacityWakeups;
+      const seenInterruptionWakeups = interruptionWakeups;
       firstEntryBaseline = undefined;
       const parsedDeadline = Date.parse(current.nextCheckAt);
       const timerMs = Number.isFinite(parsedDeadline)
@@ -182,12 +184,12 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       } else if (timerMs > 0) {
         await condition(
           () =>
-            controlEventId !== null ||
+            interruptionWakeups !== seenInterruptionWakeups ||
             wakeups !== seenWakeups ||
             capacityWakeups !== seenCapacityWakeups,
           timerMs,
         );
-        if (controlEventId !== null) {
+        if (interruptionWakeups !== seenInterruptionWakeups) {
           return;
         }
         cause =
@@ -211,10 +213,7 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       capacityChecksThisRun += 1;
       const capacityCheckBackstop =
         input.maxCapacityChecksPerRun ?? CODEX_CAPACITY_CHECKS_PER_RUN_BACKSTOP;
-      if (
-        controlEventId === null &&
-        (workflowInfo().continueAsNewSuggested || capacityChecksThisRun >= capacityCheckBackstop)
-      ) {
+      if (workflowInfo().continueAsNewSuggested || capacityChecksThisRun >= capacityCheckBackstop) {
         // The waiter/outbox is durable in Postgres. A fresh workflow run reads
         // it before goal continuation, reconstructs its timer, and turns any
         // unobserved wake revision into an immediate evaluation.
@@ -235,10 +234,10 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
   while (true) {
     // History-overflow guard. The top of the loop is the only safe
     // continueAsNew boundary: no turn is mid-flight (every path that reaches a
-    // new iteration settled or recovered its turn first), and a pending
-    // control signal is unbacked in-memory state that the new run could not
-    // reconstruct — so we refuse to continueAsNew while one is set and let the
-    // loop handle it first. A buffered userMessage/queueChanged signal only
+    // new iteration settled or recovered its turn first). Every interruption
+    // is already durable in Postgres, so all Temporal signals are replaceable
+    // wake hints and none must be carried into the next workflow run. A
+    // buffered userMessage/queueChanged signal only
     // bumps `wakeups`, and its turn was written to Postgres BEFORE the signal
     // was sent, so the fresh run observes it on its first durable work peek
     // — losing the counter strands nothing. The queue living in Postgres is the
@@ -255,7 +254,7 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       const info = workflowInfo();
       const maxTurnsPerRun = input.maxTurnsPerRun ?? TURNS_PER_RUN_BACKSTOP;
       const shouldContinue = info.continueAsNewSuggested || turnsThisRun >= maxTurnsPerRun;
-      if (shouldContinue && controlEventId === null) {
+      if (shouldContinue) {
         await continueAsNew<typeof sessionWorkflow>({
           accountId: input.accountId,
           workspaceId: input.workspaceId,
@@ -277,42 +276,16 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       workspaceId: input.workspaceId,
       sessionId: input.sessionId,
     });
-    if (peek.kind === "fence-settle") {
-      const settlement = await activity.settleSessionControl({
+    if (peek.kind === "interruption-pending") {
+      const settlement = await activity.settleSessionInterruptions({
         accountId: input.accountId,
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,
-        triggerEventId: peek.controlEventId,
+        attemptId: peek.attemptId,
         workflowId,
       });
-      if (controlEventId === peek.controlEventId) controlEventId = null;
       if (settlement.action === "paused") {
-        // The matching sessionControl signal is consumed by this exact durable
-        // settlement. It must not manufacture a second loop; only later work
-        // or a different control keeps the workflow alive.
-        if (nonControlSignalVersion !== closeNonControlSignalVersion || controlEventId !== null) {
-          continue;
-        }
-        return;
-      }
-      continue;
-    }
-    // A duplicate/repaired control signal may arrive after its durable fence
-    // already settled. Explicitly classify it through the same settlement
-    // activity and clear the in-memory signal so it cannot pin this workflow
-    // run forever or block continue-as-new.
-    if (controlEventId !== null) {
-      const signaledControlEventId = controlEventId;
-      const settlement = await activity.settleSessionControl({
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-        triggerEventId: signaledControlEventId,
-        workflowId,
-      });
-      if (controlEventId === signaledControlEventId) controlEventId = null;
-      if (settlement.action === "paused") {
-        if (nonControlSignalVersion !== closeNonControlSignalVersion || controlEventId !== null) {
+        if (nonControlSignalVersion !== closeNonControlSignalVersion) {
           continue;
         }
         return;
@@ -326,40 +299,40 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
     if (peek.kind === "approval-wait") {
       const seenApprovalWakeups = approvalWakeups;
       const seenWakeups = wakeups;
+      const seenInterruptionWakeups = interruptionWakeups;
       await condition(
         () =>
-          controlEventId !== null ||
+          interruptionWakeups !== seenInterruptionWakeups ||
           approvalWakeups !== seenApprovalWakeups ||
           wakeups !== seenWakeups,
       );
       continue;
     }
     if (peek.kind === "idle") {
-      if (controlEventId === null) {
-        let continuation: activities.MaybeContinueGoalResult = { action: "none" };
-        try {
-          continuation = await goalActivity.maybeContinueGoal({
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            workflowId,
-          });
-        } catch (error) {
-          if (isCancellation(error)) throw error;
-          await activity.enqueueGoalRetryWake({
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            workflowId,
-          });
-        }
-        if (continuation.action === "continue" || continuation.action === "queue") continue;
+      let continuation: activities.MaybeContinueGoalResult = { action: "none" };
+      try {
+        continuation = await goalActivity.maybeContinueGoal({
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          workflowId,
+        });
+      } catch (error) {
+        if (isCancellation(error)) throw error;
+        await activity.enqueueGoalRetryWake({
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          workflowId,
+        });
       }
+      if (continuation.action === "continue" || continuation.action === "queue") continue;
       const seenWakeups = wakeups;
       const seenApprovalWakeups = approvalWakeups;
+      const seenInterruptionWakeups = interruptionWakeups;
       const woke = await condition(
         () =>
-          controlEventId !== null ||
+          interruptionWakeups !== seenInterruptionWakeups ||
           wakeups !== seenWakeups ||
           approvalWakeups !== seenApprovalWakeups,
         "5s",
@@ -396,23 +369,13 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
     sessionId: string,
     trigger: activities.RunAgentTurnInput["trigger"],
   ): Promise<boolean> {
-    if (controlEventId) {
-      const settlement = await activity.settleSessionControl({
-        accountId,
-        workspaceId,
-        sessionId,
-        triggerEventId: controlEventId,
-        workflowId: workflowInfo().workflowId,
-      });
-      controlEventId = null;
-      return settlement.action !== "paused";
-    }
-
     const capacityWaitEntryBaseline = { wakeups, capacityWakeups };
     const attemptId = uuid4();
+    const interruptionBaseline = interruptionWakeups;
 
     const scope = new CancellationScope();
-    const workflowId = workflowInfo().workflowId;
+    const workflowExecution = workflowInfo();
+    const workflowId = workflowExecution.workflowId;
     // The stateless resume-by-id model (lease acquire + non-owned injection +
     // release) lives entirely in the runAgentTurn activity.
     const turn: Promise<activities.RunAgentTurnResult> = scope.run(() =>
@@ -421,6 +384,7 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
         workspaceId,
         sessionId,
         workflowId,
+        workflowRunId: workflowExecution.runId,
         attemptId,
         trigger,
       }),
@@ -430,22 +394,36 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       | { kind: "control" }
       | { kind: "failure"; error: unknown } = await Promise.race([
       turn.then(
-        (result: activities.RunAgentTurnResult) => ({ kind: "result" as const, result }),
+        (result: activities.RunAgentTurnResult) => ({
+          kind: "result" as const,
+          result,
+        }),
         (error: unknown) => ({ kind: "failure" as const, error }),
       ),
-      condition(() => controlEventId !== null).then(() => ({ kind: "control" as const })),
+      condition(() => interruptionWakeups !== interruptionBaseline).then(() => ({
+        kind: "control" as const,
+      })),
     ]);
 
     if (outcome.kind === "control") {
       scope.cancel();
-      const settlement = await activity.settleSessionControl({
+      const settlement = await activity.settleSessionInterruptions({
         accountId,
         workspaceId,
         sessionId,
-        triggerEventId: controlEventId!,
+        attemptId,
         workflowId: workflowInfo().workflowId,
       });
-      controlEventId = null;
+      // Keep the workflow alive until the cancelled activity has actually
+      // stopped. Temporal delivers activity cancellation through a heartbeat;
+      // returning while the activity promise is still detached lets the
+      // workflow complete first, after which the worker can keep streaming for
+      // the activity's entire start-to-close window. Postgres settlement above
+      // is intentionally first: it fences every late write immediately while
+      // the physical activity winds down. The control outcome is authoritative,
+      // so a concurrent activity completion or cancellation failure is ignored
+      // only after Temporal has durably observed that terminal activity state.
+      await turn.catch(() => undefined);
       return settlement.action !== "paused";
     }
 
@@ -454,7 +432,10 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       // transport/worker failed. Recover that durable boundary before generic
       // failSession can overwrite the capacity-idle session.
       {
-        const capacityWait = await activity.getCodexCapacityWait({ workspaceId, sessionId });
+        const capacityWait = await activity.getCodexCapacityWait({
+          workspaceId,
+          sessionId,
+        });
         if (capacityWait) {
           await waitForCodexCapacity(capacityWait, capacityWaitEntryBaseline);
           return true;
@@ -522,7 +503,11 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       // delay can never skip it (invariant 4: NO THRASH). A control or user signal
       // ends the wait early and is handled by the main loop.
       const seenWakeups = wakeups;
-      await condition(() => controlEventId !== null || wakeups !== seenWakeups, holdMs);
+      const seenInterruptionWakeups = interruptionWakeups;
+      await condition(
+        () => interruptionWakeups !== seenInterruptionWakeups || wakeups !== seenWakeups,
+        holdMs,
+      );
     }
     return true;
   }

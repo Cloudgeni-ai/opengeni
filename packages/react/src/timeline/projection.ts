@@ -708,13 +708,13 @@ function prescanTurnAnchors(events: SessionEvent[]): TurnAnchorPrescan {
       cancelledTurnIds.add(turnId);
     }
 
-    if (turnId && event.type !== "turn.queued" && event.type !== "turn.cancelled") {
+    if (turnId && isTurnExecutionEvidence(event.type)) {
       const previous = fallbackSeqByTurn.get(turnId);
       if (previous === undefined || event.sequence < previous) {
         fallbackSeqByTurn.set(turnId, event.sequence);
       }
     }
-    if (turnId && isAgentActivityEvent(event.type)) {
+    if (turnId && isTurnExecutionEvidence(event.type)) {
       startedTurnIds.add(turnId);
     }
   }
@@ -796,6 +796,28 @@ function pushInsertion(
 
 function isAgentActivityEvent(type: string): boolean {
   return type.startsWith("agent.") || type.startsWith("sandbox.");
+}
+
+/**
+ * Evidence that a queued prompt crossed the execution boundary when an older
+ * or partially recovered ledger is missing its canonical `turn.started`.
+ * Queue/control bookkeeping intentionally does not qualify: moving, editing,
+ * steering, or deleting a waiting row must never make its prompt appear in the
+ * transcript as though inference had begun.
+ */
+function isTurnExecutionEvidence(type: string): boolean {
+  return (
+    isAgentActivityEvent(type) ||
+    type === "turn.completed" ||
+    type === "turn.failed" ||
+    type === "turn.recovery.requested" ||
+    type === "turn.capacity_waiting" ||
+    type === "session.requiresAction" ||
+    type === "tool.auth_needed" ||
+    type.startsWith("rig.setup.") ||
+    type === "codex.capacity.waiting" ||
+    type === "codex.capacity.resumed"
+  );
 }
 
 function turnEndItem(

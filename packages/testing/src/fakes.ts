@@ -1,9 +1,14 @@
-import type { SessionEvent } from "@opengeni/contracts";
+import type { SessionEvent, WorkspaceControlEvent } from "@opengeni/contracts";
 import type { EventBus, RequestConnection, RequestHandler, RequestReply } from "@opengeni/events";
 
 export class MemoryEventBus implements EventBus {
   published: SessionEvent[][] = [];
+  publishedWorkspaceControl: WorkspaceControlEvent[] = [];
   private subscribers = new Map<string, Set<(events: SessionEvent[]) => void | Promise<void>>>();
+  private workspaceControlSubscribers = new Map<
+    string,
+    Set<(event: WorkspaceControlEvent) => void | Promise<void>>
+  >();
   /** One responder per subject — the in-memory mirror of a NATS request/reply
    *  subscription. A missing entry models "no responder" (NATS 503 → offline). */
   private responders = new Map<string, RequestHandler>();
@@ -36,6 +41,24 @@ export class MemoryEventBus implements EventBus {
     return () => {
       subscribers.delete(onEvents);
     };
+  }
+
+  async publishWorkspaceControl(workspaceId: string, event: WorkspaceControlEvent): Promise<void> {
+    this.publishedWorkspaceControl.push(event);
+    const subscribers = this.workspaceControlSubscribers.get(workspaceId);
+    if (subscribers) {
+      await Promise.all([...subscribers].map((subscriber) => subscriber(event)));
+    }
+  }
+
+  async subscribeWorkspaceControl(
+    workspaceId: string,
+    onEvent: (event: WorkspaceControlEvent) => void | Promise<void>,
+  ): Promise<() => void> {
+    const subscribers = this.workspaceControlSubscribers.get(workspaceId) ?? new Set();
+    subscribers.add(onEvent);
+    this.workspaceControlSubscribers.set(workspaceId, subscribers);
+    return () => subscribers.delete(onEvent);
   }
 
   async request(

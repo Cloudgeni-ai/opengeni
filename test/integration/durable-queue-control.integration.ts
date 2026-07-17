@@ -9,7 +9,6 @@ import {
   claimSessionWorkForAttempt,
   createDb,
   createSession,
-  enqueueSessionMessageAtomically,
   getSession,
   getSessionQueueSnapshot,
   listOutstandingSessionSystemUpdates,
@@ -34,6 +33,7 @@ import {
   TURN_WORKER_MAX_CONCURRENT_TURNS,
 } from "../../apps/worker/src/concurrency";
 import { turnTaskQueue } from "../../apps/worker/src/workflows/activities";
+import { submitTestHumanPrompt } from "./helpers/session-control";
 
 type RequiredServices = Pick<
   TestServices,
@@ -72,17 +72,16 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
     async () => {
       const grant = await testGrant(dbClient.db, "fan-in-steer");
       const session = await createDurableSession(dbClient.db, grant, "fan-in then urgent steer");
-      const initial = await enqueueSessionMessageAtomically(dbClient.db, {
+      const initial = await submitTestHumanPrompt(dbClient.db, {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
         sessionId: session.id,
-        actor: grant.subjectId,
-        origin: "human",
+        subjectId: grant.subjectId,
         text: "long-running initial work",
         resources: [],
         tools: [],
-        clientEventId: `integration-initial-${crypto.randomUUID()}`,
-        delivery: "queue",
+        operationKey: `integration-initial-${crypto.randomUUID()}`,
+        delivery: "send",
         reasoningEffortFallback: "low",
       });
       const taskQueue = `durable-fan-in-${crypto.randomUUID()}`;
@@ -117,7 +116,7 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
       const temporal = new Client({ connection });
       const handle = await temporal.workflow.signalWithStart("sessionWorkflow", {
         taskQueue,
-        workflowId: initial.temporalWorkflowId,
+        workflowId: initial.turn.temporalWorkflowId,
         workflowIdReusePolicy: "ALLOW_DUPLICATE",
         args: [
           {
@@ -176,8 +175,7 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
           tools: [],
           clientEventId: `integration-urgent-${crypto.randomUUID()}`,
           delivery: "steer",
-          expectedControlGeneration: beforeSteer!.controlGeneration,
-          expectedWorkspaceInferenceGeneration: beforeSteer!.workspaceInferenceGeneration,
+          controlEtag: beforeSteer!.effectiveControl.controlEtag,
         });
 
         await handle.result();
@@ -284,7 +282,9 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
           update: { id: committed.update.id },
           events: [],
         });
-        await activities.reapSandboxLeases();
+        // Drive the dedicated canonical wake-outbox repair activity. Sandbox
+        // lifecycle cleanup intentionally has no queue/control responsibility.
+        await activities.dispatchSessionWorkflowWakes();
         let observedSession: Awaited<ReturnType<typeof getSession>> | null = null;
         await waitFor(
           async () => {
@@ -392,6 +392,7 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
             const claim = await claimSessionWorkForAttempt(dbClient.db, input.workspaceId, {
               sessionId: input.sessionId,
               workflowId: input.workflowId,
+              workflowRunId: currentActivityContext()!.info.workflowExecution.runId,
               attemptId: input.attemptId,
               dispatchId: currentActivityContext()!.info.activityId,
               trigger: input.trigger,
@@ -534,15 +535,17 @@ function systemUpdateInput(
     accountId: grant.accountId,
     workspaceId: grant.workspaceId,
     sessionId,
-    kind: "child_session_update" as const,
-    groupingKey,
+    kind: "child_terminal_result" as const,
     classification: "success" as const,
     sourceId: `child-${index}`,
     dedupeKey: `${groupingKey}:child-${index}`,
     summary: `Child ${index} completed`,
-    payload: { childSessionId: `child-${index}`, status: "completed" },
-    lineage: { childSessionId: `child-${index}` },
-    reasoningEffortFallback: "low" as const,
+    payload: {
+      type: "child_terminal_result" as const,
+      childSessionId: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+      status: "idle" as const,
+    },
+    lineage: { childIndex: index },
   };
 }
 

@@ -7,9 +7,8 @@ import {
   type SlashCommandContext,
   type UseFileAttachmentsResult,
 } from "@opengeni/react";
+import type { EffectiveSessionControl } from "@opengeni/sdk";
 import { type ReactNode } from "react";
-
-import type { SessionStatus } from "@/types";
 
 export function useDraftAttachments(workspaceId: string): UseFileAttachmentsResult {
   return useFileAttachments({ workspaceId });
@@ -18,7 +17,13 @@ export function useDraftAttachments(workspaceId: string): UseFileAttachmentsResu
 export function ConsoleComposer(props: {
   composer: ComposerState;
   attachments: UseFileAttachmentsResult;
-  status?: SessionStatus | null;
+  effectiveControl?: EffectiveSessionControl | null;
+  queuedAheadCount?: number;
+  canControlWorkspace?: boolean;
+  controlLinks?: {
+    workspaceHref?: string;
+    sessionHref?: (sessionId: string) => string;
+  };
   placeholder?: string;
   autoFocus?: boolean;
   disabled?: boolean;
@@ -30,7 +35,10 @@ export function ConsoleComposer(props: {
   return (
     <ChatComposer
       composer={props.composer}
-      status={props.status}
+      effectiveControl={props.effectiveControl}
+      queuedAheadCount={props.queuedAheadCount}
+      canControlWorkspace={props.canControlWorkspace}
+      controlLinks={props.controlLinks}
       placeholder={props.placeholder}
       autoFocus={props.autoFocus}
       disabled={props.disabled}

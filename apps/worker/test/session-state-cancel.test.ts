@@ -6,7 +6,7 @@ const publishedEvents: Array<{ type: string; turnId?: string | null; payload: un
 const controlApplications: Array<{
   workspaceId: string;
   sessionId: string;
-  controlEventId: string;
+  attemptId: string;
 }> = [];
 
 describe("session-state interrupt settlement", () => {
@@ -23,11 +23,14 @@ describe("session-state interrupt settlement", () => {
           wakeSessionWorkflow: null,
         }) as any,
       {
-        settlePendingSessionControl: mock(
-          async (_db, workspaceId: string, sessionId: string, controlEventId: string) => {
-            controlApplications.push({ workspaceId, sessionId, controlEventId });
+        settleSessionAttemptInterruptions: mock(
+          async (_db, workspaceId: string, sessionId: string, attemptId: string) => {
+            controlApplications.push({ workspaceId, sessionId, attemptId });
             return {
-              recoveringTurnId: "turn-1",
+              action: "paused" as const,
+              attemptId,
+              turnId: "turn-1",
+              outcome: "interrupted_recoverable" as const,
               events: [
                 {
                   id: "event-recovery",
@@ -47,7 +50,7 @@ describe("session-state interrupt settlement", () => {
                   sequence: 2,
                   type: "session.status.changed",
                   turnId: "turn-1",
-                  payload: { status: "paused" },
+                  payload: { status: "recovering" },
                   occurredAt: "2026-07-10T00:00:00.000Z",
                   clientEventId: null,
                 },
@@ -65,11 +68,11 @@ describe("session-state interrupt settlement", () => {
       },
     );
 
-    await activities.settleSessionControl({
+    await activities.settleSessionInterruptions({
       accountId: "account-1",
       workspaceId: "workspace-1",
       sessionId: "session-1",
-      triggerEventId: "event-1",
+      attemptId: "attempt-1",
       workflowId: "workflow-1",
       turnId: "turn-1",
     });
@@ -78,7 +81,7 @@ describe("session-state interrupt settlement", () => {
       {
         workspaceId: "workspace-1",
         sessionId: "session-1",
-        controlEventId: "event-1",
+        attemptId: "attempt-1",
       },
     ]);
     expect(publishedEvents.map((event) => event.type)).toEqual([

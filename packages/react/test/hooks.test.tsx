@@ -6,7 +6,9 @@
    -------------------------------------------------------------------------- */
 import { describe, expect, test } from "bun:test";
 import type {
+  ComposerDraft,
   SessionEvent,
+  SessionQueueMutationResponse,
   SessionQueueSnapshot,
   SessionTurn,
   WorkspaceEnvironment,
@@ -52,11 +54,18 @@ function queueSnapshot(
 ): SessionQueueSnapshot {
   return {
     version: 1,
-    controlState: "active",
-    controlGeneration: 3,
-    workspaceInferenceState: "active",
-    workspaceInferenceGeneration: 2,
-    workspaceRunExceptionGeneration: null,
+    effectiveControl: {
+      state: "active",
+      controlVersion: 3,
+      controlEtag: "control-3",
+      directState: "active",
+      primaryBlocker: null,
+      additionalBlockerCount: 0,
+      blockers: [],
+      resumeOptions: [],
+      override: null,
+      settlement: null,
+    },
     items,
     ...overrides,
   };
@@ -100,8 +109,7 @@ describe("useTurnQueue", () => {
     await flush();
     expect(hook.result.current.loading).toBe(false);
     expect(hook.result.current.queue.map((turn) => turn.id)).toEqual(["second", "first"]);
-    expect(hook.result.current.controlGeneration).toBe(3);
-    expect(hook.result.current.workspaceInferenceGeneration).toBe(2);
+    expect(hook.result.current.effectiveControl?.controlVersion).toBe(3);
     await hook.unmount();
   });
 
@@ -113,7 +121,7 @@ describe("useTurnQueue", () => {
         listCalls += 1;
         return queueSnapshot([queued]);
       },
-      cancelQueueItem: async () => {
+      deleteQueueItem: async () => {
         throw new OpenGeniApiError(409, "turn already claimed");
       },
     });
@@ -204,6 +212,188 @@ describe("useTurnQueue", () => {
     });
     await flush(250);
     expect(listCalls).toBe(2);
+    await hook.unmount();
+  });
+
+  test("move, Edit, Steer, and Delete bind the displayed versions and accept server order", async () => {
+    const first = fakeTurn({ id: "11111111-aaaa-4aaa-8aaa-111111111111", version: 2 });
+    const second = fakeTurn({ id: "22222222-bbbb-4bbb-8bbb-222222222222", version: 4 });
+    let current = queueSnapshot([first, second], { version: 5 });
+    const calls: Array<{ action: string; request: unknown }> = [];
+    const response = (items: SessionTurn[], version: number, draft?: ComposerDraft) => ({
+      receipt: {
+        id: crypto.randomUUID(),
+        action: "queue.test",
+        operationKey: crypto.randomUUID(),
+        targetSessionId: SESSION_ID,
+        targetTurnId: null,
+        appliedControlRevision: null,
+        appliedQueueVersion: version,
+        appliedTurnVersion: null,
+        appliedDraftRevision: null,
+        createdAt: new Date().toISOString(),
+      },
+      snapshot: queueSnapshot(items, { version }),
+      ...(draft ? { draft } : {}),
+    });
+    const client = fakeClient({
+      getQueue: async () => current,
+      moveQueueItem: async (_ws, _session, _turn, request) => {
+        calls.push({ action: "move", request });
+        current = queueSnapshot([second, first], { version: 6 });
+        return response(current.items, 6);
+      },
+      editQueueItem: async (_ws, _session, _turn, request) => {
+        calls.push({ action: "edit", request });
+        const draft = {
+          revision: 3,
+          text: second.prompt,
+          resources: [],
+          tools: [],
+          model: second.model,
+          reasoningEffort: second.reasoningEffort,
+          sourceTurnId: second.id,
+          sourceTurnVersion: second.version,
+          updatedAt: new Date().toISOString(),
+        };
+        current = queueSnapshot([first], { version: 7 });
+        return response(current.items, 7, draft);
+      },
+      steerQueueItem: async (_ws, _session, _turn, request) => {
+        calls.push({ action: "steer", request });
+        return response(current.items, 8);
+      },
+      deleteQueueItem: async (_ws, _session, _turn, request) => {
+        calls.push({ action: "delete", request });
+        current = queueSnapshot([], { version: 9 });
+        return response([], 9);
+      },
+    });
+    const hook = await renderHook(
+      () => useTurnQueue(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events: noEvents }),
+      undefined,
+    );
+    await flush();
+    await flushing(async () =>
+      expect(await hook.result.current.moveTurn(first.id, null)).toBe(true),
+    );
+    expect(hook.result.current.queue.map((turn) => turn.id)).toEqual([second.id, first.id]);
+    let checkedOut = null;
+    await flushing(async () => {
+      checkedOut = await hook.result.current.editTurn(second.id, {
+        expectedDraftRevision: 2,
+        replaceDraft: true,
+      });
+    });
+    expect(checkedOut).toMatchObject({ sourceTurnId: second.id, revision: 3 });
+    await flushing(async () => expect(await hook.result.current.steerTurn(first.id)).toBe(true));
+    await flushing(async () => expect(await hook.result.current.removeTurn(first.id)).toBe(true));
+    expect(calls.map((call) => call.action)).toEqual(["move", "edit", "steer", "delete"]);
+    expect(calls[0]?.request).toMatchObject({ expectedQueueVersion: 5, beforeTurnId: null });
+    expect(calls[1]?.request).toMatchObject({ expectedTurnVersion: 4, expectedDraftRevision: 2 });
+    expect(calls[2]?.request).toMatchObject({ expectedTurnVersion: 2, controlEtag: "control-3" });
+    expect(calls[3]?.request).toMatchObject({ expectedTurnVersion: 2 });
+    await hook.unmount();
+  });
+
+  test("a delayed older GET cannot overwrite a newer mutation snapshot", async () => {
+    const old = queueSnapshot([fakeTurn({ id: "old" })], { version: 1 });
+    let resolveRead!: (snapshot: SessionQueueSnapshot) => void;
+    let reads = 0;
+    const client = fakeClient({
+      getQueue: async () => {
+        reads += 1;
+        if (reads === 1) return old;
+        return await new Promise<SessionQueueSnapshot>((resolve) => (resolveRead = resolve));
+      },
+      deleteQueueItem: async () => ({
+        receipt: {
+          id: crypto.randomUUID(),
+          action: "queue.delete",
+          operationKey: "delete",
+          targetSessionId: SESSION_ID,
+          targetTurnId: "old",
+          appliedControlRevision: null,
+          appliedQueueVersion: 2,
+          appliedTurnVersion: 2,
+          appliedDraftRevision: null,
+          createdAt: new Date().toISOString(),
+        },
+        snapshot: queueSnapshot([], { version: 2 }),
+      }),
+    });
+    const hook = await renderHook(
+      () => useTurnQueue(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events: noEvents }),
+      undefined,
+    );
+    await flush();
+    const staleRead = hook.result.current.refresh();
+    await flushing(async () => expect(await hook.result.current.removeTurn("old")).toBe(true));
+    await flushing(async () => {
+      resolveRead(old);
+      await staleRead;
+    });
+    await flush();
+    expect(hook.result.current.snapshot?.version).toBe(2);
+    expect(hook.result.current.queue).toEqual([]);
+    await hook.unmount();
+  });
+
+  test("a delayed queue mutation cannot regress newer effective-control truth", async () => {
+    const queued = fakeTurn({ id: "control-race" });
+    const snapshot = (version: number, controlVersion: number, items: SessionTurn[]) => {
+      const base = queueSnapshot(items, { version });
+      return {
+        ...base,
+        effectiveControl: {
+          ...base.effectiveControl,
+          controlVersion,
+          controlEtag: `control-${controlVersion}`,
+        },
+      };
+    };
+    let read = snapshot(5, 5, [queued]);
+    let resolveMutation!: (response: SessionQueueMutationResponse) => void;
+    const client = fakeClient({
+      getQueue: async () => read,
+      deleteQueueItem: async () =>
+        await new Promise<SessionQueueMutationResponse>((resolve) => {
+          resolveMutation = resolve;
+        }),
+    });
+    const hook = await renderHook(
+      () => useTurnQueue(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events: noEvents }),
+      undefined,
+    );
+    await flush();
+
+    let deletion!: Promise<boolean>;
+    await flushing(() => {
+      deletion = hook.result.current.removeTurn(queued.id);
+    });
+    read = snapshot(5, 6, [queued]);
+    await flushing(async () => await hook.result.current.refresh());
+    await flushing(async () => {
+      resolveMutation({
+        receipt: {
+          id: crypto.randomUUID(),
+          action: "queue.delete",
+          operationKey: "control-race-delete",
+          targetSessionId: SESSION_ID,
+          targetTurnId: queued.id,
+          appliedControlRevision: null,
+          appliedQueueVersion: 6,
+          appliedTurnVersion: 2,
+          appliedDraftRevision: null,
+          createdAt: new Date().toISOString(),
+        },
+        snapshot: snapshot(6, 5, []),
+      });
+      expect(await deletion).toBe(true);
+    });
+
+    expect(hook.result.current.snapshot?.effectiveControl.controlVersion).toBe(6);
+    expect(hook.result.current.queue.map((turn) => turn.id)).toEqual([queued.id]);
     await hook.unmount();
   });
 });
@@ -462,26 +652,35 @@ describe("useGoal", () => {
 describe("useSessionControl", () => {
   test("pause, resume, and approval decisions use the one control plane", async () => {
     const sent: unknown[] = [];
-    const response = (event: SessionEvent, controlState: "active" | "paused") => ({
-      operationId: crypto.randomUUID(),
-      event,
-      controlState,
-      controlGeneration: 1,
-      expectedActiveTurnId: null,
-      expectedExecutionGeneration: null,
-      expectedAttemptId: null,
-      deliveryEventId: null,
-      shouldSignalControl: false,
-      shouldWake: controlState === "active",
+    const response = (controlState: "active" | "paused") => ({
+      receipt: {
+        id: crypto.randomUUID(),
+        action: `session.${controlState}`,
+        operationKey: crypto.randomUUID(),
+        targetSessionId: SESSION_ID,
+        targetTurnId: null,
+        appliedControlRevision: 1,
+        appliedQueueVersion: null,
+        appliedTurnVersion: null,
+        appliedDraftRevision: null,
+        createdAt: new Date().toISOString(),
+      },
+      effectiveControl: {
+        ...queueSnapshot([]).effectiveControl,
+        state: controlState,
+        directState: controlState,
+      },
+      interruptionCount: 0,
+      wakeCount: controlState === "active" ? 1 : 0,
     });
     const client = fakeClient({
       pauseSession: async (_ws, _session, options) => {
         sent.push({ kind: "pause", ...options });
-        return makeEvent(1, "session.control.paused");
+        return response("paused");
       },
       resumeSession: async (_ws, _session, options) => {
         sent.push({ kind: "resume", ...options });
-        return response(makeEvent(2, "session.control.resumed"), "active");
+        return response("active");
       },
       sendApprovalDecision: async (_ws, _session, decision) => {
         sent.push({ kind: "decision", ...decision });
@@ -546,13 +745,137 @@ describe("useComposer queue-vs-steer", () => {
       undefined,
     );
     await flushing(async () => {
-      const sent = await hook.result.current.send("do this immediately", "steer");
+      const sent = await hook.result.current.steer("do this immediately");
       expect(sent).toBe(true);
     });
     expect(steered).toHaveLength(1);
     const input = steered[0] as { text: string; clientEventId?: string };
     expect(input.text).toBe("do this immediately");
     expect(typeof input.clientEventId).toBe("string");
+    await hook.unmount();
+  });
+});
+
+describe("useComposer durable draft and control binding", () => {
+  test("a live queue mutation reloads the authoritative draft in another tab", async () => {
+    let current: ComposerDraft = {
+      revision: 1,
+      text: "first tab state",
+      resources: [],
+      tools: [],
+      model: "model-x",
+      reasoningEffort: "medium",
+      sourceTurnId: null,
+      sourceTurnVersion: null,
+      updatedAt: new Date().toISOString(),
+    };
+    let reads = 0;
+    const client = fakeClient({
+      getComposerDraft: async () => {
+        reads += 1;
+        return current;
+      },
+    });
+    const hook = await renderHook(
+      (events: SessionEvent[]) =>
+        useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events }),
+      noEvents,
+    );
+    await flush();
+    expect(hook.result.current.value).toBe("first tab state");
+
+    current = {
+      ...current,
+      revision: 2,
+      text: "withdrawn queue prompt",
+      sourceTurnId: "33333333-3333-4333-8333-333333333333",
+      sourceTurnVersion: 1,
+    };
+    await hook.rerender([
+      makeEvent(1, "session.queue.changed", { operation: "edit", queueVersion: 2 }),
+    ]);
+    await flush();
+    expect(reads).toBe(2);
+    expect(hook.result.current.value).toBe("withdrawn queue prompt");
+    await hook.unmount();
+  });
+
+  test("hydrates, autosaves with OCC, and sends the acknowledged draft/control revision", async () => {
+    const saved: unknown[] = [];
+    const sent: unknown[] = [];
+    const initial = {
+      revision: 4,
+      text: "restored text",
+      resources: [],
+      tools: [],
+      model: "model-x",
+      reasoningEffort: "medium" as const,
+      sourceTurnId: null,
+      sourceTurnVersion: null,
+      updatedAt: new Date().toISOString(),
+    };
+    const client = fakeClient({
+      getComposerDraft: async () => initial,
+      saveComposerDraft: async (_ws, _session, request) => {
+        saved.push(request);
+        return { ...initial, ...request, revision: request.expectedRevision + 1 };
+      },
+      sendMessage: async (_ws, _session, input) => {
+        sent.push(input);
+        return makeEvent(1, "user.message");
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          effectiveControl: queueSnapshot([]).effectiveControl,
+          sendExtras: { model: "model-x", reasoningEffort: "medium" },
+        }),
+      undefined,
+    );
+    await flush();
+    expect(hook.result.current.value).toBe("restored text");
+    await flushing(async () => hook.result.current.setValue("edited locally"));
+    await flush(600);
+    expect(saved.at(-1)).toMatchObject({ expectedRevision: 4, text: "edited locally" });
+    await flushing(async () => expect(await hook.result.current.send()).toBe(true));
+    expect(sent.at(-1)).toMatchObject({
+      text: "edited locally",
+      expectedDraftRevision: 5,
+      controlEtag: "control-3",
+    });
+    await hook.unmount();
+  });
+
+  test("an autosave conflict preserves the local text and exposes both resolution choices", async () => {
+    const initial = {
+      revision: 1,
+      text: "remote one",
+      resources: [],
+      tools: [],
+      model: "model-x",
+      reasoningEffort: "medium" as const,
+      sourceTurnId: null,
+      sourceTurnVersion: null,
+      updatedAt: new Date().toISOString(),
+    };
+    const client = fakeClient({
+      getComposerDraft: async () => initial,
+      saveComposerDraft: async () => {
+        throw new OpenGeniApiError(409, "draft changed");
+      },
+    });
+    const hook = await renderHook(
+      () => useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush();
+    await flushing(async () => hook.result.current.setValue("mine remains"));
+    await flush(600);
+    expect(hook.result.current.value).toBe("mine remains");
+    expect(hook.result.current.draftConflict?.message).toContain("409");
     await hook.unmount();
   });
 });

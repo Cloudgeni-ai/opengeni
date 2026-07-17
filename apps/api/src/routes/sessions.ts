@@ -2,9 +2,10 @@ import {
   AcknowledgeStreamRequest,
   AttachViewerRequest,
   ClearSessionContextRequest,
-  CancelSessionQueueItemRequest,
   ClientSessionEvent,
   CompactSessionContextRequest,
+  DeleteSessionQueueItemRequest,
+  EditSessionQueueItemRequest,
   FsDeleteRequest,
   FsListRequest,
   FsMkdirRequest,
@@ -15,11 +16,14 @@ import {
   GitLogRequest,
   GitShowRequest,
   GitStatusRequest,
+  MoveSessionQueueItemRequest,
   PtyCloseRequest,
   PtyOpenRequest,
   PtyResizeRequest,
   PtyWriteRequest,
   SessionControlRequest,
+  SaveComposerDraftRequest,
+  SteerSessionQueueItemRequest,
   SteerSessionMessageRequest,
   TerminalExecRequest,
   UpdateSessionPinRequest,
@@ -34,7 +38,6 @@ import {
 } from "@opengeni/contracts";
 import { streamTokenDegraded } from "@opengeni/config";
 import {
-  cancelQueuedSessionTurnWithVersion,
   acceptSessionApprovalDecision,
   clearSessionGoal,
   clearSessionContext,
@@ -64,8 +67,9 @@ import {
   revokeViewer,
   setSessionGoalStatus,
   updatePtySessionActivity,
-  requestSessionControl,
-  SessionQueueConflictError,
+  QueueCommandConflictError,
+  SessionCommandIdempotencyError,
+  SessionControlConflictError,
   SessionContextBusyError,
   latestWorkspaceCapture,
   workspaceCaptureAtRevision,
@@ -97,8 +101,15 @@ import {
 } from "../sandbox/viewer";
 import {
   acceptSessionUserMessage,
+  controlHumanSessionWorkstream,
   createSessionForRequest,
+  deleteHumanQueuePrompt,
+  editHumanQueuePrompt,
+  getHumanComposerDraft,
+  moveHumanQueuePrompt,
   readSessionLineage,
+  saveHumanComposerDraft,
+  steerHumanQueuePrompt,
   updateSessionTitle,
   workflowIdForSession,
 } from "@opengeni/core";
@@ -508,39 +519,115 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     return c.json(snapshot);
   });
 
-  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/queue/:turnId/cancel", async (c) => {
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/queue/:turnId/move", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
     const sessionId = c.req.param("sessionId");
     await assertSessionExists(db, workspaceId, sessionId);
-    const payload = CancelSessionQueueItemRequest.parse(await c.req.json());
+    const payload = MoveSessionQueueItemRequest.parse(await c.req.json());
     try {
-      const result = await cancelQueuedSessionTurnWithVersion(
-        db,
+      return c.json(
+        await moveHumanQueuePrompt(
+          { db, bus },
+          { accountId: grant.accountId, workspaceId, sessionId, subjectId: grant.subjectId },
+          c.req.param("turnId"),
+          payload,
+        ),
+      );
+    } catch (error) {
+      return commandConflictResponse(c, error);
+    }
+  });
+
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/queue/:turnId/edit", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    const sessionId = c.req.param("sessionId");
+    await assertSessionExists(db, workspaceId, sessionId);
+    const payload = EditSessionQueueItemRequest.parse(await c.req.json());
+    try {
+      return c.json(
+        await editHumanQueuePrompt(
+          { db, bus },
+          { accountId: grant.accountId, workspaceId, sessionId, subjectId: grant.subjectId },
+          c.req.param("turnId"),
+          payload,
+        ),
+      );
+    } catch (error) {
+      return commandConflictResponse(c, error);
+    }
+  });
+
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/queue/:turnId/steer", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    const sessionId = c.req.param("sessionId");
+    await assertSessionExists(db, workspaceId, sessionId);
+    const payload = SteerSessionQueueItemRequest.parse(await c.req.json());
+    try {
+      return c.json(
+        await steerHumanQueuePrompt(
+          { db, bus },
+          { accountId: grant.accountId, workspaceId, sessionId, subjectId: grant.subjectId },
+          c.req.param("turnId"),
+          payload,
+        ),
+      );
+    } catch (error) {
+      return commandConflictResponse(c, error);
+    }
+  });
+
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/queue/:turnId/delete", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    const sessionId = c.req.param("sessionId");
+    await assertSessionExists(db, workspaceId, sessionId);
+    const payload = DeleteSessionQueueItemRequest.parse(await c.req.json());
+    try {
+      return c.json(
+        await deleteHumanQueuePrompt(
+          { db, bus },
+          { accountId: grant.accountId, workspaceId, sessionId, subjectId: grant.subjectId },
+          c.req.param("turnId"),
+          payload,
+        ),
+      );
+    } catch (error) {
+      return commandConflictResponse(c, error);
+    }
+  });
+
+  app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/composer-draft", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    const sessionId = c.req.param("sessionId");
+    return c.json(
+      await getHumanComposerDraft(db, {
+        accountId: grant.accountId,
         workspaceId,
         sessionId,
-        c.req.param("turnId"),
-        payload.expectedQueueVersion,
-        payload.expectedItemVersion,
-        grant.subjectId,
-        payload.reason ?? null,
+        subjectId: grant.subjectId,
+      }),
+    );
+  });
+
+  app.put("/v1/workspaces/:workspaceId/sessions/:sessionId/composer-draft", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    const sessionId = c.req.param("sessionId");
+    const payload = SaveComposerDraftRequest.parse(await c.req.json());
+    try {
+      return c.json(
+        await saveHumanComposerDraft(
+          db,
+          { accountId: grant.accountId, workspaceId, sessionId, subjectId: grant.subjectId },
+          payload,
+        ),
       );
-      await bus.publish(workspaceId, sessionId, result.events);
-      if (result.shouldWake) {
-        if (result.workflowWakeRevision === null) {
-          throw new Error("Queue continuation has no workflow wake revision");
-        }
-        await workflowClient.wakeSessionWorkflow({
-          accountId: grant.accountId,
-          workspaceId,
-          sessionId,
-          workflowId: workflowIdForSession(sessionId),
-          wakeRevision: result.workflowWakeRevision,
-        });
-      }
-      return c.json(result);
     } catch (error) {
-      throwQueueConflict(error);
+      return commandConflictResponse(c, error);
     }
   });
 
@@ -549,72 +636,17 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
     const sessionId = c.req.param("sessionId");
     const payload = SessionControlRequest.parse(await c.req.json());
-    let result;
     try {
-      result = await requestSessionControl(db, {
-        accountId: grant.accountId,
-        workspaceId,
-        sessionId,
-        actor: grant.subjectId,
-        mode: payload.mode,
-        reason: payload.reason ?? null,
-        clientEventId: payload.clientEventId ?? null,
-        ...(payload.expectedControlState !== undefined
-          ? { expectedControlState: payload.expectedControlState }
-          : {}),
-        ...(payload.expectedControlGeneration !== undefined
-          ? { expectedControlGeneration: payload.expectedControlGeneration }
-          : {}),
-        ...(payload.expectedWorkspaceInferenceGeneration !== undefined
-          ? {
-              expectedWorkspaceInferenceGeneration: payload.expectedWorkspaceInferenceGeneration,
-            }
-          : {}),
-      });
+      return c.json(
+        await controlHumanSessionWorkstream(
+          { db, bus, workflowClient },
+          { accountId: grant.accountId, workspaceId, sessionId, subjectId: grant.subjectId },
+          payload,
+        ),
+      );
     } catch (error) {
-      throwQueueConflict(error);
+      return commandConflictResponse(c, error);
     }
-    await bus.publish(workspaceId, sessionId, result.events);
-    const workflowId = workflowIdForSession(sessionId);
-    if (result.shouldSignalControl) {
-      if (result.workflowWakeRevision === null) {
-        throw new Error("Session control has no workflow wake revision");
-      }
-      await workflowClient.signalSessionControl({
-        accountId: grant.accountId,
-        workspaceId,
-        sessionId,
-        eventId: result.event.id,
-        workflowId,
-        workflowWakeRevision: result.workflowWakeRevision,
-      });
-    } else if (result.shouldWake) {
-      if (result.workflowWakeRevision === null) {
-        throw new Error("Session resume has no workflow wake revision");
-      }
-      await workflowClient.wakeSessionWorkflow({
-        accountId: grant.accountId,
-        workspaceId,
-        sessionId,
-        workflowId,
-        wakeRevision: result.workflowWakeRevision,
-      });
-    }
-    return c.json(
-      {
-        operationId: result.operationId,
-        event: result.event,
-        controlState: result.controlState,
-        controlGeneration: result.controlGeneration,
-        expectedActiveTurnId: result.expectedActiveTurnId,
-        expectedExecutionGeneration: result.expectedExecutionGeneration,
-        expectedAttemptId: result.expectedAttemptId,
-        deliveryEventId: result.deliveryEventId,
-        shouldSignalControl: result.shouldSignalControl,
-        shouldWake: result.shouldWake,
-      },
-      202,
-    );
   });
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/steer", async (c) => {
@@ -634,13 +666,9 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       mcpCredentialUpdates: payload.mcpCredentialUpdates ?? [],
       delivery: "steer",
       origin: "human",
-      ...(payload.expectedControlGeneration !== undefined
-        ? { expectedControlGeneration: payload.expectedControlGeneration }
-        : {}),
-      ...(payload.expectedWorkspaceInferenceGeneration !== undefined
-        ? {
-            expectedWorkspaceInferenceGeneration: payload.expectedWorkspaceInferenceGeneration,
-          }
+      ...(payload.controlEtag !== undefined ? { controlEtag: payload.controlEtag } : {}),
+      ...(payload.expectedDraftRevision !== undefined
+        ? { expectedDraftRevision: payload.expectedDraftRevision }
         : {}),
       ...(payload.clientEventId ? { clientEventId: payload.clientEventId } : {}),
     });
@@ -662,6 +690,12 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
         model: event.payload.model ?? null,
         reasoningEffort: event.payload.reasoningEffort ?? null,
         mcpCredentialUpdates: event.payload.mcpCredentialUpdates ?? [],
+        ...(event.payload.controlEtag !== undefined
+          ? { controlEtag: event.payload.controlEtag }
+          : {}),
+        ...(event.payload.expectedDraftRevision !== undefined
+          ? { expectedDraftRevision: event.payload.expectedDraftRevision }
+          : {}),
         ...(event.clientEventId ? { clientEventId: event.clientEventId } : {}),
       });
       return c.json(accepted, 202);
@@ -1629,17 +1663,15 @@ function userMessagePayloadHasOwnProperty(value: unknown, key: string): boolean 
   return hasOwnProperty(payload, key);
 }
 
-function throwQueueConflict(error: unknown): never {
-  if (error instanceof SessionQueueConflictError) {
-    throw new HTTPException(409, {
-      message: JSON.stringify({
-        message: error.message,
-        currentQueueVersion: error.currentQueueVersion,
-        ...(error.currentItemVersion !== undefined
-          ? { currentItemVersion: error.currentItemVersion }
-          : {}),
-      }),
-    });
+function commandConflictResponse(c: Context, error: unknown): Response {
+  if (error instanceof QueueCommandConflictError) {
+    return c.json({ code: error.code, message: error.message, current: error.current }, 409);
+  }
+  if (error instanceof SessionControlConflictError) {
+    return c.json({ code: error.code, message: error.message }, 409);
+  }
+  if (error instanceof SessionCommandIdempotencyError) {
+    return c.json({ code: error.code, message: error.message }, 409);
   }
   throw error;
 }

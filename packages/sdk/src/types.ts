@@ -10,7 +10,6 @@ export type SessionStatus =
   | "requires_action"
   | "recovering"
   | "waiting_capacity"
-  | "paused"
   | "failed"
   | "cancelled";
 
@@ -400,12 +399,7 @@ export type Session = {
   queueVersion: number;
   queueHeadPosition: number;
   queueTailPosition: number;
-  controlState: "active" | "paused";
-  controlGeneration: number;
-  controlReason: string | null;
-  controlChangedBy: string | null;
-  controlChangedAt: string | null;
-  workspaceRunExceptionGeneration: number | null;
+  effectiveControl: EffectiveSessionControl;
   lastSequence: number;
   /** Multi-account Codex (P1): the account this session is pinned to (null ⇒ follow workspace active). */
   codexPinnedCredentialId?: string | null;
@@ -467,7 +461,8 @@ export type SessionTurnStatus =
   | "completed"
   | "failed"
   | "cancelled"
-  | "superseded";
+  | "superseded"
+  | "withdrawn_for_edit";
 
 export type SessionTurnSource =
   | "user"
@@ -556,6 +551,7 @@ export const SESSION_EVENT_TYPES = [
   "session.control.steer_requested",
   "workspace.inference.paused",
   "workspace.inference.resumed",
+  "session.queue.changed",
   "session.queue.prompt.cancelled",
   "session.queue.history",
   "turn.event.rejected_late",
@@ -1355,6 +1351,11 @@ export type ClientAuthConfig =
   | { mode: "configuredToken"; headerName: "authorization"; scheme: "bearer" }
   | { mode: "managedSession"; session: "cookie" };
 
+// Kept value-identical to @opengeni/contracts and pinned by the SDK contract
+// parity suite. The SDK has no runtime dependency on the Zod contracts package.
+export const OPENGENI_API_CONTRACT_REVISION = "2026-07-session-control-v1" as const;
+export const OPENGENI_API_CONTRACT_HEADER = "x-opengeni-api-contract" as const;
+
 /**
  * Public, unauthenticated-by-default client bootstrap config returned by
  * `GET /v1/config/client`: which models + reasoning efforts are exposed, the
@@ -1364,6 +1365,8 @@ export type ClientAuthConfig =
  */
 export type ClientConfig = {
   deploymentRevision: string;
+  apiContractRevision: typeof OPENGENI_API_CONTRACT_REVISION;
+  serverVersion?: string | undefined;
   defaultModel: string;
   allowedModels: string[];
   models: ClientModel[];
@@ -1419,11 +1422,13 @@ export type Workspace = {
   externalId: string | null;
   agentInstructions: string | null;
   settings: Record<string, unknown>;
-  inferenceState?: "active" | "paused";
-  inferenceGeneration?: number;
-  inferenceReason?: string | null;
-  inferenceChangedBy?: string | null;
-  inferenceChangedAt?: string | null;
+  inferenceControl: {
+    state: "active" | "paused";
+    revision: number;
+    reason: string | null;
+    changedBy: string | null;
+    changedAt: string | null;
+  };
   defaultRigId?: string | null;
   createdAt: string;
   updatedAt: string;
@@ -1561,29 +1566,83 @@ export type CompactSessionContextResult = {
 
 // --- Turn queue --------------------------------------------------------------
 
+export type EffectiveControlBlocker = {
+  kind: "session" | "workspace";
+  sessionId?: string | undefined;
+  displayName: string;
+  actor: string | null;
+  reason: string | null;
+  changedAt: string | null;
+  revision: number;
+};
+
+export type EffectiveControlResumeOption = {
+  scope: "selected" | "session" | "workspace";
+  targetId?: string | undefined;
+  selectedStateAfter: "active" | "paused";
+  remainingPrimaryBlocker?: EffectiveControlBlocker | undefined;
+  impactCopy: string;
+};
+
+export type EffectiveSessionControl = {
+  state: "active" | "paused";
+  controlVersion: number;
+  controlEtag: string;
+  directState: "active" | "paused";
+  primaryBlocker: EffectiveControlBlocker | null;
+  additionalBlockerCount: number;
+  blockers: EffectiveControlBlocker[];
+  resumeOptions: EffectiveControlResumeOption[];
+  override: { rootSessionId: string; revision: number } | null;
+  settlement: { state: "stopping"; attemptCount: number } | null;
+};
+
+export type SessionCommandReceipt = {
+  id: string;
+  action: string;
+  operationKey: string;
+  targetSessionId: string | null;
+  targetTurnId: string | null;
+  appliedControlRevision: number | null;
+  appliedQueueVersion: number | null;
+  appliedTurnVersion: number | null;
+  appliedDraftRevision: number | null;
+  createdAt: string;
+};
+
+export type ComposerDraft = {
+  revision: number;
+  text: string;
+  resources: ResourceRef[];
+  tools: ToolRef[];
+  model: string;
+  reasoningEffort: ReasoningEffort;
+  sourceTurnId: string | null;
+  sourceTurnVersion: number | null;
+  updatedAt: string | null;
+};
+
 export type SessionQueueSnapshot = {
   version: number;
-  controlState: "active" | "paused";
-  controlGeneration: number;
-  workspaceInferenceState: "active" | "paused";
-  workspaceInferenceGeneration: number;
-  workspaceRunExceptionGeneration: number | null;
+  effectiveControl: EffectiveSessionControl;
   items: SessionTurn[];
 };
 
 export type SystemUpdateClassification = "success" | "failure" | "action_required" | "info";
 
 export type SessionSystemUpdateKind =
-  | "child_session_update"
-  | "scheduled_wake"
-  | "lifecycle_event"
-  | "runtime_notice";
+  | "scheduled_occurrence"
+  | "goal_continuation"
+  | "agent_message"
+  | "agent_steer_instruction"
+  | "child_terminal_result";
 
 export type SessionSystemUpdateState =
   | "pending"
   | "deferred"
   | "delivered"
   | "cancelled"
+  | "superseded"
   | "failed";
 
 export type SessionSystemUpdate = {
@@ -1603,32 +1662,71 @@ export type SessionSystemUpdate = {
 };
 
 export type SessionControlResponse = {
-  operationId: string;
-  event: SessionEvent;
-  controlState: "active" | "paused";
-  controlGeneration: number;
-  expectedActiveTurnId: string | null;
-  expectedExecutionGeneration: number | null;
-  expectedAttemptId: string | null;
-  deliveryEventId: string | null;
-  shouldSignalControl: boolean;
-  shouldWake: boolean;
+  receipt: SessionCommandReceipt;
+  effectiveControl: EffectiveSessionControl;
+  interruptionCount: number;
+  wakeCount: number;
 };
 
 export type WorkspaceInferenceControlResponse = {
-  operationId: string;
+  receipt: SessionCommandReceipt;
   state: "active" | "paused";
-  generation: number;
-  affectedSessionIds: string[];
-  controlSessionIds: string[];
-  exceptionSessionIds: string[];
+  revision: number;
+  interruptionCount: number;
+  wakeCount: number;
+};
+
+export type WorkspaceControlEvent = {
+  id: string;
+  workspaceId: string;
+  /** Same monotonic value as revision; named sequence for SSE resume cursors. */
+  sequence: number;
+  revision: number;
+  type: "workspace.control.changed";
+  scope: "workspace" | "session";
+  rootSessionId: string | null;
+  action: "pause" | "resume";
+  automatic: boolean;
+  reason: string | null;
+  actor: string;
+  occurredAt: string;
 };
 
 export type SessionQueueMutationResponse = {
+  receipt: SessionCommandReceipt;
   snapshot: SessionQueueSnapshot;
-  events: SessionEvent[];
-  shouldWake: boolean;
+  draft?: ComposerDraft;
 };
+
+export type MoveSessionQueueItemRequest = {
+  clientEventId: string;
+  expectedQueueVersion: number;
+  beforeTurnId: string | null;
+};
+
+export type EditSessionQueueItemRequest = {
+  clientEventId: string;
+  expectedTurnVersion: number;
+  expectedDraftRevision: number;
+  replaceDraft: boolean;
+};
+
+export type SteerSessionQueueItemRequest = {
+  clientEventId: string;
+  expectedTurnVersion: number;
+  controlEtag?: string;
+};
+
+export type DeleteSessionQueueItemRequest = {
+  clientEventId: string;
+  expectedTurnVersion: number;
+  reason?: string;
+};
+
+export type SaveComposerDraftRequest = Omit<
+  ComposerDraft,
+  "revision" | "sourceTurnId" | "sourceTurnVersion" | "updatedAt"
+> & { expectedRevision: number };
 
 // --- Scheduled tasks: requests + runs ----------------------------------------
 

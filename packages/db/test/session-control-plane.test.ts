@@ -11,12 +11,12 @@ import {
   appendSessionHistoryItems,
   appendSessionEventsForTurnAttempt,
   bootstrapWorkspace,
-  cancelQueuedSessionTurnWithVersion,
   claimSessionWorkForAttempt,
   createDb,
   createSession,
   createSessionGoal,
-  enqueueSessionMessageAtomically,
+  evaluateSessionControl,
+  evaluateSessionControls,
   getSessionQueueSnapshot,
   getBillingBalance,
   getActiveSessionHistoryItems,
@@ -25,24 +25,27 @@ import {
   listOutstandingSessionSystemUpdates,
   listSessionSystemUpdatesForTurn,
   listUsageEvents,
+  listWorkspaceControlEvents,
   isSessionCompactionRequested,
   insertRecording,
   getRecording,
   peekSessionWork,
   recoverSessionDispatch,
-  reparkOrphanedSessionTurn,
   requestSessionCompaction,
-  requestSessionControl,
   requestSessionTurnRecovery,
+  mutateSessionControlInTransaction,
+  mutateWorkspaceControlInTransaction,
   registerPendingSessionToolCall,
   recordPendingSessionToolCallResult,
   recordUsageEvent,
   recordSkippedContextCompaction,
-  setWorkspaceInferenceControl,
   setSessionLastInputTokensForTurnAttempt,
   settleSessionIdleWithParentOutbox,
-  settlePendingSessionControl,
+  settleSessionAttemptInterruptions,
+  submitHumanPromptInTransaction,
+  deleteSessionQueueItemInTransaction,
   withWorkspaceRls,
+  withWorkspaceSubjectRls,
 } from "../src/index";
 import * as schema from "../src/schema";
 import { and, eq } from "drizzle-orm";
@@ -91,21 +94,71 @@ async function send(
   grant: { accountId: string; workspaceId: string; subjectId: string },
   sessionId: string,
   text: string,
-  delivery: "queue" | "steer" = "queue",
+  delivery: "send" | "steer" = "send",
 ) {
-  return await enqueueSessionMessageAtomically(client.db, {
-    accountId: grant.accountId,
-    workspaceId: grant.workspaceId,
-    sessionId,
-    actor: grant.subjectId,
-    origin: "human",
-    text,
-    resources: [],
-    tools: [],
-    clientEventId: `${delivery}-${text}-${crypto.randomUUID()}`,
-    delivery,
-    reasoningEffortFallback: "low",
-  });
+  const accepted = await withWorkspaceSubjectRls(
+    client.db,
+    grant.workspaceId,
+    grant.subjectId,
+    (db) =>
+      db.transaction((tx) =>
+        submitHumanPromptInTransaction(tx as typeof db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId,
+          subjectId: grant.subjectId,
+          actor: { type: "human", subjectId: grant.subjectId },
+          operationKey: `${delivery}-${text}-${crypto.randomUUID()}`,
+          delivery,
+          text,
+          resources: [],
+          tools: [],
+          reasoningEffortFallback: "low",
+          source: "user",
+        }),
+      ),
+  );
+  const turn = await getSessionTurn(client.db, grant.workspaceId, accepted.turnId);
+  if (!turn) throw new Error(`Accepted turn missing: ${accepted.turnId}`);
+  return { ...accepted, turn };
+}
+
+async function controlSession(
+  grant: { accountId: string; workspaceId: string; subjectId: string },
+  sessionId: string,
+  action: "pause" | "resume",
+) {
+  return await withWorkspaceRls(client.db, grant.workspaceId, (db) =>
+    db.transaction((tx) =>
+      mutateSessionControlInTransaction(tx as typeof db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId,
+        actor: { type: "human", subjectId: grant.subjectId },
+        operationKey: crypto.randomUUID(),
+        action,
+      }),
+    ),
+  );
+}
+
+async function controlWorkspace(
+  grant: { accountId: string; workspaceId: string; subjectId: string },
+  action: "pause" | "resume",
+  reason = "test",
+) {
+  return await withWorkspaceRls(client.db, grant.workspaceId, (db) =>
+    db.transaction((tx) =>
+      mutateWorkspaceControlInTransaction(tx as typeof db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        actor: { type: "human", subjectId: grant.subjectId },
+        operationKey: crypto.randomUUID(),
+        action,
+        reason,
+      }),
+    ),
+  );
 }
 
 async function claimTestSessionWork(
@@ -122,6 +175,7 @@ async function claimTestSessionWork(
   const result = await claimSessionWorkForAttempt(db, workspaceId, {
     sessionId,
     workflowId,
+    workflowRunId: crypto.randomUUID(),
     attemptId: options.attemptId ?? crypto.randomUUID(),
     dispatchId: options.dispatchId ?? `dispatch-${crypto.randomUUID()}`,
     trigger: options.trigger ?? { kind: "next" },
@@ -130,6 +184,51 @@ async function claimTestSessionWork(
 }
 
 describe("clean session control plane", () => {
+  test("bulk control projection accepts an empty session page", async () => {
+    const { grant } = await fixture();
+    expect(
+      await evaluateSessionControls(client.db, grant.workspaceId!, [], {
+        lock: "share",
+      }),
+    ).toEqual(new Map());
+  });
+
+  test("bulk control projection reuses shared ancestors without changing per-session truth", async () => {
+    const { grant, session: root } = await fixture();
+    const child = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      initialMessage: "child",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+      parentSessionId: root.id,
+    });
+    await controlSession(grant, root.id, "pause");
+
+    const projected = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      evaluateSessionControls(db, grant.workspaceId!, [root.id, child.id, child.id], {
+        lock: "share",
+      }),
+    );
+    expect(projected.size).toBe(2);
+    expect(projected.get(root.id)).toEqual(
+      await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+        evaluateSessionControl(db, grant.workspaceId!, root.id),
+      ),
+    );
+    expect(projected.get(child.id)).toEqual(
+      await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+        evaluateSessionControl(db, grant.workspaceId!, child.id),
+      ),
+    );
+    expect(projected.get(child.id)).toMatchObject({
+      state: "paused",
+      primaryBlocker: { kind: "session", sessionId: root.id },
+    });
+  });
+
   test("recovery closes an in-flight tool call with explicit unknown outcome exactly once", async () => {
     const { grant, session } = await fixture();
     await send(grant, session.id, "change the external state");
@@ -156,7 +255,9 @@ describe("clean session control plane", () => {
           name: "mutate_state",
           callId: "call-interrupted",
           status: "in_progress",
-          arguments: JSON.stringify({ token: "model-truth-must-not-be-redacted" }),
+          arguments: JSON.stringify({
+            token: "model-truth-must-not-be-redacted",
+          }),
         },
       }),
     ).toEqual({ accepted: true, registered: true });
@@ -207,7 +308,9 @@ describe("clean session control plane", () => {
         name: "mutate_state",
         callId: "call-interrupted",
         status: "in_progress",
-        arguments: JSON.stringify({ token: "model-truth-must-not-be-redacted" }),
+        arguments: JSON.stringify({
+          token: "model-truth-must-not-be-redacted",
+        }),
       },
       {
         type: "function_call_result",
@@ -237,116 +340,6 @@ describe("clean session control plane", () => {
         reason: "worker_shutdown",
       }),
     ).toMatchObject({ action: "stale", events: [] });
-  });
-
-  test("cutover repark clears only the exact orphaned owner without creating queue work", async () => {
-    const { grant, session } = await fixture();
-    await send(grant, session.id, "continue after the production cutover");
-    const attemptId = crypto.randomUUID();
-    const turn = await claimTestSessionWork(
-      client.db,
-      grant.workspaceId!,
-      session.id,
-      `session-${session.id}`,
-      { attemptId },
-    );
-    await registerPendingSessionToolCall(client.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId!,
-      sessionId: session.id,
-      turnId: turn!.id,
-      executionGeneration: turn!.executionGeneration,
-      attemptId,
-      callId: "cutover-call",
-      callType: "function_call",
-      callItem: {
-        type: "function_call",
-        name: "external_mutation",
-        callId: "cutover-call",
-        status: "in_progress",
-        arguments: "{}",
-      },
-    });
-
-    const result = await reparkOrphanedSessionTurn(client.db, grant.workspaceId!, {
-      sessionId: session.id,
-      turnId: turn!.id,
-      attemptId,
-      reason: "production_cutover",
-    });
-    expect(result).toMatchObject({
-      action: "recovering",
-      sessionStatus: "recovering",
-      closedToolCalls: 1,
-    });
-    expect(result.events.map((event) => event.type)).toEqual([
-      "agent.toolCall.output",
-      "turn.recovery.requested",
-      "session.status.changed",
-    ]);
-    expect(await getSessionTurn(client.db, grant.workspaceId!, turn!.id)).toMatchObject({
-      id: turn!.id,
-      status: "recovering",
-      activeAttemptId: null,
-      position: turn!.position,
-    });
-    expect(await getSessionQueueSnapshot(client.db, grant.workspaceId!, session.id)).toMatchObject({
-      items: [],
-    });
-    expect(
-      await reparkOrphanedSessionTurn(client.db, grant.workspaceId!, {
-        sessionId: session.id,
-        turnId: turn!.id,
-        attemptId,
-        reason: "production_cutover",
-      }),
-    ).toMatchObject({ action: "stale", events: [], activeAttemptId: null });
-  });
-
-  test("cutover repark recovers a partially applied 0057 turn with no attempt owner", async () => {
-    const { grant, session } = await fixture();
-    await send(grant, session.id, "continue after the interrupted schema cutover");
-    const turn = await claimTestSessionWork(
-      client.db,
-      grant.workspaceId!,
-      session.id,
-      `session-${session.id}`,
-    );
-    await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
-      await db
-        .update(schema.sessionTurns)
-        .set({ activeAttemptId: null })
-        .where(
-          and(
-            eq(schema.sessionTurns.workspaceId, grant.workspaceId!),
-            eq(schema.sessionTurns.id, turn!.id),
-          ),
-        );
-    });
-
-    const result = await reparkOrphanedSessionTurn(client.db, grant.workspaceId!, {
-      sessionId: session.id,
-      turnId: turn!.id,
-      attemptId: null,
-      reason: "production_cutover_partial_0057",
-    });
-    expect(result).toMatchObject({
-      action: "recovering",
-      sessionStatus: "recovering",
-      closedToolCalls: 0,
-    });
-    expect(result.events.map((event) => event.type)).toEqual([
-      "turn.recovery.requested",
-      "session.status.changed",
-    ]);
-    expect(result.events.every((event) => event.turnAttemptId === null)).toBe(true);
-    expect(await getSessionTurn(client.db, grant.workspaceId!, turn!.id)).toMatchObject({
-      status: "recovering",
-      activeAttemptId: null,
-    });
-    expect(await getSessionQueueSnapshot(client.db, grant.workspaceId!, session.id)).toMatchObject({
-      items: [],
-    });
   });
 
   test("recovery preserves a completed parallel result and interrupts only its unresolved sibling", async () => {
@@ -407,7 +400,10 @@ describe("clean session control plane", () => {
     });
     expect(recovery.action).toBe("recovering");
     expect(recovery.events.slice(0, 2).map((event) => event.payload)).toMatchObject([
-      { id: "call-b", recovery: { interrupted: false, outcome: "durable_result_found" } },
+      {
+        id: "call-b",
+        recovery: { interrupted: false, outcome: "durable_result_found" },
+      },
       { id: "call-a", recovery: { interrupted: true, outcome: "unknown" } },
     ]);
     const history = await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id);
@@ -457,11 +453,15 @@ describe("clean session control plane", () => {
       turnId: turn!.id,
       triggerEventId: turn!.triggerEventId,
       attemptId: firstAttemptId,
-      childCompletionParentWakeEnabled: false,
       turnStatus: "requires_action",
       sessionStatus: "requires_action",
       activeTurnId: turn!.id,
-      events: [{ type: "session.requiresAction", payload: { approvalId: "approval-call" } }],
+      events: [
+        {
+          type: "session.requiresAction",
+          payload: { approvalId: "approval-call" },
+        },
+      ],
     });
     const [approval] = await appendSessionEvents(client.db, grant.workspaceId!, session.id, [
       {
@@ -553,27 +553,20 @@ describe("clean session control plane", () => {
       turnId: turn!.id,
       triggerEventId: turn!.triggerEventId,
       attemptId,
-      childCompletionParentWakeEnabled: false,
       turnStatus: "requires_action",
       sessionStatus: "requires_action",
       activeTurnId: turn!.id,
-      events: [{ type: "session.requiresAction", payload: { approvalId: "pause-approval-call" } }],
+      events: [
+        {
+          type: "session.requiresAction",
+          payload: { approvalId: "pause-approval-call" },
+        },
+      ],
     });
 
-    const paused = await requestSessionControl(client.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId!,
-      sessionId: session.id,
-      actor: grant.subjectId,
-      mode: "pause",
-      clientEventId: `pause-${crypto.randomUUID()}`,
-    });
-    expect(paused.shouldSignalControl).toBe(false);
-    expect(paused.events.map((event) => event.type)).toEqual([
-      "user.pause",
-      "session.control.paused",
-      "session.status.changed",
-    ]);
+    const paused = await controlSession(grant, session.id, "pause");
+    expect(paused.interruptionCount).toBe(0);
+    expect(paused.control.state).toBe("paused");
     expect(
       await withWorkspaceRls(client.db, grant.workspaceId!, async (db) =>
         db
@@ -639,7 +632,6 @@ describe("clean session control plane", () => {
         attemptId: neverStartedAttemptId,
         timeoutType: "SCHEDULE_TO_START",
         maxRedispatches: 3,
-        childCompletionParentWakeEnabled: false,
       }),
     ).toEqual({ action: "unclaimed", events: [] });
     expect(await getSessionTurn(client.db, grant.workspaceId!, queued.turn.id)).toMatchObject({
@@ -667,9 +659,12 @@ describe("clean session control plane", () => {
         attemptId: firstAttemptId,
         timeoutType: "HEARTBEAT",
         maxRedispatches: 3,
-        childCompletionParentWakeEnabled: false,
       }),
-    ).toMatchObject({ action: "recovering", turnId: first.id, redispatches: 1 });
+    ).toMatchObject({
+      action: "recovering",
+      turnId: first.id,
+      redispatches: 1,
+    });
 
     const secondAttemptId = crypto.randomUUID();
     const second = await claimTestSessionWork(
@@ -691,7 +686,6 @@ describe("clean session control plane", () => {
         attemptId: firstAttemptId,
         timeoutType: "HEARTBEAT",
         maxRedispatches: 3,
-        childCompletionParentWakeEnabled: false,
       }),
     ).toMatchObject({ action: "stale", activeTurnId: first.id });
     expect(await getSessionTurn(client.db, grant.workspaceId!, first.id)).toMatchObject({
@@ -703,19 +697,25 @@ describe("clean session control plane", () => {
   test("a waiting prompt can only be deleted with exact queue and row versions", async () => {
     const { grant, session } = await fixture();
     const queued = await send(grant, session.id, "delete me");
-    const snapshot = await getSessionQueueSnapshot(client.db, grant.workspaceId!, session.id);
-    const result = await cancelQueuedSessionTurnWithVersion(
-      client.db,
-      grant.workspaceId!,
-      session.id,
-      queued.turn.id,
-      snapshot!.version,
-      queued.turn.version,
-      grant.subjectId,
-      "changed my mind",
+    const result = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      db.transaction((tx) =>
+        deleteSessionQueueItemInTransaction(tx as typeof db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: session.id,
+          turnId: queued.turn.id,
+          expectedTurnVersion: queued.turn.version,
+          actor: { type: "human", subjectId: grant.subjectId },
+          operationKey: crypto.randomUUID(),
+          reason: "changed my mind",
+        }),
+      ),
     );
-    expect(result.snapshot.items).toHaveLength(0);
-    expect(result.events.map((event) => event.type)).toEqual(["session.queue.prompt.cancelled"]);
+    expect(result.items).toHaveLength(0);
+    expect(await getSessionTurn(client.db, grant.workspaceId!, queued.turn.id)).toMatchObject({
+      status: "cancelled",
+      cancelReason: "changed my mind",
+    });
   });
 
   test("internal updates dedupe and never appear in the prompt queue", async () => {
@@ -724,12 +724,16 @@ describe("clean session control plane", () => {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId!,
       sessionId: session.id,
-      kind: "child_session_update" as const,
+      kind: "child_terminal_result" as const,
       classification: "success" as const,
       sourceId: crypto.randomUUID(),
       dedupeKey: `child-${crypto.randomUUID()}`,
       summary: "Child completed",
-      payload: { status: "completed" },
+      payload: {
+        type: "child_terminal_result" as const,
+        childSessionId: crypto.randomUUID(),
+        status: "idle" as const,
+      },
     };
     const first = await addSessionSystemUpdate(client.db, input);
     const duplicate = await addSessionSystemUpdate(client.db, input);
@@ -749,12 +753,16 @@ describe("clean session control plane", () => {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId!,
       sessionId: session.id,
-      kind: "child_session_update",
+      kind: "child_terminal_result",
       classification: "success",
       sourceId: crypto.randomUUID(),
       dedupeKey: `child-${crypto.randomUUID()}`,
       summary: "Child completed",
-      payload: { status: "completed" },
+      payload: {
+        type: "child_terminal_result",
+        childSessionId: crypto.randomUUID(),
+        status: "idle",
+      },
     });
     if (!update.added) throw new Error("system update was not inserted");
 
@@ -772,7 +780,6 @@ describe("clean session control plane", () => {
       turnId: internalTurn!.id,
       triggerEventId: internalTurn!.triggerEventId,
       attemptId: failedAttemptId,
-      childCompletionParentWakeEnabled: false,
       turnStatus: "failed",
       sessionStatus: "idle",
       activeTurnId: null,
@@ -812,12 +819,16 @@ describe("clean session control plane", () => {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId!,
       sessionId: session.id,
-      kind: "child_session_update",
+      kind: "child_terminal_result",
       classification: "failure",
       sourceId: crypto.randomUUID(),
       dedupeKey: `child-${crypto.randomUUID()}`,
       summary: "First child failed",
-      payload: { status: "failed" },
+      payload: {
+        type: "child_terminal_result",
+        childSessionId: crypto.randomUUID(),
+        status: "failed",
+      },
     });
     if (!first.added) throw new Error("first system update was not inserted");
     const failedAttemptId = crypto.randomUUID();
@@ -833,7 +844,6 @@ describe("clean session control plane", () => {
       turnId: failedTurn!.id,
       triggerEventId: failedTurn!.triggerEventId,
       attemptId: failedAttemptId,
-      childCompletionParentWakeEnabled: false,
       turnStatus: "failed",
       sessionStatus: "idle",
       activeTurnId: null,
@@ -844,12 +854,16 @@ describe("clean session control plane", () => {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId!,
       sessionId: session.id,
-      kind: "child_session_update",
+      kind: "child_terminal_result",
       classification: "success",
       sourceId: crypto.randomUUID(),
       dedupeKey: `child-${crypto.randomUUID()}`,
       summary: "Second child completed",
-      payload: { status: "completed" },
+      payload: {
+        type: "child_terminal_result",
+        childSessionId: crypto.randomUUID(),
+        status: "idle",
+      },
     });
     if (!second.added) throw new Error("second system update was not inserted");
     const retryTurn = await claimTestSessionWork(
@@ -858,7 +872,10 @@ describe("clean session control plane", () => {
       session.id,
       `session-${session.id}`,
     );
-    expect(retryTurn).toMatchObject({ source: "system", metadata: { internalUpdateCount: 2 } });
+    expect(retryTurn).toMatchObject({
+      source: "system",
+      metadata: { internalUpdateCount: 2 },
+    });
     expect(
       (
         await listSessionSystemUpdatesForTurn(
@@ -884,7 +901,7 @@ describe("clean session control plane", () => {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId!,
       sessionId: session.id,
-      kind: "lifecycle_event",
+      kind: "goal_continuation",
       classification: "info",
       sourceId: goal.id,
       dedupeKey: `goal-continuation:${goal.id}:${goal.version}:1`,
@@ -894,6 +911,7 @@ describe("clean session control plane", () => {
         goalId: goal.id,
         goalVersion: goal.version,
         autoContinuation: 1,
+        prompt: "Continue the goal",
       },
     });
     if (!update.added) throw new Error("goal update was not inserted");
@@ -910,7 +928,6 @@ describe("clean session control plane", () => {
       turnId: turn!.id,
       triggerEventId: turn!.triggerEventId,
       attemptId,
-      childCompletionParentWakeEnabled: false,
       turnStatus: "failed",
       sessionStatus: "idle",
       activeTurnId: null,
@@ -967,12 +984,16 @@ describe("clean session control plane", () => {
       accountId: updateCase.grant.accountId,
       workspaceId: updateCase.grant.workspaceId!,
       sessionId: updateCase.session.id,
-      kind: "runtime_notice",
+      kind: "agent_message",
       classification: "info",
       sourceId: crypto.randomUUID(),
       dedupeKey: `notice-${crypto.randomUUID()}`,
       summary: "background update",
-      payload: { type: "runtime_notice" },
+      payload: {
+        type: "agent_message",
+        text: "background update",
+        operationId: crypto.randomUUID(),
+      },
     });
     await requestSessionCompaction(client.db, updateCase.grant.workspaceId!, updateCase.session.id);
     const claimedCompaction = await claimTestSessionWork(
@@ -1003,15 +1024,9 @@ describe("clean session control plane", () => {
       { attemptId },
     );
 
-    const paused = await requestSessionControl(client.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId!,
-      sessionId: session.id,
-      actor: grant.subjectId,
-      mode: "pause",
-      clientEventId: `pause-${crypto.randomUUID()}`,
-    });
-    expect(paused.shouldSignalControl).toBe(true);
+    const paused = await controlSession(grant, session.id, "pause");
+    expect(paused.interruptionCount).toBe(1);
+    expect(paused.wakeCount).toBe(1);
     expect(
       await recordSkippedContextCompaction(client.db, {
         accountId: grant.accountId,
@@ -1041,19 +1056,14 @@ describe("clean session control plane", () => {
     );
 
     const steered = await send(grant, session.id, "use this instead", "steer");
-    expect(steered.shouldSignalControl).toBe(true);
+    expect(steered.interruptionCount).toBe(1);
     expect((await getSessionTurn(client.db, grant.workspaceId!, compaction!.id))?.status).toBe(
-      "superseded",
+      "running",
     );
     expect(await isSessionCompactionRequested(client.db, grant.workspaceId!, session.id)).toBe(
       true,
     );
-    await settlePendingSessionControl(
-      client.db,
-      grant.workspaceId!,
-      session.id,
-      steered.controlEvent!.id,
-    );
+    await settleSessionAttemptInterruptions(client.db, grant.workspaceId!, session.id, attemptId);
     const next = await claimTestSessionWork(
       client.db,
       grant.workspaceId!,
@@ -1126,12 +1136,14 @@ describe("clean session control plane", () => {
       turnId: compaction!.id,
       triggerEventId: compaction!.triggerEventId,
       attemptId,
-      childCompletionParentWakeEnabled: false,
       turnStatus: "completed",
       sessionStatus: "idle",
       activeTurnId: null,
       events: [
-        { type: "turn.completed", payload: { maintenance: "context_compaction" } },
+        {
+          type: "turn.completed",
+          payload: { maintenance: "context_compaction" },
+        },
         { type: "session.status.changed", payload: { status: "idle" } },
       ],
     });
@@ -1146,70 +1158,61 @@ describe("clean session control plane", () => {
 
   test("Pause and Resume are the only session lifecycle controls", async () => {
     const { grant, session } = await fixture();
-    const paused = await requestSessionControl(client.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId!,
-      sessionId: session.id,
-      actor: grant.subjectId,
-      mode: "pause",
-      clientEventId: `pause-${crypto.randomUUID()}`,
-    });
-    expect(paused.controlState).toBe("paused");
-    const resumed = await requestSessionControl(client.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId!,
-      sessionId: session.id,
-      actor: grant.subjectId,
-      mode: "resume",
-      clientEventId: `resume-${crypto.randomUUID()}`,
-      expectedControlState: "paused",
-      expectedControlGeneration: paused.controlGeneration,
-    });
-    expect(resumed.controlState).toBe("active");
+    const paused = await controlSession(grant, session.id, "pause");
+    expect(paused.control.state).toBe("paused");
+    expect((await getSession(client.db, grant.workspaceId!, session.id))?.status).toBe("queued");
+    const resumed = await controlSession(grant, session.id, "resume");
+    expect(resumed.control.state).toBe("active");
+  });
+
+  test("a human send through Pause writes one automatic Resume invalidation", async () => {
+    const { grant, session } = await fixture();
+    const paused = await controlWorkspace(grant, "pause", "maintenance");
+    const accepted = await send(grant, session.id, "continue through the pause");
+    expect(accepted.workspaceControlEventId).toEqual(expect.any(String));
+    const events = await listWorkspaceControlEvents(client.db, grant.workspaceId!, 0, 10);
+    expect(events).toEqual([
+      expect.objectContaining({
+        revision: paused.revision,
+        scope: "workspace",
+        rootSessionId: null,
+        action: "pause",
+        automatic: false,
+      }),
+      expect.objectContaining({
+        revision: paused.revision + 1,
+        scope: "session",
+        rootSessionId: session.id,
+        action: "resume",
+        automatic: true,
+        reason: "human_send",
+      }),
+    ]);
   });
 
   test("idle settlement cannot cross a session or workspace Pause gate", async () => {
     const sessionPause = await fixture();
-    await requestSessionControl(client.db, {
-      accountId: sessionPause.grant.accountId,
-      workspaceId: sessionPause.grant.workspaceId!,
-      sessionId: sessionPause.session.id,
-      actor: sessionPause.grant.subjectId,
-      mode: "pause",
-      clientEventId: `pause-${crypto.randomUUID()}`,
-    });
+    await controlSession(sessionPause.grant, sessionPause.session.id, "pause");
     expect(
       await settleSessionIdleWithParentOutbox(
         client.db,
         sessionPause.grant.workspaceId!,
         sessionPause.session.id,
-        false,
       ),
     ).toEqual({ action: "stale", episodeKey: null, events: [] });
 
     const workspacePause = await fixture();
-    await setWorkspaceInferenceControl(client.db, {
-      accountId: workspacePause.grant.accountId,
-      workspaceId: workspacePause.grant.workspaceId!,
-      actor: workspacePause.grant.subjectId,
-      state: "paused",
-      reason: "test workspace Pause gate",
-      clientEventId: `workspace-pause-${crypto.randomUUID()}`,
-      expectedState: "active",
-      expectedGeneration: 0,
-      exceptSessionIds: [],
-    });
+    await controlWorkspace(workspacePause.grant, "pause", "test workspace Pause gate");
     expect(
       await settleSessionIdleWithParentOutbox(
         client.db,
         workspacePause.grant.workspaceId!,
         workspacePause.session.id,
-        false,
       ),
     ).toEqual({ action: "stale", episodeKey: null, events: [] });
   });
 
-  test("child terminal settlement keeps child truth and gates every parent outbox producer", async () => {
+  test("every child terminal path durably produces one parent update", async () => {
     const { grant, session: parent } = await fixture();
     const createChild = async (label: string) => {
       const child = await createSession(client.db, {
@@ -1246,7 +1249,6 @@ describe("clean session control plane", () => {
           turnId: turn.id,
           triggerEventId: turn.triggerEventId,
           attemptId,
-          childCompletionParentWakeEnabled: false,
           turnStatus: "completed",
           sessionStatus: "idle",
           activeTurnId: null,
@@ -1263,16 +1265,16 @@ describe("clean session control plane", () => {
           .where(eq(schema.sessionSystemUpdateOutbox.sourceSessionId, childSessionId)),
       );
 
-    const idleChild = await createIdleReadyChild("disabled idle child");
+    const idleChild = await createIdleReadyChild("idle child");
     expect(
-      await settleSessionIdleWithParentOutbox(client.db, grant.workspaceId!, idleChild.id, false),
+      await settleSessionIdleWithParentOutbox(client.db, grant.workspaceId!, idleChild.id),
     ).toMatchObject({ action: "settled" });
     expect(await getSession(client.db, grant.workspaceId!, idleChild.id)).toMatchObject({
       status: "idle",
     });
-    expect(await childOutboxes(idleChild.id)).toHaveLength(0);
+    expect(await childOutboxes(idleChild.id)).toHaveLength(1);
 
-    const failedChild = await createChild("disabled failed child");
+    const failedChild = await createChild("failed child");
     const { attemptId: failedAttemptId, turn: failedTurn } = await claimChild(failedChild);
     expect(
       await applySessionTurnSettlement(client.db, grant.workspaceId!, {
@@ -1280,7 +1282,6 @@ describe("clean session control plane", () => {
         turnId: failedTurn.id,
         triggerEventId: failedTurn.triggerEventId,
         attemptId: failedAttemptId,
-        childCompletionParentWakeEnabled: false,
         turnStatus: "failed",
         sessionStatus: "failed",
         activeTurnId: null,
@@ -1290,9 +1291,9 @@ describe("clean session control plane", () => {
     expect(await getSession(client.db, grant.workspaceId!, failedChild.id)).toMatchObject({
       status: "failed",
     });
-    expect(await childOutboxes(failedChild.id)).toHaveLength(0);
+    expect(await childOutboxes(failedChild.id)).toHaveLength(1);
 
-    const exhaustedChild = await createChild("disabled worker-death child");
+    const exhaustedChild = await createChild("worker-death child");
     const { attemptId: exhaustedAttemptId } = await claimChild(exhaustedChild);
     expect(
       await recoverSessionDispatch(client.db, grant.workspaceId!, {
@@ -1300,55 +1301,12 @@ describe("clean session control plane", () => {
         attemptId: exhaustedAttemptId,
         timeoutType: "HEARTBEAT",
         maxRedispatches: 0,
-        childCompletionParentWakeEnabled: false,
       }),
     ).toMatchObject({ action: "exceeded" });
     expect(await getSession(client.db, grant.workspaceId!, exhaustedChild.id)).toMatchObject({
       status: "failed",
     });
-    expect(await childOutboxes(exhaustedChild.id)).toHaveLength(0);
-
-    const enabledIdleChild = await createIdleReadyChild("enabled idle child");
-    expect(
-      await settleSessionIdleWithParentOutbox(
-        client.db,
-        grant.workspaceId!,
-        enabledIdleChild.id,
-        true,
-      ),
-    ).toMatchObject({ action: "settled" });
-    expect(await childOutboxes(enabledIdleChild.id)).toHaveLength(1);
-
-    const enabledFailedChild = await createChild("enabled failed child");
-    const { attemptId: enabledFailedAttemptId, turn: enabledFailedTurn } =
-      await claimChild(enabledFailedChild);
-    expect(
-      await applySessionTurnSettlement(client.db, grant.workspaceId!, {
-        sessionId: enabledFailedChild.id,
-        turnId: enabledFailedTurn.id,
-        triggerEventId: enabledFailedTurn.triggerEventId,
-        attemptId: enabledFailedAttemptId,
-        childCompletionParentWakeEnabled: true,
-        turnStatus: "failed",
-        sessionStatus: "failed",
-        activeTurnId: null,
-        events: [{ type: "turn.failed", payload: { error: "expected enabled test failure" } }],
-      }),
-    ).toMatchObject({ action: "settled" });
-    expect(await childOutboxes(enabledFailedChild.id)).toHaveLength(1);
-
-    const enabledExhaustedChild = await createChild("enabled worker-death child");
-    const { attemptId: enabledExhaustedAttemptId } = await claimChild(enabledExhaustedChild);
-    expect(
-      await recoverSessionDispatch(client.db, grant.workspaceId!, {
-        sessionId: enabledExhaustedChild.id,
-        attemptId: enabledExhaustedAttemptId,
-        timeoutType: "HEARTBEAT",
-        maxRedispatches: 0,
-        childCompletionParentWakeEnabled: true,
-      }),
-    ).toMatchObject({ action: "exceeded" });
-    expect(await childOutboxes(enabledExhaustedChild.id)).toHaveLength(1);
+    expect(await childOutboxes(exhaustedChild.id)).toHaveLength(1);
   });
 
   test("Pause blocks a racing terminal settlement and Resume admits a new attempt of the same turn", async () => {
@@ -1362,22 +1320,14 @@ describe("clean session control plane", () => {
       `session-${session.id}`,
       { attemptId: firstAttemptId },
     );
-    const paused = await requestSessionControl(client.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId!,
-      sessionId: session.id,
-      actor: grant.subjectId,
-      mode: "pause",
-      clientEventId: `pause-${crypto.randomUUID()}`,
-    });
-    expect(paused.shouldSignalControl).toBe(true);
+    const paused = await controlSession(grant, session.id, "pause");
+    expect(paused.interruptionCount).toBe(1);
     expect(
       await applySessionTurnSettlement(client.db, grant.workspaceId!, {
         sessionId: session.id,
         turnId: turn!.id,
         triggerEventId: turn!.triggerEventId,
         attemptId: firstAttemptId,
-        childCompletionParentWakeEnabled: false,
         turnStatus: "completed",
         sessionStatus: "idle",
         activeTurnId: null,
@@ -1385,22 +1335,15 @@ describe("clean session control plane", () => {
       }),
     ).toMatchObject({ action: "stale", events: [] });
 
-    const control = await settlePendingSessionControl(
+    const control = await settleSessionAttemptInterruptions(
       client.db,
       grant.workspaceId!,
       session.id,
-      paused.event.id,
+      firstAttemptId,
     );
-    expect(control.recoveringTurnId).toBe(turn!.id);
-    const resumed = await requestSessionControl(client.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId!,
-      sessionId: session.id,
-      actor: grant.subjectId,
-      mode: "resume",
-      clientEventId: `resume-${crypto.randomUUID()}`,
-    });
-    expect(resumed.shouldWake).toBe(true);
+    expect(control).toMatchObject({ action: "paused", turnId: turn!.id });
+    const resumed = await controlSession(grant, session.id, "resume");
+    expect(resumed.wakeCount).toBeGreaterThanOrEqual(1);
     const resumedTurn = await claimTestSessionWork(
       client.db,
       grant.workspaceId!,
@@ -1414,7 +1357,7 @@ describe("clean session control plane", () => {
     });
   });
 
-  test("Send cannot erase an unsettled Pause fence", async () => {
+  test("Send reopens admission without erasing an unsettled Pause interruption", async () => {
     const { grant, session } = await fixture();
     await send(grant, session.id, "running prompt");
     const attemptId = crypto.randomUUID();
@@ -1426,15 +1369,8 @@ describe("clean session control plane", () => {
       { attemptId },
     );
     expect(running?.status).toBe("running");
-    const paused = await requestSessionControl(client.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId!,
-      sessionId: session.id,
-      actor: grant.subjectId,
-      mode: "pause",
-      clientEventId: `pause-${crypto.randomUUID()}`,
-    });
-    expect(paused.shouldSignalControl).toBe(true);
+    const paused = await controlSession(grant, session.id, "pause");
+    expect(paused.interruptionCount).toBe(1);
 
     await send(grant, session.id, "wait behind pause");
 
@@ -1444,26 +1380,32 @@ describe("clean session control plane", () => {
       async (db) =>
         await db
           .select({
-            pendingControlEventId: schema.sessions.pendingControlEventId,
-            pendingControlKind: schema.sessions.pendingControlKind,
-            pendingControlExpectedTurnId: schema.sessions.pendingControlExpectedTurnId,
-            pendingControlExpectedAttemptId: schema.sessions.pendingControlExpectedAttemptId,
-            controlState: schema.sessions.controlState,
+            attemptId: schema.sessionAttemptInterruptions.attemptId,
+            kind: schema.sessionAttemptInterruptions.kind,
+            state: schema.sessionAttemptInterruptions.state,
           })
-          .from(schema.sessions)
+          .from(schema.sessionAttemptInterruptions)
           .where(
             and(
-              eq(schema.sessions.workspaceId, grant.workspaceId!),
-              eq(schema.sessions.id, session.id),
+              eq(schema.sessionAttemptInterruptions.workspaceId, grant.workspaceId!),
+              eq(schema.sessionAttemptInterruptions.sessionId, session.id),
+              eq(schema.sessionAttemptInterruptions.attemptId, attemptId),
             ),
           ),
     );
-    expect(after).toBeDefined();
-    expect(after!.pendingControlEventId).toBe(paused.deliveryEventId);
-    expect(after!.pendingControlKind).toBe("pause");
-    expect(after!.pendingControlExpectedTurnId).toBe(running!.id);
-    expect(after!.pendingControlExpectedAttemptId).toBe(attemptId);
-    expect(after!.controlState).toBe("paused");
+    expect(after).toMatchObject({
+      attemptId,
+      kind: "session_pause",
+      state: "pending",
+    });
+    expect(
+      await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+        evaluateSessionControl(db, grant.workspaceId!, session.id),
+      ),
+    ).toMatchObject({
+      state: "active",
+      settlement: { state: "stopping", attemptCount: 1 },
+    });
   });
 
   test("a replaced attempt keeps late evidence but cannot publish it as current truth", async () => {
@@ -1598,17 +1540,7 @@ describe("clean session control plane", () => {
 
     let pauseSettled = false;
     const pause = (async () => {
-      const result = await setWorkspaceInferenceControl(client.db, {
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId!,
-        actor: grant.subjectId,
-        state: "paused",
-        reason: "concurrency test",
-        clientEventId: `workspace-pause-${crypto.randomUUID()}`,
-        expectedState: "active",
-        expectedGeneration: 0,
-        exceptSessionIds: [],
-      });
+      const result = await controlWorkspace(grant, "pause", "concurrency test");
       pauseSettled = true;
       return result;
     })();
@@ -1622,7 +1554,10 @@ describe("clean session control plane", () => {
       releaseFirstWrite();
       await heldFirstWrite;
     }
-    expect(await pause).toMatchObject({ state: "paused", generation: 1 });
+    expect(await pause).toMatchObject({
+      workspaceState: "paused",
+      revision: 1,
+    });
   });
 
   test("a replaced attempt cannot compact history or overwrite its token signal", async () => {
@@ -1705,7 +1640,11 @@ describe("clean session control plane", () => {
       expectedExecutionGeneration: second!.executionGeneration,
       expectedAttemptId: secondAttemptId,
       replacementItems: [{ type: "message", role: "user", content: "retained request" }],
-      summaryItem: { type: "message", role: "user", content: "current summary" },
+      summaryItem: {
+        type: "message",
+        role: "user",
+        content: "current summary",
+      },
       replacementInputTokens: 42,
       clearRequestedCompaction: true,
       eventPayload: {
@@ -1992,11 +1931,15 @@ describe("clean session control plane", () => {
         turnId: running!.id,
         triggerEventId: running!.triggerEventId,
         attemptId: firstAttemptId,
-        childCompletionParentWakeEnabled: false,
         turnStatus: "requires_action",
         sessionStatus: "requires_action",
         activeTurnId: running!.id,
-        events: [{ type: "session.requiresAction", payload: { approvalId: "approval-1" } }],
+        events: [
+          {
+            type: "session.requiresAction",
+            payload: { approvalId: "approval-1" },
+          },
+        ],
       }),
     ).toMatchObject({ action: "settled" });
     const [approval] = await appendSessionEvents(client.db, grant.workspaceId!, session.id, [
@@ -2058,11 +2001,15 @@ describe("clean session control plane", () => {
       turnId: turn.id,
       triggerEventId: turn.triggerEventId,
       attemptId: firstAttemptId,
-      childCompletionParentWakeEnabled: false,
       turnStatus: "requires_action",
       sessionStatus: "requires_action",
       activeTurnId: turn.id,
-      events: [{ type: "session.requiresAction", payload: { approvalId: "approval-race" } }],
+      events: [
+        {
+          type: "session.requiresAction",
+          payload: { approvalId: "approval-race" },
+        },
+      ],
     });
     expect(await peekSessionWork(client.db, grant.workspaceId!, session.id)).toEqual({
       kind: "approval-wait",
@@ -2112,49 +2059,109 @@ describe("clean session control plane", () => {
     });
   });
 
-  test("a workspace pause exception is generation-bound", async () => {
+  test("a committed session control command replays before its stale control fence is checked", async () => {
     const { grant, session } = await fixture();
-    const paused = await setWorkspaceInferenceControl(client.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId!,
-      actor: grant.subjectId,
-      state: "paused",
-      reason: "maintenance",
-      clientEventId: `workspace-pause-${crypto.randomUUID()}`,
-      expectedState: "active",
-      expectedGeneration: 0,
-      exceptSessionIds: [session.id],
+    const before = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      evaluateSessionControl(db, grant.workspaceId!, session.id),
+    );
+    const operationKey = crypto.randomUUID();
+    const mutate = async () =>
+      await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+        db.transaction((tx) =>
+          mutateSessionControlInTransaction(tx as typeof db, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId!,
+            sessionId: session.id,
+            actor: { type: "human", subjectId: grant.subjectId },
+            operationKey,
+            action: "pause",
+            reason: "idempotent session retry",
+            expectedControlEtag: before.controlEtag,
+          }),
+        ),
+      );
+
+    const first = await mutate();
+    expect(first.replay).toBe(false);
+    const replay = await mutate();
+    expect(replay).toMatchObject({
+      replay: true,
+      workspaceControlEventId: first.workspaceControlEventId,
+      control: { state: "paused" },
     });
-    expect(paused.exceptionSessionIds).toEqual([session.id]);
-    const pausedAgain = await setWorkspaceInferenceControl(client.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId!,
-      actor: grant.subjectId,
-      state: "paused",
-      reason: "override exceptions",
-      clientEventId: `workspace-pause-${crypto.randomUUID()}`,
-      expectedState: "paused",
-      expectedGeneration: paused.generation,
-      exceptSessionIds: [],
+    expect(replay.receipt.id).toBe(first.receipt.id);
+    expect(await listWorkspaceControlEvents(client.db, grant.workspaceId!, 0, 10)).toHaveLength(1);
+  });
+
+  test("a committed workspace control command replays before its stale revision is checked", async () => {
+    const { grant } = await fixture();
+    const operationKey = crypto.randomUUID();
+    const mutate = async () =>
+      await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+        db.transaction((tx) =>
+          mutateWorkspaceControlInTransaction(tx as typeof db, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId!,
+            actor: { type: "human", subjectId: grant.subjectId },
+            operationKey,
+            action: "pause",
+            reason: "idempotent workspace retry",
+            expectedRevision: 0,
+          }),
+        ),
+      );
+
+    const first = await mutate();
+    expect(first).toMatchObject({
+      replay: false,
+      revision: 1,
+      workspaceState: "paused",
     });
-    expect(pausedAgain.generation).toBe(paused.generation + 1);
-    expect(pausedAgain.exceptionSessionIds).toEqual([]);
+    const replay = await mutate();
+    expect(replay).toMatchObject({
+      replay: true,
+      revision: 1,
+      workspaceState: "paused",
+      workspaceControlEventId: first.workspaceControlEventId,
+    });
+    expect(replay.receipt.id).toBe(first.receipt.id);
+    expect(await listWorkspaceControlEvents(client.db, grant.workspaceId!, 0, 10)).toHaveLength(1);
+  });
+
+  test("a selected branch override is invalidated by the next workspace Pause", async () => {
+    const { grant, session } = await fixture();
+    const paused = await controlWorkspace(grant, "pause", "maintenance");
+    const resumed = await controlSession(grant, session.id, "resume");
+    expect(resumed.control.state).toBe("active");
+    expect(resumed.control.override?.rootSessionId).toBe(session.id);
+    const pausedAgain = await controlWorkspace(grant, "pause", "override exceptions");
+    expect(pausedAgain.revision).toBe(paused.revision + 2);
+    expect(
+      await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+        evaluateSessionControl(db, grant.workspaceId!, session.id),
+      ),
+    ).toMatchObject({
+      state: "paused",
+      primaryBlocker: { kind: "workspace" },
+    });
   });
 
   test("Resume can run one session inside a paused workspace until the next workspace Pause", async () => {
     const { grant, session } = await fixture();
     await send(grant, session.id, "run only this session");
-    const paused = await setWorkspaceInferenceControl(client.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId!,
-      actor: grant.subjectId,
-      state: "paused",
-      reason: "workspace maintenance",
-      clientEventId: `workspace-pause-${crypto.randomUUID()}`,
-      expectedState: "active",
-      expectedGeneration: 0,
-      exceptSessionIds: [],
-    });
+    const pauseWorkspace = async (reason: string) =>
+      await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+        mutateWorkspaceControlInTransaction(db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          actor: { type: "human", subjectId: grant.subjectId },
+          operationKey: crypto.randomUUID(),
+          action: "pause",
+          reason,
+        }),
+      );
+    const paused = await pauseWorkspace("workspace maintenance");
+    expect(paused.wakeCount).toBe(0);
     expect(
       await claimTestSessionWork(
         client.db,
@@ -2164,52 +2171,45 @@ describe("clean session control plane", () => {
       ),
     ).toBeNull();
 
-    const resumed = await requestSessionControl(client.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId!,
-      sessionId: session.id,
-      actor: grant.subjectId,
-      mode: "resume",
-      clientEventId: `session-resume-${crypto.randomUUID()}`,
-      expectedWorkspaceInferenceGeneration: paused.generation,
-    });
-    expect(resumed.shouldWake).toBe(true);
-    let snapshot = await getSessionQueueSnapshot(client.db, grant.workspaceId!, session.id);
-    expect(snapshot?.workspaceRunExceptionGeneration).toBe(paused.generation);
-
-    const pausedAgain = await setWorkspaceInferenceControl(client.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId!,
-      actor: grant.subjectId,
-      state: "paused",
-      reason: "override every explicit session run",
-      clientEventId: `workspace-pause-${crypto.randomUUID()}`,
-      expectedState: "paused",
-      expectedGeneration: paused.generation,
-      exceptSessionIds: [],
-    });
-    snapshot = await getSessionQueueSnapshot(client.db, grant.workspaceId!, session.id);
-    expect(snapshot?.workspaceInferenceGeneration).toBe(pausedAgain.generation);
-    expect(snapshot?.workspaceRunExceptionGeneration).toBeNull();
-    expect(
-      await claimTestSessionWork(
-        client.db,
-        grant.workspaceId!,
-        session.id,
-        `session-${session.id}`,
-      ),
-    ).toBeNull();
-
-    const [row] = await withWorkspaceRls(
-      client.db,
-      grant.workspaceId!,
-      async (db) =>
-        await db
-          .select({ status: schema.sessions.status })
-          .from(schema.sessions)
-          .where(eq(schema.sessions.id, session.id)),
+    const resumed = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      mutateSessionControlInTransaction(db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        actor: { type: "human", subjectId: grant.subjectId },
+        operationKey: crypto.randomUUID(),
+        action: "resume",
+      }),
     );
-    expect(row?.status).toBe("paused");
+    expect(resumed.wakeCount).toBe(1);
+    expect(resumed.control).toMatchObject({
+      state: "active",
+      override: { rootSessionId: session.id },
+    });
+
+    const pausedAgain = await pauseWorkspace("override every explicit session run");
+    expect(pausedAgain.revision).toBeGreaterThan(paused.revision);
+    expect(
+      await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+        evaluateSessionControl(db, grant.workspaceId!, session.id),
+      ),
+    ).toMatchObject({ state: "paused", primaryBlocker: { kind: "workspace" } });
+    expect(
+      await claimTestSessionWork(
+        client.db,
+        grant.workspaceId!,
+        session.id,
+        `session-${session.id}`,
+      ),
+    ).toBeNull();
+
+    const [row] = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      db
+        .select({ status: schema.sessions.status })
+        .from(schema.sessions)
+        .where(eq(schema.sessions.id, session.id)),
+    );
+    expect(row?.status).toBe("queued");
   });
 
   test("atomically commits an available recording before terminal turn events", async () => {
@@ -2242,7 +2242,6 @@ describe("clean session control plane", () => {
       turnId: turn.id,
       triggerEventId: turn.triggerEventId,
       attemptId,
-      childCompletionParentWakeEnabled: false,
       turnStatus: "completed",
       sessionStatus: "idle",
       activeTurnId: null,
@@ -2257,7 +2256,10 @@ describe("clean session control plane", () => {
       },
       events: [{ type: "turn.completed", payload: { output: "done" } }],
     });
-    expect(settled).toMatchObject({ action: "settled", recordingMutationApplied: true });
+    expect(settled).toMatchObject({
+      action: "settled",
+      recordingMutationApplied: true,
+    });
     if (settled.action !== "settled") throw new Error("recording settlement became stale");
     expect(settled.events.map((event) => event.type)).toEqual([
       "recording.available",
@@ -2313,7 +2315,6 @@ describe("clean session control plane", () => {
         turnId: failedTurn.id,
         triggerEventId: failedTurn.triggerEventId,
         attemptId: failedAttemptId,
-        childCompletionParentWakeEnabled: false,
         turnStatus: "completed",
         sessionStatus: "idle",
         activeTurnId: null,
@@ -2368,14 +2369,16 @@ describe("clean session control plane", () => {
       turnId: approvalTurn.id,
       triggerEventId: approvalTurn.triggerEventId,
       attemptId: approvalAttemptId,
-      childCompletionParentWakeEnabled: false,
       turnStatus: "requires_action",
       sessionStatus: "requires_action",
       activeTurnId: approvalTurn.id,
       recording: { action: "discard", recordingId: discardedRecordingId },
       events: [{ type: "session.requiresAction", payload: { approvals: [] } }],
     });
-    expect(suspended).toMatchObject({ action: "settled", recordingMutationApplied: true });
+    expect(suspended).toMatchObject({
+      action: "settled",
+      recordingMutationApplied: true,
+    });
     expect(await getRecording(client.db, approval.grant.workspaceId!, discardedRecordingId)).toBe(
       null,
     );
@@ -2415,7 +2418,6 @@ describe("clean session control plane", () => {
         turnId: turn.id,
         triggerEventId: turn.triggerEventId,
         attemptId: wrongAttemptId,
-        childCompletionParentWakeEnabled: false,
         turnStatus: "completed",
         sessionStatus: "idle",
         activeTurnId: null,

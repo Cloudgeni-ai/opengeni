@@ -150,9 +150,10 @@ workflow's `codexCapacityChanged` signal is only a nudge; the Postgres revision
 is authoritative. The workflow snapshots its wake counters before dispatching a
 turn, so a signal delivered after waiter commit but before the activity result
 returns causes immediate reconciliation instead of being baselined away. It
-reconstructs pending timers on worker/Temporal restart and `continueAsNew`, while
-`validateCodexCapacityResumeTurn` closes the wake→claim race against user queue,
-pause/stop, goal/control/policy changes, and duplicate turns before
+reconstructs pending timers on worker/Temporal restart and `continueAsNew`.
+`reconcileCodexCapacityWait` atomically rechecks human queue, effective Pause,
+goal, policy, blocked-turn identity, and duplicate-work fences before recording
+the typed capacity-resume update; ordinary attempt claim repeats admission before
 provider/model/tool/billing work starts. Reset/boost entitlement redemption is
 never automatic.
 
@@ -169,11 +170,14 @@ another credential:
 | Network break, 5xx, invalid content, malformed/partial 200 stream | No credential quarantine | **No** |
 
 Before definitive failover, the worker flushes streamed events and reconciles
-`session_history_items`, then quarantines status/cooldown only through the exact
-live holder/generation. It increments a persisted per-turn failover counter,
-emits `turn.preempted`, and requeues the **same turn row**. This is an explicit
-checkpoint/resume, not a Temporal or SDK blind retry. The resumed attempt receives
-a side-effect verification notice when progress already exists. The counter is
+attempt-fenced `session_history_items`, then quarantines status/cooldown only
+through the exact live credential holder/generation. One transaction closes the
+first-class turn attempt as recoverable, closes ambiguous in-flight tool calls
+as `interrupted / outcome unknown`, increments a persisted per-turn failover
+counter, emits `turn.recovery.requested`, and leaves the **same logical turn** in
+`recovering`. It creates no prompt queue row or synthetic user/resume message.
+The next attempt reconstructs durable model history and tool lineage. This is an
+explicit checkpoint/resume, not a Temporal or SDK blind retry. The counter is
 bounded by pool size so a malformed classification cannot walk forever; a stale
 holder cannot quarantine a credential or settle the turn.
 
@@ -243,7 +247,7 @@ provider response body.
 The default PrometheusRule alerts when a workspace observes zero eligible
 credentials (critical) or one eligible credential (warning). Operators should
 correlate those alerts with `codex.credential.selected`,
-`codex.account.switched`, and `turn.preempted`/`turn.failed` events.
+`codex.account.switched`, and `turn.recovery.requested`/`turn.failed` events.
 
 ## Verification
 

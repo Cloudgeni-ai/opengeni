@@ -1,4 +1,4 @@
-import { proxyActivities } from "@temporalio/workflow";
+import { ActivityCancellationType, proxyActivities } from "@temporalio/workflow";
 import type * as activities from "../activities";
 
 type WorkflowControlActivities = Pick<
@@ -11,7 +11,7 @@ type WorkflowControlActivities = Pick<
   | "peekSessionWork"
   | "reconcileCodexCapacityWait"
   | "recoverDispatch"
-  | "settleSessionControl"
+  | "settleSessionInterruptions"
 >;
 
 /**
@@ -57,6 +57,12 @@ export function turnActivityForTaskQueue(baseTaskQueue: string) {
     // accepts them and performs the atomic claim.
     startToCloseTimeout: "30 days",
     heartbeatTimeout: "2 minutes",
+    // Pause/Steer may complete the durable control transition immediately,
+    // but the session workflow must remain open until the old turn activity is
+    // physically gone. Leaving this implicit uses Temporal's try-cancel wire
+    // default: the activity promise rejects as soon as cancellation is
+    // requested and the workflow can close while the worker keeps streaming.
+    cancellationType: ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
     retry: { maximumAttempts: 1 },
   });
 }

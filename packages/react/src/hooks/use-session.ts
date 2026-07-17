@@ -1,5 +1,5 @@
 import type { Session, SessionEvent } from "@opengeni/sdk";
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useOpenGeni, type ClientOverride } from "../provider";
 import {
   useMutationRunner,
@@ -37,7 +37,8 @@ export function useSession(
   sessionId: string | null | undefined,
   options: UseSessionOptions = {},
 ): UseSessionResult {
-  const { client, workspaceId } = useOpenGeni(options);
+  const { client, workspaceId, workspaceControlEvent, registerSessionReconciler } =
+    useOpenGeni(options);
   const enabled = (options.enabled ?? true) && Boolean(sessionId);
   const [override, setOverride] = useState<Session | null>(null);
   const { run, mutating, mutationError, clearMutationError } = useMutationRunner();
@@ -54,6 +55,13 @@ export function useSession(
     pollIntervalMs: options.pollIntervalMs,
     enabled,
   });
+  useEffect(() => {
+    if (enabled && workspaceControlEvent) void refresh();
+  }, [enabled, refresh, workspaceControlEvent]);
+  useEffect(() => {
+    if (!sessionId || !enabled) return;
+    return registerSessionReconciler(sessionId, "session", refresh);
+  }, [enabled, refresh, registerSessionReconciler, sessionId]);
 
   const base = data ?? null;
   // The override only ever carries title/titleSource patches; it is reset on

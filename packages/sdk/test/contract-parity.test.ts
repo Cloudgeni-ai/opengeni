@@ -19,6 +19,8 @@ import {
   DESKTOP_STREAM_PORT,
   ListWorkspaceMembersResponse as ContractListWorkspaceMembersResponse,
   MachineState as ContractMachineState,
+  OPENGENI_API_CONTRACT_HEADER as CONTRACT_API_CONTRACT_HEADER,
+  OPENGENI_API_CONTRACT_REVISION as CONTRACT_API_CONTRACT_REVISION,
   MachineView as ContractMachineView,
   MachinesResponse as ContractMachinesResponse,
   MetricSample as ContractMetricSample,
@@ -53,7 +55,11 @@ import {
 } from "@opengeni/contracts";
 import { SandboxBackend as DeploymentSandboxBackend } from "@opengeni/deployment";
 import type { z } from "zod";
-import { SESSION_EVENT_TYPES } from "../src/types";
+import {
+  OPENGENI_API_CONTRACT_HEADER,
+  OPENGENI_API_CONTRACT_REVISION,
+  SESSION_EVENT_TYPES,
+} from "../src/types";
 import type {
   AcknowledgeStreamRequest,
   AcknowledgeStreamResponse,
@@ -110,6 +116,10 @@ import type {
 // contracts move, these checks (value-level and type-level) fail the gate.
 
 describe("SDK / contracts parity", () => {
+  test("pins the exact API revision and header values", () => {
+    expect(OPENGENI_API_CONTRACT_REVISION).toBe(CONTRACT_API_CONTRACT_REVISION);
+    expect(OPENGENI_API_CONTRACT_HEADER).toBe(CONTRACT_API_CONTRACT_HEADER);
+  });
   test("known session event types match the contracts enum exactly", () => {
     expect([...SESSION_EVENT_TYPES].sort()).toEqual([...ContractSessionEventType.options].sort());
   });

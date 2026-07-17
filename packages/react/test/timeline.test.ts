@@ -447,6 +447,12 @@ describe("buildTimeline", () => {
         ),
         eventAt(
           18,
+          "session.queue.changed",
+          { operation: "move", targetTurnId: "turn-b", queueVersion: 2 },
+          { turnId: "turn-b" },
+        ),
+        eventAt(
+          19,
           "turn.cancelled",
           { turnId: "turn-b", triggerEventId: "evt-16" },
           { turnId: "turn-b" },

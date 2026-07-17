@@ -1,13 +1,14 @@
-import type { ClientModel, SessionStatus } from "@opengeni/sdk";
+import type { ClientModel, EffectiveSessionControl } from "@opengeni/sdk";
 import {
   ArrowUpIcon,
+  ChevronDownIcon,
   FileIcon,
   ImageIcon,
   LoaderCircleIcon,
   PaperclipIcon,
+  PauseIcon,
   PlayIcon,
   RotateCwIcon,
-  SquareIcon,
   XIcon,
 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
@@ -28,7 +29,7 @@ import {
 import { argHint } from "../commands/registry";
 import type { Notice, SlashCommand } from "../commands/types";
 import type { ComposerState } from "../hooks/use-composer";
-import { composerModeForKey, shouldSubmitOnKey } from "../hooks/use-composer";
+import { shouldSteerOnKey, shouldSubmitOnKey } from "../hooks/use-composer";
 import type { UseFileAttachmentsResult } from "../hooks/use-file-attachments";
 import { defaultCommands } from "../commands/registry";
 import {
@@ -37,14 +38,25 @@ import {
   type SlashCommandContext,
 } from "../hooks/use-slash-commands";
 import { cn } from "../lib/cn";
-import { formatBytes } from "../lib/format";
+import { formatBytes, formatRelativeTime } from "../lib/format";
 import { CommandPalette } from "./command-palette";
 import { ModelPicker } from "./model-picker";
 
 export type ChatComposerProps = {
   composer: ComposerState;
-  /** Current session status; shows the stop control while a turn runs. */
-  status?: SessionStatus | null | undefined;
+  /** Canonical workstream control, separate from lifecycle status. */
+  effectiveControl?: EffectiveSessionControl | null | undefined;
+  /** Waiting prompts already ahead of a normal Send. */
+  queuedAheadCount?: number | undefined;
+  /** Whether broader Workspace Resume is authorized for this viewer. */
+  canControlWorkspace?: boolean | undefined;
+  /** Optional host routes used to navigate from effective Pause blockers. */
+  controlLinks?:
+    | {
+        workspaceHref?: string | undefined;
+        sessionHref?: ((sessionId: string) => string) | undefined;
+      }
+    | undefined;
   placeholder?: string | undefined;
   disabled?: boolean | undefined;
   autoFocus?: boolean | undefined;
@@ -95,13 +107,7 @@ export type ChatComposerProps = {
   onClearView?: (() => void) | undefined;
 };
 
-const ACTIVE_STATUSES: ReadonlySet<SessionStatus> = new Set([
-  "queued",
-  "running",
-  "requires_action",
-  "recovering",
-  "waiting_capacity",
-]);
+export const OPEN_WORKSTREAM_CONTROL_EVENT = "opengeni:open-workstream-control";
 
 /**
  * The chat composer — the only human-to-agent input surface. Plain chat in,
@@ -116,7 +122,10 @@ const ACTIVE_STATUSES: ReadonlySet<SessionStatus> = new Set([
  */
 export function ChatComposer({
   composer,
-  status,
+  effectiveControl,
+  queuedAheadCount = 0,
+  canControlWorkspace = false,
+  controlLinks,
   placeholder,
   disabled,
   autoFocus,
@@ -135,7 +144,24 @@ export function ChatComposer({
 }: ChatComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const active = status != null && ACTIVE_STATUSES.has(status);
+  const paused = effectiveControl?.state === "paused";
+  const [controlDetailsOpen, setControlDetailsOpen] = useState(false);
+  useEffect(() => {
+    const openControl = () => {
+      textareaRef.current?.scrollIntoView({ block: "end", behavior: "smooth" });
+      if (paused) {
+        setControlDetailsOpen(true);
+        return;
+      }
+      window.requestAnimationFrame(() => {
+        document
+          .querySelector<HTMLButtonElement>('button[aria-label="Pause this workstream"]')
+          ?.focus();
+      });
+    };
+    document.addEventListener(OPEN_WORKSTREAM_CONTROL_EVENT, openControl);
+    return () => document.removeEventListener(OPEN_WORKSTREAM_CONTROL_EVENT, openControl);
+  }, [paused]);
 
   // Block sends while attachments are still uploading so a message never
   // departs without the files the user attached to it. This gates BOTH the
@@ -300,7 +326,7 @@ export function ChatComposer({
         // depart without them. The send button is disabled in the same state.
         return;
       }
-      void composer.send(undefined, composerModeForKey(event));
+      void (shouldSteerOnKey(event) ? composer.steer() : composer.send());
     }
   };
 
@@ -342,8 +368,9 @@ export function ChatComposer({
     (composer.error
       ? {
           tone: "error" as const,
-          message:
-            composer.error.message || "Sending failed — your draft is still here. Try again.",
+          message: /control changed|paused while/i.test(composer.error.message)
+            ? "This workstream was paused while you were sending. Nothing was sent, and your draft is still here."
+            : composer.error.message || "Sending failed — your draft is still here. Try again.",
         }
       : null);
 
@@ -403,6 +430,26 @@ export function ChatComposer({
               </span>
             </div>
           ) : null}
+          {paused && effectiveControl ? (
+            <WorkstreamPausedStrip
+              control={effectiveControl}
+              queuedAheadCount={queuedAheadCount}
+              open={controlDetailsOpen}
+              busy={composer.resuming}
+              sending={composer.sending}
+              canControlWorkspace={canControlWorkspace}
+              controlLinks={controlLinks}
+              onOpenChange={setControlDetailsOpen}
+              onResume={() => void composer.resume()}
+              onResumeOption={(option) => void composer.resumeScope(option)}
+            />
+          ) : null}
+          {composer.restoredResources.length > 0 ? (
+            <RestoredResourceChips
+              resources={composer.restoredResources}
+              onRemove={composer.removeRestoredResource}
+            />
+          ) : null}
           {attachments && attachments.attachments.length > 0 ? (
             <AttachmentChips
               attachments={attachments.attachments}
@@ -418,7 +465,11 @@ export function ChatComposer({
             onChange={(event) => composer.setValue(event.target.value)}
             onKeyDown={onKeyDown}
             onPaste={handlePaste}
-            placeholder={placeholder ?? "Message the agent…"}
+            placeholder={
+              paused && disabled !== true
+                ? "Sending will resume this workstream…"
+                : (placeholder ?? "Message the agent…")
+            }
             disabled={disabled}
             autoFocus={autoFocus}
             aria-label="Message the agent"
@@ -505,42 +556,27 @@ export function ChatComposer({
                 </span>
               )}
               <span className="ml-auto flex shrink-0 items-center gap-1.5">
-                <AnimatePresence initial={false}>
-                  {active || status === "paused" ? (
-                    <motion.button
-                      key="stop"
-                      type="button"
-                      initial={{ opacity: 0, scale: 0.8 }}
-                      animate={{ opacity: 1, scale: 1 }}
-                      exit={{ opacity: 0, scale: 0.8 }}
-                      transition={{ duration: 0.15, ease: "easeOut" }}
-                      onClick={() =>
-                        void (status === "paused" ? composer.resume() : composer.pause())
-                      }
-                      disabled={composer.pausing || composer.resuming}
-                      aria-label={status === "paused" ? "Resume the session" : "Pause the session"}
-                      title={
-                        status === "paused"
-                          ? "Resume the current inference before queued prompts"
-                          : "Pause the session; queued prompts are preserved"
-                      }
-                      className={cn(
-                        "inline-flex size-8 items-center justify-center rounded-og-md border border-og-border pointer-coarse:size-11",
-                        "bg-og-surface-2 text-og-fg-muted transition-colors duration-150",
-                        "hover:border-og-status-failed/50 hover:text-og-status-failed",
-                        "disabled:opacity-50",
-                      )}
-                    >
-                      {composer.pausing || composer.resuming ? (
-                        <LoaderCircleIcon className="size-3.5 animate-og-spin" />
-                      ) : status === "paused" ? (
-                        <PlayIcon className="size-3.5 fill-current" />
-                      ) : (
-                        <SquareIcon className="size-3 fill-current" />
-                      )}
-                    </motion.button>
-                  ) : null}
-                </AnimatePresence>
+                {effectiveControl && !paused ? (
+                  <button
+                    type="button"
+                    onClick={() => void composer.pause()}
+                    disabled={composer.pausing || composer.resuming}
+                    aria-label="Pause this workstream"
+                    title="Pause this workstream; queued prompts and approvals are preserved"
+                    className={cn(
+                      "inline-flex size-8 items-center justify-center rounded-og-md border border-og-border pointer-coarse:size-11",
+                      "bg-og-surface-2 text-og-fg-muted transition-colors duration-150",
+                      "hover:border-og-status-waiting/50 hover:text-og-status-waiting",
+                      "disabled:opacity-50",
+                    )}
+                  >
+                    {composer.pausing || composer.resuming ? (
+                      <LoaderCircleIcon className="size-3.5 animate-og-spin" />
+                    ) : (
+                      <PauseIcon className="size-3.5 fill-current" />
+                    )}
+                  </button>
+                ) : null}
                 <button
                   type="button"
                   onClick={() => {
@@ -550,8 +586,12 @@ export function ChatComposer({
                     void composer.send();
                   }}
                   disabled={!canSend || disabled === true || commandDraftBlocked}
-                  aria-label="Send message"
-                  title="Queue message (Enter); steer with Cmd/Ctrl+Enter"
+                  aria-label={paused ? "Send and resume" : "Send message"}
+                  title={
+                    paused
+                      ? "Send & resume (Enter); Steer & resume with Cmd/Ctrl+Enter"
+                      : "Queue message (Enter); steer with Cmd/Ctrl+Enter"
+                  }
                   className={cn(
                     "inline-flex size-8 items-center justify-center rounded-og-md pointer-coarse:size-11",
                     "bg-og-accent text-og-accent-fg shadow-og-sm",
@@ -599,6 +639,218 @@ export function ChatComposer({
           </motion.p>
         ) : null}
       </AnimatePresence>
+      {composer.draftConflict ? (
+        <div
+          className="mt-1.5 flex flex-wrap items-center gap-2 px-1 text-og-xs text-og-status-failed"
+          role="alert"
+        >
+          <span className="min-w-0 flex-1">
+            This draft changed in another tab. Your local draft is still here.
+          </span>
+          <button
+            type="button"
+            className="underline underline-offset-2"
+            onClick={() => void composer.resolveDraftConflict("use_remote")}
+          >
+            Use other draft
+          </button>
+          <button
+            type="button"
+            className="font-medium underline underline-offset-2"
+            onClick={() => void composer.resolveDraftConflict("keep_mine")}
+          >
+            Keep mine
+          </button>
+        </div>
+      ) : composer.draftSaving ? (
+        <p className="px-1 pt-1 text-og-xs text-og-fg-subtle" role="status">
+          Saving draft…
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+function WorkstreamPausedStrip({
+  control,
+  queuedAheadCount,
+  open,
+  busy,
+  sending,
+  canControlWorkspace,
+  controlLinks,
+  onOpenChange,
+  onResume,
+  onResumeOption,
+}: {
+  control: EffectiveSessionControl;
+  queuedAheadCount: number;
+  open: boolean;
+  busy: boolean;
+  sending: boolean;
+  canControlWorkspace: boolean;
+  controlLinks: ChatComposerProps["controlLinks"];
+  onOpenChange: (open: boolean) => void;
+  onResume: () => void;
+  onResumeOption: (option: EffectiveSessionControl["resumeOptions"][number]) => void;
+}) {
+  const blocker = control.primaryBlocker;
+  const cause =
+    blocker?.kind === "workspace"
+      ? "Workspace paused"
+      : control.directState === "paused"
+        ? "Paused here"
+        : `Paused by ${blocker?.displayName ?? "parent"}`;
+  const primary = control.resumeOptions.find((option) => option.scope === "selected");
+  const broaderOptions = control.resumeOptions.filter(
+    (option) =>
+      option !== primary &&
+      option.scope !== "selected" &&
+      (option.scope !== "workspace" || canControlWorkspace),
+  );
+  return (
+    <div className="border-b border-og-status-waiting/25 bg-og-status-waiting/[0.07]">
+      <div className="flex min-w-0 items-center gap-2 px-3 py-2">
+        <PauseIcon className="size-3.5 shrink-0 text-og-status-waiting" />
+        <button
+          type="button"
+          className="min-w-0 flex-1 text-left"
+          onClick={() => onOpenChange(!open)}
+          aria-expanded={open}
+        >
+          <span className="block truncate text-og-xs font-medium text-og-fg">{cause}</span>
+          <span className="block truncate text-[11px] text-og-fg-muted">
+            {queuedAheadCount > 0
+              ? `Send & resume queues behind ${queuedAheadCount} waiting prompt${queuedAheadCount === 1 ? "" : "s"}.`
+              : sending
+                ? "Resuming and sending…"
+                : "Your next message resumes this workstream automatically."}
+          </span>
+        </button>
+        <button
+          type="button"
+          aria-label="Resume this workstream"
+          className="inline-flex min-h-8 shrink-0 items-center gap-1.5 rounded-og-md border border-og-status-waiting/35 bg-og-surface-1 px-2.5 text-og-xs font-medium text-og-fg hover:bg-og-surface-2 pointer-coarse:min-h-11"
+          disabled={busy}
+          onClick={onResume}
+        >
+          {busy ? (
+            <LoaderCircleIcon className="size-3.5 animate-og-spin" />
+          ) : (
+            <PlayIcon className="size-3.5 fill-current" />
+          )}
+          <span className="hidden min-[400px]:inline">Resume this workstream</span>
+          <span className="min-[400px]:hidden">Resume</span>
+        </button>
+        <button
+          type="button"
+          className="inline-flex size-8 shrink-0 items-center justify-center rounded-og-md text-og-fg-muted hover:bg-og-surface-2 pointer-coarse:size-11"
+          onClick={() => onOpenChange(!open)}
+          aria-label={open ? "Hide pause details" : "Show pause details"}
+        >
+          <ChevronDownIcon className={cn("size-3.5 transition-transform", open && "rotate-180")} />
+        </button>
+      </div>
+      {open ? (
+        <div className="border-t border-og-status-waiting/20 px-3 pb-3 pt-2">
+          <ul className="grid gap-2" aria-label="Reasons this workstream is paused">
+            {control.blockers.map((entry, index) => (
+              <li
+                key={`${entry.kind}-${entry.sessionId ?? "workspace"}-${entry.revision}`}
+                className="text-og-xs"
+              >
+                <span className="font-medium text-og-fg">
+                  {index === 0 ? "Paused by " : "Also paused by "}
+                </span>
+                {blockerHref(entry, controlLinks) ? (
+                  <a
+                    href={blockerHref(entry, controlLinks)}
+                    className="font-medium text-og-fg underline decoration-og-border-strong underline-offset-2 hover:text-og-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-og-ring/40"
+                  >
+                    {entry.displayName}
+                  </a>
+                ) : (
+                  <span className="font-medium text-og-fg">{entry.displayName}</span>
+                )}
+                {entry.reason ? <span className="text-og-fg-muted"> · {entry.reason}</span> : null}
+                {entry.actor ? <span className="text-og-fg-subtle"> · {entry.actor}</span> : null}
+                {entry.changedAt ? (
+                  <span className="text-og-fg-subtle">
+                    {" "}
+                    · {formatRelativeTime(entry.changedAt)}
+                  </span>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+          {broaderOptions.length > 0 ? (
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {broaderOptions.map((option) => (
+                <button
+                  key={`${option.scope}-${option.targetId ?? "selected"}`}
+                  type="button"
+                  disabled={busy}
+                  title={option.impactCopy}
+                  onClick={() => onResumeOption(option)}
+                  className="rounded-og-md border border-og-border bg-og-surface-1 px-2 py-1 text-og-xs text-og-fg-muted hover:bg-og-surface-2 hover:text-og-fg pointer-coarse:min-h-10"
+                >
+                  <span className="block font-medium">
+                    {option.scope === "workspace" ? "Resume workspace" : "Resume from this session"}
+                  </span>
+                  <span className="block text-[10px] text-og-fg-subtle">
+                    {option.selectedStateAfter === "active"
+                      ? "This session will be able to run"
+                      : `Still paused by ${option.remainingPrimaryBlocker?.displayName ?? "a narrower pause"}`}
+                  </span>
+                </button>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function blockerHref(
+  blocker: EffectiveSessionControl["blockers"][number],
+  links: ChatComposerProps["controlLinks"],
+): string | undefined {
+  if (blocker.kind === "workspace") return links?.workspaceHref;
+  return blocker.sessionId ? links?.sessionHref?.(blocker.sessionId) : undefined;
+}
+
+function RestoredResourceChips({
+  resources,
+  onRemove,
+}: {
+  resources: ComposerState["restoredResources"];
+  onRemove: (index: number) => void;
+}) {
+  return (
+    <div
+      className="flex flex-wrap gap-1.5 border-b border-og-border px-3 py-2"
+      aria-label="Restored prompt resources"
+    >
+      {resources.map((resource, index) => (
+        <span
+          key={`${resource.kind}-${resource.kind === "file" ? resource.fileId : resource.uri}`}
+          className="inline-flex min-w-0 max-w-full items-center gap-1.5 rounded-og-md border border-og-border bg-og-surface-2 px-2 py-1 text-og-xs text-og-fg-muted"
+        >
+          <FileIcon className="size-3 shrink-0" />
+          <span className="truncate">
+            {resource.kind === "file" ? `File ${resource.fileId.slice(0, 8)}` : resource.uri}
+          </span>
+          <button
+            type="button"
+            className="shrink-0 hover:text-og-fg"
+            onClick={() => onRemove(index)}
+            aria-label={`Remove restored resource ${index + 1}`}
+          >
+            <XIcon className="size-3" />
+          </button>
+        </span>
+      ))}
     </div>
   );
 }

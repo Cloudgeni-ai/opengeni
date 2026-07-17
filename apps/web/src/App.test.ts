@@ -287,48 +287,62 @@ describe("rail session grouping", () => {
 });
 
 describe("rail effective state and deep-path presentation", () => {
-  const pausedWorkspace = {
-    inferenceState: "paused" as const,
-    inferenceGeneration: 7,
-  };
-
   test("does not claim an idle exception is running", () => {
     expect(
-      sessionStateLabel(
-        session({ status: "idle", workspaceRunExceptionGeneration: 7 }),
-        pausedWorkspace,
-      ),
-    ).toBe("Idle · Allowed while paused");
+      sessionStateLabel(session({ status: "idle", effectiveControl: activeControl(true) })),
+    ).toBe("Idle · Resumed workstream");
+    expect(
+      sessionStateLabel(session({ status: "running", effectiveControl: activeControl(true) })),
+    ).toBe("Running · Resumed workstream");
     expect(
       sessionStateLabel(
-        session({ status: "running", workspaceRunExceptionGeneration: 7 }),
-        pausedWorkspace,
+        session({
+          status: "idle",
+          effectiveControl: pausedControl("workspace"),
+        }),
       ),
-    ).toBe("Running · Workspace exception");
-    expect(
-      sessionStateLabel(session({ status: "idle", workspaceRunExceptionGeneration: undefined }), {
-        inferenceState: "paused",
-      }),
-    ).toBe("Paused by workspace");
+    ).toBe("Workspace paused");
   });
 
   test("reports workspace pause transitions and attention honestly", () => {
-    expect(sessionStateLabel(session({ status: "running" }), pausedWorkspace)).toBe("Pausing…");
-    expect(sessionStateLabel(session({ status: "idle" }), pausedWorkspace)).toBe(
-      "Paused by workspace",
-    );
-    expect(sessionStateLabel(session({ status: "requires_action" }), pausedWorkspace)).toBe(
-      "Needs you · Workspace paused",
-    );
+    expect(
+      sessionStateLabel(
+        session({
+          status: "running",
+          effectiveControl: pausedControl("workspace", true),
+        }),
+      ),
+    ).toBe("Pausing…");
+    expect(
+      sessionStateLabel(
+        session({
+          status: "idle",
+          effectiveControl: pausedControl("workspace"),
+        }),
+      ),
+    ).toBe("Workspace paused");
+    expect(
+      sessionStateLabel(
+        session({
+          status: "requires_action",
+          effectiveControl: pausedControl("workspace"),
+        }),
+      ),
+    ).toBe("Needs you · Workspace paused");
   });
 
   test("keeps direct session pause distinct from workspace pause", () => {
-    expect(sessionStateLabel(session({ status: "idle", controlState: "paused" }), undefined)).toBe(
-      "Paused",
-    );
     expect(
-      sessionStateLabel(session({ status: "failed", controlState: "paused" }), undefined),
-    ).toBe("Failed · Session paused");
+      sessionStateLabel(session({ status: "idle", effectiveControl: pausedControl("session") })),
+    ).toBe("Paused here");
+    expect(
+      sessionStateLabel(
+        session({
+          status: "failed",
+          effectiveControl: pausedControl("session"),
+        }),
+      ),
+    ).toBe("Failed · Paused here");
   });
 
   test("keeps recovering and capacity-waiting workstreams in the active group", () => {
@@ -404,6 +418,13 @@ describe("organization helpers", () => {
       externalId: null,
       agentInstructions: null,
       settings: {},
+      inferenceControl: {
+        state: "active",
+        revision: 0,
+        reason: null,
+        changedBy: null,
+        changedAt: null,
+      },
       createdAt: "2026-06-11T00:00:00.000Z",
       updatedAt: "2026-06-11T00:00:00.000Z",
     };
@@ -802,6 +823,19 @@ describe("projectSessionTimeline", () => {
     });
   });
 
+  test("does not resurrect the initial message while its turn is still queued", () => {
+    const items = projectSessionTimeline(session({ initialMessage: "Queued bootstrap" }), [
+      { ...event(1, "user.message", { text: "Queued bootstrap" }), turnId: null },
+      event(2, "turn.queued", {
+        turnId: "turn-1",
+        triggerEventId: "event-1",
+        source: "user",
+      }),
+    ]);
+
+    expect(items).toEqual([]);
+  });
+
   test("hides archived terminal failure payloads in the main timeline projection", () => {
     const items = projectSessionTimeline(session({ status: "cancelled" }), [
       event(1, "user.message", { text: "Inspect" }),
@@ -1048,6 +1082,7 @@ describe("composer reasoning-effort picker (full host enum)", () => {
   function clientConfig(patch: Partial<ClientConfig> = {}): ClientConfig {
     return {
       deploymentRevision: "rev-1",
+      apiContractRevision: "2026-07-session-control-v1",
       defaultModel: "gpt-5.6-sol",
       allowedModels: ["gpt-5.6-sol"],
       models: [],
@@ -1057,6 +1092,11 @@ describe("composer reasoning-effort picker (full host enum)", () => {
       fileUploads: { enabled: false, maxSizeBytes: 0 },
       productAccessMode: "local",
       auth: { mode: "none" },
+      structuredServices: {
+        fileSystem: false,
+        git: false,
+        terminalEvents: false,
+      },
       ...patch,
     };
   }
@@ -1506,12 +1546,7 @@ function session(patch: Partial<Session> = {}): Session {
     queueVersion: patch.queueVersion ?? 0,
     queueHeadPosition: patch.queueHeadPosition ?? 0,
     queueTailPosition: patch.queueTailPosition ?? 0,
-    controlState: patch.controlState ?? "active",
-    controlGeneration: patch.controlGeneration ?? 0,
-    controlReason: patch.controlReason ?? null,
-    controlChangedBy: patch.controlChangedBy ?? null,
-    controlChangedAt: patch.controlChangedAt ?? null,
-    workspaceRunExceptionGeneration: patch.workspaceRunExceptionGeneration ?? null,
+    effectiveControl: patch.effectiveControl ?? activeControl(false),
   };
 }
 
@@ -1769,9 +1804,64 @@ describe("workspace switcher helpers", () => {
       externalId: null,
       agentInstructions: null,
       settings: {},
+      inferenceControl: {
+        state: "active",
+        revision: 0,
+        reason: null,
+        changedBy: null,
+        changedAt: null,
+      },
       createdAt: "2026-06-11T08:00:00.000Z",
       updatedAt: "2026-06-11T08:00:00.000Z",
       ...patch,
     };
   }
 });
+
+function activeControl(withOverride: boolean): Session["effectiveControl"] {
+  return {
+    state: "active",
+    controlVersion: withOverride ? 7 : 0,
+    controlEtag: withOverride ? "override-7" : "active-0",
+    directState: "active",
+    primaryBlocker: null,
+    additionalBlockerCount: 0,
+    blockers: [],
+    resumeOptions: [],
+    override: withOverride ? { rootSessionId: "session-1", revision: 7 } : null,
+    settlement: null,
+  };
+}
+
+function pausedControl(
+  kind: "session" | "workspace",
+  stopping = false,
+): Session["effectiveControl"] {
+  const blocker = {
+    kind,
+    ...(kind === "session" ? { sessionId: "session-1" } : {}),
+    displayName: kind === "workspace" ? "Workspace paused" : "Paused here",
+    actor: null,
+    reason: null,
+    changedAt: null,
+    revision: 1,
+  };
+  return {
+    ...activeControl(false),
+    state: "paused",
+    controlVersion: 1,
+    controlEtag: `${kind}-paused-1`,
+    directState: kind === "session" ? "paused" : "active",
+    primaryBlocker: blocker,
+    blockers: [blocker],
+    resumeOptions: [
+      {
+        scope: "selected",
+        targetId: "session-1",
+        selectedStateAfter: "active",
+        impactCopy: "This workstream can run.",
+      },
+    ],
+    settlement: stopping ? { state: "stopping", attemptCount: 1 } : null,
+  };
+}

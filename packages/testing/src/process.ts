@@ -1,6 +1,7 @@
 import { mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { spawn } from "node:child_process";
 
 export type CommandResult = {
   stdout: string;
@@ -16,24 +17,38 @@ export async function runCommand(
     timeoutMs?: number;
   } = {},
 ): Promise<CommandResult> {
-  const proc = Bun.spawn(args, {
+  const [command, ...commandArgs] = args;
+  if (!command) throw new Error("runCommand requires a command");
+  const proc = spawn(command, commandArgs, {
     env: compactEnv({ ...process.env, ...options.env }),
-    stdout: "pipe",
-    stderr: "pipe",
+    stdio: ["ignore", "pipe", "pipe"],
     ...(options.cwd ? { cwd: options.cwd } : {}),
+  });
+  let stdout = "";
+  let stderr = "";
+  proc.stdout.setEncoding("utf8");
+  proc.stderr.setEncoding("utf8");
+  proc.stdout.on("data", (chunk: string) => {
+    stdout += chunk;
+  });
+  proc.stderr.on("data", (chunk: string) => {
+    stderr += chunk;
   });
   const timeout = options.timeoutMs
     ? setTimeout(() => proc.kill("SIGKILL"), options.timeoutMs)
     : null;
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
-  if (timeout) {
-    clearTimeout(timeout);
+  try {
+    const exitCode = await new Promise<number>((resolve, reject) => {
+      proc.once("error", reject);
+      // Node's `close` event fires only after the child is reaped and both
+      // output pipes close. That is the lifecycle finite commands need; Bun's
+      // subprocess promise can otherwise remain pending on a defunct CLI.
+      proc.once("close", (code, signal) => resolve(code ?? (signal ? 1 : 0)));
+    });
+    return { stdout, stderr, exitCode };
+  } finally {
+    if (timeout) clearTimeout(timeout);
   }
-  return { stdout, stderr, exitCode };
 }
 
 export type StartedProcess = {
@@ -88,7 +103,7 @@ export async function startProcess(
   } = {},
 ): Promise<StartedProcess> {
   let output = "";
-  const proc = Bun.spawn(args, {
+  const proc = Bun.spawn(isolatedCommand(args), {
     env: compactEnv({ ...process.env, ...options.env }),
     stdout: "pipe",
     stderr: "pipe",
@@ -105,11 +120,11 @@ export async function startProcess(
     logs: () => output,
     stop: async () => {
       if (proc.exitCode === null) {
-        proc.kill("SIGTERM");
+        terminateOwnedProcess(proc, "SIGTERM");
         await Promise.race([proc.exited, Bun.sleep(3_000)]);
       }
       if (proc.exitCode === null) {
-        proc.kill("SIGKILL");
+        terminateOwnedProcess(proc, "SIGKILL");
         await proc.exited.catch(() => undefined);
       }
     },
@@ -122,6 +137,39 @@ export async function startProcess(
     });
   }
   return started;
+}
+
+/**
+ * Long-lived test servers frequently launch a child tree (`bun run vite`). On
+ * Linux, give every owned server its own session so cleanup can
+ * terminate the complete tree and close inherited stdout/stderr handles. A
+ * direct-process kill can otherwise leave the grandchild alive and make a
+ * completed test hang until the suite-level hook timeout.
+ */
+function isolatedCommand(args: string[]): string[] {
+  return process.platform === "linux" ? ["setsid", "--wait", ...args] : args;
+}
+
+function terminateOwnedProcess(
+  proc: ReturnType<typeof Bun.spawn>,
+  signal: "SIGTERM" | "SIGKILL",
+): void {
+  if (process.platform === "linux") {
+    try {
+      process.kill(-proc.pid, signal);
+    } catch {
+      // The session leader may have exited between the status check and the
+      // signal. Bun still needs its own subprocess handle settled below.
+    }
+  }
+  try {
+    // Keep Bun's subprocess state in sync even when the OS-level group signal
+    // already removed the session leader. Without this nudge, `proc.exited`
+    // can remain pending after every process is visibly gone from the OS.
+    proc.kill(signal);
+  } catch {
+    // The process may already have been reaped after the group signal.
+  }
 }
 
 export async function waitFor(
@@ -137,7 +185,14 @@ export async function waitFor(
   let lastError: unknown;
   while (Date.now() < deadline) {
     try {
-      if (await predicate()) {
+      const remainingMs = Math.max(1, deadline - Date.now());
+      const result = await Promise.race([
+        Promise.resolve(predicate()),
+        Bun.sleep(remainingMs).then(() => {
+          throw new Error("condition attempt exceeded the wait deadline");
+        }),
+      ]);
+      if (result) {
         return;
       }
     } catch (error) {

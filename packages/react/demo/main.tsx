@@ -95,6 +95,7 @@ function OpsChannel() {
   // time so it always reflects the current selection).
   const composer = useComposer(MANAGER_SESSION_ID, {
     sendExtras: () => (model ? { model } : {}),
+    effectiveControl: session?.effectiveControl,
   });
   const status = sessionStatus ?? session?.status ?? null;
   // Surface the slash-command palette (type "/"): operator controls on this
@@ -130,7 +131,7 @@ function OpsChannel() {
       <div className="shrink-0 px-4 pb-4 pt-1">
         <ChatComposer
           composer={composer}
-          status={status}
+          effectiveControl={session?.effectiveControl}
           placeholder="Message your infrastructure…"
           autoFocus
           commandContext={commandContext}

@@ -31,6 +31,7 @@ async function claimCompactionForAttempt(
   const result = await claimSessionWorkForAttempt(db, workspaceId, {
     sessionId,
     workflowId: `session-${sessionId}`,
+    workflowRunId: crypto.randomUUID(),
     attemptId,
     dispatchId: `dispatch-${crypto.randomUUID()}`,
     trigger: { kind: "next" },
@@ -180,6 +181,7 @@ describe("standalone context compaction execution", () => {
       workspaceId: grant.workspaceId!,
       sessionId: session.id,
       workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
       attemptId,
       trigger: { kind: "next" },
     });

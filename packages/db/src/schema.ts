@@ -60,11 +60,6 @@ export const workspaces = pgTable(
     // Growth-ready per-workspace settings bag (migration 0045). Holds memoryEnabled
     // and future workspace-level toggles; validated/merged via WorkspaceSettingsSchema.
     settings: jsonb("settings").$type<Record<string, unknown>>().notNull().default({}),
-    inferenceState: text("inference_state").notNull().default("active"),
-    inferenceGeneration: integer("inference_generation").notNull().default(0),
-    inferenceReason: text("inference_reason"),
-    inferenceChangedBy: text("inference_changed_by"),
-    inferenceChangedAt: timestamp("inference_changed_at", { withTimezone: true }),
     // The workspace's default rig (migration 0047). NULL ⇒ no default; sessions
     // created without an explicit rig ride no rig (today's behavior exactly). FK
     // (-> rigs(id) ON DELETE SET NULL) lives in migration 0047, not a Drizzle
@@ -80,6 +75,49 @@ export const workspaces = pgTable(
       .on(table.accountId, table.slug)
       .where(sql`${table.slug} is not null`),
     external: uniqueIndex("workspaces_external_idx").on(table.externalSource, table.externalId),
+  }),
+);
+
+// One mandatory workspace-wide admission barrier. Every inference-admitting
+// transaction locks this row before it touches a session; Pause/Resume and
+// foreground Send/Steer advance its monotonic revision under FOR UPDATE.
+export const workspaceInferenceControls = pgTable(
+  "workspace_inference_controls",
+  {
+    workspaceId: uuid("workspace_id").primaryKey(),
+    accountId: uuid("account_id").notNull(),
+    revision: bigint("revision", { mode: "number" }).notNull().default(0),
+    workspaceState: text("workspace_state").notNull().default("active"),
+    workspacePauseRevision: bigint("workspace_pause_revision", { mode: "number" }),
+    reason: text("reason"),
+    changedBy: text("changed_by"),
+    changedAt: timestamp("changed_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "workspace_inference_controls_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    workspaceAccountIdentity: uniqueIndex("workspace_inference_controls_workspace_account_uq").on(
+      table.workspaceId,
+      table.accountId,
+    ),
+    stateValid: check(
+      "workspace_inference_controls_state_check",
+      sql`${table.workspaceState} in ('active', 'paused')`,
+    ),
+    pauseRevisionConsistent: check(
+      "workspace_inference_controls_pause_revision_check",
+      sql`(${table.workspaceState} = 'active' and ${table.workspacePauseRevision} is null)
+        or (${table.workspaceState} = 'paused' and ${table.workspacePauseRevision} is not null)`,
+    ),
+    revisionValid: check(
+      "workspace_inference_controls_revision_check",
+      sql`${table.revision} >= 0 and (${table.workspacePauseRevision} is null or ${table.workspacePauseRevision} <= ${table.revision})`,
+    ),
   }),
 );
 
@@ -580,17 +618,13 @@ export const sessions = pgTable(
     queueVersion: integer("queue_version").notNull().default(0),
     queueHeadPosition: bigint("queue_head_position", { mode: "number" }).notNull().default(0),
     queueTailPosition: bigint("queue_tail_position", { mode: "number" }).notNull().default(0),
-    controlState: text("control_state").notNull().default("active"),
-    controlGeneration: integer("control_generation").notNull().default(0),
-    controlReason: text("control_reason"),
-    controlChangedBy: text("control_changed_by"),
-    controlChangedAt: timestamp("control_changed_at", { withTimezone: true }),
-    pendingControlEventId: uuid("pending_control_event_id"),
-    pendingControlKind: text("pending_control_kind"),
-    pendingControlExpectedTurnId: uuid("pending_control_expected_turn_id"),
-    pendingControlExpectedGeneration: integer("pending_control_expected_generation"),
-    pendingControlExpectedAttemptId: uuid("pending_control_expected_attempt_id"),
-    workspaceRunExceptionGeneration: integer("workspace_run_exception_generation"),
+    directControlState: text("direct_control_state").notNull().default("active"),
+    directPauseRevision: bigint("direct_pause_revision", { mode: "number" }),
+    subtreeRunOverrideRevision: bigint("subtree_run_override_revision", { mode: "number" }),
+    controlVersion: bigint("control_version", { mode: "number" }).notNull().default(0),
+    directControlReason: text("direct_control_reason"),
+    directControlChangedBy: text("direct_control_changed_by"),
+    directControlChangedAt: timestamp("direct_control_changed_at", { withTimezone: true }),
     lastSequence: integer("last_sequence").notNull().default(0),
     // The session's PINNED Codex account (manual override from the in-session
     // switcher). NULL ⇒ follow the workspace active pointer. FK declared in the
@@ -1054,6 +1088,10 @@ export const sessionTurns = pgTable(
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
     version: integer("version").notNull().default(1),
     executionGeneration: integer("execution_generation").notNull().default(0),
+    // Composite FK to session_turn_attempts is installed by migration 0063.
+    // It lives in SQL because attempts carry the reciprocal turn FK and because
+    // the claim transaction preallocates this ID before inserting the attempt;
+    // the SQL constraint is therefore DEFERRABLE INITIALLY DEFERRED.
     activeAttemptId: uuid("active_attempt_id"),
     lineage: jsonb("lineage").$type<Record<string, unknown>>().notNull().default({}),
     cancelledBy: text("cancelled_by"),
@@ -1081,6 +1119,310 @@ export const sessionTurns = pgTable(
     oneCurrentInference: uniqueIndex("session_turns_one_current_inference_uq")
       .on(table.workspaceId, table.sessionId)
       .where(sql`${table.status} in ('running','requires_action','recovering','waiting_capacity')`),
+  }),
+);
+
+// First-class ownership for one accepted execution attempt. A workflow may
+// preallocate id, but this row is inserted only by the activity transaction
+// that actually claims the logical turn and registers its exact dispatch.
+export const sessionTurnAttempts = pgTable(
+  "session_turn_attempts",
+  {
+    id: uuid("id").primaryKey(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sessionId: uuid("session_id").notNull(),
+    turnId: uuid("turn_id").notNull(),
+    executionGeneration: integer("execution_generation").notNull(),
+    state: text("state").notNull().default("claimed"),
+    outcome: text("outcome"),
+    temporalWorkflowId: text("temporal_workflow_id").notNull(),
+    temporalWorkflowRunId: text("temporal_workflow_run_id").notNull(),
+    temporalActivityId: text("temporal_activity_id").notNull(),
+    workerId: text("worker_id"),
+    leaseId: text("lease_id"),
+    leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
+    verifiedControlRevision: bigint("verified_control_revision", { mode: "number" }).notNull(),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    closedAt: timestamp("closed_at", { withTimezone: true }),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "session_turn_attempts_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    workspaceSession: foreignKey({
+      name: "session_turn_attempts_workspace_session_fk",
+      columns: [table.workspaceId, table.sessionId],
+      foreignColumns: [sessions.workspaceId, sessions.id],
+    }).onDelete("restrict"),
+    workspaceTurn: foreignKey({
+      name: "session_turn_attempts_workspace_turn_fk",
+      columns: [table.workspaceId, table.turnId],
+      foreignColumns: [sessionTurns.workspaceId, sessionTurns.id],
+    }).onDelete("restrict"),
+    workspaceIdentity: uniqueIndex("session_turn_attempts_workspace_id_uq").on(
+      table.workspaceId,
+      table.id,
+    ),
+    liveTurn: uniqueIndex("session_turn_attempts_live_turn_uq")
+      .on(table.workspaceId, table.turnId)
+      .where(sql`${table.state} in ('claimed', 'running')`),
+    liveSession: uniqueIndex("session_turn_attempts_live_session_uq")
+      .on(table.workspaceId, table.sessionId)
+      .where(sql`${table.state} in ('claimed', 'running')`),
+    dispatch: uniqueIndex("session_turn_attempts_dispatch_uq").on(
+      table.workspaceId,
+      table.temporalWorkflowRunId,
+      table.temporalActivityId,
+    ),
+    leaseExpiry: index("session_turn_attempts_lease_expiry_idx")
+      .on(table.leaseExpiresAt, table.workspaceId, table.sessionId)
+      .where(sql`${table.state} in ('claimed', 'running')`),
+    stateValid: check(
+      "session_turn_attempts_state_check",
+      sql`${table.state} in ('claimed', 'running', 'closed')`,
+    ),
+    outcomeValid: check(
+      "session_turn_attempts_outcome_check",
+      sql`${table.outcome} is null or ${table.outcome} in (
+        'completed', 'failed', 'cancelled', 'superseded', 'requires_action',
+        'interrupted_recoverable', 'lease_lost_recoverable', 'pre_cutover_closed'
+      )`,
+    ),
+    closedConsistent: check(
+      "session_turn_attempts_closed_check",
+      sql`(${table.state} = 'closed' and ${table.outcome} is not null and ${table.closedAt} is not null)
+        or (${table.state} <> 'closed' and ${table.outcome} is null and ${table.closedAt} is null)`,
+    ),
+  }),
+);
+
+// One durable idempotency/operation record for every queue, control,
+// foreground Send/Steer, and Agent MCP mutation. The database migration owns
+// the NULLS NOT DISTINCT uniqueness form because Drizzle does not model it.
+export const sessionCommandReceipts = pgTable(
+  "session_command_receipts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    actorType: text("actor_type").notNull(),
+    actorSubjectId: text("actor_subject_id"),
+    actorAttemptId: uuid("actor_attempt_id"),
+    action: text("action").notNull(),
+    targetSessionId: uuid("target_session_id"),
+    targetTurnId: uuid("target_turn_id"),
+    operationKey: text("operation_key").notNull(),
+    canonicalRequestHash: text("canonical_request_hash").notNull(),
+    appliedControlRevision: bigint("applied_control_revision", { mode: "number" }),
+    appliedQueueVersion: integer("applied_queue_version"),
+    appliedTurnVersion: integer("applied_turn_version"),
+    appliedDraftRevision: bigint("applied_draft_revision", { mode: "number" }),
+    result: jsonb("result").$type<Record<string, unknown>>().notNull().default({}),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "session_command_receipts_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    actorAttempt: foreignKey({
+      name: "session_command_receipts_actor_attempt_fk",
+      columns: [table.workspaceId, table.actorAttemptId],
+      foreignColumns: [sessionTurnAttempts.workspaceId, sessionTurnAttempts.id],
+    }).onDelete("restrict"),
+    targetSession: foreignKey({
+      name: "session_command_receipts_target_session_fk",
+      columns: [table.workspaceId, table.targetSessionId],
+      foreignColumns: [sessions.workspaceId, sessions.id],
+    }).onDelete("restrict"),
+    targetTurn: foreignKey({
+      name: "session_command_receipts_target_turn_fk",
+      columns: [table.workspaceId, table.targetTurnId],
+      foreignColumns: [sessionTurns.workspaceId, sessionTurns.id],
+    }).onDelete("restrict"),
+    workspaceIdentity: uniqueIndex("session_command_receipts_workspace_id_uq").on(
+      table.workspaceId,
+      table.id,
+    ),
+    targetCreated: index("session_command_receipts_target_created_idx").on(
+      table.workspaceId,
+      table.targetSessionId,
+      table.createdAt,
+    ),
+    actorValid: check(
+      "session_command_receipts_actor_check",
+      sql`(
+        ${table.actorType} = 'agent_attempt'
+        and ${table.actorAttemptId} is not null
+        and ${table.actorSubjectId} is null
+      ) or (
+        ${table.actorType} in ('human', 'operator')
+        and ${table.actorSubjectId} is not null
+        and ${table.actorAttemptId} is null
+      )`,
+    ),
+  }),
+);
+
+// One workspace-scoped durable invalidation per committed control revision.
+// This is deliberately separate from conversation/session events: a parent or
+// workspace Pause can change thousands of effective projections without
+// manufacturing one event (or queue row) per descendant.
+export const workspaceControlEvents = pgTable(
+  "workspace_control_events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    revision: bigint("revision", { mode: "number" }).notNull(),
+    scope: text("scope").notNull(),
+    rootSessionId: uuid("root_session_id"),
+    action: text("action").notNull(),
+    automatic: boolean("automatic").notNull().default(false),
+    reason: text("reason"),
+    actor: text("actor").notNull(),
+    occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "workspace_control_events_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    rootSession: foreignKey({
+      name: "workspace_control_events_root_session_fk",
+      columns: [table.workspaceId, table.rootSessionId],
+      foreignColumns: [sessions.workspaceId, sessions.id],
+    }).onDelete("restrict"),
+    workspaceRevision: uniqueIndex("workspace_control_events_workspace_revision_uq").on(
+      table.workspaceId,
+      table.revision,
+    ),
+    revisionValid: check("workspace_control_events_revision_check", sql`${table.revision} > 0`),
+    shapeValid: check(
+      "workspace_control_events_shape_check",
+      sql`(${table.scope} = 'workspace' and ${table.rootSessionId} is null)
+        or (${table.scope} = 'session' and ${table.rootSessionId} is not null)`,
+    ),
+    actionValid: check(
+      "workspace_control_events_action_check",
+      sql`${table.action} in ('pause', 'resume')`,
+    ),
+  }),
+);
+
+// An interruption is an independently durable request against an exact live
+// attempt. Multiple Pause/Steer causes coexist; no scalar session field owns
+// delivery or settlement.
+export const sessionAttemptInterruptions = pgTable(
+  "session_attempt_interruptions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sessionId: uuid("session_id").notNull(),
+    operationId: uuid("operation_id").notNull(),
+    attemptId: uuid("attempt_id").notNull(),
+    kind: text("kind").notNull(),
+    controlRevision: bigint("control_revision", { mode: "number" }).notNull(),
+    state: text("state").notNull().default("pending"),
+    requestedAt: timestamp("requested_at", { withTimezone: true }).notNull().defaultNow(),
+    deliveredAt: timestamp("delivered_at", { withTimezone: true }),
+    acknowledgedAt: timestamp("acknowledged_at", { withTimezone: true }),
+    settledAt: timestamp("settled_at", { withTimezone: true }),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "session_attempt_interruptions_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    workspaceSession: foreignKey({
+      name: "session_attempt_interruptions_workspace_session_fk",
+      columns: [table.workspaceId, table.sessionId],
+      foreignColumns: [sessions.workspaceId, sessions.id],
+    }).onDelete("restrict"),
+    operation: foreignKey({
+      name: "session_attempt_interruptions_operation_fk",
+      columns: [table.workspaceId, table.operationId],
+      foreignColumns: [sessionCommandReceipts.workspaceId, sessionCommandReceipts.id],
+    }).onDelete("restrict"),
+    attempt: foreignKey({
+      name: "session_attempt_interruptions_attempt_fk",
+      columns: [table.workspaceId, table.attemptId],
+      foreignColumns: [sessionTurnAttempts.workspaceId, sessionTurnAttempts.id],
+    }).onDelete("restrict"),
+    operationAttempt: uniqueIndex("session_attempt_interruptions_operation_attempt_uq").on(
+      table.operationId,
+      table.attemptId,
+    ),
+    unsettled: index("session_attempt_interruptions_unsettled_idx")
+      .on(table.workspaceId, table.sessionId, table.requestedAt)
+      .where(sql`${table.state} in ('pending', 'delivered', 'acknowledged')`),
+    kindValid: check(
+      "session_attempt_interruptions_kind_check",
+      sql`${table.kind} in ('session_pause', 'workspace_pause', 'steer', 'maintenance')`,
+    ),
+    stateValid: check(
+      "session_attempt_interruptions_state_check",
+      sql`${table.state} in ('pending', 'delivered', 'acknowledged', 'settled', 'rejected_stale')`,
+    ),
+  }),
+);
+
+// Private, authenticated-subject composer truth. Editing a queued prompt and
+// restoring it here is one transaction; human drafts are never agent-visible.
+export const composerDrafts = pgTable(
+  "composer_drafts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sessionId: uuid("session_id").notNull(),
+    subjectId: text("subject_id").notNull(),
+    revision: bigint("revision", { mode: "number" }).notNull().default(1),
+    text: text("text").notNull().default(""),
+    resources: jsonb("resources").$type<unknown[]>().notNull().default([]),
+    tools: jsonb("tools").$type<unknown[]>().notNull().default([]),
+    model: text("model").notNull(),
+    reasoningEffort: text("reasoning_effort").notNull(),
+    sourceTurnId: uuid("source_turn_id"),
+    sourceTurnVersion: integer("source_turn_version"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "composer_drafts_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    workspaceSession: foreignKey({
+      name: "composer_drafts_workspace_session_fk",
+      columns: [table.workspaceId, table.sessionId],
+      foreignColumns: [sessions.workspaceId, sessions.id],
+    }).onDelete("cascade"),
+    sourceTurn: foreignKey({
+      name: "composer_drafts_source_turn_fk",
+      columns: [table.workspaceId, table.sourceTurnId],
+      foreignColumns: [sessionTurns.workspaceId, sessionTurns.id],
+    }).onDelete("restrict"),
+    subjectSession: uniqueIndex("composer_drafts_subject_session_uq").on(
+      table.workspaceId,
+      table.sessionId,
+      table.subjectId,
+    ),
+    subjectValid: check(
+      "composer_drafts_subject_check",
+      sql`length(btrim(${table.subjectId})) > 0`,
+    ),
+    revisionValid: check("composer_drafts_revision_check", sql`${table.revision} >= 1`),
   }),
 );
 
@@ -1116,6 +1458,18 @@ export const sessionSystemUpdates = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
+    kindValid: check(
+      "system_updates_kind_check",
+      sql`${table.kind} in ('scheduled_occurrence', 'goal_continuation', 'agent_message', 'agent_steer_instruction', 'child_terminal_result')`,
+    ),
+    payloadKindValid: check(
+      "system_updates_payload_kind_check",
+      sql`${table.payload} ->> 'type' = ${table.kind}`,
+    ),
+    stateValid: check(
+      "system_updates_state_check",
+      sql`${table.state} in ('pending', 'deferred', 'delivered', 'cancelled', 'superseded', 'failed')`,
+    ),
     dedupe: uniqueIndex("session_system_updates_dedupe_uq").on(
       table.workspaceId,
       table.sessionId,
@@ -1125,46 +1479,6 @@ export const sessionSystemUpdates = pgTable(
       table.workspaceId,
       table.sessionId,
       table.state,
-      table.createdAt,
-    ),
-  }),
-);
-
-/**
- * Stable idempotency record for session and workspace pause operations.
- * `result` contains only durable IDs/state
- * snapshots; delivery repair always revalidates those exact IDs against the
- * current pending fence instead of consulting an unrelated newer operation.
- */
-export const runtimeControlOperations = pgTable(
-  "runtime_control_operations",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    accountId: uuid("account_id")
-      .notNull()
-      .references(() => managedAccounts.id, { onDelete: "cascade" }),
-    workspaceId: uuid("workspace_id")
-      .notNull()
-      .references(() => workspaces.id, { onDelete: "cascade" }),
-    scope: text("scope").notNull(),
-    targetId: uuid("target_id").notNull(),
-    clientEventId: text("client_event_id").notNull(),
-    requestedState: text("requested_state").notNull(),
-    expectedState: text("expected_state"),
-    expectedGeneration: integer("expected_generation"),
-    result: jsonb("result").$type<Record<string, unknown>>().notNull().default({}),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-  },
-  (table) => ({
-    idempotency: uniqueIndex("runtime_control_operations_client_uq").on(
-      table.workspaceId,
-      table.clientEventId,
-    ),
-    target: index("runtime_control_operations_target_idx").on(
-      table.workspaceId,
-      table.scope,
-      table.targetId,
       table.createdAt,
     ),
   }),
@@ -1208,6 +1522,14 @@ export const sessionSystemUpdateOutbox = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
+    kindValid: check(
+      "system_update_outbox_kind_check",
+      sql`${table.kind} = 'child_terminal_result'`,
+    ),
+    payloadKindValid: check(
+      "system_update_outbox_payload_kind_check",
+      sql`${table.payload} ->> 'type' = 'child_terminal_result'`,
+    ),
     dedupe: uniqueIndex("session_system_update_outbox_dedupe_uq").on(
       table.workspaceId,
       table.dedupeKey,
@@ -1315,9 +1637,9 @@ export const sessionGoals = pgTable(
 //
 // The session/goal/turn foreign keys are declared in migration 0053 so the
 // table keeps the same composite workspace-integrity posture as credential
-// leases. OPE-18 may later supply a non-zero controlGeneration; legacy rows use
-// zero and remain fenced by goal version + session/queue/turn truth. OPE-32
-// supplies policyHash when accepted-turn pool routing lands.
+// leases. Control is evaluated independently at admission and never changes a
+// capacity waiter's identity. OPE-32 supplies policyHash when accepted-turn
+// pool routing lands.
 export const codexCapacityWaiters = pgTable(
   "codex_capacity_waiters",
   {
@@ -1335,7 +1657,6 @@ export const codexCapacityWaiters = pgTable(
     generation: integer("generation").notNull().default(1),
     status: text("status").notNull().default("waiting"), // waiting | resumed | superseded
     goalVersion: integer("goal_version").notNull(),
-    controlGeneration: integer("control_generation").notNull().default(0),
     policyHash: text("policy_hash"),
     earliestResetAt: timestamp("earliest_reset_at", { withTimezone: true }),
     nextCheckAt: timestamp("next_check_at", { withTimezone: true }).notNull(),
@@ -1402,6 +1723,11 @@ export const sessionEvents = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
+    workspaceAttempt: foreignKey({
+      name: "session_events_workspace_attempt_fk",
+      columns: [table.workspaceId, table.turnAttemptId],
+      foreignColumns: [sessionTurnAttempts.workspaceId, sessionTurnAttempts.id],
+    }).onDelete("restrict"),
     sessionSequence: uniqueIndex("session_events_workspace_session_sequence_idx").on(
       table.workspaceId,
       table.sessionId,
@@ -1542,6 +1868,11 @@ export const sessionPendingToolCalls = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
+    workspaceAttempt: foreignKey({
+      name: "pending_tool_calls_workspace_attempt_fk",
+      columns: [table.workspaceId, table.attemptId],
+      foreignColumns: [sessionTurnAttempts.workspaceId, sessionTurnAttempts.id],
+    }).onDelete("restrict"),
     turnCall: uniqueIndex("session_pending_tool_calls_turn_call_idx").on(
       table.workspaceId,
       table.turnId,

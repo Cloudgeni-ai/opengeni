@@ -1,4 +1,9 @@
-import type { ResourceRef, SessionStatus, ToolRef } from "@opengeni/contracts";
+import type {
+  ResourceRef,
+  SessionStatus,
+  SessionSystemUpdatePayload,
+  ToolRef,
+} from "@opengeni/contracts";
 
 export {
   mergeResourceRefs,
@@ -28,8 +33,9 @@ export function scheduledUserMessagePayload(
   tools: ToolRef[],
   taskId: string,
   runId: string,
-): Record<string, unknown> {
+): Extract<SessionSystemUpdatePayload, { type: "scheduled_occurrence" }> {
   return {
+    type: "scheduled_occurrence",
     text: prompt,
     scheduledTaskId: taskId,
     scheduledTaskRunId: runId,

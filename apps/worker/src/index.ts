@@ -34,7 +34,7 @@ import {
   SESSION_WORKFLOW_WAKE_DISPATCHER_PERIOD_MS,
   SESSION_WORKFLOW_WAKE_DISPATCHER_SCHEDULE_ID,
   SESSION_WORKFLOW_WAKE_DISPATCHER_WORKFLOW_TYPE,
-} from "./workflow-wake-contract";
+} from "@opengeni/core";
 import {
   CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES,
   CONTROL_WORKER_MAX_CONCURRENT_WORKFLOW_TASKS,
@@ -157,16 +157,16 @@ export async function createWorkerWorkflowSignaler(
       sessionId,
       workflowId,
       wakeRevision,
-      controlEventId,
+      interruptionRequested,
     }) => {
-      if (controlEventId) {
+      if (interruptionRequested) {
         await temporal.workflow.signalWithStart("sessionWorkflow", {
           taskQueue: settings.temporalTaskQueue,
           workflowId,
           workflowIdReusePolicy: "ALLOW_DUPLICATE",
           args: [{ accountId, workspaceId, sessionId }],
           signal: "sessionControl",
-          signalArgs: [controlEventId],
+          signalArgs: [],
         });
       } else {
         await temporal.workflow.signalWithStart("sessionWorkflow", {

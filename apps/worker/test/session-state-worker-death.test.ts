@@ -20,7 +20,6 @@ function makeActivities() {
         settings: {
           sessionHistorySource: "items",
           openaiReasoningEffort: "medium",
-          childCompletionParentWakeEnabled: false,
         },
         observability: {},
         wakeSessionWorkflow: null,
@@ -77,7 +76,6 @@ describe("recoverDispatch: exact attempt ownership fence", () => {
         attemptId: "attempt-1",
         timeoutType: "HEARTBEAT",
         maxRedispatches: 3,
-        childCompletionParentWakeEnabled: false,
       },
     ]);
     expect(publishedEvents).toEqual([{ id: "recovery-1", type: "turn.recovery.requested" }]);

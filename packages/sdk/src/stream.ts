@@ -34,6 +34,8 @@ export type StreamSessionEventsOptions = {
    * reconnects = N+1 total open-stream calls). Defaults to unlimited.
    */
   maxReconnectAttempts?: number;
+  /** Await authoritative client reconciliation before exposing `live`. */
+  beforeLive?: (() => void | Promise<void>) | undefined;
   onStateChange?: (state: StreamConnectionState) => void;
 };
 
@@ -75,6 +77,7 @@ export async function* streamSessionEvents(
       everConnected = true;
       failedAttempts = 0;
       delayMs = baseDelayMs;
+      await options.beforeLive?.();
       options.onStateChange?.("live");
       for await (const message of parseSseStream(body)) {
         // Re-check after every yield resumption: an abort from the consumer

@@ -212,10 +212,17 @@ async function waitForNats(natsUrl: string): Promise<void> {
 async function waitForTemporal(address: string): Promise<void> {
   await waitFor(
     async () => {
-      const connection = await Connection.connect({ address, connectTimeout: 1_000 });
+      const connection = await Connection.connect({
+        address,
+        connectTimeout: 1_000,
+      });
       try {
-        await connection.workflowService.describeNamespace({ namespace: "default" });
-        await connection.workflowService.countWorkflowExecutions({ namespace: "default" });
+        await connection.workflowService.describeNamespace({
+          namespace: "default",
+        });
+        await connection.workflowService.countWorkflowExecutions({
+          namespace: "default",
+        });
         return true;
       } finally {
         await connection.close();
@@ -235,17 +242,37 @@ async function composeLogs(projectName: string, composeFile: string): Promise<st
   return `${result.stdout}\n${result.stderr}`;
 }
 
+const TEST_LISTENER_PORT_START = 20_000;
+const TEST_LISTENER_PORT_END = 29_999;
+const issuedTestPorts = new Set<number>();
+
 export async function freePort(): Promise<number> {
-  const server = Bun.listen({
-    hostname: "127.0.0.1",
-    port: 0,
-    socket: {
-      data() {},
-    },
-  });
-  const port = server.port;
-  server.stop(true);
-  return port;
+  // Port 0 returns a Linux ephemeral client port. Releasing it before a child
+  // process binds lets an unrelated outbound connection claim the same port,
+  // which can leave Vite or a real test service waiting until timeout. Allocate
+  // listeners from a range below the host ephemeral range and never hand the
+  // same port out twice in one test process.
+  for (let attempt = 0; attempt < 256; attempt += 1) {
+    const port =
+      TEST_LISTENER_PORT_START +
+      Math.floor(Math.random() * (TEST_LISTENER_PORT_END - TEST_LISTENER_PORT_START + 1));
+    if (issuedTestPorts.has(port)) continue;
+    try {
+      const server = Bun.listen({
+        hostname: "127.0.0.1",
+        port,
+        socket: {
+          data() {},
+        },
+      });
+      server.stop(true);
+      issuedTestPorts.add(port);
+      return port;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EADDRINUSE") throw error;
+    }
+  }
+  throw new Error("Unable to reserve a test listener port outside the ephemeral range");
 }
 
 async function waitForMinio(endpoint: string): Promise<void> {

@@ -96,6 +96,7 @@ async function seedSession(input: { selects: string[]; withActiveTurn: boolean }
     insert into managed_accounts (name) values ('acct') returning id`;
   const [workspace] = await admin<{ id: string }[]>`
     insert into workspaces (account_id, name) values (${account!.id}, 'ws') returning id`;
+  await admin`insert into workspace_inference_controls (workspace_id, account_id) values (${workspace!.id}, ${account!.id})`;
   const session = await createSession(db, {
     accountId: account!.id,
     workspaceId: workspace!.id,

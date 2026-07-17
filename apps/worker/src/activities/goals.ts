@@ -155,7 +155,7 @@ export function createGoalActivities(services: () => Promise<ActivityServices>) 
       accountId: input.accountId,
       workspaceId: input.workspaceId,
       sessionId: input.sessionId,
-      kind: "lifecycle_event",
+      kind: "goal_continuation",
       classification: "info",
       sourceId: decision.goal.id,
       dedupeKey: `goal-continuation:${decision.goal.id}:${decision.goal.version}:${decision.autoContinuation}`,

@@ -1,7 +1,12 @@
 // The console's only bespoke HTTP surface: client config bootstrap and the
 // Better Auth (managed session) endpoints, which sit outside the public API
 // the SDK covers. Everything else goes through `@opengeni/sdk`.
-import { OpenGeniApiError, OpenGeniClient } from "@opengeni/sdk";
+import {
+  OpenGeniApiError,
+  OpenGeniClient,
+  OPENGENI_API_CONTRACT_HEADER,
+  OPENGENI_API_CONTRACT_REVISION,
+} from "@opengeni/sdk";
 
 import type { AuthSession, ClientConfig } from "./types";
 
@@ -15,6 +20,7 @@ export const bundleDeploymentRevision = String(
 );
 const accessKeyStorageKey = "opengeni.accessKey";
 const deploymentReloadStoragePrefix = "opengeni.reloadForRevision:";
+const contractReloadStoragePrefix = "opengeni.reloadForApiContract:";
 let activeAuthConfig: ClientConfig["auth"] | null = null;
 
 export class ApiError extends Error {
@@ -43,7 +49,11 @@ export function createOpenGeniClient(): OpenGeniClient {
   return new OpenGeniClient({
     baseUrl: apiBaseUrl,
     headers: () => authHeaders(),
-    fetch: (input, init) => fetch(input, { ...init, credentials: "include" }),
+    fetch: async (input, init) => {
+      const response = await fetch(input, { ...init, credentials: "include" });
+      handleApiContractResponse(response);
+      return response;
+    },
   });
 }
 
@@ -99,11 +109,13 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     credentials: "include",
     headers: {
       "content-type": "application/json",
+      [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
       ...authHeaders(),
       ...init?.headers,
     },
   });
   if (!response.ok) {
+    handleApiContractResponse(response);
     const text = await response.text();
     throw new ApiError(response.status, text);
   }
@@ -180,9 +192,78 @@ export async function resetPassword(input: {
 
 export async function fetchClientConfig(): Promise<ClientConfig> {
   const config = await request<ClientConfig>("/v1/config/client");
+  reloadIfStaleApiContract(config);
   reloadIfStaleDeployment(config);
   configureClientAuth(config.auth);
   return config;
+}
+
+export function shouldReloadForApiContractRevision(
+  config: { apiContractRevision: string },
+  bundleRevision: string = OPENGENI_API_CONTRACT_REVISION,
+  storage: Pick<Storage, "getItem" | "setItem"> | null = typeof sessionStorage === "undefined"
+    ? null
+    : sessionStorage,
+): boolean {
+  if (!config.apiContractRevision || config.apiContractRevision === bundleRevision || !storage) {
+    return false;
+  }
+  const key = `${contractReloadStoragePrefix}${config.apiContractRevision}`;
+  if (storage.getItem(key) === bundleRevision) {
+    return false;
+  }
+  storage.setItem(key, bundleRevision);
+  return true;
+}
+
+function handleApiContractResponse(response: Response): void {
+  const apiContractRevision = response.headers.get(OPENGENI_API_CONTRACT_HEADER);
+  if (!apiContractRevision || apiContractRevision === OPENGENI_API_CONTRACT_REVISION) {
+    return;
+  }
+  reloadForApiContract({ apiContractRevision });
+}
+
+function reloadIfStaleApiContract(config: { apiContractRevision: string }): void {
+  if (config.apiContractRevision !== OPENGENI_API_CONTRACT_REVISION) {
+    reloadForApiContract(config);
+  }
+}
+
+function reloadForApiContract(config: { apiContractRevision: string }): void {
+  const willReload = shouldReloadForApiContractRevision(config);
+  showApiUpdateNotice(willReload);
+  if (willReload && typeof window !== "undefined") {
+    window.setTimeout(() => window.location.reload(), 150);
+  }
+}
+
+function showApiUpdateNotice(willReload: boolean): void {
+  if (typeof document === "undefined") {
+    return;
+  }
+  const existing = document.getElementById("opengeni-api-update-notice");
+  const notice = existing ?? document.createElement("div");
+  notice.id = "opengeni-api-update-notice";
+  notice.setAttribute("role", "status");
+  notice.textContent = willReload
+    ? "OpenGeni updated — reloading…"
+    : "OpenGeni updated. Reload this tab to continue.";
+  Object.assign(notice.style, {
+    position: "fixed",
+    inset: "16px 16px auto auto",
+    zIndex: "2147483647",
+    border: "1px solid rgba(255,255,255,.14)",
+    borderRadius: "10px",
+    background: "#17191d",
+    color: "#f5f7fa",
+    boxShadow: "0 12px 32px rgba(0,0,0,.35)",
+    font: "500 14px/1.4 Inter, system-ui, sans-serif",
+    padding: "10px 14px",
+  });
+  if (!existing) {
+    document.body.append(notice);
+  }
 }
 
 export function shouldReloadForDeploymentRevision(

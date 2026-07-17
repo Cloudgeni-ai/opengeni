@@ -31,7 +31,12 @@ export function ComposerAgentsPill({
   if (count === 0) {
     return null;
   }
-  const runningCount = nodes.filter((n) => n.session.status === "running").length;
+  const runningCount = nodes.filter(
+    (node) => node.session.status === "running" && node.session.effectiveControl.state === "active",
+  ).length;
+  const pausedCount = nodes.filter(
+    (node) => node.session.effectiveControl.state === "paused",
+  ).length;
   const live = runningCount > 0;
 
   return (
@@ -72,6 +77,16 @@ export function ComposerAgentsPill({
                 </span>
                 <span className="shrink-0 font-medium text-status-running">
                   {runningCount} running
+                </span>
+              </>
+            ) : null}
+            {pausedCount > 0 ? (
+              <>
+                <span aria-hidden className="shrink-0 text-fg-subtle">
+                  ·
+                </span>
+                <span className="shrink-0 font-medium text-status-waiting">
+                  {pausedCount} paused
                 </span>
               </>
             ) : null}

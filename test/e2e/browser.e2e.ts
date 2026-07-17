@@ -86,7 +86,7 @@ describe("browser e2e", () => {
     await worker?.stop();
     await api?.stop();
     await services?.down();
-  }, 60_000);
+  }, 120_000);
 
   test("streams markdown updates to multiple clients and replays after refresh", async () => {
     const pageA = await browser.newPage();

@@ -45,16 +45,19 @@ import {
   ChatComposer,
   MessageTimeline,
   OpenGeniProvider,
+  QueueSurface,
   SessionStatus,
   useComposer,
   useSessionEvents,
+  useTurnQueue,
 } from "@opengeni/react";
 
 const client = new OpenGeniClient({ baseUrl: "/api/opengeni" }); // proxy through your API
 
 function OpsChannel({ sessionId }: { sessionId: string }) {
   const { timeline, sessionStatus, hasOlder, loadingOlder, loadOlder } = useSessionEvents(sessionId);
-  const composer = useComposer(sessionId);
+  const queue = useTurnQueue(sessionId);
+  const composer = useComposer(sessionId, { effectiveControl: queue.effectiveControl });
   return (
     <div className="flex h-full flex-col">
       {sessionStatus ? <SessionStatus status={sessionStatus} /> : null}
@@ -66,7 +69,8 @@ function OpsChannel({ sessionId }: { sessionId: string }) {
         onLoadOlder={() => void loadOlder()}
         className="min-h-0 flex-1"
       />
-      <ChatComposer composer={composer} status={sessionStatus} />
+      <QueueSurface queue={queue} composer={composer} />
+      <ChatComposer composer={composer} effectiveControl={queue.effectiveControl} />
     </div>
   );
 }
@@ -90,27 +94,29 @@ export function App() {
   older-history controls (`hasOlder`, `loadingOlder`, `loadOlder`). Pass
   `replay: "full"` to opt back into full replay; a nonzero `after` keeps the
   previous resume semantics.
-- `useComposer(sessionId, { sendExtras, defaultMode })` — draft/send/interrupt
-  state plus the compose-time **queue-vs-steer** choice (`mode`/`setMode`,
-  default `"queue"`): queue stacks the message behind the running turn, steer
-  interrupts and injects it now. Drafts survive failed sends; each draft
-  reuses one `clientEventId` across retries so the server dedupes.
+- `useComposer(sessionId, { sendExtras, effectiveControl })` — revisioned private
+  draft, Send, Steer, and workstream Pause/Resume state. `send()` appends in
+  visible queue order; `steer()` supersedes the current direction. Drafts
+  autosave with optimistic concurrency, survive failed sends, and reuse one
+  `clientEventId` across retries so the server dedupes.
   `sendExtras` (object or function evaluated at send time) merges
   resources/tools/model/reasoningEffort into every message. All human input is
   plain chat text by design; approvals flow as control events
   (`useSessionControl`), not bespoke widgets.
-- `useTurnQueue(sessionId, { events })` — the live turn queue: `queue` (queued
-  turns in execution order), `activeTurn`, and optimistic `editTurn` /
-  `reorderTurns` / `removeTurn` that reconcile with the server (failed
-  mutations roll back via refetch). Live-updates on `turn.*` events — pass the
+- `useTurnQueue(sessionId, { events })` — the one server-authoritative human
+  prompt queue with `moveTurn`, crash-safe `editTurn`, identity-preserving
+  `steerTurn`, and `removeTurn`. Mutations carry observed revisions and conflicts
+  refetch server truth. Live-updates on `turn.*` and `session.queue.*` events — pass the
   `events` log from `useSessionEvents` to reuse its stream, or let it tail the
   session itself.
 - `useGoal(sessionId, { events })` — goal state + autonomy counters
   (`autoContinuations`, `noProgressStreak`) with `pause(rationale?)` /
   `resume()`. Goal-less sessions yield `goal: null`. Live-updates on `goal.*`
   events.
-- `useSessionControl(sessionId)` — `interrupt(reason?)` and
-  `approve`/`reject(approvalId, message?)` for `requires_action` approvals.
+- `useSessionControl(sessionId)` — durable `pause(reason?)` / `resume(reason?)`
+  workstream controls and `approve`/`reject(approvalId, message?)` for
+  `requires_action` approvals. Pause is recursive control state, not lifecycle
+  status or queue work; Resume creates no message.
 - `useSession(sessionId)` — fetch one session (optional polling) with
   `updateTitle(title)` (rename) and live title-patching on `session.title_set`.
 - `useFileAttachments()` — the composer's attach flow: stages files, drives the

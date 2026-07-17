@@ -20,7 +20,6 @@ import {
 import {
   createSession,
   createSessionWithIdempotencyKey,
-  enqueueSessionMessageAtomically,
   encryptVariableSetValue,
   getAnySessionInGroup,
   getEnrollment,
@@ -31,20 +30,26 @@ import {
   getSandbox,
   getSession,
   getSessionByCreateIdempotencyKey,
+  getSessionEvent,
+  getWorkspaceControlEvent,
   getSessionLineage,
   getSessionTurn,
   getWorkspaceModelPolicy,
   initializeSessionStartAtomically,
   requireSession,
+  submitHumanPromptInTransaction,
   updateSessionTitle as updateSessionTitleRow,
+  withWorkspaceSubjectRls,
   type CreateSessionMcpServerInput,
   type Database,
   type UpdateSessionMcpServerCredentialsInput,
-  SessionQueueConflictError,
+  QueueCommandConflictError,
+  SessionControlConflictError,
 } from "@opengeni/db";
 import {
   appendAndPublishEvents,
   publishDurableSessionEvents,
+  publishDurableWorkspaceControlEvent,
   type EventBus,
 } from "@opengeni/events";
 import { HTTPException } from "hono/http-exception";
@@ -596,7 +601,7 @@ export function reasoningEffortForSession(
 export async function postUserMessageTurn(input: {
   db: Database;
   bus: EventBus;
-  workflowClient: Pick<SessionWorkflowClient, "wakeSessionWorkflow" | "signalSessionControl">;
+  workflowClient: Pick<SessionWorkflowClient, "wakeSessionWorkflow">;
   settings: Settings;
   accountId: string;
   workspaceId: string;
@@ -608,11 +613,11 @@ export async function postUserMessageTurn(input: {
   reasoningEffort?: Settings["openaiReasoningEffort"] | null;
   clientEventId?: string;
   mcpCredentialUpdates?: UpdateSessionMcpServerCredentialsInput[];
-  delivery?: "queue" | "steer";
+  delivery?: "send" | "steer";
   origin?: "human" | "operator";
   actor?: string;
-  expectedControlGeneration?: number;
-  expectedWorkspaceInferenceGeneration?: number;
+  controlEtag?: string | null;
+  expectedDraftRevision?: number | null;
 }): Promise<{ accepted: SessionEvent; turn: SessionTurn }> {
   const { db, bus, workflowClient, settings, accountId, workspaceId, sessionId } = input;
   const requestedModel = input.model ?? null;
@@ -621,34 +626,37 @@ export async function postUserMessageTurn(input: {
   // model inherits the session's model downstream (always a configured id).
   assertConfiguredModel(settings, requestedModel);
   await assertWorkspaceModelPolicyAllows(db, settings, workspaceId, requestedModel);
+  const operationKey = input.clientEventId ?? crypto.randomUUID();
   let result;
   try {
-    result = await enqueueSessionMessageAtomically(db, {
-      accountId,
-      workspaceId,
-      sessionId,
-      actor: input.actor ?? accountId,
-      origin: input.origin ?? "human",
-      text: input.text,
-      resources: input.resources,
-      tools: input.tools,
-      model: requestedModel,
-      reasoningEffort: requestedReasoningEffort,
-      clientEventId: input.clientEventId ?? null,
-      mcpCredentialUpdates: input.mcpCredentialUpdates ?? [],
-      delivery: input.delivery ?? "queue",
-      ...(input.expectedControlGeneration !== undefined
-        ? { expectedControlGeneration: input.expectedControlGeneration }
-        : {}),
-      ...(input.expectedWorkspaceInferenceGeneration !== undefined
-        ? {
-            expectedWorkspaceInferenceGeneration: input.expectedWorkspaceInferenceGeneration,
-          }
-        : {}),
-      reasoningEffortFallback: settings.openaiReasoningEffort,
-    });
+    result = await withWorkspaceSubjectRls(db, workspaceId, input.actor ?? accountId, (scoped) =>
+      scoped.transaction((tx) =>
+        submitHumanPromptInTransaction(tx as unknown as Database, {
+          accountId,
+          workspaceId,
+          sessionId,
+          subjectId: input.actor ?? accountId,
+          actor: { type: "human", subjectId: input.actor ?? accountId },
+          operationKey,
+          delivery: input.delivery ?? "send",
+          controlEtag: input.controlEtag ?? null,
+          expectedDraftRevision: input.expectedDraftRevision ?? null,
+          text: input.text,
+          resources: input.resources,
+          tools: input.tools,
+          model: requestedModel,
+          reasoningEffort: requestedReasoningEffort,
+          reasoningEffortFallback: settings.openaiReasoningEffort,
+          source: input.origin === "operator" ? "api" : "user",
+          mcpCredentialUpdates: input.mcpCredentialUpdates ?? [],
+        }),
+      ),
+    );
   } catch (error) {
-    if (error instanceof SessionQueueConflictError) {
+    if (
+      error instanceof QueueCommandConflictError ||
+      error instanceof SessionControlConflictError
+    ) {
       throw new HTTPException(409, { message: error.message });
     }
     if (error instanceof Error && error.message.includes("cancelled")) {
@@ -659,35 +667,51 @@ export async function postUserMessageTurn(input: {
     }
     throw error;
   }
-  await bus.publish(workspaceId, sessionId, result.events);
-  if (result.shouldSignalControl && result.controlEvent) {
-    if (result.workflowWakeRevision === null) {
-      throw new Error("Steer control has no workflow wake revision");
-    }
-    await workflowClient.signalSessionControl({
-      accountId,
+  const events = await Promise.all(
+    result.eventIds.map((eventId) => getSessionEvent(db, workspaceId, eventId)),
+  );
+  if (events.some((event) => event === null)) {
+    throw new Error("Committed prompt events could not be reloaded");
+  }
+  const turn = await getSessionTurn(db, workspaceId, result.turnId);
+  if (!turn) throw new Error("Committed prompt turn could not be reloaded");
+  const accepted = events.find((event) => event?.id === result.acceptedEventId);
+  if (!accepted) throw new Error("Committed user.message event could not be reloaded");
+  await publishDurableSessionEvents(
+    bus,
+    workspaceId,
+    sessionId,
+    events.filter((event): event is SessionEvent => event !== null),
+  );
+  if (result.workspaceControlEventId) {
+    const controlEvent = await getWorkspaceControlEvent(
+      db,
       workspaceId,
-      sessionId,
-      eventId: result.controlEvent.id,
-      workflowId: result.temporalWorkflowId,
-      workflowWakeRevision: result.workflowWakeRevision,
-    });
-  } else if (result.shouldWake) {
-    if (result.workflowWakeRevision === null) {
-      throw new Error("Runnable prompt has no workflow wake revision");
+      result.workspaceControlEventId,
+    );
+    if (!controlEvent) {
+      throw new Error(
+        `Committed workspace control event disappeared: ${result.workspaceControlEventId}`,
+      );
     }
+    await publishDurableWorkspaceControlEvent(bus, workspaceId, controlEvent);
+  }
+  try {
     await workflowClient.wakeSessionWorkflow({
       accountId,
       workspaceId,
       sessionId,
-      workflowId: result.temporalWorkflowId,
-      wakeRevision: result.workflowWakeRevision,
+      workflowId: turn.temporalWorkflowId,
+      wakeRevision: result.wakeRevision,
+      ...(result.interruptionCount > 0 ? { interruptionRequested: true } : {}),
     });
+  } catch (error) {
+    console.warn(
+      `[sessions] workflow wake failed for committed prompt ${workspaceId}/${sessionId}; durable outbox will retry`,
+      error,
+    );
   }
-  return {
-    accepted: result.accepted,
-    turn: result.turn,
-  };
+  return { accepted, turn };
 }
 
 /**
@@ -1132,10 +1156,10 @@ export async function acceptSessionUserMessage(
     reasoningEffort?: ReasoningEffort | null;
     clientEventId?: string;
     mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[];
-    delivery?: "queue" | "steer";
+    delivery?: "send" | "steer";
     origin?: "human" | "operator";
-    expectedControlGeneration?: number;
-    expectedWorkspaceInferenceGeneration?: number;
+    controlEtag?: string | null;
+    expectedDraftRevision?: number | null;
   },
 ): Promise<{ accepted: SessionEvent; turn: SessionTurn }> {
   const { settings, db, bus, workflowClient, objectStorage } = deps;
@@ -1192,16 +1216,12 @@ export async function acceptSessionUserMessage(
     model: input.model ?? null,
     reasoningEffort: input.reasoningEffort ?? null,
     mcpCredentialUpdates,
-    delivery: input.delivery ?? "queue",
+    delivery: input.delivery ?? "send",
     origin: input.origin ?? "human",
     actor: grant.subjectId,
-    ...(input.expectedControlGeneration !== undefined
-      ? { expectedControlGeneration: input.expectedControlGeneration }
-      : {}),
-    ...(input.expectedWorkspaceInferenceGeneration !== undefined
-      ? {
-          expectedWorkspaceInferenceGeneration: input.expectedWorkspaceInferenceGeneration,
-        }
+    ...(input.controlEtag !== undefined ? { controlEtag: input.controlEtag } : {}),
+    ...(input.expectedDraftRevision !== undefined
+      ? { expectedDraftRevision: input.expectedDraftRevision }
       : {}),
     ...(input.clientEventId ? { clientEventId: input.clientEventId } : {}),
   });

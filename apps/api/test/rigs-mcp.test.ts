@@ -179,6 +179,7 @@ class FakeWorkflowClient implements SessionWorkflowClient {
   rigVerifications: unknown[] = [];
   async signalUserMessage(): Promise<void> {}
   async wakeSessionWorkflow(): Promise<void> {}
+  async requestSessionWorkflowWakeDispatch(): Promise<void> {}
   async signalApprovalDecision(): Promise<void> {}
   async signalSessionControl(): Promise<void> {}
   async syncScheduledTask(): Promise<void> {}

@@ -27,7 +27,7 @@ It does **not** restate the run lifecycle, goal loop, deployment procedures, or 
 
 **The "managed agent service" framing.** OpenGeni is the *substrate*, not the agent. You bring a goal and a workspace; OpenGeni gives you:
 
-- **A session API** — create/list/get/rename sessions, post messages, control events (approve/interrupt), and read durable history.
+- **A session API** — create/list/get/rename sessions, Send/Steer human prompts, Pause/Resume recursive workstreams, approve tools, and read durable history.
 - **An exactly-once live stream** — SSE anchored on a per-session monotonic `sequence`, with reconnect, replay, and gap backfill.
 - **Durable, recoverable runs** — runs survive worker death and provider hiccups, with no run-length limits by design.
 - **A dual compute model** — *provisioned sandboxes* (disposable boxes OpenGeni creates, snapshots, and reaps across ten local/cloud backends) **and** *Connected Machines* (a user's own always-on machine, enrolled via the `selfhosted` backend, as a **first-class, co-equal PRIMARY** compute target — a machine-targeted turn runs the agent **directly on the machine** with no cloud box created, leased, or billed).
@@ -75,8 +75,8 @@ These are the load-bearing, cross-cutting rules. Breaking one tends to be a subt
 - Each turn runs as one activity with `maximumAttempts: 1` (`apps/worker/src/workflows/activities.ts`). **There is no automatic activity retry.** Model/sandbox/GitHub/cloud calls are side-effectful.
 - **Do not add automatic Temporal retries around full agent turns** unless every model/tool/sandbox boundary has been made idempotent.
 - Recovery is *explicit*: graceful shutdown checkpoints the same turn as `recovering`; ungraceful death is detected via typed heartbeat/schedule-to-start timeout failures and re-dispatched through `recoverTurnAfterWorkerDeath`, **bounded by a per-turn redispatch ceiling of 3** before the session fails for real.
-- A claimed turn registers the exact Temporal activity id, trigger, and monotonic dispatch generation before model/tool work. The same activity id is stable for a genuine Temporal activity retry; every actual re-dispatch gets a new id/generation. A typed schedule-to-start timeout is the sole no-registration exception because no activity started.
-- Claim, control, and every event-writing lifecycle settlement use one lock order (workspace → session → exact turn). Start, requires-action, ordinary terminal, preemption, and worker-death events commit in the same transaction as queue delivery/version state, system-update bundles, turn/session state, active pointer, and sequence. Missing/terminal targets, superseded attempts, and durable interrupts newer than the current attempt are event-free stale no-ops, so a cancelled zombie cannot publish contradictory terminal/preemption truth or fail the session.
+- A claimed turn creates a first-class `session_turn_attempts` row before model/tool work. It binds the exact Temporal activity id, trigger, dispatch generation, control revision, and write lease to one logical turn. A genuine Temporal activity retry retains the activity id; every explicit re-dispatch creates a new attempt. A typed schedule-to-start timeout is the sole no-attempt exception because no activity started.
+- Claim, interruption, and every event-writing lifecycle settlement use one lock order (workspace → session → exact turn → attempt). Start, requires-action, ordinary terminal, recoverable interruption, supersession, and worker-death events commit with queue delivery/version state, system-update bundles, turn/session state, active pointer, and sequence. Every write from a running activity is attempt-fenced. A missing/closed owner is an event-free stale no-op, so a zombie cannot publish contradictory terminal or recovery truth.
 - Worker-death detection **must use typed SDK failure classes** (`instanceof ActivityFailure` + `TimeoutFailure.timeoutType`), never message-string matching, so it is replay-safe.
 
 > Canonical: `apps/worker/src/activities/agent-turn.ts`, `apps/worker/src/activities/session-state.ts`, [`run-lifecycle.md`](run-lifecycle.md).
@@ -218,9 +218,9 @@ flowchart LR
 2. **Authn/authz.** The route resolves an `AccessContext` (per `productAccessMode`), then `requireAccessGrant(workspaceId, permission)` resolves a per-workspace grant. This is the workspace-scoping boundary; no workspace data is touched before it passes.
 3. **Create session.** `createSessionForRequest` validates payload + resources + tools + variable set + model (`assertConfiguredModel` → 422 on unknown), checks usage limits/entitlements, writes durable session/goal rows + an initial event batch, enqueues the first turn, and wakes the Temporal workflow via `signalWithStart`. A create may attach per-session third-party MCP servers with write-only encrypted headers (`CreateSessionRequest.mcpServers`); responses/events expose only metadata, and later `user.message.mcpCredentialUpdates` rotate headers for the next turn. A create may target a **Connected Machine** with `CreateSessionRequest.targetSandboxId` (+ optional `workingDir`, which is a **422 without a `targetSandboxId`**): the active-sandbox pointer is seeded at creation — race-free, committed before the worker turn can read it — so the **first** turn routes to the chosen machine and lands in its working directory; an invalid/unowned/offline target **422s** (never a silent fall-back to the default box). Canonical: `packages/core/src/domain/sessions.ts`, `packages/contracts/src/index.ts` (`CreateSessionRequest`), [`session-mcp-servers.md`](session-mcp-servers.md).
 4. **Orchestrate.** The `sessionWorkflow` (id `session-<sessionId>`) claims the queued turn and dispatches the single `runAgentTurn` activity.
-5. **Execute.** `runAgentTurn` registers its exact Temporal dispatch attempt, builds + runs the OpenAI Agents SDK stream inside a sandbox, publishes realtime events, dual-writes conversation truth to `session_history_items`, meters/bills usage per model call, and atomically settles the turn (`idle` / `requires_action` / `failed` / `cancelled` / `preempted`).
+5. **Execute.** `runAgentTurn` registers a first-class exact attempt, builds + runs the OpenAI Agents SDK stream inside a sandbox, publishes realtime events, writes attempt-fenced conversation truth to `session_history_items`, meters/bills usage per model call, and atomically settles the turn (`idle` / `requires_action` / `recovering` / `failed` / `cancelled`).
 6. **Stream back.** Events were durably appended then live-published; the client's SSE connection delivers them exactly-once, in-order, gap-free.
-7. **Continue or idle.** With no queued turn and an active goal, the workflow synthesizes a continuation turn (`maybeContinueGoal`); otherwise it idles out (and `continueAsNew`s before Temporal's history limit). Goal continuations inherit model + reasoning from the newest turn that durably emitted `turn.started` (fallback: session default), so preflight-rejected turns cannot silently change provider or billing owner. Child-completion parent wakes are temporarily disabled by default (`OPENGENI_CHILD_COMPLETION_PARENT_WAKE_ENABLED=false`), preserving child evidence without synthesizing parent chat work.
+7. **Continue or idle.** With no queued human prompt and an active goal, `maybeContinueGoal` records one typed internal update; the next eligible internal-update inference consumes it with other machine updates. Otherwise the workflow idles out (and `continueAsNew`s before Temporal's history limit). Goal continuations inherit model + reasoning from the newest turn that durably emitted `turn.started` (fallback: session default), so preflight-rejected turns cannot silently change provider or billing owner. Child terminal results enter the same bounded typed internal-update batch.
 
 ---
 
@@ -228,8 +228,8 @@ flowchart LR
 
 ### 5.1 Session → turn → run
 
-- **Session**: a durable, long-lived conversation/workspace context (one Postgres row + a Temporal workflow). Status flows through `queued`/`running`/`requires_action`/`recovering`/`paused`/`idle`/`failed`/`cancelled`.
-- **Turn**: one unit of agent work (from a user message, a goal continuation, an approval decision, or a scheduled task), run as **one non-retryable activity**. Inside it, the SDK loop makes as many model/tool calls as the work needs.
+- **Session**: a durable, long-lived conversation/workspace context (one Postgres row + a Temporal workflow). Lifecycle status flows through `queued`/`running`/`requires_action`/`recovering`/`idle`/`failed`/`cancelled`. Pause is a separate recursive admission-control projection, never a lifecycle status.
+- **Turn**: one logical unit of agent work, triggered by a waiting human/API prompt, an approval decision, or one coalesced internal-update batch (goals, schedules, child results, capacity recovery, and similar machine updates). Each execution attempt is one **non-retryable activity**. Inside it, the SDK loop makes as many model/tool calls as the work needs.
 - **Run**: the SDK execution inside a turn — the streamed agent loop in a sandbox.
 
 ### 5.2 Session/turn lifecycle
@@ -245,8 +245,6 @@ stateDiagram-v2
   running --> idle: inference completes and no prompt waits
   idle --> queued: a human/API prompt arrives
   running --> failed: unrecoverable error
-  running --> paused: Pause settles the current attempt
-  paused --> recovering: Resume restores the same turn
   failed --> queued: a new human/API prompt revives the session
   idle --> [*]: continueAsNew / workflow shutdown
 ```
@@ -255,15 +253,16 @@ Key transitions (canonical: `apps/worker/src/workflows/session.ts`):
 
 - **The visible queue contains only waiting human/API prompts.** The current inference, same-turn recovery, compaction, goals, schedules, and child updates are not queue rows.
 - **Send appends; Steer inserts at the head and supersedes the current attempt.** Both result in ordinary prompt execution once admitted by the session/workspace gate.
-- **Pause and Resume are the only lifecycle controls.** Pause closes admission and settles an active attempt as recoverable; Resume admits that same logical turn before later prompts. A session Resume inside a paused workspace is a generation-bound exception that the next workspace Pause invalidates.
-- **`continueAsNew` runs only at a turn boundary and only when `controlEventId === null`.** The queue and recovery state are durable in Postgres; an in-memory control signal must settle before the workflow hands off.
+- **Pause and Resume operate one recursive admission gate, separate from lifecycle.** Pause preserves the visible queue, approval, goal, and current lifecycle truth; if an attempt is live, an exact durable interruption closes it as recoverable. Resume creates no prompt and no queue row: it merely admits the preserved logical turn. Explicitly resuming a selected descendant through a paused ancestor records an override for the current control revision; any later Pause at that controlling scope invalidates the override.
+- **Send and Steer into a paused session explicitly resume the selected branch in the same transaction.** Send appends the human prompt. Steer puts the human prompt first and supersedes the live attempt. Neither silently resumes siblings or the whole workspace.
+- **`continueAsNew` runs only at a settled turn boundary.** Queue rows, attempts, interruptions, approvals, effective controls, internal updates, and recovery state are durable in Postgres. Temporal signals are replaceable wake hints and carry no authoritative state across the boundary.
 - **Session control uses `signalWithStart`.** Product, source, and Temporal wire semantics use the single `sessionControl` signal.
-- **Workflow wakes are transactional revisions, not inferred repair scans.** Every transaction that creates or re-enables session work increments the session's coalescing `session_workflow_wake_outbox` row. The direct `signalWithStart` path acknowledges that exact revision; one dedicated 10-second control-worker Schedule runs a bounded `SKIP LOCKED` dispatcher that retries only due undelivered revisions. It derives any still-pending Pause/Steer event from Postgres before delivery, while ordinary repaired wakes also wake approval/capacity waits. Wake repair is independent of sandbox cleanup and child-agent feature flags. A final signal-generation close gate prevents a wake accepted during workflow completion from being closed into the old run.
+- **Workflow wakes are transactional revisions, not inferred repair scans.** Every transaction that creates or re-enables session work increments the session's coalescing `session_workflow_wake_outbox` row. Single-target producers use direct `signalWithStart`; recursive controls trigger the one bounded dispatcher without materializing descendant ids in the API. Successful delivery acknowledges the exact revision. The same dedicated 10-second control-worker Schedule runs bounded `SKIP LOCKED` repair for due undelivered revisions. It derives any unsettled exact-attempt interruption from Postgres before delivery, while ordinary repaired wakes also wake approval/capacity waits. Wake repair is independent of sandbox cleanup and child-agent feature flags. A final signal-version close gate prevents a wake accepted during workflow completion from being closed into the old run.
 - **Lazy sandbox provisioning** (`OPENGENI_SANDBOX_LAZY_PROVISION`, effective only with ownership enabled) changes when a provisioned box is acquired, not the turn state machine: `runAgentTurn` computes the stable manifest env at turn start, injects a synthetic routing proxy, and first sandbox op runs the single-flight provisioner. A chat-only lazy turn can go `running -> idle` without a lease row, provider box, heartbeat, recording, or warm-seconds. Connected Machine primary turns stay eager (§3.8).
 
 ### 5.3 Goals & long runs
 
-A **goal** flips the default: a session that finishes a turn with nothing queued does not idle out — the workflow synthesizes a continuation turn, and stopping becomes an explicit act (`goal_complete`/`goal_pause`). Goals are bounded by progress (`OPENGENI_GOAL_NO_PROGRESS_LIMIT`, default 3) and budget guards, **not by count**. The loop is replay-safe (goal state lives only in `session_goals`, accessed via activities). Deep dive: [`goals.md`](goals.md).
+A **goal** flips the default: a session that finishes a turn with nothing queued records one typed goal-continuation internal update, which joins the next coalesced internal-update inference without becoming a human queue row. Stopping becomes an explicit act (`goal_complete`/`goal_pause`). Goals are bounded by progress (`OPENGENI_GOAL_NO_PROGRESS_LIMIT`, default 3) and budget guards, **not by count**. The loop is replay-safe (goal state lives only in `session_goals`, accessed via activities). Deep dive: [`goals.md`](goals.md).
 
 ### 5.4 Memory model
 
@@ -529,7 +528,7 @@ A typed `DeploymentContract` (`@opengeni/deployment`) turns an abstract profile 
 | The session workflow / turn loop / continueAsNew | `apps/worker/src/workflows/session.ts` | [`run-lifecycle.md`](run-lifecycle.md) |
 | The agent turn activity (streaming, billing, history dual-write) | `apps/worker/src/activities/agent-turn.ts` | [`run-lifecycle.md`](run-lifecycle.md) |
 | Temporal activity registration / cutover boundary | `apps/worker/src/activities.ts` and `apps/worker/src/workflows/activities.ts` | [`run-lifecycle.md`](run-lifecycle.md) |
-| Worker-death / preempt / requeue | `apps/worker/src/activities/session-state.ts` | [`run-lifecycle.md`](run-lifecycle.md) |
+| Worker-death / exact-attempt interruption / same-turn recovery | `apps/worker/src/activities/session-state.ts`, `packages/db/src/index.ts` | [`run-lifecycle.md`](run-lifecycle.md) |
 | Codex subscription selection / leasing / failover | `apps/worker/src/activities/codex-rotation.ts`, `apps/worker/src/activities/agent-turn.ts`, `packages/db/src/index.ts` | [`codex-subscription-rotation.md`](codex-subscription-rotation.md) |
 | Goals / continuation loop | `apps/worker/src/activities/goals.ts` | [`goals.md`](goals.md) |
 | Scheduled tasks / cron | `packages/core/src/domain/scheduled-tasks.ts`, `apps/worker/src/activities/scheduled-tasks.ts` | [`reliability-fixes.md`](reliability-fixes.md) |

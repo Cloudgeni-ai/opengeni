@@ -169,11 +169,13 @@ Merging a changesets Version PR only commits package versions and changelogs; it
 does not publish packages or release images. Public release is an explicit
 dispatch of `.github/workflows/release.yml` from a ref pinned to the exact
 accepted source SHA. The dispatch fails closed unless it receives retained
-staging, production, and 72-hour production-canary evidence URLs, the sanitized
-acceptance bundle SHA-256, and an explicit confirmation that there are zero
-known defects, skipped/late cycles, or unverified acceptance rows. It also
-requires the exact expected package set (for example,
-`@opengeni/react@0.14.0`). The selected
+verification evidence for that exact source, the sanitized acceptance bundle
+SHA-256, and an explicit confirmation that there are zero known defects,
+skipped checks, or unverified acceptance rows. Publication unblocks separately
+built package consumers; production deployment and acceptance follow it as the
+release-completion gate. Staging and a fixed soak delay are not prerequisites.
+The dispatch also requires the exact expected package set (for example,
+`@opengeni/react@0.15.0`). The selected
 dispatch ref, `source_sha`, checked-out commit, and a commit reachable from
 `main` must all identify the same revision.
 
