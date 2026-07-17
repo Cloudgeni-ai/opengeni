@@ -1260,7 +1260,12 @@ describe("clean session control plane", () => {
     const childOutboxes = async (childSessionId: string) =>
       await withWorkspaceRls(client.db, grant.workspaceId!, async (db) =>
         db
-          .select({ id: schema.sessionSystemUpdateOutbox.id })
+          .select({
+            id: schema.sessionSystemUpdateOutbox.id,
+            dedupeKey: schema.sessionSystemUpdateOutbox.dedupeKey,
+            payload: schema.sessionSystemUpdateOutbox.payload,
+            lineage: schema.sessionSystemUpdateOutbox.lineage,
+          })
           .from(schema.sessionSystemUpdateOutbox)
           .where(eq(schema.sessionSystemUpdateOutbox.sourceSessionId, childSessionId)),
       );
@@ -1291,22 +1296,42 @@ describe("clean session control plane", () => {
     expect(await getSession(client.db, grant.workspaceId!, failedChild.id)).toMatchObject({
       status: "failed",
     });
-    expect(await childOutboxes(failedChild.id)).toHaveLength(1);
+    expect(await childOutboxes(failedChild.id)).toEqual([
+      expect.objectContaining({
+        dedupeKey: `child-completion:${failedChild.id}:turn:${failedTurn.id}`,
+        payload: expect.objectContaining({
+          type: "child_terminal_result",
+          childSessionId: failedChild.id,
+          status: "failed",
+          turnId: failedTurn.id,
+        }),
+        lineage: expect.objectContaining({
+          childSessionId: failedChild.id,
+          parentSessionId: parent.id,
+          turnId: failedTurn.id,
+        }),
+      }),
+    ]);
 
     const exhaustedChild = await createChild("worker-death child");
-    const { attemptId: exhaustedAttemptId } = await claimChild(exhaustedChild);
-    expect(
-      await recoverSessionDispatch(client.db, grant.workspaceId!, {
-        sessionId: exhaustedChild.id,
-        attemptId: exhaustedAttemptId,
-        timeoutType: "HEARTBEAT",
-        maxRedispatches: 0,
-      }),
-    ).toMatchObject({ action: "exceeded" });
+    const { attemptId: exhaustedAttemptId, turn: exhaustedTurn } = await claimChild(exhaustedChild);
+    const exhausted = await recoverSessionDispatch(client.db, grant.workspaceId!, {
+      sessionId: exhaustedChild.id,
+      attemptId: exhaustedAttemptId,
+      timeoutType: "HEARTBEAT",
+      maxRedispatches: 0,
+    });
+    expect(exhausted).toMatchObject({ action: "exceeded", turnId: exhaustedTurn.id });
     expect(await getSession(client.db, grant.workspaceId!, exhaustedChild.id)).toMatchObject({
       status: "failed",
     });
-    expect(await childOutboxes(exhaustedChild.id)).toHaveLength(1);
+    expect(await childOutboxes(exhaustedChild.id)).toEqual([
+      expect.objectContaining({
+        dedupeKey: `child-completion:${exhaustedChild.id}:turn:${exhaustedTurn.id}`,
+        payload: expect.objectContaining({ turnId: exhaustedTurn.id }),
+        lineage: expect.objectContaining({ turnId: exhaustedTurn.id }),
+      }),
+    ]);
   });
 
   test("Pause blocks a racing terminal settlement and Resume admits a new attempt of the same turn", async () => {

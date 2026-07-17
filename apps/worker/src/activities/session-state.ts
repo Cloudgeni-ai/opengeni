@@ -10,7 +10,7 @@ import {
   settleSessionIdleWithParentOutbox,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
-import { notifyParentOfChildTerminal } from "./parent-wake";
+import { deliverFailedChildTurnToParent, notifyParentOfChildIdle } from "./parent-wake";
 import { recordTurnsQueuedGauge } from "../observability-metrics";
 import type {
   ActivityServices,
@@ -33,7 +33,8 @@ export type SessionStateActivityOverrides = Partial<{
   requireSession: typeof requireSession;
   settleSessionIdleWithParentOutbox: typeof settleSessionIdleWithParentOutbox;
   publishDurableSessionEvents: typeof publishDurableSessionEvents;
-  notifyParentOfChildTerminal: typeof notifyParentOfChildTerminal;
+  deliverFailedChildTurnToParent: typeof deliverFailedChildTurnToParent;
+  notifyParentOfChildIdle: typeof notifyParentOfChildIdle;
   recordTurnsQueuedGauge: typeof recordTurnsQueuedGauge;
 }>;
 
@@ -61,8 +62,9 @@ export function createSessionStateActivities(
     overrides.settleSessionIdleWithParentOutbox ?? settleSessionIdleWithParentOutbox;
   const publishDurableSessionEventsFn =
     overrides.publishDurableSessionEvents ?? publishDurableSessionEvents;
-  const notifyParentOfChildTerminalFn =
-    overrides.notifyParentOfChildTerminal ?? notifyParentOfChildTerminal;
+  const deliverFailedChildTurnToParentFn =
+    overrides.deliverFailedChildTurnToParent ?? deliverFailedChildTurnToParent;
+  const notifyParentOfChildIdleFn = overrides.notifyParentOfChildIdle ?? notifyParentOfChildIdle;
   const recordTurnsQueuedGaugeFn = overrides.recordTurnsQueuedGauge ?? recordTurnsQueuedGauge;
 
   async function failSessionAttempt(input: FailSessionAttemptInput): Promise<void> {
@@ -103,12 +105,11 @@ export function createSessionStateActivities(
       return;
     }
     await publishDurableSessionEventsFn(bus, input.workspaceId, input.sessionId, result.events);
-    await notifyParentOfChildTerminalFn(
+    await deliverFailedChildTurnToParentFn(
       { db, bus, settings, observability, wakeSessionWorkflow },
       input.workspaceId,
       input.sessionId,
-      "failed",
-      `turn:${turn.id}`,
+      turn.id,
     );
   }
 
@@ -150,12 +151,11 @@ export function createSessionStateActivities(
     await publishDurableSessionEventsFn(bus, input.workspaceId, input.sessionId, result.events);
     await refreshQueuedTurnsGauge(db, observability, countQueuedTurnsFn, recordTurnsQueuedGaugeFn);
     if (result.action === "exceeded") {
-      await notifyParentOfChildTerminalFn(
+      await deliverFailedChildTurnToParentFn(
         { db, bus, settings, observability, wakeSessionWorkflow },
         input.workspaceId,
         input.sessionId,
-        "failed",
-        `turn:${result.turnId}`,
+        result.turnId,
       );
       return {
         action: "exceeded",
@@ -196,11 +196,10 @@ export function createSessionStateActivities(
     // point for a spawned worker, whatever the cause (goal completed, agent or
     // system paused goal, goalless work finished, idle control settlement). Wake
     // the parent here, deduped per idle episode so the manager is nudged once.
-    await notifyParentOfChildTerminalFn(
+    await notifyParentOfChildIdleFn(
       { db, bus, settings, observability, wakeSessionWorkflow },
       input.workspaceId,
       input.sessionId,
-      "idle",
       settled.episodeKey,
     );
   }

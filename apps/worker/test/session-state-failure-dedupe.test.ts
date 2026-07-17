@@ -25,7 +25,7 @@ describe("failSessionAttempt child-terminal identity", () => {
           recordingMutationApplied: false,
         })),
         publishDurableSessionEvents: mock(async () => undefined),
-        notifyParentOfChildTerminal: mock(async (...args: unknown[]) => {
+        deliverFailedChildTurnToParent: mock(async (...args: unknown[]) => {
           parentWakeCalls.push(args);
         }),
       },
@@ -41,7 +41,7 @@ describe("failSessionAttempt child-terminal identity", () => {
 
     expect(parentWakeCalls).toHaveLength(1);
     expect(parentWakeCalls[0]).toEqual(
-      expect.arrayContaining(["workspace-1", "child-1", "failed", "turn:turn-1"]),
+      expect.arrayContaining(["workspace-1", "child-1", "turn-1"]),
     );
   });
 });

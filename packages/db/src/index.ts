@@ -19826,7 +19826,7 @@ export async function peekSessionWork(
  * Commit the workflow's terminal-for-now idle decision and its parent delivery
  * source in one transaction. A crash after commit leaves a pending outbox row for
  * the global reconciler; a normal caller immediately enriches/delivers the same
- * dedupe identity through notifyParentOfChildTerminal.
+ * dedupe identity through notifyParentOfChildIdle.
  */
 export async function settleSessionIdleWithParentOutbox(
   db: Database,
@@ -21770,6 +21770,52 @@ function mapSystemUpdateOutboxRow(row: {
     payload: parseChildTerminalResultPayload(row.payload),
     lineage: row.lineage,
   };
+}
+
+/**
+ * Read the exact durable parent-update row created by terminal turn settlement.
+ * Failure delivery must never upsert this row: settlement owns its payload and
+ * turn provenance, while the activity layer only delivers the committed fact.
+ */
+export async function getSessionSystemUpdateOutboxByDedupeKey(
+  db: Database,
+  input: { accountId: string; workspaceId: string; dedupeKey: string },
+): Promise<SessionSystemUpdateOutboxDelivery | null> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const [row] = await scopedDb
+        .select()
+        .from(schema.sessionSystemUpdateOutbox)
+        .where(
+          and(
+            eq(schema.sessionSystemUpdateOutbox.workspaceId, input.workspaceId),
+            eq(schema.sessionSystemUpdateOutbox.dedupeKey, input.dedupeKey),
+          ),
+        )
+        .limit(1);
+      if (!row) return null;
+      if (row.kind !== "child_terminal_result") {
+        throw new Error(`System-update outbox contains retired kind ${row.kind}`);
+      }
+      return {
+        id: row.id,
+        status: row.status as "pending" | "delivered",
+        accountId: row.accountId,
+        workspaceId: row.workspaceId,
+        sourceSessionId: row.sourceSessionId,
+        targetSessionId: row.targetSessionId,
+        dedupeKey: row.dedupeKey,
+        kind: "child_terminal_result",
+        classification: row.classification as SystemUpdateClassification,
+        sourceId: row.sourceId,
+        summary: row.summary,
+        payload: parseChildTerminalResultPayload(row.payload),
+        lineage: row.lineage,
+      };
+    },
+  );
 }
 
 export async function claimPendingSessionSystemUpdateOutbox(

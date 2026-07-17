@@ -171,7 +171,7 @@ import {
   settingsWithPackSandboxImage,
   settingsWithRigImage,
 } from "./packs";
-import { notifyParentOfChildTerminal } from "./parent-wake";
+import { deliverFailedChildTurnToParent } from "./parent-wake";
 import { createSecretRedactor, identityRedactor } from "./redaction";
 import { applyCodexHistoryStrip, turnInput, type TurnCodexAccount } from "./run-input";
 import {
@@ -4515,12 +4515,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         if (settlement.action === "failed") {
           activityStatus = "failed";
           turnMetricOutcome = "failed";
-          await notifyParentOfChildTerminal(
+          await deliverFailedChildTurnToParent(
             { db, bus, settings, observability, wakeSessionWorkflow },
             input.workspaceId,
             input.sessionId,
-            "failed",
-            `turn:${lostTurnId}`,
+            lostTurnId,
           );
           return claimedResult({ status: "failed" });
         }
@@ -5163,15 +5162,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // failed and returns "failed", and the session workflow then exits
       // WITHOUT calling failSession/markSessionIdle. Wake a spawned worker's
       // parent here too, so a manager learns of a worker that died inside its
-      // turn (not just one failed by the workflow's failSession path). Deduped
-      // per terminal episode by the child's lastSequence, so it never
-      // double-fires with the workflow-level wake.
-      await notifyParentOfChildTerminal(
+      // turn (not just one failed by the workflow's failSession path). Turn
+      // settlement already owns the durable outbox payload; this call only
+      // delivers that exact turn-scoped row.
+      await deliverFailedChildTurnToParent(
         { db, bus, settings, observability, wakeSessionWorkflow },
         input.workspaceId,
         input.sessionId,
-        "failed",
-        `turn:${turnId}`,
+        turnId,
       );
       return claimedResult({ status: "failed" });
     } finally {

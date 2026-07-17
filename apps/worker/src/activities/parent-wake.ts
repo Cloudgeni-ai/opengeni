@@ -6,6 +6,7 @@ import {
   addSessionSystemUpdateWithSourceMutation,
   claimPendingSessionSystemUpdateOutbox,
   claimPendingSessionWorkflowWakes,
+  getSessionSystemUpdateOutboxByDedupeKey,
   getOrCreateSessionSystemUpdateOutbox,
   markSessionWorkflowWakeFailed,
   markSessionSystemUpdateOutboxDeliveredInTransaction,
@@ -33,36 +34,15 @@ export type ReconcileSessionWorkflowWakeOverrides = Partial<{
 }>;
 
 /**
- * Deliver exactly one completion wake to a spawned worker's parent (manager)
- * session when the worker reaches a terminal-for-now state. No-op for a
- * parentless session (direct API create / scheduled run). Idempotent per
- * terminal episode: the idempotency key is the child's current lastSequence,
- * which advances every time the child does work, so a retry of the same
- * terminal transition (activity retry, the workflow's idle re-check, the
- * runAgentTurn-failed path overlapping a workflow-level wake) is deduped while
- * a genuinely new idle-after-work episode notifies again. The parent receives
- * one typed internal update; signalling its workflow ensures an idle parent can
- * coalesce and process all pending updates in one inference. Failures here never
- * fail the child because the durable outbox remains retryable.
- *
- * Lives in its own module so both the session-state terminal activities
- * (markSessionIdle / failSession) and runAgentTurn's in-turn failure path can
- * call it without a circular import between those two activity modules.
+ * Enrich and deliver the durable idle-boundary row committed by
+ * settleSessionIdleWithParentOutbox. Idle has no single owning turn, so its
+ * stable episode identity is the newest non-status event sequence.
  */
-export async function notifyParentOfChildTerminal(
+export async function notifyParentOfChildIdle(
   svc: NotifyServices,
   workspaceId: string,
   childSessionId: string,
-  terminalStatus: "idle" | "failed",
-  // Stable identifier for the terminal episode, used as the idempotency key so
-  // the same completion never wakes the parent twice. A FAILURE passes the
-  // failed turn's id: both the in-turn wake (runAgentTurn) and the
-  // workflow-level wake (failSession, after it appends more events that would
-  // shift lastSequence) key on the same turn, so a finally-throw that turns one
-  // failure into both paths still dedupes. An idle episode has no single
-  // owning turn, so it falls back to the child's lastSequence — which advances
-  // per work batch and is stable across retries of that same idle transition.
-  episodeKey?: string | null,
+  episodeKey: string,
 ): Promise<void> {
   try {
     const child = await getSession(svc.db, workspaceId, childSessionId);
@@ -75,23 +55,18 @@ export async function notifyParentOfChildTerminal(
     // what re-arms the loop the user just stopped. Suppress the resume nudge and
     // tell the agent to stay paused. Paired with the goal_set reactivation
     // guard so a nudge that slips through still cannot revive the goal.
-    const clientEventId = `child-completion:${childSessionId}:${episodeKey ?? child.lastSequence}`;
-    const payload = childCompletionPayload(child, goal, terminalStatus);
+    const clientEventId = `child-completion:${childSessionId}:${episodeKey}`;
+    const payload = childCompletionPayload(child, goal);
     const outbox = await getOrCreateSessionSystemUpdateOutbox(svc.db, {
       accountId: child.accountId,
       workspaceId,
       sourceSessionId: child.id,
       targetSessionId: child.parentSessionId,
       kind: "child_terminal_result",
-      classification:
-        terminalStatus === "failed"
-          ? "failure"
-          : goal?.status === "paused"
-            ? "action_required"
-            : "success",
+      classification: goal?.status === "paused" ? "action_required" : "success",
       sourceId: child.id,
       dedupeKey: clientEventId,
-      summary: childCompletionSummary(child, goal, terminalStatus),
+      summary: childCompletionSummary(child, goal, "idle"),
       payload,
       lineage: { childSessionId: child.id, parentSessionId: child.parentSessionId },
     });
@@ -102,8 +77,44 @@ export async function notifyParentOfChildTerminal(
   } catch (error) {
     // A durable pending outbox row survives this boundary. The global worker
     // reaper retries it; child terminal settlement never depends on this turn.
-    svc.observability.error("Failed to wake parent session on worker completion", {
+    svc.observability.error("Failed to wake parent session on worker idle boundary", {
       childSessionId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+/**
+ * Deliver the exact failure row already committed by turn settlement. This
+ * layer deliberately cannot create or rewrite the row: the settlement
+ * transaction is the sole owner of the failed turn id, payload, and lineage.
+ */
+export async function deliverFailedChildTurnToParent(
+  svc: NotifyServices,
+  workspaceId: string,
+  childSessionId: string,
+  turnId: string,
+): Promise<void> {
+  try {
+    const child = await getSession(svc.db, workspaceId, childSessionId);
+    if (!child || !child.parentSessionId) return;
+    const dedupeKey = `child-completion:${childSessionId}:turn:${turnId}`;
+    const outbox = await getSessionSystemUpdateOutboxByDedupeKey(svc.db, {
+      accountId: child.accountId,
+      workspaceId,
+      dedupeKey,
+    });
+    if (!outbox) {
+      throw new Error(`Committed failed-child outbox disappeared: ${dedupeKey}`);
+    }
+    if (outbox.status === "delivered") return;
+    await deliverParentSystemUpdateOutbox(svc, outbox);
+  } catch (error) {
+    // Settlement already committed the retryable outbox row. The global
+    // reconciler remains the recovery path if immediate delivery fails.
+    svc.observability.error("Failed to deliver committed child-turn failure", {
+      childSessionId,
+      turnId,
       error: error instanceof Error ? error.message : String(error),
     });
   }
@@ -231,12 +242,11 @@ export async function reconcilePendingSessionWorkflowWakes(
 function childCompletionPayload(
   child: Session,
   goal: SessionGoal | null,
-  terminalStatus: "idle" | "failed",
 ): Extract<SessionSystemUpdatePayload, { type: "child_terminal_result" }> {
   return {
     type: "child_terminal_result",
     childSessionId: child.id,
-    status: terminalStatus,
+    status: "idle",
     ...(goal
       ? {
           goal: {
