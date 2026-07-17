@@ -652,22 +652,52 @@ BEGIN
 END $hold_only_verify$;
 
 -- Old Session Pause silently paused an otherwise-active goal with the private
--- reason user_pause and emitted no goal.paused event. Restore only that exact,
--- source-proven shape; an explicit goal pause uses another reason/event and is
--- preserved. Any user_pause goal outside a currently paused session is
--- ambiguous and therefore blocks the cutover instead of being guessed.
+-- reason user_pause and emitted no goal.paused event. Migration 0057 also
+-- normalized the older *explicit* user-goal reason user_interrupt to the same
+-- database value, while correctly preserving its goal.paused event. Classify
+-- the current goal by its latest status-changing event so an explicit user
+-- pause stays sacred and only the eventless Session-Pause coupling is removed.
+CREATE TEMP TABLE "cutover_user_pause_goal_fates" (
+  "workspace_id" uuid NOT NULL,
+  "goal_id" uuid PRIMARY KEY,
+  "source" text NOT NULL CHECK ("source" IN ('explicit_goal_pause', 'session_pause'))
+) ON COMMIT DROP;
+
+INSERT INTO "cutover_user_pause_goal_fates" ("workspace_id", "goal_id", "source")
+SELECT goal."workspace_id", goal."id",
+       CASE
+         WHEN latest."type" = 'goal.paused'
+          AND latest."reason" IN ('user_interrupt', 'user_pause')
+         THEN 'explicit_goal_pause'
+         ELSE 'session_pause'
+       END
+FROM "session_goals" goal
+LEFT JOIN LATERAL (
+  SELECT event."type", event."payload" ->> 'reason' AS reason
+  FROM "session_events" event
+  WHERE event."workspace_id" = goal."workspace_id"
+    AND event."session_id" = goal."session_id"
+    AND event."payload" ->> 'goalId' = goal."id"::text
+    AND event."type" IN ('goal.set', 'goal.paused', 'goal.resumed', 'goal.completed', 'goal.cleared')
+  ORDER BY event."sequence" DESC, event."id" DESC
+  LIMIT 1
+) latest ON TRUE
+WHERE goal."status" = 'paused'
+  AND goal."paused_reason" = 'user_pause';
+
 DO $goal_preflight$
 BEGIN
   IF EXISTS (
     SELECT 1
-    FROM "session_goals" goal
+    FROM "cutover_user_pause_goal_fates" fate
+    JOIN "session_goals" goal
+      ON goal."workspace_id" = fate."workspace_id" AND goal."id" = fate."goal_id"
     JOIN "sessions" session
       ON session."workspace_id" = goal."workspace_id" AND session."id" = goal."session_id"
-    WHERE goal."status" = 'paused'
-      AND goal."paused_reason" = 'user_pause'
+    WHERE fate."source" = 'session_pause'
       AND session."control_state" <> 'paused'
   ) THEN
-    RAISE EXCEPTION 'session-control cutover: ambiguous user_pause goal outside paused session';
+    RAISE EXCEPTION 'session-control cutover: eventless user_pause goal outside paused session';
   END IF;
 END $goal_preflight$;
 
@@ -678,10 +708,11 @@ SELECT goal."account_id", goal."workspace_id", 'control-mega-migration',
        'session.goal.migration.restored_from_session_pause', 'session_goal', goal."id"::text,
        jsonb_build_object('oldStatus', goal."status", 'newStatus', 'active', 'oldVersion', goal."version")
 FROM "session_goals" goal
+JOIN "cutover_user_pause_goal_fates" fate
+  ON fate."workspace_id" = goal."workspace_id" AND fate."goal_id" = goal."id"
 JOIN "sessions" session
   ON session."workspace_id" = goal."workspace_id" AND session."id" = goal."session_id"
-WHERE goal."status" = 'paused'
-  AND goal."paused_reason" = 'user_pause'
+WHERE fate."source" = 'session_pause'
   AND session."control_state" = 'paused';
 
 UPDATE "session_goals" goal
@@ -695,10 +726,12 @@ SET "status" = 'active',
     "version" = goal."version" + 1,
     "updated_at" = now()
 FROM "sessions" session
+JOIN "cutover_user_pause_goal_fates" fate
+  ON fate."workspace_id" = session."workspace_id"
 WHERE session."workspace_id" = goal."workspace_id"
   AND session."id" = goal."session_id"
-  AND goal."status" = 'paused'
-  AND goal."paused_reason" = 'user_pause'
+  AND fate."goal_id" = goal."id"
+  AND fate."source" = 'session_pause'
   AND session."control_state" = 'paused';
 
 -- Pause was previously overloaded into session lifecycle. Recover canonical

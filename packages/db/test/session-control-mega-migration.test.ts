@@ -370,6 +370,78 @@ describe("0063 session control mega migration", () => {
     }
   }, 180_000);
 
+  test("preserves explicit user goal pauses while removing only Session-Pause coupling", async () => {
+    await withPreMegaDatabase("goal-pause-provenance", async (sql) => {
+      const scope = await seedAccountWorkspace(sql, "goal-pause-provenance");
+      const explicitActiveId = await seedSession(sql, scope);
+      const explicitPausedId = await seedSession(sql, scope);
+      const coupledPausedId = await seedSession(sql, scope);
+      await sql`
+        update sessions
+        set status = 'paused', control_state = 'paused', control_generation = 1
+        where id in (${explicitPausedId}, ${coupledPausedId})`;
+
+      const seedPausedGoal = async (sessionId: string, explicit: boolean): Promise<void> => {
+        const [{ id: goalId } = { id: "" }] = await sql<{ id: string }[]>`
+          insert into session_goals (
+            account_id, workspace_id, session_id, text, status, paused_reason
+          ) values (
+            ${scope.accountId}, ${scope.workspaceId}, ${sessionId}, ${`goal ${sessionId}`},
+            'paused', 'user_pause'
+          ) returning id`;
+        if (explicit) {
+          await sql`
+            insert into session_events (
+              account_id, workspace_id, session_id, sequence, type, payload
+            ) values (
+              ${scope.accountId}, ${scope.workspaceId}, ${sessionId}, 1, 'goal.paused',
+              ${sql.json({ goalId, actor: "user", reason: "user_interrupt" })}
+            )`;
+        }
+      };
+      await seedPausedGoal(explicitActiveId, true);
+      await seedPausedGoal(explicitPausedId, true);
+      await seedPausedGoal(coupledPausedId, false);
+
+      await applyFile(sql, "0063_session_control_mega_foundation.sql");
+
+      const goals = await sql<
+        Array<{ session_id: string; status: string; paused_reason: string | null }>
+      >`
+        select session_id, status, paused_reason
+        from session_goals
+        where session_id in (${explicitActiveId}, ${explicitPausedId}, ${coupledPausedId})`;
+      const bySession = new Map(goals.map((goal) => [goal.session_id, goal]));
+      expect(bySession.get(explicitActiveId)).toMatchObject({
+        status: "paused",
+        paused_reason: "user_pause",
+      });
+      expect(bySession.get(explicitPausedId)).toMatchObject({
+        status: "paused",
+        paused_reason: "user_pause",
+      });
+      expect(bySession.get(coupledPausedId)).toMatchObject({
+        status: "active",
+        paused_reason: null,
+      });
+    });
+  }, 180_000);
+
+  test("fails closed for an eventless user-pause goal outside Session Pause", async () => {
+    await withPreMegaDatabase("ambiguous-goal-pause", async (sql) => {
+      const scope = await seedAccountWorkspace(sql, "ambiguous-goal-pause");
+      const sessionId = await seedSession(sql, scope);
+      await sql`
+        insert into session_goals (
+          account_id, workspace_id, session_id, text, status, paused_reason
+        ) values (
+          ${scope.accountId}, ${scope.workspaceId}, ${sessionId}, 'ambiguous pause',
+          'paused', 'user_pause'
+        )`;
+      await expectMegaMigrationRollback(sql, "eventless user_pause goal outside paused session");
+    });
+  }, 180_000);
+
   test("fails closed and rolls back an unknown legacy internal-update shape", async () => {
     await withPreMegaDatabase("unknown-update", async (sql) => {
       const { accountId, workspaceId } = await seedAccountWorkspace(sql, "unknown-update");

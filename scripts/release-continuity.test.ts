@@ -55,6 +55,39 @@ describe("release continuity", () => {
           'codex/gpt-5.6-sol', 'none', ${sessionId}, ${`session-${sessionId}`}, 'active', 7,
           jsonb_build_object('childNotificationsMode', 'passive', 'retained', true)
         )`;
+      const [{ id: explicitGoalId } = { id: "" }] = await sql<{ id: string }[]>`
+        insert into session_goals (
+          account_id, workspace_id, session_id, text, status, paused_reason
+        ) values (
+          ${accountId}, ${workspaceId}, ${sessionId}, 'explicit pause', 'paused', 'user_pause'
+        ) returning id`;
+      await sql`
+        insert into session_events (
+          account_id, workspace_id, session_id, sequence, type, payload
+        ) values (
+          ${accountId}, ${workspaceId}, ${sessionId}, 1, 'goal.paused',
+          ${sql.json({ goalId: explicitGoalId, actor: "user", reason: "user_interrupt" })}
+        )`;
+      await sql`update sessions set last_sequence = 1 where id = ${sessionId}`;
+
+      const coupledSessionId = crypto.randomUUID();
+      await sql`
+        insert into sessions (
+          id, account_id, workspace_id, status, initial_message, model,
+          sandbox_backend, sandbox_group_id, temporal_workflow_id,
+          control_state, control_generation, metadata
+        ) values (
+          ${coupledSessionId}, ${accountId}, ${workspaceId}, 'paused', 'coupled pause',
+          'codex/gpt-5.6-sol', 'none', ${coupledSessionId}, ${`session-${coupledSessionId}`},
+          'paused', 1, '{}'::jsonb
+        )`;
+      await sql`
+        insert into session_goals (
+          account_id, workspace_id, session_id, text, status, paused_reason
+        ) values (
+          ${accountId}, ${workspaceId}, ${coupledSessionId}, 'coupled pause',
+          'paused', 'user_pause'
+        )`;
 
       const captured = await runContinuity(
         ["--mode", "capture", "--manifest", manifest],

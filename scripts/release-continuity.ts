@@ -286,7 +286,22 @@ function canonicalProjectionQueries(): Record<string, Query> {
 
 function projectedGoalQuery(legacy: boolean): string {
   const converted = legacy
-    ? "goal.status = 'paused' and goal.paused_reason = 'user_pause' and session.control_state = 'paused'"
+    ? `goal.status = 'paused'
+       and goal.paused_reason = 'user_pause'
+       and session.control_state = 'paused'
+       and not coalesce((
+         select event.type = 'goal.paused'
+                and event.payload ->> 'reason' in ('user_interrupt', 'user_pause')
+         from session_events event
+         where event.workspace_id = goal.workspace_id
+           and event.session_id = goal.session_id
+           and event.payload ->> 'goalId' = goal.id::text
+           and event.type in (
+             'goal.set', 'goal.paused', 'goal.resumed', 'goal.completed', 'goal.cleared'
+           )
+         order by event.sequence desc, event.id desc
+         limit 1
+       ), false)`
     : "false";
   return `select goal.id::text, goal.session_id::text, goal.text, goal.success_criteria,
                  goal.evidence,
