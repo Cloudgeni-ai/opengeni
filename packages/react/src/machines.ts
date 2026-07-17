@@ -34,6 +34,22 @@ export { MachineMetrics } from "./components/machine-metrics";
 export type { MachineMetricsProps } from "./components/machine-metrics";
 export { MachineCard } from "./components/machine-card";
 export type { MachineCardProps } from "./components/machine-card";
+export { MachineHealthPill } from "./components/machine-health-pill";
+export type { MachineHealthPillProps } from "./components/machine-health-pill";
+// Telemetry: fused health signal + history charts + the per-machine detail view.
+export { deriveHealth, HEALTH_TOKEN, healthPulses } from "./components/machines/health";
+export type { HealthLevel, HealthVerdict } from "./components/machines/health";
+export { MetricSparkline } from "./components/machines/metric-sparkline";
+export type { MetricSparklineProps } from "./components/machines/metric-sparkline";
+export { MetricHistoryChart } from "./components/machines/metric-history-chart";
+export type {
+  MetricHistoryChartProps,
+  SeriesPoint,
+} from "./components/machines/metric-history-chart";
+export { MachineDetail } from "./components/machines/machine-detail";
+export type { MachineDetailProps } from "./components/machines/machine-detail";
+export { METRICS, METRIC_WINDOWS, WINDOW_LABEL, pointsFor } from "./components/machines/series";
+export type { MetricDef, MetricKey, MetricWindow } from "./components/machines/series";
 export { MachinesDashboard } from "./components/machines-dashboard";
 export type { MachinesDashboardProps } from "./components/machines-dashboard";
 export { MachineDockBar, SharedMachineDisclosure } from "./components/machine-dock-bar";

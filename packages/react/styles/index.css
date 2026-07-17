@@ -165,6 +165,28 @@
   }
 }
 
+/* Metric-history line draw-in. The chart path carries `pathLength={1}`, so the
+   dash math is resolution-independent: one full-length dash whose offset animates
+   from 1 (hidden) to 0 (drawn). Degrades to a solid line if animations are off. */
+@keyframes og-mh-draw {
+  from {
+    stroke-dashoffset: 1;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+.og-mh-draw {
+  stroke-dasharray: 1;
+  animation: og-mh-draw 900ms var(--og-ease-out) forwards;
+}
+@media (prefers-reduced-motion: reduce) {
+  .og-mh-draw {
+    animation: none;
+    stroke-dasharray: none;
+  }
+}
+
 /* Shimmer helper: gradient text the keyframe scrolls through. */
 .og-shimmer-text {
   background: linear-gradient(
