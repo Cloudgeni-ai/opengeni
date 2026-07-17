@@ -1,7 +1,7 @@
 # Conversation context compaction
 
 OpenGeni has one compaction mechanism: durable, portable plaintext compaction
-that follows the local compaction path in Codex CLI 0.144.4. It is used for
+that follows the local compaction path in Codex CLI 0.144.5. It is used for
 OpenAI, Azure, Codex subscriptions, and registry providers. There is no
 provider-side mode, off switch, compatibility ladder, request-local history
 trim, or deterministic non-model fallback.
@@ -37,7 +37,7 @@ If a model has no explicit automatic limit, OpenGeni uses
 0.9 and is clamped to 0.3–0.9. An explicit limit is capped at 90% of the raw
 window, matching Codex core.
 
-The Codex subscription catalog verified with Codex CLI 0.144.4 on 2026-07-14
+The Codex subscription catalog verified with Codex CLI 0.144.5 on 2026-07-17
 has:
 
 | quantity | tokens |
