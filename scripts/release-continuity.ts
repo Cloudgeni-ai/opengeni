@@ -312,6 +312,7 @@ type Query = {
 
 async function streamDigest(sql: Sql, query: Query): Promise<Digest> {
   const hash = createHash("sha256");
+  const frame = Buffer.allocUnsafe(40);
   let rows = 0;
   const source = inlineQueryParameters(query);
   // Hash each serialized row in PostgreSQL and stream only its fixed-size
@@ -330,7 +331,7 @@ async function streamDigest(sql: Sql, query: Query): Promise<Digest> {
   `;
   await sql
     .unsafe<{ row_bytes: number | string; row_sha256: string }[]>(hashedQuery)
-    .cursor(10_000, (batch) => {
+    .cursor(1_000, (batch) => {
       for (const row of batch) {
         const byteLength = Number(row.row_bytes);
         if (!Number.isSafeInteger(byteLength) || byteLength < 0) {
@@ -339,10 +340,14 @@ async function streamDigest(sql: Sql, query: Query): Promise<Digest> {
         if (!/^[0-9a-f]{64}$/u.test(row.row_sha256)) {
           throw new Error("Invalid continuity row digest returned by PostgreSQL");
         }
-        const length = Buffer.allocUnsafe(8);
-        length.writeBigUInt64BE(BigInt(byteLength));
-        hash.update(length);
-        hash.update(Buffer.from(row.row_sha256, "hex"));
+        frame.writeBigUInt64BE(BigInt(byteLength), 0);
+        if (frame.write(row.row_sha256, 8, 32, "hex") !== 32) {
+          throw new Error("Continuity row digest was not exactly 32 bytes");
+        }
+        // `Hash.update()` consumes synchronously, so this single frame can be
+        // reused for every row instead of retaining allocation pressure from
+        // tens of millions of short-lived Buffer objects.
+        hash.update(frame);
         rows += 1;
       }
     });
