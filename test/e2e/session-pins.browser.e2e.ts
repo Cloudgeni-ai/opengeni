@@ -414,28 +414,19 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         name: "Reorder queued prompt 2",
       });
       await secondHandle.focus();
-      const draggedHandle = await secondHandle.elementHandle();
-      if (!draggedHandle) throw new Error("queued prompt 2 reorder handle disappeared");
-      await draggedHandle.press("Space");
+      await desktopPage.keyboard.press("Space");
       await queue
         .getByText(
           "Lifted queued prompt 2 of 2. Use arrow keys to move it, then press Space to drop.",
           { exact: true },
         )
         .waitFor();
-      // Keep the exact DOM handle for the full keyboard gesture. A role locator
-      // named by position may intentionally resolve to another row as DnD
-      // projects its new position.
-      await draggedHandle.press("ArrowUp");
-      await waitFor(
-        async () =>
-          await draggedHandle.evaluate((handle) => {
-            const style = handle.closest<HTMLElement>("[data-queue-turn-id]")?.style.transform;
-            return Boolean(style && style !== "translate3d(0px, 0px, 0px)");
-          }),
-        { timeoutMs: 5_000 },
-      );
-      await draggedHandle.press("Space");
+      // Keep focus on the lifted handle for the full gesture. The projected
+      // order is visible immediately, but remains local until Space commits
+      // the move to the durable server-owned queue.
+      await desktopPage.keyboard.press("ArrowUp");
+      await expectRowPrompt(queuedRows, 0, "Inspect the full session-control surface");
+      await desktopPage.keyboard.press("Space");
       await queue.getByText("Queued prompt moved to position 1.", { exact: true }).waitFor();
       await expectRowPrompt(queuedRows, 0, "Inspect the full session-control surface");
 

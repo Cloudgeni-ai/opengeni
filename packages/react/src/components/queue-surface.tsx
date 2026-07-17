@@ -1,7 +1,6 @@
 import {
   DndContext,
   DragOverlay,
-  KeyboardSensor,
   PointerSensor,
   closestCenter,
   useSensor,
@@ -13,7 +12,6 @@ import {
 import {
   SortableContext,
   arrayMove,
-  sortableKeyboardCoordinates,
   useSortable,
   verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
@@ -31,7 +29,7 @@ import {
   Trash2Icon,
   ZapIcon,
 } from "lucide-react";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 
 import { DropdownMenu } from "radix-ui";
 import type { ComposerState } from "../hooks/use-composer";
@@ -55,13 +53,21 @@ export function QueueSurface({ queue, composer, readOnly = false }: QueueSurface
   const [replaceDraftFor, setReplaceDraftFor] = useState<string | null>(null);
   const [announcement, setAnnouncement] = useState("");
   const [draggedTurnId, setDraggedTurnId] = useState<string | null>(null);
+  const [keyboardDrag, setKeyboardDrag] = useState<{
+    turnId: string;
+    projectedIndex: number;
+  } | null>(null);
   const count = queue.queue.length;
-  const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
-    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
-  );
+  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }));
 
-  const ids = useMemo(() => queue.queue.map((turn) => turn.id), [queue.queue]);
+  const displayedQueue = useMemo(() => {
+    if (!keyboardDrag) return queue.queue;
+    const oldIndex = queue.queue.findIndex((turn) => turn.id === keyboardDrag.turnId);
+    if (oldIndex < 0) return queue.queue;
+    return arrayMove(queue.queue, oldIndex, keyboardDrag.projectedIndex);
+  }, [keyboardDrag, queue.queue]);
+
+  const ids = useMemo(() => displayedQueue.map((turn) => turn.id), [displayedQueue]);
   const moveToIndex = useCallback(
     async (turnId: string, nextIndex: number): Promise<void> => {
       const oldIndex = queue.queue.findIndex((turn) => turn.id === turnId);
@@ -98,14 +104,57 @@ export function QueueSurface({ queue, composer, readOnly = false }: QueueSurface
 
   const onDragStart = useCallback(
     (event: DragStartEvent) => {
+      setKeyboardDrag(null);
       const turnId = String(event.active.id);
       const position = queue.queue.findIndex((turn) => turn.id === turnId) + 1;
       setDraggedTurnId(turnId);
-      setAnnouncement(
-        `Lifted queued prompt ${position} of ${queue.queue.length}. Use arrow keys to move it, then press Space to drop.`,
-      );
+      setAnnouncement(`Dragging queued prompt ${position} of ${queue.queue.length}.`);
     },
     [queue.queue],
+  );
+
+  const onHandleKeyDown = useCallback(
+    (event: ReactKeyboardEvent<HTMLButtonElement>, turnId: string) => {
+      const canonicalIndex = queue.queue.findIndex((turn) => turn.id === turnId);
+      if (canonicalIndex < 0) return;
+
+      if (!keyboardDrag) {
+        if (event.key !== " ") return;
+        event.preventDefault();
+        setKeyboardDrag({ turnId, projectedIndex: canonicalIndex });
+        setAnnouncement(
+          `Lifted queued prompt ${canonicalIndex + 1} of ${count}. Use arrow keys to move it, then press Space to drop.`,
+        );
+        return;
+      }
+      if (keyboardDrag.turnId !== turnId) return;
+
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setKeyboardDrag(null);
+        setAnnouncement("Queue reorder cancelled.");
+        return;
+      }
+      if (event.key === " ") {
+        event.preventDefault();
+        const targetIndex = keyboardDrag.projectedIndex;
+        setAnnouncement(`Moving queued prompt to position ${targetIndex + 1}.`);
+        void moveToIndex(turnId, targetIndex).finally(() => setKeyboardDrag(null));
+        return;
+      }
+
+      const direction = event.key === "ArrowUp" ? -1 : event.key === "ArrowDown" ? 1 : 0;
+      const edge = event.key === "Home" ? 0 : event.key === "End" ? count - 1 : null;
+      if (direction === 0 && edge === null) return;
+      event.preventDefault();
+      const projectedIndex = Math.max(
+        0,
+        Math.min(edge ?? keyboardDrag.projectedIndex + direction, count - 1),
+      );
+      setKeyboardDrag({ turnId, projectedIndex });
+      setAnnouncement(`Queued prompt projected to position ${projectedIndex + 1} of ${count}.`);
+    },
+    [count, keyboardDrag, moveToIndex, queue.queue],
   );
 
   const edit = useCallback(
@@ -205,7 +254,7 @@ export function QueueSurface({ queue, composer, readOnly = false }: QueueSurface
                 className="divide-y divide-border border-t border-border"
                 aria-label="Queued prompts"
               >
-                {queue.queue.map((turn, index) => (
+                {displayedQueue.map((turn, index) => (
                   <SortableQueueRow
                     key={turn.id}
                     turn={turn}
@@ -213,6 +262,8 @@ export function QueueSurface({ queue, composer, readOnly = false }: QueueSurface
                     count={count}
                     pending={queue.mutationFor(turn.id)}
                     confirmingReplace={replaceDraftFor === turn.id}
+                    keyboardDragging={keyboardDrag?.turnId === turn.id}
+                    onHandleKeyDown={(event) => onHandleKeyDown(event, turn.id)}
                     onMove={(nextIndex) => void moveToIndex(turn.id, nextIndex)}
                     onEdit={() => requestEdit(turn)}
                     onConfirmReplace={() => void edit(turn, true)}
@@ -314,6 +365,8 @@ function SortableQueueRow({
   count,
   pending,
   confirmingReplace,
+  keyboardDragging,
+  onHandleKeyDown,
   onMove,
   onEdit,
   onConfirmReplace,
@@ -326,6 +379,8 @@ function SortableQueueRow({
   count: number;
   pending: QueueMutationKind | null;
   confirmingReplace: boolean;
+  keyboardDragging: boolean;
+  onHandleKeyDown: (event: ReactKeyboardEvent<HTMLButtonElement>) => void;
   onMove: (index: number) => void;
   onEdit: () => void;
   onConfirmReplace: () => void;
@@ -333,7 +388,10 @@ function SortableQueueRow({
   onSteer: () => void;
   onDelete: () => void;
 }) {
-  const sortable = useSortable({ id: turn.id, disabled: pending !== null });
+  const sortable = useSortable({
+    id: turn.id,
+    disabled: pending !== null || keyboardDragging,
+  });
   return (
     <li
       data-queue-turn-id={turn.id}
@@ -342,7 +400,7 @@ function SortableQueueRow({
         transform: CSS.Transform.toString(sortable.transform),
         transition: sortable.transition,
       }}
-      className={`bg-surface ${sortable.isDragging ? "relative z-10 shadow-lg ring-1 ring-brand/40" : ""}`}
+      className={`bg-surface ${sortable.isDragging || keyboardDragging ? "relative z-10 shadow-lg ring-1 ring-brand/40" : ""}`}
     >
       <div className="flex min-w-0 items-start gap-1.5 px-2 py-2 sm:gap-2 sm:px-3">
         <button
@@ -351,6 +409,7 @@ function SortableQueueRow({
           type="button"
           {...sortable.attributes}
           {...sortable.listeners}
+          onKeyDown={onHandleKeyDown}
           disabled={pending !== null}
           className="mt-0.5 inline-flex size-7 shrink-0 touch-none items-center justify-center rounded-md text-fg-subtle hover:bg-surface-2 hover:text-fg focus-visible:ring-2 focus-visible:ring-ring/40 pointer-coarse:size-11"
           aria-label={`Reorder queued prompt ${index + 1}`}

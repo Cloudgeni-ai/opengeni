@@ -7,13 +7,16 @@ import postgres, { type Sql } from "postgres";
 type Phase = "legacy" | "canonical";
 type Digest = { rows: number; sha256: string };
 type Manifest = {
-  schemaVersion: 1;
+  schemaVersion: 2;
+  digestAlgorithm: typeof DIGEST_ALGORITHM;
   phase: Phase;
   capturedAt: string;
   sourceRevision: string;
   databaseVersion: string;
   categories: Record<string, Digest>;
 };
+
+const DIGEST_ALGORITHM = "postgres-jsonb-row-sha256-length-framed-v1" as const;
 
 const mode = stringArgument("--mode");
 if (mode !== "capture" && mode !== "verify") {
@@ -58,7 +61,8 @@ async function capture(sql: Sql, path: string): Promise<void> {
   const cutoff = capturedAt.toISOString();
   const categories = await digestCategories(sql, phase, cutoff);
   const manifest: Manifest = {
-    schemaVersion: 1,
+    schemaVersion: 2,
+    digestAlgorithm: DIGEST_ALGORITHM,
     phase,
     capturedAt: cutoff,
     sourceRevision,
@@ -73,7 +77,9 @@ async function capture(sql: Sql, path: string): Promise<void> {
 
 async function verify(sql: Sql, path: string): Promise<void> {
   const manifest = JSON.parse(await readFile(path, "utf8")) as Manifest;
-  if (manifest.schemaVersion !== 1) throw new Error("Unsupported continuity manifest");
+  if (manifest.schemaVersion !== 2 || manifest.digestAlgorithm !== DIGEST_ALGORITHM) {
+    throw new Error("Unsupported continuity manifest");
+  }
   const phase = await schemaPhase(sql);
   if (manifest.phase === "legacy" && phase !== "canonical") {
     throw new Error(`Expected canonical schema after cutover; found ${phase}`);
@@ -151,7 +157,7 @@ async function digestCategories(
                     temporal_workflow_id, active_turn_id::text, last_input_tokens,
                     compact_requested, last_sequence, codex_pinned_credential_id::text,
                     codex_last_credential_id::text, codex_pin_source, created_at
-             from sessions order by workspace_id, id`,
+             from sessions`,
     },
     turns_immutable: {
       text: `select id::text, account_id::text, workspace_id::text, session_id::text,
@@ -160,19 +166,19 @@ async function digestCategories(
                     sandbox_os, metadata, version, execution_generation, lineage,
                     cancelled_by, cancel_reason, toolspace_call_count, started_at, finished_at,
                     created_at, updated_at
-             from session_turns order by workspace_id, id`,
+             from session_turns`,
     },
     conversation_history: {
       text: `select id::text, account_id::text, workspace_id::text, session_id::text,
                     turn_id::text, position::text, item, active,
                     producer_codex_credential_id::text, created_at
-             from session_history_items order by workspace_id, session_id, position, id`,
+             from session_history_items`,
     },
     approval_run_states: {
       text: `select id::text, account_id::text, workspace_id::text, session_id::text,
                     turn_id::text, state_version, serialized_run_state, pending_approvals,
                     frozen_codex_credential_id::text, created_at
-             from agent_run_states order by workspace_id, id`,
+             from agent_run_states`,
     },
     capacity_waiters: {
       text: `select id::text, account_id::text, workspace_id::text, session_id::text,
@@ -180,33 +186,31 @@ async function digestCategories(
                     goal_version, policy_hash, earliest_reset_at, next_check_at, reset_kind,
                     refresh_attempt, wake_revision, observed_wake_revision, last_wake_reason,
                     resumed_update_id::text, created_at
-             from codex_capacity_waiters order by workspace_id, id`,
+             from codex_capacity_waiters`,
     },
     internal_update_identities: {
       text: `select id::text, account_id::text, workspace_id::text, session_id::text,
                     classification, summary, state, delivered_turn_id::text,
                     delivered_at, created_at
-             from session_system_updates order by workspace_id, id`,
+             from session_system_updates`,
     },
     internal_update_outbox_identities: {
       text: `select id::text, account_id::text, workspace_id::text,
                     source_session_id::text, target_session_id::text,
                     classification, summary, status, attempts, update_id::text,
                     last_error, delivered_at, created_at
-             from session_system_update_outbox order by workspace_id, id`,
+             from session_system_update_outbox`,
     },
     pre_cutover_events: {
       text: `select id::text, account_id::text, workspace_id::text, session_id::text,
                     turn_id::text, sequence, type, client_event_id, payload, occurred_at, created_at
-             from session_events where created_at <= $1::timestamptz
-             order by workspace_id, session_id, sequence, id`,
+             from session_events where created_at <= $1::timestamptz`,
       parameters: [cutoff],
     },
     pre_cutover_audit: {
       text: `select id::text, account_id::text, workspace_id::text, subject_id,
                     action, target_type, target_id, metadata, occurred_at
-             from audit_events where occurred_at <= $1::timestamptz
-             order by workspace_id, occurred_at, id`,
+             from audit_events where occurred_at <= $1::timestamptz`,
       parameters: [cutoff],
     },
   };
@@ -250,16 +254,14 @@ function legacyProjectionQueries(): Record<string, Query> {
              from sessions session
              left join session_turns active_turn
                on active_turn.workspace_id = session.workspace_id
-              and active_turn.id = session.active_turn_id
-             order by session.workspace_id, session.id`,
+              and active_turn.id = session.active_turn_id`,
     },
     legacy_blocked_fates: {
       text: `select session.id::text
              from sessions session
              join workspaces workspace on workspace.id = session.workspace_id
              where session.control_state = 'paused'
-                or workspace.inference_state = 'paused'
-             order by session.workspace_id, session.id`,
+                or workspace.inference_state = 'paused'`,
     },
     goal_fates: { text: projectedGoalQuery(true) },
   };
@@ -268,15 +270,14 @@ function legacyProjectionQueries(): Record<string, Query> {
 function canonicalProjectionQueries(): Record<string, Query> {
   return {
     lifecycle_fates: {
-      text: `select id::text, status from sessions order by workspace_id, id`,
+      text: `select id::text, status from sessions`,
     },
     legacy_blocked_fates: {
       text: `select session.id::text
              from sessions session
              join workspace_inference_controls control
                on control.workspace_id = session.workspace_id
-             where session.direct_control_state = 'paused' or control.workspace_state = 'paused'
-             order by session.workspace_id, session.id`,
+             where session.direct_control_state = 'paused' or control.workspace_state = 'paused'`,
     },
     goal_fates: { text: projectedGoalQuery(false) },
   };
@@ -301,8 +302,7 @@ function projectedGoalQuery(legacy: boolean): string {
                  goal.max_auto_continuations, goal.created_by, goal.metadata, goal.created_at
           from session_goals goal
           join sessions session
-            on session.workspace_id = goal.workspace_id and session.id = goal.session_id
-          order by goal.workspace_id, goal.id`;
+            on session.workspace_id = goal.workspace_id and session.id = goal.session_id`;
 }
 
 type Query = {
@@ -313,17 +313,63 @@ type Query = {
 async function streamDigest(sql: Sql, query: Query): Promise<Digest> {
   const hash = createHash("sha256");
   let rows = 0;
-  await sql.unsafe(query.text, query.parameters ?? []).cursor(1_000, (batch) => {
-    for (const row of batch) {
-      const bytes = Buffer.from(stableStringify(row));
-      const length = Buffer.allocUnsafe(8);
-      length.writeBigUInt64BE(BigInt(bytes.length));
-      hash.update(length);
-      hash.update(bytes);
-      rows += 1;
-    }
-  });
+  const source = inlineQueryParameters(query);
+  // Hash each serialized row in PostgreSQL and stream only its fixed-size
+  // digest plus original byte length. Large history/event payloads therefore
+  // never enter the operator process, while the outer digest remains ordered
+  // and length-framed. Every category projects its globally unique `id`, so
+  // the outermost ORDER BY is both deterministic and migration-stable.
+  const hashedQuery = `
+    select octet_length(encoded.payload)::bigint as row_bytes,
+           encode(sha256(encoded.payload), 'hex') as row_sha256
+    from (${source}) source
+    cross join lateral (
+      select convert_to(to_jsonb(source)::text, 'UTF8') as payload
+    ) encoded
+    order by source.id
+  `;
+  await sql
+    .unsafe<{ row_bytes: number | string; row_sha256: string }[]>(hashedQuery)
+    .cursor(10_000, (batch) => {
+      for (const row of batch) {
+        const byteLength = Number(row.row_bytes);
+        if (!Number.isSafeInteger(byteLength) || byteLength < 0) {
+          throw new Error(`Invalid continuity row byte length: ${row.row_bytes}`);
+        }
+        if (!/^[0-9a-f]{64}$/u.test(row.row_sha256)) {
+          throw new Error("Invalid continuity row digest returned by PostgreSQL");
+        }
+        const length = Buffer.allocUnsafe(8);
+        length.writeBigUInt64BE(BigInt(byteLength));
+        hash.update(length);
+        hash.update(Buffer.from(row.row_sha256, "hex"));
+        rows += 1;
+      }
+    });
   return { rows, sha256: hash.digest("hex") };
+}
+
+function inlineQueryParameters(query: Query): string {
+  let text = query.text;
+  const parameters = query.parameters ?? [];
+  for (let index = parameters.length; index >= 1; index -= 1) {
+    text = text.replaceAll(`$${index}`, sqlLiteral(parameters[index - 1]));
+  }
+  if (/\$\d+/u.test(text)) {
+    throw new Error("Continuity query contains an unbound parameter");
+  }
+  return text;
+}
+
+function sqlLiteral(value: string | number | boolean | Date | null): string {
+  if (value === null) return "null";
+  if (typeof value === "boolean") return value ? "true" : "false";
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new Error("Continuity query parameter must be finite");
+    return String(value);
+  }
+  const text = value instanceof Date ? value.toISOString() : value;
+  return `'${text.replaceAll("'", "''")}'`;
 }
 
 async function schemaPhase(sql: Sql): Promise<Phase> {
@@ -350,24 +396,6 @@ async function scalar(sql: Sql, query: string): Promise<number> {
   const rows = await sql.unsafe(query);
   const value = Number(rows[0]?.value);
   if (!Number.isSafeInteger(value) || value < 0) throw new Error(`Invalid count from: ${query}`);
-  return value;
-}
-
-function stableStringify(value: unknown): string {
-  return JSON.stringify(normalize(value));
-}
-
-function normalize(value: unknown): unknown {
-  if (value instanceof Date) return value.toISOString();
-  if (typeof value === "bigint") return value.toString();
-  if (Array.isArray(value)) return value.map(normalize);
-  if (value && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>)
-        .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
-        .map(([key, nested]) => [key, normalize(nested)]),
-    );
-  }
   return value;
 }
 
