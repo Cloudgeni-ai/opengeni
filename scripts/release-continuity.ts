@@ -17,6 +17,7 @@ type Manifest = {
 };
 
 const DIGEST_ALGORITHM = "postgres-jsonb-row-sha256-length-framed-v1" as const;
+const GC_INTERVAL_ROWS = 50_000;
 
 const mode = stringArgument("--mode");
 if (mode !== "capture" && mode !== "verify") {
@@ -314,6 +315,7 @@ async function streamDigest(sql: Sql, query: Query): Promise<Digest> {
   const hash = createHash("sha256");
   const frame = Buffer.allocUnsafe(40);
   let rows = 0;
+  let nextCollectionAt = GC_INTERVAL_ROWS;
   const source = inlineQueryParameters(query);
   // Hash each serialized row in PostgreSQL and stream only its fixed-size
   // digest plus original byte length. Large history/event payloads therefore
@@ -349,6 +351,16 @@ async function streamDigest(sql: Sql, query: Query): Promise<Digest> {
         // tens of millions of short-lived Buffer objects.
         hash.update(frame);
         rows += 1;
+      }
+      // Postgres.js necessarily creates one short-lived digest string per
+      // row. Bun otherwise lets that garbage accumulate across a category
+      // with millions of rows before performing a major collection, which
+      // makes the operator's RSS depend on table cardinality. Collect only at
+      // cursor batch boundaries, after earlier batches are unreachable, so
+      // memory stays bounded without affecting the digest stream.
+      if (rows >= nextCollectionAt) {
+        Bun.gc(true);
+        nextCollectionAt = rows + GC_INTERVAL_ROWS;
       }
     });
   return { rows, sha256: hash.digest("hex") };
