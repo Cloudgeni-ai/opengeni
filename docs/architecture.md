@@ -297,7 +297,7 @@ In `managed` mode, billing integrates with **Stripe**, which is confined to `app
 
 ## 6. Repository layout
 
-The monorepo is a **Bun workspace** (`workspaces: [apps/*, packages/*]`). TS packages are consumed as **source** for internal use (`main`/`types` point at `./src/index.ts`). The Stage C npm publish matrix is the full runtime closure needed by external hosts: the client closure (`@opengeni/contracts` -> `@opengeni/sdk` -> `@opengeni/react`) plus the engine/embed closure (`@opengeni/core`, `@opengeni/api-router`, `@opengeni/worker-bundle`, and their internal `@opengeni/*` dependencies such as `config`, `db`, `runtime`, `events`, `storage`, `documents`, `github`, `observability`, `codex`, and `agent-proto`). Package manifests and `.changeset/config.json` own the exact publish/build settings; ignored packages must be leaf-only. The Rust agent is a separate Cargo workspace under `agent/`.
+The monorepo is a **Bun workspace** (`workspaces: [apps/*, examples/*, packages/*]`). TS packages are consumed as **source** for internal use (`main`/`types` point at `./src/index.ts`). The Stage C npm publish matrix is the full runtime closure needed by external hosts: the client closure (`@opengeni/contracts` -> `@opengeni/sdk` -> `@opengeni/react`) plus the engine/embed closure (`@opengeni/core`, `@opengeni/api-router`, `@opengeni/worker-bundle`, and their internal `@opengeni/*` dependencies such as `config`, `db`, `runtime`, `events`, `storage`, `documents`, `github`, `observability`, `codex`, and `agent-proto`). Package manifests and `.changeset/config.json` own the exact publish/build settings; ignored packages must be leaf-only. The Rust agent is a separate Cargo workspace under `agent/`.
 
 ### 6.1 Applications (`apps/`)
 
@@ -340,6 +340,8 @@ A Cargo workspace building the box-side binary for the `selfhosted` backend. `ag
 ### 6.5 Docs, scripts, test
 
 `docs/` (this map + topic docs, §14), `scripts/` (dev-stack, release mechanics, static guards, deployment CLIs, plus control-plane-only operator helpers under `scripts/operator/`, §11), `test/` (integration/e2e/live tiers + `source-hygiene.test.ts`).
+
+`examples/northstar-support` is the executable product-integration reference: a fictional SaaS support screen embedding `@opengeni/react`, a server-side SDK proxy, an authenticated product MCP server, and independent OpenGeni/product SSE streams. It is private, built in the repository check, and never part of the publish closure.
 
 ### 6.6 The relay edge (BYO-compute data plane)
 
@@ -495,7 +497,7 @@ The current map:
 
 ## 11. Build, test & release
 
-- **Bun workspace.** `workspaces: [apps/*, packages/*]`; shared strict TS baseline in `tsconfig.base.json` (`strict`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, Bundler resolution, `@opengeni/* → packages/*/src` aliases).
+- **Bun workspace.** `workspaces: [apps/*, examples/*, packages/*]`; shared strict TS baseline in `tsconfig.base.json` (`strict`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, Bundler resolution, `@opengeni/* → packages/*/src` aliases).
 - **Dev stack.** `bun run dev` (= `scripts/dev-stack.sh`): copy `.env`, pick free ports, `docker compose up` Postgres/NATS/Temporal/MinIO, migrate, build the sandbox image, launch api+worker+web. It auto-selects alternate ports if defaults are taken.
 - **Test tiers.** `test`/`test:unit` (bun test, **no infra**), `test:integration` (a fixed enumerated list of `*.integration.ts`), `test:e2e` (browser harness + Docker sandbox + Channel-A), `test:live` (opt-in via `OPENGENI_ENABLE_LIVE_TESTS`). **Unit tests and typecheck require no Temporal/NATS/Postgres/sandbox/model credentials** — keep new unit tests in that tier.
 - **Typecheck/check/prep.** `typecheck` is a hand-ordered `cd`-chain (add new packages to it). `check` = typecheck + unit + build sdk/react + web build; `check:full`/`prep` add integration + e2e; `check:workspace-billing` adds the static auth/billing guard.

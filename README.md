@@ -10,6 +10,8 @@ Every session picks where it runs. A **managed sandbox** (a fresh cloud box Open
 
 If you want to try the managed version, go to [app.opengeni.ai](https://app.opengeni.ai).
 
+To see how a SaaS product embeds the React timeline, proxies sessions through its backend, exposes authenticated MCP tools, and reflects agent mutations live, run the [Northstar support example](examples/northstar-support).
+
 ## Why OpenGeni
 
 Most agent products give you some of these; OpenGeni's premise is that organizations need all four in one runtime:

@@ -35,6 +35,7 @@ const projects = [
   "apps/api",
   "apps/worker",
   "apps/web",
+  "examples/northstar-support",
 ];
 
 const tsgo = join(process.cwd(), "node_modules", ".bin", "tsgo");
