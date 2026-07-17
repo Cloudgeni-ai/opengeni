@@ -1,5 +1,20 @@
 # @opengeni/worker-bundle
 
+## 0.7.4
+
+### Patch Changes
+
+- 6882ff2: Reuse the failed turn identity across database and workflow child-terminal producers so one failure cannot enqueue two parent updates. Bind the Codex subscription client header and compaction documentation to latest stable Codex CLI 0.144.5.
+- Updated dependencies [6882ff2]
+  - @opengeni/codex@0.2.3
+  - @opengeni/config@0.5.1
+  - @opengeni/core@0.4.9
+  - @opengeni/db@0.7.2
+  - @opengeni/runtime@0.7.1
+  - @opengeni/documents@0.2.11
+  - @opengeni/storage@0.2.10
+  - @opengeni/events@0.3.2
+
 ## 0.7.3
 
 ### Patch Changes
