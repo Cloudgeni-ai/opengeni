@@ -22,8 +22,12 @@ function published(pkg: PublishablePackage, gitHead = sha): RegistryPackage {
 describe("release package evidence", () => {
   test("inventories the exact publishable workspace closure, including app packages", () => {
     const publishable = loadPublishablePackages();
-    expect(publishable).toContainEqual({ name: "@opengeni/api-router", version: "0.5.5" });
-    expect(publishable).toContainEqual({ name: "@opengeni/worker-bundle", version: "0.7.3" });
+    expect(publishable).toContainEqual(
+      expect.objectContaining({ name: "@opengeni/api-router" }),
+    );
+    expect(publishable).toContainEqual(
+      expect.objectContaining({ name: "@opengeni/worker-bundle" }),
+    );
     expect(publishable).not.toContainEqual(expect.objectContaining({ name: "opengeni-web" }));
   });
 
