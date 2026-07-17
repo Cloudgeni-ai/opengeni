@@ -8,21 +8,23 @@ over this doc; the canonical sources are `apps/worker/src/workflows/session.ts`,
 
 ## Turns
 
-A **turn** is one unit of agent work inside a session: an input (a user message,
-a goal continuation, or an approval decision) is processed until the agent
-reaches a natural stopping point. One turn runs as one non-retryable Temporal
-`runAgentTurn` activity. Inside the activity the OpenAI Agents SDK loop makes
-as many model calls and tool calls as the work needs.
+A **turn** is one logical unit of agent work inside a session: a waiting
+human/API prompt, an approval decision, or one coalesced internal-update batch
+is processed until the agent reaches a natural stopping point. The visible
+queue contains only waiting human/API prompts; goals, schedules, child results,
+capacity recovery, and lifecycle notices are typed internal updates, not queue
+rows. One execution attempt runs as one non-retryable Temporal `runAgentTurn`
+activity. Inside the activity the OpenAI Agents SDK loop makes as many model
+calls and tool calls as the work needs.
 
 Synthesized goal continuations inherit the model and reasoning effort from the
 newest turn with a durable `turn.started` event. The session default is used
 only when no turn has actually started. This keeps routing and billing
 ownership aligned after an explicit per-turn switch and excludes turns rejected
 during admission, whose `started_at` claim timestamp alone is not proof that
-their policy ran. Child-completion parent wakes are temporarily disabled by
-default (`OPENGENI_CHILD_COMPLETION_PARENT_WAKE_ENABLED=false`): spawned child
-sessions retain their own durable events and goal evidence without injecting a
-synthetic `user.message` or queued turn into the parent chat.
+their policy ran. Spawned-child terminal results enter the parent's bounded
+typed internal-update batch without injecting a synthetic `user.message` or a
+human queue row.
 
 **Runs have no length limits, by design.** What the SDK calls "turns" are model
 calls; `OPENGENI_AGENT_MAX_MODEL_CALLS_PER_TURN` exists but defaults to
@@ -59,18 +61,20 @@ five-hour reset semantics, and rollout fence are canonical in
 When every allocator-enabled Codex credential is unavailable and the session
 still has an active goal, this recovery boundary becomes a durable capacity
 wait. The worker atomically settles the blocked turn once, idles the session,
-and stores one session-scoped waiter fenced by goal version, control generation,
-accepted policy hash, and blocked turn. The workflow waits for the earliest
+and stores one session-scoped waiter fenced by goal version, accepted policy
+hash, blocked turn, and the effective admission gate. The workflow waits for the earliest
 authoritative provider reset or a bounded secret-safe metadata refresh, and
 capacity-affecting writes increment a same-transaction wake revision before a
 best-effort Temporal signal. Duplicate/lost signals are harmless: row-locked
 re-evaluation is the sole continuation writer, and unobserved revisions repair
 commit-to-signal loss after restart or `continueAsNew`; a signal delivered
 between waiter commit and the activity result is compared against the workflow's
-pre-dispatch wake counters and cannot be baselined away. Capacity return enqueues
-one normal, queue-respecting goal continuation with the blocked turn's effective
+pre-dispatch wake counters and cannot be baselined away. Capacity return records
+one typed goal-continuation internal update with the blocked turn's effective
 model/reasoning/resources/tools while resetting execution-local worker-death and
-credential-failover counters; it does not create a user message, replay the
+credential-failover counters. That update can start one internal-update
+inference only when no human prompt or approval is waiting and the admission
+gate is open; it does not create a user message or visible queue row, replay the
 failed full turn, poll with inference, or redeem a reset/boost entitlement.
 
 Provider context-window overflow is also handled inside the activity, not by a
@@ -94,29 +98,28 @@ only the newest real user messages that fit one cumulative 20,000-token budget,
 then appends the summary; internal resume notices are never retained as user
 intent. See [`context-compaction.md`](context-compaction.md).
 
-Before model/tool work, a claimed turn registers its exact Temporal activity id,
-current trigger, and a monotonic dispatch generation in turn metadata. A real
-Temporal activity retry retains the activity id; a re-dispatch registers a new
-id/generation. Every lifecycle writer must match that attempt. A typed
-schedule-to-start timeout is the only no-registration recovery case because its
-activity never ran.
+Before model/tool work, a claimed turn inserts a first-class
+`session_turn_attempts` row containing its exact Temporal activity id, current
+trigger, monotonic dispatch generation, verified control revision, and write
+lease. A real Temporal activity retry retains the activity id; a re-dispatch
+creates a new attempt. Every event, model-history write, run-state write,
+compaction transition, tool receipt, and terminal settlement must match that
+attempt. A typed schedule-to-start timeout is the only no-attempt recovery case
+because its activity never ran.
 
-Claim, control, and event-writing settlement share one lock order: workspace,
-then session, then exact turn. Event inserts also touch the workspace through
+Claim, interruption, and event-writing settlement share one lock order:
+workspace, then session, then exact turn, then exact attempt. Event inserts also touch the workspace through
 their foreign keys, so acquiring it later would reintroduce a claim/preemption
-deadlock. Start,
-requires-action, ordinary terminal, preemption, and worker-death events commit
+deadlock. Start, requires-action, ordinary terminal, recoverable interruption,
+supersession, and worker-death events commit
 with turn status, session status/pointer, and `lastSequence` in one transaction.
-For preemption that transaction appends `turn.preempted` plus queued status,
-changes the turn back to queued, and clears the session's active pointer. A
-missing/already-terminal turn, a superseded dispatch, or a durable
-pending Pause/Steer control newer than the attempt returns a stale no-op and
-appends nothing. This prevents a superseded activity that keeps running through
-compaction from publishing contradictory preemption/terminal truth and then
-failing the session on a later row CAS. Control settlement uses the same lock
-order and current-trigger fence, so a delayed control signal cannot change a
-newer turn. Product, source, and Temporal wire semantics all use one
-`sessionControl` signal for Pause/Steer.
+Pause closes the exact live attempt as `interrupted_recoverable` and leaves its
+logical turn `recovering`; Steer closes it as `superseded`, makes the steered
+human prompt first, and does not revive the old turn. A missing or already
+closed owner is an event-free stale no-op. This prevents a superseded activity
+that keeps running from publishing contradictory history or terminal truth.
+Each Pause/Steer cause is a durable `session_attempt_interruptions` row; the
+workflow's `sessionControl` signal is only a wake hint to settle those rows.
 
 Sandbox lease warming is bounded for the same reason: it is a capacity/setup
 symptom, not legitimate agent work. A turn that attaches while another worker is
@@ -130,20 +133,18 @@ terminates that just-created sandbox before the lease can be retried.
 
 **Worker restarts are survivable.** A graceful worker shutdown (a deploy or
 rollout restart delivers SIGTERM; Temporal cancels in-flight activities with
-reason `WORKER_SHUTDOWN`) preempts the in-flight turn instead of failing the
-session: the activity checkpoints the final conversation truth plus the sandbox
-envelope, puts the
-turn back on the session queue, emits a `turn.preempted` event, and completes
-with status `preempted`. The session workflow then re-dispatches the same turn
-on a healthy worker — entering through a synthesized resume notice when the
-turn had already persisted progress (so the model is not handed duplicate
-input and is told to verify in-flight side effects before repeating them), or
-replaying the original trigger when nothing was persisted yet. At most the
+reason `WORKER_SHUTDOWN`) checkpoints conversation truth and the sandbox
+envelope, closes the exact attempt as recoverable, and leaves the same logical
+turn in `recovering`. It never creates a human queue row or synthetic user
+message. Any in-flight side-effecting tool call is durably closed with an
+explicit `interrupted / outcome unknown` result before the next attempt can
+run; a late result is retained only as rejected evidence. The workflow then
+creates a fresh attempt for that same turn on a healthy worker and reconstructs
+model input from durable model history and tool-call lineage. At most the
 single in-flight model step is lost, the same bound as a crash. This is an
-explicit checkpoint/resume, not an automatic Temporal retry.
-The event, turn reset, and session transition share the atomic settlement above;
-a newer control generation, terminal state, or newer attempt is respected as stale rather
-than overwritten.
+explicit checkpoint/resume, not an automatic Temporal retry. A newer control
+revision, terminal state, or successor attempt wins instead of being
+overwritten.
 
 **Ungraceful worker death is also survivable — bounded, never blind.** A hard
 kill (SIGKILL, OOM, node loss, a rollout whose grace period expired) never
@@ -151,12 +152,14 @@ runs the graceful checkpoint; it surfaces to the session workflow as a
 heartbeat-timeout `ActivityFailure` carrying the exact dead activity id. The
 workflow does not fail the session independently for that shape: conversation
 truth was still dual-written after every model response during the turn, so
-the fenced `recoverTurnAfterWorkerDeath` activity atomically marks the same
+the fenced `recoverTurnAfterWorkerDeath` activity atomically closes the lost
+attempt, marks the same
 logical turn `recovering` and the loop dispatches its next attempt. This is not
 prompt-queue work and not an automatic Temporal retry of side-effectful work:
-the resumed attempt sees everything durably checkpointed and is told to verify
-in-flight side effects before repeating them. The dying activity never writes a
-competing cancellation.
+the resumed attempt sees everything durably checkpointed, including explicit
+`interrupted / outcome unknown` tool results when an effect cannot be proven.
+The dying activity never writes a competing cancellation or authoritative late
+result.
 A per-turn redispatch counter persisted on the turn row (ceiling 3) breaks
 crash loops: the transaction that exceeds the ceiling appends the failure
 events and fails the exact turn/session, and the workflow performs no second
@@ -169,22 +172,26 @@ workflow (signalWithStart), and the next turn runs from the stored items.
 Only `cancelled` — an explicit user act — is terminal.
 
 Every transaction that creates or re-enables workflow work also increments the
-session's durable wake revision. A successful `signalWithStart` acknowledges
-that exact revision; a bounded dispatcher retries only due unacknowledged rows.
+session's durable wake revision. Single-target producers signal directly;
+recursive controls trigger the bounded dispatcher once without loading the
+affected tree into API memory. Successful delivery acknowledges the exact
+revision, and the dispatcher retries only due unacknowledged rows.
 Temporal is therefore a nudge, never the work ledger, and a commit/signal crash
-cannot strand the prompt. Repaired wakes inspect the current pending control so
-a live Pause/Steer still reaches the control handler. The workflow records a
-monotonic signal generation before its final activity chain and refuses to
+cannot strand the prompt. Repaired wakes inspect unsettled exact-attempt
+interruptions so a live Pause/Steer still reaches settlement. The workflow
+records a monotonic signal version before its final activity chain and refuses to
 return when a signal arrived during that chain, closing the completion race.
 
 ## Goals — what makes long runs continue
 
 Agents stop prematurely. A **goal** flips the default so that finishing a turn
-with nothing queued does not idle the session out — the workflow synthesizes a
-continuation turn and the agent must explicitly `goal_complete` or `goal_pause`
-to stop. This is the mechanism behind every multi-day autonomous run. Full
-detail in `docs/goals.md`; the one-line model: queued user input always wins
-over a continuation, and goals are bounded by progress/budget guards, not counts.
+with nothing queued records one typed goal-continuation internal update and the
+agent must explicitly `goal_complete` or `goal_pause` to stop. The update joins
+the next bounded internal batch and never appears as a human queue row. This is
+the mechanism behind every multi-day autonomous run. Full detail in
+`docs/goals.md`; the one-line model: queued human input always wins over an
+internal continuation, and goals are bounded by progress/budget guards, not
+counts.
 
 ## Memory — three stores, three jobs
 

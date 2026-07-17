@@ -57,7 +57,8 @@ export function useSessionLineage(
   sessionId: string | null | undefined,
   options: UseSessionLineageOptions = {},
 ): UseSessionLineageResult {
-  const { client, workspaceId } = useOpenGeni(options);
+  const { client, workspaceId, workspaceControlEvent, registerSessionReconciler } =
+    useOpenGeni(options);
   const enabled = (options.enabled ?? true) && Boolean(sessionId);
   const load = useCallback(
     async () =>
@@ -67,7 +68,15 @@ export function useSessionLineage(
     [client, workspaceId, sessionId],
   );
   const state = usePolledValue(load, { pollIntervalMs: options.pollIntervalMs, enabled });
-  const refreshSoon = useDebouncedCallback(() => void state.refresh(), 150);
+  const refresh = state.refresh;
+  useEffect(() => {
+    if (enabled && workspaceControlEvent) void refresh();
+  }, [enabled, refresh, workspaceControlEvent]);
+  useEffect(() => {
+    if (!sessionId || !enabled) return;
+    return registerSessionReconciler(sessionId, "lineage", refresh);
+  }, [enabled, refresh, registerSessionReconciler, sessionId]);
+  const refreshSoon = useDebouncedCallback(() => void refresh(), 150);
   const delayedChildRefreshRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Clear a pending delayed refresh on session/workspace SWITCH (not just
   // unmount): otherwise a timer scheduled for the previous session can fire
@@ -81,15 +90,15 @@ export function useSessionLineage(
     };
   }, [sessionId, workspaceId]);
   const refreshAfterChildCreate = useCallback(() => {
-    void state.refresh();
+    void refresh();
     if (delayedChildRefreshRef.current !== null) {
       clearTimeout(delayedChildRefreshRef.current);
     }
     delayedChildRefreshRef.current = setTimeout(() => {
       delayedChildRefreshRef.current = null;
-      void state.refresh();
+      void refresh();
     }, 2500);
-  }, [state]);
+  }, [refresh]);
   useSessionEventTrigger(
     client,
     workspaceId,
@@ -114,6 +123,6 @@ export function useSessionLineage(
     lineage: state.data,
     loading: state.loading,
     error: state.error,
-    refresh: state.refresh,
+    refresh,
   };
 }

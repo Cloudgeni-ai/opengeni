@@ -249,7 +249,12 @@ export type ResolveConnectionCredentialInput = {
 };
 
 export type ResolveConnectionCredentialResult =
-  | { status: "ok"; headers: Record<string, string>; connectionId: string; expiresAt?: Date | null }
+  | {
+      status: "ok";
+      headers: Record<string, string>;
+      connectionId: string;
+      expiresAt?: Date | null;
+    }
   | {
       status: "auth_needed";
       reason: ToolAuthNeededPayload["reason"];
@@ -1070,7 +1075,6 @@ export type WorkspaceEnvironmentContext = {
 
 export type PersistentSessionSettings = {
   titleIsSet: boolean;
-  childNotificationsMode?: "digest" | "passive";
 };
 
 /**
@@ -1181,13 +1185,7 @@ export function appendPersistentSessionSettings(
   if (!settings) {
     return composed;
   }
-  const childState = settings.childNotificationsMode
-    ? `; spawned-worker completion notifications are ${settings.childNotificationsMode}`
-    : "";
-  const persistentTools = settings.childNotificationsMode
-    ? "opengeni__set_session_title or opengeni__set_child_notifications_mode"
-    : "opengeni__set_session_title";
-  return `${composed} Persistent session settings already in effect: the display title is ${settings.titleIsSet ? "set" : "not set"}${childState}. These settings persist across turns, continuations, and interruptions. Do not call ${persistentTools} merely to reassert an unchanged value; call them only when the current value actually needs to change.`;
+  return `${composed} Persistent session settings already in effect: the display title is ${settings.titleIsSet ? "set" : "not set"}. This setting persists across turns, continuations, and interruptions. Do not call opengeni__set_session_title merely to reassert an unchanged value; call it only when the current value actually needs to change.`;
 }
 
 /**
@@ -1511,7 +1509,10 @@ function mcpToolRequiresApproval(policy: boolean | string[], unprefixedName: str
 }
 
 /** A per-server approval policy keyed by the server's `<id>__` tool prefix. */
-type McpApprovalPolicy = { prefix: string; requireApproval: boolean | string[] };
+type McpApprovalPolicy = {
+  prefix: string;
+  requireApproval: boolean | string[];
+};
 
 /** The subset of the agent surface the approval wrap needs — including `clone`. */
 type ApprovalCapableAgent = {
@@ -1829,6 +1830,9 @@ export type PrepareToolsOptions = {
   // The calling turn's id, signed into the token so tools can classify the
   // caller from its own identity instead of the session's live active pointer.
   turnId?: string;
+  // The exact executing attempt that owns the MCP call.
+  attemptId?: string;
+  executionGeneration?: number;
   subjectId?: string;
   subjectLabel?: string;
   // Overrides the fixed first-party MCP permission set for this session's
@@ -2134,7 +2138,9 @@ async function authNeededFetchResponse(
   if (request.method === "tools/call") {
     return mcpToolAuthNeededResponse(request.id);
   }
-  return new Response("Authentication required for MCP server connection", { status: 401 });
+  return new Response("Authentication required for MCP server connection", {
+    status: 401,
+  });
 }
 
 async function publishAuthNeeded(
@@ -2295,7 +2301,10 @@ function mcpToolUnavailableMessage(reason: string): string {
 // transport error carries the raw response BODY in its `.message` (a broker
 // 401/403 body can echo request detail), so `.message` is never included; the
 // numeric `.code`/`.status` (e.g. 401) is safe and useful.
-function safeMcpErrorFields(error: unknown): { errorClass: string; status?: number } {
+function safeMcpErrorFields(error: unknown): {
+  errorClass: string;
+  status?: number;
+} {
   const errorClass = error instanceof Error ? error.constructor.name : typeof error;
   const raw = (error as { code?: unknown; status?: unknown } | null)?.code;
   const status = typeof raw === "number" ? raw : undefined;
@@ -2383,6 +2392,8 @@ async function signFirstPartyDelegatedBearer(
     permissions: options.firstPartyPermissions ?? firstPartyMcpPermissions,
     ...(options.sessionId ? { sessionId: options.sessionId } : {}),
     ...(options.turnId ? { turnId: options.turnId } : {}),
+    ...(options.attemptId ? { attemptId: options.attemptId } : {}),
+    ...(options.executionGeneration ? { executionGeneration: options.executionGeneration } : {}),
     exp: Math.floor(Date.now() / 1000) + 60 * 60,
   });
 }
@@ -2635,7 +2646,10 @@ class PrefixedMcpServer implements MCPServer {
     }
     return tools
       .filter((tool) => this.isAllowed(tool.name))
-      .map((tool) => ({ ...tool, name: prefixedMcpToolName(this.name, tool.name) }));
+      .map((tool) => ({
+        ...tool,
+        name: prefixedMcpToolName(this.name, tool.name),
+      }));
   }
 
   async callTool(
@@ -2657,7 +2671,10 @@ class PrefixedMcpServer implements MCPServer {
       // This applies to ANY server — an auth-needed is recoverable once the user
       // re-links, so even a required tool degrades gracefully here.
       if (isAuthNeededMcpError(error)) {
-        return { isError: true, content: [{ type: "text", text: MCP_AUTH_NEEDED_MESSAGE }] };
+        return {
+          isError: true,
+          content: [{ type: "text", text: MCP_AUTH_NEEDED_MESSAGE }],
+        };
       }
       // Best-effort INVOCATION isolation (sibling to the listTools guard). When
       // the model calls a best-effort server's tool and the call throws for ANY
@@ -2679,7 +2696,12 @@ class PrefixedMcpServer implements MCPServer {
         );
         return {
           isError: true,
-          content: [{ type: "text", text: mcpToolUnavailableMessage(mcpErrorReason(fields)) }],
+          content: [
+            {
+              type: "text",
+              text: mcpToolUnavailableMessage(mcpErrorReason(fields)),
+            },
+          ],
         };
       }
       throw error;
@@ -2815,6 +2837,8 @@ export async function prepareRunInput(
 }
 
 export type RunAgentStreamOptions = {
+  /** Abort the provider/tool loop when the owning activity is cancelled. */
+  signal?: AbortSignal;
   sandboxClient?: unknown;
   sandboxEnvironment?: Record<string, string>;
   onRuntimeEvent?: (event: NormalizedRuntimeEvent) => Promise<void> | void;
@@ -3129,10 +3153,14 @@ export async function runAgentStream(
             overrides.contextCompactionSignalTokens || overrides.contextCompactionRequested,
           ),
           ...(overrides.contextCompactionSignalTokens
-            ? { contextCompactionSignalTokens: overrides.contextCompactionSignalTokens }
+            ? {
+                contextCompactionSignalTokens: overrides.contextCompactionSignalTokens,
+              }
             : {}),
           ...(overrides.contextCompactionRequested
-            ? { contextCompactionRequested: overrides.contextCompactionRequested }
+            ? {
+                contextCompactionRequested: overrides.contextCompactionRequested,
+              }
             : {}),
         }),
         genesisTitleInputFilter,
@@ -3143,6 +3171,7 @@ export async function runAgentStream(
       stream: true,
       maxTurns: settings.agentMaxModelCallsPerTurn,
       callModelInputFilter: ownedFilter,
+      ...(overrides.signal ? { signal: overrides.signal } : {}),
     };
     ownedRunOptions.sandbox = {
       client: decoratedClient,
@@ -3215,7 +3244,9 @@ export async function runAgentStream(
           overrides.contextCompactionSignalTokens || overrides.contextCompactionRequested,
         ),
         ...(overrides.contextCompactionSignalTokens
-          ? { contextCompactionSignalTokens: overrides.contextCompactionSignalTokens }
+          ? {
+              contextCompactionSignalTokens: overrides.contextCompactionSignalTokens,
+            }
           : {}),
         ...(overrides.contextCompactionRequested
           ? { contextCompactionRequested: overrides.contextCompactionRequested }
@@ -3233,6 +3264,7 @@ export async function runAgentStream(
     // raise the proactive compaction signal. This runs for turn-start replay AND
     // every mid-turn follow-up.
     callModelInputFilter,
+    ...(overrides.signal ? { signal: overrides.signal } : {}),
   };
   if (client) {
     runOptions.sandbox = {
@@ -3282,7 +3314,9 @@ function appendSandboxFileDownloadFailureNote(
  * default runner. setDefaultModelProvider remains only as a boot-time fallback.
  */
 function runScopedRunner(settings: Settings): Runner {
-  return new Runner({ modelProvider: new MultiProviderModelProvider(settings) });
+  return new Runner({
+    modelProvider: new MultiProviderModelProvider(settings),
+  });
 }
 
 export { MaxTurnsExceededError } from "@openai/agents";
@@ -3338,7 +3372,9 @@ export function withManifestRefreshOnResume(
       ? { supportsDefaultOptions: client.supportsDefaultOptions }
       : {}),
     ...(client.create
-      ? { create: async (...args: any[]) => await (client.create as any)(...args) }
+      ? {
+          create: async (...args: any[]) => await (client.create as any)(...args),
+        }
       : {}),
     resume: async (state: SandboxSessionState) => {
       const session = await client.resume!(state);
@@ -3346,7 +3382,9 @@ export function withManifestRefreshOnResume(
       return session;
     },
     ...(client.delete
-      ? { delete: async (state: SandboxSessionState) => await client.delete!(state) }
+      ? {
+          delete: async (state: SandboxSessionState) => await client.delete!(state),
+        }
       : {}),
     ...(client.serializeSessionState
       ? {
@@ -3395,7 +3433,11 @@ export async function applyMissingManifestEntries(
       state?: {
         manifest?:
           | Manifest
-          | { root?: string; entries?: Record<string, any>; environment?: Record<string, any> };
+          | {
+              root?: string;
+              entries?: Record<string, any>;
+              environment?: Record<string, any>;
+            };
       };
     }
   ).state?.manifest;
@@ -3505,7 +3547,11 @@ export function manifestEnvironmentDrift(
   if (added.length === 0 && removed.length === 0 && changed.length === 0) {
     return null;
   }
-  return { added: added.sort(), removed: removed.sort(), changed: changed.sort() };
+  return {
+    added: added.sort(),
+    removed: removed.sort(),
+    changed: changed.sort(),
+  };
 }
 
 async function reportManifestEnvironmentDrift(
@@ -3520,7 +3566,10 @@ async function reportManifestEnvironmentDrift(
   // Reporting must never break a resume: the drift itself is benign under the
   // env pin (the box keeps running on its baked env); only the SIGNAL matters.
   try {
-    await context.onRuntimeEvent?.({ type: "sandbox.env.drift", payload: drift });
+    await context.onRuntimeEvent?.({
+      type: "sandbox.env.drift",
+      payload: drift,
+    });
   } catch {
     // Swallow: a failed emit must not fail the turn.
   }
@@ -3549,7 +3598,11 @@ export async function pinProvidedSessionManifestEnvironment(
       state?: {
         manifest?:
           | Manifest
-          | { root?: string; entries?: Record<string, any>; environment?: Record<string, any> };
+          | {
+              root?: string;
+              entries?: Record<string, any>;
+              environment?: Record<string, any>;
+            };
       };
     }
   ).state?.manifest;
@@ -3732,7 +3785,9 @@ export function withSandboxFileDownloads(
         }
       : {}),
     ...(client.delete
-      ? { delete: async (state: SandboxSessionState) => await client.delete!(state) }
+      ? {
+          delete: async (state: SandboxSessionState) => await client.delete!(state),
+        }
       : {}),
     ...(client.serializeSessionState
       ? {
@@ -3935,7 +3990,11 @@ function structuredImageToDataUrl(value: unknown): string | null {
   if (v.type !== "image" || !v.image || typeof v.image !== "object") {
     return null;
   }
-  const image = v.image as { data?: unknown; mediaType?: unknown; url?: unknown };
+  const image = v.image as {
+    data?: unknown;
+    mediaType?: unknown;
+    url?: unknown;
+  };
   if (typeof image.url === "string" && image.url.length > 0) {
     return image.url;
   }
@@ -4002,7 +4061,10 @@ export function normalizeSdkEvent(event: RunStreamEvent): NormalizedRuntimeEvent
     return out;
   }
   if (event.type === "agent_updated_stream_event") {
-    out.push({ type: "agent.updated", payload: { agent: (event as any).agent?.name ?? null } });
+    out.push({
+      type: "agent.updated",
+      payload: { agent: (event as any).agent?.name ?? null },
+    });
     return out;
   }
   if (event.type !== "run_item_stream_event") {
@@ -4164,7 +4226,9 @@ function inputTokenDetailsProp(raw: Record<string, unknown>): Partial<ModelRespo
   if (!details || typeof details !== "object") {
     return {};
   }
-  return { inputTokensDetails: details as Record<string, number> | Array<Record<string, number>> };
+  return {
+    inputTokensDetails: details as Record<string, number> | Array<Record<string, number>>,
+  };
 }
 
 function outputTokenDetailsProp(
@@ -4282,7 +4346,9 @@ function objectStorageFileMount(settings: Settings, prefix: string): any {
       accountKey: config.accountKey,
       endpointUrl: config.endpointUrl,
       readOnly: true,
-      mountStrategy: inContainerMountStrategy({ pattern: { type: "rclone", mode: "fuse" } }),
+      mountStrategy: inContainerMountStrategy({
+        pattern: { type: "rclone", mode: "fuse" },
+      }),
     });
   }
   if (settings.objectStorageBackend === "aws-s3" || settings.objectStorageBackend === "gcs") {
@@ -4574,7 +4640,9 @@ export function withSandboxLifecycleHooks(
         }
       : {}),
     ...(client.delete
-      ? { delete: async (state: SandboxSessionState) => await client.delete!(state) }
+      ? {
+          delete: async (state: SandboxSessionState) => await client.delete!(state),
+        }
       : {}),
     ...(client.serializeSessionState
       ? {
@@ -5272,7 +5340,10 @@ export async function runRigSetupHook(
     const message = error instanceof Error ? error.message : String(error);
     await context.onRuntimeEvent?.({
       type: "rig.setup.failed",
-      payload: { ...payload, error: message.slice(-RIG_SETUP_OUTPUT_TAIL_LIMIT) },
+      payload: {
+        ...payload,
+        error: message.slice(-RIG_SETUP_OUTPUT_TAIL_LIMIT),
+      },
     });
     throw new Error(
       `Rig setup failed for rig "${rigSetup.rigName}" (version ${rigSetup.versionId}): ${message}`,
@@ -5304,7 +5375,10 @@ export async function runRigSetupHook(
     );
     await context.onRuntimeEvent?.({
       type: "rig.setup.failed",
-      payload: { ...payload, error: failure.message.slice(-RIG_SETUP_OUTPUT_TAIL_LIMIT) },
+      payload: {
+        ...payload,
+        error: failure.message.slice(-RIG_SETUP_OUTPUT_TAIL_LIMIT),
+      },
     });
     throw failure;
   }
@@ -5319,8 +5393,14 @@ export async function runRepositoryCloneHook(
   resources: Extract<ResourceRef, { kind: "repository" }>[],
   context: SandboxLifecycleHookContext = { environment: {} },
 ): Promise<void> {
-  const payload = { name: "repository-clone", repositoryCount: resources.length };
-  await context.onRuntimeEvent?.({ type: "sandbox.operation.started", payload });
+  const payload = {
+    name: "repository-clone",
+    repositoryCount: resources.length,
+  };
+  await context.onRuntimeEvent?.({
+    type: "sandbox.operation.started",
+    payload,
+  });
   try {
     // TOKEN-BROKER (B1): thread run-scoped provider tokens PER-EXEC, never on
     // the manifest. The SDK's ExecCommandArgs has no `environment` field (exec
@@ -5359,7 +5439,10 @@ export async function runRepositoryCloneHook(
     } else {
       throw new Error("Sandbox session does not support command execution");
     }
-    await context.onRuntimeEvent?.({ type: "sandbox.operation.completed", payload });
+    await context.onRuntimeEvent?.({
+      type: "sandbox.operation.completed",
+      payload,
+    });
   } catch (error) {
     await context.onRuntimeEvent?.({
       type: "sandbox.operation.failed",
@@ -5472,8 +5555,14 @@ export async function runAzureCliLoginHook(
   session: SandboxSessionLike,
   context: SandboxLifecycleHookContext = { environment: {} },
 ): Promise<void> {
-  const payload = { name: "azure-cli-login", command: "az login --service-principal" };
-  await context.onRuntimeEvent?.({ type: "sandbox.operation.started", payload });
+  const payload = {
+    name: "azure-cli-login",
+    command: "az login --service-principal",
+  };
+  await context.onRuntimeEvent?.({
+    type: "sandbox.operation.started",
+    payload,
+  });
   try {
     if (session.exec) {
       const result = await session.exec({
@@ -5496,7 +5585,10 @@ export async function runAzureCliLoginHook(
     } else {
       throw new Error("Sandbox session does not support command execution");
     }
-    await context.onRuntimeEvent?.({ type: "sandbox.operation.completed", payload });
+    await context.onRuntimeEvent?.({
+      type: "sandbox.operation.completed",
+      payload,
+    });
   } catch (error) {
     await context.onRuntimeEvent?.({
       type: "sandbox.operation.failed",

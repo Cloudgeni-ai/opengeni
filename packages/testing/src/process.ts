@@ -137,7 +137,14 @@ export async function waitFor(
   let lastError: unknown;
   while (Date.now() < deadline) {
     try {
-      if (await predicate()) {
+      const remainingMs = Math.max(1, deadline - Date.now());
+      const result = await Promise.race([
+        Promise.resolve(predicate()),
+        Bun.sleep(remainingMs).then(() => {
+          throw new Error("condition attempt exceeded the wait deadline");
+        }),
+      ]);
+      if (result) {
         return;
       }
     } catch (error) {

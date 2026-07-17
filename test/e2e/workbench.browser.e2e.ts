@@ -60,9 +60,8 @@ describe("workbench browser acceptance", () => {
   }, 60_000);
 
   afterAll(async () => {
-    await demo?.stop();
-    await browser?.close();
-  }, 30_000);
+    await Promise.allSettled([demo?.stop(), browser?.close()]);
+  }, 60_000);
 
   test("all states stay bounded and meet touch-target budgets in both themes", async () => {
     const failures: unknown[] = [];

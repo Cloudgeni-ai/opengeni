@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { OpenGeniClient } from "../src/client";
-import { OpenGeniApiError } from "../src/errors";
+import { OpenGeniApiContractMismatchError, OpenGeniApiError } from "../src/errors";
+import { OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION } from "../src/types";
 import { collect, makeEvent, SESSION_ID, sseBlock, WORKSPACE_ID } from "./helpers";
 
 type RecordedRequest = {
@@ -63,6 +64,7 @@ describe("OpenGeniClient", () => {
     expect(request.url).toBe(`https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions`);
     expect(request.method).toBe("POST");
     expect(request.headers.authorization).toBe("Bearer og_test_key");
+    expect(request.headers[OPENGENI_API_CONTRACT_HEADER]).toBe(OPENGENI_API_CONTRACT_REVISION);
     expect(request.headers["content-type"]).toBe("application/json");
     expect(JSON.parse(request.body!)).toEqual({ initialMessage: "hello", sandboxBackend: "none" });
   });
@@ -117,10 +119,11 @@ describe("OpenGeniClient", () => {
       approvalId: "ap-1",
       decision: "approve",
     });
-    expect(JSON.parse(requests[0]!.body!)).toEqual({
-      mode: "pause",
+    expect(JSON.parse(requests[0]!.body!)).toMatchObject({
+      action: "pause",
       reason: "pause",
     });
+    expect(JSON.parse(requests[0]!.body!).clientEventId).toEqual(expect.any(String));
     expect(JSON.parse(requests[1]!.body!)).toEqual({
       type: "user.approvalDecision",
       payload: { approvalId: "ap-1", decision: "approve" },
@@ -178,6 +181,36 @@ describe("OpenGeniClient", () => {
     expect((error as OpenGeniApiError).body).toBe("workspace not found");
   });
 
+  test("JSON and void requests fail closed when the API response contract differs", async () => {
+    const mismatchHeaders = { [OPENGENI_API_CONTRACT_HEADER]: "future-contract" };
+    const jsonClient = makeClient(
+      () => new Response(JSON.stringify({ id: SESSION_ID }), { headers: mismatchHeaders }),
+    ).client;
+    await expect(jsonClient.getSession(WORKSPACE_ID, SESSION_ID)).rejects.toEqual(
+      expect.objectContaining({
+        name: "OpenGeniApiContractMismatchError",
+        expected: OPENGENI_API_CONTRACT_REVISION,
+        actual: "future-contract",
+      }),
+    );
+
+    const voidClient = makeClient(
+      () => new Response(null, { status: 204, headers: mismatchHeaders }),
+    ).client;
+    await expect(voidClient.clearSessionContext(WORKSPACE_ID, SESSION_ID)).rejects.toBeInstanceOf(
+      OpenGeniApiContractMismatchError,
+    );
+  });
+
+  test("client bootstrap validates its payload contract even if a proxy strips the header", async () => {
+    const { client } = makeClient(() => jsonResponse({ apiContractRevision: "future-contract" }));
+    await expect(client.getClientConfig()).rejects.toMatchObject({
+      name: "OpenGeniApiContractMismatchError",
+      expected: OPENGENI_API_CONTRACT_REVISION,
+      actual: "future-contract",
+    });
+  });
+
   test("merges extra headers from a header factory", async () => {
     const { fetch, requests } = recordingFetch(() => jsonResponse([]));
     const client = new OpenGeniClient({
@@ -194,7 +227,7 @@ describe("OpenGeniClient", () => {
     expect(requests[0]!.headers.authorization).toBe("Bearer og_test_key");
   });
 
-  test("legacy listSessions stays array-shaped while listSessionPage adds pin cursors", async () => {
+  test("listSessions stays array-shaped while listSessionPage adds pin cursors", async () => {
     const { client, requests } = makeClient((request) =>
       request.url.includes("view=page")
         ? jsonResponse({ pinned: [], sessions: [], nextCursor: null })
@@ -220,27 +253,6 @@ describe("OpenGeniClient", () => {
     expect(requests[3]!.url).toBe(
       `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/lineage`,
     );
-  });
-
-  test("listSessionPage falls back to an older server's array endpoint", async () => {
-    const legacy = [
-      { id: SESSION_ID, workspaceId: WORKSPACE_ID },
-    ] as unknown as import("../src/types").Session[];
-    const { client, requests } = makeClient(() => jsonResponse(legacy));
-    await expect(client.listSessionPage(WORKSPACE_ID, { limit: 5 })).resolves.toEqual({
-      pinned: [],
-      sessions: legacy,
-      nextCursor: null,
-    });
-    expect(requests.map((request) => request.url)).toEqual([
-      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions?view=page&limit=5`,
-    ]);
-    await expect(
-      client.listSessionPage(WORKSPACE_ID, { cursor: "unsupported-on-legacy" }),
-    ).rejects.toThrow("does not support stable session-page cursors");
-    await expect(
-      client.listSessionPage(WORKSPACE_ID, { search: "unsupported-on-legacy" }),
-    ).rejects.toThrow("does not support session search");
   });
 
   test("streamEvents consumes the SSE endpoint end to end through fetch", async () => {
@@ -270,5 +282,23 @@ describe("OpenGeniClient", () => {
     await expect(client.openEventStream(WORKSPACE_ID, SESSION_ID)).rejects.toMatchObject({
       status: 403,
     });
+  });
+
+  test("both raw SSE transports reject contract skew without entering reconnect loops", async () => {
+    const { client } = makeClient(
+      () =>
+        new Response("", {
+          headers: {
+            "Content-Type": "text/event-stream",
+            [OPENGENI_API_CONTRACT_HEADER]: "future-contract",
+          },
+        }),
+    );
+    await expect(client.openEventStream(WORKSPACE_ID, SESSION_ID)).rejects.toBeInstanceOf(
+      OpenGeniApiContractMismatchError,
+    );
+    await expect(client.openWorkspaceControlEventStream(WORKSPACE_ID)).rejects.toBeInstanceOf(
+      OpenGeniApiContractMismatchError,
+    );
   });
 });

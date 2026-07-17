@@ -97,16 +97,6 @@ function fakeTurn(overrides: Partial<SessionTurn>): SessionTurn {
 }
 
 describe("OpenGeniClient turn queue", () => {
-  test("deleteQueuedTurn DELETEs and returns the cancelled turn", async () => {
-    const { client, requests } = makeClient(() => jsonResponse(fakeTurn({ status: "cancelled" })));
-    const turn = await client.deleteQueuedTurn(WORKSPACE_ID, SESSION_ID, TURN_A);
-    expect(turn.status).toBe("cancelled");
-    expect(requests[0]!.method).toBe("DELETE");
-    expect(requests[0]!.url).toBe(
-      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/turns/${TURN_A}`,
-    );
-  });
-
   test("steerMessage performs one atomic server request", async () => {
     const accepted = makeEvent(7, "user.message", { text: "do this now" });
     const steerTurn = fakeTurn({ id: TURN_B, position: 1, triggerEventId: accepted.id });
@@ -122,34 +112,34 @@ describe("OpenGeniClient turn queue", () => {
     expect(JSON.parse(requests[0]!.body!)).toEqual({ text: "do this now" });
   });
 
-  test("steerMessage forwards idempotency and generation fences", async () => {
+  test("steerMessage forwards idempotency, control, and draft fences", async () => {
     const accepted = makeEvent(9, "user.message", { text: "now" });
     const steerTurn = fakeTurn({ id: TURN_B, position: 1, triggerEventId: accepted.id });
     const { client, requests } = makeClient(() => jsonResponse({ accepted, turn: steerTurn }, 202));
     const result = await client.steerMessage(WORKSPACE_ID, SESSION_ID, {
       text: "now",
       clientEventId: "steer-once",
-      expectedControlGeneration: 17,
-      expectedWorkspaceInferenceGeneration: 4,
+      controlEtag: "sc1:observed",
+      expectedDraftRevision: 4,
     });
     expect(result.turn.id).toBe(TURN_B);
     expect(JSON.parse(requests[0]!.body!)).toEqual({
       text: "now",
       clientEventId: "steer-once",
-      expectedControlGeneration: 17,
-      expectedWorkspaceInferenceGeneration: 4,
+      controlEtag: "sc1:observed",
+      expectedDraftRevision: 4,
     });
   });
 
-  test("steerMessage surfaces an atomic generation conflict without fallback calls", async () => {
+  test("steerMessage surfaces an atomic control conflict without fallback calls", async () => {
     const { client, requests } = makeClient(() =>
-      jsonResponse({ message: "session control generation changed" }, 409),
+      jsonResponse({ message: "session control changed" }, 409),
     );
     let thrown: unknown;
     try {
       await client.steerMessage(WORKSPACE_ID, SESSION_ID, {
         text: "now",
-        expectedControlGeneration: 16,
+        controlEtag: "sc1:stale",
       });
     } catch (error) {
       thrown = error;
@@ -235,6 +225,7 @@ describe("OpenGeniClient access + workspaces", () => {
   test("getClientConfig fetches the public bootstrap endpoint and returns the provider-grouped models", async () => {
     const config = {
       deploymentRevision: "rev-1",
+      apiContractRevision: "2026-07-session-control-v1",
       defaultModel: "gpt-5.6-sol",
       allowedModels: ["gpt-5.6-sol", "accounts/fireworks/models/glm-5p2"],
       models: [

@@ -3,7 +3,13 @@ import {
   configuredAllowedReasoningEfforts,
   configuredModels,
 } from "@opengeni/config";
-import { ClientConfig, resolveWorkspaceMemoryEnabled, type AccessGrant } from "@opengeni/contracts";
+import {
+  ClientConfig,
+  OPENGENI_API_CONTRACT_HEADER,
+  OPENGENI_API_CONTRACT_REVISION,
+  resolveWorkspaceMemoryEnabled,
+  type AccessGrant,
+} from "@opengeni/contracts";
 import {
   createDocumentServices,
   indexDocumentNow,
@@ -14,6 +20,7 @@ import { createObservability } from "@opengeni/observability";
 import { createObjectStorage } from "@opengeni/storage";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { cors } from "hono/cors";
 import { HTTPException } from "hono/http-exception";
 import type { ApiRouteDeps, AppDependencies } from "@opengeni/core";
@@ -62,7 +69,9 @@ export {
   withDefaultEnabledCapabilityMcpTools,
 } from "@opengeni/core";
 export { workflowIdForSession } from "@opengeni/core";
-export { replaySessionEvents, sseSessionStream } from "./http/sse";
+export { replaySessionEvents, sseSessionStream, sseWorkspaceControlStream } from "./http/sse";
+
+export const API_MAX_REQUEST_BODY_BYTES = 8 * 1024 * 1024;
 
 export function createApp(deps: AppDependencies): Hono {
   const managedAuth = deps.managedAuth ?? createManagedAuth(deps.settings, deps.db);
@@ -84,7 +93,9 @@ export function createApp(deps: AppDependencies): Hono {
       documentId: string;
     }) => {
       if (!objectStorage) {
-        throw new HTTPException(503, { message: "object storage is not configured" });
+        throw new HTTPException(503, {
+          message: "object storage is not configured",
+        });
       }
       return await indexDocumentNow(
         deps.db,
@@ -130,12 +141,30 @@ export function createApp(deps: AppDependencies): Hono {
     "*",
     cors({
       credentials: true,
+      allowHeaders: [
+        "Accept",
+        "Authorization",
+        "Content-Type",
+        "X-OpenGeni-Access-Key",
+        "X-OpenGeni-Api-Contract",
+        "X-OpenGeni-Subject",
+      ],
+      exposeHeaders: ["X-OpenGeni-Api-Contract"],
       origin: (origin) => {
         if (!origin) {
           return null;
         }
         return allowedCorsOrigin(deps.settings.corsAllowOriginRegex, origin) ? origin : null;
       },
+    }),
+  );
+
+  app.use(
+    "*",
+    bodyLimit({
+      maxSize: API_MAX_REQUEST_BODY_BYTES,
+      onError: (c) =>
+        c.json({ code: "PAYLOAD_TOO_LARGE", message: "Request body is too large." }, 413),
     }),
   );
 
@@ -152,7 +181,12 @@ export function createApp(deps: AppDependencies): Hono {
       await next();
       const status = c.res.status || 200;
       const durationSeconds = (performance.now() - start) / 1000;
-      observability.recordHttpRequest({ method: c.req.method, route, status, durationSeconds });
+      observability.recordHttpRequest({
+        method: c.req.method,
+        route,
+        status,
+        durationSeconds,
+      });
       span.end({
         attributes: {
           "http.response.status_code": status,
@@ -170,7 +204,12 @@ export function createApp(deps: AppDependencies): Hono {
     } catch (error) {
       const status = httpStatusForError(error);
       const durationSeconds = (performance.now() - start) / 1000;
-      observability.recordHttpRequest({ method: c.req.method, route, status, durationSeconds });
+      observability.recordHttpRequest({
+        method: c.req.method,
+        route,
+        status,
+        durationSeconds,
+      });
       span.end({
         attributes: {
           "http.response.status_code": status,
@@ -192,6 +231,25 @@ export function createApp(deps: AppDependencies): Hono {
   });
 
   app.use("*", requireAccessKey(deps.settings));
+
+  app.use("/v1/*", async (c, next) => {
+    c.header(OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION);
+    if (
+      deps.settings.environment !== "test" &&
+      isApiContractProtectedMutation(c.req.method, new URL(c.req.url).pathname) &&
+      c.req.header(OPENGENI_API_CONTRACT_HEADER) !== OPENGENI_API_CONTRACT_REVISION
+    ) {
+      return c.json(
+        {
+          code: "API_CONTRACT_CHANGED",
+          message: "OpenGeni updated. Reload this client before changing state.",
+          apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
+        },
+        409,
+      );
+    }
+    await next();
+  });
 
   if (managedAuth) {
     app.on(["GET", "POST"], "/v1/auth/*", (c) => managedAuth.handler(c.req.raw));
@@ -218,10 +276,12 @@ export function createApp(deps: AppDependencies): Hono {
     }),
   );
 
-  app.get("/v1/config/client", (c) =>
-    c.json(
+  app.get("/v1/config/client", (c) => {
+    c.header("cache-control", "no-store");
+    return c.json(
       ClientConfig.parse({
         deploymentRevision: deps.settings.deploymentRevision,
+        apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
         ...(deps.settings.serverVersion ? { serverVersion: deps.settings.serverVersion } : {}),
         defaultModel: deps.settings.openaiModel,
         allowedModels: configuredAllowedModels(deps.settings),
@@ -256,8 +316,8 @@ export function createApp(deps: AppDependencies): Hono {
         // Per-session availability is still negotiated on /stream-capabilities.
         structuredServices: structuredServicesHint(deps.settings.sandboxBackend),
       }),
-    ),
-  );
+    );
+  });
 
   app.all("/v1/workspaces/:workspaceId/mcp", async (c) => {
     const workspaceId = c.req.param("workspaceId");
@@ -267,7 +327,9 @@ export function createApp(deps: AppDependencies): Hono {
       : null;
     const workspace = await getWorkspace(routeDeps.db, workspaceId);
     const workspaceMemoryEnabled = resolveWorkspaceMemoryEnabled(workspace?.settings);
-    const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
+    const transport = new WebStandardStreamableHTTPServerTransport({
+      enableJsonResponse: true,
+    });
     const mcp = buildOpenGeniMcpServer(routeDeps, grant, {
       requestOrigin: new URL(c.req.url).origin,
       toolspace,
@@ -332,7 +394,10 @@ function clientAuthConfig(settings: AppDependencies["settings"]) {
     };
   }
   if (settings.authRequired) {
-    return { mode: "deploymentKey" as const, headerName: "x-opengeni-access-key" as const };
+    return {
+      mode: "deploymentKey" as const,
+      headerName: "x-opengeni-access-key" as const,
+    };
   }
   return { mode: "none" as const };
 }
@@ -399,7 +464,10 @@ async function runReadinessChecks(
         } catch (error) {
           return [
             name,
-            { ok: false, error: error instanceof Error ? error.message : String(error) },
+            {
+              ok: false,
+              error: error instanceof Error ? error.message : String(error),
+            },
           ] as const;
         }
       },
@@ -453,15 +521,24 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
     pattern: /^\/v1\/workspaces\/[^/]+\/codex\/usage$/,
     label: "/v1/workspaces/:workspaceId/codex/usage",
   },
-  { pattern: /^\/v1\/workspaces\/[^/]+\/codex$/, label: "/v1/workspaces/:workspaceId/codex" },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/codex$/,
+    label: "/v1/workspaces/:workspaceId/codex",
+  },
   { pattern: /^\/metrics$/, label: "/metrics" },
   { pattern: /^\/v1\/config\/client$/, label: "/v1/config/client" },
   { pattern: /^\/v1\/billing$/, label: "/v1/billing" },
   { pattern: /^\/v1\/billing\/checkout$/, label: "/v1/billing/checkout" },
   { pattern: /^\/v1\/billing\/usage$/, label: "/v1/billing/usage" },
-  { pattern: /^\/v1\/billing\/entitlements$/, label: "/v1/billing/entitlements" },
+  {
+    pattern: /^\/v1\/billing\/entitlements$/,
+    label: "/v1/billing/entitlements",
+  },
   { pattern: /^\/v1\/webhooks\/stripe$/, label: "/v1/webhooks/stripe" },
-  { pattern: /^\/v1\/workspaces\/[^/]+\/mcp$/, label: "/v1/workspaces/:workspaceId/mcp" },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/mcp$/,
+    label: "/v1/workspaces/:workspaceId/mcp",
+  },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/mcp\/docs$/,
     label: "/v1/workspaces/:workspaceId/mcp/docs",
@@ -470,7 +547,22 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
     pattern: /^\/v1\/workspaces\/[^/]+\/default-rig$/,
     label: "/v1/workspaces/:workspaceId/default-rig",
   },
-  { pattern: /^\/v1\/workspaces\/[^/]+\/sessions$/, label: "/v1/workspaces/:workspaceId/sessions" },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/sessions$/,
+    label: "/v1/workspaces/:workspaceId/sessions",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/control-events\/stream$/,
+    label: "/v1/workspaces/:workspaceId/control-events/stream",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/control-events$/,
+    label: "/v1/workspaces/:workspaceId/control-events",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/inference-control$/,
+    label: "/v1/workspaces/:workspaceId/inference-control",
+  },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/sessions\/[^/]+\/events\/stream$/,
     label: "/v1/workspaces/:workspaceId/sessions/:id/events/stream",
@@ -484,16 +576,20 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
     label: "/v1/workspaces/:workspaceId/sessions/:id/events",
   },
   {
-    pattern: /^\/v1\/workspaces\/[^/]+\/sessions\/[^/]+\/turns\/reorder$/,
-    label: "/v1/workspaces/:workspaceId/sessions/:id/turns/reorder",
+    pattern: /^\/v1\/workspaces\/[^/]+\/sessions\/[^/]+\/queue\/[^/]+\/(move|edit|steer|delete)$/,
+    label: "/v1/workspaces/:workspaceId/sessions/:id/queue/:turnId/:action",
   },
   {
-    pattern: /^\/v1\/workspaces\/[^/]+\/sessions\/[^/]+\/turns\/[^/]+$/,
-    label: "/v1/workspaces/:workspaceId/sessions/:id/turns/:turnId",
+    pattern: /^\/v1\/workspaces\/[^/]+\/sessions\/[^/]+\/queue$/,
+    label: "/v1/workspaces/:workspaceId/sessions/:id/queue",
   },
   {
-    pattern: /^\/v1\/workspaces\/[^/]+\/sessions\/[^/]+\/turns$/,
-    label: "/v1/workspaces/:workspaceId/sessions/:id/turns",
+    pattern: /^\/v1\/workspaces\/[^/]+\/sessions\/[^/]+\/composer-draft$/,
+    label: "/v1/workspaces/:workspaceId/sessions/:id/composer-draft",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/sessions\/[^/]+\/(control|steer)$/,
+    label: "/v1/workspaces/:workspaceId/sessions/:id/:controlAction",
   },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/sessions\/[^/]+\/stream-capabilities$/,
@@ -535,7 +631,10 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
     pattern: /^\/v1\/workspaces\/[^/]+\/files\/[^/]+$/,
     label: "/v1/workspaces/:workspaceId/files/:id",
   },
-  { pattern: /^\/v1\/workspaces\/[^/]+\/api-keys$/, label: "/v1/workspaces/:workspaceId/api-keys" },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/api-keys$/,
+    label: "/v1/workspaces/:workspaceId/api-keys",
+  },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/api-keys\/[^/]+$/,
     label: "/v1/workspaces/:workspaceId/api-keys/:id",
@@ -644,7 +743,10 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
     pattern: /^\/v1\/workspaces\/[^/]+\/environments\/[^/]+$/,
     label: "/v1/workspaces/:workspaceId/environments/:id",
   },
-  { pattern: /^\/v1\/workspaces\/[^/]+\/packs$/, label: "/v1/workspaces/:workspaceId/packs" },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/packs$/,
+    label: "/v1/workspaces/:workspaceId/packs",
+  },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/packs\/installations$/,
     label: "/v1/workspaces/:workspaceId/packs/installations",
@@ -682,13 +784,22 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
     label: "/v1/workspaces/:workspaceId/connections/:connectionId",
   },
   { pattern: /^\/v1\/catalog-assets\/.+$/, label: "/v1/catalog-assets/*" },
-  { pattern: /^\/v1\/integrations\/oauth\/callback$/, label: "/v1/integrations/oauth/callback" },
+  {
+    pattern: /^\/v1\/integrations\/oauth\/callback$/,
+    label: "/v1/integrations/oauth/callback",
+  },
   {
     pattern: /^\/v1\/integrations\/oauth\/client-metadata\.json$/,
     label: "/v1/integrations/oauth/client-metadata.json",
   },
-  { pattern: /^\/v1\/enrollments\/device\/start$/, label: "/v1/enrollments/device/start" },
-  { pattern: /^\/v1\/enrollments\/device\/poll$/, label: "/v1/enrollments/device/poll" },
+  {
+    pattern: /^\/v1\/enrollments\/device\/start$/,
+    label: "/v1/enrollments/device/start",
+  },
+  {
+    pattern: /^\/v1\/enrollments\/device\/poll$/,
+    label: "/v1/enrollments/device/poll",
+  },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/enrollments\/device\/approve$/,
     label: "/v1/workspaces/:workspaceId/enrollments/device/approve",
@@ -705,11 +816,23 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
     pattern: /^\/v1\/workspaces\/[^/]+\/machines\/[^/]+\/metrics\/series$/,
     label: "/v1/workspaces/:workspaceId/machines/:enrollmentId/metrics/series",
   },
-  { pattern: /^\/v1\/workspaces\/[^/]+\/machines$/, label: "/v1/workspaces/:workspaceId/machines" },
-  { pattern: /^\/v1\/github\/app-manifest\/callback$/, label: "/v1/github/app-manifest/callback" },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/machines$/,
+    label: "/v1/workspaces/:workspaceId/machines",
+  },
+  {
+    pattern: /^\/v1\/github\/app-manifest\/callback$/,
+    label: "/v1/github/app-manifest/callback",
+  },
   { pattern: /^\/v1\/github\/setup$/, label: "/v1/github/setup" },
-  { pattern: /^\/v1\/github\/install\/callback$/, label: "/v1/github/install/callback" },
-  { pattern: /^\/v1\/github\/oauth\/callback$/, label: "/v1/github/oauth/callback" },
+  {
+    pattern: /^\/v1\/github\/install\/callback$/,
+    label: "/v1/github/install/callback",
+  },
+  {
+    pattern: /^\/v1\/github\/oauth\/callback$/,
+    label: "/v1/github/oauth/callback",
+  },
 ];
 
 export function routeLabel(pathname: string): string {
@@ -718,4 +841,30 @@ export function routeLabel(pathname: string): string {
     return match.label;
   }
   return pathname.startsWith("/v1/") ? "/v1/unknown" : "/unknown";
+}
+
+/**
+ * State-changing OpenGeni HTTP calls must never cross an incompatible rollout
+ * boundary. Standard third-party protocols and externally initiated callbacks
+ * are intentionally outside this product API contract.
+ */
+export function isApiContractProtectedMutation(method: string, pathname: string): boolean {
+  if (!new Set(["POST", "PUT", "PATCH", "DELETE"]).has(method.toUpperCase())) {
+    return false;
+  }
+  if (!pathname.startsWith("/v1/")) {
+    return false;
+  }
+  if (
+    pathname.startsWith("/v1/auth/") ||
+    pathname.startsWith("/v1/webhooks/") ||
+    pathname.startsWith("/v1/integrations/oauth/") ||
+    pathname.startsWith("/v1/github/") ||
+    pathname === "/v1/enrollments/device/start" ||
+    pathname === "/v1/enrollments/device/poll" ||
+    pathname === "/v1/enrollments/token/exchange"
+  ) {
+    return false;
+  }
+  return !pathname.split("/").includes("mcp");
 }

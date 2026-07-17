@@ -25,7 +25,12 @@ export type SessionClientLike = Pick<
   | "streamEvents"
   // Turn queue
   | "getQueue"
-  | "cancelQueueItem"
+  | "moveQueueItem"
+  | "editQueueItem"
+  | "steerQueueItem"
+  | "deleteQueueItem"
+  | "getComposerDraft"
+  | "saveComposerDraft"
   | "listTurns"
   // Goal
   | "getGoal"
@@ -76,6 +81,10 @@ export type SessionClientLike = Pick<
   | "listWorkspaces"
   | "createWorkspace"
   | "updateWorkspace"
+  | "setWorkspaceInferenceState"
+  | "getWorkspace"
+  | "listWorkspaceControlEvents"
+  | "streamWorkspaceControlEvents"
   | "getBillingUsage"
   // Stream surfacing (Phase 5): capability negotiation + viewer lifecycle
   | "getClientConfig"

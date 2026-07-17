@@ -384,7 +384,6 @@ function CanvasTopStrip({ hamburgerRef }: { hamburgerRef: RefObject<HTMLButtonEl
     pollIntervalMs: 30_000,
   });
   const ancestors = lineage.lineage?.ancestors ?? [];
-  const parentSession = ancestors.length > 0 ? ancestors[ancestors.length - 1]! : null;
 
   // On desktop, the strip only renders when there is something to show.
   if (!rail.isMobile && !showSessionActions) {
@@ -419,7 +418,8 @@ function CanvasTopStrip({ hamburgerRef }: { hamburgerRef: RefObject<HTMLButtonEl
     return (
       <SessionHeader
         session={session}
-        parent={parentSession}
+        ancestors={ancestors}
+        lineageError={lineage.error}
         connectionState={context.connectionState}
         status={session.status}
         keyAuthRequired={context.keyAuthRequired}

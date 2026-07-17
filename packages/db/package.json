@@ -31,10 +31,6 @@
       "types": "./src/migrate.ts",
       "default": "./src/migrate.ts"
     },
-    "./session-control-cutover-audit": {
-      "types": "./src/session-control-cutover-audit.ts",
-      "default": "./src/session-control-cutover-audit.ts"
-    },
     "./provision-roles": {
       "types": "./src/provision-roles.ts",
       "default": "./src/provision-roles.ts"

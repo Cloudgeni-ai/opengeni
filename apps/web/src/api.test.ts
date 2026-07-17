@@ -8,6 +8,7 @@ import {
   setStoredAccessKey,
   clearStoredAccessKey,
   shouldReloadForDeploymentRevision,
+  shouldReloadForApiContractRevision,
 } from "./api";
 
 describe("web API auth helpers", () => {
@@ -56,6 +57,35 @@ describe("web API auth helpers", () => {
     ).toBe(false);
     expect(
       shouldReloadForDeploymentRevision({ deploymentRevision: "api-sha" }, "", fakeStorage),
+    ).toBe(false);
+  });
+
+  test("reloads once when the API protocol differs from the compiled client", () => {
+    const storage = new Map<string, string>();
+    const fakeStorage = {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => void storage.set(key, value),
+    };
+    expect(
+      shouldReloadForApiContractRevision(
+        { apiContractRevision: "next-contract" },
+        "current-contract",
+        fakeStorage,
+      ),
+    ).toBe(true);
+    expect(
+      shouldReloadForApiContractRevision(
+        { apiContractRevision: "next-contract" },
+        "current-contract",
+        fakeStorage,
+      ),
+    ).toBe(false);
+    expect(
+      shouldReloadForApiContractRevision(
+        { apiContractRevision: "current-contract" },
+        "current-contract",
+        fakeStorage,
+      ),
     ).toBe(false);
   });
 
@@ -134,6 +164,9 @@ describe("createOpenGeniClient", () => {
     expect(String(request!.input)).toBe("/v1/workspaces/workspace-id/sessions?limit=25");
     expect(request!.init?.credentials).toBe("include");
     expect(new Headers(request!.init?.headers).get("x-opengeni-access-key")).toBe("secret-key");
+    expect(new Headers(request!.init?.headers).get("x-opengeni-api-contract")).toBe(
+      "2026-07-session-control-v1",
+    );
   });
 
   test("reads the access key at request time, not at client construction", async () => {

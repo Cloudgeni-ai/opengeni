@@ -1,3 +1,6 @@
+// oxlint-disable-next-line typescript/triple-slash-reference -- package consumers must load the ambient type for this optional untyped peer without emitting a runtime import.
+/// <reference path="./types/external.d.ts" />
+
 // @opengeni/react — hooks + styled components on @opengeni/sdk.
 //
 // Import the styles once in your Tailwind entry CSS:
@@ -20,15 +23,11 @@ export type {
 export {
   useComposer,
   composeSendInput,
+  shouldSteerOnKey,
   shouldSubmitOnKey,
   FILE_ONLY_MESSAGE_TEXT,
 } from "./hooks/use-composer";
-export type {
-  ComposerMode,
-  ComposerSendExtras,
-  ComposerState,
-  UseComposerOptions,
-} from "./hooks/use-composer";
+export type { ComposerSendExtras, ComposerState, UseComposerOptions } from "./hooks/use-composer";
 export { useFileAttachments } from "./hooks/use-file-attachments";
 export type {
   FileAttachment,
@@ -36,7 +35,14 @@ export type {
   UseFileAttachmentsResult,
 } from "./hooks/use-file-attachments";
 export { useTurnQueue, isTurnQueueEvent } from "./hooks/use-turn-queue";
-export type { UseTurnQueueOptions, UseTurnQueueResult } from "./hooks/use-turn-queue";
+export type {
+  QueueMutationKind,
+  UseTurnQueueOptions,
+  UseTurnQueueResult,
+} from "./hooks/use-turn-queue";
+export { QueueSurface } from "./components/queue-surface";
+export type { QueueSurfaceProps } from "./components/queue-surface";
+export { OPEN_WORKSTREAM_CONTROL_EVENT } from "./components/chat-composer";
 export { useGoal, isGoalEvent } from "./hooks/use-goal";
 export type { UseGoalOptions, UseGoalResult } from "./hooks/use-goal";
 export { useSessionControl } from "./hooks/use-session-control";

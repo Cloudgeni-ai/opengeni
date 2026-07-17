@@ -268,7 +268,7 @@ export function SessionList() {
         running: status === "running" || status === "recovering" ? 1 : 0,
         queued: status === "queued" || status === "waiting_capacity" ? 1 : 0,
         attention: status === "requires_action" ? 1 : 0,
-        paused: status === "paused" ? 1 : 0,
+        paused: node.session.effectiveControl.state === "paused" ? 1 : 0,
         failed: status === "failed" ? 1 : 0,
       };
       if (stats) {
@@ -1095,10 +1095,8 @@ function ActivePathShortcut({
   onReveal: () => void;
 }) {
   const rail = useRail();
-  const app = useAppContext();
   const title = session.title?.trim() || session.initialMessage?.trim() || "Untitled session";
-  const workspace = app.workspaces.find((candidate) => candidate.id === session.workspaceId);
-  const state = sessionStateLabel(session, workspace);
+  const state = sessionStateLabel(session);
   const style = { paddingLeft: 10 + visualTreeDepth(depth) * 12 };
   return (
     <div role="listitem" className="min-w-0" style={style}>
@@ -1172,13 +1170,11 @@ function SessionRow(props: {
   onPin: PinFn;
 }) {
   const rail = useRail();
-  const app = useAppContext();
   const title =
     props.session.title?.trim() || props.session.initialMessage?.trim() || "Untitled session";
   const rename = useInlineRename(props.session, props.onRename);
   const hasChildren = props.hasChildren;
-  const workspace = app.workspaces.find((candidate) => candidate.id === props.session.workspaceId);
-  const stateLabel = sessionStateLabel(props.session, workspace);
+  const stateLabel = sessionStateLabel(props.session);
   const descendantLabel = sessionDescendantLabel(props.session);
   const depthLabel = props.depth > MAX_VISUAL_TREE_DEPTH ? `Level ${props.depth + 1}` : null;
   const relativeTime = relativeTimeLabel(props.session.updatedAt);

@@ -1,4 +1,4 @@
-import type { SessionBusMessage, SessionEvent } from "@opengeni/contracts";
+import type { SessionBusMessage, SessionEvent, WorkspaceControlEvent } from "@opengeni/contracts";
 import {
   appendSessionEvents,
   appendSessionEventsForTurnAttempt,
@@ -15,7 +15,7 @@ import {
   type Subscription,
 } from "nats";
 
-const codec = JSONCodec<SessionBusMessage | SessionEvent>();
+const codec = JSONCodec<SessionBusMessage | SessionEvent | WorkspaceControlEvent>();
 
 export type EventLogger = {
   debug?: (message: string, attributes?: Record<string, unknown>) => void;
@@ -210,6 +210,13 @@ export type EventBus = {
     sessionId: string,
     onEvents: (events: SessionEvent[]) => void | Promise<void>,
   ) => Promise<() => void>;
+  /** Best-effort live invalidation; the event is already durable in Postgres. */
+  publishWorkspaceControl: (workspaceId: string, event: WorkspaceControlEvent) => Promise<void>;
+  /** One workspace subscription fans a control change to every open descendant view. */
+  subscribeWorkspaceControl: (
+    workspaceId: string,
+    onEvent: (event: WorkspaceControlEvent) => void | Promise<void>,
+  ) => Promise<() => void>;
   /**
    * Issue a binary request/reply on a subject over the bus's NATS connection
    * (the selfhosted control plane: `agent.<ws>.<id>.rpc`). A new usage of what was
@@ -334,6 +341,31 @@ export async function createNatsEventBus(
     },
     subscribe: async (workspaceId, sessionId, onEvents) =>
       subscribeSession(nc, workspaceId, sessionId, onEvents),
+    publishWorkspaceControl: async (workspaceId, event) => {
+      try {
+        nc.publish(workspaceControlSubject(workspaceId), codec.encode(event));
+      } catch (error) {
+        (options.logger?.warn ?? silentLogger.warn)(
+          "NATS workspace-control invalidation dropped; clients reconcile from Postgres",
+          {
+            workspaceId,
+            revision: event.revision,
+            error: error instanceof Error ? error.message : String(error),
+          },
+        );
+        return;
+      }
+      await flushWithTimeout(nc, PUBLISH_FLUSH_TIMEOUT_MS);
+    },
+    subscribeWorkspaceControl: async (workspaceId, onEvent) => {
+      const sub = nc.subscribe(workspaceControlSubject(workspaceId));
+      void (async () => {
+        for await (const msg of sub) {
+          await onEvent(codec.decode(msg.data) as WorkspaceControlEvent);
+        }
+      })();
+      return () => sub.unsubscribe();
+    },
     request: async (subject, payload, opts) => requestReply(nc, subject, payload, opts.timeoutMs),
     subscribeRequests: (subject, handler) => subscribeRequests(nc, subject, handler),
     subscribeAgentEvents: (subject, handler) => subscribeAgentEvents(nc, subject, handler),
@@ -518,6 +550,22 @@ export async function publishDurableSessionEvents(
   observeSince(observe?.onPublish, publishStartedAt, appended.length);
 }
 
+/** Best-effort fanout for a workspace-control event already committed in PostgreSQL. */
+export async function publishDurableWorkspaceControlEvent(
+  bus: EventBus,
+  workspaceId: string,
+  event: WorkspaceControlEvent,
+): Promise<void> {
+  try {
+    await bus.publishWorkspaceControl(workspaceId, event);
+  } catch (error) {
+    console.warn(
+      `[events] workspace-control live publish failed for ${workspaceId} at revision ${event.revision}; the event is durable and reconciles on stream replay`,
+      error,
+    );
+  }
+}
+
 export async function appendAndPublishTurnEventsFenced(
   db: Database,
   bus: EventBus,
@@ -648,7 +696,7 @@ function subscribeAgentEvents(
   };
 }
 
-export function formatSse(event: SessionEvent): string {
+export function formatSse<T extends { sequence: number; type: string }>(event: T): string {
   return [
     `id: ${event.sequence}`,
     `event: ${event.type}`,
@@ -656,4 +704,8 @@ export function formatSse(event: SessionEvent): string {
     "",
     "",
   ].join("\n");
+}
+
+function workspaceControlSubject(workspaceId: string): string {
+  return `workspaces.${workspaceId}.control`;
 }

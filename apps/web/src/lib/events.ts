@@ -19,7 +19,7 @@ export function projectSessionTimeline(session: Session, events: SessionEvent[])
   const items = buildTimeline(
     events.map((event) => sanitizeEventForDisplay(event, session.status)),
   );
-  if (items.length === 0 && session.initialMessage) {
+  if (events.length === 0 && items.length === 0 && session.initialMessage) {
     return [
       {
         kind: "user-message",

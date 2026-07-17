@@ -9,7 +9,6 @@ import {
   UpdateScheduledTaskRequest,
 } from "@opengeni/contracts";
 import {
-  addSessionSystemUpdate,
   correctWorkspaceMemory,
   countVariableSets,
   beginRigChangeVerificationAttempt,
@@ -18,6 +17,7 @@ import {
   encryptVariableSetValue,
   getSession,
   getSessionGoal,
+  getSessionQueueSnapshot,
   getSessionTurn,
   getVariableSet,
   getVariableSetByName,
@@ -36,10 +36,8 @@ import {
   requireFile,
   requireScheduledTask,
   requireSession,
-  requestSessionControl,
   saveWorkspaceMemory,
   searchWorkspaceMemories,
-  setSessionChildNotificationsMode,
   setSessionGoalStatus,
   setVariableSetVariable,
   updateScheduledTask,
@@ -87,9 +85,13 @@ import {
 } from "@opengeni/core";
 import {
   acceptSessionUserMessage,
+  controlAgentSessionWorkstream,
+  controlHumanSessionWorkstream,
   createSessionForRequest,
+  sendAgentSessionMessage,
+  steerAgentSession,
   updateSessionTitle,
-  workflowIdForSession,
+  type AgentSessionCommandContext,
 } from "@opengeni/core";
 import {
   buildFleetContextForSession,
@@ -151,25 +153,6 @@ export function buildOpenGeniMcpServer(
       },
     );
   }
-  if (sessionId !== null && !toolspaceMode && can("sessions:create")) {
-    server.registerTool(
-      "set_child_notifications_mode",
-      {
-        description:
-          "Change how workers you spawn report back when they finish. This setting persists across turns and must not be re-applied as routine setup or recovery. 'digest' (default): completions arrive as a coalesced turn you process. 'passive': completions appear only as quiet cards and never queue a turn or model run. Call only when the desired mode differs from the mode already in effect.",
-        inputSchema: { mode: z4.enum(["digest", "passive"]) },
-      },
-      async ({ mode }) => {
-        const changed = await setSessionChildNotificationsMode(
-          deps.db,
-          grant.workspaceId,
-          sessionId,
-          mode,
-        );
-        return json({ ok: true, changed, mode });
-      },
-    );
-  }
   // Goal tools require goals:manage (in the default first-party permission set).
   if (sessionId !== null && can("goals:manage")) {
     registerGoalTools(server, deps, grant, sessionId, json);
@@ -204,7 +187,7 @@ export function buildOpenGeniMcpServer(
   // and mint GitHub install links out of the box. A user DEMOTES a specific
   // session by setting a narrower session.firstPartyMcpPermissions (capped to
   // the creator's own grant); operators still cap what any session can be given.
-  registerWorkspaceOrchestrationTools(server, deps, grant, can, sessionId, json);
+  registerWorkspaceOrchestrationTools(server, deps, grant, can, sessionId, toolspaceMode, json);
   registerVariableSetTools(server, deps, grant, can, json);
   if (can("github:use")) {
     registerGitHubConnectTool(server, deps, grant, options, json);
@@ -1235,12 +1218,39 @@ function registerRigTools(
 // Workspace orchestration for manager-style agents. Session-authenticated
 // workers communicate through the typed internal-update plane; only a
 // sessionless operator can append a visible prompt through this surface.
+function exactAgentCommandContext(
+  grant: AccessGrant,
+  callerSessionId: string,
+): AgentSessionCommandContext {
+  const turnId = grant.metadata?.["turnId"];
+  const attemptId = grant.metadata?.["attemptId"];
+  const executionGeneration = grant.metadata?.["executionGeneration"];
+  if (
+    typeof turnId !== "string" ||
+    typeof attemptId !== "string" ||
+    typeof executionGeneration !== "number" ||
+    !Number.isSafeInteger(executionGeneration) ||
+    executionGeneration < 1
+  ) {
+    throw new Error("caller_attempt_claims_missing");
+  }
+  return {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    callerSessionId,
+    callerTurnId: turnId,
+    callerAttemptId: attemptId,
+    callerExecutionGeneration: executionGeneration,
+  };
+}
+
 function registerWorkspaceOrchestrationTools(
   server: McpServer,
   deps: ApiRouteDeps,
   grant: AccessGrant,
   can: (permission: Permission) => boolean,
   callerSessionId: string | null,
+  toolspaceMode: boolean,
   json: JsonResult,
 ): void {
   if (can("sessions:read")) {
@@ -1266,7 +1276,11 @@ function registerWorkspaceOrchestrationTools(
         if (!session) {
           throw new Error("session not found");
         }
-        return json(capSessionDetail(session));
+        const queue = await getSessionQueueSnapshot(deps.db, grant.workspaceId, sessionId);
+        return json({
+          ...capSessionDetail(session),
+          effectiveControl: queue?.effectiveControl ?? null,
+        });
       },
     );
 
@@ -1384,7 +1398,7 @@ function registerWorkspaceOrchestrationTools(
     );
   }
 
-  if (can("sessions:control")) {
+  if (can("sessions:control") && !toolspaceMode) {
     server.registerTool(
       "session_send_message",
       {
@@ -1393,50 +1407,30 @@ function registerWorkspaceOrchestrationTools(
         inputSchema: {
           sessionId: z4.string().uuid(),
           text: z4.string().min(1),
+          idempotencyKey: z4.string().uuid(),
           // Header-value rotation only. URL/name/tool settings are immutable
           // after create; core enforces mcp_servers:attach on this field.
           mcpCredentialUpdates: z4.array(z4.unknown()).optional(),
         },
       },
-      async ({ sessionId: targetSessionId, text, mcpCredentialUpdates }) => {
+      async ({ sessionId: targetSessionId, text, idempotencyKey, mcpCredentialUpdates }) => {
         if (callerSessionId !== null) {
           if ((mcpCredentialUpdates?.length ?? 0) > 0) {
             throw new Error("internal session updates cannot change MCP credentials");
           }
-          const result = await addSessionSystemUpdate(deps.db, {
-            accountId: grant.accountId,
-            workspaceId: grant.workspaceId,
-            sessionId: targetSessionId,
-            kind: "runtime_notice",
-            classification: "info",
-            sourceId: callerSessionId,
-            dedupeKey: `session-message:${callerSessionId}:${crypto.randomUUID()}`,
-            summary: text,
-            payload: { text },
-            lineage: { sourceSessionId: callerSessionId, targetSessionId },
-          });
-          if (result.reason === "session_cancelled") {
-            return json({ delivered: false, reason: result.reason });
-          }
-          if (result.added && result.events.length > 0) {
-            await deps.bus.publish(grant.workspaceId, targetSessionId, result.events);
-          }
-          if (result.shouldWake) {
-            if (result.workflowWakeRevision === null) {
-              throw new Error("Internal update has no workflow wake revision");
-            }
-            await deps.workflowClient.wakeSessionWorkflow({
-              accountId: grant.accountId,
-              workspaceId: grant.workspaceId,
-              sessionId: targetSessionId,
-              workflowId: result.temporalWorkflowId ?? workflowIdForSession(targetSessionId),
-              wakeRevision: result.workflowWakeRevision,
-            });
-          }
+          const result = await sendAgentSessionMessage(
+            deps,
+            exactAgentCommandContext(grant, callerSessionId),
+            { targetSessionId, text, idempotencyKey },
+          );
           return json({
             delivered: true,
-            updateId: result.update.id,
+            updateId: result.updateId,
             delivery: "coalesced_internal_update",
+            effectiveState: result.effectiveState,
+            wakeRequested: result.wakeRevision !== null,
+            resumeRequired: result.effectiveState === "paused",
+            replay: result.replay,
           });
         }
         const { accepted, turn } = await acceptSessionUserMessage(
@@ -1447,8 +1441,9 @@ function registerWorkspaceOrchestrationTools(
           {
             text,
             toolsProvided: false,
-            delivery: "queue",
+            delivery: "send",
             origin: "operator",
+            clientEventId: idempotencyKey,
             mcpCredentialUpdates: (mcpCredentialUpdates ?? []).map((update) =>
               SessionMcpCredentialUpdateInput.parse(update),
             ),
@@ -1464,38 +1459,125 @@ function registerWorkspaceOrchestrationTools(
         description: "Pause this session. Waiting prompts stay saved and inert until Resume.",
         inputSchema: {
           sessionId: z4.string().uuid(),
+          idempotencyKey: z4.string().uuid(),
+          reason: z4.string().min(1).max(500).optional(),
         },
       },
-      async ({ sessionId }) => {
-        const controlled = await requestSessionControl(deps.db, {
-          accountId: grant.accountId,
-          workspaceId: grant.workspaceId,
-          sessionId,
-          actor: grant.subjectId,
-          mode: "pause",
-          reason: "mcp_pause",
-        });
-        await deps.bus.publish(grant.workspaceId, sessionId, controlled.events);
-        if (controlled.shouldSignalControl) {
-          if (controlled.workflowWakeRevision === null) {
-            throw new Error("Session control has no workflow wake revision");
-          }
-          await deps.workflowClient.signalSessionControl({
-            accountId: grant.accountId,
-            workspaceId: grant.workspaceId,
-            sessionId,
-            eventId: controlled.event.id,
-            workflowId: workflowIdForSession(sessionId),
-            workflowWakeRevision: controlled.workflowWakeRevision,
+      async ({ sessionId, idempotencyKey, reason }) => {
+        if (callerSessionId !== null) {
+          const controlled = await controlAgentSessionWorkstream(
+            deps,
+            exactAgentCommandContext(grant, callerSessionId),
+            {
+              targetSessionId: sessionId,
+              action: "pause",
+              idempotencyKey,
+              reason: reason ?? "agent_mcp_pause",
+            },
+          );
+          return json({
+            receiptId: controlled.receipt.id,
+            effectiveControl: controlled.control,
+            interruptionCount: controlled.interruptionCount,
+            replay: controlled.replay,
           });
         }
-        return json({
-          event: controlled.event,
-          controlState: controlled.controlState,
-          controlGeneration: controlled.controlGeneration,
-        });
+        return json(
+          await controlHumanSessionWorkstream(
+            deps,
+            {
+              accountId: grant.accountId,
+              workspaceId: grant.workspaceId,
+              sessionId,
+              subjectId: grant.subjectId,
+            },
+            {
+              action: "pause",
+              clientEventId: idempotencyKey,
+              ...(reason ? { reason } : {}),
+            },
+          ),
+        );
       },
     );
+
+    server.registerTool(
+      "session_resume",
+      {
+        description:
+          "Resume the selected session workstream through older parent/workspace pauses. This creates no message.",
+        inputSchema: {
+          sessionId: z4.string().uuid(),
+          idempotencyKey: z4.string().uuid(),
+          reason: z4.string().min(1).max(500).optional(),
+        },
+      },
+      async ({ sessionId, idempotencyKey, reason }) => {
+        if (callerSessionId !== null) {
+          const controlled = await controlAgentSessionWorkstream(
+            deps,
+            exactAgentCommandContext(grant, callerSessionId),
+            {
+              targetSessionId: sessionId,
+              action: "resume",
+              idempotencyKey,
+              reason: reason ?? "agent_mcp_resume",
+            },
+          );
+          return json({
+            receiptId: controlled.receipt.id,
+            effectiveControl: controlled.control,
+            interruptionCount: controlled.interruptionCount,
+            replay: controlled.replay,
+          });
+        }
+        return json(
+          await controlHumanSessionWorkstream(
+            deps,
+            {
+              accountId: grant.accountId,
+              workspaceId: grant.workspaceId,
+              sessionId,
+              subjectId: grant.subjectId,
+            },
+            {
+              action: "resume",
+              clientEventId: idempotencyKey,
+              ...(reason ? { reason } : {}),
+            },
+          ),
+        );
+      },
+    );
+
+    if (callerSessionId !== null) {
+      server.registerTool(
+        "session_steer",
+        {
+          description:
+            "Atomically replace another session's current direction and resume it. The instruction is an internal update, never a human queue row.",
+          inputSchema: {
+            sessionId: z4.string().uuid(),
+            instruction: z4.string().min(1),
+            idempotencyKey: z4.string().uuid(),
+          },
+        },
+        async ({ sessionId, instruction, idempotencyKey }) => {
+          const result = await steerAgentSession(
+            deps,
+            exactAgentCommandContext(grant, callerSessionId),
+            { targetSessionId: sessionId, instruction, idempotencyKey },
+          );
+          return json({
+            updateId: result.updateId,
+            interruptionCount: result.interruptionCount,
+            stoppingPreviousAttempt: result.interruptionCount > 0,
+            effectiveState: result.effectiveState,
+            replay: result.replay,
+          });
+        },
+      );
+    }
 
     server.registerTool(
       "set_other_session_title",

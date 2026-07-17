@@ -1130,7 +1130,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       >,
     ): RunAgentTurnResult => {
       if (!turnId) throw new Error("Claimed activity result produced before turn admission");
-      return { ...result, turnId, attemptId: input.attemptId } as RunAgentTurnResult;
+      return {
+        ...result,
+        turnId,
+        attemptId: input.attemptId,
+      } as RunAgentTurnResult;
     };
     // The Connected Machine op observer for this turn: meters every op AND buffers
     // the eventable ones (infra failures + healed recoveries) as machine.op.* session
@@ -1707,6 +1711,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       const claim = await claimSessionWorkForAttempt(db, input.workspaceId, {
         sessionId: input.sessionId,
         workflowId: input.workflowId,
+        workflowRunId: input.workflowRunId,
         attemptId: input.attemptId,
         dispatchId,
         trigger: input.trigger,
@@ -1874,7 +1879,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           turnId: turnId!,
           triggerEventId: triggerEventId!,
           attemptId: input.attemptId,
-          childCompletionParentWakeEnabled: settings.childCompletionParentWakeEnabled,
           turnStatus: inputSettlement.turnStatus,
           sessionStatus: inputSettlement.sessionStatus,
           activeTurnId: inputSettlement.activeTurnId,
@@ -2708,13 +2712,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       if (turn.source === "compaction") {
         const persistentSessionSettings = {
           titleIsSet: Boolean(session.title?.trim()),
-          childNotificationsMode:
-            typeof session.metadata === "object" &&
-            session.metadata !== null &&
-            (session.metadata as { childNotificationsMode?: unknown }).childNotificationsMode ===
-              "passive"
-              ? ("passive" as const)
-              : ("digest" as const),
         };
         const compactionInstructions = appendPersistentSessionSettings(
           appendSessionInstructions(
@@ -3250,6 +3247,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // the caller by its own identity (sacred-pause guard), not the racy
           // live active pointer.
           ...(turnId ? { turnId } : {}),
+          attemptId: input.attemptId,
+          executionGeneration,
           subjectId: "worker:first-party-mcp",
           subjectLabel: "OpenGeni worker",
           resolveCredential,
@@ -3305,13 +3304,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         genesisTitleHint: isGenesisTurn,
         persistentSessionSettings: {
           titleIsSet: Boolean(session.title?.trim()),
-          childNotificationsMode:
-            typeof session.metadata === "object" &&
-            session.metadata !== null &&
-            (session.metadata as { childNotificationsMode?: unknown }).childNotificationsMode ===
-              "passive"
-              ? ("passive" as const)
-              : ("digest" as const),
         },
         sandboxEnvironment,
         // TOKEN-BROKER (B1): forward the per-turn git token OFF-MANIFEST as the clone
@@ -3809,6 +3801,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         const ownedEstablished = resolvedSandbox?.established ?? lazyOwnedSandbox;
         const runStreamOnce = (): ReturnType<OpenGeniRuntime["runStream"]> =>
           runtime.runStream(agent, runInput!, modelRunSettings, {
+            ...(activityContext ? { signal: activityContext.cancellationSignal } : {}),
             sandboxEnvironment,
             onRuntimeEvent: async (event) => {
               await renewCodexLease("runtime_event");
@@ -4041,7 +4034,15 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           }
         } finally {
           if (!streamDone) {
-            await iterator.return?.();
+            // ReadableStream cancellation synchronously trips the Agents SDK's
+            // abort controller, but its returned promise may wait for an
+            // uncooperative provider producer. Once this attempt is fenced,
+            // awaiting that provider-side cleanup pins the Temporal activity
+            // (and therefore Pause) even though every late write is already
+            // rejected. Start cancellation and detach only its cleanup wait;
+            // the SDK abort signal stops the producer and the durable attempt
+            // fence remains the authority for every callback that arrives late.
+            void iterator.return?.().catch(() => undefined);
           }
         }
         await batcher.flush();
@@ -4397,10 +4398,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         activityError = error;
         await flushRuntimeBatcher();
         // Ownership already moved to a newer attempt or an authoritative
-        // control transaction. Return locally; no Temporal cancellation and no
-        // competing turn/session settlement is needed.
+        // control transaction. Surface a transport cancellation instead of a
+        // normal activity result: with WAIT_CANCELLATION_COMPLETED, Temporal
+        // must observe a terminal cancellation before the session workflow may
+        // close. Returning normally after a cancel request is rejected by the
+        // server and leaves the worker task detached indefinitely.
         turnMetricOutcome = "cancelled";
-        return claimedResult({ status: "cancelled" });
+        throw new CancelledFailure("TURN_ATTEMPT_FENCED", [], error);
       }
       if (error instanceof CancelledFailure) {
         activityStatus = "cancelled";

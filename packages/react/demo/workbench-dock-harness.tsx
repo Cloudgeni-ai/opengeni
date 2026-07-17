@@ -88,7 +88,7 @@ function Harness() {
 }
 
 createRoot(document.getElementById("root")!).render(
-  <OpenGeniProvider client={client} workspaceId="11111111-2222-4333-8444-555555555555">
+  <OpenGeniProvider client={client as never} workspaceId="11111111-2222-4333-8444-555555555555">
     <Harness />
   </OpenGeniProvider>,
 );

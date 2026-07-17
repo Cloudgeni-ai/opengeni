@@ -1,5 +1,5 @@
-import type { SessionEvent } from "@opengeni/contracts";
-import { listSessionEvents, type Database } from "@opengeni/db";
+import type { SessionEvent, WorkspaceControlEvent } from "@opengeni/contracts";
+import { listSessionEvents, listWorkspaceControlEvents, type Database } from "@opengeni/db";
 import { formatSse, type EventBus } from "@opengeni/events";
 
 export async function sseSessionStream(
@@ -107,4 +107,59 @@ export async function replaySessionEvents(
       return;
     }
   }
+}
+
+export async function sseWorkspaceControlStream(
+  db: Database,
+  bus: EventBus,
+  workspaceId: string,
+  after: number,
+  signal: AbortSignal,
+): Promise<Response> {
+  const encoder = new TextEncoder();
+  let lastSent = after;
+  let replaying = true;
+  const buffered: WorkspaceControlEvent[] = [];
+  let unsubscribe: (() => void) | null = null;
+
+  const stream = new ReadableStream<Uint8Array>({
+    start: async (controller) => {
+      const send = (event: WorkspaceControlEvent) => {
+        if (event.sequence <= lastSent) return;
+        controller.enqueue(encoder.encode(formatSse(event)));
+        lastSent = event.sequence;
+      };
+      unsubscribe = await bus.subscribeWorkspaceControl(workspaceId, async (event) => {
+        if (replaying) {
+          buffered.push(event);
+        } else {
+          send(event);
+        }
+      });
+      let cursor = after;
+      while (true) {
+        const page = await listWorkspaceControlEvents(db, workspaceId, cursor, 1000);
+        for (const event of page) {
+          send(event);
+          cursor = Math.max(cursor, event.sequence);
+        }
+        if (page.length < 1000) break;
+      }
+      replaying = false;
+      for (const event of buffered.sort((left, right) => left.sequence - right.sequence)) {
+        send(event);
+      }
+      buffered.length = 0;
+      controller.enqueue(encoder.encode(": connected\n\n"));
+    },
+    cancel: () => unsubscribe?.(),
+  });
+  signal.addEventListener("abort", () => unsubscribe?.(), { once: true });
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+    },
+  });
 }

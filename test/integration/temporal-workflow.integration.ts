@@ -60,10 +60,15 @@ describe("Temporal workflow integration", () => {
   beforeAll(async () => {
     const externalTemporalHost = process.env.OPENGENI_TEST_TEMPORAL_HOST?.trim();
     services = externalTemporalHost
-      ? ({ temporalHost: externalTemporalHost, down: async () => undefined } as TestServices)
+      ? ({
+          temporalHost: externalTemporalHost,
+          down: async () => undefined,
+        } as TestServices)
       : await startTestServices({ temporal: true });
     connection = await Connection.connect({ address: services.temporalHost });
-    nativeConnection = await NativeConnection.connect({ address: services.temporalHost });
+    nativeConnection = await NativeConnection.connect({
+      address: services.temporalHost,
+    });
   }, 300_000);
 
   afterAll(async () => {
@@ -87,7 +92,9 @@ describe("Temporal workflow integration", () => {
         ...admission.activities,
         markSessionIdle: async () => undefined,
         failSessionAttempt: async () => undefined,
-        settleSessionControl: async () => undefined,
+        settleSessionInterruptions: async () => ({
+          action: "continue" as const,
+        }),
       });
       const run = worker.run();
       try {
@@ -95,7 +102,13 @@ describe("Temporal workflow integration", () => {
         const handle = await client.workflow.start("sessionWorkflow", {
           taskQueue,
           workflowId: `wf-${crypto.randomUUID()}`,
-          args: [{ ...scope, sessionId: crypto.randomUUID(), initialEventId: "event-1" }],
+          args: [
+            {
+              ...scope,
+              sessionId: crypto.randomUUID(),
+              initialEventId: "event-1",
+            },
+          ],
         });
         await waitFor(() => calls.length === 1);
         queuedTurns.push(queuedTurn("event-2"));
@@ -124,7 +137,9 @@ describe("Temporal workflow integration", () => {
         ...admission.activities,
         markSessionIdle: async () => undefined,
         failSessionAttempt: async () => undefined,
-        settleSessionControl: async () => undefined,
+        settleSessionInterruptions: async () => ({
+          action: "continue" as const,
+        }),
       });
       const run = worker.run();
       try {
@@ -132,7 +147,13 @@ describe("Temporal workflow integration", () => {
         const handle = await client.workflow.start("sessionWorkflow", {
           taskQueue,
           workflowId: `wf-${crypto.randomUUID()}`,
-          args: [{ ...scope, sessionId: crypto.randomUUID(), initialEventId: "event-1" }],
+          args: [
+            {
+              ...scope,
+              sessionId: crypto.randomUUID(),
+              initialEventId: "event-1",
+            },
+          ],
         });
         await waitFor(() => calls.length === 1);
         await Bun.sleep(300);
@@ -166,7 +187,9 @@ describe("Temporal workflow integration", () => {
         failSessionAttempt: async (input: unknown) => {
           failures.push(input);
         },
-        settleSessionControl: async () => undefined,
+        settleSessionInterruptions: async () => ({
+          action: "continue" as const,
+        }),
       });
       const run = worker.run();
       try {
@@ -174,7 +197,13 @@ describe("Temporal workflow integration", () => {
         const handle = await client.workflow.start("sessionWorkflow", {
           taskQueue,
           workflowId: `wf-${crypto.randomUUID()}`,
-          args: [{ ...scope, sessionId: crypto.randomUUID(), initialEventId: "event-1" }],
+          args: [
+            {
+              ...scope,
+              sessionId: crypto.randomUUID(),
+              initialEventId: "event-1",
+            },
+          ],
         });
         await handle.result();
         expect(attempts).toBe(1);
@@ -194,7 +223,9 @@ describe("Temporal workflow integration", () => {
       const scope = workflowScope();
       const turn = queuedTurn("event-1");
       const queuedTurns = [turn];
-      const runs: Array<{ trigger: { kind: string; triggerEventId?: string } }> = [];
+      const runs: Array<{
+        trigger: { kind: string; triggerEventId?: string };
+      }> = [];
       const failures: unknown[] = [];
       const admission = createTurnAdmission(queuedTurns, async (input) => {
         runs.push(input as (typeof runs)[number]);
@@ -206,7 +237,9 @@ describe("Temporal workflow integration", () => {
         failSessionAttempt: async (input: unknown) => {
           failures.push(input);
         },
-        settleSessionControl: async () => undefined,
+        settleSessionInterruptions: async () => ({
+          action: "continue" as const,
+        }),
       });
       const run = worker.run();
       try {
@@ -214,7 +247,13 @@ describe("Temporal workflow integration", () => {
         const handle = await client.workflow.start("sessionWorkflow", {
           taskQueue,
           workflowId: `wf-${crypto.randomUUID()}`,
-          args: [{ ...scope, sessionId: crypto.randomUUID(), initialEventId: "event-1" }],
+          args: [
+            {
+              ...scope,
+              sessionId: crypto.randomUUID(),
+              initialEventId: "event-1",
+            },
+          ],
         });
         await handle.result();
         expect(runs).toHaveLength(2);
@@ -260,7 +299,9 @@ describe("Temporal workflow integration", () => {
         failSessionAttempt: async (input: unknown) => {
           failures.push(input);
         },
-        settleSessionControl: async () => undefined,
+        settleSessionInterruptions: async () => ({
+          action: "continue" as const,
+        }),
       });
       const run = worker.run();
       try {
@@ -268,7 +309,13 @@ describe("Temporal workflow integration", () => {
         const handle = await client.workflow.start("sessionWorkflow", {
           taskQueue,
           workflowId: `wf-${crypto.randomUUID()}`,
-          args: [{ ...scope, sessionId: crypto.randomUUID(), initialEventId: "event-1" }],
+          args: [
+            {
+              ...scope,
+              sessionId: crypto.randomUUID(),
+              initialEventId: "event-1",
+            },
+          ],
         });
         await handle.result();
         expect(runs).toHaveLength(2);
@@ -319,7 +366,9 @@ describe("Temporal workflow integration", () => {
         failSessionAttempt: async (input: { error?: string }) => {
           failures.push(input);
         },
-        settleSessionControl: async () => undefined,
+        settleSessionInterruptions: async () => ({
+          action: "continue" as const,
+        }),
       });
       const run = worker.run();
       try {
@@ -327,7 +376,13 @@ describe("Temporal workflow integration", () => {
         const handle = await client.workflow.start("sessionWorkflow", {
           taskQueue,
           workflowId: `wf-${crypto.randomUUID()}`,
-          args: [{ ...scope, sessionId: crypto.randomUUID(), initialEventId: "event-1" }],
+          args: [
+            {
+              ...scope,
+              sessionId: crypto.randomUUID(),
+              initialEventId: "event-1",
+            },
+          ],
         });
         await handle.result();
         expect(runs).toHaveLength(1);
@@ -349,24 +404,22 @@ describe("Temporal workflow integration", () => {
   );
 
   test(
-    "idle Pause delegates one atomic control settlement without cancelling a turn",
+    "idle Pause is already durable and never invents an attempt interruption",
     async () => {
       const taskQueue = `workflow-test-${crypto.randomUUID()}`;
       const scope = workflowScope();
       const idleMarks: unknown[] = [];
       const controls: unknown[] = [];
-      const control = createPendingControlPeek("control-event");
       const worker = await testWorker(nativeConnection, taskQueue, {
-        peekSessionWork: control.peekSessionWork,
+        peekSessionWork: async () => ({ kind: "idle" as const }),
         markSessionIdle: async (input: unknown) => {
           idleMarks.push(input);
         },
         runAgentTurn: async () => ({ status: "idle" }),
         failSessionAttempt: async () => undefined,
-        settleSessionControl: async (input: unknown) => {
+        settleSessionInterruptions: async (input: unknown) => {
           controls.push(input);
-          control.settled();
-          return { action: "paused" as const };
+          return { action: "continue" as const };
         },
       });
       const run = worker.run();
@@ -380,16 +433,15 @@ describe("Temporal workflow integration", () => {
         });
         await handle.signal("sessionControl", "control-event");
         await handle.result();
-        expect(idleMarks).toHaveLength(0);
-        expect(controls).toEqual([
-          {
-            accountId: scope.accountId,
-            workspaceId: scope.workspaceId,
-            sessionId,
-            triggerEventId: "control-event",
-            workflowId: expect.any(String),
-          },
-        ]);
+        expect(idleMarks.length).toBeGreaterThanOrEqual(1);
+        expect(
+          idleMarks.every(
+            (mark) =>
+              JSON.stringify(mark) ===
+              JSON.stringify({ workspaceId: scope.workspaceId, sessionId }),
+          ),
+        ).toBe(true);
+        expect(controls).toHaveLength(0);
       } finally {
         worker.shutdown();
         await run;
@@ -406,27 +458,24 @@ describe("Temporal workflow integration", () => {
       // getHandle(workflowId).signal("sessionControl", …), which throws
       // WorkflowNotFoundError -> a 500. The FIXED client uses signalWithStart
       // exactly as wired below; it must start a fresh sessionWorkflow that
-      // immediately honors the buffered Pause via the idle-control path
-      // (pause goal for the trigger event + mark idle), with no active turn to
-      // cancel.
+      // observes the Pause already committed by the API and closes through the
+      // normal idle settlement, with no active attempt to interrupt.
       const taskQueue = `workflow-test-${crypto.randomUUID()}`;
       const scope = workflowScope();
       const sessionId = crypto.randomUUID();
       const workflowId = `wf-${crypto.randomUUID()}`;
       const idleMarks: unknown[] = [];
       const controls: unknown[] = [];
-      const control = createPendingControlPeek("control-event", true);
       const worker = await testWorker(nativeConnection, taskQueue, {
-        peekSessionWork: control.peekSessionWork,
+        peekSessionWork: async () => ({ kind: "idle" as const }),
         markSessionIdle: async (input: unknown) => {
           idleMarks.push(input);
         },
         runAgentTurn: async () => ({ status: "idle" }),
         failSessionAttempt: async () => undefined,
-        settleSessionControl: async (input: unknown) => {
+        settleSessionInterruptions: async (input: unknown) => {
           controls.push(input);
-          control.settled();
-          return { action: "paused" as const };
+          return { action: "continue" as const };
         },
       });
       const run = worker.run();
@@ -444,18 +493,8 @@ describe("Temporal workflow integration", () => {
           signalArgs: ["control-event"],
         });
         await handle.result();
-        // The idle-control path is one atomic activity: it owns goal pause,
-        // durable events, and the idle session state. No legacy split calls.
-        expect(idleMarks).toHaveLength(0);
-        expect(controls).toEqual([
-          {
-            accountId: scope.accountId,
-            workspaceId: scope.workspaceId,
-            sessionId,
-            triggerEventId: "control-event",
-            workflowId,
-          },
-        ]);
+        expect(idleMarks).toEqual([{ workspaceId: scope.workspaceId, sessionId }]);
+        expect(controls).toHaveLength(0);
       } finally {
         worker.shutdown();
         await run;
@@ -469,7 +508,8 @@ describe("Temporal workflow integration", () => {
     async () => {
       const taskQueue = `workflow-test-${crypto.randomUUID()}`;
       const scope = workflowScope();
-      let pendingControl = true;
+      const interruptedAttemptId = crypto.randomUUID();
+      let pendingInterruption = true;
       let resumedWork = false;
       let turnRuns = 0;
       let releaseSettlement!: () => void;
@@ -482,17 +522,20 @@ describe("Temporal workflow integration", () => {
       });
       const worker = await testWorker(nativeConnection, taskQueue, {
         peekSessionWork: async () => {
-          if (pendingControl) {
-            return { kind: "fence-settle", controlEventId: "pause-event" } as const;
+          if (pendingInterruption) {
+            return {
+              kind: "interruption-pending",
+              attemptId: interruptedAttemptId,
+            } as const;
           }
           return resumedWork && turnRuns === 0
             ? ({ kind: "runnable" } as const)
             : ({ kind: "idle" } as const);
         },
-        settleSessionControl: async () => {
+        settleSessionInterruptions: async () => {
           settlementEntered();
           await settlementRelease;
-          pendingControl = false;
+          pendingInterruption = false;
           return { action: "paused" as const };
         },
         runAgentTurn: async (input: { attemptId: string }) => {
@@ -557,7 +600,7 @@ describe("Temporal workflow integration", () => {
         ...admission.activities,
         markSessionIdle: async () => undefined,
         failSessionAttempt: async () => undefined,
-        settleSessionControl: async (input: unknown) => {
+        settleSessionInterruptions: async (input: unknown) => {
           controls.push(input);
           allowFirstRunToFinish = true;
           return { action: "continue" as const };
@@ -577,7 +620,7 @@ describe("Temporal workflow integration", () => {
         await handle.signal("sessionControl", "control-event");
         await waitFor(() => runs.length === 2);
         expect(controls).toEqual([
-          { ...scope, sessionId, triggerEventId: "control-event", workflowId },
+          { ...scope, sessionId, attemptId: expect.any(String), workflowId },
         ]);
         expect(runs[1]).toEqual(second);
       } finally {
@@ -609,7 +652,7 @@ describe("Temporal workflow integration", () => {
         ...admission.activities,
         markSessionIdle: async () => undefined,
         failSessionAttempt: async () => undefined,
-        settleSessionControl: async (input: unknown) => {
+        settleSessionInterruptions: async (input: unknown) => {
           controls.push(input);
           admission.supersede();
           return { action: "continue" as const };
@@ -625,11 +668,12 @@ describe("Temporal workflow integration", () => {
         });
         await waitFor(() => runs.length === 1);
         queuedTurns.push(second);
+        admission.requestInterruption();
         await handle.signal("userMessage", second.triggerEventId);
         await handle.signal("sessionControl", "control-event");
         await waitFor(() => runs.length === 2);
         expect(controls).toEqual([
-          { ...scope, sessionId, triggerEventId: "control-event", workflowId },
+          { ...scope, sessionId, attemptId: expect.any(String), workflowId },
         ]);
         expect(runs[1]).toEqual(second);
       } finally {
@@ -658,7 +702,9 @@ describe("Temporal workflow integration", () => {
         ...admission.activities,
         markSessionIdle: async () => undefined,
         failSessionAttempt: async () => undefined,
-        settleSessionControl: async () => undefined,
+        settleSessionInterruptions: async () => ({
+          action: "continue" as const,
+        }),
         maybeContinueGoal: async (input: unknown) => {
           goalChecks.push(input);
           if (continuations < 2) {
@@ -681,7 +727,11 @@ describe("Temporal workflow integration", () => {
         await handle.result();
         expect(runs).toEqual(["event-1", "goal-event-1", "goal-event-2"]);
         expect(goalChecks.length).toBeGreaterThanOrEqual(3);
-        expect(goalChecks[0]).toMatchObject({ ...scope, sessionId, workflowId });
+        expect(goalChecks[0]).toMatchObject({
+          ...scope,
+          sessionId,
+          workflowId,
+        });
       } finally {
         worker.shutdown();
         await run;
@@ -709,7 +759,9 @@ describe("Temporal workflow integration", () => {
         ...admission.activities,
         markSessionIdle: async () => undefined,
         failSessionAttempt: async () => undefined,
-        settleSessionControl: async () => undefined,
+        settleSessionInterruptions: async () => ({
+          action: "continue" as const,
+        }),
         maybeContinueGoal: async () => {
           if (!goalCheckedAt) {
             goalCheckedAt = Date.now();
@@ -739,46 +791,6 @@ describe("Temporal workflow integration", () => {
   );
 
   test(
-    "idle Pause uses the atomic control settlement",
-    async () => {
-      const taskQueue = `workflow-test-${crypto.randomUUID()}`;
-      const scope = workflowScope();
-      const sessionId = crypto.randomUUID();
-      const order: string[] = [];
-      const control = createPendingControlPeek("control-event");
-      const worker = await testWorker(nativeConnection, taskQueue, {
-        peekSessionWork: control.peekSessionWork,
-        markSessionIdle: async () => {
-          order.push("idle");
-        },
-        runAgentTurn: async () => ({ status: "idle" }),
-        failSessionAttempt: async () => undefined,
-        settleSessionControl: async () => {
-          order.push("control");
-          control.settled();
-          return { action: "paused" as const };
-        },
-      });
-      const run = worker.run();
-      try {
-        const client = new Client({ connection });
-        const handle = await client.workflow.start("sessionWorkflow", {
-          taskQueue,
-          workflowId: `wf-${crypto.randomUUID()}`,
-          args: [{ ...scope, sessionId }],
-        });
-        await handle.signal("sessionControl", "control-event");
-        await handle.result();
-        expect(order).toEqual(["control"]);
-      } finally {
-        worker.shutdown();
-        await run;
-      }
-    },
-    temporalWorkflowTestTimeoutMs,
-  );
-
-  test(
     "a failing goal continuation check falls back to idle shutdown",
     async () => {
       const taskQueue = `workflow-test-${crypto.randomUUID()}`;
@@ -798,7 +810,9 @@ describe("Temporal workflow integration", () => {
           idleMarks.push(input);
         },
         failSessionAttempt: async () => undefined,
-        settleSessionControl: async () => undefined,
+        settleSessionInterruptions: async () => ({
+          action: "continue" as const,
+        }),
         maybeContinueGoal: async () => {
           throw new Error("goal store unavailable");
         },
@@ -857,7 +871,9 @@ describe("Temporal workflow integration", () => {
         },
         runAgentTurn: async () => ({ status: "idle" }),
         failSessionAttempt: async () => undefined,
-        settleSessionControl: async () => undefined,
+        settleSessionInterruptions: async () => ({
+          action: "continue" as const,
+        }),
       });
       const run = worker.run();
       try {
@@ -875,7 +891,11 @@ describe("Temporal workflow integration", () => {
         });
         const result = await handle.result();
         expect(calls).toEqual([
-          { accountId: scope.accountId, workspaceId: scope.workspaceId, documentId: "document-1" },
+          {
+            accountId: scope.accountId,
+            workspaceId: scope.workspaceId,
+            documentId: "document-1",
+          },
         ]);
         expect(result).toMatchObject({ id: "document-1", status: "ready" });
       } finally {
@@ -916,7 +936,13 @@ describe("Temporal workflow integration", () => {
         const handle = await client.workflow.start("scheduledTaskFireWorkflow", {
           taskQueue,
           workflowId: `scheduled-fire-${crypto.randomUUID()}`,
-          args: [{ ...scope, taskId: crypto.randomUUID(), triggerType: "scheduled" }],
+          args: [
+            {
+              ...scope,
+              taskId: crypto.randomUUID(),
+              triggerType: "scheduled",
+            },
+          ],
         });
         await handle.result();
         expect(dispatches).toHaveLength(1);
@@ -1041,7 +1067,9 @@ describe("Temporal workflow integration", () => {
         ...admission.activities,
         markSessionIdle: async () => undefined,
         failSessionAttempt: async () => undefined,
-        settleSessionControl: async () => undefined,
+        settleSessionInterruptions: async () => ({
+          action: "continue" as const,
+        }),
         getCodexCapacityWait: async () => (resumed ? null : waiter),
         reconcileCodexCapacityWait: async (input: { cause: string }) => {
           reconciliations.push(input);
@@ -1114,7 +1142,9 @@ describe("Temporal workflow integration", () => {
         ...admission.activities,
         markSessionIdle: async () => undefined,
         failSessionAttempt: async () => undefined,
-        settleSessionControl: async () => undefined,
+        settleSessionInterruptions: async () => ({
+          action: "continue" as const,
+        }),
         getCodexCapacityWait: async () => waiter,
         reconcileCodexCapacityWait: async (input: { cause: string }) => {
           reconciliationCauses.push(input.cause);
@@ -1174,7 +1204,9 @@ describe("Temporal workflow integration", () => {
         ...admission.activities,
         markSessionIdle: async () => undefined,
         failSessionAttempt: async () => undefined,
-        settleSessionControl: async () => undefined,
+        settleSessionInterruptions: async () => ({
+          action: "continue" as const,
+        }),
         maybeContinueGoal: async () => {
           goalChecks += 1;
           return { action: "none" };
@@ -1258,7 +1290,9 @@ describe("Temporal workflow integration", () => {
         ...admission.activities,
         markSessionIdle: async () => undefined,
         failSessionAttempt: async () => undefined,
-        settleSessionControl: async () => undefined,
+        settleSessionInterruptions: async () => ({
+          action: "continue" as const,
+        }),
         getCodexCapacityWait: async () => (resumed ? null : waiter),
         reconcileCodexCapacityWait: async () => {
           reconciliations += 1;
@@ -1323,7 +1357,9 @@ describe("Temporal workflow integration", () => {
         ...admission.activities,
         markSessionIdle: async () => undefined,
         failSessionAttempt: async () => undefined,
-        settleSessionControl: async () => undefined,
+        settleSessionInterruptions: async () => ({
+          action: "continue" as const,
+        }),
         maybeContinueGoal: async (input: unknown) => {
           goalChecks.push(input);
           return { action: "none" };
@@ -1335,7 +1371,14 @@ describe("Temporal workflow integration", () => {
         const handle = await client.workflow.start("sessionWorkflow", {
           taskQueue,
           workflowId,
-          args: [{ ...scope, sessionId, initialEventId: "event-1", maxTurnsPerRun: 1 }],
+          args: [
+            {
+              ...scope,
+              sessionId,
+              initialEventId: "event-1",
+              maxTurnsPerRun: 1,
+            },
+          ],
         });
         // The handle follows the continueAsNew chain: it resolves only when the
         // FINAL run completes (idle, after both turns drained).
@@ -1391,7 +1434,9 @@ describe("Temporal workflow integration", () => {
         ...admission.activities,
         markSessionIdle: async () => undefined,
         failSessionAttempt: async () => undefined,
-        settleSessionControl: async () => undefined,
+        settleSessionInterruptions: async () => ({
+          action: "continue" as const,
+        }),
         maybeContinueGoal: async () => ({ action: "none" }),
       });
       const run = worker.run();
@@ -1400,7 +1445,14 @@ describe("Temporal workflow integration", () => {
         const handle = await client.workflow.start("sessionWorkflow", {
           taskQueue,
           workflowId,
-          args: [{ ...scope, sessionId, initialEventId: "event-1", maxTurnsPerRun: 1 }],
+          args: [
+            {
+              ...scope,
+              sessionId,
+              initialEventId: "event-1",
+              maxTurnsPerRun: 1,
+            },
+          ],
         });
         await waitFor(() => runs.length === 1);
         // Mirror the signaler contract: write the turn to the durable queue, THEN
@@ -1442,7 +1494,9 @@ describe("Temporal workflow integration", () => {
         ...admission.activities,
         markSessionIdle: async () => undefined,
         failSessionAttempt: async () => undefined,
-        settleSessionControl: async () => undefined,
+        settleSessionInterruptions: async () => ({
+          action: "continue" as const,
+        }),
         maybeContinueGoal: async () => ({ action: "none" }),
       });
       const run = worker.run();
@@ -1451,7 +1505,14 @@ describe("Temporal workflow integration", () => {
         const handle = await client.workflow.start("sessionWorkflow", {
           taskQueue,
           workflowId,
-          args: [{ ...scope, sessionId, initialEventId: "event-1", maxTurnsPerRun: 1 }],
+          args: [
+            {
+              ...scope,
+              sessionId,
+              initialEventId: "event-1",
+              maxTurnsPerRun: 1,
+            },
+          ],
         });
         // Wait until the first turn is blocked on approval, then submit two
         // signals. Only approval-1 exists in durable admission state.
@@ -1511,23 +1572,6 @@ function decodeContinuedInput(
 
 type WorkflowTestTurn = { id: string; triggerEventId: string };
 
-function createPendingControlPeek(controlEventId: string, initiallyPending = false) {
-  let reads = 0;
-  let settled = false;
-  return {
-    peekSessionWork: async () => {
-      const pending = !settled && (initiallyPending || reads > 0);
-      reads += 1;
-      return pending
-        ? ({ kind: "fence-settle", controlEventId } as const)
-        : ({ kind: "idle" } as const);
-    },
-    settled() {
-      settled = true;
-    },
-  };
-}
-
 function createTurnAdmission(
   queuedTurns: WorkflowTestTurn[],
   run: (
@@ -1540,7 +1584,9 @@ function createTurnAdmission(
   ) => Promise<Record<string, unknown>>,
 ) {
   let current: WorkflowTestTurn | null = null;
+  let currentAttemptId: string | null = null;
   let currentState: "running" | "approval" | "recovering" | "capacity" | null = null;
+  let interruptionPending = false;
   let approvalEventId: string | null = null;
   let capacityRef: {
     waiterId: string;
@@ -1556,6 +1602,10 @@ function createTurnAdmission(
       if (!current) throw new Error("cannot recover without a current turn");
       currentState = "recovering";
     },
+    requestInterruption() {
+      if (!currentAttemptId) throw new Error("cannot interrupt without a current attempt");
+      interruptionPending = true;
+    },
     resumeCapacity() {
       if (currentState !== "capacity") {
         throw new Error("cannot resume without a durable capacity wait");
@@ -1565,15 +1615,27 @@ function createTurnAdmission(
     },
     supersede() {
       current = null;
+      currentAttemptId = null;
       currentState = null;
+      interruptionPending = false;
       approvalEventId = null;
       capacityRef = null;
     },
     activities: {
       peekSessionWork: async () => {
+        if (interruptionPending) {
+          if (!currentAttemptId) throw new Error("interruption lost its current attempt");
+          return {
+            kind: "interruption-pending",
+            attemptId: currentAttemptId,
+          } as const;
+        }
         if (currentState === "approval") {
           return approvalEventId
-            ? ({ kind: "approval-pending", triggerEventId: approvalEventId } as const)
+            ? ({
+                kind: "approval-pending",
+                triggerEventId: approvalEventId,
+              } as const)
             : ({ kind: "approval-wait" } as const);
         }
         if (currentState === "capacity") {
@@ -1605,6 +1667,7 @@ function createTurnAdmission(
           if (!current) return { status: "unclaimed", reason: "no-work" } as const;
         }
         currentState = "running";
+        currentAttemptId = input.attemptId;
         const turn = current;
         const result = await run(input, turn!);
         if (result.status === "requires_action") {
@@ -1613,10 +1676,12 @@ function createTurnAdmission(
           currentState = "recovering";
         } else if (result.capacityWait) {
           current = null;
+          currentAttemptId = null;
           currentState = "capacity";
           capacityRef = result.capacityWait as typeof capacityRef;
         } else {
           current = null;
+          currentAttemptId = null;
           currentState = null;
         }
         return {

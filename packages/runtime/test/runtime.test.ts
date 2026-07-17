@@ -1163,16 +1163,15 @@ describe("runtime event normalization", () => {
       sessionInstructions: "Session-scoped rule.",
       persistentSessionSettings: {
         titleIsSet: true,
-        childNotificationsMode: "passive",
       },
       genesisTitleHint: true,
     });
 
     expect(agent.instructions).toContain(
-      "Persistent session settings already in effect: the display title is set; spawned-worker completion notifications are passive.",
+      "Persistent session settings already in effect: the display title is set.",
     );
     expect(agent.instructions).toContain(
-      "Do not call opengeni__set_session_title or opengeni__set_child_notifications_mode merely to reassert an unchanged value",
+      "Do not call opengeni__set_session_title merely to reassert an unchanged value",
     );
     expect(agent.instructions.indexOf("Session-scoped rule.")).toBeLessThan(
       agent.instructions.indexOf("Persistent session settings already in effect"),

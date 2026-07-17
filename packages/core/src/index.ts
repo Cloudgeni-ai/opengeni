@@ -27,6 +27,7 @@
 // The central dependency type surface (AppDependencies, ApiRouteDeps,
 // SessionWorkflowClient, DocumentIndexClient, ObjectStorageDependency).
 export * from "./dependencies";
+export * from "./workflow-wake-contract";
 
 // Boundary type slots referenced by dependencies.ts. The IMPLEMENTATIONS that
 // construct these (the real sandbox client / Better Auth instance) stay in
@@ -58,3 +59,4 @@ export * from "./domain/resources";
 export * from "./domain/scheduled-tasks";
 export * from "./domain/sessions";
 export * from "./domain/workspace-members";
+export * from "./application/session-commands";

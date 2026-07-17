@@ -58,7 +58,7 @@ export function useSessionEvents(
   sessionId: string | null | undefined,
   options: UseSessionEventsOptions = {},
 ): UseSessionEventsResult {
-  const { client, workspaceId } = useOpenGeni(options);
+  const { client, workspaceId, reconcileSession } = useOpenGeni(options);
   const enabled = options.enabled ?? true;
   const after = options.after ?? 0;
   const replay = options.replay ?? "windowed";
@@ -160,6 +160,7 @@ export function useSessionEvents(
         const stream = client.streamEvents(workspaceId, sessionId, {
           after: lastSequenceRef.current,
           signal: controller.signal,
+          beforeLive: async () => await reconcileSession(sessionId),
           onStateChange: (state) => {
             if (!controller.signal.aborted) {
               setConnectionState(state);
@@ -189,7 +190,7 @@ export function useSessionEvents(
         clearTimeout(flushTimer);
       }
     };
-  }, [client, workspaceId, sessionId, after, enabled, fullReplay, streamKey]);
+  }, [client, workspaceId, sessionId, after, enabled, fullReplay, streamKey, reconcileSession]);
 
   const loadOlder = useCallback(async (): Promise<boolean> => {
     if (!sessionId || fullReplay || loadingOlderRef.current || !hasOlderRef.current) {

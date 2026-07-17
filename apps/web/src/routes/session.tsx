@@ -11,6 +11,7 @@ import {
   useSession,
   useSessionEvents,
   useSessionLineage,
+  QueueSurface,
   useTurnQueue,
   type AgentMessageItem,
   type AuthNeededItem,
@@ -38,7 +39,6 @@ import { ComposerAgentsPill } from "@/components/session/composer-agents-pill";
 import { useRail } from "@/components/rail/rail-context";
 import { GoalSurface } from "@/components/session/goal-surface";
 import { SessionInspector } from "@/components/session/inspector";
-import { QueueSurface } from "@/components/session/queue-surface";
 import { SessionWorkspace } from "@/components/session/sandbox-workspace";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -53,7 +53,7 @@ import {
   summarizeSessionFailure,
 } from "@/lib/events";
 import { buildTools } from "@/lib/session-tools";
-import type { LineageNode } from "@opengeni/sdk";
+import type { ComposerDraft, LineageNode } from "@opengeni/sdk";
 import type { ConnectionMetadata, Session, SessionEvent } from "@/types";
 
 export function SessionRoute({
@@ -80,14 +80,20 @@ export function SessionRoute({
     loadOlder,
     error: streamError,
   } = useSessionEvents(sessionId);
-  const session = useMemo(
-    () =>
-      fetchedSession ? { ...fetchedSession, status: sessionStatus ?? fetchedSession.status } : null,
-    [fetchedSession, sessionStatus],
-  );
   // Queue + goal share the timeline's event stream — one SSE connection total.
   const queue = useTurnQueue(sessionId, { events });
   const goal = useGoal(sessionId, { events });
+  const session = useMemo(
+    () =>
+      fetchedSession
+        ? {
+            ...fetchedSession,
+            status: sessionStatus ?? fetchedSession.status,
+            effectiveControl: queue.effectiveControl ?? fetchedSession.effectiveControl,
+          }
+        : null,
+    [fetchedSession, queue.effectiveControl, sessionStatus],
+  );
   // /clear-view: a LOCAL, this-device-only collapse of the transcript. It hides
   // every event at or before the sequence seen when the operator ran it; the
   // server log is untouched and newer events (higher sequence) keep streaming
@@ -558,7 +564,17 @@ function SessionChatPane(props: {
   // The model is session-scoped: this session remembers its own pick (falling
   // back to the deployment default), so a switch here doesn't bleed into others.
   const model = context.modelForSession(props.session.id);
+  const { setModelForSession, setReasoningEffort, setSelectedCapabilityToolIds } = context;
+  const applyComposerSettings = useCallback(
+    (draft: ComposerDraft) => {
+      setModelForSession(props.session.id, draft.model);
+      setReasoningEffort(draft.reasoningEffort);
+      setSelectedCapabilityToolIds(new Set(draft.tools.map((tool) => tool.id)));
+    },
+    [props.session.id, setModelForSession, setReasoningEffort, setSelectedCapabilityToolIds],
+  );
   const composer = useComposer(props.session.id, {
+    events: props.events,
     // Evaluated at send time: attachments and tools picked while the draft was
     // being written ride along with the message.
     sendExtras: () => ({
@@ -567,6 +583,8 @@ function SessionChatPane(props: {
       model,
       reasoningEffort,
     }),
+    effectiveControl: props.queue.effectiveControl ?? props.session.effectiveControl,
+    onDraftApplied: applyComposerSettings,
     onSent: () => attachments.clear(),
   });
 
@@ -727,20 +745,23 @@ function SessionChatPane(props: {
       {/* The one compact control stack above the composer. Each surface hides
           when it has nothing to show, so the stack degrades to
           whichever one is present — or neither. */}
-      {!terminal ? (
-        <>
-          <QueueSurface queue={props.queue} />
-          <GoalSurface session={props.session} goal={props.goal} />
-          <ComposerAgentsPill workspaceId={props.session.workspaceId} nodes={props.agentNodes} />
-        </>
-      ) : null}
+      {!terminal ? <QueueSurface queue={props.queue} composer={composer} /> : null}
+      <GoalSurface session={props.session} goal={props.goal} />
+      <ComposerAgentsPill workspaceId={props.session.workspaceId} nodes={props.agentNodes} />
 
       <div className="shrink-0 px-4 pb-4 pt-1 sm:px-6">
         <div className="mx-auto w-full max-w-3xl">
           <ConsoleComposer
             composer={composer}
             attachments={attachments}
-            status={props.session.status}
+            effectiveControl={props.queue.effectiveControl ?? props.session.effectiveControl}
+            queuedAheadCount={props.queue.queue.length}
+            canControlWorkspace={workspacePermissions.includes("workspace:admin")}
+            controlLinks={{
+              workspaceHref: `/workspaces/${props.session.workspaceId}`,
+              sessionHref: (sessionId) =>
+                `/workspaces/${props.session.workspaceId}/sessions/${sessionId}`,
+            }}
             disabled={terminal}
             commandContext={commandContext}
             onClearView={props.onClearView}

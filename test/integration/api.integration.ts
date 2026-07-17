@@ -11,7 +11,6 @@ import {
   isSessionCompactionRequested,
   createDb,
   createSession,
-  enqueueSessionMessageAtomically,
   createWorkspaceEnvironment,
   dbSql,
   decryptEnvironmentValue,
@@ -79,6 +78,7 @@ import {
   DEFAULT_DOCUMENT_EMBEDDING_MODEL,
   searchDocuments,
 } from "../../packages/documents/src";
+import { submitTestHumanPrompt } from "./helpers/session-control";
 
 async function setSessionStatus(
   db: Database,
@@ -102,7 +102,10 @@ describe("API component integration", () => {
   let workflow: FakeWorkflowClient;
 
   beforeAll(async () => {
-    services = await startTestServices({ temporal: false, objectStorage: true });
+    services = await startTestServices({
+      temporal: false,
+      objectStorage: true,
+    });
     await services.migrate();
     dbClient = createDb(services.databaseUrl);
   }, 180_000);
@@ -111,6 +114,29 @@ describe("API component integration", () => {
     await dbClient?.close();
     await services?.down();
   }, 60_000);
+
+  test("configured browser principals pass the CORS preflight", async () => {
+    const app = createApp({
+      settings: testSettings({ databaseUrl: services.databaseUrl }),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+    });
+    const response = await app.request("http://api.test/v1/config/client", {
+      method: "OPTIONS",
+      headers: {
+        origin: "http://127.0.0.1:24000",
+        "access-control-request-method": "GET",
+        "access-control-request-headers": "content-type,x-opengeni-api-contract,x-opengeni-subject",
+      },
+    });
+
+    expect(response.status).toBe(204);
+    expect(response.headers.get("access-control-allow-origin")).toBe("http://127.0.0.1:24000");
+    expect(response.headers.get("access-control-allow-headers")?.toLowerCase()).toContain(
+      "x-opengeni-subject",
+    );
+  });
 
   test("creates sessions, persists initial events, and starts workflow", async () => {
     workflow = new FakeWorkflowClient();
@@ -171,7 +197,7 @@ describe("API component integration", () => {
     ).toBe(true);
   });
 
-  test("keeps legacy session lists compatible while pin pages are stable, idempotent, and OCC-fenced", async () => {
+  test("keeps array session lists stable while pin pages are idempotent and OCC-fenced", async () => {
     workflow = new FakeWorkflowClient();
     const app = createApp({
       settings: testSettings({ databaseUrl: services.databaseUrl }),
@@ -235,7 +261,11 @@ describe("API component integration", () => {
       pinVersion: number;
     }>;
     expect(Array.isArray(legacyRows)).toBe(true);
-    expect(legacyRows[0]).toMatchObject({ id: pinnedTarget.id, pinned: true, pinVersion: 1 });
+    expect(legacyRows[0]).toMatchObject({
+      id: pinnedTarget.id,
+      pinned: true,
+      pinVersion: 1,
+    });
 
     const firstPageResponse = await app.request(
       workspacePath(workspaceId, "/sessions?view=page&limit=1"),
@@ -310,7 +340,10 @@ describe("API component integration", () => {
 
     const repinned = await setPin({ pinned: true, expectedVersion: 2 });
     expect(repinned.status).toBe(200);
-    expect(await repinned.json()).toMatchObject({ pinned: true, pinVersion: 3 });
+    expect(await repinned.json()).toMatchObject({
+      pinned: true,
+      pinVersion: 3,
+    });
     const staleAfterRepin = await setPin({ pinned: false, expectedVersion: 0 });
     expect(staleAfterRepin.status).toBe(409);
     expect(await staleAfterRepin.json()).toMatchObject({
@@ -358,7 +391,10 @@ describe("API component integration", () => {
       headers: { "content-type": "application/json" },
     });
     expect(response.status).toBe(202);
-    const created = (await response.json()) as { id: string; instructions: string | null };
+    const created = (await response.json()) as {
+      id: string;
+      instructions: string | null;
+    };
     // Create response exposes the (trimmed) instructions.
     expect(created.instructions).toBe("You are the PR-reviewer persona: be terse and cite files.");
 
@@ -386,10 +422,16 @@ describe("API component integration", () => {
     // Absent instructions read back as null (byte-identical to today).
     const plain = await app.request(workspacePath(workspaceId, "/sessions"), {
       method: "POST",
-      body: JSON.stringify({ initialMessage: "no instructions", model: "scripted-model" }),
+      body: JSON.stringify({
+        initialMessage: "no instructions",
+        model: "scripted-model",
+      }),
       headers: { "content-type": "application/json" },
     });
-    const plainSession = (await plain.json()) as { id: string; instructions: string | null };
+    const plainSession = (await plain.json()) as {
+      id: string;
+      instructions: string | null;
+    };
     expect(plainSession.instructions).toBeNull();
   });
 
@@ -460,12 +502,18 @@ describe("API component integration", () => {
     // Absent key -> independent each time (the legacy path).
     const plain1 = await app.request(workspacePath(workspaceId, "/sessions"), {
       method: "POST",
-      body: JSON.stringify({ initialMessage: "no key", model: "scripted-model" }),
+      body: JSON.stringify({
+        initialMessage: "no key",
+        model: "scripted-model",
+      }),
       headers: { "content-type": "application/json" },
     });
     const plain2 = await app.request(workspacePath(workspaceId, "/sessions"), {
       method: "POST",
-      body: JSON.stringify({ initialMessage: "no key", model: "scripted-model" }),
+      body: JSON.stringify({
+        initialMessage: "no key",
+        model: "scripted-model",
+      }),
       headers: { "content-type": "application/json" },
     });
     expect(((await plain1.json()) as { id: string }).id).not.toBe(
@@ -593,7 +641,10 @@ describe("API component integration", () => {
     // Sessions without goals 404.
     const plain = await app.request(workspacePath(workspaceId, "/sessions"), {
       method: "POST",
-      body: JSON.stringify({ initialMessage: "no goal here", model: "scripted-model" }),
+      body: JSON.stringify({
+        initialMessage: "no goal here",
+        model: "scripted-model",
+      }),
       headers: { "content-type": "application/json" },
     });
     const plainSession = (await plain.json()) as { id: string };
@@ -614,7 +665,10 @@ describe("API component integration", () => {
     const workspaceId = await defaultWorkspaceId(app);
     const created = await app.request(workspacePath(workspaceId, "/sessions"), {
       method: "POST",
-      body: JSON.stringify({ initialMessage: "clear me", model: "scripted-model" }),
+      body: JSON.stringify({
+        initialMessage: "clear me",
+        model: "scripted-model",
+      }),
       headers: { "content-type": "application/json" },
     });
     const session = (await created.json()) as { id: string };
@@ -705,7 +759,10 @@ describe("API component integration", () => {
     });
     const created = await app.request(workspacePath(workspaceId, "/sessions"), {
       method: "POST",
-      body: JSON.stringify({ initialMessage: "compact me", model: "scripted-model" }),
+      body: JSON.stringify({
+        initialMessage: "compact me",
+        model: "scripted-model",
+      }),
       headers: { "content-type": "application/json" },
     });
     const session = (await created.json()) as { id: string };
@@ -756,17 +813,20 @@ describe("API component integration", () => {
       "MCP tool not registered",
     );
 
-    const grant = { ...baseGrant, metadata: { delegated: true, sessionId: session.id } };
+    const grant = {
+      ...baseGrant,
+      metadata: { delegated: true, sessionId: session.id },
+    };
     const mcp = buildOpenGeniMcpServer(mcpDeps, grant);
 
-    const setGoal = await callMcpTool<{ id: string; status: string; version: number }>(
-      mcp,
-      "goal_set",
-      {
-        text: "keep CI green",
-        successCriteria: "main pipeline passes",
-      },
-    );
+    const setGoal = await callMcpTool<{
+      id: string;
+      status: string;
+      version: number;
+    }>(mcp, "goal_set", {
+      text: "keep CI green",
+      successCriteria: "main pipeline passes",
+    });
     expect(setGoal.status).toBe("active");
     expect(setGoal.version).toBe(1);
 
@@ -776,11 +836,10 @@ describe("API component integration", () => {
     });
     expect(updated.version).toBe(2);
 
-    const pausedGoal = await callMcpTool<{ status: string; pausedReason: string }>(
-      mcp,
-      "goal_pause",
-      { rationale: "waiting on upstream fix" },
-    );
+    const pausedGoal = await callMcpTool<{
+      status: string;
+      pausedReason: string;
+    }>(mcp, "goal_pause", { rationale: "waiting on upstream fix" });
     expect(pausedGoal.status).toBe("paused");
     expect(pausedGoal.pausedReason).toBe("agent");
 
@@ -789,11 +848,10 @@ describe("API component integration", () => {
     });
     expect(replacedGoal.status).toBe("active");
 
-    const completedGoal = await callMcpTool<{ status: string; evidence: string }>(
-      mcp,
-      "goal_complete",
-      { evidence: "CI green for 3 consecutive runs" },
-    );
+    const completedGoal = await callMcpTool<{
+      status: string;
+      evidence: string;
+    }>(mcp, "goal_complete", { evidence: "CI green for 3 consecutive runs" });
     expect(completedGoal.status).toBe("completed");
     expect(completedGoal.evidence).toBe("CI green for 3 consecutive runs");
     await expect(callMcpTool(mcp, "goal_pause", { rationale: "too late" })).rejects.toThrow(
@@ -851,7 +909,9 @@ describe("API component integration", () => {
     const cookie = signin.headers.get("set-cookie");
     expect(cookie).toBeTruthy();
 
-    const access = await app.request("/v1/access/me", { headers: { cookie: cookie! } });
+    const access = await app.request("/v1/access/me", {
+      headers: { cookie: cookie! },
+    });
     expect(access.status).toBe(200);
     const context = (await access.json()) as AccessContext;
     expect(context.mode).toBe("managed");
@@ -866,14 +926,19 @@ describe("API component integration", () => {
       }),
     });
     expect(createdKey.status).toBe(201);
-    const keyBody = (await createdKey.json()) as { token: string; apiKey: { workspaceId: string } };
+    const keyBody = (await createdKey.json()) as {
+      token: string;
+      apiKey: { workspaceId: string };
+    };
     expect(keyBody.token).toStartWith("ogk_");
     expect(keyBody.apiKey.workspaceId).toBe(workspaceId);
     const keyWorkspaceList = await app.request("/v1/workspaces", {
       headers: { authorization: `Bearer ${keyBody.token}` },
     });
     expect(keyWorkspaceList.status).toBe(200);
-    const keyWorkspaces = (await keyWorkspaceList.json()) as Array<{ id: string }>;
+    const keyWorkspaces = (await keyWorkspaceList.json()) as Array<{
+      id: string;
+    }>;
     expect(keyWorkspaces.map((workspace) => workspace.id)).toEqual([workspaceId]);
 
     const billingKey = await app.request(workspacePath(workspaceId, "/api-keys"), {
@@ -894,10 +959,15 @@ describe("API component integration", () => {
     const workspaceOnlyKey = await app.request(workspacePath(workspaceId, "/api-keys"), {
       method: "POST",
       headers: { "content-type": "application/json", cookie: cookie! },
-      body: JSON.stringify({ name: "Workspace only key", permissions: ["workspace:read"] }),
+      body: JSON.stringify({
+        name: "Workspace only key",
+        permissions: ["workspace:read"],
+      }),
     });
     expect(workspaceOnlyKey.status).toBe(201);
-    const workspaceOnlyKeyBody = (await workspaceOnlyKey.json()) as { token: string };
+    const workspaceOnlyKeyBody = (await workspaceOnlyKey.json()) as {
+      token: string;
+    };
     const deniedBilling = await app.request(`/v1/billing?accountId=${context.defaultAccountId}`, {
       headers: { authorization: `Bearer ${workspaceOnlyKeyBody.token}` },
     });
@@ -1162,7 +1232,9 @@ describe("API component integration", () => {
       },
     );
     expect(preserved.status).toBe(200);
-    expect((await preserved.json()) as { status: string }).toMatchObject({ status: "ready" });
+    expect((await preserved.json()) as { status: string }).toMatchObject({
+      status: "ready",
+    });
 
     // Retrying after funds arrive attaches the same durable file rather than
     // creating another object or requiring a re-upload.
@@ -1350,8 +1422,11 @@ describe("API component integration", () => {
 
     expect((await app.request("/v1/access/me")).status).toBe(401);
     expect(
-      (await app.request("/v1/access/me", { headers: { authorization: "Bearer invalid-token" } }))
-        .status,
+      (
+        await app.request("/v1/access/me", {
+          headers: { authorization: "Bearer invalid-token" },
+        })
+      ).status,
     ).toBe(401);
 
     const extraWorkspace = await app.request("/v1/workspaces", {
@@ -1364,13 +1439,19 @@ describe("API component integration", () => {
     const keyOne = await app.request(workspacePath(workspaceId, "/api-keys"), {
       method: "POST",
       headers: { "content-type": "application/json", ...authHeaders },
-      body: JSON.stringify({ name: "first key", permissions: ["workspace:read"] }),
+      body: JSON.stringify({
+        name: "first key",
+        permissions: ["workspace:read"],
+      }),
     });
     expect(keyOne.status).toBe(201);
     const keyTwo = await app.request(workspacePath(workspaceId, "/api-keys"), {
       method: "POST",
       headers: { "content-type": "application/json", ...authHeaders },
-      body: JSON.stringify({ name: "second key", permissions: ["workspace:read"] }),
+      body: JSON.stringify({
+        name: "second key",
+        permissions: ["workspace:read"],
+      }),
     });
     expect(keyTwo.status).toBe(429);
 
@@ -1396,7 +1477,9 @@ describe("API component integration", () => {
         productAccessMode: "configured",
         delegationSecret,
         usageLimitsMode: "static",
-        staticUsageLimitsJson: JSON.stringify({ maxMonthlyCostMicrosPerAccount: 100 }),
+        staticUsageLimitsJson: JSON.stringify({
+          maxMonthlyCostMicrosPerAccount: 100,
+        }),
       }),
       db: dbClient.db,
       bus: new MemoryEventBus(),
@@ -1435,7 +1518,10 @@ describe("API component integration", () => {
 
     const blocked = await app.request(workspacePath(workspaceId, "/sessions"), {
       method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${token}`,
+      },
       body: JSON.stringify({ initialMessage: "blocked by cost cap" }),
     });
     expect(blocked.status).toBe(429);
@@ -1783,7 +1869,10 @@ describe("API component integration", () => {
         method: "POST",
         body: JSON.stringify({
           type: "user.message",
-          payload: { text: "search docs", tools: [{ kind: "mcp", id: "docs" }] },
+          payload: {
+            text: "search docs",
+            tools: [{ kind: "mcp", id: "docs" }],
+          },
         }),
         headers: { "content-type": "application/json" },
       },
@@ -1793,8 +1882,7 @@ describe("API component integration", () => {
     expect(event.payload).toEqual({
       text: "search docs",
       tools: [{ kind: "mcp", id: "docs" }],
-      origin: "human",
-      delivery: "queue",
+      delivery: "send",
     });
     expect((await requireSession(dbClient.db, workspaceId, session.id)).tools).toEqual([
       { kind: "mcp", id: "docs" },
@@ -1859,7 +1947,10 @@ describe("API component integration", () => {
       workspacePath(workspaceId, `/sessions/${session.id}/events`),
       {
         method: "POST",
-        body: JSON.stringify({ type: "user.message", payload: { text: "are you still there?" } }),
+        body: JSON.stringify({
+          type: "user.message",
+          payload: { text: "are you still there?" },
+        }),
         headers: { "content-type": "application/json" },
       },
     );
@@ -1880,7 +1971,10 @@ describe("API component integration", () => {
       workspacePath(workspaceId, `/sessions/${session.id}/events`),
       {
         method: "POST",
-        body: JSON.stringify({ type: "user.message", payload: { text: "hello?" } }),
+        body: JSON.stringify({
+          type: "user.message",
+          payload: { text: "hello?" },
+        }),
         headers: { "content-type": "application/json" },
       },
     );
@@ -1929,8 +2023,7 @@ describe("API component integration", () => {
       text: "use a stronger model",
       model: "gpt-5.6-sol",
       reasoningEffort: "xhigh",
-      origin: "human",
-      delivery: "queue",
+      delivery: "send",
     });
     const turns = await listSessionTurns(dbClient.db, workspaceId, session.id);
     const turn = turns.find((item) => item.triggerEventId === event.id);
@@ -1938,7 +2031,7 @@ describe("API component integration", () => {
     expect(turn?.reasoningEffort).toBe("xhigh");
   });
 
-  test("does not record follow-up run usage when workflow wake fails", async () => {
+  test("keeps a committed follow-up accepted and metered when immediate workflow wake fails", async () => {
     const failingWorkflow = new FakeWorkflowClient();
     const app = createApp({
       settings: testSettings({ databaseUrl: services.databaseUrl }),
@@ -1961,22 +2054,25 @@ describe("API component integration", () => {
       since: startOfUtcMonth(),
     });
 
-    const failed = await app.request(workspacePath(workspaceId, `/sessions/${session.id}/events`), {
-      method: "POST",
-      body: JSON.stringify({
-        type: "user.message",
-        payload: { text: "this wake fails" },
-      }),
-      headers: { "content-type": "application/json" },
-    });
+    const accepted = await app.request(
+      workspacePath(workspaceId, `/sessions/${session.id}/events`),
+      {
+        method: "POST",
+        body: JSON.stringify({
+          type: "user.message",
+          payload: { text: "this wake fails" },
+        }),
+        headers: { "content-type": "application/json" },
+      },
+    );
 
-    expect(failed.status).toBe(500);
+    expect(accepted.status).toBe(202);
     const after = await sumUsageQuantity(dbClient.db, {
       workspaceId,
       eventType: "agent_run.created",
       since: startOfUtcMonth(),
     });
-    expect(after).toBe(before);
+    expect(after).toBe(before + 1);
   });
 
   test("queues concurrent follow-up user messages while merging session tools", async () => {
@@ -2011,7 +2107,10 @@ describe("API component integration", () => {
           method: "POST",
           body: JSON.stringify({
             type: "user.message",
-            payload: { text: `search ${server.id}`, tools: [{ kind: "mcp", id: server.id }] },
+            payload: {
+              text: `search ${server.id}`,
+              tools: [{ kind: "mcp", id: server.id }],
+            },
           }),
           headers: { "content-type": "application/json" },
         }),
@@ -2045,7 +2144,10 @@ describe("API component integration", () => {
         method: "POST",
         body: JSON.stringify({
           type: "user.message",
-          payload: { text: "search docs", tools: [{ kind: "mcp", id: "docs" }] },
+          payload: {
+            text: "search docs",
+            tools: [{ kind: "mcp", id: "docs" }],
+          },
         }),
         headers: { "content-type": "application/json" },
       },
@@ -2071,7 +2173,10 @@ describe("API component integration", () => {
     expect(payload.deploymentRevision).toBe("dev");
     expect(payload.defaultModel).toBe("scripted-model");
     expect(payload.allowedReasoningEfforts).toContain("high");
-    expect(payload.fileUploads).toEqual({ enabled: false, maxSizeBytes: 5_000_000_000 });
+    expect(payload.fileUploads).toEqual({
+      enabled: false,
+      maxSizeBytes: 5_000_000_000,
+    });
   });
 
   test("catalog exposes workspace-template API paths and default MCP capability tools", async () => {
@@ -2100,7 +2205,11 @@ describe("API component integration", () => {
       capabilityId,
       kind: "mcp",
       metadata: {
-        mcpConnectivity: { status: "ok", checkedAt: new Date().toISOString(), toolCount: 1 },
+        mcpConnectivity: {
+          status: "ok",
+          checkedAt: new Date().toISOString(),
+          toolCount: 1,
+        },
       },
     });
 
@@ -2147,7 +2256,9 @@ describe("API component integration", () => {
       headers: { "content-type": "application/json" },
     });
     expect(explicitEmptyTools.status).toBe(202);
-    const explicitEmptySession = (await explicitEmptyTools.json()) as { id: string };
+    const explicitEmptySession = (await explicitEmptyTools.json()) as {
+      id: string;
+    };
     expect((await requireSession(dbClient.db, workspaceId, explicitEmptySession.id)).tools).toEqual(
       [],
     );
@@ -2214,7 +2325,9 @@ describe("API component integration", () => {
       {
         method: "PATCH",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ agentConfig: { prompt: "sweep verbatim", tools: [] } }),
+        body: JSON.stringify({
+          agentConfig: { prompt: "sweep verbatim", tools: [] },
+        }),
       },
     );
     expect(patchedExplicit.status).toBe(200);
@@ -2289,7 +2402,9 @@ describe("API component integration", () => {
         workspacePath(workspaceId, `/capabilities/${encodeURIComponent(capabilityId)}/enable`),
         {
           method: "POST",
-          body: JSON.stringify({ headers: { Authorization: "Bearer bad\u0007value" } }),
+          body: JSON.stringify({
+            headers: { Authorization: "Bearer bad\u0007value" },
+          }),
           headers: { "content-type": "application/json" },
         },
       );
@@ -2326,7 +2441,9 @@ describe("API component integration", () => {
       expect(installation.config.headersEncrypted).toBeUndefined();
       expect(installation.config.headers).toBeUndefined();
       expect(installation.config.note).toBe("kept");
-      expect(installation.metadata.mcpConnectivity).toMatchObject({ status: "ok" });
+      expect(installation.metadata.mcpConnectivity).toMatchObject({
+        status: "ok",
+      });
 
       // The stored value is AES-GCM ciphertext that decrypts back to the credential.
       const [row] = (await dbClient.db.execute(dbSql`
@@ -2378,7 +2495,9 @@ describe("API component integration", () => {
         },
       );
       expect(reEnabled.status).toBe(201);
-      const reEnabledInstallation = (await reEnabled.json()) as { config: Record<string, unknown> };
+      const reEnabledInstallation = (await reEnabled.json()) as {
+        config: Record<string, unknown>;
+      };
       expect(reEnabledInstallation.config.headerNames).toEqual(["Authorization"]);
     } finally {
       mcp.close();
@@ -2404,7 +2523,9 @@ describe("API component integration", () => {
     });
     const workspaceId = await defaultWorkspaceId(app);
     const bearer = `Bearer broker-${crypto.randomUUID()}`;
-    const mcp = startTestMcpServer({ requiredHeaders: { authorization: bearer } });
+    const mcp = startTestMcpServer({
+      requiredHeaders: { authorization: bearer },
+    });
     const providerDomain = new URL(mcp.url).host;
     const capabilityId = `mcp:i1accept-${crypto.randomUUID()}`;
     const mcpServerId = "i1accept";
@@ -2435,7 +2556,9 @@ describe("API component integration", () => {
         headers: { "content-type": "application/json" },
       });
       expect(createdConnection.status).toBe(201);
-      const { connection } = (await createdConnection.json()) as { connection: { id: string } };
+      const { connection } = (await createdConnection.json()) as {
+        connection: { id: string };
+      };
 
       const enabled = await app.request(
         workspacePath(workspaceId, `/capabilities/${encodeURIComponent(capabilityId)}/enable`),
@@ -2462,7 +2585,9 @@ describe("API component integration", () => {
         kind: "api_key",
         subjectScope: "workspace",
       });
-      expect(installation.metadata.mcpConnectivity).toMatchObject({ status: "auth_deferred" });
+      expect(installation.metadata.mcpConnectivity).toMatchObject({
+        status: "auth_deferred",
+      });
 
       const createdSession = await app.request(workspacePath(workspaceId, "/sessions"), {
         method: "POST",
@@ -2645,7 +2770,10 @@ describe("API component integration", () => {
       headers: { "content-type": "application/json" },
     });
     expect(created.status).toBe(201);
-    const task = (await created.json()) as { id: string; temporalScheduleId: string };
+    const task = (await created.json()) as {
+      id: string;
+      temporalScheduleId: string;
+    };
     expect(task.temporalScheduleId).toBe(`scheduled-task-${task.id}`);
     expect(workflow.synced).toHaveLength(1);
 
@@ -2899,7 +3027,9 @@ describe("API component integration", () => {
       headers: { "content-type": "application/json" },
     });
     expect(disabledResponse.status).toBe(201);
-    const disabledConnection = (await disabledResponse.json()) as { id: string };
+    const disabledConnection = (await disabledResponse.json()) as {
+      id: string;
+    };
 
     const created = await app.request(
       workspacePath(workspaceId, "/packs/marketing-social-daily-analysis/scheduled-tasks"),
@@ -2951,7 +3081,12 @@ describe("API component integration", () => {
           id: "drift-daily",
           name: "Daily drift check",
           description: "Compare expected state against live state.",
-          defaultSchedule: { type: "calendar", timeZone: "UTC", hour: 6, minute: 0 },
+          defaultSchedule: {
+            type: "calendar",
+            timeZone: "UTC",
+            hour: 6,
+            minute: 0,
+          },
           defaultRunMode: "new_session_per_run",
           defaultOverlapPolicy: "skip",
           prompt: "Run the daily drift check.",
@@ -2987,14 +3122,19 @@ describe("API component integration", () => {
 
     const builtInCollision = await app.request(workspacePath(workspaceId, "/packs"), {
       method: "POST",
-      body: JSON.stringify({ ...manifest, id: "marketing-social-daily-analysis" }),
+      body: JSON.stringify({
+        ...manifest,
+        id: "marketing-social-daily-analysis",
+      }),
       headers: { "content-type": "application/json" },
     });
     expect(builtInCollision.status).toBe(409);
 
     const listed = await app.request(workspacePath(workspaceId, "/packs"));
     expect(listed.status).toBe(200);
-    const listedBody = (await listed.json()) as { packs: Array<{ id: string; version: string }> };
+    const listedBody = (await listed.json()) as {
+      packs: Array<{ id: string; version: string }>;
+    };
     expect(listedBody.packs.map((pack) => pack.id)).toContain(packId);
     expect(listedBody.packs.find((pack) => pack.id === packId)?.version).toBe("0.1.1");
 
@@ -3102,7 +3242,12 @@ describe("API component integration", () => {
     const catalogResponse = await app.request(workspacePath(workspaceId, "/capabilities"));
     expect(catalogResponse.status).toBe(200);
     const catalog = (await catalogResponse.json()) as {
-      items: Array<{ id: string; kind: string; source: string; enabled: boolean }>;
+      items: Array<{
+        id: string;
+        kind: string;
+        source: string;
+        enabled: boolean;
+      }>;
     };
     expect(catalog.items.find((item) => item.id === `pack:${packId}`)).toMatchObject({
       kind: "pack",
@@ -3420,7 +3565,9 @@ describe("API component integration", () => {
         settings: testSettings({
           databaseUrl: services.databaseUrl,
           usageLimitsMode: "static",
-          staticUsageLimitsJson: JSON.stringify({ maxSchedulesPerWorkspace: 1 }),
+          staticUsageLimitsJson: JSON.stringify({
+            maxSchedulesPerWorkspace: 1,
+          }),
         }),
         db: dbClient.db,
         bus: new MemoryEventBus(),
@@ -3461,7 +3608,9 @@ describe("API component integration", () => {
         settings: testSettings({
           databaseUrl: services.databaseUrl,
           usageLimitsMode: "static",
-          staticUsageLimitsJson: JSON.stringify({ maxMonthlyAgentRunsPerWorkspace: 1 }),
+          staticUsageLimitsJson: JSON.stringify({
+            maxMonthlyAgentRunsPerWorkspace: 1,
+          }),
         }),
         db: dbClient.db,
         bus: new MemoryEventBus(),
@@ -3477,7 +3626,9 @@ describe("API component integration", () => {
       grant,
     );
     await expect(
-      callMcpTool(blockedTriggerMcp, "scheduled_tasks_trigger", { id: task.id }),
+      callMcpTool(blockedTriggerMcp, "scheduled_tasks_trigger", {
+        id: task.id,
+      }),
     ).rejects.toThrow("monthly agent run limit reached");
     expect(workflow.triggers).toHaveLength(0);
   });
@@ -3550,7 +3701,10 @@ describe("API component integration", () => {
     const payload = (await response.json()) as {
       fileUploads: { enabled: boolean; maxSizeBytes: number };
     };
-    expect(payload.fileUploads).toEqual({ enabled: true, maxSizeBytes: 5_000_000_000 });
+    expect(payload.fileUploads).toEqual({
+      enabled: true,
+      maxSizeBytes: 5_000_000_000,
+    });
   });
 
   test("rejects mixed GitHub App repository installations during session create", async () => {
@@ -3666,9 +3820,16 @@ describe("API component integration", () => {
       headers: { "content-type": "application/json" },
     });
     expect(sessionResponse.status).toBe(202);
-    const session = (await sessionResponse.json()) as { id: string; resources: unknown[] };
+    const session = (await sessionResponse.json()) as {
+      id: string;
+      resources: unknown[];
+    };
     expect(session.resources).toEqual([
-      { kind: "file", fileId: upload.fileId, mountPath: `files/${upload.fileId}` },
+      {
+        kind: "file",
+        fileId: upload.fileId,
+        mountPath: `files/${upload.fileId}`,
+      },
     ]);
     const initialEvents = await listSessionEvents(dbClient.db, workspaceId, session.id, 0, 10);
     const initialPayload = initialEvents.find((event) => event.type === "user.message")?.payload as
@@ -3676,7 +3837,13 @@ describe("API component integration", () => {
       | undefined;
     expect(initialPayload).toMatchObject({
       text: "use file",
-      resources: [{ kind: "file", fileId: upload.fileId, mountPath: `files/${upload.fileId}` }],
+      resources: [
+        {
+          kind: "file",
+          fileId: upload.fileId,
+          mountPath: `files/${upload.fileId}`,
+        },
+      ],
     });
     if (Array.isArray(initialPayload?.tools)) {
       expect(initialPayload.tools).toContainEqual({
@@ -3691,7 +3858,9 @@ describe("API component integration", () => {
       body: JSON.stringify({ initialMessage: "start empty" }),
       headers: { "content-type": "application/json" },
     });
-    const followUpSession = (await followUpSessionResponse.json()) as { id: string };
+    const followUpSession = (await followUpSessionResponse.json()) as {
+      id: string;
+    };
     await setSessionStatus(dbClient.db, workspaceId, followUpSession.id, "idle", null);
     const followUp = await app.request(
       workspacePath(workspaceId, `/sessions/${followUpSession.id}/events`),
@@ -3711,7 +3880,13 @@ describe("API component integration", () => {
     const followUpEvent = (await followUp.json()) as SessionEvent;
     expect(followUpEvent.payload).toMatchObject({
       text: "use file now",
-      resources: [{ kind: "file", fileId: upload.fileId, mountPath: `files/${upload.fileId}` }],
+      resources: [
+        {
+          kind: "file",
+          fileId: upload.fileId,
+          mountPath: `files/${upload.fileId}`,
+        },
+      ],
     });
     if (Array.isArray((followUpEvent.payload as Record<string, unknown>).tools)) {
       expect((followUpEvent.payload as { tools: unknown[] }).tools).toContainEqual({
@@ -3721,7 +3896,11 @@ describe("API component integration", () => {
       });
     }
     expect((await requireSession(dbClient.db, workspaceId, followUpSession.id)).resources).toEqual([
-      { kind: "file", fileId: upload.fileId, mountPath: `files/${upload.fileId}` },
+      {
+        kind: "file",
+        fileId: upload.fileId,
+        mountPath: `files/${upload.fileId}`,
+      },
     ]);
   });
 
@@ -3735,7 +3914,11 @@ describe("API component integration", () => {
     const workspaceId = await defaultWorkspaceId(app);
     const uploadResponse = await app.request(workspacePath(workspaceId, "/files/uploads"), {
       method: "POST",
-      body: JSON.stringify({ filename: "pending.txt", contentType: "text/plain", sizeBytes: 7 }),
+      body: JSON.stringify({
+        filename: "pending.txt",
+        contentType: "text/plain",
+        sizeBytes: 7,
+      }),
       headers: { "content-type": "application/json" },
     });
     const upload = (await uploadResponse.json()) as { fileId: string };
@@ -3770,7 +3953,10 @@ describe("API component integration", () => {
       workspacePath(workspaceId, `/sessions/${session.id}/events`),
       {
         method: "POST",
-        body: JSON.stringify({ type: "user.message", payload: { text: "too soon" } }),
+        body: JSON.stringify({
+          type: "user.message",
+          payload: { text: "too soon" },
+        }),
         headers: { "content-type": "application/json" },
       },
     );
@@ -3809,6 +3995,7 @@ describe("API component integration", () => {
     const approvalWaitClaim = await claimSessionWorkForAttempt(dbClient.db, workspaceId, {
       sessionId: session.id,
       workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
       attemptId: approvalWaitAttemptId,
       dispatchId: `dispatch-${crypto.randomUUID()}`,
       trigger: { kind: "next" },
@@ -3821,7 +4008,6 @@ describe("API component integration", () => {
       turnId: approvalWaitClaim.turn.id,
       triggerEventId: approvalWaitClaim.turn.triggerEventId,
       attemptId: approvalWaitAttemptId,
-      childCompletionParentWakeEnabled: false,
       turnStatus: "requires_action",
       sessionStatus: "requires_action",
       activeTurnId: approvalWaitClaim.turn.id,
@@ -3846,6 +4032,7 @@ describe("API component integration", () => {
     const running = await claimSessionWorkForAttempt(dbClient.db, workspaceId, {
       sessionId: session.id,
       workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
       attemptId,
       dispatchId: `dispatch-${crypto.randomUUID()}`,
       trigger: { kind: "approval", triggerEventId: approvalEvent.id },
@@ -3853,69 +4040,42 @@ describe("API component integration", () => {
     expect(running).toMatchObject({ action: "claimed" });
     if (running.action !== "claimed") throw new Error("approval fixture did not resume");
 
+    const dispatchCountBeforePause = workflow.wakeDispatches;
     const paused = await app.request(
       workspacePath(workspaceId, `/sessions/${session.id}/control`),
       {
         method: "POST",
         body: JSON.stringify({
-          mode: "pause",
+          action: "pause",
           reason: "operator pause",
           clientEventId: `pause-${crypto.randomUUID()}`,
         }),
         headers: { "content-type": "application/json" },
       },
     );
-    expect(paused.status).toBe(202);
+    expect(paused.status).toBe(200);
     expect(await paused.json()).toMatchObject({
-      controlState: "paused",
-      expectedActiveTurnId: running.turn.id,
-      expectedAttemptId: attemptId,
-      shouldSignalControl: true,
+      effectiveControl: { state: "paused" },
+      interruptionCount: 1,
     });
-    expect(workflow.interrupts).toHaveLength(1);
-    expect(workflow.interrupts[0]).toMatchObject({
-      workspaceId,
-      sessionId: session.id,
-      workflowId: `session-${session.id}`,
-    });
-    expect((workflow.interrupts[0] as { accountId?: unknown }).accountId).toBeTruthy();
+    expect(workflow.wakeDispatches).toBe(dispatchCountBeforePause + 1);
 
     const resumed = await app.request(
       workspacePath(workspaceId, `/sessions/${session.id}/control`),
       {
         method: "POST",
         body: JSON.stringify({
-          mode: "resume",
+          action: "resume",
           reason: "continue",
           clientEventId: `resume-${crypto.randomUUID()}`,
         }),
         headers: { "content-type": "application/json" },
       },
     );
-    expect(resumed.status).toBe(202);
-    expect(await resumed.json()).toMatchObject({ controlState: "active" });
-
-    // Pausing an idle session is still a durable control operation, but there
-    // is no running attempt to interrupt.
-    await setSessionStatus(dbClient.db, workspaceId, session.id, "idle", null);
-    const idlePause = await app.request(
-      workspacePath(workspaceId, `/sessions/${session.id}/control`),
-      {
-        method: "POST",
-        body: JSON.stringify({
-          mode: "pause",
-          reason: "idle pause",
-          clientEventId: `idle-pause-${crypto.randomUUID()}`,
-        }),
-        headers: { "content-type": "application/json" },
-      },
-    );
-    expect(idlePause.status).toBe(202);
-    expect(await idlePause.json()).toMatchObject({
-      controlState: "paused",
-      shouldSignalControl: false,
+    expect(resumed.status).toBe(200);
+    expect(await resumed.json()).toMatchObject({
+      effectiveControl: { state: "active" },
     });
-    expect(workflow.interrupts).toHaveLength(1);
 
     const malformed = await app.request(
       workspacePath(workspaceId, `/sessions/${session.id}/events`),
@@ -4107,7 +4267,10 @@ describe("API component integration", () => {
     const workspaceId = await defaultWorkspaceId(app);
     const response = await app.request(workspacePath(workspaceId, "/github/app"));
     expect(response.status).toBe(200);
-    const body = (await response.json()) as { configured: boolean; missing: string[] };
+    const body = (await response.json()) as {
+      configured: boolean;
+      missing: string[];
+    };
     expect(body.configured).toBe(false);
     expect(body.missing.length).toBeGreaterThan(0);
   });
@@ -4190,7 +4353,11 @@ describe("API component integration", () => {
       requiredHeaders: Record<string, string>;
     };
     const body = "Private endpoint failures are fixed by updating the network policy.";
-    await fetch(upload.putUrl, { method: "PUT", body, headers: upload.requiredHeaders });
+    await fetch(upload.putUrl, {
+      method: "PUT",
+      body,
+      headers: upload.requiredHeaders,
+    });
     expect(
       (
         await app.request(
@@ -4202,7 +4369,10 @@ describe("API component integration", () => {
 
     const baseResponse = await app.request(workspacePath(workspaceId, "/document-bases"), {
       method: "POST",
-      body: JSON.stringify({ name: "Runbooks", description: "Operational docs" }),
+      body: JSON.stringify({
+        name: "Runbooks",
+        description: "Operational docs",
+      }),
       headers: { "content-type": "application/json" },
     });
     expect(baseResponse.status).toBe(201);
@@ -4388,7 +4558,9 @@ describe("API component integration", () => {
       },
     );
     expect(deletedSearchResponse.status).toBe(200);
-    const deletedSearch = (await deletedSearchResponse.json()) as { results: unknown[] };
+    const deletedSearch = (await deletedSearchResponse.json()) as {
+      results: unknown[];
+    };
     expect(deletedSearch.results).toEqual([]);
 
     await expect(requireFile(dbClient.db, workspaceId, upload.fileId)).resolves.toMatchObject({
@@ -4466,7 +4638,10 @@ describe("API component integration", () => {
       workspacePath(workspaceId, "/knowledge/memories?status=approved&query=Azure"),
     );
     expect(approvedSearchAfter.status).toBe(200);
-    const memories = (await approvedSearchAfter.json()) as Array<{ id: string; text: string }>;
+    const memories = (await approvedSearchAfter.json()) as Array<{
+      id: string;
+      text: string;
+    }>;
     expect(memories[0]?.id).toBe(proposed.id);
     expect(memories[0]?.text).toContain("Azure Blob");
 
@@ -4527,7 +4702,10 @@ describe("API component integration", () => {
     };
     expect(created.status).toBe("active");
     expect(created.pinned).toBe(false);
-    expect(created.metadata).toMatchObject({ source: "rest-lifecycle", origin: "human" });
+    expect(created.metadata).toMatchObject({
+      source: "rest-lifecycle",
+      origin: "human",
+    });
 
     // List (active) shows it.
     const listResponse = await app.request(
@@ -4549,7 +4727,10 @@ describe("API component integration", () => {
     );
     expect(searchResponse.status).toBe(200);
     const search = (await searchResponse.json()) as {
-      results: Array<{ memory: { id: string; usageCount: number }; score: number }>;
+      results: Array<{
+        memory: { id: string; usageCount: number };
+        score: number;
+      }>;
     };
     const found = search.results.find((r) => r.memory.id === created.id);
     expect(found).toBeTruthy();
@@ -4611,7 +4792,9 @@ describe("API component integration", () => {
       },
     );
     expect(proposedActiveResponse.status).toBe(201);
-    const proposedActive = (await proposedActiveResponse.json()) as { id: string };
+    const proposedActive = (await proposedActiveResponse.json()) as {
+      id: string;
+    };
     const activatedResponse = await app.request(
       workspacePath(workspaceId, `/knowledge/memories/${proposedActive.id}`),
       {
@@ -4621,7 +4804,10 @@ describe("API component integration", () => {
       },
     );
     expect(activatedResponse.status).toBe(200);
-    const activated = (await activatedResponse.json()) as { text: string; status: string };
+    const activated = (await activatedResponse.json()) as {
+      text: string;
+      status: string;
+    };
     expect(activated.status).toBe("active");
     expect(activated.text).toContain("[REDACTED]");
     expect(activated.text).not.toContain(activateSecret);
@@ -4651,7 +4837,9 @@ describe("API component integration", () => {
       },
     );
     expect(proposedApprovedResponse.status).toBe(201);
-    const proposedApproved = (await proposedApprovedResponse.json()) as { id: string };
+    const proposedApproved = (await proposedApprovedResponse.json()) as {
+      id: string;
+    };
     const approvedTransitionResponse = await app.request(
       workspacePath(workspaceId, `/knowledge/memories/${proposedApproved.id}`),
       {
@@ -4695,7 +4883,10 @@ describe("API component integration", () => {
     // PATCH status into the agent-visible set enforces the workspace cap.
     const cappedResponse = await app.request(workspacePath(workspaceId, "/knowledge/memories"), {
       method: "POST",
-      body: JSON.stringify({ status: "proposed", text: "A proposed row to activate at cap." }),
+      body: JSON.stringify({
+        status: "proposed",
+        text: "A proposed row to activate at cap.",
+      }),
       headers: { "content-type": "application/json" },
     });
     expect(cappedResponse.status).toBe(201);
@@ -4745,9 +4936,11 @@ describe("API component integration", () => {
       },
     );
     expect(
-      ((await afterArchive.json()) as { results: Array<{ memory: { id: string } }> }).results.some(
-        (r) => r.memory.id === created.id,
-      ),
+      (
+        (await afterArchive.json()) as {
+          results: Array<{ memory: { id: string } }>;
+        }
+      ).results.some((r) => r.memory.id === created.id),
     ).toBe(false);
 
     // Invalid params → 400 not 500.
@@ -4766,7 +4959,9 @@ describe("API component integration", () => {
 
     // Settings default off, PATCH round-trips + preserves unknown keys.
     const beforeSettings = await app.request(workspacePath(workspaceId, ""));
-    const workspaceBefore = (await beforeSettings.json()) as { settings: Record<string, unknown> };
+    const workspaceBefore = (await beforeSettings.json()) as {
+      settings: Record<string, unknown>;
+    };
     expect(workspaceBefore.settings.memoryEnabled ?? false).toBe(false);
 
     const seedUnknown = await app.request(workspacePath(workspaceId, "/settings"), {
@@ -4781,7 +4976,9 @@ describe("API component integration", () => {
       headers: { "content-type": "application/json" },
     });
     expect(enableResponse.status).toBe(200);
-    const enabled = (await enableResponse.json()) as { settings: Record<string, unknown> };
+    const enabled = (await enableResponse.json()) as {
+      settings: Record<string, unknown>;
+    };
     expect(enabled.settings.memoryEnabled).toBe(true);
     expect(enabled.settings.someFutureKey).toBe("keep-me");
   });
@@ -4879,7 +5076,9 @@ describe("API component integration", () => {
       settings: {
         ...objectStorageSettings(services.databaseUrl, services.objectStorageEndpoint!),
         usageLimitsMode: "static",
-        staticUsageLimitsJson: JSON.stringify({ maxDocumentIndexedChunksPerWorkspace: 2 }),
+        staticUsageLimitsJson: JSON.stringify({
+          maxDocumentIndexedChunksPerWorkspace: 2,
+        }),
       },
       db: dbClient.db,
       bus: new MemoryEventBus(),
@@ -4889,7 +5088,10 @@ describe("API component integration", () => {
           name: "test-text",
           parse: async (bytes, file) => ({
             text: new TextDecoder().decode(bytes),
-            metadata: { filename: file.filename, contentType: file.contentType },
+            metadata: {
+              filename: file.filename,
+              contentType: file.contentType,
+            },
           }),
         },
         chunker: {
@@ -5003,7 +5205,11 @@ describe("API component integration", () => {
       bus: new MemoryEventBus(),
       workflowClient: new FakeWorkflowClient(),
     });
-    const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: mcpApp.fetch });
+    const server = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch: mcpApp.fetch,
+    });
     const settings = {
       ...appSettings,
       mcpServers: [
@@ -5164,7 +5370,9 @@ describe("API component integration", () => {
           headers: { "content-type": "application/json" },
         },
       );
-      const pendingUpload = (await pendingUploadResponse.json()) as { fileId: string };
+      const pendingUpload = (await pendingUploadResponse.json()) as {
+        fileId: string;
+      };
       expect(
         mcpText(
           await filesServer.callTool("files__files_get_download_url", {
@@ -5201,7 +5409,11 @@ describe("API component integration", () => {
       workflowClient: new FakeWorkflowClient(),
       documentServices,
     });
-    const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: mcpApp.fetch });
+    const server = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch: mcpApp.fetch,
+    });
     const settings = {
       ...appSettings,
       mcpServers: [
@@ -5240,7 +5452,9 @@ describe("API component integration", () => {
       await prepared.close();
       prepared = null;
 
-      await updateWorkspaceSettings(dbClient.db, workspaceId, { memoryEnabled: true });
+      await updateWorkspaceSettings(dbClient.db, workspaceId, {
+        memoryEnabled: true,
+      });
 
       prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: "opengeni" }], {
         accountId,
@@ -5357,7 +5571,11 @@ describe("API component integration", () => {
             reason: "Staging deploy process moved into a runbook.",
           }),
         ),
-      ) as { action: string; memory: { id: string; status: string }; replacement: null };
+      ) as {
+        action: string;
+        memory: { id: string; status: string };
+        replacement: null;
+      };
       expect(archived.action).toBe("archived");
       expect(archived.memory.status).toBe("archived");
       expect(
@@ -5449,7 +5667,9 @@ describe("API component integration", () => {
     expect(JSON.stringify(listedBody)).not.toContain("tok-write-only-123456");
     const canonicalListed = await app.request(workspacePath(workspaceId, "/variable-sets"));
     expect(canonicalListed.status).toBe(200);
-    const canonicalListedBody = (await canonicalListed.json()) as Array<{ id: string }>;
+    const canonicalListedBody = (await canonicalListed.json()) as Array<{
+      id: string;
+    }>;
     expect(canonicalListedBody).toEqual(listedBody);
 
     const rotated = await app.request(
@@ -5461,11 +5681,16 @@ describe("API component integration", () => {
       },
     );
     expect(rotated.status).toBe(200);
-    const rotatedBody = (await rotated.json()) as { name: string; version: number };
+    const rotatedBody = (await rotated.json()) as {
+      name: string;
+      version: number;
+    };
     expect(rotatedBody).toMatchObject({ name: "API_TOKEN", version: 2 });
     expect(JSON.stringify(rotatedBody)).not.toContain("tok-rotated-654321");
 
-    const storedRows = await dbClient.db.execute(dbSql<{ value_encrypted: string }>`
+    const storedRows = await dbClient.db.execute(dbSql<{
+      value_encrypted: string;
+    }>`
       select value_encrypted from workspace_variable_set_variables
       where variable_set_id = ${created.id} and name = 'API_TOKEN'
     `);
@@ -5503,7 +5728,9 @@ describe("API component integration", () => {
       where target_id = ${created.id} and action like 'variable_set.%'
     `);
     expect(Number(audited[0]?.count ?? 0)).toBeGreaterThanOrEqual(4);
-    const auditedPayloads = await dbClient.db.execute(dbSql<{ metadata: unknown }>`
+    const auditedPayloads = await dbClient.db.execute(dbSql<{
+      metadata: unknown;
+    }>`
       select metadata from audit_events where target_id = ${created.id}
     `);
     expect(JSON.stringify(auditedPayloads)).not.toContain("tok-rotated-654321");
@@ -5534,7 +5761,10 @@ describe("API component integration", () => {
     const sessionResponse = await app.request(workspacePath(workspaceId, "/sessions"), {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ initialMessage: "attach", environmentId: crypto.randomUUID() }),
+      body: JSON.stringify({
+        initialMessage: "attach",
+        environmentId: crypto.randomUUID(),
+      }),
     });
     expect(sessionResponse.status).toBe(503);
   });
@@ -5558,7 +5788,10 @@ describe("API component integration", () => {
     const unknownAttachment = await app.request(workspacePath(workspaceId, "/sessions"), {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ initialMessage: "attach", environmentId: crypto.randomUUID() }),
+      body: JSON.stringify({
+        initialMessage: "attach",
+        environmentId: crypto.randomUUID(),
+      }),
     });
     expect(unknownAttachment.status).toBe(422);
     expect(await unknownAttachment.text()).toContain("unknown variableSetId");
@@ -5566,10 +5799,16 @@ describe("API component integration", () => {
     const sessionResponse = await app.request(workspacePath(workspaceId, "/sessions"), {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ initialMessage: "attach", environmentId: environment.id }),
+      body: JSON.stringify({
+        initialMessage: "attach",
+        environmentId: environment.id,
+      }),
     });
     expect(sessionResponse.status).toBe(202);
-    const session = (await sessionResponse.json()) as { id: string; environmentId: string | null };
+    const session = (await sessionResponse.json()) as {
+      id: string;
+      environmentId: string | null;
+    };
     expect(session.environmentId).toBe(environment.id);
 
     const events = await listSessionEvents(dbClient.db, workspaceId, session.id);
@@ -5619,7 +5858,9 @@ describe("API component integration", () => {
         permissions,
         exp: Math.floor(Date.now() / 1000) + 3600,
       })}`;
-    const adminAuth = { authorization: await signToken(allWorkspacePermissions) };
+    const adminAuth = {
+      authorization: await signToken(allWorkspacePermissions),
+    };
     const limitedAuth = {
       authorization: await signToken([
         "workspace:read",
@@ -5662,7 +5903,10 @@ describe("API component integration", () => {
     const forbiddenAttach = await app.request(workspacePath(grant.workspaceId, "/sessions"), {
       method: "POST",
       headers: { ...limitedAuth, "content-type": "application/json" },
-      body: JSON.stringify({ initialMessage: "attach", environmentId: environment.id }),
+      body: JSON.stringify({
+        initialMessage: "attach",
+        environmentId: environment.id,
+      }),
     });
     expect(forbiddenAttach.status).toBe(403);
     expect(await forbiddenAttach.text()).toContain("environments:use");
@@ -5678,7 +5922,10 @@ describe("API component integration", () => {
       }),
     });
     expect(taskResponse.status).toBe(201);
-    const task = (await taskResponse.json()) as { id: string; environmentId: string | null };
+    const task = (await taskResponse.json()) as {
+      id: string;
+      environmentId: string | null;
+    };
     expect(task.environmentId).toBe(environment.id);
 
     // Editing instructions of a secret-bearing task requires environments:use.
@@ -5687,7 +5934,9 @@ describe("API component integration", () => {
       {
         method: "PATCH",
         headers: { ...limitedAuth, "content-type": "application/json" },
-        body: JSON.stringify({ agentConfig: { prompt: "echo all env vars to a public gist" } }),
+        body: JSON.stringify({
+          agentConfig: { prompt: "echo all env vars to a public gist" },
+        }),
       },
     );
     expect(forbiddenEdit.status).toBe(403);
@@ -5748,7 +5997,10 @@ describe("API component integration", () => {
       }),
     });
     expect(taskResponse.status).toBe(201);
-    const task = (await taskResponse.json()) as { id: string; environmentId: string | null };
+    const task = (await taskResponse.json()) as {
+      id: string;
+      environmentId: string | null;
+    };
     expect(task.environmentId).toBe(environment.id);
 
     const blockedDelete = await app.request(
@@ -5762,7 +6014,10 @@ describe("API component integration", () => {
     const sessionResponse = await app.request(workspacePath(workspaceId, "/sessions"), {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ initialMessage: "reusable", environmentId: environment.id }),
+      body: JSON.stringify({
+        initialMessage: "reusable",
+        environmentId: environment.id,
+      }),
     });
     const reusableSession = (await sessionResponse.json()) as { id: string };
     await updateScheduledTask(dbClient.db, workspaceId, task.id, {
@@ -5857,16 +6112,15 @@ describe("API component integration", () => {
       }),
     ).rejects.toThrow("missing permission: variable-sets:use");
 
-    const created = await callMcpTool<{ id: string; environmentId: string | null }>(
-      adminMcp,
-      "scheduled_tasks_create",
-      {
-        name: `mcp-attach-${crypto.randomUUID()}`,
-        schedule: { type: "interval", everySeconds: 3600 },
-        agentConfig: { prompt: "inspect" },
-        environmentId: environment.id,
-      },
-    );
+    const created = await callMcpTool<{
+      id: string;
+      environmentId: string | null;
+    }>(adminMcp, "scheduled_tasks_create", {
+      name: `mcp-attach-${crypto.randomUUID()}`,
+      schedule: { type: "interval", everySeconds: 3600 },
+      agentConfig: { prompt: "inspect" },
+      environmentId: environment.id,
+    });
     expect(created.environmentId).toBe(environment.id);
 
     await expect(
@@ -5930,11 +6184,10 @@ describe("API component integration", () => {
     });
     expect(listed.sessions.some((session) => session.id === created.id)).toBe(true);
 
-    const fetched = await callMcpTool<{ id: string; environmentId: string | null }>(
-      mcp,
-      "session_get",
-      { sessionId: created.id },
-    );
+    const fetched = await callMcpTool<{
+      id: string;
+      environmentId: string | null;
+    }>(mcp, "session_get", { sessionId: created.id });
     expect(fetched.id).toBe(created.id);
     expect(fetched.environmentId).toBeNull();
     await expect(
@@ -5953,11 +6206,13 @@ describe("API component integration", () => {
       "turn.queued",
     ]);
     expect(timeline.nextAfter).toBe(timeline.events[timeline.events.length - 1]!.sequence);
-    const caughtUp = await callMcpTool<{ events: unknown[]; nextAfter: number }>(
-      mcp,
-      "session_events",
-      { sessionId: created.id, after: timeline.nextAfter },
-    );
+    const caughtUp = await callMcpTool<{
+      events: unknown[];
+      nextAfter: number;
+    }>(mcp, "session_events", {
+      sessionId: created.id,
+      after: timeline.nextAfter,
+    });
     expect(caughtUp.events).toHaveLength(0);
     expect(caughtUp.nextAfter).toBe(timeline.nextAfter);
 
@@ -5967,6 +6222,7 @@ describe("API component integration", () => {
     }>(mcp, "session_send_message", {
       sessionId: created.id,
       text: "also enable the health alerts",
+      idempotencyKey: crypto.randomUUID(),
     });
     expect(sent.event.type).toBe("user.message");
     expect(sent.event.payload.text).toBe("also enable the health alerts");
@@ -5974,9 +6230,27 @@ describe("API component integration", () => {
     const turns = await listSessionTurns(dbClient.db, grant.workspaceId, created.id);
     expect(turns.some((turn) => turn.id === sent.turnId && turn.status === "queued")).toBe(true);
 
+    const callerAttemptId = crypto.randomUUID();
+    const callerClaim = await claimSessionWorkForAttempt(dbClient.db, grant.workspaceId, {
+      sessionId: created.id,
+      workflowId: `session-${created.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: callerAttemptId,
+      dispatchId: `dispatch-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    if (callerClaim.action !== "claimed") {
+      throw new Error(`manager MCP caller was not claimed: ${callerClaim.reason}`);
+    }
     const workerMcpWithIdentity = buildOpenGeniMcpServer(mcpDeps, {
       ...grant,
-      metadata: { delegated: true, sessionId: created.id },
+      metadata: {
+        delegated: true,
+        sessionId: created.id,
+        turnId: callerClaim.turn.id,
+        attemptId: callerAttemptId,
+        executionGeneration: callerClaim.turn.executionGeneration,
+      },
     });
     const beforeInternalTurnIds = (
       await listSessionTurns(dbClient.db, grant.workspaceId, created.id)
@@ -5990,6 +6264,7 @@ describe("API component integration", () => {
     }>(workerMcpWithIdentity, "session_send_message", {
       sessionId: created.id,
       text: "child result one of several",
+      idempotencyKey: crypto.randomUUID(),
     });
     expect(internal).toMatchObject({
       delivered: true,
@@ -6005,11 +6280,88 @@ describe("API component integration", () => {
     ).toEqual([
       expect.objectContaining({
         id: internal.updateId,
-        kind: "runtime_notice",
+        kind: "agent_message",
         sourceId: created.id,
         summary: "child result one of several",
       }),
     ]);
+
+    // Agent MCP owns the same recursive Pause/Resume plane as the UI. A live
+    // descendant attempt receives an immediate revisioned control wake; Resume
+    // creates no human prompt, and Agent Steer is one typed internal update
+    // rather than a fake prompt-queue row.
+    const controlledChild = await callMcpTool<{ id: string }>(
+      workerMcpWithIdentity,
+      "session_create",
+      {
+        initialMessage: "wait for manager control",
+        model: "scripted-model",
+      },
+    );
+    const childAttemptId = crypto.randomUUID();
+    const childClaim = await claimSessionWorkForAttempt(dbClient.db, grant.workspaceId, {
+      sessionId: controlledChild.id,
+      workflowId: `session-${controlledChild.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: childAttemptId,
+      dispatchId: `dispatch-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    if (childClaim.action !== "claimed") {
+      throw new Error(`controlled child was not claimed: ${childClaim.reason}`);
+    }
+    const dispatchCountBeforeAgentPause = wf.wakeDispatches;
+    const agentPause = await callMcpTool<{
+      effectiveControl: { state: string };
+      interruptionCount: number;
+    }>(workerMcpWithIdentity, "session_pause", {
+      sessionId: controlledChild.id,
+      idempotencyKey: crypto.randomUUID(),
+      reason: "manager inspection",
+    });
+    expect(agentPause).toMatchObject({
+      effectiveControl: { state: "paused" },
+      interruptionCount: 1,
+    });
+    expect(wf.wakeDispatches).toBe(dispatchCountBeforeAgentPause + 1);
+    const turnsBeforeAgentResume = await listSessionTurns(
+      dbClient.db,
+      grant.workspaceId,
+      controlledChild.id,
+    );
+    const agentResume = await callMcpTool<{
+      effectiveControl: { state: string };
+    }>(workerMcpWithIdentity, "session_resume", {
+      sessionId: controlledChild.id,
+      idempotencyKey: crypto.randomUUID(),
+    });
+    expect(agentResume.effectiveControl.state).toBe("active");
+    expect(
+      (await listSessionTurns(dbClient.db, grant.workspaceId, controlledChild.id)).map(
+        (turn) => turn.id,
+      ),
+    ).toEqual(turnsBeforeAgentResume.map((turn) => turn.id));
+    const agentSteer = await callMcpTool<{
+      updateId: string;
+      interruptionCount: number;
+    }>(workerMcpWithIdentity, "session_steer", {
+      sessionId: controlledChild.id,
+      instruction: "Inspect the new control-plane evidence first",
+      idempotencyKey: crypto.randomUUID(),
+    });
+    expect(agentSteer).toMatchObject({
+      updateId: expect.any(String),
+      interruptionCount: 1,
+    });
+    expect(
+      await listOutstandingSessionSystemUpdates(dbClient.db, grant.workspaceId, controlledChild.id),
+    ).toContainEqual(
+      expect.objectContaining({
+        id: agentSteer.updateId,
+        kind: "agent_steer_instruction",
+        summary: "Inspect the new control-plane evidence first",
+      }),
+    );
 
     // The sandboxed worker's first-party delegated permission set sees none of
     // the manager tools: orchestration, environments, or the connect link.
@@ -6031,6 +6383,9 @@ describe("API component integration", () => {
       "session_events",
       "session_create",
       "session_send_message",
+      "session_pause",
+      "session_resume",
+      "session_steer",
       "environment_list",
       "environment_set_variable",
       "github_connect_link",
@@ -6086,7 +6441,10 @@ describe("API component integration", () => {
           "goals:manage",
         ],
       }),
-      headers: { "content-type": "application/json", authorization: `Bearer ${managerToken}` },
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${managerToken}`,
+      },
     });
     expect(createResponse.status).toBe(202);
     const managerSession = (await createResponse.json()) as {
@@ -6118,7 +6476,10 @@ describe("API component integration", () => {
         model: "scripted-model",
         firstPartyMcpPermissions: ["environments:manage"],
       }),
-      headers: { "content-type": "application/json", authorization: `Bearer ${limitedToken}` },
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${limitedToken}`,
+      },
     });
     expect(escalation.status).toBe(403);
     expect(await escalation.text()).toContain(
@@ -6134,7 +6495,10 @@ describe("API component integration", () => {
         model: "scripted-model",
         firstPartyMcpPermissions: [],
       }),
-      headers: { "content-type": "application/json", authorization: `Bearer ${managerToken}` },
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${managerToken}`,
+      },
     });
     expect(emptySet.status).toBe(422);
     expect(await emptySet.text()).toContain("firstPartyMcpPermissions must not be empty");
@@ -6182,7 +6546,11 @@ describe("API component integration", () => {
     // The delegated token the runtime mints for a session's first-party MCP
     // connection carries the session's permission set, which gates manager
     // tool visibility end to end; the default set stays worker-shaped.
-    const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: app.fetch });
+    const server = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch: app.fetch,
+    });
     let managerPrepared: Awaited<ReturnType<typeof prepareAgentTools>> | null = null;
     let workerPrepared: Awaited<ReturnType<typeof prepareAgentTools>> | null = null;
     try {
@@ -6218,6 +6586,7 @@ describe("API component integration", () => {
       );
       expect(managerTools).toContain("opengeni__sessions_list");
       expect(managerTools).toContain("opengeni__session_create");
+      expect(managerTools).not.toContain("opengeni__set_child_notifications_mode");
       expect(managerTools).not.toContain("opengeni__environment_set_variable");
 
       workerPrepared = await prepareAgentTools(runtimeSettings, [{ kind: "mcp", id: "opengeni" }], {
@@ -6230,6 +6599,7 @@ describe("API component integration", () => {
       );
       expect(workerTools).toContain("opengeni__sessions_list");
       expect(workerTools).toContain("opengeni__session_create");
+      expect(workerTools).not.toContain("opengeni__set_child_notifications_mode");
       expect(workerTools).toContain("opengeni__environment_set_variable");
       expect(workerTools).toContain("opengeni__scheduled_tasks_list");
       expect(workerTools).not.toContain("opengeni__mcp_servers_attach");
@@ -6297,7 +6667,10 @@ describe("API component integration", () => {
           },
         ],
       }),
-      headers: { "content-type": "application/json", authorization: attachAuth },
+      headers: {
+        "content-type": "application/json",
+        authorization: attachAuth,
+      },
     });
     expect(created.status).toBe(202);
     const createText = await created.text();
@@ -6342,7 +6715,9 @@ describe("API component integration", () => {
     `);
     expect(JSON.stringify(rawMcpRows)).not.toContain(createSecret);
 
-    const createdEventRows = await dbClient.db.execute(dbSql<{ payload: unknown }>`
+    const createdEventRows = await dbClient.db.execute(dbSql<{
+      payload: unknown;
+    }>`
       select payload from session_events where session_id = ${session.id} order by sequence
     `);
     const createdEventsJson = JSON.stringify(createdEventRows);
@@ -6359,11 +6734,17 @@ describe("API component integration", () => {
           payload: {
             text: "rotate then continue",
             mcpCredentialUpdates: [
-              { id: "crm", headers: { Authorization: rotatedSecret, "X-Turn": "2" } },
+              {
+                id: "crm",
+                headers: { Authorization: rotatedSecret, "X-Turn": "2" },
+              },
             ],
           },
         }),
-        headers: { "content-type": "application/json", authorization: attachAuth },
+        headers: {
+          "content-type": "application/json",
+          authorization: attachAuth,
+        },
       },
     );
     expect(rotated.status).toBe(202);
@@ -6379,23 +6760,17 @@ describe("API component integration", () => {
         }>;
       };
     };
-    expect(accepted.payload.mcpCredentialUpdates).toEqual([
-      {
-        id: "crm",
-        name: "CRM MCP",
-        url: "https://crm.example/mcp",
-        headerNames: ["Authorization", "X-Turn"],
-        credentialVersion: 2,
-      },
-    ]);
-    expect(accepted.payload.mcpCredentialUpdates?.[0]?.headers).toBeUndefined();
+    expect(accepted.payload.mcpCredentialUpdates).toBeUndefined();
     const afterRotation = await listSessionMcpServersForRun(
       dbClient.db,
       grant.workspaceId,
       session.id,
       key,
     );
-    expect(afterRotation[0]?.headers).toEqual({ Authorization: rotatedSecret, "X-Turn": "2" });
+    expect(afterRotation[0]?.headers).toEqual({
+      Authorization: rotatedSecret,
+      "X-Turn": "2",
+    });
     expect(afterRotation[0]?.credentialVersion).toBe(2);
 
     const allEventRows = await dbClient.db.execute(dbSql<{ payload: unknown }>`
@@ -6417,7 +6792,10 @@ describe("API component integration", () => {
             mcpCredentialUpdates: [{ id: "unknown", headers: { Authorization: "Bearer nope" } }],
           },
         }),
-        headers: { "content-type": "application/json", authorization: attachAuth },
+        headers: {
+          "content-type": "application/json",
+          authorization: attachAuth,
+        },
       },
     );
     expect(unknown.status).toBe(422);
@@ -6434,7 +6812,10 @@ describe("API component integration", () => {
             mcpCredentialUpdates: [{ id: "crm", headers: { Authorization: "Bearer denied" } }],
           },
         }),
-        headers: { "content-type": "application/json", authorization: limitedAuth },
+        headers: {
+          "content-type": "application/json",
+          authorization: limitedAuth,
+        },
       },
     );
     expect(deniedRotate.status).toBe(403);
@@ -6453,7 +6834,10 @@ describe("API component integration", () => {
           },
         ],
       }),
-      headers: { "content-type": "application/json", authorization: limitedAuth },
+      headers: {
+        "content-type": "application/json",
+        authorization: limitedAuth,
+      },
     });
     expect(deniedCreate.status).toBe(403);
     expect(await deniedCreate.text()).toContain("missing permission: mcp_servers:attach");
@@ -6471,7 +6855,10 @@ describe("API component integration", () => {
           },
         ],
       }),
-      headers: { "content-type": "application/json", authorization: attachAuth },
+      headers: {
+        "content-type": "application/json",
+        authorization: attachAuth,
+      },
     });
     expect(collision.status).toBe(422);
     expect(await collision.text()).toContain("MCP server id already exists: opengeni");
@@ -6499,7 +6886,10 @@ describe("API component integration", () => {
           },
         ],
       }),
-      headers: { "content-type": "application/json", authorization: attachAuth },
+      headers: {
+        "content-type": "application/json",
+        authorization: attachAuth,
+      },
     });
     expect(missingKey.status).toBe(503);
     expect(await missingKey.text()).toContain("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY");
@@ -6524,7 +6914,11 @@ describe("API component integration", () => {
       bus: new MemoryEventBus(),
       workflowClient: new FakeWorkflowClient(),
     });
-    const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: app.fetch });
+    const server = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch: app.fetch,
+    });
     let toolspaceClient: Awaited<ReturnType<typeof prepareToolspaceClient>> | null = null;
     let workspaceClient: Awaited<ReturnType<typeof prepareToolspaceClient>> | null = null;
     try {
@@ -6577,7 +6971,9 @@ describe("API component integration", () => {
         "agent.toolCall.output",
       ]);
       expect(toolspaceEvents.every((event) => event.turnId === turnId)).toBe(true);
-      const producerRows = await dbClient.db.execute(dbSql<{ producer_id: string | null }>`
+      const producerRows = await dbClient.db.execute(dbSql<{
+        producer_id: string | null;
+      }>`
         select producer_id from session_events
         where workspace_id = ${grant.workspaceId}
           and session_id = ${session.id}
@@ -6651,10 +7047,17 @@ describe("API component integration", () => {
           initialMessage: "try attach",
           model: "scripted-model",
           mcpServers: [
-            { id: "denied", url: upstream.url, headers: { authorization: "Bearer denied" } },
+            {
+              id: "denied",
+              url: upstream.url,
+              headers: { authorization: "Bearer denied" },
+            },
           ],
         }),
-        headers: { "content-type": "application/json", authorization: toolspaceAuth },
+        headers: {
+          "content-type": "application/json",
+          authorization: toolspaceAuth,
+        },
       });
       expect(attachAttempt.status).toBe(403);
     } finally {
@@ -6681,7 +7084,11 @@ describe("API component integration", () => {
       bus: new MemoryEventBus(),
       workflowClient: new FakeWorkflowClient(),
     });
-    const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: app.fetch });
+    const server = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch: app.fetch,
+    });
     let client: Awaited<ReturnType<typeof prepareToolspaceClient>> | null = null;
     try {
       const { session } = await createToolspaceMcpSession(dbClient.db, grant, {
@@ -6732,7 +7139,11 @@ describe("API component integration", () => {
       bus: new MemoryEventBus(),
       workflowClient: new FakeWorkflowClient(),
     });
-    const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: app.fetch });
+    const server = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch: app.fetch,
+    });
     let client: Awaited<ReturnType<typeof prepareToolspaceClient>> | null = null;
     try {
       const { session } = await createToolspaceMcpSession(dbClient.db, grant, {
@@ -6812,7 +7223,10 @@ describe("API component integration", () => {
           },
         ],
       }),
-      headers: { "content-type": "application/json", authorization: attachAuth },
+      headers: {
+        "content-type": "application/json",
+        authorization: attachAuth,
+      },
     });
     expect(created.status).toBe(202);
     const session = (await created.json()) as { id: string };
@@ -6854,15 +7268,21 @@ describe("API component integration", () => {
           payload: {
             text: "rotate after cancellation",
             mcpCredentialUpdates: [
-              { id: "crm", headers: { Authorization: "Bearer rejected", "X-Initial": "2" } },
+              {
+                id: "crm",
+                headers: { Authorization: "Bearer rejected", "X-Initial": "2" },
+              },
             ],
           },
         }),
-        headers: { "content-type": "application/json", authorization: attachAuth },
+        headers: {
+          "content-type": "application/json",
+          authorization: attachAuth,
+        },
       },
     );
     expect(rejected.status).toBe(409);
-    expect(await rejected.text()).toContain("Session is cancelled");
+    expect(await rejected.text()).toContain("Cancelled session cannot accept work");
 
     const afterCredentials = await listSessionMcpServersForRun(
       dbClient.db,
@@ -6870,7 +7290,10 @@ describe("API component integration", () => {
       session.id,
       key,
     );
-    expect(afterCredentials[0]?.headers).toEqual({ Authorization: createSecret, "X-Initial": "1" });
+    expect(afterCredentials[0]?.headers).toEqual({
+      Authorization: createSecret,
+      "X-Initial": "1",
+    });
     expect(afterCredentials[0]?.credentialVersion).toBe(1);
     expect(
       await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100),
@@ -6927,7 +7350,10 @@ describe("API component integration", () => {
         goal: { text: "repo deployed to staging" },
         firstPartyMcpPermissions: ["workspace:read"],
       }),
-      headers: { "content-type": "application/json", authorization: `Bearer ${creatorToken}` },
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${creatorToken}`,
+      },
     });
     expect(withGoal.status).toBe(202);
     const goalSession = (await withGoal.json()) as {
@@ -6947,7 +7373,10 @@ describe("API component integration", () => {
         model: "scripted-model",
         firstPartyMcpPermissions: ["workspace:read"],
       }),
-      headers: { "content-type": "application/json", authorization: `Bearer ${creatorToken}` },
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${creatorToken}`,
+      },
     });
     expect(withoutGoal.status).toBe(202);
     const plainSession = (await withoutGoal.json()) as {
@@ -6979,17 +7408,16 @@ describe("API component integration", () => {
       permissions: ["workspace:read", "sessions:create", "sessions:read"] as Permission[],
     };
     const managerMcp = buildOpenGeniMcpServer(mcpDeps, managerGrant);
-    const spawned = await callMcpTool<{ id: string; firstPartyMcpPermissions: string[] | null }>(
-      managerMcp,
-      "session_create",
-      {
-        initialMessage: "spawn a goal-bearing worker",
-        model: "scripted-model",
-        sandboxBackend: "none",
-        goal: { text: "fleet healthy" },
-        firstPartyMcpPermissions: ["workspace:read"],
-      },
-    );
+    const spawned = await callMcpTool<{
+      id: string;
+      firstPartyMcpPermissions: string[] | null;
+    }>(managerMcp, "session_create", {
+      initialMessage: "spawn a goal-bearing worker",
+      model: "scripted-model",
+      sandboxBackend: "none",
+      goal: { text: "fleet healthy" },
+      firstPartyMcpPermissions: ["workspace:read"],
+    });
     expect(spawned.firstPartyMcpPermissions).toEqual(["workspace:read", "goals:manage"]);
     expect(
       (await getSession(dbClient.db, grant.workspaceId, spawned.id))?.firstPartyMcpPermissions,
@@ -7038,15 +7466,14 @@ describe("API component integration", () => {
     ).rejects.toThrow("missing permission: variable-sets:use (deprecated alias: environments:use)");
 
     const mcp = buildOpenGeniMcpServer(mcpDeps, grant);
-    const attached = await callMcpTool<{ id: string; environmentId: string | null }>(
-      mcp,
-      "session_create",
-      {
-        initialMessage: "deploy with cloud credentials",
-        model: "scripted-model",
-        environmentId: environment.id,
-      },
-    );
+    const attached = await callMcpTool<{
+      id: string;
+      environmentId: string | null;
+    }>(mcp, "session_create", {
+      initialMessage: "deploy with cloud credentials",
+      model: "scripted-model",
+      environmentId: environment.id,
+    });
     expect(attached.environmentId).toBe(environment.id);
     await expect(
       callMcpTool(mcp, "session_create", {
@@ -7065,7 +7492,9 @@ describe("API component integration", () => {
           databaseUrl: services.databaseUrl,
           environmentsEncryptionKey: environmentsTestKey,
           usageLimitsMode: "static",
-          staticUsageLimitsJson: JSON.stringify({ maxMonthlyAgentRunsPerWorkspace: 1 }),
+          staticUsageLimitsJson: JSON.stringify({
+            maxMonthlyAgentRunsPerWorkspace: 1,
+          }),
         }),
       },
       grant,
@@ -7162,7 +7591,10 @@ describe("API component integration", () => {
     });
     expect(first.environment.created).toBe(true);
     expect(first.environment.name).toBe(environmentName);
-    expect(first.variable).toMatchObject({ name: "AZURE_CLIENT_SECRET", version: 1 });
+    expect(first.variable).toMatchObject({
+      name: "AZURE_CLIENT_SECRET",
+      version: 1,
+    });
 
     const rotatedValue = `rotated-${crypto.randomUUID()}`;
     const rotated = await callMcpTool<{
@@ -7240,11 +7672,9 @@ describe("API component integration", () => {
       permissions: ["workspace:read", "environments:use"] as Permission[],
     };
     const useOnlyMcp = buildOpenGeniMcpServer(mcpDeps, useOnlyGrant);
-    const useOnlyList = await callMcpTool<{ environments: Array<{ id: string }> }>(
-      useOnlyMcp,
-      "environment_list",
-      {},
-    );
+    const useOnlyList = await callMcpTool<{
+      environments: Array<{ id: string }>;
+    }>(useOnlyMcp, "environment_list", {});
     expect(
       useOnlyList.environments.some((candidate) => candidate.id === first.environment.id),
     ).toBe(true);
@@ -7449,7 +7879,9 @@ describe("API component integration", () => {
       },
     );
     expect([200, 201]).toContain(enabled.status);
-    const installation = (await enabled.json()) as { metadata: Record<string, unknown> };
+    const installation = (await enabled.json()) as {
+      metadata: Record<string, unknown>;
+    };
     expect(installation.metadata.variableSetId).toBe(environment.id);
 
     // Re-enabling without environmentId keeps the stored attachment.
@@ -7462,7 +7894,9 @@ describe("API component integration", () => {
       },
     );
     expect(reenabled.status).toBe(200);
-    const reenabledInstallation = (await reenabled.json()) as { metadata: Record<string, unknown> };
+    const reenabledInstallation = (await reenabled.json()) as {
+      metadata: Record<string, unknown>;
+    };
     expect(reenabledInstallation.metadata.variableSetId).toBe(environment.id);
 
     // Back-compat: an installation enabled BEFORE the Variable Set rename stored
@@ -7498,7 +7932,11 @@ describe("API component integration", () => {
       bus: new MemoryEventBus(),
       workflowClient: new FakeWorkflowClient(),
     });
-    const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: app.fetch });
+    const server = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch: app.fetch,
+    });
     const settings = testSettings({
       databaseUrl: services.databaseUrl,
       delegationSecret: "test-delegation-secret",
@@ -7773,21 +8211,21 @@ async function createToolspaceMcpSession(
       },
     ],
   });
-  const queued = await enqueueSessionMessageAtomically(db, {
+  const queued = await submitTestHumanPrompt(db, {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId,
     sessionId: session.id,
-    actor: grant.subjectId,
-    origin: "human",
+    subjectId: grant.subjectId,
     text: "start toolspace turn",
     resources: [],
     tools: [{ kind: "mcp", id: "crm" }],
-    delivery: "queue",
+    delivery: "send",
     reasoningEffortFallback: "medium",
   });
   const running = await claimSessionWorkForAttempt(db, grant.workspaceId, {
     sessionId: session.id,
     workflowId: `session-${session.id}`,
+    workflowRunId: crypto.randomUUID(),
     attemptId: crypto.randomUUID(),
     dispatchId: `dispatch-${crypto.randomUUID()}`,
     trigger: { kind: "next" },
@@ -7844,7 +8282,9 @@ async function callMcpTool<T = unknown>(
     server as {
       _registeredTools?: Record<
         string,
-        { handler: (args: Record<string, unknown>, extra: unknown) => Promise<unknown> }
+        {
+          handler: (args: Record<string, unknown>, extra: unknown) => Promise<unknown>;
+        }
       >;
     }
   )._registeredTools?.[name];
@@ -7862,6 +8302,7 @@ async function callMcpTool<T = unknown>(
 class FakeWorkflowClient implements SessionWorkflowClient {
   userMessages: unknown[] = [];
   wakeups: unknown[] = [];
+  wakeDispatches = 0;
   approvals: unknown[] = [];
   interrupts: unknown[] = [];
   synced: unknown[] = [];
@@ -7880,6 +8321,10 @@ class FakeWorkflowClient implements SessionWorkflowClient {
     if (this.wakeError) {
       throw this.wakeError;
     }
+  }
+
+  async requestSessionWorkflowWakeDispatch(): Promise<void> {
+    this.wakeDispatches += 1;
   }
 
   async signalApprovalDecision(input: unknown): Promise<void> {

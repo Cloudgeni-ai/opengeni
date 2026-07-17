@@ -20,8 +20,10 @@ export type SessionWorkflowClient = {
     sessionId: string;
     workflowId: string;
     wakeRevision: number;
-    controlEventId?: string;
+    interruptionRequested?: boolean;
   }) => Promise<void>;
+  /** Trigger one bounded drain of already-committed workflow-wake revisions. */
+  requestSessionWorkflowWakeDispatch: () => Promise<void>;
   // Dedicated, revision-carrying nudge for a durable Codex capacity waiter.
   // Optional for embedded/back-compat clients: callers may fall back to the
   // generic queueChanged wake because Postgres wakeRevision is authoritative.
@@ -34,17 +36,6 @@ export type SessionWorkflowClient = {
     workflowWakeRevision: number;
   }) => Promise<void>;
   signalApprovalDecision: (input: {
-    accountId: string;
-    workspaceId: string;
-    sessionId: string;
-    eventId: string;
-    workflowId: string;
-    workflowWakeRevision: number;
-  }) => Promise<void>;
-  // A durable Pause/Steer control must reach the workflow even when its previous
-  // run returned idle. signalWithStart either delivers to the live workflow or
-  // starts the session workflow with the control already buffered.
-  signalSessionControl: (input: {
     accountId: string;
     workspaceId: string;
     sessionId: string;
@@ -129,6 +120,6 @@ export type AcceptSessionUserMessageDependencies = Pick<
   AppDependencies,
   "settings" | "db" | "bus"
 > & {
-  workflowClient: Pick<SessionWorkflowClient, "wakeSessionWorkflow" | "signalSessionControl">;
+  workflowClient: Pick<SessionWorkflowClient, "wakeSessionWorkflow">;
   objectStorage: ObjectStorageDependency;
 };

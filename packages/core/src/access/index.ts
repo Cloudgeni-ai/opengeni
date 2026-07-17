@@ -235,6 +235,10 @@ async function delegatedAccessContext(
           // Caller identity: the turn that minted this token. Tools classify the
           // CALLER from this instead of re-reading the live active pointer.
           ...(payload.turnId ? { turnId: payload.turnId } : {}),
+          ...(payload.attemptId ? { attemptId: payload.attemptId } : {}),
+          ...(payload.executionGeneration
+            ? { executionGeneration: payload.executionGeneration }
+            : {}),
         },
       },
     ],

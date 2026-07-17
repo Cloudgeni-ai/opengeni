@@ -1,10 +1,12 @@
 <!-- docs-refs: record -->
 
 > **Point-in-time design and execution record.** Written against OpenGeni commit
-> `65419ef9` plus its uncommitted OPE-18/OPE-22 worktree on 2026-07-13, Codex CLI
-> `0.144.4` / upstream tag `rust-v0.144.4` at
-> `8c68d4c87dc54d38861f5114e920c3de2efa5876` (re-verified 2026-07-14; the
-> 0.144.3→0.144.4 diff does not touch local/remote compaction), and the production fleet then
+> `65419ef9` plus its uncommitted OPE-18/OPE-22 worktree on 2026-07-13. The
+> compaction baseline was rebound on 2026-07-16 to installed/latest-stable Codex
+> CLI `0.144.5`, upstream tag `rust-v0.144.5` at
+> `87db9bc18ba5bc82c1cb4e4381b44f693ee35623`; the 0.144.4→0.144.5 release changes
+> no compaction/context/model path and `codex-rs/core/src/compact.rs` is byte-identical
+> (`sha256 232caf15a419a4dfd5815dee7bcc27b0f1f2dea5bb845fcceaea59492ff4e2fd`). The production fleet then
 > serving `21e21cb209b26627a78d7177f01b9793dc1e6001`. Paths and names may move. The
 > shipped code and canonical current-tier docs win after this cutover.
 
@@ -34,7 +36,7 @@ OpenGeni will have one small, truthful control model:
   persisted by the server. Goal and agent pills remain compact siblings in that
   composer stack, outside the queue.
 - Codex compaction uses one portable plaintext implementation derived from the
-  official Codex 0.144.4 local compaction path. It works across independently
+  official Codex 0.144.5 local compaction path. It works across independently
   authenticated Codex subscriptions without a bridge, account pin, or fallback.
 - A production deploy pauses admission, drains current work to durable checkpoints,
   replaces the old runtime in one direction, wakes all claimable work, and proves
@@ -177,7 +179,7 @@ diagnostics while preventing them from entering authoritative history or live ou
 
 ### 3.4 Why the old compaction assumption can lose memory on account rotation
 
-Exact Codex 0.144.4 remote compaction v2 sends structured history plus a
+Exact Codex 0.144.5 remote compaction v2 sends structured history plus a
 `CompactionTrigger` through the normal Responses stream and receives exactly one
 `ResponseItem::Compaction`. That item has encrypted content but no plaintext summary.
 The serde alias `compaction_summary` names the item type; it is not a `summary` field.
@@ -193,7 +195,7 @@ pinned to the account that is most likely to be exhausted. A bridge would requir
 more full-context call on that exhausted account, and a plaintext shadow would create a
 second compaction truth forever. All are rejected.
 
-### 3.5 Exact Codex 0.144.4 baseline
+### 3.5 Exact Codex 0.144.5 baseline
 
 For the currently selected Codex model metadata:
 
@@ -314,11 +316,15 @@ priority lanes or different ordering semantics.
   because the old cancellation has not acknowledged yet.
 - A steer during tool approval cancels/supersedes that current inference. A later
   approval submission against the cancelled inference receives a conflict.
-- A paused session accepts Send and Steer, but no inference runs until explicit Resume.
-  Send only appends. Steer durably supersedes the old current inference and inserts at
-  the head, so Resume runs the steered prompt first.
-- Queued prompts can be deleted. They cannot be edited, reprioritized, promoted,
-  “sent now” through another endpoint, assigned deadlines, or reordered arbitrarily.
+- Sending or Steering in a paused session atomically Resumes the selected branch. Send
+  appends; Steer durably supersedes the old current inference and inserts at the head.
+  Paused ancestors and a paused workspace remain paused outside that selected branch.
+- Queued prompts can be deleted, reordered, or checked out for editing. Reorder is an
+  exact server mutation, never a client-only sort. Edit atomically removes the waiting
+  prompt and restores its complete input into the durable per-user composer draft; a
+  dirty draft requires explicit replacement confirmation before either state changes.
+- Prompts cannot acquire priority lanes, promotion, deadlines, or a separate “send now”
+  lifecycle. Steer is the one explicit front-insertion action.
 - A delete racing the claim uses queue-version and row-version comparison and reports
   that the prompt already started when the claim won.
 
@@ -371,17 +377,20 @@ durable side effects before repeating an operation whose outcome is uncertain.
 
 ### 4.3 Session Pause and Resume
 
-The public session control state is exactly `active | paused`.
+The public effective workstream control state is exactly `active | paused`. It
+is a recursive admission projection, separate from session lifecycle status.
 
 Pause:
 
-1. changes control state to paused and increments its control generation;
-2. records the interrupt intent for a running attempt atomically;
+1. advances the workspace control revision and records a direct Pause revision
+   on the selected session root;
+2. records one durable interruption against each exact live descendant attempt
+   in the same transaction;
 3. cancels active model streaming and tool execution where cancellation is supported;
 4. checkpoints durable progress and transitions that running turn to recovering-but-
    ineligible under pause;
-5. pauses an active goal for this session;
-6. leaves waiting prompts and internal updates untouched and inert.
+5. preserves goals, approvals, lifecycle status, waiting prompts, and internal
+   updates; the closed gate simply holds them inert.
 
 Pause does not interrupt, cancel, or convert a `requires_action` turn because its worker
 activity has already completed; the saved approval state is its suspended form. It stays
@@ -391,10 +400,17 @@ inference, paused or active, and a later approval decision then receives a confl
 
 Resume:
 
-1. is the only operation that changes a paused session back to active;
-2. resumes the goal only when this session Pause caused that goal pause;
+1. advances the workspace control revision and makes the selected branch
+   effectively active without changing sibling workstreams;
+2. may defeat paused ancestors or a paused workspace for this selected subtree
+   by recording a revision-scoped override;
 3. wakes the same recoverable current inference first;
 4. then permits normal prompt/update/goal claims.
+
+Resume creates no user message, queue row, or special recovery turn. Sending or
+Steering a prompt to a paused session performs this same selected-branch Resume
+atomically with the prompt command, so the user never submits work that then
+appears to do nothing.
 
 There is no separate public Stop, Interrupt, Kill, or Abort mode. Cancellation remains an
 internal mechanism used to implement Pause and Steer; it is not a second lifecycle the
@@ -402,20 +418,20 @@ user must understand.
 
 ### 4.4 Workspace Pause with explicit session execution
 
-A workspace has `active | paused` plus a monotonically increasing pause generation.
+A workspace has `active | paused` plus a monotonically increasing control revision.
 Sessions do not get mass-rewritten when the workspace changes state.
 
 The one runnable predicate is:
 
 ```text
-session is active
-AND (workspace is active OR session.run_exception_generation == workspace.pause_generation)
+no undefeated direct Pause exists on the selected session ancestry
+AND (workspace is active OR an ancestry override revision is newer than the workspace Pause revision)
 AND claimable work exists
 ```
 
 An operator can explicitly run a chosen active session while the workspace remains
-paused. This stamps that session with an exception for the current pause generation. A
-new workspace Pause increments the generation and invalidates every old exception with
+paused. This stamps that session root with an override newer than the current Pause. A
+new workspace Pause advances the revision and invalidates every older override with
 no fan-out cleanup. Session Pause always wins. Workspace Pause can optionally exclude
 specified sessions atomically, so preserving an incident/debug session does not first
 interrupt and then restart it.
@@ -476,6 +492,29 @@ to solve with hidden priority.
 The goal pill and agents pill remain compact controls above the composer, outside the
 queue.
 
+### 4.7 Agent MCP controls
+
+First-party Agent MCP exposes the same durable control model without allowing machine
+work to masquerade as human queue entries:
+
+- `session_pause` and `session_resume` apply the canonical recursive workstream control
+  transaction to another session. Resume creates no prompt or continuation row.
+- `session_send_message` from a worker writes one coalescible typed internal update for
+  the target session. A sessionless human/operator invocation is the only MCP form that
+  may append a visible human prompt.
+- `session_steer` from a worker atomically supersedes the target's current inference,
+  resumes that selected branch, and records the instruction as a typed internal update.
+  It never creates a human queue row.
+- Every worker command is bound to the caller's exact running attempt and an idempotency
+  receipt. A stale or interrupted caller cannot mutate another session. An agent cannot
+  Pause or Steer itself or an ancestor, preventing it from suspending the control chain
+  that owns the call; explicit human/operator controls remain available.
+- The transaction commits the authoritative event, update/control state, exact
+  interruption, and revisioned workflow wake together. Single-target message/Steer
+  commands signal their committed revision directly. Recursive controls issue one
+  immediate bounded-dispatcher trigger without returning descendant ids to the API;
+  the durable outbox retries without repeating the command if either path fails.
+
 ## 5. Attempt ownership and late-event evidence
 
 Every current inference has a dispatch generation. Every worker attempt has a unique
@@ -504,7 +543,7 @@ Delete the current `auto/server/client/off` ladder, server `context_management` 
 rendered-transcript summarizer, hard-trim second pass, deterministic non-model fallback,
 and any persistence/sanitizer branch that expects a portable remote `compaction` item.
 
-Implement the official Codex 0.144.4 local algorithm as the sole OpenGeni compaction
+Implement the official Codex 0.144.5 local algorithm as the sole OpenGeni compaction
 path for Codex subscriptions, OpenAI API-key models, and registry providers that use
 this agent runtime:
 
@@ -582,14 +621,16 @@ reconciliation error. The cutover asserts that no active such rows exist.
 
 ### 7.1 Target data concepts
 
-- Session control state and control generation.
-- Workspace control state and pause generation.
-- Per-session workspace run-exception generation.
+- One mandatory workspace admission-control row with a monotonic revision and
+  optional workspace Pause revision.
+- Per-session direct Pause revision and subtree run-override revision; effective
+  control is the ancestry projection of those facts.
 - Submitted prompt queue row with one server order and versions for delete/claim CAS.
-- Current durable turn plus dispatch generation and attempt ownership.
-- One durable pending-cancellation intent per session (Steer or Pause), written
-  atomically with its control, honored by claim, and cleared only by fenced settlement
-  or claim-path reconciliation.
+- Current durable turn plus first-class attempt ownership, dispatch generation,
+  control revision, lease identity, and terminal outcome.
+- Durable interruption rows targeted to exact live attempts (Steer, session
+  Pause, workspace Pause, or maintenance), settled only by the owning attempt
+  transaction or rejected as stale.
 - Pending typed update rows plus one synthesized-continuation uniqueness guard.
 - Active/inactive structured history rows, including plaintext context-summary marker.
 - Attempt-scoped authoritative and rejected-late events.
@@ -597,15 +638,19 @@ reconciliation error. The cutover asserts that no active such rows exist.
 One shared runnable-predicate module is used by claim, Send/Steer admission, workspace
 Resume/exception wake selection, and UI state. Wake delivery is not reconstructed from
 that predicate: every work-producing transaction increments the one coalescing
-`session_workflow_wake_outbox` revision for its session. Direct signalling is a latency
-optimization; bounded `SKIP LOCKED` delivery repairs committed revisions that were not
-acknowledged. Duplicated eligibility implementations and periodic runnable-session scans
-are forbidden.
+`session_workflow_wake_outbox` revision for its session. A recursive control transaction
+returns only the set-based affected count and the API immediately triggers the one
+bounded dispatcher Schedule; descendant ids never enter API/worker command memory.
+Single-target producers may signal their exact committed revision directly. Both are
+low-latency nudges, not second state transitions. Bounded `SKIP LOCKED` outbox delivery
+repairs committed revisions that were not acknowledged. Duplicated eligibility
+implementations and periodic runnable-session scans are forbidden.
 
 ### 7.2 Delete in the same release
 
-- Priority, promoted, deadline, lane, arbitrary reorder, queue edit, and send-now APIs,
-  columns, contracts, helpers, tests, and UI.
+- Priority, promoted, deadline, lane, and alternate send-now APIs, columns, contracts,
+  helpers, tests, and UI. The canonical exact-before reorder and edit-to-draft checkout
+  are the only queue mutations besides append, steer, and delete.
 - Queue kinds/rows for goal continuation, update bundles, schedules, recovery,
   compaction, runtime notices, and other machine work.
 - `steer_target_turn_id`, turn-level `delivery_state`, and the settle-blocked-turn plus
@@ -625,7 +670,7 @@ are forbidden.
 - Fake resume user messages and fake compaction/requeue notices.
 - Private-ops `legacy|durable_v1` manifests, reverse conversion, rollback job, staging
   gate for this release, and any runtime switch that can re-enable old semantics.
-- Stale Codex client version `0.144.1`; pin/update to exact latest stable `0.144.4` with
+- Stale Codex client version `0.144.1`; pin/update to exact latest stable `0.144.5` with
   source provenance and tests.
 
 Before deletion, inspect every caller and migrate it to the target concept. “Delete” does
@@ -642,18 +687,37 @@ Immediately above the composer, render one compact vertical control stack:
 4. composer.
 
 The collapsed queue shows count and a short head preview. Expanded rows show prompt text,
-submitted time/provenance when useful, and Delete. They do not show priority, machine
-kind, promotion, model override, or duplicate lifecycle controls. The queue component
-uses server order without sorting.
+resources/tools/model metadata, a keyboard-accessible drag handle, visible Steer and
+Delete actions, and an overflow menu for Edit plus deterministic move-to-top/up/down/
+bottom alternatives. Drag or move sends an exact before-turn command; the UI accepts the
+returned server order and never sorts locally. Edit is a checkout: it atomically removes
+the waiting prompt, restores its complete text/resources/tools/model state into the
+durable per-user composer draft, and focuses the composer. If that draft is dirty, the
+queue row remains untouched until the user explicitly confirms replacement. Rows do not
+show hidden priority, machine lanes, promotion, or duplicate lifecycle controls.
 
 The composer has Send/Steer affordances and one Pause/Resume button:
 
 - Enter = Send;
 - Cmd/Ctrl+Enter = Steer;
-- paused state changes the control to Resume and clearly marks queued prompts inert;
-- workspace-paused state explains why the session will not run and offers explicit
-  “Run this session” only to callers already allowed to control that workspace;
+- paused state changes the control to Resume and clearly marks waiting prompts inert;
+- inherited Pause names the primary workspace/ancestor blocker, links to its actual
+  location, discloses any additional blockers, and exposes one primary “Resume this
+  workstream” action plus explicit ancestor/workspace scope alternatives;
+- Send or Steer while paused atomically resumes only the selected branch and submits the
+  prompt, so no accepted message appears to do nothing;
+- the session header always shows the effective Active/Paused truth; activating it focuses
+  the one composer control (and opens Pause details when blocked) instead of creating a
+  second control surface;
 - no Stop vs Interrupt terminology choice is exposed.
+
+Deep child sessions show a bounded root-to-parent breadcrumb in the session header. On
+desktop the root and direct parent remain visible and intermediate ancestors collapse
+into an explicit menu; on narrow screens one back-link to the direct parent is shown.
+Long names truncate inside the header instead of pushing status/actions outside it.
+Cancelled manager sessions keep Goal and Agents inspection/control available so a live
+descendant can be paused or resumed without reviving the cancelled root; only that root's
+composer and prompt queue are terminal.
 
 The right rail may show current inference/attempt diagnostics and finished-turn history,
 but never another queue. The timeline may show the submitted user message when it begins
@@ -719,7 +783,7 @@ type SessionWorkPeek =
   | { kind: "approval-pending"; triggerEventId: string }
   | { kind: "approval-wait" }
   | { kind: "capacity-wait"; ref: CodexCapacityWaitRef }
-  | { kind: "fence-settle"; controlEventId: string }
+  | { kind: "interruption-pending"; attemptId: string }
   | { kind: "idle" };
 ```
 
@@ -736,17 +800,17 @@ session or current turn:
 ```ts
 type RecoverDispatchOutcome =
   | { kind: "unclaimed" }
-  | { kind: "reparked"; turnId: string }
-  | { kind: "exceeded"; turnId: string }
+  | { kind: "recovering"; turnId: string; redispatches: number }
+  | { kind: "exceeded"; turnId: string; redispatches: number }
   | { kind: "stale" };
 ```
 
 `unclaimed` means the activity never registered its attempt and therefore changes no
-row and consumes no redispatch budget. `reparked` and `exceeded` require the exact current
+row and consumes no redispatch budget. `recovering` and `exceeded` require the exact current
 attempt/dispatch owner under one lock transaction. `stale` means a successor or terminal
 settlement owns the truth. There is no second catch-all settlement.
 
-A pending control cancellation must settle or be identified as stale before another
+A pending exact-attempt interruption must settle or be identified as stale before another
 attempt owns the inference. No deadline, machine lane, role lane, or invisible promotion
 can reorder the visible prompt queue.
 
@@ -963,12 +1027,12 @@ new fake user message, regress its goal, or remain owned by the old revision.
 - Pause vs claim, Resume vs claim, approval vs steer, delete vs claim.
 - Pause during `requires_action` preserves the approval state and holds a submitted
   decision inert until Resume.
-- Workspace generation exceptions, new-pause invalidation, and interruption of a live
+- Workspace revision overrides, new-Pause invalidation, and interruption of a live
   non-exempt session attempt.
 - Exactly one current inference and one owning attempt.
 - Claim and attempt registration are one transaction executed only after turn-slot grant;
   failure before claim is typed unclaimed and consumes no redispatch budget.
-- Exact-attempt recovery returns unclaimed/reparked/exceeded/stale under one ownership
+- Exact-attempt recovery returns unclaimed/recovering/exceeded/stale under one ownership
   lock and never chains a catch-all settlement.
 - Atomic settlement and late-event non-authority.
 - Durable approval acceptance, start-or-signal revival, approval-vs-pause/steer, and
@@ -981,7 +1045,7 @@ new fake user message, regress its goal, or remain owned by the old revision.
 
 ### Compaction
 
-- Golden tests against Codex 0.144.4 local history construction, prompt/prefix constants,
+- Golden tests against Codex 0.144.5 local history construction, prompt/prefix constants,
   20k retention, boundary truncation, initial-context placement, and overflow retry.
 - 272k raw / 258.4k effective / 244.8k auto threshold resolution for current Codex model.
 - pre-turn, mid-turn, repeated multi-call, manual active, and manual idle cases.
@@ -1027,26 +1091,26 @@ temporary runtime fallback.
 1. **Reconcile branch and preserve good OPE-22 foundations**: merge current `main`, audit
    dirty queue-removal work, retain atomic settlement/generation/capacity/audit fixes.
 2. **Schema and state model**: new prompt/current/update/workspace-generation concepts,
-   shared runnable predicate, one-way 0057 migration, classified current/duplicate/late
-   usage evidence, transactional revisioned wake outbox in 0061, and removal of the
-   superseded enrollment scan.
-3. **Send/Steer/Pause/Resume APIs**: one transaction per control, delete-only queue,
-   remove aliases and alternate mutation APIs.
+   shared runnable predicate, one-way 0063 migration, classified current/duplicate/late
+   usage evidence, transactional revisioned wake outbox, and removal of the
+   superseded enrollment and scalar-control paths.
+3. **Send/Steer/Pause/Resume APIs**: one transaction per control; revisioned
+   reorder/Edit/row-Steer/Delete queue mutations; remove aliases and alternate APIs.
 4. **Worker claim loop and admission**: split control/turn task queues and deployments;
    make read-only peek drive the workflow; claim and register the exact attempt only inside
    the bounded turn-slot activity; recover current inference, approval/capacity state,
    prompt, compaction, then combined update/goal continuation; no machine queue work or
    false running state.
 5. **Attempt ownership and recovery**: generation/attempt/dispatch fences from claim t0,
-   typed unclaimed/reparked/exceeded/stale transport recovery, interrupted tool result,
+   typed unclaimed/recovering/exceeded/stale transport recovery, interrupted tool result,
    rejected-late diagnostics, graceful deploy checkpoint, durable approval revival.
-6. **Codex 0.144.4 compaction**: official local semantics, allocator integration,
+6. **Codex 0.144.5 compaction**: official local semantics, allocator integration,
    transactional history replacement, removal of all alternate paths.
-7. **Workspace control**: pause generation, explicit per-session run, removal of kill and
+7. **Workspace control**: revision-scoped overrides, explicit per-session run, removal of kill and
    fan-out state rewriting.
 8. **React/SDK cleanup**: one composer queue, exact server order, compact goal/agents,
    one Pause control, precise sandbox lifecycle UI.
-9. **Private ops clean cutover**: exact 0057+0058+0061+0062 migration list; maintenance drain;
+9. **Private ops clean cutover**: exact 0063 migration contract; maintenance drain;
    workflow termination; evidence-writing repark; split-worker deployment; ambiguity-safe
    canary before fleet wake; enrollment/progress wake v2; final reconciliation.
 10. **Review and production proof**: Fable implementation review, UBS, complete local
@@ -1096,8 +1160,9 @@ Update existing OpenGeni issues rather than creating duplicates:
 
 - **OPE-18** becomes the umbrella for this accepted queue/control/update architecture;
   remove old priority, typed machine queue, and staging-first requirements.
-- **OPE-9** tracks the single composer queue UI and delete-only prompt interaction; remove
-  edit/reorder/send-now requirements.
+- **OPE-9** tracks the single composer queue UI, exact server-backed drag/reorder,
+  edit-to-durable-draft checkout, visible Steer, Delete, and dirty-draft confirmation;
+  remove priority/promotion/deadline and alternate send-now requirements.
 - **OPE-21** tracks portable official-local compaction and subscription-rotation proof.
 - Private ops tracks the production-only one-way maintenance cutover and full session
   continuity reconciliation; remove permanent expand/contract/rollback and staging gate.

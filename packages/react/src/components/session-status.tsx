@@ -35,12 +35,6 @@ export const SESSION_STATUS_META: Record<SessionStatusValue, SessionStatusMeta> 
     badgeClassName: "text-og-status-waiting border-og-status-waiting/35 bg-og-status-waiting/10",
     pulse: true,
   },
-  paused: {
-    label: "Paused",
-    dotClassName: "bg-og-status-cancelled",
-    badgeClassName: "text-og-fg-subtle border-og-border bg-og-status-cancelled/10",
-    pulse: false,
-  },
   idle: {
     label: "Idle",
     dotClassName: "bg-og-status-idle",

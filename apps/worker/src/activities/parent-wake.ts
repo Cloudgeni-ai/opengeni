@@ -1,5 +1,5 @@
 import type { Settings } from "@opengeni/config";
-import type { Session, SessionGoal } from "@opengeni/contracts";
+import type { Session, SessionGoal, SessionSystemUpdatePayload } from "@opengeni/contracts";
 import {
   getSession,
   getSessionGoal,
@@ -64,13 +64,6 @@ export async function notifyParentOfChildTerminal(
   // per work batch and is stable across retries of that same idle transition.
   episodeKey?: string | null,
 ): Promise<void> {
-  // Temporarily disabled by default: child completion remains durable on the
-  // child session, but must not manufacture parent system-update/inference
-  // work. Keep this before every DB read, event publish, and workflow signal so
-  // the disabled path cannot mutate or wake the parent.
-  if (!svc.settings.childCompletionParentWakeEnabled) {
-    return;
-  }
   try {
     const child = await getSession(svc.db, workspaceId, childSessionId);
     if (!child || !child.parentSessionId) {
@@ -89,7 +82,7 @@ export async function notifyParentOfChildTerminal(
       workspaceId,
       sourceSessionId: child.id,
       targetSessionId: child.parentSessionId,
-      kind: "child_session_update",
+      kind: "child_terminal_result",
       classification:
         terminalStatus === "failed"
           ? "failure"
@@ -179,13 +172,6 @@ export async function reconcilePendingParentSystemUpdates(
 ): Promise<{ claimed: number; delivered: number; failed: number }> {
   const claimPendingSessionSystemUpdateOutboxFn =
     overrides.claimPendingSessionSystemUpdateOutbox ?? claimPendingSessionSystemUpdateOutbox;
-  // Do not claim or deliver the child-terminal outbox while completion wakes
-  // are disabled. Atomic terminal producers use the same setting, so no new
-  // backlog is manufactured either. Session-workflow wake repair is owned by
-  // its dedicated dispatcher and never depends on sandbox or child settings.
-  if (!svc.settings.childCompletionParentWakeEnabled) {
-    return { claimed: 0, delivered: 0, failed: 0 };
-  }
   const rows = await claimPendingSessionSystemUpdateOutboxFn(svc.db, limit);
   let delivered = 0;
   let failed = 0;
@@ -225,7 +211,7 @@ export async function reconcilePendingSessionWorkflowWakes(
           sessionId: repair.sessionId,
           workflowId: repair.temporalWorkflowId,
           wakeRevision: repair.wakeRevision,
-          ...(repair.controlEventId ? { controlEventId: repair.controlEventId } : {}),
+          ...(repair.interruptionRequested ? { interruptionRequested: true } : {}),
         });
         delivered += 1;
       } catch (error) {
@@ -246,8 +232,9 @@ function childCompletionPayload(
   child: Session,
   goal: SessionGoal | null,
   terminalStatus: "idle" | "failed",
-): Record<string, unknown> {
+): Extract<SessionSystemUpdatePayload, { type: "child_terminal_result" }> {
   return {
+    type: "child_terminal_result",
     childSessionId: child.id,
     status: terminalStatus,
     ...(goal

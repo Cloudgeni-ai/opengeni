@@ -7,17 +7,18 @@ import {
   claimSessionWorkForAttempt,
   createDb,
   createSession,
-  enqueueSessionMessageAtomically,
   enqueueSessionWorkflowWake,
   initializeSessionStartAtomically,
   listSessionEvents,
   listSessionTurns,
   markSessionWorkflowWakeDelivered,
   markSessionWorkflowWakeFailed,
-  requestSessionControl,
+  mutateSessionControlInTransaction,
+  mutateWorkspaceControlInTransaction,
   setSessionGoalStatus,
-  setWorkspaceInferenceControl,
+  submitHumanPromptInTransaction,
   withWorkspaceRls,
+  withWorkspaceSubjectRls,
 } from "../src/index";
 import * as schema from "../src/schema";
 
@@ -63,19 +64,43 @@ async function fixture() {
 type WakeFixture = Awaited<ReturnType<typeof fixture>>;
 
 async function send(wakeFixture: WakeFixture, text: string, clientEventId = crypto.randomUUID()) {
-  return await enqueueSessionMessageAtomically(client.db, {
-    accountId: wakeFixture.grant.accountId,
-    workspaceId: wakeFixture.grant.workspaceId!,
-    sessionId: wakeFixture.session.id,
-    actor: wakeFixture.grant.subjectId,
-    origin: "human",
-    text,
-    resources: [],
-    tools: [],
-    clientEventId,
-    delivery: "queue",
-    reasoningEffortFallback: "low",
-  });
+  return await withWorkspaceSubjectRls(
+    client.db,
+    wakeFixture.grant.workspaceId!,
+    wakeFixture.grant.subjectId,
+    (db) =>
+      db.transaction((tx) =>
+        submitHumanPromptInTransaction(tx as typeof db, {
+          accountId: wakeFixture.grant.accountId,
+          workspaceId: wakeFixture.grant.workspaceId!,
+          sessionId: wakeFixture.session.id,
+          subjectId: wakeFixture.grant.subjectId,
+          actor: { type: "human", subjectId: wakeFixture.grant.subjectId },
+          operationKey: clientEventId,
+          delivery: "send",
+          text,
+          resources: [],
+          tools: [],
+          reasoningEffortFallback: "low",
+          source: "user",
+        }),
+      ),
+  );
+}
+
+async function pauseWorkspace(ctx: WakeFixture) {
+  return await withWorkspaceRls(client.db, ctx.grant.workspaceId!, (db) =>
+    db.transaction((tx) =>
+      mutateWorkspaceControlInTransaction(tx as typeof db, {
+        accountId: ctx.grant.accountId,
+        workspaceId: ctx.grant.workspaceId!,
+        actor: { type: "human", subjectId: ctx.grant.subjectId },
+        operationKey: crypto.randomUUID(),
+        action: "pause",
+        reason: "test",
+      }),
+    ),
+  );
 }
 
 async function wakeRow(workspaceId: string, sessionId: string) {
@@ -150,16 +175,18 @@ describe("transactional session workflow wake outbox", () => {
       subjectId: `paused-subject-${suffix}`,
     });
     const grant = access.workspaceGrants[0]!;
-    await setWorkspaceInferenceControl(client.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId!,
-      actor: grant.subjectId,
-      state: "paused",
-      reason: "test",
-      clientEventId: `pause:${suffix}`,
-      expectedState: "active",
-      expectedGeneration: 0,
-    });
+    await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      db.transaction((tx) =>
+        mutateWorkspaceControlInTransaction(tx as typeof db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          actor: { type: "human", subjectId: grant.subjectId },
+          operationKey: `pause:${suffix}`,
+          action: "pause",
+          reason: "test",
+        }),
+      ),
+    );
     const session = await createSession(client.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId!,
@@ -181,11 +208,11 @@ describe("transactional session workflow wake outbox", () => {
     expect(result.workflowWakeRevision).toBeNull();
     expect(result.turn?.status).toBe("queued");
     expect(result.events.find((event) => event.type === "session.created")?.payload).toMatchObject({
-      status: "paused",
+      status: "queued",
     });
     expect(
       result.events.find((event) => event.type === "session.status.changed")?.payload,
-    ).toMatchObject({ status: "paused" });
+    ).toMatchObject({ status: "queued" });
     expect(await wakeRow(grant.workspaceId!, session.id)).toBeNull();
   });
 
@@ -210,16 +237,8 @@ describe("transactional session workflow wake outbox", () => {
       status: "paused",
       rationale: "test hold",
     });
-    await setWorkspaceInferenceControl(client.db, {
-      accountId: ctx.grant.accountId,
-      workspaceId: ctx.grant.workspaceId!,
-      actor: ctx.grant.subjectId,
-      state: "paused",
-      reason: "test",
-      clientEventId: `pause-goal:${ctx.session.id}`,
-      expectedState: "active",
-      expectedGeneration: 0,
-    });
+    await pauseWorkspace(ctx);
+    const afterPause = await wakeRow(ctx.grant.workspaceId!, ctx.session.id);
 
     const resumed = await setSessionGoalStatus(client.db, ctx.grant.workspaceId!, ctx.session.id, {
       status: "active",
@@ -228,8 +247,8 @@ describe("transactional session workflow wake outbox", () => {
     expect(resumed.changed).toBe(true);
     expect(resumed.workflowWakeRevision).toBeNull();
     expect(await wakeRow(ctx.grant.workspaceId!, ctx.session.id)).toMatchObject({
-      wakeRevision: started.workflowWakeRevision,
-      deliveredRevision: started.workflowWakeRevision,
+      wakeRevision: afterPause!.wakeRevision,
+      deliveredRevision: afterPause!.deliveredRevision,
     });
   });
 
@@ -302,8 +321,8 @@ describe("transactional session workflow wake outbox", () => {
     const first = await send(ctx, "first");
     const second = await send(ctx, "second");
 
-    expect(first.workflowWakeRevision).toBe(1);
-    expect(second.workflowWakeRevision).toBe(2);
+    expect(first.wakeRevision).toBe(1);
+    expect(second.wakeRevision).toBe(2);
     expect(await wakeRow(ctx.grant.workspaceId!, ctx.session.id)).toMatchObject({
       wakeRevision: 2,
       deliveredRevision: 0,
@@ -315,7 +334,7 @@ describe("transactional session workflow wake outbox", () => {
       workspaceId: ctx.grant.workspaceId!,
       sessionId: ctx.session.id,
       temporalWorkflowId: `session-${ctx.session.id}`,
-      wakeRevision: first.workflowWakeRevision!,
+      wakeRevision: first.wakeRevision,
     });
     expect(await wakeRow(ctx.grant.workspaceId!, ctx.session.id)).toMatchObject({
       wakeRevision: 2,
@@ -327,7 +346,7 @@ describe("transactional session workflow wake outbox", () => {
       workspaceId: ctx.grant.workspaceId!,
       sessionId: ctx.session.id,
       temporalWorkflowId: `session-${ctx.session.id}`,
-      wakeRevision: second.workflowWakeRevision!,
+      wakeRevision: second.wakeRevision,
     });
     expect(await wakeRow(ctx.grant.workspaceId!, ctx.session.id)).toMatchObject({
       wakeRevision: 2,
@@ -343,7 +362,7 @@ describe("transactional session workflow wake outbox", () => {
     const claimed = (await claimPendingSessionWorkflowWakes(client.db, 1000)).find(
       (entry) => entry.sessionId === ctx.session.id,
     );
-    expect(claimed?.wakeRevision).toBe(second.workflowWakeRevision!);
+    expect(claimed?.wakeRevision).toBe(second.wakeRevision);
     await markSessionWorkflowWakeFailed(client.db, claimed!, "newer delivery failed");
 
     await markSessionWorkflowWakeDelivered(client.db, {
@@ -351,12 +370,12 @@ describe("transactional session workflow wake outbox", () => {
       workspaceId: ctx.grant.workspaceId!,
       sessionId: ctx.session.id,
       temporalWorkflowId: `session-${ctx.session.id}`,
-      wakeRevision: first.workflowWakeRevision!,
+      wakeRevision: first.wakeRevision,
     });
 
     expect(await wakeRow(ctx.grant.workspaceId!, ctx.session.id)).toMatchObject({
-      wakeRevision: second.workflowWakeRevision,
-      deliveredRevision: first.workflowWakeRevision,
+      wakeRevision: second.wakeRevision,
+      deliveredRevision: first.wakeRevision,
       attempts: 1,
       lastError: "newer delivery failed",
     });
@@ -368,7 +387,7 @@ describe("transactional session workflow wake outbox", () => {
       Array.from({ length: 12 }, (_, index) => send(ctx, `prompt-${index}`)),
     );
     expect(
-      results.map((result) => result.workflowWakeRevision).sort((left, right) => left! - right!),
+      results.map((result) => result.wakeRevision).sort((left, right) => left - right),
     ).toEqual(Array.from({ length: 12 }, (_, index) => index + 1));
     expect(await wakeRow(ctx.grant.workspaceId!, ctx.session.id)).toMatchObject({
       wakeRevision: 12,
@@ -383,8 +402,8 @@ describe("transactional session workflow wake outbox", () => {
       (entry) => entry.sessionId === ctx.session.id,
     );
     expect(claimed).toMatchObject({
-      wakeRevision: result.workflowWakeRevision,
-      controlEventId: null,
+      wakeRevision: result.wakeRevision,
+      interruptionRequested: false,
     });
     expect(
       (await claimPendingSessionWorkflowWakes(client.db, 1000)).some(
@@ -400,7 +419,7 @@ describe("transactional session workflow wake outbox", () => {
     });
   });
 
-  test("repair claims derive the current durable control event", async () => {
+  test("repair claims derive cancellation from the durable interruption ledger", async () => {
     const ctx = await fixture();
     const queued = await send(ctx, "run");
     await markSessionWorkflowWakeDelivered(client.db, {
@@ -408,29 +427,35 @@ describe("transactional session workflow wake outbox", () => {
       workspaceId: ctx.grant.workspaceId!,
       sessionId: ctx.session.id,
       temporalWorkflowId: `session-${ctx.session.id}`,
-      wakeRevision: queued.workflowWakeRevision!,
+      wakeRevision: queued.wakeRevision,
     });
+    const attemptId = crypto.randomUUID();
     await claimSessionWorkForAttempt(client.db, ctx.grant.workspaceId!, {
       sessionId: ctx.session.id,
       workflowId: `session-${ctx.session.id}`,
-      attemptId: crypto.randomUUID(),
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
       dispatchId: crypto.randomUUID(),
       trigger: { kind: "next" },
     });
-    const paused = await requestSessionControl(client.db, {
-      accountId: ctx.grant.accountId,
-      workspaceId: ctx.grant.workspaceId!,
-      sessionId: ctx.session.id,
-      actor: ctx.grant.subjectId,
-      mode: "pause",
-    });
-    expect(paused.shouldSignalControl).toBe(true);
+    const paused = await withWorkspaceRls(client.db, ctx.grant.workspaceId!, (db) =>
+      db.transaction((tx) =>
+        mutateSessionControlInTransaction(tx as typeof db, {
+          accountId: ctx.grant.accountId,
+          workspaceId: ctx.grant.workspaceId!,
+          sessionId: ctx.session.id,
+          actor: { type: "human", subjectId: ctx.grant.subjectId },
+          operationKey: crypto.randomUUID(),
+          action: "pause",
+        }),
+      ),
+    );
+    expect(paused.interruptionCount).toBe(1);
     const claimed = (await claimPendingSessionWorkflowWakes(client.db, 1000)).find(
       (entry) => entry.sessionId === ctx.session.id,
     );
     expect(claimed).toMatchObject({
-      wakeRevision: paused.workflowWakeRevision,
-      controlEventId: paused.event.id,
+      interruptionRequested: true,
     });
   });
 });

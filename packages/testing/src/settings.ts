@@ -43,7 +43,6 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     integrationsOauthClientsJson: "{}",
     goalMaxAutoContinuations: 20,
     goalNoProgressLimit: 3,
-    childCompletionParentWakeEnabled: false,
     agentMaxModelCallsPerTurn: 40,
     contextWindowTokens: 1_050_000,
     contextCompactionThresholdRatio: 0.9,

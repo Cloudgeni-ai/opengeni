@@ -127,6 +127,8 @@ export type AppContextValue = {
   handleManagedSignOut: () => Promise<void>;
   createWorkspace: (request: CreateWorkspaceRequest) => Promise<Workspace | null>;
   renameWorkspace: (workspaceId: string, name: string) => Promise<Workspace | null>;
+  setWorkspaceInferenceControl: (workspaceId: string, action: "pause" | "resume") => Promise<void>;
+  refreshWorkspace: (workspaceId: string) => Promise<void>;
   updateWorkspaceSettings: (
     workspaceId: string,
     settings: UpdateWorkspaceSettingsRequest,
@@ -451,6 +453,42 @@ export function RootRouteComponent() {
       return null;
     }
   }
+
+  async function setWorkspaceInferenceControl(
+    workspaceId: string,
+    action: "pause" | "resume",
+  ): Promise<void> {
+    const current = workspaces.find((workspace) => workspace.id === workspaceId);
+    const response = await client.setWorkspaceInferenceState(workspaceId, {
+      action,
+      clientEventId: crypto.randomUUID(),
+      ...(current ? { expectedRevision: current.inferenceControl.revision } : {}),
+    });
+    setWorkspaces((all) =>
+      all.map((workspace) =>
+        workspace.id === workspaceId
+          ? {
+              ...workspace,
+              inferenceControl: {
+                state: response.state,
+                revision: response.revision,
+                reason: null,
+                changedBy: null,
+                changedAt: new Date().toISOString(),
+              },
+            }
+          : workspace,
+      ),
+    );
+  }
+
+  const refreshWorkspace = useCallback(
+    async (workspaceId: string): Promise<void> => {
+      const updated = await client.getWorkspace(workspaceId);
+      setWorkspaces((current) => upsertWorkspace(current, updated));
+    },
+    [client],
+  );
 
   // Settings PATCH deep-merges server-side; upsert the returned workspace so the
   // cached list (and any settings-derived UI, e.g. the Documents memory pane)
@@ -863,6 +901,7 @@ export function RootRouteComponent() {
   const contextHandleManagedSignOut = useLatestCallback(handleManagedSignOut);
   const contextCreateWorkspace = useLatestCallback(createWorkspace);
   const contextRenameWorkspace = useLatestCallback(renameWorkspace);
+  const contextSetWorkspaceInferenceControl = useLatestCallback(setWorkspaceInferenceControl);
   const contextUpdateWorkspaceSettings = useLatestCallback(updateWorkspaceSettings);
   const contextSetWorkspaceDefaultRig = useLatestCallback(setWorkspaceDefaultRig);
   const contextUpdateSessionTitle = useLatestCallback(updateSessionTitle);
@@ -922,6 +961,8 @@ export function RootRouteComponent() {
           handleManagedSignOut: contextHandleManagedSignOut,
           createWorkspace: contextCreateWorkspace,
           renameWorkspace: contextRenameWorkspace,
+          setWorkspaceInferenceControl: contextSetWorkspaceInferenceControl,
+          refreshWorkspace,
           updateWorkspaceSettings: contextUpdateWorkspaceSettings,
           setWorkspaceDefaultRig: contextSetWorkspaceDefaultRig,
           updateSessionTitle: contextUpdateSessionTitle,
@@ -950,6 +991,7 @@ export function RootRouteComponent() {
     contextForgetAccessKey,
     contextHandleManagedSignOut,
     contextRenameWorkspace,
+    contextSetWorkspaceInferenceControl,
     contextSetWorkspaceDefaultRig,
     contextStartGitHubAppManifestFlow,
     contextStartSession,
@@ -971,6 +1013,7 @@ export function RootRouteComponent() {
     modelForSession,
     reasoningEffort,
     refreshGitHub,
+    refreshWorkspace,
     refreshWorkspaceMcpServers,
     repoBusy,
     repositoryGroups,

@@ -25,7 +25,7 @@ export type WakeSessionWorkflowSignal = (input: {
   sessionId: string;
   workflowId: string;
   wakeRevision: number;
-  controlEventId?: string;
+  interruptionRequested?: boolean;
 }) => Promise<void>;
 
 export type SignalCodexCapacityWorkflow = (input: {
@@ -112,15 +112,16 @@ export type RunAgentTurnInput = {
   workspaceId: string;
   sessionId: string;
   workflowId: string;
+  workflowRunId: string;
   attemptId: string;
   trigger: { kind: "next" } | { kind: "approval"; triggerEventId: string };
 };
 
-export type SettleSessionControlInput = {
+export type SettleSessionInterruptionsInput = {
   accountId: string;
   workspaceId: string;
   sessionId: string;
-  triggerEventId: string;
+  attemptId: string;
   workflowId: string;
 };
 

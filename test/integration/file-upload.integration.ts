@@ -775,6 +775,7 @@ function noopWorkflowClient(): SessionWorkflowClient {
   return {
     signalUserMessage: async () => {},
     wakeSessionWorkflow: async () => {},
+    requestSessionWorkflowWakeDispatch: async () => {},
     signalApprovalDecision: async () => {},
     signalSessionControl: async () => {},
     syncScheduledTask: async () => {},

@@ -24,7 +24,6 @@ import {
   createWorkspaceEnvironment,
   dbSql,
   encryptEnvironmentValue,
-  enqueueSessionMessageAtomically,
   enablePackInstallation,
   registerWorkspacePack,
   setWorkspaceEnvironmentVariable,
@@ -43,12 +42,13 @@ import {
   recordUsageEvent,
   requireScheduledTask,
   saveRunState,
-  setWorkspaceInferenceControl,
+  mutateWorkspaceControlInTransaction,
   sumUsageQuantity,
   updateScheduledTask,
   withWorkspaceRls,
   type Database,
 } from "@opengeni/db";
+import { submitTestHumanPrompt } from "./helpers/session-control";
 import type { AccessGrant, SessionStatus } from "@opengeni/contracts";
 import { createNatsEventBus, type EventBus } from "@opengeni/events";
 import { createObservability } from "@opengeni/observability";
@@ -139,6 +139,7 @@ describe("worker activities integration", () => {
       sessionId: session.id,
       trigger: { kind: "next" },
       workflowId: "workflow-activity",
+      workflowRunId: crypto.randomUUID(),
     });
     expect(result.status).toBe("idle");
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
@@ -262,6 +263,7 @@ describe("worker activities integration", () => {
         sessionId: session.id,
         trigger: { kind: "next" },
         workflowId: "workflow-mcp-approval",
+        workflowRunId: crypto.randomUUID(),
       });
       expect(first.status).toBe("requires_action");
       const afterFirst = await listSessionEvents(
@@ -297,6 +299,7 @@ describe("worker activities integration", () => {
         // (`${workflowId}:${turnId}`) does not collide with turn 1's — the real
         // system disambiguates via the Temporal activityId, which is absent here.
         workflowId: "workflow-mcp-approval-resume",
+        workflowRunId: crypto.randomUUID(),
       });
       expect(second.status).toBe("idle");
       expect(mcp.calls).toEqual([{ tool: "search_documents", args: { query: "network policy" } }]);
@@ -321,6 +324,7 @@ describe("worker activities integration", () => {
     const noopWorkflowClient: SessionWorkflowClient = {
       signalUserMessage: async () => undefined,
       wakeSessionWorkflow: async () => undefined,
+      requestSessionWorkflowWakeDispatch: async () => undefined,
       signalApprovalDecision: async () => undefined,
       signalSessionControl: async () => undefined,
       syncScheduledTask: async () => undefined,
@@ -387,6 +391,7 @@ describe("worker activities integration", () => {
         sessionId: session.id,
         trigger: { kind: "next" },
         workflowId: "workflow-manager-mcp",
+        workflowRunId: crypto.randomUUID(),
       });
       expect(result.status).toBe("idle");
       // The sessions_list result (containing this very session) was fed back
@@ -413,6 +418,7 @@ describe("worker activities integration", () => {
     const noopWorkflowClient: SessionWorkflowClient = {
       signalUserMessage: async () => undefined,
       wakeSessionWorkflow: async () => undefined,
+      requestSessionWorkflowWakeDispatch: async () => undefined,
       signalApprovalDecision: async () => undefined,
       signalSessionControl: async () => undefined,
       syncScheduledTask: async () => undefined,
@@ -485,6 +491,7 @@ describe("worker activities integration", () => {
         sessionId: manager.id,
         trigger: { kind: "next" },
         workflowId: "workflow-spawn-link",
+        workflowRunId: crypto.randomUUID(),
       });
       // The manager created exactly one other session: the spawned worker.
       const allSessions = await listSessions(dbClient.db, grant.workspaceId, 50);
@@ -525,6 +532,7 @@ describe("worker activities integration", () => {
       sessionId: session.id,
       trigger: { kind: "next" },
       workflowId: "workflow-followup",
+      workflowRunId: crypto.randomUUID(),
     });
     await appendOwnedEvents(dbClient.db, grant, session.id, [
       { type: "user.message", payload: { text: "second question" } },
@@ -536,6 +544,7 @@ describe("worker activities integration", () => {
       sessionId: session.id,
       trigger: { kind: "next" },
       workflowId: "workflow-followup",
+      workflowRunId: crypto.randomUUID(),
     });
 
     expect(model.calls).toBe(2);
@@ -585,6 +594,7 @@ describe("worker activities integration", () => {
       sessionId: session.id,
       trigger: { kind: "next" },
       workflowId: "workflow-image-context",
+      workflowRunId: crypto.randomUUID(),
     });
 
     const request = JSON.stringify(model.requests[0]?.input ?? {});
@@ -637,6 +647,7 @@ describe("worker activities integration", () => {
       sessionId: session.id,
       trigger: { kind: "next" },
       workflowId: "workflow-oversized-image-context",
+      workflowRunId: crypto.randomUUID(),
     });
 
     const request = JSON.stringify(model.requests[0]?.input ?? {});
@@ -704,6 +715,7 @@ describe("worker activities integration", () => {
       sessionId: session.id,
       trigger: { kind: "next" },
       workflowId: "workflow-pack-image-conflict",
+      workflowRunId: crypto.randomUUID(),
     });
     expect(result.status).toBe("failed");
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
@@ -744,6 +756,7 @@ describe("worker activities integration", () => {
         sessionId: session.id,
         trigger: { kind: "next" },
         workflowId: "workflow-fail",
+        workflowRunId: crypto.randomUUID(),
       }),
     ).resolves.toMatchObject({ status: "failed" });
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
@@ -780,6 +793,7 @@ describe("worker activities integration", () => {
         sessionId: session.id,
         trigger: { kind: "next" },
         workflowId: "workflow-max-turns",
+        workflowRunId: crypto.randomUUID(),
       }),
     ).resolves.toMatchObject({ status: "idle" });
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
@@ -822,6 +836,7 @@ describe("worker activities integration", () => {
         sessionId: session.id,
         trigger: { kind: "next" },
         workflowId: "workflow-rate-limit",
+        workflowRunId: crypto.randomUUID(),
       }),
     ).resolves.toMatchObject({ status: "idle" });
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
@@ -878,6 +893,7 @@ describe("worker activities integration", () => {
         sessionId: session.id,
         trigger: { kind: "next" },
         workflowId: "workflow-rate-limit-goal",
+        workflowRunId: crypto.randomUUID(),
       }),
     ).resolves.toMatchObject({ status: "idle", continueDelayMs: PROVIDER_BACKPRESSURE_DELAY_MS });
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
@@ -999,6 +1015,7 @@ describe("worker activities integration", () => {
         sessionId: session.id,
         trigger: { kind: "next" },
         workflowId: "workflow-mcp-timeout-after-output",
+        workflowRunId: crypto.randomUUID(),
       }),
     ).resolves.toMatchObject({ status: "idle", continueDelayMs: PROVIDER_BACKPRESSURE_DELAY_MS });
 
@@ -1063,6 +1080,7 @@ describe("worker activities integration", () => {
         sessionId: crypto.randomUUID(),
         trigger: { kind: "next" },
         workflowId: "workflow-missing-session",
+        workflowRunId: crypto.randomUUID(),
       }),
     ).rejects.toThrow("Session not found");
     await Bun.sleep(0);
@@ -1131,6 +1149,7 @@ describe("worker activities integration", () => {
         sessionId: session.id,
         trigger: { kind: "next" },
         workflowId: "workflow-status-update-fails",
+        workflowRunId: crypto.randomUUID(),
       }),
     ).rejects.toThrow("status update failed");
 
@@ -1158,6 +1177,7 @@ describe("worker activities integration", () => {
     const initialClaim = await claimSessionWorkForAttempt(dbClient.db, grant.workspaceId, {
       sessionId: session.id,
       workflowId,
+      workflowRunId: crypto.randomUUID(),
       attemptId: initialAttemptId,
       dispatchId: `approval-fixture-${crypto.randomUUID()}`,
       trigger: { kind: "next" },
@@ -1182,7 +1202,6 @@ describe("worker activities integration", () => {
         turnId: turn.id,
         triggerEventId: turn.triggerEventId,
         attemptId: initialAttemptId,
-        childCompletionParentWakeEnabled: false,
         turnStatus: "requires_action",
         sessionStatus: "requires_action",
         activeTurnId: turn.id,
@@ -1233,6 +1252,7 @@ describe("worker activities integration", () => {
         sessionId: session.id,
         trigger: { kind: "approval", triggerEventId: approvalTrigger!.id },
         workflowId,
+        workflowRunId: crypto.randomUUID(),
       }),
     ).resolves.toMatchObject({ status: "idle", turnId: turn.id });
 
@@ -1355,6 +1375,7 @@ describe("worker activities integration", () => {
       sessionId: session.id,
       trigger: { kind: "next" },
       workflowId: "workflow-modal-repo-clone",
+      workflowRunId: crypto.randomUUID(),
     });
 
     expect(result.status).toBe("failed");
@@ -1426,6 +1447,7 @@ describe("worker activities integration", () => {
         sessionId: session.id,
         trigger: { kind: "next" },
         workflowId: "workflow-mcp",
+        workflowRunId: crypto.randomUUID(),
       });
 
       expect(result.status).toBe("idle");
@@ -1511,6 +1533,7 @@ describe("worker activities integration", () => {
         sessionId: session.id,
         trigger: { kind: "next" },
         workflowId: "workflow-per-response-usage",
+        workflowRunId: crypto.randomUUID(),
       });
 
       expect(result.status).toBe("idle");
@@ -1588,6 +1611,7 @@ describe("worker activities integration", () => {
       sessionId: session.id,
       trigger: { kind: "next" },
       workflowId: "workflow-capped-model-debit",
+      workflowRunId: crypto.randomUUID(),
     });
 
     // Budget exhaustion is account state, not an agent failure: the segment
@@ -1645,6 +1669,7 @@ describe("worker activities integration", () => {
         sessionId: session.id,
         trigger: { kind: "next" },
         workflowId: "workflow-items-turn-1",
+        workflowRunId: crypto.randomUUID(),
       }),
     ).resolves.toMatchObject({ status: "idle" });
     const itemsAfterTurn1 = await getSessionHistoryItems(
@@ -1679,6 +1704,7 @@ describe("worker activities integration", () => {
         sessionId: session.id,
         trigger: { kind: "next" },
         workflowId: "workflow-items-turn-2",
+        workflowRunId: crypto.randomUUID(),
       }),
     ).resolves.toMatchObject({ status: "idle" });
     const lastRequestInput = JSON.stringify(
@@ -1770,6 +1796,7 @@ describe("worker activities integration", () => {
         sessionId: session.id,
         trigger: { kind: "next" },
         workflowId: "workflow-orphan-recover",
+        workflowRunId: crypto.randomUUID(),
       }),
     ).resolves.toMatchObject({ status: "idle" });
 
@@ -2026,6 +2053,7 @@ describe("worker activities integration", () => {
       sessionId: session.id,
       trigger: { kind: "next" },
       workflowId: "workflow-exact-run-cap",
+      workflowRunId: crypto.randomUUID(),
     });
 
     expect(result.status).toBe("idle");
@@ -2092,6 +2120,7 @@ describe("worker activities integration", () => {
         sessionId: session.id,
         trigger: { kind: "next" },
         workflowId: "workflow-follow-up-mcp",
+        workflowRunId: crypto.randomUUID(),
       });
 
       expect(result.status).toBe("idle");
@@ -2167,9 +2196,9 @@ describe("worker activities integration", () => {
     );
     expect(pendingUpdates).toHaveLength(1);
     expect(pendingUpdates[0]).toMatchObject({
-      kind: "scheduled_wake",
+      kind: "scheduled_occurrence",
       summary: "inspect nightly",
-      payload: { text: "inspect nightly", scheduledTaskId: task.id },
+      payload: { type: "scheduled_occurrence", text: "inspect nightly", scheduledTaskId: task.id },
     });
     expect(await listSessionTurns(dbClient.db, grant.workspaceId, result.sessionId)).toHaveLength(
       0,
@@ -2184,16 +2213,19 @@ describe("worker activities integration", () => {
 
   test("scheduled dispatch and its retry remain inert while the workspace is paused", async () => {
     const grant = await testGrant(dbClient.db);
-    await setWorkspaceInferenceControl(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      actor: grant.subjectId,
-      state: "paused",
-      reason: "test",
-      clientEventId: `pause:${crypto.randomUUID()}`,
-      expectedState: "active",
-      expectedGeneration: 0,
-    });
+    await withWorkspaceRls(dbClient.db, grant.workspaceId, (db) =>
+      db.transaction((tx) =>
+        mutateWorkspaceControlInTransaction(tx as typeof db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          actor: { type: "human", subjectId: grant.subjectId },
+          action: "pause",
+          reason: "test",
+          operationKey: `pause:${crypto.randomUUID()}`,
+          expectedRevision: 0,
+        }),
+      ),
+    );
     const task = await createOwnedScheduledTask(dbClient.db, grant, {
       name: "paused-scheduled-session",
       status: "active",
@@ -2233,14 +2265,15 @@ describe("worker activities integration", () => {
     expect(retry).toMatchObject({ sessionId: first.sessionId, workflowWakeRevision: null });
     expect(workflowWakes).toHaveLength(0);
     expect(await getSession(dbClient.db, grant.workspaceId, first.sessionId)).toMatchObject({
-      status: "paused",
+      status: "queued",
+      effectiveControl: { state: "paused" },
     });
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, first.sessionId, 0, 10);
     expect(events.find((event) => event.type === "session.created")?.payload).toMatchObject({
-      status: "paused",
+      status: "queued",
     });
     expect(events.find((event) => event.type === "session.status.changed")?.payload).toMatchObject({
-      status: "paused",
+      status: "queued",
     });
   });
 
@@ -2588,6 +2621,7 @@ describe("worker activities integration", () => {
       sessionId: session.id,
       trigger: { kind: "next" },
       workflowId: "workflow-environment-redaction",
+      workflowRunId: crypto.randomUUID(),
     });
     expect(result.status).toBe("idle");
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100);
@@ -2631,6 +2665,7 @@ describe("worker activities integration", () => {
       sessionId: session.id,
       trigger: { kind: "next" },
       workflowId: "workflow-environment-missing-key",
+      workflowRunId: crypto.randomUUID(),
     });
     expect(result.status).toBe("failed");
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
@@ -2861,12 +2896,11 @@ async function appendOwnedEvents(
   if (events.length === 1 && events[0]?.type === "user.message") {
     const event = events[0];
     const payload = (event.payload ?? {}) as Record<string, unknown>;
-    const accepted = await enqueueSessionMessageAtomically(db, {
+    const accepted = await submitTestHumanPrompt(db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       sessionId,
-      actor: grant.subjectId,
-      origin: "human",
+      subjectId: grant.subjectId,
       text: String(payload.text ?? ""),
       resources: Array.isArray(payload.resources) ? (payload.resources as never[]) : [],
       tools: Array.isArray(payload.tools) ? (payload.tools as never[]) : [],
@@ -2874,8 +2908,8 @@ async function appendOwnedEvents(
       ...(typeof payload.reasoningEffort === "string"
         ? { reasoningEffort: payload.reasoningEffort as "low" | "medium" | "high" | "xhigh" }
         : {}),
-      ...(event.clientEventId ? { clientEventId: event.clientEventId } : {}),
-      delivery: "queue",
+      ...(event.clientEventId ? { operationKey: event.clientEventId } : {}),
+      delivery: "send",
       reasoningEffortFallback: "medium",
     });
     return [accepted.accepted];

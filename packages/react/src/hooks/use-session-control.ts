@@ -1,4 +1,4 @@
-import type { SessionEvent } from "@opengeni/sdk";
+import type { SessionControlResponse, SessionEvent } from "@opengeni/sdk";
 import { useCallback } from "react";
 import { useOpenGeni, type ClientOverride } from "../provider";
 import { useMutationRunner } from "./internal";
@@ -6,8 +6,8 @@ import { useMutationRunner } from "./internal";
 export type UseSessionControlOptions = ClientOverride;
 
 export type UseSessionControlResult = {
-  pause: (reason?: string) => Promise<SessionEvent | null>;
-  resume: (reason?: string) => Promise<SessionEvent | null>;
+  pause: (reason?: string) => Promise<SessionControlResponse | null>;
+  resume: (reason?: string) => Promise<SessionControlResponse | null>;
   controlling: boolean;
   /** Approve a pending `requires_action` approval. */
   approve: (approvalId: string, message?: string) => Promise<SessionEvent | null>;
@@ -43,7 +43,7 @@ export function useSessionControl(
   } = useMutationRunner();
 
   const pause = useCallback(
-    async (reason?: string): Promise<SessionEvent | null> => {
+    async (reason?: string): Promise<SessionControlResponse | null> => {
       if (!sessionId) {
         return null;
       }
@@ -55,12 +55,11 @@ export function useSessionControl(
   );
 
   const resume = useCallback(
-    async (reason?: string): Promise<SessionEvent | null> => {
+    async (reason?: string): Promise<SessionControlResponse | null> => {
       if (!sessionId) return null;
-      const result = await runControl(() =>
+      return await runControl(() =>
         client.resumeSession(workspaceId, sessionId, reason !== undefined ? { reason } : {}),
       );
-      return result?.event ?? null;
     },
     [client, workspaceId, sessionId, runControl],
   );

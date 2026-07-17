@@ -79,7 +79,11 @@ export function WorkspaceShellRoute({ workspaceId }: { workspaceId: string }) {
   }
 
   return (
-    <OpenGeniProvider client={context.client} workspaceId={workspaceId}>
+    <OpenGeniProvider
+      client={context.client}
+      workspaceId={workspaceId}
+      onWorkspaceControlEvent={() => void context.refreshWorkspace(workspaceId)}
+    >
       <RailProvider workspaceId={workspaceId}>
         <RailShell>
           <Outlet />

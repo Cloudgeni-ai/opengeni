@@ -1,5 +1,5 @@
 import {
-  settlePendingSessionControl,
+  settleSessionAttemptInterruptions,
   applySessionTurnSettlement,
   recoverSessionDispatch,
   peekSessionWork as peekSessionWorkDb,
@@ -16,14 +16,14 @@ import type {
   ActivityServices,
   PeekSessionWorkInput,
   FailSessionAttemptInput,
-  SettleSessionControlInput,
+  SettleSessionInterruptionsInput,
   MarkSessionIdleInput,
   RecoverDispatchInput,
   RecoverDispatchResult,
 } from "./types";
 
 export type SessionStateActivityOverrides = Partial<{
-  settlePendingSessionControl: typeof settlePendingSessionControl;
+  settleSessionAttemptInterruptions: typeof settleSessionAttemptInterruptions;
   applySessionTurnSettlement: typeof applySessionTurnSettlement;
   recoverSessionDispatch: typeof recoverSessionDispatch;
   peekSessionWork: typeof peekSessionWorkDb;
@@ -47,8 +47,8 @@ export function createSessionStateActivities(
   services: () => Promise<ActivityServices>,
   overrides: SessionStateActivityOverrides = {},
 ) {
-  const settlePendingSessionControlFn =
-    overrides.settlePendingSessionControl ?? settlePendingSessionControl;
+  const settleSessionAttemptInterruptionsFn =
+    overrides.settleSessionAttemptInterruptions ?? settleSessionAttemptInterruptions;
   const applySessionTurnSettlementFn =
     overrides.applySessionTurnSettlement ?? applySessionTurnSettlement;
   const recoverSessionDispatchFn = overrides.recoverSessionDispatch ?? recoverSessionDispatch;
@@ -84,7 +84,6 @@ export function createSessionStateActivities(
       turnId: turn.id,
       triggerEventId: turn.triggerEventId,
       attemptId: input.attemptId,
-      childCompletionParentWakeEnabled: settings.childCompletionParentWakeEnabled,
       turnStatus: "failed",
       sessionStatus: "failed",
       activeTurnId: null,
@@ -112,15 +111,15 @@ export function createSessionStateActivities(
     );
   }
 
-  async function settleSessionControl(
-    input: SettleSessionControlInput,
+  async function settleSessionInterruptions(
+    input: SettleSessionInterruptionsInput,
   ): Promise<{ action: "paused" | "continue" | "stale" }> {
     const { db, bus, observability } = await services();
-    const applied = await settlePendingSessionControlFn(
+    const applied = await settleSessionAttemptInterruptionsFn(
       db,
       input.workspaceId,
       input.sessionId,
-      input.triggerEventId,
+      input.attemptId,
     );
     if (applied.events.length > 0) {
       await publishDurableSessionEventsFn(bus, input.workspaceId, input.sessionId, applied.events);
@@ -143,7 +142,6 @@ export function createSessionStateActivities(
       attemptId: input.attemptId,
       timeoutType: input.timeoutType,
       maxRedispatches: WORKER_DEATH_MAX_REDISPATCHES,
-      childCompletionParentWakeEnabled: settings.childCompletionParentWakeEnabled,
     });
     if (result.action === "stale" || result.action === "unclaimed") {
       return { action: result.action };
@@ -184,7 +182,6 @@ export function createSessionStateActivities(
       db,
       input.workspaceId,
       input.sessionId,
-      settings.childCompletionParentWakeEnabled,
     );
     if (settled.events.length > 0) {
       await publishDurableSessionEventsFn(bus, input.workspaceId, input.sessionId, settled.events);
@@ -209,7 +206,7 @@ export function createSessionStateActivities(
 
   return {
     failSessionAttempt,
-    settleSessionControl,
+    settleSessionInterruptions,
     recoverDispatch,
     peekSessionWork,
     markSessionIdle,
