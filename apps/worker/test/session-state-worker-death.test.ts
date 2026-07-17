@@ -35,7 +35,7 @@ function makeActivities() {
           publishedEvents.push(...events);
         },
       ),
-      notifyParentOfChildTerminal: mock(async (...args: unknown[]) => {
+      deliverFailedChildTurnToParent: mock(async (...args: unknown[]) => {
         parentWakeCalls.push(args);
       }),
       recordTurnsQueuedGauge: mock(() => undefined),
@@ -123,7 +123,7 @@ describe("recoverDispatch: exact attempt ownership fence", () => {
     expect(publishedEvents).toEqual([{ id: "failed-1", type: "turn.failed" }]);
     expect(parentWakeCalls).toHaveLength(1);
     expect(parentWakeCalls[0]).toEqual(
-      expect.arrayContaining(["workspace-1", "session-1", "failed", "turn:turn-1"]),
+      expect.arrayContaining(["workspace-1", "session-1", "turn-1"]),
     );
   });
 });
