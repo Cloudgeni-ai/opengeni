@@ -427,6 +427,55 @@ describe("0063 session control mega migration", () => {
     });
   }, 180_000);
 
+  test("keeps canonical continuability bounded for thousands of nested sessions", async () => {
+    await withPreMegaDatabase("continuability-scale", async (sql) => {
+      const scope = await seedAccountWorkspace(sql, "continuability-scale");
+      await applyFile(sql, "0063_session_control_mega_foundation.sql");
+
+      await sql`
+        insert into sessions (
+          id, account_id, workspace_id, parent_session_id, status, initial_message,
+          model, sandbox_backend, sandbox_group_id, temporal_workflow_id
+        )
+        select
+          md5(${scope.workspaceId}::text || ':' || branch::text || ':' || depth::text)::uuid,
+          ${scope.accountId},
+          ${scope.workspaceId},
+          case when depth = 0 then null else
+            md5(${scope.workspaceId}::text || ':' || branch::text || ':' || (depth - 1)::text)::uuid
+          end,
+          'queued',
+          'scale fixture',
+          'codex/gpt-5.6-sol',
+          'none',
+          md5(${scope.workspaceId}::text || ':' || branch::text || ':0')::uuid,
+          'session-' || md5(${scope.workspaceId}::text || ':' || branch::text || ':' || depth::text)
+        from generate_series(1, 128) branch
+        cross join generate_series(0, 31) depth`;
+      await sql`
+        insert into session_turns (
+          id, account_id, workspace_id, session_id, trigger_event_id,
+          temporal_workflow_id, status, source, position, prompt, model,
+          reasoning_effort, sandbox_backend
+        )
+        select gen_random_uuid(), session.account_id, session.workspace_id, session.id,
+               gen_random_uuid(), session.temporal_workflow_id, 'queued', 'user', 1,
+               'queued scale prompt', session.model, 'high', 'none'
+        from sessions session
+        where session.workspace_id = ${scope.workspaceId}`;
+
+      const startedAt = performance.now();
+      const [result] = await sql.begin(async (transaction) => {
+        await transaction`set local statement_timeout = '5s'`;
+        return await transaction<Array<{ count: number }>>`
+          select count(*)::integer as count
+          from opengeni_private.list_continuable_sessions(${scope.workspaceId}, null)`;
+      });
+      expect(result?.count).toBe(4_096);
+      expect(performance.now() - startedAt).toBeLessThan(5_000);
+    });
+  }, 180_000);
+
   test("fails closed for an eventless user-pause goal outside Session Pause", async () => {
     await withPreMegaDatabase("ambiguous-goal-pause", async (sql) => {
       const scope = await seedAccountWorkspace(sql, "ambiguous-goal-pause");

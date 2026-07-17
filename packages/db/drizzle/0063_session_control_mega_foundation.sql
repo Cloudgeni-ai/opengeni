@@ -1056,6 +1056,9 @@ ALTER TABLE "session_system_update_outbox" ADD CONSTRAINT "system_update_outbox_
 -- Control blocks ordinary work but never blocks settlement of an already
 -- committed interruption. Malformed ancestry is omitted (held fail-closed) and
 -- is separately rejected by the migration ancestry preflight above.
+-- Propagate the greatest Pause and Resume revisions once from each root instead
+-- of rescanning every target's ancestry. Pause wins an impossible equal-revision
+-- tie, matching the strict "override revision must be newer" control rule.
 DO $continuability$
 DECLARE target_schema text := current_schema();
 BEGIN
@@ -1075,162 +1078,154 @@ BEGIN
     STABLE
     SET search_path = pg_catalog
     AS $function$
-      WITH RECURSIVE descendants AS (
-        SELECT session.workspace_id, session.id,
-               ARRAY[session.id]::uuid[] AS path,
-               0::integer AS depth,
-               false AS cycle
+      WITH RECURSIVE control_tree AS (
+        SELECT session.workspace_id, session.id, session.parent_session_id,
+               greatest(control.workspace_pause_revision, session.direct_pause_revision)
+                 AS max_pause_revision,
+               session.subtree_run_override_revision AS max_override_revision,
+               0::integer AS depth
         FROM %1$I.sessions session
-        WHERE p_root_session_id IS NOT NULL
-          AND session.id = p_root_session_id
+        JOIN %1$I.workspace_inference_controls control
+          ON control.workspace_id = session.workspace_id
+        WHERE session.parent_session_id IS NULL
           AND (p_workspace_id IS NULL OR session.workspace_id = p_workspace_id)
         UNION ALL
-        SELECT child.workspace_id, child.id,
-               parent.path || child.id,
-               parent.depth + 1,
-               child.id = ANY(parent.path)
-        FROM descendants parent
+        SELECT child.workspace_id, child.id, child.parent_session_id,
+               greatest(parent.max_pause_revision, child.direct_pause_revision),
+               greatest(parent.max_override_revision, child.subtree_run_override_revision),
+               parent.depth + 1
+        FROM control_tree parent
         JOIN %1$I.sessions child
           ON child.workspace_id = parent.workspace_id
          AND child.parent_session_id = parent.id
-        WHERE NOT parent.cycle
-          AND parent.depth < 10000
+        WHERE parent.depth < 10000
+      ), descendants AS (
+        SELECT tree.workspace_id, tree.id
+        FROM control_tree tree
+        WHERE p_root_session_id IS NOT NULL AND tree.id = p_root_session_id
+        UNION ALL
+        SELECT child.workspace_id, child.id
+        FROM descendants parent
+        JOIN control_tree child
+          ON child.workspace_id = parent.workspace_id
+         AND child.parent_session_id = parent.id
       ), scope_sessions AS (
-        SELECT session.*
+        SELECT session.*, tree.max_pause_revision, tree.max_override_revision
         FROM %1$I.sessions session
-        WHERE (p_workspace_id IS NULL OR session.workspace_id = p_workspace_id)
-          AND (
+        JOIN control_tree tree
+          ON tree.workspace_id = session.workspace_id AND tree.id = session.id
+        WHERE (
             p_root_session_id IS NULL
             OR EXISTS (
               SELECT 1 FROM descendants descendant
               WHERE descendant.workspace_id = session.workspace_id
                 AND descendant.id = session.id
-                AND NOT descendant.cycle
             )
           )
-      ), ancestry AS (
-        SELECT target.workspace_id, target.id AS target_id,
-               ancestor.id AS ancestor_id, ancestor.parent_session_id,
-               ancestor.direct_control_state, ancestor.direct_pause_revision,
-               ancestor.subtree_run_override_revision,
-               0::integer AS depth, ARRAY[ancestor.id]::uuid[] AS path,
-               false AS cycle
-        FROM scope_sessions target
-        JOIN %1$I.sessions ancestor
-          ON ancestor.workspace_id = target.workspace_id AND ancestor.id = target.id
-        UNION ALL
-        SELECT child.workspace_id, child.target_id,
-               parent.id, parent.parent_session_id,
-               parent.direct_control_state, parent.direct_pause_revision,
-               parent.subtree_run_override_revision,
-               child.depth + 1, child.path || parent.id,
-               parent.id = ANY(child.path)
-        FROM ancestry child
-        JOIN %1$I.sessions parent
-          ON parent.workspace_id = child.workspace_id
-         AND parent.id = child.parent_session_id
-        WHERE child.parent_session_id IS NOT NULL
-          AND NOT child.cycle
-          AND child.depth < 10000
-      ), complete_targets AS (
-        SELECT ancestry.workspace_id, ancestry.target_id
-        FROM ancestry
-        GROUP BY ancestry.workspace_id, ancestry.target_id
-        HAVING bool_and(NOT ancestry.cycle)
-           AND (array_agg(ancestry.parent_session_id ORDER BY ancestry.depth DESC))[1] IS NULL
       ), control_state AS (
-        SELECT target.workspace_id, target.id AS session_id,
-          (
-            control.workspace_state = 'paused'
-            AND NOT EXISTS (
-              SELECT 1 FROM ancestry candidate
-              WHERE candidate.workspace_id = target.workspace_id
-                AND candidate.target_id = target.id
-                AND candidate.subtree_run_override_revision > control.workspace_pause_revision
-            )
-          ) OR EXISTS (
-            SELECT 1 FROM ancestry blocker
-            WHERE blocker.workspace_id = target.workspace_id
-              AND blocker.target_id = target.id
-              AND blocker.direct_control_state = 'paused'
-              AND NOT EXISTS (
-                SELECT 1 FROM ancestry override_row
-                WHERE override_row.workspace_id = blocker.workspace_id
-                  AND override_row.target_id = blocker.target_id
-                  AND override_row.depth < blocker.depth
-                  AND override_row.subtree_run_override_revision > blocker.direct_pause_revision
-              )
-          ) AS blocked
-        FROM scope_sessions target
-        JOIN complete_targets complete
-          ON complete.workspace_id = target.workspace_id AND complete.target_id = target.id
-        JOIN %1$I.workspace_inference_controls control
-          ON control.workspace_id = target.workspace_id
+        SELECT session.workspace_id, session.id AS session_id,
+               session.max_pause_revision IS NOT NULL
+                 AND (
+                   session.max_override_revision IS NULL
+                   OR session.max_pause_revision >= session.max_override_revision
+                 ) AS blocked
+        FROM scope_sessions session
+      ), unsettled_interruptions AS (
+        SELECT DISTINCT session.workspace_id, session.id AS session_id
+        FROM scope_sessions session
+        JOIN %1$I.session_attempt_interruptions interruption
+          ON interruption.workspace_id = session.workspace_id
+         AND interruption.session_id = session.id
+        WHERE interruption.state IN ('pending', 'delivered', 'acknowledged')
+      ), queued_human AS (
+        SELECT DISTINCT session.workspace_id, session.id AS session_id
+        FROM scope_sessions session
+        JOIN %1$I.session_turns turn
+          ON turn.workspace_id = session.workspace_id AND turn.session_id = session.id
+        WHERE turn.status = 'queued' AND turn.source IN ('user', 'api')
+      ), recovering_turn AS (
+        SELECT DISTINCT session.workspace_id, session.id AS session_id
+        FROM scope_sessions session
+        JOIN %1$I.session_turns turn
+          ON turn.workspace_id = session.workspace_id
+         AND turn.session_id = session.id
+         AND turn.id = session.active_turn_id
+        WHERE turn.status = 'recovering'
+      ), capacity_wait AS (
+        SELECT DISTINCT session.workspace_id, session.id AS session_id
+        FROM scope_sessions session
+        JOIN %1$I.codex_capacity_waiters waiter
+          ON waiter.workspace_id = session.workspace_id AND waiter.session_id = session.id
+        WHERE waiter.status = 'waiting'
+      ), decided_approval AS (
+        SELECT DISTINCT session.workspace_id, session.id AS session_id
+        FROM scope_sessions session
+        JOIN %1$I.session_turns turn
+          ON turn.workspace_id = session.workspace_id
+         AND turn.session_id = session.id
+         AND turn.id = session.active_turn_id
+        JOIN %1$I.session_events trigger_event
+          ON trigger_event.workspace_id = turn.workspace_id
+         AND trigger_event.id = turn.trigger_event_id
+        JOIN %1$I.session_events decision
+          ON decision.workspace_id = turn.workspace_id
+         AND decision.session_id = turn.session_id
+         AND decision.sequence > trigger_event.sequence
+         AND decision.type = 'user.approvalDecision'
+        WHERE turn.status = 'requires_action'
+      ), active_goal AS (
+        SELECT DISTINCT session.workspace_id, session.id AS session_id
+        FROM scope_sessions session
+        JOIN %1$I.session_goals goal
+          ON goal.workspace_id = session.workspace_id AND goal.session_id = session.id
+        WHERE goal.status = 'active'
+      ), pending_internal_updates AS (
+        SELECT DISTINCT session.workspace_id, session.id AS session_id
+        FROM scope_sessions session
+        JOIN %1$I.session_system_updates update_row
+          ON update_row.workspace_id = session.workspace_id
+         AND update_row.session_id = session.id
+        WHERE update_row.state = 'pending'
       ), classified AS (
         SELECT session.account_id, session.workspace_id, session.id AS session_id,
                coalesce(session.temporal_workflow_id, 'session-' || session.id::text)
                  AS temporal_workflow_id,
                array_remove(ARRAY[
-                 CASE WHEN EXISTS (
-                   SELECT 1 FROM %1$I.session_attempt_interruptions interruption
-                   WHERE interruption.workspace_id = session.workspace_id
-                     AND interruption.session_id = session.id
-                     AND interruption.state IN ('pending', 'delivered', 'acknowledged')
-                 ) THEN 'interruption_settlement' END,
-                 CASE WHEN NOT control.blocked AND EXISTS (
-                   SELECT 1 FROM %1$I.session_turns turn
-                   WHERE turn.workspace_id = session.workspace_id
-                     AND turn.session_id = session.id
-                     AND turn.status = 'queued'
-                     AND turn.source IN ('user', 'api')
-                 ) THEN 'queued_human' END,
-                 CASE WHEN NOT control.blocked AND EXISTS (
-                   SELECT 1 FROM %1$I.session_turns turn
-                   WHERE turn.workspace_id = session.workspace_id
-                     AND turn.id = session.active_turn_id
-                     AND turn.status = 'recovering'
-                 ) THEN 'recovering_turn' END,
-                 CASE WHEN NOT control.blocked AND EXISTS (
-                   SELECT 1 FROM %1$I.codex_capacity_waiters waiter
-                   WHERE waiter.workspace_id = session.workspace_id
-                     AND waiter.session_id = session.id
-                     AND waiter.status = 'waiting'
-                 ) THEN 'capacity_wait' END,
-                 CASE WHEN NOT control.blocked AND EXISTS (
-                   SELECT 1
-                   FROM %1$I.session_turns turn
-                   JOIN %1$I.session_events trigger_event
-                     ON trigger_event.workspace_id = turn.workspace_id
-                    AND trigger_event.id = turn.trigger_event_id
-                   WHERE turn.workspace_id = session.workspace_id
-                     AND turn.id = session.active_turn_id
-                     AND turn.status = 'requires_action'
-                     AND EXISTS (
-                       SELECT 1 FROM %1$I.session_events decision
-                       WHERE decision.workspace_id = turn.workspace_id
-                         AND decision.session_id = turn.session_id
-                         AND decision.type = 'user.approvalDecision'
-                         AND decision.sequence > trigger_event.sequence
-                     )
-                 ) THEN 'decided_approval' END,
-                 CASE WHEN NOT control.blocked AND EXISTS (
-                   SELECT 1 FROM %1$I.session_goals goal
-                   WHERE goal.workspace_id = session.workspace_id
-                     AND goal.session_id = session.id
-                     AND goal.status = 'active'
-                 ) THEN 'active_goal' END,
-                 CASE WHEN NOT control.blocked AND EXISTS (
-                   SELECT 1 FROM %1$I.session_system_updates update_row
-                   WHERE update_row.workspace_id = session.workspace_id
-                     AND update_row.session_id = session.id
-                     AND update_row.state = 'pending'
-                 ) THEN 'pending_internal_updates' END,
+                 CASE WHEN interruption.session_id IS NOT NULL
+                   THEN 'interruption_settlement' END,
+                 CASE WHEN NOT control.blocked AND queued.session_id IS NOT NULL
+                   THEN 'queued_human' END,
+                 CASE WHEN NOT control.blocked AND recovering.session_id IS NOT NULL
+                   THEN 'recovering_turn' END,
+                 CASE WHEN NOT control.blocked AND capacity.session_id IS NOT NULL
+                   THEN 'capacity_wait' END,
+                 CASE WHEN NOT control.blocked AND approval.session_id IS NOT NULL
+                   THEN 'decided_approval' END,
+                 CASE WHEN NOT control.blocked AND goal.session_id IS NOT NULL
+                   THEN 'active_goal' END,
+                 CASE WHEN NOT control.blocked AND updates.session_id IS NOT NULL
+                   THEN 'pending_internal_updates' END,
                  CASE WHEN NOT control.blocked AND session.compact_requested
                    THEN 'compaction_requested' END
                ]::text[], NULL) AS reasons
         FROM scope_sessions session
         JOIN control_state control
           ON control.workspace_id = session.workspace_id AND control.session_id = session.id
+        LEFT JOIN unsettled_interruptions interruption
+          ON interruption.workspace_id = session.workspace_id
+         AND interruption.session_id = session.id
+        LEFT JOIN queued_human queued
+          ON queued.workspace_id = session.workspace_id AND queued.session_id = session.id
+        LEFT JOIN recovering_turn recovering
+          ON recovering.workspace_id = session.workspace_id AND recovering.session_id = session.id
+        LEFT JOIN capacity_wait capacity
+          ON capacity.workspace_id = session.workspace_id AND capacity.session_id = session.id
+        LEFT JOIN decided_approval approval
+          ON approval.workspace_id = session.workspace_id AND approval.session_id = session.id
+        LEFT JOIN active_goal goal
+          ON goal.workspace_id = session.workspace_id AND goal.session_id = session.id
+        LEFT JOIN pending_internal_updates updates
+          ON updates.workspace_id = session.workspace_id AND updates.session_id = session.id
       )
       SELECT classified.account_id, classified.workspace_id, classified.session_id,
              classified.temporal_workflow_id, classified.reasons
