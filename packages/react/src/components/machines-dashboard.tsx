@@ -1,7 +1,7 @@
 import { type ReactNode } from "react";
 import { LaptopIcon, PlusIcon, RefreshCwIcon } from "lucide-react";
 import { cn } from "../lib/cn";
-import type { MachineView } from "../types/machines";
+import type { MachineView, MetricSample } from "../types/machines";
 import { MachineCard } from "./machine-card";
 
 export type MachinesDashboardProps = {
@@ -14,6 +14,12 @@ export type MachinesDashboardProps = {
   onAttach?: ((machine: MachineView) => void) | undefined;
   /** The sandbox id currently being attached/swapped to (disables that card). */
   attachingSandboxId?: string | null | undefined;
+  /** Short recent history per machine (keyed by sandboxId) — drives card sparklines. */
+  seriesByMachine?: Record<string, MetricSample[]> | undefined;
+  /** Open the per-machine telemetry detail (makes each card actionable). */
+  onOpenDetail?: ((machine: MachineView) => void) | undefined;
+  /** Shared clock so freshness/relative times render consistently across cards. */
+  now?: number | undefined;
   /** Open the enrollment flow (the "Enroll a machine" CTA). */
   onEnroll?: (() => void) | undefined;
   onRefresh?: (() => void) | undefined;
@@ -109,6 +115,9 @@ export function MachinesDashboard({
   error,
   onAttach,
   attachingSandboxId,
+  seriesByMachine,
+  onOpenDetail,
+  now,
   onEnroll,
   onRefresh,
   className,
@@ -162,6 +171,9 @@ export function MachinesDashboard({
               }}
               onAttach={onAttach}
               attaching={attachingSandboxId === machine.sandboxId}
+              series={seriesByMachine?.[machine.sandboxId]}
+              onOpenDetail={onOpenDetail}
+              now={now}
             />
           ))}
         </div>

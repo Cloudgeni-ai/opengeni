@@ -28,12 +28,14 @@ function Meter({
   fillPct: number;
   tone: "ok" | "warn" | "hot";
 }) {
+  // Traffic-light ramp, aligned with the fused health verdict: calm resources
+  // read green (idle), pressure ambers (running), near-the-wall reds (failed).
   const fillClass =
     tone === "hot"
       ? "bg-og-status-failed"
       : tone === "warn"
-        ? "bg-og-status-waiting"
-        : "bg-og-status-running";
+        ? "bg-og-status-running"
+        : "bg-og-status-idle";
   return (
     <div className="flex min-w-0 flex-col gap-1" data-metric={label.toLowerCase()}>
       <div className="flex items-baseline justify-between gap-2">
@@ -59,20 +61,12 @@ function toneFor(p: number): "ok" | "warn" | "hot" {
   return "ok";
 }
 
-/** The token text color for a tone (matches the `Meter` fill ramp). */
-function toneTextClass(tone: "ok" | "warn" | "hot"): string {
-  return tone === "hot"
-    ? "text-og-status-failed"
-    : tone === "warn"
-      ? "text-og-status-waiting"
-      : "text-og-status-running";
-}
-
 /**
  * Load average as three labeled mini-stats (1m / 5m / 15m) — an honest triple of
- * numbers, NOT a fake gauge. The whole triple is tinted by `load1`'s tone (load
- * isn't a 0..100 ratio, so we tone it but never draw a bar). Run queue rides
- * alongside as a quiet chip when there's pending work.
+ * numbers, NOT a fake gauge. Load is not a 0..100 ratio and we don't know the
+ * core count, so a raw load of 2 or 8 is not inherently "bad" — we render it
+ * NEUTRAL rather than falsely alarming. The real saturation signal is the run
+ * queue, which rides alongside as a quiet chip when there's pending work.
  */
 function StatTriple({
   load1,
@@ -85,9 +79,6 @@ function StatTriple({
   load15: number;
   runQueue: number;
 }) {
-  // Load isn't a percent — tone by load1 against a nominal single-core ceiling
-  // (≥0.9/core ≈ saturated). Used only to tint the labels/values, never a bar.
-  const tone = toneFor(load1 * 100);
   const stats: Array<{ label: string; value: number }> = [
     { label: "1m", value: load1 },
     { label: "5m", value: load5 },
@@ -102,15 +93,10 @@ function StatTriple({
         <div className="flex items-baseline gap-3">
           {stats.map((s) => (
             <div key={s.label} className="flex items-baseline gap-1">
-              <span
-                className={cn(
-                  "text-[10px] font-medium uppercase tracking-wide",
-                  toneTextClass(tone),
-                )}
-              >
+              <span className="text-[10px] font-medium uppercase tracking-wide text-og-fg-subtle">
                 {s.label}
               </span>
-              <span className={cn("font-og-mono text-[12px] tabular-nums", toneTextClass(tone))}>
+              <span className="font-og-mono text-[12px] tabular-nums text-og-fg">
                 {s.value.toFixed(2)}
               </span>
             </div>
