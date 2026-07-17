@@ -173,7 +173,7 @@ export function MetricHistoryChart({
           {yTicks.map((v, i) => {
             const y = yOf(v);
             return (
-              <g key={i}>
+              <g key={`yt-${v}`}>
                 <line
                   x1={PAD.left}
                   x2={w - PAD.right}
@@ -223,7 +223,7 @@ export function MetricHistoryChart({
           {valued.length > 1 &&
             [tMin, tMax].map((t, i) => (
               <text
-                key={i}
+                key={i === 0 ? "x-start" : "x-end"}
                 x={i === 0 ? PAD.left : w - PAD.right}
                 y={H - 4}
                 textAnchor={i === 0 ? "start" : "end"}
@@ -249,7 +249,8 @@ export function MetricHistoryChart({
           />
 
           {/* sparse markers */}
-          {sparse && pxPts.map((p, i) => <circle key={i} cx={p.x} cy={p.y} r={2.5} fill={color} />)}
+          {sparse &&
+            pxPts.map((p) => <circle key={`m-${p.t}`} cx={p.x} cy={p.y} r={2.5} fill={color} />)}
 
           {/* hover crosshair */}
           {hoverPt && (
