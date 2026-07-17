@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/db",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "description": "OpenGeni persistence: Drizzle schema, RLS-scoped query layer, the SQL migration runner, and role provisioning.",
   "license": "Apache-2.0",
   "repository": {

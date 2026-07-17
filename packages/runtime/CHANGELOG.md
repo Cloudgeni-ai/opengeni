@@ -1,5 +1,13 @@
 # @opengeni/runtime
 
+## 0.7.1
+
+### Patch Changes
+
+- Updated dependencies [6882ff2]
+  - @opengeni/codex@0.2.3
+  - @opengeni/config@0.5.1
+
 ## 0.7.0
 
 ### Minor Changes
