@@ -108,6 +108,7 @@ export function createSessionStateActivities(
       input.workspaceId,
       input.sessionId,
       "failed",
+      `turn:${turn.id}`,
     );
   }
 
