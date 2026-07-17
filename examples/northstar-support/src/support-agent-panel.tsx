@@ -191,7 +191,11 @@ function LiveAgentSession({ sessionId }: { sessionId: string }) {
       />
 
       <div className="shrink-0 border-t border-og-border/70 bg-white px-4 pb-4 pt-3">
-        <ChatComposer composer={composer} status={status} placeholder="Ask a follow-up…" />
+        <ChatComposer
+          composer={composer}
+          effectiveControl={session?.effectiveControl}
+          placeholder="Ask a follow-up…"
+        />
       </div>
     </div>
   );
