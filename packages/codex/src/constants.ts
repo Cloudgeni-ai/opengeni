@@ -31,7 +31,7 @@ export const CODEX_MODEL_ID_PREFIX = "codex/";
 export const CODEX_FALLBACK_MODEL_SLUGS = ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] as const;
 
 // Live Codex model-catalog values for every exposed gpt-5.6 subscription slug.
-// Verified 2026-07-14 against Codex CLI 0.144.4's freshly fetched
+// Verified 2026-07-17 against Codex CLI 0.144.5's freshly fetched
 // ~/.codex/models_cache.json and the matching openai/codex core derivations:
 //   raw context window                = 272,000
 //   effective input window (95%)      = 258,400
@@ -52,7 +52,7 @@ export const CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT = Math.floor(
 // 2026-07-09: 0.142.4 filtered every GPT-5.6 slug out of GET /models, while the
 // official Codex 0.144.0+ releases return all three exact slugs above. Keep
 // this pinned to the latest stable Codex release we have verified end-to-end.
-export const CODEX_CLIENT_VERSION = "0.144.4";
+export const CODEX_CLIENT_VERSION = "0.144.5";
 
 export const CODEX_REFRESH_WINDOW_MS = 5 * 60 * 1000; // proactive refresh when within 5 min of exp (spec §1.1)
 export const CODEX_REFRESH_FALLBACK_MS = 8 * 24 * 60 * 60 * 1000; // 8 days when exp is unparseable
