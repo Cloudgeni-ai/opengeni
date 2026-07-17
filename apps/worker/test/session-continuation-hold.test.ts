@@ -37,7 +37,13 @@ describe("continuationHoldMs — the all-capped idle is a real wait", () => {
     expect(continuationHoldMs({ status: "idle", continueDelayMs: 60_000 }, FLOOR)).toBe(60_000);
   });
 
-  test("a non-idle result never holds (even if idleUntilReset is somehow set)", () => {
+  test("same-turn provider recovery honors the interruptible backpressure delay", () => {
+    expect(continuationHoldMs({ status: "recovering", continueDelayMs: 60_000 }, FLOOR)).toBe(
+      60_000,
+    );
+  });
+
+  test("a non-idle, non-recovering result never holds", () => {
     expect(
       continuationHoldMs({ status: "failed", continueDelayMs: 99, idleUntilReset: true }, FLOOR),
     ).toBe(0);

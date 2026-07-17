@@ -28,7 +28,7 @@ import {
   modelUsageSourceKey,
   pointerReconcileReason,
   PROVIDER_BACKPRESSURE_DELAY_MS,
-  providerRetryRecovery,
+  providerRecoveryResult,
   resolveActiveSandboxBackend,
   shouldStartOnTurnRecording,
 } from "../src/activities/agent-turn";
@@ -1235,22 +1235,19 @@ describe("transient provider error classifier", () => {
     expect(payload.error).toBe("Invalid 'input': expected a string");
   });
 
-  test("a 503 with an active goal idles and auto-continues instead of failing (end-to-end routing)", () => {
-    // Classifier → retryable, then the retryable turn-failure branch's recovery
-    // routing → idle + goal_continuation + backpressure delay. This is the exact
-    // path that was missing when ~29 prod sessions hard-failed on provider 5xx.
+  test("a 503 recovers the same turn after backpressure pacing, independent of goal state", () => {
+    // Classifier → retryable, then the retryable turn-failure branch recovers the
+    // accepted turn itself. No goal lookup or synthetic continuation is involved.
     const failure = agentRunFailurePayload(
       Object.assign(new Error("Our servers are currently overloaded. Please try again later."), {
         status: 503,
       }),
     );
-    expect(failure.retryable).toBe(true); // enters the retryable branch (not the terminal one)
-    expect(providerRetryRecovery(true)).toEqual({
-      recovery: "goal_continuation",
+    expect(failure.retryable).toBe(true); // enters the recovery branch (not the terminal one)
+    expect(providerRecoveryResult()).toEqual({
+      status: "recovering",
       continueDelayMs: PROVIDER_BACKPRESSURE_DELAY_MS,
     });
-    // A goal-less session idles too, but waits for the next user message (no auto-continue).
-    expect(providerRetryRecovery(false)).toEqual({ recovery: "user_message" });
   });
 
   test("agentRunFailurePayload keeps a ChatGPT/Codex usage cap non-retryable (429 that won't clear)", () => {

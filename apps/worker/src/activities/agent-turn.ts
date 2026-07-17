@@ -243,26 +243,17 @@ import { createHash, randomUUID } from "node:crypto";
 // budget against the same window.
 export const PROVIDER_BACKPRESSURE_DELAY_MS = 60_000;
 
-/**
- * Recovery routing for a turn failed by a RETRYABLE provider error, once the
- * activity knows whether the session still has an active goal: a goal-bearing
- * session idles and auto-continues after the backpressure delay, a goal-less one
- * idles and waits for the next user message. A NON-retryable failure never reaches
- * here — it takes the terminal session.failed path — so the contrast this encodes
- * is "retryable provider blip ⇒ idle-with-recovery, not a dead session." Single
- * source of truth for the recovery mode and continuation delay the retryable
- * turn-failure branch publishes.
- */
-export function providerRetryRecovery(goalActive: boolean): {
-  recovery: "goal_continuation" | "user_message";
-  continueDelayMs?: number;
+/** A retryable provider fault recovers the accepted turn itself. Goal state is
+ * irrelevant: autonomous continuation and infrastructure recovery are separate
+ * concerns. */
+export function providerRecoveryResult(): {
+  status: "recovering";
+  continueDelayMs: number;
 } {
-  return goalActive
-    ? {
-        recovery: "goal_continuation",
-        continueDelayMs: PROVIDER_BACKPRESSURE_DELAY_MS,
-      }
-    : { recovery: "user_message" };
+  return {
+    status: "recovering",
+    continueDelayMs: PROVIDER_BACKPRESSURE_DELAY_MS,
+  };
 }
 
 /**
@@ -5106,52 +5097,37 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         return claimedResult({ status: "idle" });
       }
       // A retryable provider/MCP failure is transient external backpressure,
-      // not a session failure: the in-client retry budget is already
-      // exhausted by the time the error reaches here, so fail the turn
-      // truthfully but idle the session. With an active goal the continuation
-      // loop resumes after a pacing delay; without one the session simply
-      // waits for the next user message. Long-lived sessions (a per-customer
-      // ops channel between goals) must never go terminal because the
-      // provider had a bad minute -- a failed session would reject the very
-      // retry message the failure asks for.
+      // not a session or goal failure. The in-client retry budget is already
+      // exhausted by the time the error reaches here. Checkpoint conversation
+      // truth, recover this SAME accepted turn, then let the workflow re-claim
+      // it after a pacing delay. This is independent of goal state and never
+      // relies on a synthetic continuation prompt.
       const failure = agentRunFailurePayload(error);
       if (failure.retryable && publish && turnId && turnStartedPublished) {
-        const goal = await getSessionGoal(db, input.workspaceId, input.sessionId).catch(() => null);
-        const goalActive = Boolean(goal && goal.status === "active");
-        const recoveryRouting = providerRetryRecovery(goalActive);
+        const recoveryResult = providerRecoveryResult();
         await flushRuntimeBatcher();
-        // Provider/MCP errors rarely carry SDK run state; a null falls back to
-        // the previous snapshot, same degraded-context contract as the
-        // max-turns path above.
-        await reconcileConversationTruth();
-        if (
-          !(await settle!({
-            events: [
-              {
-                type: "turn.failed",
-                payload: {
-                  ...failure,
-                  recovery: recoveryRouting.recovery,
-                },
-              },
-              { type: "session.status.changed", payload: { status: "idle" } },
-            ],
-            turnStatus: "failed",
-            sessionStatus: "idle",
-            activeTurnId: null,
-          }))
-        ) {
+        await reconcileConversationTruth({ requireDurable: true });
+        const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
+          sessionId: input.sessionId,
+          turnId,
+          triggerEventId: triggerEventId!,
+          attemptId: input.attemptId,
+          reason: failure.code ?? "provider_unavailable",
+          detail: {
+            ...failure,
+            continueDelayMs: recoveryResult.continueDelayMs,
+          },
+        });
+        if (recovery.action === "stale") {
+          activityStatus = "cancelled";
+          turnMetricOutcome = "cancelled";
           return claimedResult({ status: "cancelled" });
         }
-        turnMetricOutcome = "failed";
-        activityStatus = "idle";
+        await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
+        turnMetricOutcome = "recovering";
+        activityStatus = "recovering";
         activityError = error;
-        return claimedResult({
-          status: "idle",
-          ...(recoveryRouting.continueDelayMs !== undefined
-            ? { continueDelayMs: recoveryRouting.continueDelayMs }
-            : {}),
-        });
+        return claimedResult(recoveryResult);
       }
       activityStatus = "failed";
       activityError = error;
@@ -5407,11 +5383,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
 /**
  * True when the error is transient upstream backpressure — a model-provider 5xx,
  * a "server had a bad minute" body, or a dropped/again-able network connection —
- * rather than a request the session got wrong. These are safe to retry: the turn
- * routes into the SAME idle + goal-continuation recovery the rate-limit branch
- * uses (a goal-bearing session auto-continues after PROVIDER_BACKPRESSURE_DELAY_MS;
- * a goal-less one waits for the next user message), and the resume notice tells the
- * model to re-check side effects before repeating them.
+ * rather than a request the session got wrong. These are safe to recover as a new
+ * fenced attempt of the SAME turn after PROVIDER_BACKPRESSURE_DELAY_MS. Durable
+ * tool results are preserved and ambiguous in-flight effects are closed before
+ * the new attempt, independent of whether the session has an active goal.
  *
  * This is the classification gap that hard-failed a fleet of prod sessions during a
  * provider degradation window: their errors ("Our servers are currently overloaded",
