@@ -282,9 +282,19 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
           update: { id: committed.update.id },
           events: [],
         });
-        // Drive the dedicated canonical wake-outbox repair activity. Sandbox
-        // lifecycle cleanup intentionally has no queue/control responsibility.
-        await activities.dispatchSessionWorkflowWakes();
+        // Workflow-wake repair has its own ownership-independent dispatcher.
+        // The sandbox reaper deliberately no longer scans this outbox: tying
+        // inference recovery to sandbox ownership would strand self-hosted and
+        // feature-disabled sessions.
+        const repair = await activities.dispatchSessionWorkflowWakes();
+        // The dispatcher is global, so an earlier test/session may contribute a
+        // legitimate pending revision. Assert the dispatcher contract here;
+        // the target session's one turn/model call below proves this specific
+        // revision was delivered exactly once.
+        expect(repair.failed).toBe(0);
+        expect(repair.exhaustedBatchLimit).toBe(false);
+        expect(repair.claimed).toBeGreaterThanOrEqual(1);
+        expect(repair.delivered).toBe(repair.claimed);
         let observedSession: Awaited<ReturnType<typeof getSession>> | null = null;
         await waitFor(
           async () => {

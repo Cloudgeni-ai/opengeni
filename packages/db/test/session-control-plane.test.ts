@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import {
   addSessionSystemUpdate,
   acceptSessionApprovalDecision,
@@ -56,6 +56,12 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 
 let shared: SharedTestDatabase;
 let client: ReturnType<typeof createDb>;
+
+// This file exercises the real PostgreSQL control plane. Under the repository-wide
+// test run, concurrent database suites can legitimately push a case beyond Bun's
+// five-second unit default. Keep a finite, file-scoped ceiling so contention cannot
+// create a timeout cascade while genuine lock leaks still fail closed.
+setDefaultTimeout(30_000);
 
 beforeAll(async () => {
   const acquired = await acquireSharedTestDatabase("session-control-plane");

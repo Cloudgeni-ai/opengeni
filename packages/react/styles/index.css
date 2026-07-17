@@ -228,6 +228,51 @@
   }
 }
 
+@media (forced-colors: active) {
+  /* Forced-colors can replace a painted background with Canvas while custom
+     properties retain their authored dark/light values. That combination is
+     dangerous: descendants may resolve a pale dark-theme foreground against a
+     light system canvas. Collapse the whole component palette onto guaranteed
+     system colors. Meaning in status/diff UI is also carried by text, icons,
+     and +/- markers, so it never depends on these colors alone. */
+  .og-root {
+    --og-color-bg: Canvas;
+    --og-color-surface-1: Canvas;
+    --og-color-surface-2: Canvas;
+    --og-color-surface-3: Canvas;
+    --og-color-border: CanvasText;
+    --og-color-border-strong: CanvasText;
+    --og-color-fg: CanvasText;
+    --og-color-fg-muted: CanvasText;
+    --og-color-fg-subtle: CanvasText;
+    --og-color-accent: CanvasText;
+    --og-color-accent-strong: CanvasText;
+    --og-color-accent-deep: CanvasText;
+    --og-color-accent-fg: CanvasText;
+    --og-color-accent-soft: Canvas;
+    --og-color-status-queued: CanvasText;
+    --og-color-status-running: CanvasText;
+    --og-color-status-idle: CanvasText;
+    --og-color-status-waiting: CanvasText;
+    --og-color-status-failed: CanvasText;
+    --og-color-status-cancelled: CanvasText;
+    --og-color-danger: CanvasText;
+    --og-color-diff-add-bg: Canvas;
+    --og-color-diff-del-bg: Canvas;
+    --og-shadow-sm: none;
+    --og-shadow-md: none;
+    --og-shadow-lg: none;
+    --og-shadow-glow: none;
+  }
+
+  /* Selected fills are flattened by the OS palette. Preserve a visible,
+     non-color-only tab selection affordance in every high-contrast theme. */
+  .og-root [role="tab"][aria-selected="true"] {
+    outline: 2px solid Highlight;
+    outline-offset: -2px;
+  }
+}
+
 /* ----------------------------------------------------------------------------
    xterm.js hardening (SandboxTerminal)
 

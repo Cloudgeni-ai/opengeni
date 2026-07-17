@@ -56,6 +56,15 @@ Evidence MUST NOT contain raw credentials, cookies, signed object URLs,
 kubeconfigs, customer data, conversation content outside the deterministic
 fixture, or unredacted provider responses.
 
+The pre-publication release workflow downloads the sanitized JSON bundle from
+the supplied HTTPS location, verifies its SHA-256, and validates it against
+[`scripts/workbench-acceptance-contract.ts`](../scripts/workbench-acceptance-contract.ts).
+The validator rejects a missing environment/requirement pair, retries, skips,
+known defects, artifact drift, sub-budget performance evidence, emulated
+real-device claims, fewer than ten desktop or mobile polish passes, a canary
+window shorter than 72 hours, and secret-bearing evidence. A checkbox or prose
+summary is never accepted in place of the parsed bundle.
+
 Staging and production evidence MUST identify the same source SHA and image
 digests. Promotion imports or reuses those digests; it never rebuilds them.
 

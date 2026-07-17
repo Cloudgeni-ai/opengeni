@@ -53,7 +53,7 @@ afterAll(async () => {
     /* noop */
   }
   await shared?.release();
-});
+}, 180_000);
 
 describe("session lineage", () => {
   test("listSessions filters roots and direct children by parentSessionId", async () => {

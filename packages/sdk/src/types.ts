@@ -860,6 +860,7 @@ export type GitFileDiff = {
 export type GitDiffRequest = {
   path?: string;
   staged?: boolean;
+  includeUntracked?: boolean;
   fromRef?: string;
   toRef?: string;
   pathspec?: string[];

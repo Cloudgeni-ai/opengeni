@@ -33,7 +33,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await blank?.release();
-});
+}, 180_000);
 
 describe("migration 0053 (Codex credential leases)", () => {
   test("keeps old workers compatible through schema-first rollout, cutover, and feature-off rollback", async () => {

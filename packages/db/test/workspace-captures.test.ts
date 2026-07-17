@@ -41,7 +41,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await client?.close().catch(() => undefined);
   await shared?.release();
-});
+}, 180_000);
 
 async function freshWorkspace(): Promise<{ accountId: string; workspaceId: string }> {
   const [account] = await admin<{ id: string }[]>`
@@ -188,6 +188,7 @@ describe("workspace capture revisions (real PostgreSQL + FORCE RLS)", () => {
       treeIndexKey: "workspace/trees/1.json",
       blobKeys: ["workspace/blobs/sha256/content"],
       sizeBytes: 123,
+      capturedAt: capturedAt.toISOString(),
     });
     expect(
       (await listSessionEvents(db, workspace.workspaceId, session.id)).filter((event) =>

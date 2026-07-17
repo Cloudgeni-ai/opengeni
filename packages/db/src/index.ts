@@ -15278,7 +15278,7 @@ function mapWorkspaceCaptureRow(row: {
   blob_keys: unknown;
   size_bytes: number | string | null;
   stats: unknown;
-  captured_at: string;
+  captured_at: string | Date;
 }): WorkspaceCaptureRow {
   return {
     id: row.id,
@@ -15292,7 +15292,13 @@ function mapWorkspaceCaptureRow(row: {
     blobKeys: Array.isArray(row.blob_keys) ? (row.blob_keys as string[]) : [],
     sizeBytes: row.size_bytes === null ? null : Number(row.size_bytes),
     stats: (row.stats && typeof row.stats === "object" ? row.stats : {}) as Record<string, unknown>,
-    capturedAt: row.captured_at,
+    // postgres-js decodes `timestamptz` as a Date. Keep the public DB contract
+    // canonical and driver-independent: capture manifests embed ISO strings and
+    // the API compares this identity before it serves any blob.
+    capturedAt:
+      row.captured_at instanceof Date
+        ? row.captured_at.toISOString()
+        : new Date(row.captured_at).toISOString(),
   };
 }
 

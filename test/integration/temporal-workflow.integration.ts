@@ -35,11 +35,13 @@ async function hangWithoutHeartbeating(): Promise<{ status: string }> {
   throw new Error("unreachable simulated dead worker completion");
 }
 
-// Generous bound for the server to detect a missed-heartbeat activity
-// (2-minute heartbeat window + server detection slack) plus the rest of the
-// test. This timeout does not change runtime behavior; it only prevents a slow
-// CI host from killing the real heartbeat proof just before recovery settles.
-const workerDeathTestTimeoutMs = 240_000;
+// The end-to-end ownership chain has two independently bounded phases: the
+// server may spend the full two-minute heartbeat window detecting the dead turn
+// worker, then the control-plane recovery activity has its own two-minute
+// start-to-close contract. Leave scheduling and worker-drain slack after both
+// phases so a loaded CI host cannot cancel a valid recovery at the boundary.
+// This finite test ceiling does not change either runtime timeout.
+const workerDeathTestTimeoutMs = 360_000;
 
 const temporalWorkflowTestTimeoutMs = 30_000;
 

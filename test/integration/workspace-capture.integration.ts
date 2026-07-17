@@ -125,6 +125,9 @@ describe("workspace capture — B-suite (real docker turns)", () => {
       const appDiff = rootRepo!.diff.find((d) => d.path === "app.py");
       expect(appDiff).toBeTruthy();
       expect(appDiff!.additions).toBeGreaterThanOrEqual(1);
+      const utilsDiff = rootRepo!.diff.find((d) => d.path === "utils.py");
+      expect(utilsDiff?.status).toBe("untracked");
+      expect(utilsDiff?.hunks[0]?.lines[0]?.text).toBe("fresh file");
       // Both the modified and the untracked file are captured as after-images.
       const appFile = manifest.files.find((f) => f.path === "app.py");
       const utilsFile = manifest.files.find((f) => f.path === "utils.py");
@@ -192,6 +195,7 @@ describe("workspace capture — B-suite (real docker turns)", () => {
       for (const root of ["api", "web"]) {
         const repo = manifest.repos.find((r) => r.root === root)!;
         expect(repo.diff.some((d) => d.path === "app.py")).toBe(true);
+        expect(repo.diff.some((d) => d.path === "utils.py" && d.status === "untracked")).toBe(true);
         expect(manifest.files.some((f) => f.path === `${root}/app.py`)).toBe(true);
         expect(manifest.files.some((f) => f.path === `${root}/utils.py`)).toBe(true);
       }

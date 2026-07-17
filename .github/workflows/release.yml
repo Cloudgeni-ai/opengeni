@@ -2,11 +2,9 @@ name: Release
 
 # A push to main may open/update the changesets Version PR, but it can NEVER
 # publish. Publication is a separate, explicit workflow_dispatch after the
-# exact source revision has passed the retained verification bundle. The
-# dispatch is bound to the selected git ref and records that evidence. Package
-# publication then unblocks the production consumer build; production
-# acceptance follows deployment. A staging deployment or fixed soak delay is
-# not part of the release protocol.
+# exact source revision has passed staging, production, and the production
+# canary window described in docs/workbench-acceptance.md. The dispatch is bound
+# to the selected git ref and records the retained acceptance evidence.
 #
 # The GHCR image job runs ONLY after that explicit npm publication succeeds and
 # tags images from the same evidence-bound source revision. Ordinary pushes to
@@ -40,16 +38,28 @@ on:
         description: Exact comma-separated package set, for example @opengeni/react@0.15.0.
         required: true
         type: string
-      verification_evidence_url:
-        description: Retained verification evidence URL for this exact source SHA.
+      staging_evidence_url:
+        description: Retained staging acceptance/soak evidence URL for this exact SHA and image digests.
+        required: true
+        type: string
+      production_evidence_url:
+        description: Retained production promotion and immediate acceptance evidence URL.
+        required: true
+        type: string
+      production_canary_evidence_url:
+        description: Retained 72-hour zero-failure production canary evidence URL.
+        required: true
+        type: string
+      acceptance_bundle_url:
+        description: Direct HTTPS URL for the sanitized machine-readable acceptance bundle.
         required: true
         type: string
       acceptance_bundle_sha256:
-        description: SHA-256 of the complete sanitized acceptance bundle.
+        description: SHA-256 of the exact bytes downloaded from acceptance_bundle_url.
         required: true
         type: string
       confirm_zero_gaps:
-        description: Confirm zero known defects, skipped checks, and unverified acceptance rows.
+        description: Confirm zero known defects, skipped checks, failed/late canary cycles, and unverified acceptance rows.
         required: true
         default: false
         type: boolean
@@ -135,7 +145,10 @@ jobs:
         shell: bash
         env:
           SOURCE_SHA: ${{ inputs.source_sha }}
-          VERIFICATION_EVIDENCE_URL: ${{ inputs.verification_evidence_url }}
+          STAGING_EVIDENCE_URL: ${{ inputs.staging_evidence_url }}
+          PRODUCTION_EVIDENCE_URL: ${{ inputs.production_evidence_url }}
+          PRODUCTION_CANARY_EVIDENCE_URL: ${{ inputs.production_canary_evidence_url }}
+          ACCEPTANCE_BUNDLE_URL: ${{ inputs.acceptance_bundle_url }}
           ACCEPTANCE_BUNDLE_SHA256: ${{ inputs.acceptance_bundle_sha256 }}
           CONFIRM_ZERO_GAPS: ${{ inputs.confirm_zero_gaps }}
         run: |
@@ -165,10 +178,20 @@ jobs:
             echo "acceptance_bundle_sha256 must be a lowercase SHA-256" >&2
             exit 1
           }
-          [[ "$VERIFICATION_EVIDENCE_URL" =~ ^https://[^[:space:]]+$ ]] || {
-            echo "verification_evidence_url must be an absolute HTTPS URL" >&2
+          [[ "$ACCEPTANCE_BUNDLE_URL" != *\?* && "$ACCEPTANCE_BUNDLE_URL" != *\#* ]] || {
+            echo "acceptance_bundle_url must be a stable retained URL without a query or fragment" >&2
             exit 1
           }
+          for value in \
+            "$STAGING_EVIDENCE_URL" \
+            "$PRODUCTION_EVIDENCE_URL" \
+            "$PRODUCTION_CANARY_EVIDENCE_URL" \
+            "$ACCEPTANCE_BUNDLE_URL"; do
+            [[ "$value" =~ ^https://[^[:space:]]+$ ]] || {
+              echo "every evidence URL must be an absolute HTTPS URL" >&2
+              exit 1
+            }
+          done
           if find .changeset -maxdepth 1 -type f -name '*.md' ! -name README.md -print -quit | grep -q .; then
             echo "pending changesets remain; merge the generated Version PR before release acceptance" >&2
             exit 1
@@ -182,6 +205,39 @@ jobs:
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
+
+      - name: Download and validate the complete acceptance bundle
+        env:
+          SOURCE_SHA: ${{ steps.preflight.outputs.source_sha }}
+          STAGING_EVIDENCE_URL: ${{ inputs.staging_evidence_url }}
+          PRODUCTION_EVIDENCE_URL: ${{ inputs.production_evidence_url }}
+          PRODUCTION_CANARY_EVIDENCE_URL: ${{ inputs.production_canary_evidence_url }}
+          ACCEPTANCE_BUNDLE_URL: ${{ inputs.acceptance_bundle_url }}
+          ACCEPTANCE_BUNDLE_SHA256: ${{ inputs.acceptance_bundle_sha256 }}
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          curl \
+            --fail \
+            --silent \
+            --show-error \
+            --proto '=https' \
+            --connect-timeout 10 \
+            --max-time 120 \
+            --retry 2 \
+            --retry-all-errors \
+            --output evidence/workbench-acceptance.json \
+            "$ACCEPTANCE_BUNDLE_URL"
+          printf '%s  %s\n' \
+            "$ACCEPTANCE_BUNDLE_SHA256" \
+            evidence/workbench-acceptance.json \
+            | sha256sum --check --strict -
+          bun scripts/verify-workbench-acceptance-bundle.ts \
+            --bundle evidence/workbench-acceptance.json \
+            --source-sha "$SOURCE_SHA" \
+            --staging-evidence-url "$STAGING_EVIDENCE_URL" \
+            --production-evidence-url "$PRODUCTION_EVIDENCE_URL" \
+            --production-canary-evidence-url "$PRODUCTION_CANARY_EVIDENCE_URL"
 
       # Re-run deterministic package gates at the exact accepted source before
       # bytes leave the repository. Live acceptance is bound above, not replaced.
@@ -209,19 +265,28 @@ jobs:
       - name: Write pre-publication release plan
         env:
           SOURCE_SHA: ${{ steps.preflight.outputs.source_sha }}
-          VERIFICATION_EVIDENCE_URL: ${{ inputs.verification_evidence_url }}
+          STAGING_EVIDENCE_URL: ${{ inputs.staging_evidence_url }}
+          PRODUCTION_EVIDENCE_URL: ${{ inputs.production_evidence_url }}
+          PRODUCTION_CANARY_EVIDENCE_URL: ${{ inputs.production_canary_evidence_url }}
+          ACCEPTANCE_BUNDLE_URL: ${{ inputs.acceptance_bundle_url }}
           ACCEPTANCE_BUNDLE_SHA256: ${{ inputs.acceptance_bundle_sha256 }}
         run: |
           jq -n \
             --arg sourceSha "$SOURCE_SHA" \
-            --arg verificationEvidenceUrl "$VERIFICATION_EVIDENCE_URL" \
+            --arg stagingEvidenceUrl "$STAGING_EVIDENCE_URL" \
+            --arg productionEvidenceUrl "$PRODUCTION_EVIDENCE_URL" \
+            --arg productionCanaryEvidenceUrl "$PRODUCTION_CANARY_EVIDENCE_URL" \
+            --arg acceptanceBundleUrl "$ACCEPTANCE_BUNDLE_URL" \
             --arg acceptanceBundleSha256 "$ACCEPTANCE_BUNDLE_SHA256" \
             --slurpfile packagePlan evidence/release-packages-plan.json \
             '{
               schemaVersion: 1,
               sourceSha: $sourceSha,
               acceptance: {
-                verificationEvidenceUrl: $verificationEvidenceUrl,
+                stagingEvidenceUrl: $stagingEvidenceUrl,
+                productionEvidenceUrl: $productionEvidenceUrl,
+                productionCanaryEvidenceUrl: $productionCanaryEvidenceUrl,
+                bundleUrl: $acceptanceBundleUrl,
                 bundleSha256: $acceptanceBundleSha256,
                 zeroKnownDefectsAndGapsConfirmed: true
               },
@@ -234,7 +299,9 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: verified-release-plan-${{ steps.preflight.outputs.source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: evidence/verified-release-plan.json
+          path: |
+            evidence/verified-release-plan.json
+            evidence/workbench-acceptance.json
           if-no-files-found: error
           retention-days: 90
 
@@ -270,7 +337,10 @@ jobs:
         env:
           VERIFIED_PACKAGES: ${{ steps.registry.outputs.verified_packages }}
           SOURCE_SHA: ${{ steps.preflight.outputs.source_sha }}
-          VERIFICATION_EVIDENCE_URL: ${{ inputs.verification_evidence_url }}
+          STAGING_EVIDENCE_URL: ${{ inputs.staging_evidence_url }}
+          PRODUCTION_EVIDENCE_URL: ${{ inputs.production_evidence_url }}
+          PRODUCTION_CANARY_EVIDENCE_URL: ${{ inputs.production_canary_evidence_url }}
+          ACCEPTANCE_BUNDLE_URL: ${{ inputs.acceptance_bundle_url }}
           ACCEPTANCE_BUNDLE_SHA256: ${{ inputs.acceptance_bundle_sha256 }}
         run: |
           set -euo pipefail
@@ -279,14 +349,20 @@ jobs:
             <<<"$VERIFIED_PACKAGES" >/dev/null
           jq -n \
             --arg sourceSha "$SOURCE_SHA" \
-            --arg verificationEvidenceUrl "$VERIFICATION_EVIDENCE_URL" \
+            --arg stagingEvidenceUrl "$STAGING_EVIDENCE_URL" \
+            --arg productionEvidenceUrl "$PRODUCTION_EVIDENCE_URL" \
+            --arg productionCanaryEvidenceUrl "$PRODUCTION_CANARY_EVIDENCE_URL" \
+            --arg acceptanceBundleUrl "$ACCEPTANCE_BUNDLE_URL" \
             --arg acceptanceBundleSha256 "$ACCEPTANCE_BUNDLE_SHA256" \
             --argjson publishedPackages "$VERIFIED_PACKAGES" \
             '{
               schemaVersion: 1,
               sourceSha: $sourceSha,
               acceptance: {
-                verificationEvidenceUrl: $verificationEvidenceUrl,
+                stagingEvidenceUrl: $stagingEvidenceUrl,
+                productionEvidenceUrl: $productionEvidenceUrl,
+                productionCanaryEvidenceUrl: $productionCanaryEvidenceUrl,
+                bundleUrl: $acceptanceBundleUrl,
                 bundleSha256: $acceptanceBundleSha256,
                 zeroKnownDefectsAndGapsConfirmed: true
               },

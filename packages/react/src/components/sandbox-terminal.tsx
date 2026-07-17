@@ -221,7 +221,13 @@ export function SandboxTerminal({
   // status lines INSIDE xterm instead of an overlay — but only when there is no
   // firehose transcript to show yet (otherwise the projected output is shown).
   const warm = liveness === "warm" || liveness === "draining";
-  const booting = activated && !ptyMode && !warm && liveness != null && result.chunks.length === 0;
+  const booting =
+    activated &&
+    !ptyMode &&
+    !warm &&
+    liveness !== null &&
+    liveness !== undefined &&
+    result.chunks.length === 0;
 
   function handleActivate() {
     if (!activated) setActivated(true);
@@ -502,7 +508,7 @@ export function SandboxTerminal({
                 writtenRef.current = new Set();
                 wroteFirehoseRef.current = false;
               }}
-              className="rounded-og-sm px-1.5 py-0.5 text-og-xs hover:text-og-fg pointer-coarse:min-h-10"
+              className="rounded-og-sm px-1.5 py-0.5 text-og-xs hover:text-og-fg pointer-coarse:min-h-11"
             >
               Clear
             </button>

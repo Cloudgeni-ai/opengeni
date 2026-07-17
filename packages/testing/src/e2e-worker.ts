@@ -26,7 +26,10 @@ const { worker, connection } = await createOpenGeniWorker({
   },
 });
 
-console.log(`OpenGeni ${role} test worker listening on ${settings.temporalTaskQueue}`);
+console.log(
+  `OpenGeni ${role} test worker listening on ${settings.temporalTaskQueue} ` +
+    `(ownership=${settings.sandboxOwnershipEnabled} capture=${settings.workspaceCaptureEnabled} storage=${Boolean(settings.objectStorageEndpoint)})`,
+);
 try {
   await worker.run();
 } finally {
@@ -79,9 +82,13 @@ function sandboxStepForRequest(request: ModelRequest): ScriptedModelStep {
   if (
     body.includes("sandbox-ok") ||
     body.includes("file-mounted-ok") ||
-    body.includes("sandbox-view-image")
+    body.includes("sandbox-view-image") ||
+    body.includes("workbench-capture-e2e-complete")
   ) {
     return sandboxDoneStep();
+  }
+  if (body.includes("workbench capture acceptance fixture")) {
+    return workspaceCaptureShellStep();
   }
   if (body.includes("verify mounted image")) {
     return {
@@ -97,6 +104,44 @@ function sandboxStepForRequest(request: ModelRequest): ScriptedModelStep {
     };
   }
   return sandboxShellStep();
+}
+
+function workspaceCaptureShellStep(): ScriptedModelStep {
+  return {
+    output: [
+      functionCall(
+        "exec_command",
+        {
+          cmd: [
+            "set -euo pipefail",
+            "rm -rf api web",
+            "mkdir -p api web",
+            "git -C api init -q",
+            "git -C api config user.email e2e@opengeni.dev",
+            "git -C api config user.name 'OpenGeni E2E'",
+            "printf 'base api\\n' > api/app.txt",
+            "git -C api add app.txt",
+            "git -C api commit -qm base",
+            "printf 'changed api\\n' > api/app.txt",
+            "printf 'untracked api\\n' > api/notes.txt",
+            "git -C web init -q",
+            "git -C web config user.email e2e@opengeni.dev",
+            "git -C web config user.name 'OpenGeni E2E'",
+            "printf 'rename me\\n' > web/old.txt",
+            "printf 'delete me\\n' > web/deleted.txt",
+            "git -C web add -A",
+            "git -C web commit -qm base",
+            "git -C web mv old.txt renamed.txt",
+            "git -C web rm -q deleted.txt",
+            "printf 'workbench-capture-e2e-complete\\n'",
+          ].join("\n"),
+          yield_time_ms: 10_000,
+          max_output_tokens: 20_000,
+        },
+        "workbench-capture-e2e-shell",
+      ),
+    ],
+  };
 }
 
 function sandboxShellStep(): ScriptedModelStep {

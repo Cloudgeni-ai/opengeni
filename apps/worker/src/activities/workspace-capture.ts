@@ -294,6 +294,11 @@ async function runCapture(
   // ── 1. per-repo status + diff, union the touched set ──────────────────────
   const discovery = await svc.detectReposDetailed();
   throwIfCaptureAborted(signal);
+  if (process.env.OPENGENI_TEST_SCENARIO === "sandbox") {
+    console.log(
+      `[sandbox-e2e] capture discovery complete=${discovery.complete} repos=${JSON.stringify(discovery.repos)} degraded=${discovery.degradedReason ?? "none"}`,
+    );
+  }
   if (!discovery.complete) {
     const capturedAt = new Date();
     const reason = captureDegradedReason(discovery.degradedReason);
@@ -368,6 +373,7 @@ async function runCapture(
       diff = await svc.gitDiff({
         path: root,
         staged: false,
+        includeUntracked: true,
         fromRef: "HEAD",
         pathspec: [],
         contextLines: 3,
@@ -718,6 +724,11 @@ async function runCapture(
     stats,
     capturedAt,
   });
+  if (process.env.OPENGENI_TEST_SCENARIO === "sandbox") {
+    console.log(
+      `[sandbox-e2e] capture commit inserted=${Boolean(inserted)} revision=${revision} epoch=${input.leaseEpoch} group=${input.sandboxGroupId}`,
+    );
+  }
   throwIfCaptureAborted(signal);
   if (!inserted) {
     // Lease superseded/released between capture and commit. Best-effort clean up

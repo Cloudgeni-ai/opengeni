@@ -4,6 +4,7 @@ import { connect as connectNats } from "nats";
 import postgres from "postgres";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { makeTempDir, removeTempDir, runCommand, waitFor } from "./process";
 
 export type TestServices = {
@@ -65,19 +66,32 @@ async function startTestServicesAttempt(
       objectStorage: options.objectStorage ?? false,
     }),
   );
-  const up = await runCommand(
-    ["docker", "compose", "-p", projectName, "-f", composeFile, "up", "-d"],
-    { timeoutMs: 180_000 },
-  );
-  if (up.exitCode !== 0) {
-    await runCommand(
-      ["docker", "compose", "-p", projectName, "-f", composeFile, "down", "-v", "--remove-orphans"],
-      { timeoutMs: 60_000 },
-    ).catch(() => undefined);
-    await removeTempDir(cwd);
-    throw new Error(`docker compose up failed\n${up.stdout}\n${up.stderr}`);
+  const composeUpCommand = [
+    // Serialize this contract across worktrees. Shared CI hosts may prune old
+    // image digests while another suite is between pull and container create.
+    ...(process.platform === "linux"
+      ? ["flock", "--exclusive", "--timeout", "120", "/tmp/opengeni-test-compose-images-v1.lock"]
+      : []),
+    "bun",
+    fileURLToPath(new URL("./compose-up.ts", import.meta.url)),
+    projectName,
+    composeFile,
+    JSON.stringify(testServiceImages(options)),
+  ];
+  const up = await runCommand(composeUpCommand, { timeoutMs: 210_000 });
+  if (up.timedOut || up.exitCode !== 0) {
+    let cleanupFailure = "";
+    try {
+      await stopTestServices(projectName, composeFile, cwd);
+    } catch (error) {
+      cleanupFailure = `\ncompose cleanup also failed: ${String(error)}`;
+    }
+    throw new Error(
+      `docker compose up ${up.timedOut ? "timed out" : "failed"}\n${up.stdout}\n${up.stderr}${cleanupFailure}`,
+    );
   }
 
+  let downPromise: Promise<void> | undefined;
   const services: TestServices = {
     projectName,
     cwd,
@@ -102,23 +116,7 @@ async function startTestServicesAttempt(
     migrate: async () => {
       await migrate(services.databaseUrl);
     },
-    down: async () => {
-      await runCommand(
-        [
-          "docker",
-          "compose",
-          "-p",
-          projectName,
-          "-f",
-          composeFile,
-          "down",
-          "-v",
-          "--remove-orphans",
-        ],
-        { timeoutMs: 60_000 },
-      ).catch(() => undefined);
-      await removeTempDir(cwd);
-    },
+    down: () => (downPromise ??= stopTestServices(projectName, composeFile, cwd)),
   };
 
   try {
@@ -134,12 +132,123 @@ async function startTestServicesAttempt(
     return services;
   } catch (error) {
     const logs = await composeLogs(projectName, composeFile);
-    await services.down();
+    let cleanupFailure = "";
+    try {
+      await services.down();
+    } catch (cleanupError) {
+      cleanupFailure = `\ncompose cleanup also failed: ${String(cleanupError)}`;
+    }
     throw new Error(
-      `test services failed to become ready: ${error instanceof Error ? error.message : String(error)}\n${logs}`,
+      `test services failed to become ready: ${error instanceof Error ? error.message : String(error)}\n${logs}${cleanupFailure}`,
       { cause: error },
     );
   }
+}
+
+async function stopTestServices(
+  projectName: string,
+  composeFile: string,
+  cwd: string,
+): Promise<void> {
+  const diagnostics: string[] = [];
+  const pinCleanupFailure = await removeTestImagePins(projectName);
+  if (pinCleanupFailure) {
+    diagnostics.push(pinCleanupFailure);
+  }
+  for (const stopTimeoutSeconds of ["5", "0"] as const) {
+    const result = await runCommand(
+      [
+        "docker",
+        "compose",
+        "-p",
+        projectName,
+        "-f",
+        composeFile,
+        "down",
+        "--timeout",
+        stopTimeoutSeconds,
+        "-v",
+        "--remove-orphans",
+      ],
+      { timeoutMs: 30_000 },
+    );
+    diagnostics.push(
+      `down --timeout ${stopTimeoutSeconds}: exit=${result.exitCode} timedOut=${String(result.timedOut)}\n${result.stdout}\n${result.stderr}`,
+    );
+    if (result.timedOut || result.exitCode !== 0) {
+      continue;
+    }
+
+    const residue = await testServiceResidue(projectName);
+    if (residue.length === 0) {
+      await removeTempDir(cwd);
+      return;
+    }
+    diagnostics.push(`residue after down --timeout ${stopTimeoutSeconds}:\n${residue.join("\n")}`);
+  }
+
+  throw new Error(
+    `failed to remove owned test-service project ${projectName}; compose file retained at ${composeFile}\n${diagnostics.join("\n")}`,
+  );
+}
+
+async function testServiceResidue(projectName: string): Promise<string[]> {
+  const filter = `label=com.docker.compose.project=${projectName}`;
+  const pinFilter = `label=com.opengeni.test-image-pin=${projectName}`;
+  const labels = ["containers", "image pins", "volumes", "networks"] as const;
+  const checks = await Promise.allSettled([
+    inspectDockerResidue("containers", ["docker", "ps", "-aq", "--filter", filter]),
+    inspectDockerResidue("image pins", ["docker", "ps", "-aq", "--filter", pinFilter]),
+    inspectDockerResidue("volumes", ["docker", "volume", "ls", "-q", "--filter", filter]),
+    inspectDockerResidue("networks", ["docker", "network", "ls", "-q", "--filter", filter]),
+  ]);
+  return checks
+    .map((result, index) =>
+      result.status === "fulfilled"
+        ? result.value
+        : `${labels[index]} inspection threw: ${String(result.reason)}`,
+    )
+    .filter((result): result is string => result !== null);
+}
+
+async function removeTestImagePins(projectName: string): Promise<string | null> {
+  const list = await runCommand(
+    ["docker", "ps", "-aq", "--filter", `label=com.opengeni.test-image-pin=${projectName}`],
+    { timeoutMs: 5_000 },
+  );
+  if (list.timedOut || list.exitCode !== 0) {
+    return `image pin inspection failed: exit=${list.exitCode} timedOut=${String(list.timedOut)}\n${list.stdout}\n${list.stderr}`;
+  }
+  const pins = list.stdout.trim().split("\n").filter(Boolean);
+  if (pins.length === 0) {
+    return null;
+  }
+
+  const remove = await runCommand(["docker", "rm", "-f", "-v", ...pins], {
+    timeoutMs: 15_000,
+  });
+  if (remove.timedOut || remove.exitCode !== 0) {
+    return `image pin removal failed: exit=${remove.exitCode} timedOut=${String(remove.timedOut)}\n${remove.stdout}\n${remove.stderr}`;
+  }
+  return null;
+}
+
+async function inspectDockerResidue(label: string, args: string[]): Promise<string | null> {
+  const result = await runCommand(args, { timeoutMs: 5_000 });
+  if (result.timedOut || result.exitCode !== 0) {
+    return `${label} inspection failed: exit=${result.exitCode} timedOut=${String(result.timedOut)}\n${result.stdout}\n${result.stderr}`;
+  }
+  const ids = result.stdout.trim();
+  return ids.length > 0 ? `${label}: ${ids.replaceAll("\n", ", ")}` : null;
+}
+
+function testServiceImages(options: { temporal?: boolean; objectStorage?: boolean }): string[] {
+  return [
+    "pgvector/pgvector:pg17",
+    "nats:2-alpine",
+    ...((options.temporal ?? true) ? ["temporalio/auto-setup:1.28"] : []),
+    ...((options.objectStorage ?? false) ? ["minio/minio:latest", "minio/mc:latest"] : []),
+  ];
 }
 
 function isRetryableComposeStartupError(error: unknown): boolean {
@@ -278,7 +387,9 @@ export async function freePort(): Promise<number> {
 async function waitForMinio(endpoint: string): Promise<void> {
   await waitFor(
     async () => {
-      const response = await fetch(`${endpoint}/minio/health/ready`).catch(() => null);
+      const response = await fetch(`${endpoint}/minio/health/ready`, {
+        signal: AbortSignal.timeout(2_000),
+      }).catch(() => null);
       return response?.ok === true;
     },
     { timeoutMs: 90_000, intervalMs: 500 },
@@ -316,6 +427,7 @@ function composeYaml(
   return `services:
   postgres:
     image: pgvector/pgvector:pg17
+    pull_policy: never
     environment:
       POSTGRES_DB: opengeni
       POSTGRES_USER: opengeni
@@ -330,6 +442,7 @@ function composeYaml(
 
   nats:
     image: nats:2-alpine
+    pull_policy: never
     command: ["-m", "8222"]
     ports:
       - "127.0.0.1:${ports.nats}:4222"
@@ -339,6 +452,13 @@ ${
   options.temporal
     ? `  temporal:
     image: temporalio/auto-setup:1.28
+    pull_policy: never
+    # pg_isready can briefly report healthy during the official Postgres
+    # image's temporary initialization server, immediately before that server
+    # shuts down for the final restart. If Temporal lands in that narrow window,
+    # auto-setup exits once. Retry it rather than turning host load into a
+    # four-minute test-suite flake.
+    restart: "on-failure:5"
     environment:
       HTTP_PROXY: ""
       HTTPS_PROXY: ""
@@ -367,6 +487,7 @@ ${
   options.objectStorage
     ? `  minio:
     image: minio/minio:latest
+    pull_policy: never
     command: ["server", "/data", "--console-address", ":9001"]
     environment:
       MINIO_ROOT_USER: minioadmin
@@ -382,6 +503,12 @@ ${
 
   minio-init:
     image: minio/mc:latest
+    pull_policy: never
+    # Keep this one-shot bootstrap out of the initial compose-up. The harness
+    # runs it explicitly after MinIO is healthy; including it here as well both
+    # creates the bucket twice and can race concurrent image pulls before the
+    # Docker daemon has committed the mc tag.
+    profiles: ["bootstrap"]
     depends_on:
       minio:
         condition: service_healthy

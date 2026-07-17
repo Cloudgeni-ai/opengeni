@@ -1,5 +1,9 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import type { SessionEvent } from "@opengeni/contracts";
+import type {
+  GetWorkspaceCaptureResponse,
+  SessionEvent,
+  WorkspaceCaptureManifest,
+} from "@opengeni/contracts";
 import {
   buildSandboxImage,
   freePort,
@@ -83,6 +87,95 @@ describe("real Docker sandbox e2e", () => {
     expect(toolOutputs.some((output) => output.includes("sandbox-ok"))).toBe(true);
     expect(events.some((event) => event.type === "agent.message.completed")).toBe(true);
   }, 240_000);
+
+  test("captures a real turn-end multi-repository workspace through the public API", async () => {
+    const create = await fetch(apiPath("/sessions"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        initialMessage: "Create the workbench capture acceptance fixture exactly.",
+        sandboxBackend: "docker",
+      }),
+    });
+    expect(create.status).toBe(202);
+    const session = (await create.json()) as { id: string };
+
+    await waitFor(
+      async () => {
+        const events = await sessionEvents(session.id);
+        return events.some(
+          (event) =>
+            event.type === "session.status.changed" &&
+            (event.payload as { status?: string }).status === "idle",
+        );
+      },
+      { timeoutMs: 180_000 },
+    );
+
+    const settledEvents = await sessionEvents(session.id);
+    expect(
+      settledEvents.some(
+        (event) =>
+          event.type === "agent.toolCall.output" &&
+          JSON.stringify(event.payload ?? {}).includes("workbench-capture-e2e-complete"),
+      ),
+    ).toBe(true);
+
+    let capture: GetWorkspaceCaptureResponse | null = null;
+    await waitFor(
+      async () => {
+        const response = await fetch(apiPath(`/sessions/${session.id}/workspace/capture`));
+        expect(response.ok).toBe(true);
+        capture = (await response.json()) as GetWorkspaceCaptureResponse;
+        if (!capture.available && capture.degradedReason) {
+          throw new Error(`workspace capture degraded: ${capture.degradedReason}`);
+        }
+        return capture.available;
+      },
+      {
+        timeoutMs: 60_000,
+        describe: () =>
+          [
+            `last capture response: ${JSON.stringify(capture)}`,
+            `api logs:\n${api.logs().slice(-4_000)}`,
+            `worker logs:\n${worker.logs().slice(-8_000)}`,
+          ].join("\n"),
+      },
+    );
+    expect(capture?.available).toBe(true);
+    if (!capture?.available) throw new Error("workspace capture did not become available");
+    const manifest = capture.manifest as WorkspaceCaptureManifest | null;
+    expect(manifest).not.toBeNull();
+    const roots = manifest!.repos.map((repo) => repo.root).sort();
+    expect(roots).toContain("api");
+    expect(roots).toContain("web");
+    expect(manifest!.repos.find((repo) => repo.root === "api")?.diff).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ path: "app.txt", status: "modified" }),
+        expect.objectContaining({ path: "notes.txt", status: "untracked" }),
+      ]),
+    );
+    expect(manifest!.files).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ path: "api/app.txt", deleted: false }),
+        expect.objectContaining({ path: "api/notes.txt", status: "untracked" }),
+        expect.objectContaining({ path: "web/renamed.txt", status: "renamed" }),
+        expect.objectContaining({ path: "web/deleted.txt", deleted: true }),
+      ]),
+    );
+
+    const fileUrl = new URL(apiPath(`/sessions/${session.id}/workspace/capture/file`));
+    fileUrl.searchParams.set("path", "api/notes.txt");
+    fileUrl.searchParams.set("revision", String(capture.revision));
+    const fileResponse = await fetch(fileUrl);
+    expect(fileResponse.ok).toBe(true);
+    const file = (await fileResponse.json()) as {
+      content?: string | null;
+      encoding?: string | null;
+    };
+    expect(file.encoding).toBe("utf8");
+    expect(file.content).toBe("untracked api\n");
+  }, 300_000);
 
   test("materializes uploaded file resources inside the real Docker sandbox", async () => {
     const upload = await fetch(apiPath("/files/uploads"), {
@@ -271,6 +364,10 @@ function stackEnv(services: TestServices, localApiPort: number): Record<string, 
     OPENGENI_OPENAI_API_KEY: "test",
     OPENGENI_OPENAI_MODEL: "scripted-model",
     OPENGENI_SANDBOX_BACKEND: "docker",
+    // Workspace capture is attached to the durable group-lease ownership path.
+    // Keep this real-stack acceptance on the same architecture as production;
+    // the legacy per-run box path intentionally has no turn-end capture handle.
+    OPENGENI_SANDBOX_OWNERSHIP_ENABLED: "true",
     OPENGENI_DOCKER_IMAGE: "opengeni-sandbox:local",
     OPENGENI_DOCKER_NETWORK: services.dockerNetwork,
     OPENGENI_SANDBOX_PREPARATION_PROFILES: "none",

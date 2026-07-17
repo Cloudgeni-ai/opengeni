@@ -5435,6 +5435,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // epoch-fenced, and it NEVER closes the box. The emitted
       // workspace.revision.captured event is ANNOUNCE-ONLY (metadata, never
       // content).
+      if (process.env.OPENGENI_TEST_SCENARIO === "sandbox") {
+        console.log(
+          `[sandbox-e2e] capture preflight ownership=${settings.sandboxOwnershipEnabled} enabled=${settings.workspaceCaptureEnabled} resolved=${Boolean(resolvedSandbox)} session=${Boolean(setupBoxSession)} group=${Boolean(sandboxGroupId)} storage=${Boolean(objectStorage)}`,
+        );
+      }
       if (resolvedSandbox && setupBoxSession && sandboxGroupId) {
         // Stop new heartbeat snapshot/meter ticks so a mid-turn snapshot cannot
         // start concurrently with capture, then drain any in-flight snapshot
