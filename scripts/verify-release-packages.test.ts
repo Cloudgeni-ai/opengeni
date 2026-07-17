@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  loadPublishablePackages,
   parseExpectedPackages,
   reconcileReleasePackages,
   type PublishablePackage,
@@ -19,6 +20,13 @@ function published(pkg: PublishablePackage, gitHead = sha): RegistryPackage {
 }
 
 describe("release package evidence", () => {
+  test("inventories the exact publishable workspace closure, including app packages", () => {
+    const publishable = loadPublishablePackages();
+    expect(publishable).toContainEqual({ name: "@opengeni/api-router", version: "0.5.5" });
+    expect(publishable).toContainEqual({ name: "@opengeni/worker-bundle", version: "0.7.3" });
+    expect(publishable).not.toContainEqual(expect.objectContaining({ name: "opengeni-web" }));
+  });
+
   test("parses a bounded comma/newline package set and rejects duplicates", () => {
     expect(parseExpectedPackages("@opengeni/react@0.14.0,\n@opengeni/sdk@0.13.0")).toEqual([
       react,

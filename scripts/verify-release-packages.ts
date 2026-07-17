@@ -1,11 +1,6 @@
-import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
-
-type PackageManifest = {
-  name?: unknown;
-  version?: unknown;
-  private?: unknown;
-};
+import { publishableWorkspacePackages } from "./publishable-workspaces";
 
 export type PublishablePackage = {
   name: string;
@@ -132,30 +127,15 @@ export function reconcileReleasePackages(options: {
   return { needsPublish, releaseReady: !needsPublish, packages };
 }
 
-async function loadPublishablePackages(root: string): Promise<PublishablePackage[]> {
-  const packages: PublishablePackage[] = [];
-  const glob = new Bun.Glob("packages/*/package.json");
-  for await (const relativePath of glob.scan({ cwd: root, onlyFiles: true })) {
-    let manifest: PackageManifest;
-    try {
-      manifest = JSON.parse(await readFile(resolve(root, relativePath), "utf8")) as PackageManifest;
-    } catch (error) {
-      throw new Error(`could not parse publishable package manifest: ${relativePath}`, {
-        cause: error,
-      });
-    }
-    if (manifest.private === true) continue;
-    if (
-      typeof manifest.name !== "string" ||
-      !packageNamePattern.test(manifest.name) ||
-      typeof manifest.version !== "string" ||
-      !packageVersionPattern.test(manifest.version)
-    ) {
-      throw new Error(`invalid publishable package manifest: ${relativePath}`);
-    }
-    packages.push({ name: manifest.name, version: manifest.version });
-  }
-  return packages.sort((a, b) => a.name.localeCompare(b.name));
+export function loadPublishablePackages(): PublishablePackage[] {
+  return publishableWorkspacePackages()
+    .map(({ name, version }) => {
+      if (!packageNamePattern.test(name) || !packageVersionPattern.test(version)) {
+        throw new Error(`invalid publishable package manifest: ${name}@${version}`);
+      }
+      return { name, version };
+    })
+    .sort((a, b) => a.name.localeCompare(b.name));
 }
 
 async function fetchRegistryPackage(pkg: PublishablePackage): Promise<RegistryPackage | null> {
@@ -224,7 +204,7 @@ async function main(): Promise<void> {
     throw new Error("OPENGENI_RELEASE_PACKAGE_PHASE must be plan or verify");
   }
 
-  const publishable = await loadPublishablePackages(root);
+  const publishable = loadPublishablePackages();
   const expectedNames = new Set(expected.map((pkg) => pkg.name));
   const registryEntries = await Promise.all(
     publishable.map(
