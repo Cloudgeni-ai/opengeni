@@ -49,10 +49,11 @@ describe("release continuity", () => {
         insert into sessions (
           id, account_id, workspace_id, status, initial_message, model,
           sandbox_backend, sandbox_group_id, temporal_workflow_id,
-          control_state, workspace_run_exception_generation
+          control_state, workspace_run_exception_generation, metadata
         ) values (
           ${sessionId}, ${accountId}, ${workspaceId}, 'idle', 'continuity',
-          'codex/gpt-5.6-sol', 'none', ${sessionId}, ${`session-${sessionId}`}, 'active', 7
+          'codex/gpt-5.6-sol', 'none', ${sessionId}, ${`session-${sessionId}`}, 'active', 7,
+          jsonb_build_object('childNotificationsMode', 'passive', 'retained', true)
         )`;
 
       const captured = await runContinuity(

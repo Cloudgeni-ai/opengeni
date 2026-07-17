@@ -143,7 +143,8 @@ async function digestCategories(
     sessions_immutable: {
       text: `select id::text, account_id::text, workspace_id::text,
                     parent_session_id::text, initial_message, title, title_source, instructions,
-                    resources, tools, metadata, model, sandbox_backend, sandbox_os,
+                    resources, tools, metadata - 'childNotificationsMode' as metadata,
+                    model, sandbox_backend, sandbox_os,
                     sandbox_group_id::text, active_sandbox_id::text, active_epoch, working_dir,
                     variable_set_id::text, rig_id::text, rig_version_id::text,
                     first_party_mcp_permissions, create_idempotency_key,
