@@ -21031,6 +21031,7 @@ export type RequestSessionTurnRecoveryInput = {
   triggerEventId: string;
   attemptId: string;
   reason: string;
+  detail?: Record<string, unknown>;
   fromStatuses?: SessionTurnStatus[];
 };
 
@@ -21146,6 +21147,7 @@ export async function requestSessionTurnRecovery(
             turnAttemptId: turn.activeAttemptId,
             turnAssociation: "current",
             payload: sanitizeEventPayload({
+              ...(input.detail ?? {}),
               triggerEventId: input.triggerEventId,
               reason: input.reason,
             }),
