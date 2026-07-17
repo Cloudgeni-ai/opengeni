@@ -805,7 +805,7 @@ describe("worker activities integration", () => {
     expect(turns.every((turn) => turn.status !== "failed")).toBe(true);
   });
 
-  test("idles the session on a retryable provider failure without a goal", async () => {
+  test("recovers the same turn on a retryable provider failure without a goal", async () => {
     const grant = await testGrant(dbClient.db);
     const session = await createOwnedSession(dbClient.db, grant, {
       initialMessage: "rate limit",
@@ -828,34 +828,44 @@ describe("worker activities integration", () => {
       }),
     });
 
-    await expect(
-      activities.runAgentTurn({
-        attemptId: crypto.randomUUID(),
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        sessionId: session.id,
-        trigger: { kind: "next" },
-        workflowId: "workflow-rate-limit",
-        workflowRunId: crypto.randomUUID(),
-      }),
-    ).resolves.toMatchObject({ status: "idle" });
-    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
-    const failed = events.find((event) => event.type === "turn.failed");
-    expect(failed?.payload).toEqual({
-      error: "Model provider rate limit hit. Try again in a minute or lower the reasoning effort.",
-      code: "provider_rate_limited",
-      retryable: true,
-      recovery: "user_message",
+    const result = await activities.runAgentTurn({
+      attemptId: crypto.randomUUID(),
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      trigger: { kind: "next" },
+      workflowId: "workflow-rate-limit",
+      workflowRunId: crypto.randomUUID(),
     });
-    // The turn is truthfully failed, but a transient provider failure must
-    // not kill a long-lived session: it idles and the next user message
-    // resumes it (no continuation pacing -- there is no goal to continue).
-    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("idle");
+    expect(result).toMatchObject({
+      status: "recovering",
+      continueDelayMs: PROVIDER_BACKPRESSURE_DELAY_MS,
+    });
+    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
+    expect(events.some((event) => event.type === "turn.failed")).toBe(false);
+    expect(events.find((event) => event.type === "turn.recovery.requested")?.payload).toMatchObject(
+      {
+        error:
+          "Model provider rate limit hit. Try again in a minute or lower the reasoning effort.",
+        code: "provider_rate_limited",
+        reason: "provider_rate_limited",
+        retryable: true,
+        continueDelayMs: PROVIDER_BACKPRESSURE_DELAY_MS,
+      },
+    );
+    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe(
+      "recovering",
+    );
     const turns = await listSessionTurns(dbClient.db, grant.workspaceId, session.id, 10);
-    expect(turns.some((turn) => turn.status === "failed")).toBe(true);
+    expect(turns).toHaveLength(1);
+    expect(turns[0]).toMatchObject({
+      id: result.turnId,
+      status: "recovering",
+      activeAttemptId: null,
+    });
   });
 
-  test("idles the session on a retryable provider failure when a goal is active", async () => {
+  test("recovers the same turn on a retryable provider failure when a goal is active", async () => {
     const grant = await testGrant(dbClient.db);
     const session = await createOwnedSession(dbClient.db, grant, {
       initialMessage: "rate limit with goal",
@@ -885,30 +895,41 @@ describe("worker activities integration", () => {
       }),
     });
 
-    await expect(
-      activities.runAgentTurn({
-        attemptId: crypto.randomUUID(),
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        sessionId: session.id,
-        trigger: { kind: "next" },
-        workflowId: "workflow-rate-limit-goal",
-        workflowRunId: crypto.randomUUID(),
-      }),
-    ).resolves.toMatchObject({ status: "idle", continueDelayMs: PROVIDER_BACKPRESSURE_DELAY_MS });
-    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
-    const failed = events.find((event) => event.type === "turn.failed");
-    expect(failed?.payload).toEqual({
-      error: "Model provider rate limit hit. Try again in a minute or lower the reasoning effort.",
-      code: "provider_rate_limited",
-      retryable: true,
-      recovery: "goal_continuation",
+    const result = await activities.runAgentTurn({
+      attemptId: crypto.randomUUID(),
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      trigger: { kind: "next" },
+      workflowId: "workflow-rate-limit-goal",
+      workflowRunId: crypto.randomUUID(),
     });
-    // The turn is truthfully failed, but the session stays resumable and the
-    // goal remains active for the continuation loop to pick up.
-    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("idle");
+    expect(result).toMatchObject({
+      status: "recovering",
+      continueDelayMs: PROVIDER_BACKPRESSURE_DELAY_MS,
+    });
+    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
+    expect(events.some((event) => event.type === "turn.failed")).toBe(false);
+    expect(events.find((event) => event.type === "turn.recovery.requested")?.payload).toMatchObject(
+      {
+        error:
+          "Model provider rate limit hit. Try again in a minute or lower the reasoning effort.",
+        code: "provider_rate_limited",
+        reason: "provider_rate_limited",
+        retryable: true,
+        continueDelayMs: PROVIDER_BACKPRESSURE_DELAY_MS,
+      },
+    );
+    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe(
+      "recovering",
+    );
     const turns = await listSessionTurns(dbClient.db, grant.workspaceId, session.id, 10);
-    expect(turns.some((turn) => turn.status === "failed")).toBe(true);
+    expect(turns).toHaveLength(1);
+    expect(turns[0]).toMatchObject({
+      id: result.turnId,
+      status: "recovering",
+      activeAttemptId: null,
+    });
     expect((await getSessionGoal(dbClient.db, grant.workspaceId, session.id))?.status).toBe(
       "active",
     );
