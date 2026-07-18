@@ -537,18 +537,21 @@ mod tests {
             journalctl_args(ServiceScope::System, 25, false),
             ["-u", "opengeni-agent.service", "-n", "25", "--no-pager"]
         );
+        let log_dir = std::path::Path::new("/Users/u/Library/Logs/OpenGeni Agent");
         assert_eq!(
-            launchd_tail_args(
-                std::path::Path::new("/Users/u/Library/Logs/OpenGeni Agent"),
-                25,
-                true
-            ),
+            launchd_tail_args(log_dir, 25, true),
             [
-                "-n",
-                "25",
-                "-f",
-                "/Users/u/Library/Logs/OpenGeni Agent/agent.stdout.log",
-                "/Users/u/Library/Logs/OpenGeni Agent/agent.stderr.log"
+                "-n".to_string(),
+                "25".to_string(),
+                "-f".to_string(),
+                log_dir
+                    .join("agent.stdout.log")
+                    .to_string_lossy()
+                    .into_owned(),
+                log_dir
+                    .join("agent.stderr.log")
+                    .to_string_lossy()
+                    .into_owned(),
             ]
         );
     }
