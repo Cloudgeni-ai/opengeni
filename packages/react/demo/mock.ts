@@ -1857,6 +1857,14 @@ function fabricateGoal(sessionId: string): SessionGoal {
     noProgressStreak: 0,
     maxAutoContinuations: 25,
     metadata: {},
+    continuation: {
+      state: "running",
+      reason: "goal_turn_running",
+      wakeRevision: 2,
+      observedRevision: 2,
+      nextAttemptAt: null,
+      lastError: null,
+    },
     createdAt: now,
     updatedAt: now,
   };
