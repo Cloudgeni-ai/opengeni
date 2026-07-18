@@ -3452,6 +3452,10 @@ export const SessionEventType = z.enum([
   // OPE-21 per-turn selection audit. Payload is metadata only: credential row
   // id, bounded strategy/reason, and pool counts — never token material.
   "codex.credential.selected",
+  // OPE-32 shadow decision record. Contains only bounded opaque candidate aliases,
+  // normalized pressure/cache/confidence features, deterministic fingerprints,
+  // the actual-vs-shadow comparison, and no credential/account identity.
+  "codex.fleet.decision",
   // OPE-21 durable zero-capacity wait lifecycle. Runtime/system events only;
   // no synthetic user message is created when capacity returns.
   "codex.capacity.waiting",

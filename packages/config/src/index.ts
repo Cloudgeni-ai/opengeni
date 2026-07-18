@@ -258,6 +258,10 @@ const SettingsSchema = z.object({
   // enable. Turning it off restores the legacy sticky selector without a schema
   // rollback; the additive lease table/cursor columns become inert.
   codexCredentialLeasingEnabled: EnvBoolean.default(false),
+  // OPE-32 decision-observability fence. When enabled, the worker emits one
+  // bounded, metadata-only adaptive-policy replay record alongside the unchanged
+  // sticky-sharded decision. It never changes placement/admission/failover.
+  codexFleetPolicyShadowEnabled: EnvBoolean.default(false),
   // Multi-account P3 (auto-rotation): an account is "near exhaustion" — ineligible to be
   // rotated TO — when EITHER usage window (5h/weekly) is at/over this percent. Default 90 to
   // match the UI danger flip (UsageBar danger at pct >= 90). OPENGENI_CODEX_ROTATION_NEAR_EXHAUSTION_PCT.
@@ -1038,6 +1042,7 @@ export function getSettings(): Settings {
     codexSubscriptionEnabled: optional("OPENGENI_CODEX_SUBSCRIPTION_ENABLED"),
     codexToolSearchEnabled: optional("OPENGENI_CODEX_TOOL_SEARCH_ENABLED"),
     codexCredentialLeasingEnabled: optional("OPENGENI_CODEX_CREDENTIAL_LEASING_ENABLED"),
+    codexFleetPolicyShadowEnabled: optional("OPENGENI_CODEX_FLEET_POLICY_SHADOW_ENABLED"),
     codexProductSku: optional("OPENGENI_CODEX_PRODUCT_SKU"),
     codexRotationNearExhaustionPct: optional("OPENGENI_CODEX_ROTATION_NEAR_EXHAUSTION_PCT"),
     openaiReasoningEffort: optional("OPENGENI_OPENAI_REASONING_EFFORT"),

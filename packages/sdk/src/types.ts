@@ -579,6 +579,8 @@ export const SESSION_EVENT_TYPES = [
   "codex.account.switched",
   // OPE-21 metadata-only per-turn credential selection audit.
   "codex.credential.selected",
+  // OPE-32 bounded, identity-free deterministic shadow/replay decision.
+  "codex.fleet.decision",
   // OPE-21 durable zero-capacity wait lifecycle. These are system/runtime
   // events, never synthetic user messages.
   "codex.capacity.waiting",
