@@ -12,6 +12,7 @@ import {
   testSettings,
   type SharedTestDatabase,
 } from "@opengeni/testing";
+import { migrate } from "@opengeni/db/migrate";
 import postgres from "postgres";
 import { createScheduledTaskActivities } from "../src/activities/scheduled-tasks";
 import type { ActivityServices } from "../src/activities/types";
@@ -40,7 +41,9 @@ afterAll(async () => {
 describe("scheduled-task nested-agent policy dispatch (real PostgreSQL)", () => {
   test("persists the durable agent override on the dispatched root session", async () => {
     if (!available) return;
-    const [account] = await admin<{ id: string }[]>`
+    await migrate(shared!.adminUrl, undefined, { maxNestedAgentDepth: 1 });
+    try {
+      const [account] = await admin<{ id: string }[]>`
       insert into managed_accounts (name) values ('worker scheduled depth') returning id`;
     const [workspace] = await admin<{ id: string }[]>`
       insert into workspaces (account_id, name)
@@ -107,14 +110,17 @@ describe("scheduled-task nested-agent policy dispatch (real PostgreSQL)", () => 
         (event) => event.type,
       ),
     ).toEqual(["session.created", "session.status.changed", "system.update.pending"]);
-    expect(wakeups).toEqual([
-      {
-        accountId: account!.id,
-        workspaceId: workspace!.id,
-        sessionId: result.sessionId,
-        workflowId: result.workflowId,
-        wakeRevision: result.workflowWakeRevision,
-      },
-    ]);
+      expect(wakeups).toEqual([
+        {
+          accountId: account!.id,
+          workspaceId: workspace!.id,
+          sessionId: result.sessionId,
+          workflowId: result.workflowId,
+          wakeRevision: result.workflowWakeRevision,
+        },
+      ]);
+    } finally {
+      await migrate(shared!.adminUrl, undefined, {});
+    }
   }, 60_000);
 });

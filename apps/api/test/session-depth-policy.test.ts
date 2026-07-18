@@ -16,6 +16,7 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
+import { migrate } from "@opengeni/db/migrate";
 import postgres from "postgres";
 import { createApp } from "../src/app";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
@@ -150,6 +151,18 @@ async function usageCount(workspaceId: string): Promise<number> {
   return row?.count ?? 0;
 }
 
+async function withDeploymentDepth<T>(
+  maxNestedAgentDepth: number,
+  run: () => Promise<T>,
+): Promise<T> {
+  await migrate(shared!.adminUrl, undefined, { maxNestedAgentDepth });
+  try {
+    return await run();
+  } finally {
+    await migrate(shared!.adminUrl, undefined, {});
+  }
+}
+
 function grant(workspace: Workspace, subjectId: string, sessionId?: string): AccessGrant {
   return {
     accountId: workspace.accountId,
@@ -202,7 +215,8 @@ afterAll(async () => {
 describe("nested-agent depth at HTTP/MCP creation boundaries (real PostgreSQL)", () => {
   test("HTTP returns committed typed denials before start/usage side effects", async () => {
     if (!available) return;
-    const workspace = await freshWorkspace("api depth policy");
+    await withDeploymentDepth(0, async () => {
+      const workspace = await freshWorkspace("api depth policy");
     const workflow = new WorkflowStub();
     const settings = testSettings({
       databaseUrl: shared!.appUrl,
@@ -314,12 +328,13 @@ describe("nested-agent depth at HTTP/MCP creation boundaries (real PostgreSQL)",
       }),
     });
     expect(authorized.status).toBe(202);
-    expect(await authorized.json()).toMatchObject({
-      parentSessionId: root.id,
-      nestedAgentDepth: 1,
-      maxNestedAgentDepthOverride: 1,
-      effectiveMaxNestedAgentDepth: 1,
-      nestedAgentDepthPolicySource: "session",
+      expect(await authorized.json()).toMatchObject({
+        parentSessionId: root.id,
+        nestedAgentDepth: 1,
+        maxNestedAgentDepthOverride: 1,
+        effectiveMaxNestedAgentDepth: 1,
+        nestedAgentDepthPolicySource: "session",
+      });
     });
   }, 60_000);
 
