@@ -1626,6 +1626,8 @@ export type ComposerDraft = {
 export type SessionQueueSnapshot = {
   version: number;
   effectiveControl: EffectiveSessionControl;
+  /** Saved queue work is waiting for its interrupted predecessor to reach quiescence. */
+  stoppingPreviousAttempt: boolean;
   items: SessionTurn[];
 };
 

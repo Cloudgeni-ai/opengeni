@@ -122,6 +122,7 @@ import {
   registerInternalUpdateWakeInTransaction,
   registerSessionTurnAttemptClaim,
   serializeEffectiveSessionControl,
+  SessionControlInvariantError,
   type SessionTurnAttemptOutcome,
 } from "./session-control";
 import * as schema from "./schema";
@@ -15054,6 +15055,9 @@ export async function persistWarmSnapshot(
   input: {
     accountId: string;
     workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    attemptId: string;
     sandboxGroupId: string;
     expectedEpoch: number;
     /** base64 of the provider snapshot-ref / tar archive from persistWorkspace(). */
@@ -15078,6 +15082,56 @@ export async function persistWarmSnapshot(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
+      // Serialize with control acceptance before touching resume state. Either
+      // this exact attempt snapshot commits first, or Pause/Steer commits its
+      // interruption first and the late snapshot becomes a no-op. An in-process
+      // AbortSignal cannot close this database race.
+      await lockWorkspaceInferenceControl(scopedDb, input.workspaceId, "share");
+      const [attempt] = await scopedDb
+        .select({
+          accountId: schema.sessionTurnAttempts.accountId,
+          state: schema.sessionTurnAttempts.state,
+          outcome: schema.sessionTurnAttempts.outcome,
+        })
+        .from(schema.sessionTurnAttempts)
+        .where(
+          and(
+            eq(schema.sessionTurnAttempts.workspaceId, input.workspaceId),
+            eq(schema.sessionTurnAttempts.sessionId, input.sessionId),
+            eq(schema.sessionTurnAttempts.turnId, input.turnId),
+            eq(schema.sessionTurnAttempts.id, input.attemptId),
+          ),
+        )
+        .limit(1);
+      const [interruption] = attempt
+        ? await scopedDb
+            .select({ id: schema.sessionAttemptInterruptions.id })
+            .from(schema.sessionAttemptInterruptions)
+            .where(
+              and(
+                eq(schema.sessionAttemptInterruptions.workspaceId, input.workspaceId),
+                eq(schema.sessionAttemptInterruptions.sessionId, input.sessionId),
+                eq(schema.sessionAttemptInterruptions.attemptId, input.attemptId),
+              ),
+            )
+            .limit(1)
+        : [];
+      const attemptMayPersistWorkspace =
+        attempt !== undefined &&
+        (attempt.state === "claimed" || attempt.state === "running"
+          ? attempt.outcome === null
+          : attempt.state === "closed" &&
+            (attempt.outcome === "completed" ||
+              attempt.outcome === "failed" ||
+              attempt.outcome === "requires_action"));
+      if (
+        !attempt ||
+        attempt.accountId !== input.accountId ||
+        interruption ||
+        !attemptMayPersistWorkspace
+      ) {
+        return { wrote: false, throttled: false, superseded: true, priorArchiveForGc: null };
+      }
       const guard = await scopedDb.execute<{
         prior_archive: string | null;
         prior_archive_prev: string | null;
@@ -15235,11 +15289,9 @@ export async function markSandboxFileResourcesMaterialized(
 
 // ═══════════════ Workbench v2 turn-end workspace capture (dossier §10.2) ═══════
 // The durable index for turn-end workspace captures. `insertWorkspaceCapture`
-// mirrors persistWarmSnapshot's epoch-CAS discipline: the write is fenced on the
-// live lease's epoch so a capture whose lease was superseded (a newer turn
-// re-armed the box under a fresh epoch) writes ZERO rows. `revision` is assigned
-// monotonically per session inside the same statement (max+1), unique on
-// (session_id, revision).
+// mirrors persistWarmSnapshot's epoch-CAS discipline and also requires the exact
+// closed, uninterrupted turn attempt. A cancelled attempt or superseded lease
+// writes ZERO rows. `revision` is explicit and unique on (session_id, revision).
 
 export type WorkspaceCaptureRow = {
   id: string;
@@ -15306,7 +15358,8 @@ type CommitWorkspaceCaptureRevisionInput = {
   accountId: string;
   workspaceId: string;
   sessionId: string;
-  turnId: string | null;
+  turnId: string;
+  attemptId: string;
   sandboxGroupId: string;
   expectedEpoch: number;
   revision: number;
@@ -15320,10 +15373,10 @@ type CommitWorkspaceCaptureRevisionInput = {
 };
 
 /**
- * Commit the epoch-fenced capture index and its session-scoped announcement as
- * one durable transition. The announcement is metadata about an already
- * captured revision, not output from the active turn attempt, so it deliberately
- * carries no attempt/generation fence or current-turn association.
+ * Commit the attempt/control/epoch-fenced capture index and its session-scoped
+ * announcement as one durable transition. The announcement is metadata rather
+ * than model output, so it has no current-turn association, but it still carries
+ * the exact attempt/generation that produced the filesystem state.
  */
 async function commitWorkspaceCaptureRevision(
   db: Database,
@@ -15334,9 +15387,20 @@ async function commitWorkspaceCaptureRevision(
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
-        // Match the canonical lifecycle lock order. The capture event has FKs to
-        // workspace/session/turn, so taking these locks later could deadlock a
-        // concurrent turn settlement that already owns them in this order.
+        // Match the canonical control/lifecycle lock order. A shared inference-
+        // control lock makes acceptance of Pause/Steer and this commit mutually
+        // ordered: either this revision commits first, or the control transaction
+        // commits its exact attempt interruption first and the checks below reject
+        // the late capture. Never rely on an in-process AbortSignal for that race.
+        const [workspaceControl] = await tx
+          .select({ workspaceId: schema.workspaceInferenceControls.workspaceId })
+          .from(schema.workspaceInferenceControls)
+          .where(eq(schema.workspaceInferenceControls.workspaceId, input.workspaceId))
+          .for("share")
+          .limit(1);
+        if (!workspaceControl) {
+          throw new Error(`Workspace control not found: ${input.workspaceId}`);
+        }
         await tx
           .select({ id: schema.workspaces.id })
           .from(schema.workspaces)
@@ -15355,6 +15419,68 @@ async function commitWorkspaceCaptureRevision(
           .for("update")
           .limit(1);
         if (!session) throw new Error(`Session not found: ${input.sessionId}`);
+
+        const [turn] = await tx
+          .select({
+            accountId: schema.sessionTurns.accountId,
+            executionGeneration: schema.sessionTurns.executionGeneration,
+            status: schema.sessionTurns.status,
+          })
+          .from(schema.sessionTurns)
+          .where(
+            and(
+              eq(schema.sessionTurns.workspaceId, input.workspaceId),
+              eq(schema.sessionTurns.sessionId, input.sessionId),
+              eq(schema.sessionTurns.id, input.turnId),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        const [attempt] = turn
+          ? await tx
+              .select()
+              .from(schema.sessionTurnAttempts)
+              .where(
+                and(
+                  eq(schema.sessionTurnAttempts.workspaceId, input.workspaceId),
+                  eq(schema.sessionTurnAttempts.sessionId, input.sessionId),
+                  eq(schema.sessionTurnAttempts.turnId, input.turnId),
+                  eq(schema.sessionTurnAttempts.id, input.attemptId),
+                ),
+              )
+              .for("update")
+              .limit(1)
+          : [];
+        const [interruption] = attempt
+          ? await tx
+              .select({ id: schema.sessionAttemptInterruptions.id })
+              .from(schema.sessionAttemptInterruptions)
+              .where(
+                and(
+                  eq(schema.sessionAttemptInterruptions.workspaceId, input.workspaceId),
+                  eq(schema.sessionAttemptInterruptions.sessionId, input.sessionId),
+                  eq(schema.sessionAttemptInterruptions.attemptId, input.attemptId),
+                ),
+              )
+              .limit(1)
+          : [];
+        if (
+          !turn ||
+          !attempt ||
+          turn.accountId !== input.accountId ||
+          attempt.accountId !== input.accountId ||
+          attempt.executionGeneration !== turn.executionGeneration ||
+          attempt.state !== "closed" ||
+          (attempt.outcome !== "completed" &&
+            attempt.outcome !== "failed" &&
+            attempt.outcome !== "requires_action") ||
+          interruption ||
+          (turn.status !== "completed" &&
+            turn.status !== "failed" &&
+            turn.status !== "requires_action")
+        ) {
+          return null;
+        }
 
         const capturedAt = input.capturedAt ?? new Date();
         const rows = await tx.execute<{ revision: number | string }>(sql`
@@ -15413,8 +15539,8 @@ async function commitWorkspaceCaptureRevision(
             payload: sanitizeEventPayload(payload),
             clientEventId: `opengeni:workspace-capture:${revision}`,
             turnId: input.turnId,
-            turnGeneration: null,
-            turnAttemptId: null,
+            turnGeneration: attempt.executionGeneration,
+            turnAttemptId: attempt.id,
             turnAssociation: null,
             duplicateOfEventId: null,
             duplicateReason: null,
@@ -15444,9 +15570,10 @@ async function commitWorkspaceCaptureRevision(
  * — can embed the same number). Writes ONLY when a warm lease with the expected
  * epoch still exists for the sandbox group (the same supersession guard
  * persistWarmSnapshot uses, expressed as an EXISTS on sandbox_leases). Returns
- * the assigned revision, or null when the fence rejected the write (superseded /
- * released lease). Captures for one session are serialized (one turn at a time),
- * so the explicit revision never races the unique (session_id, revision) index.
+ * the assigned revision, or null when the fence rejected the write (interrupted
+ * attempt, cancelled/superseded turn, or released/superseded lease). Captures for
+ * one session are serialized (one turn at a time), so the explicit revision never
+ * races the unique (session_id, revision) index.
  */
 export async function insertWorkspaceCapture(
   db: Database,
@@ -15454,7 +15581,8 @@ export async function insertWorkspaceCapture(
     accountId: string;
     workspaceId: string;
     sessionId: string;
-    turnId: string | null;
+    turnId: string;
+    attemptId: string;
     sandboxGroupId: string;
     expectedEpoch: number;
     revision: number;
@@ -15487,7 +15615,8 @@ export async function insertFailedWorkspaceCapture(
     accountId: string;
     workspaceId: string;
     sessionId: string;
-    turnId: string | null;
+    turnId: string;
+    attemptId: string;
     sandboxGroupId: string;
     expectedEpoch: number;
     revision: number;
@@ -19021,6 +19150,36 @@ export async function claimSessionWorkForAttempt(
         if (effectiveControl.state !== "active") {
           return { action: "unclaimed", reason: "gate-closed" };
         }
+        // Quiescence is a session-wide admission fence, not a property of one
+        // queue row. The user may delete/reorder the original Steer replacement
+        // while its predecessor is still stopping, and recovery/internal-update
+        // claimers must remain blocked just the same. The session lock serializes
+        // this read with markSessionAttemptQuiesced's receipt transaction.
+        const [unquiescedInterruption] = await tx
+          .select({ attemptId: schema.sessionAttemptInterruptions.attemptId })
+          .from(schema.sessionAttemptInterruptions)
+          .innerJoin(
+            schema.sessionTurnAttempts,
+            and(
+              eq(
+                schema.sessionTurnAttempts.workspaceId,
+                schema.sessionAttemptInterruptions.workspaceId,
+              ),
+              eq(schema.sessionTurnAttempts.id, schema.sessionAttemptInterruptions.attemptId),
+            ),
+          )
+          .where(
+            and(
+              eq(schema.sessionAttemptInterruptions.workspaceId, workspaceId),
+              eq(schema.sessionAttemptInterruptions.sessionId, sessionId),
+              isNull(schema.sessionTurnAttempts.quiescedAt),
+            ),
+          )
+          .orderBy(desc(schema.sessionAttemptInterruptions.requestedAt))
+          .limit(1);
+        if (unquiescedInterruption) {
+          return { action: "unclaimed", reason: "control-pending" };
+        }
         const registerAttempt = async (turn: typeof schema.sessionTurns.$inferSelect) =>
           await registerSessionTurnAttemptClaim(tx as unknown as Database, {
             id: input.attemptId,
@@ -19051,14 +19210,6 @@ export async function claimSessionWorkForAttempt(
           if (parsedDispatch.kind === "malformed") {
             throw new Error(`Malformed turn dispatch metadata: ${parsedDispatch.reason}`);
           }
-          if (
-            activeTurn?.status === "running" &&
-            activeTurn.activeAttemptId === input.attemptId &&
-            parsedDispatch.attempt?.id === input.dispatchId
-          ) {
-            await registerAttempt(activeTurn);
-            return { action: "claimed", turn: mapSessionTurn(activeTurn) };
-          }
           const [pendingInterruption] = activeTurn?.activeAttemptId
             ? await tx
                 .select({ id: schema.sessionAttemptInterruptions.id })
@@ -19079,6 +19230,14 @@ export async function claimSessionWorkForAttempt(
             : [];
           if (pendingInterruption) {
             return { action: "unclaimed", reason: "control-pending" };
+          }
+          if (
+            activeTurn?.status === "running" &&
+            activeTurn.activeAttemptId === input.attemptId &&
+            parsedDispatch.attempt?.id === input.dispatchId
+          ) {
+            await registerAttempt(activeTurn);
+            return { action: "claimed", turn: mapSessionTurn(activeTurn) };
           }
           if (activeTurn?.status === "requires_action") {
             if (input.trigger.kind !== "approval") {
@@ -19506,6 +19665,28 @@ export async function claimSessionWorkForAttempt(
           await registerAttempt(internalTurn);
           return { action: "claimed", turn: mapSessionTurn(internalTurn) };
         }
+        const predecessorAttemptId = queuedSteerReplacementAttemptId(queuedTurn.metadata);
+        if (predecessorAttemptId) {
+          const [predecessor] = await tx
+            .select({ quiescedAt: schema.sessionTurnAttempts.quiescedAt })
+            .from(schema.sessionTurnAttempts)
+            .where(
+              and(
+                eq(schema.sessionTurnAttempts.workspaceId, workspaceId),
+                eq(schema.sessionTurnAttempts.sessionId, sessionId),
+                eq(schema.sessionTurnAttempts.id, predecessorAttemptId),
+              ),
+            )
+            .limit(1);
+          if (!predecessor) {
+            throw new SessionControlInvariantError(
+              `Queued Steer ${id} points to missing predecessor attempt ${predecessorAttemptId}`,
+            );
+          }
+          if (!predecessor.quiescedAt) {
+            return { action: "unclaimed", reason: "control-pending" };
+          }
+        }
         // The database guard makes this function the only supported
         // queued-to-running transition. Raw or stale claimers cannot bypass the
         // generation/active-pointer transaction.
@@ -19594,6 +19775,173 @@ export type SessionAttemptInterruptionSettlement = {
   turnId: string | null;
   outcome: SessionTurnAttemptOutcome | null;
 };
+
+/**
+ * Acknowledge that the exact cancelled attempt reached its final quiescence
+ * boundary: after this transaction it has no inference, user-visible output,
+ * or workspace-persistence authority. Fenced/idempotent cleanup and telemetry
+ * may still finish. This may race the workflow's logical settlement transaction
+ * in either order; both use the same session-first lock order and require the
+ * durable interruption. Temporal separately waits for the activity promise to
+ * terminate before the workflow dispatches its replacement.
+ */
+export async function markSessionAttemptQuiesced(
+  db: Database,
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    attemptId: string;
+    temporalWorkflowId: string;
+    /** The dying activity also reaches this boundary for non-control ownership
+     * fences. It may no-op when no Pause/Steer interruption exists; the workflow
+     * control fallback deliberately omits this and therefore remains strict. */
+    allowUninterrupted?: boolean;
+  },
+): Promise<SessionEvent[]> {
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    await lockWorkspaceInferenceControl(scopedDb, input.workspaceId, "share");
+    const [session] = await scopedDb
+      .select()
+      .from(schema.sessions)
+      .where(
+        and(
+          eq(schema.sessions.workspaceId, input.workspaceId),
+          eq(schema.sessions.id, input.sessionId),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    const [attempt] = await scopedDb
+      .select()
+      .from(schema.sessionTurnAttempts)
+      .where(
+        and(
+          eq(schema.sessionTurnAttempts.workspaceId, input.workspaceId),
+          eq(schema.sessionTurnAttempts.sessionId, input.sessionId),
+          eq(schema.sessionTurnAttempts.id, input.attemptId),
+          eq(schema.sessionTurnAttempts.temporalWorkflowId, input.temporalWorkflowId),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    const [interruption] = attempt
+      ? await scopedDb
+          .select({
+            id: schema.sessionAttemptInterruptions.id,
+            state: schema.sessionAttemptInterruptions.state,
+          })
+          .from(schema.sessionAttemptInterruptions)
+          .where(
+            and(
+              eq(schema.sessionAttemptInterruptions.workspaceId, input.workspaceId),
+              eq(schema.sessionAttemptInterruptions.sessionId, input.sessionId),
+              eq(schema.sessionAttemptInterruptions.attemptId, input.attemptId),
+            ),
+          )
+          .orderBy(asc(schema.sessionAttemptInterruptions.requestedAt))
+          .limit(1)
+      : [];
+    if (!session || !attempt) {
+      throw new SessionControlInvariantError(
+        `Attempt ${input.attemptId} cannot acknowledge quiescence without its session ownership`,
+      );
+    }
+    if (!interruption) {
+      if (input.allowUninterrupted) return [];
+      throw new SessionControlInvariantError(
+        `Attempt ${input.attemptId} cannot acknowledge quiescence without its interruption`,
+      );
+    }
+    const liveQuiescence =
+      (attempt.state === "claimed" || attempt.state === "running") &&
+      (interruption.state === "pending" ||
+        interruption.state === "delivered" ||
+        interruption.state === "acknowledged");
+    const settledQuiescence =
+      attempt.state === "closed" &&
+      (interruption.state === "settled" || interruption.state === "rejected_stale");
+    if (!liveQuiescence && !settledQuiescence) {
+      throw new SessionControlInvariantError(
+        `Attempt ${input.attemptId} cannot acknowledge quiescence from ${attempt.state}/${interruption.state}`,
+      );
+    }
+
+    const clientEventId = `opengeni:attempt-quiesced:${input.attemptId}`;
+    if (attempt.quiescedAt) {
+      const [existing] = await scopedDb
+        .select()
+        .from(schema.sessionEvents)
+        .where(
+          and(
+            eq(schema.sessionEvents.workspaceId, input.workspaceId),
+            eq(schema.sessionEvents.sessionId, input.sessionId),
+            eq(schema.sessionEvents.clientEventId, clientEventId),
+          ),
+        )
+        .limit(1);
+      if (!existing) {
+        // Migration 0065 seeds quiesced_at for interrupted attempts that were
+        // already closed before queue-event receipts existed. A replaying
+        // workflow may still execute this idempotent fallback after rollout;
+        // there is nothing new to publish and admission is already safely open.
+        return [];
+      }
+      return [mapEvent(existing)];
+    }
+
+    const now = new Date();
+    const queueVersion = session.queueVersion + 1;
+    const [marked] = await scopedDb
+      .update(schema.sessionTurnAttempts)
+      .set({
+        quiescedAt: now,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(schema.sessionTurnAttempts.workspaceId, input.workspaceId),
+          eq(schema.sessionTurnAttempts.id, input.attemptId),
+          isNull(schema.sessionTurnAttempts.quiescedAt),
+        ),
+      )
+      .returning({ id: schema.sessionTurnAttempts.id });
+    if (!marked) {
+      throw new SessionControlInvariantError(`Attempt ${input.attemptId} quiescence CAS lost`);
+    }
+    const [event] = await scopedDb
+      .insert(schema.sessionEvents)
+      .values({
+        accountId: session.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        sequence: session.lastSequence + 1,
+        type: "session.queue.changed",
+        payload: sanitizeEventPayload({
+          operation: "attempt_quiesced",
+          attemptId: input.attemptId,
+          queueVersion,
+        }),
+        clientEventId,
+        turnId: attempt.turnId,
+        turnGeneration: attempt.executionGeneration,
+        turnAttemptId: attempt.id,
+        turnAssociation: null,
+        occurredAt: now,
+      })
+      .returning();
+    if (!event) throw new Error("Attempt-quiesced queue event was not inserted");
+    await scopedDb
+      .update(schema.sessions)
+      .set({ queueVersion, lastSequence: event.sequence, updatedAt: now })
+      .where(
+        and(
+          eq(schema.sessions.workspaceId, input.workspaceId),
+          eq(schema.sessions.id, input.sessionId),
+        ),
+      );
+    return [mapEvent(event)];
+  });
+}
 
 /**
  * Settle every durable interruption cause for one exact first-class attempt.
@@ -21904,12 +22252,100 @@ export async function getSessionQueueSnapshot(
         ),
       )
       .orderBy(asc(schema.sessionTurns.position), asc(schema.sessionTurns.createdAt));
+    const quiescenceCandidates = [
+      ...new Set(
+        rows.flatMap((row) => {
+          const attemptId = queuedSteerReplacementAttemptId(row.metadata);
+          return attemptId ? [attemptId] : [];
+        }),
+      ),
+    ];
+    const quiescenceAttempts =
+      quiescenceCandidates.length === 0
+        ? []
+        : await scopedDb
+            .select({
+              id: schema.sessionTurnAttempts.id,
+              quiescedAt: schema.sessionTurnAttempts.quiescedAt,
+            })
+            .from(schema.sessionTurnAttempts)
+            .where(
+              and(
+                eq(schema.sessionTurnAttempts.workspaceId, workspaceId),
+                eq(schema.sessionTurnAttempts.sessionId, sessionId),
+                inArray(schema.sessionTurnAttempts.id, quiescenceCandidates),
+              ),
+            );
+    const foundQuiescenceAttempts = new Set(quiescenceAttempts.map((attempt) => attempt.id));
+    const missingQuiescenceAttempt = quiescenceCandidates.find(
+      (attemptId) => !foundQuiescenceAttempts.has(attemptId),
+    );
+    if (missingQuiescenceAttempt) {
+      throw new SessionControlInvariantError(
+        `Queued Steer points to missing predecessor attempt ${missingQuiescenceAttempt}`,
+      );
+    }
+    const nonQuiescedAttemptIds = new Set(
+      quiescenceAttempts
+        .filter((attempt) => attempt.quiescedAt === null)
+        .map((attempt) => attempt.id),
+    );
+    const [sessionWideUnquiescedInterruption] = await scopedDb
+      .select({ attemptId: schema.sessionAttemptInterruptions.attemptId })
+      .from(schema.sessionAttemptInterruptions)
+      .innerJoin(
+        schema.sessionTurnAttempts,
+        and(
+          eq(
+            schema.sessionTurnAttempts.workspaceId,
+            schema.sessionAttemptInterruptions.workspaceId,
+          ),
+          eq(schema.sessionTurnAttempts.id, schema.sessionAttemptInterruptions.attemptId),
+        ),
+      )
+      .where(
+        and(
+          eq(schema.sessionAttemptInterruptions.workspaceId, workspaceId),
+          eq(schema.sessionAttemptInterruptions.sessionId, sessionId),
+          isNull(schema.sessionTurnAttempts.quiescedAt),
+        ),
+      )
+      .orderBy(desc(schema.sessionAttemptInterruptions.requestedAt))
+      .limit(1);
     return {
       version: session.queueVersion,
       effectiveControl: serializeEffectiveSessionControl(effectiveControl),
+      stoppingPreviousAttempt:
+        rows.length > 0 &&
+        (sessionWideUnquiescedInterruption !== undefined ||
+          rows.some((row) => {
+            const metadata = row.metadata as Record<string, unknown>;
+            return (
+              metadata.delivery === "steer" &&
+              typeof metadata.replacedAttemptId === "string" &&
+              nonQuiescedAttemptIds.has(metadata.replacedAttemptId)
+            );
+          })),
       items: rows.map(mapSessionTurn),
     };
   });
+}
+
+function queuedSteerReplacementAttemptId(metadata: Record<string, unknown>): string | null {
+  if (metadata.delivery !== "steer") return null;
+  const attemptId = metadata.replacedAttemptId;
+  const interruptionCount = metadata.interruptionCount;
+  if (attemptId === null && interruptionCount === 0) return null;
+  if (
+    typeof attemptId === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(attemptId) &&
+    typeof interruptionCount === "number" &&
+    Number.isSafeInteger(interruptionCount) &&
+    interruptionCount > 0
+  ) {
+    return attemptId;
+  }
+  throw new SessionControlInvariantError("Queued Steer has malformed predecessor metadata");
 }
 
 async function enqueueFailedChildOutboxForTurnTx(

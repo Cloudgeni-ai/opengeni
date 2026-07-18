@@ -170,6 +170,11 @@ const REPOSITORY_DISCOVERY_TRUNCATED_SENTINEL = "__OPENGENI_REPOSITORY_DISCOVERY
 const REPOSITORY_DISCOVERY_STATUS_PREFIX = "__OPENGENI_REPOSITORY_DISCOVERY_STATUS__:";
 
 const NUL = String.fromCharCode(0); // \0 NUL — find/porcelain/numstat -z separator
+const FS_LIST_TRUNCATED_MARKER = "__OPENGENI_FS_LIST_TRUNCATED__";
+// Both the local and Modal SDK sessions retain at most 1 MiB per active output
+// stream. Leave ample framing/translation headroom and emit an explicit marker
+// instead of allowing the SDK to drop the tree's leading parent records.
+const FS_LIST_MAX_OUTPUT_BYTES = 768 * 1024;
 const US = String.fromCharCode(0x1f); // \x1f unit sep — git-log field separator
 const RS = String.fromCharCode(0x1e); // \x1e record sep — git-log record separator
 const SELFHOSTED_VIRTUAL_ROOT = "/workspace";
@@ -259,32 +264,103 @@ export class SandboxChannelAService {
   // ════════════════════════════ FileSystem (A2) ═════════════════════════════
 
   async fsList(req: FsListRequest): Promise<FsListResponse> {
+    return await this.fsListInternal(req, []);
+  }
+
+  /**
+   * Worker-only fast path for a bounded whole-workspace index. Matching
+   * directory nodes are emitted but pruned by `find` before descent, so residue
+   * such as node_modules cannot consume the result budget. The public fs/list
+   * wire remains unchanged; interactive callers still expand every directory
+   * they explicitly request.
+   */
+  async fsListPruned(
+    req: FsListRequest,
+    pruneDirectoryNames: readonly string[],
+  ): Promise<FsListResponse> {
+    return await this.fsListInternal(req, pruneDirectoryNames);
+  }
+
+  private async fsListInternal(
+    req: FsListRequest,
+    pruneDirectoryNames: readonly string[],
+  ): Promise<FsListResponse> {
     const root = assertSafeRelPathOrRoot(req.path);
-    // A single bounded `find` (NUL-delimited) builds the whole subtree in one
-    // round-trip. Prefer GNU find's -printf on the Ubuntu-based images, but fall
-    // back to a POSIX-ish find+stat loop for unix_local on macOS/BSD.
+    const pruneNames = [...new Set(pruneDirectoryNames)].map(assertSafePruneDirectoryName);
+    // A single bounded command (NUL-delimited) builds the whole subtree in one
+    // round-trip. Prefer GNU find's -printf on the Ubuntu-based images; on
+    // macOS/BSD, use a depth-bounded Bash glob walker because their find has no
+    // -mindepth/-maxdepth/-printf contract.
     const findRoot = ".";
     const depthArg = Math.max(1, req.depth);
-    const hidden = req.includeHidden ? "" : ` -not -path '*/.*'`;
-    const gnuFind = `find ${findRoot} -mindepth 1 -maxdepth ${depthArg}${hidden} -printf '%y\\t%s\\t%T@\\t%m\\t%p\\0' 2>/dev/null`;
-    let { stdout } = await this.runInConfinedDirectory(root, {
-      cmd: `bash -lc ${shellQuote(gnuFind)}`,
+    const maxCommandEntries = req.maxEntries + 1;
+    const gnuPrint = `-printf '%y\\t%s\\t%T@\\t%m\\t%p\\0'`;
+    const gnuSelector = pruneNames.length
+      ? `\\( -type d \\( ${pruneNames.map((name) => `-name ${shellQuote(name)}`).join(" -o ")} \\) ${gnuPrint} -prune \\) -o ${gnuPrint}`
+      : gnuPrint;
+    const gnuVisibleSelector = req.includeHidden
+      ? gnuSelector
+      : `\\( -path '*/.*' -prune \\) -o \\( ${gnuSelector} \\)`;
+    const gnuFind = `find ${findRoot} -mindepth 1 -maxdepth ${depthArg} \\( ${gnuVisibleSelector} \\) 2>/dev/null`;
+    const portableHiddenGuard = req.includeHidden
+      ? ""
+      : `if [[ "$base" == .* ]]; then continue; fi;`;
+    const portablePruneCase = pruneNames.length
+      ? `case "$base" in ${pruneNames.map(shellQuote).join("|")}) pruned=1 ;; *) pruned=0 ;; esac;`
+      : "pruned=0;";
+    const portableWalk = [
+      "shopt -s nullglob dotglob; count=0; stop=0;",
+      'walk() { local dir="$1" level="$2" p base t size mtime mode pruned;',
+      'for p in "$dir"/*; do [ "$stop" -eq 1 ] && return; base=${p##*/};',
+      portableHiddenGuard,
+      `if [ -L "$p" ]; then t=l; size=0; elif [ -d "$p" ]; then t=d; size=0; elif [ -f "$p" ]; then t=f; size=$(wc -c < "$p" | tr -d ' '); else t=o; size=0; fi;`,
+      `mtime=$(date -r "$p" +%s 2>/dev/null || stat -c %Y "$p" 2>/dev/null || echo 0);`,
+      `mode=$(stat -f %Lp "$p" 2>/dev/null || stat -c %a "$p" 2>/dev/null || echo 0);`,
+      `printf '%s\\t%s\\t%s\\t%s\\t%s\\0' "$t" "$size" "$mtime" "$mode" "$p";`,
+      `count=$((count + 1)); if [ "$count" -ge ${maxCommandEntries} ]; then stop=1; return; fi;`,
+      portablePruneCase,
+      `if [ "$t" = d ] && [ "$pruned" -eq 0 ] && [ "$level" -lt ${depthArg} ]; then walk "$p" $((level + 1)); fi;`,
+      "done; }; walk . 1",
+    ].join(" ");
+    // Capability selection lives inside the confined command. Even a BSD/macOS
+    // box therefore pays exactly one provider round-trip, and an empty GNU
+    // listing cannot be mistaken for a failed capability probe.
+    const rawFindCommand = [
+      `if find --version >/dev/null 2>&1 && head -z -n 0 </dev/null >/dev/null 2>&1; then`,
+      `${gnuFind};`,
+      "else",
+      `${portableWalk};`,
+      "fi",
+    ].join(" ");
+    const boundedOutput = [
+      "LC_ALL=C; bytes=0; records=0; truncated=0;",
+      "while IFS= read -r -d '' record; do",
+      "record_bytes=${#record};",
+      `if [ "$records" -ge ${req.maxEntries} ] || [ $((bytes + record_bytes + 1)) -gt ${FS_LIST_MAX_OUTPUT_BYTES} ]; then truncated=1; break; fi;`,
+      "printf '%s\\0' \"$record\"; bytes=$((bytes + record_bytes + 1)); records=$((records + 1));",
+      "done;",
+      `if [ "$truncated" -eq 1 ]; then printf '%s\\0' ${shellQuote(FS_LIST_TRUNCATED_MARKER)}; fi`,
+    ].join(" ");
+    const findCommand = [
+      `{ ${rawFindCommand}; } | { ${boundedOutput}; };`,
+      "producer_status=${PIPESTATUS[0]};",
+      `if [ "$producer_status" -ne 0 ] && [ "$producer_status" -ne 141 ]; then printf '%s\\0' ${shellQuote(FS_LIST_TRUNCATED_MARKER)}; fi`,
+    ].join(" ");
+    const { stdout, exitCode, sessionId } = await this.runInConfinedDirectory(root, {
+      cmd: `bash -lc ${shellQuote(findCommand)}`,
+      yieldTimeMs: 10_000,
+      maxOutputTokens: Math.ceil(FS_LIST_MAX_OUTPUT_BYTES / 4) + 1_024,
     });
-    if (!stdout) {
-      const portableFind = [
-        `find ${findRoot} -mindepth 1 -maxdepth ${depthArg}${hidden} -print0 2>/dev/null | while IFS= read -r -d '' p; do`,
-        `if [ -L "$p" ]; then t=l; size=0; elif [ -d "$p" ]; then t=d; size=0; elif [ -f "$p" ]; then t=f; size=$(wc -c < "$p" | tr -d ' '); else t=o; size=0; fi;`,
-        `mtime=$(date -r "$p" +%s 2>/dev/null || stat -c %Y "$p" 2>/dev/null || echo 0);`,
-        `mode=$(stat -f %Lp "$p" 2>/dev/null || stat -c %a "$p" 2>/dev/null || echo 0);`,
-        `printf '%s\\t%s\\t%s\\t%s\\t%s\\0' "$t" "$size" "$mtime" "$mode" "$p";`,
-        `done`,
-      ].join(" ");
-      ({ stdout } = await this.runInConfinedDirectory(root, {
-        cmd: `bash -lc ${shellQuote(portableFind)}`,
-      }));
+    if (sessionId !== undefined) {
+      throw new ChannelAValidationError("filesystem listing exceeded its 10 second deadline");
+    }
+    if (exitCode !== 0) {
+      throw new ChannelAValidationError(`filesystem listing failed with exit code ${exitCode}`);
     }
 
     const entries = stdout.split(NUL).filter((s) => s.length > 0);
+    const transportTruncated = entries.at(-1) === FS_LIST_TRUNCATED_MARKER;
+    if (transportTruncated) entries.pop();
     const rootNode: FsTreeNode = {
       name: basename(root) || (root === "" ? "" : root),
       path: root,
@@ -299,7 +375,7 @@ export class SandboxChannelAService {
     const byPath = new Map<string, FsTreeNode>();
     byPath.set(root, rootNode);
     let count = 0;
-    let truncated = false;
+    let truncated = transportTruncated;
     for (const entry of entries) {
       if (count >= req.maxEntries) {
         truncated = true;
@@ -1366,6 +1442,13 @@ export function assertSafeRelPath(p: string): string {
 
 function shellQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+function assertSafePruneDirectoryName(name: string): string {
+  if (name.length > 255 || !/^[A-Za-z0-9._@+-]+$/.test(name) || name === "." || name === "..") {
+    throw new ChannelAValidationError(`invalid directory prune name: ${JSON.stringify(name)}`);
+  }
+  return name;
 }
 
 function basename(p: string): string {

@@ -66,6 +66,7 @@ function queueSnapshot(
       override: null,
       settlement: null,
     },
+    stoppingPreviousAttempt: false,
     items,
     ...overrides,
   };

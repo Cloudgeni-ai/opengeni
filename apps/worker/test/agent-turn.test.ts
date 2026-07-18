@@ -16,6 +16,7 @@ import { testSettings } from "@opengeni/testing";
 import {
   acceptsPromptCacheKeyForTurn,
   agentRunFailurePayload,
+  assertPhysicalToolQuiescenceForCancellation,
   classifyContextWindowOverflowError,
   classifyMcpTransportTimeoutError,
   codexCredentialLeaseDeadlineExpired,
@@ -36,6 +37,9 @@ import {
   resolveActiveSandboxBackend,
   shouldRecoverCompactionProviderFailure,
   shouldStartOnTurnRecording,
+  shouldRunTurnEndWorkspacePersistence,
+  waitForTurnFinalizerStep,
+  TurnSandboxProvisionCancelledError,
 } from "../src/activities/agent-turn";
 import { sandboxLeaseHolderIdForAttempt } from "../src/sandbox-resume";
 import { settingsWithPackSandboxImage } from "../src/activities/packs";
@@ -1005,6 +1009,49 @@ describe("lazy sandbox provisioner single-flight", () => {
       true,
     );
   });
+
+  test("Steer/Pause cancels a pending provision immediately and disposes its late lease", async () => {
+    const controller = new AbortController();
+    let resolveEstablish!: (value: { lease: string }) => void;
+    const establish = new Promise<{ lease: string }>((resolve) => {
+      resolveEstablish = resolve;
+    });
+    let completed = 0;
+    let failed = 0;
+    let disposed = 0;
+    let resolveDisposed!: () => void;
+    const disposal = new Promise<void>((resolve) => {
+      resolveDisposed = resolve;
+    });
+    const provisioner = createTurnSandboxProvisioner(() => establish, {
+      signal: controller.signal,
+      onCompleted: () => {
+        completed += 1;
+      },
+      onFailed: () => {
+        failed += 1;
+      },
+      disposeResult: () => {
+        disposed += 1;
+        resolveDisposed();
+      },
+    });
+
+    const pending = provisioner.get();
+    await Bun.sleep(0);
+    const cancelledAt = performance.now();
+    controller.abort(new Error("STEER"));
+
+    await expect(pending).rejects.toBeInstanceOf(TurnSandboxProvisionCancelledError);
+    expect(performance.now() - cancelledAt).toBeLessThan(100);
+    expect(await provisioner.waitForSettled(30_000)).toBeNull();
+    expect(completed).toBe(0);
+    expect(failed).toBe(0);
+
+    resolveEstablish({ lease: "late" });
+    await disposal;
+    expect(disposed).toBe(1);
+  });
 });
 
 describe("worker shutdown preemption", () => {
@@ -1016,6 +1063,67 @@ describe("worker shutdown preemption", () => {
     expect(isWorkerShutdownCancellation(new CancelledFailure("TIMED_OUT"))).toBe(false);
     expect(isWorkerShutdownCancellation(new Error("WORKER_SHUTDOWN"))).toBe(false);
     expect(isWorkerShutdownCancellation(undefined)).toBe(false);
+  });
+
+  test("skips slow workspace housekeeping for every physical cancellation boundary", () => {
+    expect(
+      shouldRunTurnEndWorkspacePersistence({
+        activityStatus: "cancelled",
+        cancellationRequested: false,
+      }),
+    ).toBe(false);
+    expect(
+      shouldRunTurnEndWorkspacePersistence({
+        activityStatus: "recovering",
+        cancellationRequested: true,
+      }),
+    ).toBe(false);
+    expect(
+      shouldRunTurnEndWorkspacePersistence({
+        activityStatus: "idle",
+        cancellationRequested: false,
+      }),
+    ).toBe(true);
+  });
+
+  test("turns an unconfirmed physical tool fence into a hard failure", () => {
+    const fenceFailure = new Error("remote process identity could not be verified");
+    expect(() =>
+      assertPhysicalToolQuiescenceForCancellation({
+        acknowledgeQuiescence: true,
+        physicalToolQuiescenceConfirmed: false,
+        failure: fenceFailure,
+      }),
+    ).toThrow(fenceFailure);
+    expect(() =>
+      assertPhysicalToolQuiescenceForCancellation({
+        acknowledgeQuiescence: true,
+        physicalToolQuiescenceConfirmed: true,
+        failure: fenceFailure,
+      }),
+    ).not.toThrow();
+    expect(() =>
+      assertPhysicalToolQuiescenceForCancellation({
+        acknowledgeQuiescence: false,
+        physicalToolQuiescenceConfirmed: false,
+        failure: fenceFailure,
+      }),
+    ).not.toThrow();
+  });
+
+  test("a cancelled activity never waits for a hung idempotent finalizer step", async () => {
+    const controller = new AbortController();
+    let rejectLate: ((error: Error) => void) | undefined;
+    const hung = new Promise<never>((_resolve, reject) => {
+      rejectLate = reject;
+    });
+    const startedAt = performance.now();
+    const waiting = waitForTurnFinalizerStep(hung, controller.signal);
+    controller.abort(new Error("STEER"));
+    await expect(waiting).resolves.toBeUndefined();
+    expect(performance.now() - startedAt).toBeLessThan(100);
+    rejectLate?.(new Error("late cleanup failure"));
+    await Bun.sleep(0);
   });
 });
 

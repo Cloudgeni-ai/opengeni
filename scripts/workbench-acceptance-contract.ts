@@ -35,6 +35,7 @@ export const WORKBENCH_ACCEPTANCE_REQUIREMENTS = [
   { id: "functional.host-tabs", environments: staging },
   { id: "functional.collapse-resize", environments: both },
   { id: "functional.notifications", environments: both },
+  { id: "functional.control-cancellation", environments: both },
 
   // Identity and race matrix.
   { id: "identity.session-workspace-subject-transitions", environments: staging },
@@ -77,6 +78,7 @@ export const WORKBENCH_ACCEPTANCE_REQUIREMENTS = [
   { id: "performance.session-asset-graph", environments: staging },
   { id: "performance.lazy-javascript", environments: staging },
   { id: "performance.css", environments: staging },
+  { id: "performance.control-cancellation", environments: both },
 
   // Accessibility and input acceptance.
   { id: "accessibility.keyboard", environments: both },
@@ -147,6 +149,8 @@ export const TIMING_SENSITIVE_REQUIREMENTS = new Set<string>([
   "identity.zero-cross-session-terminal-editor",
   "identity.zero-sensitive-residue",
   "identity.randomized-state-machine",
+  "functional.control-cancellation",
+  "performance.control-cancellation",
 ]);
 
 export const REAL_DEVICE_REQUIREMENTS = new Set<string>([
@@ -239,5 +243,11 @@ export const NUMERIC_PERFORMANCE_BUDGETS: Readonly<Record<string, NumericBudget>
     direction: "maximum",
     limit: 30_720,
     unit: "bytes",
+  },
+  "performance.control-cancellation": {
+    statistic: "worst",
+    direction: "maximum",
+    limit: 2_000,
+    unit: "ms",
   },
 };

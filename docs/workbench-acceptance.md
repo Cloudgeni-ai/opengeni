@@ -110,6 +110,7 @@ Every row below is required on the real deployed surface.
 | Host tabs | Leading/trailing tabs preserve ordering, selection, accessibility, and session isolation. |
 | Collapse/resize | Controlled and uncontrolled collapse, panel resize, min/max constraints, persistence, narrow viewport, and orientation change are correct. |
 | Notifications | Errors are deduplicated, actionable, host-routed, non-secret, and scoped to the current session. |
+| Steer/Pause cancellation | A committed control is never lost: the old attempt is durably fenced, every unresolved side-effecting tool call is closed as `interrupted / outcome unknown`, and physical activity shutdown completes before the replacement starts. Exercise model streaming; an INT/TERM-resistant terminal process; repository clone, rig setup, file materialization, token seeding, and in-flight credential refresh; turn-end capture; warm snapshot; eager and lazy sandbox provisioning; recording teardown; and MCP teardown. Test cloud PTY, local PTY, and connected-machine OpCancel paths. A Steer waiting on that fence renders `Stopping previous attempt…` with its durable queued prompt; it never looks like ordinary capacity queueing. No late capture, event, output, file mutation, lease, or provider result from the predecessor becomes authoritative. |
 
 ## 5. Identity and race matrix
 
@@ -193,6 +194,7 @@ with a warm cache. Reports include p50, p75, p95, p99, and worst observation.
 | Direct session asset graph | ≤ 1,900 KiB raw and ≤ 540 KiB gzip before optional editor/diff/terminal chunks |
 | Lazy JavaScript chunk | ≤ 800 KiB raw and ≤ 240 KiB gzip |
 | CSS asset | ≤ 30 KiB gzip |
+| Steer/Pause physical cancellation | worst ≤ 2,000 ms from committed control to replacement `turn.started` (Steer) or physically stopped activity (Pause), with zero zombie output |
 
 Measure representative high-, mid-, and low-end desktop hardware plus current
 iOS and Android devices. Include a 4× CPU slowdown and constrained-network run.

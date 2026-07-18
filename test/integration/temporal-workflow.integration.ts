@@ -623,10 +623,78 @@ describe("Temporal workflow integration", () => {
         await waitFor(() => runs.length === 2);
         expect(controls).toEqual([
           { ...scope, sessionId, attemptId: expect.any(String), workflowId },
+          {
+            ...scope,
+            sessionId,
+            attemptId: expect.any(String),
+            workflowId,
+            phase: "attempt_quiesced",
+          },
         ]);
+        expect((controls[1] as { attemptId: string }).attemptId).toBe(
+          (controls[0] as { attemptId: string }).attemptId,
+        );
         expect(runs[1]).toEqual(second);
       } finally {
         allowFirstRunToFinish = true;
+        worker.shutdown();
+        await run;
+      }
+    },
+    temporalWorkflowTestTimeoutMs,
+  );
+
+  test(
+    "Steer fails closed without a quiescence receipt when the cancelled activity terminates as a failure",
+    async () => {
+      const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+      const scope = workflowScope();
+      const sessionId = crypto.randomUUID();
+      const workflowId = `wf-${crypto.randomUUID()}`;
+      const first = queuedTurn("event-1");
+      const second = queuedTurn("event-2");
+      const queuedTurns = [first];
+      const controls: unknown[] = [];
+      let runs = 0;
+      let terminateFirst = false;
+      const admission = createTurnAdmission(queuedTurns, async () => {
+        runs += 1;
+        if (runs === 1) {
+          await waitFor(() => terminateFirst);
+          throw new Error("physical cancellation was not confirmed");
+        }
+        return { status: "idle" };
+      });
+      const worker = await testWorker(nativeConnection, taskQueue, {
+        ...admission.activities,
+        markSessionIdle: async () => undefined,
+        failSessionAttempt: async () => undefined,
+        settleSessionInterruptions: async (input: unknown) => {
+          controls.push(input);
+          terminateFirst = true;
+          return { action: "continue" as const };
+        },
+      });
+      const run = worker.run();
+      try {
+        const client = new Client({ connection });
+        const handle = await client.workflow.start("sessionWorkflow", {
+          taskQueue,
+          workflowId,
+          args: [{ ...scope, sessionId, initialEventId: first.triggerEventId }],
+        });
+        await waitFor(() => runs === 1);
+        queuedTurns.push(second);
+        await handle.signal("userMessage", second.triggerEventId);
+        await handle.signal("sessionControl", "control-event");
+        await expect(handle.result()).rejects.toBeDefined();
+
+        expect(runs).toBe(1);
+        expect(controls).toEqual([
+          { ...scope, sessionId, attemptId: expect.any(String), workflowId },
+        ]);
+      } finally {
+        terminateFirst = true;
         worker.shutdown();
         await run;
       }

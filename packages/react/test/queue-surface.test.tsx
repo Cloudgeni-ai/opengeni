@@ -58,6 +58,7 @@ function queue(overrides: Partial<UseTurnQueueResult> = {}): UseTurnQueueResult 
     snapshot: null,
     queue: items,
     effectiveControl: null,
+    stoppingPreviousAttempt: false,
     loading: false,
     error: null,
     refresh: async () => {},
@@ -124,5 +125,54 @@ describe("QueueSurface", () => {
     );
     expect(mounted.container.textContent).toContain("first queued prompt");
     expect(mounted.container.textContent).toContain("second queued prompt");
+  });
+
+  test("explains the durable Steer shutdown fence instead of looking stuck in an ordinary queue", async () => {
+    mounted = await renderComponent(
+      <QueueSurface queue={queue({ stoppingPreviousAttempt: true })} composer={composer()} />,
+    );
+
+    const status = mounted.container.querySelector('[data-testid="stopping-previous-attempt"]');
+    expect(status?.getAttribute("role")).toBe("status");
+    expect(status?.textContent).toContain("Stopping previous attempt…");
+    expect(status?.textContent).toContain("Queued work is saved and starts automatically.");
+    expect(mounted.container.textContent).toContain("2 queued prompts");
+  });
+
+  test("explains that Pause keeps queued work inert while physical cancellation settles", async () => {
+    const blocker = {
+      kind: "session" as const,
+      sessionId: "22222222-2222-4222-8222-222222222222",
+      displayName: "Paused here",
+      actor: null,
+      reason: null,
+      changedAt: null,
+      revision: 1,
+    };
+    mounted = await renderComponent(
+      <QueueSurface
+        queue={queue({
+          effectiveControl: {
+            state: "paused",
+            directState: "paused",
+            controlVersion: 1,
+            controlEtag: "paused:1",
+            primaryBlocker: blocker,
+            additionalBlockerCount: 0,
+            blockers: [blocker],
+            resumeOptions: [],
+            override: null,
+            settlement: { state: "stopping", attemptCount: 1 },
+          },
+          stoppingPreviousAttempt: true,
+        })}
+        composer={composer()}
+      />,
+    );
+
+    const status = mounted.container.querySelector('[data-testid="stopping-previous-attempt"]');
+    expect(status?.textContent).toContain("Stopping current attempt…");
+    expect(status?.textContent).toContain("Queued work stays saved until you resume.");
+    expect(status?.textContent).not.toContain("starts automatically");
   });
 });

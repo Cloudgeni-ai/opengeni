@@ -86,6 +86,7 @@ type LiveReceipt = {
   measurements: {
     captureApiResponse: Measurement;
     captureUsableWorkbench: Measurement;
+    controlCancellation: Measurement;
   };
   artifacts: Artifact[];
   knownDefects: [];
@@ -326,6 +327,7 @@ async function main(): Promise<void> {
   const browser = await chromium.launch();
   const artifacts: Artifact[] = [];
   let captureUsableWorkbench: Measurement;
+  let controlCancellation: Measurement;
   try {
     const navigationSamples: number[] = [];
     for (let index = 0; index < args.repetitions; index += 1) {
@@ -403,7 +405,7 @@ async function main(): Promise<void> {
       "Fresh desktop/mobile browsers rendered capture-backed Changes and Files with zero Channel-A requests and left the lease cold.",
     );
 
-    await runLiveWorkspaceFlow({
+    const liveFlow = await runLiveWorkspaceFlow({
       browser,
       cookieHeader,
       client: cookieClient,
@@ -414,6 +416,7 @@ async function main(): Promise<void> {
       checks,
       artifacts,
     });
+    controlCancellation = measurement(liveFlow.controlCancellationSamples);
   } finally {
     await browser.close();
   }
@@ -436,7 +439,7 @@ async function main(): Promise<void> {
     captureRevision: manifest.revision,
     captureStats: manifest.stats,
     checks,
-    measurements: { captureApiResponse, captureUsableWorkbench },
+    measurements: { captureApiResponse, captureUsableWorkbench, controlCancellation },
     artifacts,
     knownDefects: [],
     failures: [],
@@ -845,7 +848,7 @@ async function runLiveWorkspaceFlow(input: {
   marker: string;
   checks: Check[];
   artifacts: Artifact[];
-}): Promise<void> {
+}): Promise<{ controlCancellationSamples: number[] }> {
   const { browser, cookieHeader, client, args, workspaceId, sessionId, marker, checks, artifacts } =
     input;
   const context = await browser.newContext({ viewport: { width: 1440, height: 960 } });
@@ -1017,14 +1020,601 @@ async function runLiveWorkspaceFlow(input: {
       );
     }
 
+    const controlCancellationSamples: number[] = [];
+    const controlAudit: ControlCancellationAudit = {
+      cursor: (await client.getSession(workspaceId, sessionId)).lastSequence,
+      fences: new Map(),
+    };
+    for (let iteration = 0; iteration < args.repetitions; iteration += 1) {
+      controlCancellationSamples.push(
+        await proveLiveSteerCancellation({
+          client,
+          page,
+          workspaceId,
+          sessionId,
+          marker,
+          iteration,
+          verifyReplacementCapture: iteration === 0,
+          audit: controlAudit,
+          sessionTimeoutMs: args.sessionTimeoutMs,
+        }),
+      );
+    }
+    controlCancellationSamples.push(
+      await proveLivePauseCancellation({
+        client,
+        page,
+        workspaceId,
+        sessionId,
+        marker,
+        audit: controlAudit,
+        sessionTimeoutMs: args.sessionTimeoutMs,
+      }),
+    );
+    // A provider that merely detaches the old terminal process can surface a
+    // delayed completion after the replacement is already idle. Keep one quiet
+    // window after the final repetition and audit the continuous event cursor.
+    await Bun.sleep(6_000);
+    await auditCancelledPredecessorEvents(client, workspaceId, sessionId, controlAudit);
+    const zombieProbe = await client.terminalExec(workspaceId, sessionId, {
+      command:
+        "test -z \"$(find steer-stress pause-stress -maxdepth 2 -name 'zombie-*.txt' -print -quit 2>/dev/null)\"",
+      cwd: "",
+      timeoutMs: 20_000,
+      emitStream: false,
+    });
+    if (zombieProbe.exitCode !== 0) {
+      throw new Error("a cancelled predecessor terminal process performed a delayed write");
+    }
+    const controlSummary = measurement(controlCancellationSamples);
+    pass(
+      checks,
+      "functional.control-cancellation",
+      `${args.repetitions} real Modal turns with a 4,500-entry workspace were Steered and one hostile terminal turn was Paused without zombie output or late capture commits; the shutdown fence rendered whenever cancellation exceeded the immediate-feedback budget.`,
+    );
+    pass(
+      checks,
+      "performance.control-cancellation",
+      `Steer/Pause physical cancellation worst=${round(controlSummary.worst)}ms, p95=${round(controlSummary.p95)}ms across ${controlSummary.sampleCount} controls (hard budget 2000ms).`,
+    );
+
     assertNoProblems(problems, false);
     const liveShot = resolve(args.outputDir, "desktop-live-workbench.png");
     const livePng = await page.locator("[data-workspace-surface]").screenshot({ path: liveShot });
     await assertScreenshotPainted(page, livePng, "live desktop workbench");
     artifacts.push(await artifact(liveShot, args.outputDir));
+    return { controlCancellationSamples };
   } finally {
     await context.close();
   }
+}
+
+type ControlCancellationAudit = {
+  cursor: number;
+  fences: Map<
+    string,
+    {
+      control: "Steer" | "Pause";
+      controlRequestedSequence: number;
+      physicallyStoppedSequence: number;
+    }
+  >;
+};
+
+async function proveLiveSteerCancellation(input: {
+  client: OpenGeniClient;
+  page: Page;
+  workspaceId: string;
+  sessionId: string;
+  marker: string;
+  iteration: number;
+  verifyReplacementCapture: boolean;
+  audit: ControlCancellationAudit;
+  sessionTimeoutMs: number;
+}): Promise<number> {
+  const {
+    client,
+    page,
+    workspaceId,
+    sessionId,
+    marker,
+    iteration,
+    verifyReplacementCapture,
+    audit,
+    sessionTimeoutMs,
+  } = input;
+  const afterSequence = (await client.getSession(workspaceId, sessionId)).lastSequence;
+  const controlMarker = `CONTROL_READY_${marker}_${iteration}`;
+  const zombiePath = `steer-stress/zombie-${iteration}.txt`;
+  const terminalCommand =
+    iteration === 0
+      ? `rm -rf steer-stress; mkdir -p steer-stress; for d in $(seq 1 150); do mkdir -p "steer-stress/d$d"; for f in $(seq 1 29); do : > "steer-stress/d$d/f$f.ts"; done; done; printf '${controlMarker}\\n'; trap '' INT TERM; sleep 5; printf zombie > '${zombiePath}'`
+      : `rm -f '${zombiePath}'; test "$(find steer-stress -type f | wc -l)" -ge 4350; printf '${controlMarker}\\n'; trap '' INT TERM; sleep 5; printf zombie > '${zombiePath}'`;
+  const queue = await client.getQueue(workspaceId, sessionId);
+  const initialAccepted = await client.sendMessage(workspaceId, sessionId, {
+    text: [
+      "Run exactly one terminal command and do nothing else.",
+      "The command deliberately remains active after printing its marker; wait for it to finish.",
+      "```bash",
+      terminalCommand,
+      "```",
+    ].join("\n"),
+    controlEtag: queue.effectiveControl.controlEtag,
+    clientEventId: `workbench-control-initial:${crypto.randomUUID()}`,
+  });
+  const ready = await waitForSessionEvent(
+    client,
+    workspaceId,
+    sessionId,
+    afterSequence,
+    sessionTimeoutMs,
+    (event) =>
+      event.type === "sandbox.command.output.delta" &&
+      JSON.stringify(event.payload).includes(controlMarker),
+    "the live cancellation fixture command marker",
+  );
+  if (!ready.turnId || !ready.turnAttemptId) {
+    throw new Error("control fixture output was not bound to its owning turn attempt");
+  }
+  const predecessorTurnId = ready.turnId;
+  const predecessorAttemptId = ready.turnAttemptId;
+  const predecessorStarted = await waitForSessionEvent(
+    client,
+    workspaceId,
+    sessionId,
+    afterSequence,
+    10_000,
+    (event) => event.type === "turn.started" && event.turnId === predecessorTurnId,
+    "the predecessor turn start",
+  );
+  if (predecessorStarted.sequence >= ready.sequence) {
+    throw new Error("control fixture output preceded its turn.start ownership event");
+  }
+  const initialEvents = await listAllSessionEventsAfter(
+    client,
+    workspaceId,
+    sessionId,
+    afterSequence,
+  );
+  if (!initialEvents.some((event) => event.id === initialAccepted.id)) {
+    throw new Error("the initial control fixture prompt disappeared from canonical history");
+  }
+
+  const composer = page.getByLabel("Message the agent");
+  await composer.waitFor({ timeout: 20_000 });
+  await composer.fill(`Reply exactly REPLACED_${marker}. Do not run a tool.`);
+  const stoppingVisible = page
+    .getByTestId("stopping-previous-attempt")
+    .waitFor({ state: "visible", timeout: 1_000 })
+    .then(() => true)
+    .catch(() => false);
+  const steerResponsePromise = page.waitForResponse(
+    (response) => {
+      const url = new URL(response.url());
+      return (
+        response.request().method() === "POST" &&
+        url.pathname ===
+          `/v1/workspaces/${encodeURIComponent(workspaceId)}/sessions/${encodeURIComponent(sessionId)}/steer`
+      );
+    },
+    { timeout: 30_000 },
+  );
+  await composer.press("Control+Enter");
+  const steerResponse = await steerResponsePromise;
+  if (steerResponse.status() !== 202) {
+    throw new Error(`live Steer returned HTTP ${steerResponse.status()}`);
+  }
+  const steerResult = (await steerResponse.json()) as unknown;
+  if (!isRecord(steerResult) || !isRecord(steerResult.accepted) || !isRecord(steerResult.turn)) {
+    throw new Error("live Steer returned a malformed receipt");
+  }
+  const replacementTurnId = steerResult.turn.id;
+  const committedAt = Date.parse(String(steerResult.accepted.occurredAt));
+  if (typeof replacementTurnId !== "string" || !Number.isFinite(committedAt)) {
+    throw new Error("live Steer receipt omitted its turn identity or commit time");
+  }
+  const replacementStarted = await waitForSessionEvent(
+    client,
+    workspaceId,
+    sessionId,
+    ready.sequence,
+    2_000,
+    (event) => event.type === "turn.started" && event.turnId === replacementTurnId,
+    "replacement turn start inside the 2s physical-cancellation budget",
+  );
+  const controlCancellationMs = controlCancellationDurationMs(
+    committedAt,
+    Date.parse(replacementStarted.occurredAt),
+  );
+  if (controlCancellationMs > 2_000) {
+    throw new Error(`Steer replacement took ${controlCancellationMs}ms; budget is 2000ms`);
+  }
+  const renderedStoppingState = await stoppingVisible;
+  if (controlCancellationMs > 100 && !renderedStoppingState) {
+    throw new Error(
+      `Steer spent ${controlCancellationMs}ms behind the physical fence without rendering its stopping state`,
+    );
+  }
+  await page.getByTestId("stopping-previous-attempt").waitFor({ state: "hidden", timeout: 5_000 });
+
+  const settled = await waitForSettled(client, workspaceId, sessionId, sessionTimeoutMs);
+  if (settled.status !== "idle") {
+    throw new Error(`replacement Steer ended in ${settled.status}`);
+  }
+  await Bun.sleep(500);
+  const finalEvents = await listAllSessionEventsAfter(
+    client,
+    workspaceId,
+    sessionId,
+    afterSequence,
+  );
+  if (
+    !finalEvents.some(
+      (event) => event.type === "turn.superseded" && event.turnId === predecessorTurnId,
+    )
+  ) {
+    throw new Error("predecessor turn was not durably superseded");
+  }
+  const steerRequested = finalEvents.find(
+    (event) =>
+      event.type === "session.control.steer_requested" &&
+      isRecord(event.payload) &&
+      event.payload.targetTurnId === replacementTurnId &&
+      event.payload.replacedTurnId === predecessorTurnId,
+  );
+  if (!steerRequested) {
+    throw new Error("Steer receipt had no matching durable control-request event");
+  }
+  const quiesced = finalEvents.find(
+    (event) =>
+      event.type === "session.queue.changed" &&
+      event.turnId === predecessorTurnId &&
+      isRecord(event.payload) &&
+      event.payload.operation === "attempt_quiesced",
+  );
+  if (!quiesced) {
+    throw new Error("Steer predecessor had no durable quiescence receipt");
+  }
+  if (
+    quiesced.sequence <= steerRequested.sequence ||
+    quiesced.sequence >= replacementStarted.sequence
+  ) {
+    throw new Error("Steer quiescence receipt was outside its control-to-replacement fence");
+  }
+  audit.fences.set(predecessorAttemptId, {
+    control: "Steer",
+    controlRequestedSequence: steerRequested.sequence,
+    physicallyStoppedSequence: replacementStarted.sequence,
+  });
+  await auditCancelledPredecessorEvents(client, workspaceId, sessionId, audit);
+  if (verifyReplacementCapture) {
+    const replacementCapture = await waitForCaptureTurn(
+      client,
+      workspaceId,
+      sessionId,
+      replacementTurnId,
+      sessionTimeoutMs,
+    );
+    if (replacementCapture.stats.treeEntryCount < 4_500) {
+      throw new Error(
+        `replacement capture indexed only ${replacementCapture.stats.treeEntryCount} stress-tree entries`,
+      );
+    }
+    if (replacementCapture.stats.durationMs > 10_000) {
+      throw new Error(
+        `replacement capture took ${replacementCapture.stats.durationMs}ms for the production-sized tree`,
+      );
+    }
+  }
+  return controlCancellationMs;
+}
+
+async function proveLivePauseCancellation(input: {
+  client: OpenGeniClient;
+  page: Page;
+  workspaceId: string;
+  sessionId: string;
+  marker: string;
+  audit: ControlCancellationAudit;
+  sessionTimeoutMs: number;
+}): Promise<number> {
+  const { client, page, workspaceId, sessionId, marker, audit, sessionTimeoutMs } = input;
+  const prepared = await client.terminalExec(workspaceId, sessionId, {
+    command: "rm -rf pause-stress; mkdir -p pause-stress",
+    cwd: "",
+    timeoutMs: 20_000,
+    emitStream: false,
+  });
+  if (prepared.exitCode !== 0) throw new Error("could not prepare the live Pause fixture");
+
+  const afterSequence = (await client.getSession(workspaceId, sessionId)).lastSequence;
+  const controlMarker = `PAUSE_READY_${marker}`;
+  const zombiePath = "pause-stress/zombie-pause.txt";
+  // The first execution leaves `claimed` behind before it blocks. If recovery
+  // resumes the interrupted logical turn, a repeated exact command takes the
+  // safe branch and cannot manufacture a false zombie after Resume.
+  const terminalCommand =
+    `if mkdir pause-stress/claimed 2>/dev/null; then printf '${controlMarker}\\n'; ` +
+    `trap '' INT TERM; sleep 5; printf zombie > '${zombiePath}'; ` +
+    `else printf 'PAUSE_RESUMED_SAFE_${marker}\\n'; fi`;
+  await client.sendMessage(workspaceId, sessionId, {
+    text: [
+      "Run exactly one terminal command and do nothing else.",
+      "The command deliberately remains active after printing its marker; wait for it to finish.",
+      "```bash",
+      terminalCommand,
+      "```",
+    ].join("\n"),
+    controlEtag: (await client.getQueue(workspaceId, sessionId)).effectiveControl.controlEtag,
+    clientEventId: `workbench-pause-initial:${crypto.randomUUID()}`,
+  });
+  const ready = await waitForSessionEvent(
+    client,
+    workspaceId,
+    sessionId,
+    afterSequence,
+    sessionTimeoutMs,
+    (event) =>
+      event.type === "sandbox.command.output.delta" &&
+      JSON.stringify(event.payload).includes(controlMarker),
+    "the live Pause fixture command marker",
+  );
+  if (!ready.turnId || !ready.turnAttemptId) {
+    throw new Error("Pause fixture output was not bound to its owning turn attempt");
+  }
+  const predecessorTurnId = ready.turnId;
+  const predecessorAttemptId = ready.turnAttemptId;
+
+  const stoppingState = page
+    .getByTestId("stopping-previous-attempt")
+    .waitFor({ state: "visible", timeout: 1_000 })
+    .then(async () => ({
+      visible: true,
+      text: (await page.getByTestId("stopping-previous-attempt").textContent()) ?? "",
+    }))
+    .catch(() => ({ visible: false, text: "" }));
+  const pauseResponsePromise = page.waitForResponse(
+    (response) => {
+      const url = new URL(response.url());
+      return (
+        response.request().method() === "POST" &&
+        url.pathname ===
+          `/v1/workspaces/${encodeURIComponent(workspaceId)}/sessions/${encodeURIComponent(sessionId)}/control`
+      );
+    },
+    { timeout: 30_000 },
+  );
+  await page.getByRole("button", { name: "Pause this workstream" }).click();
+  const pauseResponse = await pauseResponsePromise;
+  if (pauseResponse.status() !== 200) {
+    throw new Error(`live Pause returned HTTP ${pauseResponse.status()}`);
+  }
+  const pauseResult = (await pauseResponse.json()) as unknown;
+  if (
+    !isRecord(pauseResult) ||
+    !isRecord(pauseResult.receipt) ||
+    !isRecord(pauseResult.effectiveControl) ||
+    pauseResult.effectiveControl.state !== "paused" ||
+    pauseResult.interruptionCount !== 1
+  ) {
+    throw new Error("live Pause returned a malformed or non-interrupting receipt");
+  }
+  const operationId = pauseResult.receipt.id;
+  const committedAt = Date.parse(String(pauseResult.receipt.createdAt));
+  if (typeof operationId !== "string" || !Number.isFinite(committedAt)) {
+    throw new Error("live Pause receipt omitted its operation identity or commit time");
+  }
+  const pauseRequested = await waitForSessionEvent(
+    client,
+    workspaceId,
+    sessionId,
+    ready.sequence,
+    2_000,
+    (event) =>
+      event.type === "session.control.paused" &&
+      isRecord(event.payload) &&
+      event.payload.operationId === operationId,
+    "the durable Pause request",
+  );
+  const quiesced = await waitForSessionEvent(
+    client,
+    workspaceId,
+    sessionId,
+    pauseRequested.sequence,
+    2_000,
+    (event) =>
+      event.type === "session.queue.changed" &&
+      event.turnId === predecessorTurnId &&
+      isRecord(event.payload) &&
+      event.payload.operation === "attempt_quiesced",
+    "Pause physical quiescence inside the 2s budget",
+  );
+  const controlCancellationMs = controlCancellationDurationMs(
+    committedAt,
+    Date.parse(quiesced.occurredAt),
+  );
+  if (controlCancellationMs > 2_000) {
+    throw new Error(
+      `Pause physical cancellation took ${controlCancellationMs}ms; budget is 2000ms`,
+    );
+  }
+  const renderedStoppingState = await stoppingState;
+  if (controlCancellationMs > 100 && !renderedStoppingState.visible) {
+    throw new Error(
+      `Pause spent ${controlCancellationMs}ms behind the physical fence without rendering its stopping state`,
+    );
+  }
+  if (
+    renderedStoppingState.visible &&
+    (!renderedStoppingState.text.includes("Stopping current attempt") ||
+      !renderedStoppingState.text.includes("until you resume"))
+  ) {
+    throw new Error(
+      "Pause rendered misleading Steer queue copy while physical cancellation settled",
+    );
+  }
+  await page.getByTestId("stopping-previous-attempt").waitFor({ state: "hidden", timeout: 5_000 });
+  await page.getByText("Paused here", { exact: true }).waitFor({ timeout: 5_000 });
+
+  audit.fences.set(predecessorAttemptId, {
+    control: "Pause",
+    controlRequestedSequence: pauseRequested.sequence,
+    physicallyStoppedSequence: quiesced.sequence,
+  });
+  await Bun.sleep(6_000);
+  await auditCancelledPredecessorEvents(client, workspaceId, sessionId, audit);
+  const zombieProbe = await client.terminalExec(workspaceId, sessionId, {
+    command: `test ! -e '${zombiePath}'`,
+    cwd: "",
+    timeoutMs: 20_000,
+    emitStream: false,
+  });
+  if (zombieProbe.exitCode !== 0) {
+    throw new Error("a Paused predecessor terminal process performed a delayed write");
+  }
+
+  const resumeResponsePromise = page.waitForResponse(
+    (response) => {
+      const url = new URL(response.url());
+      return (
+        response.request().method() === "POST" &&
+        url.pathname ===
+          `/v1/workspaces/${encodeURIComponent(workspaceId)}/sessions/${encodeURIComponent(sessionId)}/control`
+      );
+    },
+    { timeout: 30_000 },
+  );
+  await page.getByRole("button", { name: "Resume this workstream" }).click();
+  const resumeResponse = await resumeResponsePromise;
+  if (resumeResponse.status() !== 200) {
+    throw new Error(`live Resume returned HTTP ${resumeResponse.status()}`);
+  }
+  const resumeResult = (await resumeResponse.json()) as unknown;
+  if (
+    !isRecord(resumeResult) ||
+    !isRecord(resumeResult.effectiveControl) ||
+    resumeResult.effectiveControl.state !== "active"
+  ) {
+    throw new Error("live Resume did not reactivate the Paused workstream");
+  }
+  const settled = await waitForSettled(client, workspaceId, sessionId, sessionTimeoutMs);
+  if (settled.status !== "idle") {
+    throw new Error(`resumed Pause fixture ended in ${settled.status}`);
+  }
+  await Bun.sleep(6_000);
+  const postResumeZombieProbe = await client.terminalExec(workspaceId, sessionId, {
+    command: `test ! -e '${zombiePath}'`,
+    cwd: "",
+    timeoutMs: 20_000,
+    emitStream: false,
+  });
+  if (postResumeZombieProbe.exitCode !== 0) {
+    throw new Error("the interrupted Pause fixture performed a delayed write after Resume");
+  }
+  return controlCancellationMs;
+}
+
+async function auditCancelledPredecessorEvents(
+  client: OpenGeniClient,
+  workspaceId: string,
+  sessionId: string,
+  audit: ControlCancellationAudit,
+): Promise<void> {
+  while (true) {
+    const events = await client.listEvents(workspaceId, sessionId, {
+      after: audit.cursor,
+      limit: 500,
+    });
+    for (const event of events) {
+      const fence = event.turnAttemptId ? audit.fences.get(event.turnAttemptId) : undefined;
+      if (!fence) continue;
+      if (
+        event.sequence > fence.controlRequestedSequence &&
+        event.type.startsWith("workspace.revision.")
+      ) {
+        throw new Error(
+          `cancelled predecessor ${event.turnId} committed forbidden ${event.type} after ${fence.control} acceptance`,
+        );
+      }
+      if (
+        event.sequence > fence.physicallyStoppedSequence &&
+        event.turnAssociation !== "late_rejected"
+      ) {
+        throw new Error(
+          `cancelled predecessor ${event.turnId} emitted authoritative ${event.type} after ${fence.control} physical cancellation`,
+        );
+      }
+    }
+    const lastSequence = events.at(-1)?.sequence;
+    if (lastSequence !== undefined) audit.cursor = lastSequence;
+    if (events.length < 500) return;
+  }
+}
+
+async function listAllSessionEventsAfter(
+  client: OpenGeniClient,
+  workspaceId: string,
+  sessionId: string,
+  after: number,
+): Promise<Awaited<ReturnType<OpenGeniClient["listEvents"]>>> {
+  const collected: Awaited<ReturnType<OpenGeniClient["listEvents"]>> = [];
+  let cursor = after;
+  while (true) {
+    const page = await client.listEvents(workspaceId, sessionId, { after: cursor, limit: 500 });
+    collected.push(...page);
+    const lastSequence = page.at(-1)?.sequence;
+    if (lastSequence !== undefined) cursor = lastSequence;
+    if (page.length < 500) return collected;
+  }
+}
+
+export function controlCancellationDurationMs(committedAt: number, replacementStartedAt: number) {
+  if (!Number.isFinite(committedAt) || !Number.isFinite(replacementStartedAt)) {
+    throw new Error("control cancellation timestamps must be finite");
+  }
+  if (replacementStartedAt < committedAt) {
+    throw new Error("physical cancellation completed before its control commit timestamp");
+  }
+  return replacementStartedAt - committedAt;
+}
+
+async function waitForSessionEvent(
+  client: OpenGeniClient,
+  workspaceId: string,
+  sessionId: string,
+  after: number,
+  timeoutMs: number,
+  predicate: (event: Awaited<ReturnType<OpenGeniClient["listEvents"]>>[number]) => boolean,
+  label: string,
+): Promise<Awaited<ReturnType<OpenGeniClient["listEvents"]>>[number]> {
+  const deadline = Date.now() + timeoutMs;
+  let cursor = after;
+  while (Date.now() < deadline) {
+    const events = await client.listEvents(workspaceId, sessionId, { after: cursor, limit: 500 });
+    const found = events.find(predicate);
+    if (found) return found;
+    cursor = events.at(-1)?.sequence ?? cursor;
+    await Bun.sleep(25);
+  }
+  throw new Error(`timed out waiting for ${label}`);
+}
+
+async function waitForCaptureTurn(
+  client: OpenGeniClient,
+  workspaceId: string,
+  sessionId: string,
+  turnId: string,
+  timeoutMs: number,
+): Promise<Extract<GetWorkspaceCaptureResponse, { available: true }>> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const capture = await client.getWorkspaceCapture(workspaceId, sessionId);
+    if (capture.available && capture.turnId === turnId) return capture;
+    if (!capture.available && capture.degradedReason)
+      throw new Error(`replacement capture degraded: ${capture.degradedReason}`);
+    await Bun.sleep(250);
+  }
+  throw new Error("replacement turn capture did not become authoritative before timeout");
 }
 
 async function measureCaptureApi(
@@ -1148,7 +1738,10 @@ async function assertColdReview(page: Page, marker: string): Promise<void> {
 }
 
 async function assertAccessibility(page: Page): Promise<void> {
-  const report = await new AxeBuilder({ page })
+  // Bun currently resolves Axe's Playwright peer to a second declaration copy.
+  // The runtime Page is the same protocol object; erase only that duplicate-type
+  // identity at this boundary instead of weakening the script's Page type.
+  const report = await new AxeBuilder({ page: page as never })
     .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"])
     .analyze();
   const manual = await manualAccessibilityAudit(page);

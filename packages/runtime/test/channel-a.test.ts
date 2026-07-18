@@ -174,6 +174,203 @@ describe("P4.4 SandboxChannelAService — FileSystem (real local box)", () => {
     expect(Array.isArray(srcNode?.children)).toBe(true);
   });
 
+  test("fsListPruned emits residue directories but skips their descendants in one tree query", async () => {
+    const { session } = await makeBox();
+    const svc = new SandboxChannelAService({ session });
+    const made = await svc.terminalExec({
+      command: [
+        "mkdir -p node_modules/pkg src/node_modules/nested src/deep",
+        "printf residue > node_modules/pkg/index.js",
+        "printf nested > src/node_modules/nested/index.js",
+        "printf authored > src/deep/keep.ts",
+      ].join(" && "),
+      cwd: "",
+      timeoutMs: 20_000,
+      emitStream: false,
+    });
+    expect(made.exitCode).toBe(0);
+
+    const list = await svc.fsListPruned(
+      { path: "", depth: 20, maxEntries: 1_000, includeHidden: true },
+      ["node_modules"],
+    );
+    const paths: string[] = [];
+    const walk = (node: typeof list.root): void => {
+      paths.push(node.path);
+      node.children?.forEach(walk);
+    };
+    walk(list.root);
+
+    expect(paths).toContain("node_modules");
+    expect(paths).toContain("src/node_modules");
+    expect(paths).toContain("src/deep/keep.ts");
+    expect(paths).not.toContain("node_modules/pkg");
+    expect(paths).not.toContain("src/node_modules/nested");
+  });
+
+  test("fsListPruned portable macOS/BSD branch preserves depth, hidden, and prune semantics", async () => {
+    const { session } = await makeBox();
+    const made = await new SandboxChannelAService({ session }).terminalExec({
+      command: [
+        "mkdir -p src/deep node_modules/pkg .hidden",
+        "printf visible > src/keep.ts",
+        "printf deep > src/deep/too-deep.ts",
+        "printf residue > node_modules/pkg/index.js",
+        "printf secret > .hidden/secret.txt",
+      ].join(" && "),
+      cwd: "",
+      timeoutMs: 20_000,
+      emitStream: false,
+    });
+    expect(made.exitCode).toBe(0);
+
+    const originalExec = session.exec?.bind(session);
+    if (!originalExec) throw new Error("local test session has no exec surface");
+    let portableBranchObserved = false;
+    session.exec = async (args) => {
+      const capabilityProbe =
+        "if find --version >/dev/null 2>&1 && head -z -n 0 </dev/null >/dev/null 2>&1; then";
+      if (args.cmd.includes(capabilityProbe)) {
+        portableBranchObserved = true;
+        args = { ...args, cmd: args.cmd.replace(capabilityProbe, "if false; then") };
+      }
+      return await originalExec(args);
+    };
+
+    const list = await new SandboxChannelAService({ session }).fsListPruned(
+      { path: "", depth: 2, maxEntries: 1_000, includeHidden: false },
+      ["node_modules"],
+    );
+    const paths: string[] = [];
+    const walk = (node: typeof list.root): void => {
+      paths.push(node.path);
+      node.children?.forEach(walk);
+    };
+    walk(list.root);
+
+    expect(portableBranchObserved).toBe(true);
+    expect(paths).toContain("src/keep.ts");
+    expect(paths).toContain("src/deep");
+    expect(paths).toContain("node_modules");
+    expect(paths).not.toContain("src/deep/too-deep.ts");
+    expect(paths).not.toContain("node_modules/pkg");
+    expect(paths).not.toContain(".hidden");
+  });
+
+  test("fsListPruned indexes a production-sized tree in one provider exec", async () => {
+    const { session } = await makeBox();
+    const svc = new SandboxChannelAService({ session });
+    const made = await svc.terminalExec({
+      command:
+        'mkdir -p src; for d in $(seq 1 150); do mkdir -p "src/d$d"; for f in $(seq 1 29); do : > "src/d$d/f$f.ts"; done; done',
+      cwd: "",
+      timeoutMs: 20_000,
+      emitStream: false,
+    });
+    expect(made.exitCode).toBe(0);
+
+    const originalExec = session.exec?.bind(session);
+    if (!originalExec) throw new Error("local test session has no exec surface");
+    let providerExecs = 0;
+    session.exec = async (args) => {
+      providerExecs += 1;
+      return await originalExec(args);
+    };
+
+    const startedAt = performance.now();
+    const list = await svc.fsListPruned(
+      { path: "", depth: 20, maxEntries: 10_000, includeHidden: true },
+      ["node_modules"],
+    );
+    const durationMs = performance.now() - startedAt;
+    let entryCount = 0;
+    const walk = (node: typeof list.root): void => {
+      for (const child of node.children ?? []) {
+        entryCount += 1;
+        walk(child);
+      }
+    };
+    walk(list.root);
+
+    expect(providerExecs).toBe(1);
+    expect(entryCount).toBe(4_501);
+    expect(list.truncated).toBe(false);
+    // A generous local-host guard catches accidental per-directory traversal
+    // without coupling CI to Modal network latency (the deployed gate owns that).
+    expect(durationMs).toBeLessThan(5_000);
+  });
+
+  test("fsListPruned rejects non-literal prune patterns before executing the box", async () => {
+    let executed = false;
+    const svc = new SandboxChannelAService({
+      session: {
+        exec: async () => {
+          executed = true;
+          return { stdout: "", stderr: "", exitCode: 0 };
+        },
+      },
+    });
+
+    await expect(
+      svc.fsListPruned({ path: "", depth: 1, maxEntries: 10, includeHidden: true }, [
+        "../node_modules",
+        "*",
+      ]),
+    ).rejects.toThrow(/invalid directory prune name/);
+    expect(executed).toBe(false);
+  });
+
+  test("fsListPruned reports transport byte truncation without orphaning child nodes", async () => {
+    const recordDelimiter = String.fromCharCode(0);
+    let command = "";
+    const svc = new SandboxChannelAService({
+      session: {
+        exec: async (args) => {
+          command = args.cmd;
+          return {
+            stdout: [
+              "__OPENGENI_FS_CONFINED_OK__\n",
+              `d\t0\t1.0\t755\t./src${recordDelimiter}`,
+              `f\t1\t1.0\t644\t./src/a.ts${recordDelimiter}`,
+              `__OPENGENI_FS_LIST_TRUNCATED__${recordDelimiter}`,
+            ].join(""),
+            stderr: "",
+            exitCode: 0,
+          };
+        },
+      },
+    });
+
+    const list = await svc.fsListPruned(
+      { path: "", depth: 8, maxEntries: 10, includeHidden: true },
+      ["node_modules"],
+    );
+
+    expect(list.truncated).toBe(true);
+    expect(list.root.children?.[0]?.path).toBe("src");
+    expect(list.root.children?.[0]?.children?.[0]?.path).toBe("src/a.ts");
+    expect(command).toContain("__OPENGENI_FS_LIST_TRUNCATED__");
+  });
+
+  test("fsListPruned fails closed when the provider command is still running", async () => {
+    const svc = new SandboxChannelAService({
+      session: {
+        exec: async () => ({
+          stdout: "__OPENGENI_FS_CONFINED_OK__\n",
+          stderr: "",
+          exitCode: null,
+          sessionId: 17,
+        }),
+      },
+    });
+
+    await expect(
+      svc.fsListPruned({ path: "", depth: 8, maxEntries: 10, includeHidden: true }, [
+        "node_modules",
+      ]),
+    ).rejects.toThrow(/exceeded its 10 second deadline/);
+  });
+
   test("write with overwrite:false on an existing path throws conflict", async () => {
     const { session } = await makeBox();
     const svc = new SandboxChannelAService({ session });

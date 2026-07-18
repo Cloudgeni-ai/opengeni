@@ -67,12 +67,13 @@ type CaptureRow = {
   account_id: string;
   workspace_id: string;
   session_id: string;
+  turn_id: string | null;
 };
 
 async function captureRows(sessionId: string): Promise<CaptureRow[]> {
   const rows = await db.execute<CaptureRow>(dbSql`
     select id, revision::int as revision, state, manifest_key, tree_index_key, blob_keys,
-           size_bytes::int as size_bytes, stats, account_id, workspace_id, session_id
+           size_bytes::int as size_bytes, stats, account_id, workspace_id, session_id, turn_id
     from workspace_captures where session_id = ${sessionId} order by revision`);
   return rows as unknown as CaptureRow[];
 }
@@ -345,6 +346,14 @@ describe("workspace capture — B-suite (real docker turns)", () => {
       await Bun.sleep(1500);
       const [seed] = await captureRows(session.id);
       const { account_id, workspace_id, session_id } = seed!;
+      expect(seed!.turn_id).not.toBeNull();
+      const attemptRows = await db.execute<{ id: string }>(dbSql`
+        select id from session_turn_attempts
+        where workspace_id = ${workspace_id} and turn_id = ${seed!.turn_id}
+        order by started_at desc
+        limit 1`);
+      const attemptId = (attemptRows as unknown as Array<{ id: string }>)[0]?.id;
+      expect(attemptId).toBeTruthy();
 
       // The live lease epoch for this session's sandbox group.
       const grpRows = await db.execute<{ sandbox_group_id: string }>(dbSql`
@@ -360,7 +369,8 @@ describe("workspace capture — B-suite (real docker turns)", () => {
         accountId: account_id,
         workspaceId: workspace_id,
         sessionId: session_id,
-        turnId: null,
+        turnId: seed!.turn_id!,
+        attemptId: attemptId!,
         sandboxGroupId,
         revision: degradedRevision,
         manifestKey: "m",

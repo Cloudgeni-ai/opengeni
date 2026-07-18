@@ -5,6 +5,7 @@ import {
   continueAsNew,
   defineSignal,
   isCancellation,
+  patched,
   setHandler,
   TimeoutFailure,
   uuid4,
@@ -423,7 +424,31 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       // the physical activity winds down. The control outcome is authoritative,
       // so a concurrent activity completion or cancellation failure is ignored
       // only after Temporal has durably observed that terminal activity state.
-      await turn.catch(() => undefined);
+      const termination = await turn.then(
+        () => ({ kind: "completed" as const }),
+        (error: unknown) => ({ kind: "failed" as const, error }),
+      );
+      // This is a new durable command in a long-lived workflow. The patch marker
+      // keeps histories that already crossed this point replay-safe. New workers
+      // record quiescence from inside the dying activity; this post-termination
+      // call is its idempotent recovery fallback. A fulfilled activity or a
+      // Temporal cancellation proves the worker crossed its mandatory physical
+      // tool fence. A timeout/worker-loss failure proves no such thing: a remote
+      // command may still be alive, so fail closed with the queue blocked rather
+      // than manufacture a false quiescence receipt.
+      const physicalStopConfirmed =
+        termination.kind === "completed" || isCancellation(termination.error);
+      if (patched("session-attempt-quiescence-v1") && physicalStopConfirmed) {
+        await activity.settleSessionInterruptions({
+          accountId,
+          workspaceId,
+          sessionId,
+          attemptId,
+          workflowId: workflowInfo().workflowId,
+          phase: "attempt_quiesced",
+        });
+      }
+      if (!physicalStopConfirmed) throw termination.error;
       return settlement.action !== "paused";
     }
 

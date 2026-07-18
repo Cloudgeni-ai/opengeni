@@ -5,6 +5,7 @@ import type { WorkspaceCaptureManifest } from "@opengeni/sdk";
 import {
   assertFixtureCapture,
   assertDedicatedCanaryEmail,
+  controlCancellationDurationMs,
   fixturePrompt,
   parseCookieHeader,
   parseLiveAcceptanceArgs,
@@ -78,6 +79,12 @@ describe("workbench live acceptance preflight", () => {
       "GET https://blob.example/file?signature=secret&token=also-secret Bearer abc.def",
     );
     expect(clean).toBe("GET https://blob.example/file Bearer [redacted]");
+  });
+
+  test("control cancellation timing fails closed on invalid or impossible event order", () => {
+    expect(controlCancellationDurationMs(1_000, 1_125)).toBe(125);
+    expect(() => controlCancellationDurationMs(1_000, 999)).toThrow("before its control commit");
+    expect(() => controlCancellationDurationMs(Number.NaN, 1_000)).toThrow("must be finite");
   });
 
   test("the fixture and its verifier fail closed across the documented boundary matrix", () => {

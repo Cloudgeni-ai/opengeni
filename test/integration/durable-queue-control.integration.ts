@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { Client, Connection } from "@temporalio/client";
 import { NativeConnection, Worker } from "@temporalio/worker";
 import type { AccessGrant, SessionEvent } from "@opengeni/contracts";
-import { postUserMessageTurn } from "@opengeni/core";
+import { controlHumanSessionWorkstream, postUserMessageTurn } from "@opengeni/core";
 import {
   addSessionSystemUpdate,
   bootstrapWorkspace,
@@ -162,6 +162,7 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
         expect(
           await listOutstandingSessionSystemUpdates(dbClient.db, grant.workspaceId, session.id),
         ).toHaveLength(100);
+        const steerRequestedAt = performance.now();
         const urgent = await postUserMessageTurn({
           db: dbClient.db,
           bus,
@@ -177,6 +178,44 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
           delivery: "steer",
           controlEtag: beforeSteer!.effectiveControl.controlEtag,
         });
+        try {
+          await waitFor(() => model.calls === 2, {
+            timeoutMs: 2_000,
+            intervalMs: 10,
+            describe: () =>
+              `replacement model call did not start within the 2s Steer budget; calls=${model.calls}`,
+          });
+        } catch (error) {
+          const diagnosticEvents = await listSessionEvents(
+            dbClient.db,
+            grant.workspaceId,
+            session.id,
+            0,
+            2_000,
+          );
+          const diagnosticQueue = await getSessionQueueSnapshot(
+            dbClient.db,
+            grant.workspaceId,
+            session.id,
+          );
+          throw new Error(
+            `${error instanceof Error ? error.message : String(error)}; ` +
+              `queue=${JSON.stringify({
+                version: diagnosticQueue?.version,
+                stopping: diagnosticQueue?.stoppingPreviousAttempt,
+                items: diagnosticQueue?.items.map((turn) => turn.id),
+              })}; tail=${JSON.stringify(
+                diagnosticEvents.slice(-8).map((event) => ({
+                  sequence: event.sequence,
+                  type: event.type,
+                  turnId: event.turnId,
+                  payload: event.payload,
+                })),
+              )}`,
+            { cause: error },
+          );
+        }
+        expect(performance.now() - steerRequestedAt).toBeLessThan(2_000);
 
         await handle.result();
         const turns = await listSessionTurns(dbClient.db, grant.workspaceId, session.id);
@@ -200,6 +239,28 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
             (event) => event.type === "turn.superseded" && event.turnId === initial.turn.id,
           ),
         ).toHaveLength(1);
+        const steerRequested = events.find(
+          (event) =>
+            event.type === "session.control.steer_requested" &&
+            event.payload.targetTurnId === urgent.turn.id,
+        );
+        const quiesced = events.find(
+          (event) =>
+            event.type === "session.queue.changed" &&
+            event.turnId === initial.turn.id &&
+            event.payload.operation === "attempt_quiesced",
+        );
+        const replacementStarted = events.find(
+          (event) => event.type === "turn.started" && event.turnId === urgent.turn.id,
+        );
+        expect(steerRequested).toBeDefined();
+        expect(quiesced).toBeDefined();
+        expect(replacementStarted).toBeDefined();
+        expect(quiesced!.sequence).toBeGreaterThan(steerRequested!.sequence);
+        expect(replacementStarted!.sequence).toBeGreaterThan(quiesced!.sequence);
+        expect(
+          Date.parse(quiesced!.occurredAt) - Date.parse(urgent.accepted.occurredAt),
+        ).toBeLessThan(2_000);
         expect(model.calls).toBe(2);
         const deliveredUpdates = await listSessionSystemUpdatesForTurn(
           dbClient.db,
@@ -353,6 +414,149 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
         unsubscribe();
         secondWorker.shutdown();
         await secondRun;
+      }
+    },
+    integrationTimeoutMs,
+  );
+
+  test(
+    "Pause reaches quiescence and physically stops the active attempt within two seconds",
+    async () => {
+      const grant = await testGrant(dbClient.db, "pause-quiescence");
+      const session = await createDurableSession(
+        dbClient.db,
+        grant,
+        "keep producing output until paused",
+      );
+      const initial = await submitTestHumanPrompt(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        subjectId: grant.subjectId,
+        text: "keep producing output until paused",
+        resources: [],
+        tools: [],
+        operationKey: `pause-initial-${crypto.randomUUID()}`,
+        delivery: "send",
+        reasoningEffortFallback: "low",
+      });
+      const taskQueue = `durable-pause-quiescence-${crypto.randomUUID()}`;
+      const model = new ScriptedModel([
+        {
+          id: "pause-long-running",
+          chunks: Array.from({ length: 10_000 }, () => "working "),
+          delayMs: 10,
+        },
+      ]);
+      const settings = testSettings({
+        databaseUrl: services.databaseUrl,
+        natsUrl: services.natsUrl,
+        temporalHost: services.temporalHost,
+        temporalTaskQueue: taskQueue,
+      });
+      const temporal = new Client({ connection });
+      const workflowClient = sessionWorkflowClient(temporal, taskQueue);
+      const activities = createActivityTestHarness({
+        settings,
+        db: dbClient.db,
+        bus,
+        runtime: createProductionAgentRuntime({ model }),
+        wakeSessionWorkflow: workflowClient.wakeSessionWorkflow,
+      });
+      const worker = await integrationWorker(nativeConnection, taskQueue, activities);
+      const workerRun = worker.run();
+      await temporal.workflow.start("sessionWorkflow", {
+        taskQueue,
+        workflowId: initial.turn.temporalWorkflowId,
+        args: [
+          {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            sessionId: session.id,
+          },
+        ],
+      });
+
+      try {
+        await waitFor(() => model.calls === 1);
+        const pauseRequestedAt = performance.now();
+        const paused = await controlHumanSessionWorkstream(
+          {
+            db: dbClient.db,
+            bus,
+            workflowClient: {
+              requestSessionWorkflowWakeDispatch: async () => {
+                const delivery = await activities.dispatchSessionWorkflowWakes();
+                if (delivery.failed > 0 || delivery.exhaustedBatchLimit) {
+                  throw new Error(`Pause wake delivery failed: ${JSON.stringify(delivery)}`);
+                }
+              },
+            },
+          },
+          {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            sessionId: session.id,
+            subjectId: grant.subjectId,
+          },
+          {
+            action: "pause",
+            reason: "strict physical-cancellation acceptance",
+            clientEventId: `pause-quiescence-${crypto.randomUUID()}`,
+          },
+        );
+        expect(paused.interruptionCount).toBe(1);
+        expect(paused.effectiveControl.state).toBe("paused");
+        let events: SessionEvent[] = [];
+        await waitFor(
+          async () => {
+            events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 2_000);
+            const state = await getSession(dbClient.db, grant.workspaceId, session.id);
+            return (
+              state?.status === "recovering" &&
+              events.some(
+                (event) =>
+                  event.type === "session.queue.changed" &&
+                  event.payload.operation === "attempt_quiesced",
+              )
+            );
+          },
+          {
+            timeoutMs: 2_000,
+            intervalMs: 10,
+            describe: () =>
+              "Pause did not commit both quiescence and logical recovery within the 2s budget",
+          },
+        );
+        expect(performance.now() - pauseRequestedAt).toBeLessThan(2_000);
+
+        const pauseEvent = events.find((event) => event.type === "session.control.paused");
+        const quiesced = events.find(
+          (event) =>
+            event.type === "session.queue.changed" &&
+            event.payload.operation === "attempt_quiesced",
+        );
+        expect(pauseEvent).toBeDefined();
+        expect(quiesced).toBeDefined();
+        expect(quiesced!.sequence).toBeGreaterThan(pauseEvent!.sequence);
+        expect(Date.parse(quiesced!.occurredAt) - Date.parse(pauseEvent!.occurredAt)).toBeLessThan(
+          2_000,
+        );
+        expect(
+          events.filter(
+            (event) =>
+              event.type === "agent.message.delta" &&
+              event.turnId === quiesced!.turnId &&
+              event.sequence > quiesced!.sequence,
+          ),
+        ).toHaveLength(0);
+        expect(model.calls).toBe(1);
+        expect(await getSession(dbClient.db, grant.workspaceId, session.id)).toMatchObject({
+          status: "recovering",
+        });
+      } finally {
+        worker.shutdown();
+        await workerRun;
       }
     },
     integrationTimeoutMs,
@@ -566,6 +770,7 @@ function sessionWorkflowClient(temporal: Client, taskQueue: string) {
       workspaceId: string;
       sessionId: string;
       workflowId: string;
+      interruptionRequested?: boolean;
     }) => {
       await temporal.workflow.signalWithStart("sessionWorkflow", {
         taskQueue,
@@ -578,7 +783,7 @@ function sessionWorkflowClient(temporal: Client, taskQueue: string) {
             sessionId: input.sessionId,
           },
         ],
-        signal: "queueChanged",
+        signal: input.interruptionRequested ? "sessionControl" : "queueChanged",
       });
     },
     signalSessionControl: async (input: {
