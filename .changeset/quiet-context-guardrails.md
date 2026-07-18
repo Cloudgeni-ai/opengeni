@@ -8,7 +8,7 @@
 "@opengeni/worker-bundle": patch
 ---
 
-Bound model-facing textual tool output with Codex-compatible semantics, account
+Bound model-facing textual tool output with Codex-compatible, replay-idempotent semantics, account
 for complete current model input, make compaction failure/progress transitions
 durable and convergent, and replace recursive session discovery with a compact
 paginated projection.
