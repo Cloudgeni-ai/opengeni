@@ -33,6 +33,13 @@ A goal is `active`, `paused`, or `completed`.
   numbers themselves never reset or move backward.
 - `goal_update` revises text/criteria or records a progress note. The version
   bump counts as progress for the no-progress detector. Status is unchanged.
+  Agent calls require a stable UUID `idempotencyKey`. That operation identity
+  belongs to the target session across replacement attempts, while its durable
+  receipt retains the attempt that first applied it for audit. The receipt,
+  exact result snapshot, goal revision, session-sequenced `goal.updated` event,
+  and mutation commit atomically. A recovered attempt can therefore reconcile
+  a lost response without applying the update twice; replaying an older key
+  returns its stored result and never overwrites a newer goal revision.
 - `goal_complete { evidence }` is terminal. Only a new `goal_set` can replace a
   completed goal.
 - `goal_pause { rationale }` stops the loop until the goal is resumed or
@@ -179,7 +186,11 @@ session id into the delegated access token it uses for first-party MCP calls
 `goal_set`/`goal_update`/`goal_complete`/`goal_pause` only for grants carrying
 that claim plus the `goals:manage` permission. Goal-bearing sessions, turns,
 and scheduled dispatches force-merge the `opengeni` tool ref so these tools are
-reachable even when the session was created with an empty tool list.
+reachable even when the session was created with an empty tool list. The
+worker also signs the exact turn, attempt, and execution generation used to
+authorize a first application of `goal_update`; a replacement attempt may
+reconcile the same target-scoped operation key, but a key reused with different
+arguments is rejected as `IDEMPOTENCY_KEY_REUSED`.
 
 ## Settings
 
