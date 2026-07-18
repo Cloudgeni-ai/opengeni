@@ -82,7 +82,7 @@ import {
   SessionSystemUpdatePayload,
 } from "@opengeni/contracts";
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
-import { isCodexBilledModel } from "@opengeni/codex";
+import { boundModelToolOutputItem, isCodexBilledModel } from "@opengeni/codex";
 // Re-exported so consumers get the whole codex-billed detection surface (the pure
 // prefix test + the credential-aware predicates below) from a single import.
 export { isCodexBilledModel } from "@opengeni/codex";
@@ -11423,6 +11423,173 @@ export async function listSessions(
   });
 }
 
+export type SessionDiscoveryCursor = { createdAt: Date; id: string };
+export type SessionDiscoverySummary = {
+  id: string;
+  title: string | null;
+  parentSessionId: string | null;
+  status: SessionStatus;
+  effectiveControl: Session["effectiveControl"];
+  goal: { status: SessionGoalStatus; text: string } | null;
+  queuedPromptCount: number;
+  treeStats: NonNullable<Session["treeStats"]>;
+  latestMessage: { type: SessionEventType; preview: string | null } | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+/**
+ * Compact-by-construction discovery projection for the first-party
+ * `sessions_list` MCP tool. It never selects instructions, resources, tools,
+ * MCP metadata, repositories, settings, or full event/history bodies.
+ */
+export async function listSessionDiscoverySummaries(
+  db: Database,
+  workspaceId: string,
+  options: {
+    limit: number;
+    cursor?: SessionDiscoveryCursor;
+    includeLastMessage?: boolean;
+  },
+): Promise<{
+  sessions: SessionDiscoverySummary[];
+  hasMore: boolean;
+  nextCursor: SessionDiscoveryCursor | null;
+  total: number;
+}> {
+  const limit = Math.max(1, Math.min(100, Math.floor(options.limit)));
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const cursorPredicate = options.cursor
+      ? or(
+          lt(schema.sessions.createdAt, options.cursor.createdAt),
+          and(
+            eq(schema.sessions.createdAt, options.cursor.createdAt),
+            lt(schema.sessions.id, options.cursor.id),
+          ),
+        )
+      : undefined;
+    const rows = await scopedDb
+      .select({
+        id: schema.sessions.id,
+        title: schema.sessions.title,
+        parentSessionId: schema.sessions.parentSessionId,
+        status: schema.sessions.status,
+        createdAt: schema.sessions.createdAt,
+        updatedAt: schema.sessions.updatedAt,
+      })
+      .from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), cursorPredicate))
+      .orderBy(desc(schema.sessions.createdAt), desc(schema.sessions.id))
+      .limit(limit + 1);
+    const hasMore = rows.length > limit;
+    const page = rows.slice(0, limit);
+    const ids = page.map((row) => row.id);
+    const [{ total } = { total: 0 }] = await scopedDb
+      .select({ total: sql<number>`count(*)::int` })
+      .from(schema.sessions)
+      .where(eq(schema.sessions.workspaceId, workspaceId));
+    if (ids.length === 0) {
+      return { sessions: [], hasMore: false, nextCursor: null, total: Number(total) };
+    }
+
+    const controls = await sessionControlProjections(scopedDb, workspaceId, ids);
+    const treeStats = await sessionTreeStatsForSessions(scopedDb, workspaceId, ids);
+    const goals = await scopedDb
+      .select({
+        sessionId: schema.sessionGoals.sessionId,
+        status: schema.sessionGoals.status,
+        text: schema.sessionGoals.text,
+      })
+      .from(schema.sessionGoals)
+      .where(
+        and(
+          eq(schema.sessionGoals.workspaceId, workspaceId),
+          inArray(schema.sessionGoals.sessionId, ids),
+        ),
+      );
+    const goalsBySession = new Map(goals.map((goal) => [goal.sessionId, goal]));
+    const queueCounts = await scopedDb
+      .select({
+        sessionId: schema.sessionTurns.sessionId,
+        count: sql<number>`count(*)::int`,
+      })
+      .from(schema.sessionTurns)
+      .where(
+        and(
+          eq(schema.sessionTurns.workspaceId, workspaceId),
+          inArray(schema.sessionTurns.sessionId, ids),
+          eq(schema.sessionTurns.status, "queued"),
+          inArray(schema.sessionTurns.source, ["user", "api"]),
+        ),
+      )
+      .groupBy(schema.sessionTurns.sessionId);
+    const queueBySession = new Map(
+      queueCounts.map((entry) => [entry.sessionId, Number(entry.count)]),
+    );
+    const latestMessages = options.includeLastMessage
+      ? await scopedDb
+          .selectDistinctOn([schema.sessionEvents.sessionId], {
+            sessionId: schema.sessionEvents.sessionId,
+            type: schema.sessionEvents.type,
+            // Extract only the bounded textual preview in PostgreSQL. Selecting
+            // the JSON payload here would re-materialize the exact multi-MB
+            // event bodies this compact discovery path exists to avoid.
+            preview: sql<string | null>`left(coalesce(
+              ${schema.sessionEvents.payload}->>'text',
+              ${schema.sessionEvents.payload}->>'message',
+              ${schema.sessionEvents.payload}->>'content'
+            ), 1200)`,
+          })
+          .from(schema.sessionEvents)
+          .where(
+            and(
+              eq(schema.sessionEvents.workspaceId, workspaceId),
+              inArray(schema.sessionEvents.sessionId, ids),
+              inArray(schema.sessionEvents.type, ["user.message", "agent.message.completed"]),
+            ),
+          )
+          .orderBy(schema.sessionEvents.sessionId, desc(schema.sessionEvents.sequence))
+      : [];
+    const latestBySession = new Map(latestMessages.map((entry) => [entry.sessionId, entry]));
+    const sessions = page.map((row): SessionDiscoverySummary => {
+      const control = controls.get(row.id);
+      if (!control) throw new Error(`Effective control missing for session ${row.id}`);
+      const goal = goalsBySession.get(row.id);
+      const latest = latestBySession.get(row.id);
+      return {
+        id: row.id,
+        title: row.title,
+        parentSessionId: row.parentSessionId,
+        status: row.status as SessionStatus,
+        effectiveControl: control,
+        goal: goal ? { status: goal.status as SessionGoalStatus, text: goal.text } : null,
+        queuedPromptCount: queueBySession.get(row.id) ?? 0,
+        treeStats: treeStats.get(row.id) ?? {
+          directChildren: 0,
+          totalDescendants: 0,
+          runningDescendants: 0,
+          queuedDescendants: 0,
+          attentionDescendants: 0,
+          pausedDescendants: 0,
+          failedDescendants: 0,
+        },
+        latestMessage: latest
+          ? { type: latest.type as SessionEventType, preview: latest.preview }
+          : null,
+        createdAt: row.createdAt.toISOString(),
+        updatedAt: row.updatedAt.toISOString(),
+      };
+    });
+    const last = page.at(-1);
+    return {
+      sessions,
+      hasMore,
+      nextCursor: hasMore && last ? { createdAt: last.createdAt, id: last.id } : null,
+      total: Number(total),
+    };
+  });
+}
+
 export type SessionLineage = {
   ancestors: Session[];
   children: LineageNode[];
@@ -11989,6 +12156,7 @@ export async function appendSessionHistoryItems(
     // id), or null/undefined on the non-codex path. Stored verbatim so the read
     // path can strip cross-account reasoning.encrypted_content blobs per turn.
     producerCodexCredentialId?: string | null;
+    modelToolOutputTruncationTokens?: number;
     items: Array<{ position: number; item: Record<string, unknown> }>;
   },
 ): Promise<boolean> {
@@ -12018,7 +12186,12 @@ export async function appendSessionHistoryItems(
               turnId: input.turnId,
               producerCodexCredentialId: input.producerCodexCredentialId ?? null,
               position: entry.position,
-              item: sanitizeModelPayload(entry.item),
+              // This is the canonical model-memory boundary. The pending-call
+              // ledger and audit event may retain their separate raw/preview
+              // forms, but conversation truth is always the bounded Codex form.
+              item: sanitizeModelPayload(
+                boundModelToolOutputItem(entry.item, input.modelToolOutputTruncationTokens),
+              ),
             })),
           )
           .onConflictDoNothing({
@@ -12586,7 +12759,11 @@ export async function recordSkippedContextCompaction(
     turnId: string;
     expectedExecutionGeneration: number;
     expectedAttemptId: string;
-    reason: "no_history" | "replacement_not_smaller";
+    reason:
+      | "no_history"
+      | "replacement_not_smaller"
+      | "replacement_unchanged"
+      | "summarization_failed";
   },
 ): Promise<
   | { recorded: true; events: SessionEvent[] }

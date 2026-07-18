@@ -694,7 +694,7 @@ describe("buildTimeline", () => {
     expect(items[0]).toMatchObject({
       kind: "notice",
       tone: "waiting",
-      text: "Context compacted from approximately 288,000 to 23,091 tokens.",
+      text: "Active conversation history compacted from approximately 288,000 to 23,091 tokens.",
     });
   });
 
@@ -729,6 +729,20 @@ describe("buildTimeline", () => {
         kind: "notice",
         tone: "waiting",
         text: "Context compaction skipped because the generated checkpoint would not reduce the context.",
+      }),
+    ]);
+  });
+
+  test("shows a terminal compaction-summary failure without claiming history changed", () => {
+    reset();
+    const items = buildTimeline([
+      event("session.context.compaction.skipped", { reason: "summarization_failed" }),
+    ]);
+    expect(items).toEqual([
+      expect.objectContaining({
+        kind: "notice",
+        tone: "failed",
+        text: "Context compaction failed without replacing the active conversation history. Request it again to retry.",
       }),
     ]);
   });

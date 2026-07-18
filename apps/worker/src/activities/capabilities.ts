@@ -14,6 +14,7 @@ import {
   CODEX_MODEL_CONTEXT_WINDOW_TOKENS,
   CODEX_MODEL_EFFECTIVE_CONTEXT_WINDOW_TOKENS,
   CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
+  CODEX_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS,
   CODEX_MODEL_ID_PREFIX,
   CODEX_PROVIDER_BASE_URL,
   CODEX_PROVIDER_ID,
@@ -174,6 +175,7 @@ export function withCodexProvider(settings: Settings): Settings {
       contextWindowTokens: CODEX_MODEL_CONTEXT_WINDOW_TOKENS,
       effectiveContextWindowTokens: CODEX_MODEL_EFFECTIVE_CONTEXT_WINDOW_TOKENS,
       autoCompactTokenLimit: CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
+      toolOutputTruncationTokens: CODEX_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS,
     })),
   };
   return { ...settings, modelProvidersJson: JSON.stringify([...providers, codexProvider]) };

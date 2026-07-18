@@ -393,7 +393,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
           tone: "waiting",
           text:
             before && after
-              ? `Context compacted from approximately ${before} to ${after} tokens.`
+              ? `Active conversation history compacted from approximately ${before} to ${after} tokens.`
               : "Context compacted so the turn could continue.",
           occurredAt: event.occurredAt,
         });
@@ -406,13 +406,17 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         items.push({
           kind: "notice",
           id: event.id,
-          tone: "waiting",
+          tone: reason === "summarization_failed" ? "failed" : "waiting",
           text:
             reason === "no_history"
               ? "Context compaction skipped because there is no active history to compact."
               : reason === "replacement_not_smaller"
                 ? "Context compaction skipped because the generated checkpoint would not reduce the context."
-                : "Context compaction was not needed.",
+                : reason === "replacement_unchanged"
+                  ? "Context compaction stopped because it reproduced the same checkpoint without making progress."
+                  : reason === "summarization_failed"
+                    ? "Context compaction failed without replacing the active conversation history. Request it again to retry."
+                    : "Context compaction was not needed.",
           occurredAt: event.occurredAt,
         });
         break;

@@ -1,4 +1,5 @@
 import type { SessionEvent } from "@opengeni/contracts";
+import { boundModelToolOutputItem } from "@opengeni/codex";
 import { and, asc, eq, sql } from "drizzle-orm";
 import type { Database } from "./index";
 import { sanitizeEventPayload, sanitizeModelPayload } from "./event-payload-sanitizer";
@@ -210,7 +211,7 @@ export async function closePendingSessionToolCallsInTransaction(
         sessionId: input.sessionId,
         turnId: input.turnId,
         position: nextPosition++,
-        item: sanitizeModelPayload(resolution.result),
+        item: sanitizeModelPayload(boundModelToolOutputItem(resolution.result)),
         active: true,
       });
     }

@@ -28,6 +28,10 @@
  */
 
 import { SCREENSHOT_FAILURE_CARD_IMAGE_URL } from "./screenshot-error-card";
+import {
+  boundModelToolOutputItems,
+  DEFAULT_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS,
+} from "@opengeni/codex";
 
 /** A history item is any JSON object; we only inspect a few discriminator fields. */
 export type HistoryItem = Record<string, unknown>;
@@ -224,7 +228,10 @@ export function elideSupersededViewImagePairs<T extends HistoryItem>(items: read
  * types exist with that id, the call appearing before the result. Calls and
  * results that satisfy that survive untouched.
  */
-export function sanitizeHistoryItemsForModel<T extends HistoryItem>(items: readonly T[]): T[] {
+export function sanitizeHistoryItemsForModel<T extends HistoryItem>(
+  items: readonly T[],
+  toolOutputTruncationTokens = DEFAULT_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS,
+): T[] {
   if (items.length === 0) {
     return [];
   }
@@ -314,10 +321,12 @@ export function sanitizeHistoryItemsForModel<T extends HistoryItem>(items: reado
     }
   }
 
-  if (dropped.size === 0) {
-    return items.map(stripInternalResumeMarker);
-  }
-  return items.filter((_item, index) => !dropped.has(index)).map(stripInternalResumeMarker);
+  const paired =
+    dropped.size === 0 ? items.slice() : items.filter((_item, index) => !dropped.has(index));
+  return boundModelToolOutputItems(
+    paired.map(stripInternalResumeMarker),
+    toolOutputTruncationTokens,
+  );
 }
 
 /**

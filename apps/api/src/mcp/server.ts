@@ -25,7 +25,7 @@ import {
   listScheduledTaskRuns,
   listScheduledTasks,
   listSessionEvents,
-  listSessions,
+  listSessionDiscoverySummaries,
   listRigs,
   listSocialConnections,
   listSocialPosts,
@@ -1257,11 +1257,22 @@ function registerWorkspaceOrchestrationTools(
     server.registerTool(
       "sessions_list",
       {
-        description: "List sessions in this workspace, newest first.",
-        inputSchema: { limit: z4.number().int().positive().optional() },
+        description:
+          "List compact high-level session status in this workspace, newest first. Use session_get for one session's detailed resources/tools/settings. The list never returns full session objects or history.",
+        inputSchema: {
+          limit: z4.number().int().positive().max(100).optional(),
+          cursor: z4.string().max(512).optional(),
+          includeLastMessage: z4.boolean().optional(),
+        },
       },
-      async ({ limit }) =>
-        json({ sessions: await listSessions(deps.db, grant.workspaceId, boundedMcpLimit(limit)) }),
+      async ({ limit, cursor, includeLastMessage }) => {
+        const page = await listSessionDiscoverySummaries(deps.db, grant.workspaceId, {
+          limit: boundedSessionDiscoveryLimit(limit),
+          ...(cursor ? { cursor: decodeSessionDiscoveryCursor(cursor) } : {}),
+          includeLastMessage: includeLastMessage === true,
+        });
+        return json(capSessionDiscoveryPage(page, includeLastMessage === true));
+      },
     );
 
     server.registerTool(
@@ -1905,6 +1916,148 @@ function boundedMcpLimit(limit: number | undefined): number {
     return 100;
   }
   return Math.min(500, Math.max(1, Math.floor(limit)));
+}
+
+const SESSION_DISCOVERY_DEFAULT_LIMIT = 20;
+const SESSION_DISCOVERY_MAX_LIMIT = 100;
+const SESSION_DISCOVERY_TEXT_CHARS = 600;
+const SESSION_DISCOVERY_PAGE_MAX_BYTES = 128_000;
+
+function boundedSessionDiscoveryLimit(limit: number | undefined): number {
+  if (!limit || !Number.isFinite(limit)) return SESSION_DISCOVERY_DEFAULT_LIMIT;
+  return Math.min(SESSION_DISCOVERY_MAX_LIMIT, Math.max(1, Math.floor(limit)));
+}
+
+function encodeSessionDiscoveryCursor(cursor: { createdAt: Date | string; id: string }): string {
+  return Buffer.from(
+    JSON.stringify({
+      createdAt:
+        cursor.createdAt instanceof Date ? cursor.createdAt.toISOString() : cursor.createdAt,
+      id: cursor.id,
+    }),
+    "utf8",
+  ).toString("base64url");
+}
+
+function decodeSessionDiscoveryCursor(value: string): { createdAt: Date; id: string } {
+  try {
+    const parsed = JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as {
+      createdAt?: unknown;
+      id?: unknown;
+    };
+    const createdAt = typeof parsed.createdAt === "string" ? new Date(parsed.createdAt) : null;
+    if (
+      !createdAt ||
+      Number.isNaN(createdAt.getTime()) ||
+      typeof parsed.id !== "string" ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(parsed.id)
+    ) {
+      throw new Error("invalid cursor fields");
+    }
+    return { createdAt, id: parsed.id };
+  } catch {
+    throw new Error("sessions_list cursor is invalid");
+  }
+}
+
+function capSessionDiscoveryText(value: string | null, maxChars = SESSION_DISCOVERY_TEXT_CHARS) {
+  if (value === null || value.length <= maxChars) {
+    return { text: value, truncated: false };
+  }
+  const marker = `…[${value.length - maxChars} chars truncated]…`;
+  const body = Math.max(0, maxChars - marker.length);
+  const head = Math.ceil(body * 0.7);
+  const tail = body - head;
+  return {
+    text: `${value.slice(0, head)}${marker}${tail > 0 ? value.slice(-tail) : ""}`,
+    truncated: true,
+  };
+}
+
+export function capSessionDiscoveryPage(
+  page: Awaited<ReturnType<typeof listSessionDiscoverySummaries>>,
+  includeLastMessage: boolean,
+) {
+  const projected = page.sessions.map((session) => {
+    const title = capSessionDiscoveryText(session.title, 200);
+    const goal = session.goal ? capSessionDiscoveryText(session.goal.text) : null;
+    const preview = includeLastMessage
+      ? capSessionDiscoveryText(session.latestMessage?.preview ?? null)
+      : null;
+    const blocker = session.effectiveControl.primaryBlocker;
+    return {
+      id: session.id,
+      title: title.text,
+      titleTruncated: title.truncated,
+      parentSessionId: session.parentSessionId,
+      isRoot: session.parentSessionId === null,
+      status: session.status,
+      pause: {
+        state: session.effectiveControl.state,
+        source: blocker
+          ? {
+              kind: blocker.kind,
+              ...(blocker.sessionId ? { sessionId: blocker.sessionId } : {}),
+              displayName: capSessionDiscoveryText(blocker.displayName, 200).text,
+            }
+          : null,
+      },
+      goal: session.goal
+        ? {
+            status: session.goal.status,
+            summary: goal!.text,
+            summaryTruncated: goal!.truncated,
+          }
+        : null,
+      queuedPromptCount: session.queuedPromptCount,
+      children: session.treeStats,
+      ...(includeLastMessage
+        ? {
+            latestMessage: session.latestMessage
+              ? {
+                  type: session.latestMessage.type,
+                  preview: preview!.text,
+                  previewTruncated: preview!.truncated,
+                }
+              : null,
+          }
+        : {}),
+      createdAt: session.createdAt,
+      updatedAt: session.updatedAt,
+    };
+  });
+
+  let kept = projected;
+  let responseTruncated = false;
+  while (
+    kept.length > 1 &&
+    Buffer.byteLength(JSON.stringify({ sessions: kept }), "utf8") >
+      SESSION_DISCOVERY_PAGE_MAX_BYTES - 2_048
+  ) {
+    kept = kept.slice(0, -1);
+    responseTruncated = true;
+  }
+  const lastKept = kept.at(-1);
+  const droppedForByteCap = kept.length < projected.length;
+  const nextCursor = droppedForByteCap
+    ? lastKept
+      ? encodeSessionDiscoveryCursor({ createdAt: lastKept.createdAt, id: lastKept.id })
+      : null
+    : page.nextCursor
+      ? encodeSessionDiscoveryCursor(page.nextCursor)
+      : null;
+  return {
+    sessions: kept,
+    total: page.total,
+    hasMore: page.hasMore || droppedForByteCap,
+    nextCursor,
+    responseTruncated,
+    ...(responseTruncated
+      ? {
+          truncationReason: `response exceeded ${SESSION_DISCOVERY_PAGE_MAX_BYTES} bytes; continue with nextCursor`,
+        }
+      : {}),
+  };
 }
 
 function parseMcpDate(raw: string, label: string): Date {

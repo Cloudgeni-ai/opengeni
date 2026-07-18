@@ -23,6 +23,7 @@ import {
   getSession,
   getSessionTurn,
   listOutstandingSessionSystemUpdates,
+  listSessionDiscoverySummaries,
   listSessionSystemUpdatesForTurn,
   listUsageEvents,
   listWorkspaceControlEvents,
@@ -184,6 +185,173 @@ async function claimTestSessionWork(
 }
 
 describe("clean session control plane", () => {
+  test("session discovery is compact-by-query and cursor-stable", async () => {
+    const { grant, session: first } = await fixture();
+    const second = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      initialMessage: "second",
+      resources: [],
+      metadata: { mustNeverLeak: "x".repeat(100_000) },
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    const third = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      initialMessage: "third",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    await appendSessionEvents(client.db, grant.workspaceId!, second.id, [
+      { type: "user.message", payload: { text: "p".repeat(20_000) } },
+    ]);
+
+    const all = await listSessionDiscoverySummaries(client.db, grant.workspaceId!, {
+      limit: 3,
+      includeLastMessage: true,
+    });
+    const projectedSecond = all.sessions.find((entry) => entry.id === second.id)!;
+    expect(projectedSecond.latestMessage?.preview).toHaveLength(1_200);
+    expect(JSON.stringify(projectedSecond)).not.toContain("mustNeverLeak");
+
+    const pageOne = await listSessionDiscoverySummaries(client.db, grant.workspaceId!, {
+      limit: 2,
+    });
+    expect(pageOne).toMatchObject({ total: 3, hasMore: true });
+    expect(pageOne.sessions).toHaveLength(2);
+    expect(pageOne.nextCursor).toBeTruthy();
+
+    const pageTwo = await listSessionDiscoverySummaries(client.db, grant.workspaceId!, {
+      limit: 2,
+      cursor: pageOne.nextCursor!,
+    });
+    expect(pageTwo.sessions).toHaveLength(1);
+    expect(pageTwo.hasMore).toBe(false);
+    expect(new Set([...pageOne.sessions, ...pageTwo.sessions].map((entry) => entry.id))).toEqual(
+      new Set([first.id, second.id, third.id]),
+    );
+  });
+
+  test("canonical history bounds tool output while the pending receipt keeps raw recovery evidence", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "inspect a very large result");
+    const attemptId = crypto.randomUUID();
+    const turn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId },
+    );
+    const huge = "x".repeat(500_000);
+    expect(
+      await appendSessionHistoryItems(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn!.id,
+        expectedExecutionGeneration: turn!.executionGeneration,
+        expectedAttemptId: attemptId,
+        modelToolOutputTruncationTokens: 100,
+        items: [
+          {
+            position: 0,
+            item: {
+              type: "function_call",
+              callId: "canonical-call",
+              name: "sessions_list",
+              arguments: "{}",
+            },
+          },
+          {
+            position: 1,
+            item: {
+              type: "function_call_result",
+              callId: "canonical-call",
+              output: { type: "text", text: huge },
+            },
+          },
+        ],
+      }),
+    ).toBe(true);
+    const canonical = await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id);
+    const canonicalText = (canonical[1]!.item.output as { text: string }).text;
+    expect(canonicalText).toContain("tokens truncated");
+    expect(canonicalText.length).toBeLessThan(1_000);
+
+    expect(
+      await registerPendingSessionToolCall(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn!.id,
+        executionGeneration: turn!.executionGeneration,
+        attemptId,
+        callId: "pending-call",
+        callType: "function_call",
+        callItem: {
+          type: "function_call",
+          callId: "pending-call",
+          name: "raw_tool",
+          arguments: "{}",
+        },
+      }),
+    ).toEqual({ accepted: true, registered: true });
+    await recordPendingSessionToolCallResult(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      turnId: turn!.id,
+      executionGeneration: turn!.executionGeneration,
+      attemptId,
+      callId: "pending-call",
+      resultItem: {
+        type: "function_call_result",
+        callId: "pending-call",
+        output: { type: "text", text: huge },
+      },
+    });
+    const [pending] = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      db
+        .select({ resultItem: schema.sessionPendingToolCalls.resultItem })
+        .from(schema.sessionPendingToolCalls)
+        .where(eq(schema.sessionPendingToolCalls.callId, "pending-call")),
+    );
+    expect(((pending!.resultItem as any).output as { text: string }).text).toBe(huge);
+
+    const recovery = await requestSessionTurnRecovery(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      turnId: turn!.id,
+      triggerEventId: turn!.triggerEventId,
+      attemptId,
+      reason: "worker_shutdown",
+    });
+    expect(recovery).toMatchObject({ action: "recovering" });
+    const recoveredHistory = await getActiveSessionHistoryItems(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+    );
+    const recoveredResult = recoveredHistory
+      .map((row) => row.item)
+      .find(
+        (item) =>
+          item.type === "function_call_result" &&
+          (item as { callId?: unknown }).callId === "pending-call",
+      ) as { output: { text: string } };
+    expect(recoveredResult.output.text).toContain("tokens truncated");
+    expect(recoveredResult.output.text.length).toBeLessThan(50_000);
+    const recoveryOutput = recovery.events.find(
+      (event) =>
+        event.type === "agent.toolCall.output" &&
+        (event.payload as { id?: unknown }).id === "pending-call",
+    )?.payload as { output: { text: string } };
+    expect(recoveryOutput.output.text).toBe(huge);
+  });
+
   test("bulk control projection accepts an empty session page", async () => {
     const { grant } = await fixture();
     expect(

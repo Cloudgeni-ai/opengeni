@@ -104,6 +104,7 @@ import {
   CODEX_APPS_MCP_SERVER_ID,
   CODEX_MODEL_ID_PREFIX,
   CODEX_ORIGINATOR,
+  boundModelToolOutputItems,
   codexAppsSanitizingFetch,
   codexRequestStorage,
   codexSubscriptionFetch,
@@ -121,10 +122,15 @@ import {
 import { installCodexToolSearch } from "./codex-tool-search";
 import {
   CompactionNeededError,
+  EmptyCompactionSummaryError,
   SUMMARY_BUFFER_TOKENS,
   compactionThresholdTokens,
-  estimateTokens,
+  estimateCompleteModelInput,
+  estimateSerializedValueTokens,
+  hasModelGeneratedItem,
   renderCompactionPromptInputForChat,
+  type CompleteModelInputFootprint,
+  type ProviderContextTokenSignal,
 } from "./context-compaction";
 import {
   createSandboxClient,
@@ -188,17 +194,23 @@ export { OpenAIChatCompletionsModel, OpenAIResponsesModel } from "@openai/agents
 
 export {
   CompactionNeededError,
+  EmptyCompactionSummaryError,
   buildCompactionPromptInput,
   buildCompactionReplacementHistory,
+  compactionReplacementFingerprint,
   compactionThresholdTokens,
   clampCompactionThresholdRatio,
   decideCompaction,
   buildSummaryItem,
   findCompactionNeededError,
   isCompactionSummary,
+  latestCompactionReplacementFingerprint,
   isUserMessage,
   estimateTokens,
   estimateItemTokens,
+  estimateCompleteModelInput,
+  estimateSerializedValueTokens,
+  hasModelGeneratedItem,
   renderCompactionPromptInputForChat,
   COMPACTION_SUMMARY_MARKER,
   COMPACTION_PROMPT,
@@ -816,7 +828,11 @@ export async function summarizeForCompaction(
     }
     const text = (completion as { choices?: Array<{ message?: { content?: unknown } }> })
       .choices?.[0]?.message?.content;
-    return typeof text === "string" ? text.trim() : "";
+    const summary = typeof text === "string" ? text.trim() : "";
+    if (!summary) {
+      throw new EmptyCompactionSummaryError(compactionResponseDiagnostics(completion, summary));
+    }
+    return summary;
   }
   // Use the same SDK Responses adapter as the real agent call. It converts the
   // structured AgentInputItems (callId/providerData/etc.) to provider wire
@@ -844,7 +860,67 @@ export async function summarizeForCompaction(
   if (usage) {
     await options.onUsage?.(usage);
   }
-  return extractResponseOutputText(response).trim();
+  const summary = extractResponseOutputText(response).trim();
+  if (!summary) {
+    throw new EmptyCompactionSummaryError(compactionResponseDiagnostics(response, summary));
+  }
+  return summary;
+}
+
+/** Bounded, content-free diagnostics for a semantically empty checkpoint. */
+export function compactionResponseDiagnostics(
+  response: unknown,
+  extractedText = extractResponseOutputText(response).trim(),
+): Record<string, unknown> {
+  if (!response || typeof response !== "object") {
+    return { responseShape: typeof response, extractedTextLength: extractedText.length };
+  }
+  const record = response as Record<string, unknown>;
+  const output = Array.isArray(record.output) ? record.output : [];
+  const outputItems = output.slice(0, 50).map((item) => {
+    if (!item || typeof item !== "object") return { type: typeof item };
+    const value = item as Record<string, unknown>;
+    const content = Array.isArray(value.content) ? value.content : [];
+    return {
+      type: typeof value.type === "string" ? value.type : null,
+      role: typeof value.role === "string" ? value.role : null,
+      status: typeof value.status === "string" ? value.status : null,
+      contentPartTypes: content
+        .slice(0, 50)
+        .map((part) =>
+          part && typeof part === "object" && typeof (part as { type?: unknown }).type === "string"
+            ? (part as { type: string }).type
+            : typeof part,
+        ),
+      contentPartCount: content.length,
+    };
+  });
+  const choices = Array.isArray(record.choices) ? record.choices : [];
+  const usage = modelResponseUsageFromResponse(response)?.usage;
+  const incomplete =
+    record.incomplete_details && typeof record.incomplete_details === "object"
+      ? (record.incomplete_details as Record<string, unknown>)
+      : null;
+  return {
+    responseId: typeof record.id === "string" ? record.id : null,
+    status: typeof record.status === "string" ? record.status : null,
+    outputItemCount: output.length,
+    outputItems,
+    choiceCount: choices.length,
+    finishReasons: choices
+      .slice(0, 20)
+      .map((choice) =>
+        choice && typeof choice === "object"
+          ? ((choice as Record<string, unknown>).finish_reason ?? null)
+          : null,
+      ),
+    incompleteReason:
+      incomplete && typeof incomplete.reason === "string" ? incomplete.reason : null,
+    inputTokens: usage?.inputTokens ?? null,
+    outputTokens: usage?.outputTokens ?? null,
+    totalTokens: usage?.totalTokens ?? null,
+    extractedTextLength: extractedText.length,
+  };
 }
 
 /**
@@ -2588,6 +2664,7 @@ class PrefixedMcpServer implements MCPServer {
   // doesn't spam the log when the SDK re-lists across model turns.
   private readonly bestEffort: boolean;
   private loggedListToolsFailure = false;
+  private listedToolSchemaTokens = 0;
 
   constructor(
     private readonly inner: MCPServer,
@@ -2644,12 +2721,19 @@ class PrefixedMcpServer implements MCPServer {
       }
       return [];
     }
-    return tools
+    const exposed = tools
       .filter((tool) => this.isAllowed(tool.name))
       .map((tool) => ({
         ...tool,
         name: prefixedMcpToolName(this.name, tool.name),
       }));
+    this.listedToolSchemaTokens = estimateSerializedValueTokens(exposed);
+    return exposed;
+  }
+
+  /** Latest exact tools/list projection used to build the model request. */
+  modelToolSchemaTokens(): number {
+    return this.listedToolSchemaTokens;
   }
 
   async callTool(
@@ -2842,7 +2926,7 @@ export type RunAgentStreamOptions = {
   sandboxClient?: unknown;
   sandboxEnvironment?: Record<string, string>;
   onRuntimeEvent?: (event: NormalizedRuntimeEvent) => Promise<void> | void;
-  contextCompactionSignalTokens?: () => number | null | undefined;
+  contextCompactionSignal?: () => ProviderContextTokenSignal | null | undefined;
   contextCompactionRequested?: () => boolean | Promise<boolean>;
   // Host-managed git credential renewal registration. Called only after the
   // initial token-file seed completed on a real provisioned box. The worker
@@ -2888,7 +2972,7 @@ export type RunAgentStreamOptions = {
 };
 
 export type ContextRobustnessFilterOptions = {
-  contextCompactionSignalTokens?: () => number | null | undefined;
+  contextCompactionSignal?: () => ProviderContextTokenSignal | null | undefined;
   contextCompactionRequested?: () => boolean | Promise<boolean>;
   throwOnCompactionNeeded?: boolean;
 };
@@ -2995,24 +3079,89 @@ export const elideSupersededViewImagesFilter: CallModelInputFilter = ({ modelDat
   ) as unknown as AgentInputItem[],
 });
 
+/**
+ * Canonical Codex-style tool-result bound at the final model-input seam. The
+ * identical pure normalizer also runs before conversation rows are persisted,
+ * so this is a live-turn defense rather than a request-only alternate history.
+ */
+export function boundModelToolOutputsFilterForSettings(settings: Settings): CallModelInputFilter {
+  return ({ modelData }) => ({
+    ...modelData,
+    input: boundModelToolOutputItems(
+      modelData.input as unknown as Array<Record<string, unknown>>,
+      settings.modelToolOutputTruncationTokens,
+    ) as unknown as AgentInputItem[],
+  });
+}
+
+function estimateAgentToolSchemaTokens(agent: Agent<any, any>): number {
+  const localTools = Array.isArray((agent as { tools?: unknown }).tools)
+    ? ((agent as { tools: unknown[] }).tools ?? [])
+    : [];
+  const localDescriptors = localTools.map((candidate) => {
+    if (!candidate || typeof candidate !== "object") return candidate;
+    const tool = candidate as Record<string, unknown>;
+    return {
+      type: tool.type,
+      name: tool.name,
+      description: tool.description,
+      parameters: tool.parameters,
+      inputSchema: tool.inputSchema,
+      strict: tool.strict,
+      providerData: tool.providerData,
+    };
+  });
+  const mcpServers = Array.isArray((agent as { mcpServers?: unknown }).mcpServers)
+    ? ((agent as { mcpServers: unknown[] }).mcpServers ?? [])
+    : [];
+  const mcpTokens = mcpServers.reduce<number>((total, server) => {
+    const getter = (server as { modelToolSchemaTokens?: () => number } | null)
+      ?.modelToolSchemaTokens;
+    return total + (typeof getter === "function" ? getter.call(server) : 0);
+  }, 0);
+  return estimateSerializedValueTokens(localDescriptors) + mcpTokens;
+}
+
 export function contextRobustnessFilterForSettings(
   settings: Settings,
   options: ContextRobustnessFilterOptions = {},
 ): CallModelInputFilter {
   const thresholdTokens = compactionThresholdTokens(settings);
-  return async ({ modelData }) => {
+  let previousRequest: { revision: number; footprint: CompleteModelInputFootprint } | null = null;
+  let requestRevision = 0;
+  return async ({ modelData, agent }) => {
     const input = modelData.input;
     if (options.throwOnCompactionNeeded) {
-      const reported = options.contextCompactionSignalTokens?.();
-      const hasReported = typeof reported === "number" && reported > 0;
-      const signalTokens = hasReported
-        ? reported
-        : estimateTokens(input as unknown as Array<Record<string, unknown>>);
+      const reported = options.contextCompactionSignal?.();
+      const current: CompleteModelInputFootprint = {
+        input: input as unknown as Array<Record<string, unknown>>,
+        instructionsTokens: estimateSerializedValueTokens(modelData.instructions ?? ""),
+        toolSchemaTokens: estimateAgentToolSchemaTokens(agent),
+      };
+      // Stream consumption can lag the SDK's background model loop. A provider
+      // usage signal is safe only when its response revision belongs to the
+      // immediately preceding request. Never attach a delayed response count to
+      // a newer footprint: doing so can hide all model output produced between
+      // them and recreate an under-counting compaction loop.
+      const boundProvider =
+        reported &&
+        previousRequest &&
+        reported.revision === previousRequest.revision &&
+        hasModelGeneratedItem(current.input)
+          ? reported
+          : null;
+      const estimate = estimateCompleteModelInput({
+        current,
+        provider: boundProvider,
+        providerRequestFootprint: boundProvider ? (previousRequest?.footprint ?? null) : null,
+      });
+      const signalTokens = estimate.tokens;
+      previousRequest = { revision: ++requestRevision, footprint: current };
       if (await options.contextCompactionRequested?.()) {
         throw new CompactionNeededError({
           signalTokens,
           thresholdTokens,
-          signalSource: hasReported ? "provider" : "estimate",
+          signalSource: boundProvider ? "provider" : "estimate",
           trigger: "operator",
         });
       }
@@ -3020,7 +3169,7 @@ export function contextRobustnessFilterForSettings(
         throw new CompactionNeededError({
           signalTokens,
           thresholdTokens,
-          signalSource: hasReported ? "provider" : "estimate",
+          signalSource: boundProvider ? "provider" : "estimate",
         });
       }
     }
@@ -3057,6 +3206,7 @@ export function callModelInputFilterForSettings(
   const filters: CallModelInputFilter[] = [
     normalizeComputerCallsFilter,
     elideSupersededViewImagesFilter,
+    boundModelToolOutputsFilterForSettings(settings),
   ];
   if (settings.openaiProviderItemIds === "strip") {
     filters.push(stripProviderItemIdsFilter);
@@ -3148,23 +3298,24 @@ export async function runAgentStream(
     const decoratedClient = withSandboxLifecycleHooks(resourceClient, ownedHooks, ownedHookContext);
     const ownedFilter = composeCallModelInputFilters(
       [
-        callModelInputFilterForSettings(settings, {
-          throwOnCompactionNeeded: Boolean(
-            overrides.contextCompactionSignalTokens || overrides.contextCompactionRequested,
-          ),
-          ...(overrides.contextCompactionSignalTokens
-            ? {
-                contextCompactionSignalTokens: overrides.contextCompactionSignalTokens,
-              }
-            : {}),
-          ...(overrides.contextCompactionRequested
-            ? {
-                contextCompactionRequested: overrides.contextCompactionRequested,
-              }
-            : {}),
-        }),
+        callModelInputFilterForSettings(settings),
         genesisTitleInputFilter,
         overrides.callModelInputFilter,
+        // A caller filter may synthesize model input. Re-apply the idempotent
+        // canonical bound at the literal final seam before accounting/provider
+        // serialization so no extension can bypass the policy.
+        boundModelToolOutputsFilterForSettings(settings),
+        contextRobustnessFilterForSettings(settings, {
+          throwOnCompactionNeeded: Boolean(
+            overrides.contextCompactionSignal || overrides.contextCompactionRequested,
+          ),
+          ...(overrides.contextCompactionSignal
+            ? { contextCompactionSignal: overrides.contextCompactionSignal }
+            : {}),
+          ...(overrides.contextCompactionRequested
+            ? { contextCompactionRequested: overrides.contextCompactionRequested }
+            : {}),
+        }),
       ].filter((f): f is CallModelInputFilter => Boolean(f)),
     );
     const ownedRunOptions: Parameters<typeof run>[2] = {
@@ -3239,21 +3390,21 @@ export async function runAgentStream(
   // OpenGeni's durable conversation truth is still reconciled explicitly below.
   const callModelInputFilter = composeCallModelInputFilters(
     [
-      callModelInputFilterForSettings(settings, {
+      callModelInputFilterForSettings(settings),
+      genesisTitleInputFilter,
+      overrides.callModelInputFilter,
+      boundModelToolOutputsFilterForSettings(settings),
+      contextRobustnessFilterForSettings(settings, {
         throwOnCompactionNeeded: Boolean(
-          overrides.contextCompactionSignalTokens || overrides.contextCompactionRequested,
+          overrides.contextCompactionSignal || overrides.contextCompactionRequested,
         ),
-        ...(overrides.contextCompactionSignalTokens
-          ? {
-              contextCompactionSignalTokens: overrides.contextCompactionSignalTokens,
-            }
+        ...(overrides.contextCompactionSignal
+          ? { contextCompactionSignal: overrides.contextCompactionSignal }
           : {}),
         ...(overrides.contextCompactionRequested
           ? { contextCompactionRequested: overrides.contextCompactionRequested }
           : {}),
       }),
-      genesisTitleInputFilter,
-      overrides.callModelInputFilter,
     ].filter((f): f is CallModelInputFilter => Boolean(f)),
   );
   const runOptions: Parameters<typeof run>[2] = {

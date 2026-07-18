@@ -13,7 +13,11 @@ import {
 } from "@opengeni/db";
 import * as schema from "@opengeni/db/schema";
 import type { EventBus } from "@opengeni/events";
-import type { OpenGeniRuntime } from "@opengeni/runtime";
+import {
+  EmptyCompactionSummaryError,
+  SUMMARY_PREFIX,
+  type OpenGeniRuntime,
+} from "@opengeni/runtime";
 import {
   acquireSharedTestDatabase,
   testSettings,
@@ -227,6 +231,142 @@ describe("standalone context compaction execution", () => {
     ]);
   });
 
+  test("a failed standalone summary consumes the request once and preserves active history", async () => {
+    const suffix = crypto.randomUUID();
+    const access = await bootstrapWorkspace(client.db, {
+      accountExternalSource: "test",
+      accountExternalId: `account-${suffix}`,
+      accountName: "Failed standalone compaction test",
+      workspaceExternalSource: "test",
+      workspaceExternalId: `workspace-${suffix}`,
+      workspaceName: "Failed standalone compaction test",
+      subjectId: `subject-${suffix}`,
+    });
+    const grant = access.workspaceGrants[0]!;
+    const session = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      initialMessage: "initial",
+      resources: [],
+      metadata: {},
+      model: "scripted-compactor",
+      sandboxBackend: "none",
+    });
+    const originalItems = [
+      { type: "message", role: "user", content: "preserve this request" },
+      {
+        type: "message",
+        role: "assistant",
+        status: "completed",
+        content: [{ type: "output_text", text: "work in progress ".repeat(1_000) }],
+      },
+    ];
+    await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
+      await db.insert(schema.sessionHistoryItems).values(
+        originalItems.map((item, position) => ({
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: session.id,
+          position,
+          item,
+        })),
+      );
+    });
+    await requestSessionCompaction(client.db, grant.workspaceId!, session.id);
+
+    const runtime = {
+      configure: () => undefined,
+      resolveTurnModel: () => ({
+        client: {
+          chat: {
+            completions: {
+              create: async () => ({
+                id: "chatcmpl-empty",
+                usage: { prompt_tokens: 100, completion_tokens: 0, total_tokens: 100 },
+                choices: [{ message: { content: "" }, finish_reason: "stop" }],
+              }),
+            },
+          },
+        },
+        provider: { id: "test-chat", kind: "api-key", api: "chat", builtin: false },
+        configured: {
+          id: "scripted-compactor",
+          contextWindowTokens: 250_000,
+          effectiveContextWindowTokens: 250_000,
+          autoCompactLimitTokens: 225_000,
+          hostedWebSearch: false,
+        },
+      }),
+      buildAgent: () => {
+        throw new Error("failed standalone compaction entered the agent runtime");
+      },
+      prepareTools: () => {
+        throw new Error("failed standalone compaction prepared tools");
+      },
+      prepareInput: () => {
+        throw new Error("failed standalone compaction prepared input");
+      },
+      runStream: () => {
+        throw new Error("failed standalone compaction started inference");
+      },
+      serializeApprovals: () => {
+        throw new Error("failed standalone compaction serialized approvals");
+      },
+    } as unknown as OpenGeniRuntime;
+    const bus = {
+      publish: async () => undefined,
+      subscribe: async function* () {},
+      close: async () => undefined,
+    } as unknown as EventBus;
+    const activities = createActivityTestHarness({
+      settings: testSettings({
+        databaseUrl: shared.appUrl,
+        openaiModel: "scripted-compactor",
+        sandboxBackend: "none",
+      }),
+      db: client.db,
+      bus,
+      runtime,
+    });
+
+    const attemptId = crypto.randomUUID();
+    const result = await activities.runAgentTurn({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      trigger: { kind: "next" },
+    });
+
+    expect(result).toMatchObject({ status: "failed", attemptId });
+    if (result.status === "unclaimed") throw new Error("Compaction was not claimed");
+    expect(await isSessionCompactionRequested(client.db, grant.workspaceId!, session.id)).toBe(
+      false,
+    );
+    expect(
+      (await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id)).map(
+        (row) => row.item,
+      ),
+    ).toEqual(originalItems);
+    const turn = await getSessionTurn(client.db, grant.workspaceId!, result.turnId);
+    expect(turn).toMatchObject({ source: "compaction", status: "failed" });
+    const events = await listSessionEvents(client.db, grant.workspaceId!, session.id, {
+      after: 0,
+      limit: 100,
+    });
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "session.context.compaction.skipped",
+        payload: { reason: "summarization_failed" },
+      }),
+    );
+    expect(
+      events.filter((event) => event.type === "session.context.compaction.requested"),
+    ).toHaveLength(1);
+  });
+
   test("consumes an operator request without replacing history when its summary is not smaller", async () => {
     const suffix = crypto.randomUUID();
     const access = await bootstrapWorkspace(client.db, {
@@ -403,6 +543,162 @@ describe("standalone context compaction execution", () => {
         content: expect.stringContaining("Recovered compact context"),
       }),
     ]);
+  });
+
+  test("an empty checkpoint cannot mutate or consume before the caller records terminal failure", async () => {
+    const suffix = crypto.randomUUID();
+    const access = await bootstrapWorkspace(client.db, {
+      accountExternalSource: "test",
+      accountExternalId: `account-${suffix}`,
+      accountName: "Empty checkpoint test",
+      workspaceExternalSource: "test",
+      workspaceExternalId: `workspace-${suffix}`,
+      workspaceName: "Empty checkpoint test",
+      subjectId: `subject-${suffix}`,
+    });
+    const grant = access.workspaceGrants[0]!;
+    const session = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      initialMessage: "initial",
+      resources: [],
+      metadata: {},
+      model: "scripted-compactor",
+      sandboxBackend: "none",
+    });
+    const originalItems = [
+      { type: "message", role: "user", content: "x".repeat(100_000) },
+      {
+        type: "message",
+        role: "assistant",
+        status: "completed",
+        content: [{ type: "output_text", text: "work in progress" }],
+      },
+    ];
+    await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
+      await db.insert(schema.sessionHistoryItems).values(
+        originalItems.map((item, position) => ({
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: session.id,
+          position,
+          item,
+        })),
+      );
+    });
+    await requestSessionCompaction(client.db, grant.workspaceId!, session.id);
+    const attemptId = crypto.randomUUID();
+    const turn = await claimCompactionForAttempt(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      attemptId,
+    );
+
+    await expect(
+      maybeCompactContext(
+        client.db,
+        testSettings({ contextWindowTokens: 250_000 }),
+        {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: session.id,
+          turnId: turn!.id,
+          executionGeneration: turn!.executionGeneration,
+          attemptId,
+        },
+        null,
+        async () => "   ",
+        { force: true, clearRequestedCompaction: true, trigger: "operator" },
+      ),
+    ).rejects.toBeInstanceOf(EmptyCompactionSummaryError);
+    expect(await isSessionCompactionRequested(client.db, grant.workspaceId!, session.id)).toBe(
+      true,
+    );
+    expect(
+      (await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id)).map(
+        (row) => row.item,
+      ),
+    ).toEqual(originalItems);
+  });
+
+  test("an exact repeated checkpoint is consumed once without another history rewrite", async () => {
+    const suffix = crypto.randomUUID();
+    const access = await bootstrapWorkspace(client.db, {
+      accountExternalSource: "test",
+      accountExternalId: `account-${suffix}`,
+      accountName: "Repeated checkpoint test",
+      workspaceExternalSource: "test",
+      workspaceExternalId: `workspace-${suffix}`,
+      workspaceName: "Repeated checkpoint test",
+      subjectId: `subject-${suffix}`,
+    });
+    const grant = access.workspaceGrants[0]!;
+    const session = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      initialMessage: "initial",
+      resources: [],
+      metadata: {},
+      model: "scripted-compactor",
+      sandboxBackend: "none",
+    });
+    const originalItems = [
+      { type: "message", role: "user", content: "keep this user request" },
+      {
+        type: "message",
+        role: "user",
+        content: `${SUMMARY_PREFIX}\nsame checkpoint`,
+        opengeni_context_summary: true,
+      },
+    ];
+    await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
+      await db.insert(schema.sessionHistoryItems).values(
+        originalItems.map((item, position) => ({
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: session.id,
+          position,
+          item,
+        })),
+      );
+    });
+    await requestSessionCompaction(client.db, grant.workspaceId!, session.id);
+    const attemptId = crypto.randomUUID();
+    const turn = await claimCompactionForAttempt(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      attemptId,
+    );
+    const outcome = await maybeCompactContext(
+      client.db,
+      testSettings({ contextWindowTokens: 250_000 }),
+      {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn!.id,
+        executionGeneration: turn!.executionGeneration,
+        attemptId,
+      },
+      null,
+      async () => "same checkpoint",
+      { force: true, clearRequestedCompaction: true, trigger: "operator" },
+    );
+    expect(outcome).toMatchObject({
+      compacted: false,
+      reason: "replacement_unchanged",
+      requestConsumed: true,
+    });
+    expect(await isSessionCompactionRequested(client.db, grant.workspaceId!, session.id)).toBe(
+      false,
+    );
+    expect(
+      (await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id)).map(
+        (row) => row.item,
+      ),
+    ).toEqual(originalItems);
   });
 
   test("matches Codex's overflow floor by trying the checkpoint prompt alone once", async () => {
