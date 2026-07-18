@@ -14,6 +14,7 @@ import {
   initializeSessionStartAtomically,
   materializeGoalContinuation,
   mutateSessionControlInTransaction,
+  recoverSessionDispatch,
   setSessionGoalStatusWithEvent,
   submitHumanPromptInTransaction,
   updateCodexRotationSettings,
@@ -193,6 +194,17 @@ describe("durable active-goal wake", () => {
       from session_workflow_wake_outbox where session_id = ${ctx.session.id}`;
     expect(wake).toMatchObject({ reason: "goal_turn_settled" });
     expect(Number(wake!.wake_revision)).toBeGreaterThan(Number(wake!.delivered_revision));
+
+    // A historical late failure attached to an already-delivered workflow
+    // nudge does not describe the still-pending goal obligation.
+    await shared.admin`
+      update session_workflow_wake_outbox
+      set delivered_revision = wake_revision, last_error = 'late duplicate failure'
+      where session_id = ${ctx.session.id}`;
+    expect(
+      (await getSessionGoalWithContinuation(client.db, ctx.grant.workspaceId!, ctx.session.id))
+        ?.continuation,
+    ).toMatchObject({ state: "scheduled", reason: "wake_pending", lastError: null });
   });
 
   test("concurrent evaluators and a lost COMMIT response materialize one update, event, and usage row", async () => {
@@ -211,6 +223,41 @@ describe("durable active-goal wake", () => {
       usage: 1,
       events: 1,
     });
+    expect(
+      (await getSessionGoalWithContinuation(client.db, ctx.grant.workspaceId!, ctx.session.id))
+        ?.continuation,
+    ).toMatchObject({ state: "scheduled", reason: "continuation_pending" });
+  });
+
+  test("projects only a live goal attempt as running while worker recovery is scheduled", async () => {
+    const ctx = await runningGoalFixture();
+    await settleIdle(ctx);
+    expect((await materialize(ctx)).action).toBe("continue");
+
+    const attemptId = crypto.randomUUID();
+    const claimed = await claimSessionWorkForAttempt(client.db, ctx.grant.workspaceId!, {
+      sessionId: ctx.session.id,
+      workflowId: `session-${ctx.session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: `dispatch-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    expect(claimed.action).toBe("claimed");
+    if (claimed.action !== "claimed") throw new Error("goal continuation was not claimed");
+    expect(claimed.turn.source).toBe("goal");
+    expect(
+      (await getSessionGoalWithContinuation(client.db, ctx.grant.workspaceId!, ctx.session.id))
+        ?.continuation,
+    ).toMatchObject({ state: "running", reason: "goal_turn_running" });
+
+    const recovered = await recoverSessionDispatch(client.db, ctx.grant.workspaceId!, {
+      sessionId: ctx.session.id,
+      attemptId,
+      timeoutType: "HEARTBEAT",
+      maxRedispatches: 3,
+    });
+    expect(recovered.action).toBe("recovering");
     expect(
       (await getSessionGoalWithContinuation(client.db, ctx.grant.workspaceId!, ctx.session.id))
         ?.continuation,

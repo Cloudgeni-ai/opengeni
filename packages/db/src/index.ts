@@ -17981,15 +17981,19 @@ export async function getSessionGoalWithContinuation(
         )
         .limit(1);
 
+      const pendingWorkflowWake =
+        wake !== undefined && wake.wakeRevision > wake.deliveredRevision ? wake : null;
       const base = {
         wakeRevision: goal.continuationWakeRevision,
         observedRevision: goal.continuationObservedRevision,
         nextAttemptAt:
           capacityWait?.nextCheckAt.toISOString() ??
-          (wake && wake.wakeRevision > wake.deliveredRevision
-            ? wake.nextAttemptAt.toISOString()
-            : null),
-        lastError: wake?.lastError ?? null,
+          pendingWorkflowWake?.nextAttemptAt.toISOString() ??
+          null,
+        // Delivery errors belong to one still-undelivered workflow-wake
+        // revision. A late duplicate failure must not make already-accepted
+        // Temporal work look blocked or broken.
+        lastError: pendingWorkflowWake?.lastError ?? null,
       };
       let continuation: SessionGoalContinuationProjection;
       if (goal.status !== "active") {
@@ -18009,7 +18013,10 @@ export async function getSessionGoalWithContinuation(
           ...base,
         };
       } else if (turn?.source === "goal") {
-        continuation = { state: "running", reason: "goal_turn_running", ...base };
+        continuation =
+          turn.status === "running"
+            ? { state: "running", reason: "goal_turn_running", ...base }
+            : { state: "scheduled", reason: "continuation_pending", ...base };
       } else if (turn) {
         continuation = { state: "scheduled", reason: "system_work_pending", ...base };
       } else if (continuationUpdate) {
@@ -23756,6 +23763,7 @@ export async function markSessionWorkflowWakeFailed(
             eq(schema.sessionWorkflowWakeOutbox.sessionId, input.sessionId),
             eq(schema.sessionWorkflowWakeOutbox.workspaceId, input.workspaceId),
             eq(schema.sessionWorkflowWakeOutbox.wakeRevision, input.wakeRevision),
+            lt(schema.sessionWorkflowWakeOutbox.deliveredRevision, input.wakeRevision),
           ),
         )
         .returning({ sessionId: schema.sessionWorkflowWakeOutbox.sessionId });

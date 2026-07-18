@@ -88,6 +88,56 @@ describe("migration 0073 (durable goal wake)", () => {
           })}
         )`;
 
+      const staleVersion = await insertGoalSession("stale continuation version");
+      await admin`update session_goals set version = 2 where id = ${staleVersion.goalId}`;
+      await admin`
+        insert into session_system_updates (
+          account_id, workspace_id, session_id, kind, source_id,
+          dedupe_key, summary, payload
+        ) values (
+          ${account!.id}, ${workspace!.id}, ${staleVersion.sessionId}, 'goal_continuation',
+          ${staleVersion.goalId}, 'legacy-stale-goal-continuation', 'stale pending update',
+          ${admin.json({
+            type: "goal_continuation",
+            goalId: staleVersion.goalId,
+            goalVersion: 1,
+            autoContinuation: 1,
+            maxAutoContinuations: null,
+            prompt: "continue stale goal",
+            policy: {
+              model: "scripted-model",
+              reasoningEffort: "low",
+              tools: [],
+              sandboxBackend: "none",
+            },
+          })}
+        )`;
+
+      const delivered = await insertGoalSession("delivered terminal continuation");
+      await admin`
+        insert into session_system_updates (
+          account_id, workspace_id, session_id, kind, source_id,
+          dedupe_key, summary, payload, state, delivered_at
+        ) values (
+          ${account!.id}, ${workspace!.id}, ${delivered.sessionId}, 'goal_continuation',
+          ${delivered.goalId}, 'legacy-delivered-goal-continuation', 'already delivered',
+          ${admin.json({
+            type: "goal_continuation",
+            goalId: delivered.goalId,
+            goalVersion: 1,
+            autoContinuation: 1,
+            maxAutoContinuations: null,
+            prompt: "continue delivered goal",
+            policy: {
+              model: "scripted-model",
+              reasoningEffort: "low",
+              tools: [],
+              sandboxBackend: "none",
+            },
+          })},
+          'delivered', now()
+        )`;
+
       const humanQueued = await insertGoalSession("human queued goal");
       await admin`
         insert into session_turns (
@@ -145,8 +195,10 @@ describe("migration 0073 (durable goal wake)", () => {
       ).toEqual([
         { text: "already materialized goal", wake_revision: 1, observed_revision: 1 },
         { text: "capacity blocked goal", wake_revision: 0, observed_revision: 0 },
+        { text: "delivered terminal continuation", wake_revision: 1, observed_revision: 0 },
         { text: "human queued goal", wake_revision: 0, observed_revision: 0 },
         { text: "idle legacy goal", wake_revision: 1, observed_revision: 0 },
+        { text: "stale continuation version", wake_revision: 1, observed_revision: 0 },
       ]);
 
       const wakes = await admin<
@@ -155,18 +207,32 @@ describe("migration 0073 (durable goal wake)", () => {
         select session_id, reason, wake_revision::integer as wake_revision
         from session_workflow_wake_outbox order by session_id`;
       expect(
-        wakes.map(({ session_id, reason, wake_revision }) => ({
-          session_id,
-          reason,
-          wake_revision,
-        })),
-      ).toEqual([
-        {
-          session_id: idle.sessionId,
-          reason: "goal_obligation_backfill",
-          wake_revision: 1,
-        },
-      ]);
+        wakes
+          .map(({ session_id, reason, wake_revision }) => ({
+            session_id,
+            reason,
+            wake_revision,
+          }))
+          .sort((left, right) => left.session_id.localeCompare(right.session_id)),
+      ).toEqual(
+        [
+          {
+            session_id: delivered.sessionId,
+            reason: "goal_obligation_backfill",
+            wake_revision: 1,
+          },
+          {
+            session_id: idle.sessionId,
+            reason: "goal_obligation_backfill",
+            wake_revision: 1,
+          },
+          {
+            session_id: staleVersion.sessionId,
+            reason: "goal_obligation_backfill",
+            wake_revision: 1,
+          },
+        ].sort((left, right) => left.session_id.localeCompare(right.session_id)),
+      );
 
       let rejectedInvalidRevision = false;
       try {
