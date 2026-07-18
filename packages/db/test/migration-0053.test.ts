@@ -7,9 +7,8 @@ import postgres from "postgres";
 import {
   chooseShardedHome,
   selectCodexCredentialLeaseForTurn,
-  type CodexRotationAccount,
 } from "../../../apps/worker/src/activities/codex-rotation";
-import { acquireCodexCredentialLease, createDb } from "../src/index";
+import { acquireCodexCredentialLease, createDb, type CodexLeaseAccountStatus } from "../src/index";
 import { migrate } from "../src/migrate";
 
 const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../drizzle");
@@ -169,7 +168,17 @@ describe("migration 0053 (Codex credential leases)", () => {
             rotation_enabled = true,
             lease_rotation_enabled = false
         where workspace_id = ${workspaceId}`;
-      const rollbackAccounts: CodexRotationAccount[] = [credentialA, credentialB].map((id) => ({
+      // Production's allocator order is `created_at ASC, id ASC`. Both fixture
+      // credentials are inserted in one statement, so PostgreSQL gives them the
+      // same transaction timestamp and the UUID tie-breaker is authoritative;
+      // INSERT RETURNING order is not. Build the expected sharding snapshot from
+      // the exact production ordering so this migration proof is deterministic.
+      const stableCredentialIds = await admin<{ id: string }[]>`
+        select id
+        from codex_subscription_credentials
+        where workspace_id = ${workspaceId}
+        order by created_at asc, id asc`;
+      const rollbackAccounts: CodexLeaseAccountStatus[] = stableCredentialIds.map(({ id }) => ({
         id,
         chatgptAccountId: null,
         label: null,
@@ -195,30 +204,7 @@ describe("migration 0053 (Codex credential leases)", () => {
       }));
       const rollbackSelection = selectCodexCredentialLeaseForTurn({
         context: {
-          accounts: [credentialA, credentialB].map((id) => ({
-            id,
-            chatgptAccountId: null,
-            label: null,
-            accountEmail: null,
-            planType: "pro",
-            status: "active",
-            allocatorEnabled: true,
-            isActive: id === credentialB,
-            expiresAt: null,
-            lastRefreshAt: null,
-            lastError: null,
-            primaryUsedPercent: 0,
-            primaryResetAt: null,
-            secondaryUsedPercent: 0,
-            secondaryResetAt: null,
-            usageCheckedAt: null,
-            exhaustedUntil: null,
-            connectorNamespaces: null,
-            connectorsCheckedAt: null,
-            activeLeaseCount: 0,
-            selectionCount: 0,
-            lastSelectedAt: null,
-          })),
+          accounts: rollbackAccounts,
           activeCredentialId: credentialB,
           rotationEnabled: true,
           leaseRotationEnabled: false,

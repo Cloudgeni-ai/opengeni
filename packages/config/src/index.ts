@@ -216,6 +216,10 @@ const SettingsSchema = z.object({
   // Model-catalog auto-compact limit. When present it is clamped to
   // 90% of the raw window, matching Codex core's auto_compact_token_limit().
   contextAutoCompactThresholdTokens: z.coerce.number().int().positive().optional(),
+  // Provider-neutral fallback for canonical model-facing tool-result text.
+  // The current stable Codex catalog policy is 10k tokens; the truncator adds
+  // Codex's 1.2x JSON serialization allowance when applying it.
+  modelToolOutputTruncationTokens: z.coerce.number().int().positive().default(10_000),
   authRequired: EnvBoolean.default(false),
   accessKey: z.string().optional(),
   authAllowHealth: EnvBoolean.default(true),
@@ -750,6 +754,9 @@ const RegistryModelSchema = z.object({
   contextWindowTokens: z.number().int().positive().optional(),
   effectiveContextWindowTokens: z.number().int().positive().optional(),
   autoCompactTokenLimit: z.number().int().positive().optional(),
+  // Canonical model-facing function/tool-result policy. The runtime applies
+  // the same 1.2x serialization allowance as Codex when materializing output.
+  toolOutputTruncationTokens: z.number().int().positive().optional(),
   reasoningEffort: z.boolean().optional(), // model accepts a reasoning-effort control
   hostedWebSearch: z.boolean().optional(), // provider executes the hosted web_search tool for this model
   pricing: ModelPricingSchema.optional(),
@@ -808,6 +815,7 @@ export interface ConfiguredModel {
   contextWindowTokens?: number | undefined;
   effectiveContextWindowTokens?: number | undefined;
   autoCompactTokenLimit?: number | undefined;
+  toolOutputTruncationTokens?: number | undefined;
   reasoningEffort: boolean;
   hostedWebSearch: boolean;
 }
@@ -1010,6 +1018,7 @@ export function getSettings(): Settings {
     contextCompactionThresholdRatio: optional("OPENGENI_COMPACTION_THRESHOLD_RATIO"),
     contextReservedOutputTokens: optional("OPENGENI_CONTEXT_RESERVED_OUTPUT_TOKENS"),
     contextAutoCompactThresholdTokens: optional("OPENGENI_CONTEXT_AUTO_COMPACT_THRESHOLD_TOKENS"),
+    modelToolOutputTruncationTokens: optional("OPENGENI_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS"),
     authRequired: optional("OPENGENI_AUTH_REQUIRED"),
     accessKey: optional("OPENGENI_ACCESS_KEY"),
     authAllowHealth: optional("OPENGENI_AUTH_ALLOW_HEALTH"),
@@ -1368,6 +1377,7 @@ export function configuredModels(settings: Settings): ConfiguredModel[] {
       providerLabel: builtinLabel,
       api: "responses" as const,
       contextWindowTokens: settings.contextWindowTokens,
+      toolOutputTruncationTokens: settings.modelToolOutputTruncationTokens,
       reasoningEffort: true,
       hostedWebSearch: settings.webSearchEnabled,
     }));
@@ -1389,6 +1399,9 @@ export function configuredModels(settings: Settings): ConfiguredModel[] {
         ...(model.autoCompactTokenLimit === undefined
           ? {}
           : { autoCompactTokenLimit: model.autoCompactTokenLimit }),
+        ...(model.toolOutputTruncationTokens === undefined
+          ? {}
+          : { toolOutputTruncationTokens: model.toolOutputTruncationTokens }),
         reasoningEffort: model.reasoningEffort ?? false,
         hostedWebSearch: model.hostedWebSearch ?? false,
       });
@@ -1485,7 +1498,10 @@ export function settingsWithResolvedModelContext(
   settings: Settings,
   model: Pick<
     ConfiguredModel,
-    "contextWindowTokens" | "effectiveContextWindowTokens" | "autoCompactTokenLimit"
+    | "contextWindowTokens"
+    | "effectiveContextWindowTokens"
+    | "autoCompactTokenLimit"
+    | "toolOutputTruncationTokens"
   >,
 ): Settings {
   const contextWindowTokens = model.contextWindowTokens ?? settings.contextWindowTokens;
@@ -1503,6 +1519,9 @@ export function settingsWithResolvedModelContext(
     ...(model.autoCompactTokenLimit === undefined
       ? {}
       : { contextAutoCompactThresholdTokens: model.autoCompactTokenLimit }),
+    ...(model.toolOutputTruncationTokens === undefined
+      ? {}
+      : { modelToolOutputTruncationTokens: model.toolOutputTruncationTokens }),
   };
 }
 

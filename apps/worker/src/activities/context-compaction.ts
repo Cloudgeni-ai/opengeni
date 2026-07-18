@@ -8,8 +8,10 @@ import {
   SUMMARY_BUFFER_TOKENS,
   buildCompactionPromptInput,
   buildCompactionReplacementHistory,
+  compactionReplacementFingerprint,
   decideCompaction,
   estimateTokens,
+  latestCompactionReplacementFingerprint,
   sanitizeHistoryItemsForModel,
   summarizeForCompaction,
   type CompactionItem,
@@ -33,6 +35,7 @@ export type MaybeCompactResult =
       thresholdTokens: number;
       estimatedTokensBefore: number;
       estimatedTokensAfter: number;
+      replacementFingerprint: string;
       events: SessionEvent[];
     };
 
@@ -130,6 +133,8 @@ export async function maybeCompactContext(
   const summaryBody = await summarizeWithCodexOverflowTrimming(summarize, settings, items);
   const replacementHistory = buildCompactionReplacementHistory(items, summaryBody);
   const estimatedTokensAfter = estimateTokens(replacementHistory);
+  const replacementFingerprint = compactionReplacementFingerprint(replacementHistory);
+  const previousReplacementFingerprint = latestCompactionReplacementFingerprint(items);
   const summaryItem = replacementHistory.at(-1);
   if (!summaryItem) {
     return {
@@ -137,6 +142,35 @@ export async function maybeCompactContext(
       reason: "compaction produced no replacement history",
       events: [],
       requestConsumed: false,
+    };
+  }
+  if (previousReplacementFingerprint === replacementFingerprint) {
+    let requestConsumed = false;
+    if (options.clearRequestedCompaction) {
+      const skipped = await recordSkippedContextCompaction(db, {
+        ...scope,
+        expectedExecutionGeneration: scope.executionGeneration,
+        expectedAttemptId: scope.attemptId,
+        reason: "replacement_unchanged",
+      });
+      if (!skipped.recorded) {
+        throw new TurnAttemptFencedError(
+          "turn attempt was fenced while consuming an unchanged context compaction request",
+        );
+      }
+      requestConsumed = true;
+      return {
+        compacted: false,
+        reason: "replacement_unchanged",
+        events: skipped.events,
+        requestConsumed,
+      };
+    }
+    return {
+      compacted: false,
+      reason: "replacement_unchanged",
+      events: [],
+      requestConsumed,
     };
   }
   if (estimatedTokensAfter >= estimatedTokensBefore) {
@@ -199,6 +233,7 @@ export async function maybeCompactContext(
     thresholdTokens: decision.thresholdTokens,
     estimatedTokensBefore,
     estimatedTokensAfter,
+    replacementFingerprint,
     events: applied.events,
   };
 }

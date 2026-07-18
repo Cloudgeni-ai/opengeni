@@ -9,6 +9,7 @@
  */
 
 import { TOOL_CALL_RESULT_TYPE_BY_CALL_TYPE } from "./history-sanitizer";
+import { createHash } from "node:crypto";
 
 export type CompactionItem = Record<string, unknown>;
 
@@ -53,6 +54,19 @@ export const USER_MESSAGE_TRUNCATION_MARKER =
 
 const RESULT_TYPE_BY_CALL_TYPE = TOOL_CALL_RESULT_TYPE_BY_CALL_TYPE;
 const RESULT_TYPES = new Set(Object.values(RESULT_TYPE_BY_CALL_TYPE));
+const MODEL_GENERATED_ITEM_TYPES = new Set([
+  "reasoning",
+  "function_call",
+  "custom_tool_call",
+  "tool_search_call",
+  "web_search_call",
+  "image_generation_call",
+  "computer_call",
+  "shell_call",
+  "apply_patch_call",
+  "compaction",
+  "context_compaction",
+]);
 
 function itemType(item: unknown): string | undefined {
   if (!item || typeof item !== "object") {
@@ -109,6 +123,109 @@ export function estimateTokens(items: readonly CompactionItem[]): number {
   return total;
 }
 
+export function estimateSerializedValueTokens(value: unknown): number {
+  let serialized: string;
+  try {
+    serialized = typeof value === "string" ? value : JSON.stringify(value);
+  } catch {
+    serialized = String(value);
+  }
+  return Math.ceil(Buffer.byteLength(serialized ?? "", "utf8") / 4);
+}
+
+export type CompleteModelInputFootprint = {
+  input: readonly CompactionItem[];
+  instructionsTokens: number;
+  toolSchemaTokens: number;
+};
+
+export type ProviderContextTokenSignal = {
+  /** Monotonic within one sampled run; advances after every model response. */
+  revision: number;
+  /** Provider total tokens after that response (input + generated output). */
+  totalTokens: number;
+};
+
+export type CompleteModelInputEstimate = {
+  tokens: number;
+  source: "complete_estimate" | "provider_plus_local";
+  inputTokens: number;
+  instructionsTokens: number;
+  toolSchemaTokens: number;
+  appendedAfterModelTokens: number;
+};
+
+/**
+ * Match Codex history accounting: after one provider response, start from its
+ * authoritative TOTAL token count and add only local items placed after the
+ * newest model-generated item. System instructions and tool schemas are
+ * compared with the exact request footprint that produced the provider count;
+ * positive growth is added. Without a bound anchor, estimate the entire
+ * outgoing request rather than trusting stale usage from an earlier turn.
+ */
+export function estimateCompleteModelInput(input: {
+  current: CompleteModelInputFootprint;
+  provider?: ProviderContextTokenSignal | null;
+  providerRequestFootprint?: CompleteModelInputFootprint | null;
+}): CompleteModelInputEstimate {
+  const inputTokens = estimateTokens(input.current.input);
+  const instructionsTokens = input.current.instructionsTokens;
+  const toolSchemaTokens = input.current.toolSchemaTokens;
+  if (!input.provider || !input.providerRequestFootprint || input.provider.totalTokens <= 0) {
+    return {
+      tokens: inputTokens + instructionsTokens + toolSchemaTokens,
+      source: "complete_estimate",
+      inputTokens,
+      instructionsTokens,
+      toolSchemaTokens,
+      appendedAfterModelTokens: 0,
+    };
+  }
+
+  const appended = itemsAfterLastModelGeneratedItem(input.current.input);
+  const appendedAfterModelTokens = estimateTokens(appended);
+  const instructionGrowth = Math.max(
+    0,
+    instructionsTokens - input.providerRequestFootprint.instructionsTokens,
+  );
+  const toolSchemaGrowth = Math.max(
+    0,
+    toolSchemaTokens - input.providerRequestFootprint.toolSchemaTokens,
+  );
+  return {
+    tokens:
+      input.provider.totalTokens + appendedAfterModelTokens + instructionGrowth + toolSchemaGrowth,
+    source: "provider_plus_local",
+    inputTokens,
+    instructionsTokens,
+    toolSchemaTokens,
+    appendedAfterModelTokens,
+  };
+}
+
+export function itemsAfterLastModelGeneratedItem(
+  items: readonly CompactionItem[],
+): CompactionItem[] {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    if (isModelGeneratedItem(items[index])) {
+      return items.slice(index + 1);
+    }
+  }
+  // Codex treats a provider token anchor without any model-generated item as
+  // unbound. Callers therefore fall back to a complete estimate in that case.
+  return items.slice();
+}
+
+export function hasModelGeneratedItem(items: readonly CompactionItem[]): boolean {
+  return items.some(isModelGeneratedItem);
+}
+
+function isModelGeneratedItem(item: unknown): boolean {
+  const type = itemType(item);
+  if (type === "message") return itemRole(item) === "assistant";
+  return MODEL_GENERATED_ITEM_TYPES.has(type ?? "");
+}
+
 export function clampCompactionThresholdRatio(value: number | undefined | null): number {
   const numeric =
     typeof value === "number" && Number.isFinite(value)
@@ -159,7 +276,11 @@ export function decideCompaction(input: {
     typeof input.lastInputTokens === "number" && input.lastInputTokens > 0
       ? input.lastInputTokens
       : 0;
-  const signalTokens = recorded > 0 ? recorded : estimateTokens(input.items);
+  const activeHistoryEstimate = estimateTokens(input.items);
+  // A durable provider count belongs to an earlier request. The full active
+  // estimate is a conservative cross-turn floor until an exact same-run anchor
+  // is available in the per-call guard.
+  const signalTokens = Math.max(recorded, activeHistoryEstimate);
   if (input.items.length === 0) {
     return { shouldCompact: false, reason: "no_history", signalTokens, thresholdTokens };
   }
@@ -195,6 +316,19 @@ export class CompactionNeededError extends Error {
     this.thresholdTokens = input.thresholdTokens;
     this.signalSource = input.signalSource;
     this.trigger = trigger;
+  }
+}
+
+export class EmptyCompactionSummaryError extends Error {
+  readonly diagnostics: Record<string, unknown>;
+
+  constructor(diagnostics: Record<string, unknown> = {}) {
+    const compact = JSON.stringify(diagnostics).slice(0, 2_000);
+    super(
+      `Compaction summarizer returned no assistant text; active history was preserved${compact ? ` (${compact})` : ""}`,
+    );
+    this.name = "EmptyCompactionSummaryError";
+    this.diagnostics = diagnostics;
   }
 }
 
@@ -262,12 +396,46 @@ export function buildCompactionReplacementHistory(
   return history;
 }
 
+export function compactionReplacementFingerprint(items: readonly CompactionItem[]): string {
+  // PostgreSQL JSONB does not preserve JavaScript object-key insertion order.
+  // Canonicalize recursively so a replacement has the same identity before
+  // and after its durable round trip.
+  const serialized = JSON.stringify(canonicalJsonValue(items));
+  return createHash("sha256").update(serialized, "utf8").digest("hex");
+}
+
+function canonicalJsonValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalJsonValue);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .filter(([, entry]) => entry !== undefined)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => [key, canonicalJsonValue(entry)]),
+  );
+}
+
+/** Fingerprint the latest durable replacement prefix in active history. */
+export function latestCompactionReplacementFingerprint(
+  items: readonly CompactionItem[],
+): string | null {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    if (isCompactionSummary(items[index])) {
+      return compactionReplacementFingerprint(items.slice(0, index + 1));
+    }
+  }
+  return null;
+}
+
 /**
  * Build the synthetic summary item (a plain user message) appended to the
  * rebuilt active history.
  */
 export function buildSummaryItem(summaryBody: string): CompactionItem {
-  const trimmed = summaryBody.trim() || "(no summary available)";
+  const trimmed = summaryBody.trim();
+  if (!trimmed) {
+    throw new EmptyCompactionSummaryError({ stage: "build_summary_item" });
+  }
   return {
     type: "message",
     role: "user",

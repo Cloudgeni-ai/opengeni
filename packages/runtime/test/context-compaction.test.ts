@@ -4,6 +4,7 @@ import {
   COMPACTION_PROMPT,
   COMPACTION_SUMMARY_MARKER,
   CompactionNeededError,
+  EmptyCompactionSummaryError,
   DEFAULT_COMPACTION_THRESHOLD_RATIO,
   MAX_COMPACTION_THRESHOLD_RATIO,
   MIN_COMPACTION_THRESHOLD_RATIO,
@@ -15,7 +16,10 @@ import {
   compactionThresholdTokens,
   clampCompactionThresholdRatio,
   decideCompaction,
+  estimateCompleteModelInput,
   findCompactionNeededError,
+  compactionReplacementFingerprint,
+  latestCompactionReplacementFingerprint,
   isCompactionSummary,
   isEphemeralInternalContext,
   isUserMessage,
@@ -87,8 +91,8 @@ describe("codex-parity constants and summary marker", () => {
     expect(item.content).toBe(`${SUMMARY_PREFIX}\nhandoff body`);
   });
 
-  test("an empty provider summary uses Codex's explicit placeholder", () => {
-    expect(buildSummaryItem("   ").content).toBe(`${SUMMARY_PREFIX}\n(no summary available)`);
+  test("an empty provider summary fails without manufacturing durable history", () => {
+    expect(() => buildSummaryItem("   ")).toThrow(EmptyCompactionSummaryError);
   });
 });
 
@@ -140,16 +144,16 @@ describe("single portable compaction threshold", () => {
     ).toBe(750);
   });
 
-  test("prefers provider-reported input tokens over the estimate", () => {
-    const items = [bigUser(900_000, "x")];
+  test("never lets a stale provider count hide larger active history", () => {
+    const items = [bigUser(1_000_000, "x")];
     const decision = decideCompaction({
       items,
       lastInputTokens: 10,
       contextWindowTokens: WINDOW,
       contextReservedOutputTokens: RESERVED_OUTPUT,
     });
-    expect(decision.signalTokens).toBe(10);
-    expect(decision.shouldCompact).toBe(false);
+    expect(decision.signalTokens).toBeGreaterThan(1_000_000);
+    expect(decision.shouldCompact).toBe(true);
   });
 
   test("uses char/4 estimate only when there is no provider signal yet", () => {
@@ -187,6 +191,101 @@ describe("single portable compaction threshold", () => {
     });
     expect(decision.shouldCompact).toBe(true);
     expect(decision.reason).toBe("force");
+  });
+});
+
+describe("complete outgoing model-input accounting", () => {
+  test("counts history, instructions, and tool schemas before a provider anchor exists", () => {
+    const estimate = estimateCompleteModelInput({
+      current: {
+        input: [user("u".repeat(400))],
+        instructionsTokens: 700,
+        toolSchemaTokens: 900,
+      },
+    });
+    expect(estimate.source).toBe("complete_estimate");
+    expect(estimate.tokens).toBe(
+      estimate.inputTokens + estimate.instructionsTokens + estimate.toolSchemaTokens,
+    );
+  });
+
+  test("anchors to provider total tokens and adds every item after the last model output", () => {
+    const prior = {
+      input: [user("question"), assistant("answer"), call("c1")],
+      instructionsTokens: 100,
+      toolSchemaTokens: 200,
+    };
+    const current = {
+      input: [...prior.input, result("c1", "x".repeat(4_000))],
+      instructionsTokens: 100,
+      toolSchemaTokens: 200,
+    };
+    const estimate = estimateCompleteModelInput({
+      current,
+      provider: { revision: 1, totalTokens: 12_345 },
+      providerRequestFootprint: prior,
+    });
+    expect(estimate.source).toBe("provider_plus_local");
+    expect(estimate.appendedAfterModelTokens).toBeGreaterThan(1_000);
+    expect(estimate.tokens).toBe(12_345 + estimate.appendedAfterModelTokens);
+  });
+
+  test("adds positive instruction and tool-schema growth to a provider anchor", () => {
+    const prior = {
+      input: [user("question"), assistant("answer")],
+      instructionsTokens: 100,
+      toolSchemaTokens: 200,
+    };
+    const estimate = estimateCompleteModelInput({
+      current: { ...prior, instructionsTokens: 130, toolSchemaTokens: 270 },
+      provider: { revision: 2, totalTokens: 10_000 },
+      providerRequestFootprint: prior,
+    });
+    expect(estimate.tokens).toBe(10_100);
+  });
+
+  test("treats an anchor without a model-generated boundary as unbound at the caller", () => {
+    const current = {
+      input: [user("only user input")],
+      instructionsTokens: 10,
+      toolSchemaTokens: 20,
+    };
+    const estimate = estimateCompleteModelInput({ current });
+    expect(estimate.source).toBe("complete_estimate");
+  });
+});
+
+describe("durable compaction progress identity", () => {
+  test("is stable across PostgreSQL JSONB object-key reordering", () => {
+    expect(
+      compactionReplacementFingerprint([
+        { type: "message", role: "user", content: "same", nested: { z: 1, a: 2 } },
+      ]),
+    ).toBe(
+      compactionReplacementFingerprint([
+        { nested: { a: 2, z: 1 }, content: "same", role: "user", type: "message" },
+      ]),
+    );
+  });
+
+  test("recognizes an exact repeat of the latest replacement across attempts", () => {
+    const replacement = buildCompactionReplacementHistory([user("question")], "same summary");
+    expect(latestCompactionReplacementFingerprint(replacement)).toBe(
+      compactionReplacementFingerprint(replacement),
+    );
+    expect(
+      compactionReplacementFingerprint(
+        buildCompactionReplacementHistory(replacement, "same summary"),
+      ),
+    ).toBe(compactionReplacementFingerprint(replacement));
+  });
+
+  test("does not conflate a genuinely changed checkpoint with a repeat", () => {
+    const first = buildCompactionReplacementHistory([user("question")], "first summary");
+    const second = buildCompactionReplacementHistory(first, "second summary");
+    expect(compactionReplacementFingerprint(second)).not.toBe(
+      latestCompactionReplacementFingerprint(first),
+    );
   });
 });
 
@@ -383,6 +482,43 @@ describe("provider-proof compaction transcript", () => {
         usage: { inputTokens: 321, outputTokens: 12, totalTokens: 333 },
       },
     ]);
+  });
+
+  test("rejects a semantically empty provider response with content-free diagnostics", async () => {
+    const fakeClient = {
+      responses: {
+        create: async () => ({
+          id: "resp_empty",
+          status: "incomplete",
+          incomplete_details: { reason: "max_output_tokens" },
+          usage: { input_tokens: 321, output_tokens: 0, total_tokens: 321 },
+          output: [{ type: "reasoning", content: [] }],
+        }),
+      },
+    };
+    try {
+      await summarizeForCompaction(
+        testSettings({ openaiProvider: "azure" }),
+        buildCompactionPromptInput([user("deploy it")]),
+        {
+          client: fakeClient as any,
+          api: "responses",
+          model: "scripted-model",
+        },
+      );
+      throw new Error("expected empty compaction response to fail");
+    } catch (error) {
+      expect(error).toBeInstanceOf(EmptyCompactionSummaryError);
+      expect((error as EmptyCompactionSummaryError).diagnostics).toMatchObject({
+        responseId: "resp_empty",
+        status: "incomplete",
+        incompleteReason: "max_output_tokens",
+        extractedTextLength: 0,
+      });
+      expect(JSON.stringify((error as EmptyCompactionSummaryError).diagnostics)).not.toContain(
+        "deploy it",
+      );
+    }
   });
 
   test("renders the full checkpoint input without silently dropping old records", () => {

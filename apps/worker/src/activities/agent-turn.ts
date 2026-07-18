@@ -42,6 +42,7 @@ import {
   clearDurablePendingSessionToolCalls,
   appendSessionHistoryItems,
   isSessionCompactionRequested,
+  recordSkippedContextCompaction,
   countSessionHistoryItems,
   getActiveSessionHistoryItems,
   nextSessionHistoryPosition,
@@ -440,6 +441,28 @@ export function modelUsageSourceKey(input: {
   return input.dispatchId ? `${input.dispatchId}:${input.positionalKey}` : input.positionalKey;
 }
 
+export function providerContextTokens(
+  usage:
+    | {
+        inputTokens?: number;
+        outputTokens?: number;
+        totalTokens?: number;
+      }
+    | null
+    | undefined,
+): number | null {
+  const total = usage?.totalTokens;
+  if (typeof total === "number" && Number.isFinite(total) && total > 0) {
+    return total;
+  }
+  const input = usage?.inputTokens;
+  if (typeof input !== "number" || !Number.isFinite(input) || input <= 0) {
+    return null;
+  }
+  const output = usage?.outputTokens;
+  return input + (typeof output === "number" && Number.isFinite(output) && output > 0 ? output : 0);
+}
+
 /**
  * A provider call has already consumed tokens by the time its usage frame is
  * available. Losing the Codex credential lease at the renewal checkpoint must
@@ -565,12 +588,13 @@ export function historyRowsToAppend(
   // persistedHistoryCount to preserve the pre-compaction behaviour (contiguous
   // positions from 0) when callers do not pass an explicit next position.
   nextPosition: number = persistedHistoryCount,
+  toolOutputTruncationTokens?: number,
 ): {
   rows: Array<{ position: number; item: Record<string, unknown> }>;
   nextWatermark: number;
   nextPosition: number;
 } {
-  const sanitized = sanitizeHistoryItemsForModel(rawHistory).filter(
+  const sanitized = sanitizeHistoryItemsForModel(rawHistory, toolOutputTruncationTokens).filter(
     (item) => !isEphemeralInternalContext(item),
   );
   if (sanitized.length <= persistedHistoryCount) {
@@ -1366,6 +1390,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       | null = null;
     let turnStartedPublished = false;
     let stream: Awaited<ReturnType<OpenGeniRuntime["runStream"]>> | undefined;
+    // Reconciliation is declared before provider routing so every turn-end path
+    // can share one closure. It cannot run until `stream` exists, by which time
+    // this value has been rebound to the turn's resolved model policy.
+    let modelRunSettings: Settings = settings;
     const publishSandboxLifecycleEvents = async (sandbox: ResumedTurnSandbox): Promise<void> => {
       const established = sandbox.established;
       if (publish && established.origin && established.origin !== "resumed") {
@@ -1602,6 +1630,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             rawHistory as Array<Record<string, unknown>>,
             persistedHistoryCount,
             nextHistoryPosition,
+            modelRunSettings.modelToolOutputTruncationTokens,
           );
           const hasModelOrToolProgress = rows.some((row) =>
             isModelOrToolProgressHistoryItem(row.item),
@@ -1621,6 +1650,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               // runs, so this is the turn's effective account. The read path uses
               // it to strip cross-account reasoning.encrypted_content next turn.
               producerCodexCredentialId: effectiveCodexCredentialId,
+              modelToolOutputTruncationTokens: modelRunSettings.modelToolOutputTruncationTokens,
               items: rows,
             });
             if (!appended) {
@@ -2552,7 +2582,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // raw window, effective ceiling, and auto-compact limit are distinct live
       // catalog values and must reach pre-turn compaction, history guards, and
       // every model call together.
-      const modelRunSettings = resolvedModel
+      modelRunSettings = resolvedModel
         ? settingsWithResolvedModelContext(runSettings, resolvedModel.configured)
         : runSettings;
       // WORKSPACE MODEL POLICY — the authoritative hard gate. Runs immediately
@@ -2700,6 +2730,25 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 ...(promptCacheKey ? { promptCacheKey } : {}),
               });
 
+      const consumeFailedRequestedCompaction = async (failedTurnId: string): Promise<void> => {
+        const skipped = await recordSkippedContextCompaction(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: failedTurnId,
+          expectedExecutionGeneration: executionGeneration,
+          expectedAttemptId: input.attemptId,
+          reason: "summarization_failed",
+        });
+        if (!skipped.recorded) {
+          if (skipped.reason === "request_not_pending") return;
+          throw new TurnAttemptFencedError(
+            "turn attempt was fenced while consuming a failed context compaction request",
+          );
+        }
+        await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, skipped.events);
+      };
+
       if (turn.source === "compaction") {
         const persistentSessionSettings = {
           titleIsSet: Boolean(session.title?.trim()),
@@ -2725,25 +2774,30 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         );
         let outcome: Awaited<ReturnType<typeof maybeCompactContext>> | null = null;
         if (requested) {
-          outcome = await maybeCompactContext(
-            db,
-            modelRunSettings,
-            {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-              turnId: turn.id,
-              executionGeneration,
-              attemptId: input.attemptId,
-            },
-            session.lastInputTokens,
-            compactionSummarizerFor(compactionInstructions),
-            {
-              force: true,
-              clearRequestedCompaction: true,
-              trigger: "operator",
-            },
-          );
+          try {
+            outcome = await maybeCompactContext(
+              db,
+              modelRunSettings,
+              {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                turnId: turn.id,
+                executionGeneration,
+                attemptId: input.attemptId,
+              },
+              session.lastInputTokens,
+              compactionSummarizerFor(compactionInstructions),
+              {
+                force: true,
+                clearRequestedCompaction: true,
+                trigger: "operator",
+              },
+            );
+          } catch (error) {
+            await consumeFailedRequestedCompaction(turn.id);
+            throw error;
+          }
           if (outcome.events.length > 0) {
             if (outcome.compacted) {
               recordContextCompaction(observability, "operator");
@@ -3566,11 +3620,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // RunState verbatim and recovering attempts already compacted, if needed,
       // before the first attempt's model boundary.
       if (triggerType === "user.message" || triggerType === "system.update.delivered") {
+        let forced = false;
         try {
           // Operator /compact (the slash command) sets a durable request flag;
           // observe it without consuming it so a failed/stale attempt cannot
           // lose the request. The replacement transaction clears it on success.
-          const forced = await isSessionCompactionRequested(db, input.workspaceId, input.sessionId);
+          forced = await isSessionCompactionRequested(db, input.workspaceId, input.sessionId);
           const outcome = await maybeCompactContext(
             db,
             modelRunSettings,
@@ -3608,6 +3663,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             );
           }
         } catch (compactError) {
+          if (forced && turnId) {
+            await consumeFailedRequestedCompaction(turnId);
+          }
           observability.error("context compaction failed", {
             sessionId: input.sessionId,
             turnId,
@@ -3740,30 +3798,38 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         triggerLabel: "overflow" | "proactive" | "operator",
         recoverySignalTokens: number | null,
       ) => {
-        const outcome = await maybeCompactContext(
-          db,
-          modelRunSettings,
-          {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            turnId: activeTurnId,
-            executionGeneration,
-            attemptId: input.attemptId,
-          },
-          // Never reuse the persisted prior-turn signal for recovery. Proactive
-          // guards provide their exact current signal; provider overflows do not,
-          // so null derives decision metadata from active history. Forced
-          // recovery proves progress separately by comparing the replacement
-          // with the current active-history estimate in maybeCompactContext.
-          recoverySignalTokens,
-          compactSummarizer,
-          {
-            force: true,
-            ...(triggerLabel === "operator" ? { clearRequestedCompaction: true } : {}),
-            trigger: triggerLabel,
-          },
-        );
+        let outcome: Awaited<ReturnType<typeof maybeCompactContext>>;
+        try {
+          outcome = await maybeCompactContext(
+            db,
+            modelRunSettings,
+            {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              turnId: activeTurnId,
+              executionGeneration,
+              attemptId: input.attemptId,
+            },
+            // Never reuse the persisted prior-turn signal for recovery. Proactive
+            // guards provide their exact current signal; provider overflows do not,
+            // so null derives decision metadata from active history. Forced
+            // recovery proves progress separately by comparing the replacement
+            // with the current active-history estimate in maybeCompactContext.
+            recoverySignalTokens,
+            compactSummarizer,
+            {
+              force: true,
+              ...(triggerLabel === "operator" ? { clearRequestedCompaction: true } : {}),
+              trigger: triggerLabel,
+            },
+          );
+        } catch (error) {
+          if (triggerLabel === "operator") {
+            await consumeFailedRequestedCompaction(activeTurnId);
+          }
+          throw error;
+        }
         if (outcome.events.length > 0) {
           if (outcome.compacted) {
             recordContextCompaction(observability, triggerLabel);
@@ -3787,7 +3853,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         let responseUsageCount = 0;
         // Actual input tokens of the most recent model response this turn; the
         // pre-read trigger for the NEXT turn. Persisted at every turn-end path.
-        let lastInputTokensObserved: number | null = null;
+        let lastProviderContextTokensObserved: number | null = null;
+        let providerContextRevision = 0;
         throwIfWorkerShuttingDown();
         const ownedEstablished = resolvedSandbox?.established ?? lazyOwnedSandbox;
         const runStreamOnce = (): ReturnType<OpenGeniRuntime["runStream"]> =>
@@ -3831,7 +3898,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   },
                 }
               : {}),
-            contextCompactionSignalTokens: () => lastInputTokensObserved,
+            contextCompactionSignal: () =>
+              lastProviderContextTokensObserved === null
+                ? null
+                : {
+                    revision: providerContextRevision,
+                    totalTokens: lastProviderContextTokensObserved,
+                  },
             contextCompactionRequested: () =>
               isSessionCompactionRequested(db, input.workspaceId, input.sessionId),
           });
@@ -3915,7 +3988,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   const observed = responseUsage.usage?.inputTokens;
                   if (typeof observed === "number" && observed > 0) {
                     recordModelInputTokens(observability, streamProvider, observed);
-                    lastInputTokensObserved = observed;
+                  }
+                  const observedTotal = providerContextTokens(responseUsage.usage);
+                  if (observedTotal !== null) {
+                    lastProviderContextTokensObserved = observedTotal;
+                    providerContextRevision += 1;
                   }
                   // Prompt-cache efficiency for this response — same usage frame as the
                   // input-token accounting above, so the two are always consistent.
@@ -4043,7 +4120,17 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           const aggregateInput = (aggregateUsage as { inputTokens?: unknown } | undefined)
             ?.inputTokens;
           if (typeof aggregateInput === "number" && aggregateInput > 0) {
-            lastInputTokensObserved = aggregateInput;
+            const aggregateContext = providerContextTokens(
+              aggregateUsage as {
+                inputTokens?: number;
+                outputTokens?: number;
+                totalTokens?: number;
+              },
+            );
+            if (aggregateContext !== null) {
+              lastProviderContextTokensObserved = aggregateContext;
+              providerContextRevision += 1;
+            }
           }
           const aggregateSourceKey = modelUsageSourceKey({
             responseId: null,

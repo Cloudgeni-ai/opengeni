@@ -41,6 +41,7 @@ import {
   prepareRunInput,
   stripProviderItemIdsFilter,
   callModelInputFilterForSettings,
+  contextRobustnessFilterForSettings,
   prefixedMcpToolName,
   prepareAgentTools,
   runAzureCliLoginHook,
@@ -3934,6 +3935,151 @@ describe("provider item id stripping", () => {
 
     expect(clientOut.input).toEqual(input);
     expect(serverOut.input).toEqual(input);
+  });
+
+  test("callModelInputFilterForSettings bounds a multi-megabyte tool result before model input", async () => {
+    const filter = callModelInputFilterForSettings(testSettings())!;
+    const original = "x".repeat(2_000_000);
+    const input = [
+      { type: "function_call", callId: "huge-1", name: "sessions_list", arguments: "{}" },
+      {
+        type: "function_call_result",
+        callId: "huge-1",
+        output: { type: "text", text: original },
+      },
+    ] as any;
+    const result = await filter({
+      modelData: { input },
+      agent: {} as any,
+      context: undefined,
+    });
+    const text = ((result.input[1] as any).output as { text: string }).text;
+    expect(text).toContain("tokens truncated");
+    expect(Buffer.byteLength(text, "utf8")).toBeLessThan(50_000);
+    expect(((input[1] as any).output as { text: string }).text).toBe(original);
+  });
+
+  test("same-run provider totals add the complete trailing tool result before the next call", async () => {
+    let signal: { revision: number; totalTokens: number } | null = null;
+    const filter = contextRobustnessFilterForSettings(
+      testSettings({
+        contextWindowTokens: 20_000,
+        contextAutoCompactThresholdTokens: 10_000,
+      }),
+      {
+        throwOnCompactionNeeded: true,
+        contextCompactionSignal: () => signal,
+      },
+    );
+    const userOnly = [{ type: "message", role: "user", content: "start" }] as any;
+    await filter({
+      modelData: { input: userOnly, instructions: "system" },
+      agent: {} as any,
+      context: undefined,
+    });
+    signal = { revision: 1, totalTokens: 200 };
+    const next = [
+      ...userOnly,
+      { type: "function_call", callId: "c1", name: "sessions_list", arguments: "{}" },
+      { type: "function_call_result", callId: "c1", output: "x".repeat(48_000) },
+    ] as any;
+    try {
+      await filter({
+        modelData: { input: next, instructions: "system" },
+        agent: {} as any,
+        context: undefined,
+      });
+      throw new Error("expected complete trailing tool output to trigger compaction");
+    } catch (error) {
+      expect(error).toBeInstanceOf(CompactionNeededError);
+      expect((error as CompactionNeededError).signalSource).toBe("provider");
+      expect((error as CompactionNeededError).signalTokens).toBeGreaterThan(10_000);
+    }
+  });
+
+  test("a delayed provider usage signal cannot bind to a newer model request", async () => {
+    let signal: { revision: number; totalTokens: number } | null = null;
+    const filter = contextRobustnessFilterForSettings(
+      testSettings({
+        contextWindowTokens: 20_000,
+        contextAutoCompactThresholdTokens: 10_000,
+      }),
+      {
+        throwOnCompactionNeeded: true,
+        contextCompactionSignal: () => signal,
+      },
+    );
+    const first = [{ type: "message", role: "user", content: "start" }] as any;
+    await filter({
+      modelData: { input: first, instructions: "system" },
+      agent: {} as any,
+      context: undefined,
+    });
+    // The SDK can prepare request two before the stream consumer observes the
+    // usage frame for request one.
+    const second = [
+      ...first,
+      { type: "message", role: "assistant", content: "first response" },
+      { type: "message", role: "user", content: "continue" },
+    ] as any;
+    await filter({
+      modelData: { input: second, instructions: "system" },
+      agent: {} as any,
+      context: undefined,
+    });
+
+    signal = { revision: 1, totalTokens: 200 };
+    const third = [
+      ...second,
+      {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "x".repeat(48_000) }],
+      },
+      { type: "message", role: "user", content: "continue again" },
+    ] as any;
+    try {
+      await filter({
+        modelData: { input: third, instructions: "system" },
+        agent: {} as any,
+        context: undefined,
+      });
+      throw new Error("expected the complete estimate to trigger compaction");
+    } catch (error) {
+      expect(error).toBeInstanceOf(CompactionNeededError);
+      expect((error as CompactionNeededError).signalSource).toBe("estimate");
+      expect((error as CompactionNeededError).signalTokens).toBeGreaterThan(10_000);
+    }
+  });
+
+  test("first-call accounting includes instructions and tool schemas", async () => {
+    const filter = contextRobustnessFilterForSettings(
+      testSettings({
+        contextWindowTokens: 10_000,
+        contextAutoCompactThresholdTokens: 5_000,
+      }),
+      { throwOnCompactionNeeded: true },
+    );
+    const agent = {
+      tools: [
+        {
+          type: "function",
+          name: "large_schema",
+          description: "d".repeat(24_000),
+          parameters: { type: "object", properties: {} },
+        },
+      ],
+    } as any;
+    await expect(
+      filter({
+        modelData: {
+          input: [{ type: "message", role: "user", content: "small" }] as any,
+          instructions: "system",
+        },
+        agent,
+        context: undefined,
+      }),
+    ).rejects.toBeInstanceOf(CompactionNeededError);
   });
 
   test("callModelInputFilterForSettings observes an operator compaction request before each model call", async () => {
