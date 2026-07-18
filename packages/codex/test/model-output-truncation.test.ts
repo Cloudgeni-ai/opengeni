@@ -11,12 +11,20 @@ describe("Codex-parity model tool-output truncation", () => {
   });
 
   test("matches Codex's head/tail token marker", () => {
-    expect(
-      truncateMiddleWithTokenBudget(
-        "this is an example of a long output that should be truncated",
-        5,
-      ),
-    ).toBe("this is an…10 tokens truncated… truncated");
+    const bounded = truncateMiddleWithTokenBudget(
+      "this is an example of a long output that should be truncated",
+      5,
+    );
+    expect(bounded).toBe("this is an…10 tokens truncated… truncated");
+    expect(truncateMiddleWithTokenBudget(bounded, 5)).toBe(bounded);
+  });
+
+  test("does not mistake marker-like text in an oversized raw result for a bounded result", () => {
+    const raw = `prefix …999 tokens truncated… ${"x".repeat(100)}`;
+    expect(truncateMiddleWithTokenBudget(raw, 5)).not.toBe(raw);
+
+    const forgedMarker = `…${"9".repeat(500)} tokens truncated…`;
+    expect(truncateMiddleWithTokenBudget(forgedMarker, 5)).not.toBe(forgedMarker);
   });
 
   test("preserves UTF-8 boundaries", () => {
@@ -93,6 +101,7 @@ describe("Codex-parity model tool-output truncation", () => {
     expect(output[0]!.stdout).toContain("tokens truncated");
     expect(output[0]!.stderr).toContain("omitted text field");
     expect(output[0]!.outcome).toEqual({ type: "exit", exitCode: 0 });
+    expect(boundModelToolOutputItem(bounded, 5)).toEqual(bounded);
   });
 
   test("preserves MCP content discriminators while bounding nested text", () => {
