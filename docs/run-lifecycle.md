@@ -108,11 +108,26 @@ attempt. A typed schedule-to-start timeout is the only no-attempt recovery case
 because its activity never ran.
 
 Claim, interruption, and event-writing settlement share one lock order:
-workspace, then session, then exact turn, then exact attempt. Event inserts also touch the workspace through
-their foreign keys, so acquiring it later would reintroduce a claim/preemption
-deadlock. Start, requires-action, ordinary terminal, recoverable interruption,
+`workspace_inference_controls FOR SHARE` when the write is control-aware, then
+the actual `workspaces` row `FOR KEY SHARE`, UUID-ordered sessions `FOR UPDATE`,
+UUID-ordered exact turns `FOR UPDATE`, and UUID-ordered exact attempts
+`FOR UPDATE`. Generic audit/title appends skip the control row but use the same
+workspace-key-share prefix. Event inserts also touch the workspace through their
+foreign keys, so acquiring it later would reintroduce a claim/preemption
+deadlock; key-share rather than update keeps unrelated sessions in one workspace
+concurrent. Start, requires-action, ordinary terminal, recoverable interruption,
 supersession, and worker-death events commit
 with turn status, session status/pointer, and `lastSequence` in one transaction.
+
+After a reviewed release reaches staging, run the dry-by-default OPE-63 canary
+with `bun run canary:session-event-ordering`. Execution requires
+`OPENGENI_CANARY_EXECUTE=1`, the API base URL, workspace ID, and exactly one
+canary API credential. It creates one isolated `sandboxBackend=none` session on
+a `codex/*` subscription model, immediately writes a first-turn title through
+the normal API, and accepts only one model-usage event plus one successful
+terminal event on a unique contiguous durable sequence. The operator output is
+limited to safe IDs, event counts, sequences, and model name; credentials and
+event payloads are never printed.
 Pause closes the exact live attempt as `interrupted_recoverable` and leaves its
 logical turn `recovering`; Steer closes it as `superseded`, makes the steered
 human prompt first, and does not revive the old turn. A missing or already

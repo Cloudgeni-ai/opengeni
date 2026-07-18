@@ -6,6 +6,7 @@ import {
   interruptedToolCallResult,
   SandboxImageConflictError,
   SandboxLeaseSupersededError,
+  SessionEventPersistenceError,
 } from "@opengeni/db";
 import {
   CompactionProviderResponseError,
@@ -1137,6 +1138,41 @@ describe("escaped MCP transport timeout classifier", () => {
 // goal-continuation recovery instead of a terminal session.failed — the gap that
 // hard-failed a fleet of prod sessions during a provider degradation window.
 describe("transient provider error classifier", () => {
+  test("classifies nested database truth without retrying provider work or exposing SQL", () => {
+    const error = new SessionEventPersistenceError({
+      code: "db_deadlock",
+      sqlState: "40P01",
+      stage: "session_events.append_for_turn_attempt",
+      eventTypes: ["agent.model.usage"],
+      correlationId: "corr-safe",
+      attempts: 3,
+      retryOutcome: "exhausted",
+      database: {
+        table: "session_events",
+        constraint: "session_events_workspace_session_sequence_idx",
+      },
+    });
+    const payload = agentRunFailurePayload(error);
+    expect(payload).toEqual({
+      error:
+        "Database deadlock while persisting agent.model.usage. The completed provider call and external effects were not retried.",
+      code: "db_deadlock",
+      detail: "The idempotent persistence transaction failed after 3 attempts.",
+      correlationId: "corr-safe",
+      stage: "session_events.append_for_turn_attempt",
+      sqlState: "40P01",
+      attempts: 3,
+      retryOutcome: "exhausted",
+      database: {
+        table: "session_events",
+        constraint: "session_events_workspace_session_sequence_idx",
+      },
+    });
+    expect(payload.retryable).toBeUndefined();
+    expect(JSON.stringify(payload)).not.toContain("insert into");
+    expect(JSON.stringify(payload)).not.toContain("parameters");
+  });
+
   test("classifies 5xx status codes as transient (status is authoritative)", () => {
     for (const status of [500, 502, 503, 504, 529]) {
       const err = Object.assign(new Error("Service failure"), { status });

@@ -57,6 +57,7 @@ import {
   markSandboxFileResourcesMaterialized,
   SandboxLeaseSupersededError,
   SandboxImageConflictError,
+  isSessionEventPersistenceError,
   buildConnectionTokenResolver,
   getEnrollment,
   abandonRecordingForTurnAttempt,
@@ -5261,6 +5262,34 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // it after a pacing delay. This is independent of goal state and never
       // relies on a synthetic continuation prompt.
       const failure = agentRunFailurePayload(error);
+      if (isSessionEventPersistenceError(error)) {
+        // Never pass the original Drizzle/postgres-js error to telemetry: its
+        // nested cause may contain raw SQL and bound parameters. The typed DB
+        // boundary retains only SQLSTATE, stage, correlation, and safe catalog
+        // identifiers. Provider inference has already happened and is NOT
+        // retried by this terminal classification.
+        observability.error("session event persistence failed", {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId,
+          attemptId: input.attemptId,
+          code: error.details.code,
+          sqlState: error.details.sqlState,
+          stage: error.details.stage,
+          eventTypes: error.details.eventTypes.join(","),
+          correlationId: error.details.correlationId,
+          attempts: error.details.attempts,
+          retryOutcome: error.details.retryOutcome,
+          dbSeverity: error.details.database.severity,
+          dbSchema: error.details.database.schema,
+          dbTable: error.details.database.table,
+          dbColumn: error.details.database.column,
+          dbDataType: error.details.database.dataType,
+          dbConstraint: error.details.database.constraint,
+          dbRoutine: error.details.database.routine,
+        });
+      }
       if (failure.retryable && publish && turnId && turnStartedPublished) {
         const recoveryResult = providerRecoveryResult();
         await flushRuntimeBatcher();
@@ -5588,6 +5617,12 @@ export function agentRunFailurePayload(error: unknown): {
   code?: string;
   retryable?: boolean;
   detail?: string;
+  correlationId?: string;
+  stage?: string;
+  sqlState?: string;
+  attempts?: number;
+  retryOutcome?: string;
+  database?: Record<string, string>;
 } {
   const message = error instanceof Error ? error.message : String(error);
   const status =
@@ -5598,6 +5633,30 @@ export function agentRunFailurePayload(error: unknown): {
     typeof error === "object" && error !== null && "code" in error
       ? String((error as { code?: unknown }).code)
       : undefined;
+  if (isSessionEventPersistenceError(error)) {
+    const { details } = error;
+    const eventLabel = details.eventTypes.join(", ") || "session events";
+    const failureLabel =
+      details.code === "db_deadlock"
+        ? "Database deadlock"
+        : details.code === "db_serialization_failure"
+          ? "Database serialization failure"
+          : "Database failure";
+    return {
+      error: `${failureLabel} while persisting ${eventLabel}. The completed provider call and external effects were not retried.`,
+      code: details.code,
+      detail:
+        details.retryOutcome === "exhausted"
+          ? `The idempotent persistence transaction failed after ${details.attempts} attempts.`
+          : "The database rejected the idempotent persistence transaction.",
+      correlationId: details.correlationId,
+      stage: details.stage,
+      sqlState: details.sqlState,
+      attempts: details.attempts,
+      retryOutcome: details.retryOutcome,
+      ...(Object.keys(details.database).length > 0 ? { database: details.database } : {}),
+    };
+  }
   // A ChatGPT/Codex usage cap is a HARD limit, not transient backpressure: it
   // must NOT be reported as a generic, retryable rate-limit (which would loop a
   // goal against a capped backend). Surface a precise, actionable message with
