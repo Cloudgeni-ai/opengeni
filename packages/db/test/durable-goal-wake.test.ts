@@ -17,7 +17,6 @@ import {
   upsertSessionGoalWithEvent,
   withWorkspaceSubjectRls,
 } from "../src/index";
-import * as schema from "../src/schema";
 
 let shared: SharedTestDatabase;
 let client: ReturnType<typeof createDb>;

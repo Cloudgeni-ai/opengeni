@@ -37,7 +37,7 @@ describe("migration 0073 (durable goal wake)", () => {
     const admin = postgres(blank.databaseUrl, { max: 1 });
     try {
       const files = (await readdir(migrationsDir)).filter((file) => file.endsWith(".sql")).sort();
-      for (const file of files.filter((file) => file < "0073_")) {
+      for (const file of files.filter((candidate) => candidate < "0073_")) {
         await applyFile(admin, file);
       }
 
