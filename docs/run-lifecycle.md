@@ -205,6 +205,12 @@ human message or model polling. A dead worker may re-dispatch the same logical
 goal turn under a new fenced attempt, but cannot materialize or bill another
 continuation. The goal API projects scheduled/running/blocked/invariant-broken
 from one repeatable snapshot so UI state never guesses from `active` or `idle`.
+Agent `goal_update` is itself a revisioned command: its stable operation key is
+target-scoped across replacement attempts, while the receipt retains the
+original attempt for audit. Receipt/result, goal version, session-sequenced
+event, and mutation commit atomically. A lost response can therefore be
+reconciled from a recovered attempt without double-applying the update, and an
+old replay returns its stored result rather than overwriting newer goal truth.
 Full detail in `docs/goals.md`; goals are bounded by progress/budget guards, not
 counts.
 
