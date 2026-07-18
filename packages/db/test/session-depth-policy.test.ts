@@ -27,6 +27,7 @@ import {
   type SessionCreateResult,
   type SessionSpawnDenial,
 } from "../src/index";
+import { migrate } from "../src/migrate";
 
 const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../drizzle");
 
@@ -112,6 +113,65 @@ async function count(table: string, workspaceId: string): Promise<number> {
   const [row] = await admin<{ count: number }[]>`
     select count(*)::int as count from ${admin(table)} where workspace_id = ${workspaceId}`;
   return row?.count ?? 0;
+}
+
+async function sortedMigrationFiles(): Promise<string[]> {
+  return (await readdir(migrationsDir)).filter((file) => file.endsWith(".sql")).sort();
+}
+
+async function applyAndRecordMigration(sql: postgres.Sql, file: string): Promise<void> {
+  await sql.unsafe(await readFile(join(migrationsDir, file), "utf8"));
+  await sql`insert into schema_migrations (name) values (${file}) on conflict do nothing`;
+}
+
+async function prepareDatabaseThrough0064(sql: postgres.Sql): Promise<void> {
+  await sql.unsafe(
+    `create table if not exists schema_migrations (name text primary key, applied_at timestamptz not null default now())`,
+  );
+  for (const file of (await sortedMigrationFiles()).filter((candidate) => candidate < "0065_")) {
+    await applyAndRecordMigration(sql, file);
+  }
+}
+
+async function grantAppRoleForDepthPolicy(sql: postgres.Sql): Promise<void> {
+  await sql.unsafe(`
+    GRANT USAGE ON SCHEMA public, opengeni_private TO opengeni_app;
+    GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO opengeni_app;
+    GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA opengeni_private TO opengeni_app;
+    REVOKE INSERT, UPDATE, DELETE ON nested_agent_depth_configuration FROM opengeni_app;
+    GRANT SELECT ON nested_agent_depth_configuration TO opengeni_app;
+    REVOKE UPDATE, DELETE ON session_spawn_denials FROM opengeni_app;
+    GRANT SELECT, INSERT ON session_spawn_denials TO opengeni_app;
+    REVOKE ALL ON FUNCTION lock_nested_agent_depth_configuration() FROM PUBLIC;
+    GRANT EXECUTE ON FUNCTION lock_nested_agent_depth_configuration() TO opengeni_app;
+  `);
+}
+
+async function expectStillPending<T>(promise: Promise<T>): Promise<void> {
+  const state = await Promise.race([
+    promise.then(
+      () => "resolved" as const,
+      () => "rejected" as const,
+    ),
+    Bun.sleep(150).then(() => "pending" as const),
+  ]);
+  expect(state).toBe("pending");
+}
+
+async function expectPostgresCode(promise: Promise<unknown>, expectedCode: string): Promise<void> {
+  try {
+    await promise;
+  } catch (error) {
+    let current: unknown = error;
+    const seen = new Set<unknown>();
+    while (current && typeof current === "object" && !seen.has(current)) {
+      seen.add(current);
+      if ((current as { code?: unknown }).code === expectedCode) return;
+      current = (current as { cause?: unknown }).cause;
+    }
+    throw error;
+  }
+  throw new Error(`expected PostgreSQL SQLSTATE ${expectedCode}`);
 }
 
 const sessionCreateSideEffectTables = [
@@ -325,72 +385,158 @@ describe("nested agent depth policy (real PostgreSQL + FORCE RLS)", () => {
 
   test("uses workspace over deployment over default and serializes policy change with create", async () => {
     if (!available) return;
-    const workspace = await freshWorkspace("precedence");
-    await admin`
+    await migrate(shared!.adminUrl, undefined, { maxNestedAgentDepth: 5 });
+    try {
+      const workspace = await freshWorkspace("precedence");
+      await admin`
       update workspaces
       set settings = settings || '{"maxNestedAgentDepth": 2}'::jsonb
       where id = ${workspace.workspaceId}`;
-    const workspacePolicy = await createSession(
-      db,
-      sessionInput(workspace, "workspace-policy", { deploymentMaxNestedAgentDepth: 5 }),
-    );
-    expect(workspacePolicy.effectiveMaxNestedAgentDepth).toBe(2);
-    expect(workspacePolicy.nestedAgentDepthPolicySource).toBe("workspace");
-    const workspaceChild = await createSession(
-      db,
-      sessionInput(workspace, "workspace-child", {
-        parentSessionId: workspacePolicy.id,
-        deploymentMaxNestedAgentDepth: 5,
-      }),
-    );
-    expect(workspaceChild.effectiveMaxNestedAgentDepth).toBe(2);
-    expect(workspaceChild.nestedAgentDepthPolicySource).toBe("workspace");
+      const workspacePolicy = await createSession(
+        db,
+        sessionInput(workspace, "workspace-policy", { deploymentMaxNestedAgentDepth: 5 }),
+      );
+      expect(workspacePolicy.effectiveMaxNestedAgentDepth).toBe(2);
+      expect(workspacePolicy.nestedAgentDepthPolicySource).toBe("workspace");
+      const workspaceChild = await createSession(
+        db,
+        sessionInput(workspace, "workspace-child", {
+          parentSessionId: workspacePolicy.id,
+          deploymentMaxNestedAgentDepth: 5,
+        }),
+      );
+      expect(workspaceChild.effectiveMaxNestedAgentDepth).toBe(2);
+      expect(workspaceChild.nestedAgentDepthPolicySource).toBe("workspace");
 
-    await admin`
+      await admin`
       update workspaces
       set settings = settings - 'maxNestedAgentDepth'
       where id = ${workspace.workspaceId}`;
-    const reResolvedChild = await createSession(
-      db,
-      sessionInput(workspace, "re-resolved-child", {
-        parentSessionId: workspacePolicy.id,
-        deploymentMaxNestedAgentDepth: 5,
-      }),
-    );
-    expect(reResolvedChild.effectiveMaxNestedAgentDepth).toBe(5);
-    expect(reResolvedChild.nestedAgentDepthPolicySource).toBe("deployment");
-    const deploymentPolicy = await createSession(
-      db,
-      sessionInput(workspace, "deployment-policy", { deploymentMaxNestedAgentDepth: 5 }),
-    );
-    expect(deploymentPolicy.effectiveMaxNestedAgentDepth).toBe(5);
-    expect(deploymentPolicy.nestedAgentDepthPolicySource).toBe("deployment");
-    const defaultPolicy = await createSession(db, sessionInput(workspace, "default-policy"));
-    expect(defaultPolicy.effectiveMaxNestedAgentDepth).toBe(3);
-    expect(defaultPolicy.nestedAgentDepthPolicySource).toBe("default");
+      const reResolvedChild = await createSession(
+        db,
+        sessionInput(workspace, "re-resolved-child", {
+          parentSessionId: workspacePolicy.id,
+          deploymentMaxNestedAgentDepth: 5,
+        }),
+      );
+      expect(reResolvedChild.effectiveMaxNestedAgentDepth).toBe(5);
+      expect(reResolvedChild.nestedAgentDepthPolicySource).toBe("deployment");
+      const deploymentPolicy = await createSession(
+        db,
+        sessionInput(workspace, "deployment-policy", { deploymentMaxNestedAgentDepth: 5 }),
+      );
+      expect(deploymentPolicy.effectiveMaxNestedAgentDepth).toBe(5);
+      expect(deploymentPolicy.nestedAgentDepthPolicySource).toBe("deployment");
+      const blocker = postgres(shared!.adminUrl, { max: 1 });
+      try {
+        await blocker`begin`;
+        await blocker`
+          select workspace_id from workspace_inference_controls
+          where workspace_id = ${workspace.workspaceId} for update`;
+        const pending = createSession(
+          db,
+          sessionInput(workspace, "serialized-policy", { deploymentMaxNestedAgentDepth: 5 }),
+        );
+        await Bun.sleep(100);
+        await blocker`
+          update workspaces
+          set settings = settings || '{"maxNestedAgentDepth": 1}'::jsonb
+          where id = ${workspace.workspaceId}`;
+        await blocker`commit`;
+        const serialized = await pending;
+        expect(serialized.effectiveMaxNestedAgentDepth).toBe(1);
+        expect(serialized.nestedAgentDepthPolicySource).toBe("workspace");
+      } finally {
+        await blocker`rollback`.catch(() => undefined);
+        await blocker.end();
+      }
+      await migrate(shared!.adminUrl, undefined, {});
+      const defaultWorkspace = await freshWorkspace("default-precedence");
+      const defaultPolicy = await createSession(
+        db,
+        sessionInput(defaultWorkspace, "default-policy"),
+      );
+      expect(defaultPolicy.effectiveMaxNestedAgentDepth).toBe(3);
+      expect(defaultPolicy.nestedAgentDepthPolicySource).toBe("default");
+    } finally {
+      await migrate(shared!.adminUrl, undefined, {});
+    }
+  }, 60_000);
 
+  test("serializes an old-shape workspace policy writer through the inference-control row", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace("old-settings-writer");
     const blocker = postgres(shared!.adminUrl, { max: 1 });
+    const writer = postgres(shared!.adminUrl, { max: 1 });
     try {
       await blocker`begin`;
       await blocker`
         select workspace_id from workspace_inference_controls
-        where workspace_id = ${workspace.workspaceId} for update`;
-      const pending = createSession(
-        db,
-        sessionInput(workspace, "serialized-policy", { deploymentMaxNestedAgentDepth: 5 }),
-      );
-      await Bun.sleep(100);
-      await blocker`
+        where workspace_id = ${workspace.workspaceId} for share`;
+      await writer`begin`;
+      const pendingWrite = writer`
         update workspaces
-        set settings = settings || '{"maxNestedAgentDepth": 1}'::jsonb
+        set settings = settings || '{"maxNestedAgentDepth":1}'::jsonb
         where id = ${workspace.workspaceId}`;
+      await expectStillPending(pendingWrite);
       await blocker`commit`;
-      const serialized = await pending;
-      expect(serialized.effectiveMaxNestedAgentDepth).toBe(1);
-      expect(serialized.nestedAgentDepthPolicySource).toBe("workspace");
+      expect((await pendingWrite).count).toBe(1);
+      await writer`commit`;
+
+      const [row] = await admin<{ limit: number }[]>`
+        select (settings ->> 'maxNestedAgentDepth')::int as limit
+        from workspaces where id = ${workspace.workspaceId}`;
+      expect(row?.limit).toBe(1);
     } finally {
       await blocker`rollback`.catch(() => undefined);
+      await writer`rollback`.catch(() => undefined);
       await blocker.end();
+      await writer.end();
+    }
+  }, 60_000);
+
+  test("keeps the app role mutation-free while deployment policy reconciliation waits for its share lock", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace("deployment-policy-lock");
+    const app = postgres(shared!.appUrl, { max: 1 });
+    try {
+      const [privileges] = await admin<
+        Array<{ tableUpdate: boolean; denialDelete: boolean; functionExecute: boolean }>
+      >`
+        select
+          has_table_privilege('opengeni_app', 'nested_agent_depth_configuration', 'UPDATE')
+            as "tableUpdate",
+          has_table_privilege('opengeni_app', 'session_spawn_denials', 'DELETE')
+            as "denialDelete",
+          has_function_privilege(
+            'opengeni_app', 'lock_nested_agent_depth_configuration()', 'EXECUTE'
+          ) as "functionExecute"`;
+      expect(privileges).toEqual({
+        tableUpdate: false,
+        denialDelete: false,
+        functionExecute: true,
+      });
+
+      await app`begin`;
+      await app`select set_config('opengeni.account_id', ${workspace.accountId}, true)`;
+      await app`select set_config('opengeni.workspace_id', ${workspace.workspaceId}, true)`;
+      const [locked] = await app<
+        Array<{ max_nested_agent_depth: number; policy_source: string }>
+      >`select * from lock_nested_agent_depth_configuration()`;
+      expect(locked).toMatchObject({ max_nested_agent_depth: 3, policy_source: "default" });
+
+      const reconciliation = migrate(shared!.adminUrl, undefined, { maxNestedAgentDepth: 4 });
+      await expectStillPending(reconciliation);
+      await app`commit`;
+      await reconciliation;
+      const [updated] = await admin<
+        Array<{ max_nested_agent_depth: number; policy_source: string }>
+      >`select max_nested_agent_depth, policy_source from nested_agent_depth_configuration`;
+      expect(updated).toEqual({ max_nested_agent_depth: 4, policy_source: "deployment" });
+    } finally {
+      await app`rollback`.catch(() => undefined);
+      await app.end();
+      await migrate(shared!.adminUrl, undefined, {});
     }
   }, 60_000);
 
@@ -503,34 +649,51 @@ describe("nested agent depth policy (real PostgreSQL + FORCE RLS)", () => {
     );
   }, 60_000);
 
-  test("fails closed for old nested inserts and makes denial evidence append-only", async () => {
+  test("keeps eligible old-shape inserts available, rejects old depth4 atomically, and keeps denials append-only", async () => {
     if (!available) return;
     const workspace = await freshWorkspace("rolling-and-immutable");
-    const parent = await createSession(db, sessionInput(workspace, "parent"));
+    const ids = Array.from({ length: 5 }, () => crypto.randomUUID());
 
-    await expect(
-      withWorkspaceRls(db, workspace.workspaceId, async (scopedDb) => {
-        const childId = crypto.randomUUID();
+    for (let depth = 0; depth < 4; depth += 1) {
+      await withWorkspaceRls(db, workspace.workspaceId, async (scopedDb) => {
         await scopedDb.execute(dbSql`
           insert into sessions (
             id, account_id, workspace_id, parent_session_id, initial_message,
             model, sandbox_backend, sandbox_group_id
           ) values (
-            ${childId}, ${workspace.accountId}, ${workspace.workspaceId}, ${parent.id},
-            'old binary child', 'test', 'none', ${childId}
+            ${ids[depth]!}, ${workspace.accountId}, ${workspace.workspaceId},
+            ${depth === 0 ? null : ids[depth - 1]!}, ${`old binary depth ${depth}`},
+            'test', 'none', ${ids[depth]!}
+          )
+        `);
+      });
+      expect((await getSession(db, workspace.workspaceId, ids[depth]!))?.nestedAgentDepth).toBe(
+        depth,
+      );
+    }
+    expect(await count("sessions", workspace.workspaceId)).toBe(4);
+
+    await expectPostgresCode(
+      withWorkspaceRls(db, workspace.workspaceId, async (scopedDb) => {
+        await scopedDb.execute(dbSql`
+          insert into sessions (
+            id, account_id, workspace_id, parent_session_id, initial_message,
+            model, sandbox_backend, sandbox_group_id
+          ) values (
+            ${ids[4]!}, ${workspace.accountId}, ${workspace.workspaceId}, ${ids[3]!},
+            'old binary depth 4', 'test', 'none', ${ids[4]!}
           )
         `);
       }),
-    ).rejects.toThrow();
-    expect(await count("sessions", workspace.workspaceId)).toBe(1);
+      "23514",
+    );
+    expect(await count("sessions", workspace.workspaceId)).toBe(4);
 
-    const descendants = await chain(workspace, 3);
     const outcome = await createSessionWithIdempotencyKey(
       db,
       sessionInput(workspace, "append-only denial", {
-        parentSessionId: descendants[2]!.id,
+        parentSessionId: ids[3]!,
         createIdempotencyKey: "append-only",
-        maxNestedAgentDepthOverride: 2,
       }),
     );
     const denial = deniedSpawn(outcome);
@@ -556,21 +719,73 @@ describe("nested agent depth policy (real PostgreSQL + FORCE RLS)", () => {
     });
   }, 60_000);
 
-  test("backfills a genuine 0064 deep tree before enforcing 0065", async () => {
+  test("rejects every application-role lineage/policy mutation and a referenced root deletion", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace("immutable-snapshot");
+    const [root, child] = await chain(workspace, 2);
+    const mutations = [
+      dbSql`update sessions set parent_session_id = null where workspace_id = ${workspace.workspaceId} and id = ${child!.id}`,
+      dbSql`update sessions set root_session_id = ${child!.id} where workspace_id = ${workspace.workspaceId} and id = ${child!.id}`,
+      dbSql`update sessions set nested_agent_depth = 2 where workspace_id = ${workspace.workspaceId} and id = ${child!.id}`,
+      dbSql`update sessions set max_nested_agent_depth_override = 1 where workspace_id = ${workspace.workspaceId} and id = ${child!.id}`,
+      dbSql`update sessions set effective_max_nested_agent_depth = 2 where workspace_id = ${workspace.workspaceId} and id = ${child!.id}`,
+      dbSql`update sessions set nested_agent_depth_policy_source = 'workspace' where workspace_id = ${workspace.workspaceId} and id = ${child!.id}`,
+      dbSql`update sessions set nested_agent_depth_policy_session_id = ${root!.id} where workspace_id = ${workspace.workspaceId} and id = ${child!.id}`,
+    ];
+    for (const mutation of mutations) {
+      await expectPostgresCode(
+        withWorkspaceRls(db, workspace.workspaceId, async (scopedDb) => {
+          await scopedDb.execute(mutation);
+        }),
+        "55000",
+      );
+    }
+
+    await expect(
+      withWorkspaceRls(db, workspace.workspaceId, async (scopedDb) => {
+        await scopedDb.transaction(async (tx) => {
+          await tx.execute(
+            dbSql`delete from sessions where workspace_id = ${workspace.workspaceId} and id = ${root!.id}`,
+          );
+        });
+      }),
+    ).rejects.toThrow();
+    expect(await count("sessions", workspace.workspaceId)).toBe(2);
+  }, 60_000);
+
+  test("allows a whole-workspace cascade across the session tree and denial evidence", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace("workspace-cascade");
+    const sessions = await chain(workspace, 4);
+    const denial = await createSessionWithIdempotencyKey(
+      db,
+      sessionInput(workspace, "cascade denial", {
+        parentSessionId: sessions[3]!.id,
+        createIdempotencyKey: "cascade-denial",
+      }),
+    );
+    expect(denial.denied).toBe(true);
+
+    await admin`delete from workspaces where id = ${workspace.workspaceId}`;
+    expect(await count("sessions", workspace.workspaceId)).toBe(0);
+    expect(await count("session_spawn_denials", workspace.workspaceId)).toBe(0);
+  }, 60_000);
+
+  test("backfills a genuine 0064 deep tree through the phased migration runner", async () => {
     if (!available) return;
     const blank = await acquireBlankTestDatabase("session-depth-policy-backfill");
     if (!blank) throw new Error("real PostgreSQL is required for migration backfill proof");
     const sql = postgres(blank.databaseUrl, { max: 1 });
     try {
-      const files = (await readdir(migrationsDir)).filter((file) => file.endsWith(".sql")).sort();
-      for (const file of files.filter((candidate) => candidate < "0065_")) {
-        await sql.unsafe(await readFile(join(migrationsDir, file), "utf8"));
-      }
+      await prepareDatabaseThrough0064(sql);
       const [{ id: accountId } = { id: "" }] = await sql<{ id: string }[]>`
         insert into managed_accounts (name) values ('0065 backfill') returning id`;
       const [{ id: workspaceId } = { id: "" }] = await sql<{ id: string }[]>`
         insert into workspaces (account_id, name, settings)
         values (${accountId}, '0065 backfill', '{"maxNestedAgentDepth":2}') returning id`;
+      await sql`
+        insert into workspace_inference_controls (workspace_id, account_id)
+        values (${workspaceId}, ${accountId}) on conflict do nothing`;
       const ids = Array.from({ length: 5 }, () => crypto.randomUUID());
       for (let depth = 0; depth < ids.length; depth += 1) {
         await sql`
@@ -582,9 +797,7 @@ describe("nested agent depth policy (real PostgreSQL + FORCE RLS)", () => {
             ${`legacy depth ${depth}`}, 'test', 'none', ${ids[0]!}
           )`;
       }
-      await sql.unsafe(
-        await readFile(join(migrationsDir, "0065_nested_agent_depth_policy.sql"), "utf8"),
-      );
+      await migrate(blank.databaseUrl, undefined, { maxNestedAgentDepth: 3 });
       const rows = await sql<
         Array<{
           id: string;
@@ -608,7 +821,163 @@ describe("nested agent depth policy (real PostgreSQL + FORCE RLS)", () => {
           nested_agent_depth_policy_source: "workspace",
         });
       }
+      const phasedFiles = (await sortedMigrationFiles()).filter(
+        (file) => file >= "0065_" && file <= "0072_zzzz",
+      );
+      const applied = await sql<{ name: string }[]>`
+        select name from schema_migrations
+        where name >= '0065_' and name <= '0072_zzzz' order by name`;
+      expect(applied.map((row) => row.name)).toEqual(phasedFiles);
+      const [contract] = await sql<Array<{ validatedConstraints: number; validIndex: boolean }>>`
+        select
+          count(*) filter (where convalidated)::int as "validatedConstraints",
+          coalesce((
+            select indisvalid from pg_index
+            where indexrelid = 'sessions_workspace_root_depth_idx'::regclass
+          ), false) as "validIndex"
+        from pg_constraint
+        where conname in (
+          'sessions_nested_agent_depth_check',
+          'sessions_nested_agent_policy_source_check',
+          'sessions_nested_agent_policy_session_check',
+          'sessions_nested_agent_override_check',
+          'sessions_workspace_parent_fk',
+          'sessions_workspace_root_session_fk',
+          'sessions_workspace_policy_session_fk'
+        )`;
+      expect(contract).toEqual({ validatedConstraints: 7, validIndex: true });
     } finally {
+      await sql.end().catch(() => undefined);
+      await blank.release();
+    }
+  }, 180_000);
+
+  test("commits bounded backfill batches while old-shape root and child writes remain available", async () => {
+    if (!available) return;
+    const blank = await acquireBlankTestDatabase("session-depth-policy-batched-backfill");
+    if (!blank) throw new Error("real PostgreSQL is required for batched backfill proof");
+    const sql = postgres(blank.databaseUrl, { max: 1 });
+    const observer = postgres(blank.databaseUrl, { max: 1 });
+    const oldWriter = postgres(blank.databaseUrl, { max: 1 });
+    let migration: Promise<void> | undefined;
+    try {
+      await prepareDatabaseThrough0064(sql);
+      const [{ id: accountId } = { id: "" }] = await sql<{ id: string }[]>`
+        insert into managed_accounts (name) values ('bounded backfill') returning id`;
+      const [{ id: workspaceId } = { id: "" }] = await sql<{ id: string }[]>`
+        insert into workspaces (account_id, name)
+        values (${accountId}, 'bounded backfill') returning id`;
+      await sql`
+        insert into workspace_inference_controls (workspace_id, account_id)
+        values (${workspaceId}, ${accountId}) on conflict do nothing`;
+
+      const legacyRoots = Array.from({ length: 2_500 }, (_, index) => ({
+        id: crypto.randomUUID(),
+        account_id: accountId,
+        workspace_id: workspaceId,
+        initial_message: `legacy root ${index}`,
+        model: "test",
+        sandbox_backend: "none",
+      }));
+      for (let offset = 0; offset < legacyRoots.length; offset += 500) {
+        const batch = legacyRoots.slice(offset, offset + 500);
+        await sql`
+          insert into sessions (
+            id, account_id, workspace_id, initial_message, model,
+            sandbox_backend, sandbox_group_id
+          )
+          select id::uuid, account_id::uuid, workspace_id::uuid, initial_message,
+                 model, sandbox_backend, id::uuid
+          from jsonb_to_recordset(${sql.json(batch)}::jsonb) as input(
+            id text, account_id text, workspace_id text, initial_message text,
+            model text, sandbox_backend text
+          )`;
+      }
+
+      await sql`select set_config('opengeni.max_nested_agent_depth', '3', false)`;
+      await sql`select set_config('opengeni.nested_agent_depth_policy_source', 'default', false)`;
+      await applyAndRecordMigration(sql, "0065_nested_agent_depth_expand.sql");
+      await applyAndRecordMigration(sql, "0066_nested_agent_depth_boundary.sql");
+      await grantAppRoleForDepthPolicy(sql);
+      await sql.unsafe(`
+        CREATE FUNCTION slow_nested_agent_backfill() RETURNS trigger
+        LANGUAGE plpgsql AS $$
+        BEGIN
+          PERFORM pg_sleep(0.002);
+          RETURN NEW;
+        END $$;
+        CREATE TRIGGER slow_nested_agent_backfill
+        BEFORE UPDATE OF root_session_id ON sessions
+        FOR EACH ROW
+        WHEN (OLD.root_session_id IS NULL AND NEW.root_session_id IS NOT NULL)
+        EXECUTE FUNCTION slow_nested_agent_backfill();
+      `);
+
+      migration = migrate(blank.databaseUrl, undefined, { maxNestedAgentDepth: 3 });
+      void migration.catch(() => undefined);
+      const deadline = Date.now() + 30_000;
+      let committed = 0;
+      while (Date.now() < deadline) {
+        const [row] = await observer<{ count: number }[]>`
+          select count(*)::int as count from sessions
+          where workspace_id = ${workspaceId} and root_session_id is not null`;
+        committed = row?.count ?? 0;
+        if (committed >= 1_000 && committed < 2_500) break;
+        await Bun.sleep(50);
+      }
+      expect(committed).toBeGreaterThanOrEqual(1_000);
+      expect(committed).toBeLessThan(2_500);
+
+      const oldRootId = crypto.randomUUID();
+      const oldChildId = crypto.randomUUID();
+      await oldWriter`begin`;
+      await oldWriter.unsafe("set local role opengeni_app");
+      await oldWriter`select set_config('opengeni.account_id', ${accountId}, true)`;
+      await oldWriter`select set_config('opengeni.workspace_id', ${workspaceId}, true)`;
+      await oldWriter`
+        insert into sessions (
+          id, account_id, workspace_id, initial_message, model,
+          sandbox_backend, sandbox_group_id
+        ) values (
+          ${oldRootId}, ${accountId}, ${workspaceId}, 'old root during backfill',
+          'test', 'none', ${oldRootId}
+        )`;
+      await oldWriter`
+        insert into sessions (
+          id, account_id, workspace_id, parent_session_id, initial_message, model,
+          sandbox_backend, sandbox_group_id
+        ) values (
+          ${oldChildId}, ${accountId}, ${workspaceId}, ${oldRootId},
+          'old child during backfill', 'test', 'none', ${oldChildId}
+        )`;
+      await oldWriter`commit`;
+      await expectStillPending(migration);
+      await migration;
+
+      const [finalState] = await observer<
+        Array<{ total: number; incomplete: number; childDepth: number; migrations: number }>
+      >`
+        select
+          count(*)::int as total,
+          count(*) filter (
+            where root_session_id is null or nested_agent_depth is null
+              or effective_max_nested_agent_depth is null
+              or nested_agent_depth_policy_source is null
+          )::int as incomplete,
+          max(nested_agent_depth) filter (where id = ${oldChildId})::int as "childDepth",
+          (select count(*)::int from schema_migrations
+            where name >= '0065_' and name <= '0072_zzzz') as migrations
+        from sessions where workspace_id = ${workspaceId}`;
+      expect(finalState).toEqual({ total: 2_502, incomplete: 0, childDepth: 1, migrations: 8 });
+      const [index] = await observer<{ valid: boolean }[]>`
+        select indisvalid as valid from pg_index
+        where indexrelid = 'sessions_workspace_root_depth_idx'::regclass`;
+      expect(index?.valid).toBe(true);
+    } finally {
+      await oldWriter`rollback`.catch(() => undefined);
+      await migration?.catch(() => undefined);
+      await oldWriter.end().catch(() => undefined);
+      await observer.end().catch(() => undefined);
       await sql.end().catch(() => undefined);
       await blank.release();
     }

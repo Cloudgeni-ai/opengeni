@@ -171,6 +171,10 @@ BEGIN
       EXECUTE format('REVOKE INSERT, UPDATE, DELETE ON %I.nested_agent_depth_configuration FROM %I', ${literal(schema)}, ${literal(role)});
       EXECUTE format('GRANT SELECT ON %I.nested_agent_depth_configuration TO %I', ${literal(schema)}, ${literal(role)});
     END IF;
+    IF to_regprocedure(format('%I.lock_nested_agent_depth_configuration()', ${literal(schema)})) IS NOT NULL THEN
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.lock_nested_agent_depth_configuration() FROM PUBLIC', ${literal(schema)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.lock_nested_agent_depth_configuration() TO %I', ${literal(schema)}, ${literal(role)});
+    END IF;
     IF to_regclass(format('%I.session_spawn_denials', ${literal(schema)})) IS NOT NULL THEN
       EXECUTE format('REVOKE UPDATE, DELETE ON %I.session_spawn_denials FROM %I', ${literal(schema)}, ${literal(role)});
       EXECUTE format('GRANT SELECT, INSERT ON %I.session_spawn_denials TO %I', ${literal(schema)}, ${literal(role)});

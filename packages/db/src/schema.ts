@@ -80,8 +80,9 @@ export const workspaces = pgTable(
 
 // One non-secret, target-schema-local deployment fallback. migrate.ts seeds
 // and reconciles this row from OPENGENI_MAX_NESTED_AGENT_DEPTH; session creates
-// read it under FOR SHARE so mixed old/new binaries and the DB trigger resolve
-// exactly the same policy. The application role has SELECT only.
+// lock/read it through a narrow SECURITY DEFINER function so mixed old/new
+// binaries and the DB trigger resolve exactly the same policy. The application
+// role has SELECT only on the table and cannot mutate the persisted fallback.
 export const nestedAgentDepthConfiguration = pgTable(
   "nested_agent_depth_configuration",
   {
@@ -91,7 +92,10 @@ export const nestedAgentDepthConfiguration = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
-    singletonOnly: check("nested_agent_depth_configuration_singleton_check", table.singleton),
+    singletonOnly: check(
+      "nested_agent_depth_configuration_singleton_check",
+      sql`${table.singleton}`,
+    ),
     nonNegative: check(
       "nested_agent_depth_configuration_max_check",
       sql`${table.maxNestedAgentDepth} >= 0`,

@@ -42,8 +42,12 @@ export class SessionSpawnDeniedError extends OpenGeniApiError {
 /** Construct the most specific validated API error for a response body. */
 export function createOpenGeniApiError(status: number, body: string): OpenGeniApiError {
   const parsed = parseErrorEnvelope(body);
-  const denial = status === 409 ? parseSessionSpawnDenial(parsed?.details?.["denial"]) : null;
-  if (denial && parsed?.code === denial.code) {
+  const denial =
+    status === 403 || status === 409 ? parseSessionSpawnDenial(parsed?.details?.["denial"]) : null;
+  const statusMatchesCode =
+    (status === 409 && denial?.code === "nested_agent_depth_exceeded") ||
+    (status === 403 && denial?.code === "nested_agent_depth_override_forbidden");
+  if (denial && parsed?.code === denial.code && statusMatchesCode) {
     return new SessionSpawnDeniedError(status, body, denial);
   }
   return new OpenGeniApiError(status, body);
@@ -75,8 +79,7 @@ function parseSessionSpawnDenial(value: unknown): SessionSpawnDenial | null {
   const code = value["code"];
   const policySource = value["policySource"];
   if (
-    (code !== "nested_agent_depth_exceeded" &&
-      code !== "nested_agent_depth_override_forbidden") ||
+    (code !== "nested_agent_depth_exceeded" && code !== "nested_agent_depth_override_forbidden") ||
     (policySource !== "session" &&
       policySource !== "workspace" &&
       policySource !== "deployment" &&

@@ -160,6 +160,43 @@ BEGIN
 END
 $function$;
 
+-- SELECT ... FOR SHARE requires UPDATE privilege on the locked relation. Keep
+-- the application role read-only on the deployment singleton and expose only
+-- this target-schema-local lock/read capability instead. The fully-qualified
+-- function body is frozen at migration time so dedicated schemas cannot read or
+-- lock another embedded OpenGeni installation's policy row.
+DO $configuration_lock_function$
+DECLARE
+  target_schema text := current_schema();
+  function_body text;
+BEGIN
+  function_body := format(
+    'SELECT "max_nested_agent_depth", "policy_source" '
+      'FROM %I."nested_agent_depth_configuration" '
+      'WHERE "singleton" FOR SHARE',
+    target_schema
+  );
+  EXECUTE format($ddl$
+    CREATE OR REPLACE FUNCTION %I."lock_nested_agent_depth_configuration"()
+    RETURNS TABLE ("max_nested_agent_depth" integer, "policy_source" text)
+    LANGUAGE sql
+    SECURITY DEFINER
+    SET search_path = pg_catalog
+    AS %L
+  $ddl$, target_schema, function_body);
+  EXECUTE format(
+    'REVOKE ALL ON FUNCTION %I."lock_nested_agent_depth_configuration"() FROM PUBLIC',
+    target_schema
+  );
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
+    EXECUTE format(
+      'GRANT EXECUTE ON FUNCTION %I."lock_nested_agent_depth_configuration"() '
+        'TO opengeni_app',
+      target_schema
+    );
+  END IF;
+END $configuration_lock_function$;
+
 CREATE OR REPLACE FUNCTION opengeni_private.session_depth_policy_defaults()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -219,8 +256,7 @@ BEGIN
 
   EXECUTE format(
     'SELECT "max_nested_agent_depth", "policy_source" '
-      'FROM %I."nested_agent_depth_configuration" '
-      'WHERE "singleton" FOR SHARE',
+      'FROM %I."lock_nested_agent_depth_configuration"()',
     TG_TABLE_SCHEMA
   ) INTO deployment_configured, deployment_source;
   IF deployment_configured IS NULL THEN

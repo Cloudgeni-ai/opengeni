@@ -72,7 +72,22 @@ async function executeMigrationFile(
     return;
   }
 
-  const statement = lines.slice(directiveIndex + 1).join("\n").trim();
+  const statementLines = lines.slice(directiveIndex + 1);
+  // Human-readable comments may explain the one validated operation, but they
+  // are not part of the statement shape. Strip only leading ordinary comments;
+  // a second OpenGeni directive is always an error rather than an escape hatch.
+  while (
+    statementLines.length > 0 &&
+    (statementLines[0]!.trim() === "" ||
+      (statementLines[0]!.trim().startsWith("--") &&
+        !statementLines[0]!.trim().startsWith("-- opengeni:")))
+  ) {
+    statementLines.shift();
+  }
+  if (statementLines.some((line) => line.trim().startsWith("-- opengeni:"))) {
+    throw new Error(`Unsupported additional OpenGeni migration directive in ${file}`);
+  }
+  const statement = statementLines.join("\n").trim();
   const withoutTrailingSemicolon = statement.endsWith(";")
     ? statement.slice(0, -1).trimEnd()
     : statement;
@@ -126,7 +141,9 @@ async function executeMigrationFile(
   }
 }
 
-function deploymentDepthPolicy(options: MigrationRuntimeOptions | undefined): DeploymentDepthPolicy {
+function deploymentDepthPolicy(
+  options: MigrationRuntimeOptions | undefined,
+): DeploymentDepthPolicy {
   const configured =
     options === undefined
       ? process.env.OPENGENI_MAX_NESTED_AGENT_DEPTH?.trim() || undefined

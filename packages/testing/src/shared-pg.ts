@@ -263,6 +263,12 @@ async function ensureTemplateBuilt(): Promise<void> {
       GRANT USAGE ON SCHEMA opengeni_private TO opengeni_app;
       GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO opengeni_app;
       GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA opengeni_private TO opengeni_app;
+      REVOKE INSERT, UPDATE, DELETE ON nested_agent_depth_configuration FROM opengeni_app;
+      GRANT SELECT ON nested_agent_depth_configuration TO opengeni_app;
+      REVOKE UPDATE, DELETE ON session_spawn_denials FROM opengeni_app;
+      GRANT SELECT, INSERT ON session_spawn_denials TO opengeni_app;
+      REVOKE ALL ON FUNCTION lock_nested_agent_depth_configuration() FROM PUBLIC;
+      GRANT EXECUTE ON FUNCTION lock_nested_agent_depth_configuration() TO opengeni_app;
     `);
   } finally {
     await grantsSql.end().catch(() => undefined);

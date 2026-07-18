@@ -32,6 +32,10 @@ Every session persists and exposes:
 - `nestedAgentDepthPolicySessionId`, which identifies the session whose
   explicit policy is inherited.
 
+These lineage and policy-snapshot fields are immutable after creation. The
+application role cannot rewrite a session into another tree or retroactively
+change the policy under which it was admitted.
+
 An explicit session policy is inherited by all future descendants until an
 authorized descendant supplies another explicit override. Without an inherited
 session policy, each creation re-resolves the current workspace policy while
@@ -69,6 +73,15 @@ denied attempts. Concurrent/retried denied calls return the same denial id.
 When a successful session already owns the key, that session remains the
 winner. These rules are resolved under the same creation lock, so a retry
 cannot turn one logical denied create into multiple audit rows or partial work.
+
+The production migration is rolling-safe expand/backfill/contract work. It adds
+nullable fields first, installs a mixed-version insert trigger so eligible old
+binaries continue creating root and nested sessions, backfills committed batches
+under bounded locks, validates constraints separately, makes the snapshot
+immutable/non-null, validates deferred self-references, and builds the tree index
+concurrently. A genuinely over-depth insert from an old binary still fails
+atomically. Workspace deletion remains a valid cascade over the entire session
+tree and its denial evidence; deleting only a referenced root does not.
 
 ## Existing trees, Pause, and budgets
 
