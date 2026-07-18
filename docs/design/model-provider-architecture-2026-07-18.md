@@ -11,6 +11,9 @@
 - **Baseline:** `a906a06881036b7d005ab33940f5ec6c91938482`
 - **Issue:** Linear OPE-12
 - **Owner:** OPE-12 Model Provider Architecture
+- **Review:** Independent Sol/xhigh review of `7a86fb08909045e79207193a8f97d88afaa021f5`
+  requested changes; this revision addresses those findings and still requires
+  exact-head approval before implementation
 
 ## Context
 
@@ -98,25 +101,33 @@ but it must preserve these fields and meanings:
 ```ts
 type ModelDefinitionV1 = {
   schemaVersion: 1;
-  id: string;                     // stable canonical product id
-  aliases: string[];              // explicit accepted input ids; never fallback
+  id: string; // stable canonical product id
+  aliases: string[]; // explicit accepted input ids; never fallback
   label: string;
   providerId: string;
   deployment: ModelDeploymentV1;
+  executionLimits: ModelExecutionLimitsV1;
   credentialSource: CredentialSourceV1;
   billing: BillingAttributionV1;
   capabilities: ModelCapabilitiesV1;
   pricing?: ModelPricingScheduleV1;
-  definitionVersion: string;      // deterministic digest of executable fields
+  definitionVersion: string; // deterministic digest of executable fields
 };
 
 type ModelDeploymentV1 = {
-  upstreamModelId: string;        // exact slug/deployment sent to the provider
+  upstreamModelId: string; // exact slug/deployment sent to the provider
   wireApi: "responses" | "chat";
 };
 
+type ModelExecutionLimitsV1 = {
+  contextWindowTokens: number | null;
+  effectiveContextWindowTokens: number | null;
+  autoCompactTokenLimit: number | null;
+  toolOutputTruncationTokens: number | null;
+};
+
 type CredentialSourceV1 =
-  | { kind: "deployment"; mechanism: "api_key" }
+  | { kind: "deployment"; mechanism: "api_key" | "azure_ad_bearer" }
   | { kind: "connected_subscription"; provider: "codex" }
   | { kind: "workspace_connection"; mechanism: "api_key" }; // reserved
 
@@ -140,12 +151,78 @@ model fallback. Changing provider, credential-source kind, upstream payer, or
 metering owner requires a new canonical product id and an explicit user choice;
 an alias cannot move a durable preference across those boundaries.
 
+OPE-35 remains an allowlist over canonical product/provider identity:
+
+- new model-policy PUTs canonicalize every known alias before storing it and
+  persist canonical ids for all known models; unknown strings retain the
+  existing exact-string behavior so operators may preconfigure a future
+  canonical id, but they are not interpreted as aliases;
+- the existing GET response continues returning the persisted `allowedModels`
+  field, while an additive diagnostic projection may report which legacy values
+  resolved and which are unresolved;
+- evaluation canonicalizes the candidate and compares its canonical id against
+  stored exact strings, so API admission and the worker use the same pure
+  verdict. Baseline rows predate aliases and retain their exact canonical or
+  unresolved meaning; an old unknown string does not become active merely
+  because a later catalog reuses it as an alias; and
+- because accepted aliases are stored as canonical ids, later alias removal does
+  not change a policy. Any externally inserted/raw alias string is unresolved and
+  fails closed (it may block the model, but can never widen access or fall back).
+
+The deployment-wide public `allowedModels` picker list remains canonical-only;
+aliases are accepted inputs, not duplicate rows. Tests cover new writes, reads,
+baseline exact/unresolved rows, raw alias rows failing closed, collision, unknown
+values, and removal preserving canonical policy. No SQL
+migration or rewrite of historical policy rows is required.
+
 Existing definitions remain compatible: absent `upstreamModelId` means `id`,
 absent aliases means `[]`, existing API-key providers map to deployment
-credentials/OpenGeni metering, and Codex maps to connected-subscription
-credentials/external metering. Existing flat `reasoningEffort` and
+`api_key` credentials/OpenGeni metering, and Codex maps to
+connected-subscription credentials/external metering. The built-in Azure path
+maps to deployment `api_key` when `azureOpenaiApiKey` is configured and to
+deployment `azure_ad_bearer` when the existing `azureOpenaiAdToken` bearer path
+is used; the API key continues to win when both are present. No token value is
+copied into a definition or turn snapshot. Existing flat `reasoningEffort` and
 `hostedWebSearch` fields remain accepted as a compatibility projection while the
 normalized capability object becomes canonical.
+
+`definitionVersion` is the lowercase `sha256:` digest of UTF-8
+`opengeni:model-definition:v1\n` followed by canonical JSON (object keys sorted
+recursively, array order preserved, `undefined` omitted, integers in decimal)
+of these normalized fields:
+
+- schema version, canonical product id, provider id, deployment upstream model
+  id, and wire API;
+- provider adapter kind/API, normalized base URL, and non-secret static
+  query/header names and values that alter requests;
+- credential-source class/mechanism and billing attribution, but never a
+  resolved key/token, key environment-variable value, concrete Codex credential
+  id, account label, authorization header, or credential-bearing query value;
+- `contextWindowTokens`, `effectiveContextWindowTokens`,
+  `autoCompactTokenLimit`, and `toolOutputTruncationTokens` after defaults are
+  resolved;
+- normalized runnable capability metadata and supported/default reasoning
+  efforts; and
+- the complete normalized pricing schedule.
+
+The digest input omits `definitionVersion` itself. Credential-bearing header
+names are matched case-insensitively (`authorization`, `proxy-authorization`,
+`api-key`, and `x-api-key`); credential-bearing query names are
+`api_key`, `key`, `access_token`, and `token`. Their names participate but their
+values do not. Built-in key/token fields and registry `apiKey`/`apiKeyEnv` are
+credential material regardless of name.
+
+Registry credential fields (`apiKey`, the value resolved through `apiKeyEnv`,
+and recognized authorization/query credential material) are excluded so a key
+rotation inside the same accepted credential class does not rebind a model.
+Registry default headers or query parameters that are not credential material
+are executable configuration and therefore participate. Labels, aliases,
+health/availability observations, policy results, and secret values are
+excluded: aliases have completed their job before persistence, and mutable
+observations are rechecked independently. Any change to a participating value
+changes the digest and makes an already-present snapshot fail closed. Tests must
+pin canonical serialization and prove each participating field changes the
+digest while excluded labels, aliases, health, and credential rotations do not.
 
 `allowedModels` and the existing top-level `ClientModel` fields remain additive
 compatibility surfaces. New clients consume the normalized fields; old clients
@@ -210,14 +287,16 @@ and compatibility contracts are independently implemented.
 ### 3. Definition, credential readiness, health, availability, and policy are separate
 
 A definition says what a product model is. It does not claim that a workspace can
-run it. The client-safe projection may add:
+run it. The authenticated workspace projection adds:
 
 ```ts
 type ModelAvailabilityV1 = {
   status: "available" | "unavailable" | "degraded" | "unknown";
+  selectable: boolean;
   reason:
     | "missing_credential"
     | "needs_reauth"
+    | "not_entitled"
     | "provider_unhealthy"
     | "policy_blocked"
     | "unsupported"
@@ -226,6 +305,15 @@ type ModelAvailabilityV1 = {
 };
 ```
 
+Workspace availability is returned only by the new
+`GET /v1/workspaces/:workspaceId/model-catalog` projection, guarded by
+`workspace:read`. The existing public `GET /v1/config/client` remains a static
+deployment catalog and may expose
+definition/capability metadata, but it must omit workspace credential readiness,
+connection state, OPE-35 results, account labels, and workspace availability.
+Existing `ClientModel` fields and the public `allowedModels` list remain
+unchanged.
+
 Availability is the intersection of:
 
 1. a valid static definition and adapter;
@@ -233,12 +321,20 @@ Availability is the intersection of:
 3. current provider/deployment health, when known; and
 4. OPE-35 workspace model policy.
 
-Unknown health is not fabricated as healthy. A deployment provider whose key is
-validated at boot may be selectable with health `unknown`; a connected
-subscription is only projected as available when the existing connection path
-does so. No unavailable definition is silently replaced by another provider or
-model. The worker remains the authoritative post-resolution OPE-35 gate before
-compaction or the main model call.
+`selectable` is normative and clients must not infer it from `status` alone. It
+is true exactly when the definition is runnable, the workspace credential source
+is currently ready, OPE-35 allows the canonical provider/model, and no typed
+hard-unavailable observation from the entitlement/health owners applies.
+`available` and `degraded` therefore have `selectable: true`; `unavailable` has
+`selectable: false`. `unknown` may have `selectable: true` only when credential
+readiness and policy are known-good but no current health observation exists;
+otherwise it is false. Unknown health is not fabricated as healthy. A deployment
+provider whose key is validated at boot may be selectable with health `unknown`;
+a connected subscription is selectable only when the existing authenticated
+connection path reports it ready. The projection is advisory and is rechecked at
+admission and execution. No unavailable definition is silently replaced by
+another provider or model. The worker remains the authoritative post-resolution
+OPE-35 gate before compaction or the main model call.
 
 OPE-24 remains authoritative for entitlement/quota observations and OPE-32 for
 adaptive health/capacity policy. OPE-12 only consumes typed observations if and
@@ -293,11 +389,11 @@ its fenced interface and is not copied into this snapshot.
 
 At execution, the worker parses the snapshot and resolves the current provider
 client. A present malformed snapshot, product/provider mismatch, upstream-model
-mismatch, definition-version mismatch, credential-source-class mismatch, or
-billing mismatch fails closed before any model/compaction call. V1 deliberately
-fails closed when executable deployment configuration changed; it does not try
-to persist arbitrary client construction data. A later self-contained adapter
-snapshot requires a separate security review.
+mismatch, definition-version mismatch, credential-source kind/mechanism
+mismatch, or billing mismatch fails closed before any model/compaction call. V1
+deliberately fails closed when executable deployment configuration changed; it
+does not try to persist arbitrary client construction data. A later
+self-contained adapter snapshot requires a separate security review.
 
 Legacy queued turns without a snapshot resolve once before their first model
 call and persist a V1 snapshot under the exact attempt fence. Same-turn recovery
@@ -305,11 +401,18 @@ then reuses it. New system/goal turns do the same at their first execution
 boundary if their admission path could not resolve configuration transactionally.
 Malformed present data is never treated as legacy absence.
 
+The legacy/system-turn write is one metadata merge against the exact row whose
+workspace id, session id, turn id, active attempt UUID, and execution generation
+still match and whose state is executable (`running` or `requires_action`). It
+must preserve unrelated dispatch/recovery metadata and affect exactly one row;
+zero or multiple matches fail before a provider call. Existing JSONB is
+sufficient, so this decision requires no SQL migration.
+
 Foreground command receipt results and `audit_events.metadata` record only the
 secret-safe requested/effective model, model source, requested/effective
-reasoning effort, reasoning source, provider id, credential-source kind, billing
-owner, definition version, and turn id. Idempotent replay returns the same
-effective values. This is evidence, not a second policy source.
+reasoning effort, reasoning source, provider id, credential-source kind and
+mechanism, billing owner, definition version, and turn id. Idempotent replay
+returns the same effective values. This is evidence, not a second policy source.
 
 ### 5. Credential source and billing owner are explicit but allocator/entitlement logic is unchanged
 
@@ -328,6 +431,13 @@ Provider client construction consumes `credentialSource`; metering consumes
 OPE-21’s concrete Codex credential id, lease, failover, and capacity wait remain
 unchanged. OPE-24’s quota/reset/entitlement result remains unchanged. OPE-32 may
 later consume the normalized provider/deployment id but owns all adaptive choice.
+
+The worker must resolve or validate `TurnExecutionPolicyV1` immediately after
+claim and before the credit gate, compaction, or main model call. The credit gate
+and metering consume the snapshot's explicit billing attribution; the current
+pre-resolution Codex-prefix predicate is removed only from this classification
+seam. OPE-21 allocation/leases/failover/compaction and OPE-24
+quota/entitlement decisions are not modified.
 
 Pricing is keyed by canonical product id and may be a threshold schedule:
 
@@ -416,12 +526,15 @@ The approved slice is additive and ordered:
 1. **Normalized config contracts.** Add upstream model id, aliases,
    credential-source, billing, capabilities, deterministic definition version,
    and tiered pricing. Preserve old registry JSON and flat projections.
-2. **Client-safe projection.** Add optional normalized metadata to
-   `ClientModel`; retain `allowedModels` and all existing fields. Mark upstream
-   support separately from `runnable` and availability.
+2. **Client-safe projection.** Add optional normalized static metadata to the
+   public `ClientModel`; retain `allowedModels` and all existing fields. Add an
+   authenticated workspace catalog for availability and `selectable`. Mark
+   upstream support separately from `runnable` and availability.
 3. **Canonical admission.** Canonicalize explicit aliases at create,
-   Send/Steer, schedule, and child admission, then apply OPE-35 to canonical
-   product/provider identity. Unknowns remain 422 and no fallback is added.
+   Send/Steer, schedule, child admission, and model-policy PUT, then apply
+   OPE-35 to canonical product/provider identity. Preserve baseline policy rows
+   as exact canonical-or-unresolved strings; unknown model admissions remain 422
+   and raw alias policy rows fail closed.
 4. **Turn policy and audit.** Correct omitted-reasoning inheritance, write the
    non-secret V1 snapshot, parse/verify it before model calls, and add secret-safe
    receipt/audit evidence. Use existing turn metadata; no SQL migration is
@@ -450,6 +563,9 @@ The implementation must prove:
 - old `allowedModels` and `ClientModel` clients remain compatible;
 - aliases canonicalize exactly once and collision/cross-provider ambiguity fails
   at boot;
+- OPE-35 stores canonical ids on new writes, preserves baseline exact/unresolved
+  rows, rejects raw alias rows at evaluation, and cannot widen access after
+  alias removal;
 - BYOK is not accidentally enabled by generic provider configuration;
 - connected-subscription billing remains external and deployment-key billing
   remains OpenGeni-metered in managed mode;
@@ -457,13 +573,18 @@ The implementation must prove:
   preference, and goal/child semantics match this ADR;
 - approval resume, capacity wait, and worker recovery retain the same V1 policy;
 - a new turn re-resolves the current definition;
+- every normative definition input changes `definitionVersion`, while label,
+  alias, health, and same-class credential rotation do not;
 - malformed/mismatched present policy fails before any provider call;
 - unknown, unavailable, and OPE-35-blocked models never silently fall through to
   the built-in provider;
 - xAI priority, WebSocket, X search, code execution, and realtime audio cannot be
   selected when `runnable` is false;
 - xAI threshold pricing selects the correct per-request tier at 199,999 and
-  200,000 input tokens; and
+  200,000 input tokens;
+- public config leaks no workspace credential/policy state, and the authenticated
+  workspace projection exercises available, unavailable, degraded, and both
+  selectable/non-selectable unknown cases; and
 - logs, events, receipts, and snapshots contain no credential, secret header,
   token, or credential-bearing URL.
 
@@ -512,7 +633,7 @@ OPE-25 alone may release. OPE-12 does not merge, dispatch, or release.
 Retrieved 2026-07-18 without authentication:
 
 - xAI LLM documentation index: <https://docs.x.ai/llms.txt>
-- xAI Grok 4.5: <https://docs.x.ai/developers/grok-4-5>
+- xAI Grok 4.5: <https://docs.x.ai/developers/models/grok-4.5>
 - xAI models: <https://docs.x.ai/developers/models>
 - xAI pricing: <https://docs.x.ai/developers/pricing>
 - xAI reasoning: <https://docs.x.ai/developers/model-capabilities/text/reasoning>
@@ -523,7 +644,7 @@ Retrieved 2026-07-18 without authentication:
 - Cursor model/pricing documentation: <https://cursor.com/docs/models-and-pricing>
 - Cursor Grok 4.5 model page: <https://cursor.com/docs/models/grok-4-5>
 - Cursor Cloud Agents API overview: <https://cursor.com/docs/cloud-agent/api/endpoints>
-- Cursor TypeScript Agent SDK: <https://cursor.com/docs/agent-sdk/typescript>
+- Cursor TypeScript Agent SDK: <https://cursor.com/docs/sdk/typescript>
 - Cursor API-key help: <https://cursor.com/help/models-and-usage/api-keys>
 - Cursor terms of service (last updated 2026-01-13): <https://cursor.com/terms-of-service>
 
