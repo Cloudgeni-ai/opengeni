@@ -27,6 +27,12 @@ export const DEFAULT_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS =
   CODEX_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS;
 
 const APPROX_BYTES_PER_TOKEN = 4;
+// Twelve decimal digits already describe ~4 TB at four bytes/token, far beyond
+// any JavaScript string the runtime can materialize. Bounding the digit run is
+// security-significant: otherwise a forged multi-megabyte run of digits could
+// make `markerBytes` as large as the entire untrusted tool result and bypass the
+// cap below.
+const TOKEN_TRUNCATION_MARKER = /…\d{1,12} tokens truncated…/u;
 const TOOL_RESULT_TYPES = new Set([
   "function_call_result",
   "function_call_output",
@@ -64,6 +70,17 @@ export function truncateMiddleWithTokenBudget(value: string, maxTokens: number):
   const maxBytes = Math.max(0, maxTokens) * APPROX_BYTES_PER_TOKEN;
   const valueBytes = Buffer.byteLength(value, "utf8");
   if (maxTokens > 0 && valueBytes <= maxBytes) return value;
+  // Codex applies this transform once while recording history, so its marker
+  // sits just outside the content budget. OpenGeni deliberately enforces the
+  // same policy both at canonical persistence and at the final provider seam.
+  // Recognize only an output whose excess is no larger than its own canonical
+  // marker; this makes that repeated enforcement byte-idempotent without letting
+  // an arbitrary oversized string bypass the cap merely by containing marker-like
+  // text. The first application remains byte-for-byte Codex 0.144.6 behavior.
+  const existingMarker = value.match(TOKEN_TRUNCATION_MARKER)?.[0];
+  if (existingMarker && valueBytes <= maxBytes + Buffer.byteLength(existingMarker, "utf8")) {
+    return value;
+  }
   if (maxBytes === 0) {
     return `…${approximateTokenCount(value)} tokens truncated…`;
   }
