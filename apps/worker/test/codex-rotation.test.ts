@@ -8,6 +8,7 @@ import {
   computeIdleDelayMs,
   computeReactiveRotationResume,
   DEFAULT_RESET_COOLDOWN_MS,
+  effectiveRotationStrategy,
   isCodexAccountEligible,
   MIN_IDLE_MS,
   REACTIVE_CIRCUIT_BREAKER_IDLE_MS,
