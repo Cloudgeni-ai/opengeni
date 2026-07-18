@@ -111,6 +111,112 @@ profile is not a production approval: CPU throttling, event-loop lag, turn
 latency, real sandbox latency, capture residency, recording residency, and
 worker restarts require separate provider/deployment evidence.
 
+## Exact implementation-head isolated profile evidence (2026-07-18)
+
+The exact implementation commit `206da6c0` was profiled in this non-serving
+Linux/x64 sandbox with Bun 1.3.14 and local PostgreSQL 17. The profile used no
+external model, Azure inference, real sandbox provider, or serving pod. Raw
+artifacts and timing logs remain outside the repository under `/tmp`; only
+their checksums and reduced results are recorded here.
+
+The canonical default three-wave sweep completed in 8:41.74 with exit 0 and a
+maximum process RSS of 1,072,432 KiB. It emitted exactly one result line and
+left zero profiling workspaces or sessions. Its artifact SHA-256 is
+`5e715bd390a58193f88b882d42713628a9547ca707a2c53f2ad6ebc41bb4edee`.
+
+| Density | Worst incremental RSS MiB/turn | Settled RSS slope MiB/wave |
+| ---: | ---: | ---: |
+| 1 | 8.0 | 3.0 |
+| 2 | 3.0 | -0.5 |
+| 4 | 1.6 | 10.2 |
+| 8 | 3.8 | -11.0 |
+| 12 | 2.2 | 2.0 |
+| 16 | 1.8 | -6.0 |
+| 24 | 2.3 | 0.8 |
+| 32 | 0.2 | 18.0 |
+
+Across all 744 canonical plateau samples, incremental RSS per turn was 0.2 MiB
+p50, 3.6 MiB p95, and 8.0 MiB p99/worst. The ordinary 750,000-byte active
+history is below the compaction threshold, so this sweep correctly made zero
+compaction calls. Settled slopes are reported rather than hidden; they vary in
+both directions as Bun's allocator retains and releases process arenas. No
+density breached the target or hard gate, but three waves are not a proof that
+allocator RSS will monotonically return to the first baseline.
+
+The separate maximum-history sweep used one wave at every required density,
+32 MiB active plus 32 MiB inactive durable history per turn, an 8 MiB recent
+compaction tail, 2 MiB synthetic working data per turn, and 1,024 bounded
+tool-burst, fan-out, and drain entries. It completed 99 turns in 3:10.27 with
+exit 0 and a maximum process RSS of 2,059,064 KiB. It emitted one result line,
+deleted every profiling workspace/session, and produced artifact SHA-256
+`90c10e90bf7326b55f81a4b9b115ae5f44463f51fafe81e98b02b2710d8ee7a1`.
+
+| Density | Compaction calls | Worst incremental RSS MiB/turn |
+| ---: | ---: | ---: |
+| 1 | 1 | 48.0 |
+| 2 | 2 | 30.0 |
+| 4 | 4 | 32.0 |
+| 8 | 8 | 31.0 |
+| 12 | 12 | 26.7 |
+| 16 | 16 | 25.8 |
+| 24 | 24 | 24.6 |
+| 32 | 32 | 15.3 |
+
+The maximum-history aggregate was 28.4 MiB p50 and 48.0 MiB p95/p99/worst,
+passing both the 50 MiB target and 100 MiB hard ceiling. Compaction calls equal
+the admitted turn count at every density, proving the memory result includes
+the compaction path rather than only the ordinary model gate. A preceding
+single-density smoke independently measured 48.0 MiB worst, exit 0, one
+compaction, and artifact SHA-256
+`4906ec9af496856393291302ba3878aa5e040745b940288bcd7f927078a276b4`.
+
+The pathological result depends on two allocation fixes. Active compaction
+history is read in ordered keyset pages of 16 while retaining exactly one
+logical history, and JSON token estimation counts exact serialized UTF-16 or
+UTF-8 length without allocating a second giant string. This applies both to
+history items and to aggregate instruction/tool descriptors. Differential
+tests compare the counters with `JSON.stringify`/`Buffer.byteLength`, including
+escapes, Unicode, lone surrogates, omitted values, `toJSON`, cycles, and
+fallbacks. A deterministic 10,000-shape differential run also matched exactly.
+
+The process maximum is intentionally reported but is not the per-turn gate: it
+includes Bun, loaded application modules, database/runtime clients, native
+allocator arenas, all concurrently active turns, and post-settlement retained
+pages. Kubernetes sizing must therefore combine measured baseline/current
+cgroup usage, the hard per-turn reservation, and explicit native headroom.
+
+## Admission, resource sizing, and autoscaling contract
+
+Turn workers use a Temporal custom activity-slot supplier instead of accepting
+16 tasks unconditionally. The hard density remains 16, but each reservation
+must satisfy both projections below using the pod cgroup v1/v2 current/limit:
+
+```text
+startup_baseline + reserved_after * 100 MiB + 512 MiB <= cgroup_limit
+current_usage    + pending_after  * 100 MiB + 512 MiB <= cgroup_limit
+```
+
+The worker rejects startup if even one turn is unsafe. It publishes capacity,
+reserved/used/available slots, saturation, baseline/current/limit memory, hard
+turn bytes, and native headroom as bounded gauges. OOM is never used as an
+admission mechanism. The production Azure 3 GiB request / 6 GiB limit and
+500m / 2 CPU envelope remains conservative: the observed current-revision
+maximum working set was about 0.93 GiB, while the contract reserves 1.56 GiB
+for 16 turns plus 0.5 GiB native headroom and the measured startup baseline.
+Lowering the limit or request without measuring the exact image would reduce
+schedule/admission headroom rather than constitute right-sizing.
+
+Runnable pressure comes from Temporal's turn activity task queue, not prompt or
+session counts. The exported series cover eligible backlog/count/age/rates and
+slot capacity/reservation/use/availability/saturation. Dashboard queries use
+`max`, not `sum`, for queue state because each worker observes the same task
+queue. A Pods HPA metric named `opengeni_turn_slot_saturation_ratio` targets
+`750m`; it is deliberately disabled until a verified `custom.metrics.k8s.io`
+adapter exists. CPU 70% and memory 80% remain the production fallback. This is
+truthful degradation: a missing adapter must not make an HPA depend on an
+unavailable metric, and the removed aggregate paused-prompt gauge must never be
+reintroduced as runnable demand.
+
 ## Previously recorded evidence
 
 The following baseline is a pre-existing historical record from before this
@@ -172,6 +278,37 @@ the observed placement of no more than two turn pods per node, the current hard
 node-loss bound was 32 turns. At the 20-pod HPA maximum across six nodes, even
 balanced placement can put four pods on one node, for a topology-dependent
 64-turn hard node-loss bound. A PDB cannot constrain involuntary node loss.
+
+## Rollout, node-loss, and OOM fault contract
+
+The safe fault matrix separates graceful rollout from abrupt process loss:
+
+- graceful worker shutdown interrupts a turn after a checkpointed MCP side
+  effect, moves the exact existing turn to `recovering`, and finishes it on a
+  healthy worker without replaying that side effect;
+- graceful shutdown before model progress recovers the same turn and original
+  trigger without creating a prompt, recovery message, or second turn;
+- a late activity settlement after Pause is rejected by the attempt fence and
+  cannot override the durable recovery/control winner;
+- a real Temporal heartbeat timeout simulates the observable result of a node
+  loss, `SIGKILL`, or cgroup OOM: the exact attempt is recovered and the same
+  logical turn is dispatched once to a surviving worker; and
+- an atomic redispatch ceiling of three makes repeated worker deaths terminal
+  once, rather than creating an unbounded duplicate loop.
+
+The integration assertions require one logical turn row, one recovery request,
+no failure on a successful recovery, the canonical conversation input on the
+successor attempt, and no second invocation of an already-completed MCP tool.
+Unit tests independently prove cgroup memory-limit admission, exact attempt
+ownership, stale-successor rejection, and one terminal settlement/wakeup at the
+redispatch ceiling.
+
+No destructive OOM was injected into a shared production pod. The heartbeat
+timeout uses a real Temporal server and a deliberately non-heartbeating
+activity in isolated test services, exercising the same orchestration boundary
+seen after an ungraceful pod/node/OOM death without consuming serving headroom.
+The rollout/node blast-radius numbers above are topology bounds, not a claim
+that PDBs can prevent involuntary disruption.
 
 ## Non-serving execution requirement
 
