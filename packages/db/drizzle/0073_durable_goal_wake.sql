@@ -19,6 +19,28 @@ BEGIN
         "continuation_wake_revision" >= 0
         AND "continuation_observed_revision" >= 0
         AND "continuation_observed_revision" <= "continuation_wake_revision"
+        AND "continuation_wake_revision" <= 9007199254740991
+        AND "continuation_observed_revision" <= 9007199254740991
+      );
+  END IF;
+END $$;
+
+-- Drizzle and every public workflow/client contract represent revisions as
+-- JavaScript numbers. Reject manual corruption or impossible exhaustion in
+-- PostgreSQL before a bigint can be rounded into another producer's revision.
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conname = 'session_workflow_wake_outbox_revision_safe_check'
+      AND conrelid = 'session_workflow_wake_outbox'::regclass
+  ) THEN
+    ALTER TABLE "session_workflow_wake_outbox"
+      ADD CONSTRAINT "session_workflow_wake_outbox_revision_safe_check"
+      CHECK (
+        "wake_revision" <= 9007199254740991
+        AND "delivered_revision" <= 9007199254740991
       );
   END IF;
 END $$;

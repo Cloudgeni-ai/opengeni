@@ -484,6 +484,28 @@ describe("migration 0073 (durable goal wake)", () => {
         rejectedInvalidRevision = true;
       }
       expect(rejectedInvalidRevision).toBe(true);
+
+      let rejectedUnsafeGoalRevision = false;
+      try {
+        await admin`
+          update session_goals
+          set continuation_wake_revision = 9007199254740992
+          where id = ${idle.goalId}`;
+      } catch {
+        rejectedUnsafeGoalRevision = true;
+      }
+      expect(rejectedUnsafeGoalRevision).toBe(true);
+
+      let rejectedUnsafeWorkflowRevision = false;
+      try {
+        await admin`
+          update session_workflow_wake_outbox
+          set wake_revision = 9007199254740992
+          where session_id = ${idle.sessionId}`;
+      } catch {
+        rejectedUnsafeWorkflowRevision = true;
+      }
+      expect(rejectedUnsafeWorkflowRevision).toBe(true);
     } finally {
       await admin.end().catch(() => undefined);
     }
