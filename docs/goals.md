@@ -16,7 +16,10 @@ RLS-isolated like every other workspace table). Its monotonic
 authoritative obligation ledger: `wake > observed` means an evaluation still
 has to be materialized. The Temporal workflow never owns that state — it reads
 and mutates it only through activities. Temporal signals, workflow runs, and
-workflow history are replaceable delivery nudges over Postgres truth.
+workflow history are replaceable delivery nudges over Postgres truth. Goal and
+workflow-wake revisions are bounded to JavaScript's maximum safe integer in
+Postgres, so corruption or theoretical exhaustion fails the producing
+transaction instead of rounding one producer's revision into another's.
 
 ## Lifecycle
 
