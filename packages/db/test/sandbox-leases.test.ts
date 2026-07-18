@@ -3,13 +3,17 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import postgres from "postgres";
 import {
   acquireLease,
+  beginSandboxRematerialization,
   commitWarmingToWarm,
   confirmDrainCold,
   createDb,
   getMaterializedSandboxFileResources,
   heartbeatLeaseHolder,
+  markSandboxRestoreVerifying,
+  markWarmLeaseInstanceLost,
   markSandboxFileResourcesMaterialized,
   persistDrainSnapshot,
+  recordWarmingSandboxCreated,
   reapStaleLeaseHolders,
   reapStaleLeaseHoldersGlobal,
   releaseLeaseHolder,
@@ -1194,4 +1198,205 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     expect(row?.rig_version_id).toBe("aaaa1111-1111-4111-8111-111111111111");
     expect(row?.liveness).toBe("warm");
   });
+
+  test("(19) provider loss elects one epoch-fenced rematerialization and publishes only its verified revision", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    const archive = Buffer.from("ope-60-exact-durable-revision").toString("base64");
+    const archiveHash = "a".repeat(64);
+    const descriptor = {
+      version: 1 as const,
+      revision: `wa1:1900000000000:${archiveHash}`,
+      archiveSha256: archiveHash,
+      archiveBytes: Buffer.from(archive, "base64").length,
+      capturedAt: "2030-03-17T17:46:40.000Z",
+      workspace: {
+        algorithm: "sha256" as const,
+        sha256: "b".repeat(64),
+        entryCount: 7,
+        fileCount: 3,
+        totalFileBytes: 91,
+      },
+    };
+
+    const initial = await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "initial",
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
+    expect(initial.role).toBe("spawner");
+    const firstCommit = await commitWarmingToWarm(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: 0,
+      instanceId: "box-before-loss",
+      resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: {
+          providerState: { sandboxId: "box-before-loss" },
+          workspaceArchive: archive,
+          workspaceArchiveMeta: descriptor,
+        },
+      },
+      leaseTtlMs: 45_000,
+    });
+    expect(firstCommit.committed).toBe(true);
+
+    const losses = await Promise.all(
+      Array.from({ length: 24 }, () =>
+        markWarmLeaseInstanceLost(db, {
+          accountId,
+          workspaceId,
+          sandboxGroupId: groupId,
+          expectedEpoch: 1,
+          expectedInstanceId: "box-before-loss",
+          diagnostic: "provider_not_found",
+        }),
+      ),
+    );
+    expect(losses.filter((result) => result.status === "marked")).toHaveLength(1);
+    expect(losses.filter((result) => result.status === "stale")).toHaveLength(23);
+    const lost = losses.find((result) => result.status === "marked");
+    expect(lost?.lease.leaseEpoch).toBe(2);
+    expect(lost?.lease.recovery.provider.status).toBe("missing");
+    expect(lost?.lease.recovery.archive.current?.revision).toBe(descriptor.revision);
+    expect(lost?.lease.recovery.restore.status).toBe("pending");
+    expect(lost?.lease.recovery.workspace.status).toBe("not_ready");
+
+    const acquires = await Promise.all(
+      Array.from({ length: 24 }, (_, index) =>
+        acquireLease(db, {
+          accountId,
+          workspaceId,
+          sandboxGroupId: groupId,
+          kind: "turn",
+          holderId: `recovery-${index}`,
+          backend: "modal",
+          leaseTtlMs: 45_000,
+        }),
+      ),
+    );
+    expect(acquires.filter((result) => result.role === "spawner")).toHaveLength(1);
+    expect(acquires.filter((result) => result.role === "attached")).toHaveLength(23);
+
+    const rematerializationId = crypto.randomUUID();
+    const starts = await Promise.all(
+      Array.from({ length: 8 }, () =>
+        beginSandboxRematerialization(db, {
+          accountId,
+          workspaceId,
+          sandboxGroupId: groupId,
+          expectedEpoch: 2,
+          rematerializationId,
+        }),
+      ),
+    );
+    expect(starts.every((result) => result.status === "started")).toBe(true);
+    expect(
+      starts.every(
+        (result) =>
+          result.status === "started" &&
+          result.lease.recovery.restore.rematerializationId === rematerializationId &&
+          result.lease.recovery.restore.selectedRevision === descriptor.revision,
+      ),
+    ).toBe(true);
+    const rival = await beginSandboxRematerialization(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: 2,
+      rematerializationId: crypto.randomUUID(),
+    });
+    expect(rival.status).toBe("blocked");
+    if (rival.status === "blocked") expect(rival.code).toBe("attempt_conflict");
+
+    const recorded = await recordWarmingSandboxCreated(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: 2,
+      instanceId: "box-after-loss",
+      resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: { providerState: { sandboxId: "box-after-loss" } },
+      },
+      leaseTtlMs: 45_000,
+    });
+    expect(recorded.recorded).toBe(true);
+    expect(recorded.lease?.recovery.restore.rematerializationId).toBe(rematerializationId);
+    expect(recorded.lease?.recovery.archive.current?.revision).toBe(descriptor.revision);
+
+    const verifying = await markSandboxRestoreVerifying(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: 2,
+      rematerializationId,
+    });
+    expect(verifying.wrote).toBe(true);
+    const staleCommit = await commitWarmingToWarm(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: 2,
+      instanceId: "stale-box",
+      resumeBackendId: "modal",
+      resumeState: { backendId: "modal" },
+      rematerialization: {
+        id: crypto.randomUUID(),
+        verifiedRevision: descriptor.revision,
+      },
+      leaseTtlMs: 45_000,
+    });
+    expect(staleCommit.committed).toBe(false);
+    expect(staleCommit.reason).toBe("rematerialization_mismatch");
+
+    const committed = await commitWarmingToWarm(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: 2,
+      instanceId: "box-after-loss",
+      resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: { providerState: { sandboxId: "box-after-loss" } },
+      },
+      rematerialization: {
+        id: rematerializationId,
+        verifiedRevision: descriptor.revision,
+      },
+      leaseTtlMs: 45_000,
+    });
+    expect(committed.committed).toBe(true);
+    expect(committed.lease?.leaseEpoch).toBe(3);
+    expect(committed.lease?.recovery.provider).toMatchObject({
+      status: "exists",
+      instanceId: "box-after-loss",
+    });
+    expect(committed.lease?.recovery.restore).toMatchObject({
+      status: "ready",
+      rematerializationId,
+      selectedRevision: descriptor.revision,
+    });
+    expect(committed.lease?.recovery.workspace).toMatchObject({
+      status: "ready",
+      verifiedRevision: descriptor.revision,
+    });
+    const staleVerifying = await markSandboxRestoreVerifying(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: 2,
+      rematerializationId,
+    });
+    expect(staleVerifying.wrote).toBe(false);
+  }, 60_000);
 });

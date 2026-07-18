@@ -13655,6 +13655,71 @@ export async function listOpenPtySessions(
 export type SandboxLeaseLiveness = "cold" | "warming" | "warm" | "draining";
 export type LeaseHolderKind = "turn" | "viewer";
 
+export type SandboxProviderExistence =
+  | "not_created"
+  | "creating"
+  | "exists"
+  | "missing"
+  | "unknown";
+export type SandboxArchiveAvailability = "none" | "available" | "unverified" | "invalid";
+export type SandboxRestoreStatus =
+  | "not_required"
+  | "pending"
+  | "restoring"
+  | "verifying"
+  | "ready"
+  | "degraded"
+  | "unrecoverable";
+export type SandboxWorkspaceReadiness =
+  | "unknown"
+  | "not_ready"
+  | "ready"
+  | "degraded"
+  | "unrecoverable";
+
+export type SandboxArchiveRevision = {
+  version: 1;
+  revision: string;
+  archiveSha256: string;
+  archiveBytes: number;
+  capturedAt: string;
+  workspace: {
+    algorithm: "sha256";
+    sha256: string;
+    entryCount: number;
+    fileCount: number;
+    totalFileBytes: number;
+  };
+};
+
+export type SandboxRecoveryState = {
+  provider: {
+    status: SandboxProviderExistence;
+    instanceId: string | null;
+    observedAt: string | null;
+    diagnostic?: string;
+  };
+  archive: {
+    status: SandboxArchiveAvailability;
+    current: SandboxArchiveRevision | null;
+    previous: SandboxArchiveRevision | null;
+  };
+  restore: {
+    status: SandboxRestoreStatus;
+    rematerializationId: string | null;
+    selectedRevision: string | null;
+    startedAt: string | null;
+    completedAt: string | null;
+    failureCode?: string;
+    retryable?: boolean;
+  };
+  workspace: {
+    status: SandboxWorkspaceReadiness;
+    verifiedRevision: string | null;
+    verifiedAt: string | null;
+  };
+};
+
 // The snake_case raw shape returned by the raw sql`` lease queries. lease_epoch
 // comes back as a number for an integer column, but we type it number|string
 // and Number()-coerce so the same code is correct regardless of column type.
@@ -13710,6 +13775,10 @@ export interface LeaseSnapshot {
   leaseEpoch: number;
   resumeBackendId: string | null;
   resumeState: Record<string, unknown> | null;
+  /** Provider/archive/restore/workspace truth, deliberately separate from the
+   * lease liveness and epoch fields above. Legacy envelopes project to
+   * conservative unknown/unverified values. */
+  recovery: SandboxRecoveryState;
   expiresAt: Date;
 }
 
@@ -13765,6 +13834,13 @@ export type AcquireLeaseResult =
   | { role: "attached"; lease: LeaseSnapshot }
   // Re-armed a draining lease back to warm (box never torn down).
   | { role: "rearmed"; lease: LeaseSnapshot }
+  // Durable recovery truth says this cold group cannot safely materialize. No
+  // holder is registered and no provider create is licensed.
+  | {
+      role: "blocked";
+      code: "restore_degraded" | "restore_unrecoverable";
+      lease: LeaseSnapshot;
+    }
   // Epoch fence rejected the turn-arrival increment: a newer epoch exists (a
   // later turn re-established the box). Caller must back off and re-read; NEVER
   // create().
@@ -13778,6 +13854,21 @@ export class SandboxLeaseSupersededError extends Error {
   ) {
     super(`Sandbox lease superseded for group ${sandboxGroupId} (epoch ${leaseEpoch})`);
     this.name = "SandboxLeaseSupersededError";
+  }
+}
+
+export class SandboxLeaseRecoveryBlockedError extends Error {
+  readonly name = "SandboxLeaseRecoveryBlockedError";
+
+  constructor(
+    public readonly sandboxGroupId: string,
+    public readonly leaseEpoch: number,
+    public readonly code: "restore_degraded" | "restore_unrecoverable",
+    public readonly recovery: SandboxRecoveryState,
+  ) {
+    super(
+      `Sandbox ${sandboxGroupId} recovery is ${code === "restore_degraded" ? "degraded" : "unrecoverable"} at epoch ${leaseEpoch}`,
+    );
   }
 }
 
@@ -13841,7 +13932,244 @@ function mapLeaseRow(row: LeaseRow): LeaseSnapshot {
     leaseEpoch: Number(row.lease_epoch),
     resumeBackendId: row.resume_backend_id,
     resumeState: row.resume_state,
+    recovery: recoveryStateFromLeaseRow(row),
     expiresAt: row.expires_at instanceof Date ? row.expires_at : new Date(row.expires_at),
+  };
+}
+
+const SHA256_HEX = /^[a-f0-9]{64}$/;
+const ARCHIVE_REVISION = /^wa1:[0-9]{13}:[a-f0-9]{64}$/;
+
+function parseArchiveRevision(value: unknown): SandboxArchiveRevision | null {
+  if (!value || typeof value !== "object") return null;
+  const input = value as Partial<SandboxArchiveRevision>;
+  const workspace = input.workspace as Partial<SandboxArchiveRevision["workspace"]> | undefined;
+  if (
+    input.version !== 1 ||
+    typeof input.revision !== "string" ||
+    !ARCHIVE_REVISION.test(input.revision) ||
+    typeof input.archiveSha256 !== "string" ||
+    !SHA256_HEX.test(input.archiveSha256) ||
+    !Number.isSafeInteger(input.archiveBytes) ||
+    (input.archiveBytes ?? 0) <= 0 ||
+    typeof input.capturedAt !== "string" ||
+    !Number.isFinite(Date.parse(input.capturedAt)) ||
+    workspace?.algorithm !== "sha256" ||
+    typeof workspace.sha256 !== "string" ||
+    !SHA256_HEX.test(workspace.sha256) ||
+    !Number.isSafeInteger(workspace.entryCount) ||
+    !Number.isSafeInteger(workspace.fileCount) ||
+    !Number.isSafeInteger(workspace.totalFileBytes)
+  ) {
+    return null;
+  }
+  return input as SandboxArchiveRevision;
+}
+
+function recoveryStateFromLeaseRow(row: LeaseRow): SandboxRecoveryState {
+  const resume =
+    row.resume_state && typeof row.resume_state === "object" ? row.resume_state : undefined;
+  const sessionState =
+    resume?.sessionState && typeof resume.sessionState === "object"
+      ? (resume.sessionState as Record<string, unknown>)
+      : undefined;
+  const currentArchivePresent =
+    typeof sessionState?.workspaceArchive === "string" && sessionState.workspaceArchive.length > 0;
+  const previousArchivePresent =
+    typeof sessionState?.workspaceArchivePrev === "string" &&
+    sessionState.workspaceArchivePrev.length > 0;
+  const current = parseArchiveRevision(sessionState?.workspaceArchiveMeta);
+  const previous = parseArchiveRevision(sessionState?.workspaceArchivePrevMeta);
+  const archiveStatus: SandboxArchiveAvailability = currentArchivePresent
+    ? current
+      ? "available"
+      : "unverified"
+    : previousArchivePresent
+      ? "unverified"
+      : "none";
+
+  const explicit =
+    resume?.opengeniRecovery && typeof resume.opengeniRecovery === "object"
+      ? (resume.opengeniRecovery as Partial<SandboxRecoveryState>)
+      : undefined;
+  const providerInput = explicit?.provider;
+  const restoreInput = explicit?.restore;
+  const workspaceInput = explicit?.workspace;
+  const providerStatus = providerInput?.status;
+  const provider: SandboxRecoveryState["provider"] = {
+    status:
+      providerStatus === "not_created" ||
+      providerStatus === "creating" ||
+      providerStatus === "exists" ||
+      providerStatus === "missing" ||
+      providerStatus === "unknown"
+        ? providerStatus
+        : row.liveness === "warming"
+          ? "creating"
+          : row.instance_id
+            ? "unknown"
+            : "not_created",
+    instanceId:
+      typeof providerInput?.instanceId === "string" || providerInput?.instanceId === null
+        ? providerInput.instanceId
+        : row.instance_id,
+    observedAt:
+      typeof providerInput?.observedAt === "string" || providerInput?.observedAt === null
+        ? providerInput.observedAt
+        : null,
+    ...(typeof providerInput?.diagnostic === "string"
+      ? { diagnostic: providerInput.diagnostic }
+      : {}),
+  };
+  const restoreStatus = restoreInput?.status;
+  const restore: SandboxRecoveryState["restore"] = {
+    status:
+      restoreStatus === "not_required" ||
+      restoreStatus === "pending" ||
+      restoreStatus === "restoring" ||
+      restoreStatus === "verifying" ||
+      restoreStatus === "ready" ||
+      restoreStatus === "degraded" ||
+      restoreStatus === "unrecoverable"
+        ? restoreStatus
+        : row.liveness === "cold" && archiveStatus === "available"
+          ? "pending"
+          : row.liveness === "cold" && archiveStatus === "unverified"
+            ? "degraded"
+            : "not_required",
+    rematerializationId:
+      typeof restoreInput?.rematerializationId === "string"
+        ? restoreInput.rematerializationId
+        : null,
+    selectedRevision:
+      typeof restoreInput?.selectedRevision === "string" ? restoreInput.selectedRevision : null,
+    startedAt: typeof restoreInput?.startedAt === "string" ? restoreInput.startedAt : null,
+    completedAt: typeof restoreInput?.completedAt === "string" ? restoreInput.completedAt : null,
+    ...(typeof restoreInput?.failureCode === "string"
+      ? { failureCode: restoreInput.failureCode }
+      : {}),
+    ...(typeof restoreInput?.retryable === "boolean" ? { retryable: restoreInput.retryable } : {}),
+  };
+  const workspaceStatus = workspaceInput?.status;
+  const workspace: SandboxRecoveryState["workspace"] = {
+    status:
+      workspaceStatus === "unknown" ||
+      workspaceStatus === "not_ready" ||
+      workspaceStatus === "ready" ||
+      workspaceStatus === "degraded" ||
+      workspaceStatus === "unrecoverable"
+        ? workspaceStatus
+        : row.liveness === "cold" && archiveStatus === "available"
+          ? "not_ready"
+          : row.liveness === "cold" && archiveStatus === "unverified"
+            ? "degraded"
+            : "unknown",
+    verifiedRevision:
+      typeof workspaceInput?.verifiedRevision === "string" ? workspaceInput.verifiedRevision : null,
+    verifiedAt: typeof workspaceInput?.verifiedAt === "string" ? workspaceInput.verifiedAt : null,
+  };
+  return {
+    provider,
+    archive: { status: archiveStatus, current, previous },
+    restore,
+    workspace,
+  };
+}
+
+function resumeStateWithRecovery(
+  resumeState: Record<string, unknown> | null,
+  recovery: SandboxRecoveryState,
+): Record<string, unknown> {
+  return { ...(resumeState ?? {}), opengeniRecovery: recovery };
+}
+
+const WORKSPACE_ARCHIVE_SESSION_KEYS = [
+  "workspaceArchive",
+  "workspaceArchiveMeta",
+  "workspaceArchivePrev",
+  "workspaceArchivePrevMeta",
+  "workspaceArchiveAt",
+] as const;
+
+function resumeStateWithPreservedArchives(
+  resumeState: Record<string, unknown> | null,
+  archiveSource: Record<string, unknown> | null,
+): Record<string, unknown> | null {
+  const sourceSession =
+    archiveSource?.sessionState && typeof archiveSource.sessionState === "object"
+      ? (archiveSource.sessionState as Record<string, unknown>)
+      : undefined;
+  if (!sourceSession) return resumeState;
+  const archiveFields: Record<string, unknown> = {};
+  for (const key of WORKSPACE_ARCHIVE_SESSION_KEYS) {
+    if (sourceSession[key] !== undefined && sourceSession[key] !== null) {
+      archiveFields[key] = sourceSession[key];
+    }
+  }
+  if (Object.keys(archiveFields).length === 0) return resumeState;
+  const targetSession =
+    resumeState?.sessionState && typeof resumeState.sessionState === "object"
+      ? (resumeState.sessionState as Record<string, unknown>)
+      : {};
+  return {
+    ...(resumeState ?? {}),
+    ...(resumeState?.backendId === undefined && archiveSource?.backendId !== undefined
+      ? { backendId: archiveSource.backendId }
+      : {}),
+    sessionState: { ...targetSession, ...archiveFields },
+  };
+}
+
+function archiveOnlyResumeState(
+  row: LeaseRow,
+  recovery: SandboxRecoveryState,
+): Record<string, unknown> {
+  const current =
+    row.resume_state && typeof row.resume_state === "object" ? row.resume_state : undefined;
+  const currentSession =
+    current?.sessionState && typeof current.sessionState === "object"
+      ? (current.sessionState as Record<string, unknown>)
+      : undefined;
+  const sessionState: Record<string, unknown> = {};
+  for (const key of WORKSPACE_ARCHIVE_SESSION_KEYS) {
+    if (currentSession?.[key] !== undefined && currentSession[key] !== null) {
+      sessionState[key] = currentSession[key];
+    }
+  }
+  return {
+    backendId:
+      typeof current?.backendId === "string"
+        ? current.backendId
+        : (row.resume_backend_id ?? row.backend),
+    ...(Object.keys(sessionState).length > 0 ? { sessionState } : {}),
+    opengeniRecovery: recovery,
+  };
+}
+
+function archiveProjectionFromResumeState(
+  resumeState: Record<string, unknown> | null,
+): SandboxRecoveryState["archive"] {
+  const sessionState =
+    resumeState?.sessionState && typeof resumeState.sessionState === "object"
+      ? (resumeState.sessionState as Record<string, unknown>)
+      : undefined;
+  const currentPresent =
+    typeof sessionState?.workspaceArchive === "string" && sessionState.workspaceArchive.length > 0;
+  const previousPresent =
+    typeof sessionState?.workspaceArchivePrev === "string" &&
+    sessionState.workspaceArchivePrev.length > 0;
+  const current = parseArchiveRevision(sessionState?.workspaceArchiveMeta);
+  const previous = parseArchiveRevision(sessionState?.workspaceArchivePrevMeta);
+  return {
+    status: currentPresent
+      ? current
+        ? "available"
+        : "unverified"
+      : previousPresent
+        ? "unverified"
+        : "none",
+    current,
+    previous,
   };
 }
 
@@ -14015,6 +14343,20 @@ export async function acquireLease(
         // The image (B3) is (re-)stamped on the CAS so the box the spawner cold-creates
         // records the image it runs — for a fresh cold row or a solo-recreate above.
         if (liveness === "cold") {
+          const recovery = recoveryStateFromLeaseRow(row);
+          if (
+            recovery.restore.status === "degraded" ||
+            recovery.restore.status === "unrecoverable"
+          ) {
+            return {
+              role: "blocked" as const,
+              code:
+                recovery.restore.status === "degraded"
+                  ? ("restore_degraded" as const)
+                  : ("restore_unrecoverable" as const),
+              lease: mapLeaseRow(row),
+            };
+          }
           const casRows = await tx.execute<{ id: string }>(sql`
           update sandbox_leases set
             liveness = 'warming',
@@ -14060,6 +14402,299 @@ export async function acquireLease(
   );
 }
 
+export type BeginSandboxRematerializationResult =
+  | { status: "started"; lease: LeaseSnapshot }
+  | {
+      status: "blocked";
+      code: "archive_unavailable" | "archive_unverified" | "attempt_conflict" | "stale_epoch";
+      lease: LeaseSnapshot | null;
+    };
+
+/** Records the single cold->warming winner's exact restore attempt. The lease
+ * election remains the sole spawner guard; this adds durable selected-revision
+ * and progress truth under the same epoch. */
+export async function beginSandboxRematerialization(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sandboxGroupId: string;
+    expectedEpoch: number;
+    rematerializationId: string;
+  },
+): Promise<BeginSandboxRematerializationResult> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (txRaw) => {
+        const tx = txRaw as unknown as Database;
+        const rows = await tx.execute<LeaseRow>(sql`
+          select * from sandbox_leases
+          where workspace_id = ${input.workspaceId}
+            and sandbox_group_id = ${input.sandboxGroupId}
+          for update
+        `);
+        const row = rows[0];
+        if (!row || row.liveness !== "warming" || Number(row.lease_epoch) !== input.expectedEpoch) {
+          return {
+            status: "blocked" as const,
+            code: "stale_epoch" as const,
+            lease: row ? mapLeaseRow(row) : null,
+          };
+        }
+        const current = recoveryStateFromLeaseRow(row);
+        if (current.archive.status !== "available" || !current.archive.current) {
+          return {
+            status: "blocked" as const,
+            code:
+              current.archive.status === "none"
+                ? ("archive_unavailable" as const)
+                : ("archive_unverified" as const),
+            lease: mapLeaseRow(row),
+          };
+        }
+        if (
+          (current.restore.status === "restoring" || current.restore.status === "verifying") &&
+          current.restore.rematerializationId !== input.rematerializationId
+        ) {
+          return {
+            status: "blocked" as const,
+            code: "attempt_conflict" as const,
+            lease: mapLeaseRow(row),
+          };
+        }
+        if (
+          (current.restore.status === "restoring" || current.restore.status === "verifying") &&
+          current.restore.rematerializationId === input.rematerializationId
+        ) {
+          return { status: "started" as const, lease: mapLeaseRow(row) };
+        }
+        const startedAt = new Date().toISOString();
+        const recovery: SandboxRecoveryState = {
+          provider: {
+            status: "creating",
+            instanceId: null,
+            observedAt: startedAt,
+          },
+          archive: current.archive,
+          restore: {
+            status: "restoring",
+            rematerializationId: input.rematerializationId,
+            selectedRevision: current.archive.current.revision,
+            startedAt,
+            completedAt: null,
+          },
+          workspace: {
+            status: "not_ready",
+            verifiedRevision: null,
+            verifiedAt: null,
+          },
+        };
+        const resumeStateJson = JSON.stringify(resumeStateWithRecovery(row.resume_state, recovery));
+        const updated = await tx.execute<LeaseRow>(sql`
+          update sandbox_leases set
+            resume_state = ${resumeStateJson}::jsonb,
+            updated_at = now()
+          where id = ${row.id}
+            and liveness = 'warming'
+            and lease_epoch = ${input.expectedEpoch}
+          returning *
+        `);
+        return updated[0]
+          ? { status: "started" as const, lease: mapLeaseRow(updated[0]) }
+          : { status: "blocked" as const, code: "stale_epoch" as const, lease: null };
+      }),
+  );
+}
+
+export async function markSandboxRestoreVerifying(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sandboxGroupId: string;
+    expectedEpoch: number;
+    rematerializationId: string;
+  },
+): Promise<{ wrote: boolean }> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await scopedDb.execute<{ id: string }>(sql`
+        update sandbox_leases set
+          resume_state = jsonb_set(resume_state, '{opengeniRecovery,restore,status}', '"verifying"'::jsonb),
+          updated_at = now()
+        where workspace_id = ${input.workspaceId}
+          and sandbox_group_id = ${input.sandboxGroupId}
+          and liveness = 'warming'
+          and lease_epoch = ${input.expectedEpoch}
+          and resume_state #>> '{opengeniRecovery,restore,rematerializationId}' = ${input.rematerializationId}
+          and resume_state #>> '{opengeniRecovery,restore,status}' = 'restoring'
+        returning id
+      `);
+      return { wrote: rows.length > 0 };
+    },
+  );
+}
+
+export async function failSandboxRematerialization(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sandboxGroupId: string;
+    expectedEpoch: number;
+    rematerializationId: string;
+    failureCode: string;
+    retryable: boolean;
+  },
+): Promise<{ failed: boolean; lease: LeaseSnapshot | null }> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (txRaw) => {
+        const tx = txRaw as unknown as Database;
+        const rows = await tx.execute<LeaseRow>(sql`
+          select * from sandbox_leases
+          where workspace_id = ${input.workspaceId}
+            and sandbox_group_id = ${input.sandboxGroupId}
+          for update
+        `);
+        const row = rows[0];
+        if (
+          !row ||
+          row.liveness !== "warming" ||
+          Number(row.lease_epoch) !== input.expectedEpoch ||
+          (
+            row.resume_state as {
+              opengeniRecovery?: { restore?: { rematerializationId?: unknown } };
+            }
+          )?.opengeniRecovery?.restore?.rematerializationId !== input.rematerializationId
+        ) {
+          return { failed: false, lease: row ? mapLeaseRow(row) : null };
+        }
+        const current = recoveryStateFromLeaseRow(row);
+        const terminalStatus: SandboxRestoreStatus = input.retryable ? "degraded" : "unrecoverable";
+        const recovery: SandboxRecoveryState = {
+          provider: {
+            status: "missing",
+            instanceId: row.instance_id,
+            observedAt: new Date().toISOString(),
+          },
+          archive: current.archive,
+          restore: {
+            ...current.restore,
+            status: terminalStatus,
+            completedAt: new Date().toISOString(),
+            failureCode: input.failureCode.slice(0, 96),
+            retryable: input.retryable,
+          },
+          workspace: {
+            status: input.retryable ? "degraded" : "unrecoverable",
+            verifiedRevision: null,
+            verifiedAt: null,
+          },
+        };
+        const resumeStateJson = JSON.stringify(archiveOnlyResumeState(row, recovery));
+        const updated = await tx.execute<LeaseRow>(sql`
+          update sandbox_leases set
+            liveness = 'cold',
+            instance_id = null,
+            data_plane_url = null,
+            terminal_data_plane_url = null,
+            lease_epoch = lease_epoch + 1,
+            resume_state = ${resumeStateJson}::jsonb,
+            updated_at = now()
+          where id = ${row.id}
+            and liveness = 'warming'
+            and lease_epoch = ${input.expectedEpoch}
+          returning *
+        `);
+        return updated[0]
+          ? { failed: true, lease: mapLeaseRow(updated[0]) }
+          : { failed: false, lease: null };
+      }),
+  );
+}
+
+export async function markSandboxProviderReady(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sandboxGroupId: string;
+    expectedEpoch: number;
+    expectedInstanceId: string;
+  },
+): Promise<{ wrote: boolean; lease: LeaseSnapshot | null }> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (txRaw) => {
+        const tx = txRaw as unknown as Database;
+        const rows = await tx.execute<LeaseRow>(sql`
+          select * from sandbox_leases
+          where workspace_id = ${input.workspaceId}
+            and sandbox_group_id = ${input.sandboxGroupId}
+          for update
+        `);
+        const row = rows[0];
+        if (
+          !row ||
+          row.liveness !== "warm" ||
+          Number(row.lease_epoch) !== input.expectedEpoch ||
+          row.instance_id !== input.expectedInstanceId
+        ) {
+          return { wrote: false, lease: row ? mapLeaseRow(row) : null };
+        }
+        const current = recoveryStateFromLeaseRow(row);
+        const observedAt = new Date().toISOString();
+        const recovery: SandboxRecoveryState = {
+          ...current,
+          provider: {
+            status: "exists",
+            instanceId: row.instance_id,
+            observedAt,
+          },
+          restore:
+            current.restore.status === "ready"
+              ? current.restore
+              : {
+                  status: "not_required",
+                  rematerializationId: null,
+                  selectedRevision: null,
+                  startedAt: null,
+                  completedAt: observedAt,
+                },
+          workspace:
+            current.restore.status === "ready"
+              ? current.workspace
+              : {
+                  status: "ready",
+                  verifiedRevision: null,
+                  verifiedAt: observedAt,
+                },
+        };
+        const resumeStateJson = JSON.stringify(resumeStateWithRecovery(row.resume_state, recovery));
+        const updated = await tx.execute<LeaseRow>(sql`
+          update sandbox_leases set resume_state = ${resumeStateJson}::jsonb, updated_at = now()
+          where id = ${row.id}
+            and liveness = 'warm'
+            and lease_epoch = ${input.expectedEpoch}
+            and instance_id = ${input.expectedInstanceId}
+          returning *
+        `);
+        return updated[0]
+          ? { wrote: true, lease: mapLeaseRow(updated[0]) }
+          : { wrote: false, lease: null };
+      }),
+  );
+}
+
 // §4.2 — the ONLY lease_epoch++ site. CAS on (warming AND lease_epoch=expected).
 // Folds the group box-envelope (resume_backend_id/resume_state) onto the lease.
 export async function commitWarmingToWarm(
@@ -14073,43 +14708,145 @@ export async function commitWarmingToWarm(
     dataPlaneUrl?: string | null; // event-driven resolveExposedPort result, any worker
     resumeBackendId?: string | null;
     resumeState?: Record<string, unknown> | null;
+    /** Required when the warming lease carries a selected durable archive.
+     *  The warm transition is rejected unless this exact attempt is in the
+     *  verifying state for this exact revision. */
+    rematerialization?: {
+      id: string;
+      verifiedRevision: string;
+    };
     leaseTtlMs: number;
   },
-): Promise<{ committed: boolean; lease: LeaseSnapshot | null }> {
+): Promise<{
+  committed: boolean;
+  lease: LeaseSnapshot | null;
+  reason?:
+    | "stale_epoch"
+    | "rematerialization_required"
+    | "rematerialization_mismatch"
+    | "archive_revision_mismatch";
+}> {
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      // resume_state is jsonb: the raw postgres driver does NOT auto-stringify a
-      // plain object bound for a jsonb column, so serialize to a JSON string and
-      // cast ::jsonb (null stays a real SQL null). Binding the object directly
-      // throws "string argument must be of type string" on the wire.
-      const resumeStateJson = input.resumeState == null ? null : JSON.stringify(input.resumeState);
-      const rows = await scopedDb.execute<LeaseRow>(sql`
-        update sandbox_leases set
-          liveness          = 'warm',
-          instance_id       = ${input.instanceId},
-          data_plane_url    = ${input.dataPlaneUrl ?? null},
-          -- A box re-key (epoch++) invalidates the prior epoch's ttyd tunnel; the
-          -- terminal URL is re-resolved + re-recorded lazily by mintTerminalStream
-          -- on the next attach. Clear it here so a stale URL never survives a roll.
-          terminal_data_plane_url = null,
-          resume_backend_id = ${input.resumeBackendId ?? null},
-          resume_state      = ${resumeStateJson}::jsonb,
-          lease_epoch       = lease_epoch + 1,
-          expires_at        = now() + (${String(input.leaseTtlMs)} || ' milliseconds')::interval,
-          updated_at        = now()
-        where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
-          and liveness = 'warming' and lease_epoch = ${input.expectedEpoch}
-        returning *
-      `);
-      // CAS miss = a reaper already reset this warming row to cold (the spawner
-      // was too slow), or another spawner re-established and bumped the epoch.
-      // The spawner MUST drop its in-memory handle and re-acquire — NEVER force
-      // warm, NEVER provider-delete the box (it rides the provider idle-timeout).
-      if (rows.length === 0) return { committed: false, lease: null };
-      return { committed: true, lease: mapLeaseRow(rows[0]!) };
-    },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (txRaw) => {
+        const tx = txRaw as unknown as Database;
+        const rows = await tx.execute<LeaseRow>(sql`
+          select * from sandbox_leases
+          where workspace_id = ${input.workspaceId}
+            and sandbox_group_id = ${input.sandboxGroupId}
+          for update
+        `);
+        const row = rows[0];
+        if (!row || row.liveness !== "warming" || Number(row.lease_epoch) !== input.expectedEpoch) {
+          return {
+            committed: false,
+            lease: row ? mapLeaseRow(row) : null,
+            reason: "stale_epoch" as const,
+          };
+        }
+
+        const current = recoveryStateFromLeaseRow(row);
+        const rematerialization = input.rematerialization;
+        if (current.archive.status === "available" && !rematerialization) {
+          return {
+            committed: false,
+            lease: mapLeaseRow(row),
+            reason: "rematerialization_required" as const,
+          };
+        }
+        if (
+          rematerialization &&
+          (current.restore.status !== "verifying" ||
+            current.restore.rematerializationId !== rematerialization.id ||
+            current.restore.selectedRevision !== rematerialization.verifiedRevision)
+        ) {
+          return {
+            committed: false,
+            lease: mapLeaseRow(row),
+            reason: "rematerialization_mismatch" as const,
+          };
+        }
+        if (
+          rematerialization &&
+          current.archive.current?.revision !== rematerialization.verifiedRevision
+        ) {
+          return {
+            committed: false,
+            lease: mapLeaseRow(row),
+            reason: "archive_revision_mismatch" as const,
+          };
+        }
+
+        const completedAt = new Date().toISOString();
+        const recovery: SandboxRecoveryState = rematerialization
+          ? {
+              provider: {
+                status: "exists",
+                instanceId: input.instanceId,
+                observedAt: completedAt,
+              },
+              archive: current.archive,
+              restore: {
+                status: "ready",
+                rematerializationId: rematerialization.id,
+                selectedRevision: rematerialization.verifiedRevision,
+                startedAt: current.restore.startedAt,
+                completedAt,
+              },
+              workspace: {
+                status: "ready",
+                verifiedRevision: rematerialization.verifiedRevision,
+                verifiedAt: completedAt,
+              },
+            }
+          : {
+              provider: {
+                status: "exists",
+                instanceId: input.instanceId,
+                observedAt: completedAt,
+              },
+              archive: archiveProjectionFromResumeState(input.resumeState ?? null),
+              restore: {
+                status: "not_required",
+                rematerializationId: null,
+                selectedRevision: null,
+                startedAt: null,
+                completedAt,
+              },
+              workspace: {
+                status: "ready",
+                verifiedRevision: null,
+                verifiedAt: completedAt,
+              },
+            };
+        const withArchives = resumeStateWithPreservedArchives(
+          input.resumeState ?? null,
+          row.resume_state,
+        );
+        const resumeStateJson = JSON.stringify(resumeStateWithRecovery(withArchives, recovery));
+        const updated = await tx.execute<LeaseRow>(sql`
+          update sandbox_leases set
+            liveness          = 'warm',
+            instance_id       = ${input.instanceId},
+            data_plane_url    = ${input.dataPlaneUrl ?? null},
+            terminal_data_plane_url = null,
+            resume_backend_id = ${input.resumeBackendId ?? null},
+            resume_state      = ${resumeStateJson}::jsonb,
+            lease_epoch       = lease_epoch + 1,
+            expires_at        = now() + (${String(input.leaseTtlMs)} || ' milliseconds')::interval,
+            updated_at        = now()
+          where id = ${row.id}
+            and liveness = 'warming'
+            and lease_epoch = ${input.expectedEpoch}
+          returning *
+        `);
+        if (!updated[0]) {
+          return { committed: false, lease: null, reason: "stale_epoch" as const };
+        }
+        return { committed: true, lease: mapLeaseRow(updated[0]) };
+      }),
   );
 }
 
@@ -14140,23 +14877,57 @@ export async function recordWarmingSandboxCreated(
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      const resumeStateJson = input.resumeState == null ? null : JSON.stringify(input.resumeState);
-      const warmingTtlMs = input.warmingLeaseTtlMs ?? input.leaseTtlMs;
-      const rows = await scopedDb.execute<LeaseRow>(sql`
-        update sandbox_leases set
-          instance_id       = ${input.instanceId},
-          resume_backend_id = ${input.resumeBackendId ?? null},
-          resume_state      = ${resumeStateJson}::jsonb,
-          expires_at        = now() + (${String(warmingTtlMs)} || ' milliseconds')::interval,
-          updated_at        = now()
-        where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
-          and liveness = 'warming' and lease_epoch = ${input.expectedEpoch}
-        returning *
-      `);
-      if (rows.length === 0) return { recorded: false, lease: null };
-      return { recorded: true, lease: mapLeaseRow(rows[0]!) };
-    },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (txRaw) => {
+        const tx = txRaw as unknown as Database;
+        const rows = await tx.execute<LeaseRow>(sql`
+          select * from sandbox_leases
+          where workspace_id = ${input.workspaceId}
+            and sandbox_group_id = ${input.sandboxGroupId}
+          for update
+        `);
+        const row = rows[0];
+        if (!row || row.liveness !== "warming" || Number(row.lease_epoch) !== input.expectedEpoch) {
+          return { recorded: false, lease: row ? mapLeaseRow(row) : null };
+        }
+        const now = new Date().toISOString();
+        const current = recoveryStateFromLeaseRow(row);
+        const recovery: SandboxRecoveryState = {
+          ...current,
+          provider: {
+            status: "creating",
+            instanceId: input.instanceId,
+            observedAt: now,
+          },
+          workspace: {
+            ...current.workspace,
+            status: "not_ready",
+            verifiedRevision: null,
+            verifiedAt: null,
+          },
+        };
+        const withArchives = resumeStateWithPreservedArchives(
+          input.resumeState ?? null,
+          row.resume_state,
+        );
+        const resumeStateJson = JSON.stringify(resumeStateWithRecovery(withArchives, recovery));
+        const warmingTtlMs = input.warmingLeaseTtlMs ?? input.leaseTtlMs;
+        const updated = await tx.execute<LeaseRow>(sql`
+          update sandbox_leases set
+            instance_id       = ${input.instanceId},
+            resume_backend_id = ${input.resumeBackendId ?? null},
+            resume_state      = ${resumeStateJson}::jsonb,
+            expires_at        = now() + (${String(warmingTtlMs)} || ' milliseconds')::interval,
+            updated_at        = now()
+          where id = ${row.id}
+            and liveness = 'warming'
+            and lease_epoch = ${input.expectedEpoch}
+          returning *
+        `);
+        return updated[0]
+          ? { recorded: true, lease: mapLeaseRow(updated[0]) }
+          : { recorded: false, lease: null };
+      }),
   );
 }
 
@@ -14184,6 +14955,8 @@ export async function markWarmLeaseInstanceLost(
     sandboxGroupId: string;
     expectedEpoch: number;
     expectedInstanceId: string;
+    /** Bounded classifier output only; never raw provider error text. */
+    diagnostic?: string;
   },
 ): Promise<MarkWarmLeaseInstanceLostResult> {
   return await withRlsContext(
@@ -14211,6 +14984,50 @@ export async function markWarmLeaseInstanceLost(
           };
         }
 
+        const observedAt = new Date().toISOString();
+        const before = recoveryStateFromLeaseRow(current);
+        const archiveStatus = before.archive.status;
+        const restoreStatus: SandboxRestoreStatus =
+          archiveStatus === "available"
+            ? "pending"
+            : archiveStatus === "unverified" || archiveStatus === "invalid"
+              ? "degraded"
+              : "unrecoverable";
+        const workspaceStatus: SandboxWorkspaceReadiness =
+          restoreStatus === "pending"
+            ? "not_ready"
+            : restoreStatus === "degraded"
+              ? "degraded"
+              : "unrecoverable";
+        const recovery: SandboxRecoveryState = {
+          provider: {
+            status: "missing",
+            instanceId: current.instance_id,
+            observedAt,
+            ...(input.diagnostic ? { diagnostic: input.diagnostic.slice(0, 160) } : {}),
+          },
+          archive: before.archive,
+          restore: {
+            status: restoreStatus,
+            rematerializationId: null,
+            selectedRevision:
+              restoreStatus === "pending" ? (before.archive.current?.revision ?? null) : null,
+            startedAt: null,
+            completedAt: null,
+            ...(restoreStatus === "degraded"
+              ? { failureCode: "archive_unverified", retryable: false }
+              : restoreStatus === "unrecoverable"
+                ? { failureCode: "archive_unavailable", retryable: false }
+                : {}),
+          },
+          workspace: {
+            status: workspaceStatus,
+            verifiedRevision: null,
+            verifiedAt: null,
+          },
+        };
+        const coldResumeState = archiveOnlyResumeState(current, recovery);
+        const coldResumeStateJson = JSON.stringify(coldResumeState);
         const updatedRows = await tx.execute<LeaseRow>(sql`
           update sandbox_leases set
             liveness = 'cold',
@@ -14218,21 +15035,8 @@ export async function markWarmLeaseInstanceLost(
             data_plane_url = null,
             terminal_data_plane_url = null,
             lease_epoch = lease_epoch + 1,
-            resume_state = case
-              when (resume_state #>> '{sessionState,workspaceArchive}') is not null
-                then jsonb_build_object(
-                  'backendId', coalesce(resume_state ->> 'backendId', to_jsonb(resume_backend_id) #>> '{}'),
-                  'sessionState', jsonb_strip_nulls(jsonb_build_object(
-                    'workspaceArchive', resume_state #> '{sessionState,workspaceArchive}',
-                    'workspaceArchivePrev', resume_state #> '{sessionState,workspaceArchivePrev}',
-                    'workspaceArchiveAt', resume_state #> '{sessionState,workspaceArchiveAt}')))
-              else null
-            end,
-            resume_backend_id = case
-              when (resume_state #>> '{sessionState,workspaceArchive}') is not null
-                then resume_backend_id
-              else null
-            end,
+            resume_state = ${coldResumeStateJson}::jsonb,
+            resume_backend_id = coalesce(resume_backend_id, backend),
             updated_at = now()
           where id = ${current.id}
           returning *
@@ -14273,35 +15077,76 @@ export async function failWarmingToCold(
   await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      await scopedDb.execute(sql`
-        update sandbox_leases set
-          liveness = 'cold', instance_id = null,
-          data_plane_url = null, terminal_data_plane_url = null, updated_at = now(),
-          resume_state = case
-            when (resume_state #>> '{sessionState,workspaceArchive}') is not null
-              then jsonb_build_object(
-                'backendId', coalesce(resume_state ->> 'backendId', to_jsonb(resume_backend_id) #>> '{}'),
-                -- Carry BOTH archives (+ the capture time) into the minimal cold
-                -- envelope: the mid-session fallback (workspaceArchivePrev) was
-                -- retained and never GC'd, so dropping it here would strand the
-                -- provider snapshot AND lose the restore fallback across a
-                -- drain/warming-death. strip_nulls omits prev/at when absent.
-                'sessionState', jsonb_strip_nulls(jsonb_build_object(
-                  'workspaceArchive', resume_state #> '{sessionState,workspaceArchive}',
-                  'workspaceArchivePrev', resume_state #> '{sessionState,workspaceArchivePrev}',
-                  'workspaceArchiveAt', resume_state #> '{sessionState,workspaceArchiveAt}')))
-            else null
-          end,
-          resume_backend_id = case
-            when (resume_state #>> '{sessionState,workspaceArchive}') is not null
-              then resume_backend_id
-            else null
-          end
-        where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
-          and liveness = 'warming' and lease_epoch = ${input.expectedEpoch}
-      `);
-    },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (txRaw) => {
+        const tx = txRaw as unknown as Database;
+        const rows = await tx.execute<LeaseRow>(sql`
+          select * from sandbox_leases
+          where workspace_id = ${input.workspaceId}
+            and sandbox_group_id = ${input.sandboxGroupId}
+          for update
+        `);
+        const row = rows[0];
+        if (!row || row.liveness !== "warming" || Number(row.lease_epoch) !== input.expectedEpoch) {
+          return;
+        }
+        const current = recoveryStateFromLeaseRow(row);
+        const hasArchive = current.archive.status !== "none";
+        const now = new Date().toISOString();
+        const restoreStatus: SandboxRestoreStatus =
+          current.archive.status === "available"
+            ? "pending"
+            : hasArchive
+              ? "degraded"
+              : "unrecoverable";
+        const recovery: SandboxRecoveryState = {
+          provider: {
+            status: "missing",
+            instanceId: row.instance_id,
+            observedAt: now,
+          },
+          archive: current.archive,
+          restore: {
+            status: restoreStatus,
+            rematerializationId: null,
+            selectedRevision: current.archive.current?.revision ?? null,
+            startedAt: null,
+            completedAt: now,
+            ...(restoreStatus === "degraded"
+              ? { failureCode: "archive_unverified", retryable: false }
+              : restoreStatus === "unrecoverable"
+                ? { failureCode: "archive_unavailable", retryable: false }
+                : {}),
+          },
+          workspace: {
+            status:
+              restoreStatus === "pending"
+                ? "not_ready"
+                : restoreStatus === "degraded"
+                  ? "degraded"
+                  : "unrecoverable",
+            verifiedRevision: null,
+            verifiedAt: null,
+          },
+        };
+        const resumeStateJson = hasArchive
+          ? JSON.stringify(archiveOnlyResumeState(row, recovery))
+          : null;
+        await tx.execute(sql`
+          update sandbox_leases set
+            liveness = 'cold',
+            instance_id = null,
+            data_plane_url = null,
+            terminal_data_plane_url = null,
+            lease_epoch = lease_epoch + 1,
+            resume_state = ${resumeStateJson}::jsonb,
+            resume_backend_id = case when ${hasArchive} then coalesce(resume_backend_id, backend) else null end,
+            updated_at = now()
+          where id = ${row.id}
+            and liveness = 'warming'
+            and lease_epoch = ${input.expectedEpoch}
+        `);
+      }),
   );
 }
 
@@ -14837,51 +15682,96 @@ export async function confirmDrainCold(
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      // draining->cold: the box is terminated, so EVERY live-box field is cleared
-      // (instance_id / data-plane URLs). resume_state, however, is NOT blindly
-      // nulled — if the reaper PERSISTED a /workspace snapshot onto it
-      // (persistDrainSnapshot folds the archive at resume_state.sessionState.
-      // workspaceArchive BEFORE this CAS, in the SAME sweep), nulling it here would
-      // immediately destroy the snapshot the next cold-restore must replay — the
-      // file-persistence bug. So we PRESERVE a MINIMAL archive-only envelope
-      // `{ backendId, sessionState: { workspaceArchive } }` (dropping the dead box's
-      // providerState/sandboxId — the box is gone, resume-by-id would only fail) and
-      // KEEP resume_backend_id so cold-restore knows which client to hydrate with.
-      // No archive (a non-persisted drain, or a 'none'/tar config that stored none)
-      // -> resume_state is nulled as before. The archive then rides the COLD lease's
-      // resume_state until the next spawner reads + hydrates it; it is re-superseded
-      // (GC'd) on the next drain and finally cleared on workspace teardown.
-      const rows = await scopedDb.execute<{ id: string }>(sql`
+    async (scopedDb) =>
+      await scopedDb.transaction(async (txRaw) => {
+        const tx = txRaw as unknown as Database;
+        // draining->cold: the box is terminated, so EVERY live-box field is cleared
+        // (instance_id / data-plane URLs). resume_state, however, is NOT blindly
+        // nulled — if the reaper PERSISTED a /workspace snapshot onto it
+        // (persistDrainSnapshot folds the archive at resume_state.sessionState.
+        // workspaceArchive BEFORE this CAS, in the SAME sweep), nulling it here would
+        // immediately destroy the snapshot the next cold-restore must replay — the
+        // file-persistence bug. So we PRESERVE a MINIMAL archive-only envelope
+        // `{ backendId, sessionState: { workspaceArchive } }` (dropping the dead box's
+        // providerState/sandboxId — the box is gone, resume-by-id would only fail) and
+        // KEEP resume_backend_id so cold-restore knows which client to hydrate with.
+        // No archive (a non-persisted drain, or a 'none'/tar config that stored none)
+        // -> resume_state is nulled as before. The archive then rides the COLD lease's
+        // resume_state until the next spawner reads + hydrates it; it is re-superseded
+        // (GC'd) on the next drain and finally cleared on workspace teardown.
+        const locked = await tx.execute<LeaseRow>(sql`
+          select * from sandbox_leases
+          where workspace_id = ${input.workspaceId}
+            and sandbox_group_id = ${input.sandboxGroupId}
+          for update
+        `);
+        const row = locked[0];
+        if (
+          !row ||
+          row.liveness !== "draining" ||
+          row.refcount !== 0 ||
+          Number(row.lease_epoch) !== input.expectedEpoch
+        ) {
+          return { wentCold: false };
+        }
+        const current = recoveryStateFromLeaseRow(row);
+        const hasArchive = current.archive.status !== "none";
+        const now = new Date().toISOString();
+        const restoreStatus: SandboxRestoreStatus =
+          current.archive.status === "available"
+            ? "pending"
+            : hasArchive
+              ? "degraded"
+              : "not_required";
+        const recovery: SandboxRecoveryState = {
+          provider: {
+            status: "not_created",
+            instanceId: null,
+            observedAt: now,
+          },
+          archive: current.archive,
+          restore: {
+            status: restoreStatus,
+            rematerializationId: null,
+            selectedRevision: current.archive.current?.revision ?? null,
+            startedAt: null,
+            completedAt: now,
+            ...(restoreStatus === "degraded"
+              ? { failureCode: "archive_unverified", retryable: false }
+              : {}),
+          },
+          workspace: {
+            status:
+              restoreStatus === "pending"
+                ? "not_ready"
+                : restoreStatus === "degraded"
+                  ? "degraded"
+                  : "unknown",
+            verifiedRevision: null,
+            verifiedAt: null,
+          },
+        };
+        const resumeStateJson = hasArchive
+          ? JSON.stringify(archiveOnlyResumeState(row, recovery))
+          : null;
+        const rows = await tx.execute<{ id: string }>(sql`
         update sandbox_leases set
-          liveness = 'cold', instance_id = null,
-          data_plane_url = null, terminal_data_plane_url = null, updated_at = now(),
-          resume_state = case
-            when (resume_state #>> '{sessionState,workspaceArchive}') is not null
-              then jsonb_build_object(
-                'backendId', coalesce(resume_state ->> 'backendId', to_jsonb(resume_backend_id) #>> '{}'),
-                -- Carry BOTH archives (+ the capture time) into the minimal cold
-                -- envelope: the mid-session fallback (workspaceArchivePrev) was
-                -- retained and never GC'd, so dropping it here would strand the
-                -- provider snapshot AND lose the restore fallback across a
-                -- drain/warming-death. strip_nulls omits prev/at when absent.
-                'sessionState', jsonb_strip_nulls(jsonb_build_object(
-                  'workspaceArchive', resume_state #> '{sessionState,workspaceArchive}',
-                  'workspaceArchivePrev', resume_state #> '{sessionState,workspaceArchivePrev}',
-                  'workspaceArchiveAt', resume_state #> '{sessionState,workspaceArchiveAt}')))
-            else null
-          end,
-          resume_backend_id = case
-            when (resume_state #>> '{sessionState,workspaceArchive}') is not null
-              then resume_backend_id
-            else null
-          end
-        where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
-          and liveness = 'draining' and refcount = 0 and lease_epoch = ${input.expectedEpoch}
+          liveness = 'cold',
+          instance_id = null,
+          data_plane_url = null,
+          terminal_data_plane_url = null,
+          lease_epoch = lease_epoch + 1,
+          resume_state = ${resumeStateJson}::jsonb,
+          resume_backend_id = case when ${hasArchive} then coalesce(resume_backend_id, backend) else null end,
+          updated_at = now()
+        where id = ${row.id}
+          and liveness = 'draining'
+          and refcount = 0
+          and lease_epoch = ${input.expectedEpoch}
         returning id
       `);
-      return { wentCold: rows.length > 0 };
-    },
+        return { wentCold: rows.length > 0 };
+      }),
   );
 }
 
@@ -14921,8 +15811,23 @@ export async function persistDrainSnapshot(
     /** base64 of the provider snapshot-ref / tar archive from persistWorkspace().
      *  Pass null to CAS-check without writing (for backends with no persistWorkspace). */
     workspaceArchive: string | null;
+    /** Exact verified archive/tree descriptor produced by the runtime capture.
+     *  Omission is accepted only for legacy callers and remains unverified. */
+    workspaceArchiveMeta?: SandboxArchiveRevision;
   },
-): Promise<{ wrote: boolean; priorArchive: string | null; priorArchivePrev: string | null }> {
+): Promise<{
+  wrote: boolean;
+  priorArchive: string | null;
+  priorArchivePrev: string | null;
+  archiveRevision: string | null;
+}> {
+  const workspaceArchiveMeta =
+    input.workspaceArchiveMeta === undefined
+      ? null
+      : parseArchiveRevision(input.workspaceArchiveMeta);
+  if (input.workspaceArchiveMeta !== undefined && !workspaceArchiveMeta) {
+    throw new Error("Invalid verified workspace archive descriptor");
+  }
   // withRlsContext already runs `fn` inside ONE transaction with the RLS GUCs set,
   // so the SELECT...FOR UPDATE + UPDATE below are atomic (one snapshot, one lock)
   // WITHOUT an extra nested savepoint — nesting a second transaction here under
@@ -14937,34 +15842,53 @@ export async function persistDrainSnapshot(
       const guard = await scopedDb.execute<{
         prior_archive: string | null;
         prior_archive_prev: string | null;
+        resume_state: Record<string, unknown> | null;
       }>(sql`
         select
           resume_state #>> '{sessionState,workspaceArchive}' as prior_archive,
-          resume_state #>> '{sessionState,workspaceArchivePrev}' as prior_archive_prev
+          resume_state #>> '{sessionState,workspaceArchivePrev}' as prior_archive_prev,
+          resume_state
         from sandbox_leases
         where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
           and liveness = 'draining' and refcount = 0 and lease_epoch = ${input.expectedEpoch}
         for update
       `);
       if (guard.length === 0) {
-        return { wrote: false, priorArchive: null, priorArchivePrev: null };
+        return {
+          wrote: false,
+          priorArchive: null,
+          priorArchivePrev: null,
+          archiveRevision: null,
+        };
       }
       const priorArchive = guard[0]!.prior_archive ?? null;
       const priorArchivePrev = guard[0]!.prior_archive_prev ?? null;
       // null workspaceArchive = pure CAS-check (re-arm guard for no-archive backends).
       // The FOR UPDATE lock above is the only synchronization needed; no write.
       if (input.workspaceArchive === null) {
-        return { wrote: true, priorArchive: null, priorArchivePrev: null };
+        return {
+          wrote: true,
+          priorArchive: null,
+          priorArchivePrev: null,
+          archiveRevision: null,
+        };
       }
       await foldWorkspaceArchiveOntoLease(scopedDb, {
         workspaceId: input.workspaceId,
         sandboxGroupId: input.sandboxGroupId,
         expectedEpoch: input.expectedEpoch,
         workspaceArchive: input.workspaceArchive,
+        workspaceArchiveMeta,
+        resumeState: guard[0]!.resume_state,
         livenessGuard: "draining",
         clearPreviousArchive: true,
       });
-      return { wrote: true, priorArchive, priorArchivePrev };
+      return {
+        wrote: true,
+        priorArchive,
+        priorArchivePrev,
+        archiveRevision: workspaceArchiveMeta?.revision ?? null,
+      };
     },
   );
 }
@@ -14992,8 +15916,11 @@ async function foldWorkspaceArchiveOntoLease(
     sandboxGroupId: string;
     expectedEpoch: number;
     workspaceArchive: string;
+    workspaceArchiveMeta: SandboxArchiveRevision | null;
+    resumeState: Record<string, unknown> | null;
     livenessGuard: "draining" | "warm";
     priorCurrentArchive?: string | null;
+    priorCurrentArchiveMeta?: unknown;
     clearPreviousArchive?: boolean;
     /** The wall-clock (ISO) this archive's capture STARTED. Stamped as
      *  workspaceArchiveAt so warm-snapshot ordering is by capture-initiation, not
@@ -15006,32 +15933,47 @@ async function foldWorkspaceArchiveOntoLease(
     input.livenessGuard === "draining"
       ? sql`liveness = 'draining' and refcount = 0`
       : sql`liveness = 'warm'`;
-  const archiveAt = input.archiveAtIso
-    ? sql`to_jsonb(${input.archiveAtIso}::text)`
-    : sql`to_jsonb(now()::timestamptz::text)`;
+  const archiveAtIso =
+    input.workspaceArchiveMeta?.capturedAt ?? input.archiveAtIso ?? new Date().toISOString();
+  const base = input.resumeState && typeof input.resumeState === "object" ? input.resumeState : {};
+  const currentSession =
+    base.sessionState && typeof base.sessionState === "object"
+      ? (base.sessionState as Record<string, unknown>)
+      : {};
+  const sessionState: Record<string, unknown> = {
+    ...currentSession,
+    workspaceArchive: input.workspaceArchive,
+    workspaceArchiveAt: archiveAtIso,
+  };
+  if (input.workspaceArchiveMeta) {
+    sessionState.workspaceArchiveMeta = input.workspaceArchiveMeta;
+  } else {
+    delete sessionState.workspaceArchiveMeta;
+  }
+  if (input.clearPreviousArchive) {
+    delete sessionState.workspaceArchivePrev;
+    delete sessionState.workspaceArchivePrevMeta;
+  } else if (input.priorCurrentArchive) {
+    sessionState.workspaceArchivePrev = input.priorCurrentArchive;
+    if (input.priorCurrentArchiveMeta !== undefined && input.priorCurrentArchiveMeta !== null) {
+      sessionState.workspaceArchivePrevMeta = input.priorCurrentArchiveMeta;
+    } else {
+      delete sessionState.workspaceArchivePrevMeta;
+    }
+  }
+  const folded: Record<string, unknown> = { ...base, sessionState };
+  const explicitRecovery =
+    folded.opengeniRecovery && typeof folded.opengeniRecovery === "object"
+      ? (folded.opengeniRecovery as Record<string, unknown>)
+      : {};
+  folded.opengeniRecovery = {
+    ...explicitRecovery,
+    archive: archiveProjectionFromResumeState(folded),
+  };
+  const foldedJson = JSON.stringify(folded);
   await scopedDb.execute(sql`
     update sandbox_leases set
-      resume_state = jsonb_set(
-        -- Defensive: only treat resume_state / its sessionState as an object
-        -- when it actually IS one; a null/scalar (legacy or malformed envelope)
-        -- starts from '{}' so jsonb_set never throws "cannot set path in scalar".
-        case when jsonb_typeof(resume_state) = 'object' then resume_state else '{}'::jsonb end,
-        '{sessionState}',
-        jsonb_strip_nulls(
-          (case when jsonb_typeof(resume_state -> 'sessionState') = 'object'
-                then resume_state -> 'sessionState' else '{}'::jsonb end)
-            || jsonb_build_object(
-              'workspaceArchive', to_jsonb(${input.workspaceArchive}::text),
-              'workspaceArchiveAt', ${archiveAt},
-              'workspaceArchivePrev', case
-                when ${input.clearPreviousArchive ? "yes" : "no"}::text = 'yes' then null::jsonb
-                when ${input.priorCurrentArchive ?? null}::text is null then null::jsonb
-                else to_jsonb(${input.priorCurrentArchive ?? null}::text)
-              end
-            )
-        ),
-        true
-      ),
+      resume_state = ${foldedJson}::jsonb,
       updated_at = now()
     where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
       and ${livenessGuard} and lease_epoch = ${input.expectedEpoch}
@@ -15058,6 +16000,9 @@ export async function persistWarmSnapshot(
     expectedEpoch: number;
     /** base64 of the provider snapshot-ref / tar archive from persistWorkspace(). */
     workspaceArchive: string;
+    /** Exact verified archive/tree descriptor produced by the runtime capture.
+     *  Omission is accepted only for legacy callers and remains unverified. */
+    workspaceArchiveMeta?: SandboxArchiveRevision;
     /** Snapshots newer than this many ms are kept (throttle); 0 = always write. */
     minIntervalMs: number;
     /** Wall-clock (ms) this capture STARTED. Ordering is by capture-initiation,
@@ -15072,8 +16017,16 @@ export async function persistWarmSnapshot(
   throttled: boolean;
   superseded: boolean;
   priorArchiveForGc: string | null;
+  archiveRevision: string | null;
 }> {
   const capturedAtMs = input.capturedAtMs ?? Date.now();
+  const workspaceArchiveMeta =
+    input.workspaceArchiveMeta === undefined
+      ? null
+      : parseArchiveRevision(input.workspaceArchiveMeta);
+  if (input.workspaceArchiveMeta !== undefined && !workspaceArchiveMeta) {
+    throw new Error("Invalid verified workspace archive descriptor");
+  }
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -15082,18 +16035,28 @@ export async function persistWarmSnapshot(
         prior_archive: string | null;
         prior_archive_prev: string | null;
         prior_archive_at: string | null;
+        prior_archive_meta: unknown;
+        resume_state: Record<string, unknown> | null;
       }>(sql`
         select
           resume_state #>> '{sessionState,workspaceArchive}' as prior_archive,
           resume_state #>> '{sessionState,workspaceArchivePrev}' as prior_archive_prev,
-          resume_state #>> '{sessionState,workspaceArchiveAt}' as prior_archive_at
+          resume_state #>> '{sessionState,workspaceArchiveAt}' as prior_archive_at,
+          resume_state #> '{sessionState,workspaceArchiveMeta}' as prior_archive_meta,
+          resume_state
         from sandbox_leases
         where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
           and liveness = 'warm' and lease_epoch = ${input.expectedEpoch}
         for update
       `);
       if (guard.length === 0) {
-        return { wrote: false, throttled: false, superseded: false, priorArchiveForGc: null };
+        return {
+          wrote: false,
+          throttled: false,
+          superseded: false,
+          priorArchiveForGc: null,
+          archiveRevision: null,
+        };
       }
       const priorArchive = guard[0]!.prior_archive ?? null;
       const priorArchivePrev = guard[0]!.prior_archive_prev ?? null;
@@ -15105,29 +16068,45 @@ export async function persistWarmSnapshot(
       // fresher turn-end one). No-op — do NOT overwrite and do NOT advance the
       // throttle clock. This is what makes the bounded snapshot wait safe.
       if (Number.isFinite(priorAtMs) && capturedAtMs <= priorAtMs) {
-        return { wrote: false, throttled: false, superseded: true, priorArchiveForGc: null };
+        return {
+          wrote: false,
+          throttled: false,
+          superseded: true,
+          priorArchiveForGc: null,
+          archiveRevision: null,
+        };
       }
       if (
         input.minIntervalMs > 0 &&
         Number.isFinite(priorAtMs) &&
         capturedAtMs - priorAtMs < input.minIntervalMs
       ) {
-        return { wrote: false, throttled: true, superseded: false, priorArchiveForGc: null };
+        return {
+          wrote: false,
+          throttled: true,
+          superseded: false,
+          priorArchiveForGc: null,
+          archiveRevision: null,
+        };
       }
       await foldWorkspaceArchiveOntoLease(scopedDb, {
         workspaceId: input.workspaceId,
         sandboxGroupId: input.sandboxGroupId,
         expectedEpoch: input.expectedEpoch,
         workspaceArchive: input.workspaceArchive,
+        workspaceArchiveMeta,
+        resumeState: guard[0]!.resume_state,
         livenessGuard: "warm",
         priorCurrentArchive: priorArchive,
-        archiveAtIso: new Date(capturedAtMs).toISOString(),
+        priorCurrentArchiveMeta: guard[0]!.prior_archive_meta,
+        archiveAtIso: workspaceArchiveMeta?.capturedAt ?? new Date(capturedAtMs).toISOString(),
       });
       return {
         wrote: true,
         throttled: false,
         superseded: false,
         priorArchiveForGc: priorArchivePrev,
+        archiveRevision: workspaceArchiveMeta?.revision ?? null,
       };
     },
   );
