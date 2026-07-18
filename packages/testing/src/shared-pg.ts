@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import postgres from "postgres";
 import { migrate } from "@opengeni/db/migrate";
+import { TEST_SERVICE_IMAGES } from "./service-images";
 
 const execFileAsync = promisify(execFile);
 
@@ -48,7 +49,7 @@ const PORT = 61440;
 const CONTAINER = `opengeni-shared-test-pg-${PORT}`;
 const PASSWORD = "x";
 const APP_PASSWORD = "apppw";
-const IMAGE = "pgvector/pgvector:pg16";
+const IMAGE = TEST_SERVICE_IMAGES.pgvectorPg16;
 const ADMIN_BASE_URL = `postgres://postgres:${PASSWORD}@127.0.0.1:${PORT}`;
 // A once-migrated database every test file clones from via `CREATE DATABASE ...
 // TEMPLATE`. Postgres clones a template with a file-level copy, so each file

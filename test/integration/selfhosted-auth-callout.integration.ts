@@ -17,7 +17,8 @@
 //   - an agent authenticated for workspace A is DENIED pub/sub on `agent.B.>`;
 //   - an invalid/revoked bearer is DENIED connection entirely.
 //
-// nats-server is launched via nix (`nix run nixpkgs#nats-server`) so the test needs
+// CI launches the broker from an immutable Docker image because GitHub's stock
+// Ubuntu runner does not include Nix. Local runs retain the Nix fallback and need
 // no globally-installed broker. The responder runs in-process (the SAME
 // handleAuthorizationRequest the API boots), connected as the callout `auth` user.
 
@@ -115,8 +116,19 @@ interface RunningNats {
   serverLog: () => Promise<string>;
 }
 
+const NATS_DOCKER_IMAGE =
+  "nats:2.10.29-alpine@sha256:b83efabe3e7def1e0a4a31ec6e078999bb17c80363f881df35edc70fcb6bb927";
+
+async function removeDockerContainer(name: string): Promise<void> {
+  const child = Bun.spawn(["docker", "rm", "--force", name], {
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  await child.exited.catch(() => undefined);
+}
+
 /**
- * Start a nats-server (via nix) configured with auth_callout: the AUTH account holds
+ * Start a real nats-server configured with auth_callout: the AUTH account holds
  * the responder's `auth`/`auth` login (the only configured auth_users), and the
  * callout `issuer` is our account public key. A client presenting any token triggers
  * the callout; the responder mints the scoped JWT placing the user into the AUTH
@@ -171,11 +183,32 @@ authorization {
   // stalls the server under `debug:true`; the test can read it on a failure.
   const logPath = join(configDir, "nats.log");
   const logFile = Bun.file(logPath);
-
-  const proc = Bun.spawn(["nix", "run", "nixpkgs#nats-server", "--", "-c", configPath], {
-    stdout: logFile,
-    stderr: logFile,
-  });
+  const requireDocker = process.env.OPENGENI_TEST_REQUIRE_DOCKER === "1";
+  const useDocker = requireDocker || Bun.which("nix") === null;
+  const dockerContainerName = `opengeni-authcallout-${process.pid}-${port}`;
+  if (useDocker) await removeDockerContainer(dockerContainerName);
+  const proc = useDocker
+    ? Bun.spawn(
+        [
+          "docker",
+          "run",
+          "--rm",
+          "--name",
+          dockerContainerName,
+          "--network",
+          "host",
+          "--volume",
+          `${configPath}:/etc/nats/nats.conf:ro`,
+          NATS_DOCKER_IMAGE,
+          "--config",
+          "/etc/nats/nats.conf",
+        ],
+        { stdout: logFile, stderr: logFile },
+      )
+    : Bun.spawn(["nix", "run", "nixpkgs#nats-server", "--", "-c", configPath], {
+        stdout: logFile,
+        stderr: logFile,
+      });
 
   const url = `nats://127.0.0.1:${port}`;
   // Wait for the monitor port to answer (the server is up). The control-plane
@@ -183,6 +216,7 @@ authorization {
   const deadline = Date.now() + 60_000;
   let up = false;
   while (Date.now() < deadline) {
+    if (proc.exitCode !== null) break;
     try {
       const res = await fetch(`http://127.0.0.1:${port + 1}/healthz`);
       if (res.ok) {
@@ -195,7 +229,9 @@ authorization {
     await Bun.sleep(250);
   }
   if (!up) {
-    proc.kill();
+    if (proc.exitCode === null) proc.kill();
+    await proc.exited.catch(() => undefined);
+    if (useDocker) await removeDockerContainer(dockerContainerName);
     const err = await Bun.file(logPath)
       .text()
       .catch(() => "");
@@ -211,8 +247,9 @@ authorization {
         .text()
         .catch(() => ""),
     stop: async () => {
-      proc.kill();
+      if (proc.exitCode === null) proc.kill();
       await proc.exited.catch(() => undefined);
+      if (useDocker) await removeDockerContainer(dockerContainerName);
       await rm(configDir, { recursive: true, force: true });
     },
   };

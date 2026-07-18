@@ -4859,7 +4859,7 @@ async function runSandboxLifecycleCommand(
 
 // M3: everything the rig-setup hook needs to run the frozen rig version's setup
 // script exactly once per box. `versionId` keys the idempotence marker
-// (/var/opengeni/rig-setup-<versionId>.done); `timeoutMs` is the rig-specific
+// (under a UID-scoped runtime directory); `timeoutMs` is the rig-specific
 // budget (settings.rigSetupTimeoutMs), NOT the 120s lifecycle default; `rigName`
 // is for human-readable events/errors only.
 export type RigSetupDescriptor = {
@@ -5545,7 +5545,8 @@ const RIG_SETUP_SKIPPED_SENTINEL = "__OPENGENI_RIG_SETUP_SKIPPED__";
 
 /**
  * The rig-setup command (M3). One idempotent bash program:
- *   1. `mkdir -p /var/opengeni` and, if the per-version marker already exists,
+ *   1. create a UID-scoped directory below XDG_RUNTIME_DIR/TMPDIR (or use the
+ *      explicit test root) and, if the per-version marker already exists,
  *      print the SKIP sentinel and exit 0 (a warm box re-running the hook).
  *   2. otherwise atomically claim a per-version lock directory. A loser waits
  *      for the winner's marker, then skips; if the winner fails and releases the
@@ -5554,22 +5555,31 @@ const RIG_SETUP_SKIPPED_SENTINEL = "__OPENGENI_RIG_SETUP_SKIPPED__";
  *      coreutils `timeout` (NOT `bash -e` — the script opts into `set -e`
  *      itself if it wants), then captures the exit code and `touch`es the marker
  *      ONLY on success (exit 0) so a failed/timed-out setup re-runs next turn.
- * The heredoc delimiter is quoted, so the script content is executed verbatim
- * with no host-side expansion.
+ * The script is transported as one rigorously shell-quoted printf argument, so
+ * every character is written verbatim with no delimiter collision or host-side
+ * expansion. Setup output is captured while the script runs: successful user
+ * output cannot counterfeit the wrapper-owned skip sentinel, while failed setup
+ * still reports its diagnostics.
  */
 export function rigSetupScriptCommand(
   script: string,
   versionId: string,
   timeoutMs = 600_000,
-  markerRoot = "/var/opengeni",
+  markerRoot?: string,
 ): string {
   const timeoutSecs = Math.max(1, Math.ceil(timeoutMs / 1000));
   const lockWaitSecs = timeoutSecs + 6;
-  const marker = `${markerRoot.replace(/\/+$/, "")}/rig-setup-${versionId}.done`;
+  const markerName = `rig-setup-${versionId}.done`;
   return [
     "set -u",
-    `mkdir -p ${shellQuote(markerRoot)}`,
-    `__OG_RIG_MARKER=${shellQuote(marker)}`,
+    "umask 077",
+    markerRoot
+      ? `__OG_RIG_ROOT=${shellQuote(markerRoot.replace(/\/+$/, ""))}`
+      : '__OG_RIG_ROOT="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/opengeni-rig-setup-$(id -u)"',
+    'case "$__OG_RIG_ROOT" in /*) ;; *) printf \'%s\\n\' "rig setup marker root must be absolute: $__OG_RIG_ROOT" >&2; exit 73 ;; esac',
+    'mkdir -p "$__OG_RIG_ROOT"',
+    'if [ ! -d "$__OG_RIG_ROOT" ] || [ ! -w "$__OG_RIG_ROOT" ]; then printf \'%s\\n\' "rig setup marker root is not a writable directory: $__OG_RIG_ROOT" >&2; exit 73; fi',
+    `__OG_RIG_MARKER="$__OG_RIG_ROOT"/${shellQuote(markerName)}`,
     '__OG_RIG_LOCK="$__OG_RIG_MARKER.lock"',
     `__OG_RIG_TIMEOUT_SECS=${timeoutSecs}`,
     `__OG_RIG_LOCK_WAIT_SECS=${lockWaitSecs}`,
@@ -5579,12 +5589,12 @@ export function rigSetupScriptCommand(
     "    trap 'rm -rf \"$__OG_RIG_LOCK\"' EXIT",
     `    if [ -f "$__OG_RIG_MARKER" ]; then printf '%s\\n' ${shellQuote(RIG_SETUP_SKIPPED_SENTINEL)}; exit 0; fi`,
     '__OG_RIG_SCRIPT="$(mktemp)"',
-    "cat > \"$__OG_RIG_SCRIPT\" <<'__OPENGENI_RIG_SETUP_SCRIPT_EOF__'",
-    script,
-    "__OPENGENI_RIG_SETUP_SCRIPT_EOF__",
-    '    timeout -k 5s "${__OG_RIG_TIMEOUT_SECS}s" bash "$__OG_RIG_SCRIPT"',
+    `    printf '%s' ${shellQuote(script)} > "$__OG_RIG_SCRIPT"`,
+    '    __OG_RIG_OUTPUT="$(mktemp)"',
+    '    timeout -k 5s "${__OG_RIG_TIMEOUT_SECS}s" bash "$__OG_RIG_SCRIPT" >"$__OG_RIG_OUTPUT" 2>&1',
     "__OG_RIG_RC=$?",
-    '    rm -f "$__OG_RIG_SCRIPT"',
+    '    if [ "$__OG_RIG_RC" -ne 0 ]; then cat "$__OG_RIG_OUTPUT" >&2 || true; fi',
+    '    rm -f "$__OG_RIG_SCRIPT" "$__OG_RIG_OUTPUT"',
     '    if [ "$__OG_RIG_RC" -eq 0 ]; then touch "$__OG_RIG_MARKER"; fi',
     '    exit "$__OG_RIG_RC"',
     "  fi",
@@ -5656,13 +5666,9 @@ export async function runRigSetupHook(
     );
   }
   const output = sandboxCommandOutput(result);
-  // Marker present → the guard skipped the script. Distinct terminal signal.
-  if (output.includes(RIG_SETUP_SKIPPED_SENTINEL)) {
-    await context.onRuntimeEvent?.({ type: "rig.setup.skipped", payload });
-    return;
-  }
-  // Ran → classify. A "still running" result means the script outlived the rig
-  // timeout; any nonzero/absent exit code is a setup failure. Both fail closed.
+  // Classify execution status before interpreting any output. A failed or
+  // still-running command must never turn into a skip merely because the user
+  // script echoed the wrapper's sentinel.
   const stillRunning = sandboxCommandStillRunning(result);
   const exitCode = sandboxCommandExitCode(result);
   if (stillRunning || exitCode === null || exitCode !== 0) {
@@ -5674,7 +5680,9 @@ export async function runRigSetupHook(
       ? `did not finish within the rig setup timeout (${rigSetup.timeoutMs}ms)`
       : exitCode === null
         ? "did not report an exit code"
-        : `exited with code ${exitCode}`;
+        : exitCode === 124
+          ? "timed out or exited with code 124"
+          : `exited with code ${exitCode}`;
     const failure = new Error(
       `Rig setup failed for rig "${rigSetup.rigName}" (version ${rigSetup.versionId}): the setup script ${reason}${tail ? `:\n${tail}` : ""}`,
     );
@@ -5686,6 +5694,13 @@ export async function runRigSetupHook(
       },
     });
     throw failure;
+  }
+  // The wrapper's skip branch emits exactly this one line. Accept the
+  // transport-normalized no-newline form as well, but reject any prefix,
+  // suffix, or user-script output so only an authentic wrapper result skips.
+  if (output === RIG_SETUP_SKIPPED_SENTINEL || output === `${RIG_SETUP_SKIPPED_SENTINEL}\n`) {
+    await context.onRuntimeEvent?.({ type: "rig.setup.skipped", payload });
+    return;
   }
   await context.onRuntimeEvent?.({
     type: "rig.setup.completed",
