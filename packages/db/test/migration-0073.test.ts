@@ -43,24 +43,48 @@ describe("migration 0073 (durable goal wake)", () => {
 
       const [account] = await admin<{ id: string }[]>`
         insert into managed_accounts (name) values ('migration-0073-account') returning id`;
-      const [workspace] = await admin<{ id: string }[]>`
-        insert into workspaces (account_id, name)
-        values (${account!.id}, 'migration-0073-workspace') returning id`;
+      const insertWorkspace = async (name: string, paused = false) => {
+        const [workspace] = await admin<{ id: string }[]>`
+          insert into workspaces (account_id, name)
+          values (${account!.id}, ${name}) returning id`;
+        await admin`
+          insert into workspace_inference_controls (
+            workspace_id, account_id, revision, workspace_state, workspace_pause_revision
+          ) values (
+            ${workspace!.id}, ${account!.id}, ${paused ? 1 : 0},
+            ${paused ? "paused" : "active"}, ${paused ? 1 : null}
+          )`;
+        return workspace!;
+      };
+      const workspace = await insertWorkspace("migration-0073-workspace");
+      const pausedWorkspace = await insertWorkspace("migration-0073-paused-workspace", true);
 
-      const insertGoalSession = async (text: string) => {
+      const insertSession = async (
+        text: string,
+        options: { workspaceId?: string; parentSessionId?: string } = {},
+      ) => {
         const sessionId = crypto.randomUUID();
+        const workspaceId = options.workspaceId ?? workspace.id;
         await admin`
           insert into sessions (
             id, account_id, workspace_id, status, initial_message, model,
-            sandbox_backend, sandbox_group_id, temporal_workflow_id
+            sandbox_backend, sandbox_group_id, temporal_workflow_id, parent_session_id
           ) values (
-            ${sessionId}, ${account!.id}, ${workspace!.id}, 'idle', ${text},
-            'scripted-model', 'none', ${sessionId}, ${`session-${sessionId}`}
+            ${sessionId}, ${account!.id}, ${workspaceId}, 'idle', ${text},
+            'scripted-model', 'none', ${sessionId}, ${`session-${sessionId}`},
+            ${options.parentSessionId ?? null}
           )`;
+        return { sessionId, workspaceId };
+      };
+      const insertGoalSession = async (
+        text: string,
+        options: { workspaceId?: string; parentSessionId?: string } = {},
+      ) => {
+        const { sessionId, workspaceId } = await insertSession(text, options);
         const [goal] = await admin<{ id: string }[]>`
           insert into session_goals (account_id, workspace_id, session_id, text)
-          values (${account!.id}, ${workspace!.id}, ${sessionId}, ${text}) returning id`;
-        return { sessionId, goalId: goal!.id };
+          values (${account!.id}, ${workspaceId}, ${sessionId}, ${text}) returning id`;
+        return { sessionId, workspaceId, goalId: goal!.id };
       };
 
       const idle = await insertGoalSession("idle legacy goal");
@@ -173,6 +197,24 @@ describe("migration 0073 (durable goal wake)", () => {
           })}
         )`;
 
+      // Payload matching remains textual so malformed legacy JSON cannot make
+      // the rollout migration cast-and-abort or count as an observed revision.
+      const malformed = await insertGoalSession("malformed legacy continuation");
+      await admin`
+        insert into session_system_updates (
+          account_id, workspace_id, session_id, kind, source_id,
+          dedupe_key, summary, payload
+        ) values (
+          ${account!.id}, ${workspace.id}, ${malformed.sessionId}, 'goal_continuation',
+          ${malformed.goalId}, 'legacy-malformed-goal-continuation',
+          'malformed pending update',
+          ${admin.json({
+            type: "goal_continuation",
+            goalId: malformed.goalId,
+            goalVersion: "not-an-integer",
+          })}
+        )`;
+
       const delivered = await insertGoalSession("delivered terminal continuation");
       await admin`
         insert into session_system_updates (
@@ -233,6 +275,73 @@ describe("migration 0073 (durable goal wake)", () => {
           1, now() + interval '1 hour', 'authoritative'
         )`;
 
+      const directlyPaused = await insertGoalSession("directly paused goal");
+      await admin`
+        update sessions
+        set direct_control_state = 'paused', direct_pause_revision = 1, control_version = 1
+        where id = ${directlyPaused.sessionId}`;
+
+      const pausedAncestor = await insertSession("paused ancestor");
+      await admin`
+        update sessions
+        set direct_control_state = 'paused', direct_pause_revision = 2, control_version = 2
+        where id = ${pausedAncestor.sessionId}`;
+      await insertGoalSession("ancestor paused goal", {
+        parentSessionId: pausedAncestor.sessionId,
+      });
+
+      await insertGoalSession("workspace paused goal", {
+        workspaceId: pausedWorkspace.id,
+      });
+      const pausedMaterialized = await insertGoalSession("paused materialized goal", {
+        workspaceId: pausedWorkspace.id,
+      });
+      await admin`
+        insert into session_system_updates (
+          account_id, workspace_id, session_id, kind, source_id,
+          dedupe_key, summary, payload
+        ) values (
+          ${account!.id}, ${pausedWorkspace.id}, ${pausedMaterialized.sessionId},
+          'goal_continuation', ${pausedMaterialized.goalId},
+          'legacy-paused-materialized-goal-continuation', 'paused pending update',
+          ${admin.json({
+            type: "goal_continuation",
+            goalId: pausedMaterialized.goalId,
+            goalVersion: 1,
+            autoContinuation: 1,
+            maxAutoContinuations: null,
+            prompt: "continue after resume",
+            policy: {
+              model: "scripted-model",
+              reasoningEffort: "low",
+              tools: [],
+              sandboxBackend: "none",
+            },
+          })}
+        )`;
+
+      // The target's revision-3 subtree override is closer than its ancestor's
+      // revision-2 pause and newer than the workspace's revision-1 pause. Both
+      // barriers are therefore defeated, exactly as in projectEffectiveControl.
+      const overriddenAncestor = await insertSession("overridden paused ancestor", {
+        workspaceId: pausedWorkspace.id,
+      });
+      await admin`
+        update sessions
+        set direct_control_state = 'paused', direct_pause_revision = 2, control_version = 2
+        where id = ${overriddenAncestor.sessionId}`;
+      const overrideAdmitted = await insertGoalSession("newer subtree override goal", {
+        workspaceId: pausedWorkspace.id,
+        parentSessionId: overriddenAncestor.sessionId,
+      });
+      await admin`
+        update sessions
+        set subtree_run_override_revision = 3, control_version = 3
+        where id = ${overrideAdmitted.sessionId}`;
+      await admin`
+        update workspace_inference_controls set revision = 3
+        where workspace_id = ${pausedWorkspace.id}`;
+
       await applyFile(admin, "0073_durable_goal_wake.sql");
 
       const goals = await admin<
@@ -254,12 +363,18 @@ describe("migration 0073 (durable goal wake)", () => {
         })),
       ).toEqual([
         { text: "already materialized goal", wake_revision: 1, observed_revision: 1 },
+        { text: "ancestor paused goal", wake_revision: 0, observed_revision: 0 },
         { text: "capacity blocked goal", wake_revision: 0, observed_revision: 0 },
         { text: "delivered terminal continuation", wake_revision: 1, observed_revision: 0 },
+        { text: "directly paused goal", wake_revision: 0, observed_revision: 0 },
         { text: "human queued goal", wake_revision: 0, observed_revision: 0 },
         { text: "idle legacy goal", wake_revision: 1, observed_revision: 0 },
+        { text: "malformed legacy continuation", wake_revision: 1, observed_revision: 0 },
+        { text: "newer subtree override goal", wake_revision: 1, observed_revision: 0 },
+        { text: "paused materialized goal", wake_revision: 1, observed_revision: 1 },
         { text: "single deferred continuation", wake_revision: 1, observed_revision: 1 },
         { text: "stale continuation version", wake_revision: 1, observed_revision: 0 },
+        { text: "workspace paused goal", wake_revision: 0, observed_revision: 0 },
       ]);
 
       const migratedUpdates = await admin<
@@ -267,7 +382,10 @@ describe("migration 0073 (durable goal wake)", () => {
       >`
         select session_id, summary, state
         from session_system_updates
-        where session_id in (${materialized.sessionId}, ${deferred.sessionId})
+        where session_id in (
+          ${materialized.sessionId}, ${deferred.sessionId}, ${malformed.sessionId},
+          ${pausedMaterialized.sessionId}
+        )
         order by summary`;
       expect(
         migratedUpdates.map(({ session_id, summary, state }) => ({
@@ -287,8 +405,18 @@ describe("migration 0073 (durable goal wake)", () => {
           state: "cancelled",
         },
         {
+          session_id: malformed.sessionId,
+          summary: "malformed pending update",
+          state: "pending",
+        },
+        {
           session_id: deferred.sessionId,
           summary: "only deferred update",
+          state: "pending",
+        },
+        {
+          session_id: pausedMaterialized.sessionId,
+          summary: "paused pending update",
           state: "pending",
         },
       ]);
@@ -324,9 +452,19 @@ describe("migration 0073 (durable goal wake)", () => {
             wake_revision: 1,
           },
           {
+            session_id: malformed.sessionId,
+            reason: "goal_obligation_backfill",
+            wake_revision: 1,
+          },
+          {
             session_id: materialized.sessionId,
             reason: "goal_materialized_backfill",
             wake_revision: 2,
+          },
+          {
+            session_id: overrideAdmitted.sessionId,
+            reason: "goal_obligation_backfill",
+            wake_revision: 1,
           },
           {
             session_id: staleVersion.sessionId,
