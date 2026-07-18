@@ -140,6 +140,66 @@ export type MemoryItem = {
   occurredAt: string;
 };
 
+export type FleetDecisionScoreItem = {
+  candidateKey: string;
+  eligible: boolean;
+  rejectionReason:
+    | "allocator_disabled"
+    | "unavailable"
+    | "cooling"
+    | "quota_ceiling"
+    | "overlay_isolation"
+    | null;
+  total: number;
+  confidence: "unknown" | "low" | "medium" | "high";
+};
+
+/**
+ * One OPE-32 production-vs-shadow placement explanation. Candidate keys are
+ * event-local aliases only; no credential/account identity reaches this item.
+ */
+export type FleetDecisionItem = {
+  kind: "fleet-decision";
+  id: string;
+  turnId: string | null;
+  policyVersion: "adaptive-shadow-v1";
+  actualOutcome: "selected" | "waiting" | "none";
+  actualCandidateKey: string | null;
+  actualReason: "lease_reused" | "pin" | "rotation" | "active" | "all_capped" | "none";
+  shadowOutcome: "selected" | "paced" | "none";
+  shadowCandidateKey: string | null;
+  shadowReason:
+    | "fenced_in_flight"
+    | "fenced_candidate_missing"
+    | "admission_paced"
+    | "no_eligible_candidate"
+    | "overlay_isolated_empty"
+    | "best_score"
+    | "affinity_best"
+    | "hysteresis_hold";
+  comparison: "match" | "different_candidate" | "different_outcome" | "not_comparable_truncated";
+  confidence: "unknown" | "low" | "medium" | "high";
+  admissionOutcome: "admit" | "pace";
+  admissionReason:
+    | "fenced_in_flight"
+    | "pacing_disabled"
+    | "capacity_unknown"
+    | "capacity_available"
+    | "work_conserving_borrow"
+    | "manager_priority"
+    | "standard_starvation_bound"
+    | "capacity_saturated"
+    | "emergency_fuse";
+  borrowedIdleCapacity: boolean;
+  borrowedOverlayCapacity: boolean;
+  strandedEligibleCount: number;
+  candidateCount: number;
+  truncatedCandidateCount: number;
+  scoreRowsTruncatedCount: number;
+  scores: FleetDecisionScoreItem[];
+  occurredAt: string;
+};
+
 export type SessionStatusItem = {
   kind: "session-status";
   id: string;
@@ -219,10 +279,17 @@ export type TimelineItem =
   | NoticeItem
   | AuthNeededItem
   | MemoryItem
+  | FleetDecisionItem
   | TurnEndItem;
 
 /** Activity items cluster between chat messages (reasoning, tools, workers, sandbox, memory). */
-export type ActivityItem = ReasoningItem | ToolCallItem | WorkerItem | SandboxItem | MemoryItem;
+export type ActivityItem =
+  | ReasoningItem
+  | ToolCallItem
+  | WorkerItem
+  | SandboxItem
+  | MemoryItem
+  | FleetDecisionItem;
 
 export type TimelineGroup =
   | { kind: "item"; item: TimelineItem }

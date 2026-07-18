@@ -662,6 +662,85 @@ export type AgentToolCallCreatedPayload = {
 export type AgentToolCallOutputPayload = { id: string | null; output: unknown };
 export type SessionStatusChangedPayload = { status: SessionStatus };
 
+// OPE-32 adaptive-fleet shadow event. This is the typed, identity-free view
+// consumed by UI/manager tooling; the durable replay record also contains the
+// complete normalized policy/input needed for offline deterministic replay.
+export type CodexFleetConfidence = "unknown" | "low" | "medium" | "high";
+export type CodexFleetShadowComparison =
+  | "match"
+  | "different_candidate"
+  | "different_outcome"
+  | "not_comparable_truncated";
+export type CodexFleetDecisionScore = {
+  candidateKey: string;
+  eligible: boolean;
+  rejectionReason:
+    | "allocator_disabled"
+    | "unavailable"
+    | "cooling"
+    | "quota_ceiling"
+    | "overlay_isolation"
+    | null;
+  quotaPressure: number;
+  leasePressure: number;
+  inferredBurnPressure: number;
+  runwayPressure: number;
+  uncertaintyPressure: number;
+  cacheAffinityBenefit: number;
+  total: number;
+  confidence: CodexFleetConfidence;
+};
+export type CodexFleetDecisionEventPayload = {
+  schemaVersion: 1;
+  mode: "shadow";
+  actual: {
+    outcome: "selected" | "waiting" | "none";
+    candidateKey: string | null;
+    reason: "lease_reused" | "pin" | "rotation" | "active" | "all_capped" | "none";
+  };
+  comparison: CodexFleetShadowComparison;
+  replay: {
+    schemaVersion: 1;
+    policyVersion: "adaptive-shadow-v1";
+    mode: "shadow";
+    input: { candidates: Array<{ key: string }> } & Record<string, unknown>;
+    truncatedCandidateCount: number;
+    inputFingerprint: string;
+    decisionFingerprint: string;
+    decision: {
+      outcome: "selected" | "paced" | "none";
+      selectedCandidateKey: string | null;
+      reason:
+        | "fenced_in_flight"
+        | "fenced_candidate_missing"
+        | "admission_paced"
+        | "no_eligible_candidate"
+        | "overlay_isolated_empty"
+        | "best_score"
+        | "affinity_best"
+        | "hysteresis_hold";
+      admission: {
+        outcome: "admit" | "pace";
+        reason:
+          | "fenced_in_flight"
+          | "pacing_disabled"
+          | "capacity_unknown"
+          | "capacity_available"
+          | "work_conserving_borrow"
+          | "manager_priority"
+          | "standard_starvation_bound"
+          | "capacity_saturated"
+          | "emergency_fuse";
+        borrowedIdleCapacity: boolean;
+      };
+      borrowedOverlayCapacity: boolean;
+      strandedEligibleCount: number;
+      confidence: CodexFleetConfidence;
+      scores: CodexFleetDecisionScore[];
+    };
+  } & Record<string, unknown>;
+};
+
 // Recording payloads (P4.3 — plain TS mirror of the contracts Zod schemas; the
 // SDK is zero-runtime-dep so these are TYPES, not Zod, F15). The contract-parity
 // test asserts the event-type literals; these shapes document the wire payloads.

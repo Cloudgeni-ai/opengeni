@@ -86,6 +86,100 @@ function toolItem(overrides: Partial<ToolCallItem>): ToolCallItem {
   };
 }
 
+function fleetDecisionEventPayload(): Record<string, unknown> {
+  return {
+    schemaVersion: 1,
+    mode: "shadow",
+    actual: { outcome: "selected", candidateKey: "c00", reason: "active" },
+    comparison: "different_candidate",
+    replay: {
+      schemaVersion: 1,
+      policyVersion: "adaptive-shadow-v1",
+      mode: "shadow",
+      input: { candidates: [{ key: "c00" }, { key: "c01" }] },
+      truncatedCandidateCount: 3,
+      inputFingerprint: "secret-input-fingerprint",
+      decisionFingerprint: "secret-decision-fingerprint",
+      decision: {
+        outcome: "selected",
+        selectedCandidateKey: "c01",
+        reason: "best_score",
+        admission: {
+          outcome: "admit",
+          reason: "work_conserving_borrow",
+          borrowedIdleCapacity: true,
+        },
+        borrowedOverlayCapacity: false,
+        strandedEligibleCount: 1,
+        confidence: "low",
+        scores: [
+          {
+            candidateKey: "c00",
+            eligible: false,
+            rejectionReason: "overlay_isolation",
+            total: 2_000,
+            confidence: "low",
+          },
+          {
+            candidateKey: "c01",
+            eligible: true,
+            rejectionReason: null,
+            total: 1_200,
+            confidence: "low",
+          },
+        ],
+      },
+    },
+    accountEmail: "secret-owner@example.test",
+    credentialId: "credential-secret",
+  };
+}
+
+describe("FleetDecisionRow", () => {
+  test("renders an accessible bounded production-vs-shadow explanation without secret metadata", async () => {
+    resetTimelineEvents();
+    const r = await renderComponent(
+      <MessageTimeline
+        events={[timelineEvent("codex.fleet.decision", fleetDecisionEventPayload())]}
+      />,
+    );
+    await flush();
+
+    const disclosure = r.container.querySelector('[role="button"]') as HTMLElement | null;
+    expect(disclosure?.getAttribute("aria-expanded")).toBe("false");
+    expect(r.container.textContent ?? "").toContain("Fleet policy shadow");
+    expect(r.container.textContent ?? "").toContain("Shadow preferred another candidate");
+
+    await act(async () => {
+      disclosure?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+
+    expect(disclosure?.getAttribute("aria-expanded")).toBe("true");
+    expect(
+      r.container.querySelector('section[aria-label="Fleet policy shadow details"]'),
+    ).toBeTruthy();
+    expect(r.container.querySelectorAll("dt").length).toBeGreaterThanOrEqual(8);
+    const text = r.container.textContent ?? "";
+    expect(text).toContain("Shadow observation only");
+    expect(text).toContain("Selected c00");
+    expect(text).toContain("Selected c01");
+    expect(text).toContain("Borrowed for standard work");
+    expect(text).toContain("1 eligible candidate");
+    expect(text).toContain("temporary and local to this event");
+    expect(text).toContain("3 additional candidates were excluded");
+    expect(text).not.toContain("different_candidate");
+    expect(text).not.toContain("work_conserving_borrow");
+    expect(text).not.toContain("overlay_isolation");
+    expect(text).not.toContain("secret-owner@example.test");
+    expect(text).not.toContain("credential-secret");
+    expect(text).not.toContain("secret-input-fingerprint");
+    expect(text).not.toContain("secret-decision-fingerprint");
+
+    await r.unmount();
+  });
+});
+
 describe("MessageTimeline — settled turn folding", () => {
   test("settled turn renders one top-level chip, final answer, and folded narration", async () => {
     resetTimelineEvents();
