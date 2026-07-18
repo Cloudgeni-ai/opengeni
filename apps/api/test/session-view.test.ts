@@ -44,13 +44,12 @@ describe("capPayloadValue", () => {
     expect(capPayloadValue(small, 2_000)).toBe(small);
   });
 
-  test("clamps an over-long string with a head+tail truncation marker", () => {
+  test("clamps an over-long string with a truthful head+tail omission marker", () => {
     const long = "A".repeat(5_000) + "TAILMARK";
     const capped = capPayloadValue(long, 2_000) as string;
     expect(capped.length).toBeLessThan(long.length);
-    expect(capped).toContain("chars truncated");
-    expect(capped).toContain("page with after/limit");
-    expect(capped).toContain("read the session notebook");
+    expect(capped).toContain("chars omitted from this monitoring projection");
+    expect(capped).toContain("generic source output may not have been retained");
     // head retained
     expect(capped.startsWith("A")).toBe(true);
     // tail retained (the most diagnostic part of an output/error survives)
@@ -67,7 +66,7 @@ describe("capPayloadValue", () => {
     expect(capped.id).toBe("call_1");
     expect(capped.meta).toEqual({ ok: true });
     expect(typeof capped.output).toBe("string");
-    expect(capped.output).toContain("chars truncated");
+    expect(capped.output).toContain("chars omitted from this monitoring projection");
     expect(jsonChars(capped)).toBeLessThan(jsonChars(payload));
   });
 
@@ -82,7 +81,7 @@ describe("capPayloadValue", () => {
     // serialized form, but that is bounded too).
     expect(typeof capped).toBe("string");
     expect((capped as string).length).toBeLessThanOrEqual(2_000 + 200);
-    expect(capped).toContain("chars truncated");
+    expect(capped).toContain("chars omitted from this monitoring projection");
   });
 
   test("is resilient to cyclic structures via the depth guard", () => {
@@ -169,7 +168,8 @@ describe("capEventPage", () => {
       100 - DEFAULT_EVENT_CAP.headEvents - DEFAULT_EVENT_CAP.tailEvents,
     );
 
-    // nextAfter still points at the real last event so paging does not skip.
+    // nextAfter points at the real last event so the next monitoring page does
+    // not repeat the DB page represented by the head/marker/tail projection.
     expect(result.nextAfter).toBe(1_099);
 
     // The whole capped page is comfortably within the token budget (allow the
@@ -254,7 +254,9 @@ describe("capSessionDetail", () => {
     const capped = capSessionDetail(session);
     expect(capped).not.toBe(session);
     expect(jsonChars(capped.metadata)).toBeLessThan(jsonChars(session.metadata));
-    expect((capped.metadata as { note: string }).note).toContain("chars truncated");
+    expect((capped.metadata as { note: string }).note).toContain(
+      "chars omitted from this monitoring projection",
+    );
     // unrelated fields preserved
     expect(capped.initialMessage).toBe("small");
   });
@@ -266,6 +268,6 @@ describe("capSessionDetail", () => {
     };
     const capped = capSessionDetail(session);
     expect((capped.initialMessage as string).length).toBeLessThan(session.initialMessage.length);
-    expect(capped.initialMessage).toContain("chars truncated");
+    expect(capped.initialMessage).toContain("chars omitted from this monitoring projection");
   });
 });

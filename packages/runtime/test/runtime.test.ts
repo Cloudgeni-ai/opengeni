@@ -313,7 +313,7 @@ describe("runtime event normalization", () => {
     expect((event?.payload as { id?: string } | undefined)?.id).toBe("call-1");
   });
 
-  test("compacts a codex computer_screenshot Uint8Array output to a data-URL string in the event", () => {
+  test("compacts a codex computer_screenshot Uint8Array output to a non-retained media fact", () => {
     const pngBytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
     const [event] = normalizeSdkEvent({
       type: "run_item_stream_event",
@@ -328,81 +328,110 @@ describe("runtime event normalization", () => {
     expect(event?.type).toBe("agent.toolCall.output");
     const payload = event?.payload as { id: string; output: unknown };
     expect(payload.id).toBe("call-shot");
-    expect(payload.output).toBe(
-      `data:image/png;base64,${Buffer.from(pngBytes).toString("base64")}`,
-    );
+    expect(payload.output).toMatchObject({
+      type: "media_preview",
+      mediaType: "image/png",
+      inlineBytes: pngBytes.byteLength,
+      fullOutputAvailable: false,
+    });
     // No raw typed-array / object-of-numbers survives into the serialized event.
     expect(JSON.stringify(event)).not.toContain('"0":137');
+    expect(JSON.stringify(event)).not.toContain("base64");
   });
 
   describe("normalizeToolOutputForEvent", () => {
-    test("Uint8Array structured image → data-URL string", () => {
+    test("Uint8Array structured image → non-retained media fact", () => {
       const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
       expect(
         normalizeToolOutputForEvent({
           type: "image",
           image: { data: bytes, mediaType: "image/png" },
         }),
-      ).toBe(`data:image/png;base64,${Buffer.from(bytes).toString("base64")}`);
+      ).toMatchObject({
+        type: "media_preview",
+        mediaType: "image/png",
+        inlineBytes: 4,
+        fullOutputAvailable: false,
+      });
     });
 
-    test("object-of-numbers (JSON-round-tripped Uint8Array) → data-URL string", () => {
+    test("object-of-numbers (JSON-round-tripped Uint8Array) → media fact", () => {
       const bytes = new Uint8Array([0xff, 0xd8, 0xff, 0xe0]);
       const roundTripped = JSON.parse(
         JSON.stringify({ type: "image", image: { data: bytes, mediaType: "image/jpeg" } }),
       );
-      expect(normalizeToolOutputForEvent(roundTripped)).toBe(
-        `data:image/jpeg;base64,${Buffer.from(bytes).toString("base64")}`,
-      );
+      expect(normalizeToolOutputForEvent(roundTripped)).toMatchObject({
+        type: "media_preview",
+        mediaType: "image/jpeg",
+        inlineBytes: 4,
+      });
     });
 
     test("defaults media type to image/png when absent", () => {
       const bytes = new Uint8Array([1, 2, 3]);
-      expect(normalizeToolOutputForEvent({ type: "image", image: { data: bytes } })).toBe(
-        `data:image/png;base64,${Buffer.from(bytes).toString("base64")}`,
-      );
+      expect(normalizeToolOutputForEvent({ type: "image", image: { data: bytes } })).toMatchObject({
+        type: "media_preview",
+        mediaType: "image/png",
+        inlineBytes: 3,
+      });
     });
 
-    test("base64 string / data-URL image data pass through as a data-URL", () => {
+    test("base64 string / data-URL image data become byte-counted media facts", () => {
       expect(
         normalizeToolOutputForEvent({
           type: "image",
           image: { data: "aGk=", mediaType: "image/webp" },
         }),
-      ).toBe("data:image/webp;base64,aGk=");
+      ).toMatchObject({ type: "media_preview", mediaType: "image/webp", inlineBytes: 2 });
       expect(
         normalizeToolOutputForEvent({
           type: "image",
           image: { data: "data:image/png;base64,aGk=" },
         }),
-      ).toBe("data:image/png;base64,aGk=");
+      ).toMatchObject({ type: "media_preview", mediaType: "image/png", inlineBytes: 2 });
     });
 
-    test("already-normalized input_image content item → its data-URL", () => {
+    test("already-normalized input_image content item → media fact", () => {
       expect(
         normalizeToolOutputForEvent({ type: "input_image", image: "data:image/png;base64,aGk=" }),
-      ).toBe("data:image/png;base64,aGk=");
+      ).toMatchObject({ type: "media_preview", mediaType: "image/png", inlineBytes: 2 });
     });
 
-    test("a single-image array unwraps to the bare data-URL string", () => {
+    test("a single-image array unwraps to the media fact", () => {
       const bytes = new Uint8Array([0x47, 0x49, 0x46, 0x38]);
       expect(
         normalizeToolOutputForEvent([
           { type: "image", image: { data: bytes, mediaType: "image/gif" } },
         ]),
-      ).toBe(`data:image/gif;base64,${Buffer.from(bytes).toString("base64")}`);
+      ).toMatchObject({ type: "media_preview", mediaType: "image/gif", inlineBytes: 4 });
     });
 
     test("text outputs pass through unchanged", () => {
       expect(normalizeToolOutputForEvent("plain tool output")).toBe("plain tool output");
-      expect(normalizeToolOutputForEvent("data:image/png;base64,aGk=")).toBe(
-        "data:image/png;base64,aGk=",
-      );
     });
 
-    test("hosted computer_call data-URL string output is unchanged", () => {
+    test("hosted computer_call data-URL string output becomes a media fact", () => {
       const hosted = "data:image/png;base64,iVBORw0KGgo=";
-      expect(normalizeToolOutputForEvent(hosted)).toBe(hosted);
+      expect(normalizeToolOutputForEvent(hosted)).toMatchObject({
+        type: "media_preview",
+        mediaType: "image/png",
+        inlineBytes: 8,
+        fullOutputAvailable: false,
+      });
+    });
+
+    test("mixed outputs retain text/error facts while replacing only inline media", () => {
+      const mixed = normalizeToolOutputForEvent([
+        { type: "text", text: "visible explanation" },
+        { type: "input_image", image: "data:image/png;base64,aGk=" },
+        { isError: true, text: "capture degraded" },
+      ]);
+      expect(mixed).toEqual([
+        { type: "text", text: "visible explanation" },
+        expect.objectContaining({ type: "media_preview", inlineBytes: 2 }),
+        { isError: true, text: "capture degraded" },
+      ]);
+      expect(JSON.stringify(mixed)).not.toContain("base64");
     });
 
     test("MCP isError object output is unchanged", () => {

@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import type { SessionEvent } from "@opengeni/contracts";
+import {
+  SESSION_EVENT_PAYLOAD_MAX_BYTES,
+  sessionEventJsonBytes,
+  sessionEventPayloadTruncation,
+  type SessionEvent,
+} from "@opengeni/contracts";
 import { coalesceSessionEventDeltas } from "../src/index";
 
 const WORKSPACE_ID = "11111111-1111-4111-8111-111111111111";
@@ -132,5 +137,24 @@ describe("coalesceSessionEventDeltas", () => {
 
     expect(result).toHaveLength(1);
     expect(result[0]?.payload).toEqual({ text: "look here now", coalescedUntil: 2 });
+  });
+
+  test("does not recreate an oversized payload when a long delta run is coalesced", () => {
+    const events = Array.from({ length: 2_000 }, (_, index) =>
+      event(index + 1, "agent.message.delta", {
+        text: `${index === 0 ? "HEAD-" : ""}${"x".repeat(2_000)}${index === 1_999 ? "-TAIL" : ""}`,
+      }),
+    );
+
+    const result = coalesceSessionEventDeltas(events);
+
+    expect(result).toHaveLength(1);
+    expect(sessionEventJsonBytes(result[0]?.payload)).toBeLessThanOrEqual(
+      SESSION_EVENT_PAYLOAD_MAX_BYTES,
+    );
+    expect(result[0]?.payload).toMatchObject({ coalescedUntil: 2_000 });
+    expect(sessionEventPayloadTruncation(result[0]?.payload)?.surface).toBe("http_projection");
+    expect(JSON.stringify(result[0]?.payload)).toContain("HEAD-");
+    expect(JSON.stringify(result[0]?.payload)).toContain("-TAIL");
   });
 });

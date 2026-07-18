@@ -2,7 +2,13 @@ import { describe, expect, test } from "bun:test";
 import type { SessionEvent } from "@opengeni/sdk";
 import { actRun, registerDom, renderHook, flush } from "./render-hook";
 import { fakeClient, SESSION_ID, WORKSPACE_ID } from "./fake-client";
-import { useSessionEvents } from "../src/hooks/use-session-events";
+import {
+  SESSION_EVENT_BROWSER_MAX_BYTES,
+  SESSION_EVENT_BROWSER_MAX_COUNT,
+  SESSION_EVENT_BROWSER_SINGLE_EVENT_MAX_BYTES,
+  boundBrowserSessionEventWindow,
+  useSessionEvents,
+} from "../src/hooks/use-session-events";
 import { buildTimeline, type TimelineItem } from "../src/timeline";
 
 registerDom();
@@ -407,5 +413,71 @@ describe("useSessionEvents", () => {
     expect(hook.result.current.hasOlder).toBe(true);
 
     await hook.unmount();
+  });
+
+  test("keeps a bounded live suffix, advances resume, and preserves status after its event is evicted", async () => {
+    const streamed = [
+      event(1, "session.status.changed", { status: "running" }),
+      ...Array.from({ length: SESSION_EVENT_BROWSER_MAX_COUNT + 50 }, (_, index) =>
+        event(index + 2, "machine.op.recovered", { attempt: index + 1 }),
+      ),
+    ];
+    const { client } = scriptedClient({ store: [], streamEvents: streamed });
+    const hook = await renderHook(
+      () =>
+        useSessionEvents(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          replay: "full",
+        }),
+      undefined,
+    );
+    await flush(80);
+
+    expect(hook.result.current.events).toHaveLength(SESSION_EVENT_BROWSER_MAX_COUNT);
+    expect(hook.result.current.events[0]?.sequence).toBe(52);
+    expect(hook.result.current.events.at(-1)?.sequence).toBe(streamed.length);
+    expect(hook.result.current.lastSequence).toBe(streamed.length);
+    expect(hook.result.current.windowTruncated).toBeTrue();
+    expect(hook.result.current.windowBytes).toBeLessThanOrEqual(SESSION_EVENT_BROWSER_MAX_BYTES);
+    expect(hook.result.current.hasOlder).toBeTrue();
+    expect(hook.result.current.sessionStatus).toBe("running");
+
+    await hook.unmount();
+  });
+});
+
+describe("boundBrowserSessionEventWindow", () => {
+  test("defensively replaces a multi-megabyte legacy event before rendering", () => {
+    const legacy = event(1, "agent.toolCall.output", {
+      id: "call-1",
+      output: `HEAD-${"x".repeat(3 * 1024 * 1024)}-TAIL`,
+    });
+    const window = boundBrowserSessionEventWindow([legacy]);
+    const retained = window.events[0]!;
+    const payload = retained.payload as Record<string, unknown>;
+    const truncation = payload.truncation as Record<string, unknown>;
+
+    expect(window.truncated).toBeFalse();
+    expect(window.bytes).toBeLessThanOrEqual(SESSION_EVENT_BROWSER_SINGLE_EVENT_MAX_BYTES);
+    expect(payload.id).toBe("call-1");
+    expect(payload.preview).toContain("browser rendering boundary");
+    expect(truncation.surface).toBe("browser_legacy_guard");
+    expect(truncation.fullEvidence).toEqual({ available: false, reason: "not_retained" });
+    expect(JSON.stringify(retained)).not.toContain("HEAD-");
+  });
+
+  test("retains the newest exact byte-bounded suffix independently of the count cap", () => {
+    const events = Array.from({ length: 200 }, (_, index) =>
+      event(index + 1, "agent.message.completed", { text: "x".repeat(60_000) }),
+    );
+    const window = boundBrowserSessionEventWindow(events);
+
+    expect(window.truncated).toBeTrue();
+    expect(window.events.length).toBeLessThan(events.length);
+    expect(window.events.at(-1)?.sequence).toBe(200);
+    expect(window.events[0]!.sequence).toBe(201 - window.events.length);
+    expect(window.bytes).toBeLessThanOrEqual(SESSION_EVENT_BROWSER_MAX_BYTES);
+    expect(new TextEncoder().encode(JSON.stringify(window.events)).byteLength).toBe(window.bytes);
   });
 });

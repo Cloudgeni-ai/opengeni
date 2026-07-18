@@ -1744,6 +1744,10 @@ export const sessionEvents = pgTable(
       table.sessionId,
       table.createdAt,
     ),
+    payloadBytes: check(
+      "session_events_payload_bytes_check",
+      sql`octet_length(${table.payload}::text) <= 65536`,
+    ),
   }),
 );
 

@@ -1,4 +1,12 @@
-import type { SessionBusMessage, SessionEvent, WorkspaceControlEvent } from "@opengeni/contracts";
+import {
+  boundSessionEventPayload,
+  sessionEventJsonBytes,
+  sessionEventPayloadTruncation,
+  type SessionBusMessage,
+  type SessionEvent,
+  type SessionEventBoundarySurface,
+  type WorkspaceControlEvent,
+} from "@opengeni/contracts";
 import {
   appendSessionEvents,
   appendSessionEventsForTurnAttempt,
@@ -80,6 +88,13 @@ function withReconnectDefaults(options: ConnectionOptions): ConnectionOptions {
 
 /** How long a best-effort publish waits on `flush()` before giving up (see `publish`). */
 const PUBLISH_FLUSH_TIMEOUT_MS = 2_000;
+
+/** Comfortably below NATS Core's common 1 MiB max_payload default. */
+export const SESSION_EVENT_NATS_MESSAGE_MAX_BYTES = 512 * 1024;
+/** Payload is <=64 KiB; the larger envelope leaves deterministic wire headroom. */
+export const SESSION_EVENT_SSE_FRAME_MAX_BYTES = 96 * 1024;
+/** Independent count+byte envelope for one durable HTTP replay response. */
+export const SESSION_EVENT_HTTP_PAGE_MAX_BYTES = 1024 * 1024;
 
 /**
  * Await `nc.flush()` but never longer than `timeoutMs`. With infinite reconnect a
@@ -320,10 +335,23 @@ export async function createNatsEventBus(
       // next successful publish's gap-backfill, or a stream reconnect); it must
       // never throw the in-flight turn to death.
       try {
-        nc.publish(
-          sessionSubject(workspaceId, sessionId),
-          codec.encode({ workspaceId, sessionId, events }),
-        );
+        const batches = sessionEventBatchesByBytes(workspaceId, sessionId, events);
+        for (const batch of batches) {
+          nc.publish(
+            sessionSubject(workspaceId, sessionId),
+            codec.encode({ workspaceId, sessionId, events: batch }),
+          );
+        }
+        if (batches.length > 1) {
+          (options.logger?.debug ?? silentLogger.debug)("NATS session event batch chunked", {
+            workspaceId,
+            sessionId,
+            eventCount: events.length,
+            batchCount: batches.length,
+            maxMessageBytes: SESSION_EVENT_NATS_MESSAGE_MAX_BYTES,
+          });
+        }
+        observeEventBoundaries(batches.flat(), options.logger);
       } catch (error) {
         // `publish()` throws synchronously only when the connection is fully
         // CLOSED (with infinite reconnect, effectively never outside shutdown).
@@ -607,7 +635,9 @@ function subscribeSession(
   void (async () => {
     for await (const msg of sub) {
       const decoded = codec.decode(msg.data) as SessionBusMessage | SessionEvent;
-      const events = "events" in decoded ? decoded.events : [decoded];
+      const events = ("events" in decoded ? decoded.events : [decoded]).map((event) =>
+        boundSessionEventForSurface(event, "nats_legacy_guard"),
+      );
       await onEvents(events);
     }
   })();
@@ -704,6 +734,116 @@ export function formatSse<T extends { sequence: number; type: string }>(event: T
     "",
     "",
   ].join("\n");
+}
+
+/** Defensively bounds historical rows before they become one SSE frame. */
+export function formatSessionEventSse(event: SessionEvent): string {
+  const bounded = boundSessionEventForSurface(event, "sse_legacy_guard");
+  const formatted = formatSse(bounded);
+  if (new TextEncoder().encode(formatted).byteLength > SESSION_EVENT_SSE_FRAME_MAX_BYTES) {
+    // The payload normalizer targets 60 KiB, so this fallback is reachable only
+    // for a malformed legacy event with oversized non-payload envelope fields.
+    const minimal: SessionEvent = {
+      ...bounded,
+      type: bounded.type.slice(0, 256) as SessionEvent["type"],
+      payload: boundSessionEventPayload(
+        {
+          preview: "[legacy event envelope omitted at SSE frame boundary]",
+          originalPayloadBytes: sessionEventJsonBytes(event.payload),
+        },
+        { surface: "sse_legacy_guard", maxBytes: 4096 },
+      ),
+    };
+    return formatSse(minimal);
+  }
+  return formatted;
+}
+
+/**
+ * Split an already-durable batch by exact encoded NATS bytes. Each event is
+ * defensively normalized first so historical oversized rows cannot exceed the
+ * broker envelope. Sequence and ordering are unchanged across chunks.
+ */
+export function sessionEventBatchesByBytes(
+  workspaceId: string,
+  sessionId: string,
+  events: readonly SessionEvent[],
+  maxBytes = SESSION_EVENT_NATS_MESSAGE_MAX_BYTES,
+): SessionEvent[][] {
+  const bounded = events.map((event) => boundSessionEventForSurface(event, "nats_legacy_guard"));
+  const batches: SessionEvent[][] = [];
+  let current: SessionEvent[] = [];
+  for (const event of bounded) {
+    const candidate = [...current, event];
+    const encodedBytes = codec.encode({ workspaceId, sessionId, events: candidate }).byteLength;
+    if (current.length > 0 && encodedBytes > maxBytes) {
+      batches.push(current);
+      current = [event];
+    } else {
+      current = candidate;
+    }
+  }
+  if (current.length > 0) batches.push(current);
+  for (const batch of batches) {
+    const encodedBytes = codec.encode({ workspaceId, sessionId, events: batch }).byteLength;
+    if (encodedBytes > maxBytes) {
+      throw new RangeError(
+        `Session event cannot fit in the configured NATS envelope (${encodedBytes} > ${maxBytes} bytes)`,
+      );
+    }
+  }
+  return batches;
+}
+
+/** Return one count+byte-bounded HTTP page and truthful continuation facts. */
+export function boundSessionEventHttpPage(
+  events: readonly SessionEvent[],
+  options: { direction: "after" | "before"; maxBytes?: number },
+): { events: SessionEvent[]; truncated: boolean; nextSequence: number | null; bytes: number } {
+  const maxBytes = options.maxBytes ?? SESSION_EVENT_HTTP_PAGE_MAX_BYTES;
+  const selected: SessionEvent[] = [];
+  let bytes = 2; // []
+  const projected = events.map((event) => boundSessionEventForSurface(event, "http_projection"));
+  const candidates = options.direction === "after" ? projected : [...projected].reverse();
+  for (const event of candidates) {
+    const eventBytes = sessionEventJsonBytes(event);
+    const separator = selected.length === 0 ? 0 : 1;
+    if (bytes + separator + eventBytes > maxBytes) break;
+    selected.push(event);
+    bytes += separator + eventBytes;
+  }
+  if (options.direction === "before") selected.reverse();
+  const truncated = selected.length < projected.length;
+  const edge = options.direction === "after" ? selected.at(-1) : selected[0];
+  return {
+    events: selected,
+    truncated,
+    nextSequence: edge?.sequence ?? null,
+    bytes,
+  };
+}
+
+function boundSessionEventForSurface(
+  event: SessionEvent,
+  surface: SessionEventBoundarySurface,
+): SessionEvent {
+  const payload = boundSessionEventPayload(event.payload, { surface });
+  return payload === event.payload ? event : { ...event, payload };
+}
+
+function observeEventBoundaries(events: readonly SessionEvent[], logger?: EventLogger): void {
+  for (const event of events) {
+    const boundary = sessionEventPayloadTruncation(event.payload);
+    if (!boundary) continue;
+    (logger?.debug ?? silentLogger.debug)("Session event payload is a bounded audit preview", {
+      eventType: event.type,
+      surface: boundary.surface,
+      reason: boundary.reason,
+      originalBytes: boundary.originalBytes,
+      deliveredBytes: boundary.deliveredBytes,
+      fullEvidenceAvailable: false,
+    });
+  }
 }
 
 function workspaceControlSubject(workspaceId: string): string {

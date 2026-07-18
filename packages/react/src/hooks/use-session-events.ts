@@ -30,6 +30,10 @@ export type UseSessionEventsResult = {
   connectionState: SessionEventsConnectionState;
   /** Highest sequence seen so far (0 before the first event). */
   lastSequence: number;
+  /** Exact serialized bytes retained in the current browser event window. */
+  windowBytes: number;
+  /** Whether older delivered events were evicted from the browser window. */
+  windowTruncated: boolean;
   /** True until the initial tail window has been applied (windowed mode). */
   initialLoading: boolean;
   /** Whether older durable events are available before the current window. */
@@ -48,6 +52,23 @@ const OLDER_GROUP_TARGET = 32;
 const OLDER_FETCH_CAP = 2;
 const BOUNDARY_PAGE_CAP = 4;
 const EMPTY_EVENTS: SessionEvent[] = [];
+const encoder = new TextEncoder();
+
+export const SESSION_EVENT_BROWSER_MAX_BYTES = 8 * 1024 * 1024;
+export const SESSION_EVENT_BROWSER_MAX_COUNT = 10_000;
+export const SESSION_EVENT_BROWSER_SINGLE_EVENT_MAX_BYTES = 96 * 1024;
+
+export type BrowserSessionEventWindow = {
+  events: SessionEvent[];
+  bytes: number;
+  truncated: boolean;
+};
+
+const EMPTY_EVENT_WINDOW: BrowserSessionEventWindow = {
+  events: EMPTY_EVENTS,
+  bytes: 2,
+  truncated: false,
+};
 
 /**
  * Live-stream a session's event log with replay-by-sequence, reconnect, and
@@ -65,10 +86,13 @@ export function useSessionEvents(
   const fullReplay = replay === "full" || after !== 0;
   const streamKey = `${workspaceId}\u0000${sessionId ?? ""}\u0000${after}\u0000${fullReplay ? "full" : "windowed"}`;
 
-  const [events, setEvents] = useState<SessionEvent[]>([]);
+  const [eventWindow, setEventWindow] = useState<BrowserSessionEventWindow>(EMPTY_EVENT_WINDOW);
   const [connectionState, setConnectionState] = useState<SessionEventsConnectionState>("idle");
   const [error, setError] = useState<Error | null>(null);
   const [hasOlder, setHasOlder] = useState(false);
+  const [sessionStatusProjection, setSessionStatusProjection] = useState<SessionStatus | null>(
+    null,
+  );
   const [initialLoading, setInitialLoading] = useState(true);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const lastSequenceRef = useRef(after);
@@ -77,6 +101,11 @@ export function useSessionEvents(
   const loadingOlderRef = useRef(false);
   const streamKeyRef = useRef<string | null>(null);
   const generationRef = useRef(0);
+  const eventWindowRef = useRef<BrowserSessionEventWindow>(EMPTY_EVENT_WINDOW);
+  const sessionStatusRef = useRef<{ sequence: number; status: SessionStatus | null }>({
+    sequence: after,
+    status: null,
+  });
   // Effects reset state after commit. Tag the state so the first render for a
   // new stream identity cannot expose the previous session's event log.
   const [stateStreamKey, setStateStreamKey] = useState(streamKey);
@@ -88,9 +117,12 @@ export function useSessionEvents(
       streamKeyRef.current = streamKey;
       generationRef.current += 1;
       setStateStreamKey(streamKey);
-      setEvents([]);
+      eventWindowRef.current = EMPTY_EVENT_WINDOW;
+      setEventWindow(EMPTY_EVENT_WINDOW);
       setError(null);
       setHasOlder(false);
+      sessionStatusRef.current = { sequence: after, status: null };
+      setSessionStatusProjection(null);
       setLoadingOlder(false);
       setInitialLoading(true);
       lastSequenceRef.current = after;
@@ -124,7 +156,17 @@ export function useSessionEvents(
           ...batch.map(eventResumeSequence),
         );
       }
-      setEvents((existing) => [...existing, ...batch]);
+      observeSessionStatus(batch, sessionStatusRef, setSessionStatusProjection);
+      const current = eventWindowRef.current;
+      const next = boundBrowserSessionEventWindow([...current.events, ...batch]);
+      const retained = { ...next, truncated: current.truncated || next.truncated };
+      eventWindowRef.current = retained;
+      setEventWindow(retained);
+      oldestSequenceRef.current = retained.events[0]?.sequence ?? null;
+      if (retained.truncated) {
+        hasOlderRef.current = true;
+        setHasOlder(true);
+      }
     };
     const scheduleFlush = () => {
       flushTimer ??= setTimeout(flush, 16);
@@ -147,11 +189,14 @@ export function useSessionEvents(
           if (controller.signal.aborted) {
             return;
           }
-          oldestSequenceRef.current = window.oldestSequence;
-          hasOlderRef.current = window.hasOlder;
+          observeSessionStatus(window.events, sessionStatusRef, setSessionStatusProjection);
+          const retained = boundBrowserSessionEventWindow(window.events);
+          eventWindowRef.current = retained;
+          setEventWindow(retained);
+          oldestSequenceRef.current = retained.events[0]?.sequence ?? window.oldestSequence;
+          hasOlderRef.current = window.hasOlder || retained.truncated;
           lastSequenceRef.current = window.newestSequence;
-          setHasOlder(window.hasOlder);
-          setEvents(window.events);
+          setHasOlder(window.hasOlder || retained.truncated);
           setInitialLoading(false);
         }
         if (fullReplay) {
@@ -221,14 +266,18 @@ export function useSessionEvents(
         setHasOlder(false);
         return false;
       }
-      oldestSequenceRef.current = window.oldestSequence;
-      hasOlderRef.current = window.hasOlder;
-      setHasOlder(window.hasOlder);
-      setEvents((existing) => {
-        assertPrependOrder(existing, window.events);
-        return [...window.events, ...existing];
-      });
-      return window.hasOlder;
+      const current = eventWindowRef.current;
+      assertPrependOrder(current.events, window.events);
+      observeSessionStatus(window.events, sessionStatusRef, setSessionStatusProjection);
+      const next = boundBrowserSessionEventWindow([...window.events, ...current.events]);
+      const retained = { ...next, truncated: current.truncated || next.truncated };
+      eventWindowRef.current = retained;
+      setEventWindow(retained);
+      oldestSequenceRef.current = retained.events[0]?.sequence ?? window.oldestSequence;
+      const olderStillAvailable = window.hasOlder || retained.truncated;
+      hasOlderRef.current = olderStillAvailable;
+      setHasOlder(olderStillAvailable);
+      return olderStillAvailable;
     } finally {
       if (generationRef.current === generation) {
         loadingOlderRef.current = false;
@@ -238,22 +287,124 @@ export function useSessionEvents(
   }, [client, workspaceId, sessionId, fullReplay]);
 
   const identityMatches = stateStreamKey === streamKey;
-  const visibleEvents = identityMatches ? events : EMPTY_EVENTS;
+  const visibleEvents = identityMatches ? eventWindow.events : EMPTY_EVENTS;
   const timeline = useMemo(() => buildTimeline(visibleEvents), [visibleEvents]);
-  const sessionStatus = useMemo(() => sessionStatusFromEvents(visibleEvents), [visibleEvents]);
 
   return {
     events: visibleEvents,
     timeline,
-    sessionStatus,
+    sessionStatus: identityMatches ? sessionStatusProjection : null,
     connectionState: identityMatches ? connectionState : "idle",
     lastSequence: identityMatches ? lastSequenceRef.current : after,
+    windowBytes: identityMatches ? eventWindow.bytes : 2,
+    windowTruncated: identityMatches ? eventWindow.truncated : false,
     initialLoading: fullReplay ? false : identityMatches ? initialLoading : true,
-    hasOlder: fullReplay || !identityMatches ? false : hasOlder,
+    hasOlder: !identityMatches ? false : hasOlder,
     loadingOlder: fullReplay || !identityMatches ? false : loadingOlder,
     loadOlder,
     error: identityMatches ? error : null,
   };
+}
+
+/**
+ * Keep only the newest count+byte-bounded browser window. This is deliberately
+ * separate from durable history and transport paging: eviction changes neither
+ * the resume cursor nor whether the source event still exists in PostgreSQL.
+ */
+export function boundBrowserSessionEventWindow(
+  events: readonly SessionEvent[],
+  options: { maxBytes?: number; maxCount?: number } = {},
+): BrowserSessionEventWindow {
+  const maxBytes = Math.max(1024, options.maxBytes ?? SESSION_EVENT_BROWSER_MAX_BYTES);
+  const maxCount = Math.max(1, Math.floor(options.maxCount ?? SESSION_EVENT_BROWSER_MAX_COUNT));
+  const safe = events.map(boundBrowserLegacyEvent);
+  const selected: SessionEvent[] = [];
+  let bytes = 2; // []
+  const countStart = Math.max(0, safe.length - maxCount);
+  for (let index = safe.length - 1; index >= countStart; index -= 1) {
+    const event = safe[index]!;
+    const eventBytes = browserJsonBytes(event);
+    const separator = selected.length === 0 ? 0 : 1;
+    if (bytes + separator + eventBytes > maxBytes) break;
+    selected.push(event);
+    bytes += separator + eventBytes;
+  }
+  selected.reverse();
+  return {
+    events: selected,
+    bytes,
+    truncated: selected.length < safe.length,
+  };
+}
+
+function boundBrowserLegacyEvent(event: SessionEvent): SessionEvent {
+  if (browserJsonBytes(event) <= SESSION_EVENT_BROWSER_SINGLE_EVENT_MAX_BYTES) return event;
+  const originalBytes = browserJsonBytes(event.payload);
+  const identity = browserPayloadIdentity(event.payload);
+  const payload: Record<string, unknown> = {
+    ...identity,
+    preview: "[legacy event payload omitted at browser rendering boundary]",
+    truncation: {
+      truncated: true,
+      surface: "browser_legacy_guard",
+      reason: "payload_bytes_exceeded",
+      originalBytes,
+      deliveredBytes: 0,
+      omittedBytes: originalBytes,
+      estimatedOriginalTokens: Math.ceil(originalBytes / 4),
+      estimatedDeliveredTokens: 0,
+      fullEvidence: { available: false, reason: "not_retained" },
+      details: [{ path: "$", kind: "object", originalBytes }],
+    },
+  };
+  const truncation = payload.truncation as Record<string, unknown>;
+  for (let pass = 0; pass < 6; pass += 1) {
+    const deliveredBytes = browserJsonBytes(payload);
+    truncation.deliveredBytes = deliveredBytes;
+    truncation.omittedBytes = Math.max(0, originalBytes - deliveredBytes);
+    truncation.estimatedDeliveredTokens = Math.ceil(deliveredBytes / 4);
+  }
+  return { ...event, payload };
+}
+
+function browserPayloadIdentity(payload: unknown): Record<string, unknown> {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return {};
+  const record = payload as Record<string, unknown>;
+  const identity: Record<string, unknown> = {};
+  for (const key of ["id", "callId", "name", "toolName", "type", "status", "code", "isError"]) {
+    const value = record[key];
+    if (typeof value === "string") identity[key] = value.slice(0, 256);
+    else if (typeof value === "number" || typeof value === "boolean" || value === null) {
+      identity[key] = value;
+    }
+  }
+  return identity;
+}
+
+function browserJsonBytes(value: unknown): number {
+  try {
+    const serialized = JSON.stringify(value);
+    return encoder.encode(serialized === undefined ? "null" : serialized).byteLength;
+  } catch {
+    return encoder.encode('"[unserializable event payload omitted]"').byteLength;
+  }
+}
+
+function observeSessionStatus(
+  events: readonly SessionEvent[],
+  ref: { current: { sequence: number; status: SessionStatus | null } },
+  setStatus: (status: SessionStatus | null) => void,
+): void {
+  let latest: { sequence: number; status: SessionStatus } | null = null;
+  for (const event of events) {
+    const status = sessionStatusFromEvents([event]);
+    if (status && (!latest || event.sequence >= latest.sequence)) {
+      latest = { sequence: event.sequence, status };
+    }
+  }
+  if (!latest || latest.sequence < ref.current.sequence) return;
+  ref.current = latest;
+  setStatus(latest.status);
 }
 
 type LoadedEventWindow = {

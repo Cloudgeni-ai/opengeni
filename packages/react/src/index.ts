@@ -14,8 +14,15 @@ export type { ClientOverride, OpenGeniContextValue, OpenGeniProviderProps } from
 // Hooks
 export { useSession, isTitleEvent } from "./hooks/use-session";
 export type { UseSessionOptions, UseSessionResult } from "./hooks/use-session";
-export { useSessionEvents } from "./hooks/use-session-events";
+export {
+  SESSION_EVENT_BROWSER_MAX_BYTES,
+  SESSION_EVENT_BROWSER_MAX_COUNT,
+  SESSION_EVENT_BROWSER_SINGLE_EVENT_MAX_BYTES,
+  boundBrowserSessionEventWindow,
+  useSessionEvents,
+} from "./hooks/use-session-events";
 export type {
+  BrowserSessionEventWindow,
   SessionEventsConnectionState,
   UseSessionEventsOptions,
   UseSessionEventsResult,

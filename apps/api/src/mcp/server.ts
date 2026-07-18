@@ -1299,7 +1299,7 @@ function registerWorkspaceOrchestrationTools(
       "session_events",
       {
         description:
-          "Read a session's event timeline (oldest first), to monitor another session's progress. Pass `after` = the highest event `sequence` already seen to page forward; the response's `nextAfter` is that cursor. The response is BYTE-CAPPED for a monitoring glance: fat per-event payloads (a worker's verbatim tool outputs, message/reasoning bodies) are clamped, and an over-budget page is reduced to its head + tail with a marker — page the gap with `after`/`limit`, or read the worker's session notebook, if you need omitted content verbatim. `nextAfter` always advances past every event the page covered, so paging never skips real events.",
+          "Read a session's event timeline (oldest first), to monitor another session's progress. Pass `after` = the highest event `sequence` already seen to page forward; the response's `nextAfter` is that cursor. The response is BYTE-CAPPED for a monitoring glance: fat per-event audit previews are clamped, and an over-budget page is reduced to its head + tail with a marker. Re-read the marker's sequence range with a smaller `limit` to inspect retained durable previews. Generic source output omitted at the durable event boundary is unavailable unless a separately retained artifact/file receipt exists. `nextAfter` advances past every real event the page covered.",
         inputSchema: {
           sessionId: z4.string().uuid(),
           after: z4.number().int().nonnegative().optional(),

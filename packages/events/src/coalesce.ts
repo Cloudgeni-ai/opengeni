@@ -1,4 +1,4 @@
-import type { SessionEvent } from "@opengeni/contracts";
+import { boundSessionEventPayload, type SessionEvent } from "@opengeni/contracts";
 
 const COALESCIBLE_DELTA_TYPES = new Set([
   "agent.message.delta",
@@ -23,23 +23,24 @@ export function coalesceSessionEventDeltas(events: SessionEvent[]): SessionEvent
     if (!run) {
       return;
     }
+    const payload =
+      run.first.type === "sandbox.command.output.delta"
+        ? // Sandbox output keeps its CANONICAL field (`chunk` — the terminal and
+          // projection read it) plus the stream/commandId identity of the run.
+          {
+            chunk: run.text,
+            coalescedUntil: run.lastSequence,
+            ...(run.sandboxStream !== undefined ? { stream: run.sandboxStream } : {}),
+            ...(run.sandboxCommandId !== undefined ? { commandId: run.sandboxCommandId } : {}),
+            ...(run.sandboxName !== undefined ? { name: run.sandboxName } : {}),
+          }
+        : {
+            text: run.text,
+            coalescedUntil: run.lastSequence,
+          };
     coalesced.push({
       ...run.first,
-      payload:
-        run.first.type === "sandbox.command.output.delta"
-          ? // Sandbox output keeps its CANONICAL field (`chunk` — the terminal and
-            // projection read it) plus the stream/commandId identity of the run.
-            {
-              chunk: run.text,
-              coalescedUntil: run.lastSequence,
-              ...(run.sandboxStream !== undefined ? { stream: run.sandboxStream } : {}),
-              ...(run.sandboxCommandId !== undefined ? { commandId: run.sandboxCommandId } : {}),
-              ...(run.sandboxName !== undefined ? { name: run.sandboxName } : {}),
-            }
-          : {
-              text: run.text,
-              coalescedUntil: run.lastSequence,
-            },
+      payload: boundSessionEventPayload(payload, { surface: "http_projection" }),
     });
     run = null;
   };

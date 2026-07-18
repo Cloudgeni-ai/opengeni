@@ -212,8 +212,21 @@ wrong one is the classic mistake.
    Do not use it as conversation memory.
 3. **`session_events` — the redacted human/audit timeline.** Append-only,
    per-session sequence numbers, drives replay/SSE/UI. It is **secret-redacted
-   and lossy** (reasoning items and several item types are dropped), so it is
-   correct for humans and auditing and must never be fed back to the model.
+   and lossy** (reasoning items and several item types are dropped), and each
+   payload is capped at 64 KiB with explicit surface/byte/token/non-retention
+   metadata. Large text keeps deterministic head/tail facts; inline media is a
+   compact `media_preview` and its bytes are not retained by this generic path.
+   It is correct for human progress/audit previews and must never be fed back to
+   the model or advertised as a full-output evidence store.
+
+Those durable stores are still not the realtime or browser representation.
+NATS chunks bounded encoded messages; SSE uses bounded frames plus bounded-page
+Postgres replay/gap fill; REST uses byte-bounded forward prefixes/backward
+suffixes; and React retains only a newest-suffix count+byte window while keeping
+its resume cursor and latest status separately. Historical oversized event rows
+remain readable during the rolling migration and are defensively normalized at
+each outbound boundary. Generic omitted output is unavailable unless a separate
+access-controlled artifact/file receipt explicitly retained it.
 
 Sandbox recovery state is persisted separately again, in
 `sandbox_session_envelopes`: the small versioned descriptor (provider handle /

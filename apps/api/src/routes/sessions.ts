@@ -77,6 +77,7 @@ import {
 } from "@opengeni/db";
 import {
   appendAndPublishEvents,
+  boundSessionEventHttpPage,
   coalesceSessionEventDeltas,
   publishDurableSessionEvents,
 } from "@opengeni/events";
@@ -481,7 +482,20 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       ...(before !== undefined ? { before } : {}),
       limit,
     });
-    return c.json(compact ? coalesceSessionEventDeltas(events) : events);
+    const projected = compact ? coalesceSessionEventDeltas(events) : events;
+    const page = boundSessionEventHttpPage(projected, {
+      direction: before !== undefined ? "before" : "after",
+    });
+    const hasMore = page.truncated || events.length === limit;
+    c.header("X-OpenGeni-Page-Bytes", String(page.bytes));
+    c.header("X-OpenGeni-Page-Truncated", String(hasMore));
+    if (page.nextSequence !== null) {
+      c.header(
+        before !== undefined ? "X-OpenGeni-Next-Before" : "X-OpenGeni-Next-After",
+        String(page.nextSequence),
+      );
+    }
+    return c.json(page.events);
   });
 
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/events/stream", async (c) => {

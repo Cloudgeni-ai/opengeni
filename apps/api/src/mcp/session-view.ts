@@ -3,10 +3,10 @@
  * `session_get`) exposed to manager-style agents over MCP.
  *
  * A long-lived manager session monitors its spawned workers by reading their
- * event timeline. A worker's events carry verbatim model output and, worse,
- * verbatim TOOL OUTPUTS (`agent.toolCall.output.payload.output`) and raw tool
- * call items (`agent.toolCall.created.payload.raw` / `.arguments`). Those are
- * sized for the worker's own context, not the manager's: a single
+ * event timeline. Historical event rows may carry large model/tool output
+ * previews and raw tool-call items (`agent.toolCall.created.payload.raw` /
+ * `.arguments`). Those are sized for the worker's own audit view, not the
+ * manager's: a single
  * `session_events` page (the DB limit caps event COUNT, not BYTES) can return
  * tens of thousands of characters, and a manager that pages a busy worker piles
  * hundreds of thousands of characters into its own context in one monitoring
@@ -26,11 +26,12 @@
  *  2. HEAD+TAIL PAGE BUDGET (`capEventPage`): after per-event trim, if the page
  *     still exceeds the total token budget, keep a HEAD (oldest, for entry
  *     context) and a TAIL (newest, for recent progress) of events and drop the
- *     middle, inserting one synthetic marker event that says how many were
- *     dropped and how to get them (page with `after`/`limit`, or read the
- *     notebook). Pagination semantics are preserved: `nextAfter` is still the
- *     real highest `sequence` returned, so the next page starts exactly where
- *     this one ended.
+ *     middle, inserting one synthetic marker event that says how many durable
+ *     audit previews were dropped from this monitoring projection. A smaller
+ *     page can inspect that sequence range, but it cannot recover generic
+ *     source output that was never retained. Pagination semantics are
+ *     preserved: `nextAfter` is still the real highest `sequence` returned, so
+ *     the next page starts exactly where this one ended.
  *
  * Worker-side and UI consumers never go through here — they call the DB
  * functions or the REST routes directly. This module only shapes the MCP tool
@@ -92,7 +93,7 @@ function safeStringify(value: unknown): string {
 }
 
 function truncationMarker(droppedChars: number): string {
-  return `…[${droppedChars} chars truncated — page with after/limit on session_events, or read the session notebook for the full content]`;
+  return `…[${droppedChars} chars omitted from this monitoring projection; generic source output may not have been retained]`;
 }
 
 function clampString(value: string, maxChars: number): string {
@@ -193,7 +194,7 @@ function buildTruncationEvent(
     type: "session.status.changed",
     payload: {
       _truncated: true,
-      note: `${droppedCount} event(s) (sequence ${firstDroppedSequence}–${lastDroppedSequence}) omitted from this monitoring view to keep the response bounded. Page the gap with session_events after=${firstDroppedSequence - 1} limit=… if you need them verbatim, or read the worker's session notebook.`,
+      note: `${droppedCount} durable audit preview(s) (sequence ${firstDroppedSequence}–${lastDroppedSequence}) omitted from this monitoring view to keep the response bounded. Re-read that range with session_events after=${firstDroppedSequence - 1} and a smaller limit. This can recover only retained audit previews; generic source output is unavailable unless a separate artifact/file receipt retained it.`,
       droppedCount,
       omittedSequenceRange: [firstDroppedSequence, lastDroppedSequence],
     },

@@ -1,5 +1,19 @@
 import { z } from "zod";
 
+export {
+  SESSION_EVENT_PAYLOAD_MAX_BYTES,
+  approximateSessionEventTokens,
+  boundSessionEventPayload,
+  sessionEventJsonBytes,
+  sessionEventMediaPreview,
+  sessionEventMediaPreviewFromDataUrl,
+  sessionEventPayloadTruncation,
+  type BoundSessionEventPayloadOptions,
+  type SessionEventBoundarySurface,
+  type SessionEventMediaPreview,
+  type SessionEventPayloadTruncation,
+} from "./event-preview";
+
 export const SessionStatus = z.enum([
   "queued",
   "running",
