@@ -51,7 +51,12 @@ WITH repairable AS (
   JOIN "sessions" AS session
     ON session.workspace_id = goal.workspace_id AND session.id = goal.session_id
   WHERE goal.status = 'active'
-    AND goal.continuation_wake_revision = goal.continuation_observed_revision
+    -- Only untouched legacy rows are deployment repair candidates. The
+    -- baseline update above deliberately changes already-materialized goals to
+    -- 1/1; accepting arbitrary equal revisions here would immediately re-arm
+    -- those same goals and manufacture a duplicate continuation.
+    AND goal.continuation_wake_revision = 0
+    AND goal.continuation_observed_revision = 0
     AND session.status <> 'cancelled'
     AND session.active_turn_id IS NULL
     AND NOT EXISTS (
