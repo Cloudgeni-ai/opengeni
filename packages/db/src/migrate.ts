@@ -8,6 +8,8 @@ const DEFAULT_MAX_NESTED_AGENT_DEPTH = 3;
 const MAX_NESTED_AGENT_DEPTH = 2_147_483_647;
 const deploymentModeDirective = /^-- deployment-mode: (?:rolling|maintenance)$/;
 const concurrentIndexDirective = /^-- opengeni:concurrent-index lock-timeout=(\d+(?:ms|s|min))$/;
+const concurrentIndexStatement =
+  /^CREATE\s+(?:UNIQUE\s+)?INDEX\s+CONCURRENTLY\s+(?:"((?:[^"]|"")*)"|([A-Za-z_][A-Za-z0-9_$]*))\s+ON\b/is;
 const batchedBackfillDirective =
   /^-- opengeni:batched-backfill batch-size=(\d+) lock-timeout=(\d+(?:ms|s|min)) statement-timeout=(\d+(?:ms|s|min))$/;
 
@@ -31,6 +33,10 @@ function assertIdentifier(name: string, value: string): string {
     throw new Error(`${name} is not a valid Postgres identifier: ${value}`);
   }
   return value;
+}
+
+function quoteIdentifier(value: string): string {
+  return `"${value.replaceAll('"', '""')}"`;
 }
 
 /**
@@ -92,17 +98,41 @@ async function executeMigrationFile(
     ? statement.slice(0, -1).trimEnd()
     : statement;
   if (concurrentDirective) {
-    if (
-      !/^CREATE\s+(?:UNIQUE\s+)?INDEX\s+CONCURRENTLY\b/is.test(withoutTrailingSemicolon) ||
-      withoutTrailingSemicolon.includes(";")
-    ) {
+    const createIndex = concurrentIndexStatement.exec(withoutTrailingSemicolon);
+    if (!createIndex || withoutTrailingSemicolon.includes(";")) {
       throw new Error(
-        `${file}: opengeni:concurrent-index requires exactly one CREATE [UNIQUE] INDEX CONCURRENTLY statement`,
+        `${file}: opengeni:concurrent-index requires exactly one CREATE [UNIQUE] INDEX CONCURRENTLY statement with an unqualified index name`,
       );
     }
+    const indexName = createIndex[1]
+      ? createIndex[1].replaceAll('""', '"')
+      : createIndex[2]!.toLowerCase();
 
     await sql`select set_config('lock_timeout', ${concurrentDirective[1]!}, false)`;
     try {
+      // A concurrent build commits its catalog row before validation. Process
+      // interruption can therefore leave either a valid index without a
+      // migration-history row or an invalid same-name index that blocks retry.
+      // Resolve only the current target schema: embedded installations may use
+      // the same migration/index names in independent schemas.
+      const [existing] = await sql<
+        Array<{ schemaName: string; indexName: string; valid: boolean }>
+      >`
+        select namespace.nspname as "schemaName",
+               index_class.relname as "indexName",
+               index.indisvalid as valid
+        from pg_catalog.pg_index index
+        join pg_catalog.pg_class index_class on index_class.oid = index.indexrelid
+        join pg_catalog.pg_namespace namespace on namespace.oid = index_class.relnamespace
+        where namespace.nspname = current_schema()
+          and index_class.relname = ${indexName}
+      `;
+      if (existing?.valid) return;
+      if (existing) {
+        await sql.unsafe(
+          `DROP INDEX CONCURRENTLY ${quoteIdentifier(existing.schemaName)}.${quoteIdentifier(existing.indexName)}`,
+        );
+      }
       await sql.unsafe(statement);
     } finally {
       await sql`select set_config('lock_timeout', '0', false)`;

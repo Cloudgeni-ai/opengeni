@@ -930,6 +930,84 @@ describe("nested agent depth policy (real PostgreSQL + FORCE RLS)", () => {
     }
   }, 180_000);
 
+  test("repairs an invalid concurrent depth index and accepts a valid retry", async () => {
+    if (!available) return;
+    const blank = await acquireBlankTestDatabase("session-depth-policy-index-retry");
+    if (!blank) throw new Error("real PostgreSQL is required for concurrent index proof");
+    const sql = postgres(blank.databaseUrl, { max: 1 });
+    try {
+      await prepareDatabaseThrough0064(sql);
+      await sql`select set_config('opengeni.max_nested_agent_depth', '3', false)`;
+      await sql`select set_config('opengeni.nested_agent_depth_policy_source', 'default', false)`;
+      for (const file of (await sortedMigrationFiles()).filter(
+        (candidate) => candidate >= "0065_" && candidate < "0072_",
+      )) {
+        await applyAndRecordMigration(sql, file);
+      }
+
+      const [{ id: accountId } = { id: "" }] = await sql<{ id: string }[]>`
+        insert into managed_accounts (name) values ('invalid concurrent index') returning id`;
+      const [{ id: workspaceId } = { id: "" }] = await sql<{ id: string }[]>`
+        insert into workspaces (account_id, name)
+        values (${accountId}, 'invalid concurrent index') returning id`;
+      await sql`
+        insert into workspace_inference_controls (workspace_id, account_id)
+        values (${workspaceId}, ${accountId}) on conflict do nothing`;
+      for (const initialMessage of ["duplicate index key one", "duplicate index key two"]) {
+        const id = crypto.randomUUID();
+        await sql`
+          insert into sessions (
+            id, account_id, workspace_id, initial_message, model,
+            sandbox_backend, sandbox_group_id
+          ) values (
+            ${id}, ${accountId}, ${workspaceId}, ${initialMessage},
+            'test', 'none', ${id}
+          )`;
+      }
+
+      await expectPostgresCode(
+        sql.unsafe(`
+          CREATE UNIQUE INDEX CONCURRENTLY "sessions_workspace_root_depth_idx"
+          ON "sessions" ("workspace_id")
+        `),
+        "23505",
+      );
+      const [invalid] = await sql<{ valid: boolean }[]>`
+        select indisvalid as valid
+        from pg_index
+        where indexrelid = 'sessions_workspace_root_depth_idx'::regclass`;
+      expect(invalid).toEqual({ valid: false });
+
+      await migrate(blank.databaseUrl, undefined, { maxNestedAgentDepth: 3 });
+      const [repaired] = await sql<{ oid: number; valid: boolean; columns: string[] }[]>`
+        select index_class.oid::int as oid, index.indisvalid as valid,
+               array_agg(attribute.attname order by key.ordinality) as columns
+        from pg_index index
+        join pg_class index_class on index_class.oid = index.indexrelid
+        join unnest(index.indkey) with ordinality as key(attnum, ordinality) on true
+        join pg_attribute attribute
+          on attribute.attrelid = index.indrelid and attribute.attnum = key.attnum
+        where index.indexrelid = 'sessions_workspace_root_depth_idx'::regclass
+        group by index_class.oid, index.indisvalid`;
+      expect(repaired?.valid).toBe(true);
+      expect(repaired?.columns).toEqual(["workspace_id", "root_session_id", "nested_agent_depth"]);
+      const repairedOid = repaired!.oid;
+
+      await sql`
+        delete from schema_migrations
+        where name = '0072_nested_agent_depth_index.sql'`;
+      await migrate(blank.databaseUrl, undefined, { maxNestedAgentDepth: 3 });
+      const [validRetry] = await sql<{ oid: number; migrationRecords: number }[]>`
+        select 'sessions_workspace_root_depth_idx'::regclass::oid::int as oid,
+               (select count(*)::int from schema_migrations
+                where name = '0072_nested_agent_depth_index.sql') as "migrationRecords"`;
+      expect(validRetry).toEqual({ oid: repairedOid, migrationRecords: 1 });
+    } finally {
+      await sql.end().catch(() => undefined);
+      await blank.release();
+    }
+  }, 180_000);
+
   test("commits bounded backfill batches while old-shape root and child writes remain available", async () => {
     if (!available) return;
     const blank = await acquireBlankTestDatabase("session-depth-policy-batched-backfill");
