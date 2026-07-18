@@ -381,6 +381,26 @@ describe("transactional session workflow wake outbox", () => {
     });
   });
 
+  test("a late duplicate failure cannot poison an already-delivered revision", async () => {
+    const ctx = await fixture();
+    const queued = await send(ctx, "deliver once");
+    const claimed = (await claimPendingSessionWorkflowWakes(client.db, 1000)).find(
+      (entry) => entry.sessionId === ctx.session.id,
+    );
+    expect(claimed?.wakeRevision).toBe(queued.wakeRevision);
+
+    await markSessionWorkflowWakeDelivered(client.db, claimed!);
+    expect(await markSessionWorkflowWakeFailed(client.db, claimed!, "late duplicate failure")).toBe(
+      false,
+    );
+    expect(await wakeRow(ctx.grant.workspaceId!, ctx.session.id)).toMatchObject({
+      wakeRevision: queued.wakeRevision,
+      deliveredRevision: queued.wakeRevision,
+      attempts: 0,
+      lastError: null,
+    });
+  });
+
   test("concurrent producers serialize into distinct monotonically increasing revisions", async () => {
     const ctx = await fixture();
     const results = await Promise.all(

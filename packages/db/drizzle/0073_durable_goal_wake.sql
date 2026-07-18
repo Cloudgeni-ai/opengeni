@@ -23,9 +23,13 @@ BEGIN
   END IF;
 END $$;
 
--- Existing pending/delivered continuation updates are already-materialized
--- work. Mark one synthetic baseline revision observed so deployment cannot
--- manufacture a second continuation beside them.
+-- Existing current-version pending/deferred continuation updates are already-
+-- materialized work. Mark one synthetic baseline revision observed so
+-- deployment cannot manufacture a second continuation beside them. A
+-- delivered update is not itself outstanding: its owning nonterminal turn is
+-- protected by the repair query below, while an idle goal whose delivered turn
+-- already settled still needs a new obligation. Likewise, a stale-version
+-- update cannot satisfy the current goal.
 UPDATE "session_goals" AS goal
 SET
   "continuation_wake_revision" = 1,
@@ -37,8 +41,9 @@ WHERE goal.status = 'active'
     WHERE update.workspace_id = goal.workspace_id
       AND update.session_id = goal.session_id
       AND update.kind = 'goal_continuation'
-      AND update.state IN ('pending', 'delivered', 'deferred')
+      AND update.state IN ('pending', 'deferred')
       AND update.payload ->> 'goalId' = goal.id::text
+      AND update.payload ->> 'goalVersion' = goal.version::text
   );
 
 -- An active, admitted-idle goal with neither work nor a capacity waiter is the
