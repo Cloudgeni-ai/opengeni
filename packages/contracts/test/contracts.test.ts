@@ -24,6 +24,7 @@ import {
   OPENGENI_API_CONTRACT_REVISION,
   ResourceRef,
   SessionBusMessage,
+  SessionGoal,
   SessionMcpServerMetadata,
   CLEARED_RUN_STATE_BLOB,
   CLEARED_RUN_STATE_MARKER,
@@ -31,6 +32,64 @@ import {
 } from "../src";
 
 describe("contracts", () => {
+  test("accepts the truthful goal continuation projection and keeps it source-compatible", () => {
+    const baseGoal = {
+      id: "00000000-0000-4000-8000-000000000001",
+      accountId: "00000000-0000-4000-8000-000000000002",
+      workspaceId: "00000000-0000-4000-8000-000000000003",
+      sessionId: "00000000-0000-4000-8000-000000000004",
+      status: "active" as const,
+      text: "Keep deploys green",
+      successCriteria: null,
+      evidence: null,
+      rationale: null,
+      pausedReason: null,
+      createdBy: "api" as const,
+      version: 1,
+      autoContinuations: 0,
+      noProgressStreak: 0,
+      maxAutoContinuations: null,
+      metadata: {},
+      createdAt: "2026-07-11T12:00:00.000Z",
+      updatedAt: "2026-07-11T12:00:00.000Z",
+    };
+
+    expect(SessionGoal.parse(baseGoal).continuation).toBeUndefined();
+    expect(
+      SessionGoal.parse({
+        ...baseGoal,
+        continuation: {
+          state: "scheduled",
+          reason: "wake_pending",
+          wakeRevision: 8,
+          observedRevision: 7,
+          nextAttemptAt: "2026-07-11T12:01:00.000Z",
+          lastError: null,
+        },
+      }).continuation,
+    ).toEqual({
+      state: "scheduled",
+      reason: "wake_pending",
+      wakeRevision: 8,
+      observedRevision: 7,
+      nextAttemptAt: "2026-07-11T12:01:00.000Z",
+      lastError: null,
+    });
+    expect(() =>
+      SessionGoal.parse({
+        ...baseGoal,
+        continuation: {
+          state: "running",
+          reason: "goal_turn_running",
+          wakeRevision: -1,
+          observedRevision: 0,
+          nextAttemptAt: null,
+          lastError: null,
+        },
+      }),
+    ).toThrow();
+  });
+
   test("accepts create session defaults", () => {
     const payload = CreateSessionRequest.parse({ initialMessage: "inspect repo" });
     expect(payload.resources).toEqual([]);
