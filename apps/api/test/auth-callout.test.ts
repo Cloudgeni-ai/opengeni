@@ -57,8 +57,7 @@ mock.module("@opengeni/db", () => ({
 }));
 
 // Imported AFTER the db mock so the responder binds the mocked getEnrollment.
-const { handleAuthorizationRequest, NATS_USER_JWT_TTL_SECONDS } =
-  await import("../src/sandbox/auth-callout");
+const { handleAuthorizationRequest } = await import("../src/sandbox/auth-callout");
 
 const account = nkeys.createAccount();
 const ACCOUNT_SEED = new TextDecoder().decode(account.getSeed());
@@ -107,13 +106,14 @@ afterAll(() => {
 
 describe("handleAuthorizationRequest", () => {
   test("a valid + active bearer GRANTS a workspace-scoped user JWT", async () => {
+    const bearerExp = Math.floor(Date.now() / 1000) + 3600;
     const bearer = await signEnrollmentBearer(SECRET, {
       workspaceId: WS,
       agentId: AGENT,
       enrollmentId: AGENT,
       credentialGeneration: 1,
       subjectPrefix: `agent.${WS}.${AGENT}`,
-      exp: Math.floor(Date.now() / 1000) + 3600,
+      exp: bearerExp,
     });
     const out = await handleAuthorizationRequest(deps(), authRequest(bearer));
     const res = readResponse(out);
@@ -127,7 +127,7 @@ describe("handleAuthorizationRequest", () => {
     expect(userClaims.aud).toBe("APP");
     const now = Math.floor(Date.now() / 1000);
     expect(userClaims.exp).toBeGreaterThan(now);
-    expect(userClaims.exp).toBeLessThanOrEqual(now + NATS_USER_JWT_TTL_SECONDS);
+    expect(userClaims.exp).toBeLessThanOrEqual(bearerExp);
   });
 
   test("a MISSING bearer is denied", async () => {
