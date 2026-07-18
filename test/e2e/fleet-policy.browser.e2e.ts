@@ -93,8 +93,8 @@ describe("OPE-32 fleet policy browser acceptance", () => {
       const pageAudit = await page.evaluate(() => {
         const bodyText = document.body.innerText;
         const root = document.documentElement;
-        const disclosure = document.querySelector('[role="button"][aria-expanded="true"]');
-        const bounds = disclosure?.getBoundingClientRect();
+        const expandedDisclosure = document.querySelector('[role="button"][aria-expanded="true"]');
+        const bounds = expandedDisclosure?.getBoundingClientRect();
         return {
           horizontalOverflow: root.scrollWidth - root.clientWidth,
           disclosureRight: bounds?.right ?? null,
