@@ -239,19 +239,38 @@ describe("P1.2 isProviderSandboxNotFoundError (per-backend NotFound discriminato
     expect(isProviderSandboxNotFoundError("e2b", { statusCode: 404 })).toBe(true);
   });
 
-  test("box-gone phrasing -> NotFound", () => {
+  test("only typed codes and Modal's exact terminal grammar are NotFound", () => {
+    expect(
+      isProviderSandboxNotFoundError(
+        "modal",
+        new Error("Modal sandbox sb-123 not found (has been terminated)"),
+      ),
+    ).toBe(true);
     expect(isProviderSandboxNotFoundError("modal", new Error("Sandbox sb-123 not found"))).toBe(
-      true,
+      false,
     );
     expect(
       isProviderSandboxNotFoundError("e2b", new Error("the sandbox is no longer running")),
-    ).toBe(true);
-    expect(isProviderSandboxNotFoundError("runloop", new Error("devbox has been terminated"))).toBe(
-      true,
-    );
+    ).toBe(false);
     expect(
       isProviderSandboxNotFoundError("daytona", { code: "SANDBOX_NOT_FOUND", message: "gone" }),
     ).toBe(true);
+  });
+
+  test("transient typed evidence dominates nested NotFound prose", () => {
+    expect(
+      isProviderSandboxNotFoundError("modal", {
+        code: "UNAVAILABLE",
+        status: 14,
+        cause: { code: "NOT_FOUND", message: "Modal sandbox sb-old not found" },
+      }),
+    ).toBe(false);
+    expect(
+      isProviderSandboxNotFoundError("modal", {
+        code: "ENOTFOUND",
+        message: "Name resolution failed: sandbox not found",
+      }),
+    ).toBe(false);
   });
 
   test("a resume-conflict / still-running / generic error is NOT NotFound (never recreate -> never double-spawn)", () => {
