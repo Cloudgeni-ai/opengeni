@@ -310,6 +310,24 @@ seen after an ungraceful pod/node/OOM death without consuming serving headroom.
 The rollout/node blast-radius numbers above are topology bounds, not a claim
 that PDBs can prevent involuntary disruption.
 
+Exact implementation/docs head `7ad07113` was validated on 2026-07-18 with
+isolated PostgreSQL 17, checksum-verified NATS 2.14.3, and checksum-verified
+Temporal CLI 1.8.0 / server 1.31.2:
+
+- standalone DB-backed context compaction: 7 passed, 0 failed;
+- real heartbeat timeout redispatch plus atomic redispatch ceiling: 2 passed,
+  0 failed, 7 assertions, 249.01 seconds;
+- graceful mid-turn and pre-model worker shutdown against real DB/NATS/Temporal:
+  2 passed, 0 failed, 32 assertions, 17.17 seconds; and
+- exact attempt ownership, cancellation settlement, memory admission, and
+  eligible-capacity metrics: 17 passed, 0 failed, 56 assertions.
+
+The graceful mid-turn case asserts that the already-completed MCP call occurs
+exactly once. The early-shutdown case asserts one `turn.started` after recovery.
+The heartbeat case uses Temporal's real `HEARTBEAT` timeout type, and the
+ceiling case proves the durable terminal result does not issue a second failure
+write. No external model or sandbox provider participates in these tests.
+
 ## Non-serving execution requirement
 
 A read-only forensic fingerprint over 3,823 sessions was previously run inside
