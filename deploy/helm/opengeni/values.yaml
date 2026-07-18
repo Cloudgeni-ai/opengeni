@@ -241,6 +241,13 @@ worker:
       maxReplicas: 20
       targetCPUUtilizationPercentage: 70
       targetMemoryUtilizationPercentage: null
+      # Requires a custom.metrics.k8s.io adapter that maps the per-pod
+      # Prometheus gauge under this exact name. Leave disabled otherwise: an
+      # unavailable metric makes the HPA report ScalingActive=False.
+      slotSaturationMetric:
+        enabled: false
+        name: opengeni_turn_slot_saturation_ratio
+        targetAverageValue: "750m"
       customMetrics: []
       behavior: {}
   podSecurityContext:

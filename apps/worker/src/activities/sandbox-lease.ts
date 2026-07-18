@@ -34,7 +34,6 @@ import {
   accrueWarmSeconds,
   confirmDrainCold,
   appendSessionEventToSandboxGroup,
-  countQueuedTurns,
   countSandboxLeasesByLiveness,
   forceDrainOverLimitViewerOnlyBoxes,
   getBillingBalance,
@@ -71,7 +70,6 @@ import {
   recordCreditMicros,
   recordSandboxLeaseGauges,
   recordSandboxOrphansTerminated,
-  recordTurnsQueuedGauge,
 } from "../observability-metrics";
 
 export type ReapSandboxLeasesResult = {
@@ -372,13 +370,6 @@ async function refreshQueueLeaseAndCreditGauges(
   db: ActivityServices["db"],
   observability: ActivityServices["observability"],
 ): Promise<void> {
-  try {
-    recordTurnsQueuedGauge(observability, await countQueuedTurns(db));
-  } catch (error) {
-    observability.warn("sandbox reaper: queued-turn gauge refresh failed", {
-      error: error instanceof Error ? error.message : String(error),
-    });
-  }
   try {
     recordSandboxLeaseGauges(observability, await countSandboxLeasesByLiveness(db));
   } catch (error) {

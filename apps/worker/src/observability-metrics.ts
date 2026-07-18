@@ -14,6 +14,23 @@ export type TurnOutcome = "completed" | "failed" | "cancelled" | "recovering";
 export type CreditMicrosKind = "usage" | "grant" | "topup" | "refund";
 export type SandboxLeaseLiveness = "cold" | "warming" | "warm" | "draining";
 export type CreditBalanceGauge = { accountId: string; balanceMicros: number };
+export type TurnTaskQueueStats = {
+  /** Temporal activity tasks ready for a turn worker to accept. */
+  eligibleBacklog: number;
+  oldestBacklogAgeSeconds: number;
+  tasksAddRate: number;
+  tasksDispatchRate: number;
+};
+
+export type TemporalTurnTaskQueueStats = {
+  approximateBacklogCount?: unknown;
+  approximateBacklogAge?: {
+    seconds?: unknown;
+    nanos?: unknown;
+  } | null;
+  tasksAddRate?: unknown;
+  tasksDispatchRate?: unknown;
+} | null;
 
 const turnTrackers = new WeakMap<Observability, TurnLifecycleMetrics>();
 const creditBalanceGaugeAccounts = new WeakMap<Observability, Set<string>>();
@@ -314,12 +331,86 @@ export class TurnLifecycleMetrics {
   }
 }
 
-export function recordTurnsQueuedGauge(observability: Observability, value: number): void {
+/**
+ * Record the authoritative turn activity queue rather than aggregate Postgres
+ * prompts. A paused human prompt is durable queue truth but is not runnable and
+ * never reaches this Temporal task queue. DescribeTaskQueue's approximate
+ * backlog count and age are explicitly documented by Temporal as autoscaling
+ * signals.
+ */
+export function recordTurnTaskQueueStats(
+  observability: Observability,
+  stats: TurnTaskQueueStats,
+): void {
   observability.setGauge({
-    name: "opengeni_turns_queued",
-    help: "Current number of queued session turns.",
-    value,
+    name: "opengeni_turn_eligible_backlog",
+    help: "Temporal runAgentTurn activity tasks eligible for immediate worker admission.",
+    value: nonnegativeFinite(stats.eligibleBacklog),
   });
+  observability.setGauge({
+    name: "opengeni_turn_eligible_backlog_oldest_age_seconds",
+    help: "Approximate age of the oldest eligible runAgentTurn activity task.",
+    value: nonnegativeFinite(stats.oldestBacklogAgeSeconds),
+  });
+  observability.setGauge({
+    name: "opengeni_turn_eligible_tasks_add_rate",
+    help: "Temporal runAgentTurn tasks added per second over its rolling window.",
+    value: nonnegativeFinite(stats.tasksAddRate),
+  });
+  observability.setGauge({
+    name: "opengeni_turn_eligible_tasks_dispatch_rate",
+    help: "Temporal runAgentTurn tasks dispatched per second over its rolling window.",
+    value: nonnegativeFinite(stats.tasksDispatchRate),
+  });
+}
+
+export function normalizeTurnTaskQueueStats(
+  stats: TemporalTurnTaskQueueStats | undefined,
+): TurnTaskQueueStats {
+  return {
+    eligibleBacklog: temporalNumber(stats?.approximateBacklogCount),
+    oldestBacklogAgeSeconds: Math.max(
+      0,
+      temporalNumber(stats?.approximateBacklogAge?.seconds) +
+        temporalNumber(stats?.approximateBacklogAge?.nanos) / 1_000_000_000,
+    ),
+    tasksAddRate: temporalNumber(stats?.tasksAddRate),
+    tasksDispatchRate: temporalNumber(stats?.tasksDispatchRate),
+  };
+}
+
+export function startTurnCapacityMonitor(input: {
+  observability: Observability;
+  read: () => Promise<TurnTaskQueueStats>;
+  intervalMs?: number;
+}): { close: () => Promise<void> } {
+  const intervalMs = input.intervalMs ?? 15_000;
+  let stopped = false;
+  let running: Promise<void> | null = null;
+  const refresh = () => {
+    if (stopped || running) return;
+    running = input
+      .read()
+      .then((stats) => recordTurnTaskQueueStats(input.observability, stats))
+      .catch((error) => {
+        input.observability.warn("turn capacity monitor: Temporal task-queue stats failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      })
+      .finally(() => {
+        running = null;
+      });
+  };
+  refresh();
+  const timer = setInterval(refresh, intervalMs);
+  timer.unref?.();
+  return {
+    close: async () => {
+      stopped = true;
+      clearInterval(timer);
+      await running;
+    },
+  };
 }
 
 export function recordSandboxLeaseGauges(
@@ -635,6 +726,16 @@ export function recordModelCacheTokens(
 
 function nonNegativeTokenCount(value: number | null | undefined): number {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+function nonnegativeFinite(value: number): number {
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+function temporalNumber(value: unknown): number {
+  if (value === null || value === undefined) return 0;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
 }
 
 /**

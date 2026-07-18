@@ -3,7 +3,6 @@ import {
   applySessionTurnSettlement,
   recoverSessionDispatch,
   peekSessionWork as peekSessionWorkDb,
-  countQueuedTurns,
   getSessionEvent,
   getSessionTurnForAttempt,
   requireSession,
@@ -11,7 +10,6 @@ import {
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import { deliverFailedChildTurnToParent, notifyParentOfChildIdle } from "./parent-wake";
-import { recordTurnsQueuedGauge } from "../observability-metrics";
 import type {
   ActivityServices,
   PeekSessionWorkInput,
@@ -27,7 +25,6 @@ export type SessionStateActivityOverrides = Partial<{
   applySessionTurnSettlement: typeof applySessionTurnSettlement;
   recoverSessionDispatch: typeof recoverSessionDispatch;
   peekSessionWork: typeof peekSessionWorkDb;
-  countQueuedTurns: typeof countQueuedTurns;
   getSessionEvent: typeof getSessionEvent;
   getSessionTurnForAttempt: typeof getSessionTurnForAttempt;
   requireSession: typeof requireSession;
@@ -35,7 +32,6 @@ export type SessionStateActivityOverrides = Partial<{
   publishDurableSessionEvents: typeof publishDurableSessionEvents;
   deliverFailedChildTurnToParent: typeof deliverFailedChildTurnToParent;
   notifyParentOfChildIdle: typeof notifyParentOfChildIdle;
-  recordTurnsQueuedGauge: typeof recordTurnsQueuedGauge;
 }>;
 
 // Crash-loop guard for worker-death re-dispatch: a turn that takes a worker
@@ -54,7 +50,6 @@ export function createSessionStateActivities(
     overrides.applySessionTurnSettlement ?? applySessionTurnSettlement;
   const recoverSessionDispatchFn = overrides.recoverSessionDispatch ?? recoverSessionDispatch;
   const peekSessionWorkFn = overrides.peekSessionWork ?? peekSessionWorkDb;
-  const countQueuedTurnsFn = overrides.countQueuedTurns ?? countQueuedTurns;
   const getSessionEventFn = overrides.getSessionEvent ?? getSessionEvent;
   const getSessionTurnForAttemptFn = overrides.getSessionTurnForAttempt ?? getSessionTurnForAttempt;
   const requireSessionFn = overrides.requireSession ?? requireSession;
@@ -65,7 +60,6 @@ export function createSessionStateActivities(
   const deliverFailedChildTurnToParentFn =
     overrides.deliverFailedChildTurnToParent ?? deliverFailedChildTurnToParent;
   const notifyParentOfChildIdleFn = overrides.notifyParentOfChildIdle ?? notifyParentOfChildIdle;
-  const recordTurnsQueuedGaugeFn = overrides.recordTurnsQueuedGauge ?? recordTurnsQueuedGauge;
 
   async function failSessionAttempt(input: FailSessionAttemptInput): Promise<void> {
     const { db, bus, settings, observability, wakeSessionWorkflow } = await services();
@@ -116,7 +110,7 @@ export function createSessionStateActivities(
   async function settleSessionInterruptions(
     input: SettleSessionInterruptionsInput,
   ): Promise<{ action: "paused" | "continue" | "stale" }> {
-    const { db, bus, observability } = await services();
+    const { db, bus } = await services();
     const applied = await settleSessionAttemptInterruptionsFn(
       db,
       input.workspaceId,
@@ -126,7 +120,6 @@ export function createSessionStateActivities(
     if (applied.events.length > 0) {
       await publishDurableSessionEventsFn(bus, input.workspaceId, input.sessionId, applied.events);
     }
-    await refreshQueuedTurnsGauge(db, observability, countQueuedTurnsFn, recordTurnsQueuedGaugeFn);
     return { action: applied.action };
   }
 
@@ -149,7 +142,6 @@ export function createSessionStateActivities(
       return { action: result.action };
     }
     await publishDurableSessionEventsFn(bus, input.workspaceId, input.sessionId, result.events);
-    await refreshQueuedTurnsGauge(db, observability, countQueuedTurnsFn, recordTurnsQueuedGaugeFn);
     if (result.action === "exceeded") {
       await deliverFailedChildTurnToParentFn(
         { db, bus, settings, observability, wakeSessionWorkflow },
@@ -171,10 +163,8 @@ export function createSessionStateActivities(
   }
 
   async function peekSessionWork(input: PeekSessionWorkInput) {
-    const { db, observability } = await services();
-    const peek = await peekSessionWorkFn(db, input.workspaceId, input.sessionId);
-    await refreshQueuedTurnsGauge(db, observability, countQueuedTurnsFn, recordTurnsQueuedGaugeFn);
-    return peek;
+    const { db } = await services();
+    return peekSessionWorkFn(db, input.workspaceId, input.sessionId);
   }
 
   async function markSessionIdle(input: MarkSessionIdleInput): Promise<void> {
@@ -187,7 +177,6 @@ export function createSessionStateActivities(
     if (settled.events.length > 0) {
       await publishDurableSessionEventsFn(bus, input.workspaceId, input.sessionId, settled.events);
     }
-    await refreshQueuedTurnsGauge(db, observability, countQueuedTurnsFn, recordTurnsQueuedGaugeFn);
     if (settled.action === "stale") {
       return;
     }
@@ -211,17 +200,4 @@ export function createSessionStateActivities(
     peekSessionWork,
     markSessionIdle,
   };
-}
-
-async function refreshQueuedTurnsGauge(
-  db: ActivityServices["db"],
-  observability: ActivityServices["observability"],
-  countQueuedTurnsFn: typeof countQueuedTurns,
-  recordTurnsQueuedGaugeFn: typeof recordTurnsQueuedGauge,
-): Promise<void> {
-  try {
-    recordTurnsQueuedGaugeFn(observability, await countQueuedTurnsFn(db));
-  } catch {
-    // Best-effort telemetry; session state transitions remain authoritative.
-  }
 }

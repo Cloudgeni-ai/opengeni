@@ -1,7 +1,7 @@
 {
   "uid": "opengeni-worker-fleet",
-  "title": "OpenGeni \u00b7 Worker Fleet",
-  "description": "Turn flow, worker memory vs limit, HPA replicas, sandbox leases, and compaction firing vs context pressure.",
+  "title": "OpenGeni · Worker Fleet",
+  "description": "Eligible turn backlog, memory-aware slot saturation, worker memory vs limit, HPA replicas, sandbox leases, and compaction pressure.",
   "schemaVersion": 39,
   "version": 1,
   "editable": true,
@@ -29,7 +29,7 @@
   "panels": [
     {
       "type": "row",
-      "title": "Turn flow \u2014 inflight, queued, throughput",
+      "title": "Turn flow — inflight, eligible backlog, throughput",
       "collapsed": false,
       "panels": [],
       "id": 1,
@@ -42,8 +42,8 @@
     },
     {
       "type": "timeseries",
-      "title": "Turns inflight vs queued (fleet total)",
-      "description": "Backlog pressure. Queued climbing while inflight is flat = capacity-bound.",
+      "title": "Turns inflight vs eligible backlog (fleet total)",
+      "description": "Temporal activity backlog contains only runAgentTurn work eligible for worker admission. Paused human prompts are intentionally excluded.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -85,8 +85,8 @@
         },
         {
           "refId": "B",
-          "expr": "sum(opengeni_turns_queued)",
-          "legendFormat": "queued",
+          "expr": "max(opengeni_turn_eligible_backlog)",
+          "legendFormat": "eligible backlog",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -218,8 +218,60 @@
       }
     },
     {
+      "type": "timeseries",
+      "title": "Oldest eligible turn backlog age",
+      "description": "Temporal schedule-to-start pressure. Sustained age means runnable work is waiting for admission; paused human prompts never enter this series.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": ["last", "max"]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(opengeni_turn_eligible_backlog_oldest_age_seconds)",
+          "legendFormat": "oldest eligible",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "id": 15,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 9
+      }
+    },
+    {
       "type": "row",
-      "title": "Memory \u2014 working set vs the container limit (pre-OOM)",
+      "title": "Memory — working set vs the container limit (pre-OOM)",
       "collapsed": false,
       "panels": [],
       "id": 5,
@@ -233,7 +285,7 @@
     {
       "type": "timeseries",
       "title": "Worker memory: fraction of limit",
-      "description": "cAdvisor working set \u00f7 kube-state-metrics limit. >0.9 sustained precedes an OOM kill mid-turn.",
+      "description": "cAdvisor working set ÷ kube-state-metrics limit. >0.9 sustained precedes an OOM kill mid-turn.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -285,7 +337,7 @@
     {
       "type": "timeseries",
       "title": "App RSS by process (fallback when cluster infra is absent)",
-      "description": "App-emitted resident memory (prom-client default metrics) \u2014 works without cAdvisor.",
+      "description": "App-emitted resident memory (prom-client default metrics) — works without cAdvisor.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -316,7 +368,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "opengeni_process_resident_memory_bytes{component=\"worker\"}",
+          "expr": "opengeni_process_resident_memory_bytes{component=~\"worker-.*\"}",
           "legendFormat": "{{instance}}",
           "datasource": {
             "type": "prometheus",
@@ -336,7 +388,7 @@
     },
     {
       "type": "row",
-      "title": "Autoscaling \u2014 HPA replicas vs max",
+      "title": "Autoscaling — eligible work and memory-safe slots",
       "collapsed": false,
       "panels": [],
       "id": 8,
@@ -350,7 +402,7 @@
     {
       "type": "timeseries",
       "title": "Worker HPA: current vs max replicas",
-      "description": "When current pins at max and stays there, turns queue \u2014 raise max or shed load.",
+      "description": "Resource-HPA fallback. Backlog/slot scaling requires a Kubernetes custom-metrics adapter; never configure the legacy aggregate prompt gauge.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -405,8 +457,71 @@
       "id": 9,
       "gridPos": {
         "h": 8,
-        "w": 12,
+        "w": 8,
         "x": 0,
+        "y": 27
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Turn slot saturation",
+      "description": "Used runAgentTurn slots divided by the memory-safe per-pod capacity. The maximum exposes one saturated pod; the fleet ratio weights by safe capacity.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": ["last", "max"]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(opengeni_turn_slots_used) / clamp_min(sum(opengeni_turn_slots_capacity), 1)",
+          "legendFormat": "fleet weighted",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "max(opengeni_turn_slot_saturation_ratio)",
+          "legendFormat": "most saturated pod",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "id": 16,
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
         "y": 27
       }
     },
@@ -457,14 +572,14 @@
       "id": 10,
       "gridPos": {
         "h": 8,
-        "w": 12,
-        "x": 12,
+        "w": 8,
+        "x": 16,
         "y": 27
       }
     },
     {
       "type": "row",
-      "title": "Context pressure \u2014 is compaction keeping up?",
+      "title": "Context pressure — is compaction keeping up?",
       "collapsed": false,
       "panels": [],
       "id": 11,
@@ -530,7 +645,7 @@
     {
       "type": "timeseries",
       "title": "Observed model input tokens p95 / p50 (context size)",
-      "description": "Context tokens per model response \u2014 the pressure toward the model window.",
+      "description": "Context tokens per model response — the pressure toward the model window.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -593,7 +708,7 @@
     {
       "type": "timeseries",
       "title": "Model call duration p95 by provider",
-      "description": "Full model HTTP call (request \u2192 response headers).",
+      "description": "Full model HTTP call (request → response headers).",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"

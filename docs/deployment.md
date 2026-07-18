@@ -623,15 +623,37 @@ helm upgrade --install opengeni deploy/helm/opengeni \
   --set secret.existingSecret=opengeni-runtime
 ```
 
-`ServiceMonitor` and `PrometheusRule` templates render only when `monitoring.coreos.com/v1` CRDs are installed. The starter rules cover stuck turns (`opengeni_turn_oldest_inflight_age_seconds > 900`), sandbox create failure ratio, orphan sandbox growth, and scraped target availability. The chart-managed OpenTelemetry Collector remains optional and is for traces/logs forwarding, not scraped metrics.
+`ServiceMonitor` and `PrometheusRule` templates render only when `monitoring.coreos.com/v1` CRDs are installed. The starter rules cover stuck turns (`opengeni_turn_oldest_inflight_age_seconds > 900`), eligible Temporal backlog age, memory-safe slot saturation, sandbox create failure ratio, orphan sandbox growth, and scraped target availability. The chart-managed OpenTelemetry Collector remains optional and is for traces/logs forwarding, not scraped metrics.
+
+Turn HPA always supports CPU/memory resource metrics. Per-pod slot saturation is
+the truthful demand metric, but Kubernetes can consume it only when the cluster
+has a `custom.metrics.k8s.io` adapter mapping the scraped Prometheus series. The
+chart therefore keeps it explicitly opt-in:
+
+```yaml
+worker:
+  turns:
+    autoscaling:
+      slotSaturationMetric:
+        enabled: true
+        name: opengeni_turn_slot_saturation_ratio
+        targetAverageValue: "750m" # 0.75 used / memory-safe capacity
+```
+
+Verify `kubectl get --raw /apis/custom.metrics.k8s.io` and the named pod metric
+before enabling it. If no adapter is installed, leave this off; otherwise the
+HPA reports an unavailable metric. Never substitute the aggregate durable
+prompt count: paused human prompts are intentionally queued but ineligible and
+would create false scale pressure.
 
 Minimum production dashboards should cover:
 
 - API traffic: request rate, error rate, and p50/p95/p99 latency by `route`, `method`, `status`, `variable set`, and `component`.
 - Worker execution: activity run rate, failure rate, and p50/p95/p99 `runAgentTurn` duration by `activity`, `status`, `variable set`, and `component`.
 - Turn lifecycle: `opengeni_turns_total{outcome}`, `opengeni_turn_duration_seconds`, `opengeni_turns_inflight`, and `opengeni_turn_oldest_inflight_age_seconds`.
+- Turn capacity: `opengeni_turn_eligible_backlog`, `opengeni_turn_eligible_backlog_oldest_age_seconds`, add/dispatch rates, used/reserved/available/capacity slots, `opengeni_turn_slot_saturation_ratio`, and admission current/limit bytes. Use `max` for task-queue gauges because every turn pod observes the same Temporal queue.
 - Model, Codex, and sandbox SLIs: `opengeni_model_calls_total{provider,outcome}`, `opengeni_model_call_duration_seconds{provider}`, `opengeni_codex_credential_selections_total{strategy,reason}`, `opengeni_codex_credential_failures_total{kind,outcome}`, `opengeni_codex_pool_observations_total{depth}`, `opengeni_codex_pool_low_total{depth}`, `opengeni_sandbox_creates_total{backend,outcome}`, `opengeni_sandbox_create_duration_seconds{backend}`, `opengeni_sandbox_leases{liveness}`, `opengeni_sandbox_warming_timeouts_total`, and `opengeni_sandbox_orphans_terminated_total`.
-- Queue and billing: `opengeni_turns_queued`, `opengeni_credit_balance_micros{account_id}`, `opengeni_credit_micros_total{kind}`, and `opengeni_build_info{version,revision}`.
+- Billing and deploy marker: `opengeni_credit_balance_micros{account_id}`, `opengeni_credit_micros_total{kind}`, and `opengeni_build_info{version,revision}`.
 - Dependency health: Postgres connection health, Temporal worker poll health, NATS connectivity, object-storage write/read conformance, and sandbox backend readiness.
 - Runtime health: API/worker restarts, CPU/memory saturation, pod pending time, collector scrape/export errors, and OTLP export failures.
 
@@ -675,6 +697,7 @@ Minimum production alerts:
 - API errors: 5xx ratio is above 2% for 10 minutes, or any critical route stays above 5% for 5 minutes.
 - API latency: p95 latency is above the product SLO for 10 minutes, tracked separately for `/v1/workspaces/:workspaceId/sessions`, event replay, SSE, scheduled-task trigger, and file routes.
 - Turn stuck: the oldest in-flight turn is older than 15 minutes for 5 minutes.
+- Turn admission: Temporal's oldest eligible `runAgentTurn` backlog is above 30 seconds for 5 minutes, or a pod remains above 90% of memory-safe slots while eligible work waits. Durable prompts behind a pause do not count.
 - Sandbox create failures: sandbox create failure ratio is above 20% for 10 minutes.
 - Sandbox orphan growth: `increase(opengeni_sandbox_orphans_terminated_total[30m]) > 0`.
 - Codex credential pool: any zero-eligible observation is critical; repeated one-eligible observations are warning-level reduced redundancy. The default PrometheusRule uses `opengeni_codex_pool_low_total{depth="zero"|"one"}`.

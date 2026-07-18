@@ -148,6 +148,28 @@ spec:
         # those exporters are absent the alerts simply never fire (no data). Pod/
         # HPA matchers assume the default "opengeni" release name — override
         # observability.prometheusRule.rules for a custom name.
+        - alert: OpenGeniTurnEligibleBacklogOld
+          expr: |
+            max(opengeni_turn_eligible_backlog_oldest_age_seconds) > 30
+            and on()
+            max(opengeni_turn_eligible_backlog) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: Runnable OpenGeni turns have waited for worker admission for more than 30 seconds
+            description: Temporal's runAgentTurn activity queue contains eligible work. Paused human prompts are deliberately excluded from this capacity signal.
+        - alert: OpenGeniTurnSlotsSaturated
+          expr: |
+            max(opengeni_turn_slot_saturation_ratio) > 0.9
+            and on()
+            max(opengeni_turn_eligible_backlog) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: A turn worker is above 90% of memory-safe slots while eligible work waits
+            description: Scale the turn fleet or inspect an admission-memory contraction. The slot denominator already honors the hard per-turn memory budget.
         - alert: OpenGeniWorkerMemoryNearLimit
           expr: |
             max by (namespace, pod, container) (

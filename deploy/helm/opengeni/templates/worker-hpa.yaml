@@ -33,6 +33,19 @@ spec:
           type: Utilization
           averageUtilization: {{ $config.autoscaling.targetMemoryUtilizationPercentage }}
     {{- end }}
+    {{- if eq $role "turns" }}
+    {{- with $config.autoscaling.slotSaturationMetric }}
+    {{- if .enabled }}
+    - type: Pods
+      pods:
+        metric:
+          name: {{ .name }}
+        target:
+          type: AverageValue
+          averageValue: {{ .targetAverageValue | quote }}
+    {{- end }}
+    {{- end }}
+    {{- end }}
     {{- with $config.autoscaling.customMetrics }}
     {{- toYaml . | nindent 4 }}
     {{- end }}

@@ -29,7 +29,6 @@ function makeActivities() {
         recoveryCalls.push(args[2]);
         return recoveryResult as any;
       }),
-      countQueuedTurns: mock(async () => 0),
       publishDurableSessionEvents: mock(
         async (_bus, _workspaceId, _sessionId, events: unknown[]) => {
           publishedEvents.push(...events);
@@ -38,7 +37,6 @@ function makeActivities() {
       deliverFailedChildTurnToParent: mock(async (...args: unknown[]) => {
         parentWakeCalls.push(args);
       }),
-      recordTurnsQueuedGauge: mock(() => undefined),
     },
   );
 }

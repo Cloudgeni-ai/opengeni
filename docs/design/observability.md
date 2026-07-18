@@ -43,6 +43,23 @@ work. The domain metric set (all `opengeni_` prefixed, bounded label values only
   the 2026-07-02 outage (every turn silently hung) is one `> 900` threshold away
   from a page.
 
+**Turn capacity** (dedicated turn workers, no session/workspace labels):
+- `opengeni_turn_eligible_backlog` and
+  `opengeni_turn_eligible_backlog_oldest_age_seconds` — Temporal activity tasks
+  that are actually eligible for `runAgentTurn`; each pod observes the same
+  task queue, so fleet queries use `max`, not `sum`
+- `opengeni_turn_eligible_tasks_add_rate` and
+  `opengeni_turn_eligible_tasks_dispatch_rate`
+- `opengeni_turn_slots_capacity`, `opengeni_turn_slots_reserved`,
+  `opengeni_turn_slots_used`, `opengeni_turn_slots_available`, and
+  `opengeni_turn_slot_saturation_ratio` — the memory-aware Temporal slot plane
+- `opengeni_turn_admission_memory_baseline_bytes`, current/limit bytes,
+  `opengeni_turn_admission_hard_bytes_per_turn`, and
+  `opengeni_turn_admission_native_headroom_bytes`
+
+The durable human prompt count is deliberately **not** a capacity metric. A
+paused prompt stays queued in Postgres but never schedules `runAgentTurn`.
+
 **Model calls** (`{provider, outcome}`; model names are bounded, provider ids more so):
 - `opengeni_model_calls_total`, `opengeni_model_call_duration_seconds`
 
@@ -54,8 +71,7 @@ work. The domain metric set (all `opengeni_` prefixed, bounded label values only
 - `opengeni_sandbox_orphans_terminated_total` — reaper GC; sustained non-zero means
   something upstream is leaking again
 
-**Queue & billing:**
-- `opengeni_turns_queued` gauge
+**Billing:**
 - `opengeni_credit_balance_micros{account_id}` gauge
 - `opengeni_credit_micros_total{kind}` counter (usage | grant | topup | refund)
 
