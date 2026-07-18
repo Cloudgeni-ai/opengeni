@@ -4,7 +4,12 @@ import { createNatsEventBus } from "@opengeni/events";
 import { createProductionAgentRuntime } from "@opengeni/runtime";
 import { createOpenGeniWorker } from "@opengeni/worker-bundle";
 import type { Model, ModelRequest, ModelResponse, StreamEvent } from "@openai/agents";
-import { functionCall, ScriptedModel, type ScriptedModelStep } from "./scripted-model";
+import {
+  functionCall,
+  latestExecCommandState,
+  ScriptedModel,
+  type ScriptedModelStep,
+} from "./scripted-model";
 
 const settings = getSettings();
 const role = process.env.OPENGENI_WORKER_ROLE;
@@ -79,12 +84,39 @@ class SandboxScriptedModel implements Model {
 
 function sandboxStepForRequest(request: ModelRequest): ScriptedModelStep {
   const body = JSON.stringify(request.input ?? request);
-  if (
-    body.includes("sandbox-ok") ||
-    body.includes("file-mounted-ok") ||
-    body.includes("sandbox-view-image") ||
-    body.includes("workbench-capture-e2e-complete")
-  ) {
+  const completionMarkers = [
+    "sandbox-ok",
+    "file-mounted-ok",
+    "sandbox-view-image",
+    "workbench-capture-e2e-complete",
+  ];
+  const execState = latestExecCommandState(body);
+  if (execState?.status === "running") {
+    return {
+      output: [
+        functionCall(
+          "write_stdin",
+          {
+            session_id: execState.sessionId,
+            chars: "",
+            yield_time_ms: 10_000,
+            max_output_tokens: 20_000,
+          },
+          `sandbox-shell-poll-${execState.sessionId}-${execState.occurrence}`,
+        ),
+      ],
+    };
+  }
+  if (execState?.status === "exited") {
+    if (completionMarkers.some((marker) => body.lastIndexOf(marker) > execState.index)) {
+      return sandboxDoneStep();
+    }
+    return {
+      chunks: ["sandbox command exited without its acceptance marker"],
+      outputText: "sandbox command exited without its acceptance marker",
+    };
+  }
+  if (completionMarkers.some((marker) => body.includes(marker))) {
     return sandboxDoneStep();
   }
   if (body.includes("workbench capture acceptance fixture")) {

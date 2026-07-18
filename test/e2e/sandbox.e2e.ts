@@ -64,14 +64,14 @@ describe("real Docker sandbox e2e", () => {
     await waitFor(
       async () => {
         events = await sessionEvents(sessionId);
-        const outputIndex = events.findIndex(
-          (event) =>
-            event.type === "agent.toolCall.output" &&
-            JSON.stringify(event.payload ?? {}).includes(outputMarker),
-        );
-        if (outputIndex < 0) return false;
+        const completedIndex = events.findIndex((event) => event.type === "turn.completed");
+        if (completedIndex < 0) return false;
+        const hasToolOutput = events
+          .slice(0, completedIndex)
+          .some((event) => event.type === "agent.toolCall.output");
+        if (!hasToolOutput) return false;
         return events
-          .slice(outputIndex + 1)
+          .slice(completedIndex + 1)
           .some(
             (event) =>
               event.type === "session.status.changed" &&
@@ -84,12 +84,25 @@ describe("real Docker sandbox e2e", () => {
           [
             `waiting for settled tool output: ${outputMarker}`,
             `event types: ${events.map((event) => event.type).join(", ")}`,
+            `tool outputs: ${events
+              .filter((event) => event.type === "agent.toolCall.output")
+              .map((event) => JSON.stringify(event.payload ?? {}))
+              .join("\n")}`,
             `api logs:\n${api.logs().slice(-4_000)}`,
             `worker logs:\n${worker.logs().slice(-8_000)}`,
           ].join("\n"),
       },
     );
     return events;
+  }
+
+  function requireToolOutputMarker(events: SessionEvent[], marker: string): void {
+    const outputs = events
+      .filter((event) => event.type === "agent.toolCall.output")
+      .map((event) => JSON.stringify(event.payload ?? {}));
+    if (!outputs.some((output) => output.includes(marker))) {
+      throw new Error(`sandbox command did not emit ${marker}:\n${outputs.join("\n")}`);
+    }
   }
 
   test("runs SDK shell tool calls inside the real Docker sandbox", async () => {
@@ -105,10 +118,7 @@ describe("real Docker sandbox e2e", () => {
     const session = (await create.json()) as { id: string };
 
     const events = await waitForSettledToolOutput(session.id, "sandbox-ok");
-    const toolOutputs = events
-      .filter((event) => event.type === "agent.toolCall.output")
-      .map((event) => JSON.stringify(event.payload ?? {}));
-    expect(toolOutputs.some((output) => output.includes("sandbox-ok"))).toBe(true);
+    requireToolOutputMarker(events, "sandbox-ok");
     expect(events.some((event) => event.type === "agent.message.completed")).toBe(true);
   }, 240_000);
 
@@ -128,13 +138,7 @@ describe("real Docker sandbox e2e", () => {
       session.id,
       "workbench-capture-e2e-complete",
     );
-    expect(
-      settledEvents.some(
-        (event) =>
-          event.type === "agent.toolCall.output" &&
-          JSON.stringify(event.payload ?? {}).includes("workbench-capture-e2e-complete"),
-      ),
-    ).toBe(true);
+    requireToolOutputMarker(settledEvents, "workbench-capture-e2e-complete");
 
     let capture: GetWorkspaceCaptureResponse | null = null;
     await waitFor(
@@ -233,11 +237,7 @@ describe("real Docker sandbox e2e", () => {
     const session = (await create.json()) as { id: string };
 
     const events = await waitForSettledToolOutput(session.id, "file-mounted-ok");
-    expect(
-      events
-        .filter((event) => event.type === "agent.toolCall.output")
-        .some((event) => JSON.stringify(event.payload ?? {}).includes("file-mounted-ok")),
-    ).toBe(true);
+    requireToolOutputMarker(events, "file-mounted-ok");
   }, 240_000);
 
   test("views uploaded image resources from materialized sandbox files", async () => {
@@ -313,6 +313,8 @@ describe("real Docker sandbox e2e", () => {
           "git --version >/dev/null",
           "jq --version >/dev/null",
           "curl --version >/dev/null",
+          'test -x "$(command -v ps)"',
+          'test -x "$(command -v setsid)"',
           "test -x /usr/local/bin/opengeni-git-askpass",
           "test ! -e /usr/local/bin/opengeni-azure-login",
         ].join(" && "),
