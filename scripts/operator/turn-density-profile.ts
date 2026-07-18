@@ -432,14 +432,19 @@ async function runWave(input: {
     const baseline = summarizeMemory(await sampleMemory(config.baselineSamples, 250));
     const runs = turnInputs.map((turnInput) => activities.runAgentTurn(turnInput));
     allRuns = Promise.allSettled(runs);
-    await Promise.race([
-      model.allStarted,
-      allRuns.then((results) => {
-        const rejected = results.find((result) => result.status === "rejected");
-        throw rejected?.reason ?? new Error("Density turns settled before reaching the model gate");
-      }),
-      timeout(config.timeoutMs, `Timed out waiting for density ${density} wave ${wave}`),
-    ]);
+    await withTimeout(
+      Promise.race([
+        model.allStarted,
+        allRuns.then((results) => {
+          const rejected = results.find((result) => result.status === "rejected");
+          throw (
+            rejected?.reason ?? new Error("Density turns settled before reaching the model gate")
+          );
+        }),
+      ]),
+      config.timeoutMs,
+      `Timed out waiting for density ${density} wave ${wave}`,
+    );
 
     const plateauSampleCount = Math.max(
       2,
@@ -1003,8 +1008,20 @@ function rounded(value: number): number {
   return Math.round(value * 10) / 10;
 }
 
-function timeout(milliseconds: number, message: string): Promise<never> {
-  return new Promise((_, reject) => setTimeout(() => reject(new Error(message)), milliseconds));
+export async function withTimeout<T>(
+  work: Promise<T>,
+  milliseconds: number,
+  message: string,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), milliseconds);
+  });
+  try {
+    return await Promise.race([work, deadline]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 function errorMessage(error: unknown): string {

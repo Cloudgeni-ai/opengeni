@@ -7,6 +7,7 @@ import {
   quantile,
   scenarioForTurn,
   summarizeNumbers,
+  withTimeout,
 } from "./turn-density-profile";
 
 describe("turn density profile release-gate helpers", () => {
@@ -70,5 +71,14 @@ describe("turn density profile release-gate helpers", () => {
       p99: 4,
       worst: 4,
     });
+  });
+
+  test("clears a long deadline after work settles and still rejects real timeouts", async () => {
+    expect(await withTimeout(Promise.resolve("settled"), 60_000, "should be cleared")).toBe(
+      "settled",
+    );
+    await expect(
+      withTimeout(new Promise(() => undefined), 5, "density deadline elapsed"),
+    ).rejects.toThrow("density deadline elapsed");
   });
 });
