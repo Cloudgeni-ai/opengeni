@@ -73,8 +73,11 @@ describe("migration 0053 (Codex credential leases)", () => {
           (${accountId}, ${workspaceId}, 'legacy-a', 'external-a', 'pro', 'active'),
           (${accountId}, ${workspaceId}, 'legacy-b', 'external-b', 'pro', 'active')
         returning id`;
-      const credentialA = credentials[0]!.id;
-      const credentialB = credentials[1]!.id;
+      // Both rows share one statement timestamp, so the allocator's canonical
+      // created_at/id order is lexical id order. Multi-row RETURNING order is
+      // unspecified; normalize the fixture to the production query order.
+      const [credentialA, credentialB] = credentials.map((row) => row.id).sort();
+      if (!credentialA || !credentialB) throw new Error("expected two migration credentials");
       await admin`
         insert into codex_rotation_settings (
           account_id, workspace_id, active_credential_id,

@@ -178,6 +178,9 @@ describe("Step I — embedded dedicated-schema isolation (SPIKE-1 F1, productize
         INSERT INTO opengeni.managed_accounts (name) VALUES ('grant acct') RETURNING id`;
       const [workspace] = await sql<{ id: string }[]>`
         INSERT INTO opengeni.workspaces (account_id, name) VALUES (${account!.id}, 'grant ws') RETURNING id`;
+      await sql`
+        INSERT INTO opengeni.workspace_inference_controls (workspace_id, account_id)
+        VALUES (${workspace!.id}, ${account!.id})`;
       const [session] = await sql<{ id: string }[]>`
         WITH ids AS (SELECT gen_random_uuid() AS id)
         INSERT INTO opengeni.sessions (
