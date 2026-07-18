@@ -33,6 +33,7 @@ import {
   setDefaultModelProvider,
   MaxTurnsExceededError,
   MCPServerStreamableHttp,
+  NoopTrace,
   // Provider-bound Model instances. Both are re-exported from
   // @openai/agents-openai via `export * from '@openai/agents-openai'` in
   // @openai/agents' index (0.11.6), so the multi-provider routing imports them
@@ -52,6 +53,7 @@ import {
   setDefaultOpenAIKey,
   setOpenAIResponsesTransport,
   setTracingDisabled,
+  withTrace,
   // Hosted web_search tool factory. Re-exported from @openai/agents-openai via
   // `export * from '@openai/agents-openai'` in @openai/agents' index (0.11.6);
   // it returns a { type: 'hosted_tool', providerData: { type: 'web_search' } }
@@ -128,7 +130,6 @@ import {
   estimateCompleteModelInput,
   estimateSerializedValueTokens,
   hasModelGeneratedItem,
-  renderCompactionPromptInputForChat,
   type CompleteModelInputFootprint,
   type ProviderContextTokenSignal,
 } from "./context-compaction";
@@ -179,8 +180,11 @@ setSelfhostedApplyDiff(
 export {
   elideSupersededViewImagePairs,
   sanitizeHistoryItemsForModel,
+  assertNoRemoteCompactionItems,
+  assertNoRemoteCompactionItemsInSerializedRunState,
+  dropReasoningItemsFromSerializedRunState,
+  RemoteCompactionReplayError,
   stripReasoningEncryptedContent,
-  stripReasoningIdentityFromSerializedRunState,
   neutralizeToolSearchItemsInSerializedRunState,
 } from "./history-sanitizer";
 export type { HistoryItem } from "./history-sanitizer";
@@ -211,7 +215,6 @@ export {
   estimateCompleteModelInput,
   estimateSerializedValueTokens,
   hasModelGeneratedItem,
-  renderCompactionPromptInputForChat,
   COMPACTION_SUMMARY_MARKER,
   COMPACTION_PROMPT,
   COMPACT_USER_MESSAGE_MAX_TOKENS,
@@ -791,11 +794,12 @@ function recordModelCallMetric(
  *
  * Provider-aware: the summary always runs on the SAME provider that serves the
  * turn (registry providers can't summarize through OpenAI/Azure, and vice
- * versa). `api: "chat"` providers (Fireworks) speak /v1/chat/completions, where
- * the summary is choices[0].message.content; `api: "responses"` (the default,
- * built-in OpenAI/Azure) speaks /v1/responses as before. When no client/api is
- * supplied it uses the built-in OpenAI/Azure Responses path. store:false is set
- * only on the OpenAI-platform Responses path (Azure rejects it; chat ignores it).
+ * versa). Both adapters receive the same structured AgentInputItems, base
+ * instructions, and explicitly empty tool set. `api: "chat"` uses the SDK's
+ * Chat Completions converter rather than flattening history into a synthetic
+ * transcript. When no client/api is supplied, the built-in Responses path is
+ * used. `store:false` is set only on the OpenAI-platform Responses path (Azure
+ * rejects it and compatible Chat providers need not implement it).
  */
 export async function summarizeForCompaction(
   settings: Settings,
@@ -814,37 +818,17 @@ export async function summarizeForCompaction(
   const api = options.api ?? "responses";
   const model = options.model ?? settings.openaiModel;
   const maxTokens = options.maxOutputTokens ?? SUMMARY_BUFFER_TOKENS;
-  if (api === "chat") {
-    const transcript = renderCompactionPromptInputForChat(input);
-    const completion = await client.chat.completions.create({
-      model,
-      max_tokens: maxTokens,
-      messages: [{ role: "user", content: transcript }],
-      ...(options.promptCacheKey ? { prompt_cache_key: options.promptCacheKey } : {}),
-    } as any);
-    const usage = modelResponseUsageFromResponse(completion);
-    if (usage) {
-      await options.onUsage?.(usage);
-    }
-    const text = (completion as { choices?: Array<{ message?: { content?: unknown } }> })
-      .choices?.[0]?.message?.content;
-    const summary = typeof text === "string" ? text.trim() : "";
-    if (!summary) {
-      throw new EmptyCompactionSummaryError(compactionResponseDiagnostics(completion, summary));
-    }
-    return summary;
-  }
-  // Use the same SDK Responses adapter as the real agent call. It converts the
-  // structured AgentInputItems (callId/providerData/etc.) to provider wire
-  // items without flattening tool history into a fake user transcript.
+  // Use the same SDK adapter family as the real agent call. Both adapters
+  // convert the structured AgentInputItems (callId/providerData/etc.) to their
+  // provider wire shape without flattening tool history into a fake transcript.
   const request: ModelRequest = {
     systemInstructions: options.systemInstructions ?? "",
     input: input as AgentInputItem[],
     modelSettings: {
       maxTokens,
       // Azure rejects store:false; the Codex subscription transport enforces
-      // it independently. The OpenAI platform path remains explicitly storeless.
-      ...(settings.openaiProvider === "azure" ? {} : { store: false }),
+      // it independently. Chat-compatible providers need not implement store.
+      ...(api === "responses" && settings.openaiProvider !== "azure" ? { store: false } : {}),
       ...(options.promptCacheKey
         ? { providerData: { prompt_cache_key: options.promptCacheKey } }
         : {}),
@@ -855,7 +839,12 @@ export async function summarizeForCompaction(
     handoffs: [],
     tracing: false,
   };
-  const response = await new CompactionResponsesModel(client, model).fetchResponse(request);
+  const response =
+    api === "chat"
+      ? await withTrace(new NoopTrace(), () =>
+          new OpenAIChatCompletionsModel(client, model).getResponse(request),
+        )
+      : await new CompactionResponsesModel(client, model).fetchResponse(request);
   const usage = modelResponseUsageFromResponse(response);
   if (usage) {
     await options.onUsage?.(usage);
@@ -973,10 +962,11 @@ export function extractResponseOutputText(response: unknown): string {
 }
 
 /**
- * The public SDK getResponse() method is runner-facing and always opens a
- * tracing span. Compaction is a standalone model call, so use the same SDK
- * request conversion and Responses transport without manufacturing a runner
- * trace solely to satisfy that wrapper.
+ * The Responses adapter exposes its request conversion/transport as a
+ * protected method. Chat's equivalent converter is private and its public
+ * getResponse() always opens a generation span, so the Chat path above gives
+ * it a NoopTrace context: the SDK converter is reused without exporting a
+ * standalone compaction trace or attaching sensitive request/response data.
  */
 class CompactionResponsesModel extends OpenAIResponsesModel {
   fetchResponse(request: ModelRequest) {

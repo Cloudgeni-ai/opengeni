@@ -6,8 +6,9 @@ import {
   rewriteComputerCallsToActionsOnly,
   rewriteEmptyComputerCallOutputImageUrls,
   sanitizeHistoryItemsForModel,
+  dropReasoningItemsFromSerializedRunState,
+  RemoteCompactionReplayError,
   stripReasoningEncryptedContent,
-  stripReasoningIdentityFromSerializedRunState,
 } from "../src/history-sanitizer";
 
 // The legible "screen capture failed" error card the wire-level backstop now
@@ -690,11 +691,11 @@ describe("stripReasoningEncryptedContent", () => {
     expect("encrypted_content" in out.providerData).toBe(false);
   });
 
-  test("clears a top-level encrypted_content (compaction item shape)", () => {
+  test("does not turn provider compaction into replayable plaintext", () => {
     const item = { type: "compaction", encrypted_content: "blob", summary: "kept" } as any;
     const out = stripReasoningEncryptedContent(item) as any;
-    expect("encrypted_content" in out).toBe(false);
-    expect(out.summary).toBe("kept");
+    expect(out).toBe(item);
+    expect(out.encrypted_content).toBe("blob");
   });
 
   test("returns the SAME reference when there is nothing encrypted to strip", () => {
@@ -719,14 +720,11 @@ describe("stripReasoningEncryptedContent", () => {
   });
 });
 
-describe("stripReasoningIdentityFromSerializedRunState", () => {
+describe("dropReasoningItemsFromSerializedRunState", () => {
   // The approval RunState replay path
   // replay a serialized RunState blob that has no per-item producer tag. When the
-  // resuming codex account differs from the freezing one, this neutralizes EVERY
-  // reasoning item's account-bound identity (encrypted_content + provider id)
-  // wherever it lives in the blob, while preserving message / tool / compaction
-  // content. Both HOLE A vectors (foreign blob 400, foreign rs_ id rejection) are
-  // closed because neither the blob nor the id survives.
+  // resuming codex account differs from the freezing one, this drops EVERY
+  // reasoning item whole wherever it lives while preserving message/tool content.
 
   const fullBlob = () =>
     JSON.stringify({
@@ -784,20 +782,26 @@ describe("stripReasoningIdentityFromSerializedRunState", () => {
       ],
     });
 
-  test("strips encrypted_content (snake+camel) and the rs_ id from reasoning in every location", () => {
-    const out = stripReasoningIdentityFromSerializedRunState(fullBlob());
+  test("drops reasoning whole from every RunState location", () => {
+    const out = dropReasoningItemsFromSerializedRunState(fullBlob());
     const parsed = JSON.parse(out);
-    // No encrypted blob survives anywhere…
+    // No encrypted blob, foreign id, or visible reasoning survives anywhere.
     for (const enc of ["enc-orig", "enc-resp-camel", "enc-last", "enc-gen"]) {
       expect(out).not.toContain(enc);
     }
-    // …no foreign rs_ id survives anywhere…
     for (const id of ["rs_orig", "rs_resp", "rs_last", "rs_gen"]) {
       expect(out).not.toContain(id);
     }
-    // …a non-blob providerData sibling on a reasoning item is preserved…
-    expect(parsed.originalInput[0].providerData.keep).toBe("yes");
-    // …and all message / tool content survives.
+    expect(parsed.originalInput).toEqual([
+      { type: "message", role: "user", content: "the question" },
+    ]);
+    expect(parsed.generatedItems.map((item: { type: string }) => item.type)).toEqual([
+      "message_output_item",
+    ]);
+    expect(parsed.modelResponses[0].output).toEqual([
+      { type: "function_call", callId: "call_1", name: "t", arguments: "{}" },
+    ]);
+    expect(parsed.lastModelResponse.output).toEqual([]);
     expect(out).toContain("the question");
     expect(out).toContain("the answer");
     expect(out).toContain("call_1");
@@ -819,23 +823,72 @@ describe("stripReasoningIdentityFromSerializedRunState", () => {
         },
       ],
     });
-    expect(stripReasoningIdentityFromSerializedRunState(blob)).toBe(blob);
+    expect(dropReasoningItemsFromSerializedRunState(blob)).toBe(blob);
   });
 
-  test("leaves compaction items untouched (their encrypted_content is a required field)", () => {
+  test.each([
+    {
+      location: "originalInput",
+      state: {
+        originalInput: [{ type: "compaction", encrypted_content: "comp-blob", summary: "kept" }],
+      },
+    },
+    {
+      location: "generatedItems[].rawItem",
+      state: {
+        generatedItems: [
+          {
+            type: "run_item",
+            rawItem: { type: "compaction", encrypted_content: "comp-blob", summary: "kept" },
+          },
+        ],
+      },
+    },
+    {
+      location: "modelResponses[].output",
+      state: {
+        modelResponses: [
+          {
+            output: [{ type: "compaction", encrypted_content: "comp-blob", summary: "kept" }],
+          },
+        ],
+      },
+    },
+    {
+      location: "lastModelResponse.output",
+      state: {
+        lastModelResponse: {
+          output: [{ type: "compaction", encrypted_content: "comp-blob", summary: "kept" }],
+        },
+      },
+    },
+  ])("rejects provider compaction from $location", ({ state }) => {
     const blob = JSON.stringify({
       $schemaVersion: "1.12",
-      originalInput: [{ type: "compaction", encrypted_content: "comp-blob", summary: "kept" }],
+      originalInput: [],
       modelResponses: [],
       generatedItems: [],
+      ...state,
     });
-    // No reasoning anywhere → byte-identical (same reference); compaction intact.
-    expect(stripReasoningIdentityFromSerializedRunState(blob)).toBe(blob);
+    expect(() => dropReasoningItemsFromSerializedRunState(blob)).toThrow(
+      RemoteCompactionReplayError,
+    );
   });
 
   test("forwards a non-JSON string unchanged (same reference)", () => {
     const sentinel = "not-json-cleared-state-sentinel";
-    expect(stripReasoningIdentityFromSerializedRunState(sentinel)).toBe(sentinel);
+    expect(dropReasoningItemsFromSerializedRunState(sentinel)).toBe(sentinel);
+  });
+});
+
+describe("sanitizeHistoryItemsForModel: provider compaction rejection", () => {
+  test("fails loudly instead of treating encrypted remote compaction as history", () => {
+    expect(() =>
+      sanitizeHistoryItemsForModel([
+        userMessage("before"),
+        { type: "compaction", encrypted_content: "opaque", summary: "untrusted" },
+      ]),
+    ).toThrow(RemoteCompactionReplayError);
   });
 });
 
