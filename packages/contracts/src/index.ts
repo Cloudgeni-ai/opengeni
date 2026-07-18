@@ -4976,6 +4976,9 @@ export const SwapActiveSandboxResponse = z.object({
       "unsupported_backend_context",
       "transient_establishment",
       "concurrent_swap",
+      "recovery_in_progress",
+      "recovery_degraded",
+      "recovery_unrecoverable",
     ])
     .optional(),
 });

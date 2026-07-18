@@ -57,12 +57,14 @@ import {
   // builds the client + resumes the envelope DIRECTLY: a live box resumes, gets
   // its /workspace PERSISTED (snapshot/tar), then is terminated; a gone box
   // (NotFound on resume) is already down, a clean no-op.
+  captureVerifiedWorkspaceArchive,
   createSandboxClientForBackend,
   deletePriorPersistedSnapshot,
   deserializeSandboxSessionStateEnvelope,
   isProviderSandboxNotFoundError,
   sweepModalOrphanSandboxes,
   terminateModalSandboxById,
+  type WorkspaceArchiveDescriptor,
 } from "@opengeni/runtime";
 import type { ActivityServices } from "./types";
 import { reconcilePendingParentSystemUpdates } from "./parent-wake";
@@ -132,7 +134,13 @@ type CreateSandboxClientForBackendFn = typeof createSandboxClientForBackend;
  */
 export type PersistArchiveFn = (
   archiveBase64: string | null,
-) => Promise<{ wrote: boolean; priorArchive: string | null; priorArchivePrev: string | null }>;
+  archiveMetadata?: WorkspaceArchiveDescriptor,
+) => Promise<{
+  wrote: boolean;
+  priorArchive: string | null;
+  priorArchivePrev: string | null;
+  archiveRevision?: string | null;
+}>;
 
 /** The provider-terminate seam. Production wires the real resume-by-id ->
  *  persistWorkspace -> persist-onto-lease (epoch-fenced) -> snapshot-GC ->
@@ -541,16 +549,22 @@ async function terminateDrainableBox(
   // the durable sandbox.box.terminated event below carries it, so a "terminated
   // with NOTHING persisted" (box already dead at drain) is visible in the DB.
   let persisted = false;
-  const persistArchive: PersistArchiveFn = async (archiveBase64: string | null) => {
+  let archiveRevision: string | null = null;
+  const persistArchive: PersistArchiveFn = async (
+    archiveBase64: string | null,
+    archiveMetadata?: WorkspaceArchiveDescriptor,
+  ) => {
     const result = await persistDrainSnapshot(db, {
       accountId,
       workspaceId: row.workspaceId,
       sandboxGroupId: row.sandboxGroupId,
       expectedEpoch: row.leaseEpoch,
       workspaceArchive: archiveBase64,
+      ...(archiveMetadata ? { workspaceArchiveMeta: archiveMetadata } : {}),
     });
     if (result.wrote && archiveBase64 !== null) {
       persisted = true;
+      archiveRevision = result.archiveRevision;
     }
     return result;
   };
@@ -584,7 +598,12 @@ async function terminateDrainableBox(
     try {
       await appendSessionEventToSandboxGroup(db, row.workspaceId, row.sandboxGroupId, {
         type: "sandbox.box.terminated",
-        payload: { actor: "reaper", persisted, instanceId: lease.instanceId },
+        payload: {
+          actor: "reaper",
+          persisted,
+          archiveRevision,
+          instanceId: lease.instanceId,
+        },
       });
     } catch (eventError) {
       observability.warn(
@@ -767,9 +786,11 @@ export async function terminateProviderBox(
   // snapshot must re-throw BEFORE any terminate so files are never lost — the next
   // sweep retries, the provider idle-timeout is the backstop. A NotFound here (the
   // box raced gone between resume and persist) is success: nothing to persist.
-  let archiveBytes: Uint8Array | undefined;
+  let verifiedArchive: Awaited<ReturnType<typeof captureVerifiedWorkspaceArchive>> | undefined;
   try {
-    archiveBytes = session?.persistWorkspace ? await session.persistWorkspace() : undefined;
+    verifiedArchive = session?.persistWorkspace
+      ? await captureVerifiedWorkspaceArchive(session)
+      : undefined;
   } catch (error) {
     if (isProviderSandboxNotFoundError(client.backendId, error)) {
       observability.info(
@@ -805,9 +826,11 @@ export async function terminateProviderBox(
   // so without this check we would delete a box the lease now treats as live. The
   // null-archive path of persistArchive does exactly this: FOR UPDATE + liveness/
   // refcount/epoch guard, no write. wrote:false → abort the terminate.
-  if (archiveBytes && archiveBytes.length > 0) {
-    const archiveBase64 = Buffer.from(archiveBytes).toString("base64");
-    const { wrote, priorArchive, priorArchivePrev } = await persistArchive(archiveBase64);
+  if (verifiedArchive) {
+    const { wrote, priorArchive, priorArchivePrev } = await persistArchive(
+      verifiedArchive.base64,
+      verifiedArchive.descriptor,
+    );
     if (!wrote) {
       observability.info(
         "sandbox reaper: lease re-armed during persist — leaving box RUNNING (no terminate)",

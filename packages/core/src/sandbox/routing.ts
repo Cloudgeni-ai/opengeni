@@ -13,9 +13,15 @@
 // over the events bus) lives here, not in the leaf (which stays db-free).
 
 import type { Settings } from "@opengeni/config";
-import { getSandbox, readActiveSandbox, type Database } from "@opengeni/db";
-import type { EventBus } from "@opengeni/events";
 import {
+  getSandbox,
+  markWarmLeaseInstanceLost,
+  readActiveSandbox,
+  type Database,
+} from "@opengeni/db";
+import { appendAndPublishEvents, type EventBus } from "@opengeni/events";
+import {
+  isProviderSandboxNotFoundError,
   makeActiveBackendResolver,
   NatsControlRpc,
   RoutingSandboxSession,
@@ -97,7 +103,17 @@ export function routingEnabled(settings: Settings): boolean {
  */
 export function wrapChannelABoxWithRouting(
   services: ChannelARoutingServices,
-  ids: { workspaceId: string; sessionId: string },
+  ids: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    homeLease: {
+      sandboxGroupId: string;
+      leaseEpoch: number;
+      instanceId: string;
+      backend: string;
+    };
+  },
   established: EstablishedSandboxSession,
 ): EstablishedSandboxSession {
   const { db, settings, bus } = services;
@@ -122,10 +138,45 @@ export function wrapChannelABoxWithRouting(
 
   const proxy = new RoutingSandboxSession({
     readPointer: async () => {
+      if (!routingEnabled(settings)) {
+        return { activeSandboxId: null, activeEpoch: 0 };
+      }
       const pointer = await readActiveSandbox(db, ids.workspaceId, ids.sessionId);
       return pointer ?? { activeSandboxId: null, activeEpoch: 0 };
     },
     resolveActiveBackend: resolver,
+    onDefaultBackendError: async ({ error }) => {
+      if (!isProviderSandboxNotFoundError(ids.homeLease.backend, error)) return null;
+      const marked = await markWarmLeaseInstanceLost(db, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sandboxGroupId: ids.homeLease.sandboxGroupId,
+        expectedEpoch: ids.homeLease.leaseEpoch,
+        expectedInstanceId: ids.homeLease.instanceId,
+        diagnostic: "provider_not_found_during_routed_operation",
+      });
+      if (marked.status === "marked" && bus) {
+        await appendAndPublishEvents(db, bus, ids.workspaceId, ids.sessionId, [
+          {
+            type: "sandbox.box.lost",
+            payload: { sandboxId: ids.homeLease.instanceId },
+          },
+        ]).catch(() => undefined);
+      }
+      const lease = marked.lease;
+      const restore = lease?.recovery.restore.status;
+      return {
+        leaseEpoch: lease?.leaseEpoch ?? ids.homeLease.leaseEpoch,
+        recovery:
+          marked.status === "stale"
+            ? ("superseded" as const)
+            : restore === "pending"
+              ? ("pending" as const)
+              : restore === "degraded"
+                ? ("degraded" as const)
+                : ("unrecoverable" as const),
+      };
+    },
   });
 
   return { ...established, session: proxy };

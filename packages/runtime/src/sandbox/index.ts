@@ -328,9 +328,11 @@ export {
 // currently-active backend (Modal or selfhosted) — flippable mid-turn, single
 // active at a time, fence-retrying on a swap race.
 export {
+  RoutingBackendRecoveryRequiredError,
   RoutingSandboxSession,
   RoutingUnsupportedError,
   type ActivePointer,
+  type DefaultBackendLossResult,
   type RoutableBackendSession,
   type ResolvedActiveBackend,
   type RoutingSandboxSessionDeps,
@@ -736,6 +738,70 @@ export type EstablishedSandboxSession = {
   restoredArchive?: WorkspaceArchiveDescriptor;
 };
 
+export class SandboxExecReadinessError extends Error {
+  readonly name = "SandboxExecReadinessError";
+
+  constructor(
+    public readonly backend: string,
+    public readonly code: "exec_probe_unavailable" | "exec_probe_timeout",
+    public readonly timeoutMs: number,
+  ) {
+    super(
+      code === "exec_probe_timeout"
+        ? `sandbox creation timed out waiting for ${backend} command readiness after ${timeoutMs}ms`
+        : `${backend} sandbox session does not expose an exec readiness probe`,
+    );
+  }
+}
+
+/** A provider handle is not workspace readiness. Modal can return a handle
+ * before its command router accepts exec, so every create path must pass this
+ * bounded probe before atomically publishing the lease warm/ready. */
+export async function verifySandboxExecReadiness(
+  established: EstablishedSandboxSession,
+  timeoutMs = 15_000,
+): Promise<void> {
+  if (established.backendId !== "modal") return;
+  const session = established.session as {
+    exec?: (args: {
+      cmd: string;
+      yieldTimeMs?: number;
+      maxOutputTokens?: number;
+    }) => Promise<unknown>;
+    execCommand?: (args: {
+      cmd: string;
+      yieldTimeMs?: number;
+      maxOutputTokens?: number;
+    }) => Promise<unknown>;
+  };
+  const run = session.exec ?? session.execCommand;
+  if (!run) {
+    throw new SandboxExecReadinessError(established.backendId, "exec_probe_unavailable", timeoutMs);
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      run.call(session, {
+        cmd: "true",
+        yieldTimeMs: 1_000,
+        maxOutputTokens: 1_000,
+      }),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () =>
+            reject(
+              new SandboxExecReadinessError(established.backendId, "exec_probe_timeout", timeoutMs),
+            ),
+          timeoutMs,
+        );
+        if (timer && "unref" in timer && typeof timer.unref === "function") timer.unref();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 export type SandboxCreatedCallback = (established: EstablishedSandboxSession) => Promise<void>;
 
 // The structural slice we need from a provider SandboxClient to resume by id and
@@ -822,6 +888,10 @@ export async function establishSandboxSessionFromEnvelope(
     backendOverride?: SandboxBackend;
     environment?: Record<string, string>;
     onSandboxCreated?: SandboxCreatedCallback;
+    /** Called after archive hydration but immediately before the exact workspace
+     * fingerprint probe. Lease-aware callers persist `verifying` here so a box
+     * is never observable as ready while verification is in flight. */
+    onWorkspaceRestoreVerifying?: (descriptor: WorkspaceArchiveDescriptor) => Promise<void>;
     metrics?: RuntimeMetricsHooks;
   },
 ): Promise<EstablishedSandboxSession> {
@@ -935,16 +1005,35 @@ export async function establishSandboxSessionFromEnvelope(
         );
       }
       try {
-        // hydrateWorkspace may internally replace the underlying box. Verification
-        // happens on that replacement before any caller may publish it warm.
+        // hydrateWorkspace may internally replace the underlying box.
         await hydrate.call(restored, workspaceArchive.bytes);
-        await verifyRestoredWorkspace(restored, workspaceArchive.descriptor);
       } catch (error) {
         await terminateCreatedSandbox(client, restored, (restored as { state?: unknown }).state);
         if (error instanceof WorkspaceArchiveIntegrityError) throw error;
         throw new WorkspaceArchiveIntegrityError(
           "archive_hydration_failed",
           `failed to hydrate selected workspace archive revision ${workspaceArchive.descriptor.revision}`,
+          { retryable: true },
+        );
+      }
+      if (opts.onWorkspaceRestoreVerifying) {
+        try {
+          await opts.onWorkspaceRestoreVerifying(workspaceArchive.descriptor);
+        } catch (error) {
+          await terminateCreatedSandbox(client, restored, (restored as { state?: unknown }).state);
+          throw error;
+        }
+      }
+      try {
+        // Verification happens on the hydrated replacement before any caller
+        // may publish it warm or route an operation to it.
+        await verifyRestoredWorkspace(restored, workspaceArchive.descriptor);
+      } catch (error) {
+        await terminateCreatedSandbox(client, restored, (restored as { state?: unknown }).state);
+        if (error instanceof WorkspaceArchiveIntegrityError) throw error;
+        throw new WorkspaceArchiveIntegrityError(
+          "workspace_fingerprint_unavailable",
+          `failed to verify selected workspace archive revision ${workspaceArchive.descriptor.revision}`,
           { retryable: true },
         );
       }

@@ -3292,24 +3292,29 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // the flag off the established group box is injected unchanged (today's
           // path). The lease still owns the group box lifecycle — the proxy is a
           // routing veneer, not an owner.
-          if (routingEnabled(settings)) {
-            resolvedSandbox = {
-              ...resolvedSandbox,
-              established: wrapTurnBoxWithRouting(
-                { db, settings, bus },
-                // Thread the SAME declared environment the group box was created with
-                // (resumeBoxForTurn, above) so a selfhosted swap target's manifest
-                // carries it too — the SDK's per-turn manifest-env delta stays empty
-                // (no "cannot change manifest environment variables" throw).
-                {
-                  workspaceId: input.workspaceId,
-                  sessionId: input.sessionId,
-                  environment: sandboxEnvironment,
+          resolvedSandbox = {
+            ...resolvedSandbox,
+            established: wrapTurnBoxWithRouting(
+              { db, settings, bus, onHomeSandboxLost: publishSandboxLost },
+              // Thread the SAME declared environment the group box was created with
+              // (resumeBoxForTurn, above) so a selfhosted swap target's manifest
+              // carries it too — the SDK's per-turn manifest-env delta stays empty
+              // (no "cannot change manifest environment variables" throw).
+              {
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                environment: sandboxEnvironment,
+                homeLease: {
+                  accountId: input.accountId,
+                  sandboxGroupId: session.sandboxGroupId,
+                  leaseEpoch: resolvedSandbox.leaseEpoch,
+                  instanceId: resolvedSandbox.established.instanceId,
+                  backend: groupBoxBackend,
                 },
-                resolvedSandbox.established,
-              ),
-            };
-          }
+              },
+              resolvedSandbox.established,
+            ),
+          };
         }
         if (resolvedSandbox) {
           startLeaseHeartbeat(resolvedSandbox, activeSandboxBackend ?? groupBoxBackend);
@@ -3640,6 +3645,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             settings,
             bus,
             onOp: machineOpObserver.observer,
+            onHomeSandboxLost: publishSandboxLost,
           },
           {
             workspaceId: input.workspaceId,
@@ -3651,6 +3657,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             backendId: sdkBackendIdForSandboxBackend(groupBoxBackend),
             agentDefaultManifest,
             provisioner: turnSandboxProvisioner,
+            homeLeaseIdentity: {
+              accountId: input.accountId,
+              sandboxGroupId: session.sandboxGroupId,
+              backend: groupBoxBackend,
+            },
           },
         );
       }

@@ -126,7 +126,22 @@ export interface RoutingSandboxSessionDeps {
   maxFenceRetries?: number;
   /** Optional structured-log sink for swap/fence transitions (diagnostics). */
   onTransition?: (event: RoutingTransitionEvent) => void;
+  /** Called only when an operation against the default/home backend throws a
+   * non-fence error. Wiring may classify definitive provider disappearance and
+   * atomically retire the exact lease epoch. Returning a result makes dispatch
+   * throw a typed recovery-required error WITHOUT replaying the operation (the
+   * original mutation may have reached the provider). */
+  onDefaultBackendError?: (input: {
+    op: string;
+    error: unknown;
+    kind: string;
+  }) => Promise<DefaultBackendLossResult | null>;
 }
+
+export type DefaultBackendLossResult = {
+  leaseEpoch: number;
+  recovery: "pending" | "degraded" | "unrecoverable" | "superseded";
+};
 
 export interface RoutingTransitionEvent {
   type: "resolved" | "fenced-retry" | "epoch-changed";
@@ -142,6 +157,22 @@ export class RoutingUnsupportedError extends Error {
   readonly name = "RoutingUnsupportedError";
   constructor(op: string, kind: string) {
     super(`the active sandbox (${kind}) does not support "${op}"`);
+  }
+}
+
+export class RoutingBackendRecoveryRequiredError extends Error {
+  readonly name = "RoutingBackendRecoveryRequiredError";
+  readonly retryable: boolean;
+
+  constructor(
+    public readonly op: string,
+    public readonly leaseEpoch: number,
+    public readonly recovery: DefaultBackendLossResult["recovery"],
+  ) {
+    super(
+      `sandbox backend disappeared during ${op}; recovery is ${recovery} at epoch ${leaseEpoch}`,
+    );
+    this.retryable = recovery === "pending" || recovery === "superseded";
   }
 }
 
@@ -335,6 +366,23 @@ export class RoutingSandboxSession implements RoutableBackendSession {
         return await fn(backend.session);
       } catch (error) {
         if (!isFenceError(error)) {
+          if (backend.sandboxId === null && this.deps.onDefaultBackendError) {
+            const loss = await this.deps.onDefaultBackendError({
+              op,
+              error,
+              kind: backend.kind,
+            });
+            if (loss) {
+              // Never replay an operation after provider disappearance. Even a
+              // read may race a route change, and a mutation's provider outcome
+              // is ambiguous. The next independently-admitted call observes the
+              // advanced epoch and elected recovery state.
+              this.cachedEpoch = undefined;
+              this.cachedSandboxId = undefined;
+              this.cached = undefined;
+              throw new RoutingBackendRecoveryRequiredError(op, loss.leaseEpoch, loss.recovery);
+            }
+          }
           throw error;
         }
         // Stale-epoch fence: the active pointer moved mid-op. Drop the cache so

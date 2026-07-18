@@ -19,6 +19,7 @@
 
 import { describe, expect, test } from "bun:test";
 import {
+  RoutingBackendRecoveryRequiredError,
   RoutingSandboxSession,
   RoutingUnsupportedError,
   makeActiveBackendResolver,
@@ -104,6 +105,36 @@ function mutablePointer(initial: ActivePointer = { activeSandboxId: null, active
 }
 
 describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () => {
+  test("provider disappearance fences an ambiguous mutation and never replays it", async () => {
+    let writes = 0;
+    let lossCallbacks = 0;
+    const missing = Object.assign(new Error("provider sandbox missing"), { status: 404 });
+    const backend: RoutableBackendSession = {
+      async writeFile() {
+        writes += 1;
+        throw missing;
+      },
+    };
+    const proxy = new RoutingSandboxSession({
+      defaultResolved: { session: backend, sandboxId: null, kind: "modal" },
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => ({ session: backend, sandboxId: null, kind: "modal" }),
+      onDefaultBackendError: async ({ error, op }) => {
+        expect(error).toBe(missing);
+        expect(op).toBe("writeFile");
+        lossCallbacks += 1;
+        return { leaseEpoch: 8, recovery: "pending" };
+      },
+    });
+
+    const error = await proxy.writeFile({ path: "maybe-written" }).catch((caught) => caught);
+    expect(error).toBeInstanceOf(RoutingBackendRecoveryRequiredError);
+    expect((error as RoutingBackendRecoveryRequiredError).leaseEpoch).toBe(8);
+    expect((error as RoutingBackendRecoveryRequiredError).retryable).toBe(true);
+    expect(writes).toBe(1);
+    expect(lossCallbacks).toBe(1);
+  });
+
   test("(1) active-epoch fence: a swap mid-turn routes the NEXT op to the new backend", async () => {
     const modal = new FakeBackend("modal");
     const selfhosted = new FakeBackend("selfhosted");

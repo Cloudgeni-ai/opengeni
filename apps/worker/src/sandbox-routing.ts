@@ -15,10 +15,16 @@
 // request/reply connection.
 
 import type { Settings } from "@opengeni/config";
-import { getSandbox, readActiveSandbox, type Database } from "@opengeni/db";
+import {
+  getSandbox,
+  markWarmLeaseInstanceLost,
+  readActiveSandbox,
+  type Database,
+} from "@opengeni/db";
 import type { EventBus } from "@opengeni/events";
 import {
   buildSelfhostedBackendSession,
+  isProviderSandboxNotFoundError,
   makeActiveBackendResolver,
   NatsControlRpc,
   NatsOpStreamTransport,
@@ -49,11 +55,25 @@ export type RoutingWiringServices = {
    *  the runtime defaults (generation "1", no persistence) — tests / non-turn
    *  callers. Only consulted when op-stream is actually enabled for the turn. */
   opJournal?: OpStreamJournal;
+  /** Durable lifecycle notification emitted only by the observer that wins the
+   * exact warm-instance loss CAS. */
+  onHomeSandboxLost?: (input: {
+    sandboxGroupId: string;
+    instanceId: string;
+    leaseEpoch: number;
+  }) => Promise<void>;
 };
 
 export type RoutingWiringIds = {
   workspaceId: string;
   sessionId: string;
+  homeLease?: {
+    accountId: string;
+    sandboxGroupId: string;
+    leaseEpoch: number;
+    instanceId: string;
+    backend: string;
+  };
   /**
    * The run's declared sandbox environment — the SAME object the turn passes to
    * `runtime.buildAgent`'s `sandboxEnvironment` and to `resumeBoxForTurn` (so the
@@ -225,10 +245,49 @@ export function wrapTurnBoxWithRouting(
       kind: established.backendId,
     },
     readPointer: async () => {
+      if (!routingEnabled(settings)) {
+        return { activeSandboxId: null, activeEpoch: 0 };
+      }
       const pointer = await readActiveSandbox(db, ids.workspaceId, ids.sessionId);
       return pointer ?? { activeSandboxId: null, activeEpoch: 0 };
     },
     resolveActiveBackend: resolver,
+    ...(ids.homeLease
+      ? {
+          onDefaultBackendError: async ({ error }: { error: unknown }) => {
+            const home = ids.homeLease!;
+            if (!isProviderSandboxNotFoundError(home.backend, error)) return null;
+            const marked = await markWarmLeaseInstanceLost(db, {
+              accountId: home.accountId,
+              workspaceId: ids.workspaceId,
+              sandboxGroupId: home.sandboxGroupId,
+              expectedEpoch: home.leaseEpoch,
+              expectedInstanceId: home.instanceId,
+              diagnostic: "provider_not_found_during_routed_operation",
+            });
+            if (marked.status === "marked") {
+              await services.onHomeSandboxLost?.({
+                sandboxGroupId: home.sandboxGroupId,
+                instanceId: home.instanceId,
+                leaseEpoch: marked.lease.leaseEpoch,
+              });
+            }
+            const lease = marked.lease;
+            const restore = lease?.recovery.restore.status;
+            return {
+              leaseEpoch: lease?.leaseEpoch ?? home.leaseEpoch,
+              recovery:
+                marked.status === "stale"
+                  ? ("superseded" as const)
+                  : restore === "pending"
+                    ? ("pending" as const)
+                    : restore === "degraded"
+                      ? ("degraded" as const)
+                      : ("unrecoverable" as const),
+            };
+          },
+        }
+      : {}),
   });
 
   return { ...established, session: proxy };
@@ -241,7 +300,14 @@ export function wrapLazyTurnBoxWithRouting(
     client: EstablishedSandboxSession["client"];
     backendId: string;
     agentDefaultManifest: unknown;
-    provisioner: { get(): Promise<{ established: EstablishedSandboxSession }> };
+    provisioner: {
+      get(): Promise<{ established: EstablishedSandboxSession; leaseEpoch?: number }>;
+    };
+    homeLeaseIdentity?: {
+      accountId: string;
+      sandboxGroupId: string;
+      backend: string;
+    };
   },
 ): EstablishedSandboxSession {
   const { db, settings, bus, onOp } = services;
@@ -295,6 +361,44 @@ export function wrapLazyTurnBoxWithRouting(
       }
       return routedResolver(pointer);
     },
+    ...(args.homeLeaseIdentity
+      ? {
+          onDefaultBackendError: async ({ error }: { error: unknown }) => {
+            const home = args.homeLeaseIdentity!;
+            if (!isProviderSandboxNotFoundError(home.backend, error)) return null;
+            const provisioned = await args.provisioner.get();
+            if (provisioned.leaseEpoch === undefined) return null;
+            const marked = await markWarmLeaseInstanceLost(db, {
+              accountId: home.accountId,
+              workspaceId: ids.workspaceId,
+              sandboxGroupId: home.sandboxGroupId,
+              expectedEpoch: provisioned.leaseEpoch,
+              expectedInstanceId: provisioned.established.instanceId,
+              diagnostic: "provider_not_found_during_routed_operation",
+            });
+            if (marked.status === "marked") {
+              await services.onHomeSandboxLost?.({
+                sandboxGroupId: home.sandboxGroupId,
+                instanceId: provisioned.established.instanceId,
+                leaseEpoch: marked.lease.leaseEpoch,
+              });
+            }
+            const lease = marked.lease;
+            const restore = lease?.recovery.restore.status;
+            return {
+              leaseEpoch: lease?.leaseEpoch ?? provisioned.leaseEpoch,
+              recovery:
+                marked.status === "stale"
+                  ? ("superseded" as const)
+                  : restore === "pending"
+                    ? ("pending" as const)
+                    : restore === "degraded"
+                      ? ("degraded" as const)
+                      : ("unrecoverable" as const),
+            };
+          },
+        }
+      : {}),
   });
 
   return {

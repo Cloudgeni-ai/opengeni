@@ -2750,7 +2750,10 @@ export type SwapActiveSandboxResponse = {
     | "offline_enrollment"
     | "unsupported_backend_context"
     | "transient_establishment"
-    | "concurrent_swap";
+    | "concurrent_swap"
+    | "recovery_in_progress"
+    | "recovery_degraded"
+    | "recovery_unrecoverable";
 };
 
 // ── Self-hosted enrollment UX (design 11) ────────────────────────────────────

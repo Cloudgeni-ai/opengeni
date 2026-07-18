@@ -28,8 +28,6 @@ import { githubAppBotIdentity } from "@opengeni/github";
 import type { Session } from "@opengeni/contracts";
 import {
   acquireLease,
-  commitWarmingToWarm,
-  failWarmingToCold,
   getSandboxSessionEnvelope,
   loadWorkspaceEnvironmentForRun,
   markWarmLeaseInstanceLost,
@@ -45,7 +43,6 @@ import {
   establishSandboxSessionFromEnvelope,
   isProviderSandboxNotFoundError,
   SandboxResumeStateUnavailableError,
-  serializeEstablishedSandboxEnvelope,
   SandboxChannelAService,
   ChannelAConflictError,
   ChannelANotFoundError,
@@ -54,7 +51,8 @@ import {
   type ChannelASession,
   type EstablishedSandboxSession,
 } from "@opengeni/runtime/sandbox";
-import { routingEnabled, wrapChannelABoxWithRouting } from "@opengeni/core";
+import { wrapChannelABoxWithRouting } from "@opengeni/core";
+import { establishApiSandboxSpawner } from "./rematerialize";
 
 export type ChannelAServices = {
   db: Database;
@@ -127,6 +125,12 @@ export async function withChannelA<T>(
     warmingLeaseTtlMs: settings.sandboxWarmingTimeoutMs,
   });
 
+  if (acquired.role === "blocked") {
+    await release();
+    throw new HTTPException(409, {
+      message: `sandbox recovery ${acquired.lease.recovery.restore.status} at epoch ${acquired.lease.leaseEpoch}`,
+    });
+  }
   if (acquired.role === "fenced") {
     await release();
     throw new HTTPException(409, {
@@ -181,43 +185,28 @@ export async function withChannelA<T>(
       // the bare session envelope (a never-warmed cold start). The order matters:
       // resume_state is the lease's authoritative box descriptor; the session
       // `_sandbox` envelope is only the per-session fallback.
-      const spawnEnvelope = acquired.lease.resumeState ?? envelope;
       try {
-        established = await establishSandboxSessionFromEnvelope(settings, spawnEnvelope, {
+        const result = await establishApiSandboxSpawner({
+          db,
+          settings,
+          accountId,
+          workspaceId,
+          sandboxGroupId,
           sessionId: session.id,
-          recovery: "create-or-restore",
-          backendOverride: session.sandboxBackend,
+          backend: session.sandboxBackend,
           environment,
+          expectedEpoch,
+          acquiredLease: acquired.lease,
+          fallbackEnvelope: envelope,
+          dataPlaneUrl: acquired.lease.dataPlaneUrl,
         });
+        established = result.established;
+        leaseSnapshot = result.lease;
       } catch (error) {
-        await failWarmingToCold(db, { accountId, workspaceId, sandboxGroupId, expectedEpoch });
         throw new HTTPException(409, {
           message: `sandbox not available (${error instanceof Error ? error.message : "spawn failed"})`,
         });
       }
-      // Persist the LIVE box as the lease's resume_state so the NEXT op resumes
-      // this box by id rather than cold-creating a rival (the box-churn the
-      // prove-it surfaced). Fall back to the session envelope when serialize is
-      // unavailable.
-      const resumeEnvelope =
-        (await serializeEstablishedSandboxEnvelope(established)) ?? envelope ?? null;
-      const committed = await commitWarmingToWarm(db, {
-        accountId,
-        workspaceId,
-        sandboxGroupId,
-        expectedEpoch,
-        instanceId: established.instanceId,
-        dataPlaneUrl: acquired.lease.dataPlaneUrl,
-        resumeBackendId: established.backendId,
-        resumeState: resumeEnvelope,
-        leaseTtlMs,
-      });
-      if (!committed.committed || !committed.lease) {
-        throw new HTTPException(409, {
-          message: `sandbox lease superseded (epoch ${expectedEpoch}); retry`,
-        });
-      }
-      leaseSnapshot = committed.lease;
     } else {
       // ATTACHED / REARMED: the box is live. Read the lease to get the
       // authoritative resume_state, then resume by id for this op.
@@ -286,13 +275,21 @@ export async function withChannelA<T>(
     // service calls and dispatches to the active backend (the group box by
     // default, or a swapped-to selfhosted machine). With the flag off the
     // established group session is used unchanged.
-    const routedSession = routingEnabled(settings)
-      ? wrapChannelABoxWithRouting(
-          { db, settings, bus },
-          { workspaceId, sessionId: session.id },
-          established,
-        ).session
-      : established.session;
+    const routedSession = wrapChannelABoxWithRouting(
+      { db, settings, bus },
+      {
+        accountId,
+        workspaceId,
+        sessionId: session.id,
+        homeLease: {
+          sandboxGroupId,
+          leaseEpoch: leaseSnapshot.leaseEpoch,
+          instanceId: leaseSnapshot.instanceId!,
+          backend: session.sandboxBackend,
+        },
+      },
+      established,
+    ).session;
 
     const service = new SandboxChannelAService({
       session: routedSession as ChannelASession,

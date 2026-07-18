@@ -238,7 +238,13 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
     expect(group.id).toBe(session.sandboxGroupId);
     expect(group.kind).toBe("modal");
     expect(group.active).toBe(true);
-    expect(group.liveness).toBe("online");
+    // A session row without a materialized/verified provider is not online.
+    expect(group.liveness).toBe("offline");
+    expect(group.attachable).toBe(false);
+    expect(group.providerStatus).toBe("not_created");
+    expect(group.leaseLiveness).toBeNull();
+    expect(group.routeStatus).toBe("attached");
+    expect(group.workspaceStatus).toBe("unknown");
 
     const machine = result.sandboxes.find((s) => !s.isSessionGroup)!;
     expect(machine.id).toBe(sandbox.id);
@@ -276,6 +282,42 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
     expect(back.swapped).toBe(true);
     expect(back.activeSandboxId).toBeNull();
     expect(back.activeEpoch).toBe(swap.activeEpoch + 1);
+  }, 60_000);
+
+  test("same-target attach is a readiness repair that advances the route epoch or fails typed", async () => {
+    if (!available) return;
+    const { ctx, services } = await seedFleet();
+    const before = (await readActiveSandbox(db, ctx.workspaceId, ctx.sessionId))!;
+    let readinessChecks = 0;
+    const repaired = await swapActiveSandbox(
+      {
+        ...services,
+        ensureSessionGroupReady: async () => {
+          readinessChecks += 1;
+        },
+      },
+      ctx,
+      "session",
+    );
+    expect(repaired.swapped).toBe(true);
+    expect(repaired.activeSandboxId).toBeNull();
+    expect(repaired.activeEpoch).toBe(before.activeEpoch + 1);
+    expect(readinessChecks).toBe(1);
+
+    const rejectedBefore = (await readActiveSandbox(db, ctx.workspaceId, ctx.sessionId))!;
+    const rejected = await swapActiveSandbox(
+      {
+        ...services,
+        ensureSessionGroupReady: async () => {
+          throw new Error("restore is still verifying");
+        },
+      },
+      ctx,
+      "session",
+    );
+    expect(rejected.swapped).toBe(false);
+    expect(rejected.code).toBe("recovery_in_progress");
+    expect(rejected.activeEpoch).toBe(rejectedBefore.activeEpoch);
   }, 60_000);
 
   test("heterogeneous swap (>=2 flips): Modal->machine->Modal->machine, single-active each time", async () => {

@@ -17,6 +17,7 @@ import {
   getSandbox,
   listSandboxes,
   readActiveSandbox,
+  readLease,
   requireSession,
   setActiveSandbox,
   type Database,
@@ -40,6 +41,10 @@ export type FleetServices = {
   db: Database;
   settings: Settings;
   bus?: EventBus;
+  /** API-direct readiness owner for the session's home group. Production wires
+   * this to the same viewer/provider verification + rematerialization path; core
+   * tests may omit it when exercising pointer mechanics only. */
+  ensureSessionGroupReady?: (ctx: FleetContext) => Promise<void>;
 };
 
 export type FleetContext = {
@@ -111,6 +116,25 @@ export type FleetSandboxEntry = {
   /** Selfhosted only: whether a display (real/Xvfb) is present. */
   hasDisplay?: boolean;
   lastSeenAt?: string | null;
+  /** Orthogonal truth dimensions. `liveness` is only their conservative UI
+   * projection and is never evidence for a specific dimension. */
+  providerStatus: "not_created" | "creating" | "exists" | "missing" | "unknown";
+  leaseLiveness: "cold" | "warming" | "warm" | "draining" | null;
+  routeStatus: "attached" | "detached";
+  archiveStatus: "none" | "available" | "unverified" | "invalid";
+  restoreStatus:
+    | "not_required"
+    | "pending"
+    | "restoring"
+    | "verifying"
+    | "ready"
+    | "degraded"
+    | "unrecoverable";
+  workspaceStatus: "unknown" | "not_ready" | "ready" | "degraded" | "unrecoverable";
+  leaseEpoch: number | null;
+  routeEpoch: number;
+  archiveRevision: string | null;
+  archiveSha256: string | null;
 };
 
 export type FleetListResult = {
@@ -127,7 +151,12 @@ export type FleetSwapResult = {
   activeSandboxId: string | null;
   activeEpoch: number;
   reason?: string;
-  code?: BackendUnresolvableCode | "concurrent_swap";
+  code?:
+    | BackendUnresolvableCode
+    | "concurrent_swap"
+    | "recovery_in_progress"
+    | "recovery_degraded"
+    | "recovery_unrecoverable";
 };
 
 const PROBE_TIMEOUT_MS = 5_000;
@@ -200,17 +229,41 @@ export async function listFleet(
   const entries: FleetSandboxEntry[] = [];
 
   // The session's own group box (the default/home sandbox; null active pointer ==
-  // this box). It is live by virtue of being the session's resumable group.
+  // this box). A session/group row is not provider existence. Online requires a
+  // warm lease, observed provider existence, and verified workspace readiness.
   const groupActive = pointer.activeSandboxId === null;
+  const groupLease = await readLease(db, ctx.workspaceId, ctx.sessionGroupId);
+  const groupOnline = Boolean(
+    groupLease?.liveness === "warm" &&
+    groupLease.recovery.provider.status === "exists" &&
+    groupLease.recovery.workspace.status === "ready",
+  );
+  const groupRecovering = Boolean(
+    groupLease &&
+    (groupLease.liveness === "warming" ||
+      groupLease.recovery.restore.status === "pending" ||
+      groupLease.recovery.restore.status === "restoring" ||
+      groupLease.recovery.restore.status === "verifying"),
+  );
   entries.push({
     id: ctx.sessionGroupId,
     kind: ctx.sessionBackend === "selfhosted" ? "selfhosted" : "modal",
     name: "session sandbox",
-    liveness: "online",
+    liveness: groupOnline ? "online" : groupRecovering ? "reconnecting" : "offline",
     active: groupActive,
     isSessionGroup: true,
     enrollmentId: null,
-    attachable: true,
+    attachable: groupOnline,
+    providerStatus: groupLease?.recovery.provider.status ?? "not_created",
+    leaseLiveness: groupLease?.liveness ?? null,
+    routeStatus: groupActive ? "attached" : "detached",
+    archiveStatus: groupLease?.recovery.archive.status ?? "none",
+    restoreStatus: groupLease?.recovery.restore.status ?? "not_required",
+    workspaceStatus: groupLease?.recovery.workspace.status ?? "unknown",
+    leaseEpoch: groupLease?.leaseEpoch ?? null,
+    routeEpoch: pointer.activeEpoch,
+    archiveRevision: groupLease?.recovery.archive.current?.revision ?? null,
+    archiveSha256: groupLease?.recovery.archive.current?.archiveSha256 ?? null,
   });
 
   // The workspace's first-class selfhosted sandboxes (enrolled machines). Probe
@@ -236,6 +289,21 @@ export async function listFleet(
       consented: probe.consented,
       hasDisplay: probe.hasDisplay,
       lastSeenAt: enrollment?.lastSeenAt ?? null,
+      providerStatus:
+        probe.liveness === "online"
+          ? "exists"
+          : probe.liveness === "reconnecting"
+            ? "unknown"
+            : "missing",
+      leaseLiveness: null,
+      routeStatus: pointer.activeSandboxId === sandbox.id ? "attached" : "detached",
+      archiveStatus: "none",
+      restoreStatus: "not_required",
+      workspaceStatus: probe.liveness === "online" ? "ready" : "not_ready",
+      leaseEpoch: null,
+      routeEpoch: pointer.activeEpoch,
+      archiveRevision: null,
+      archiveSha256: null,
     });
   }
 
@@ -345,6 +413,35 @@ export async function swapActiveSandbox(
     };
   }
 
+  if (resolved.targetSandboxId === null && services.ensureSessionGroupReady) {
+    try {
+      await services.ensureSessionGroupReady(ctx);
+    } catch (error) {
+      const lease = await readLease(services.db, ctx.workspaceId, ctx.sessionGroupId);
+      const restore = lease?.recovery.restore.status;
+      const code =
+        restore === "degraded"
+          ? ("recovery_degraded" as const)
+          : restore === "unrecoverable"
+            ? ("recovery_unrecoverable" as const)
+            : ("recovery_in_progress" as const);
+      const pointer = (await readActiveSandbox(services.db, ctx.workspaceId, ctx.sessionId)) ?? {
+        activeSandboxId: null,
+        activeEpoch: 0,
+      };
+      return {
+        swapped: false,
+        activeSandboxId: pointer.activeSandboxId,
+        activeEpoch: pointer.activeEpoch,
+        reason:
+          error instanceof Error
+            ? error.message
+            : "session sandbox did not reach verified readiness",
+        code,
+      };
+    }
+  }
+
   // Read the current epoch, then CAS on it (the fence). One retry on a lost race
   // (a concurrent swap bumped the epoch between read and write).
   for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -352,14 +449,9 @@ export async function swapActiveSandbox(
       activeSandboxId: null,
       activeEpoch: 0,
     };
-    // No-op swap (already pointed there) is a success without an epoch bump churn.
-    if (pointer.activeSandboxId === resolved.targetSandboxId) {
-      return {
-        swapped: true,
-        activeSandboxId: pointer.activeSandboxId,
-        activeEpoch: pointer.activeEpoch,
-      };
-    }
+    // Even a same-target attach advances active_epoch. It is a repair/fence
+    // request, not a no-op acknowledgment: any cached stale route is invalidated
+    // only after target readiness has been proved above.
     const result = await setActiveSandbox(services.db, {
       accountId: ctx.accountId,
       workspaceId: ctx.workspaceId,
