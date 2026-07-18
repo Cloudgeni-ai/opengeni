@@ -12,10 +12,11 @@ A **turn** is one logical unit of agent work inside a session: a waiting
 human/API prompt, an approval decision, or one coalesced internal-update batch
 is processed until the agent reaches a natural stopping point. The visible
 queue contains only waiting human/API prompts; goals, schedules, child results,
-capacity recovery, and lifecycle notices are typed internal updates, not queue
-rows. One execution attempt runs as one non-retryable Temporal `runAgentTurn`
-activity. Inside the activity the OpenAI Agents SDK loop makes as many model
-calls and tool calls as the work needs.
+and lifecycle notices are typed internal updates, not queue rows. Codex
+capacity recovery preserves the current logical turn directly and is neither a
+queue row nor an internal update. One execution attempt runs as one
+non-retryable Temporal `runAgentTurn` activity. Inside the activity the OpenAI
+Agents SDK loop makes as many model calls and tool calls as the work needs.
 
 Synthesized goal continuations inherit the model and reasoning effort from the
 newest turn with a durable `turn.started` event. The session default is used
@@ -58,24 +59,35 @@ failures never rotate or blindly replay. The allocator, strict workspace scope,
 five-hour reset semantics, and rollout fence are canonical in
 [`codex-subscription-rotation.md`](codex-subscription-rotation.md).
 
-When every allocator-enabled Codex credential is unavailable and the session
-still has an active goal, this recovery boundary becomes a durable capacity
-wait. The worker atomically settles the blocked turn once, idles the session,
-and stores one session-scoped waiter fenced by goal version, accepted policy
-hash, blocked turn, and the effective admission gate. The workflow waits for the earliest
-authoritative provider reset or a bounded secret-safe metadata refresh, and
-capacity-affecting writes increment a same-transaction wake revision before a
-best-effort Temporal signal. Duplicate/lost signals are harmless: row-locked
-re-evaluation is the sole continuation writer, and unobserved revisions repair
-commit-to-signal loss after restart or `continueAsNew`; a signal delivered
-between waiter commit and the activity result is compared against the workflow's
-pre-dispatch wake counters and cannot be baselined away. Capacity return records
-one typed goal-continuation internal update with the blocked turn's effective
-model/reasoning/resources/tools while resetting execution-local worker-death and
-credential-failover counters. That update can start one internal-update
-inference only when no human prompt or approval is waiting and the admission
-gate is open; it does not create a user message or visible queue row, replay the
-failed full turn, poll with inference, or redeem a reset/boost entitlement.
+When every allocator-enabled Codex credential is unavailable, this recovery
+boundary becomes a durable capacity wait for the current logical turn, whether
+or not the session has an active goal. The worker atomically closes the exact
+attempt with outcome `waiting_capacity`, leaves the turn and session
+nonterminal with the same active-turn pointer, and stores one session-scoped
+waiter fenced by blocked turn generation, accepted policy hash, and the
+effective admission gate. An active goal adds an optional id/version fence; it
+does not own the waiter or the turn.
+
+The workflow waits for the earliest authoritative provider reset or a bounded
+secret-safe metadata refresh. Capacity-affecting writes increment a
+same-transaction wake revision before a best-effort Temporal signal.
+Duplicate/lost signals are harmless: row-locked re-evaluation is the sole
+resume writer, and unobserved revisions repair commit-to-signal loss after
+restart or `continueAsNew`; a signal delivered between waiter commit and the
+activity result is compared against the workflow's pre-dispatch wake counters
+and cannot be baselined away. Capacity return atomically moves that exact turn
+to `recovering`; ordinary attempt admission then claims the same turn id with a
+new attempt before provider/model/tool/billing work starts. It creates no
+system update, new queue turn, user message, usage event, or goal continuation,
+and it does not independently settle/requeue the blocked turn, poll with
+inference, or redeem a reset/boost entitlement.
+
+Ordinary prompts queued during the wait remain behind the current turn. Pause
+leaves the waiter intact and lets the workflow close; Resume's revisioned
+`signalWithStart` wake reconstructs it. Steer, cancellation, and changes to the
+optional goal, accepted credential policy, active pointer, or blocked-turn
+generation supersede the waiter/turn under their durable fences, so no stale
+timer or signal can produce double inference.
 
 Provider context-window overflow is also handled inside the activity, not by a
 Temporal retry. When an OpenAI/Azure context overflow is classified,
