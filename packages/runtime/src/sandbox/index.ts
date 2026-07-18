@@ -957,9 +957,10 @@ export async function establishSandboxSessionFromEnvelope(
   // create() a FRESH box, THEN replay the persisted /workspace snapshot via
   // session.hydrateWorkspace(archive) when one rode the envelope. hydrateWorkspace
   // decodes the snapshot-ref and swaps the box for one booted from the snapshot
-  // image (restoreSnapshotFilesystem); no archive -> a clean empty box. This is the
-  // SOLE archive-replay seam, shared by the NotFound warm-reattach path AND the
-  // cold-restore branch (b) below.
+  // image (restoreSnapshotFilesystem). No archive is valid only for a genuinely
+  // new workspace; recovery callers select and verify an exact archive before
+  // entering this seam. This is the SOLE archive-replay path, shared by the
+  // NotFound warm-reattach path and the cold-restore branch (b) below.
   const coldRestore = async (resumeFallbackState?: unknown): Promise<EstablishedSandboxSession> => {
     // Parse/verify lazily: a warm resume-by-id does not consume its retained
     // archive, so a legacy live box remains resumable. Creation/restoration is

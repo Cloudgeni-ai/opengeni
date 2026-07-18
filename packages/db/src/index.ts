@@ -14421,6 +14421,11 @@ export async function beginSandboxRematerialization(
     sandboxGroupId: string;
     expectedEpoch: number;
     rematerializationId: string;
+    /** Optional durable per-session fallback envelope. When the lease has no
+     *  archive yet, its archive fields are imported under this same row lock so
+     *  restoration can never consume bytes that were not durably selected by
+     *  the lease attempt. Provider/session state is never imported here. */
+    archiveSource?: Record<string, unknown> | null;
   },
 ): Promise<BeginSandboxRematerializationResult> {
   return await withRlsContext(
@@ -14443,15 +14448,65 @@ export async function beginSandboxRematerialization(
             lease: row ? mapLeaseRow(row) : null,
           };
         }
-        const current = recoveryStateFromLeaseRow(row);
+        let workingResumeState = row.resume_state;
+        let workingRow = row;
+        let current = recoveryStateFromLeaseRow(workingRow);
+        if (current.archive.status === "none" && input.archiveSource) {
+          const imported = resumeStateWithPreservedArchives(
+            workingResumeState,
+            input.archiveSource,
+          );
+          if (imported !== workingResumeState) {
+            workingResumeState = imported;
+            workingRow = { ...workingRow, resume_state: imported };
+            current = recoveryStateFromLeaseRow(workingRow);
+          }
+        }
         if (current.archive.status !== "available" || !current.archive.current) {
+          if (current.archive.status !== "none") {
+            const failedAt = new Date().toISOString();
+            const degraded: SandboxRecoveryState = {
+              provider: {
+                status: "not_created",
+                instanceId: null,
+                observedAt: failedAt,
+              },
+              archive: current.archive,
+              restore: {
+                status: "degraded",
+                rematerializationId: null,
+                selectedRevision: null,
+                startedAt: null,
+                completedAt: failedAt,
+                failureCode: "archive_unverified",
+                retryable: false,
+              },
+              workspace: {
+                status: "degraded",
+                verifiedRevision: null,
+                verifiedAt: null,
+              },
+            };
+            const degradedResumeState = resumeStateWithRecovery(workingResumeState, degraded);
+            const degradedRows = await tx.execute<LeaseRow>(sql`
+              update sandbox_leases set
+                resume_state = ${JSON.stringify(degradedResumeState)}::jsonb,
+                resume_backend_id = coalesce(resume_backend_id, backend),
+                updated_at = now()
+              where id = ${row.id}
+                and liveness = 'warming'
+                and lease_epoch = ${input.expectedEpoch}
+              returning *
+            `);
+            workingRow = degradedRows[0] ?? workingRow;
+          }
           return {
             status: "blocked" as const,
             code:
               current.archive.status === "none"
                 ? ("archive_unavailable" as const)
                 : ("archive_unverified" as const),
-            lease: mapLeaseRow(row),
+            lease: mapLeaseRow(workingRow),
           };
         }
         if (
@@ -14491,7 +14546,9 @@ export async function beginSandboxRematerialization(
             verifiedAt: null,
           },
         };
-        const resumeStateJson = JSON.stringify(resumeStateWithRecovery(row.resume_state, recovery));
+        const resumeStateJson = JSON.stringify(
+          resumeStateWithRecovery(workingResumeState, recovery),
+        );
         const updated = await tx.execute<LeaseRow>(sql`
           update sandbox_leases set
             resume_state = ${resumeStateJson}::jsonb,
@@ -14695,8 +14752,10 @@ export async function markSandboxProviderReady(
   );
 }
 
-// §4.2 — the ONLY lease_epoch++ site. CAS on (warming AND lease_epoch=expected).
-// Folds the group box-envelope (resume_backend_id/resume_state) onto the lease.
+// §4.2 — the warming publication lease_epoch++ site. Loss, failed restore, and
+// drain transitions also advance the epoch under their own exact predicates.
+// CAS on (warming AND lease_epoch=expected) and fold the group box envelope
+// (resume_backend_id/resume_state) onto the lease.
 export async function commitWarmingToWarm(
   db: Database,
   input: {
@@ -15677,6 +15736,10 @@ export async function confirmDrainCold(
     workspaceId: string;
     sandboxGroupId: string;
     expectedEpoch: number;
+    /** Definitive provider NotFound before this drain could capture /workspace.
+     *  With no durable archive this must become typed unrecoverable, never a
+     *  clean cold lease that can expose an empty replacement. */
+    providerMissingBeforeCapture?: boolean;
   },
 ): Promise<{ wentCold: boolean }> {
   return await withRlsContext(
@@ -15722,12 +15785,17 @@ export async function confirmDrainCold(
             ? "pending"
             : hasArchive
               ? "degraded"
-              : "not_required";
+              : input.providerMissingBeforeCapture
+                ? "unrecoverable"
+                : "not_required";
         const recovery: SandboxRecoveryState = {
           provider: {
-            status: "not_created",
-            instanceId: null,
+            status: input.providerMissingBeforeCapture ? "missing" : "not_created",
+            instanceId: input.providerMissingBeforeCapture ? row.instance_id : null,
             observedAt: now,
+            ...(input.providerMissingBeforeCapture
+              ? { diagnostic: "provider_not_found_before_workspace_capture" }
+              : {}),
           },
           archive: current.archive,
           restore: {
@@ -15738,7 +15806,9 @@ export async function confirmDrainCold(
             completedAt: now,
             ...(restoreStatus === "degraded"
               ? { failureCode: "archive_unverified", retryable: false }
-              : {}),
+              : restoreStatus === "unrecoverable"
+                ? { failureCode: "archive_unavailable", retryable: false }
+                : {}),
           },
           workspace: {
             status:
@@ -15746,12 +15816,15 @@ export async function confirmDrainCold(
                 ? "not_ready"
                 : restoreStatus === "degraded"
                   ? "degraded"
-                  : "unknown",
+                  : restoreStatus === "unrecoverable"
+                    ? "unrecoverable"
+                    : "unknown",
             verifiedRevision: null,
             verifiedAt: null,
           },
         };
-        const resumeStateJson = hasArchive
+        const preserveRecovery = hasArchive || restoreStatus === "unrecoverable";
+        const resumeStateJson = preserveRecovery
           ? JSON.stringify(archiveOnlyResumeState(row, recovery))
           : null;
         const rows = await tx.execute<{ id: string }>(sql`
@@ -15762,7 +15835,7 @@ export async function confirmDrainCold(
           terminal_data_plane_url = null,
           lease_epoch = lease_epoch + 1,
           resume_state = ${resumeStateJson}::jsonb,
-          resume_backend_id = case when ${hasArchive} then coalesce(resume_backend_id, backend) else null end,
+          resume_backend_id = case when ${preserveRecovery} then coalesce(resume_backend_id, backend) else null end,
           updated_at = now()
         where id = ${row.id}
           and liveness = 'draining'
@@ -15782,15 +15855,15 @@ export async function confirmDrainCold(
 // the SAME epoch fence confirmDrainCold uses (draining AND refcount=0 AND
 // lease_epoch=expected). Folding it into resume_state.sessionState.workspaceArchive
 // means a later cold-restore (establishSandboxSessionFromEnvelope) reads it back
-// off the same envelope it already deserializes, and confirmDrainCold's
-// `resume_state = null` clears it on teardown for free (delete-on-teardown).
+// off the same envelope it already deserializes. confirmDrainCold retains only
+// this archive/recovery projection after provider teardown, excluding stale live
+// provider state.
 //
 // When workspaceArchive is null this function acts as a PURE CAS-GATE: it checks
 // (draining AND refcount=0 AND epoch=expected) under a FOR UPDATE lock and returns
-// wrote:true/false WITHOUT writing anything. This allows the reaper to guard a
-// terminate that produced no archive (a backend with no persistWorkspace) against
-// the re-arm race: a re-arm during the snapshot window sets refcount>0 / liveness!=
-// draining, so wrote:false → the reaper MUST NOT delete the box.
+// wrote:true/false WITHOUT writing anything. This is useful to prove that no
+// re-arm raced an external action, but it does not itself license deleting a
+// resumable cloud box without a verified capture.
 //
 // Returns `{ wrote, priorArchive }`:
 //   - wrote:false  -> the CAS missed (re-armed / newer epoch / vanished); the
@@ -15809,7 +15882,8 @@ export async function persistDrainSnapshot(
     sandboxGroupId: string;
     expectedEpoch: number;
     /** base64 of the provider snapshot-ref / tar archive from persistWorkspace().
-     *  Pass null to CAS-check without writing (for backends with no persistWorkspace). */
+     *  Pass null only to CAS-check without writing; this does not certify that
+     *  provider termination is lossless. */
     workspaceArchive: string | null;
     /** Exact verified archive/tree descriptor produced by the runtime capture.
      *  Omission is accepted only for legacy callers and remains unverified. */

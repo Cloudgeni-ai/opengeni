@@ -58,6 +58,29 @@ function preserveWorkspaceArchives(
   };
 }
 
+function hasWorkspaceArchive(envelope: Record<string, unknown> | null): boolean {
+  const sessionState =
+    envelope?.sessionState && typeof envelope.sessionState === "object"
+      ? (envelope.sessionState as Record<string, unknown>)
+      : null;
+  return (
+    typeof sessionState?.workspaceArchive === "string" && sessionState.workspaceArchive.length > 0
+  );
+}
+
+function withoutProviderIdentity(
+  envelope: Record<string, unknown> | null,
+): Record<string, unknown> | null {
+  if (!envelope) return null;
+  const sessionState =
+    envelope.sessionState && typeof envelope.sessionState === "object"
+      ? (envelope.sessionState as Record<string, unknown>)
+      : null;
+  if (!sessionState) return envelope;
+  const { providerState: _providerState, ...providerIndependentState } = sessionState;
+  return { ...envelope, sessionState: providerIndependentState };
+}
+
 async function terminateCreated(established: EstablishedSandboxSession | null): Promise<boolean> {
   if (!established) return true;
   const client = established.client as { delete?: (state: unknown) => Promise<unknown> };
@@ -100,11 +123,24 @@ export async function establishApiSandboxSpawner(input: {
   fallbackEnvelope: Record<string, unknown> | null;
   dataPlaneUrl: string | null;
 }): Promise<{ established: EstablishedSandboxSession; lease: LeaseSnapshot }> {
-  const spawnEnvelope = input.acquiredLease.resumeState ?? input.fallbackEnvelope;
+  const fallbackArchiveEnvelope =
+    input.acquiredLease.recovery.archive.status === "none" &&
+    hasWorkspaceArchive(input.fallbackEnvelope)
+      ? withoutProviderIdentity(input.fallbackEnvelope)
+      : null;
+  const spawnEnvelope =
+    fallbackArchiveEnvelope ?? input.acquiredLease.resumeState ?? input.fallbackEnvelope;
+  const archiveSource =
+    input.acquiredLease.recovery.archive.status === "none"
+      ? fallbackArchiveEnvelope
+      : input.acquiredLease.resumeState;
   let established: EstablishedSandboxSession | null = null;
   let rematerialization: { id: string; selectedRevision: string } | null = null;
   try {
-    if (input.acquiredLease.recovery.archive.status === "available") {
+    if (
+      input.acquiredLease.recovery.archive.status === "available" ||
+      hasWorkspaceArchive(archiveSource)
+    ) {
       const id = crypto.randomUUID();
       const begun = await beginSandboxRematerialization(input.db, {
         accountId: input.accountId,
@@ -112,6 +148,7 @@ export async function establishApiSandboxSpawner(input: {
         sandboxGroupId: input.sandboxGroupId,
         expectedEpoch: input.expectedEpoch,
         rematerializationId: id,
+        archiveSource,
       });
       if (begun.status !== "started") {
         if (begun.code === "stale_epoch" || begun.code === "attempt_conflict") {

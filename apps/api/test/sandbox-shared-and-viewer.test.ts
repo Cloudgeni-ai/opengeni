@@ -22,6 +22,11 @@ import {
 } from "@opengeni/db";
 import type { AccessGrant } from "@opengeni/contracts";
 import { createSessionForRequest } from "@opengeni/core";
+import {
+  establishSandboxSessionFromEnvelope,
+  serializeEstablishedSandboxEnvelope,
+  type EstablishedSandboxSession,
+} from "@opengeni/runtime";
 import { attachViewer, detachViewer, heartbeatViewer } from "../src/sandbox/viewer";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
 
@@ -48,6 +53,7 @@ let shared: SharedTestDatabase | null = null;
 let admin: postgres.Sql;
 let client: DbClient;
 let db: Database;
+const seededLocalBoxes: EstablishedSandboxSession[] = [];
 
 // The settings the create path + the viewer path read. sandboxBackend:"none"
 // keeps the resolution tests box-free (no real provider); the warm-box viewer
@@ -137,6 +143,9 @@ beforeAll(async () => {
 }, 180_000);
 
 afterAll(async () => {
+  for (const established of seededLocalBoxes.splice(0)) {
+    await closeSeedBox(established);
+  }
   try {
     await client?.close();
   } catch {
@@ -520,13 +529,19 @@ describe("P1.4 shared-sandbox create resolution (real createSessionForRequest + 
   }, 60_000);
 });
 
-// Seed a WARM lease row directly (cold->warming CAS, then commit warm) so the
-// viewer attaches via the ATTACHED path — no provider establish needed (backend
-// 'none' has no box). Returns the group id (== a real session's group).
+// Seed a real local WARM lease (cold->warming, provider establish, serialized
+// resume state, then commit), then remove only its modern recovery projection to
+// model a legacy warm row. The viewer ATTACHED path must prove provider existence
+// and command readiness rather than trusting either `warm` or a provider id.
 async function seedWarmBox(
   accountId: string,
   workspaceId: string,
-): Promise<{ sandboxGroupId: string; leaseEpoch: number; sessionId: string }> {
+): Promise<{
+  sandboxGroupId: string;
+  leaseEpoch: number;
+  sessionId: string;
+  established: EstablishedSandboxSession;
+}> {
   const session = await createSession(db, {
     accountId,
     workspaceId,
@@ -534,7 +549,7 @@ async function seedWarmBox(
     resources: [],
     metadata: {},
     model: "m",
-    sandboxBackend: "none",
+    sandboxBackend: "local",
   });
   const sandboxGroupId = session.sandboxGroupId;
   // Spawner acquires (cold->warming), then commit warm with a (null) envelope.
@@ -545,22 +560,32 @@ async function seedWarmBox(
     kind: "turn",
     holderId: "seed-turn",
     subjectId: session.id,
-    backend: "none",
+    backend: "local",
     leaseTtlMs: 5_000,
   });
   expect(acquired.role).toBe("spawner");
+  const established = await establishSandboxSessionFromEnvelope(settings, null, {
+    sessionId: session.id,
+    recovery: "create-or-restore",
+    backendOverride: "local",
+  });
+  seededLocalBoxes.push(established);
+  const resumeState = await serializeEstablishedSandboxEnvelope(established);
   const committed = await commitWarmingToWarm(db, {
     accountId,
     workspaceId,
     sandboxGroupId,
     expectedEpoch: acquired.lease.leaseEpoch,
-    instanceId: "inst-warm",
+    instanceId: established.instanceId,
     dataPlaneUrl: null,
-    resumeBackendId: "none",
-    resumeState: { backendId: "none" },
+    resumeBackendId: established.backendId,
+    resumeState,
     leaseTtlMs: 5_000,
   });
   expect(committed.committed).toBe(true);
+  await admin`update sandbox_leases
+    set resume_state = resume_state - 'opengeniRecovery'
+    where workspace_id = ${workspaceId} and sandbox_group_id = ${sandboxGroupId}`;
   // Drop the seed turn holder so the box is warm with NO turn — a viewer-only
   // candidate for draining once no viewer holds it.
   // (Use release via a fresh acquire/release would re-warm; instead delete the
@@ -570,7 +595,17 @@ async function seedWarmBox(
     and kind = 'turn' and holder_id = 'seed-turn'`;
   await admin`update sandbox_leases set refcount = 0, turn_holders = 0
     where workspace_id = ${workspaceId} and sandbox_group_id = ${sandboxGroupId}`;
-  return { sandboxGroupId, leaseEpoch: committed.lease!.leaseEpoch, sessionId: session.id };
+  return {
+    sandboxGroupId,
+    leaseEpoch: committed.lease!.leaseEpoch,
+    sessionId: session.id,
+    established,
+  };
+}
+
+async function closeSeedBox(established: EstablishedSandboxSession): Promise<void> {
+  const session = established.session as { close?: () => Promise<void>; closed?: boolean };
+  if (session.close && !session.closed) await session.close().catch(() => undefined);
 }
 
 describe("P1.4 API-direct viewer-holder lifecycle (real lease + reaper)", () => {
@@ -580,6 +615,10 @@ describe("P1.4 API-direct viewer-holder lifecycle (real lease + reaper)", () => 
     const { sandboxGroupId, sessionId } = await seedWarmBox(accountId, workspaceId);
     const session = await getSession(db, workspaceId, sessionId);
     expect(session).toBeTruthy();
+    const legacy = await readLease(db, workspaceId, sandboxGroupId);
+    expect(legacy?.liveness).toBe("warm");
+    expect(legacy?.recovery.provider.status).toBe("unknown");
+    expect(legacy?.recovery.workspace.status).toBe("unknown");
 
     const attached = await attachViewer(
       { db, settings },
@@ -593,6 +632,12 @@ describe("P1.4 API-direct viewer-holder lifecycle (real lease + reaper)", () => 
     const lease0 = await readLease(db, workspaceId, sandboxGroupId);
     expect(lease0?.viewerHolders).toBe(1);
     expect(lease0?.turnHolders).toBe(0);
+    expect(lease0?.leaseEpoch).toBe(legacy?.leaseEpoch);
+    expect(lease0?.recovery).toMatchObject({
+      provider: { status: "exists", instanceId: legacy?.instanceId },
+      restore: { status: "not_required" },
+      workspace: { status: "ready", verifiedRevision: null },
+    });
 
     // Refresh the viewer holder so its heartbeat stays fresh across the sweep,
     // then run the reaper. With a live viewer holder the box must NOT drain.

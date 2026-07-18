@@ -1100,11 +1100,10 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     expect(created).toBe(1); // still exactly one Schedule.
   });
 
-  // ── FINDING 1: re-arm during no-archive snapshot window must NOT delete a live box.
-  // When a backend produces no archive (persistWorkspace returns nothing), the
-  // terminate seam previously skipped the persist CAS entirely and called delete()
-  // unconditionally. If a re-arm landed in the snapshot window the box was killed
-  // while live. The fix: call persistArchive(null) as a CAS-check-only gate.
+  // ── FINDING 1: even a test/legacy no-archive termination seam must remain
+  // epoch/refcount fenced. Production cloud teardown now refuses to delete a
+  // resumable box without a verified capture; this lower-level test preserves
+  // the independent invariant that a concurrent re-arm aborts any such seam.
   test("(F1) no-archive path: lease re-armed during snapshot window aborts terminate (no delete)", async () => {
     if (!available) return;
 

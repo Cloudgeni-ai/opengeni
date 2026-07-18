@@ -26,6 +26,8 @@ import { terminateProviderBox } from "../src/activities/sandbox-lease";
 // unwrap reproduces the production failure exactly.
 const resumeCalls: Array<string | undefined> = [];
 const deleteCalls: Array<string | undefined> = [];
+const TEST_WORKSPACE_FINGERPRINT =
+  "OPENGENI_WORKSPACE_FINGERPRINT_V1 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 3 2 17\n";
 function makeFakeModalClient() {
   return {
     backendId: "modal",
@@ -43,6 +45,7 @@ function makeFakeModalClient() {
       return {
         kill: async () => {},
         closed: false,
+        exec: async () => ({ stdout: TEST_WORKSPACE_FINGERPRINT }),
         persistWorkspace: async () =>
           new TextEncoder().encode('MODAL_SANDBOX_FS_SNAPSHOT_V1\n{"snapshot_id":"im-snap-123"}'),
         modal: { images: { delete: async () => {} } },
@@ -137,7 +140,10 @@ describe("reaper terminate envelope→resume round-trip preserves sandboxId", ()
       ((backend: string) => (backend === "modal" ? makeFakeModalClient() : undefined)) as never,
     );
 
-    expect(terminated).toBe(true);
+    expect(terminated).toEqual({
+      terminated: true,
+      providerMissingBeforeCapture: false,
+    });
     expect(resumeCalls).toEqual(["sb-live-123"]); // resumed BY ID, not thrown
     // persistWorkspace was captured and folded onto the lease BEFORE terminate.
     expect(persistedArchives).toHaveLength(1);
@@ -209,7 +215,10 @@ describe("reaper terminate envelope→resume round-trip preserves sandboxId", ()
     );
 
     // Drain-to-cold succeeds (the lease can go cold) ...
-    expect(drainedCold).toBe(true);
+    expect(drainedCold).toEqual({
+      terminated: true,
+      providerMissingBeforeCapture: false,
+    });
     // ... but the provider was NEVER touched: no client built, no resume, no
     // delete/kill, and no snapshot persist attempted (the machine IS the persistence).
     expect(clientBuilds).toEqual([]);
@@ -233,6 +242,7 @@ describe("reaper terminate envelope→resume round-trip preserves sandboxId", ()
         return {
           kill: async () => {},
           closed: false,
+          exec: async () => ({ stdout: TEST_WORKSPACE_FINGERPRINT }),
           persistWorkspace: async () => {
             throw new Error("Modal snapshot_filesystem persistence timed out.");
           },
@@ -278,5 +288,79 @@ describe("reaper terminate envelope→resume round-trip preserves sandboxId", ()
       ) => (backend === "modal" ? failClient : undefined)) as never),
     ).rejects.toThrow(/snapshot_filesystem persistence timed out/);
     expect(deleteCalls).toHaveLength(0); // box deliberately NOT terminated
+  });
+
+  test("provider NotFound before capture is returned as typed missing-workspace evidence", async () => {
+    const notFoundClient = {
+      backendId: "modal",
+      async deserializeSessionState(state: Record<string, unknown>) {
+        return { ...state };
+      },
+      async resume() {
+        const error = new Error("Sandbox sb-gone was not found");
+        Object.assign(error, { status: 404, code: "NOT_FOUND" });
+        throw error;
+      },
+    };
+    const lease = {
+      sandboxGroupId: "group-gone",
+      leaseEpoch: 7,
+      backend: "modal",
+      resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: { providerState: { sandboxId: "sb-gone" } },
+      },
+    };
+    const persistCalls: unknown[] = [];
+
+    const outcome = await terminateProviderBox(
+      testSettings({ sandboxBackend: "modal", sandboxOwnershipEnabled: true }),
+      lease as never,
+      observability,
+      async (...args) => {
+        persistCalls.push(args);
+        return { wrote: true, priorArchive: null, priorArchivePrev: null };
+      },
+      (() => notFoundClient) as never,
+    );
+
+    expect(outcome).toEqual({
+      terminated: true,
+      providerMissingBeforeCapture: true,
+    });
+    expect(persistCalls).toHaveLength(0);
+  });
+
+  test("an ambiguous provider termination failure is never reported as success", async () => {
+    const terminateFailureClient = {
+      ...makeFakeModalClient(),
+      async delete() {
+        throw new Error("provider transport reset during terminate");
+      },
+    };
+    const resumeState = await runtime.serializeEstablishedSandboxEnvelope({
+      client: terminateFailureClient,
+      session: {},
+      sessionState: { sandboxId: "sb-ambiguous", appName: "app", imageTag: "tag" },
+      instanceId: "sb-ambiguous",
+      backendId: "modal",
+    } as never);
+
+    await expect(
+      terminateProviderBox(
+        testSettings({ sandboxBackend: "modal", sandboxOwnershipEnabled: true }),
+        {
+          sandboxGroupId: "group-ambiguous",
+          leaseEpoch: 8,
+          backend: "modal",
+          resumeBackendId: "modal",
+          resumeState,
+        } as never,
+        observability,
+        async () => ({ wrote: true, priorArchive: null, priorArchivePrev: null }),
+        (() => terminateFailureClient) as never,
+      ),
+    ).rejects.toThrow(/provider transport reset during terminate/);
   });
 });

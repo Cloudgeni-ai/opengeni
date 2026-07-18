@@ -13,6 +13,7 @@ import {
   markWarmLeaseInstanceLost,
   markSandboxFileResourcesMaterialized,
   persistDrainSnapshot,
+  readLease,
   recordWarmingSandboxCreated,
   reapStaleLeaseHolders,
   reapStaleLeaseHoldersGlobal,
@@ -774,6 +775,84 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     expect(row?.resume_backend_id).toBeNull();
   }, 60_000);
 
+  test("(8a) provider disappearance before capture with NO archive becomes typed unrecoverable", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "missing-provider",
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
+    await commitWarmingToWarm(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: 0,
+      instanceId: "sb-missing-before-capture",
+      resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: {
+          providerState: { sandboxId: "sb-missing-before-capture" },
+        },
+      },
+      leaseTtlMs: 45_000,
+    });
+    await releaseLeaseHolder(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "missing-provider",
+      idleGraceMs: 0,
+    });
+    const before = await readLease(db, workspaceId, groupId);
+    expect(before?.liveness).toBe("draining");
+
+    const cold = await confirmDrainCold(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: before!.leaseEpoch,
+      providerMissingBeforeCapture: true,
+    });
+    expect(cold.wentCold).toBe(true);
+
+    const lease = await readLease(db, workspaceId, groupId);
+    expect(lease?.liveness).toBe("cold");
+    expect(lease?.instanceId).toBeNull();
+    expect(lease?.recovery.provider).toMatchObject({
+      status: "missing",
+      instanceId: "sb-missing-before-capture",
+      diagnostic: "provider_not_found_before_workspace_capture",
+    });
+    expect(lease?.recovery.archive.status).toBe("none");
+    expect(lease?.recovery.restore).toMatchObject({
+      status: "unrecoverable",
+      failureCode: "archive_unavailable",
+      retryable: false,
+    });
+    expect(lease?.recovery.workspace.status).toBe("unrecoverable");
+
+    const retry = await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "must-not-spawn",
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
+    expect(retry.role).toBe("blocked");
+    if (retry.role === "blocked") {
+      expect(retry.code).toBe("restore_unrecoverable");
+    }
+  }, 60_000);
+
   // IMAGE IS SHARED STATE (B3): the lease stamps the image the box runs; a resume with
   // a DIFFERENT image is a conflict (solo → recreate; N-holders → hard fail).
   test("(9) image B3: cold-create stamps the image on the warming row", async () => {
@@ -1398,5 +1477,137 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       rematerializationId,
     });
     expect(staleVerifying.wrote).toBe(false);
+  }, 60_000);
+
+  test("(20) a durable per-session fallback archive is imported and selected atomically before restore", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    const archive = Buffer.from("legacy-session-fallback-archive").toString("base64");
+    const descriptor = {
+      version: 1 as const,
+      revision: `wa1:1900000000001:${"c".repeat(64)}`,
+      archiveSha256: "c".repeat(64),
+      archiveBytes: Buffer.from(archive, "base64").length,
+      capturedAt: "2030-03-17T17:46:41.000Z",
+      workspace: {
+        algorithm: "sha256" as const,
+        sha256: "d".repeat(64),
+        entryCount: 4,
+        fileCount: 2,
+        totalFileBytes: 31,
+      },
+    };
+    const acquired = await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "fallback-importer",
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
+    expect(acquired.role).toBe("spawner");
+    expect(acquired.lease.recovery.archive.status).toBe("none");
+
+    const rematerializationId = crypto.randomUUID();
+    const begun = await beginSandboxRematerialization(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: acquired.lease.leaseEpoch,
+      rematerializationId,
+      archiveSource: {
+        backendId: "modal",
+        sessionState: {
+          providerState: { sandboxId: "dead-session-pointer-must-not-import" },
+          workspaceArchive: archive,
+          workspaceArchiveMeta: descriptor,
+        },
+      },
+    });
+    expect(begun.status).toBe("started");
+    if (begun.status === "started") {
+      expect(begun.lease.recovery.archive.current?.revision).toBe(descriptor.revision);
+      expect(begun.lease.recovery.restore).toMatchObject({
+        status: "restoring",
+        rematerializationId,
+        selectedRevision: descriptor.revision,
+      });
+    }
+
+    const [row] = await admin<
+      {
+        archive: string | null;
+        archive_revision: string | null;
+        stale_provider_id: string | null;
+      }[]
+    >`
+      select resume_state #>> '{sessionState,workspaceArchive}' as archive,
+             resume_state #>> '{sessionState,workspaceArchiveMeta,revision}' as archive_revision,
+             resume_state #>> '{sessionState,providerState,sandboxId}' as stale_provider_id
+      from sandbox_leases
+      where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
+    expect(row?.archive).toBe(archive);
+    expect(row?.archive_revision).toBe(descriptor.revision);
+    expect(row?.stale_provider_id).toBeNull();
+
+    const rival = await beginSandboxRematerialization(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: acquired.lease.leaseEpoch,
+      rematerializationId: crypto.randomUUID(),
+      archiveSource: {
+        sessionState: {
+          workspaceArchive: Buffer.from("rival").toString("base64"),
+          workspaceArchiveMeta: {
+            ...descriptor,
+            revision: `wa1:1900000000002:${"e".repeat(64)}`,
+            archiveSha256: "e".repeat(64),
+          },
+        },
+      },
+    });
+    expect(rival.status).toBe("blocked");
+    if (rival.status === "blocked") expect(rival.code).toBe("attempt_conflict");
+  }, 60_000);
+
+  test("(21) an unverified fallback archive becomes degraded and is never selected", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    const acquired = await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "viewer",
+      holderId: "unverified-fallback",
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
+    expect(acquired.role).toBe("spawner");
+
+    const begun = await beginSandboxRematerialization(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: acquired.lease.leaseEpoch,
+      rematerializationId: crypto.randomUUID(),
+      archiveSource: {
+        backendId: "modal",
+        sessionState: {
+          workspaceArchive: Buffer.from("archive-without-metadata").toString("base64"),
+        },
+      },
+    });
+    expect(begun.status).toBe("blocked");
+    if (begun.status === "blocked") {
+      expect(begun.code).toBe("archive_unverified");
+      expect(begun.lease?.recovery.restore).toMatchObject({
+        status: "degraded",
+        failureCode: "archive_unverified",
+        retryable: false,
+      });
+      expect(begun.lease?.recovery.workspace.status).toBe("degraded");
+    }
   }, 60_000);
 });

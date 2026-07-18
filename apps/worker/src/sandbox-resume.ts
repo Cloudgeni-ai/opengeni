@@ -333,6 +333,23 @@ function workspaceArchiveFieldsFromEnvelope(
   };
 }
 
+/** A per-session fallback may still carry the dead provider identity that made
+ * recovery necessary. It is useful only as durable archive/config input: never
+ * let a cold rematerialization resume that stale provider before hydrating the
+ * selected revision. */
+function withoutProviderIdentity(
+  envelope: Record<string, unknown> | null,
+): Record<string, unknown> | null {
+  if (!envelope) return null;
+  const sessionState =
+    envelope.sessionState && typeof envelope.sessionState === "object"
+      ? (envelope.sessionState as Record<string, unknown>)
+      : null;
+  if (!sessionState) return envelope;
+  const { providerState: _providerState, ...providerIndependentState } = sessionState;
+  return { ...envelope, sessionState: providerIndependentState };
+}
+
 function preserveWorkspaceArchivesOnResumeState(
   resumeState: Record<string, unknown> | null,
   archiveSource: Record<string, unknown> | null,
@@ -580,7 +597,27 @@ export async function resumeBoxForTurn(
       selectedRevision: string;
     } | null = null;
     try {
-      if (acquired.lease.recovery.archive.status === "available") {
+      const envelope = await getSandboxSessionEnvelope(db, ids.workspaceId, ids.sessionId);
+      // The lease is authoritative. A legacy per-session fallback archive may
+      // only be used after beginSandboxRematerialization imports its archive
+      // fields under the warming-row lock and records one selected revision.
+      // Select the fallback only when the lease has no archive truth at all. A
+      // lease-carried unverified/invalid archive must fail closed rather than
+      // silently substituting another revision.
+      const fallbackArchiveEnvelope =
+        acquired.lease.recovery.archive.status === "none" &&
+        workspaceArchiveFieldsFromEnvelope(envelope) !== null
+          ? withoutProviderIdentity(envelope)
+          : null;
+      const spawnEnvelope = fallbackArchiveEnvelope ?? acquired.lease.resumeState ?? envelope;
+      const archiveSource =
+        acquired.lease.recovery.archive.status === "none"
+          ? fallbackArchiveEnvelope
+          : acquired.lease.resumeState;
+      if (
+        acquired.lease.recovery.archive.status === "available" ||
+        workspaceArchiveFieldsFromEnvelope(archiveSource) !== null
+      ) {
         const rematerializationId = crypto.randomUUID();
         const begun = await beginSandboxRematerialization(db, {
           accountId: ids.accountId,
@@ -588,6 +625,7 @@ export async function resumeBoxForTurn(
           sandboxGroupId: ids.sandboxGroupId,
           expectedEpoch,
           rematerializationId,
+          archiveSource,
         });
         if (begun.status !== "started") {
           if (begun.code === "stale_epoch" || begun.code === "attempt_conflict") {
@@ -619,7 +657,6 @@ export async function resumeBoxForTurn(
           acquired.lease.recovery,
         );
       }
-      const envelope = await getSandboxSessionEnvelope(db, ids.workspaceId, ids.sessionId);
       // Prefer the COLD lease's preserved resume_state when it carries a persisted
       // /workspace snapshot (confirmDrainCold keeps a minimal archive-only envelope
       // across draining->cold for exactly this re-warm). establishSandboxSessionFromEnvelope
@@ -629,7 +666,6 @@ export async function resumeBoxForTurn(
       // spawner branch: the lease's resume_state is authoritative; the session
       // `_sandbox` envelope is the per-session fallback. Without this a turn-first
       // re-warm after a drain->cold would ignore the archive and start an EMPTY box.
-      const spawnEnvelope = acquired.lease.resumeState ?? envelope;
       const established = await establishSandboxSessionFromEnvelope(settings, spawnEnvelope, {
         sessionId: ids.sessionId,
         recovery: "create-or-restore",
@@ -705,9 +741,9 @@ export async function resumeBoxForTurn(
       // archive pointers on the committed live envelope until a later warm
       // snapshot replaces them. Without this merge, serialization publishes only
       // the new provider id; a second provider loss before the snapshot cadence
-      // fires would retire the lease with no archive and recreate an empty box.
-      // A failed hydrate falls back to a clean box with origin="created", so its
-      // unusable archive is deliberately cleared by the unmerged serialized state.
+      // fires would otherwise make truthful recovery impossible. Failed hydrate
+      // attempts terminate the replacement and fail closed; they never publish a
+      // clean or mixed workspace.
       const resumeEnvelope =
         established.origin === "restored"
           ? preserveWorkspaceArchivesOnResumeState(serializedResumeEnvelope, spawnEnvelope)

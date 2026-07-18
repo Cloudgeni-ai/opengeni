@@ -24,12 +24,17 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import postgres from "postgres";
 import {
   acquireLease,
+  beginSandboxRematerialization,
   commitWarmingToWarm,
+  createSession,
   createDb,
   heartbeatLeaseHolder,
+  markSandboxRestoreVerifying,
   markWarmLeaseInstanceLost,
   readLease,
   SandboxImageConflictError,
+  SandboxLeaseRecoveryBlockedError,
+  upsertSandboxSessionEnvelope,
   type Database,
   type DbClient,
 } from "@opengeni/db";
@@ -38,7 +43,10 @@ import {
   type SharedTestDatabase,
   testSettings,
 } from "@opengeni/testing";
-import { establishSandboxSessionFromEnvelope } from "@opengeni/runtime";
+import {
+  captureVerifiedWorkspaceArchive,
+  establishSandboxSessionFromEnvelope,
+} from "@opengeni/runtime";
 import {
   resumeBoxForTurn,
   sandboxLeaseHolderIdForAttempt,
@@ -116,6 +124,25 @@ async function dropSession(established: { session: unknown }): Promise<void> {
   if (s && typeof s.close === "function" && !s.closed) {
     await s.close().catch(() => undefined);
   }
+}
+
+function testArchiveDescriptor(archiveBase64: string, capturedAtMs: number) {
+  const bytes = Buffer.from(archiveBase64, "base64");
+  const archiveSha256 = new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
+  return {
+    version: 1 as const,
+    revision: `wa1:${capturedAtMs}:${archiveSha256}`,
+    archiveSha256,
+    archiveBytes: bytes.length,
+    capturedAt: new Date(capturedAtMs).toISOString(),
+    workspace: {
+      algorithm: "sha256" as const,
+      sha256: "a".repeat(64),
+      entryCount: 1,
+      fileCount: 1,
+      totalFileBytes: 17,
+    },
+  };
 }
 
 beforeAll(async () => {
@@ -246,11 +273,13 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
     const oldInstanceId = "box-dead";
     const oldEpoch = 7;
     const archive = Buffer.from("durable-workspace").toString("base64");
+    const archiveDescriptor = testArchiveDescriptor(archive, 1_900_000_000_003);
     const resumeState = JSON.stringify({
       backendId: "unix_local",
       sessionState: {
         providerState: { instanceId: oldInstanceId },
         workspaceArchive: archive,
+        workspaceArchiveMeta: archiveDescriptor,
       },
     });
     const [lease] = await admin<{ id: string }[]>`
@@ -328,6 +357,23 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
     expect(admissions.filter((result) => result.role === "spawner")).toHaveLength(1);
     expect(admissions.filter((result) => result.role === "attached")).toHaveLength(9);
     const winner = admissions.find((result) => result.role === "spawner")!;
+    const rematerializationId = crypto.randomUUID();
+    const begun = await beginSandboxRematerialization(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: winner.lease.leaseEpoch,
+      rematerializationId,
+    });
+    expect(begun.status).toBe("started");
+    const verifying = await markSandboxRestoreVerifying(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: winner.lease.leaseEpoch,
+      rematerializationId,
+    });
+    expect(verifying.wrote).toBe(true);
     const committed = await commitWarmingToWarm(db, {
       accountId,
       workspaceId,
@@ -338,6 +384,10 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
       resumeState: {
         backendId: "unix_local",
         sessionState: { providerState: { instanceId: "box-replacement" } },
+      },
+      rematerialization: {
+        id: rematerializationId,
+        verifiedRevision: archiveDescriptor.revision,
       },
       leaseTtlMs: settings.sandboxLeaseTtlMs,
     });
@@ -502,15 +552,10 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
   // re-warm would therefore spawn an EMPTY box instead of hydrating /workspace.
   // The fix: use `acquired.lease.resumeState ?? envelope` (mirrors channel-a.ts).
   //
-  // We test this with the `local` backend + a pre-inserted cold lease whose
-  // resume_state carries a synthetic archive-only envelope. Because the local
-  // backend has no hydrateWorkspace, we verify the CORRECT ENVELOPE is selected
-  // (spawnEnvelope === the lease's archive envelope) rather than the session
-  // envelope — i.e. the resumeBoxForTurn spawner path reads the lease's archive.
-  // We assert by reading back the committed resume_state: a spawner that ignored
-  // the lease archive would commit the session envelope's backendId (or null);
-  // a spawner that preferred the lease archive correctly uses its backendId.
-  test("(F3) turn spawner prefers lease resume_state archive over session envelope on cold re-warm", async () => {
+  // Legacy archive bytes without revision/hash/tree metadata are not a durable
+  // selected revision. The lease must remain cold+degraded and no clean provider
+  // replacement may be exposed.
+  test("(F3) an unverified lease archive is typed degraded with no clean fallback", async () => {
     if (!available) return;
     const settings = settingsFor(true);
     const { accountId, workspaceId, groupId } = await freshWorkspace();
@@ -544,17 +589,9 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
       [accountId, workspaceId, groupId, archiveEnvelopeJson],
     );
 
-    // resumeBoxForTurn must win the cold->warming CAS (spawner) and use the
-    // LEASE's resume_state (the archive-only envelope) as the spawnEnvelope
-    // rather than the null session envelope. The local backend DOES have a
-    // hydrateWorkspace that tries to JSON.parse the archive. F3's fail-open
-    // fallback now catches that unusable archive, drops the placeholder, and
-    // creates a clean box instead of failing the turn. The remaining assertion
-    // is that the lease archive was not silently discarded from resume_state.
-    let spawnError: Error | undefined;
-    let resumed: Awaited<ReturnType<typeof resumeBoxForTurn>> | undefined;
+    let recoveryError: unknown;
     try {
-      resumed = await resumeBoxForTurn(
+      await resumeBoxForTurn(
         { db, settings },
         {
           accountId,
@@ -567,24 +604,23 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
         "turn",
         sandboxLeaseHolderIdForAttempt("activity-f3"),
       );
-    } catch (e) {
-      spawnError = e instanceof Error ? e : new Error(String(e));
-    } finally {
-      await resumed?.release();
-      if (resumed) await dropSession(resumed.established);
+    } catch (error) {
+      recoveryError = error;
     }
-    expect(spawnError).toBeUndefined();
-    expect(resumed).toBeDefined();
+    expect(recoveryError).toBeInstanceOf(SandboxLeaseRecoveryBlockedError);
+    expect(recoveryError).toMatchObject({ code: "restore_degraded", leaseEpoch: 5 });
 
-    // The clean fallback succeeded; after the finally release above the idle
-    // lease has naturally entered draining. Because the only archive was
-    // unusable, the committed clean-box envelope no longer carries it.
-    const row = await readRow(workspaceId, groupId);
-    expect(row?.liveness).toBe("draining");
-    const [archiveRow] = await admin<{ archive: string | null }[]>`
-      select resume_state #>> '{sessionState,workspaceArchive}' as archive
+    const [archiveRow] = await admin<
+      { liveness: string; instance_id: string | null; archive: string | null }[]
+    >`
+      select liveness, instance_id,
+             resume_state #>> '{sessionState,workspaceArchive}' as archive
       from sandbox_leases where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
-    expect(archiveRow?.archive).toBeNull();
+    expect(archiveRow).toEqual({
+      liveness: "cold",
+      instance_id: null,
+      archive: ARCHIVE_B64,
+    });
   }, 60_000);
 
   test("(F3-b) a successfully hydrated archive remains on the committed live lease", async () => {
@@ -597,25 +633,21 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
       recovery: "create-or-restore",
       backendOverride: "local",
     });
-    let archiveBytes: Uint8Array;
+    let verifiedArchive: Awaited<ReturnType<typeof captureVerifiedWorkspaceArchive>>;
     try {
-      const persist = (seed.session as { persistWorkspace?: () => Promise<Uint8Array> })
-        .persistWorkspace;
-      if (typeof persist !== "function") {
-        throw new Error("Local sandbox test session cannot persist /workspace");
-      }
-      archiveBytes = await persist.call(seed.session);
+      verifiedArchive = await captureVerifiedWorkspaceArchive(seed.session);
     } finally {
       await dropSession(seed);
     }
 
-    const currentArchive = Buffer.from(archiveBytes).toString("base64");
+    const currentArchive = verifiedArchive.base64;
     const previousArchive = Buffer.from("previous-valid-archive-pointer").toString("base64");
     const archiveAt = "2030-03-04T05:06:07.000Z";
     const archiveEnvelopeJson = JSON.stringify({
       backendId: "unix_local",
       sessionState: {
         workspaceArchive: currentArchive,
+        workspaceArchiveMeta: verifiedArchive.descriptor,
         workspaceArchivePrev: previousArchive,
         workspaceArchiveAt: archiveAt,
       },
@@ -667,6 +699,127 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
         previous_archive: previousArchive,
         archive_at: archiveAt,
       });
+    } finally {
+      await resumed.release();
+      await dropSession(resumed.established);
+    }
+  }, 60_000);
+
+  test("(F3-c) a verified session fallback outranks an archive-less lease without importing its stale provider", async () => {
+    if (!available) return;
+    const settings = settingsFor(true);
+    const { accountId, workspaceId } = await freshWorkspace();
+    const session = await createSession(db, {
+      accountId,
+      workspaceId,
+      initialMessage: "fallback restore",
+      resources: [],
+      metadata: {},
+      model: "gpt-test",
+      sandboxBackend: "local",
+    });
+
+    const seed = await establishSandboxSessionFromEnvelope(settings, null, {
+      sessionId: session.id,
+      recovery: "create-or-restore",
+      backendOverride: "local",
+    });
+    let verifiedArchive: Awaited<ReturnType<typeof captureVerifiedWorkspaceArchive>>;
+    try {
+      const write = await (
+        seed.session as {
+          exec: (args: { cmd: string }) => Promise<{ exitCode: number; stderr?: string }>;
+        }
+      ).exec({
+        cmd: "printf 'byte-complete-session-fallback' > /workspace/fallback-only.txt",
+      });
+      expect(write.exitCode).toBe(0);
+      verifiedArchive = await captureVerifiedWorkspaceArchive(seed.session);
+    } finally {
+      await dropSession(seed);
+    }
+
+    await upsertSandboxSessionEnvelope(db, {
+      accountId,
+      workspaceId,
+      sessionId: session.id,
+      envelope: {
+        backendId: "unix_local",
+        sessionState: {
+          providerState: { sandboxId: "dead-provider-pointer-must-not-resume-or-import" },
+          workspaceArchive: verifiedArchive.base64,
+          workspaceArchiveMeta: verifiedArchive.descriptor,
+        },
+      },
+    });
+    // A non-null archive-less lease envelope previously won the `??` selection
+    // and hid the session fallback, exposing a new empty workspace.
+    await admin`
+      insert into sandbox_leases (
+        account_id, workspace_id, sandbox_group_id, liveness, refcount,
+        turn_holders, viewer_holders, backend, lease_epoch,
+        resume_backend_id, resume_state, expires_at
+      ) values (
+        ${accountId}, ${workspaceId}, ${session.sandboxGroupId}, 'cold', 0, 0, 0,
+        'local', 11, 'unix_local',
+        ${JSON.stringify({
+          backendId: "unix_local",
+          sessionState: { archiveLessLeaseMarker: true },
+        })}::text::jsonb,
+        now() + interval '60s'
+      )`;
+
+    const resumed = await resumeBoxForTurn(
+      { db, settings },
+      {
+        accountId,
+        workspaceId,
+        sandboxGroupId: session.sandboxGroupId,
+        sessionId: session.id,
+        backend: "local",
+        os: "linux",
+      },
+      "turn",
+      sandboxLeaseHolderIdForAttempt("activity-f3-session-fallback"),
+    );
+    try {
+      expect(resumed.established.origin).toBe("restored");
+      expect(resumed.established.restoredArchive?.revision).toBe(
+        verifiedArchive.descriptor.revision,
+      );
+      const read = await (
+        resumed.established.session as {
+          exec: (args: { cmd: string }) => Promise<{ stdout: string; exitCode: number }>;
+        }
+      ).exec({ cmd: "cat /workspace/fallback-only.txt" });
+      expect(read).toMatchObject({
+        exitCode: 0,
+        stdout: "byte-complete-session-fallback",
+      });
+
+      const lease = await readLease(db, workspaceId, session.sandboxGroupId);
+      expect(lease?.recovery).toMatchObject({
+        provider: { status: "exists" },
+        archive: {
+          status: "available",
+          current: { revision: verifiedArchive.descriptor.revision },
+        },
+        restore: {
+          status: "ready",
+          selectedRevision: verifiedArchive.descriptor.revision,
+        },
+        workspace: {
+          status: "ready",
+          verifiedRevision: verifiedArchive.descriptor.revision,
+        },
+      });
+      expect(JSON.stringify(lease?.resumeState)).not.toContain(
+        "dead-provider-pointer-must-not-resume-or-import",
+      );
+      expect(lease?.resumeState).toHaveProperty(
+        "sessionState.workspaceArchiveMeta.revision",
+        verifiedArchive.descriptor.revision,
+      );
     } finally {
       await resumed.release();
       await dropSession(resumed.established);
