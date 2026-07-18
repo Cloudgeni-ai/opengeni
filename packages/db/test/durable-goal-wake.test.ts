@@ -5,6 +5,7 @@ import {
   applySessionTurnSettlement,
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
+  clearSessionGoal,
   createDb,
   createSession,
   getSessionGoalWithContinuation,
@@ -13,6 +14,7 @@ import {
   setSessionGoalStatusWithEvent,
   submitHumanPromptInTransaction,
   updateSessionGoalWithEvent,
+  upsertSessionGoalWithEvent,
   withWorkspaceSubjectRls,
 } from "../src/index";
 import * as schema from "../src/schema";
@@ -77,6 +79,14 @@ async function runningGoalFixture() {
 }
 
 type GoalFixture = Awaited<ReturnType<typeof runningGoalFixture>>;
+
+async function beforeLockTimeout<T>(work: Promise<T>): Promise<T> {
+  const timeout = Symbol("lock inversion timeout");
+  const completed = await Promise.race([work, Bun.sleep(3_000).then(() => timeout)]);
+  expect(completed).not.toBe(timeout);
+  if (completed === timeout) throw new Error("goal mutation lock inversion timed out");
+  return completed as T;
+}
 
 async function settleIdle(ctx: GoalFixture) {
   const settled = await applySessionTurnSettlement(client.db, ctx.grant.workspaceId!, {
@@ -345,13 +355,7 @@ describe("durable active-goal wake", () => {
         progressNote: "still making progress",
         actor: "agent",
       });
-      const timeout = Symbol("lock inversion timeout");
-      const completed = await Promise.race([
-        Promise.all([append, mutate]),
-        Bun.sleep(3_000).then(() => timeout),
-      ]);
-      expect(completed).not.toBe(timeout);
-      if (!Array.isArray(completed)) return;
+      const completed = await beforeLockTimeout(Promise.all([append, mutate]));
       expect(completed[0].accepted).toBe(true);
       expect(completed[1].events).toHaveLength(1);
 
@@ -367,6 +371,53 @@ describe("durable active-goal wake", () => {
       );
       expect(statusMutation.changed).toBe(true);
       expect(statusMutation.events).toHaveLength(1);
+
+      const setAppend = appendSessionEventsForTurnAttempt(
+        client.db,
+        ctx.grant.workspaceId!,
+        ctx.session.id,
+        ctx.turn.id,
+        ctx.turn.executionGeneration,
+        ctx.attemptId,
+        [{ type: "agent.message.delta", payload: { text: "concurrent goal set" } }],
+      );
+      await Bun.sleep(50);
+      const [setAppendResult, setMutation] = await beforeLockTimeout(
+        Promise.all([
+          setAppend,
+          upsertSessionGoalWithEvent(client.db, {
+            accountId: ctx.grant.accountId,
+            workspaceId: ctx.grant.workspaceId!,
+            sessionId: ctx.session.id,
+            text: "replacement goal after terminal mutation",
+            createdBy: "agent",
+            actor: "agent",
+          }),
+        ]),
+      );
+      expect(setAppendResult.accepted).toBe(true);
+      expect(setMutation.replaced).toBe(true);
+      expect(setMutation.events).toHaveLength(1);
+
+      const clearAppend = appendSessionEventsForTurnAttempt(
+        client.db,
+        ctx.grant.workspaceId!,
+        ctx.session.id,
+        ctx.turn.id,
+        ctx.turn.executionGeneration,
+        ctx.attemptId,
+        [{ type: "agent.message.delta", payload: { text: "concurrent goal clear" } }],
+      );
+      await Bun.sleep(50);
+      const [clearAppendResult, clearMutation] = await beforeLockTimeout(
+        Promise.all([
+          clearAppend,
+          clearSessionGoal(client.db, ctx.grant.workspaceId!, ctx.session.id),
+        ]),
+      );
+      expect(clearAppendResult.accepted).toBe(true);
+      expect(clearMutation.cleared).toBe(true);
+      expect(clearMutation.event?.type).toBe("goal.cleared");
     } finally {
       await shared.admin.unsafe(`
         drop trigger if exists ${triggerName} on session_events;
