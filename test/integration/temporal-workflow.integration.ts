@@ -1324,7 +1324,8 @@ describe("Temporal workflow integration", () => {
           args: [{ ...scope, sessionId }],
           signal: "queueChanged",
         });
-        for (let attempt = 0; attempt < 20 && reconciliations === 0; attempt += 1) {
+        for (let attempt = 0; attempt < 20; attempt += 1) {
+          if (reconciliations > 0) break;
           await resumedHandle.signal("codexCapacityChanged", waiter.wakeRevision + attempt + 1);
           await Bun.sleep(25);
         }
