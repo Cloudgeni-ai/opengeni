@@ -1,12 +1,7 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
 import postgres from "postgres";
 import { Hono } from "hono";
-import {
-  testSettings,
-  acquireSharedTestDatabase,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
-import { MemoryEventBus } from "@opengeni/testing";
+import type { SharedTestDatabase } from "@opengeni/testing";
 import {
   acquireLease,
   commitWarmingToWarm,
@@ -20,10 +15,65 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
-import { createSessionForRequest } from "@opengeni/core";
-import { attachViewer } from "../src/sandbox/viewer";
-import { registerSessionRoutes } from "../src/routes/sessions";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
+
+// Install a Modal-shaped provider before loading any runtime/API value imports.
+// The fake has a durable provider identity and command-readiness surface, so the
+// real attached-viewer path must resume and probe it without making a cloud call.
+let fakeModalId = 0;
+
+function fakeModalSession(state: Record<string, unknown>) {
+  return {
+    state,
+    async exec() {
+      return { stdout: "", exitCode: 0 };
+    },
+  };
+}
+
+class FakeModalSandboxClient {
+  readonly backendId = "modal";
+
+  async create(input: { manifest?: unknown }) {
+    fakeModalId += 1;
+    return fakeModalSession({ sandboxId: `sb-consent-${fakeModalId}`, manifest: input.manifest });
+  }
+
+  async serializeSessionState(state: Record<string, unknown>) {
+    return { ...state };
+  }
+
+  async deserializeSessionState(state: Record<string, unknown>) {
+    return { ...state };
+  }
+
+  async resume(state: Record<string, unknown>) {
+    if (typeof state.sandboxId !== "string") {
+      throw new Error("fake Modal resume requires sandboxId");
+    }
+    return fakeModalSession(state);
+  }
+
+  async delete() {}
+}
+
+const modalModuleUrl = import.meta.resolve(
+  "@openai/agents-extensions/sandbox/modal",
+  new URL("../../../packages/runtime/src/sandbox/index.ts", import.meta.url).href,
+);
+const realModal = await import(modalModuleUrl);
+mock.module(modalModuleUrl, () => ({
+  ...realModal,
+  ModalSandboxClient: FakeModalSandboxClient,
+}));
+
+const { acquireSharedTestDatabase, MemoryEventBus, testSettings } =
+  await import("@opengeni/testing");
+const { createSessionForRequest } = await import("@opengeni/core");
+const { establishSandboxSessionFromEnvelope, serializeEstablishedSandboxEnvelope } =
+  await import("@opengeni/runtime/sandbox");
+const { attachViewer } = await import("../src/sandbox/viewer");
+const { registerSessionRoutes } = await import("../src/routes/sessions");
 
 // P3.2 — the un-redacted/shared CONSENT GATE + viewer REVOCATION (Phase 3 close).
 // Design-of-record 08-implementation-plan.md P3.2 + modules/07-channel-b.md §6 +
@@ -58,20 +108,17 @@ let app: Hono;
 
 // productAccessMode:"managed" + delegationSecret so a signed delegated token's
 // permissions are the grant (the access path builds the grant from the token
-// payload — no DB grant lookup, full control over the permission set). backend
-// "modal" is desktop-capable so the negotiation read surfaces a real desktop
-// cell (shared/acknowledged); sandboxDesktopEnabled + a stream-token secret keep
-// it un-degraded. No real provider is touched: warm boxes are PRE-SEEDED so the
-// viewer attach takes the ATTACHED path (no establish).
+// payload — no DB grant lookup, full control over the permission set). The
+// consent gate uses a deterministic fake Modal session. Its warm lease carries
+// a real resumable identity and can pass the attached-path readiness probe
+// without touching a cloud provider.
 const BACKEND = "modal" as const;
 const settings = testSettings({
   productAccessMode: "managed",
   delegationSecret: DELEGATION_SECRET,
   sandboxBackend: BACKEND,
   sandboxDesktopEnabled: true,
-  // This suite proves desktop consent and holder semantics. Its warm lease is
-  // deliberately provider-free, so an unrelated terminal capability probe must
-  // not retire that fake descriptor and turn the attach into a Modal cold-create.
+  // This suite proves desktop consent and holder semantics, not stream minting.
   sandboxTerminalEnabled: false,
   streamTokenSecret: "p32-stream-token-secret",
   sandboxOwnershipEnabled: true,
@@ -117,7 +164,7 @@ function deps(): ApiRouteDeps {
     documentIndexer: { indexDocument: async () => {} },
     getDocumentServices: () => ({}) as never,
     resumeBoxById: async () => {
-      throw new Error("resumeBoxById should not be called in these tests (backend=none)");
+      throw new Error("legacy resumeBoxById injection should not be called in these tests");
     },
   } as unknown as ApiRouteDeps;
 }
@@ -145,8 +192,9 @@ function url(workspaceId: string, sessionId: string, suffix: string): string {
 }
 
 // Seed a WARM lease row for a session's group (cold->warming CAS then commit
-// warm), dropping the seed turn holder so the box is warm with NO holder — the
-// viewer attaches via the ATTACHED path (no provider establish needed).
+// warm), dropping the seed turn holder so the box is warm with NO holder. The
+// attached viewer must resume this exact disposable fake instance and verify
+// readiness; a provider-free synthetic warm row would correctly fail closed.
 async function seedWarmBox(
   accountId: string,
   workspaceId: string,
@@ -160,19 +208,27 @@ async function seedWarmBox(
     kind: "turn",
     holderId: "seed-turn",
     subjectId: sessionId,
-    backend: "none",
+    backend: BACKEND,
     leaseTtlMs: 5_000,
   });
   expect(acquired.role).toBe("spawner");
+  const established = await establishSandboxSessionFromEnvelope(settings, null, {
+    sessionId,
+    recovery: "create-or-restore",
+    backendOverride: BACKEND,
+    environment: {},
+  });
+  const resumeState = await serializeEstablishedSandboxEnvelope(established);
+  expect(resumeState).not.toBeNull();
   const committed = await commitWarmingToWarm(db, {
     accountId,
     workspaceId,
     sandboxGroupId,
     expectedEpoch: acquired.lease.leaseEpoch,
-    instanceId: "inst-warm",
+    instanceId: established.instanceId,
     dataPlaneUrl: null,
-    resumeBackendId: "none",
-    resumeState: { backendId: "none" },
+    resumeBackendId: established.backendId,
+    resumeState,
     leaseTtlMs: 5_000,
   });
   expect(committed.committed).toBe(true);
@@ -206,6 +262,7 @@ afterAll(async () => {
     /* noop */
   }
   await shared?.release();
+  mock.restore();
 }, 180_000);
 
 // A solo session (its own singleton group), warm-boxed and ready to attach.
@@ -484,6 +541,7 @@ describe("P3.2 viewer revocation (OD-6 v1) — holder-drop drains iff last holde
           sandboxGroupId,
           sandboxBackend: BACKEND,
           sandboxOs: "linux",
+          resources: [],
         } as never,
         viewerId: "v-only",
       },
@@ -585,6 +643,7 @@ describe("P3.2 viewer revocation (OD-6 v1) — holder-drop drains iff last holde
           sandboxGroupId,
           sandboxBackend: BACKEND,
           sandboxOs: "linux",
+          resources: [],
         } as never,
         viewerId: "route-viewer",
       },
