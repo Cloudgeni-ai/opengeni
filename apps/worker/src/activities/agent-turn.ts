@@ -1040,51 +1040,51 @@ export type TurnSandboxProvisioner<T> = {
   waitForSettled(timeoutMs: number): Promise<T | null>;
 };
 
-export class TurnSandboxProvisionCancelledError extends Error {
-  readonly name = "TurnSandboxProvisionCancelledError";
+export class TurnOperationCancelledError extends Error {
+  readonly name = "TurnOperationCancelledError";
 
   constructor(readonly reason: unknown) {
-    super("Sandbox provisioning was cancelled with its owning turn", {
+    super("Turn operation was cancelled with its owning turn", {
       ...(reason instanceof Error ? { cause: reason } : {}),
     });
   }
 }
 
 /**
- * Normalize the cancellation race used by sandbox provisioning back to the
- * Temporal cancellation that owns the activity. Provider create/resume APIs do
- * not expose one portable abort primitive, so the worker stops awaiting them
- * and disposes a late lease. The wrapper error must never fall through as an
- * ordinary turn failure: doing so would omit the quiescence receipt and strand
- * a committed Steer/Pause behind `control-pending`.
+ * Normalize a preparation/provisioning cancellation race back to the Temporal
+ * cancellation that owns the activity. Several provider APIs expose no portable
+ * abort primitive, so the worker stops awaiting them and disposes any late
+ * resource. The wrapper error must never fall through as an ordinary turn
+ * failure: doing so would omit the quiescence receipt and strand a committed
+ * Steer/Pause behind `control-pending`.
  */
 export function turnOperationCancellationFailure(error: unknown): CancelledFailure | null {
   if (error instanceof CancelledFailure) return error;
-  if (!(error instanceof TurnSandboxProvisionCancelledError)) return null;
+  if (!(error instanceof TurnOperationCancelledError)) return null;
   return error.reason instanceof CancelledFailure
     ? error.reason
     : new CancelledFailure("TURN_SANDBOX_PROVISION_CANCELLED", [], error);
 }
 
-function throwIfTurnSandboxProvisionCancelled(signal: AbortSignal | undefined): void {
+function throwIfTurnOperationCancelled(signal: AbortSignal | undefined): void {
   if (signal?.aborted) {
-    throw new TurnSandboxProvisionCancelledError(signal.reason);
+    throw new TurnOperationCancelledError(signal.reason);
   }
 }
 
-export async function waitForTurnSandboxProvision<T>(
+export async function waitForTurnOperation<T>(
   operation: Promise<T>,
   signal: AbortSignal | undefined,
   disposeLateResult: ((result: T) => Promise<void> | void) | undefined,
 ): Promise<T> {
   if (!signal) return await operation;
 
-  let rejectCancellation: ((error: TurnSandboxProvisionCancelledError) => void) | undefined;
+  let rejectCancellation: ((error: TurnOperationCancelledError) => void) | undefined;
   const cancelled = new Promise<never>((_resolve, reject) => {
     rejectCancellation = reject;
   });
   const cancel = (): void => {
-    rejectCancellation?.(new TurnSandboxProvisionCancelledError(signal.reason));
+    rejectCancellation?.(new TurnOperationCancelledError(signal.reason));
   };
   signal.addEventListener("abort", cancel, { once: true });
   if (signal.aborted) cancel();
@@ -1095,7 +1095,7 @@ export async function waitForTurnSandboxProvision<T>(
     // and AbortSignal settle in the same microtask checkpoint. Never let a
     // just-resolved lease escape after the control was already committed.
     if (signal.aborted) {
-      throw new TurnSandboxProvisionCancelledError(signal.reason);
+      throw new TurnOperationCancelledError(signal.reason);
     }
     return result;
   } catch (error) {
@@ -1110,8 +1110,8 @@ export async function waitForTurnSandboxProvision<T>(
       // control. The control is authoritative; retain its cancellation shape
       // so the activity publishes quiescence instead of looking like an
       // unrelated turn failure.
-      if (!(error instanceof TurnSandboxProvisionCancelledError)) {
-        throw new TurnSandboxProvisionCancelledError(signal.reason);
+      if (!(error instanceof TurnOperationCancelledError)) {
+        throw new TurnOperationCancelledError(signal.reason);
       }
     }
     throw error;
@@ -1157,12 +1157,12 @@ export function createTurnSandboxProvisioner<T>(
     let attempt = 0;
     while (true) {
       try {
-        throwIfTurnSandboxProvisionCancelled(options.signal);
+        throwIfTurnOperationCancelled(options.signal);
         const operation = establish();
-        return await waitForTurnSandboxProvision(operation, options.signal, options.disposeResult);
+        return await waitForTurnOperation(operation, options.signal, options.disposeResult);
       } catch (error) {
         if (
-          error instanceof TurnSandboxProvisionCancelledError ||
+          error instanceof TurnOperationCancelledError ||
           attempt >= maxRetries ||
           !isLazySandboxProvisionRetryable(error)
         ) {
@@ -1178,22 +1178,22 @@ export function createTurnSandboxProvisioner<T>(
     get(): Promise<T> {
       if (!memo) {
         memo = (async () => {
-          throwIfTurnSandboxProvisionCancelled(options.signal);
+          throwIfTurnOperationCancelled(options.signal);
           await options.onStarted?.();
-          throwIfTurnSandboxProvisionCancelled(options.signal);
+          throwIfTurnOperationCancelled(options.signal);
           let result: T | undefined;
           let hasResult = false;
           try {
             result = await run();
             hasResult = true;
-            throwIfTurnSandboxProvisionCancelled(options.signal);
+            throwIfTurnOperationCancelled(options.signal);
             await options.onCompleted?.(result);
             return result;
           } catch (error) {
             if (hasResult) {
               await options.disposeResult?.(result as T);
             }
-            if (!(error instanceof TurnSandboxProvisionCancelledError)) {
+            if (!(error instanceof TurnOperationCancelledError)) {
               await options.onFailed?.(error);
             }
             throw error;
@@ -1992,24 +1992,23 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // §7.5 P3 — pass BOTH the codex predicate (codex-plan turns bypass the gate)
       // AND the optional host `entitlements` port (when bound, its admitRun replaces
       // the local credit read). Unset port → today's local-ledger path.
-      await ensureRunAllowed(
-        settings,
-        db,
-        input.accountId,
-        input.workspaceId,
-        isCodexTurn,
-        entitlements,
+      await waitForTurnOperation(
+        ensureRunAllowed(
+          settings,
+          db,
+          input.accountId,
+          input.workspaceId,
+          isCodexTurn,
+          entitlements,
+        ),
+        cancellationSignal,
+        undefined,
       );
       // Setup (variableSet load, MCP connects, sandbox restore) does not
       // stream and so never observes cancellation on its own; these explicit
       // checks let a graceful shutdown checkpoint the turn before the worker is
       // force-killed instead of riding the setup to a heartbeat timeout.
-      const throwIfWorkerShuttingDown = () => {
-        const reason = activityContext?.cancellationSignal.reason;
-        if (isWorkerShutdownCancellation(reason)) {
-          throw reason;
-        }
-      };
+      const throwIfTurnCancelled = () => throwIfTurnOperationCancelled(cancellationSignal);
       // ONE shared details object for every heartbeat this activity sends (each
       // site spreads it + its own phase), so cross-site fields — the op-stream
       // settled roster in particular — survive last-write-wins instead of being
@@ -2171,7 +2170,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // A shutdown that landed during claim/billing setup stops before the turn
       // visibly starts: nothing ran yet, so the same inference starts cleanly
       // on a healthy worker.
-      throwIfWorkerShuttingDown();
+      throwIfTurnCancelled();
       if (
         !(await settle({
           events: [
@@ -2981,24 +2980,28 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         let outcome: Awaited<ReturnType<typeof maybeCompactContext>> | null = null;
         if (requested) {
           try {
-            outcome = await maybeCompactContext(
-              db,
-              modelRunSettings,
-              {
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                sessionId: input.sessionId,
-                turnId: turn.id,
-                executionGeneration,
-                attemptId: input.attemptId,
-              },
-              session.lastInputTokens,
-              compactionSummarizerFor(compactionInstructions),
-              {
-                force: true,
-                clearRequestedCompaction: true,
-                trigger: "operator",
-              },
+            outcome = await waitForTurnOperation(
+              maybeCompactContext(
+                db,
+                modelRunSettings,
+                {
+                  accountId: input.accountId,
+                  workspaceId: input.workspaceId,
+                  sessionId: input.sessionId,
+                  turnId: turn.id,
+                  executionGeneration,
+                  attemptId: input.attemptId,
+                },
+                session.lastInputTokens,
+                compactionSummarizerFor(compactionInstructions),
+                {
+                  force: true,
+                  clearRequestedCompaction: true,
+                  trigger: "operator",
+                },
+              ),
+              cancellationSignal,
+              undefined,
             );
           } catch (error) {
             // Codex retries retryable checkpoint-provider failures rather than
@@ -3092,12 +3095,16 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         accountId: input.accountId,
         workspaceId: input.workspaceId,
       };
-      const workspaceVariableSet = await loadWorkspaceEnvironmentForRunWithCredentials(
-        db,
-        runSettings,
-        connectionScope,
-        session.variableSetId,
-        connectionCredentials?.sandboxSecrets,
+      const workspaceVariableSet = await waitForTurnOperation(
+        loadWorkspaceEnvironmentForRunWithCredentials(
+          db,
+          runSettings,
+          connectionScope,
+          session.variableSetId,
+          connectionCredentials?.sandboxSecrets,
+        ),
+        cancellationSignal,
+        undefined,
       );
       variableSetId = workspaceVariableSet?.id ?? "";
       // RIG DEFAULT VARIABLE SETS (M3): decrypt the frozen rig version's default
@@ -3112,12 +3119,16 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // set already relies on), keeping validateNoEnvironmentDelta empty.
       const rigDefaultEnvironmentValues: Record<string, string> = {};
       for (const rigDefaultVariableSetId of rigVersion?.defaultVariableSetIds ?? []) {
-        const rigDefaultSet = await loadWorkspaceEnvironmentForRunWithCredentials(
-          db,
-          runSettings,
-          connectionScope,
-          rigDefaultVariableSetId,
-          connectionCredentials?.sandboxSecrets,
+        const rigDefaultSet = await waitForTurnOperation(
+          loadWorkspaceEnvironmentForRunWithCredentials(
+            db,
+            runSettings,
+            connectionScope,
+            rigDefaultVariableSetId,
+            connectionCredentials?.sandboxSecrets,
+          ),
+          cancellationSignal,
+          undefined,
         );
         Object.assign(rigDefaultEnvironmentValues, rigDefaultSet?.values ?? {});
       }
@@ -3201,8 +3212,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         settings.sandboxOwnershipEnabled && runSettings.sandboxBackend !== "none"
           ? groupBoxBackend
           : runSettings.sandboxBackend;
-      throwIfTurnSandboxProvisionCancelled(cancellationSignal);
-      await waitForTurnSandboxProvision(
+      throwIfTurnOperationCancelled(cancellationSignal);
+      await waitForTurnOperation(
         ensureTurnModalRegistryImage(runSettings, sandboxCreationBackend),
         cancellationSignal,
         undefined,
@@ -3236,21 +3247,25 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         gitTokens: sandboxGitTokens,
         gitTokenExpiresAt: sandboxGitTokenExpiresAt,
         toolspaceToken: sandboxToolspaceToken,
-      } = await sandboxEnvironmentForRun(
-        runSettings,
-        turnResources,
-        // Rig default sets merged BELOW the session set (session wins); rig-less
-        // turns pass exactly workspaceVariableSet?.values (byte-for-byte today).
-        sandboxWorkspaceEnvironmentValues,
-        {
-          skipGitHubToken: activeSandboxBackend === "selfhosted",
-          deferGitHubToken:
-            activeSandboxBackend !== "selfhosted" && establishPolicy === "on-demand",
-          scope: connectionScope,
-          gitCredentials: connectionCredentials?.gitCredentials,
-          sessionId: input.sessionId,
-          runId: turnId,
-        },
+      } = await waitForTurnOperation(
+        sandboxEnvironmentForRun(
+          runSettings,
+          turnResources,
+          // Rig default sets merged BELOW the session set (session wins); rig-less
+          // turns pass exactly workspaceVariableSet?.values (byte-for-byte today).
+          sandboxWorkspaceEnvironmentValues,
+          {
+            skipGitHubToken: activeSandboxBackend === "selfhosted",
+            deferGitHubToken:
+              activeSandboxBackend !== "selfhosted" && establishPolicy === "on-demand",
+            scope: connectionScope,
+            gitCredentials: connectionCredentials?.gitCredentials,
+            sessionId: input.sessionId,
+            runId: turnId,
+          },
+        ),
+        cancellationSignal,
+        undefined,
       );
 
       const initialGitCredentials: MintedRunGitCredentials | undefined = sandboxGitTokens
@@ -3387,16 +3402,20 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // (buildSelfhostedBackendSession); EstablishedSandboxSession widens it.
           machinePrimarySession =
             established.session as import("@opengeni/runtime").SelfhostedSession;
-          const lease = await acquireSelfhostedLeaseForTurn(
-            { db, settings },
-            {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              sandboxGroupId: session.sandboxGroupId,
-              sessionId: input.sessionId,
-            },
-            "turn",
-            sandboxHolderId,
+          const lease = await waitForTurnOperation(
+            acquireSelfhostedLeaseForTurn(
+              { db, settings },
+              {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sandboxGroupId: session.sandboxGroupId,
+                sessionId: input.sessionId,
+              },
+              "turn",
+              sandboxHolderId,
+            ),
+            cancellationSignal,
+            async (lateLease) => await lateLease.release(),
           );
           setupBoxSession = established.session;
           resolvedSandbox = {
@@ -3441,7 +3460,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // proxy's first default-pointer op. A chat-only turn never calls it, so
           // no lease row, no provider box, no warm-meter interval.
         } else {
-          resolvedSandbox = await waitForTurnSandboxProvision(
+          resolvedSandbox = await waitForTurnOperation(
             resumeBoxForTurn(
               {
                 db,
@@ -3524,42 +3543,50 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         }
       }
 
-      const fileResourceDownloads = await sandboxFileDownloadsForRun(
-        runSettings,
-        db,
-        objectStorage,
-        input.workspaceId,
-        turnResources,
+      const fileResourceDownloads = await waitForTurnOperation(
+        sandboxFileDownloadsForRun(
+          runSettings,
+          db,
+          objectStorage,
+          input.workspaceId,
+          turnResources,
+        ),
+        cancellationSignal,
+        undefined,
       );
-      throwIfWorkerShuttingDown();
+      throwIfTurnCancelled();
       // Wrap MCP prep in the codex ALS so the codex_apps connect handshake
       // (initialize + tools/list) can resolve the per-workspace bearer from
       // codexRequestStorage (runtime/codexAppsMcpRequestInit). withCodex is the
       // identity on every non-codex turn, so this is a no-op for existing paths.
       const resolveCredential = buildConnectionTokenResolver(db, runSettings);
-      preparedTools = await withCodex(() =>
-        runtime.prepareTools(runSettings, turnTools, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          // Sign the calling turn into the first-party token so tools classify
-          // the caller by its own identity (sacred-pause guard), not the racy
-          // live active pointer.
-          ...(turnId ? { turnId } : {}),
-          attemptId: input.attemptId,
-          executionGeneration,
-          subjectId: "worker:first-party-mcp",
-          subjectLabel: "OpenGeni worker",
-          resolveCredential,
-          onAuthNeeded: async (payload) => {
-            await publish!([{ type: "tool.auth_needed", payload }], true);
-          },
-          // Manager-style sessions carry a creation-validated permission set
-          // for their first-party MCP token; null keeps the fixed default.
-          ...(session.firstPartyMcpPermissions?.length
-            ? { firstPartyPermissions: session.firstPartyMcpPermissions }
-            : {}),
-        }),
+      preparedTools = await waitForTurnOperation(
+        withCodex(() =>
+          runtime.prepareTools(runSettings, turnTools, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            // Sign the calling turn into the first-party token so tools classify
+            // the caller by its own identity (sacred-pause guard), not the racy
+            // live active pointer.
+            ...(turnId ? { turnId } : {}),
+            attemptId: input.attemptId,
+            executionGeneration,
+            subjectId: "worker:first-party-mcp",
+            subjectLabel: "OpenGeni worker",
+            resolveCredential,
+            onAuthNeeded: async (payload) => {
+              await publish!([{ type: "tool.auth_needed", payload }], true);
+            },
+            // Manager-style sessions carry a creation-validated permission set
+            // for their first-party MCP token; null keeps the fixed default.
+            ...(session.firstPartyMcpPermissions?.length
+              ? { firstPartyPermissions: session.firstPartyMcpPermissions }
+              : {}),
+          }),
+        ),
+        cancellationSignal,
+        async (latePreparedTools) => await latePreparedTools.close().catch(() => undefined),
       );
       // Genesis turn = the first user turn (no assistant history reconciled
       // yet). Durable Postgres state (countSessionHistoryItems includes
@@ -3743,7 +3770,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         } as EstablishedSandboxSession["client"];
         turnSandboxProvisioner = createTurnSandboxProvisioner<ResumedTurnSandbox>(
           async () => {
-            throwIfWorkerShuttingDown();
+            throwIfTurnCancelled();
             const lazyGitCredentials =
               activeSandboxBackend === "selfhosted"
                 ? undefined
@@ -3839,7 +3866,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 ],
                 true,
               );
-              throwIfTurnSandboxProvisionCancelled(activityContext?.cancellationSignal);
+              throwIfTurnOperationCancelled(activityContext?.cancellationSignal);
               startLeaseHeartbeat(provisioned, activeSandboxBackend ?? groupBoxBackend);
               setupBoxSession = provisioned.established.session;
               resolvedSandbox = provisioned;
@@ -3901,31 +3928,35 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // observe it without consuming it so a failed/stale attempt cannot
           // lose the request. The replacement transaction clears it on success.
           forced = await isSessionCompactionRequested(db, input.workspaceId, input.sessionId);
-          const outcome = await maybeCompactContext(
-            db,
-            modelRunSettings,
-            {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-              turnId: turnId!,
-              executionGeneration,
-              attemptId: input.attemptId,
-            },
-            session.lastInputTokens,
-            // Provider-aware summarizer: when the turn's model resolved to a
-            // registry provider, summarize on THAT provider's client + wire API
-            // (a chat provider can't summarize through OpenAI/Azure). Null
-            // resolution uses the built-in Responses summarizer with the same
-            // session prompt-cache key as the main model calls.
-            compactSummarizer,
-            forced
-              ? {
-                  force: true,
-                  clearRequestedCompaction: true,
-                  trigger: "operator",
-                }
-              : { trigger: "auto" },
+          const outcome = await waitForTurnOperation(
+            maybeCompactContext(
+              db,
+              modelRunSettings,
+              {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                turnId: turnId!,
+                executionGeneration,
+                attemptId: input.attemptId,
+              },
+              session.lastInputTokens,
+              // Provider-aware summarizer: when the turn's model resolved to a
+              // registry provider, summarize on THAT provider's client + wire API
+              // (a chat provider can't summarize through OpenAI/Azure). Null
+              // resolution uses the built-in Responses summarizer with the same
+              // session prompt-cache key as the main model calls.
+              compactSummarizer,
+              forced
+                ? {
+                    force: true,
+                    clearRequestedCompaction: true,
+                    trigger: "operator",
+                  }
+                : { trigger: "auto" },
+            ),
+            cancellationSignal,
+            undefined,
           );
           if (outcome.compacted) {
             const compactionTrigger = forced ? "operator" : undefined;
@@ -4106,29 +4137,33 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         triggerLabel: "overflow" | "proactive" | "operator",
         recoverySignalTokens: number | null,
       ) => {
-        const outcome = await maybeCompactContext(
-          db,
-          modelRunSettings,
-          {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            turnId: activeTurnId,
-            executionGeneration,
-            attemptId: input.attemptId,
-          },
-          // Never reuse the persisted prior-turn signal for recovery. Proactive
-          // guards provide their exact current signal; provider overflows do not,
-          // so null derives decision metadata from active history. Forced
-          // recovery proves progress separately by comparing the replacement
-          // with the current active-history estimate in maybeCompactContext.
-          recoverySignalTokens,
-          compactSummarizer,
-          {
-            force: true,
-            ...(triggerLabel === "operator" ? { clearRequestedCompaction: true } : {}),
-            trigger: triggerLabel,
-          },
+        const outcome = await waitForTurnOperation(
+          maybeCompactContext(
+            db,
+            modelRunSettings,
+            {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              turnId: activeTurnId,
+              executionGeneration,
+              attemptId: input.attemptId,
+            },
+            // Never reuse the persisted prior-turn signal for recovery. Proactive
+            // guards provide their exact current signal; provider overflows do not,
+            // so null derives decision metadata from active history. Forced
+            // recovery proves progress separately by comparing the replacement
+            // with the current active-history estimate in maybeCompactContext.
+            recoverySignalTokens,
+            compactSummarizer,
+            {
+              force: true,
+              ...(triggerLabel === "operator" ? { clearRequestedCompaction: true } : {}),
+              trigger: triggerLabel,
+            },
+          ),
+          cancellationSignal,
+          undefined,
         );
         if (outcome.events.length > 0) {
           if (outcome.compacted) {
@@ -4156,6 +4191,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         let lastProviderContextTokensObserved: number | null = null;
         let providerContextRevision = 0;
         throwIfWorkerShuttingDown();
+        throwIfTurnCancelled();
         const ownedEstablished = resolvedSandbox?.established ?? lazyOwnedSandbox;
         const runStreamOnce = (): ReturnType<OpenGeniRuntime["runStream"]> =>
           runtime.runStream(agent, runInput!, modelRunSettings, {

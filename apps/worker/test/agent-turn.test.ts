@@ -39,9 +39,9 @@ import {
   shouldStartOnTurnRecording,
   shouldRunTurnEndWorkspacePersistence,
   turnOperationCancellationFailure,
-  waitForTurnSandboxProvision,
+  waitForTurnOperation,
   waitForTurnFinalizerStep,
-  TurnSandboxProvisionCancelledError,
+  TurnOperationCancelledError,
 } from "../src/activities/agent-turn";
 import { sandboxLeaseHolderIdForAttempt } from "../src/sandbox-resume";
 import { settingsWithPackSandboxImage } from "../src/activities/packs";
@@ -1044,7 +1044,7 @@ describe("lazy sandbox provisioner single-flight", () => {
     const cancelledAt = performance.now();
     controller.abort(new Error("STEER"));
 
-    await expect(pending).rejects.toBeInstanceOf(TurnSandboxProvisionCancelledError);
+    await expect(pending).rejects.toBeInstanceOf(TurnOperationCancelledError);
     expect(performance.now() - cancelledAt).toBeLessThan(100);
     expect(await provisioner.waitForSettled(30_000)).toBeNull();
     expect(completed).toBe(0);
@@ -1062,7 +1062,7 @@ describe("lazy sandbox provisioner single-flight", () => {
       resolveEstablish = resolve;
     });
     let releases = 0;
-    const pending = waitForTurnSandboxProvision(establish, controller.signal, async (late) =>
+    const pending = waitForTurnOperation(establish, controller.signal, async (late) =>
       late.release(),
     );
 
@@ -1071,7 +1071,7 @@ describe("lazy sandbox provisioner single-flight", () => {
     controller.abort(temporalCancellation);
 
     const wrapped = await pending.catch((error: unknown) => error);
-    expect(wrapped).toBeInstanceOf(TurnSandboxProvisionCancelledError);
+    expect(wrapped).toBeInstanceOf(TurnOperationCancelledError);
     expect(turnOperationCancellationFailure(wrapped)).toBe(temporalCancellation);
     expect(performance.now() - cancelledAt).toBeLessThan(100);
 
@@ -1081,7 +1081,7 @@ describe("lazy sandbox provisioner single-flight", () => {
   });
 
   test("a non-Temporal provisioning abort still becomes an activity cancellation", () => {
-    const wrapped = new TurnSandboxProvisionCancelledError(new Error("STEER"));
+    const wrapped = new TurnOperationCancelledError(new Error("STEER"));
     const cancellation = turnOperationCancellationFailure(wrapped);
 
     expect(cancellation).toBeInstanceOf(CancelledFailure);
@@ -1094,13 +1094,13 @@ describe("lazy sandbox provisioner single-flight", () => {
     const temporalCancellation = new CancelledFailure("CANCELLED");
     controller.abort(temporalCancellation);
 
-    const error = await waitForTurnSandboxProvision(
+    const error = await waitForTurnOperation(
       Promise.reject(new Error("provider connection reset")),
       controller.signal,
       undefined,
     ).catch((failure: unknown) => failure);
 
-    expect(error).toBeInstanceOf(TurnSandboxProvisionCancelledError);
+    expect(error).toBeInstanceOf(TurnOperationCancelledError);
     expect(turnOperationCancellationFailure(error)).toBe(temporalCancellation);
   });
 });
