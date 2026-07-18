@@ -5,7 +5,7 @@ import * as schema from "./schema";
 
 export const SESSION_ANCESTRY_LIMIT = 10_000;
 
-export type WorkspaceControlLockMode = "share" | "update";
+export type WorkspaceControlLockMode = "none" | "share" | "update";
 export type EffectiveControlState = "active" | "paused";
 export type SessionCommandActor =
   | { type: "human" | "operator"; subjectId: string }
@@ -306,6 +306,7 @@ function controlEtag(value: unknown): string {
 }
 
 function lockClause(mode: WorkspaceControlLockMode) {
+  if (mode === "none") return sql.empty();
   return mode === "update" ? sql.raw("for update") : sql.raw("for share");
 }
 
