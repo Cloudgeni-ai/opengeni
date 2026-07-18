@@ -432,7 +432,7 @@ export const codexRotationSettings = pgTable(
     // code reads this bit; old binaries safely ignore it and keep the legacy
     // pin/rotation policy.
     leaseRotationEnabled: boolean("lease_rotation_enabled").notNull().default(false),
-    rotationStrategy: text("rotation_strategy").notNull().default("most_remaining"), // P3, inert
+    rotationStrategy: text("rotation_strategy").notNull().default("sharded"), // OPE-36: legacy residue; behavior is always sharded
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },

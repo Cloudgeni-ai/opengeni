@@ -42,10 +42,8 @@ import {
   updateCodexRotationSettings,
   upsertCodexSubscriptionCredential,
   withCodexCapacityMutation,
-  CODEX_ROTATION_STRATEGIES,
   type CodexAccountStatus,
   type CodexCapacityWakeTarget,
-  type CodexRotationStrategy,
 } from "@opengeni/db";
 
 // The picker surfaces codex models under their own "no credits" provider group so
@@ -369,7 +367,9 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       activeAccountId,
       settings: {
         rotationEnabled: rotation?.rotationEnabled ?? false,
-        rotationStrategy: rotation?.rotationStrategy ?? "most_remaining",
+        // OPE-36: rotation-enabled always behaves as sticky-sharded; report the
+        // effective truth, never the stored legacy residue.
+        rotationStrategy: "sharded",
         activeCredentialId: activeAccountId,
       },
     });
@@ -397,8 +397,11 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
     return c.json({ activated: true, accountId });
   });
 
-  // P3: update rotation settings (enable auto-rotation + pick the strategy). admin access.
-  // ensureCodexRotationSettings guarantees the row exists, then a one-cell patch.
+  // Update rotation settings. admin access. OPE-36: the strategy picker is GONE —
+  // rotation-enabled always behaves as sticky-sharded (worker-side
+  // effectiveRotationStrategy normalization). `rotationStrategy` in the body is
+  // ACCEPTED-BUT-IGNORED so no existing SDK/UI caller breaks (deprecation), and
+  // the stored column is only legacy residue kept for old-binary rollback.
   app.patch("/v1/workspaces/:workspaceId/codex/settings", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
@@ -406,18 +409,21 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       rotationEnabled?: unknown;
       rotationStrategy?: unknown;
     };
-    const patch: { rotationEnabled?: boolean; rotationStrategy?: CodexRotationStrategy } = {};
+    const patch: { rotationEnabled?: boolean } = {};
     if (typeof body.rotationEnabled === "boolean") {
       patch.rotationEnabled = body.rotationEnabled;
     }
-    if (typeof body.rotationStrategy === "string") {
-      if (!CODEX_ROTATION_STRATEGIES.includes(body.rotationStrategy as CodexRotationStrategy)) {
-        throw new HTTPException(400, { message: "invalid rotation strategy" });
-      }
-      patch.rotationStrategy = body.rotationStrategy as CodexRotationStrategy;
-    }
-    if (patch.rotationEnabled === undefined && patch.rotationStrategy === undefined) {
+    if (patch.rotationEnabled === undefined && body.rotationStrategy === undefined) {
       throw new HTTPException(400, { message: "no settings to update" });
+    }
+    if (patch.rotationEnabled === undefined) {
+      // Strategy-only writes are a deprecated no-op: report the (only) truth.
+      const rotation = await getCodexRotationSettings(db, workspaceId);
+      return c.json({
+        rotationEnabled: rotation?.rotationEnabled ?? false,
+        rotationStrategy: "sharded",
+        rotationStrategyDeprecated: true,
+      });
     }
     await ensureCodexRotationSettings(db, grant.accountId, workspaceId);
     const mutation = await withCodexCapacityMutation(
@@ -435,7 +441,8 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
     await signalCodexCapacityTargets(deps, mutation.wakeTargets);
     return c.json({
       rotationEnabled: updated.rotationEnabled,
-      rotationStrategy: updated.rotationStrategy,
+      // OPE-36: sharded is the only behavior; the stored column is residue.
+      rotationStrategy: "sharded",
       activeCredentialId: updated.activeCredentialId,
     });
   });
