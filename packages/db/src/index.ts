@@ -17896,7 +17896,9 @@ export async function getSessionGoalWithContinuation(
     db,
     context,
     async (tx) => {
-      const effectiveControl = await evaluateSessionControl(tx, workspaceId, sessionId);
+      const effectiveControl = await evaluateSessionControl(tx, workspaceId, sessionId, {
+        lock: "none",
+      });
       const [session] = await tx
         .select()
         .from(schema.sessions)
@@ -23526,7 +23528,7 @@ export async function enqueueSessionWorkflowWakeInTransaction(
         // Coalescing a delayed retry must never postpone an already-due wake
         // owned by another producer. A later revision makes the batch richer;
         // it does not revoke the earlier delivery obligation.
-        nextAttemptAt: sql`least(${schema.sessionWorkflowWakeOutbox.nextAttemptAt}, ${nextAttemptAt})`,
+        nextAttemptAt: sql`least(${schema.sessionWorkflowWakeOutbox.nextAttemptAt}, ${nextAttemptAt.toISOString()}::timestamptz)`,
         lastError: null,
         updatedAt: now,
       },
