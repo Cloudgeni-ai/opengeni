@@ -415,6 +415,8 @@ export const ErrorCode = z.enum([
   "conflict",
   "idempotency_conflict",
   "limit_exceeded",
+  "nested_agent_depth_exceeded",
+  "nested_agent_depth_override_forbidden",
   "provider_verification_failed",
   "upstream_unavailable",
   "internal_error",
@@ -430,6 +432,51 @@ export const ErrorEnvelope = z.object({
   }),
 });
 export type ErrorEnvelope = z.infer<typeof ErrorEnvelope>;
+
+/** Physical ceiling of the PostgreSQL integer columns that persist depth policy. */
+export const MAX_NESTED_AGENT_DEPTH = 2_147_483_647;
+export const NestedAgentDepthValue = z.number().int().nonnegative().max(MAX_NESTED_AGENT_DEPTH);
+export type NestedAgentDepthValue = z.infer<typeof NestedAgentDepthValue>;
+// A parent may physically be at the PostgreSQL integer ceiling. Its rejected
+// child attempt is one greater, so denial evidence admits exactly that edge
+// while persisted session depth/limits remain 32-bit integers.
+export const NestedAgentDepthAttemptValue = z
+  .number()
+  .int()
+  .nonnegative()
+  .max(MAX_NESTED_AGENT_DEPTH + 1);
+
+/** The source that supplied a session's persisted nested-agent depth limit. */
+export const NestedAgentDepthPolicySource = z.enum([
+  "session",
+  "workspace",
+  "deployment",
+  "default",
+]);
+export type NestedAgentDepthPolicySource = z.infer<typeof NestedAgentDepthPolicySource>;
+
+/**
+ * Durable evidence for a session-create denial at the authoritative database
+ * boundary. A denial creates this audit row, and no session/run side effect.
+ */
+export const SessionSpawnDenial = z.object({
+  id: z.string().uuid(),
+  accountId: z.string().uuid(),
+  workspaceId: z.string().uuid(),
+  parentSessionId: z.string().uuid().nullable(),
+  rootSessionId: z.string().uuid().nullable(),
+  currentDepth: NestedAgentDepthValue,
+  attemptedDepth: NestedAgentDepthAttemptValue,
+  effectiveMaxNestedAgentDepth: NestedAgentDepthValue,
+  requestedMaxNestedAgentDepthOverride: NestedAgentDepthValue.nullable(),
+  policySource: NestedAgentDepthPolicySource,
+  policySessionId: z.string().uuid().nullable(),
+  subjectId: z.string().nullable(),
+  code: z.enum(["nested_agent_depth_exceeded", "nested_agent_depth_override_forbidden"]),
+  idempotencyKey: z.string().nullable(),
+  createdAt: z.string(),
+});
+export type SessionSpawnDenial = z.infer<typeof SessionSpawnDenial>;
 
 export const Permission = z.enum([
   "account:read",
@@ -572,6 +619,9 @@ export type Workspace = z.infer<typeof Workspace>;
 export const WorkspaceSettingsSchema = z
   .object({
     memoryEnabled: z.boolean().optional(),
+    // Workspace policy for the deepest session that may be created. Root=0;
+    // maxNestedAgentDepth=0 therefore permits roots but no children.
+    maxNestedAgentDepth: NestedAgentDepthValue.optional(),
   })
   .passthrough();
 export type WorkspaceSettings = z.infer<typeof WorkspaceSettingsSchema>;
@@ -583,11 +633,14 @@ export function resolveWorkspaceMemoryEnabled(settings: unknown): boolean {
 }
 
 // PATCH body for workspace settings: a partial patch that deep-merges into the
-// stored bag. memoryEnabled is the only typed key today; passthrough carries
-// forward-compatible unknown keys through validation.
+// stored bag. Passthrough carries forward-compatible unknown keys through
+// validation.
 export const UpdateWorkspaceSettingsRequest = z
   .object({
     memoryEnabled: z.boolean().optional(),
+    // Null removes the workspace override and restores deployment/default
+    // precedence; a number installs/replaces the workspace policy.
+    maxNestedAgentDepth: NestedAgentDepthValue.nullable().optional(),
   })
   .passthrough();
 export type UpdateWorkspaceSettingsRequest = z.infer<typeof UpdateWorkspaceSettingsRequest>;
@@ -2580,6 +2633,9 @@ export const ScheduledTaskAgentConfig = z.object({
   reasoningEffort: ReasoningEffort.optional(),
   sandboxBackend: SandboxBackend.optional(),
   goal: GoalSpec.optional(),
+  // Durable agent-layer policy applied to every new root session this task
+  // dispatches. Increases are privilege-checked when the task is saved.
+  maxNestedAgentDepth: NestedAgentDepthValue.optional(),
 });
 export type ScheduledTaskAgentConfig = z.infer<typeof ScheduledTaskAgentConfig>;
 
@@ -3275,6 +3331,15 @@ export const Session = z.object({
   // direct API creates and scheduled-task runs. When set, this session's
   // terminal-for-now transitions wake the parent.
   parentSessionId: z.string().uuid().nullable(),
+  // Server-authored nested-agent lineage/policy. Root sessions are depth 0 and
+  // point rootSessionId at themselves. Existing deep trees stay readable;
+  // effectiveMaxNestedAgentDepth controls only future descendant creation.
+  rootSessionId: z.string().uuid(),
+  nestedAgentDepth: NestedAgentDepthValue,
+  maxNestedAgentDepthOverride: NestedAgentDepthValue.nullable(),
+  effectiveMaxNestedAgentDepth: NestedAgentDepthValue,
+  nestedAgentDepthPolicySource: NestedAgentDepthPolicySource,
+  nestedAgentDepthPolicySessionId: z.string().uuid().nullable(),
   // Workspace-scoped CREATE idempotency key the session was created under (the
   // dedup target collapsing double-submit/retry races to one session); null
   // when the create carried no key.
@@ -4295,6 +4360,11 @@ export const CreateSessionRequest = withVariableSetIdAlias({
   // creation of a brand-new session. Absent means no create-dedup (each call
   // is an independent create).
   idempotencyKey: z.string().min(1).max(200).optional(),
+  // Per-session/agent policy for this session and its future descendants.
+  // Reductions from the inherited workspace/deployment/session limit require
+  // only sessions:create. An increase requires workspace:admin server-side.
+  // Root depth is 0, so 0 creates a leaf-only root.
+  maxNestedAgentDepth: NestedAgentDepthValue.optional(),
   // Permissions the session's first-party MCP token should carry instead of
   // the fixed worker default — how an operator hands a manager-style session
   // the orchestration/variableSet/github tools. Capped at creation: every

@@ -430,6 +430,8 @@ describe("deployment contract", () => {
     expect(artifacts.runtimeEnv).toContain("OPENGENI_OBJECT_STORAGE_BACKEND=gcs");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_PRODUCT_ACCESS_MODE=configured");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_DEPLOYMENT_REVISION=test-sha");
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_MAX_NESTED_AGENT_DEPTH=3");
+    expect(artifacts.helmValuesYaml).toContain('OPENGENI_MAX_NESTED_AGENT_DEPTH: "3"');
     expect(artifacts.runtimeEnv).toContain(
       "OPENGENI_OBJECT_STORAGE_GCS_PROJECT_ID=opengeni-example",
     );
@@ -437,6 +439,29 @@ describe("deployment contract", () => {
       "OPENGENI_NATS_URL=nats://opengeni-nats.opengeni-platform.svc.cluster.local:4222",
     );
     expect(artifacts.summary.secretNames).toContain("opengeni-runtime");
+  });
+
+  test("propagates an explicit nested-agent depth deployment policy to runtime and Helm", () => {
+    const artifacts = generateRuntimeArtifacts(
+      deploymentProfiles["gcp-managed"],
+      {
+        temporal_host: { value: "host:7233" },
+        object_storage_bucket: { value: "opengeni-files" },
+        helm_set_values: { value: {} },
+      },
+      {
+        OPENGENI_ACCESS_KEY: "test-access-key",
+        OPENGENI_DELEGATION_SECRET: "test-delegation-secret",
+        OPENGENI_DATABASE_URL: "postgres://opengeni:secret@postgres/opengeni",
+        OPENGENI_MAX_NESTED_AGENT_DEPTH: "7",
+        OPENGENI_OPENAI_API_KEY: "openai",
+      },
+    );
+
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_MAX_NESTED_AGENT_DEPTH=7");
+    expect(artifacts.helmValuesYaml).toContain('OPENGENI_MAX_NESTED_AGENT_DEPTH: "7"');
+    expect(artifacts.summary.runtimeEnvKeys).toContain("OPENGENI_MAX_NESTED_AGENT_DEPTH");
+    expect(artifacts.summary.helmValueKeys).toContain("config.OPENGENI_MAX_NESTED_AGENT_DEPTH");
   });
 
   test("uses sensitive Azure Terraform connection string only in private runtime env", () => {

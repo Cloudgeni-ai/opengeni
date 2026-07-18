@@ -197,6 +197,410 @@ describe("API component integration", () => {
     ).toBe(true);
   });
 
+  test("HTTP session creation returns typed depth denials and privilege-gates increases", async () => {
+    const wf = new FakeWorkflowClient();
+    const delegationSecret = "test-nested-depth-http-secret";
+    const grant = await bootstrapMcpGrant(dbClient.db);
+    const app = createApp({
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        productAccessMode: "configured",
+        delegationSecret,
+        maxNestedAgentDepth: 0,
+      }),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: wf,
+    });
+    const rootAuth = await signDelegatedBearer(delegationSecret, grant, {
+      subjectId: "test:nested-depth-http-root",
+      permissions: ["workspace:read", "sessions:create", "sessions:read"],
+    });
+    const rootResponse = await app.request(workspacePath(grant.workspaceId, "/sessions"), {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: rootAuth },
+      body: JSON.stringify({ initialMessage: "depth-zero root", model: "scripted-model" }),
+    });
+    expect(rootResponse.status).toBe(202);
+    const root = (await rootResponse.json()) as {
+      id: string;
+      rootSessionId: string;
+      nestedAgentDepth: number;
+      effectiveMaxNestedAgentDepth: number;
+      nestedAgentDepthPolicySource: string;
+    };
+    expect(root).toMatchObject({
+      rootSessionId: root.id,
+      nestedAgentDepth: 0,
+      effectiveMaxNestedAgentDepth: 0,
+      nestedAgentDepthPolicySource: "deployment",
+    });
+
+    const childAuth = await signDelegatedBearer(delegationSecret, grant, {
+      subjectId: "test:nested-depth-http-child",
+      permissions: ["workspace:read", "sessions:create", "sessions:read"],
+      sessionId: root.id,
+    });
+    const denialKey = `depth-http-denial-${crypto.randomUUID()}`;
+    const denyChild = () =>
+      app.request(workspacePath(grant.workspaceId, "/sessions"), {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: childAuth },
+        body: JSON.stringify({
+          initialMessage: "must not exist",
+          model: "scripted-model",
+          sandbox: "new",
+          idempotencyKey: denialKey,
+        }),
+      });
+    const usageBefore = await listUsageEvents(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      limit: 100,
+    });
+    const wakeupsBefore = wf.wakeups.length;
+    const denied = await denyChild();
+    const deniedRetry = await denyChild();
+    expect(denied.status).toBe(409);
+    expect(deniedRetry.status).toBe(409);
+    const deniedBody = (await denied.json()) as NestedDepthErrorEnvelope;
+    const deniedRetryBody = (await deniedRetry.json()) as NestedDepthErrorEnvelope;
+    expect(deniedBody.error.code).toBe("nested_agent_depth_exceeded");
+    expect(deniedBody.error.details.denial).toMatchObject({
+      parentSessionId: root.id,
+      rootSessionId: root.id,
+      currentDepth: 0,
+      attemptedDepth: 1,
+      effectiveMaxNestedAgentDepth: 0,
+      policySource: "deployment",
+      idempotencyKey: denialKey,
+    });
+    expect(deniedRetryBody.error.details.denial.id).toBe(deniedBody.error.details.denial.id);
+    expect(
+      await deniedSessionArtifactCounts(
+        dbClient.db,
+        grant.workspaceId,
+        deniedBody.error.details.denial.id,
+      ),
+    ).toEqual(emptyDeniedSessionArtifactCounts());
+    expect(
+      await listUsageEvents(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        limit: 100,
+      }),
+    ).toHaveLength(usageBefore.length);
+    expect(wf.wakeups).toHaveLength(wakeupsBefore);
+
+    const forbidden = await app.request(workspacePath(grant.workspaceId, "/sessions"), {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: childAuth },
+      body: JSON.stringify({
+        initialMessage: "unprivileged increase",
+        model: "scripted-model",
+        sandbox: "new",
+        maxNestedAgentDepth: 1,
+      }),
+    });
+    expect(forbidden.status).toBe(403);
+    const forbiddenBody = (await forbidden.json()) as NestedDepthErrorEnvelope;
+    expect(forbiddenBody.error).toMatchObject({
+      code: "nested_agent_depth_override_forbidden",
+      details: {
+        denial: {
+          parentSessionId: root.id,
+          currentDepth: 0,
+          attemptedDepth: 1,
+          effectiveMaxNestedAgentDepth: 0,
+          requestedMaxNestedAgentDepthOverride: 1,
+        },
+      },
+    });
+    expect(
+      await deniedSessionArtifactCounts(
+        dbClient.db,
+        grant.workspaceId,
+        forbiddenBody.error.details.denial.id,
+      ),
+    ).toEqual(emptyDeniedSessionArtifactCounts());
+
+    const adminChildAuth = await signDelegatedBearer(delegationSecret, grant, {
+      subjectId: "test:nested-depth-http-admin-child",
+      permissions: ["workspace:admin"],
+      sessionId: root.id,
+    });
+    const authorized = await app.request(workspacePath(grant.workspaceId, "/sessions"), {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: adminChildAuth },
+      body: JSON.stringify({
+        initialMessage: "authorized child",
+        model: "scripted-model",
+        sandbox: "new",
+        maxNestedAgentDepth: 1,
+      }),
+    });
+    expect(authorized.status).toBe(202);
+    expect(await authorized.json()).toMatchObject({
+      parentSessionId: root.id,
+      rootSessionId: root.id,
+      nestedAgentDepth: 1,
+      maxNestedAgentDepthOverride: 1,
+      effectiveMaxNestedAgentDepth: 1,
+      nestedAgentDepthPolicySource: "session",
+    });
+
+    const workspaceAdminAuth = await signDelegatedBearer(delegationSecret, grant, {
+      subjectId: "test:nested-depth-workspace-admin",
+      permissions: ["workspace:admin"],
+    });
+    const setWorkspacePolicy = await app.request(workspacePath(grant.workspaceId, "/settings"), {
+      method: "PATCH",
+      headers: { "content-type": "application/json", authorization: workspaceAdminAuth },
+      body: JSON.stringify({ maxNestedAgentDepth: 2 }),
+    });
+    expect(setWorkspacePolicy.status).toBe(200);
+    expect(await setWorkspacePolicy.json()).toMatchObject({
+      settings: { maxNestedAgentDepth: 2 },
+    });
+    const workspacePolicyRoot = await app.request(workspacePath(grant.workspaceId, "/sessions"), {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: workspaceAdminAuth },
+      body: JSON.stringify({ initialMessage: "workspace policy root", model: "scripted-model" }),
+    });
+    expect(workspacePolicyRoot.status).toBe(202);
+    expect(await workspacePolicyRoot.json()).toMatchObject({
+      nestedAgentDepth: 0,
+      effectiveMaxNestedAgentDepth: 2,
+      nestedAgentDepthPolicySource: "workspace",
+    });
+
+    const clearWorkspacePolicy = await app.request(workspacePath(grant.workspaceId, "/settings"), {
+      method: "PATCH",
+      headers: { "content-type": "application/json", authorization: workspaceAdminAuth },
+      body: JSON.stringify({ maxNestedAgentDepth: null }),
+    });
+    expect(clearWorkspacePolicy.status).toBe(200);
+    const clearedWorkspace = (await clearWorkspacePolicy.json()) as {
+      settings: Record<string, unknown>;
+    };
+    expect(clearedWorkspace.settings).not.toHaveProperty("maxNestedAgentDepth");
+    const deploymentPolicyRoot = await app.request(workspacePath(grant.workspaceId, "/sessions"), {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: workspaceAdminAuth },
+      body: JSON.stringify({ initialMessage: "deployment policy root", model: "scripted-model" }),
+    });
+    expect(deploymentPolicyRoot.status).toBe(202);
+    expect(await deploymentPolicyRoot.json()).toMatchObject({
+      nestedAgentDepth: 0,
+      effectiveMaxNestedAgentDepth: 0,
+      nestedAgentDepthPolicySource: "deployment",
+    });
+  });
+
+  test("MCP permits inclusive depth three and returns one idempotent depth-four denial", async () => {
+    const wf = new FakeWorkflowClient();
+    const grant = await bootstrapMcpGrant(dbClient.db);
+    const mcpDeps = {
+      settings: testSettings({ databaseUrl: services.databaseUrl }),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: wf,
+      objectStorage: null,
+      githubStateSecret: "test-state-secret",
+      documentIndexer: { indexDocument: async () => undefined },
+      getDocumentServices: () => {
+        throw new Error("document services are not used by nested-depth MCP tests");
+      },
+      resumeBoxById: fakeResumeBoxById,
+    };
+    const spawn = async (parentSessionId: string | null, label: string) => {
+      const server = buildOpenGeniMcpServer(mcpDeps, {
+        ...grant,
+        ...(parentSessionId ? { metadata: { delegated: true, sessionId: parentSessionId } } : {}),
+      });
+      return await callMcpTool<{
+        id: string;
+        parentSessionId: string | null;
+        rootSessionId: string;
+        nestedAgentDepth: number;
+        effectiveMaxNestedAgentDepth: number;
+        nestedAgentDepthPolicySource: string;
+      }>(server, "session_create", {
+        initialMessage: label,
+        model: "scripted-model",
+        sandbox: "new",
+      });
+    };
+    const root = await spawn(null, "mcp depth zero");
+    const depthOne = await spawn(root.id, "mcp depth one");
+    const depthTwo = await spawn(depthOne.id, "mcp depth two");
+    const depthThree = await spawn(depthTwo.id, "mcp depth three");
+    for (const [session, depth, parentSessionId] of [
+      [root, 0, null],
+      [depthOne, 1, root.id],
+      [depthTwo, 2, depthOne.id],
+      [depthThree, 3, depthTwo.id],
+    ] as const) {
+      expect(session).toMatchObject({
+        parentSessionId,
+        rootSessionId: root.id,
+        nestedAgentDepth: depth,
+        effectiveMaxNestedAgentDepth: 3,
+        nestedAgentDepthPolicySource: "default",
+      });
+    }
+
+    const depthFourServer = buildOpenGeniMcpServer(mcpDeps, {
+      ...grant,
+      metadata: { delegated: true, sessionId: depthThree.id },
+    });
+    const denialKey = `depth-mcp-denial-${crypto.randomUUID()}`;
+    const usageBefore = await listUsageEvents(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      limit: 100,
+    });
+    const wakeupsBefore = wf.wakeups.length;
+    const first = await callMcpToolResult(depthFourServer, "session_create", {
+      initialMessage: "mcp depth four must not exist",
+      model: "scripted-model",
+      sandbox: "new",
+      idempotencyKey: denialKey,
+    });
+    const retry = await callMcpToolResult(depthFourServer, "session_create", {
+      initialMessage: "mcp depth four retry",
+      model: "scripted-model",
+      sandbox: "new",
+      idempotencyKey: denialKey,
+    });
+    expect(first.isError).toBe(true);
+    expect(retry.isError).toBe(true);
+    const firstBody = first.body as NestedDepthErrorEnvelope;
+    const retryBody = retry.body as NestedDepthErrorEnvelope;
+    expect(firstBody.error).toMatchObject({
+      code: "nested_agent_depth_exceeded",
+      details: {
+        denial: {
+          parentSessionId: depthThree.id,
+          rootSessionId: root.id,
+          currentDepth: 3,
+          attemptedDepth: 4,
+          effectiveMaxNestedAgentDepth: 3,
+          policySource: "default",
+          idempotencyKey: denialKey,
+        },
+      },
+    });
+    expect(retryBody.error.details.denial.id).toBe(firstBody.error.details.denial.id);
+    expect(
+      await deniedSessionArtifactCounts(
+        dbClient.db,
+        grant.workspaceId,
+        firstBody.error.details.denial.id,
+      ),
+    ).toEqual(emptyDeniedSessionArtifactCounts());
+    expect(
+      await listUsageEvents(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        limit: 100,
+      }),
+    ).toHaveLength(usageBefore.length);
+    expect(wf.wakeups).toHaveLength(wakeupsBefore);
+  });
+
+  test("scheduled-task agent depth policy persists and privilege-gates increases", async () => {
+    const wf = new FakeWorkflowClient();
+    const delegationSecret = "test-scheduled-agent-depth-secret";
+    const grant = await bootstrapMcpGrant(dbClient.db);
+    const app = createApp({
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        productAccessMode: "configured",
+        delegationSecret,
+        maxNestedAgentDepth: 1,
+      }),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: wf,
+    });
+    const managerAuth = await signDelegatedBearer(delegationSecret, grant, {
+      subjectId: "test:scheduled-depth-manager",
+      permissions: ["workspace:read", "scheduled_tasks:manage"],
+    });
+    const taskBody = (maxNestedAgentDepth: number) => ({
+      name: `depth-${maxNestedAgentDepth}`,
+      schedule: { type: "once", runAt: "2035-01-01T00:00:00.000Z", timeZone: "UTC" },
+      agentConfig: {
+        prompt: "test scheduled nested policy",
+        maxNestedAgentDepth,
+      },
+    });
+
+    const forbidden = await app.request(workspacePath(grant.workspaceId, "/scheduled-tasks"), {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: managerAuth },
+      body: JSON.stringify(taskBody(2)),
+    });
+    expect(forbidden.status).toBe(403);
+    expect(await listScheduledTasks(dbClient.db, grant.workspaceId)).toHaveLength(0);
+
+    const adminAuth = await signDelegatedBearer(delegationSecret, grant, {
+      subjectId: "test:scheduled-depth-admin",
+      permissions: ["workspace:admin"],
+    });
+    const createdResponse = await app.request(
+      workspacePath(grant.workspaceId, "/scheduled-tasks"),
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: adminAuth },
+        body: JSON.stringify(taskBody(5)),
+      },
+    );
+    expect(createdResponse.status).toBe(201);
+    const created = (await createdResponse.json()) as {
+      id: string;
+      agentConfig: { maxNestedAgentDepth?: number };
+    };
+    expect(created.agentConfig.maxNestedAgentDepth).toBe(5);
+
+    const loweredResponse = await app.request(
+      workspacePath(grant.workspaceId, `/scheduled-tasks/${created.id}`),
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json", authorization: managerAuth },
+        body: JSON.stringify({
+          agentConfig: {
+            prompt: "lowered scheduled nested policy",
+            maxNestedAgentDepth: 1,
+          },
+        }),
+      },
+    );
+    expect(loweredResponse.status).toBe(200);
+    expect(await loweredResponse.json()).toMatchObject({
+      agentConfig: { maxNestedAgentDepth: 1 },
+    });
+
+    const forbiddenUpdate = await app.request(
+      workspacePath(grant.workspaceId, `/scheduled-tasks/${created.id}`),
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json", authorization: managerAuth },
+        body: JSON.stringify({
+          agentConfig: {
+            prompt: "forbidden scheduled nested policy increase",
+            maxNestedAgentDepth: 2,
+          },
+        }),
+      },
+    );
+    expect(forbiddenUpdate.status).toBe(403);
+    expect(
+      (await getScheduledTask(dbClient.db, grant.workspaceId, created.id))?.agentConfig,
+    ).toMatchObject({ maxNestedAgentDepth: 1 });
+  });
+
   test("keeps array session lists stable while pin pages are idempotent and OCC-fenced", async () => {
     workflow = new FakeWorkflowClient();
     const app = createApp({
@@ -8273,11 +8677,116 @@ async function readSseEvents(
   }
 }
 
-async function callMcpTool<T = unknown>(
+type NestedDepthErrorEnvelope = {
+  error: {
+    code: "nested_agent_depth_exceeded" | "nested_agent_depth_override_forbidden";
+    message: string;
+    details: {
+      denial: {
+        id: string;
+        parentSessionId: string | null;
+        rootSessionId: string | null;
+        currentDepth: number;
+        attemptedDepth: number;
+        effectiveMaxNestedAgentDepth: number;
+        requestedMaxNestedAgentDepthOverride: number | null;
+        policySource: "session" | "workspace" | "deployment" | "default";
+        policySessionId: string | null;
+        idempotencyKey: string | null;
+      };
+    };
+  };
+};
+
+type DeniedSessionArtifactCounts = {
+  sessions: number;
+  mcpServers: number;
+  goals: number;
+  events: number;
+  historyItems: number;
+  turns: number;
+  turnAttempts: number;
+  pendingToolCalls: number;
+  runStates: number;
+  systemUpdates: number;
+  systemUpdateOutbox: number;
+  workflowWakeOutbox: number;
+  sandboxEnvelopes: number;
+  sandboxLeases: number;
+  sandboxLeaseHolders: number;
+  recordings: number;
+  usageEvents: number;
+  creditLedgerEntries: number;
+  auditEvents: number;
+};
+
+function emptyDeniedSessionArtifactCounts(): DeniedSessionArtifactCounts {
+  return {
+    sessions: 0,
+    mcpServers: 0,
+    goals: 0,
+    events: 0,
+    historyItems: 0,
+    turns: 0,
+    turnAttempts: 0,
+    pendingToolCalls: 0,
+    runStates: 0,
+    systemUpdates: 0,
+    systemUpdateOutbox: 0,
+    workflowWakeOutbox: 0,
+    sandboxEnvelopes: 0,
+    sandboxLeases: 0,
+    sandboxLeaseHolders: 0,
+    recordings: 0,
+    usageEvents: 0,
+    creditLedgerEntries: 0,
+    auditEvents: 0,
+  };
+}
+
+async function deniedSessionArtifactCounts(
+  db: ReturnType<typeof createDb>["db"],
+  workspaceId: string,
+  deniedId: string,
+): Promise<DeniedSessionArtifactCounts> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.execute(
+      dbSql<Record<keyof DeniedSessionArtifactCounts, number>>`
+        select
+          (select count(*)::int from sessions where workspace_id = ${workspaceId} and id = ${deniedId}) as "sessions",
+          (select count(*)::int from session_mcp_servers where workspace_id = ${workspaceId} and session_id = ${deniedId}) as "mcpServers",
+          (select count(*)::int from session_goals where workspace_id = ${workspaceId} and session_id = ${deniedId}) as "goals",
+          (select count(*)::int from session_events where workspace_id = ${workspaceId} and session_id = ${deniedId}) as "events",
+          (select count(*)::int from session_history_items where workspace_id = ${workspaceId} and session_id = ${deniedId}) as "historyItems",
+          (select count(*)::int from session_turns where workspace_id = ${workspaceId} and session_id = ${deniedId}) as "turns",
+          (select count(*)::int from session_turn_attempts where workspace_id = ${workspaceId} and session_id = ${deniedId}) as "turnAttempts",
+          (select count(*)::int from session_pending_tool_calls where workspace_id = ${workspaceId} and session_id = ${deniedId}) as "pendingToolCalls",
+          (select count(*)::int from agent_run_states where workspace_id = ${workspaceId} and session_id = ${deniedId}) as "runStates",
+          (select count(*)::int from session_system_updates where workspace_id = ${workspaceId} and session_id = ${deniedId}) as "systemUpdates",
+          (select count(*)::int from session_system_update_outbox where workspace_id = ${workspaceId} and session_id = ${deniedId}) as "systemUpdateOutbox",
+          (select count(*)::int from session_workflow_wake_outbox where workspace_id = ${workspaceId} and session_id = ${deniedId}) as "workflowWakeOutbox",
+          (select count(*)::int from sandbox_session_envelopes where workspace_id = ${workspaceId} and session_id = ${deniedId}) as "sandboxEnvelopes",
+          (select count(*)::int from sandbox_leases where workspace_id = ${workspaceId} and sandbox_group_id = ${deniedId}) as "sandboxLeases",
+          (select count(*)::int from sandbox_lease_holders where workspace_id = ${workspaceId} and subject_id = ${deniedId}) as "sandboxLeaseHolders",
+          (select count(*)::int from session_recordings where workspace_id = ${workspaceId} and session_id = ${deniedId}) as "recordings",
+          (select count(*)::int from usage_events where workspace_id = ${workspaceId} and source_resource_id = ${deniedId}) as "usageEvents",
+          (select count(*)::int from credit_ledger_entries where workspace_id = ${workspaceId} and source_id = ${deniedId}) as "creditLedgerEntries",
+          (select count(*)::int from audit_events where workspace_id = ${workspaceId} and target_id = ${deniedId}) as "auditEvents"
+      `,
+    );
+    const row = rows[0];
+    if (!row) throw new Error("denied-session artifact count query returned no row");
+    return Object.fromEntries(
+      Object.entries(row).map(([key, value]) => [key, Number(value)]),
+    ) as DeniedSessionArtifactCounts;
+  });
+}
+
+async function callMcpToolResult(
   server: unknown,
   name: string,
   args: Record<string, unknown>,
-): Promise<T> {
+): Promise<{ body: unknown; isError: boolean }> {
   const tool = (
     server as {
       _registeredTools?: Record<
@@ -8291,12 +8800,23 @@ async function callMcpTool<T = unknown>(
   if (!tool) {
     throw new Error(`MCP tool not registered: ${name}`);
   }
-  const result = await tool.handler(args, {});
-  const text = (result as { content?: Array<{ text?: string }> }).content?.[0]?.text;
+  const result = (await tool.handler(args, {})) as {
+    content?: Array<{ text?: string }>;
+    isError?: boolean;
+  };
+  const text = result.content?.[0]?.text;
   if (!text) {
     throw new Error(`MCP tool returned no text: ${name}`);
   }
-  return JSON.parse(text) as T;
+  return { body: JSON.parse(text) as unknown, isError: result.isError === true };
+}
+
+async function callMcpTool<T = unknown>(
+  server: unknown,
+  name: string,
+  args: Record<string, unknown>,
+): Promise<T> {
+  return (await callMcpToolResult(server, name, args)).body as T;
 }
 
 class FakeWorkflowClient implements SessionWorkflowClient {

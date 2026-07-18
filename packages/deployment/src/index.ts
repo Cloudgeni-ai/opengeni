@@ -1905,6 +1905,7 @@ function runtimeEnvValues(
     valueEnv("OPENGENI_BILLING_MODE", contract.product.billingMode),
     valueEnv("OPENGENI_ENTITLEMENTS_MODE", contract.product.entitlementsMode),
     valueEnv("OPENGENI_USAGE_LIMITS_MODE", contract.product.usageLimitsMode),
+    valueEnv("OPENGENI_MAX_NESTED_AGENT_DEPTH", env.OPENGENI_MAX_NESTED_AGENT_DEPTH ?? "3"),
     ...(publicBaseUrl ? [valueEnv("OPENGENI_PUBLIC_BASE_URL", publicBaseUrl)] : []),
     ...(contract.product.accessMode === "managed" || contract.product.accessMode === "configured"
       ? [requiredEnv("OPENGENI_DELEGATION_SECRET", env.OPENGENI_DELEGATION_SECRET)]
@@ -2261,6 +2262,7 @@ function addRuntimeConfigHelmValues(
   values["config.OPENGENI_BILLING_MODE"] = contract.product.billingMode;
   values["config.OPENGENI_ENTITLEMENTS_MODE"] = contract.product.entitlementsMode;
   values["config.OPENGENI_USAGE_LIMITS_MODE"] = contract.product.usageLimitsMode;
+  values["config.OPENGENI_MAX_NESTED_AGENT_DEPTH"] = env.OPENGENI_MAX_NESTED_AGENT_DEPTH ?? "3";
   values["config.OPENGENI_API_HOST"] = "0.0.0.0";
   values["config.OPENGENI_API_PORT"] = "8000";
   values["config.OPENGENI_TEMPORAL_NAMESPACE"] = contract.temporal.namespace;

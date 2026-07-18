@@ -18,6 +18,7 @@ import {
   sumUsageQuantity,
   updateScheduledTask,
   upsertSessionGoal,
+  SessionSpawnDeniedDbError,
 } from "@opengeni/db";
 import { appendAndPublishEvents, publishDurableSessionEvents } from "@opengeni/events";
 import { configuredStaticUsageLimits, type Settings } from "@opengeni/config";
@@ -151,25 +152,40 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
             frozenRigId = rig.id;
             frozenRigVersionId = rig.activeVersion.id;
           }
-          const session = await createSession(db, {
-            accountId: task.accountId,
-            workspaceId: task.workspaceId,
-            initialMessage: task.agentConfig.prompt,
-            resources: task.agentConfig.resources,
-            tools: taskTools,
-            metadata: {
-              ...task.agentConfig.metadata,
+          let session;
+          try {
+            session = await createSession(db, {
+              accountId: task.accountId,
+              workspaceId: task.workspaceId,
+              initialMessage: task.agentConfig.prompt,
+              resources: task.agentConfig.resources,
+              tools: taskTools,
+              metadata: {
+                ...task.agentConfig.metadata,
+                model,
+                reasoningEffort,
+                scheduledTaskId: task.id,
+                scheduledTaskRunId: run.id,
+              },
               model,
-              reasoningEffort,
-              scheduledTaskId: task.id,
-              scheduledTaskRunId: run.id,
-            },
-            model,
-            sandboxBackend,
-            variableSetId: task.variableSetId ?? null,
-            rigId: frozenRigId,
-            rigVersionId: frozenRigVersionId,
-          });
+              sandboxBackend,
+              variableSetId: task.variableSetId ?? null,
+              rigId: frozenRigId,
+              rigVersionId: frozenRigVersionId,
+              maxNestedAgentDepthOverride: task.agentConfig.maxNestedAgentDepth ?? null,
+              // The durable agent config was privilege-checked when the task
+              // was created/updated. Preserve that explicit policy if a broader
+              // workspace/deployment limit is narrowed before a later fire.
+              allowNestedAgentDepthIncrease: true,
+              deploymentMaxNestedAgentDepth: settings.maxNestedAgentDepth ?? null,
+              subjectId: `scheduled_task:${task.id}`,
+            });
+          } catch (error) {
+            if (error instanceof SessionSpawnDeniedDbError) {
+              throw new Error(`${error.denial.code}: denial=${error.denial.id}`, { cause: error });
+            }
+            throw error;
+          }
           const goal = goalSpec
             ? await createSessionGoal(db, {
                 accountId: task.accountId,

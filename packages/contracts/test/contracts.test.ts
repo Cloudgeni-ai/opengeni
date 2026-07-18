@@ -296,10 +296,12 @@ describe("contracts", () => {
         prompt: "Check repository health",
         resources: [{ kind: "repository", uri: "https://github.com/acme/app.git", ref: "main" }],
         tools: [{ kind: "mcp", id: "opengeni" }],
+        maxNestedAgentDepth: 2,
       },
     });
     expect(payload.schedule.type).toBe("calendar");
     expect(payload.agentConfig.tools[0]?.id).toBe("opengeni");
+    expect(payload.agentConfig.maxNestedAgentDepth).toBe(2);
   });
 
   test("accepts pack enable and marketing daily analysis defaults", () => {

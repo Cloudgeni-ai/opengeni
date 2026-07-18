@@ -244,6 +244,7 @@ export type {
   ViewerHeartbeatRequest,
   ViewerHeartbeatResponse,
   SessionEvent,
+  SessionSpawnDenial,
   SessionEventType,
   SessionGoal,
   SessionGoalCreatedBy,

@@ -182,6 +182,25 @@ interruptions so a live Pause/Steer still reaches settlement. The workflow
 records a monotonic signal version before its final activity chain and refuses to
 return when a signal arrived during that chain, closing the completion race.
 
+## Nested-agent creation admission
+
+Child-session creation has a separate server-enforced depth admission boundary.
+Roots are depth `0`; the inclusive default maximum `3` permits descendants at
+depths `1`, `2`, and `3`, then rejects an attempted depth `4`. The PostgreSQL
+creation transaction derives parent/root lineage and the effective
+session/workspace/deployment/default policy from trusted state. A rejected
+create commits only typed denial evidence and creates no session, turn,
+workflow wake, sandbox/lease, usage, or billing artifact.
+
+This does not change turn lifetime or recursive workstream control. An existing
+tree deeper than the configured limit can still run and resume; only new
+descendants are gated. A depth-eligible create beneath a paused ancestor remains
+subject to the ordinary recursive Pause projection and cannot become runnable
+until admitted. UI collapse is never runtime control, and the existing budget
+and concurrency layers stay independent. See
+[`nested-agent-depth.md`](nested-agent-depth.md) for precedence, override,
+idempotency, and canary details.
+
 ## Goals — what makes long runs continue
 
 Agents stop prematurely. A **goal** flips the default so that finishing a turn

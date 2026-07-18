@@ -2179,6 +2179,7 @@ describe("worker activities integration", () => {
         resources: [],
         tools: [{ kind: "mcp", id: "docs" }],
         metadata: { source: "test" },
+        maxNestedAgentDepth: 9,
       },
       metadata: {},
     });
@@ -2186,6 +2187,7 @@ describe("worker activities integration", () => {
       settings: testSettings({
         databaseUrl: services.databaseUrl,
         natsUrl: services.natsUrl,
+        maxNestedAgentDepth: 7,
         mcpServers: [{ id: "docs", url: "http://127.0.0.1:1/mcp", name: "Docs" }],
       }),
       db: dbClient.db,
@@ -2216,6 +2218,15 @@ describe("worker activities integration", () => {
     const session = await getSession(dbClient.db, grant.workspaceId, result.sessionId);
     expect(session?.metadata).toMatchObject({ scheduledTaskId: task.id, source: "test" });
     expect(session?.tools).toEqual([{ kind: "mcp", id: "docs" }]);
+    expect(session).toMatchObject({
+      parentSessionId: null,
+      rootSessionId: result.sessionId,
+      nestedAgentDepth: 0,
+      maxNestedAgentDepthOverride: 9,
+      effectiveMaxNestedAgentDepth: 9,
+      nestedAgentDepthPolicySource: "session",
+      nestedAgentDepthPolicySessionId: result.sessionId,
+    });
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, result.sessionId, 0, 10);
     expect(events.map((event) => event.type)).toEqual([
       "session.created",

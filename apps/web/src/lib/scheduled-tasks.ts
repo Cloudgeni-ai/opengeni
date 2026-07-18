@@ -103,6 +103,9 @@ export function agentConfigFromFormState(
     ...(existingTask?.agentConfig.sandboxBackend
       ? { sandboxBackend: existingTask.agentConfig.sandboxBackend }
       : {}),
+    ...(existingTask?.agentConfig.maxNestedAgentDepth !== undefined
+      ? { maxNestedAgentDepth: existingTask.agentConfig.maxNestedAgentDepth }
+      : {}),
   };
 }
 

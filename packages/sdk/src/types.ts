@@ -354,6 +354,25 @@ export type OAuthStartResponse = {
   expiresAt: string;
 };
 
+/** Durable, typed evidence returned when nested session creation is denied. */
+export type SessionSpawnDenial = {
+  id: string;
+  accountId: string;
+  workspaceId: string;
+  parentSessionId: string | null;
+  rootSessionId: string | null;
+  currentDepth: number;
+  attemptedDepth: number;
+  effectiveMaxNestedAgentDepth: number;
+  requestedMaxNestedAgentDepthOverride: number | null;
+  policySource: "session" | "workspace" | "deployment" | "default";
+  policySessionId: string | null;
+  subjectId: string | null;
+  code: "nested_agent_depth_exceeded" | "nested_agent_depth_override_forbidden";
+  idempotencyKey: string | null;
+  createdAt: string;
+};
+
 export type IntegrationClientMetadata = {
   client_id: string;
   client_name: "OpenGeni";
@@ -393,6 +412,14 @@ export type Session = {
   firstPartyMcpPermissions: string[] | null;
   mcpServers: SessionMcpServerMetadata[];
   parentSessionId: string | null;
+  /** Root is depth 0 and points rootSessionId at itself. */
+  rootSessionId: string;
+  nestedAgentDepth: number;
+  /** Explicit per-session/agent policy, null when inherited. */
+  maxNestedAgentDepthOverride: number | null;
+  effectiveMaxNestedAgentDepth: number;
+  nestedAgentDepthPolicySource: "session" | "workspace" | "deployment" | "default";
+  nestedAgentDepthPolicySessionId: string | null;
   createIdempotencyKey: string | null;
   temporalWorkflowId: string | null;
   activeTurnId: string | null;
@@ -1070,6 +1097,7 @@ export type ScheduledTaskAgentConfig = {
   reasoningEffort?: ReasoningEffort | undefined;
   sandboxBackend?: SandboxBackend | undefined;
   goal?: GoalSpec | undefined;
+  maxNestedAgentDepth?: number | undefined;
 };
 
 export type ScheduledTask = {
@@ -1125,6 +1153,11 @@ export type CreateSessionRequest = {
   // double-submit/retry of the same logical create collapse to one session.
   // Distinct from the per-call clientEventId.
   idempotencyKey?: string | undefined;
+  /**
+   * Per-session/agent descendant-depth policy. Root depth is 0. Reductions are
+   * always allowed; raising the inherited policy requires workspace:admin.
+   */
+  maxNestedAgentDepth?: number | undefined;
   firstPartyMcpPermissions?: string[] | undefined;
   mcpServers?: SessionMcpServerInput[] | undefined;
   // Shared-sandbox placement (mirror of `@opengeni/contracts` CreateSessionRequest.sandbox,
@@ -1436,11 +1469,14 @@ export type Workspace = {
 
 export type WorkspaceSettings = {
   memoryEnabled?: boolean | undefined;
+  maxNestedAgentDepth?: number | undefined;
   [key: string]: unknown;
 };
 
 export type UpdateWorkspaceSettingsRequest = {
   memoryEnabled?: boolean | undefined;
+  /** Null clears the workspace override and restores deployment/default precedence. */
+  maxNestedAgentDepth?: number | null | undefined;
   [key: string]: unknown;
 };
 
@@ -1740,6 +1776,8 @@ export type ScheduledTaskAgentConfigInput = {
   reasoningEffort?: ReasoningEffort | undefined;
   sandboxBackend?: SandboxBackend | undefined;
   goal?: GoalSpec | undefined;
+  /** Agent-layer descendant limit; increases require workspace:admin. */
+  maxNestedAgentDepth?: number | undefined;
 };
 
 export type CreateScheduledTaskRequest = {

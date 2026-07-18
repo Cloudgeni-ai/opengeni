@@ -181,6 +181,34 @@ describe("OpenGeniClient", () => {
     expect((error as OpenGeniApiError).body).toBe("workspace not found");
   });
 
+  test("nested-agent create denials expose typed code and durable audit details", async () => {
+    const denial = {
+      id: "00000000-0000-4000-8000-000000000099",
+      currentDepth: 3,
+      attemptedDepth: 4,
+      effectiveMaxNestedAgentDepth: 3,
+    };
+    const { client } = makeClient(() =>
+      jsonResponse(
+        {
+          error: {
+            code: "nested_agent_depth_exceeded",
+            message: "nested agent depth 4 exceeds effective limit 3",
+            details: { denial },
+          },
+        },
+        409,
+      ),
+    );
+    const error = await client
+      .createSession(WORKSPACE_ID, { initialMessage: "too deep" })
+      .catch((caught) => caught);
+    expect(error).toBeInstanceOf(OpenGeniApiError);
+    expect((error as OpenGeniApiError).status).toBe(409);
+    expect((error as OpenGeniApiError).code).toBe("nested_agent_depth_exceeded");
+    expect((error as OpenGeniApiError).details).toEqual({ denial });
+  });
+
   test("JSON and void requests fail closed when the API response contract differs", async () => {
     const mismatchHeaders = { [OPENGENI_API_CONTRACT_HEADER]: "future-contract" };
     const jsonClient = makeClient(

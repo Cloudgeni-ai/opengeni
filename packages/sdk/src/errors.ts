@@ -2,12 +2,40 @@
 export class OpenGeniApiError extends Error {
   readonly status: number;
   readonly body: string;
+  readonly code: string | null;
+  readonly details: Record<string, unknown> | null;
 
   constructor(status: number, body: string) {
+    const parsed = parseErrorEnvelope(body);
+    // Preserve the historical message/body surface for all existing callers;
+    // typed envelope fields are additive and must not rewrite unrelated errors.
     super(`OpenGeni API ${status}: ${body || "(empty body)"}`);
     this.name = "OpenGeniApiError";
     this.status = status;
     this.body = body;
+    this.code = parsed?.code ?? null;
+    this.details = parsed?.details ?? null;
+  }
+}
+
+function parseErrorEnvelope(
+  body: string,
+): { code: string; message: string; details: Record<string, unknown> | null } | null {
+  try {
+    const value = JSON.parse(body) as unknown;
+    if (!value || typeof value !== "object") return null;
+    const error = (value as Record<string, unknown>)["error"];
+    if (!error || typeof error !== "object") return null;
+    const record = error as Record<string, unknown>;
+    if (typeof record["code"] !== "string" || typeof record["message"] !== "string") return null;
+    const details = record["details"];
+    return {
+      code: record["code"],
+      message: record["message"],
+      details: details && typeof details === "object" ? (details as Record<string, unknown>) : null,
+    };
+  } catch {
+    return null;
   }
 }
 
