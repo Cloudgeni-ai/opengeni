@@ -3,7 +3,10 @@ import type { Tool } from "@openai/agents";
 import { shell } from "@openai/agents/sandbox";
 import { existsSync } from "node:fs";
 
-import { createTurnToolCancellationController } from "../src/sandbox/turn-tool-cancellation";
+import {
+  cancellableShellCommand,
+  createTurnToolCancellationController,
+} from "../src/sandbox/turn-tool-cancellation";
 import { createSandboxClientForBackend } from "../src/index";
 import { testSettings } from "@opengeni/testing";
 
@@ -55,6 +58,27 @@ async function pendingAfterMicrotasks(promise: Promise<unknown>): Promise<boolea
 }
 
 describe("turn sandbox-tool physical cancellation fence", () => {
+  test("promotes a provider shell into an isolated process group before user code", async () => {
+    const markerPath = `/tmp/opengeni-turn-shell/test-${crypto.randomUUID()}`;
+    const command = cancellableShellCommand(
+      'test "$$" = "$(ps -o pgid= -p "$$" | tr -d \'[:space:]\')" && printf isolated',
+      markerPath,
+    );
+    const process = Bun.spawn(["/bin/sh", "-c", command], {
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(process.stdout).text(),
+      new Response(process.stderr).text(),
+      process.exited,
+    ]);
+    expect(exitCode, stderr).toBe(0);
+    expect(stdout).toBe("isolated");
+    expect(existsSync(markerPath)).toBe(false);
+  });
+
   test("forces a short PTY yield and escalates ignored Ctrl-C/TERM to a confirmed group KILL", async () => {
     const abort = new AbortController();
     const controller = createTurnToolCancellationController(abort.signal);

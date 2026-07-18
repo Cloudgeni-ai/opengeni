@@ -187,7 +187,7 @@ function shellMarkerPath(token: string): string {
   return `${SHELL_MARKER_DIR}/${token}`;
 }
 
-function cancellableShellCommand(command: string, markerPath: string): string {
+function cancellableGroupLeaderCommand(command: string, markerPath: string): string {
   const marker = singleQuote(markerPath);
   const markerDir = singleQuote(SHELL_MARKER_DIR);
   return [
@@ -208,6 +208,21 @@ function cancellableShellCommand(command: string, markerPath: string): string {
     ")",
     "__opengeni_status=$?",
     'exit "$__opengeni_status"',
+  ].join("\n");
+}
+
+export function cancellableShellCommand(command: string, markerPath: string): string {
+  const groupLeaderCommand = cancellableGroupLeaderCommand(command, markerPath);
+  return [
+    '__opengeni_outer_pid="$$"',
+    '__opengeni_outer_pgid="$(command ps -o pgid= -p "$__opengeni_outer_pid" 2>/dev/null | command tr -d \'[:space:]\')"',
+    'case "$__opengeni_outer_pid:$__opengeni_outer_pgid" in *[!0-9:]*|*:|:*) exit 125 ;; esac',
+    'if [ "$__opengeni_outer_pid" != "$__opengeni_outer_pgid" ]; then',
+    '  __opengeni_setsid="$(command -v setsid 2>/dev/null)"',
+    '  [ -n "$__opengeni_setsid" ] || exit 125',
+    `  exec "$__opengeni_setsid" /bin/sh -c ${singleQuote(groupLeaderCommand)}`,
+    "fi",
+    groupLeaderCommand,
   ].join("\n");
 }
 
