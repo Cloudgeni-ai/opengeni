@@ -523,6 +523,11 @@ async function setTheme(page: Page, theme: "light" | "dark"): Promise<void> {
       requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
     });
   }, theme);
+  // Controls use Tailwind color transitions and the canonical token palette
+  // allows motion up to 320ms. A fast CI runner can reach Axe after two paints
+  // but before the computed foreground settles, producing a false mid-transition
+  // contrast failure. Audit and capture only the final theme state.
+  await page.waitForTimeout(400);
 }
 
 async function resetSurfaceCaptureViewport(page: Page): Promise<void> {
