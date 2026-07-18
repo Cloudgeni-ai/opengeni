@@ -138,11 +138,22 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     await pageA.goto(targetUrl);
     // Pin from the ordinary list-row action, not just the header. The header
     // must reconcile from the same server-authoritative member relation.
-    await pageA.getByRole("button", { name: /^Actions for Master pin target/ }).click();
-    await pageA.getByRole("menuitem", { name: "Pin", exact: true }).click();
+    const targetActions = pageA.getByRole("button", { name: /^Actions for Master pin target/ });
+    await targetActions.focus();
+    await pageA.keyboard.press("Enter");
+    const pinMenuItem = pageA.getByRole("menuitem", { name: "Pin", exact: true });
+    await pinMenuItem.waitFor();
+    await pinMenuItem.focus();
+    await pageA.keyboard.press("Enter");
     await pageA.getByRole("button", { name: "Unpin session" }).waitFor();
     const pinnedA = pageA.getByRole("group", { name: "Pinned" });
     await pinnedA.getByRole("button", { name: /^Open Master pin target/ }).waitFor();
+    await pageA.waitForFunction(() =>
+      document.activeElement?.getAttribute("aria-label")?.startsWith("Actions for Master"),
+    );
+    expect(
+      await pageA.evaluate(() => document.activeElement?.getAttribute("aria-label")),
+    ).toStartWith("Actions for Master pin target");
 
     // A genuinely separate browser context represents another device: it owns
     // independent document, cache, BroadcastChannel, and focus state, while the
@@ -293,6 +304,115 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     await deviceB.close();
     await deviceA.close();
   }, 150_000);
+
+  test("restores row-actions focus after a failed unpin while allowing authoritative GET", async () => {
+    const context = await configuredContext(browser, {
+      viewport: { width: 1280, height: 800 },
+      extraHTTPHeaders: ownerHeaders,
+    });
+    const page = await context.newPage();
+    try {
+      await page.goto(webBaseUrl);
+      const workspaceId = await workspaceFromPage(page);
+      const target = await createSessionThroughApi(
+        page,
+        apiBaseUrl,
+        workspaceId,
+        "Failed row-menu rollback target",
+      );
+      await setSessionPinThroughApi(page, apiBaseUrl, workspaceId, target, true);
+      await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions/${target.id}`);
+      const actions = page.getByRole("button", { name: /^Actions for Failed row-menu rollback/ });
+      await actions.focus();
+      await page.keyboard.press("Enter");
+      const unpin = page.getByRole("menuitem", { name: "Unpin", exact: true });
+      await unpin.waitFor();
+      await unpin.focus();
+
+      let putAttempts = 0;
+      let authoritativeGets = 0;
+      const pinUrl = `${apiBaseUrl}/v1/workspaces/${workspaceId}/sessions/${target.id}/pin`;
+      await page.route(pinUrl, async (route) => {
+        if (route.request().method() === "PUT") {
+          putAttempts += 1;
+          await route.fulfill({
+            status: 500,
+            contentType: "application/json",
+            body: JSON.stringify({ error: "synthetic row-menu failure" }),
+          });
+          return;
+        }
+        await route.continue();
+      });
+      const sessionUrl = `${apiBaseUrl}/v1/workspaces/${workspaceId}/sessions/${target.id}`;
+      await page.route(sessionUrl, async (route) => {
+        if (route.request().method() === "GET") authoritativeGets += 1;
+        await route.continue();
+      });
+
+      await page.keyboard.press("Enter");
+      await page.getByText("Couldn't unpin session", { exact: true }).waitFor();
+      await page.getByRole("button", { name: "Unpin session" }).waitFor();
+      await page.waitForFunction(
+        (sessionId) => document.activeElement?.getAttribute("data-session-actions") === sessionId,
+        target.id,
+      );
+      expect(putAttempts).toBe(1);
+      expect(authoritativeGets).toBeGreaterThan(0);
+      expect(
+        await page.evaluate(() => document.activeElement?.getAttribute("data-session-actions")),
+      ).toBe(target.id);
+    } finally {
+      await context.close();
+    }
+  }, 90_000);
+
+  test("keeps loaded continuation rows visible across a first-page poll", async () => {
+    const context = await configuredContext(browser, {
+      viewport: { width: 1280, height: 800 },
+      extraHTTPHeaders: ownerHeaders,
+    });
+    const page = await context.newPage();
+    try {
+      await page.goto(webBaseUrl);
+      const workspaceId = await workspaceFromPage(page);
+      const sentinel = await createSessionThroughApi(
+        page,
+        apiBaseUrl,
+        workspaceId,
+        "Loaded continuation sentinel",
+      );
+      await Bun.sleep(25);
+      for (let index = 0; index < 50; index += 1) {
+        await createSessionThroughApi(
+          page,
+          apiBaseUrl,
+          workspaceId,
+          `Continuation page filler ${index + 1}`,
+        );
+      }
+
+      await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions`);
+      const loadOlder = page.getByRole("button", { name: "Load older sessions" });
+      await loadOlder.waitFor({ timeout: 15_000 });
+      await loadOlder.click();
+      await page
+        .getByRole("button", { name: /^Open Loaded continuation sentinel/ })
+        .waitFor({ timeout: 15_000 });
+
+      await createSessionThroughApi(page, apiBaseUrl, workspaceId, "Poll-only newest session");
+      await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+      await page
+        .getByRole("button", { name: /^Open Poll-only newest session/ })
+        .waitFor({ timeout: 15_000 });
+      await page
+        .getByRole("button", { name: /^Open Loaded continuation sentinel/ })
+        .waitFor({ timeout: 15_000 });
+      expect(sentinel.id).toBeTruthy();
+    } finally {
+      await context.close();
+    }
+  }, 120_000);
 
   test("renders one truthful queue, goal, and agents stack above the composer", async () => {
     const desktop = await configuredContext(browser, {
@@ -571,9 +691,13 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     }
   }, 150_000);
 
-  test("keeps the pin/header/rail usable at 320px in light and dark themes", async () => {
+  test("keeps the pin/header/rail usable at 320px and 375px in light and dark themes", async () => {
+    const mobileViewports = [
+      { width: 320, height: 740, artifactSuffix: "" },
+      { width: 375, height: 812, artifactSuffix: "-375" },
+    ] as const;
     const context = await configuredContext(browser, {
-      viewport: { width: 320, height: 740 },
+      viewport: mobileViewports[0],
       hasTouch: true,
       isMobile: true,
       extraHTTPHeaders: ownerHeaders,
@@ -609,60 +733,65 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     await page.reload();
     await page.getByRole("button", { name: "Unpin session" }).waitFor();
 
-    for (const theme of ["light", "dark"] as const) {
-      await setTheme(page, theme);
-      await expectNoPageOverflow(page);
-      const pin = page.getByRole("button", { name: /^(Pin|Unpin) session$/ });
-      const inspector = page.getByRole("button", { name: /session panel$/ });
-      const hamburger = page.getByRole("button", { name: "Open navigation" });
-      for (const control of [pin, inspector, hamburger]) {
-        const box = await control.boundingBox();
-        expect(box?.width ?? 0).toBeGreaterThanOrEqual(44);
-        expect(box?.height ?? 0).toBeGreaterThanOrEqual(44);
+    for (const viewport of mobileViewports) {
+      await page.setViewportSize(viewport);
+      for (const theme of ["light", "dark"] as const) {
+        await setTheme(page, theme);
+        await expectNoPageOverflow(page);
+        const pin = page.getByRole("button", { name: /^(Pin|Unpin) session$/ });
+        const inspector = page.getByRole("button", { name: /session panel$/ });
+        const hamburger = page.getByRole("button", { name: "Open navigation" });
+        for (const control of [pin, inspector, hamburger]) {
+          const box = await control.boundingBox();
+          expect(box?.width ?? 0).toBeGreaterThanOrEqual(44);
+          expect(box?.height ?? 0).toBeGreaterThanOrEqual(44);
+        }
+
+        // Capture the actual opened drawer and pinned section in each theme, not
+        // merely the header behind a closed drawer.
+        await page.getByRole("button", { name: "Open navigation" }).click();
+        const navigation = page.getByRole("navigation", { name: "Primary" });
+        await navigation.waitFor();
+        expect(await page.getByRole("dialog").getAttribute("aria-label")).toBe(
+          "Session navigation",
+        );
+        const targetRow = navigation.getByRole("button", { name: /^Open Mobile pin/ });
+        await targetRow.waitFor();
+        // The active route row can render from its point read before the global
+        // pin page arrives. Wait for a seeded shortcut so the count below
+        // measures the fully loaded pinned section rather than that transient.
+        await navigation.getByRole("button", { name: /^Open Pinned mobile stress 7/ }).waitFor();
+        expect(await navigation.getByRole("group", { name: "Pinned" }).count()).toBe(1);
+        expect(
+          await navigation.getByRole("button", { name: /^Open Pinned mobile stress/ }).count(),
+        ).toBe(7);
+        await expectTouchTarget(targetRow);
+        await expectTouchTarget(
+          navigation.getByRole("button", { name: /^Actions for Mobile pin/ }),
+        );
+        await expectTouchTarget(navigation.getByRole("searchbox", { name: "Search sessions" }));
+        await expectContainedInViewport(navigation, viewport.width);
+        await expectNoPageOverflow(page);
+        await expectNoAxeViolations(page, [
+          "[data-ope26-session-header]",
+          "[data-ope26-session-list]",
+        ]);
+        await page.screenshot({
+          path: `/tmp/ope26-session-pin-mobile${viewport.artifactSuffix}-${theme}.png`,
+          fullPage: true,
+        });
+
+        await page.keyboard.press("Escape");
+        await page.getByRole("navigation", { name: "Primary" }).waitFor({ state: "hidden" });
+        // Radix restores focus after the drawer's close animation settles. Wait
+        // for that observable contract rather than racing the animation frame.
+        await page.waitForFunction(
+          () => document.activeElement?.getAttribute("aria-label") === "Open navigation",
+        );
+        expect(await page.evaluate(() => document.activeElement?.getAttribute("aria-label"))).toBe(
+          "Open navigation",
+        );
       }
-
-      // Capture the actual opened drawer and pinned section in each theme, not
-      // merely the header behind a closed drawer.
-      await page.getByRole("button", { name: "Open navigation" }).click();
-      const navigation = page.getByRole("navigation", { name: "Primary" });
-      await navigation.waitFor();
-      expect(await page.getByRole("dialog").getAttribute("aria-label")).toBe("Session navigation");
-      const targetRow = navigation.getByRole("button", {
-        name: /^Open Mobile pin/,
-      });
-      await targetRow.waitFor();
-      // The active route row can render from its point read before the pinned
-      // page arrives. Wait for one seeded shortcut so this assertion measures
-      // the loaded global pin section rather than that intermediate state.
-      await navigation.getByRole("button", { name: /^Open Pinned mobile stress 7/ }).waitFor();
-      expect(await navigation.getByRole("group", { name: "Pinned" }).count()).toBe(1);
-      expect(
-        await navigation.getByRole("button", { name: /^Open Pinned mobile stress/ }).count(),
-      ).toBe(7);
-      await expectTouchTarget(targetRow);
-      await expectTouchTarget(navigation.getByRole("button", { name: /^Actions for Mobile pin/ }));
-      await expectTouchTarget(navigation.getByRole("searchbox", { name: "Search sessions" }));
-      await expectContainedInViewport(navigation, 320);
-      await expectNoPageOverflow(page);
-      await expectNoAxeViolations(page, [
-        "[data-ope26-session-header]",
-        "[data-ope26-session-list]",
-      ]);
-      await page.screenshot({
-        path: `/tmp/ope26-session-pin-mobile-${theme}.png`,
-        fullPage: true,
-      });
-
-      await page.keyboard.press("Escape");
-      await page.getByRole("navigation", { name: "Primary" }).waitFor({ state: "hidden" });
-      // Radix restores focus after the drawer's close animation settles. Wait
-      // for that observable contract rather than racing the animation frame.
-      await page.waitForFunction(
-        () => document.activeElement?.getAttribute("aria-label") === "Open navigation",
-      );
-      expect(await page.evaluate(() => document.activeElement?.getAttribute("aria-label"))).toBe(
-        "Open navigation",
-      );
     }
     await context.close();
   }, 90_000);
@@ -741,7 +870,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
           headers: { authorization: `Bearer ${token}` },
         },
       );
-      await waitForDatabaseQueryWait(barrier, "workspace_memberships");
+      await waitForDatabaseQueryWait(barrier, "pg_advisory_xact_lock_shared");
       await barrier`select pg_advisory_unlock(${barrierClass}, ${removalLock})`;
       expect(await removalPromise).toBe(true);
 
@@ -862,7 +991,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
           body: JSON.stringify({ pinned: true, expectedVersion: 0 }),
         },
       );
-      await waitForDatabaseQueryWait(barrier, "workspace_memberships");
+      await waitForDatabaseQueryWait(barrier, "pg_advisory_xact_lock");
       await barrier`select pg_advisory_unlock(${barrierClass}, ${removalLock})`;
       expect(await removalPromise).toBe(true);
 

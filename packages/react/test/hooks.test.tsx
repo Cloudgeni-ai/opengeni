@@ -5,11 +5,13 @@
    needs them and restored afterwards.
    -------------------------------------------------------------------------- */
 import { describe, expect, test } from "bun:test";
+import { act as reactAct } from "react";
 import type {
   ComposerDraft,
   SessionEvent,
   SessionQueueMutationResponse,
   SessionQueueSnapshot,
+  SessionListResponse,
   SessionTurn,
   WorkspaceEnvironment,
 } from "@opengeni/sdk";
@@ -94,6 +96,89 @@ describe("useWorkspaceSessions", () => {
     ]);
     expect(hook.result.current.pinned.map((session) => session.id)).toEqual(["pinned"]);
     expect(hook.result.current.nextCursor).toBe("next-page");
+    await hook.unmount();
+  });
+
+  test("treats the query-key transition render as loading", async () => {
+    const initial = { id: "initial", pinned: false } as never;
+    const searched = { id: "searched", pinned: false } as never;
+    let resolveSearch: (() => void) | null = null;
+    const client = fakeClient({
+      listSessionPage: async (_workspaceId, options) => {
+        if (options?.search === "needle") {
+          return await new Promise<SessionListResponse>((resolve) => {
+            resolveSearch = () =>
+              resolve({
+                pinned: [],
+                sessions: [searched],
+                nextCursor: null,
+              } as SessionListResponse);
+          });
+        }
+        return { pinned: [], sessions: [initial], nextCursor: null };
+      },
+    });
+    const hook = await renderHook(
+      (search: string) => useWorkspaceSessions({ client, workspaceId: WORKSPACE_ID, search }),
+      "" as string,
+    );
+    await flush();
+    expect(hook.result.current.sessions.map((session) => session.id)).toEqual(["initial"]);
+
+    await hook.rerender("needle");
+    await flush();
+    expect(hook.result.current.loading).toBe(true);
+    expect(hook.result.current.sessions).toEqual([]);
+
+    await reactAct(async () => {
+      resolveSearch!();
+    });
+    await flush();
+    expect(hook.result.current.loading).toBe(false);
+    expect(hook.result.current.sessions.map((session) => session.id)).toEqual(["searched"]);
+    await hook.unmount();
+  });
+
+  test("keeps the last successful page visible when a poll fails", async () => {
+    const stable = { id: "stable", pinned: false } as never;
+    let calls = 0;
+    const client = fakeClient({
+      listSessionPage: async () => {
+        calls += 1;
+        if (calls > 1) throw new Error("poll unavailable");
+        return { pinned: [], sessions: [stable], nextCursor: null };
+      },
+    });
+    const hook = await renderHook(
+      () => useWorkspaceSessions({ client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush();
+    expect(hook.result.current.loading).toBe(false);
+    await reactAct(async () => {
+      await hook.result.current.refresh();
+    });
+    await flush();
+    expect(hook.result.current.sessions.map((session) => session.id)).toEqual(["stable"]);
+    expect(hook.result.current.error?.message).toBe("poll unavailable");
+    expect(hook.result.current.loading).toBe(false);
+    await hook.unmount();
+  });
+
+  test("does not report a query transition as loading while disabled", async () => {
+    const client = fakeClient({
+      listSessionPage: async () => ({ pinned: [], sessions: [], nextCursor: null }),
+    });
+    const hook = await renderHook(
+      (search: string) =>
+        useWorkspaceSessions({ client, workspaceId: WORKSPACE_ID, search, enabled: false }),
+      "" as string,
+    );
+    await flush();
+    expect(hook.result.current.loading).toBe(false);
+
+    await hook.rerender("disabled-transition");
+    expect(hook.result.current.loading).toBe(false);
     await hook.unmount();
   });
 });

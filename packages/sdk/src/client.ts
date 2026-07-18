@@ -260,13 +260,22 @@ export class OpenGeniClient {
       search?: string;
     } = {},
   ): Promise<Session[]> {
+    // Search was added with the pin-aware page endpoint. An older API silently
+    // ignores unknown query parameters on the historical array endpoint, which
+    // would turn a search into a plausible-looking unfiltered result. Route
+    // searches through listSessionPage so its rolling-version shape check can
+    // fail explicitly on an older server; retain the array endpoint for every
+    // pre-existing call shape.
+    if (options.search?.trim()) {
+      const page = await this.listSessionPage(workspaceId, options);
+      return [...page.pinned, ...page.sessions];
+    }
     return await this.requestJson<Session[]>(
       "GET",
       `/v1/workspaces/${workspaceId}/sessions`,
       undefined,
       {
         ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
-        ...(options.search?.trim() ? { search: options.search.trim() } : {}),
         ...(Object.prototype.hasOwnProperty.call(options, "parentSessionId") &&
         options.parentSessionId !== undefined
           ? {
@@ -288,7 +297,7 @@ export class OpenGeniClient {
       search?: string;
     } = {},
   ): Promise<SessionListResponse> {
-    return await this.requestJson<SessionListResponse>(
+    const response = await this.requestJson<SessionListResponse | Session[]>(
       "GET",
       `/v1/workspaces/${workspaceId}/sessions`,
       undefined,
@@ -306,6 +315,23 @@ export class OpenGeniClient {
           : {}),
       },
     );
+    if (Array.isArray(response)) {
+      // Rolling/same-major compatibility: an older API ignores `view=page` and
+      // returns the historical array. That is an honest one-page projection;
+      // never pretend it honored a cursor supplied directly by a caller.
+      if (options.cursor) {
+        throw new Error("The connected OpenGeni API does not support stable session-page cursors");
+      }
+      // Older APIs ignore unknown query parameters. Treating their unfiltered
+      // array as a successful search would be worse than an explicit rolling-
+      // upgrade error (and client-side filtering cannot recover matches beyond
+      // the old endpoint's bounded first page).
+      if (options.search?.trim()) {
+        throw new Error("The connected OpenGeni API does not support session search");
+      }
+      return { pinned: [], sessions: response, nextCursor: null };
+    }
+    return response;
   }
 
   /** Set this authenticated member's personal workspace pin for a session. */

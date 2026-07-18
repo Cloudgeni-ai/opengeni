@@ -1,5 +1,5 @@
 import type { Session } from "@opengeni/sdk";
-import { useCallback } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { useOpenGeni, type ClientOverride } from "../provider";
 import { usePolledValue } from "./internal";
 
@@ -36,7 +36,13 @@ export function useWorkspaceSessions(
   const parentSessionId = options.parentSessionId;
   const cursor = options.cursor;
   const search = options.search;
+  const enabled = options.enabled ?? true;
   const queryKey = JSON.stringify({ workspaceId, limit, parentSessionId, cursor, search });
+  const previousQueryKey = useRef(queryKey);
+  const queryKeyTransition = previousQueryKey.current !== queryKey;
+  useEffect(() => {
+    previousQueryKey.current = queryKey;
+  }, [queryKey]);
   const load = useCallback(
     async () => ({
       queryKey,
@@ -51,7 +57,7 @@ export function useWorkspaceSessions(
   );
   const state = usePolledValue(load, {
     pollIntervalMs: options.pollIntervalMs,
-    enabled: options.enabled,
+    enabled,
   });
   // usePolledValue drops stale async completions, while the explicit query key
   // also prevents the previous query's cached value from painting for the one
@@ -66,7 +72,15 @@ export function useWorkspaceSessions(
     sessions: [...pinned, ...ordinary],
     pinned,
     nextCursor: page?.nextCursor ?? null,
-    loading: state.loading,
+    // `usePolledValue` clears the old data and starts the new request in an
+    // effect. During that query-key transition render, its old loading flag
+    // can still be false; expose loading immediately so consumers do not
+    // announce a transient false zero-match result.
+    loading:
+      enabled &&
+      (state.loading ||
+        queryKeyTransition ||
+        (state.data !== null && state.data.queryKey !== queryKey)),
     error: state.error,
     refresh: state.refresh,
   };

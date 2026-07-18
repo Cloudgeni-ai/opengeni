@@ -44,6 +44,11 @@ export function sessionActivityTime(session: Session): number {
   return Number.isNaN(created) ? 0 : created;
 }
 
+/** Deterministic newest-first ordering for every flat or forest session list. */
+export function compareSessionActivity(left: Session, right: Session): number {
+  return sessionActivityTime(right) - sessionActivityTime(left) || right.id.localeCompare(left.id);
+}
+
 /**
  * Which recency bucket a timestamp falls into, relative to `now`. "Today" and
  * "Yesterday" are calendar-local; "Previous 7 days" is the rest of the trailing
@@ -87,10 +92,10 @@ export type GroupedSessions = {
 export function groupSessionsForRail(sessions: Session[], now: Date = new Date()): GroupedSessions {
   const running = sessions
     .filter((session) => isRunningStatus(session.status))
-    .sort((a, b) => sessionActivityTime(b) - sessionActivityTime(a));
+    .sort(compareSessionActivity);
   const rest = sessions
     .filter((session) => !isRunningStatus(session.status))
-    .sort((a, b) => sessionActivityTime(b) - sessionActivityTime(a));
+    .sort(compareSessionActivity);
 
   const buckets = new Map<SessionRecencyGroup, Session[]>();
   for (const session of rest) {
@@ -177,7 +182,7 @@ export function buildRailForest(sessions: Session[], now: Date = new Date()): Se
     const children = seen.has(session.id)
       ? []
       : (childrenOf.get(session.id) ?? [])
-          .sort((a, b) => sessionActivityTime(b) - sessionActivityTime(a))
+          .sort(compareSessionActivity)
           .map((child) => build(child, new Set(seen).add(session.id)));
     const hasActiveDescendant = children.some((child) => nodeIsActive(child));
     return { session, children, hasActiveDescendant };
@@ -205,10 +210,10 @@ export function buildRailForest(sessions: Session[], now: Date = new Date()): Se
   }
   const running = rootNodes
     .filter((node) => nodeIsActive(node))
-    .sort((a, b) => sessionActivityTime(b.session) - sessionActivityTime(a.session));
+    .sort((a, b) => compareSessionActivity(a.session, b.session));
   const rest = rootNodes
     .filter((node) => !nodeIsActive(node))
-    .sort((a, b) => sessionActivityTime(b.session) - sessionActivityTime(a.session));
+    .sort((a, b) => compareSessionActivity(a.session, b.session));
 
   const buckets = new Map<SessionRecencyGroup, SessionTreeNode[]>();
   for (const node of rest) {

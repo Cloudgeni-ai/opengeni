@@ -265,6 +265,38 @@ describe("rail session grouping", () => {
     expect(forest.running.map((node) => node.session.id)).toEqual(["manager-summary"]);
   });
 
+  test("breaks activity ties by descending session id in flat and forest orders", () => {
+    const flat = groupSessionsForRail(
+      [
+        railSession({ id: "session-a", updatedAt: "2026-06-19T10:00:00.000Z" }),
+        railSession({ id: "session-z", updatedAt: "2026-06-19T10:00:00.000Z" }),
+      ],
+      NOW,
+    );
+    expect(flat.grouped[0]?.sessions.map((item) => item.id)).toEqual(["session-z", "session-a"]);
+
+    const forest = buildRailForest(
+      [
+        railSession({ id: "manager", updatedAt: "2026-06-19T10:00:00.000Z" }),
+        railSession({
+          id: "worker-a",
+          parentSessionId: "manager",
+          updatedAt: "2026-06-19T11:00:00.000Z",
+        }),
+        railSession({
+          id: "worker-z",
+          parentSessionId: "manager",
+          updatedAt: "2026-06-19T11:00:00.000Z",
+        }),
+      ],
+      NOW,
+    );
+    expect(forest.grouped[0]?.sessions[0]?.children.map((node) => node.session.id)).toEqual([
+      "worker-z",
+      "worker-a",
+    ]);
+  });
+
   test("visibleForestRows expands only where the set says so", () => {
     const forest = buildRailForest(
       [
