@@ -818,9 +818,11 @@ function MachineStateChip({
       <Popover.Portal forceMount>
         <Popover.Content
           forceMount
+          data-machine-state-popover
           align="end"
           sideOffset={6}
-          className="og-root z-50 w-64 rounded-og-md border border-og-border bg-og-surface-1 p-3 text-og-sm text-og-fg shadow-lg outline-none data-[state=closed]:hidden"
+          collisionPadding={8}
+          className="og-root z-50 w-64 max-w-[calc(100vw-1rem)] rounded-og-md border border-og-border bg-og-surface-1 p-3 text-og-sm text-og-fg shadow-lg outline-none"
           style={portalStyle}
         >
           <div className="flex min-w-0 items-center gap-1.5">

@@ -536,6 +536,10 @@ function DockChrome({
   const [tabOverflow, setTabOverflow] = useState({ start: false, end: false });
   const activeId = active?.id ?? "";
   const activeTabIndex = tabs.findIndex((tab) => tab.id === activeId);
+  const keepActiveTabVisible = useCallback(() => {
+    const selected = activeTabIndex >= 0 ? tabRefs.current[activeTabIndex] : null;
+    selected?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [activeTabIndex]);
 
   useEffect(() => {
     if (!activeId) return;
@@ -552,9 +556,8 @@ function DockChrome({
   // follows focus, so keep the selected tab inside the horizontally scrollable
   // strip even when state — rather than a click or arrow key — selected it.
   useDockLayoutEffect(() => {
-    const selected = activeTabIndex >= 0 ? tabRefs.current[activeTabIndex] : null;
-    selected?.scrollIntoView({ block: "nearest", inline: "nearest" });
-  }, [activeId, activeTabIndex]);
+    keepActiveTabVisible();
+  }, [activeId, keepActiveTabVisible]);
 
   // Hidden scrollbars keep the chrome quiet, but without an edge cue a clipped
   // host label reads like corrupted copy. Fade only the edge(s) with more tabs,
@@ -572,7 +575,12 @@ function DockChrome({
     update();
     list.addEventListener("scroll", update, { passive: true });
     const observer =
-      typeof ResizeObserver === "undefined" ? null : new ResizeObserver(() => update());
+      typeof ResizeObserver === "undefined"
+        ? null
+        : new ResizeObserver(() => {
+            keepActiveTabVisible();
+            update();
+          });
     observer?.observe(list);
     for (const tab of tabRefs.current) {
       if (tab) observer?.observe(tab);
@@ -581,7 +589,7 @@ function DockChrome({
       list.removeEventListener("scroll", update);
       observer?.disconnect();
     };
-  }, [activeId, tabs.length]);
+  }, [activeId, keepActiveTabVisible, tabs.length]);
 
   const tabMask =
     tabOverflow.start && tabOverflow.end

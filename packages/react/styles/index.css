@@ -216,6 +216,17 @@
   scrollbar-color: var(--og-color-border-strong) transparent;
 }
 
+/* The machine popover stays mounted so its trigger's `aria-controls` always
+   resolves. Keep Radix's positioning wrapper measurable while closed, but
+   remove the entire fixed layer from painting, hit testing, and the a11y tree.
+   Hiding only the content leaves the wrapper able to intercept pointer input. */
+[data-radix-popper-content-wrapper]:has(
+  > [data-machine-state-popover][data-state="closed"]
+) {
+  visibility: hidden;
+  pointer-events: none;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .og-root *,
   .og-root *::before,

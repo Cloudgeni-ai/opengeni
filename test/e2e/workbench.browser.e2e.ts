@@ -594,14 +594,22 @@ describe("workbench browser acceptance", () => {
           exact: true,
         })
         .waitFor();
-      const popover = page.locator("[data-radix-popper-content-wrapper]:not([hidden])");
-      const popoverContent = popover.locator('[data-state="open"]');
-      expect(
-        await popover.evaluate((element) => {
-          const rect = element.getBoundingClientRect();
-          return rect.left >= 0 && rect.right <= window.innerWidth;
-        }),
-      ).toBe(true);
+      const popoverContent = page.locator('[data-machine-state-popover][data-state="open"]');
+      await popoverContent.waitFor({ state: "visible" });
+      const popoverBounds = await popoverContent.evaluate((element) => {
+        const rect = element.getBoundingClientRect();
+        return {
+          left: rect.left,
+          right: rect.right,
+          width: rect.width,
+          viewportWidth: window.innerWidth,
+        };
+      });
+      if (popoverBounds.left < 8 || popoverBounds.right > popoverBounds.viewportWidth - 8) {
+        throw new Error(
+          `Machine popover escaped its 8px viewport inset: ${JSON.stringify(popoverBounds)}`,
+        );
+      }
       expect(
         await popoverContent.evaluate((element) => {
           const source = document.querySelector<HTMLElement>('[data-og-theme="light"]');
@@ -642,6 +650,12 @@ describe("workbench browser acceptance", () => {
         const page = await context.newPage();
         await page.goto(dockUrl(baseUrl, "content-stress", "light", "regression-diagnostics"), {
           waitUntil: "networkidle",
+        });
+        await page.evaluate(async () => {
+          await document.fonts.ready;
+          await new Promise<void>((resolve) => {
+            requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+          });
         });
         const selected = page.getByRole("tab", {
           name: "Regression diagnostics and verification evidence",
