@@ -38,10 +38,10 @@ import {
   requireSession,
   saveWorkspaceMemory,
   searchWorkspaceMemories,
-  setSessionGoalStatus,
+  setSessionGoalStatusWithEvent,
   setVariableSetVariable,
   updateScheduledTask,
-  updateSessionGoal,
+  updateSessionGoalWithEvent,
   upsertSessionGoal,
   RigChangeAlreadyVerifyingError,
   RigChangeTransitionError,
@@ -738,23 +738,20 @@ function registerGoalTools(
       if (existing.status === "completed") {
         throw new Error("session goal is completed; use goal_set to start a new goal");
       }
-      const goal = await updateSessionGoal(deps.db, grant.workspaceId, sessionId, {
-        ...(text !== undefined ? { text } : {}),
-        ...(successCriteria !== undefined ? { successCriteria } : {}),
-      });
-      await appendAndPublishEvents(deps.db, deps.bus, grant.workspaceId, sessionId, [
+      const { goal, events } = await updateSessionGoalWithEvent(
+        deps.db,
+        grant.workspaceId,
+        sessionId,
         {
-          type: "goal.updated",
-          payload: {
-            goalId: goal.id,
-            text: goal.text,
-            ...(goal.successCriteria ? { successCriteria: goal.successCriteria } : {}),
-            ...(progressNote ? { progressNote } : {}),
-            version: goal.version,
-            actor: "agent",
-          },
+          ...(text !== undefined ? { text } : {}),
+          ...(successCriteria !== undefined ? { successCriteria } : {}),
+          ...(progressNote !== undefined ? { progressNote } : {}),
+          actor: "agent",
         },
-      ]);
+      );
+      if (events.length > 0) {
+        await deps.bus.publish(grant.workspaceId, sessionId, events);
+      }
       return json(goal);
     },
   );
@@ -772,17 +769,18 @@ function registerGoalTools(
       if (!existing) {
         throw new Error("this session has no goal; use goal_set first");
       }
-      const { goal, changed } = await setSessionGoalStatus(deps.db, grant.workspaceId, sessionId, {
-        status: "completed",
-        evidence,
-      });
-      if (changed) {
-        await appendAndPublishEvents(deps.db, deps.bus, grant.workspaceId, sessionId, [
-          {
-            type: "goal.completed",
-            payload: { goalId: goal.id, evidence, version: goal.version },
-          },
-        ]);
+      const { goal, events } = await setSessionGoalStatusWithEvent(
+        deps.db,
+        grant.workspaceId,
+        sessionId,
+        {
+          status: "completed",
+          evidence,
+          event: { type: "goal.completed", evidence },
+        },
+      );
+      if (events.length > 0) {
+        await deps.bus.publish(grant.workspaceId, sessionId, events);
       }
       return json(goal);
     },
@@ -801,25 +799,24 @@ function registerGoalTools(
       if (!existing) {
         throw new Error("this session has no goal; use goal_set first");
       }
-      const { goal, changed } = await setSessionGoalStatus(deps.db, grant.workspaceId, sessionId, {
-        status: "paused",
-        rationale,
-        pausedReason: "agent",
-      });
-      if (changed) {
-        await appendAndPublishEvents(deps.db, deps.bus, grant.workspaceId, sessionId, [
-          {
+      const { goal, events } = await setSessionGoalStatusWithEvent(
+        deps.db,
+        grant.workspaceId,
+        sessionId,
+        {
+          status: "paused",
+          rationale,
+          pausedReason: "agent",
+          event: {
             type: "goal.paused",
-            payload: {
-              goalId: goal.id,
-              actor: "agent",
-              reason: "agent",
-              rationale,
-              autoContinuations: goal.autoContinuations,
-              noProgressStreak: goal.noProgressStreak,
-            },
+            actor: "agent",
+            reason: "agent",
+            rationale,
           },
-        ]);
+        },
+      );
+      if (events.length > 0) {
+        await deps.bus.publish(grant.workspaceId, sessionId, events);
       }
       return json(goal);
     },

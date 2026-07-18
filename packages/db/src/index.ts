@@ -8956,7 +8956,13 @@ export async function reconcileCodexCapacityWait<
             and(
               eq(schema.sessionTurns.workspaceId, input.workspaceId),
               eq(schema.sessionTurns.sessionId, input.sessionId),
-              inArray(schema.sessionTurns.status, ["queued", "running", "requires_action"]),
+              inArray(schema.sessionTurns.status, [
+                "queued",
+                "running",
+                "requires_action",
+                "recovering",
+                "waiting_capacity",
+              ]),
             ),
           )
           .limit(1);
@@ -17729,6 +17735,172 @@ export async function getSessionGoal(
   });
 }
 
+export type SessionGoalContinuationProjection = {
+  state: "inactive" | "scheduled" | "running" | "blocked" | "invariant_broken";
+  reason:
+    | "goal_inactive"
+    | "wake_pending"
+    | "continuation_pending"
+    | "human_work_pending"
+    | "goal_turn_running"
+    | "human_turn_running"
+    | "workstream_paused"
+    | "approval_required"
+    | "provider_backpressure"
+    | "session_cancelled"
+    | "system_work_pending"
+    | "missing_obligation";
+  wakeRevision: number;
+  observedRevision: number;
+  nextAttemptAt: string | null;
+  lastError: string | null;
+};
+
+/**
+ * Read the goal and its autonomy state from one repeatable Postgres snapshot.
+ * The projection never infers liveness from the public session status alone:
+ * goal revisions, typed internal updates/turns, capacity waiters, admission
+ * control, and the workflow-wake delivery ledger each remain distinct truth.
+ */
+export async function getSessionGoalWithContinuation(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<(SessionGoal & { continuation: SessionGoalContinuationProjection }) | null> {
+  const context = await rlsContextForWorkspace(db, workspaceId);
+  return await withRlsContext(
+    db,
+    context,
+    async (tx) => {
+      const effectiveControl = await evaluateSessionControl(tx, workspaceId, sessionId);
+      const [session] = await tx
+        .select()
+        .from(schema.sessions)
+        .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
+        .limit(1);
+      const [goal] = await tx
+        .select()
+        .from(schema.sessionGoals)
+        .where(
+          and(
+            eq(schema.sessionGoals.workspaceId, workspaceId),
+            eq(schema.sessionGoals.sessionId, sessionId),
+          ),
+        )
+        .limit(1);
+      if (!session || !goal) return null;
+
+      const [turn] = await tx
+        .select({
+          id: schema.sessionTurns.id,
+          status: schema.sessionTurns.status,
+          source: schema.sessionTurns.source,
+        })
+        .from(schema.sessionTurns)
+        .where(
+          and(
+            eq(schema.sessionTurns.workspaceId, workspaceId),
+            eq(schema.sessionTurns.sessionId, sessionId),
+            inArray(schema.sessionTurns.status, [
+              "queued",
+              "running",
+              "requires_action",
+              "recovering",
+              "waiting_capacity",
+            ]),
+          ),
+        )
+        .orderBy(asc(schema.sessionTurns.position), asc(schema.sessionTurns.createdAt))
+        .limit(1);
+      const [continuationUpdate] = await tx
+        .select({ id: schema.sessionSystemUpdates.id })
+        .from(schema.sessionSystemUpdates)
+        .where(
+          and(
+            eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
+            eq(schema.sessionSystemUpdates.sessionId, sessionId),
+            eq(schema.sessionSystemUpdates.kind, "goal_continuation"),
+            eq(schema.sessionSystemUpdates.state, "pending"),
+            sql`${schema.sessionSystemUpdates.payload} ->> 'goalId' = ${goal.id}`,
+            sql`(${schema.sessionSystemUpdates.payload} ->> 'goalVersion')::integer = ${goal.version}`,
+          ),
+        )
+        .limit(1);
+      const [capacityWait] = await tx
+        .select({ nextCheckAt: schema.codexCapacityWaiters.nextCheckAt })
+        .from(schema.codexCapacityWaiters)
+        .where(
+          and(
+            eq(schema.codexCapacityWaiters.workspaceId, workspaceId),
+            eq(schema.codexCapacityWaiters.sessionId, sessionId),
+            eq(schema.codexCapacityWaiters.goalId, goal.id),
+            eq(schema.codexCapacityWaiters.goalVersion, goal.version),
+            eq(schema.codexCapacityWaiters.status, "waiting"),
+          ),
+        )
+        .limit(1);
+      const [wake] = await tx
+        .select({
+          wakeRevision: schema.sessionWorkflowWakeOutbox.wakeRevision,
+          deliveredRevision: schema.sessionWorkflowWakeOutbox.deliveredRevision,
+          nextAttemptAt: schema.sessionWorkflowWakeOutbox.nextAttemptAt,
+          lastError: schema.sessionWorkflowWakeOutbox.lastError,
+        })
+        .from(schema.sessionWorkflowWakeOutbox)
+        .where(
+          and(
+            eq(schema.sessionWorkflowWakeOutbox.workspaceId, workspaceId),
+            eq(schema.sessionWorkflowWakeOutbox.sessionId, sessionId),
+          ),
+        )
+        .limit(1);
+
+      const base = {
+        wakeRevision: goal.continuationWakeRevision,
+        observedRevision: goal.continuationObservedRevision,
+        nextAttemptAt:
+          capacityWait?.nextCheckAt.toISOString() ??
+          (wake && wake.wakeRevision > wake.deliveredRevision
+            ? wake.nextAttemptAt.toISOString()
+            : null),
+        lastError: wake?.lastError ?? null,
+      };
+      let continuation: SessionGoalContinuationProjection;
+      if (goal.status !== "active") {
+        continuation = { state: "inactive", reason: "goal_inactive", ...base };
+      } else if (effectiveControl.state !== "active") {
+        continuation = { state: "blocked", reason: "workstream_paused", ...base };
+      } else if (session.status === "cancelled") {
+        continuation = { state: "blocked", reason: "session_cancelled", ...base };
+      } else if (capacityWait || turn?.status === "waiting_capacity") {
+        continuation = { state: "blocked", reason: "provider_backpressure", ...base };
+      } else if (turn?.status === "requires_action") {
+        continuation = { state: "blocked", reason: "approval_required", ...base };
+      } else if (turn && ["user", "api", "scheduled_task"].includes(turn.source)) {
+        continuation = {
+          state: turn.status === "queued" ? "scheduled" : "running",
+          reason: turn.status === "queued" ? "human_work_pending" : "human_turn_running",
+          ...base,
+        };
+      } else if (turn?.source === "goal") {
+        continuation = { state: "running", reason: "goal_turn_running", ...base };
+      } else if (turn) {
+        continuation = { state: "scheduled", reason: "system_work_pending", ...base };
+      } else if (continuationUpdate) {
+        continuation = { state: "scheduled", reason: "continuation_pending", ...base };
+      } else if (goal.continuationWakeRevision > goal.continuationObservedRevision) {
+        continuation = { state: "scheduled", reason: "wake_pending", ...base };
+      } else if (session.status === "queued") {
+        continuation = { state: "scheduled", reason: "system_work_pending", ...base };
+      } else {
+        continuation = { state: "invariant_broken", reason: "missing_obligation", ...base };
+      }
+      return { ...mapSessionGoal(goal), continuation };
+    },
+    { isolationLevel: "repeatable read", accessMode: "read only" },
+  );
+}
+
 export async function clearSessionGoal(
   db: Database,
   workspaceId: string,
@@ -17861,6 +18033,7 @@ export async function upsertSessionGoal(
           noProgressStreak: 0,
           lastContinuationTurnId: null,
           versionAtLastContinuation: null,
+          continuationWakeRevision: existing.continuationWakeRevision + 1,
           updatedAt: new Date(),
         })
         .where(eq(schema.sessionGoals.id, existing.id))
@@ -17908,6 +18081,67 @@ export async function updateSessionGoal(
     }
     return mapSessionGoal(row);
   });
+}
+
+/**
+ * Agent goal_update: session sequence ownership, goal mutation, and its audit
+ * event commit together. Locking the session before the goal also matches an
+ * active turn's event-write order and avoids the workspace->session inversion
+ * that previously self-locked root goal mutations.
+ */
+export async function updateSessionGoalWithEvent(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  input: {
+    text?: string;
+    successCriteria?: string | null;
+    progressNote?: string;
+    actor: "agent" | "api";
+  },
+): Promise<{ goal: SessionGoal; events: SessionEvent[] }> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
+    scopedDb.transaction(async (rawTx) => {
+      const tx = rawTx as unknown as Database;
+      const [session] = await tx
+        .select()
+        .from(schema.sessions)
+        .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
+        .for("update")
+        .limit(1);
+      if (!session) throw new Error(`Session not found: ${sessionId}`);
+      const goal = await updateSessionGoal(tx, workspaceId, sessionId, {
+        ...(input.text !== undefined ? { text: input.text } : {}),
+        ...(input.successCriteria !== undefined ? { successCriteria: input.successCriteria } : {}),
+      });
+      const now = new Date();
+      const [event] = await tx
+        .insert(schema.sessionEvents)
+        .values({
+          accountId: session.accountId,
+          workspaceId,
+          sessionId,
+          sequence: session.lastSequence + 1,
+          type: "goal.updated",
+          payload: sanitizeEventPayload({
+            goalId: goal.id,
+            text: goal.text,
+            ...(goal.successCriteria ? { successCriteria: goal.successCriteria } : {}),
+            ...(input.progressNote ? { progressNote: input.progressNote } : {}),
+            version: goal.version,
+            actor: input.actor,
+          }),
+          occurredAt: now,
+        })
+        .returning();
+      if (!event) throw new Error("Failed to append goal.updated event");
+      await tx
+        .update(schema.sessions)
+        .set({ lastSequence: session.lastSequence + 1, updatedAt: now })
+        .where(eq(schema.sessions.id, sessionId));
+      return { goal, events: [mapEvent(event)] };
+    }),
+  );
 }
 
 /**
@@ -17988,19 +18222,12 @@ export async function setSessionGoalStatus(
     const effectiveControl = await evaluateSessionControl(scopedDb, workspaceId, sessionId, {
       lock: "share",
     });
-    const [workspace] = await scopedDb
-      .select()
-      .from(schema.workspaces)
-      .where(eq(schema.workspaces.id, workspaceId))
-      .for("update")
-      .limit(1);
     const [session] = await scopedDb
       .select()
       .from(schema.sessions)
       .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
       .for("update")
       .limit(1);
-    if (!workspace) throw new Error(`Workspace not found: ${workspaceId}`);
     if (!session) throw new Error(`Session not found: ${sessionId}`);
     const [existing] = await scopedDb
       .select()
@@ -18032,12 +18259,14 @@ export async function setSessionGoalStatus(
           ? {
               evidence: input.evidence ?? null,
               pausedReason: null,
+              continuationObservedRevision: existing.continuationWakeRevision,
             }
           : {}),
         ...(input.status === "paused"
           ? {
               rationale: input.rationale ?? null,
               pausedReason: input.pausedReason ?? null,
+              continuationObservedRevision: existing.continuationWakeRevision,
             }
           : {}),
         ...(input.status === "active"
@@ -18050,6 +18279,7 @@ export async function setSessionGoalStatus(
               // a pre-pause continuation turn must not feed the progress detector.
               lastContinuationTurnId: null,
               versionAtLastContinuation: null,
+              continuationWakeRevision: existing.continuationWakeRevision + 1,
             }
           : {}),
       })
@@ -18075,6 +18305,99 @@ export async function setSessionGoalStatus(
     }
     return { goal: mapSessionGoal(row), changed: true, workflowWakeRevision };
   });
+}
+
+export type SetSessionGoalStatusEvent =
+  | { type: "goal.completed"; evidence: string }
+  | {
+      type: "goal.paused";
+      actor: "agent" | "api";
+      reason: string;
+      rationale?: string;
+    }
+  | { type: "goal.resumed"; actor: "api" };
+
+/** Status mutation and its timeline fact share the same session-first commit. */
+export async function setSessionGoalStatusWithEvent(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  input: {
+    status: SessionGoalStatus;
+    evidence?: string;
+    rationale?: string;
+    pausedReason?: string;
+    event: SetSessionGoalStatusEvent;
+  },
+): Promise<{
+  goal: SessionGoal;
+  changed: boolean;
+  workflowWakeRevision: number | null;
+  events: SessionEvent[];
+}> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
+    scopedDb.transaction(async (rawTx) => {
+      const tx = rawTx as unknown as Database;
+      const result = await setSessionGoalStatus(tx, workspaceId, sessionId, {
+        status: input.status,
+        ...(input.evidence !== undefined ? { evidence: input.evidence } : {}),
+        ...(input.rationale !== undefined ? { rationale: input.rationale } : {}),
+        ...(input.pausedReason !== undefined ? { pausedReason: input.pausedReason } : {}),
+      });
+      if (!result.changed) return { ...result, events: [] };
+      const [session] = await tx
+        .select()
+        .from(schema.sessions)
+        .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
+        .for("update")
+        .limit(1);
+      if (!session) throw new Error(`Session not found: ${sessionId}`);
+      const payload =
+        input.event.type === "goal.completed"
+          ? {
+              goalId: result.goal.id,
+              evidence: input.event.evidence,
+              version: result.goal.version,
+            }
+          : input.event.type === "goal.paused"
+            ? {
+                goalId: result.goal.id,
+                actor: input.event.actor,
+                reason: input.event.reason,
+                ...(input.event.rationale ? { rationale: input.event.rationale } : {}),
+                autoContinuations: result.goal.autoContinuations,
+                noProgressStreak: result.goal.noProgressStreak,
+              }
+            : {
+                goalId: result.goal.id,
+                text: result.goal.text,
+                ...(result.goal.successCriteria
+                  ? { successCriteria: result.goal.successCriteria }
+                  : {}),
+                version: result.goal.version,
+                actor: input.event.actor,
+              };
+      const now = new Date();
+      const [event] = await tx
+        .insert(schema.sessionEvents)
+        .values({
+          accountId: session.accountId,
+          workspaceId,
+          sessionId,
+          sequence: session.lastSequence + 1,
+          type: input.event.type,
+          payload: sanitizeEventPayload(payload),
+          occurredAt: now,
+        })
+        .returning();
+      if (!event) throw new Error(`Failed to append ${input.event.type} event`);
+      await tx
+        .update(schema.sessions)
+        .set({ lastSequence: session.lastSequence + 1, updatedAt: now })
+        .where(eq(schema.sessions.id, sessionId));
+      return { ...result, events: [mapEvent(event)] };
+    }),
+  );
 }
 
 export async function setSessionGoalLastContinuationTurn(
@@ -18380,6 +18703,356 @@ export async function evaluateGoalContinuation(
           goal: mapSessionGoal(updated!),
           autoContinuation: nextAutoContinuations,
           cap,
+        } as const;
+      }),
+  );
+}
+
+export type MaterializeGoalContinuationResult =
+  | { action: "none" | "queue"; events: [] }
+  | { action: "paused"; events: SessionEvent[] }
+  | {
+      action: "continue";
+      events: SessionEvent[];
+      update: SessionSystemUpdate;
+      goalWakeRevision: number;
+      workflowWakeRevision: number;
+    };
+
+/**
+ * Consume one durable goal-wake revision into one continuation obligation.
+ *
+ * This is deliberately one outer PostgreSQL transaction. The existing locked
+ * evaluator runs as a nested savepoint, so its no-progress/counter mutation is
+ * rolled back if prompt construction, update/event insertion, metering, or the
+ * workflow-wake outbox write fails. Retrying after a lost COMMIT response sees
+ * the same stable goal revision and the already-pending update; it never spends
+ * another continuation count or creates another usage row.
+ */
+export async function materializeGoalContinuation(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    workflowId: string;
+    defaultMaxAutoContinuations?: number | null;
+    noProgressLimit: number;
+    budgetBlocked?: string | null;
+    policy: {
+      model: string;
+      reasoningEffort: ReasoningEffort;
+      tools: ToolRef[];
+      sandboxBackend: SandboxBackend;
+    };
+    prompt: (goal: SessionGoal, autoContinuation: number, cap: number | null) => string;
+  },
+): Promise<MaterializeGoalContinuationResult> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (rawTx) => {
+        const tx = rawTx as unknown as Database;
+        const effectiveControl = await evaluateSessionControl(
+          tx,
+          input.workspaceId,
+          input.sessionId,
+          { lock: "share" },
+        );
+        const [session] = await tx
+          .select()
+          .from(schema.sessions)
+          .where(
+            and(
+              eq(schema.sessions.accountId, input.accountId),
+              eq(schema.sessions.workspaceId, input.workspaceId),
+              eq(schema.sessions.id, input.sessionId),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        const [goalRead] = await tx
+          .select()
+          .from(schema.sessionGoals)
+          .where(
+            and(
+              eq(schema.sessionGoals.workspaceId, input.workspaceId),
+              eq(schema.sessionGoals.sessionId, input.sessionId),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (
+          !session ||
+          !goalRead ||
+          goalRead.status !== "active" ||
+          session.status === "cancelled" ||
+          effectiveControl.state !== "active"
+        ) {
+          return { action: "none", events: [] } as const;
+        }
+
+        const [pendingTurn] = await tx
+          .select({
+            id: schema.sessionTurns.id,
+            status: schema.sessionTurns.status,
+            source: schema.sessionTurns.source,
+          })
+          .from(schema.sessionTurns)
+          .where(
+            and(
+              eq(schema.sessionTurns.workspaceId, input.workspaceId),
+              eq(schema.sessionTurns.sessionId, input.sessionId),
+              inArray(schema.sessionTurns.status, [
+                "queued",
+                "running",
+                "requires_action",
+                "recovering",
+                "waiting_capacity",
+              ]),
+            ),
+          )
+          .orderBy(asc(schema.sessionTurns.position), asc(schema.sessionTurns.createdAt))
+          .limit(1);
+        if (pendingTurn) {
+          return pendingTurn.status === "queued"
+            ? ({ action: "queue", events: [] } as const)
+            : ({ action: "none", events: [] } as const);
+        }
+
+        // A human/operator Steer is the authoritative next direction. Never
+        // synthesize a goal notice beside it; its own turn settlement will arm
+        // the coalesced goal revision afterward if the goal remains active.
+        const [pendingSteer] = await tx
+          .select({ id: schema.sessionSystemUpdates.id })
+          .from(schema.sessionSystemUpdates)
+          .where(
+            and(
+              eq(schema.sessionSystemUpdates.workspaceId, input.workspaceId),
+              eq(schema.sessionSystemUpdates.sessionId, input.sessionId),
+              eq(schema.sessionSystemUpdates.kind, "agent_steer_instruction"),
+              inArray(schema.sessionSystemUpdates.state, ["pending", "deferred"]),
+            ),
+          )
+          .limit(1);
+        if (pendingSteer) {
+          return { action: "queue", events: [] } as const;
+        }
+
+        const [existingContinuation] = await tx
+          .select()
+          .from(schema.sessionSystemUpdates)
+          .where(
+            and(
+              eq(schema.sessionSystemUpdates.workspaceId, input.workspaceId),
+              eq(schema.sessionSystemUpdates.sessionId, input.sessionId),
+              eq(schema.sessionSystemUpdates.kind, "goal_continuation"),
+              eq(schema.sessionSystemUpdates.state, "pending"),
+              sql`${schema.sessionSystemUpdates.payload} ->> 'goalId' = ${goalRead.id}`,
+              sql`(${schema.sessionSystemUpdates.payload} ->> 'goalVersion')::integer = ${goalRead.version}`,
+            ),
+          )
+          .orderBy(desc(schema.sessionSystemUpdates.createdAt))
+          .limit(1);
+        if (existingContinuation) {
+          return {
+            action: "continue",
+            events: [],
+            update: mapSessionSystemUpdate(existingContinuation),
+            goalWakeRevision: goalRead.continuationObservedRevision,
+            workflowWakeRevision: 0,
+          } as const;
+        }
+
+        const [capacityWait] = await tx
+          .select({ id: schema.codexCapacityWaiters.id })
+          .from(schema.codexCapacityWaiters)
+          .where(
+            and(
+              eq(schema.codexCapacityWaiters.workspaceId, input.workspaceId),
+              eq(schema.codexCapacityWaiters.sessionId, input.sessionId),
+              eq(schema.codexCapacityWaiters.status, "waiting"),
+            ),
+          )
+          .limit(1);
+        if (capacityWait) {
+          return { action: "none", events: [] } as const;
+        }
+
+        let goalWakeRevision = goalRead.continuationWakeRevision;
+        if (goalWakeRevision <= goalRead.continuationObservedRevision) {
+          // This is an invariant-repair path, not a polling loop: a workflow
+          // reached an admitted idle goal without the terminal-settlement arm.
+          // Persist one new monotonic obligation before evaluating it.
+          const [repaired] = await tx
+            .update(schema.sessionGoals)
+            .set({
+              continuationWakeRevision: sql`${schema.sessionGoals.continuationWakeRevision} + 1`,
+              updatedAt: new Date(),
+            })
+            .where(eq(schema.sessionGoals.id, goalRead.id))
+            .returning({ revision: schema.sessionGoals.continuationWakeRevision });
+          if (!repaired) throw new Error(`Session goal not found: ${input.sessionId}`);
+          goalWakeRevision = repaired.revision;
+        }
+
+        const decision = await evaluateGoalContinuation(tx, {
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          defaultMaxAutoContinuations: input.defaultMaxAutoContinuations ?? null,
+          noProgressLimit: input.noProgressLimit,
+          budgetBlocked: input.budgetBlocked ?? null,
+        });
+        if (decision.decision === "none" || decision.decision === "queue") {
+          return { action: decision.decision, events: [] } as const;
+        }
+
+        const now = new Date();
+        if (decision.decision === "paused") {
+          const [event] = await tx
+            .insert(schema.sessionEvents)
+            .values({
+              accountId: session.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              sequence: session.lastSequence + 1,
+              type: "goal.paused",
+              payload: sanitizeEventPayload({
+                goalId: decision.goal.id,
+                actor: "system",
+                reason: decision.reason,
+                ...(decision.goal.rationale ? { rationale: decision.goal.rationale } : {}),
+                autoContinuations: decision.goal.autoContinuations,
+                noProgressStreak: decision.goal.noProgressStreak,
+              }),
+              occurredAt: now,
+            })
+            .returning();
+          if (!event) throw new Error("Failed to append goal.paused event");
+          await tx
+            .update(schema.sessionGoals)
+            .set({ continuationObservedRevision: goalWakeRevision, updatedAt: now })
+            .where(eq(schema.sessionGoals.id, decision.goal.id));
+          await tx
+            .update(schema.sessions)
+            .set({ lastSequence: session.lastSequence + 1, updatedAt: now })
+            .where(eq(schema.sessions.id, session.id));
+          return { action: "paused", events: [mapEvent(event)] } as const;
+        }
+
+        const prompt = input.prompt(decision.goal, decision.autoContinuation, decision.cap);
+        const payload = {
+          type: "goal_continuation" as const,
+          goalId: decision.goal.id,
+          goalVersion: decision.goal.version,
+          goalWakeRevision,
+          autoContinuation: decision.autoContinuation,
+          maxAutoContinuations: decision.cap,
+          prompt,
+          policy: input.policy,
+        };
+        if (Buffer.byteLength(JSON.stringify(payload)) > MAX_INTERNAL_UPDATE_BYTES) {
+          throw new Error(`Internal update payload exceeds ${MAX_INTERNAL_UPDATE_BYTES} bytes`);
+        }
+        if (Buffer.byteLength(prompt) > MAX_INTERNAL_UPDATE_BYTES) {
+          throw new Error(`Internal update summary exceeds ${MAX_INTERNAL_UPDATE_BYTES} bytes`);
+        }
+        const [update] = await tx
+          .insert(schema.sessionSystemUpdates)
+          .values({
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            kind: "goal_continuation",
+            classification: "info",
+            sourceId: decision.goal.id,
+            dedupeKey: `goal-continuation:${decision.goal.id}:wake:${goalWakeRevision}`,
+            summary: prompt,
+            payload,
+            lineage: { goalId: decision.goal.id, goalWakeRevision },
+            state: "pending",
+          })
+          .returning();
+        if (!update) throw new Error("Failed to create goal continuation update");
+
+        await tx
+          .insert(schema.usageEvents)
+          .values({
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            eventType: "agent_run.created",
+            quantity: 1,
+            unit: "run",
+            sourceResourceType: "session_system_update",
+            sourceResourceId: update.id,
+            idempotencyKey: `agent_run.created:goal:${input.workspaceId}:${decision.goal.id}:${goalWakeRevision}`,
+            occurredAt: now,
+          })
+          .onConflictDoNothing({ target: schema.usageEvents.idempotencyKey });
+
+        const insertedEvents = await tx
+          .insert(schema.sessionEvents)
+          .values([
+            {
+              accountId: session.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              sequence: session.lastSequence + 1,
+              type: "system.update.pending",
+              payload: sanitizeEventPayload({
+                updateId: update.id,
+                kind: update.kind,
+                classification: update.classification,
+                sourceId: update.sourceId,
+                summary: update.summary,
+              }),
+              occurredAt: now,
+            },
+            {
+              accountId: session.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              sequence: session.lastSequence + 2,
+              type: "goal.continuation",
+              payload: sanitizeEventPayload({
+                goalId: decision.goal.id,
+                text: decision.goal.text,
+                version: decision.goal.version,
+                goalWakeRevision,
+                autoContinuation: decision.autoContinuation,
+              }),
+              occurredAt: now,
+            },
+          ])
+          .returning();
+        if (insertedEvents.length !== 2) {
+          throw new Error("Failed to append goal continuation events");
+        }
+        await tx
+          .update(schema.sessionGoals)
+          .set({ continuationObservedRevision: goalWakeRevision, updatedAt: now })
+          .where(eq(schema.sessionGoals.id, decision.goal.id));
+        const wake = await registerInternalUpdateWakeInTransaction(tx, {
+          accountId: session.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: session.id,
+          temporalWorkflowId: session.temporalWorkflowId ?? input.workflowId,
+        });
+        await tx
+          .update(schema.sessions)
+          .set({
+            status: "queued",
+            lastSequence: session.lastSequence + 2,
+            updatedAt: now,
+          })
+          .where(eq(schema.sessions.id, session.id));
+        return {
+          action: "continue",
+          events: insertedEvents.map(mapEvent),
+          update: mapSessionSystemUpdate(update),
+          goalWakeRevision,
+          workflowWakeRevision: wake.wakeRevision,
         } as const;
       }),
   );
@@ -20756,6 +21429,34 @@ export async function applySessionTurnSettlement(
             eq(schema.sessions.id, input.sessionId),
           ),
         );
+      if (terminal && input.activeTurnId === null) {
+        const [armedGoal] = await tx
+          .update(schema.sessionGoals)
+          .set({
+            continuationWakeRevision: sql`${schema.sessionGoals.continuationWakeRevision} + 1`,
+            updatedAt: now,
+          })
+          .where(
+            and(
+              eq(schema.sessionGoals.workspaceId, workspaceId),
+              eq(schema.sessionGoals.sessionId, input.sessionId),
+              eq(schema.sessionGoals.status, "active"),
+            ),
+          )
+          .returning({ id: schema.sessionGoals.id });
+        if (armedGoal) {
+          // The obligation and its repairable Temporal nudge commit with the
+          // terminal turn/session boundary. A worker death or lost activity
+          // response after COMMIT therefore cannot strand an active idle goal.
+          await enqueueSessionWorkflowWakeInTransaction(tx as unknown as Database, {
+            accountId: session.accountId,
+            workspaceId,
+            sessionId: input.sessionId,
+            temporalWorkflowId: session.temporalWorkflowId ?? `session-${input.sessionId}`,
+            reason: "goal_turn_settled",
+          });
+        }
+      }
       return {
         action: "settled" as const,
         events: [...closedTools.events, ...inserted.map(mapEvent)],
@@ -22120,7 +22821,10 @@ export async function enqueueSessionWorkflowWakeInTransaction(
         wakeRevision: sql`${schema.sessionWorkflowWakeOutbox.wakeRevision} + 1`,
         reason: input.reason,
         attempts: 0,
-        nextAttemptAt,
+        // Coalescing a delayed retry must never postpone an already-due wake
+        // owned by another producer. A later revision makes the batch richer;
+        // it does not revoke the earlier delivery obligation.
+        nextAttemptAt: sql`least(${schema.sessionWorkflowWakeOutbox.nextAttemptAt}, ${nextAttemptAt})`,
         lastError: null,
         updatedAt: now,
       },
