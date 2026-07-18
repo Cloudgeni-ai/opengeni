@@ -1044,8 +1044,26 @@ export class TurnSandboxProvisionCancelledError extends Error {
   readonly name = "TurnSandboxProvisionCancelledError";
 
   constructor(readonly reason: unknown) {
-    super("Lazy sandbox provisioning was cancelled with its owning turn");
+    super("Sandbox provisioning was cancelled with its owning turn", {
+      ...(reason instanceof Error ? { cause: reason } : {}),
+    });
   }
+}
+
+/**
+ * Normalize the cancellation race used by sandbox provisioning back to the
+ * Temporal cancellation that owns the activity. Provider create/resume APIs do
+ * not expose one portable abort primitive, so the worker stops awaiting them
+ * and disposes a late lease. The wrapper error must never fall through as an
+ * ordinary turn failure: doing so would omit the quiescence receipt and strand
+ * a committed Steer/Pause behind `control-pending`.
+ */
+export function turnOperationCancellationFailure(error: unknown): CancelledFailure | null {
+  if (error instanceof CancelledFailure) return error;
+  if (!(error instanceof TurnSandboxProvisionCancelledError)) return null;
+  return error.reason instanceof CancelledFailure
+    ? error.reason
+    : new CancelledFailure("TURN_SANDBOX_PROVISION_CANCELLED", [], error);
 }
 
 function throwIfTurnSandboxProvisionCancelled(signal: AbortSignal | undefined): void {
@@ -1054,7 +1072,7 @@ function throwIfTurnSandboxProvisionCancelled(signal: AbortSignal | undefined): 
   }
 }
 
-async function waitForTurnSandboxProvision<T>(
+export async function waitForTurnSandboxProvision<T>(
   operation: Promise<T>,
   signal: AbortSignal | undefined,
   disposeLateResult: ((result: T) => Promise<void> | void) | undefined,
@@ -1072,7 +1090,14 @@ async function waitForTurnSandboxProvision<T>(
   if (signal.aborted) cancel();
 
   try {
-    return await Promise.race([operation, cancelled]);
+    const result = await Promise.race([operation, cancelled]);
+    // Cancellation owns an exact turn boundary even when the provider result
+    // and AbortSignal settle in the same microtask checkpoint. Never let a
+    // just-resolved lease escape after the control was already committed.
+    if (signal.aborted) {
+      throw new TurnSandboxProvisionCancelledError(signal.reason);
+    }
+    return result;
   } catch (error) {
     if (signal.aborted) {
       // The provider establish call has no universal cancellation seam. It may
@@ -1081,6 +1106,13 @@ async function waitForTurnSandboxProvision<T>(
       void operation
         .then(async (result) => await disposeLateResult?.(result))
         .catch(() => undefined);
+      // A provider failure may settle in the same checkpoint as the committed
+      // control. The control is authoritative; retain its cancellation shape
+      // so the activity publishes quiescence instead of looking like an
+      // unrelated turn failure.
+      if (!(error instanceof TurnSandboxProvisionCancelledError)) {
+        throw new TurnSandboxProvisionCancelledError(signal.reason);
+      }
     }
     throw error;
   } finally {
@@ -3169,7 +3201,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         settings.sandboxOwnershipEnabled && runSettings.sandboxBackend !== "none"
           ? groupBoxBackend
           : runSettings.sandboxBackend;
-      await ensureTurnModalRegistryImage(runSettings, sandboxCreationBackend);
+      throwIfTurnSandboxProvisionCancelled(cancellationSignal);
+      await waitForTurnSandboxProvision(
+        ensureTurnModalRegistryImage(runSettings, sandboxCreationBackend),
+        cancellationSignal,
+        undefined,
+      );
       const establishPolicy: "eager" | "on-demand" =
         lazyProvisionEnabled(settings) && !machinePrimary && runSettings.sandboxBackend !== "none"
           ? "on-demand"
@@ -3404,45 +3441,49 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // proxy's first default-pointer op. A chat-only turn never calls it, so
           // no lease row, no provider box, no warm-meter interval.
         } else {
-          resolvedSandbox = await resumeBoxForTurn(
-            {
-              db,
-              settings,
-              sandboxMetrics: runtimeMetricsHooksForObservability(observability),
-              onSandboxLost: publishSandboxLost,
-            },
-            {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              sandboxGroupId: session.sandboxGroupId,
-              sessionId: input.sessionId,
-              // groupBoxBackend, not turn.sandboxBackend: a machine-home turn that
-              // is not machine-primary resumes a real cloud group box (the
-              // deployment default), never a "selfhosted" box (which would throw
-              // for lack of a bound agentId).
-              backend: groupBoxBackend,
-              os: session.sandboxOs,
-              environment: sandboxEnvironment,
-              // IMAGE IS SHARED STATE (B3, Modal warm-box path only): the container image
-              // this run resolves. The lease stamps it + conflicts on a live shared box
-              // running a DIFFERENT image (solo → recreate on the new image; N-holders →
-              // SandboxImageConflictError surfaced as an actionable turn error). Prefer the
-              // explicit Modal image ref, else the docker image. The selfhosted branch
-              // (establishSelfhostedTurnSession/acquireSelfhostedLeaseForTurn) NEVER passes
-              // an image — B3 lives only on this Modal else-branch.
-              ...((runSettings.modalImageRef ?? runSettings.dockerImage)
-                ? {
-                    image: runSettings.modalImageRef ?? runSettings.dockerImage,
-                  }
-                : {}),
-              // RIG IS SHARED STATE (M3): stamp the frozen rig version so the lease
-              // conflicts on a live shared box set up under a different rig (solo
-              // recreate / N-holders SandboxRigConflictError). Omitted for a rig-less
-              // turn -> never stamped or enforced (shares exactly as today).
-              ...(rigVersion ? { rigVersionId: rigVersion.id } : {}),
-            },
-            "turn",
-            sandboxHolderId,
+          resolvedSandbox = await waitForTurnSandboxProvision(
+            resumeBoxForTurn(
+              {
+                db,
+                settings,
+                sandboxMetrics: runtimeMetricsHooksForObservability(observability),
+                onSandboxLost: publishSandboxLost,
+              },
+              {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sandboxGroupId: session.sandboxGroupId,
+                sessionId: input.sessionId,
+                // groupBoxBackend, not turn.sandboxBackend: a machine-home turn that
+                // is not machine-primary resumes a real cloud group box (the
+                // deployment default), never a "selfhosted" box (which would throw
+                // for lack of a bound agentId).
+                backend: groupBoxBackend,
+                os: session.sandboxOs,
+                environment: sandboxEnvironment,
+                // IMAGE IS SHARED STATE (B3, Modal warm-box path only): the container image
+                // this run resolves. The lease stamps it + conflicts on a live shared box
+                // running a DIFFERENT image (solo → recreate on the new image; N-holders →
+                // SandboxImageConflictError surfaced as an actionable turn error). Prefer the
+                // explicit Modal image ref, else the docker image. The selfhosted branch
+                // (establishSelfhostedTurnSession/acquireSelfhostedLeaseForTurn) NEVER passes
+                // an image — B3 lives only on this Modal else-branch.
+                ...((runSettings.modalImageRef ?? runSettings.dockerImage)
+                  ? {
+                      image: runSettings.modalImageRef ?? runSettings.dockerImage,
+                    }
+                  : {}),
+                // RIG IS SHARED STATE (M3): stamp the frozen rig version so the lease
+                // conflicts on a live shared box set up under a different rig (solo
+                // recreate / N-holders SandboxRigConflictError). Omitted for a rig-less
+                // turn -> never stamped or enforced (shares exactly as today).
+                ...(rigVersion ? { rigVersionId: rigVersion.id } : {}),
+              },
+              "turn",
+              sandboxHolderId,
+            ),
+            cancellationSignal,
+            async (lateSandbox) => await lateSandbox.release(),
           );
           setupBoxSession = resolvedSandbox.established.session;
           // Durable box-lifecycle events (sandbox-file-persistence observability):
@@ -4697,7 +4738,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           throw recoveryError;
         }
       }
-      if (isWorkerShutdownCancellation(error) && recoveryTurnId) {
+      const cancellationFailure = turnOperationCancellationFailure(error);
+      if (
+        cancellationFailure &&
+        isWorkerShutdownCancellation(cancellationFailure) &&
+        recoveryTurnId
+      ) {
         try {
           await flushRuntimeBatcher();
           await reconcileConversationTruth();
@@ -4755,7 +4801,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         turnMetricOutcome = "cancelled";
         throw new CancelledFailure("TURN_ATTEMPT_FENCED", [], error);
       }
-      if (error instanceof CancelledFailure) {
+      if (cancellationFailure) {
         activityStatus = "cancelled";
         activityError = error;
         acknowledgeQuiescence = true;
@@ -4769,7 +4815,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // recovery. A dying activity must never append a
         // competing cancellation or mutate the turn/session on its own.
         turnMetricOutcome = "cancelled";
-        throw error;
+        throw cancellationFailure;
       }
       // The SDK's per-segment turn cap is a pacing valve, not a failure: end
       // the turn gracefully and idle the session so an active goal continues

@@ -38,6 +38,8 @@ import {
   shouldRecoverCompactionProviderFailure,
   shouldStartOnTurnRecording,
   shouldRunTurnEndWorkspacePersistence,
+  turnOperationCancellationFailure,
+  waitForTurnSandboxProvision,
   waitForTurnFinalizerStep,
   TurnSandboxProvisionCancelledError,
 } from "../src/activities/agent-turn";
@@ -1051,6 +1053,55 @@ describe("lazy sandbox provisioner single-flight", () => {
     resolveEstablish({ lease: "late" });
     await disposal;
     expect(disposed).toBe(1);
+  });
+
+  test("eager provisioning returns at the cancellation boundary and disposes its late lease", async () => {
+    const controller = new AbortController();
+    let resolveEstablish!: (value: { release: () => void }) => void;
+    const establish = new Promise<{ release: () => void }>((resolve) => {
+      resolveEstablish = resolve;
+    });
+    let releases = 0;
+    const pending = waitForTurnSandboxProvision(establish, controller.signal, async (late) =>
+      late.release(),
+    );
+
+    const temporalCancellation = new CancelledFailure("CANCELLED");
+    const cancelledAt = performance.now();
+    controller.abort(temporalCancellation);
+
+    const wrapped = await pending.catch((error: unknown) => error);
+    expect(wrapped).toBeInstanceOf(TurnSandboxProvisionCancelledError);
+    expect(turnOperationCancellationFailure(wrapped)).toBe(temporalCancellation);
+    expect(performance.now() - cancelledAt).toBeLessThan(100);
+
+    resolveEstablish({ release: () => (releases += 1) });
+    await Bun.sleep(0);
+    expect(releases).toBe(1);
+  });
+
+  test("a non-Temporal provisioning abort still becomes an activity cancellation", () => {
+    const wrapped = new TurnSandboxProvisionCancelledError(new Error("STEER"));
+    const cancellation = turnOperationCancellationFailure(wrapped);
+
+    expect(cancellation).toBeInstanceOf(CancelledFailure);
+    expect(cancellation?.message).toBe("TURN_SANDBOX_PROVISION_CANCELLED");
+    expect(turnOperationCancellationFailure(new Error("provider failed"))).toBeNull();
+  });
+
+  test("a committed control outranks a same-checkpoint provider failure", async () => {
+    const controller = new AbortController();
+    const temporalCancellation = new CancelledFailure("CANCELLED");
+    controller.abort(temporalCancellation);
+
+    const error = await waitForTurnSandboxProvision(
+      Promise.reject(new Error("provider connection reset")),
+      controller.signal,
+      undefined,
+    ).catch((failure: unknown) => failure);
+
+    expect(error).toBeInstanceOf(TurnSandboxProvisionCancelledError);
+    expect(turnOperationCancellationFailure(error)).toBe(temporalCancellation);
   });
 });
 
