@@ -4,7 +4,11 @@ import { readdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import postgres from "postgres";
-import { selectCodexCredentialLeaseForTurn } from "../../../apps/worker/src/activities/codex-rotation";
+import {
+  chooseShardedHome,
+  selectCodexCredentialLeaseForTurn,
+  type CodexRotationAccount,
+} from "../../../apps/worker/src/activities/codex-rotation";
 import { acquireCodexCredentialLease, createDb } from "../src/index";
 import { migrate } from "../src/migrate";
 
@@ -165,6 +169,30 @@ describe("migration 0053 (Codex credential leases)", () => {
             rotation_enabled = true,
             lease_rotation_enabled = false
         where workspace_id = ${workspaceId}`;
+      const rollbackAccounts: CodexRotationAccount[] = [credentialA, credentialB].map((id) => ({
+        id,
+        chatgptAccountId: null,
+        label: null,
+        accountEmail: null,
+        planType: "pro",
+        status: "active",
+        allocatorEnabled: true,
+        isActive: id === credentialB,
+        expiresAt: null,
+        lastRefreshAt: null,
+        lastError: null,
+        primaryUsedPercent: 0,
+        primaryResetAt: null,
+        secondaryUsedPercent: 0,
+        secondaryResetAt: null,
+        usageCheckedAt: null,
+        exhaustedUntil: null,
+        connectorNamespaces: null,
+        connectorsCheckedAt: null,
+        activeLeaseCount: 0,
+        selectionCount: 0,
+        lastSelectedAt: null,
+      }));
       const rollbackSelection = selectCodexCredentialLeaseForTurn({
         context: {
           accounts: [credentialA, credentialB].map((id) => ({
@@ -207,7 +235,21 @@ describe("migration 0053 (Codex credential leases)", () => {
         nearExhaustionPct: 90,
         now: new Date(),
       });
-      expect(rollbackSelection.credentialId).toBe(credentialB);
+      // OPE-36: rotation-enabled always behaves as sticky-sharded, so the
+      // rollback selection is the session's deterministic sharded home (the
+      // stored legacy strategy is normalized) — what matters for old-binary
+      // compatibility is that selection WORKS and never touches the lease table.
+      const expectedHome = chooseShardedHome({
+        sessionId: "session-test",
+        currentPolicyPin: null,
+        accounts: rollbackAccounts,
+        nearExhaustionPct: 90,
+        now: new Date(),
+      });
+      expect(expectedHome.kind).toBe("home");
+      expect(rollbackSelection.credentialId).toBe(
+        expectedHome.kind === "home" ? expectedHome.credentialId : null,
+      );
       const [inert] = await admin<{ count: number }[]>`
         select count(*)::int as count from codex_credential_leases`;
       expect(inert!.count).toBe(0);
@@ -241,7 +283,11 @@ describe("migration 0053 (Codex credential leases)", () => {
             now: new Date(),
           }),
       );
-      expect(beforeWorkspaceCutover.credentialId).toBe(credentialB);
+      // OPE-36: unpinned + rotation-enabled selects the session's sharded home
+      // (stored strategy normalized), not the workspace active pointer.
+      expect(beforeWorkspaceCutover.credentialId).toBe(
+        expectedHome.kind === "home" ? expectedHome.credentialId : null,
+      );
       expect(beforeWorkspaceCutover.holderId).toBeNull();
       expect(beforeWorkspaceCutover.generation).toBeNull();
       const [stillInert] = await admin<{ count: number }[]>`
@@ -313,6 +359,8 @@ describe("migration 0053 (Codex credential leases)", () => {
         nearExhaustionPct: 90,
         now: new Date(),
       });
+      // Rotation OFF is untouched by OPE-36: the selector returns the workspace
+      // active pointer, exactly as before.
       expect(featureOffAgain.credentialId).toBe(oldWorkerAfterCutover!.active_credential_id);
       await migrate(databaseUrl);
       const [afterIdempotentMigrate] = await admin<

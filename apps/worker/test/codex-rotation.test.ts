@@ -8,6 +8,7 @@ import {
   computeIdleDelayMs,
   computeReactiveRotationResume,
   DEFAULT_RESET_COOLDOWN_MS,
+  effectiveRotationStrategy,
   isCodexAccountEligible,
   MIN_IDLE_MS,
   REACTIVE_CIRCUIT_BREAKER_IDLE_MS,
@@ -371,31 +372,44 @@ describe("P3 self-heal + bounded reactive walk (invariant 4)", () => {
   });
 });
 
-describe("chooseRotationActive — round_robin / drain_then_next", () => {
-  test("round_robin picks the next eligible after the prior account (wraps)", () => {
+describe("effectiveRotationStrategy (OPE-36)", () => {
+  test("every stored value — legacy, sharded, or unknown — normalizes to sharded", () => {
+    for (const stored of [
+      "most_remaining",
+      "round_robin",
+      "drain_then_next",
+      "sharded",
+      "",
+      "future_strategy",
+    ]) {
+      expect(effectiveRotationStrategy(stored)).toBe("sharded");
+    }
+  });
+});
+
+describe("chooseRotationActive — legacy strategies normalize to sharded ranking (OPE-36)", () => {
+  // The strategy picker is gone: rotation-enabled ALWAYS behaves as sticky-sharded
+  // (effectiveRotationStrategy normalizes every stored value). A stored legacy
+  // strategy must NOT reproduce its old behavior — it ranks by load like sharded.
+  test("stored round_robin does NOT advance to the next account; the load ranker decides", () => {
     const accounts = [acct("a"), acct("b"), acct("c")];
+    // Old round_robin picked "b" (next after prior "a"). Normalized: equal-load
+    // tie → stable created_at order → "a" (no pointless account hop, cache kept).
     expect(
       chooseRotationActive({
         ...base,
         rotationStrategy: "round_robin",
         activeCredentialId: "a",
         priorCredentialId: "a",
-        accounts,
-      }),
-    ).toEqual({ kind: "active", credentialId: "b", moved: true });
-    expect(
-      chooseRotationActive({
-        ...base,
-        rotationStrategy: "round_robin",
-        activeCredentialId: "a",
-        priorCredentialId: "c",
         accounts,
       }),
     ).toEqual({ kind: "active", credentialId: "a", moved: false });
   });
 
-  test("round_robin skips a cooling/capped successor", () => {
+  test("stored round_robin with a capped account still ranks (old behavior picked the successor)", () => {
     const accounts = [acct("a"), acct("b", { primaryUsedPercent: 99 }), acct("c")];
+    // Old round_robin skipped capped "b" to pick "c". Normalized: "a" is eligible
+    // and first on the equal-load tie — stay.
     expect(
       chooseRotationActive({
         ...base,
@@ -404,7 +418,7 @@ describe("chooseRotationActive — round_robin / drain_then_next", () => {
         priorCredentialId: "a",
         accounts,
       }),
-    ).toEqual({ kind: "active", credentialId: "c", moved: true });
+    ).toEqual({ kind: "active", credentialId: "a", moved: false });
   });
 
   test("round_robin all-capped wake ignores allocator-disabled credentials", () => {
@@ -427,7 +441,8 @@ describe("chooseRotationActive — round_robin / drain_then_next", () => {
     ).toEqual({ kind: "allCapped", earliestResetAt: enabledReset });
   });
 
-  test("drain_then_next stays on the prior account while eligible, else first eligible", () => {
+  test("stored drain_then_next no longer sticks to the prior account; capped accounts still fail over", () => {
+    // Old drain_then_next stuck to prior "b". Normalized: equal-load tie → "a".
     const accounts = [acct("a"), acct("b")];
     expect(
       chooseRotationActive({
@@ -437,7 +452,8 @@ describe("chooseRotationActive — round_robin / drain_then_next", () => {
         priorCredentialId: "b",
         accounts,
       }),
-    ).toEqual({ kind: "active", credentialId: "b", moved: true });
+    ).toEqual({ kind: "active", credentialId: "a", moved: false });
+    // Cap failover is strategy-independent and must keep working.
     const capped = [acct("a", { primaryUsedPercent: 99 }), acct("b")];
     expect(
       chooseRotationActive({
@@ -981,37 +997,34 @@ describe("classifyCodexPin — pin lifecycle (manual sacrosanct, policy meaningf
     }
   });
 
-  test("a leftover POLICY pin under drain_then_next → clearStale (ignore + clear, follow strategy)", () => {
-    expect(
-      classifyCodexPin({
-        pinnedCredentialId: "ex-home",
-        pinSource: "policy",
-        strategy: "drain_then_next",
-        rotationEnabled: true,
-      }),
-    ).toBe("clearStale");
+  test("OPE-36: a POLICY pin with rotation ENABLED → sharded under EVERY stored strategy (normalized)", () => {
+    // Pre-OPE-36 a stored legacy strategy made policy pins "clearStale" — that
+    // path is gone: rotation-enabled IS the sharded regime, pins are kept.
+    for (const strategy of ALL) {
+      expect(
+        classifyCodexPin({
+          pinnedCredentialId: "home",
+          pinSource: "policy",
+          strategy,
+          rotationEnabled: true,
+        }),
+      ).toBe("sharded");
+    }
   });
 
-  test("a POLICY pin is stale under ANY non-sharded strategy (and when rotation is off)", () => {
-    for (const strategy of NON_SHARDED) {
+  test("a POLICY pin with rotation DISABLED → clearStale under every stored strategy", () => {
+    // Rotation off is the one remaining non-sharded regime: a leftover policy
+    // pin is stale residue and must be ignored + lazily cleared.
+    for (const strategy of ALL) {
       expect(
         classifyCodexPin({
           pinnedCredentialId: "ex-home",
           pinSource: "policy",
           strategy,
-          rotationEnabled: true,
+          rotationEnabled: false,
         }),
       ).toBe("clearStale");
     }
-    // sharded strategy but rotation DISABLED → the sharded policy is not active → stale.
-    expect(
-      classifyCodexPin({
-        pinnedCredentialId: "ex-home",
-        pinSource: "policy",
-        strategy: "sharded",
-        rotationEnabled: false,
-      }),
-    ).toBe("clearStale");
   });
 
   test("a POLICY pin under an ACTIVE sharded policy → sharded (keep / re-shard, never clear)", () => {
@@ -1036,8 +1049,8 @@ describe("classifyCodexPin — pin lifecycle (manual sacrosanct, policy meaningf
     ).toBe("sharded");
   });
 
-  test("an UNPINNED session under a non-sharded strategy (or rotation off) → unpinned (follow the active strategy)", () => {
-    for (const strategy of NON_SHARDED) {
+  test("an UNPINNED session with rotation ENABLED → sharded under every stored strategy (lazy home assignment)", () => {
+    for (const strategy of ALL) {
       expect(
         classifyCodexPin({
           pinnedCredentialId: null,
@@ -1045,16 +1058,21 @@ describe("classifyCodexPin — pin lifecycle (manual sacrosanct, policy meaningf
           strategy,
           rotationEnabled: true,
         }),
+      ).toBe("sharded");
+    }
+  });
+
+  test("an UNPINNED session with rotation DISABLED → unpinned (workspace active pointer governs)", () => {
+    for (const strategy of ALL) {
+      expect(
+        classifyCodexPin({
+          pinnedCredentialId: null,
+          pinSource: null,
+          strategy,
+          rotationEnabled: false,
+        }),
       ).toBe("unpinned");
     }
-    expect(
-      classifyCodexPin({
-        pinnedCredentialId: null,
-        pinSource: null,
-        strategy: "sharded",
-        rotationEnabled: false,
-      }),
-    ).toBe("unpinned");
   });
 });
 
@@ -1253,8 +1271,8 @@ describe("OPE-21 pin and rollout policy", () => {
     expect(selected.credentialId).toBe("a");
   });
 
-  test("round_robin advances from session-last when it differs from workspace active", () => {
-    const decision = selectCodexCredentialLeaseForTurn({
+  test("OPE-36: stored round_robin behaves EXACTLY as sharded in the lease selector (sticky, never advancing)", () => {
+    const args = (rotationStrategy: string) => ({
       context: {
         accounts: [acct("a"), acct("b"), acct("c")].map((candidate) => ({
           ...candidate,
@@ -1265,7 +1283,7 @@ describe("OPE-21 pin and rollout policy", () => {
         activeCredentialId: "a",
         rotationEnabled: true,
         leaseRotationEnabled: true,
-        rotationStrategy: "round_robin",
+        rotationStrategy,
         existingCredentialId: null,
         policyScope: null,
         unavailableDiagnostics: [],
@@ -1278,7 +1296,13 @@ describe("OPE-21 pin and rollout policy", () => {
       nearExhaustionPct: 90,
       now: NOW,
     });
-    expect(decision.credentialId).toBe("c");
+    // Old round_robin advanced past session-last "b" to "c". Normalized: the
+    // stored legacy value is byte-equivalent to sharded (deterministic sticky
+    // home for the session), and repeated selection never advances.
+    const legacy = selectCodexCredentialLeaseForTurn(args("round_robin"));
+    const sharded = selectCodexCredentialLeaseForTurn(args("sharded"));
+    expect(legacy).toEqual(sharded);
+    expect(selectCodexCredentialLeaseForTurn(args("round_robin"))).toEqual(legacy);
   });
 
   test("same-turn frozen continuation keeps a healthy disabled credential without admitting new work", () => {
