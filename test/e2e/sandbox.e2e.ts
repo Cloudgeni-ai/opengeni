@@ -56,6 +56,42 @@ describe("real Docker sandbox e2e", () => {
     await services?.down();
   }, 60_000);
 
+  async function waitForSettledToolOutput(
+    sessionId: string,
+    outputMarker: string,
+  ): Promise<SessionEvent[]> {
+    let events: SessionEvent[] = [];
+    await waitFor(
+      async () => {
+        events = await sessionEvents(sessionId);
+        const outputIndex = events.findIndex(
+          (event) =>
+            event.type === "agent.toolCall.output" &&
+            JSON.stringify(event.payload ?? {}).includes(outputMarker),
+        );
+        if (outputIndex < 0) return false;
+        return events
+          .slice(outputIndex + 1)
+          .some(
+            (event) =>
+              event.type === "session.status.changed" &&
+              (event.payload as { status?: string }).status === "idle",
+          );
+      },
+      {
+        timeoutMs: 180_000,
+        describe: () =>
+          [
+            `waiting for settled tool output: ${outputMarker}`,
+            `event types: ${events.map((event) => event.type).join(", ")}`,
+            `api logs:\n${api.logs().slice(-4_000)}`,
+            `worker logs:\n${worker.logs().slice(-8_000)}`,
+          ].join("\n"),
+      },
+    );
+    return events;
+  }
+
   test("runs SDK shell tool calls inside the real Docker sandbox", async () => {
     const create = await fetch(apiPath("/sessions"), {
       method: "POST",
@@ -68,19 +104,7 @@ describe("real Docker sandbox e2e", () => {
     expect(create.status).toBe(202);
     const session = (await create.json()) as { id: string };
 
-    await waitFor(
-      async () => {
-        const events = await sessionEvents(session.id);
-        return events.some(
-          (event) =>
-            event.type === "session.status.changed" &&
-            (event.payload as { status?: string }).status === "idle",
-        );
-      },
-      { timeoutMs: 180_000 },
-    );
-
-    const events = await sessionEvents(session.id);
+    const events = await waitForSettledToolOutput(session.id, "sandbox-ok");
     const toolOutputs = events
       .filter((event) => event.type === "agent.toolCall.output")
       .map((event) => JSON.stringify(event.payload ?? {}));
@@ -100,19 +124,10 @@ describe("real Docker sandbox e2e", () => {
     expect(create.status).toBe(202);
     const session = (await create.json()) as { id: string };
 
-    await waitFor(
-      async () => {
-        const events = await sessionEvents(session.id);
-        return events.some(
-          (event) =>
-            event.type === "session.status.changed" &&
-            (event.payload as { status?: string }).status === "idle",
-        );
-      },
-      { timeoutMs: 180_000 },
+    const settledEvents = await waitForSettledToolOutput(
+      session.id,
+      "workbench-capture-e2e-complete",
     );
-
-    const settledEvents = await sessionEvents(session.id);
     expect(
       settledEvents.some(
         (event) =>
@@ -217,19 +232,7 @@ describe("real Docker sandbox e2e", () => {
     expect(create.status).toBe(202);
     const session = (await create.json()) as { id: string };
 
-    await waitFor(
-      async () => {
-        const events = await sessionEvents(session.id);
-        return events.some(
-          (event) =>
-            event.type === "session.status.changed" &&
-            (event.payload as { status?: string }).status === "idle",
-        );
-      },
-      { timeoutMs: 180_000 },
-    );
-
-    const events = await sessionEvents(session.id);
+    const events = await waitForSettledToolOutput(session.id, "file-mounted-ok");
     expect(
       events
         .filter((event) => event.type === "agent.toolCall.output")
@@ -283,19 +286,7 @@ describe("real Docker sandbox e2e", () => {
     expect(create.status).toBe(202);
     const session = (await create.json()) as { id: string };
 
-    await waitFor(
-      async () => {
-        const events = await sessionEvents(session.id);
-        return events.some(
-          (event) =>
-            event.type === "session.status.changed" &&
-            (event.payload as { status?: string }).status === "idle",
-        );
-      },
-      { timeoutMs: 180_000 },
-    );
-
-    const events = await sessionEvents(session.id);
+    const events = await waitForSettledToolOutput(session.id, "sandbox-view-image");
     const viewOutput = events.find(
       (event) =>
         event.type === "agent.toolCall.output" &&
