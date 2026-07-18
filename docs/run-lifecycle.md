@@ -131,6 +131,33 @@ does return, the worker immediately records the provider instance id on the
 warming lease before readiness/display/setup work; any later setup failure
 terminates that just-created sandbox before the lease can be retried.
 
+Lease liveness is not provider or workspace truth. The durable recovery
+projection independently records provider existence, archive availability,
+restore progress, and verified workspace readiness alongside lease liveness and
+epoch. API attach/swap paths therefore resume the exact live instance and pass a
+bounded command probe before reporting success. A legacy `warm` row projects to
+`unknown` until that verification succeeds; a provider `NOT_FOUND` instead
+retires only the exact `(lease_epoch, instance_id)` and advances the epoch once.
+
+A lost provider is rematerialized by one cold-to-warming winner. Under the lease
+row lock it selects one versioned archive revision containing archive byte/hash
+metadata and a deterministic workspace-tree fingerprint. Repeated starts with
+the same rematerialization id are idempotent; rivals and stale progress/commit
+writes are fenced. The runtime verifies archive bytes before hydration and the
+restored tree before `warm` publication. A partial hydrate or fingerprint
+mismatch terminates the unpublished box and leaves typed degraded/unrecoverable
+state; it never publishes a clean replacement, a previous revision, or a mixed
+snapshot. A legacy per-session archive can participate only after its archive
+fields—never provider identity—are imported and selected under that same lock.
+
+Concurrent routed calls may all discover the same missing provider. Exactly one
+observer wins the lease-loss transition; the others receive typed `superseded`
+recovery. Each ambiguous operation is invoked at most once and is never replayed
+on a replacement backend. During idle drain, a resumable cloud box is deleted
+only after a verified workspace capture is durably folded onto the fenced lease.
+Definitive `NOT_FOUND` before capture preserves any existing archive or records
+typed unrecoverable truth when no durable revision exists.
+
 **Worker restarts are survivable.** A graceful worker shutdown (a deploy or
 rollout restart delivers SIGTERM; Temporal cancels in-flight activities with
 reason `WORKER_SHUTDOWN`) checkpoints conversation truth and the sandbox
@@ -215,10 +242,12 @@ wrong one is the classic mistake.
    and lossy** (reasoning items and several item types are dropped), so it is
    correct for humans and auditing and must never be fed back to the model.
 
-Sandbox recovery state is persisted separately again, in
-`sandbox_session_envelopes`: the small versioned descriptor (provider handle /
-snapshot reference / manifest) used to reattach, snapshot-restore, or rebuild
-the session's sandbox on its next turn — decoupled from the RunState blob.
+Sandbox recovery state is persisted separately again. The group lease owns the
+authoritative provider/archive/restore/workspace projection and epoch;
+`sandbox_session_envelopes` stores the small per-session provider/manifest
+descriptor used to reattach and can supply a legacy archive only through the
+lease's atomic revision-selection step. Both are decoupled from the RunState
+blob.
 
 See issue #35 for the rationale and the dual-write → flagged-read → default-flip
 migration history.
