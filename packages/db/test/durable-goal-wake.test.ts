@@ -99,6 +99,27 @@ async function runningGoalFixture(options: { withAncestor?: boolean } = {}) {
 
 type GoalFixture = Awaited<ReturnType<typeof runningGoalFixture>>;
 
+function goalCommand(
+  ctx: GoalFixture,
+  input: {
+    attemptId: string;
+    executionGeneration: number;
+    operationKey: string;
+  },
+) {
+  return {
+    accountId: ctx.grant.accountId,
+    actor: {
+      type: "agent_attempt" as const,
+      sessionId: ctx.session.id,
+      turnId: ctx.turn.id,
+      attemptId: input.attemptId,
+      executionGeneration: input.executionGeneration,
+    },
+    operationKey: input.operationKey,
+  };
+}
+
 async function beforeLockTimeout<T>(work: Promise<T>): Promise<T> {
   const timeout = Symbol("lock inversion timeout");
   const completed = await Promise.race([work, Bun.sleep(3_000).then(() => timeout)]);
@@ -228,6 +249,182 @@ describe("durable active-goal wake", () => {
       (await getSessionGoalWithContinuation(client.db, ctx.grant.workspaceId!, ctx.session.id))
         ?.continuation,
     ).toMatchObject({ state: "scheduled", reason: "continuation_pending" });
+  });
+
+  test("a recovered attempt reconciles an ambiguously committed goal update without overwriting newer truth", async () => {
+    const ctx = await runningGoalFixture();
+    const firstKey = crypto.randomUUID();
+    const secondKey = crypto.randomUUID();
+
+    await expect(
+      (async () => {
+        await updateSessionGoalWithEvent(client.db, ctx.grant.workspaceId!, ctx.session.id, {
+          text: "Committed before the caller lost its response",
+          progressNote: "first attempt persisted",
+          actor: "agent",
+          command: goalCommand(ctx, {
+            attemptId: ctx.attemptId,
+            executionGeneration: ctx.turn.executionGeneration,
+            operationKey: firstKey,
+          }),
+        });
+        throw new Error("simulated caller-visible response loss after commit");
+      })(),
+    ).rejects.toThrow("simulated caller-visible response loss after commit");
+
+    const recovered = await recoverSessionDispatch(client.db, ctx.grant.workspaceId!, {
+      sessionId: ctx.session.id,
+      attemptId: ctx.attemptId,
+      timeoutType: "HEARTBEAT",
+      maxRedispatches: 3,
+    });
+    expect(recovered.action).toBe("recovering");
+
+    const replacementAttemptId = crypto.randomUUID();
+    const replacement = await claimSessionWorkForAttempt(client.db, ctx.grant.workspaceId!, {
+      sessionId: ctx.session.id,
+      workflowId: `session-${ctx.session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: replacementAttemptId,
+      dispatchId: `dispatch-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    expect(replacement.action).toBe("claimed");
+    if (replacement.action !== "claimed") throw new Error("replacement attempt was not claimed");
+    expect(replacement.turn.id).toBe(ctx.turn.id);
+    expect(replacement.turn.executionGeneration).toBe(ctx.turn.executionGeneration + 1);
+
+    const replayed = await updateSessionGoalWithEvent(
+      client.db,
+      ctx.grant.workspaceId!,
+      ctx.session.id,
+      {
+        text: "Committed before the caller lost its response",
+        progressNote: "first attempt persisted",
+        actor: "agent",
+        command: goalCommand(ctx, {
+          attemptId: replacementAttemptId,
+          executionGeneration: replacement.turn.executionGeneration,
+          operationKey: firstKey,
+        }),
+      },
+    );
+    expect(replayed).toMatchObject({ replay: true, events: [], goal: { version: 2 } });
+    expect(replayed.operationId).toBeTruthy();
+
+    const newer = await updateSessionGoalWithEvent(
+      client.db,
+      ctx.grant.workspaceId!,
+      ctx.session.id,
+      {
+        text: "Newer recovered-attempt direction remains authoritative",
+        progressNote: "replacement attempt advanced the goal",
+        actor: "agent",
+        command: goalCommand(ctx, {
+          attemptId: replacementAttemptId,
+          executionGeneration: replacement.turn.executionGeneration,
+          operationKey: secondKey,
+        }),
+      },
+    );
+    expect(newer).toMatchObject({ replay: false, goal: { version: 3 } });
+    expect(newer.operationId).not.toBe(replayed.operationId);
+    if (!replayed.operationId || !newer.operationId) {
+      throw new Error("receipted goal updates must return operation IDs");
+    }
+
+    const oldReplay = await updateSessionGoalWithEvent(
+      client.db,
+      ctx.grant.workspaceId!,
+      ctx.session.id,
+      {
+        text: "Committed before the caller lost its response",
+        progressNote: "first attempt persisted",
+        actor: "agent",
+        command: goalCommand(ctx, {
+          attemptId: replacementAttemptId,
+          executionGeneration: replacement.turn.executionGeneration,
+          operationKey: firstKey,
+        }),
+      },
+    );
+    expect(oldReplay).toMatchObject({
+      replay: true,
+      operationId: replayed.operationId,
+      events: [],
+      goal: {
+        version: 2,
+        text: "Committed before the caller lost its response",
+      },
+    });
+    expect(
+      (await getSessionGoalWithContinuation(client.db, ctx.grant.workspaceId!, ctx.session.id))
+        ?.version,
+    ).toBe(3);
+
+    await expect(
+      updateSessionGoalWithEvent(client.db, ctx.grant.workspaceId!, ctx.session.id, {
+        text: "Conflicting reuse must not apply",
+        actor: "agent",
+        command: goalCommand(ctx, {
+          attemptId: replacementAttemptId,
+          executionGeneration: replacement.turn.executionGeneration,
+          operationKey: firstKey,
+        }),
+      }),
+    ).rejects.toMatchObject({ code: "IDEMPOTENCY_KEY_REUSED" });
+
+    const receipts = await shared.admin<
+      Array<{ id: string; operationKey: string; actorAttemptId: string; goalVersion: number }>
+    >`
+      select id, operation_key as "operationKey", actor_attempt_id as "actorAttemptId",
+             (result ->> 'goalVersion')::int as "goalVersion"
+      from session_command_receipts
+      where workspace_id = ${ctx.grant.workspaceId!}
+        and target_session_id = ${ctx.session.id}
+        and action = 'goal.update'
+      order by created_at, id`;
+    expect([...receipts]).toEqual([
+      {
+        id: replayed.operationId,
+        operationKey: firstKey,
+        actorAttemptId: ctx.attemptId,
+        goalVersion: 2,
+      },
+      {
+        id: newer.operationId,
+        operationKey: secondKey,
+        actorAttemptId: replacementAttemptId,
+        goalVersion: 3,
+      },
+    ]);
+    const [eventCount] = await shared.admin`
+      select count(*)::int as count
+      from session_events
+      where workspace_id = ${ctx.grant.workspaceId!}
+        and session_id = ${ctx.session.id}
+        and type = 'goal.updated'`;
+    expect(Number(eventCount!.count)).toBe(2);
+
+    const settled = await applySessionTurnSettlement(client.db, ctx.grant.workspaceId!, {
+      sessionId: ctx.session.id,
+      turnId: replacement.turn.id,
+      triggerEventId: replacement.turn.triggerEventId,
+      attemptId: replacementAttemptId,
+      turnStatus: "completed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [{ type: "turn.completed", payload: { reason: "test" } }],
+    });
+    expect(settled.action).toBe("settled");
+    expect((await materialize(ctx)).action).toBe("continue");
+    const [continuation] = await shared.admin<{ payload: { goalVersion?: number } }[]>`
+      select payload
+      from session_system_updates
+      where workspace_id = ${ctx.grant.workspaceId!}
+        and session_id = ${ctx.session.id}
+        and kind = 'goal_continuation'`;
+    expect(continuation?.payload.goalVersion).toBe(3);
   });
 
   test("projects only a live goal attempt as running while worker recovery is scheduled", async () => {
@@ -701,6 +898,11 @@ describe("durable active-goal wake", () => {
       const mutate = updateSessionGoalWithEvent(client.db, ctx.grant.workspaceId!, ctx.session.id, {
         progressNote: "still making progress",
         actor: "agent",
+        command: goalCommand(ctx, {
+          attemptId: ctx.attemptId,
+          executionGeneration: ctx.turn.executionGeneration,
+          operationKey: crypto.randomUUID(),
+        }),
       });
       const completed = await beforeLockTimeout(Promise.all([append, mutate]));
       expect(completed[0].accepted).toBe(true);

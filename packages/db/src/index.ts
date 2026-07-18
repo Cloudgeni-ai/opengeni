@@ -79,6 +79,7 @@ import {
   reasoningEffortForMetadata,
   resolveWorkspaceMemoryEnabled,
   RigChange as RigChangeContract,
+  SessionGoal as SessionGoalContract,
   SessionSystemUpdatePayload,
 } from "@opengeni/contracts";
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
@@ -115,13 +116,19 @@ import {
   TOOL_RESULT_TYPE_BY_CALL_TYPE,
 } from "./session-tool-call-settlement";
 import {
+  assertAgentCommandAuthorityInTransaction,
+  canonicalSessionCommandHash,
   closeSessionTurnAttemptInTransaction,
   evaluateSessionControl,
   evaluateSessionControls,
   lockWorkspaceInferenceControl,
   registerInternalUpdateWakeInTransaction,
   registerSessionTurnAttemptClaim,
+  reserveSessionCommandReceipt,
   serializeEffectiveSessionControl,
+  SessionControlInvariantError,
+  updateSessionCommandReceiptResult,
+  type SessionCommandActor,
   type SessionTurnAttemptOutcome,
 } from "./session-control";
 import * as schema from "./schema";
@@ -18177,8 +18184,18 @@ export async function updateSessionGoalWithEvent(
     successCriteria?: string | null;
     progressNote?: string;
     actor: "agent" | "api";
+    command?: {
+      accountId: string;
+      actor: Extract<SessionCommandActor, { type: "agent_attempt" }>;
+      operationKey: string;
+    };
   },
-): Promise<{ goal: SessionGoal; events: SessionEvent[] }> {
+): Promise<{
+  goal: SessionGoal;
+  events: SessionEvent[];
+  operationId: string | null;
+  replay: boolean;
+}> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
     scopedDb.transaction(async (rawTx) => {
       const tx = rawTx as unknown as Database;
@@ -18189,10 +18206,86 @@ export async function updateSessionGoalWithEvent(
         .for("update")
         .limit(1);
       if (!session) throw new Error(`Session not found: ${sessionId}`);
-      const goal = await updateSessionGoal(tx, workspaceId, sessionId, {
-        ...(input.text !== undefined ? { text: input.text } : {}),
-        ...(input.successCriteria !== undefined ? { successCriteria: input.successCriteria } : {}),
-      });
+
+      const reserved = input.command
+        ? await reserveSessionCommandReceipt(tx, {
+            accountId: input.command.accountId,
+            workspaceId,
+            actor: input.command.actor,
+            action: "goal.update",
+            targetSessionId: sessionId,
+            targetTurnId: null,
+            operationKey: input.command.operationKey,
+            canonicalRequestHash: canonicalSessionCommandHash({
+              text: input.text ?? null,
+              successCriteria: input.successCriteria ?? null,
+              progressNote: input.progressNote ?? null,
+            }),
+            identityScope: "goal_operation",
+          })
+        : null;
+      if (reserved?.replay) {
+        const parsed = SessionGoalContract.safeParse(reserved.receipt.result.goal);
+        const goalVersion = reserved.receipt.result.goalVersion;
+        const eventId = reserved.receipt.result.eventId;
+        if (
+          !parsed.success ||
+          !Number.isSafeInteger(goalVersion) ||
+          parsed.data.version !== goalVersion ||
+          typeof eventId !== "string"
+        ) {
+          throw new SessionControlInvariantError(
+            `Goal update receipt ${reserved.receipt.id} has no valid committed result`,
+          );
+        }
+        return {
+          goal: parsed.data,
+          events: [],
+          operationId: reserved.receipt.id,
+          replay: true,
+        };
+      }
+
+      if (input.command) {
+        await assertAgentCommandAuthorityInTransaction(tx, {
+          workspaceId,
+          actor: input.command.actor,
+          targetSessionId: sessionId,
+          action: "goal",
+        });
+      }
+      const [existing] = await tx
+        .select()
+        .from(schema.sessionGoals)
+        .where(
+          and(
+            eq(schema.sessionGoals.workspaceId, workspaceId),
+            eq(schema.sessionGoals.sessionId, sessionId),
+          ),
+        )
+        .for("update")
+        .limit(1);
+      if (!existing) {
+        throw new Error("this session has no goal; use goal_set first");
+      }
+      if (existing.status === "completed") {
+        throw new Error("session goal is completed; use goal_set to start a new goal");
+      }
+      const [updated] = await tx
+        .update(schema.sessionGoals)
+        .set({
+          ...(input.text !== undefined ? { text: input.text } : {}),
+          ...(input.successCriteria !== undefined
+            ? { successCriteria: input.successCriteria }
+            : {}),
+          version: existing.version + 1,
+          noProgressStreak: 0,
+          updatedAt: new Date(),
+        })
+        .where(eq(schema.sessionGoals.id, existing.id))
+        .returning();
+      if (!updated) throw new Error(`Session goal not found: ${sessionId}`);
+      const goal = mapSessionGoal(updated);
       const now = new Date();
       const [event] = await tx
         .insert(schema.sessionEvents)
@@ -18218,7 +18311,21 @@ export async function updateSessionGoalWithEvent(
         .update(schema.sessions)
         .set({ lastSequence: session.lastSequence + 1, updatedAt: now })
         .where(eq(schema.sessions.id, sessionId));
-      return { goal, events: [mapEvent(event)] };
+      if (reserved) {
+        await updateSessionCommandReceiptResult(tx, reserved.receipt.id, {
+          result: {
+            goal,
+            goalVersion: goal.version,
+            eventId: event.id,
+          },
+        });
+      }
+      return {
+        goal,
+        events: [mapEvent(event)],
+        operationId: reserved?.receipt.id ?? null,
+        replay: false,
+      };
     }),
   );
 }
