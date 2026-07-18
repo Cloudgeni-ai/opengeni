@@ -12,6 +12,7 @@
 //   /workspaces/:id/capabilities             → capability catalog + registry (incl. Packs subsection)
 //   /workspaces/:id/schedules                → scheduled tasks + run history
 //   /workspaces/:id/documents                → document bases + search
+//   /workspaces/:id/memory                   → durable workspace memory
 //   /workspaces/:id/settings                 → workspace settings (name, API keys, danger zone)
 //   /workspaces/:id/organization             → organization settings (billing, usage, plan, members)
 //   /workspaces/:id/account                  → legacy redirect to /organization
@@ -38,6 +39,7 @@ const LazyCapabilitiesRoute = lazyRouteComponent(
 );
 const LazyDeviceRoute = lazyRouteComponent(() => import("@/routes/device"), "DeviceRoute");
 const LazyDocumentsRoute = lazyRouteComponent(() => import("@/routes/documents"), "DocumentsRoute");
+const LazyMemoryRoute = lazyRouteComponent(() => import("@/routes/memory"), "MemoryRoute");
 const LazyVariableSetsRoute = lazyRouteComponent(
   () => import("@/routes/variable-sets"),
   "VariableSetsRoute",
@@ -191,12 +193,17 @@ const workspaceSchedulesRoute = createRoute({
 const workspaceDocumentsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "documents",
+  component: Documents,
+});
+const workspaceMemoryRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "memory",
   // `?memory=<id>` deep-links a memory record (from a timeline memory step): the
-  // Documents page reveals + highlights that memory even when the filters would
+  // Memory page reveals + highlights that record even when the filters would
   // otherwise hide it. Unknown values are ignored.
   validateSearch: (search: Record<string, unknown>): { memory?: string } =>
     typeof search.memory === "string" ? { memory: search.memory } : {},
-  component: Documents,
+  component: Memory,
 });
 const workspaceSettingsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
@@ -244,6 +251,7 @@ const routeTree = rootRoute.addChildren([
     workspaceCapabilitiesRoute,
     workspaceSchedulesRoute,
     workspaceDocumentsRoute,
+    workspaceMemoryRoute,
     workspaceSettingsRoute,
     workspaceOrganizationRoute,
     workspaceAccountRoute,
@@ -348,8 +356,13 @@ function Schedules() {
 
 function Documents() {
   const { workspaceId } = workspaceDocumentsRoute.useParams();
-  const { memory } = workspaceDocumentsRoute.useSearch();
-  return <LazyDocumentsRoute workspaceId={workspaceId} focusMemoryId={memory} />;
+  return <LazyDocumentsRoute workspaceId={workspaceId} />;
+}
+
+function Memory() {
+  const { workspaceId } = workspaceMemoryRoute.useParams();
+  const { memory } = workspaceMemoryRoute.useSearch();
+  return <LazyMemoryRoute workspaceId={workspaceId} focusMemoryId={memory} />;
 }
 
 function WorkspaceSettings() {
