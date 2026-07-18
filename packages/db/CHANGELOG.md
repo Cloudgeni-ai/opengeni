@@ -1,5 +1,11 @@
 # @opengeni/db
 
+## 0.7.3
+
+### Patch Changes
+
+- b9dbb63: Keep failed-child result provenance owned by the atomic turn settlement. Worker activities now read and deliver the exact committed outbox row without rewriting its turn-scoped payload or lineage.
+
 ## 0.7.2
 
 ### Patch Changes
