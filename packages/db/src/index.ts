@@ -18172,6 +18172,67 @@ export async function upsertSessionGoal(
 }
 
 /**
+ * Agent/API goal_set: session sequence ownership, the create-or-replace
+ * mutation, and goal.set timeline fact commit together. The session-first lock
+ * order matches active-turn event writes; goal_set must never hold a goal row
+ * while waiting for the session sequence owner.
+ */
+export async function upsertSessionGoalWithEvent(
+  db: Database,
+  input: CreateSessionGoalInput & { actor: "agent" | "api" },
+): Promise<{ goal: SessionGoal; replaced: boolean; events: SessionEvent[] }> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (rawTx) => {
+        const tx = rawTx as unknown as Database;
+        const [session] = await tx
+          .select()
+          .from(schema.sessions)
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, input.workspaceId),
+              eq(schema.sessions.id, input.sessionId),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (!session) throw new Error(`Session not found: ${input.sessionId}`);
+        const result = await upsertSessionGoal(tx, input);
+        const now = new Date();
+        const [event] = await tx
+          .insert(schema.sessionEvents)
+          .values({
+            accountId: session.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            sequence: session.lastSequence + 1,
+            type: "goal.set",
+            payload: sanitizeEventPayload({
+              goalId: result.goal.id,
+              text: result.goal.text,
+              ...(result.goal.successCriteria
+                ? { successCriteria: result.goal.successCriteria }
+                : {}),
+              version: result.goal.version,
+              actor: input.actor,
+              replaced: result.replaced,
+            }),
+            occurredAt: now,
+          })
+          .returning();
+        if (!event) throw new Error("Failed to append goal.set event");
+        await tx
+          .update(schema.sessions)
+          .set({ lastSequence: session.lastSequence + 1, updatedAt: now })
+          .where(eq(schema.sessions.id, input.sessionId));
+        return { ...result, events: [mapEvent(event)] };
+      }),
+  );
+}
+
+/**
  * goal_update semantics: revise text/criteria without changing status. The
  * version bump counts as progress for the no-progress detector.
  */
