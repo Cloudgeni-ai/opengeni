@@ -42,6 +42,24 @@ describe("turn density profile release-gate helpers", () => {
     );
   });
 
+  test("rejects unbounded profile controls and inconsistent thresholds", () => {
+    expect(() => profileConfigFromEnv({ OPENGENI_DENSITY_WAVES: "11" })).toThrow(
+      "OPENGENI_DENSITY_WAVES must be at most 10",
+    );
+    expect(() =>
+      profileConfigFromEnv({ OPENGENI_DENSITY_PLATEAU_SAMPLE_INTERVAL_MS: "1" }),
+    ).toThrow("must be between 100 and 60000");
+    expect(() => profileConfigFromEnv({ OPENGENI_DENSITY_SYNTHETIC_FAN_OUT: "1025" })).toThrow(
+      "must be at most 1024",
+    );
+    expect(() =>
+      profileConfigFromEnv({
+        OPENGENI_DENSITY_TARGET_MIB_PER_TURN: "101",
+        OPENGENI_DENSITY_HARD_LIMIT_MIB_PER_TURN: "100",
+      }),
+    ).toThrow("must not exceed");
+  });
+
   test("reports interpolation-based p50/p95/p99 and worst values", () => {
     expect(quantile([1, 2, 3, 4], 0.5)).toBe(2.5);
     expect(quantile([1, 2, 3, 4], 0.95)).toBeCloseTo(3.85, 10);

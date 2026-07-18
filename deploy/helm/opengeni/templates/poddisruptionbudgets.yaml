@@ -39,7 +39,11 @@ metadata:
     {{- include "opengeni.labels" . | nindent 4 }}
     app.kubernetes.io/component: worker-turns
 spec:
+  {{- if hasKey .Values.worker.turns.podDisruptionBudget "maxUnavailable" }}
+  maxUnavailable: {{ .Values.worker.turns.podDisruptionBudget.maxUnavailable }}
+  {{- else }}
   minAvailable: {{ .Values.worker.turns.podDisruptionBudget.minAvailable }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "opengeni.selectorLabels" . | nindent 6 }}

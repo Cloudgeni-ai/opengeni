@@ -646,6 +646,12 @@ HPA reports an unavailable metric. Never substitute the aggregate durable
 prompt count: paused human prompts are intentionally queued but ineligible and
 would create false scale pressure.
 
+The turn-worker Deployment and PodDisruptionBudget both cap voluntary
+unavailability at one pod. With the 16-turn hard density this bounds a rollout
+or voluntary node drain to 16 simultaneously checkpointing logical turns. A
+hard node loss can still remove every turn pod placed on that node; topology
+spread limits skew but cannot make an involuntary failure respect a PDB.
+
 Minimum production dashboards should cover:
 
 - API traffic: request rate, error rate, and p50/p95/p99 latency by `route`, `method`, `status`, `variable set`, and `component`.

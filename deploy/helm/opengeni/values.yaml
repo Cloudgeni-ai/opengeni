@@ -234,7 +234,10 @@ worker:
         memory: 4Gi
     podDisruptionBudget:
       enabled: true
-      minAvailable: 1
+      # Bound voluntary node drains to one turn pod. At the 16-turn hard
+      # density this limits simultaneous graceful checkpoint pressure to 16
+      # logical turns regardless of current HPA replica count.
+      maxUnavailable: 1
     autoscaling:
       enabled: false
       minReplicas: 4

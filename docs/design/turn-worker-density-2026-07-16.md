@@ -56,7 +56,10 @@ newest configured tail recent user input. The default active/inactive sizes are
 the same shape as the original gate; the profile rejects more than 32 MiB for
 either per-turn history class. Sampling and synthetic allocation knobs are also
 bounded by the script so a profile cannot accidentally become an unbounded
-memory test.
+memory test: at most 10 waves, a 300-second plateau, 100 baseline or settled
+samples, 1,024 synthetic tool/fan-out/drain items, 2 MiB of synthetic working
+bytes per turn, and a 60-second synthetic wait. Plateau sampling cannot be more
+frequent than every 100 ms, and the per-wave timeout cannot exceed 30 minutes.
 
 Each activity uses `sandboxBackend: "none"`, a zero-priced
 `scripted-density-model`, no model-provider registry entries, and no API key.
@@ -132,6 +135,52 @@ workspace capture, recording, integrations, and provider calls; it is not direct
 memory evidence for those disabled subsystems. Historical Prometheus data and
 the recording/capture fixes are retained in the original production record but
 are not exercised by this synthetic local sweep.
+
+## Read-only production fleet evidence (2026-07-18)
+
+The production turn fleet had 10 replicas with HPA bounds 10–20, requests of
+500m CPU / 3 GiB memory, and limits of 2 CPU / 6 GiB memory. The HPA used CPU
+70% and memory 80%; neither `custom.metrics.k8s.io` nor
+`external.metrics.k8s.io` was installed, so an eligible-backlog or slot metric
+cannot truthfully be enabled there until a metrics adapter is verified.
+
+For current-revision pods over three days, Prometheus reported:
+
+- maximum/average working set: 997,953,536 / 349,212,644 bytes;
+- maximum process RSS: 1,048,006,656 bytes;
+- maximum/average five-minute CPU: 0.333 / 0.0275 cores;
+- maximum CPU throttle ratio: 0.0185; and
+- maximum in-flight activities on one pod: 2.
+
+The same observation window had zero current-revision restarts or OOM reasons.
+An old aggregate gauge simultaneously counted 412 paused human prompts even
+though only six turns were in flight. Paused prompts are durable but are not
+eligible `runAgentTurn` work, which is why the aggregate gauge was removed and
+the Temporal turn-activity task queue is now the authoritative runnable
+backlog.
+
+The live turn-worker PDB was `minAvailable: 1` with 10 replicas, permitting nine
+simultaneous voluntary disruptions. At 16 admitted turns per pod, that exposed
+as many as 144 turns to concurrent checkpoint/drain pressure. The source PDB is
+now `maxUnavailable: 1`, matching the Deployment rollout bound and limiting a
+voluntary disruption to one pod / 16 turns. The live Deployment had drifted to
+`maxUnavailable: 25%` even though the source value was one and must be
+reconciled through the serialized release lane.
+
+A hard pod death still affects every slot admitted on that pod, at most 16. At
+the observed placement of no more than two turn pods per node, the current hard
+node-loss bound was 32 turns. At the 20-pod HPA maximum across six nodes, even
+balanced placement can put four pods on one node, for a topology-dependent
+64-turn hard node-loss bound. A PDB cannot constrain involuntary node loss.
+
+## Non-serving execution requirement
+
+A read-only forensic fingerprint over 3,823 sessions was previously run inside
+a 1 GiB production serving API pod and exited 137. The child process did not
+restart the API container, but it broke the routed shell and consumed serving
+headroom. Heavy forensics and density profiling therefore run only in an
+isolated non-serving execution class. They must never execute in API or worker
+serving pods, and destructive shared-production OOM experiments are prohibited.
 
 ## Production release gate
 

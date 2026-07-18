@@ -32,7 +32,7 @@ import { createActivityTestHarness } from "../../apps/worker/src/activities";
 import { currentActivityContext } from "../../apps/worker/src/activities/streaming";
 import {
   CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES,
-  TURN_WORKER_MAX_CONCURRENT_TURNS,
+  createTurnWorkerTuner,
 } from "../../apps/worker/src/concurrency";
 import { turnTaskQueue } from "../../apps/worker/src/workflows/activities";
 import { submitTestHumanPrompt } from "./helpers/session-control";
@@ -733,7 +733,7 @@ async function restartTestWorker(
       namespace: "default",
       taskQueue: turnTaskQueue(taskQueue),
       activities: { runAgentTurn },
-      maxConcurrentActivityTaskExecutions: TURN_WORKER_MAX_CONCURRENT_TURNS,
+      tuner: integrationTurnTuner(),
     }),
   ]);
   return {
@@ -745,4 +745,14 @@ async function restartTestWorker(
       turns.shutdown();
     },
   };
+}
+
+function integrationTurnTuner() {
+  return createTurnWorkerTuner({
+    memorySnapshot: () => ({
+      currentBytes: 256 * 1024 * 1024,
+      limitBytes: 4 * 1024 * 1024 * 1024,
+      source: "cgroup-v2",
+    }),
+  }).tuner;
 }

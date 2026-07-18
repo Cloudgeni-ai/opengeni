@@ -19,6 +19,13 @@ import { createTurnActivities } from "../../apps/worker/src/activities";
 const MIB = 1024 * 1024;
 const MAX_HISTORY_BYTES_PER_TURN = 32 * MIB;
 const MAX_SYNTHETIC_WORK_BYTES_PER_TURN = 2 * MIB;
+const MAX_WAVES = 10;
+const MAX_PLATEAU_SECONDS = 300;
+const MAX_SAMPLE_COUNT = 100;
+const MAX_SETTLE_DELAY_MS = 60_000;
+const MAX_TIMEOUT_MS = 30 * 60_000;
+const MAX_SYNTHETIC_ITEMS = 1_024;
+const MAX_SYNTHETIC_WAIT_MS = 60_000;
 
 export const DEFAULT_DENSITIES = [1, 2, 4, 8, 12, 16, 24, 32] as const;
 export const SYNTHETIC_SCENARIOS = [
@@ -179,38 +186,89 @@ export function profileConfigFromEnv(
     activeHistoryBytes,
   );
 
+  const targetMiBPerTurn = positiveNumberFromEnv(env, "OPENGENI_DENSITY_TARGET_MIB_PER_TURN", 50);
+  const hardLimitMiBPerTurn = positiveNumberFromEnv(
+    env,
+    "OPENGENI_DENSITY_HARD_LIMIT_MIB_PER_TURN",
+    100,
+  );
+  if (targetMiBPerTurn > hardLimitMiBPerTurn) {
+    throw new Error(
+      "OPENGENI_DENSITY_TARGET_MIB_PER_TURN must not exceed OPENGENI_DENSITY_HARD_LIMIT_MIB_PER_TURN",
+    );
+  }
+
   return {
     densities: parseDensitySweep(env.OPENGENI_DENSITY_SWEEP),
-    waves: positiveIntegerFromEnv(env, "OPENGENI_DENSITY_WAVES", 3),
+    waves: boundedPositiveInteger(env, "OPENGENI_DENSITY_WAVES", 3, MAX_WAVES),
     activeHistoryBytes,
     inactiveHistoryBytes,
     compactionTailBytes,
-    plateauSeconds: positiveIntegerFromEnv(env, "OPENGENI_DENSITY_PLATEAU_SECONDS", 15),
-    plateauSampleIntervalMs: positiveIntegerFromEnv(
+    plateauSeconds: boundedPositiveInteger(
+      env,
+      "OPENGENI_DENSITY_PLATEAU_SECONDS",
+      15,
+      MAX_PLATEAU_SECONDS,
+    ),
+    plateauSampleIntervalMs: boundedIntegerRange(
       env,
       "OPENGENI_DENSITY_PLATEAU_SAMPLE_INTERVAL_MS",
       500,
-    ),
-    baselineSamples: positiveIntegerFromEnv(env, "OPENGENI_DENSITY_BASELINE_SAMPLES", 5),
-    settledSamples: positiveIntegerFromEnv(env, "OPENGENI_DENSITY_SETTLED_SAMPLES", 5),
-    settleDelayMs: positiveIntegerFromEnv(env, "OPENGENI_DENSITY_SETTLE_DELAY_MS", 1_000),
-    timeoutMs: positiveIntegerFromEnv(env, "OPENGENI_DENSITY_TIMEOUT_MS", 120_000),
-    targetMiBPerTurn: positiveNumberFromEnv(env, "OPENGENI_DENSITY_TARGET_MIB_PER_TURN", 50),
-    hardLimitMiBPerTurn: positiveNumberFromEnv(
-      env,
-      "OPENGENI_DENSITY_HARD_LIMIT_MIB_PER_TURN",
       100,
+      60_000,
     ),
+    baselineSamples: boundedPositiveInteger(
+      env,
+      "OPENGENI_DENSITY_BASELINE_SAMPLES",
+      5,
+      MAX_SAMPLE_COUNT,
+    ),
+    settledSamples: boundedPositiveInteger(
+      env,
+      "OPENGENI_DENSITY_SETTLED_SAMPLES",
+      5,
+      MAX_SAMPLE_COUNT,
+    ),
+    settleDelayMs: boundedPositiveInteger(
+      env,
+      "OPENGENI_DENSITY_SETTLE_DELAY_MS",
+      1_000,
+      MAX_SETTLE_DELAY_MS,
+    ),
+    timeoutMs: boundedPositiveInteger(env, "OPENGENI_DENSITY_TIMEOUT_MS", 120_000, MAX_TIMEOUT_MS),
+    targetMiBPerTurn,
+    hardLimitMiBPerTurn,
     syntheticWorkBytes: boundedPositiveInteger(
       env,
       "OPENGENI_DENSITY_SYNTHETIC_WORK_BYTES",
       256 * 1024,
       MAX_SYNTHETIC_WORK_BYTES_PER_TURN,
     ),
-    syntheticToolBurst: positiveIntegerFromEnv(env, "OPENGENI_DENSITY_SYNTHETIC_TOOL_BURST", 6),
-    syntheticFanOut: positiveIntegerFromEnv(env, "OPENGENI_DENSITY_SYNTHETIC_FAN_OUT", 4),
-    syntheticWaitMs: nonnegativeIntegerFromEnv(env, "OPENGENI_DENSITY_SYNTHETIC_WAIT_MS", 10),
-    syntheticDrainSteps: positiveIntegerFromEnv(env, "OPENGENI_DENSITY_SYNTHETIC_DRAIN_STEPS", 4),
+    syntheticToolBurst: boundedPositiveInteger(
+      env,
+      "OPENGENI_DENSITY_SYNTHETIC_TOOL_BURST",
+      6,
+      MAX_SYNTHETIC_ITEMS,
+    ),
+    syntheticFanOut: boundedPositiveInteger(
+      env,
+      "OPENGENI_DENSITY_SYNTHETIC_FAN_OUT",
+      4,
+      MAX_SYNTHETIC_ITEMS,
+    ),
+    syntheticWaitMs: boundedIntegerRange(
+      env,
+      "OPENGENI_DENSITY_SYNTHETIC_WAIT_MS",
+      10,
+      0,
+      MAX_SYNTHETIC_WAIT_MS,
+    ),
+    syntheticDrainSteps: boundedPositiveInteger(
+      env,
+      "OPENGENI_DENSITY_SYNTHETIC_DRAIN_STEPS",
+      4,
+      MAX_SYNTHETIC_ITEMS,
+    ),
     ...(env.OPENGENI_DENSITY_ARTIFACT_PATH
       ? { artifactPath: env.OPENGENI_DENSITY_ARTIFACT_PATH }
       : {}),
@@ -423,7 +481,7 @@ async function runWave(input: {
       plateau,
       settled,
       incrementalValues,
-      retainedValues: Array.from({ length: density }, () => retainedValue / density),
+      retainedValues: [retainedValue / density],
       plateauToSettledValues,
     };
   } finally {
@@ -902,6 +960,20 @@ function boundedNonnegativeInteger(
 ): number {
   const value = nonnegativeIntegerFromEnv(env, name, fallback);
   if (value > maximum) throw new Error(`${name} must be at most ${maximum}`);
+  return value;
+}
+
+function boundedIntegerRange(
+  env: Record<string, string | undefined>,
+  name: string,
+  fallback: number,
+  minimum: number,
+  maximum: number,
+): number {
+  const value = integerFromEnv(env, name, fallback);
+  if (value < minimum || value > maximum) {
+    throw new Error(`${name} must be between ${minimum} and ${maximum}`);
+  }
   return value;
 }
 
