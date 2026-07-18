@@ -24181,7 +24181,16 @@ export async function listSessionSystemUpdatesForTurn(
           eq(schema.sessionSystemUpdates.state, "delivered"),
         ),
       )
-      .orderBy(asc(schema.sessionSystemUpdates.createdAt), asc(schema.sessionSystemUpdates.id));
+      .orderBy(
+        // A Steer is the authoritative replacement direction even when its
+        // transaction started before, but committed after, a concurrently
+        // materialized goal continuation. Keep all coalesced work in one
+        // metered inference, but render the winning Steer last so transaction
+        // timestamps cannot let an older goal prompt override it.
+        sql`case when ${schema.sessionSystemUpdates.kind} = 'agent_steer_instruction' then 1 else 0 end`,
+        asc(schema.sessionSystemUpdates.createdAt),
+        asc(schema.sessionSystemUpdates.id),
+      );
     return rows.map(mapSessionSystemUpdate);
   });
 }

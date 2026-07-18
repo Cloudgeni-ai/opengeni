@@ -12,6 +12,7 @@ import {
   ensureCodexRotationSettings,
   getSessionGoalWithContinuation,
   initializeSessionStartAtomically,
+  listSessionSystemUpdatesForTurn,
   materializeGoalContinuation,
   mutateSessionControlInTransaction,
   recoverSessionDispatch,
@@ -548,6 +549,56 @@ describe("durable active-goal wake", () => {
       where workspace_id = ${ctx.grant.workspaceId!} and session_id = ${ctx.session.id}
         and source = 'goal'`;
     expect(Number(goalTurns!.count)).toBe(0);
+  });
+
+  test("a racing Steer remains the final authoritative direction in the coalesced goal turn", async () => {
+    const ctx = await runningGoalFixture();
+    await settleIdle(ctx);
+    expect((await materialize(ctx)).action).toBe("continue");
+
+    // PostgreSQL now() is the transaction start timestamp. Model the exact
+    // race where Steer starts first, waits on materialization, then commits
+    // second with an earlier created_at than the goal update.
+    const operationId = crypto.randomUUID();
+    await shared.admin`
+      insert into session_system_updates (
+        account_id, workspace_id, session_id, kind, classification, source_id,
+        dedupe_key, summary, payload, lineage, state, created_at
+      ) values (
+        ${ctx.grant.accountId}, ${ctx.grant.workspaceId!}, ${ctx.session.id},
+        'agent_steer_instruction', 'action_required', ${ctx.session.id},
+        ${`ope59-steer:${operationId}`}, 'operator direction wins',
+        ${shared.admin.json({
+          type: "agent_steer_instruction",
+          instruction: "operator direction wins",
+          operationId,
+        })},
+        ${shared.admin.json({})}, 'pending', now() - interval '1 day'
+      )`;
+
+    const attemptId = crypto.randomUUID();
+    const claimed = await claimSessionWorkForAttempt(client.db, ctx.grant.workspaceId!, {
+      sessionId: ctx.session.id,
+      workflowId: `session-${ctx.session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: `dispatch-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    expect(claimed.action).toBe("claimed");
+    if (claimed.action !== "claimed") throw new Error("coalesced Steer was not claimed");
+    expect(claimed.turn.source).toBe("goal");
+    const delivered = await listSessionSystemUpdatesForTurn(
+      client.db,
+      ctx.grant.workspaceId!,
+      ctx.session.id,
+      claimed.turn.id,
+    );
+    expect(delivered.map((update) => update.kind)).toEqual([
+      "goal_continuation",
+      "agent_steer_instruction",
+    ]);
+    expect(await counts(ctx)).toMatchObject({ autoContinuations: 1, updates: 1, usage: 1 });
   });
 
   test("active-turn event writes and agent goal mutations complete without workspace/session lock inversion", async () => {
