@@ -17,10 +17,12 @@ import {
   createSessionGoal,
   evaluateSessionControl,
   evaluateSessionControls,
+  evaluateGoalContinuation,
   getSessionQueueSnapshot,
   getBillingBalance,
   getActiveSessionHistoryItems,
   getSession,
+  getSessionGoal,
   getSessionTurn,
   listOutstandingSessionSystemUpdates,
   listSessionDiscoverySummaries,
@@ -1111,6 +1113,119 @@ describe("clean session control plane", () => {
     expect(
       await listOutstandingSessionSystemUpdates(client.db, grant.workspaceId!, session.id),
     ).toEqual([]);
+  });
+
+  test("a compaction failure blocks autonomous goal retry until newer finished-turn truth exists", async () => {
+    const { grant, session } = await fixture();
+    const goal = await createSessionGoal(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      text: "Finish without compaction churn",
+      createdBy: "api",
+    });
+    const firstDecision = await evaluateGoalContinuation(client.db, {
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      noProgressLimit: 3,
+    });
+    expect(firstDecision).toMatchObject({ decision: "continue", autoContinuation: 1 });
+    if (firstDecision.decision !== "continue") throw new Error("goal did not continue");
+    const update = await addSessionSystemUpdate(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      kind: "goal_continuation",
+      classification: "info",
+      sourceId: goal.id,
+      dedupeKey: `goal-continuation:${goal.id}:${goal.version}:1`,
+      summary: "Continue the goal",
+      payload: {
+        type: "goal_continuation",
+        goalId: goal.id,
+        goalVersion: goal.version,
+        autoContinuation: 1,
+        prompt: "Continue the goal",
+      },
+    });
+    if (!update.added) throw new Error("goal continuation update was not inserted");
+    const failedAttemptId = crypto.randomUUID();
+    const failedTurn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId: failedAttemptId },
+    );
+    expect(failedTurn).toMatchObject({ source: "goal", status: "running" });
+    await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      turnId: failedTurn!.id,
+      triggerEventId: failedTurn!.triggerEventId,
+      attemptId: failedAttemptId,
+      turnStatus: "failed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [
+        {
+          type: "turn.failed",
+          payload: {
+            error: "checkpoint provider failed",
+            code: "context_compaction_failed",
+            retryable: false,
+            recovery: "user_message",
+          },
+        },
+      ],
+    });
+
+    expect(
+      await evaluateGoalContinuation(client.db, {
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        noProgressLimit: 3,
+      }),
+    ).toEqual({ decision: "none" });
+    expect(await getSessionGoal(client.db, grant.workspaceId!, session.id)).toMatchObject({
+      status: "active",
+      autoContinuations: 1,
+      noProgressStreak: 0,
+    });
+
+    const human = await send(grant, session.id, "Retry from the preserved history");
+    expect(
+      await evaluateGoalContinuation(client.db, {
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        noProgressLimit: 3,
+      }),
+    ).toEqual({ decision: "queue" });
+    const humanAttemptId = crypto.randomUUID();
+    const humanTurn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId: humanAttemptId },
+    );
+    expect(humanTurn?.id).toBe(human.turn.id);
+    await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      turnId: humanTurn!.id,
+      triggerEventId: humanTurn!.triggerEventId,
+      attemptId: humanAttemptId,
+      turnStatus: "completed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [{ type: "turn.completed", payload: { output: "continued" } }],
+    });
+    expect(
+      await evaluateGoalContinuation(client.db, {
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        noProgressLimit: 3,
+      }),
+    ).toMatchObject({ decision: "continue", autoContinuation: 1 });
   });
 
   test("idle manual compaction is a born-running maintenance execution, never queue work", async () => {

@@ -135,14 +135,36 @@ attempt, and sandbox. Compaction never creates a prompt-queue row, a recovery
 message, a new logical turn, or another sandbox. The model then sees the durable
 replacement history and continues the work.
 
-If summarization fails, the turn ends with an honest
-`context_compaction_failed` result. OpenGeni does not continue with silently
-trimmed input and does not install a mechanical fallback summary. When the
-failure belongs to an explicit `/compact`, the exact attempt also records
-`session.context.compaction.skipped(reason="summarization_failed")` and clears
-that one request, so an idle maintenance execution cannot immediately recreate
-itself forever. The active history stays unchanged and the user may request a
-fresh retry.
+If summarization produces an authoritative terminal failure, the turn ends
+with an honest `context_compaction_failed` result. OpenGeni does not continue
+with silently trimmed input and does not install a mechanical fallback summary.
+Retryable provider failures instead recover the same accepted turn through the
+ordinary provider/capacity path; they do not create another goal continuation,
+and an explicit `/compact` request remains pending for that same-turn retry.
+When a terminal failure belongs to an explicit `/compact`, one attempt-fenced
+database settlement records
+`session.context.compaction.skipped(reason="summarization_failed")`, clears that
+one request, records `turn.failed`, and returns the session to idle. A worker
+crash therefore cannot clear the request without the matching terminal truth,
+and an idle maintenance execution cannot immediately recreate itself forever.
+The active history stays unchanged and the user may request a fresh retry.
+
+Codex-subscription responses are streaming on the wire even for this
+non-streaming summarizer. Terminal `response.failed`, `response.error`, `error`,
+and `response.incomplete` events are converted to ordinary non-2xx provider
+errors before the SDK sees them; a stream with no terminal event is a protocol
+error. None of these shapes may collapse to `{}` or be mislabeled as a
+semantically empty assistant response. Persisted diagnostics contain only
+bounded status/code/request identifiers, never the provider message or model
+input.
+
+When the latest finished inference has `code="context_compaction_failed"`, an
+active goal remains active but cannot synthesize another autonomous
+continuation against the same unchanged history. A queued human prompt still
+wins immediately. A newer human/internal turn or an explicit `/compact`
+maintenance turn supplies new finished-turn truth; after it succeeds, normal
+goal continuation resumes. This gate neither creates queue work nor consumes a
+goal continuation/no-progress counter.
 
 Manual `/compact` sets one durable idempotent request. During active inference,
 the worker observes it at the next model boundary and retries sampling in the

@@ -122,6 +122,7 @@ import {
 import { installCodexToolSearch } from "./codex-tool-search";
 import {
   CompactionNeededError,
+  CompactionProviderResponseError,
   EmptyCompactionSummaryError,
   SUMMARY_BUFFER_TOKENS,
   compactionThresholdTokens,
@@ -194,6 +195,7 @@ export { OpenAIChatCompletionsModel, OpenAIResponsesModel } from "@openai/agents
 
 export {
   CompactionNeededError,
+  CompactionProviderResponseError,
   EmptyCompactionSummaryError,
   buildCompactionPromptInput,
   buildCompactionReplacementHistory,
@@ -816,12 +818,17 @@ export async function summarizeForCompaction(
   const maxTokens = options.maxOutputTokens ?? SUMMARY_BUFFER_TOKENS;
   if (api === "chat") {
     const transcript = renderCompactionPromptInputForChat(input);
-    const completion = await client.chat.completions.create({
-      model,
-      max_tokens: maxTokens,
-      messages: [{ role: "user", content: transcript }],
-      ...(options.promptCacheKey ? { prompt_cache_key: options.promptCacheKey } : {}),
-    } as any);
+    let completion: unknown;
+    try {
+      completion = await client.chat.completions.create({
+        model,
+        max_tokens: maxTokens,
+        messages: [{ role: "user", content: transcript }],
+        ...(options.promptCacheKey ? { prompt_cache_key: options.promptCacheKey } : {}),
+      } as any);
+    } catch (error) {
+      throw new CompactionProviderResponseError(compactionProviderFailureDiagnostics(error), error);
+    }
     const usage = modelResponseUsageFromResponse(completion);
     if (usage) {
       await options.onUsage?.(usage);
@@ -855,16 +862,94 @@ export async function summarizeForCompaction(
     handoffs: [],
     tracing: false,
   };
-  const response = await new CompactionResponsesModel(client, model).fetchResponse(request);
+  let response: unknown;
+  try {
+    response = await new CompactionResponsesModel(client, model).fetchResponse(request);
+  } catch (error) {
+    throw new CompactionProviderResponseError(compactionProviderFailureDiagnostics(error), error);
+  }
   const usage = modelResponseUsageFromResponse(response);
   if (usage) {
     await options.onUsage?.(usage);
+  }
+  if (isFailedCompactionProviderResponse(response)) {
+    throw new CompactionProviderResponseError(compactionProviderFailureDiagnostics(response));
   }
   const summary = extractResponseOutputText(response).trim();
   if (!summary) {
     throw new EmptyCompactionSummaryError(compactionResponseDiagnostics(response, summary));
   }
   return summary;
+}
+
+function isFailedCompactionProviderResponse(response: unknown): boolean {
+  if (!response || typeof response !== "object") return false;
+  const record = response as Record<string, unknown>;
+  return (
+    record.status === "failed" ||
+    record.status === "incomplete" ||
+    (record.error !== null && record.error !== undefined)
+  );
+}
+
+/** Bounded provider diagnostics: identifiers and classifications, never messages or model data. */
+export function compactionProviderFailureDiagnostics(error: unknown): Record<string, unknown> {
+  let current = error;
+  let errorName: string | null = null;
+  let httpStatus: number | null = null;
+  let responseStatus: string | null = null;
+  let responseId: string | null = null;
+  let code: string | null = null;
+  let type: string | null = null;
+  let requestId: string | null = null;
+  const seen = new Set<object>();
+  for (let depth = 0; depth < 6 && current && typeof current === "object"; depth += 1) {
+    if (seen.has(current)) break;
+    seen.add(current);
+    const record = current as Record<string, unknown>;
+    if (!errorName && current instanceof Error) errorName = current.name;
+    if (
+      httpStatus === null &&
+      typeof record.status === "number" &&
+      Number.isFinite(record.status)
+    ) {
+      httpStatus = record.status;
+    }
+    if (responseStatus === null && typeof record.status === "string") {
+      responseStatus = record.status;
+    }
+    if (responseId === null && typeof record.id === "string") responseId = record.id;
+    if (code === null && typeof record.code === "string") code = record.code;
+    if (type === null && typeof record.type === "string") type = record.type;
+    if (requestId === null) {
+      const directRequestId = record.request_id ?? record.requestId ?? record._request_id;
+      if (typeof directRequestId === "string") requestId = directRequestId;
+      const headers = record.headers;
+      if (!requestId && headers && typeof headers === "object") {
+        const get = (headers as { get?: unknown }).get;
+        if (typeof get === "function") {
+          const headerId = get.call(headers, "x-request-id");
+          if (typeof headerId === "string") requestId = headerId;
+        }
+      }
+    }
+    const nestedError = record.error;
+    if (nestedError && typeof nestedError === "object" && !seen.has(nestedError)) {
+      const nested = nestedError as Record<string, unknown>;
+      if (code === null && typeof nested.code === "string") code = nested.code;
+      if (type === null && typeof nested.type === "string") type = nested.type;
+    }
+    current = record.cause;
+  }
+  return {
+    errorName,
+    httpStatus,
+    responseStatus,
+    responseId,
+    code,
+    type,
+    requestId,
+  };
 }
 
 /** Bounded, content-free diagnostics for a semantically empty checkpoint. */
