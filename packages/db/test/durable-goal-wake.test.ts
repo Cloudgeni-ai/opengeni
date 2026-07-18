@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import {
+  armCodexCapacityWait,
   appendSessionEventsForTurnAttempt,
   applySessionTurnSettlement,
   bootstrapWorkspace,
@@ -8,13 +9,17 @@ import {
   clearSessionGoal,
   createDb,
   createSession,
+  ensureCodexRotationSettings,
   getSessionGoalWithContinuation,
   initializeSessionStartAtomically,
   materializeGoalContinuation,
+  mutateSessionControlInTransaction,
   setSessionGoalStatusWithEvent,
   submitHumanPromptInTransaction,
+  updateCodexRotationSettings,
   updateSessionGoalWithEvent,
   upsertSessionGoalWithEvent,
+  withWorkspaceRls,
   withWorkspaceSubjectRls,
 } from "../src/index";
 
@@ -33,7 +38,7 @@ afterAll(async () => {
   await shared?.release();
 }, 60_000);
 
-async function runningGoalFixture() {
+async function runningGoalFixture(options: { withAncestor?: boolean } = {}) {
   const suffix = crypto.randomUUID();
   const access = await bootstrapWorkspace(client.db, {
     accountExternalSource: "goal-wake-test",
@@ -45,9 +50,22 @@ async function runningGoalFixture() {
     subjectId: `subject-${suffix}`,
   });
   const grant = access.workspaceGrants[0]!;
+  const ancestor = options.withAncestor
+    ? await createSession(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        initialMessage: "ancestor",
+        resources: [],
+        tools: [],
+        metadata: {},
+        model: "scripted-model",
+        sandboxBackend: "none",
+      })
+    : null;
   const session = await createSession(client.db, {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId!,
+    ...(ancestor ? { parentSessionId: ancestor.id } : {}),
     initialMessage: "start",
     resources: [],
     tools: [],
@@ -74,7 +92,7 @@ async function runningGoalFixture() {
     trigger: { kind: "next" },
   });
   if (claimed.action !== "claimed") throw new Error(`Initial turn was not claimed`);
-  return { grant, session, initialized, turn: claimed.turn, attemptId };
+  return { grant, ancestor, session, initialized, turn: claimed.turn, attemptId };
 }
 
 type GoalFixture = Awaited<ReturnType<typeof runningGoalFixture>>;
@@ -197,6 +215,166 @@ describe("durable active-goal wake", () => {
       (await getSessionGoalWithContinuation(client.db, ctx.grant.workspaceId!, ctx.session.id))
         ?.continuation,
     ).toMatchObject({ state: "scheduled", reason: "continuation_pending" });
+  });
+
+  test("recursive Pause suppresses synthesis and Resume re-arms the same pending revision", async () => {
+    const ctx = await runningGoalFixture({ withAncestor: true });
+    if (!ctx.ancestor) throw new Error("ancestor fixture was not created");
+    await settleIdle(ctx);
+
+    const control = async (sessionId: string, action: "pause" | "resume") =>
+      await withWorkspaceRls(client.db, ctx.grant.workspaceId!, (db) =>
+        db.transaction((tx) =>
+          mutateSessionControlInTransaction(tx as typeof db, {
+            accountId: ctx.grant.accountId,
+            workspaceId: ctx.grant.workspaceId!,
+            sessionId,
+            actor: { type: "human", subjectId: ctx.grant.subjectId },
+            operationKey: crypto.randomUUID(),
+            action,
+          }),
+        ),
+      );
+
+    await control(ctx.ancestor.id, "pause");
+    expect(
+      (await getSessionGoalWithContinuation(client.db, ctx.grant.workspaceId!, ctx.session.id))
+        ?.continuation,
+    ).toMatchObject({
+      state: "blocked",
+      reason: "workstream_paused",
+      wakeRevision: 1,
+      observedRevision: 0,
+    });
+    expect((await materialize(ctx)).action).toBe("none");
+    expect(await counts(ctx)).toEqual({
+      autoContinuations: 0,
+      wakeRevision: 1,
+      observedRevision: 0,
+      updates: 0,
+      usage: 0,
+      events: 0,
+    });
+
+    await control(ctx.session.id, "resume");
+    expect(
+      (await getSessionGoalWithContinuation(client.db, ctx.grant.workspaceId!, ctx.session.id))
+        ?.continuation,
+    ).toMatchObject({
+      state: "scheduled",
+      reason: "wake_pending",
+      wakeRevision: 1,
+      observedRevision: 0,
+    });
+    expect((await materialize(ctx)).action).toBe("continue");
+    expect(await counts(ctx)).toEqual({
+      autoContinuations: 1,
+      wakeRevision: 1,
+      observedRevision: 1,
+      updates: 1,
+      usage: 1,
+      events: 1,
+    });
+  });
+
+  test("provider capacity wait blocks synthesis and exposes its durable retry time", async () => {
+    const ctx = await runningGoalFixture();
+    await ensureCodexRotationSettings(client.db, ctx.grant.accountId, ctx.grant.workspaceId!);
+    await updateCodexRotationSettings(client.db, ctx.grant.workspaceId!, {
+      rotationEnabled: true,
+    });
+    const goal = await getSessionGoalWithContinuation(
+      client.db,
+      ctx.grant.workspaceId!,
+      ctx.session.id,
+    );
+    if (!goal) throw new Error("goal fixture was not created");
+    const resetAt = new Date(Date.now() + 5 * 60_000);
+    const armed = await armCodexCapacityWait(client.db, {
+      accountId: ctx.grant.accountId,
+      workspaceId: ctx.grant.workspaceId!,
+      sessionId: ctx.session.id,
+      turnId: ctx.turn.id,
+      attemptId: ctx.attemptId,
+      workflowId: `session-${ctx.session.id}`,
+      goalId: goal.id,
+      goalVersion: 1,
+      earliestResetAt: resetAt,
+      resetKind: "authoritative",
+      failurePayload: {
+        error: "all connected Codex subscriptions are unavailable",
+        code: "codex_usage_limit_reached",
+      },
+    });
+    expect(armed.action).toBe("waiting");
+    if (armed.action !== "waiting") throw new Error("capacity wait was not armed");
+
+    expect(
+      (await getSessionGoalWithContinuation(client.db, ctx.grant.workspaceId!, ctx.session.id))
+        ?.continuation,
+    ).toMatchObject({
+      state: "blocked",
+      reason: "provider_backpressure",
+      nextAttemptAt: armed.waiter.nextCheckAt.toISOString(),
+    });
+    expect((await materialize(ctx)).action).toBe("none");
+    expect(await counts(ctx)).toEqual({
+      autoContinuations: 0,
+      wakeRevision: 0,
+      observedRevision: 0,
+      updates: 0,
+      usage: 0,
+      events: 0,
+    });
+  });
+
+  test("cancelled and corrupt idle sessions report truth before refusing or repairing work", async () => {
+    const cancelled = await runningGoalFixture();
+    await settleIdle(cancelled);
+    await shared.admin`
+      update sessions set status = 'cancelled'
+      where workspace_id = ${cancelled.grant.workspaceId!} and id = ${cancelled.session.id}`;
+    expect(
+      (
+        await getSessionGoalWithContinuation(
+          client.db,
+          cancelled.grant.workspaceId!,
+          cancelled.session.id,
+        )
+      )?.continuation,
+    ).toMatchObject({ state: "blocked", reason: "session_cancelled" });
+    expect((await materialize(cancelled)).action).toBe("none");
+    expect(await counts(cancelled)).toMatchObject({ updates: 0, usage: 0, events: 0 });
+
+    const corrupt = await runningGoalFixture();
+    await settleIdle(corrupt);
+    await shared.admin`
+      update session_goals
+      set continuation_observed_revision = continuation_wake_revision
+      where workspace_id = ${corrupt.grant.workspaceId!} and session_id = ${corrupt.session.id}`;
+    expect(
+      (
+        await getSessionGoalWithContinuation(
+          client.db,
+          corrupt.grant.workspaceId!,
+          corrupt.session.id,
+        )
+      )?.continuation,
+    ).toMatchObject({
+      state: "invariant_broken",
+      reason: "missing_obligation",
+      wakeRevision: 1,
+      observedRevision: 1,
+    });
+    expect((await materialize(corrupt)).action).toBe("continue");
+    expect(await counts(corrupt)).toEqual({
+      autoContinuations: 1,
+      wakeRevision: 2,
+      observedRevision: 2,
+      updates: 1,
+      usage: 1,
+      events: 1,
+    });
   });
 
   const faults = [
