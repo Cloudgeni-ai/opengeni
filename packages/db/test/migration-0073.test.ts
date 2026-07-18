@@ -87,6 +87,66 @@ describe("migration 0073 (durable goal wake)", () => {
             },
           })}
         )`;
+      // Legacy evaluation and synthesis were separate commits. Model both a
+      // duplicate continuation and an already-acknowledged workflow nudge: the
+      // migration must keep one runnable update and commit a newer wake.
+      await admin`
+        insert into session_system_updates (
+          account_id, workspace_id, session_id, kind, source_id,
+          dedupe_key, summary, payload, state, created_at
+        ) values (
+          ${account!.id}, ${workspace!.id}, ${materialized.sessionId}, 'goal_continuation',
+          ${materialized.goalId}, 'legacy-goal-continuation-duplicate',
+          'duplicate deferred continuation',
+          ${admin.json({
+            type: "goal_continuation",
+            goalId: materialized.goalId,
+            goalVersion: 1,
+            autoContinuation: 2,
+            maxAutoContinuations: null,
+            prompt: "duplicate continuation",
+            policy: {
+              model: "scripted-model",
+              reasoningEffort: "low",
+              tools: [],
+              sandboxBackend: "none",
+            },
+          })},
+          'deferred', now() + interval '1 minute'
+        )`;
+      await admin`
+        insert into session_workflow_wake_outbox (
+          session_id, account_id, workspace_id, temporal_workflow_id,
+          wake_revision, delivered_revision, reason
+        ) values (
+          ${materialized.sessionId}, ${account!.id}, ${workspace!.id},
+          ${`session-${materialized.sessionId}`}, 1, 1, 'legacy_acknowledged_wake'
+        )`;
+
+      const deferred = await insertGoalSession("single deferred continuation");
+      await admin`
+        insert into session_system_updates (
+          account_id, workspace_id, session_id, kind, source_id,
+          dedupe_key, summary, payload, state
+        ) values (
+          ${account!.id}, ${workspace!.id}, ${deferred.sessionId}, 'goal_continuation',
+          ${deferred.goalId}, 'legacy-deferred-goal-continuation', 'only deferred update',
+          ${admin.json({
+            type: "goal_continuation",
+            goalId: deferred.goalId,
+            goalVersion: 1,
+            autoContinuation: 1,
+            maxAutoContinuations: null,
+            prompt: "continue deferred goal",
+            policy: {
+              model: "scripted-model",
+              reasoningEffort: "low",
+              tools: [],
+              sandboxBackend: "none",
+            },
+          })},
+          'deferred'
+        )`;
 
       const staleVersion = await insertGoalSession("stale continuation version");
       await admin`update session_goals set version = 2 where id = ${staleVersion.goalId}`;
@@ -198,7 +258,39 @@ describe("migration 0073 (durable goal wake)", () => {
         { text: "delivered terminal continuation", wake_revision: 1, observed_revision: 0 },
         { text: "human queued goal", wake_revision: 0, observed_revision: 0 },
         { text: "idle legacy goal", wake_revision: 1, observed_revision: 0 },
+        { text: "single deferred continuation", wake_revision: 1, observed_revision: 1 },
         { text: "stale continuation version", wake_revision: 1, observed_revision: 0 },
+      ]);
+
+      const migratedUpdates = await admin<
+        Array<{ session_id: string; summary: string; state: string }>
+      >`
+        select session_id, summary, state
+        from session_system_updates
+        where session_id in (${materialized.sessionId}, ${deferred.sessionId})
+        order by summary`;
+      expect(
+        migratedUpdates.map(({ session_id, summary, state }) => ({
+          session_id,
+          summary,
+          state,
+        })),
+      ).toEqual([
+        {
+          session_id: materialized.sessionId,
+          summary: "already pending",
+          state: "pending",
+        },
+        {
+          session_id: materialized.sessionId,
+          summary: "duplicate deferred continuation",
+          state: "cancelled",
+        },
+        {
+          session_id: deferred.sessionId,
+          summary: "only deferred update",
+          state: "pending",
+        },
       ]);
 
       const wakes = await admin<
@@ -217,6 +309,11 @@ describe("migration 0073 (durable goal wake)", () => {
       ).toEqual(
         [
           {
+            session_id: deferred.sessionId,
+            reason: "goal_materialized_backfill",
+            wake_revision: 1,
+          },
+          {
             session_id: delivered.sessionId,
             reason: "goal_obligation_backfill",
             wake_revision: 1,
@@ -225,6 +322,11 @@ describe("migration 0073 (durable goal wake)", () => {
             session_id: idle.sessionId,
             reason: "goal_obligation_backfill",
             wake_revision: 1,
+          },
+          {
+            session_id: materialized.sessionId,
+            reason: "goal_materialized_backfill",
+            wake_revision: 2,
           },
           {
             session_id: staleVersion.sessionId,

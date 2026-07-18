@@ -265,6 +265,78 @@ describe("durable active-goal wake", () => {
     ).toMatchObject({ state: "scheduled", reason: "continuation_pending" });
   });
 
+  test("reserves running for the active goal attempt while human work remains authoritative", async () => {
+    const human = await runningGoalFixture();
+    expect(
+      (await getSessionGoalWithContinuation(client.db, human.grant.workspaceId!, human.session.id))
+        ?.continuation,
+    ).toMatchObject({ state: "blocked", reason: "human_turn_running" });
+
+    const recovered = await recoverSessionDispatch(client.db, human.grant.workspaceId!, {
+      sessionId: human.session.id,
+      attemptId: human.attemptId,
+      timeoutType: "HEARTBEAT",
+      maxRedispatches: 3,
+    });
+    expect(recovered.action).toBe("recovering");
+    expect(
+      (await getSessionGoalWithContinuation(client.db, human.grant.workspaceId!, human.session.id))
+        ?.continuation,
+    ).toMatchObject({ state: "scheduled", reason: "human_work_pending" });
+
+    const goal = await runningGoalFixture();
+    await settleIdle(goal);
+    expect((await materialize(goal)).action).toBe("continue");
+    const attemptId = crypto.randomUUID();
+    const claimed = await claimSessionWorkForAttempt(client.db, goal.grant.workspaceId!, {
+      sessionId: goal.session.id,
+      workflowId: `session-${goal.session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: `dispatch-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    expect(claimed.action).toBe("claimed");
+    if (claimed.action !== "claimed") throw new Error("goal continuation was not claimed");
+    expect(claimed.turn.source).toBe("goal");
+
+    await withWorkspaceSubjectRls(client.db, goal.grant.workspaceId!, goal.grant.subjectId, (db) =>
+      db.transaction((tx) =>
+        submitHumanPromptInTransaction(tx as typeof db, {
+          accountId: goal.grant.accountId,
+          workspaceId: goal.grant.workspaceId!,
+          sessionId: goal.session.id,
+          subjectId: goal.grant.subjectId,
+          actor: { type: "human", subjectId: goal.grant.subjectId },
+          operationKey: crypto.randomUUID(),
+          delivery: "send",
+          text: "authoritative next human direction",
+          resources: [],
+          tools: [],
+          reasoningEffortFallback: "low",
+          source: "user",
+        }),
+      ),
+    );
+    const openTurns = await shared.admin<
+      Array<{ source: string; status: string; position: number }>
+    >`
+      select source, status, position
+      from session_turns
+      where workspace_id = ${goal.grant.workspaceId!} and session_id = ${goal.session.id}
+        and status in ('queued', 'running')
+      order by position`;
+    expect(openTurns.map(({ source, status }) => ({ source, status }))).toEqual([
+      { source: "user", status: "queued" },
+      { source: "goal", status: "running" },
+    ]);
+    expect(Number(openTurns[0]!.position)).toBeLessThan(Number(openTurns[1]!.position));
+    expect(
+      (await getSessionGoalWithContinuation(client.db, goal.grant.workspaceId!, goal.session.id))
+        ?.continuation,
+    ).toMatchObject({ state: "running", reason: "goal_turn_running" });
+  });
+
   test("recursive Pause suppresses synthesis and Resume re-arms the same pending revision", async () => {
     const ctx = await runningGoalFixture({ withAncestor: true });
     if (!ctx.ancestor) throw new Error("ancestor fixture was not created");
