@@ -164,14 +164,14 @@ async function stopTestServices(
     diagnostics.push(sandboxCleanup.failure);
   }
   for (const stopTimeoutSeconds of ["5", "0"] as const) {
+    const composeFiles = await composeFileArgs(composeFile);
     const result = await runCommand(
       [
         "docker",
         "compose",
         "-p",
         projectName,
-        "-f",
-        composeFile,
+        ...composeFiles,
         "down",
         "--timeout",
         stopTimeoutSeconds,
@@ -374,13 +374,18 @@ async function inspectDockerResidue(label: string, args: string[]): Promise<stri
   return ids.length > 0 ? `${label}: ${ids.replaceAll("\n", ", ")}` : null;
 }
 
-function testServiceImages(options: { temporal?: boolean; objectStorage?: boolean }): string[] {
-  return [
-    "pgvector/pgvector:pg17",
-    "nats:2-alpine",
-    ...((options.temporal ?? true) ? ["temporalio/auto-setup:1.28"] : []),
-    ...((options.objectStorage ?? false) ? ["minio/minio:latest", "minio/mc:latest"] : []),
-  ];
+function testServiceImages(options: {
+  temporal?: boolean;
+  objectStorage?: boolean;
+}): Record<string, string> {
+  return {
+    postgres: "pgvector/pgvector:pg17",
+    nats: "nats:2-alpine",
+    ...((options.temporal ?? true) ? { temporal: "temporalio/auto-setup:1.28" } : {}),
+    ...((options.objectStorage ?? false)
+      ? { minio: "minio/minio:latest", "minio-init": "minio/mc:latest" }
+      : {}),
+  };
 }
 
 function isRetryableComposeStartupError(error: unknown): boolean {
@@ -474,8 +479,9 @@ async function waitForTemporal(address: string): Promise<void> {
 }
 
 async function composeLogs(projectName: string, composeFile: string): Promise<string> {
+  const composeFiles = await composeFileArgs(composeFile);
   const result = await runCommand(
-    ["docker", "compose", "-p", projectName, "-f", composeFile, "logs", "--no-color"],
+    ["docker", "compose", "-p", projectName, ...composeFiles, "logs", "--no-color"],
     {
       timeoutMs: 30_000,
     },
@@ -531,8 +537,9 @@ async function waitForMinio(endpoint: string): Promise<void> {
 async function bootstrapMinioBucket(projectName: string, composeFile: string): Promise<void> {
   let lastResult: Awaited<ReturnType<typeof runCommand>> | null = null;
   for (let attempt = 1; attempt <= 5; attempt += 1) {
+    const composeFiles = await composeFileArgs(composeFile);
     lastResult = await runCommand(
-      ["docker", "compose", "-p", projectName, "-f", composeFile, "run", "--rm", "minio-init"],
+      ["docker", "compose", "-p", projectName, ...composeFiles, "run", "--rm", "minio-init"],
       { timeoutMs: 60_000 },
     );
     if (lastResult.exitCode === 0) {
@@ -543,6 +550,15 @@ async function bootstrapMinioBucket(projectName: string, composeFile: string): P
   throw new Error(
     `minio bucket bootstrap failed\n${lastResult?.stdout ?? ""}\n${lastResult?.stderr ?? ""}`,
   );
+}
+
+async function composeFileArgs(composeFile: string): Promise<string[]> {
+  const args = ["-f", composeFile];
+  const imageOverrideFile = `${composeFile}.images.json`;
+  if (await Bun.file(imageOverrideFile).exists()) {
+    args.push("-f", imageOverrideFile);
+  }
+  return args;
 }
 
 function composeYaml(
