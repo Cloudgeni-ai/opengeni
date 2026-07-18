@@ -1,7 +1,12 @@
-import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import postgres from "postgres";
 import { Hono } from "hono";
-import type { SharedTestDatabase } from "@opengeni/testing";
+import {
+  acquireSharedTestDatabase,
+  MemoryEventBus,
+  testSettings,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
 import {
   acquireLease,
   commitWarmingToWarm,
@@ -15,65 +20,13 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
-import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
-
-// Install a Modal-shaped provider before loading any runtime/API value imports.
-// The fake has a durable provider identity and command-readiness surface, so the
-// real attached-viewer path must resume and probe it without making a cloud call.
-let fakeModalId = 0;
-
-function fakeModalSession(state: Record<string, unknown>) {
-  return {
-    state,
-    async exec() {
-      return { stdout: "", exitCode: 0 };
-    },
-  };
-}
-
-class FakeModalSandboxClient {
-  readonly backendId = "modal";
-
-  async create(input: { manifest?: unknown }) {
-    fakeModalId += 1;
-    return fakeModalSession({ sandboxId: `sb-consent-${fakeModalId}`, manifest: input.manifest });
-  }
-
-  async serializeSessionState(state: Record<string, unknown>) {
-    return { ...state };
-  }
-
-  async deserializeSessionState(state: Record<string, unknown>) {
-    return { ...state };
-  }
-
-  async resume(state: Record<string, unknown>) {
-    if (typeof state.sandboxId !== "string") {
-      throw new Error("fake Modal resume requires sandboxId");
-    }
-    return fakeModalSession(state);
-  }
-
-  async delete() {}
-}
-
-const modalModuleUrl = import.meta.resolve(
-  "@openai/agents-extensions/sandbox/modal",
-  new URL("../../../packages/runtime/src/sandbox/index.ts", import.meta.url).href,
-);
-const realModal = await import(modalModuleUrl);
-mock.module(modalModuleUrl, () => ({
-  ...realModal,
-  ModalSandboxClient: FakeModalSandboxClient,
-}));
-
-const { acquireSharedTestDatabase, MemoryEventBus, testSettings } =
-  await import("@opengeni/testing");
-const { createSessionForRequest } = await import("@opengeni/core");
-const { establishSandboxSessionFromEnvelope, serializeEstablishedSandboxEnvelope } =
-  await import("@opengeni/runtime/sandbox");
-const { attachViewer } = await import("../src/sandbox/viewer");
-const { registerSessionRoutes } = await import("../src/routes/sessions");
+import {
+  createSessionForRequest,
+  type ApiRouteDeps,
+  type SessionWorkflowClient,
+} from "@opengeni/core";
+import { attachViewer, type ViewerServices } from "../src/sandbox/viewer";
+import { registerSessionRoutes } from "../src/routes/sessions";
 
 // P3.2 — the un-redacted/shared CONSENT GATE + viewer REVOCATION (Phase 3 close).
 // Design-of-record 08-implementation-plan.md P3.2 + modules/07-channel-b.md §6 +
@@ -127,6 +80,43 @@ const settings = testSettings({
   sandboxIdleGraceMs: 500,
 });
 
+/** Deterministic provider establishment scoped to this route harness. It
+ * verifies that API-direct operations resume the exact leased Modal identity
+ * under resume-only authority, then exposes the command surface required by
+ * the real readiness/display-stack paths. */
+const establishSandboxSession: NonNullable<ViewerServices["establishSandboxSession"]> = async (
+  _settings,
+  envelope,
+  options,
+) => {
+  expect(options.recovery).toBe("resume-only");
+  expect(options.backendOverride).toBe(BACKEND);
+  expect(envelope?.backendId).toBe(BACKEND);
+  const sessionState = envelope?.sessionState as
+    | { providerState?: { sandboxId?: unknown }; workspaceReady?: unknown }
+    | undefined;
+  const sandboxId = sessionState?.providerState?.sandboxId;
+  expect(typeof sandboxId).toBe("string");
+  expect(sessionState?.workspaceReady).toBe(true);
+  return {
+    client: {},
+    session: {
+      state: { sandboxId },
+      async exec() {
+        return { stdout: "", exitCode: 0 };
+      },
+    },
+    sessionState,
+    instanceId: sandboxId as string,
+    backendId: BACKEND,
+    origin: "resumed",
+  };
+};
+
+function viewerServices(): ViewerServices {
+  return { db, settings, establishSandboxSession };
+}
+
 async function freshWorkspace(): Promise<{
   accountId: string;
   workspaceId: string;
@@ -153,7 +143,7 @@ function stubWorkflowClient(): SessionWorkflowClient {
   } as unknown as SessionWorkflowClient;
 }
 
-function deps(): ApiRouteDeps {
+function deps(): ApiRouteDeps & Pick<ViewerServices, "establishSandboxSession"> {
   return {
     settings,
     db,
@@ -166,7 +156,8 @@ function deps(): ApiRouteDeps {
     resumeBoxById: async () => {
       throw new Error("legacy resumeBoxById injection should not be called in these tests");
     },
-  } as unknown as ApiRouteDeps;
+    establishSandboxSession,
+  } as unknown as ApiRouteDeps & Pick<ViewerServices, "establishSandboxSession">;
 }
 
 // A signed delegated token: the workspace grant IS the token's permission set.
@@ -212,22 +203,22 @@ async function seedWarmBox(
     leaseTtlMs: 5_000,
   });
   expect(acquired.role).toBe("spawner");
-  const established = await establishSandboxSessionFromEnvelope(settings, null, {
-    sessionId,
-    recovery: "create-or-restore",
-    backendOverride: BACKEND,
-    environment: {},
-  });
-  const resumeState = await serializeEstablishedSandboxEnvelope(established);
-  expect(resumeState).not.toBeNull();
+  const sandboxId = `sb-consent-${sessionId}`;
+  const resumeState = {
+    backendId: BACKEND,
+    sessionState: {
+      providerState: { sandboxId },
+      workspaceReady: true,
+    },
+  };
   const committed = await commitWarmingToWarm(db, {
     accountId,
     workspaceId,
     sandboxGroupId,
     expectedEpoch: acquired.lease.leaseEpoch,
-    instanceId: established.instanceId,
+    instanceId: sandboxId,
     dataPlaneUrl: null,
-    resumeBackendId: established.backendId,
+    resumeBackendId: BACKEND,
     resumeState,
     leaseTtlMs: 5_000,
   });
@@ -262,7 +253,6 @@ afterAll(async () => {
     /* noop */
   }
   await shared?.release();
-  mock.restore();
 }, 180_000);
 
 // A solo session (its own singleton group), warm-boxed and ready to attach.
@@ -531,21 +521,18 @@ describe("P3.2 viewer revocation (OD-6 v1) — holder-drop drains iff last holde
     const { accountId, workspaceId, sessionId, sandboxGroupId } = await soloSession();
 
     // One viewer attaches (refcount 1).
-    const attached = await attachViewer(
-      { db, settings },
-      {
-        accountId,
-        workspaceId,
-        session: {
-          id: sessionId,
-          sandboxGroupId,
-          sandboxBackend: BACKEND,
-          sandboxOs: "linux",
-          resources: [],
-        } as never,
-        viewerId: "v-only",
-      },
-    );
+    const attached = await attachViewer(viewerServices(), {
+      accountId,
+      workspaceId,
+      session: {
+        id: sessionId,
+        sandboxGroupId,
+        sandboxBackend: BACKEND,
+        sandboxOs: "linux",
+        resources: [],
+      } as never,
+      viewerId: "v-only",
+    });
     expect(attached.liveness).toBe("warm");
     const before = await readLease(db, workspaceId, sandboxGroupId);
     expect(before?.viewerHolders).toBe(1);
@@ -633,21 +620,18 @@ describe("P3.2 viewer revocation (OD-6 v1) — holder-drop drains iff last holde
   test("revoke via the route (stream:view) drops the holder", async () => {
     if (!available) return;
     const { accountId, workspaceId, sessionId, sandboxGroupId } = await soloSession();
-    await attachViewer(
-      { db, settings },
-      {
-        accountId,
-        workspaceId,
-        session: {
-          id: sessionId,
-          sandboxGroupId,
-          sandboxBackend: BACKEND,
-          sandboxOs: "linux",
-          resources: [],
-        } as never,
-        viewerId: "route-viewer",
-      },
-    );
+    await attachViewer(viewerServices(), {
+      accountId,
+      workspaceId,
+      session: {
+        id: sessionId,
+        sandboxGroupId,
+        sandboxBackend: BACKEND,
+        sandboxOs: "linux",
+        resources: [],
+      } as never,
+      viewerId: "route-viewer",
+    });
     const auth = await bearer({
       accountId,
       workspaceId,

@@ -84,6 +84,10 @@ export type ViewerServices = {
   db: Database;
   settings: Settings;
   bus?: EventBus;
+  /** Provider-establish dependency used by API-direct readiness and stream
+   *  operations. Production uses the runtime leaf; isolated tests may supply a
+   *  deterministic provider without replacing a process-global module. */
+  establishSandboxSession?: typeof establishSandboxSessionFromEnvelope;
 };
 
 /** A coherent snapshot the routes echo back: the holder id (the viewer's fence-
@@ -317,7 +321,8 @@ export async function attachViewer(
     const environment = await sessionAttachEnvironment(services, workspaceId, session);
     let observed: EstablishedSandboxSession | undefined;
     try {
-      observed = await establishSandboxSessionFromEnvelope(settings, live.resumeState, {
+      const establish = services.establishSandboxSession ?? establishSandboxSessionFromEnvelope;
+      observed = await establish(settings, live.resumeState, {
         sessionId: session.id,
         recovery: "resume-only",
         backendOverride: session.sandboxBackend,
@@ -717,12 +722,16 @@ export async function mintDesktopStream(
     try {
       established = input.establish
         ? await input.establish(envelope)
-        : await establishSandboxSessionFromEnvelope(settings, envelope, {
-            sessionId: session.id,
-            recovery: "resume-only",
-            backendOverride: session.sandboxBackend,
-            environment,
-          });
+        : await (services.establishSandboxSession ?? establishSandboxSessionFromEnvelope)(
+            settings,
+            envelope,
+            {
+              sessionId: session.id,
+              recovery: "resume-only",
+              backendOverride: session.sandboxBackend,
+              environment,
+            },
+          );
     } catch (error) {
       await retireMissingWarmLease(services, { accountId, workspaceId, session, lease }, error);
       return null;
@@ -952,12 +961,16 @@ export async function mintTerminalStream(
     try {
       established = input.establish
         ? await input.establish(envelope)
-        : await establishSandboxSessionFromEnvelope(settings, envelope, {
-            sessionId: session.id,
-            recovery: "resume-only",
-            backendOverride: session.sandboxBackend,
-            environment,
-          });
+        : await (services.establishSandboxSession ?? establishSandboxSessionFromEnvelope)(
+            settings,
+            envelope,
+            {
+              sessionId: session.id,
+              recovery: "resume-only",
+              backendOverride: session.sandboxBackend,
+              environment,
+            },
+          );
     } catch (error) {
       await retireMissingWarmLease(services, { accountId, workspaceId, session, lease }, error);
       return null;
