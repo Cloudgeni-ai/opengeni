@@ -1,3 +1,4 @@
+-- deployment-mode: rolling
 -- OPE-36: the strategy picker is gone — rotation-enabled always behaves as
 -- sticky-sharded (worker-side effectiveRotationStrategy normalizes every read).
 -- Backfill stored legacy values so the column tells the truth going forward.
