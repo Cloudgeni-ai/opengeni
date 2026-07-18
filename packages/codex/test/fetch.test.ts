@@ -24,10 +24,13 @@ function baseRecorder(statuses: number[] = [200]): { base: FetchLike; captures: 
     });
     const status = statuses[Math.min(i, statuses.length - 1)] ?? 200;
     i += 1;
-    return new Response("data: {}\n\n", {
-      status,
-      headers: { "content-type": "text/event-stream" },
-    });
+    return new Response(
+      'data: {"type":"response.completed","response":{"id":"r1","status":"completed","output":[]}}\n\n',
+      {
+        status,
+        headers: { "content-type": "text/event-stream" },
+      },
+    );
   };
   return { base, captures };
 }
@@ -177,7 +180,7 @@ describe("codexSubscriptionFetch", () => {
     expect(captures).toHaveLength(1);
   });
 
-  test("malformed non-streaming SSE is not replayed against another request", async () => {
+  test("malformed non-streaming SSE fails truthfully without a transport replay", async () => {
     let calls = 0;
     const response = await codexRequestStorage.run(ctx(), () =>
       codexSubscriptionFetch(async () => {
@@ -188,8 +191,90 @@ describe("codexSubscriptionFetch", () => {
         body: JSON.stringify({ stream: false }),
       }),
     );
-    expect(await response.json()).toEqual({});
+    expect(response.status).toBe(502);
+    expect(response.headers.get(CODEX_TRANSPORT_ERROR_HEADER)).toBe("1");
+    expect(await response.json()).toEqual({
+      error: {
+        type: "invalid_sse_terminal",
+        code: "invalid_sse_terminal",
+        message: "The Codex response stream ended without a terminal response",
+      },
+    });
     expect(calls).toBe(1);
+  });
+
+  test("non-streaming response.failed becomes a normal SDK error response", async () => {
+    let calls = 0;
+    const failure = [
+      "event: response.failed",
+      'data: {"type":"response.failed","response":{"id":"resp_failed","status":"failed","error":{"code":"context_length_exceeded","message":"input too large"}}}',
+      "",
+    ].join("\n");
+    const response = await codexRequestStorage.run(ctx(), () =>
+      codexSubscriptionFetch(async () => {
+        calls += 1;
+        return new Response(failure, { status: 200, headers: { "x-request-id": "req_failed" } });
+      })("https://chatgpt.com/backend-api/responses", {
+        method: "POST",
+        body: JSON.stringify({ stream: false }),
+      }),
+    );
+    expect(response.status).toBe(400);
+    expect(response.headers.get(CODEX_TRANSPORT_ERROR_HEADER)).toBe("1");
+    expect(response.headers.get("x-should-retry")).toBe("false");
+    expect(await response.json()).toEqual({
+      error: {
+        type: "context_length_exceeded",
+        code: "context_length_exceeded",
+        message: "input too large",
+      },
+    });
+    expect(calls).toBe(1);
+  });
+
+  test("non-streaming top-level error and response.error terminal forms do not become empty success", async () => {
+    for (const event of [
+      { type: "error", code: "server_error", message: "backend unavailable", param: null },
+      {
+        type: "response.error",
+        error: { code: "server_error", message: "backend unavailable" },
+      },
+    ]) {
+      const response = await codexRequestStorage.run(ctx(), () =>
+        codexSubscriptionFetch(
+          async () => new Response(`data: ${JSON.stringify(event)}\n\n`, { status: 200 }),
+        )("https://chatgpt.com/backend-api/responses", {
+          method: "POST",
+          body: JSON.stringify({ stream: false }),
+        }),
+      );
+      expect(response.status).toBe(502);
+      expect((await response.json()) as { error?: { code?: string } }).toMatchObject({
+        error: { code: "server_error" },
+      });
+    }
+  });
+
+  test("non-streaming response.incomplete is a provider failure like Codex CLI", async () => {
+    const response = await codexRequestStorage.run(ctx(), () =>
+      codexSubscriptionFetch(
+        async () =>
+          new Response(
+            'data: {"type":"response.incomplete","response":{"id":"resp_inc","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"}}}\n\n',
+            { status: 200 },
+          ),
+      )("https://chatgpt.com/backend-api/responses", {
+        method: "POST",
+        body: JSON.stringify({ stream: false }),
+      }),
+    );
+    expect(response.status).toBe(502);
+    expect(await response.json()).toMatchObject({
+      error: {
+        code: "response_incomplete",
+        message: "The Codex response was incomplete (max_output_tokens)",
+      },
+    });
   });
 
   test("partial streaming body failure is surfaced without a transport replay", async () => {
@@ -246,6 +331,20 @@ describe("codexSubscriptionFetch", () => {
     expect(json.status).toBe("completed");
     expect(json.output).toHaveLength(1); // assembled from output_item.done, not the empty terminal output
     expect(json.output[0]?.type).toBe("message");
+  });
+
+  test("non-streaming caller accepts canonical CRLF SSE framing", async () => {
+    const fetchImpl = codexSubscriptionFetch(
+      async () => new Response(CODEX_SSE.replaceAll("\n", "\r\n"), { status: 200 }),
+    );
+    const res = await codexRequestStorage.run(ctx(), () =>
+      fetchImpl("https://chatgpt.com/backend-api/responses", {
+        method: "POST",
+        body: JSON.stringify({ model: "gpt-5.6-sol", input: [] }),
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ id: "r1", status: "completed" });
   });
 
   test("streaming caller: stream is passed through with the terminal event's empty output repaired", async () => {
