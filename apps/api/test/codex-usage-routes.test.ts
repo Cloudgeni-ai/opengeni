@@ -286,22 +286,29 @@ describe("PATCH /codex/settings — rotation settings", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as { rotationEnabled: boolean; rotationStrategy: string };
     expect(body.rotationEnabled).toBe(true);
-    expect(body.rotationStrategy).toBe("most_remaining");
+    expect(body.rotationStrategy).toBe("sharded"); // OPE-36: the only effective strategy
     expect(ensure).toHaveBeenCalledTimes(1);
     expect(update).toHaveBeenCalledWith(expect.anything(), WS, { rotationEnabled: true });
   });
 
-  test("rejects an unknown strategy with 400 (never reaches the db)", async () => {
+  test("OPE-36: a strategy-only write is a deprecated no-op (200, db untouched)", async () => {
+    // The strategy picker is gone — rotation-enabled always behaves as sharded.
+    // Old SDK/UI callers that PATCH a strategy (valid or bogus) must not break
+    // and must not write anything.
     const { update } = spySettings();
-    const res = await app().request(`/v1/workspaces/${WS}/codex/settings`, {
-      method: "PATCH",
-      headers: {
-        authorization: await bearer(["workspace:admin"]),
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({ rotationStrategy: "bogus" }),
-    });
-    expect(res.status).toBe(400);
+    for (const rotationStrategy of ["most_remaining", "bogus"]) {
+      const res = await app().request(`/v1/workspaces/${WS}/codex/settings`, {
+        method: "PATCH",
+        headers: {
+          authorization: await bearer(["workspace:admin"]),
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ rotationStrategy }),
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { rotationStrategy: string };
+      expect(body.rotationStrategy).toBe("sharded");
+    }
     expect(update).not.toHaveBeenCalled();
   });
 

@@ -373,7 +373,14 @@ describe("P3 self-heal + bounded reactive walk (invariant 4)", () => {
 
 describe("effectiveRotationStrategy (OPE-36)", () => {
   test("every stored value — legacy, sharded, or unknown — normalizes to sharded", () => {
-    for (const stored of ["most_remaining", "round_robin", "drain_then_next", "sharded", "", "future_strategy"]) {
+    for (const stored of [
+      "most_remaining",
+      "round_robin",
+      "drain_then_next",
+      "sharded",
+      "",
+      "future_strategy",
+    ]) {
       expect(effectiveRotationStrategy(stored)).toBe("sharded");
     }
   });

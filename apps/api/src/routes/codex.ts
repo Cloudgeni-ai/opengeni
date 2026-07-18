@@ -417,13 +417,9 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw new HTTPException(400, { message: "no settings to update" });
     }
     if (patch.rotationEnabled === undefined) {
-      // Strategy-only writes are a deprecated no-op: report the (only) truth.
-      const rotation = await getCodexRotationSettings(db, workspaceId);
-      return c.json({
-        rotationEnabled: rotation?.rotationEnabled ?? false,
-        rotationStrategy: "sharded",
-        rotationStrategyDeprecated: true,
-      });
+      // Strategy-only writes are a deprecated no-op (no db touch): report the
+      // (only) truth. Callers that also flip rotationEnabled fall through.
+      return c.json({ rotationStrategy: "sharded", rotationStrategyDeprecated: true });
     }
     await ensureCodexRotationSettings(db, grant.accountId, workspaceId);
     const mutation = await withCodexCapacityMutation(
