@@ -852,6 +852,84 @@ describe("nested agent depth policy (real PostgreSQL + FORCE RLS)", () => {
     }
   }, 180_000);
 
+  test("does not record backfill completion while the final legacy row is locked", async () => {
+    if (!available) return;
+    const blank = await acquireBlankTestDatabase("session-depth-policy-backfill-lock");
+    if (!blank) throw new Error("real PostgreSQL is required for migration lock proof");
+    const sql = postgres(blank.databaseUrl, { max: 1 });
+    const blocker = postgres(blank.databaseUrl, { max: 1 });
+    try {
+      await prepareDatabaseThrough0064(sql);
+      const [{ id: accountId } = { id: "" }] = await sql<{ id: string }[]>`
+        insert into managed_accounts (name) values ('locked backfill') returning id`;
+      const [{ id: workspaceId } = { id: "" }] = await sql<{ id: string }[]>`
+        insert into workspaces (account_id, name)
+        values (${accountId}, 'locked backfill') returning id`;
+      await sql`
+        insert into workspace_inference_controls (workspace_id, account_id)
+        values (${workspaceId}, ${accountId}) on conflict do nothing`;
+      const legacyRootId = crypto.randomUUID();
+      await sql`
+        insert into sessions (
+          id, account_id, workspace_id, initial_message, model,
+          sandbox_backend, sandbox_group_id
+        ) values (
+          ${legacyRootId}, ${accountId}, ${workspaceId}, 'locked legacy root',
+          'test', 'none', ${legacyRootId}
+        )`;
+
+      await sql`select set_config('opengeni.max_nested_agent_depth', '3', false)`;
+      await sql`select set_config('opengeni.nested_agent_depth_policy_source', 'default', false)`;
+      await applyAndRecordMigration(sql, "0065_nested_agent_depth_expand.sql");
+      await applyAndRecordMigration(sql, "0066_nested_agent_depth_boundary.sql");
+
+      await blocker`begin`;
+      await blocker`select id from sessions where id = ${legacyRootId} for update`;
+      await expectPostgresCode(
+        migrate(blank.databaseUrl, undefined, { maxNestedAgentDepth: 3 }),
+        "55P03",
+      );
+      const [failedAttempt] = await sql<{ recorded: boolean }[]>`
+        select exists(
+          select 1 from schema_migrations
+          where name = '0067_nested_agent_depth_backfill.sql'
+        ) as recorded`;
+      expect(failedAttempt?.recorded).toBe(false);
+
+      await blocker`commit`;
+      await migrate(blank.databaseUrl, undefined, { maxNestedAgentDepth: 3 });
+      const [recovered] = await sql<
+        Array<{
+          rootSessionId: string;
+          nestedAgentDepth: number;
+          effectiveMax: number;
+          policySource: string;
+          phasedMigrations: number;
+        }>
+      >`
+        select
+          root_session_id as "rootSessionId",
+          nested_agent_depth as "nestedAgentDepth",
+          effective_max_nested_agent_depth as "effectiveMax",
+          nested_agent_depth_policy_source as "policySource",
+          (select count(*)::int from schema_migrations
+            where name >= '0065_' and name <= '0072_zzzz') as "phasedMigrations"
+        from sessions where id = ${legacyRootId}`;
+      expect(recovered).toEqual({
+        rootSessionId: legacyRootId,
+        nestedAgentDepth: 0,
+        effectiveMax: 3,
+        policySource: "default",
+        phasedMigrations: 8,
+      });
+    } finally {
+      await blocker`rollback`.catch(() => undefined);
+      await blocker.end().catch(() => undefined);
+      await sql.end().catch(() => undefined);
+      await blank.release();
+    }
+  }, 180_000);
+
   test("commits bounded backfill batches while old-shape root and child writes remain available", async () => {
     if (!available) return;
     const blank = await acquireBlankTestDatabase("session-depth-policy-batched-backfill");

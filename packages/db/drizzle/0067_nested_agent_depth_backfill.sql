@@ -52,7 +52,7 @@ WITH candidates AS (
     )
   ORDER BY session."created_at", session."id"
   LIMIT 1000
-  FOR UPDATE OF session SKIP LOCKED
+  FOR UPDATE OF session
 )
 UPDATE "sessions" session
 SET "root_session_id" = candidates.root_session_id,
