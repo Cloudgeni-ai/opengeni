@@ -1261,6 +1261,9 @@ export const sessionCommandReceipts = pgTable(
       table.targetSessionId,
       table.createdAt,
     ),
+    goalUpdateOperation: uniqueIndex("session_command_receipts_goal_update_operation_uq")
+      .on(table.workspaceId, table.action, table.targetSessionId, table.operationKey)
+      .where(sql`${table.action} = 'goal.update'`),
     actorValid: check(
       "session_command_receipts_actor_check",
       sql`(

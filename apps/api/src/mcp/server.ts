@@ -46,7 +46,7 @@ import {
   RigChangeAlreadyVerifyingError,
   RigChangeTransitionError,
 } from "@opengeni/db";
-import { appendAndPublishEvents } from "@opengeni/events";
+import { appendAndPublishEvents, publishDurableSessionEvents } from "@opengeni/events";
 import {
   createGitHubAppInstallationToken,
   createSignedState,
@@ -718,18 +718,12 @@ function registerGoalTools(
         text: z4.string().min(1).optional(),
         successCriteria: z4.string().min(1).optional(),
         progressNote: z4.string().min(1).optional(),
+        idempotencyKey: z4.string().uuid(),
       },
     },
-    async ({ text, successCriteria, progressNote }) => {
-      await requireSession(deps.db, grant.workspaceId, sessionId);
-      const existing = await getSessionGoal(deps.db, grant.workspaceId, sessionId);
-      if (!existing) {
-        throw new Error("this session has no goal; use goal_set first");
-      }
-      if (existing.status === "completed") {
-        throw new Error("session goal is completed; use goal_set to start a new goal");
-      }
-      const { goal, events } = await updateSessionGoalWithEvent(
+    async ({ text, successCriteria, progressNote, idempotencyKey }) => {
+      const context = exactAgentCommandContext(grant, sessionId);
+      const { goal, events, operationId, replay } = await updateSessionGoalWithEvent(
         deps.db,
         grant.workspaceId,
         sessionId,
@@ -738,12 +732,21 @@ function registerGoalTools(
           ...(successCriteria !== undefined ? { successCriteria } : {}),
           ...(progressNote !== undefined ? { progressNote } : {}),
           actor: "agent",
+          command: {
+            accountId: grant.accountId,
+            actor: {
+              type: "agent_attempt",
+              attemptId: context.callerAttemptId,
+              sessionId: context.callerSessionId,
+              turnId: context.callerTurnId,
+              executionGeneration: context.callerExecutionGeneration,
+            },
+            operationKey: idempotencyKey,
+          },
         },
       );
-      if (events.length > 0) {
-        await deps.bus.publish(grant.workspaceId, sessionId, events);
-      }
-      return json(goal);
+      await publishDurableSessionEvents(deps.bus, grant.workspaceId, sessionId, events);
+      return json({ ...goal, operationId, replay });
     },
   );
 
