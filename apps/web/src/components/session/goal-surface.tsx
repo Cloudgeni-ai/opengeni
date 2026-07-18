@@ -108,7 +108,13 @@ export function goalPillState(
     return "invariant_broken";
   }
   if (continuation.state === "running") {
-    return "pursuing";
+    // `running` is meaningful only with the goal-owned reason. Keep the UI
+    // truthful even when an older or corrupt server pairs it with human work.
+    return continuation.reason === "goal_turn_running"
+      ? "pursuing"
+      : continuation.reason === "human_turn_running"
+        ? "blocked"
+        : "invariant_broken";
   }
   if (continuation.state === "scheduled") {
     return "scheduled";
@@ -218,7 +224,10 @@ export function GoalSurface({ goal }: { session: Session; goal: UseGoalResult })
   // All hooks run unconditionally (the null-goal early return is below): the
   // elapsed clock ticks only while the server-authoritative projection says the
   // goal turn is running. No session status is used as a pursuit proxy.
-  const live = record?.status === "active" && record.continuation?.state === "running";
+  const live =
+    record?.status === "active" &&
+    record.continuation?.state === "running" &&
+    record.continuation.reason === "goal_turn_running";
   const elapsed = useLiveElapsed(
     record?.createdAt,
     Boolean(live),

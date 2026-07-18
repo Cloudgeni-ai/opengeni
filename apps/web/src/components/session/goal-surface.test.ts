@@ -6,6 +6,7 @@ const continuation = (
   reason:
     | "wake_pending"
     | "goal_turn_running"
+    | "human_turn_running"
     | "human_work_pending"
     | "workstream_paused"
     | "missing_obligation",
@@ -21,6 +22,7 @@ const continuation = (
 describe("goal continuation surface", () => {
   test("only a running continuation is shown as pursuing", () => {
     expect(goalPillState("active", continuation("running", "goal_turn_running"))).toBe("pursuing");
+    expect(goalPillState("active", continuation("running", "human_turn_running"))).toBe("blocked");
     expect(goalPillState("active", undefined)).toBe("invariant_broken");
     expect(goalPillState("active", continuation("inactive", "missing_obligation"))).toBe(
       "invariant_broken",

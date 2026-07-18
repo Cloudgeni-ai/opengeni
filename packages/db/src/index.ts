@@ -17936,7 +17936,15 @@ export async function getSessionGoalWithContinuation(
             ]),
           ),
         )
-        .orderBy(asc(schema.sessionTurns.position), asc(schema.sessionTurns.createdAt))
+        .orderBy(
+          // The active pointer is the authoritative current execution. A Send
+          // accepted while a goal turn is running can have a lower normalized
+          // queue position; that future human turn must not hide the live goal
+          // attempt in this projection.
+          sql`case when ${schema.sessionTurns.id} = ${session.activeTurnId} then 0 else 1 end`,
+          asc(schema.sessionTurns.position),
+          asc(schema.sessionTurns.createdAt),
+        )
         .limit(1);
       const [continuationUpdate] = await tx
         .select({ id: schema.sessionSystemUpdates.id })
@@ -18006,19 +18014,26 @@ export async function getSessionGoalWithContinuation(
         continuation = { state: "blocked", reason: "provider_backpressure", ...base };
       } else if (turn?.status === "requires_action") {
         continuation = { state: "blocked", reason: "approval_required", ...base };
-      } else if (turn && ["user", "api", "scheduled_task"].includes(turn.source)) {
-        continuation = {
-          state: turn.status === "queued" ? "scheduled" : "running",
-          reason: turn.status === "queued" ? "human_work_pending" : "human_turn_running",
-          ...base,
-        };
+      } else if (turn && ["user", "api"].includes(turn.source)) {
+        // Human/API work is authoritative, but it is not an autonomous goal
+        // continuation. A live human turn blocks continuation; queued or
+        // recovering human work is scheduled. Reserve `running` exclusively
+        // for a live goal-owned attempt so clients never paint false pursuit.
+        continuation =
+          turn.status === "running"
+            ? { state: "blocked", reason: "human_turn_running", ...base }
+            : { state: "scheduled", reason: "human_work_pending", ...base };
       } else if (turn?.source === "goal") {
         continuation =
           turn.status === "running"
             ? { state: "running", reason: "goal_turn_running", ...base }
             : { state: "scheduled", reason: "continuation_pending", ...base };
       } else if (turn) {
-        continuation = { state: "scheduled", reason: "system_work_pending", ...base };
+        continuation = {
+          state: turn.status === "running" ? "blocked" : "scheduled",
+          reason: "system_work_pending",
+          ...base,
+        };
       } else if (continuationUpdate) {
         continuation = { state: "scheduled", reason: "continuation_pending", ...base };
       } else if (goal.continuationWakeRevision > goal.continuationObservedRevision) {

@@ -145,9 +145,11 @@ recovery of the same turn, not creation or charging of another continuation.
   `inactive`, `scheduled`, `running`, `blocked`, or `invariant_broken`, with a
   typed reason, wake/observed revisions, optional next-attempt time, and the
   latest workflow-wake error. Clients must not infer autonomy from goal/session
-  status alone: only `running` means "Pursuing"; pause, approval, provider
-  backpressure, cancellation, queued human/system work, pending wake/update,
-  and a missing obligation are distinct truthful states.
+  status alone: `running` is reserved for a live goal-owned turn and alone
+  means "Pursuing". A live human/API or system turn blocks autonomous
+  continuation; recovering or queued work is scheduled. Pause, approval,
+  provider backpressure, cancellation, pending wake/update, and a missing
+  obligation are distinct truthful states.
 - `PATCH /v1/workspaces/:id/sessions/:sessionId/goal` with
   `{ status: "paused" | "active", rationale? }` is the operator override
   (`sessions:control`). Pausing emits `goal.paused` (`actor: "api"`). Resuming
