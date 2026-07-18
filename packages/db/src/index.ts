@@ -1130,15 +1130,15 @@ export async function updateWorkspaceSettings(
   if (resetMaxNestedAgentDepth) {
     delete mergedPatch.maxNestedAgentDepth;
   }
-  // Nested-agent policy reads share the mandatory inference-control row with
-  // session creation. Take the update lock here so a policy write cannot
-  // commit between the create's lock and its workspace.settings read.
+  // The DB trigger takes the mandatory inference-control UPDATE lock after the
+  // workspace row is locked. Keeping that one workspace -> control order makes
+  // new and old binaries serialize identically and avoids mixed-version lock
+  // inversion with an old settings writer that does not know about OPE-53.
   return await withWorkspaceRls(
     db,
     workspaceId,
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
-        await lockWorkspaceInferenceControl(tx as unknown as Database, workspaceId, "update");
         const [row] = await tx
           .update(schema.workspaces)
           .set({
@@ -10510,7 +10510,7 @@ function requireDepthInput(value: number | null | undefined, name: string): numb
 
 function workspaceDepthPolicy(
   workspace: typeof schema.workspaces.$inferSelect,
-  deploymentMaxNestedAgentDepth: number | null | undefined,
+  deploymentPolicy: typeof schema.nestedAgentDepthConfiguration.$inferSelect,
 ): Pick<
   SessionDepthPolicy,
   | "effectiveMaxNestedAgentDepth"
@@ -10525,29 +10525,42 @@ function workspaceDepthPolicy(
       nestedAgentDepthPolicySessionId: null,
     };
   }
-  const deploymentValue = requireDepthInput(
-    deploymentMaxNestedAgentDepth,
-    "deploymentMaxNestedAgentDepth",
-  );
-  if (deploymentValue !== null) {
-    return {
-      effectiveMaxNestedAgentDepth: deploymentValue,
-      nestedAgentDepthPolicySource: "deployment",
-      nestedAgentDepthPolicySessionId: null,
-    };
-  }
   return {
-    effectiveMaxNestedAgentDepth: DEFAULT_MAX_NESTED_AGENT_DEPTH,
-    nestedAgentDepthPolicySource: "default",
+    effectiveMaxNestedAgentDepth: deploymentPolicy.maxNestedAgentDepth,
+    nestedAgentDepthPolicySource: deploymentPolicy.policySource,
     nestedAgentDepthPolicySessionId: null,
   };
+}
+
+function assertDeploymentDepthPolicyMatchesInput(
+  input: SessionCreateInput,
+  persisted: typeof schema.nestedAgentDepthConfiguration.$inferSelect,
+): void {
+  if (!Object.prototype.hasOwnProperty.call(input, "deploymentMaxNestedAgentDepth")) return;
+  const configured = requireDepthInput(
+    input.deploymentMaxNestedAgentDepth,
+    "deploymentMaxNestedAgentDepth",
+  );
+  const expectedMax = configured ?? DEFAULT_MAX_NESTED_AGENT_DEPTH;
+  const expectedSource = configured === null ? "default" : "deployment";
+  if (
+    persisted.maxNestedAgentDepth !== expectedMax ||
+    persisted.policySource !== expectedSource
+  ) {
+    throw new Error(
+      "Deployment nested-agent depth policy does not match the persisted migration configuration",
+    );
+  }
 }
 
 async function lockWorkspaceForSessionCreate(
   tx: Database,
   workspaceId: string,
   accountId: string,
-): Promise<typeof schema.workspaces.$inferSelect> {
+): Promise<{
+  workspace: typeof schema.workspaces.$inferSelect;
+  deploymentPolicy: typeof schema.nestedAgentDepthConfiguration.$inferSelect;
+}> {
   await lockWorkspaceInferenceControl(tx, workspaceId, "share");
   const [workspace] = await tx
     .select()
@@ -10560,7 +10573,16 @@ async function lockWorkspaceForSessionCreate(
   if (workspace.accountId !== accountId) {
     throw new Error(`Workspace ${workspaceId} does not belong to account ${accountId}`);
   }
-  return workspace;
+  const [deploymentPolicy] = await tx
+    .select()
+    .from(schema.nestedAgentDepthConfiguration)
+    .where(eq(schema.nestedAgentDepthConfiguration.singleton, true))
+    .for("share")
+    .limit(1);
+  if (!deploymentPolicy) {
+    throw new Error("Nested-agent deployment policy is not configured");
+  }
+  return { workspace, deploymentPolicy };
 }
 
 function mapSessionSpawnDenial(
@@ -10590,6 +10612,7 @@ async function resolveSessionDepthDecision(
   input: SessionCreateInput,
   id: string,
   workspace: typeof schema.workspaces.$inferSelect,
+  deploymentPolicy: typeof schema.nestedAgentDepthConfiguration.$inferSelect,
 ): Promise<SessionDepthDecision> {
   const parentSessionId = input.parentSessionId ?? null;
   const requestedOverride = requireDepthInput(
@@ -10626,7 +10649,7 @@ async function resolveSessionDepthDecision(
             parent.nestedAgentDepthPolicySource as NestedAgentDepthPolicySource,
           nestedAgentDepthPolicySessionId: parent.nestedAgentDepthPolicySessionId ?? null,
         }
-      : workspaceDepthPolicy(workspace, input.deploymentMaxNestedAgentDepth);
+      : workspaceDepthPolicy(workspace, deploymentPolicy);
 
   if (
     explicitOverride &&
@@ -10778,7 +10801,12 @@ async function createSessionInTransaction(
   input: SessionCreateInput,
   id: string,
 ): Promise<SessionCreateResult> {
-  const workspace = await lockWorkspaceForSessionCreate(tx, input.workspaceId, input.accountId);
+  const { workspace, deploymentPolicy } = await lockWorkspaceForSessionCreate(
+    tx,
+    input.workspaceId,
+    input.accountId,
+  );
+  assertDeploymentDepthPolicyMatchesInput(input, deploymentPolicy);
   const createIdempotencyKey = input.createIdempotencyKey ?? null;
   if (createIdempotencyKey !== null) {
     await lockSessionCreateIdempotencyKey(tx, input.workspaceId, createIdempotencyKey);
@@ -10808,7 +10836,7 @@ async function createSessionInTransaction(
     }
   }
 
-  const decision = await resolveSessionDepthDecision(tx, input, id, workspace);
+  const decision = await resolveSessionDepthDecision(tx, input, id, workspace, deploymentPolicy);
   if (decision.denied) {
     return {
       created: false,

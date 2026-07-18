@@ -1,4 +1,8 @@
-import { OpenGeniApiContractMismatchError, OpenGeniApiError } from "./errors";
+import {
+  createOpenGeniApiError,
+  OpenGeniApiContractMismatchError,
+  OpenGeniApiError,
+} from "./errors";
 import {
   streamSessionEvents,
   type SessionEventStreamTransport,
@@ -616,7 +620,7 @@ export class OpenGeniClient {
     });
     assertApiContractResponse(response);
     if (!response.ok) {
-      throw new OpenGeniApiError(response.status, await safeText(response));
+      throw createOpenGeniApiError(response.status, await safeText(response));
     }
     if (!response.body) {
       throw new OpenGeniApiError(response.status, "SSE response did not include a readable body");
@@ -797,7 +801,7 @@ export class OpenGeniClient {
       },
     );
     assertApiContractResponse(response);
-    if (!response.ok) throw new OpenGeniApiError(response.status, await safeText(response));
+    if (!response.ok) throw createOpenGeniApiError(response.status, await safeText(response));
     if (!response.body) {
       throw new OpenGeniApiError(response.status, "SSE response did not include a readable body");
     }
@@ -1676,7 +1680,7 @@ export class OpenGeniClient {
       body,
     });
     if (!putResponse.ok) {
-      throw new OpenGeniApiError(putResponse.status, await safeText(putResponse));
+      throw createOpenGeniApiError(putResponse.status, await safeText(putResponse));
     }
     return await this.completeFileUpload(workspaceId, upload.uploadId);
   }
@@ -2315,7 +2319,7 @@ export class OpenGeniClient {
     });
     assertApiContractResponse(response);
     if (!response.ok) {
-      throw new OpenGeniApiError(response.status, await safeText(response));
+      throw createOpenGeniApiError(response.status, await safeText(response));
     }
     return (await response.json()) as T;
   }
@@ -2333,7 +2337,7 @@ export class OpenGeniClient {
     });
     assertApiContractResponse(response);
     if (!response.ok) {
-      throw new OpenGeniApiError(response.status, await safeText(response));
+      throw createOpenGeniApiError(response.status, await safeText(response));
     }
   }
 }

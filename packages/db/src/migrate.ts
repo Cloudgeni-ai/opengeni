@@ -4,7 +4,26 @@ import { fileURLToPath } from "node:url";
 import postgres from "postgres";
 
 const DEFAULT_DATABASE_URL = "postgres://opengeni:opengeni@127.0.0.1:5432/opengeni";
+const DEFAULT_MAX_NESTED_AGENT_DEPTH = 3;
+const MAX_NESTED_AGENT_DEPTH = 2_147_483_647;
+const deploymentModeDirective = /^-- deployment-mode: (?:rolling|maintenance)$/;
 const concurrentIndexDirective = /^-- opengeni:concurrent-index lock-timeout=(\d+(?:ms|s|min))$/;
+const batchedBackfillDirective =
+  /^-- opengeni:batched-backfill batch-size=(\d+) lock-timeout=(\d+(?:ms|s|min)) statement-timeout=(\d+(?:ms|s|min))$/;
+
+export type MigrationRuntimeOptions = {
+  /**
+   * Deployment-wide nested-agent maximum to persist in the target schema.
+   * An omitted property means the product default (3). Omitting the options
+   * object entirely reads OPENGENI_MAX_NESTED_AGENT_DEPTH for CLI parity.
+   */
+  maxNestedAgentDepth?: number;
+};
+
+type DeploymentDepthPolicy = {
+  maxNestedAgentDepth: number;
+  source: "deployment" | "default";
+};
 
 /** A bare Postgres identifier (schema/role name) safe to interpolate into DDL. */
 function assertIdentifier(name: string, value: string): string {
@@ -16,52 +35,140 @@ function assertIdentifier(name: string, value: string): string {
 
 /**
  * Most migration files intentionally execute as one implicit transaction.
- * PostgreSQL forbids CREATE INDEX CONCURRENTLY there, so a migration may opt
- * into one narrowly validated transactionless statement with:
+ * Online migrations may opt into one of two narrowly validated, autocommitted
+ * operations on the line immediately after their required deployment mode:
  *
+ *   -- deployment-mode: rolling
  *   -- opengeni:concurrent-index lock-timeout=5s
  *   CREATE [UNIQUE] INDEX CONCURRENTLY ...;
  *
- * The directive is deliberately not a generic "no transaction" escape hatch:
- * only one concurrent-index statement is accepted, and lock acquisition is
- * always bounded. This keeps additive large-table indexes online without making
- * arbitrary partially-applied migration scripts possible.
+ * or:
+ *
+ *   -- deployment-mode: rolling
+ *   -- opengeni:batched-backfill batch-size=1000 lock-timeout=5s statement-timeout=30s
+ *   WITH ... LIMIT 1000 ... UPDATE ... RETURNING ...;
+ *
+ * Neither directive is a generic "no transaction" escape hatch. The first
+ * accepts exactly one concurrent-index statement with bounded lock acquisition.
+ * The second accepts exactly one bounded CTE UPDATE RETURNING statement and
+ * repeats it, one autocommit transaction per batch, until it updates zero rows.
  */
 async function executeMigrationFile(
   sql: postgres.Sql,
   file: string,
   sqlText: string,
 ): Promise<void> {
-  const [firstLine = "", ...remainingLines] = sqlText.replaceAll("\r\n", "\n").split("\n");
-  const directive = concurrentIndexDirective.exec(firstLine.trim());
-  if (!directive) {
-    if (firstLine.trim().startsWith("-- opengeni:")) {
+  const lines = sqlText.replaceAll("\r\n", "\n").split("\n");
+  const firstLine = lines[0]?.trim() ?? "";
+  const directiveIndex = deploymentModeDirective.test(firstLine) ? 1 : 0;
+  const directiveLine = lines[directiveIndex]?.trim() ?? "";
+  const concurrentDirective = concurrentIndexDirective.exec(directiveLine);
+  const backfillDirective = batchedBackfillDirective.exec(directiveLine);
+  if (!concurrentDirective && !backfillDirective) {
+    if (directiveLine.startsWith("-- opengeni:")) {
       throw new Error(`Unsupported OpenGeni migration directive in ${file}`);
     }
     await sql.unsafe(sqlText);
     return;
   }
 
-  const lockTimeout = directive[1]!;
-  const statement = remainingLines.join("\n").trim();
+  const statement = lines.slice(directiveIndex + 1).join("\n").trim();
   const withoutTrailingSemicolon = statement.endsWith(";")
     ? statement.slice(0, -1).trimEnd()
     : statement;
+  if (concurrentDirective) {
+    if (
+      !/^CREATE\s+(?:UNIQUE\s+)?INDEX\s+CONCURRENTLY\b/is.test(withoutTrailingSemicolon) ||
+      withoutTrailingSemicolon.includes(";")
+    ) {
+      throw new Error(
+        `${file}: opengeni:concurrent-index requires exactly one CREATE [UNIQUE] INDEX CONCURRENTLY statement`,
+      );
+    }
+
+    await sql`select set_config('lock_timeout', ${concurrentDirective[1]!}, false)`;
+    try {
+      await sql.unsafe(statement);
+    } finally {
+      await sql`select set_config('lock_timeout', '0', false)`;
+    }
+    return;
+  }
+
+  const batchSize = Number(backfillDirective![1]!);
+  const lockTimeout = backfillDirective![2]!;
+  const statementTimeout = backfillDirective![3]!;
   if (
-    !/^CREATE\s+(?:UNIQUE\s+)?INDEX\s+CONCURRENTLY\b/is.test(withoutTrailingSemicolon) ||
+    !Number.isSafeInteger(batchSize) ||
+    batchSize < 1 ||
+    batchSize > 10_000 ||
+    !/^WITH\b/is.test(withoutTrailingSemicolon) ||
+    !/\bUPDATE\b/is.test(withoutTrailingSemicolon) ||
+    !/\bRETURNING\b/is.test(withoutTrailingSemicolon) ||
+    !new RegExp(`\\bLIMIT\\s+${batchSize}\\b`, "i").test(withoutTrailingSemicolon) ||
     withoutTrailingSemicolon.includes(";")
   ) {
     throw new Error(
-      `${file}: opengeni:concurrent-index requires exactly one CREATE [UNIQUE] INDEX CONCURRENTLY statement`,
+      `${file}: opengeni:batched-backfill requires exactly one bounded WITH ... UPDATE ... RETURNING statement whose LIMIT matches batch-size`,
     );
   }
 
   await sql`select set_config('lock_timeout', ${lockTimeout}, false)`;
+  await sql`select set_config('statement_timeout', ${statementTimeout}, false)`;
   try {
-    await sql.unsafe(statement);
+    for (;;) {
+      const rows = await sql.unsafe(statement);
+      if (rows.length === 0) break;
+    }
   } finally {
+    await sql`select set_config('statement_timeout', '0', false)`;
     await sql`select set_config('lock_timeout', '0', false)`;
   }
+}
+
+function deploymentDepthPolicy(options: MigrationRuntimeOptions | undefined): DeploymentDepthPolicy {
+  const configured =
+    options === undefined
+      ? process.env.OPENGENI_MAX_NESTED_AGENT_DEPTH?.trim() || undefined
+      : options.maxNestedAgentDepth;
+  if (configured === undefined) {
+    return { maxNestedAgentDepth: DEFAULT_MAX_NESTED_AGENT_DEPTH, source: "default" };
+  }
+  const value = typeof configured === "number" ? configured : Number(configured);
+  if (
+    !Number.isSafeInteger(value) ||
+    value < 0 ||
+    value > MAX_NESTED_AGENT_DEPTH ||
+    (typeof configured === "string" && !/^(0|[1-9][0-9]*)$/.test(configured))
+  ) {
+    throw new Error(
+      `OPENGENI_MAX_NESTED_AGENT_DEPTH must be a non-negative 32-bit integer: ${configured}`,
+    );
+  }
+  return { maxNestedAgentDepth: value, source: "deployment" };
+}
+
+async function persistDeploymentDepthPolicy(
+  sql: postgres.Sql,
+  policy: DeploymentDepthPolicy,
+): Promise<void> {
+  const [relation] = await sql<{ exists: boolean }[]>`
+    select to_regclass('nested_agent_depth_configuration') is not null as exists
+  `;
+  if (!relation?.exists) return;
+  await sql`
+    insert into "nested_agent_depth_configuration" (
+      "singleton", "max_nested_agent_depth", "policy_source", "updated_at"
+    ) values (true, ${policy.maxNestedAgentDepth}, ${policy.source}, now())
+    on conflict ("singleton") do update
+    set "max_nested_agent_depth" = excluded."max_nested_agent_depth",
+        "policy_source" = excluded."policy_source",
+        "updated_at" = now()
+    where "nested_agent_depth_configuration"."max_nested_agent_depth"
+            is distinct from excluded."max_nested_agent_depth"
+       or "nested_agent_depth_configuration"."policy_source"
+            is distinct from excluded."policy_source"
+  `;
 }
 
 /**
@@ -97,9 +204,11 @@ export async function migrate(
     process.env.OPENGENI_DATABASE_URL ??
     DEFAULT_DATABASE_URL,
   schema: string | undefined = process.env.OPENGENI_DB_SCHEMA?.trim() || undefined,
+  runtimeOptions?: MigrationRuntimeOptions,
 ): Promise<void> {
   const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../drizzle");
   const files = (await readdir(migrationsDir)).filter((file) => file.endsWith(".sql")).sort();
+  const depthPolicy = deploymentDepthPolicy(runtimeOptions);
   const sql = postgres(databaseUrl, { max: 1 });
   try {
     // Serialize concurrent migrate() runs; the session-level lock is released
@@ -114,6 +223,11 @@ export async function migrate(
       await sql.unsafe(`CREATE SCHEMA IF NOT EXISTS "opengeni_private"`);
       await sql.unsafe(`SET search_path = "${schema}", "opengeni_private", "public"`);
     }
+    // The expand migration reads these session-local values when it creates the
+    // singleton row, so there is no commit gap in which mixed-version inserts
+    // could observe the wrong deployment fallback.
+    await sql`select set_config('opengeni.max_nested_agent_depth', ${String(depthPolicy.maxNestedAgentDepth)}, false)`;
+    await sql`select set_config('opengeni.nested_agent_depth_policy_source', ${depthPolicy.source}, false)`;
     await sql.unsafe(
       `CREATE TABLE IF NOT EXISTS "schema_migrations" ("name" text PRIMARY KEY, "applied_at" timestamptz NOT NULL DEFAULT now())`,
     );
@@ -127,6 +241,10 @@ export async function migrate(
       await executeMigrationFile(sql, file, sqlText);
       await sql`INSERT INTO "schema_migrations" ("name") VALUES (${file}) ON CONFLICT DO NOTHING`;
     }
+    // Reconcile configuration even when the SQL chain was already current.
+    // The row lock serializes this rare deployment change with trigger- and
+    // application-side policy readers.
+    await persistDeploymentDepthPolicy(sql, depthPolicy);
   } finally {
     await sql.end();
   }
@@ -140,8 +258,12 @@ export async function migrate(
  * `targetSchema` undefined → `public` → standalone behavior. Thin wrapper over
  * `migrate` so there is one migration engine.
  */
-export async function runMigrations(adminConnection: string, targetSchema?: string): Promise<void> {
-  await migrate(adminConnection, targetSchema);
+export async function runMigrations(
+  adminConnection: string,
+  targetSchema?: string,
+  runtimeOptions?: MigrationRuntimeOptions,
+): Promise<void> {
+  await migrate(adminConnection, targetSchema, runtimeOptions);
 }
 
 if (import.meta.main) {

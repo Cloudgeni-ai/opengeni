@@ -38,7 +38,7 @@ set an absolute `maxNestedAgentDepth`; reducing the inherited limit is allowed,
 while increasing it requires `workspace:admin`.
 
 ```ts
-import { OpenGeniApiError, type SessionSpawnDenial } from "@opengeni/sdk";
+import { SessionSpawnDeniedError } from "@opengeni/sdk";
 
 try {
   await client.createSession(workspaceId, {
@@ -47,13 +47,12 @@ try {
     idempotencyKey: "stable-create-key",
   });
 } catch (error) {
-  if (
-    error instanceof OpenGeniApiError &&
-    (error.code === "nested_agent_depth_exceeded" ||
-      error.code === "nested_agent_depth_override_forbidden")
-  ) {
-    const denial = error.details?.["denial"] as SessionSpawnDenial;
-    console.error(denial.currentDepth, denial.attemptedDepth, denial.effectiveMaxNestedAgentDepth);
+  if (error instanceof SessionSpawnDeniedError) {
+    console.error(
+      error.denial.currentDepth,
+      error.denial.attemptedDepth,
+      error.denial.effectiveMaxNestedAgentDepth,
+    );
   }
 }
 ```

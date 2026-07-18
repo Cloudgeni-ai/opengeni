@@ -78,6 +78,31 @@ export const workspaces = pgTable(
   }),
 );
 
+// One non-secret, target-schema-local deployment fallback. migrate.ts seeds
+// and reconciles this row from OPENGENI_MAX_NESTED_AGENT_DEPTH; session creates
+// read it under FOR SHARE so mixed old/new binaries and the DB trigger resolve
+// exactly the same policy. The application role has SELECT only.
+export const nestedAgentDepthConfiguration = pgTable(
+  "nested_agent_depth_configuration",
+  {
+    singleton: boolean("singleton").primaryKey().notNull().default(true),
+    maxNestedAgentDepth: integer("max_nested_agent_depth").notNull(),
+    policySource: text("policy_source").$type<"deployment" | "default">().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    singletonOnly: check("nested_agent_depth_configuration_singleton_check", table.singleton),
+    nonNegative: check(
+      "nested_agent_depth_configuration_max_check",
+      sql`${table.maxNestedAgentDepth} >= 0`,
+    ),
+    sourceValid: check(
+      "nested_agent_depth_configuration_source_check",
+      sql`${table.policySource} in ('deployment', 'default')`,
+    ),
+  }),
+);
+
 // One mandatory workspace-wide admission barrier. Every inference-admitting
 // transaction locks this row before it touches a session; Pause/Resume and
 // foreground Send/Steer advance its monotonic revision under FOR UPDATE.

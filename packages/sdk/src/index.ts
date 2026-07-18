@@ -9,6 +9,8 @@ export {
   OpenGeniApiContractMismatchError,
   OpenGeniApiError,
   OpenGeniStreamError,
+  SessionSpawnDeniedError,
+  createOpenGeniApiError,
   isRetryableStreamError,
 } from "./errors";
 export {

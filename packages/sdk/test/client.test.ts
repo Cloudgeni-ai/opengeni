@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { OpenGeniClient } from "../src/client";
-import { OpenGeniApiContractMismatchError, OpenGeniApiError } from "../src/errors";
+import {
+  OpenGeniApiContractMismatchError,
+  OpenGeniApiError,
+  SessionSpawnDeniedError,
+} from "../src/errors";
 import { OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION } from "../src/types";
 import { collect, makeEvent, SESSION_ID, sseBlock, WORKSPACE_ID } from "./helpers";
 
@@ -184,9 +188,20 @@ describe("OpenGeniClient", () => {
   test("nested-agent create denials expose typed code and durable audit details", async () => {
     const denial = {
       id: "00000000-0000-4000-8000-000000000099",
+      accountId: "00000000-0000-4000-8000-000000000001",
+      workspaceId: WORKSPACE_ID,
+      parentSessionId: "00000000-0000-4000-8000-000000000088",
+      rootSessionId: "00000000-0000-4000-8000-000000000077",
       currentDepth: 3,
       attemptedDepth: 4,
       effectiveMaxNestedAgentDepth: 3,
+      requestedMaxNestedAgentDepthOverride: null,
+      policySource: "default",
+      policySessionId: null,
+      subjectId: "user:test",
+      code: "nested_agent_depth_exceeded",
+      idempotencyKey: "typed-denial",
+      createdAt: "2026-07-18T00:00:00.000Z",
     };
     const { client } = makeClient(() =>
       jsonResponse(
@@ -203,10 +218,32 @@ describe("OpenGeniClient", () => {
     const error = await client
       .createSession(WORKSPACE_ID, { initialMessage: "too deep" })
       .catch((caught) => caught);
+    expect(error).toBeInstanceOf(SessionSpawnDeniedError);
+    expect((error as SessionSpawnDeniedError).status).toBe(409);
+    expect((error as SessionSpawnDeniedError).code).toBe("nested_agent_depth_exceeded");
+    expect((error as SessionSpawnDeniedError).denial).toEqual(denial);
+    expect((error as SessionSpawnDeniedError).details).toEqual({ denial });
+  });
+
+  test("incomplete denial envelopes remain generic API errors", async () => {
+    const { client } = makeClient(() =>
+      jsonResponse(
+        {
+          error: {
+            code: "nested_agent_depth_exceeded",
+            message: "incomplete evidence",
+            details: { denial: { id: "incomplete", attemptedDepth: 4 } },
+          },
+        },
+        409,
+      ),
+    );
+    const error = await client
+      .createSession(WORKSPACE_ID, { initialMessage: "too deep" })
+      .catch((caught) => caught);
     expect(error).toBeInstanceOf(OpenGeniApiError);
-    expect((error as OpenGeniApiError).status).toBe(409);
+    expect(error).not.toBeInstanceOf(SessionSpawnDeniedError);
     expect((error as OpenGeniApiError).code).toBe("nested_agent_depth_exceeded");
-    expect((error as OpenGeniApiError).details).toEqual({ denial });
   });
 
   test("JSON and void requests fail closed when the API response contract differs", async () => {
