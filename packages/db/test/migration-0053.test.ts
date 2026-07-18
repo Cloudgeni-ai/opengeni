@@ -65,16 +65,19 @@ describe("migration 0053 (Codex credential leases)", () => {
           { id: string }[]
         >`insert into workspaces (account_id, name) values (${accountId}, 'legacy-workspace') returning id`
       )[0]!.id;
-      const credentials = await admin<{ id: string }[]>`
+      // Both rows share one transaction timestamp, so the allocator's canonical
+      // `created_at, id` order is decided by the UUID tie-break. Keep the ids
+      // fixed and insert them in reverse order: the test must model the actual
+      // allocator order, never PostgreSQL RETURNING/insertion order.
+      const credentialA = "00000000-0000-4000-8000-000000000001";
+      const credentialB = "00000000-0000-4000-8000-000000000002";
+      await admin`
         insert into codex_subscription_credentials (
-          account_id, workspace_id, credential_encrypted, chatgpt_account_id,
+          id, account_id, workspace_id, credential_encrypted, chatgpt_account_id,
           plan_type, status
         ) values
-          (${accountId}, ${workspaceId}, 'legacy-a', 'external-a', 'pro', 'active'),
-          (${accountId}, ${workspaceId}, 'legacy-b', 'external-b', 'pro', 'active')
-        returning id`;
-      const credentialA = credentials[0]!.id;
-      const credentialB = credentials[1]!.id;
+          (${credentialB}, ${accountId}, ${workspaceId}, 'legacy-b', 'external-b', 'pro', 'active'),
+          (${credentialA}, ${accountId}, ${workspaceId}, 'legacy-a', 'external-a', 'pro', 'active')`;
       await admin`
         insert into codex_rotation_settings (
           account_id, workspace_id, active_credential_id,
@@ -202,6 +205,7 @@ describe("migration 0053 (Codex credential leases)", () => {
         selectionCount: 0,
         lastSelectedAt: null,
       }));
+      const selectionNow = new Date("2026-01-01T00:00:00.000Z");
       const rollbackSelection = selectCodexCredentialLeaseForTurn({
         context: {
           accounts: rollbackAccounts,
@@ -219,7 +223,7 @@ describe("migration 0053 (Codex credential leases)", () => {
         sessionPinnedCredentialId: null,
         sessionLastCredentialId: credentialA,
         nearExhaustionPct: 90,
-        now: new Date(),
+        now: selectionNow,
       });
       // OPE-36: rotation-enabled always behaves as sticky-sharded, so the
       // rollback selection is the session's deterministic sharded home (the
@@ -230,7 +234,7 @@ describe("migration 0053 (Codex credential leases)", () => {
         currentPolicyPin: null,
         accounts: rollbackAccounts,
         nearExhaustionPct: 90,
-        now: new Date(),
+        now: selectionNow,
       });
       expect(expectedHome.kind).toBe("home");
       expect(rollbackSelection.credentialId).toBe(
@@ -266,7 +270,7 @@ describe("migration 0053 (Codex credential leases)", () => {
             sessionPinnedCredentialId: null,
             sessionLastCredentialId: credentialA,
             nearExhaustionPct: 90,
-            now: new Date(),
+            now: selectionNow,
           }),
       );
       // OPE-36: unpinned + rotation-enabled selects the session's sharded home
@@ -305,7 +309,7 @@ describe("migration 0053 (Codex credential leases)", () => {
             sessionPinnedCredentialId: null,
             sessionLastCredentialId: null,
             nearExhaustionPct: 90,
-            now: new Date(),
+            now: selectionNow,
           }),
       );
       expect(leased.credentialId).not.toBeNull();
@@ -343,7 +347,7 @@ describe("migration 0053 (Codex credential leases)", () => {
         sessionPinnedCredentialId: null,
         sessionLastCredentialId: leased.credentialId,
         nearExhaustionPct: 90,
-        now: new Date(),
+        now: selectionNow,
       });
       // Rotation OFF is untouched by OPE-36: the selector returns the workspace
       // active pointer, exactly as before.

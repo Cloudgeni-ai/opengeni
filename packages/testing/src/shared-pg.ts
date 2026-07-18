@@ -296,7 +296,10 @@ async function ensureContainerAndAcquire(): Promise<boolean> {
       // Remove a stopped leftover of the same name, then start fresh. NOT --rm:
       // the container must survive across the many test-file processes that
       // share it; the last file out removes it explicitly.
-      await dockerOk(["rm", "-f", CONTAINER]);
+      // The postgres image declares an anonymous data volume. Remove it with
+      // the container or every test-file lifecycle leaks a full migrated
+      // cluster into the shared Docker filesystem.
+      await dockerOk(["rm", "-f", "-v", CONTAINER]);
       // ONE container is shared by every DB/API/worker integration test FILE in
       // the parallel `bun test` run. Each file opens its own connection pool (the
       // createDb pool + a superuser admin pool), so dozens of files together can
@@ -340,7 +343,7 @@ async function ensureContainerAndAcquire(): Promise<boolean> {
           await admin.end().catch(() => undefined);
         }
       } catch (err) {
-        await dockerOk(["rm", "-f", CONTAINER]);
+        await dockerOk(["rm", "-f", "-v", CONTAINER]);
         throw err;
       }
     }
@@ -358,7 +361,7 @@ async function releaseContainer(): Promise<void> {
     const next = (await readRefcount()) - 1;
     if (next <= 0) {
       await writeRefcount(0);
-      await dockerOk(["rm", "-f", CONTAINER]);
+      await dockerOk(["rm", "-f", "-v", CONTAINER]);
       await rm(STATE_DIR, { recursive: true, force: true }).catch(() => undefined);
     } else {
       await writeRefcount(next);
