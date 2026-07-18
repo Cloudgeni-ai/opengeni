@@ -82,13 +82,20 @@ Temporal retry. When an OpenAI/Azure context overflow is classified,
 `runAgentTurn` invokes the portable Codex-local compaction path. The summarizer
 receives structured active history plus the checkpoint prompt; on context
 overflow it removes exactly one oldest input item and retries. Other failures
-propagate without changing active history. After a fenced durable replacement,
-the same activity, turn, attempt, and sandbox rebuild model input and continue;
-compaction never creates queue or recovery work.
+propagate without changing active history. A Codex terminal SSE failure carried
+on HTTP 200 is converted to one bounded, marked, non-retried provider error; it
+cannot masquerade as an empty successful summary. After a fenced durable
+replacement, the same activity, turn, attempt, and sandbox rebuild model input
+and continue; compaction never creates queue or recovery work.
 A no-shrink result publishes a clear recovery message and leaves the session
-`idle`, so zero-progress churn cannot loop. Exhausted or impossible compaction
-fails with an error that identifies compaction summarization, not the threshold
-event; it never installs a mechanical summary.
+`idle`, so zero-progress churn cannot loop. Exhausted, empty-summary, or
+otherwise failed compaction identifies compaction summarization or the provider
+failure, never installs a mechanical summary, and preserves active history. A
+failed same-turn recovery atomically settles the exact turn, defers ordinary
+internal updates, terminalizes a delivered goal-continuation receipt, and ends
+that workflow run. Without a newer durable work wake, the workflow cannot
+synthesize another goal continuation from unchanged history; a later prompt,
+Steer, or genuinely new internal update may make one new attempt.
 
 Resolved model context metadata is authoritative on every model-facing path.
 For the Codex subscription catalog this means a 272,000-token raw window, a

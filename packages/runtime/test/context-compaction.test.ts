@@ -1,4 +1,10 @@
 import { describe, expect, test } from "bun:test";
+import OpenAI from "openai";
+import {
+  codexRequestStorage,
+  codexSubscriptionFetch,
+  isCodexTransportError,
+} from "@opengeni/codex";
 import {
   COMPACT_USER_MESSAGE_MAX_TOKENS,
   COMPACTION_PROMPT,
@@ -596,6 +602,69 @@ describe("provider-proof compaction transcript", () => {
         code: "server_error",
       },
     });
+  });
+
+  test("propagates an HTTP-200 Codex terminal failure instead of calling it an empty summary", async () => {
+    let calls = 0;
+    const client = new OpenAI({
+      apiKey: "test-key",
+      baseURL: "https://chatgpt.com/backend-api",
+      // Deliberately leave the normal SDK retry budget enabled. The adapter's
+      // x-should-retry:false must make this accepted terminal response a
+      // single request.
+      maxRetries: 2,
+      fetch: codexSubscriptionFetch(async () => {
+        calls += 1;
+        return new Response(
+          'data: {"type":"response.failed","response":{"id":"resp_terminal_failure","status":"failed","error":{"type":"server_error","code":"checkpoint_failed","message":"provider checkpoint worker failed"}}}\n\n',
+          { status: 200, headers: { "content-type": "text/event-stream" } },
+        );
+      }),
+    });
+    let observed: unknown;
+    try {
+      await codexRequestStorage.run(
+        {
+          clientVersion: "test",
+          getToken: async () => ({
+            accessToken: "test-token",
+            chatgptAccountId: "test-account",
+            isFedramp: false,
+          }),
+          refresh: async () => ({
+            accessToken: "refreshed-test-token",
+            chatgptAccountId: "test-account",
+            isFedramp: false,
+          }),
+          resolveModel: (model) => model,
+        },
+        () =>
+          summarizeForCompaction(
+            testSettings({ openaiProvider: "openai" }),
+            buildCompactionPromptInput([user("preserve the active history")]),
+            {
+              client,
+              api: "responses",
+              model: "gpt-5.6-sol",
+            },
+          ),
+      );
+    } catch (error) {
+      observed = error;
+    }
+
+    expect(calls).toBe(1);
+    expect(observed).not.toBeInstanceOf(EmptyCompactionSummaryError);
+    expect(observed).toBeInstanceOf(CompactionProviderResponseError);
+    expect(observed).toMatchObject({
+      diagnostics: {
+        httpStatus: 502,
+        type: "server_error",
+        code: "checkpoint_failed",
+      },
+    });
+    expect(isCodexTransportError((observed as CompactionProviderResponseError).cause)).toBe(true);
+    expect((observed as Error).message).not.toContain("provider checkpoint worker failed");
   });
 
   test("renders the full checkpoint input without silently dropping old records", () => {

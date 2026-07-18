@@ -1,5 +1,10 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
+  SESSION_EVENT_PAYLOAD_MAX_BYTES,
+  sessionEventJsonBytes,
+  sessionEventPayloadTruncation,
+} from "@opengeni/contracts";
+import {
   addSessionSystemUpdate,
   acceptSessionApprovalDecision,
   applyCreditDebitUpToBalance,
@@ -237,7 +242,7 @@ describe("clean session control plane", () => {
     );
   });
 
-  test("canonical history bounds tool output while the pending receipt keeps raw recovery evidence", async () => {
+  test("history, pending receipt, and recovery audit keep distinct truthful output representations", async () => {
     const { grant, session } = await fixture();
     await send(grant, session.id, "inspect a very large result");
     const attemptId = crypto.randomUUID();
@@ -350,8 +355,29 @@ describe("clean session control plane", () => {
       (event) =>
         event.type === "agent.toolCall.output" &&
         (event.payload as { id?: unknown }).id === "pending-call",
-    )?.payload as { output: { text: string } };
-    expect(recoveryOutput.output.text).toBe(huge);
+    )?.payload as { output: { text: string }; truncation: unknown };
+    expect(recoveryOutput.output.text).toContain("bytes omitted");
+    expect(recoveryOutput.output.text.length).toBeLessThan(50_000);
+    expect(sessionEventJsonBytes(recoveryOutput)).toBeLessThanOrEqual(
+      SESSION_EVENT_PAYLOAD_MAX_BYTES,
+    );
+    expect(sessionEventPayloadTruncation(recoveryOutput)).toMatchObject({
+      truncated: true,
+      surface: "durable_audit",
+      reason: "payload_bytes_exceeded",
+      fullEvidence: { available: false, reason: "not_retained" },
+      details: expect.arrayContaining([
+        expect.objectContaining({ path: "$.output.text", kind: "string" }),
+      ]),
+    });
+    expect(
+      await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+        db
+          .select({ id: schema.sessionPendingToolCalls.id })
+          .from(schema.sessionPendingToolCalls)
+          .where(eq(schema.sessionPendingToolCalls.callId, "pending-call")),
+      ),
+    ).toEqual([]);
   });
 
   test("bulk control projection accepts an empty session page", async () => {

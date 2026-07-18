@@ -400,6 +400,30 @@ const NON_RETRYABLE_SSE_ERROR_CODES = new Set([
   "usage_limit_reached",
 ]);
 
+const CODEX_TERMINAL_ERROR_FIELD_MAX_BYTES = 256;
+const CODEX_TERMINAL_ERROR_MESSAGE_MAX_BYTES = 4 * 1024;
+const CODEX_TERMINAL_ERROR_TRUNCATION_MARKER = "… [truncated]";
+
+function boundedTerminalErrorField(
+  value: unknown,
+  maxBytes: number,
+): { value?: string; truncated: boolean } {
+  if (typeof value !== "string") return { truncated: false };
+  const encoder = new TextEncoder();
+  const encoded = encoder.encode(value);
+  if (encoded.byteLength <= maxBytes) return { value, truncated: false };
+
+  const markerBytes = encoder.encode(CODEX_TERMINAL_ERROR_TRUNCATION_MARKER).byteLength;
+  let prefixEnd = Math.max(0, maxBytes - markerBytes);
+  while (prefixEnd > 0 && (encoded[prefixEnd]! & 0xc0) === 0x80) {
+    prefixEnd -= 1;
+  }
+  return {
+    value: `${new TextDecoder().decode(encoded.subarray(0, prefixEnd))}${CODEX_TERMINAL_ERROR_TRUNCATION_MARKER}`,
+    truncated: true,
+  };
+}
+
 /**
  * Convert a terminal error carried inside an HTTP-200 SSE stream into the
  * ordinary non-2xx JSON error contract expected by the OpenAI SDK. Codex CLI
@@ -413,20 +437,42 @@ function codexSseFailureResponse(
   fallbackMessage: string,
 ): Response {
   const record =
-    rawError && typeof rawError === "object" ? (rawError as Record<string, unknown>) : {};
+    rawError && typeof rawError === "object" && !Array.isArray(rawError)
+      ? (rawError as Record<string, unknown>)
+      : {};
+  const typeField = boundedTerminalErrorField(record.type, CODEX_TERMINAL_ERROR_FIELD_MAX_BYTES);
+  const codeField = boundedTerminalErrorField(record.code, CODEX_TERMINAL_ERROR_FIELD_MAX_BYTES);
+  const messageField = boundedTerminalErrorField(
+    record.message ?? (typeof rawError === "string" ? rawError : undefined),
+    CODEX_TERMINAL_ERROR_MESSAGE_MAX_BYTES,
+  );
+  const paramField = boundedTerminalErrorField(record.param, CODEX_TERMINAL_ERROR_FIELD_MAX_BYTES);
+  const providerType =
+    typeField.value === "error" ||
+    typeField.value === "response.error" ||
+    typeField.value === "response.failed"
+      ? undefined
+      : typeField.value;
   const code =
-    (typeof record.code === "string" && record.code.length > 0 ? record.code : undefined) ??
-    (typeof record.type === "string" && record.type.length > 0 ? record.type : undefined) ??
+    (codeField.value?.length ? codeField.value : undefined) ??
+    (providerType?.length ? providerType : undefined) ??
     fallbackCode;
-  const message =
-    typeof record.message === "string" && record.message.length > 0
-      ? record.message
-      : fallbackMessage;
+  const diagnosticTruncated =
+    typeField.truncated ||
+    codeField.truncated ||
+    messageField.truncated ||
+    paramField.truncated ||
+    Object.keys(record).some((key) => !["type", "code", "message", "param"].includes(key)) ||
+    (rawError !== null &&
+      rawError !== undefined &&
+      typeof rawError !== "string" &&
+      (typeof rawError !== "object" || Array.isArray(rawError)));
   const error = {
-    type: typeof record.type === "string" && record.type.length > 0 ? record.type : code,
+    type: providerType?.length ? providerType : code,
     code,
-    message,
-    ...(typeof record.param === "string" ? { param: record.param } : {}),
+    message: messageField.value?.length ? messageField.value : fallbackMessage,
+    ...(paramField.value?.length ? { param: paramField.value } : {}),
+    ...(diagnosticTruncated ? { diagnostic_truncated: true } : {}),
   };
   const status =
     code === "rate_limit_exceeded" ||
@@ -439,11 +485,12 @@ function codexSseFailureResponse(
   const headers = new Headers(source.headers);
   headers.set("content-type", "application/json");
   headers.set(CODEX_TRANSPORT_ERROR_HEADER, "1");
+  // A terminal event means the provider already accepted and completed this
+  // request. Never let the OpenAI SDK replay it merely because we synthesized
+  // a non-2xx response to preserve the terminal failure.
+  headers.set("x-should-retry", "false");
   headers.delete("content-length");
   headers.delete("content-encoding");
-  if (NON_RETRYABLE_SSE_ERROR_CODES.has(code)) {
-    headers.set("x-should-retry", "false");
-  }
   return new Response(JSON.stringify({ error }), { status, headers });
 }
 

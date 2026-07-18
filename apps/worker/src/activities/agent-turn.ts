@@ -4438,7 +4438,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             turnMetricOutcome = "failed";
             activityStatus = "idle";
             activityError = attemptError;
-            return claimedResult({ status: "idle" });
+            // The failed turn settlement already defers ordinary internal
+            // updates and makes the delivered goal-continuation receipt
+            // terminal. End this workflow run as well: returning plain idle
+            // would immediately synthesize another goal continuation against
+            // the unchanged active history and repeat the same failed
+            // compaction. A new human prompt, Steer, or genuinely new internal
+            // update remains a durable explicit wake and may retry.
+            return claimedResult({ status: "idle", deferredUntilWake: true });
           }
           // Codex parity: compaction remains inside the same logical turn and
           // the same activity. Rebuild the model-visible history from the

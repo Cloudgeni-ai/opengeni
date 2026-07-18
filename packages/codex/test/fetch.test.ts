@@ -347,6 +347,117 @@ describe("codexSubscriptionFetch", () => {
     expect(await res.json()).toMatchObject({ id: "r1", status: "completed" });
   });
 
+  test("non-streaming caller: response.failed becomes a marked non-retried provider error", async () => {
+    let calls = 0;
+    const response = await codexRequestStorage.run(ctx(), () =>
+      codexSubscriptionFetch(async () => {
+        calls += 1;
+        return new Response(
+          [
+            'data: {"type":"response.created","response":{"id":"resp_failed"}}',
+            'data: {"type":"response.failed","response":{"id":"resp_failed","status":"failed","error":{"type":"server_error","code":"upstream_failed","message":"checkpoint backend failed"}}}',
+            "",
+          ].join("\n\n"),
+          { status: 200, headers: { "content-type": "text/event-stream" } },
+        );
+      })("https://chatgpt.com/backend-api/responses", {
+        method: "POST",
+        body: JSON.stringify({
+          model: "gpt-5.6-sol",
+          stream: false,
+          input: [],
+        }),
+      }),
+    );
+
+    expect(calls).toBe(1);
+    expect(response.status).toBe(502);
+    expect(response.headers.get(CODEX_TRANSPORT_ERROR_HEADER)).toBe("1");
+    expect(response.headers.get("x-should-retry")).toBe("false");
+    expect(await response.json()).toEqual({
+      error: {
+        type: "server_error",
+        code: "upstream_failed",
+        message: "checkpoint backend failed",
+      },
+    });
+  });
+
+  test("non-streaming caller: response.error preserves its top-level diagnostic", async () => {
+    const response = await codexRequestStorage.run(ctx(), () =>
+      codexSubscriptionFetch(
+        async () =>
+          new Response(
+            'data: {"type":"response.error","code":"service_unavailable","message":"stream worker unavailable","param":"input"}\n\n',
+            { status: 200, headers: { "content-type": "text/event-stream" } },
+          ),
+      )("https://chatgpt.com/backend-api/responses", {
+        method: "POST",
+        body: JSON.stringify({
+          model: "gpt-5.6-sol",
+          stream: false,
+          input: [],
+        }),
+      }),
+    );
+
+    expect(response.status).toBe(502);
+    expect(await response.json()).toEqual({
+      error: {
+        type: "service_unavailable",
+        code: "service_unavailable",
+        message: "stream worker unavailable",
+        param: "input",
+      },
+    });
+  });
+
+  test("non-streaming caller: terminal diagnostics are projected and explicitly bounded", async () => {
+    const oversized = "x".repeat(100_000);
+    const response = await codexRequestStorage.run(ctx(), () =>
+      codexSubscriptionFetch(
+        async () =>
+          new Response(
+            `data: ${JSON.stringify({
+              type: "response.failed",
+              response: {
+                id: "resp_bounded",
+                status: "failed",
+                error: {
+                  type: "server_error",
+                  code: "diagnostic_too_large",
+                  message: oversized,
+                  stack: oversized,
+                  nested: { opaque: oversized },
+                },
+              },
+            })}\n\n`,
+            { status: 200, headers: { "content-type": "text/event-stream" } },
+          ),
+      )("https://chatgpt.com/backend-api/responses", {
+        method: "POST",
+        body: JSON.stringify({
+          model: "gpt-5.6-sol",
+          stream: false,
+          input: [],
+        }),
+      }),
+    );
+
+    const body = await response.text();
+    expect(Buffer.byteLength(body)).toBeLessThan(6 * 1024);
+    expect(JSON.parse(body)).toEqual({
+      error: {
+        type: "server_error",
+        code: "diagnostic_too_large",
+        message: expect.stringMatching(/… \[truncated\]$/),
+        diagnostic_truncated: true,
+      },
+    });
+    expect(body).not.toContain("stack");
+    expect(body).not.toContain("nested");
+  });
+
   test("streaming caller: stream is passed through with the terminal event's empty output repaired", async () => {
     const fetchImpl = codexSubscriptionFetch(codexBase);
     const res = await codexRequestStorage.run(ctx(), () =>

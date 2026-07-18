@@ -89,9 +89,14 @@ plain-text adapter because Chat Completions has a different item protocol.
 If the summarizer request exceeds the context window, OpenGeni removes exactly
 one oldest history item and retries, retaining the checkpoint prompt. It repeats
 until the request fits or only the prompt remains. Other provider errors
-propagate and do not mutate active history. An empty model response is a typed
-compaction failure with bounded, content-free response diagnostics; the old
-active history remains byte-for-byte active. OpenGeni never installs a
+propagate and do not mutate active history. For Codex subscriptions, terminal
+SSE `response.failed` and `response.error` events that arrive on HTTP 200 become
+one non-retried, marked provider error with a bounded projection of
+type/code/message/parameter and response identity; arbitrary nested diagnostics
+are omitted and truncation is explicit. They are never misclassified as an
+empty summary. A genuinely successful but empty model response is a distinct
+typed compaction failure with bounded, content-free response diagnostics; the
+old active history remains byte-for-byte active. OpenGeni never installs a
 manufactured placeholder as conversation truth.
 
 ## Durable replacement
@@ -144,10 +149,15 @@ and an explicit `/compact` request remains pending for that same-turn retry.
 When a terminal failure belongs to an explicit `/compact`, one attempt-fenced
 database settlement records
 `session.context.compaction.skipped(reason="summarization_failed")`, clears that
-one request, records `turn.failed`, and returns the session to idle. A worker
-crash therefore cannot clear the request without the matching terminal truth,
-and an idle maintenance execution cannot immediately recreate itself forever.
-The active history stays unchanged and the user may request a fresh retry.
+one request, records `turn.failed`, and returns the session to idle. For a
+failure during same-turn recovery, the exact turn is settled once, ordinary
+internal updates are deferred, and any delivered goal-continuation receipt is
+terminalized. A worker crash therefore cannot clear the request without the
+matching terminal truth, and an idle maintenance execution cannot immediately
+recreate itself forever. With no newer durable work wake, the workflow ends
+instead of retrying against unchanged history. A later human prompt, Steer, or
+genuinely new internal update can wake normal claim ordering and make one new
+attempt. The active history stays unchanged throughout.
 
 Codex-subscription responses are streaming on the wire even for this
 non-streaming summarizer. Terminal `response.failed`, `response.error`, `error`,
