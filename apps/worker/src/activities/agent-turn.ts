@@ -2008,6 +2008,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // stream and so never observes cancellation on its own; these explicit
       // checks let a graceful shutdown checkpoint the turn before the worker is
       // force-killed instead of riding the setup to a heartbeat timeout.
+      const throwIfWorkerShuttingDown = () => {
+        const reason = activityContext?.cancellationSignal.reason;
+        if (isWorkerShutdownCancellation(reason)) {
+          throw reason;
+        }
+      };
       const throwIfTurnCancelled = () => throwIfTurnOperationCancelled(cancellationSignal);
       // ONE shared details object for every heartbeat this activity sends (each
       // site spreads it + its own phase), so cross-site fields — the op-stream
@@ -2170,6 +2176,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // A shutdown that landed during claim/billing setup stops before the turn
       // visibly starts: nothing ran yet, so the same inference starts cleanly
       // on a healthy worker.
+      throwIfWorkerShuttingDown();
       throwIfTurnCancelled();
       if (
         !(await settle({
@@ -3554,6 +3561,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         cancellationSignal,
         undefined,
       );
+      throwIfWorkerShuttingDown();
       throwIfTurnCancelled();
       // Wrap MCP prep in the codex ALS so the codex_apps connect handshake
       // (initialize + tools/list) can resolve the per-workspace bearer from
@@ -3770,6 +3778,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         } as EstablishedSandboxSession["client"];
         turnSandboxProvisioner = createTurnSandboxProvisioner<ResumedTurnSandbox>(
           async () => {
+            throwIfWorkerShuttingDown();
             throwIfTurnCancelled();
             const lazyGitCredentials =
               activeSandboxBackend === "selfhosted"
