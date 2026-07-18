@@ -50,6 +50,12 @@ work. The domain metric set (all `opengeni_` prefixed, bounded label values only
   task queue, so fleet queries use `max`, not `sum`
 - `opengeni_turn_eligible_tasks_add_rate` and
   `opengeni_turn_eligible_tasks_dispatch_rate`
+- `opengeni_turn_capacity_monitor_last_read_success`,
+  `opengeni_turn_capacity_monitor_last_success_timestamp_seconds`,
+  `opengeni_turn_capacity_monitor_last_success_age_seconds`, and
+  `opengeni_turn_capacity_monitor_fresh` — failed or hung Temporal reads make
+  old queue samples explicitly stale rather than silently preserving apparent
+  runnable pressure
 - `opengeni_turn_slots_capacity`, `opengeni_turn_slots_reserved`,
   `opengeni_turn_slots_used`, `opengeni_turn_slots_available`, and
   `opengeni_turn_slot_saturation_ratio` — the memory-aware Temporal slot plane
@@ -59,6 +65,9 @@ work. The domain metric set (all `opengeni_` prefixed, bounded label values only
 
 The durable human prompt count is deliberately **not** a capacity metric. A
 paused prompt stays queued in Postgres but never schedules `runAgentTurn`.
+PromQL alerts and the bundled dashboard select one exact namespace,
+environment, Helm release, and turn-worker component. Cross-fleet aggregation
+must be an explicit operator query, never the default capacity or paging path.
 
 **Model calls** (`{provider, outcome}`; model names are bounded, provider ids more so):
 - `opengeni_model_calls_total`, `opengeni_model_call_duration_seconds`

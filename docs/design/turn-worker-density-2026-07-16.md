@@ -13,6 +13,13 @@ Owner: OPE-52
   release ceiling is 100 MiB per active turn, including exceptionally long
   model histories. Fleet pod requests and limits must retain process/runtime
   headroom in addition to this incremental amount.
+- The complete active model-facing transcript has a 32 MiB UTF-8 JSON
+  materialization envelope. PostgreSQL measures `item::text` bytes before
+  returning any JSONB row and the worker rejects an oversized transcript with
+  non-retryable `active_history_too_large`; it never silently trims durable
+  conversation truth or relies on compressed JSONB storage size. Normal
+  token-driven compaction should keep valid sessions far below this final
+  safety boundary.
 - Production density evidence must use the exact production image and database
   shape. The reproducible local profile uses `ScriptedModel` and must not call
   an Azure or other external model endpoint.
@@ -54,7 +61,11 @@ The history seed is deterministic and bounded. It writes inactive rows followed
 by active rows, marks a compaction-checkpoint-shaped active item, and makes the
 newest configured tail recent user input. The default active/inactive sizes are
 the same shape as the original gate; the profile rejects more than 32 MiB for
-either per-turn history class. Sampling and synthetic allocation knobs are also
+either per-turn history class. The production active-history reader separately
+measures the aggregate server-rendered UTF-8 JSON size under one repeatable-read
+snapshot before keyset paging, so TOAST-compressible payloads and concurrent
+appends cannot bypass the envelope. Sampling and synthetic allocation knobs are
+also
 bounded by the script so a profile cannot accidentally become an unbounded
 memory test: at most 10 waves, a 300-second plateau, 100 baseline or settled
 samples, 1,024 synthetic tool/fan-out/drain items, 2 MiB of synthetic working
@@ -84,8 +95,20 @@ consumer cannot mistake this profile for provider or sandbox evidence.
 The profile always emits one `OPENGENI_DENSITY_RESULT=<JSON>` line. When
 `OPENGENI_DENSITY_ARTIFACT_PATH` is set, the same result is written as a
 pretty-printed JSON file. The artifact contains per-wave baseline, plateau, and
-settled RSS/heap/external summaries, per-density statistics, an aggregate
-summary, and thresholds.
+settled RSS/heap/external summaries, the raw memory samples and derived series,
+per-density statistics, an aggregate summary, cleanup totals, and thresholds.
+Schema-v3 artifacts are independently checked from their exact file bytes:
+
+```bash
+bun run verify:turn-density -- artifacts/turn-density.json \
+  --sha256 <expected-sha256>
+```
+
+The verifier hashes the exact UTF-8 file, then recomputes every memory summary,
+per-turn value, percentile, retained/leak statistic, per-density and aggregate
+threshold, raw sample count, truthful synthetic-buffer allocation, and expected
+workspace/session cleanup total. Stored summaries are never accepted as proof
+of their own raw samples.
 
 For each plateau RSS sample, incremental RSS per active turn is:
 
@@ -170,14 +193,16 @@ single-density smoke independently measured 48.0 MiB worst, exit 0, one
 compaction, and artifact SHA-256
 `4906ec9af496856393291302ba3878aa5e040745b940288bcd7f927078a276b4`.
 
-The pathological result depends on two allocation fixes. Active compaction
-history is read in ordered keyset pages of 16 while retaining exactly one
-logical history, and JSON token estimation counts exact serialized UTF-16 or
-UTF-8 length without allocating a second giant string. This applies both to
-history items and to aggregate instruction/tool descriptors. Differential
-tests compare the counters with `JSON.stringify`/`Buffer.byteLength`, including
-escapes, Unicode, lone surrogates, omitted values, `toJSON`, cycles, and
-fallbacks. A deterministic 10,000-shape differential run also matched exactly.
+The pathological result depends on allocation fixes. Active history is read in
+ordered keyset pages of 16 while retaining exactly one logical transcript, and
+the sanitized item count produced by that same runtime input is reused for
+reconciliation instead of loading the full active history a second time. JSON
+token estimation counts exact serialized UTF-16 or UTF-8 length without
+allocating a second giant string for persisted plain JSON/JSONB. Objects with
+non-persisted JavaScript semantics (proxies, accessors, custom `toJSON`, boxed
+values, sparse or decorated arrays, and custom/cross-realm prototypes) are
+rejected from the plain-JSON fast path; direct non-persisted callers use the
+materializing fallback rather than receiving a false universal-parity claim.
 
 The process maximum is intentionally reported but is not the per-turn gate: it
 includes Bun, loaded application modules, database/runtime clients, native
@@ -196,10 +221,17 @@ startup_baseline + reserved_after * 100 MiB + 512 MiB <= cgroup_limit
 current_usage    + pending_after  * 100 MiB + 512 MiB <= cgroup_limit
 ```
 
-The worker rejects startup if even one turn is unsafe. It publishes capacity,
-reserved/used/available slots, saturation, baseline/current/limit memory, hard
-turn bytes, and native headroom as bounded gauges. OOM is never used as an
-admission mechanism. The production Azure 3 GiB request / 6 GiB limit and
+The worker rejects startup if even one turn is unsafe. After startup, available
+slots are the minimum of the density remainder, baseline-contract remainder,
+and live cgroup-usage remainder after pending permits. Advertised capacity is
+already-reserved slots plus those currently available slots, so retained native
+memory contracts new admission without pretending admitted work disappeared.
+Malformed, partial, unreadable, nonpositive, or unsafe finite cgroup controller
+values fail closed; only explicit v2 `max` and valid v1 unlimited sentinels are
+unlimited. The worker publishes capacity, reserved/used/available slots,
+saturation, baseline/current/limit memory, hard turn bytes, and native headroom
+as bounded gauges. OOM is never used as an admission mechanism. The production
+Azure 3 GiB request / 6 GiB limit and
 500m / 2 CPU envelope remains conservative: the observed current-revision
 maximum working set was about 0.93 GiB, while the contract reserves 1.56 GiB
 for 16 turns plus 0.5 GiB native headroom and the measured startup baseline.
@@ -207,10 +239,15 @@ Lowering the limit or request without measuring the exact image would reduce
 schedule/admission headroom rather than constitute right-sizing.
 
 Runnable pressure comes from Temporal's turn activity task queue, not prompt or
-session counts. The exported series cover eligible backlog/count/age/rates and
-slot capacity/reservation/use/availability/saturation. Dashboard queries use
-`max`, not `sum`, for queue state because each worker observes the same task
-queue. A Pods HPA metric named `opengeni_turn_slot_saturation_ratio` targets
+session counts. The exported series cover eligible backlog/count/age/rates,
+monitor read success/timestamp/age/freshness, and slot
+capacity/reservation/use/availability/saturation. A failed or hung Temporal
+read leaves the old value visible for diagnosis but marks it stale; backlog and
+saturation alerts require a successful sample less than 45 seconds old.
+Dashboard queries use `max`, not `sum`, for queue state because each worker
+observes the same task queue, and require one exact namespace, environment, and
+Helm release so independent fleets cannot aggregate by default. A Pods HPA
+metric named `opengeni_turn_slot_saturation_ratio` targets
 `750m`; it is deliberately disabled until a verified `custom.metrics.k8s.io`
 adapter exists. CPU 70% and memory 80% remain the production fallback. This is
 truthful degradation: a missing adapter must not make an HPA depend on an
@@ -273,11 +310,13 @@ voluntary disruption to one pod / 16 turns. The live Deployment had drifted to
 `maxUnavailable: 25%` even though the source value was one and must be
 reconciled through the serialized release lane.
 
-A hard pod death still affects every slot admitted on that pod, at most 16. At
-the observed placement of no more than two turn pods per node, the current hard
-node-loss bound was 32 turns. At the 20-pod HPA maximum across six nodes, even
-balanced placement can put four pods on one node, for a topology-dependent
-64-turn hard node-loss bound. A PDB cannot constrain involuntary node loss.
+A hard pod death still affects every slot admitted on that pod, a hard maximum
+of 16 turns. Production happened to place no more than two turn pods on one
+node during the read-only observation, so that observed topology exposed up to
+32 turns to one node loss; placement policy does not enforce that number. At
+the 20-pod HPA maximum across six nodes, a balanced four-pods-on-one-node
+placement would expose an estimated 64 turns, and worse skew remains possible.
+A PDB cannot constrain involuntary node loss.
 
 ## Rollout, node-loss, and OOM fault contract
 
@@ -336,6 +375,11 @@ restart the API container, but it broke the routed shell and consumed serving
 headroom. Heavy forensics and density profiling therefore run only in an
 isolated non-serving execution class. They must never execute in API or worker
 serving pods, and destructive shared-production OOM experiments are prohibited.
+
+The three historical raw density artifacts named above are private and
+immutable; only their SHA-256 fingerprints and reduced evidence belong in this
+open-source repository. They predate schema v3. New evidence must use schema v3
+and pass `verify:turn-density` before its checksum or reduced result is cited.
 
 ## Production release gate
 

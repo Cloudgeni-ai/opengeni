@@ -76,6 +76,11 @@ describe("turn capacity metrics", () => {
 
     const metrics = await observability.prometheusMetrics();
     expect(metrics).toMatch(/opengeni_turn_eligible_backlog\{[^}]*\} 3/);
+    expect(metrics).toMatch(/opengeni_turn_capacity_monitor_last_read_success\{[^}]*\} 1/);
+    expect(metrics).toMatch(/opengeni_turn_capacity_monitor_fresh\{[^}]*\} 1/);
+    expect(metrics).toMatch(
+      /opengeni_turn_capacity_monitor_last_success_timestamp_seconds\{[^}]*\} \d+/,
+    );
   });
 
   test("contains read failures and logs one bounded warning", async () => {
@@ -93,6 +98,47 @@ describe("turn capacity metrics", () => {
     await monitor.close();
     expect(warn).toHaveBeenCalledTimes(1);
     expect(warn.mock.calls[0]?.[1]).toMatchObject({ error: "Temporal unavailable" });
+    const metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(/opengeni_turn_capacity_monitor_last_read_success\{[^}]*\} 0/);
+    expect(metrics).toMatch(/opengeni_turn_capacity_monitor_fresh\{[^}]*\} 0/);
+  });
+
+  test("marks a previously successful backlog sample stale after a read failure", async () => {
+    let clock = 1_000;
+    let reads = 0;
+    const observability = createObservability(testSettings(), { component: "worker" });
+    observability.warn = () => undefined;
+    const monitor = startTurnCapacityMonitor({
+      observability,
+      intervalMs: 10,
+      now: () => clock,
+      read: async () => {
+        reads += 1;
+        if (reads === 1) {
+          return {
+            eligibleBacklog: 9,
+            oldestBacklogAgeSeconds: 4,
+            tasksAddRate: 2,
+            tasksDispatchRate: 1,
+          };
+        }
+        throw new Error("stale");
+      },
+    });
+    await Bun.sleep(5);
+    clock += 40;
+    await Bun.sleep(15);
+    await monitor.close();
+
+    const metrics = await observability.prometheusMetrics();
+    // The last value remains diagnostic, but the explicit freshness contract
+    // prevents autoscaling/alerts from treating it as current truth.
+    expect(metrics).toMatch(/opengeni_turn_eligible_backlog\{[^}]*\} 9/);
+    expect(metrics).toMatch(/opengeni_turn_capacity_monitor_last_read_success\{[^}]*\} 0/);
+    expect(metrics).toMatch(/opengeni_turn_capacity_monitor_fresh\{[^}]*\} 0/);
+    expect(metrics).toMatch(
+      /opengeni_turn_capacity_monitor_last_success_age_seconds\{[^}]*\} 0\.04/,
+    );
   });
 });
 

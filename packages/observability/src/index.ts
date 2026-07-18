@@ -73,6 +73,7 @@ export class Observability {
       service: settings.serviceName,
       environment: settings.environment,
       component: options.component,
+      deployment_revision: settings.deploymentRevision ?? "dev",
     });
     if (settings.observabilityMetricsEnabled) {
       collectDefaultMetrics({ register: this.registry, prefix: "opengeni_" });

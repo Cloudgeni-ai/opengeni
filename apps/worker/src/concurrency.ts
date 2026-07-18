@@ -158,10 +158,11 @@ export class MemoryAwareTurnSlotSupplier implements CustomSlotSupplier<ActivityS
 
   snapshot(memory = this.memorySnapshot()): TurnAdmissionSnapshot {
     const usedSlots = this.usedSlots();
-    const memoryBoundCapacity =
-      memory.limitBytes === null
-        ? this.maximumTurns
-        : Math.min(this.maximumTurns, this.memoryBoundCapacity(memory.limitBytes));
+    const reservedSlots = this.permits.size;
+    const availableSlots = this.availableSlots(memory);
+    // Never report less capacity than work already admitted. The dynamic
+    // denominator is exactly reserved + what a new poll could reserve now.
+    const memoryBoundCapacity = reservedSlots + availableSlots;
     return {
       baselineBytes: this.baselineBytes,
       currentBytes: memory.currentBytes,
@@ -170,9 +171,9 @@ export class MemoryAwareTurnSlotSupplier implements CustomSlotSupplier<ActivityS
       nativeHeadroomBytes: this.nativeHeadroomBytes,
       maximumTurns: this.maximumTurns,
       memoryBoundCapacity,
-      reservedSlots: this.permits.size,
+      reservedSlots,
       usedSlots,
-      availableSlots: Math.max(0, memoryBoundCapacity - this.permits.size),
+      availableSlots,
     };
   }
 
@@ -189,14 +190,20 @@ export class MemoryAwareTurnSlotSupplier implements CustomSlotSupplier<ActivityS
   }
 
   private memoryAllowsAnother(memory: CgroupMemorySnapshot): boolean {
-    if (memory.limitBytes === null) return true;
-    const reservedAfter = this.permits.size + 1;
-    const pendingAfter = this.pendingSlots() + 1;
-    const contractProjection =
-      this.baselineBytes + reservedAfter * this.hardBytesPerTurn + this.nativeHeadroomBytes;
-    const observedProjection =
-      memory.currentBytes + pendingAfter * this.hardBytesPerTurn + this.nativeHeadroomBytes;
-    return Math.max(contractProjection, observedProjection) <= memory.limitBytes;
+    return this.availableSlots(memory) > 0;
+  }
+
+  private availableSlots(memory: CgroupMemorySnapshot): number {
+    const densityRemaining = this.maximumTurns - this.permits.size;
+    if (memory.limitBytes === null) return Math.max(0, densityRemaining);
+
+    const baselineRemaining = this.memoryBoundCapacity(memory.limitBytes) - this.permits.size;
+    const observedRemaining =
+      Math.floor(
+        (memory.limitBytes - memory.currentBytes - this.nativeHeadroomBytes) /
+          this.hardBytesPerTurn,
+      ) - this.pendingSlots();
+    return Math.max(0, Math.min(densityRemaining, baselineRemaining, observedRemaining));
   }
 
   private memoryBoundCapacity(limitBytes: number): number {
@@ -304,14 +311,17 @@ export function createTurnWorkerTuner(options: TurnAdmissionOptions = {}): {
 
 export function readCgroupMemorySnapshot(): CgroupMemorySnapshot {
   for (const [index, files] of CGROUP_MEMORY_FILES.entries()) {
-    const limitRaw = readText(files.limit);
-    const currentRaw = readText(files.current);
-    if (limitRaw === null || currentRaw === null) continue;
-    const current = parseCgroupBytes(currentRaw);
-    if (current === null) continue;
+    const limitRaw = readCgroupText(files.limit);
+    const currentRaw = readCgroupText(files.current);
+    if (limitRaw === null && currentRaw === null) continue;
+    if (limitRaw === null || currentRaw === null) {
+      throw new Error(
+        `Incomplete cgroup memory controller: limit=${files.limit} current=${files.current}`,
+      );
+    }
     return {
-      currentBytes: current,
-      limitBytes: parseCgroupLimit(limitRaw),
+      currentBytes: parseCgroupCurrentValue(currentRaw),
+      limitBytes: parseCgroupLimitValue(limitRaw),
       source: index === 0 ? "cgroup-v2" : "cgroup-v1",
     };
   }
@@ -322,19 +332,32 @@ export function readCgroupMemorySnapshot(): CgroupMemorySnapshot {
   };
 }
 
-function parseCgroupLimit(value: string): number | null {
+export function parseCgroupLimitValue(value: string): number | null {
   if (value.trim() === "max") return null;
   const parsed = parseCgroupBigInt(value);
-  if (parsed === null || parsed >= UNLIMITED_CGROUP_BYTES) return null;
+  if (parsed === null || parsed <= 0n) {
+    throw new Error(`Malformed finite cgroup memory limit: ${JSON.stringify(value.trim())}`);
+  }
+  if (parsed >= UNLIMITED_CGROUP_BYTES) return null;
   const number = Number(parsed);
-  return Number.isSafeInteger(number) && number > 0 ? number : null;
+  if (!Number.isSafeInteger(number)) {
+    throw new Error(
+      `Finite cgroup memory limit exceeds JavaScript's safe integer range: ${parsed}`,
+    );
+  }
+  return number;
 }
 
-function parseCgroupBytes(value: string): number | null {
+export function parseCgroupCurrentValue(value: string): number {
   const parsed = parseCgroupBigInt(value);
-  if (parsed === null) return null;
+  if (parsed === null || parsed < 0n) {
+    throw new Error(`Malformed cgroup current memory value: ${JSON.stringify(value.trim())}`);
+  }
   const number = Number(parsed);
-  return Number.isSafeInteger(number) && number >= 0 ? number : null;
+  if (!Number.isSafeInteger(number)) {
+    throw new Error(`Cgroup current memory exceeds JavaScript's safe integer range: ${parsed}`);
+  }
+  return number;
 }
 
 function parseCgroupBigInt(value: string): bigint | null {
@@ -345,11 +368,17 @@ function parseCgroupBigInt(value: string): bigint | null {
   }
 }
 
-function readText(path: string): string | null {
+function readCgroupText(path: string): string | null {
   try {
     return readFileSync(path, "utf8");
-  } catch {
-    return null;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw new Error(
+      `Unable to read present cgroup memory controller file ${path}: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+      { cause: error },
+    );
   }
 }
 

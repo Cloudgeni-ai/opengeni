@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { runInNewContext } from "node:vm";
 import {
   COMPACT_USER_MESSAGE_MAX_TOKENS,
   COMPACTION_PROMPT,
@@ -67,7 +68,7 @@ const WINDOW = 1_050_000;
 const RESERVED_OUTPUT = 128_000;
 const THRESHOLD = Math.floor(WINDOW * DEFAULT_COMPACTION_THRESHOLD_RATIO);
 
-describe("allocation-free JSON length", () => {
+describe("non-materializing plain JSON length", () => {
   test("matches JSON.stringify for persisted history shapes and escapes", () => {
     const values: unknown[] = [
       null,
@@ -91,8 +92,6 @@ describe("allocation-free JSON length", () => {
         omitted: undefined,
       },
       { nested: { array: [{ ok: true }, { value: 42 }] } },
-      new Date("2026-07-18T00:00:00.000Z"),
-      new Number(7),
     ];
 
     for (const value of values) {
@@ -112,10 +111,12 @@ describe("allocation-free JSON length", () => {
       "lone-low-\udfff",
     ];
     for (const value of rawStrings) {
-      expect(utf8ByteLength(value)).toBe(Buffer.byteLength(value, "utf8"));
-      expect(estimateSerializedValueTokens(value)).toBe(
-        Math.ceil(Buffer.byteLength(value, "utf8") / 4),
-      );
+      // TextEncoder follows the UTF-8 replacement contract for lone UTF-16
+      // surrogates. Bun 1.3.14's Buffer.byteLength SIMD path undercounts these
+      // by one byte on some CPUs, while Node and TextEncoder report three.
+      const encodedLength = new TextEncoder().encode(value).length;
+      expect(utf8ByteLength(value)).toBe(encodedLength);
+      expect(estimateSerializedValueTokens(value)).toBe(Math.ceil(encodedLength / 4));
     }
 
     const descriptors: unknown[] = [
@@ -123,7 +124,6 @@ describe("allocation-free JSON length", () => {
       { name: "搜索🦄", inputSchema: { type: "object", description: "café 中文" } },
       { escaped: 'quotes " slash \\ controls \u0000', lone: "\ud800" },
       [undefined, "three", null],
-      new Date("2026-07-18T00:00:00.000Z"),
     ];
     for (const value of descriptors) {
       expect(estimateSerializedValueTokens(value)).toBe(
@@ -144,6 +144,42 @@ describe("allocation-free JSON length", () => {
     expect(estimateSerializedValueTokens(undefined)).toBe(0);
     expect(estimateSerializedValueTokens(1n)).toBe(1);
     expect(estimateSerializedValueTokens(cyclic)).toBe(4);
+  });
+
+  test("rejects non-persisted object semantics instead of claiming universal stringify parity", () => {
+    const getter = Object.defineProperty({}, "value", {
+      enumerable: true,
+      get: () => 1,
+    });
+    const proxy = new Proxy({ value: 1 }, {});
+    const crossRealm = runInNewContext("({ value: 1 })");
+    const boxedBigInt = Object(1n);
+    const hiddenToJson: Record<string, unknown> = { safe: true };
+    Object.defineProperty(hiddenToJson, "toJSON", {
+      value: () => ({ changed: true }),
+      enumerable: false,
+    });
+    const arrayToJson = [1, 2];
+    Object.defineProperty(arrayToJson, "toJSON", {
+      value: () => [3],
+      enumerable: false,
+    });
+    const values = [
+      new Date("2026-07-18T00:00:00.000Z"),
+      new Number(7),
+      boxedBigInt,
+      { toJSON: () => ({ value: 1 }) },
+      hiddenToJson,
+      arrayToJson,
+      getter,
+      proxy,
+      crossRealm,
+    ];
+    for (const value of values) {
+      expect(() => jsonSerializedLength(value)).toThrow();
+      expect(() => jsonSerializedUtf8ByteLength(value)).toThrow();
+      expect(estimateSerializedValueTokens(value)).toBeGreaterThanOrEqual(0);
+    }
   });
 });
 

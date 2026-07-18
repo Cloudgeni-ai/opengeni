@@ -10,6 +10,8 @@ import {
   TURN_WORKER_MAX_CONCURRENT_TURNS,
   TURN_WORKER_NATIVE_HEADROOM_BYTES,
   createTurnWorkerTuner,
+  parseCgroupCurrentValue,
+  parseCgroupLimitValue,
   readCgroupMemorySnapshot,
   type CgroupMemorySnapshot,
 } from "../src/concurrency";
@@ -63,11 +65,37 @@ describe("worker concurrency contract", () => {
 
     // observed + one pending + one new hard budget + headroom = 2,250 MiB
     expect(supplier.tryReserveSlot({} as never)).toBeNull();
+    expect(supplier.snapshot()).toMatchObject({
+      reservedSlots: 2,
+      availableSlots: 0,
+      memoryBoundCapacity: 2,
+    });
     supplier.releaseSlot(released(second!));
     // observed + one new pending budget + headroom = 2,150 MiB
     expect(supplier.tryReserveSlot({} as never)).toBeNull();
     memory.currentBytes = 1_450 * MIB;
     expect(supplier.tryReserveSlot({} as never)).not.toBeNull();
+  });
+
+  test("contracts advertised availability when retained memory grows", () => {
+    const memory = mutableMemory(300 * MIB, 2_100 * MIB);
+    const supplier = new MemoryAwareTurnSlotSupplier({
+      maximumTurns: 16,
+      hardBytesPerTurn: 100 * MIB,
+      nativeHeadroomBytes: 500 * MIB,
+      memorySnapshot: memory.read,
+    });
+    const permit = supplier.tryReserveSlot({} as never)!;
+    supplier.markSlotUsed(used(permit));
+
+    memory.currentBytes = 1_550 * MIB;
+    expect(supplier.tryReserveSlot({} as never)).toBeNull();
+    expect(supplier.snapshot()).toMatchObject({
+      reservedSlots: 1,
+      usedSlots: 1,
+      availableSlots: 0,
+      memoryBoundCapacity: 1,
+    });
   });
 
   test("releases used capacity and exposes a complete Temporal tuner", () => {
@@ -152,6 +180,16 @@ describe("worker concurrency contract", () => {
       source: expect.stringMatching(/^(cgroup-v1|cgroup-v2|process)$/),
     });
     expect(readCgroupMemorySnapshot().currentBytes).toBeGreaterThanOrEqual(0);
+  });
+
+  test("rejects malformed finite cgroup values instead of failing open as unlimited", () => {
+    expect(parseCgroupLimitValue("max\n")).toBeNull();
+    expect(parseCgroupLimitValue(String(1n << 62n))).toBeNull();
+    expect(parseCgroupLimitValue("1048576\n")).toBe(1_048_576);
+    expect(() => parseCgroupLimitValue("not-a-limit")).toThrow("Malformed finite");
+    expect(() => parseCgroupLimitValue("0")).toThrow("Malformed finite");
+    expect(() => parseCgroupCurrentValue("-1")).toThrow("Malformed cgroup current");
+    expect(() => parseCgroupCurrentValue("not-current")).toThrow("Malformed cgroup current");
   });
 });
 

@@ -411,8 +411,14 @@ export async function withWorkspaceRls<T>(
   db: Database,
   workspaceId: string,
   fn: (db: Database) => Promise<T>,
+  transactionConfig?: PgTransactionConfig,
 ): Promise<T> {
-  return await withRlsContext(db, await rlsContextForWorkspace(db, workspaceId), fn);
+  return await withRlsContext(
+    db,
+    await rlsContextForWorkspace(db, workspaceId),
+    fn,
+    transactionConfig,
+  );
 }
 
 /**
@@ -12476,22 +12482,47 @@ export async function getActiveSessionHistoryItems(
 }
 
 /**
+ * Profiled upper envelope for the JSONB payload of one session's complete
+ * active, model-facing transcript. Normal token-driven compaction keeps active
+ * history far below this boundary. The limit is a final materialization guard:
+ * a corrupt/imported/pathological transcript fails deterministically before a
+ * Postgres driver decodes it instead of using the pod OOM killer as admission.
+ */
+export const ACTIVE_SESSION_HISTORY_MAX_JSON_BYTES = 32 * 1024 * 1024;
+
+export class ActiveSessionHistoryLimitExceededError extends Error {
+  readonly code = "active_history_too_large";
+
+  constructor(
+    readonly actualBytes: number,
+    readonly maximumBytes: number,
+  ) {
+    super(
+      `Active session history is ${actualBytes} UTF-8 JSON bytes, exceeding the ${maximumBytes}-byte materialization limit.`,
+    );
+    this.name = "ActiveSessionHistoryLimitExceededError";
+  }
+}
+
+/**
  * Memory-bounded variant of {@link getActiveSessionHistoryItems} for paths
  * that must inspect an arbitrarily long active transcript (context compaction
  * in particular). PostgreSQL/postgres.js otherwise materializes the complete
  * JSONB result frame before returning any row, transiently holding the wire
  * payload beside every decoded history item.
  *
- * Keyset pages preserve the exact position order and item values while
- * bounding each driver result frame. The enclosing RLS transaction pins one
- * connection for the complete read; callers still receive the same full
- * logical array and therefore do not change compaction semantics.
+ * A server-side JSON-text-size preflight rejects payloads above the profiled
+ * envelope before any item is decoded. Keyset pages then preserve the exact
+ * position order and item values while bounding each driver result frame. The
+ * enclosing repeatable-read RLS transaction pins one snapshot for the complete
+ * read, so callers receive the same full logical array without silent trimming.
  */
 export async function getActiveSessionHistoryItemsPaged(
   db: Database,
   workspaceId: string,
   sessionId: string,
   pageSize = 16,
+  maximumJsonBytes = ACTIVE_SESSION_HISTORY_MAX_JSON_BYTES,
 ): Promise<
   Array<{
     position: number;
@@ -12502,23 +12533,26 @@ export async function getActiveSessionHistoryItemsPaged(
   if (!Number.isSafeInteger(pageSize) || pageSize < 1 || pageSize > 100) {
     throw new Error("active session history page size must be an integer between 1 and 100");
   }
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const rows: Array<{
-      position: number;
-      item: Record<string, unknown>;
-      producerCodexCredentialId: string | null;
-    }> = [];
-    let afterPosition: number | null = null;
-    while (true) {
-      const page: Array<{
-        position: number;
-        item: Record<string, unknown>;
-        producerCodexCredentialId: string | null;
-      }> = await scopedDb
+  if (!Number.isSafeInteger(maximumJsonBytes) || maximumJsonBytes < 1) {
+    throw new Error("active session history JSON limit must be a positive safe integer");
+  }
+  return await withWorkspaceRls(
+    db,
+    workspaceId,
+    async (scopedDb) => {
+      // This scalar aggregate is deliberately the first history-table query.
+      // PostgreSQL measures one JSON array containing every active item and
+      // returns one number, so an oversized transcript is rejected before
+      // postgres.js decodes any item value. The count includes array brackets
+      // and separators. Do not use pg_column_size(jsonb): TOAST or pglz
+      // compression would let highly compressible pathological payloads bypass
+      // a model-facing materialization envelope.
+      const [size] = await scopedDb
         .select({
-          position: schema.sessionHistoryItems.position,
-          item: schema.sessionHistoryItems.item,
-          producerCodexCredentialId: schema.sessionHistoryItems.producerCodexCredentialId,
+          bytes: sql<string>`case
+            when count(*) = 0 then 2
+            else sum(octet_length((${schema.sessionHistoryItems.item})::text)) + count(*) + 1
+          end`,
         })
         .from(schema.sessionHistoryItems)
         .where(
@@ -12526,24 +12560,63 @@ export async function getActiveSessionHistoryItemsPaged(
             eq(schema.sessionHistoryItems.workspaceId, workspaceId),
             eq(schema.sessionHistoryItems.sessionId, sessionId),
             eq(schema.sessionHistoryItems.active, true),
-            ...(afterPosition === null
-              ? []
-              : [gt(schema.sessionHistoryItems.position, afterPosition)]),
           ),
-        )
-        .orderBy(schema.sessionHistoryItems.position)
-        .limit(pageSize);
-      rows.push(...page);
-      if (page.length < pageSize) {
-        return rows;
+        );
+      const actualBytes = Number(size?.bytes ?? 0);
+      if (!Number.isSafeInteger(actualBytes) || actualBytes < 0) {
+        throw new Error(
+          `Active session history size is not a safe integer: ${String(size?.bytes)}`,
+        );
       }
-      const nextPosition: number = page.at(-1)!.position;
-      if (afterPosition !== null && nextPosition <= afterPosition) {
-        throw new Error("active session history keyset did not advance");
+      if (actualBytes > maximumJsonBytes) {
+        throw new ActiveSessionHistoryLimitExceededError(actualBytes, maximumJsonBytes);
       }
-      afterPosition = nextPosition;
-    }
-  });
+
+      const rows: Array<{
+        position: number;
+        item: Record<string, unknown>;
+        producerCodexCredentialId: string | null;
+      }> = [];
+      let afterPosition: number | null = null;
+      while (true) {
+        const page: Array<{
+          position: number;
+          item: Record<string, unknown>;
+          producerCodexCredentialId: string | null;
+        }> = await scopedDb
+          .select({
+            position: schema.sessionHistoryItems.position,
+            item: schema.sessionHistoryItems.item,
+            producerCodexCredentialId: schema.sessionHistoryItems.producerCodexCredentialId,
+          })
+          .from(schema.sessionHistoryItems)
+          .where(
+            and(
+              eq(schema.sessionHistoryItems.workspaceId, workspaceId),
+              eq(schema.sessionHistoryItems.sessionId, sessionId),
+              eq(schema.sessionHistoryItems.active, true),
+              ...(afterPosition === null
+                ? []
+                : [gt(schema.sessionHistoryItems.position, afterPosition)]),
+            ),
+          )
+          .orderBy(schema.sessionHistoryItems.position)
+          .limit(pageSize);
+        rows.push(...page);
+        if (page.length < pageSize) {
+          return rows;
+        }
+        const nextPosition: number = page.at(-1)!.position;
+        if (afterPosition !== null && nextPosition <= afterPosition) {
+          throw new Error("active session history keyset did not advance");
+        }
+        afterPosition = nextPosition;
+      }
+    },
+    // Keep the size preflight and every keyset page on one MVCC snapshot. A
+    // concurrent append cannot appear after the preflight and bypass the bound.
+    { isolationLevel: "repeatable read" },
+  );
 }
 
 /**

@@ -10,6 +10,7 @@
 
 import { TOOL_CALL_RESULT_TYPE_BY_CALL_TYPE } from "./history-sanitizer";
 import { createHash } from "node:crypto";
+import { isProxy } from "node:util/types";
 
 export type CompactionItem = Record<string, unknown>;
 
@@ -116,40 +117,30 @@ export function estimateItemTokens(item: CompactionItem): number {
 }
 
 /**
- * Count the UTF-16 code units JSON.stringify would emit without allocating the
- * serialized payload. Conversation history comes from JSONB and is therefore
- * plain JSON; supporting the normal toJSON hook keeps this helper honest for
- * direct callers as well. The caller retains the historical String fallback
- * for cycles and other non-JSON values.
+ * Count the UTF-16 code units JSON.stringify emits for a persisted plain
+ * JSON/JSONB value without materializing the serialized payload. This exact
+ * path deliberately rejects custom prototypes, proxies, accessors, wrappers,
+ * symbols, sparse arrays, and toJSON hooks; direct non-persisted callers retain
+ * the historical String fallback in their estimator.
  */
 export function jsonSerializedLength(value: unknown): number {
-  const length = jsonValueLength(value, "", new Set<object>());
+  const length = jsonValueLength(value, new Set<object>());
   if (length === undefined) {
     throw new TypeError("value has no JSON representation");
   }
   return length;
 }
 
-/** Count the UTF-8 bytes JSON.stringify would emit without materializing it. */
+/** Count UTF-8 bytes for a persisted plain JSON/JSONB value without materializing it. */
 export function jsonSerializedUtf8ByteLength(value: unknown): number {
-  const length = jsonValueUtf8ByteLength(value, "", new Set<object>());
+  const length = jsonValueUtf8ByteLength(value, new Set<object>());
   if (length === undefined) {
     throw new TypeError("value has no JSON representation");
   }
   return length;
 }
 
-function jsonValueLength(input: unknown, key: string, ancestors: Set<object>): number | undefined {
-  let value = input;
-  if (value && typeof value === "object") {
-    const toJSON = (value as { toJSON?: unknown }).toJSON;
-    if (typeof toJSON === "function") {
-      value = toJSON.call(value, key);
-    } else if (value instanceof Number || value instanceof String || value instanceof Boolean) {
-      value = value.valueOf();
-    }
-  }
-
+function jsonValueLength(value: unknown, ancestors: Set<object>): number | undefined {
   switch (typeof value) {
     case "string":
       return jsonStringLength(value);
@@ -165,28 +156,25 @@ function jsonValueLength(input: unknown, key: string, ancestors: Set<object>): n
       throw new TypeError("BigInt is not JSON serializable");
     case "object": {
       if (value === null) return 4;
+      const shape = plainJsonContainer(value);
       if (ancestors.has(value)) {
         throw new TypeError("Converting circular structure to JSON");
       }
       ancestors.add(value);
       try {
-        if (Array.isArray(value)) {
+        if (shape.kind === "array") {
           let length = 2;
-          for (let index = 0; index < value.length; index += 1) {
+          for (let index = 0; index < shape.values.length; index += 1) {
             if (index > 0) length += 1;
-            length += jsonValueLength(value[index], String(index), ancestors) ?? 4;
+            length += jsonValueLength(shape.values[index], ancestors) ?? 4;
           }
           return length;
         }
 
         let length = 2;
         let emitted = 0;
-        for (const property of Object.keys(value)) {
-          const childLength = jsonValueLength(
-            (value as Record<string, unknown>)[property],
-            property,
-            ancestors,
-          );
+        for (const [property, child] of shape.entries) {
+          const childLength = jsonValueLength(child, ancestors);
           if (childLength === undefined) continue;
           if (emitted > 0) length += 1;
           length += jsonStringLength(property) + 1 + childLength;
@@ -227,21 +215,7 @@ function jsonStringLength(value: string): number {
   return length;
 }
 
-function jsonValueUtf8ByteLength(
-  input: unknown,
-  key: string,
-  ancestors: Set<object>,
-): number | undefined {
-  let value = input;
-  if (value && typeof value === "object") {
-    const toJSON = (value as { toJSON?: unknown }).toJSON;
-    if (typeof toJSON === "function") {
-      value = toJSON.call(value, key);
-    } else if (value instanceof Number || value instanceof String || value instanceof Boolean) {
-      value = value.valueOf();
-    }
-  }
-
+function jsonValueUtf8ByteLength(value: unknown, ancestors: Set<object>): number | undefined {
   switch (typeof value) {
     case "string":
       return jsonStringUtf8ByteLength(value);
@@ -257,28 +231,25 @@ function jsonValueUtf8ByteLength(
       throw new TypeError("BigInt is not JSON serializable");
     case "object": {
       if (value === null) return 4;
+      const shape = plainJsonContainer(value);
       if (ancestors.has(value)) {
         throw new TypeError("Converting circular structure to JSON");
       }
       ancestors.add(value);
       try {
-        if (Array.isArray(value)) {
+        if (shape.kind === "array") {
           let length = 2;
-          for (let index = 0; index < value.length; index += 1) {
+          for (let index = 0; index < shape.values.length; index += 1) {
             if (index > 0) length += 1;
-            length += jsonValueUtf8ByteLength(value[index], String(index), ancestors) ?? 4;
+            length += jsonValueUtf8ByteLength(shape.values[index], ancestors) ?? 4;
           }
           return length;
         }
 
         let length = 2;
         let emitted = 0;
-        for (const property of Object.keys(value)) {
-          const childLength = jsonValueUtf8ByteLength(
-            (value as Record<string, unknown>)[property],
-            property,
-            ancestors,
-          );
+        for (const [property, child] of shape.entries) {
+          const childLength = jsonValueUtf8ByteLength(child, ancestors);
           if (childLength === undefined) continue;
           if (emitted > 0) length += 1;
           length += jsonStringUtf8ByteLength(property) + 1 + childLength;
@@ -292,7 +263,67 @@ function jsonValueUtf8ByteLength(
   }
 }
 
-/** Count raw UTF-8 bytes using the same lone-surrogate replacement as Buffer. */
+type PlainJsonContainer =
+  | { kind: "array"; values: unknown[] }
+  | { kind: "object"; entries: Array<[string, unknown]> };
+
+function plainJsonContainer(value: object): PlainJsonContainer {
+  if (isProxy(value)) {
+    throw new TypeError("plain JSON estimator does not accept proxies");
+  }
+  if (Object.getOwnPropertySymbols(value).length > 0) {
+    throw new TypeError("plain JSON estimator does not accept symbol properties");
+  }
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const toJsonDescriptor = descriptors.toJSON;
+  if (
+    toJsonDescriptor &&
+    (!("value" in toJsonDescriptor) || typeof toJsonDescriptor.value === "function")
+  ) {
+    throw new TypeError("plain JSON estimator does not accept toJSON hooks");
+  }
+  if (Array.isArray(value)) {
+    if (Object.getPrototypeOf(value) !== Array.prototype) {
+      throw new TypeError("plain JSON estimator does not accept cross-realm or subclassed arrays");
+    }
+    const values: unknown[] = [];
+    for (let index = 0; index < value.length; index += 1) {
+      const descriptor = descriptors[String(index)];
+      if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) {
+        throw new TypeError("plain JSON estimator requires dense data-property arrays");
+      }
+      values.push(descriptor.value);
+    }
+    for (const [property, descriptor] of Object.entries(descriptors)) {
+      if (property === "length" || isCanonicalArrayIndex(property, value.length)) continue;
+      if (descriptor.enumerable) {
+        throw new TypeError("plain JSON estimator does not accept named array properties");
+      }
+    }
+    return { kind: "array", values };
+  }
+
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw new TypeError("plain JSON estimator accepts only plain objects");
+  }
+  const entries: Array<[string, unknown]> = [];
+  for (const property of Object.keys(value)) {
+    const descriptor = descriptors[property];
+    if (!descriptor || !("value" in descriptor)) {
+      throw new TypeError("plain JSON estimator does not accept accessors");
+    }
+    entries.push([property, descriptor.value]);
+  }
+  return { kind: "object", entries };
+}
+
+function isCanonicalArrayIndex(property: string, length: number): boolean {
+  const index = Number(property);
+  return Number.isSafeInteger(index) && index >= 0 && index < length && String(index) === property;
+}
+
+/** Count raw UTF-8 bytes using the standard three-byte lone-surrogate replacement. */
 export function utf8ByteLength(value: string): number {
   let length = 0;
   for (let index = 0; index < value.length; index += 1) {

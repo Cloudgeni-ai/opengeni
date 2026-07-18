@@ -44,7 +44,6 @@ import {
   isSessionCompactionRequested,
   recordSkippedContextCompaction,
   countSessionHistoryItems,
-  getActiveSessionHistoryItems,
   nextSessionHistoryPosition,
   settleCodexCredentialLeaseLoss,
   settleCodexCredentialFailover,
@@ -58,6 +57,7 @@ import {
   markSandboxFileResourcesMaterialized,
   SandboxLeaseSupersededError,
   SandboxImageConflictError,
+  ActiveSessionHistoryLimitExceededError,
   buildConnectionTokenResolver,
   getEnrollment,
   abandonRecordingForTurnAttempt,
@@ -3775,18 +3775,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // and bricks the session (issue-61). The sanitized seed is already
         // orphan-free, so it is a stable prefix of the re-sanitized history and the
         // slice begins exactly at the first genuinely-new item.
-        const activeSeedRows = await getActiveSessionHistoryItems(
-          db,
-          input.workspaceId,
-          input.sessionId,
-        );
-        // Seed the reconcile watermark from EXACTLY the view the model's
-        // `state.history` was seeded from (items strip on the items path = HOLE D; NO
-        // strip on the run-state blob path, where foreign reasoning is neutralized but
-        // KEPT = HOLE E), so the model-input length and the watermark never disagree.
-        persistedHistoryCount = reconcileSeedCount(activeSeedRows, prepared.modelHistoryFromItems, {
-          currentCodexCredentialId: effectiveCodexCredentialId,
-        });
+        // prepareInput already sanitized the exact durable prefix represented
+        // by state.history. Carry its count forward instead of loading and
+        // retaining the full active transcript a second time beside runInput.
+        persistedHistoryCount = prepared.persistedHistoryCount;
         nextHistoryPosition = await nextSessionHistoryPosition(
           db,
           input.workspaceId,
@@ -5530,6 +5522,15 @@ export function agentRunFailurePayload(error: unknown): {
     typeof error === "object" && error !== null && "code" in error
       ? String((error as { code?: unknown }).code)
       : undefined;
+  if (error instanceof ActiveSessionHistoryLimitExceededError) {
+    return {
+      error:
+        "The session's active conversation history exceeds the worker's safe materialization envelope. Compact or clear the session context before retrying.",
+      code: error.code,
+      retryable: false,
+      detail: error.message,
+    };
+  }
   // A ChatGPT/Codex usage cap is a HARD limit, not transient backpressure: it
   // must NOT be reported as a generic, retryable rate-limit (which would loop a
   // goal against a capped backend). Surface a precise, actionable message with

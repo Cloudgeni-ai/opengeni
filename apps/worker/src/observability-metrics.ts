@@ -383,16 +383,57 @@ export function startTurnCapacityMonitor(input: {
   observability: Observability;
   read: () => Promise<TurnTaskQueueStats>;
   intervalMs?: number;
+  now?: () => number;
 }): { close: () => Promise<void> } {
   const intervalMs = input.intervalMs ?? 15_000;
+  const now = input.now ?? Date.now;
+  const startedAt = now();
+  let lastSuccessAt: number | null = null;
+  let lastReadSucceeded = false;
   let stopped = false;
   let running: Promise<void> | null = null;
+  const recordStatus = () => {
+    const observedAt = now();
+    const successAgeMs = observedAt - (lastSuccessAt ?? startedAt);
+    const set = (name: string, help: string, value: number) =>
+      input.observability.setGauge({ name, help, value });
+    set(
+      "opengeni_turn_capacity_monitor_last_read_success",
+      "Whether the latest Temporal turn-queue capacity read completed successfully.",
+      lastReadSucceeded ? 1 : 0,
+    );
+    set(
+      "opengeni_turn_capacity_monitor_last_success_timestamp_seconds",
+      "Unix timestamp of the latest successful Temporal turn-queue capacity read, or zero before one succeeds.",
+      lastSuccessAt === null ? 0 : lastSuccessAt / 1_000,
+    );
+    set(
+      "opengeni_turn_capacity_monitor_last_success_age_seconds",
+      "Age of the latest successful Temporal turn-queue capacity read, or monitor age before one succeeds.",
+      Math.max(0, successAgeMs / 1_000),
+    );
+    set(
+      "opengeni_turn_capacity_monitor_fresh",
+      "Whether eligible-backlog gauges have a successful Temporal read within three monitor intervals.",
+      lastReadSucceeded && lastSuccessAt !== null && successAgeMs <= intervalMs * 3 ? 1 : 0,
+    );
+  };
   const refresh = () => {
+    // Advance freshness age even while a Temporal read is hung. Old backlog
+    // values remain observable for diagnosis but cease to be authoritative.
+    recordStatus();
     if (stopped || running) return;
     running = input
       .read()
-      .then((stats) => recordTurnTaskQueueStats(input.observability, stats))
+      .then((stats) => {
+        recordTurnTaskQueueStats(input.observability, stats);
+        lastSuccessAt = now();
+        lastReadSucceeded = true;
+        recordStatus();
+      })
       .catch((error) => {
+        lastReadSucceeded = false;
+        recordStatus();
         input.observability.warn("turn capacity monitor: Temporal task-queue stats failed", {
           error: error instanceof Error ? error.message : String(error),
         });

@@ -646,18 +646,29 @@ HPA reports an unavailable metric. Never substitute the aggregate durable
 prompt count: paused human prompts are intentionally queued but ineligible and
 would create false scale pressure.
 
+Backlog gauges are authoritative only while
+`opengeni_turn_capacity_monitor_fresh == 1` and the last successful Temporal
+read is less than 45 seconds old. The bundled alerts enforce both conditions
+with exact namespace, Helm release, environment, and turn-worker component
+selectors. A stale sample remains visible for diagnosis but cannot page as
+fresh runnable pressure.
+
 The turn-worker Deployment and PodDisruptionBudget both cap voluntary
 unavailability at one pod. With the 16-turn hard density this bounds a rollout
 or voluntary node drain to 16 simultaneously checkpointing logical turns. A
-hard node loss can still remove every turn pod placed on that node; topology
-spread limits skew but cannot make an involuntary failure respect a PDB.
+hard pod death affects at most that pod's 16 admitted turns. A hard node loss
+can still remove every turn pod placed on that node; topology spread limits
+skew but cannot make an involuntary failure respect a PDB. Two pods per node
+was an observed production placement (32-turn exposure), not a hard bound. At
+20 replicas across six nodes, even a balanced four-pod placement estimates a
+64-turn exposure, and actual exposure remains topology-dependent.
 
 Minimum production dashboards should cover:
 
 - API traffic: request rate, error rate, and p50/p95/p99 latency by `route`, `method`, `status`, `variable set`, and `component`.
 - Worker execution: activity run rate, failure rate, and p50/p95/p99 `runAgentTurn` duration by `activity`, `status`, `variable set`, and `component`.
 - Turn lifecycle: `opengeni_turns_total{outcome}`, `opengeni_turn_duration_seconds`, `opengeni_turns_inflight`, and `opengeni_turn_oldest_inflight_age_seconds`.
-- Turn capacity: `opengeni_turn_eligible_backlog`, `opengeni_turn_eligible_backlog_oldest_age_seconds`, add/dispatch rates, used/reserved/available/capacity slots, `opengeni_turn_slot_saturation_ratio`, and admission current/limit bytes. Use `max` for task-queue gauges because every turn pod observes the same Temporal queue.
+- Turn capacity: `opengeni_turn_eligible_backlog`, `opengeni_turn_eligible_backlog_oldest_age_seconds`, add/dispatch rates, monitor last-read success/last-success timestamp/age/freshness, used/reserved/available/capacity slots, `opengeni_turn_slot_saturation_ratio`, and admission current/limit bytes. Use `max` for task-queue gauges because every turn pod observes the same Temporal queue, require fresh reads for decisions, and scope dashboards to one exact namespace/environment/release fleet.
 - Model, Codex, and sandbox SLIs: `opengeni_model_calls_total{provider,outcome}`, `opengeni_model_call_duration_seconds{provider}`, `opengeni_codex_credential_selections_total{strategy,reason}`, `opengeni_codex_credential_failures_total{kind,outcome}`, `opengeni_codex_pool_observations_total{depth}`, `opengeni_codex_pool_low_total{depth}`, `opengeni_sandbox_creates_total{backend,outcome}`, `opengeni_sandbox_create_duration_seconds{backend}`, `opengeni_sandbox_leases{liveness}`, `opengeni_sandbox_warming_timeouts_total`, and `opengeni_sandbox_orphans_terminated_total`.
 - Billing and deploy marker: `opengeni_credit_balance_micros{account_id}`, `opengeni_credit_micros_total{kind}`, and `opengeni_build_info{version,revision}`.
 - Dependency health: Postgres connection health, Temporal worker poll health, NATS connectivity, object-storage write/read conformance, and sandbox backend readiness.

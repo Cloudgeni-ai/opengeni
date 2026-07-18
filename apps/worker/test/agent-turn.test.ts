@@ -1,4 +1,5 @@
 import { describe, expect, mock, test } from "bun:test";
+import { ActiveSessionHistoryLimitExceededError } from "@opengeni/db";
 import { CancelledFailure } from "@temporalio/activity";
 import { ModelItem } from "@openai/agents-core/types";
 import type { Settings } from "@opengeni/config";
@@ -1233,6 +1234,19 @@ describe("transient provider error classifier", () => {
     expect(payload.retryable).toBeUndefined();
     expect(payload.code).toBeUndefined();
     expect(payload.error).toBe("Invalid 'input': expected a string");
+  });
+
+  test("agentRunFailurePayload reports the active-history envelope as deterministic", () => {
+    expect(
+      agentRunFailurePayload(new ActiveSessionHistoryLimitExceededError(2_048, 1_024)),
+    ).toEqual({
+      error:
+        "The session's active conversation history exceeds the worker's safe materialization envelope. Compact or clear the session context before retrying.",
+      code: "active_history_too_large",
+      retryable: false,
+      detail:
+        "Active session history is 2048 UTF-8 JSON bytes, exceeding the 1024-byte materialization limit.",
+    });
   });
 
   test("a 503 recovers the same turn after backpressure pacing, independent of goal state", () => {

@@ -1,10 +1,12 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
+  ActiveSessionHistoryLimitExceededError,
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
   createDb,
   createSession,
   getActiveSessionHistoryItems,
+  getActiveSessionHistoryItemsPaged,
   getSessionTurn,
   isSessionCompactionRequested,
   listSessionEvents,
@@ -61,6 +63,52 @@ describe("standalone context compaction execution", () => {
     await client?.close();
     await shared?.release();
   }, 60_000);
+
+  test("rejects an oversized active UTF-8 JSON transcript before paged item decoding", async () => {
+    const suffix = crypto.randomUUID();
+    const access = await bootstrapWorkspace(client.db, {
+      accountExternalSource: "test",
+      accountExternalId: `account-${suffix}`,
+      accountName: "History envelope test",
+      workspaceExternalSource: "test",
+      workspaceExternalId: `workspace-${suffix}`,
+      workspaceName: "History envelope test",
+      subjectId: `subject-${suffix}`,
+    });
+    const grant = access.workspaceGrants[0]!;
+    const session = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      initialMessage: "initial",
+      resources: [],
+      metadata: {},
+      model: "scripted-compactor",
+      sandboxBackend: "none",
+    });
+    await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
+      await db.insert(schema.sessionHistoryItems).values({
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        position: 0,
+        item: { type: "message", role: "user", content: "x".repeat(4_096) },
+      });
+    });
+
+    const read = getActiveSessionHistoryItemsPaged(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      16,
+      1_024,
+    );
+    await expect(read).rejects.toBeInstanceOf(ActiveSessionHistoryLimitExceededError);
+    await expect(read).rejects.toMatchObject({
+      code: "active_history_too_large",
+      maximumBytes: 1_024,
+      actualBytes: expect.any(Number),
+    });
+  });
 
   test("compacts idle history without preparing tools, input, or a sandbox", async () => {
     const suffix = crypto.randomUUID();

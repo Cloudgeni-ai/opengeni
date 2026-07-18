@@ -48,6 +48,7 @@
     "test:e2e": "bun scripts/run-browser-e2e.ts && bun test ./test/e2e/sandbox.e2e.ts && bun test --timeout 360000 ./test/e2e/rig-setup.e2e.ts && bun test --timeout 360000 ./test/e2e/channel-a.e2e.ts && bun test --timeout 2100000 ./apps/worker/test/desktop-image.e2e.ts",
     "test:live": "bun test ./test/live/*.live.ts",
     "profile:turn-density": "bun scripts/operator/turn-density-profile.ts",
+    "verify:turn-density": "bun scripts/operator/verify-turn-density-profile.ts",
     "test:all": "bun run test:unit && bun run test:integration && bun run test:e2e",
     "deployment:profiles": "bun scripts/deployment-preflight.ts --list",
     "deployment:preflight": "bun scripts/deployment-preflight.ts",

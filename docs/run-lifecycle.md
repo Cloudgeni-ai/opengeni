@@ -25,8 +25,12 @@ age), together with the turn workers' used/memory-safe slots. Each turn worker
 must obtain a cgroup-aware slot before polling. Admission is capped at the
 measured density of 16 and reserves a hard 100 MiB per turn plus 512 MiB of
 runtime/native headroom; a finite container that cannot safely admit one turn
-does not start. The release target remains at most 50 MiB incremental RSS per
-active turn. See
+does not start, and live retained-memory growth contracts new slot availability.
+Before decoding model-facing JSONB, the worker also rejects a complete active
+transcript above the 32 MiB UTF-8 JSON materialization envelope. It never
+silently trims conversation truth; normal proactive compaction keeps long
+sessions under the boundary. The release target remains at most 50 MiB
+incremental RSS per active turn. See
 [`design/turn-worker-density-2026-07-16.md`](design/turn-worker-density-2026-07-16.md).
 
 Synthesized goal continuations inherit the model and reasoning effort from the

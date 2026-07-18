@@ -23,6 +23,63 @@
         "current": {},
         "hide": 0,
         "refresh": 1
+      },
+      {
+        "name": "namespace",
+        "label": "Namespace",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "query": {
+          "query": "label_values(opengeni_turn_slots_capacity, namespace)",
+          "refId": "namespace"
+        },
+        "definition": "label_values(opengeni_turn_slots_capacity, namespace)",
+        "current": {},
+        "includeAll": false,
+        "multi": false,
+        "refresh": 1,
+        "sort": 1
+      },
+      {
+        "name": "environment",
+        "label": "Environment",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "query": {
+          "query": "label_values(opengeni_turn_slots_capacity{namespace=\"$namespace\"}, environment)",
+          "refId": "environment"
+        },
+        "definition": "label_values(opengeni_turn_slots_capacity{namespace=\"$namespace\"}, environment)",
+        "current": {},
+        "includeAll": false,
+        "multi": false,
+        "refresh": 1,
+        "sort": 1
+      },
+      {
+        "name": "release",
+        "label": "Release",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "query": {
+          "query": "label_values(opengeni_turn_slots_capacity{namespace=\"$namespace\",environment=\"$environment\"}, release)",
+          "refId": "release"
+        },
+        "definition": "label_values(opengeni_turn_slots_capacity{namespace=\"$namespace\",environment=\"$environment\"}, release)",
+        "current": {},
+        "includeAll": false,
+        "multi": false,
+        "refresh": 1,
+        "sort": 1
       }
     ]
   },
@@ -74,7 +131,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(opengeni_turns_inflight)",
+          "expr": "sum(opengeni_turns_inflight{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"})",
           "legendFormat": "inflight",
           "datasource": {
             "type": "prometheus",
@@ -85,7 +142,7 @@
         },
         {
           "refId": "B",
-          "expr": "max(opengeni_turn_eligible_backlog)",
+          "expr": "max(opengeni_turn_eligible_backlog{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"})",
           "legendFormat": "eligible backlog",
           "datasource": {
             "type": "prometheus",
@@ -147,7 +204,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max(opengeni_turn_oldest_inflight_age_seconds)",
+          "expr": "max(opengeni_turn_oldest_inflight_age_seconds{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"})",
           "legendFormat": "",
           "datasource": {
             "type": "prometheus",
@@ -199,7 +256,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (outcome) (rate(opengeni_turns_total[5m]))",
+          "expr": "sum by (outcome) (rate(opengeni_turns_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[5m]))",
           "legendFormat": "{{outcome}}",
           "datasource": {
             "type": "prometheus",
@@ -251,7 +308,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max(opengeni_turn_eligible_backlog_oldest_age_seconds)",
+          "expr": "max(opengeni_turn_eligible_backlog_oldest_age_seconds{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"})",
           "legendFormat": "oldest eligible",
           "datasource": {
             "type": "prometheus",
@@ -316,7 +373,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max by (pod) (container_memory_working_set_bytes{container=\"worker\", pod=~\".*opengeni.*\"}) / max by (pod) (kube_pod_container_resource_limits{resource=\"memory\", container=\"worker\", pod=~\".*opengeni.*\"})",
+          "expr": "max by (pod) (container_memory_working_set_bytes{namespace=\"$namespace\",container=\"worker\",pod=~\"$release.*\"}) / max by (pod) (kube_pod_container_resource_limits{namespace=\"$namespace\",resource=\"memory\",container=\"worker\",pod=~\"$release.*\"})",
           "legendFormat": "{{pod}}",
           "datasource": {
             "type": "prometheus",
@@ -368,7 +425,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "opengeni_process_resident_memory_bytes{component=~\"worker-.*\"}",
+          "expr": "opengeni_process_resident_memory_bytes{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",component=~\"worker-.*\"}",
           "legendFormat": "{{instance}}",
           "datasource": {
             "type": "prometheus",
@@ -433,7 +490,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "kube_horizontalpodautoscaler_status_current_replicas{horizontalpodautoscaler=~\".*opengeni.*worker.*\"}",
+          "expr": "kube_horizontalpodautoscaler_status_current_replicas{namespace=\"$namespace\",horizontalpodautoscaler=~\"$release.*worker.*\"}",
           "legendFormat": "current {{horizontalpodautoscaler}}",
           "datasource": {
             "type": "prometheus",
@@ -444,7 +501,7 @@
         },
         {
           "refId": "B",
-          "expr": "kube_horizontalpodautoscaler_spec_max_replicas{horizontalpodautoscaler=~\".*opengeni.*worker.*\"}",
+          "expr": "kube_horizontalpodautoscaler_spec_max_replicas{namespace=\"$namespace\",horizontalpodautoscaler=~\"$release.*worker.*\"}",
           "legendFormat": "max {{horizontalpodautoscaler}}",
           "datasource": {
             "type": "prometheus",
@@ -496,7 +553,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(opengeni_turn_slots_used) / clamp_min(sum(opengeni_turn_slots_capacity), 1)",
+          "expr": "sum(opengeni_turn_slots_used{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}) / clamp_min(sum(opengeni_turn_slots_capacity{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}), 1)",
           "legendFormat": "fleet weighted",
           "datasource": {
             "type": "prometheus",
@@ -507,7 +564,7 @@
         },
         {
           "refId": "B",
-          "expr": "max(opengeni_turn_slot_saturation_ratio)",
+          "expr": "max(opengeni_turn_slot_saturation_ratio{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"})",
           "legendFormat": "most saturated pod",
           "datasource": {
             "type": "prometheus",
@@ -559,7 +616,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (liveness) (opengeni_sandbox_leases)",
+          "expr": "sum by (liveness) (opengeni_sandbox_leases{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"})",
           "legendFormat": "{{liveness}}",
           "datasource": {
             "type": "prometheus",
@@ -624,7 +681,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (trigger) (increase(opengeni_context_compactions_total[15m]))",
+          "expr": "sum by (trigger) (increase(opengeni_context_compactions_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[15m]))",
           "legendFormat": "{{trigger}}",
           "datasource": {
             "type": "prometheus",
@@ -676,7 +733,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(opengeni_model_input_tokens_bucket[10m])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(opengeni_model_input_tokens_bucket{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[10m])))",
           "legendFormat": "p95",
           "datasource": {
             "type": "prometheus",
@@ -687,7 +744,7 @@
         },
         {
           "refId": "B",
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(opengeni_model_input_tokens_bucket[10m])))",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(opengeni_model_input_tokens_bucket{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[10m])))",
           "legendFormat": "p50",
           "datasource": {
             "type": "prometheus",
@@ -739,7 +796,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.95, sum by (le, provider) (rate(opengeni_model_call_duration_seconds_bucket[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (le, provider) (rate(opengeni_model_call_duration_seconds_bucket{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[5m])))",
           "legendFormat": "{{provider}}",
           "datasource": {
             "type": "prometheus",

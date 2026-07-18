@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
@@ -9,6 +10,7 @@ import {
   createSession,
   deleteWorkspace,
   enqueueSessionTurn,
+  ACTIVE_SESSION_HISTORY_MAX_JSON_BYTES,
   withWorkspaceRls,
 } from "@opengeni/db";
 import * as schema from "@opengeni/db/schema";
@@ -17,7 +19,7 @@ import { MemoryEventBus, ScriptedModel, type ScriptedModelStep } from "@opengeni
 import { createTurnActivities } from "../../apps/worker/src/activities";
 
 const MIB = 1024 * 1024;
-const MAX_HISTORY_BYTES_PER_TURN = 32 * MIB;
+const MAX_HISTORY_BYTES_PER_TURN = ACTIVE_SESSION_HISTORY_MAX_JSON_BYTES;
 const MAX_SYNTHETIC_WORK_BYTES_PER_TURN = 2 * MIB;
 const MAX_WAVES = 10;
 const MAX_PLATEAU_SECONDS = 300;
@@ -59,6 +61,8 @@ export type DensityProfileConfig = {
   syntheticWaitMs: number;
   syntheticDrainSteps: number;
   artifactPath?: string;
+  /** Test-only fault injection: one post-gate model activity never settles. */
+  testNeverSettleAfterGate?: boolean;
 };
 
 export type NumericSummary = {
@@ -79,9 +83,9 @@ export type MemorySummary = {
   externalMiBMedian: number;
 };
 
-type MemorySample = ReturnType<typeof process.memoryUsage>;
+export type DensityMemorySample = ReturnType<typeof process.memoryUsage>;
 
-type WaveMeasurement = {
+export type WaveMeasurement = {
   wave: number;
   compactionCalls: number;
   baseline: MemorySummary;
@@ -90,9 +94,14 @@ type WaveMeasurement = {
   incrementalValues: number[];
   retainedValues: number[];
   plateauToSettledValues: number[];
+  rawMemory: {
+    baseline: DensityMemorySample[];
+    plateau: DensityMemorySample[];
+    settled: DensityMemorySample[];
+  };
 };
 
-type DensityMeasurement = {
+export type DensityMeasurement = {
   density: number;
   waves: WaveMeasurement[];
 };
@@ -288,6 +297,7 @@ async function main(): Promise<void> {
   });
   const bus = new MemoryEventBus();
   let workspaceId: string | null = null;
+  let sessionsCreated = 0;
 
   try {
     const access = await bootstrapWorkspace(dbClient.db, {
@@ -322,22 +332,36 @@ async function main(): Promise<void> {
             settings,
           }),
         );
+        sessionsCreated += density;
       }
       densityMeasurements.push({ density, waves });
     }
 
+    await cleanupDensityWorkspace(
+      () => deleteWorkspace(dbClient.db, workspaceId!),
+      config.timeoutMs,
+    );
+    workspaceId = null;
     const result = buildProfileResult({
       config,
       runId,
       productionRevision: productionSettings.deploymentRevision,
       densityMeasurements,
+      cleanup: {
+        workspacesCreated: 1,
+        workspacesDeleted: 1,
+        sessionsCreated,
+      },
     });
     await writeArtifact(config.artifactPath, result);
     console.log(`OPENGENI_DENSITY_RESULT=${JSON.stringify(result)}`);
     if (!result.thresholds.hardLimitMet) process.exitCode = 2;
   } finally {
     if (workspaceId) {
-      await deleteWorkspace(dbClient.db, workspaceId).catch((error) => {
+      await cleanupDensityWorkspace(
+        () => deleteWorkspace(dbClient.db, workspaceId!),
+        config.timeoutMs,
+      ).catch((error) => {
         console.error(`Density workspace cleanup failed: ${errorMessage(error)}`);
         process.exitCode = 1;
       });
@@ -346,7 +370,7 @@ async function main(): Promise<void> {
   }
 }
 
-async function runWave(input: {
+export async function runWave(input: {
   config: DensityProfileConfig;
   density: number;
   wave: number;
@@ -369,56 +393,72 @@ async function runWave(input: {
   });
   const turnInputs = [];
   let allRuns: Promise<PromiseSettledResult<unknown>[]> | null = null;
+  let allRunsSettled = false;
+  const deadlineAt = Date.now() + config.timeoutMs;
+  const phase = <T>(work: Promise<T>, label: string) =>
+    withDeadline(work, deadlineAt, `Timed out during ${label} for density ${density} wave ${wave}`);
 
   try {
     for (let index = 0; index < density; index += 1) {
-      const session = await createSession(db, {
-        accountId,
-        workspaceId,
-        initialMessage: `density profile ${density}/${wave}/${index}`,
-        resources: [],
-        tools: [],
-        metadata: {
-          densityProfileRunId: runId,
-          density,
-          wave,
-          turnIndex: index,
-          syntheticScenarios: SYNTHETIC_SCENARIOS,
-        },
-        model: "scripted-density-model",
-        sandboxBackend: "none",
-      });
-      await seedHistory({
-        db,
-        accountId,
-        workspaceId,
-        sessionId: session.id,
-        sessionIndex: index,
-        activeBytes: config.activeHistoryBytes,
-        inactiveBytes: config.inactiveHistoryBytes,
-        compactionTailBytes: config.compactionTailBytes,
-      });
-      const [trigger] = await appendSessionEvents(db, workspaceId, session.id, [
-        { type: "user.message", payload: { text: session.initialMessage } },
-      ]);
+      const session = await phase(
+        createSession(db, {
+          accountId,
+          workspaceId,
+          initialMessage: `density profile ${density}/${wave}/${index}`,
+          resources: [],
+          tools: [],
+          metadata: {
+            densityProfileRunId: runId,
+            density,
+            wave,
+            turnIndex: index,
+            syntheticScenarios: SYNTHETIC_SCENARIOS,
+          },
+          model: "scripted-density-model",
+          sandboxBackend: "none",
+        }),
+        "session creation",
+      );
+      await phase(
+        seedHistory({
+          db,
+          accountId,
+          workspaceId,
+          sessionId: session.id,
+          sessionIndex: index,
+          activeBytes: config.activeHistoryBytes,
+          inactiveBytes: config.inactiveHistoryBytes,
+          compactionTailBytes: config.compactionTailBytes,
+        }),
+        "history seeding",
+      );
+      const [trigger] = await phase(
+        appendSessionEvents(db, workspaceId, session.id, [
+          { type: "user.message", payload: { text: session.initialMessage } },
+        ]),
+        "trigger creation",
+      );
       if (!trigger) throw new Error(`Failed to append trigger for density session ${session.id}`);
       const workflowId = `density-profile-${runId}-${density}-${wave}-${index}`;
-      await enqueueSessionTurn(db, {
-        accountId,
-        workspaceId,
-        sessionId: session.id,
-        triggerEventId: trigger.id,
-        temporalWorkflowId: workflowId,
-        source: "user",
-        prompt: session.initialMessage,
-        resources: [],
-        tools: [],
-        model: "scripted-density-model",
-        reasoningEffort: "low",
-        sandboxBackend: "none",
-        metadata: { densityProfileRunId: runId, density, wave, turnIndex: index },
-        placement: "tail",
-      });
+      await phase(
+        enqueueSessionTurn(db, {
+          accountId,
+          workspaceId,
+          sessionId: session.id,
+          triggerEventId: trigger.id,
+          temporalWorkflowId: workflowId,
+          source: "user",
+          prompt: session.initialMessage,
+          resources: [],
+          tools: [],
+          model: "scripted-density-model",
+          reasoningEffort: "low",
+          sandboxBackend: "none",
+          metadata: { densityProfileRunId: runId, density, wave, turnIndex: index },
+          placement: "tail",
+        }),
+        "turn enqueue",
+      );
       turnInputs.push({
         accountId,
         workspaceId,
@@ -430,11 +470,20 @@ async function runWave(input: {
       });
     }
 
-    await settleAndCollect(config.settleDelayMs);
-    const baseline = summarizeMemory(await sampleMemory(config.baselineSamples, 250));
+    await settleAndCollect(config.settleDelayMs, deadlineAt);
+    const baselineSamples = await sampleMemory(
+      config.baselineSamples,
+      250,
+      deadlineAt,
+      "baseline sampling",
+    );
+    const baseline = summarizeMemory(baselineSamples);
     const runs = turnInputs.map((turnInput) => activities.runAgentTurn(turnInput));
-    allRuns = Promise.allSettled(runs);
-    await withTimeout(
+    allRuns = Promise.allSettled(runs).then((results) => {
+      allRunsSettled = true;
+      return results;
+    });
+    await phase(
       Promise.race([
         model.allStarted,
         allRuns.then((results) => {
@@ -444,17 +493,21 @@ async function runWave(input: {
           );
         }),
       ]),
-      config.timeoutMs,
-      `Timed out waiting for density ${density} wave ${wave}`,
+      "model gate arrival",
     );
 
     const plateauSampleCount = Math.max(
       2,
       Math.ceil((config.plateauSeconds * 1_000) / config.plateauSampleIntervalMs) + 1,
     );
-    const plateauSamples = await sampleMemory(plateauSampleCount, config.plateauSampleIntervalMs);
+    const plateauSamples = await sampleMemory(
+      plateauSampleCount,
+      config.plateauSampleIntervalMs,
+      deadlineAt,
+      "plateau sampling",
+    );
     model.release();
-    const results = await allRuns;
+    const results = await phase(allRuns, "activity settlement");
     const failures = results.flatMap((result, index) =>
       result.status === "rejected"
         ? [{ index, error: errorMessage(result.reason) }]
@@ -471,8 +524,13 @@ async function runWave(input: {
 
     model.clearRequests();
     bus.published.length = 0;
-    await settleAndCollect(config.settleDelayMs);
-    const settledSamples = await sampleMemory(config.settledSamples, 250);
+    await settleAndCollect(config.settleDelayMs, deadlineAt);
+    const settledSamples = await sampleMemory(
+      config.settledSamples,
+      250,
+      deadlineAt,
+      "settled sampling",
+    );
     const plateau = summarizeMemory(plateauSamples);
     const settled = summarizeMemory(settledSamples);
     const incrementalValues = plateauSamples.map(
@@ -491,10 +549,16 @@ async function runWave(input: {
       incrementalValues,
       retainedValues: [retainedValue / density],
       plateauToSettledValues,
+      rawMemory: { baseline: baselineSamples, plateau: plateauSamples, settled: settledSamples },
     };
   } finally {
     model.release();
-    if (allRuns) await allRuns;
+    if (allRuns && !allRunsSettled) {
+      // Never extend the wave timeout while draining a post-gate activity. The
+      // allSettled promise is intentionally left observed if a fault-injected
+      // activity never resolves; workspace cleanup runs independently in main.
+      await phase(allRuns, "fault cleanup settlement").catch(() => undefined);
+    }
   }
 }
 
@@ -645,6 +709,9 @@ function createDensityModel(expected: number, config: DensityProfileConfig) {
       if (work.waitBeforeGateMs > 0) await Bun.sleep(work.waitBeforeGateMs);
       if (this.started === expected) this.resolveAllStarted();
       await this.gate;
+      if (config.testNeverSettleAfterGate && turnIndex === 0) {
+        await new Promise<void>(() => undefined);
+      }
       await work.release();
       this.activeWork.delete(work);
       // Keep the request live until the gate and synthetic drain have both
@@ -741,13 +808,32 @@ function syntheticWorkForTurn(turnIndex: number, config: DensityProfileConfig): 
   };
 }
 
-function buildProfileResult(input: {
+export function syntheticAllocatedWorkBytesByScenario(
+  configuredBytes: number,
+): Record<SyntheticScenario, number> {
+  const bytesPerBuffer = Math.max(1, Math.floor(configuredBytes / 2));
+  return {
+    streaming: bytesPerBuffer,
+    "tool-burst": bytesPerBuffer * 2,
+    sandbox: bytesPerBuffer * 2,
+    "fan-out": bytesPerBuffer,
+    wait: bytesPerBuffer,
+    drain: bytesPerBuffer,
+  };
+}
+
+export function buildProfileResult(input: {
   config: DensityProfileConfig;
   runId: string;
   productionRevision: string;
   densityMeasurements: DensityMeasurement[];
+  cleanup: {
+    workspacesCreated: number;
+    workspacesDeleted: number;
+    sessionsCreated: number;
+  };
 }) {
-  const { config, runId, productionRevision, densityMeasurements } = input;
+  const { config, runId, productionRevision, densityMeasurements, cleanup } = input;
   const densityResults = densityMeasurements.map(({ density, waves }) => {
     const incrementalValues = waves.flatMap((wave) => wave.incrementalValues);
     const retainedValues = waves.flatMap((wave) => wave.retainedValues);
@@ -767,6 +853,12 @@ function buildProfileResult(input: {
         leak: {
           retainedAfterSettlementMiBPerTurn: summarizeNumbers(wave.retainedValues),
           plateauToSettledMiB: summarizeNumbers(wave.plateauToSettledValues),
+        },
+        rawSamples: {
+          memory: wave.rawMemory,
+          incrementalRssMiBPerTurn: wave.incrementalValues,
+          retainedAfterSettlementMiBPerTurn: wave.retainedValues,
+          plateauToSettledMiB: wave.plateauToSettledValues,
         },
       })),
       statistics: {
@@ -790,7 +882,7 @@ function buildProfileResult(input: {
   const aggregateIncrementalSummary = summarizeNumbers(aggregateIncremental);
 
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     runId,
     generatedAt: new Date().toISOString(),
     productionRevision,
@@ -806,9 +898,18 @@ function buildProfileResult(input: {
       },
       plateauSeconds: config.plateauSeconds,
       plateauSampleIntervalMs: config.plateauSampleIntervalMs,
+      sampling: {
+        baselineSamples: config.baselineSamples,
+        settledSamples: config.settledSamples,
+        settleDelayMs: config.settleDelayMs,
+        timeoutMs: config.timeoutMs,
+      },
       syntheticMix: {
         scenarios: SYNTHETIC_SCENARIOS,
-        workBytesPerTurn: config.syntheticWorkBytes,
+        configuredWorkBytesPerTurn: config.syntheticWorkBytes,
+        allocatedWorkBytesByScenario: syntheticAllocatedWorkBytesByScenario(
+          config.syntheticWorkBytes,
+        ),
         toolBurst: config.syntheticToolBurst,
         fanOut: config.syntheticFanOut,
         waitMs: config.syntheticWaitMs,
@@ -830,6 +931,7 @@ function buildProfileResult(input: {
       targetMet: densityResults.every((result) => result.thresholds.targetMet),
       hardLimitMet: densityResults.every((result) => result.thresholds.hardLimitMet),
     },
+    cleanup,
     densities: densityResults,
   };
 }
@@ -869,7 +971,7 @@ function linearSlope(values: number[]): number {
   return denominator === 0 ? 0 : numerator / denominator;
 }
 
-function summarizeMemory(samples: MemorySample[]): MemorySummary {
+function summarizeMemory(samples: DensityMemorySample[]): MemorySummary {
   const rss = samples.map((sample) => sample.rss / MIB);
   const heap = samples.map((sample) => sample.heapUsed / MIB);
   const external = samples.map((sample) => sample.external / MIB);
@@ -884,19 +986,364 @@ function summarizeMemory(samples: MemorySample[]): MemorySummary {
   };
 }
 
-async function sampleMemory(count: number, intervalMs: number): Promise<MemorySample[]> {
-  const samples: MemorySample[] = [];
+async function sampleMemory(
+  count: number,
+  intervalMs: number,
+  deadlineAt: number,
+  label: string,
+): Promise<DensityMemorySample[]> {
+  const samples: DensityMemorySample[] = [];
   for (let index = 0; index < count; index += 1) {
     samples.push(process.memoryUsage());
-    if (index + 1 < count) await Bun.sleep(intervalMs);
+    if (index + 1 < count) {
+      await withDeadline(Bun.sleep(intervalMs), deadlineAt, `Timed out during ${label}`);
+    }
   }
   return samples;
 }
 
-async function settleAndCollect(delayMs: number): Promise<void> {
+async function settleAndCollect(delayMs: number, deadlineAt: number): Promise<void> {
   Bun.gc(true);
-  await Bun.sleep(delayMs);
+  await withDeadline(Bun.sleep(delayMs), deadlineAt, "Timed out waiting for memory settlement");
   Bun.gc(true);
+}
+
+export async function cleanupDensityWorkspace(
+  remove: () => Promise<unknown>,
+  timeoutMs: number,
+): Promise<void> {
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
+    throw new Error("density workspace cleanup timeout must be a positive safe integer");
+  }
+  await withTimeout(
+    Promise.resolve().then(remove),
+    timeoutMs,
+    `Timed out deleting density profile workspace after ${timeoutMs} ms`,
+  );
+}
+
+export type DensityProfileVerification = {
+  sha256: string;
+  schemaVersion: 3;
+  densities: number[];
+  wavesPerDensity: number;
+  rawMemorySamples: number;
+  sessionsCreated: number;
+  targetMet: boolean;
+  hardLimitMet: boolean;
+};
+
+/** Recompute a schema-v3 artifact from its exact UTF-8 file contents. */
+export function verifyDensityProfileArtifactText(
+  text: string,
+  expectedSha256?: string,
+): DensityProfileVerification {
+  const sha256 = createHash("sha256").update(text, "utf8").digest("hex");
+  if (expectedSha256 !== undefined) {
+    const normalized = expectedSha256.trim().toLowerCase();
+    if (!/^[a-f0-9]{64}$/.test(normalized)) {
+      throw new Error("Expected density artifact SHA-256 must be 64 hexadecimal characters");
+    }
+    if (sha256 !== normalized) {
+      throw new Error(`Density artifact SHA-256 mismatch: expected ${normalized}, got ${sha256}`);
+    }
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (error) {
+    throw new Error(`Density artifact is not valid JSON: ${errorMessage(error)}`, { cause: error });
+  }
+  const root = artifactRecord(parsed, "artifact");
+  if (artifactInteger(root.schemaVersion, "artifact.schemaVersion") !== 3) {
+    throw new Error("Density artifact schemaVersion must be 3");
+  }
+
+  const workload = artifactRecord(root.workload, "artifact.workload");
+  const configuredDensities = artifactNumberArray(
+    workload.densities,
+    "artifact.workload.densities",
+  );
+  const allowedDensities = new Set<number>(DEFAULT_DENSITIES);
+  if (
+    configuredDensities.length === 0 ||
+    configuredDensities.some(
+      (density) => !Number.isSafeInteger(density) || !allowedDensities.has(density),
+    ) ||
+    new Set(configuredDensities).size !== configuredDensities.length
+  ) {
+    throw new Error("Density artifact workload contains unsupported or duplicate densities");
+  }
+  const wavesPerDensity = artifactInteger(workload.waves, "artifact.workload.waves");
+  if (wavesPerDensity < 1) throw new Error("Density artifact workload.waves must be positive");
+  const plateauSeconds = artifactNumber(
+    workload.plateauSeconds,
+    "artifact.workload.plateauSeconds",
+  );
+  const plateauSampleIntervalMs = artifactNumber(
+    workload.plateauSampleIntervalMs,
+    "artifact.workload.plateauSampleIntervalMs",
+  );
+  const sampling = artifactRecord(workload.sampling, "artifact.workload.sampling");
+  const baselineSampleCount = artifactInteger(
+    sampling.baselineSamples,
+    "artifact.workload.sampling.baselineSamples",
+  );
+  const settledSampleCount = artifactInteger(
+    sampling.settledSamples,
+    "artifact.workload.sampling.settledSamples",
+  );
+  const plateauSampleCount = Math.max(
+    2,
+    Math.ceil((plateauSeconds * 1_000) / plateauSampleIntervalMs) + 1,
+  );
+  if (baselineSampleCount < 1 || settledSampleCount < 1 || plateauSampleIntervalMs <= 0) {
+    throw new Error("Density artifact declares invalid sampling controls");
+  }
+
+  const syntheticMix = artifactRecord(workload.syntheticMix, "artifact.workload.syntheticMix");
+  assertArtifactEqual(
+    syntheticMix.scenarios,
+    SYNTHETIC_SCENARIOS,
+    "artifact.workload.syntheticMix.scenarios",
+  );
+  const configuredWorkBytes = artifactInteger(
+    syntheticMix.configuredWorkBytesPerTurn,
+    "artifact.workload.syntheticMix.configuredWorkBytesPerTurn",
+  );
+  assertArtifactEqual(
+    syntheticMix.allocatedWorkBytesByScenario,
+    syntheticAllocatedWorkBytesByScenario(configuredWorkBytes),
+    "artifact.workload.syntheticMix.allocatedWorkBytesByScenario",
+  );
+
+  const rootThresholds = artifactRecord(root.thresholds, "artifact.thresholds");
+  const targetMiBPerTurn = artifactNumber(
+    rootThresholds.targetMiBPerTurn,
+    "artifact.thresholds.targetMiBPerTurn",
+  );
+  const hardLimitMiBPerTurn = artifactNumber(
+    rootThresholds.hardLimitMiBPerTurn,
+    "artifact.thresholds.hardLimitMiBPerTurn",
+  );
+  if (targetMiBPerTurn <= 0 || hardLimitMiBPerTurn < targetMiBPerTurn) {
+    throw new Error("Density artifact declares invalid memory thresholds");
+  }
+
+  const densityRows = artifactArray(root.densities, "artifact.densities");
+  if (densityRows.length !== configuredDensities.length) {
+    throw new Error("Density artifact result count does not match workload.densities");
+  }
+  const aggregateIncremental: number[] = [];
+  let rawMemorySamples = 0;
+  const verifiedDensityThresholds: Array<ReturnType<typeof thresholdResult>> = [];
+
+  densityRows.forEach((densityValue, densityIndex) => {
+    const path = `artifact.densities[${densityIndex}]`;
+    const densityRow = artifactRecord(densityValue, path);
+    const density = artifactInteger(densityRow.density, `${path}.density`);
+    if (density !== configuredDensities[densityIndex]) {
+      throw new Error(`${path}.density does not match workload density order`);
+    }
+    const waveRows = artifactArray(densityRow.waves, `${path}.waves`);
+    if (waveRows.length !== wavesPerDensity) {
+      throw new Error(`${path}.waves does not contain ${wavesPerDensity} waves`);
+    }
+
+    const densityIncremental: number[] = [];
+    const densityRetained: number[] = [];
+    const densityPlateauToSettled: number[] = [];
+    const settledMedians: number[] = [];
+
+    waveRows.forEach((waveValue, waveIndex) => {
+      const wavePath = `${path}.waves[${waveIndex}]`;
+      const wave = artifactRecord(waveValue, wavePath);
+      if (artifactInteger(wave.wave, `${wavePath}.wave`) !== waveIndex) {
+        throw new Error(`${wavePath}.wave is not the expected zero-based wave index`);
+      }
+      const rawSamples = artifactRecord(wave.rawSamples, `${wavePath}.rawSamples`);
+      const rawMemory = artifactRecord(rawSamples.memory, `${wavePath}.rawSamples.memory`);
+      const baselineSamples = artifactMemorySamples(
+        rawMemory.baseline,
+        `${wavePath}.rawSamples.memory.baseline`,
+      );
+      const plateauSamples = artifactMemorySamples(
+        rawMemory.plateau,
+        `${wavePath}.rawSamples.memory.plateau`,
+      );
+      const settledSamples = artifactMemorySamples(
+        rawMemory.settled,
+        `${wavePath}.rawSamples.memory.settled`,
+      );
+      if (
+        baselineSamples.length !== baselineSampleCount ||
+        plateauSamples.length !== plateauSampleCount ||
+        settledSamples.length !== settledSampleCount
+      ) {
+        throw new Error(`${wavePath} raw memory sample counts do not match workload sampling`);
+      }
+      rawMemorySamples += baselineSamples.length + plateauSamples.length + settledSamples.length;
+
+      const baseline = summarizeMemory(baselineSamples);
+      const plateau = summarizeMemory(plateauSamples);
+      const settled = summarizeMemory(settledSamples);
+      const memory = artifactRecord(wave.memory, `${wavePath}.memory`);
+      assertArtifactEqual(memory.baseline, baseline, `${wavePath}.memory.baseline`);
+      assertArtifactEqual(memory.plateau, plateau, `${wavePath}.memory.plateau`);
+      assertArtifactEqual(memory.settled, settled, `${wavePath}.memory.settled`);
+
+      const incrementalValues = plateauSamples.map(
+        (sample) => Math.max(0, sample.rss / MIB - baseline.rssMiBMedian) / density,
+      );
+      const retainedValues = [(settled.rssMiBMedian - baseline.rssMiBMedian) / density];
+      const plateauToSettledValues = plateauSamples.map(
+        (sample) => sample.rss / MIB - settled.rssMiBMedian,
+      );
+      assertArtifactEqual(
+        rawSamples.incrementalRssMiBPerTurn,
+        incrementalValues,
+        `${wavePath}.rawSamples.incrementalRssMiBPerTurn`,
+      );
+      assertArtifactEqual(
+        rawSamples.retainedAfterSettlementMiBPerTurn,
+        retainedValues,
+        `${wavePath}.rawSamples.retainedAfterSettlementMiBPerTurn`,
+      );
+      assertArtifactEqual(
+        rawSamples.plateauToSettledMiB,
+        plateauToSettledValues,
+        `${wavePath}.rawSamples.plateauToSettledMiB`,
+      );
+      assertArtifactEqual(
+        wave.incrementalRssMiBPerTurn,
+        summarizeNumbers(incrementalValues),
+        `${wavePath}.incrementalRssMiBPerTurn`,
+      );
+      const waveLeak = artifactRecord(wave.leak, `${wavePath}.leak`);
+      assertArtifactEqual(
+        waveLeak.retainedAfterSettlementMiBPerTurn,
+        summarizeNumbers(retainedValues),
+        `${wavePath}.leak.retainedAfterSettlementMiBPerTurn`,
+      );
+      assertArtifactEqual(
+        waveLeak.plateauToSettledMiB,
+        summarizeNumbers(plateauToSettledValues),
+        `${wavePath}.leak.plateauToSettledMiB`,
+      );
+
+      densityIncremental.push(...incrementalValues);
+      densityRetained.push(...retainedValues);
+      densityPlateauToSettled.push(...plateauToSettledValues);
+      settledMedians.push(settled.rssMiBMedian);
+    });
+
+    const expectedStatistics = {
+      incrementalRssMiBPerTurn: summarizeNumbers(densityIncremental),
+      leak: {
+        retainedAfterSettlementMiBPerTurn: summarizeNumbers(densityRetained),
+        plateauToSettledMiB: summarizeNumbers(densityPlateauToSettled),
+        settledGrowthMiB: settledGrowth(settledMedians),
+      },
+    };
+    assertArtifactEqual(densityRow.statistics, expectedStatistics, `${path}.statistics`);
+    const expectedThresholds = thresholdResult(
+      expectedStatistics.incrementalRssMiBPerTurn.worst,
+      targetMiBPerTurn,
+      hardLimitMiBPerTurn,
+    );
+    assertArtifactEqual(densityRow.thresholds, expectedThresholds, `${path}.thresholds`);
+    verifiedDensityThresholds.push(expectedThresholds);
+    aggregateIncremental.push(...densityIncremental);
+  });
+
+  assertArtifactEqual(
+    root.statistics,
+    { incrementalRssMiBPerTurn: summarizeNumbers(aggregateIncremental) },
+    "artifact.statistics",
+  );
+  const expectedRootThresholds = {
+    targetMiBPerTurn,
+    hardLimitMiBPerTurn,
+    targetMet: verifiedDensityThresholds.every((result) => result.targetMet),
+    hardLimitMet: verifiedDensityThresholds.every((result) => result.hardLimitMet),
+  };
+  assertArtifactEqual(root.thresholds, expectedRootThresholds, "artifact.thresholds");
+
+  const cleanup = artifactRecord(root.cleanup, "artifact.cleanup");
+  const expectedSessions = configuredDensities.reduce(
+    (total, density) => total + density * wavesPerDensity,
+    0,
+  );
+  assertArtifactEqual(
+    cleanup,
+    { workspacesCreated: 1, workspacesDeleted: 1, sessionsCreated: expectedSessions },
+    "artifact.cleanup",
+  );
+
+  return {
+    sha256,
+    schemaVersion: 3,
+    densities: configuredDensities,
+    wavesPerDensity,
+    rawMemorySamples,
+    sessionsCreated: expectedSessions,
+    targetMet: expectedRootThresholds.targetMet,
+    hardLimitMet: expectedRootThresholds.hardLimitMet,
+  };
+}
+
+type ArtifactRecord = Record<string, unknown>;
+
+function artifactRecord(value: unknown, path: string): ArtifactRecord {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error(`${path} must be an object`);
+  }
+  return value as ArtifactRecord;
+}
+
+function artifactArray(value: unknown, path: string): unknown[] {
+  if (!Array.isArray(value)) throw new Error(`${path} must be an array`);
+  return value;
+}
+
+function artifactNumber(value: unknown, path: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new Error(`${path} must be a finite number`);
+  }
+  return value;
+}
+
+function artifactInteger(value: unknown, path: string): number {
+  const number = artifactNumber(value, path);
+  if (!Number.isSafeInteger(number)) throw new Error(`${path} must be a safe integer`);
+  return number;
+}
+
+function artifactNumberArray(value: unknown, path: string): number[] {
+  return artifactArray(value, path).map((item, index) => artifactNumber(item, `${path}[${index}]`));
+}
+
+function artifactMemorySamples(value: unknown, path: string): DensityMemorySample[] {
+  return artifactArray(value, path).map((sampleValue, index) => {
+    const samplePath = `${path}[${index}]`;
+    const sample = artifactRecord(sampleValue, samplePath);
+    return {
+      rss: artifactNumber(sample.rss, `${samplePath}.rss`),
+      heapTotal: artifactNumber(sample.heapTotal, `${samplePath}.heapTotal`),
+      heapUsed: artifactNumber(sample.heapUsed, `${samplePath}.heapUsed`),
+      external: artifactNumber(sample.external, `${samplePath}.external`),
+      arrayBuffers: artifactNumber(sample.arrayBuffers, `${samplePath}.arrayBuffers`),
+    };
+  });
+}
+
+function assertArtifactEqual(actual: unknown, expected: unknown, path: string): void {
+  if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+    throw new Error(
+      `${path} does not match raw-sample recomputation: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`,
+    );
+  }
 }
 
 async function writeArtifact(path: string | undefined, result: unknown): Promise<void> {
@@ -1044,6 +1491,20 @@ export async function withTimeout<T>(
   } finally {
     if (timer) clearTimeout(timer);
   }
+}
+
+export async function withDeadline<T>(
+  work: Promise<T>,
+  deadlineAt: number,
+  message: string,
+): Promise<T> {
+  if (!Number.isFinite(deadlineAt)) throw new Error("deadlineAt must be finite");
+  const remainingMs = deadlineAt - Date.now();
+  if (remainingMs <= 0) {
+    void work.catch(() => undefined);
+    throw new Error(message);
+  }
+  return await withTimeout(work, remainingMs, message);
 }
 
 function errorMessage(error: unknown): string {
