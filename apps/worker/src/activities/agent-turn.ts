@@ -81,7 +81,6 @@ import {
   appendSessionInstructions,
   appendWorkspaceMemory,
   composeAgentInstructions,
-  summarizeForCompaction,
   ensureModalRegistryImage,
   findCompactionNeededError,
   materializeSandboxFileDownloads,
@@ -1118,6 +1117,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       db,
       bus,
       runtime,
+      summarizeContextForCompaction,
       objectStorage,
       observability,
       wakeSessionWorkflow,
@@ -2712,7 +2712,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         resolvedModel
           ? (s: Settings, m: Array<Record<string, unknown>>) =>
               withCodex(() =>
-                summarizeForCompaction(s, m, {
+                summarizeContextForCompaction(s, m, {
                   client: resolvedModel.client,
                   api: resolvedModel.provider.api,
                   model: resolvedModel.configured.id,
@@ -2723,7 +2723,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 }),
               )
           : (s: Settings, m: Array<Record<string, unknown>>) =>
-              summarizeForCompaction(s, m, {
+              summarizeContextForCompaction(s, m, {
                 maxOutputTokens: SUMMARY_BUFFER_TOKENS,
                 onUsage: recordCompactionUsage,
                 ...(systemInstructions ? { systemInstructions } : {}),

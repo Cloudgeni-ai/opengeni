@@ -23,6 +23,7 @@ import {
   isCompactionSummary,
   isEphemeralInternalContext,
   isUserMessage,
+  jsonSerializedLength,
   renderCompactionPromptInputForChat,
   type CompactionItem,
 } from "../src/context-compaction";
@@ -62,6 +63,48 @@ function bigUser(tokens: number, char: string): CompactionItem {
 const WINDOW = 1_050_000;
 const RESERVED_OUTPUT = 128_000;
 const THRESHOLD = Math.floor(WINDOW * DEFAULT_COMPACTION_THRESHOLD_RATIO);
+
+describe("allocation-free JSON length", () => {
+  test("matches JSON.stringify for persisted history shapes and escapes", () => {
+    const values: unknown[] = [
+      null,
+      true,
+      false,
+      0,
+      -0,
+      1.25,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      "plain",
+      'quotes " slash \\ controls \b\f\n\r\t\u0000',
+      "unicode 🦄 café 中文",
+      "lone-high-\ud800",
+      "lone-low-\udfff",
+      [1, undefined, "three", null],
+      {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "x".repeat(4_096) }],
+        omitted: undefined,
+      },
+      { nested: { array: [{ ok: true }, { value: 42 }] } },
+      new Date("2026-07-18T00:00:00.000Z"),
+      new Number(7),
+    ];
+
+    for (const value of values) {
+      expect(jsonSerializedLength(value)).toBe(JSON.stringify(value)!.length);
+    }
+  });
+
+  test("rejects values JSON.stringify cannot represent at the root", () => {
+    expect(() => jsonSerializedLength(undefined)).toThrow();
+    expect(() => jsonSerializedLength(1n)).toThrow();
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic;
+    expect(() => jsonSerializedLength(cyclic)).toThrow();
+  });
+});
 
 describe("codex-parity constants and summary marker", () => {
   test("uses Codex's checkpoint prompt and summary prefix verbatim", () => {

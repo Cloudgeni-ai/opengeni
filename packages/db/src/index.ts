@@ -12476,6 +12476,77 @@ export async function getActiveSessionHistoryItems(
 }
 
 /**
+ * Memory-bounded variant of {@link getActiveSessionHistoryItems} for paths
+ * that must inspect an arbitrarily long active transcript (context compaction
+ * in particular). PostgreSQL/postgres.js otherwise materializes the complete
+ * JSONB result frame before returning any row, transiently holding the wire
+ * payload beside every decoded history item.
+ *
+ * Keyset pages preserve the exact position order and item values while
+ * bounding each driver result frame. The enclosing RLS transaction pins one
+ * connection for the complete read; callers still receive the same full
+ * logical array and therefore do not change compaction semantics.
+ */
+export async function getActiveSessionHistoryItemsPaged(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  pageSize = 16,
+): Promise<
+  Array<{
+    position: number;
+    item: Record<string, unknown>;
+    producerCodexCredentialId: string | null;
+  }>
+> {
+  if (!Number.isSafeInteger(pageSize) || pageSize < 1 || pageSize > 100) {
+    throw new Error("active session history page size must be an integer between 1 and 100");
+  }
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows: Array<{
+      position: number;
+      item: Record<string, unknown>;
+      producerCodexCredentialId: string | null;
+    }> = [];
+    let afterPosition: number | null = null;
+    while (true) {
+      const page: Array<{
+        position: number;
+        item: Record<string, unknown>;
+        producerCodexCredentialId: string | null;
+      }> = await scopedDb
+        .select({
+          position: schema.sessionHistoryItems.position,
+          item: schema.sessionHistoryItems.item,
+          producerCodexCredentialId: schema.sessionHistoryItems.producerCodexCredentialId,
+        })
+        .from(schema.sessionHistoryItems)
+        .where(
+          and(
+            eq(schema.sessionHistoryItems.workspaceId, workspaceId),
+            eq(schema.sessionHistoryItems.sessionId, sessionId),
+            eq(schema.sessionHistoryItems.active, true),
+            ...(afterPosition === null
+              ? []
+              : [gt(schema.sessionHistoryItems.position, afterPosition)]),
+          ),
+        )
+        .orderBy(schema.sessionHistoryItems.position)
+        .limit(pageSize);
+      rows.push(...page);
+      if (page.length < pageSize) {
+        return rows;
+      }
+      const nextPosition: number = page.at(-1)!.position;
+      if (afterPosition !== null && nextPosition <= afterPosition) {
+        throw new Error("active session history keyset did not advance");
+      }
+      afterPosition = nextPosition;
+    }
+  });
+}
+
+/**
  * Count of ACTIVE (live, model-facing) history rows for a session. This is the
  * length of the history the next turn is seeded from — the dual-write slice
  * index — which after a compaction is far smaller than the total persisted-row

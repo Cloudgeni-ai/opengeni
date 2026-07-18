@@ -106,13 +106,116 @@ export function isEphemeralInternalContext(item: unknown): boolean {
  * the pre-first-call signal and the retained user-message budget.
  */
 export function estimateItemTokens(item: CompactionItem): number {
-  let text: string;
+  let characters: number;
   try {
-    text = JSON.stringify(item);
+    characters = jsonSerializedLength(item);
   } catch {
-    text = String(item);
+    characters = String(item).length;
   }
-  return Math.ceil(text.length / 4);
+  return Math.ceil(characters / 4);
+}
+
+/**
+ * Count the UTF-16 code units JSON.stringify would emit without allocating the
+ * serialized payload. Conversation history comes from JSONB and is therefore
+ * plain JSON; supporting the normal toJSON hook keeps this helper honest for
+ * direct callers as well. The caller retains the historical String fallback
+ * for cycles and other non-JSON values.
+ */
+export function jsonSerializedLength(value: unknown): number {
+  const length = jsonValueLength(value, "", new Set<object>());
+  if (length === undefined) {
+    throw new TypeError("value has no JSON representation");
+  }
+  return length;
+}
+
+function jsonValueLength(input: unknown, key: string, ancestors: Set<object>): number | undefined {
+  let value = input;
+  if (value && typeof value === "object") {
+    const toJSON = (value as { toJSON?: unknown }).toJSON;
+    if (typeof toJSON === "function") {
+      value = toJSON.call(value, key);
+    } else if (value instanceof Number || value instanceof String || value instanceof Boolean) {
+      value = value.valueOf();
+    }
+  }
+
+  switch (typeof value) {
+    case "string":
+      return jsonStringLength(value);
+    case "number":
+      return Number.isFinite(value) ? String(Object.is(value, -0) ? 0 : value).length : 4;
+    case "boolean":
+      return value ? 4 : 5;
+    case "undefined":
+    case "function":
+    case "symbol":
+      return undefined;
+    case "bigint":
+      throw new TypeError("BigInt is not JSON serializable");
+    case "object": {
+      if (value === null) return 4;
+      if (ancestors.has(value)) {
+        throw new TypeError("Converting circular structure to JSON");
+      }
+      ancestors.add(value);
+      try {
+        if (Array.isArray(value)) {
+          let length = 2;
+          for (let index = 0; index < value.length; index += 1) {
+            if (index > 0) length += 1;
+            length += jsonValueLength(value[index], String(index), ancestors) ?? 4;
+          }
+          return length;
+        }
+
+        let length = 2;
+        let emitted = 0;
+        for (const property of Object.keys(value)) {
+          const childLength = jsonValueLength(
+            (value as Record<string, unknown>)[property],
+            property,
+            ancestors,
+          );
+          if (childLength === undefined) continue;
+          if (emitted > 0) length += 1;
+          length += jsonStringLength(property) + 1 + childLength;
+          emitted += 1;
+        }
+        return length;
+      } finally {
+        ancestors.delete(value);
+      }
+    }
+  }
+}
+
+function jsonStringLength(value: string): number {
+  let length = 2;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code === 0x22 || code === 0x5c || code === 0x08 || code === 0x0c) {
+      length += 2;
+    } else if (code === 0x0a || code === 0x0d || code === 0x09) {
+      length += 2;
+    } else if (code <= 0x1f) {
+      length += 6;
+    } else if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        length += 2;
+        index += 1;
+      } else {
+        length += 6;
+      }
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      length += 6;
+    } else {
+      length += 1;
+    }
+  }
+  return length;
 }
 
 export function estimateTokens(items: readonly CompactionItem[]): number {

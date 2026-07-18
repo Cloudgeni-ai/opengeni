@@ -1,6 +1,6 @@
 import {
   applyContextCompaction,
-  getActiveSessionHistoryItems,
+  getActiveSessionHistoryItemsPaged,
   recordSkippedContextCompaction,
   type Database,
 } from "@opengeni/db";
@@ -84,7 +84,10 @@ export async function maybeCompactContext(
     trigger?: "auto" | "operator" | "proactive" | "overflow";
   } = {},
 ): Promise<MaybeCompactResult> {
-  const active = await getActiveSessionHistoryItems(db, scope.workspaceId, scope.sessionId);
+  // The logical result remains the complete ordered active transcript. Read it
+  // in small keyset pages so the Postgres driver never stages a second,
+  // transcript-sized JSONB result frame beside the decoded history.
+  const active = await getActiveSessionHistoryItemsPaged(db, scope.workspaceId, scope.sessionId);
   if (active.length === 0) {
     let requestConsumed = false;
     if (options.clearRequestedCompaction) {

@@ -83,6 +83,7 @@ type MemorySample = ReturnType<typeof process.memoryUsage>;
 
 type WaveMeasurement = {
   wave: number;
+  compactionCalls: number;
   baseline: MemorySummary;
   plateau: MemorySummary;
   settled: MemorySummary;
@@ -363,6 +364,7 @@ async function runWave(input: {
     db,
     bus,
     runtime: createProductionAgentRuntime({ model }),
+    summarizeContextForCompaction: model.summarizeForCompaction,
     objectStorage: null,
   });
   const turnInputs = [];
@@ -482,6 +484,7 @@ async function runWave(input: {
     );
     return {
       wave,
+      compactionCalls: model.compactionCalls,
       baseline,
       plateau,
       settled,
@@ -576,6 +579,7 @@ function deterministicText(sessionIndex: number, itemIndex: number, bytes: numbe
 function createDensityModel(expected: number, config: DensityProfileConfig) {
   return new (class {
     readonly allStarted: Promise<void>;
+    compactionCalls = 0;
     private started = 0;
     private resolveAllStarted!: () => void;
     private readonly gate: Promise<void>;
@@ -604,6 +608,15 @@ function createDensityModel(expected: number, config: DensityProfileConfig) {
       yield* this.delegate.getStreamedResponse(request);
     }
 
+    readonly summarizeForCompaction = async (
+      _settings: Settings,
+      input: Array<Record<string, unknown>>,
+    ): Promise<string> => {
+      this.compactionCalls += 1;
+      await this.arrive({ input });
+      return "Deterministic bounded density-profile context summary.";
+    };
+
     release(): void {
       if (this.released) return;
       this.released = true;
@@ -614,7 +627,14 @@ function createDensityModel(expected: number, config: DensityProfileConfig) {
       this.delegate.requests.length = 0;
     }
 
-    private async arrive(request: Parameters<ScriptedModel["getStreamedResponse"]>[0]) {
+    private async arrive(request: { input?: unknown }) {
+      // A proactive compaction call is the first memory boundary for a
+      // pathological history. After that boundary is released, the same turn's
+      // main model call must pass through instead of counting as a second turn.
+      if (this.released) {
+        void request.input;
+        return;
+      }
       if (this.started >= expected) {
         throw new Error(`Density model received more than ${expected} model calls`);
       }
@@ -737,6 +757,7 @@ function buildProfileResult(input: {
       density,
       waves: waves.map((wave) => ({
         wave: wave.wave,
+        compactionCalls: wave.compactionCalls,
         memory: {
           baseline: wave.baseline,
           plateau: wave.plateau,
@@ -793,6 +814,7 @@ function buildProfileResult(input: {
         waitMs: config.syntheticWaitMs,
         drainSteps: config.syntheticDrainSteps,
         modelProvider: "ScriptedModel",
+        compactionSummarizer: "injected deterministic density gate",
         externalModelProviderCalled: false,
         azureInferenceCalled: false,
         realSandboxProviderCalled: false,
