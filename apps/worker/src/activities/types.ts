@@ -102,8 +102,7 @@ export type ReconcileCodexCapacityWaitInput = {
 
 export type ReconcileCodexCapacityWaitResult =
   | ({ action: "waiting" } & CodexCapacityWaitRef)
-  | { action: "resumed"; updateId: string }
-  | { action: "superseded" | "stale" };
+  | { action: "resumed" | "paused" | "superseded" | "stale" };
 
 export type ActivityDependencies = Partial<ActivityServices>;
 
@@ -204,7 +203,7 @@ export type IndexDocumentInput = {
 type ClaimedRunAgentTurnResult = {
   // "recovering": this attempt ended after durably preserving the same current
   // inference for a new attempt. Recovery is not prompt queue work.
-  status: "idle" | "requires_action" | "failed" | "cancelled" | "recovering";
+  status: "idle" | "requires_action" | "failed" | "cancelled" | "recovering" | "waiting_capacity";
   turnId: string;
   attemptId: string;
   // Provider backpressure pacing: when set on an idle or recovering result, the
@@ -216,9 +215,10 @@ type ClaimedRunAgentTurnResult = {
   // "continue now" (invariant 4: NO THRASH). Distinct from a normal continueDelayMs:0
   // which legitimately means "a rotation candidate is ready, re-dispatch immediately".
   idleUntilReset?: boolean;
-  // Durable native zero-pool wait. Unlike continueDelayMs, this reference is
-  // persisted in Postgres and reconstructed after workflow/worker restart.
-  // The workflow must not call maybeContinueGoal while this waiter is active.
+  // Durable native zero-pool wait for this same nonterminal logical turn.
+  // Unlike continueDelayMs, this reference is persisted in Postgres and
+  // reconstructed after workflow/worker restart. The workflow must not call
+  // maybeContinueGoal or manufacture queue/input work while it is active.
   capacityWait?: CodexCapacityWaitRef;
   // A maintenance execution could not run (for example, every Codex account
   // is unavailable). End this workflow run without consuming the durable

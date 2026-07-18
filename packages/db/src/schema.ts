@@ -1189,7 +1189,8 @@ export const sessionTurnAttempts = pgTable(
       "session_turn_attempts_outcome_check",
       sql`${table.outcome} is null or ${table.outcome} in (
         'completed', 'failed', 'cancelled', 'superseded', 'requires_action',
-        'interrupted_recoverable', 'lease_lost_recoverable', 'pre_cutover_closed'
+        'waiting_capacity', 'interrupted_recoverable', 'lease_lost_recoverable',
+        'pre_cutover_closed'
       )`,
     ),
     closedConsistent: check(
@@ -1635,9 +1636,11 @@ export const sessionGoals = pgTable(
 // allocator. Temporal signals are therefore repairable nudges rather than the
 // source of truth. No credential material or provider response is stored here.
 //
-// The session/goal/turn foreign keys are declared in migration 0053 so the
-// table keeps the same composite workspace-integrity posture as credential
-// leases. Control is evaluated independently at admission and never changes a
+// The session/turn foreign keys are declared in migration 0053. Goal identity
+// is an optional version fence, not waiter ownership: a goal-less human/API
+// turn can wait too, and deleting a goal must leave the waiter available for a
+// row-locked stale/superseded decision instead of cascading away the only wake
+// ledger. Control is evaluated independently at admission and never changes a
 // capacity waiter's identity. OPE-32 supplies policyHash when accepted-turn
 // pool routing lands.
 export const codexCapacityWaiters = pgTable(
@@ -1651,12 +1654,13 @@ export const codexCapacityWaiters = pgTable(
       .notNull()
       .references(() => workspaces.id, { onDelete: "cascade" }),
     sessionId: uuid("session_id").notNull(),
-    goalId: uuid("goal_id").notNull(),
+    goalId: uuid("goal_id"),
     blockedTurnId: uuid("blocked_turn_id").notNull(),
+    blockedTurnGeneration: integer("blocked_turn_generation").notNull(),
     workflowId: text("workflow_id").notNull(),
     generation: integer("generation").notNull().default(1),
     status: text("status").notNull().default("waiting"), // waiting | resumed | superseded
-    goalVersion: integer("goal_version").notNull(),
+    goalVersion: integer("goal_version"),
     policyHash: text("policy_hash"),
     earliestResetAt: timestamp("earliest_reset_at", { withTimezone: true }),
     nextCheckAt: timestamp("next_check_at", { withTimezone: true }).notNull(),

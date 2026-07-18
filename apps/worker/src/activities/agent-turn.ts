@@ -2258,43 +2258,42 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           const goal = await getSessionGoal(db, input.workspaceId, input.sessionId).catch(
             () => null,
           );
-          if (goal?.status === "active") {
-            const armed = await armCodexCapacityWait(db, {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-              turnId,
-              attemptId: input.attemptId,
-              workflowId: input.workflowId,
-              goalId: goal.id,
-              goalVersion: goal.version,
-              earliestResetAt: null,
-              resetKind: "bounded_refresh",
-              failurePayload: {
-                error: "All connected Codex subscriptions are disabled for new allocations.",
-                code: "codex_allocator_disabled",
-                detail: "waiting for a credential to be re-enabled, reconnected, or added",
+          const activeGoal = goal?.status === "active" ? goal : null;
+          const armed = await armCodexCapacityWait(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId,
+            attemptId: input.attemptId,
+            workflowId: input.workflowId,
+            goalId: activeGoal?.id ?? null,
+            goalVersion: activeGoal?.version ?? null,
+            earliestResetAt: null,
+            resetKind: "bounded_refresh",
+            failurePayload: {
+              error: "All connected Codex subscriptions are disabled for new allocations.",
+              code: "codex_allocator_disabled",
+              detail: "waiting for a credential to be re-enabled or reconnected",
+            },
+          });
+          if (armed.action === "waiting") {
+            await publishDurableSessionEvents(
+              bus,
+              input.workspaceId,
+              input.sessionId,
+              armed.events,
+            );
+            turnMetricOutcome = "recovering";
+            activityStatus = "waiting_capacity";
+            return claimedResult({
+              status: "waiting_capacity",
+              capacityWait: {
+                waiterId: armed.waiter.id,
+                generation: armed.waiter.generation,
+                nextCheckAt: armed.waiter.nextCheckAt.toISOString(),
+                wakeRevision: armed.waiter.wakeRevision,
               },
             });
-            if (armed.action === "waiting") {
-              await publishDurableSessionEvents(
-                bus,
-                input.workspaceId,
-                input.sessionId,
-                armed.events,
-              );
-              turnMetricOutcome = "failed";
-              activityStatus = "idle";
-              return claimedResult({
-                status: "idle",
-                capacityWait: {
-                  waiterId: armed.waiter.id,
-                  generation: armed.waiter.generation,
-                  nextCheckAt: armed.waiter.nextCheckAt.toISOString(),
-                  wakeRevision: armed.waiter.wakeRevision,
-                },
-              });
-            }
           }
           if (
             !(await settle!({
@@ -2373,44 +2372,42 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             "all connected Codex subscriptions are rate-limited",
             { allAccounts: true },
           );
-          if (goalActive && goal) {
-            const authoritativeResetAt = authoritativeCodexCapacityResetAt(
-              leased.accounts,
-              settings.codexRotationNearExhaustionPct,
-              new Date(),
+          const authoritativeResetAt = authoritativeCodexCapacityResetAt(
+            leased.accounts,
+            settings.codexRotationNearExhaustionPct,
+            new Date(),
+          );
+          const armed = await armCodexCapacityWait(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId,
+            attemptId: input.attemptId,
+            workflowId: input.workflowId,
+            goalId: goalActive && goal ? goal.id : null,
+            goalVersion: goalActive && goal ? goal.version : null,
+            earliestResetAt: authoritativeResetAt,
+            resetKind: authoritativeResetAt ? "authoritative" : "bounded_refresh",
+            failurePayload,
+          });
+          if (armed.action === "waiting") {
+            await publishDurableSessionEvents(
+              bus,
+              input.workspaceId,
+              input.sessionId,
+              armed.events,
             );
-            const armed = await armCodexCapacityWait(db, {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-              turnId,
-              attemptId: input.attemptId,
-              workflowId: input.workflowId,
-              goalId: goal.id,
-              goalVersion: goal.version,
-              earliestResetAt: authoritativeResetAt,
-              resetKind: authoritativeResetAt ? "authoritative" : "bounded_refresh",
-              failurePayload,
+            turnMetricOutcome = "recovering";
+            activityStatus = "waiting_capacity";
+            return claimedResult({
+              status: "waiting_capacity",
+              capacityWait: {
+                waiterId: armed.waiter.id,
+                generation: armed.waiter.generation,
+                nextCheckAt: armed.waiter.nextCheckAt.toISOString(),
+                wakeRevision: armed.waiter.wakeRevision,
+              },
             });
-            if (armed.action === "waiting") {
-              await publishDurableSessionEvents(
-                bus,
-                input.workspaceId,
-                input.sessionId,
-                armed.events,
-              );
-              turnMetricOutcome = "failed";
-              activityStatus = "idle";
-              return claimedResult({
-                status: "idle",
-                capacityWait: {
-                  waiterId: armed.waiter.id,
-                  generation: armed.waiter.generation,
-                  nextCheckAt: armed.waiter.nextCheckAt.toISOString(),
-                  wakeRevision: armed.waiter.wakeRevision,
-                },
-              });
-            }
           }
           if (
             !(await settle!({
@@ -5036,7 +5033,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // same-policy continuation path. When no alternate exists (all capped,
         // or a single non-rotating account), persist the native capacity wait
         // instead of an in-memory delay/user-message recovery.
-        if (goalActive && goal && rotationResumeMs === null) {
+        if (rotationResumeMs === null) {
           const providerResetAt =
             capacityAuthoritativeResetAt ??
             (usageLimit.resetsInSeconds !== null &&
@@ -5051,8 +5048,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             turnId,
             attemptId: input.attemptId,
             workflowId: input.workflowId,
-            goalId: goal.id,
-            goalVersion: goal.version,
+            goalId: goalActive && goal ? goal.id : null,
+            goalVersion: goalActive && goal ? goal.version : null,
             earliestResetAt: providerResetAt,
             resetKind: providerResetAt ? "authoritative" : "bounded_refresh",
             failurePayload,
@@ -5073,11 +5070,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               input.sessionId,
               armed.events,
             );
-            turnMetricOutcome = "failed";
-            activityStatus = "idle";
+            turnMetricOutcome = "recovering";
+            activityStatus = "waiting_capacity";
             activityError = error;
             return claimedResult({
-              status: "idle",
+              status: "waiting_capacity",
               capacityWait: {
                 waiterId: armed.waiter.id,
                 generation: armed.waiter.generation,

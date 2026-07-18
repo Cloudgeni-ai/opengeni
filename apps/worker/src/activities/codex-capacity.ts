@@ -205,7 +205,7 @@ export function createCodexCapacityActivities(services: () => Promise<ActivitySe
       }
     }
     if (result.action === "resumed") {
-      return { action: "resumed", updateId: result.update.id };
+      return { action: "resumed" };
     }
     if (result.action === "waiting") {
       return {
