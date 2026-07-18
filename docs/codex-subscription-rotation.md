@@ -95,6 +95,48 @@ or quota history. An exact same-turn live lease or frozen approval/preemption
 checkpoint may continue on that healthy row; reconnect and token refresh never
 flip allocator eligibility. OPE-24 owns toggle OCC/audit and product controls.
 
+## Quota overview, allocator control, and reset-credit redemption
+
+OPE-24 adds three deliberately separate product seams:
+
+- **Overview reads** fetch `/wham/usage` and the detailed reset-credit inventory
+  independently for each workspace credential, with at most four provider calls in
+  flight. Every result names its provider/cache source, timestamp, staleness and
+  typed detail authority (`detailed`, `count_only`, `capped`, `unsupported`,
+  `unknown`, or `error`). `available_count` is cached as summary metadata;
+  detailed opaque ids are never cached as activation authority. Missing/capped
+  detail, unknown enums, expired/non-available rows, and summary disagreement are
+  view-only.
+- **Allocator control** writes only `allocator_enabled` plus its independent
+  `allocator_version`/actor/timestamp. Same desired state is idempotent even with
+  a stale expected version; a conflicting stale transition returns the current
+  version. One real change and one audit row share a transaction. Credential
+  token `version`, health, connection, cooldown, quota history, active leases,
+  and frozen turns remain independent; reconnect, refresh and redemption never
+  auto-enable the row.
+- **Reset redemption** has no SDK method, MCP/Toolspace tool, worker activity,
+  scheduled/background hook, or allocator/rotation call. Its REST mutation
+  requires managed product mode, an actual Better Auth cookie with no
+  `Authorization` header, workspace admin, the exact `user:<id>` who most
+  recently connected the credential through a direct cookie session, exact
+  same-origin `Origin`, `Sec-Fetch-Site: same-origin`, and a five-minute
+  session-bound HMAC confirmation. Legacy/nonhuman-connected rows are view-only.
+
+The durable redemption attempt separates `processing` (fresh exact actionable
+detail still owed) from `provider_started` (the consume POST may have begun).
+The browser supplies one stable logical UUID; the server creates one upstream
+idempotency key. A crash before `provider_started` re-fetches detail. Any
+timeout/network/invalid response after `provider_started` preserves that state
+and retries with the same upstream key even if inventory has since changed;
+`alreadyRedeemed` resolves the ambiguity as success. Concurrent claims return
+in-progress. Exact `reset`, `nothingToReset`, `noCredit`, or `alreadyRedeemed`
+outcomes are persisted and audited once, followed by an overview refetch.
+Only `reset`/`alreadyRedeemed` clear provider-exhaustion cooldown, and no outcome
+changes allocator eligibility. The one-credit fence remains permanent only for
+those successful outcomes; `nothingToReset`/`noCredit` permit a later, newly
+confirmed logical attempt. Provider bodies, bearer tokens, opaque credit ids and
+upstream keys never enter logs/events/audit metadata.
+
 The unique same-turn lease is idempotent. A one-minute heartbeat renews its
 five-minute TTL throughout long tool/model runs; normal completion releases it
 idempotently. The worker advances a conservative monotonic ownership deadline

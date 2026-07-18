@@ -177,6 +177,66 @@ export async function signOutManaged(): Promise<unknown> {
   return await authRequest<unknown>("/sign-out", { method: "POST" });
 }
 
+export type CodexResetRedemptionPreparation = {
+  attemptId: string;
+  confirmationToken: string;
+  expiresAt: string;
+  resumable: boolean;
+};
+
+export type CodexResetRedemptionResult = {
+  status: "completed";
+  attemptId: string;
+  outcome: "reset" | "nothingToReset" | "noCredit" | "alreadyRedeemed";
+  overview: unknown;
+};
+
+/**
+ * Browser-only reset-credit preparation. This intentionally bypasses the SDK
+ * and all configured bearer/deployment headers: only the Better Auth cookie is
+ * allowed to authenticate the irreversible route.
+ */
+export async function prepareCodexResetRedemption(
+  workspaceId: string,
+  accountId: string,
+  input: { attemptId: string; creditId: string },
+): Promise<CodexResetRedemptionPreparation> {
+  return await managedBrowserMutation<CodexResetRedemptionPreparation>(
+    `/v1/workspaces/${encodeURIComponent(workspaceId)}/codex/accounts/${encodeURIComponent(accountId)}/reset-credits/prepare`,
+    input,
+  );
+}
+
+/** The sole browser mutation that can redeem one provider reset credit. */
+export async function redeemCodexResetCredit(
+  workspaceId: string,
+  accountId: string,
+  input: {
+    attemptId: string;
+    creditId: string;
+    confirmationToken: string;
+    confirmation: "REDEEM_USAGE_LIMIT_RESET";
+  },
+): Promise<CodexResetRedemptionResult> {
+  return await managedBrowserMutation<CodexResetRedemptionResult>(
+    `/v1/workspaces/${encodeURIComponent(workspaceId)}/codex/accounts/${encodeURIComponent(accountId)}/reset-credits/redeem`,
+    input,
+  );
+}
+
+async function managedBrowserMutation<T>(path: string, body: unknown): Promise<T> {
+  const response = await fetch(`${apiBaseUrl}${path}`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    throw new ApiError(response.status, await response.text());
+  }
+  return (await response.json()) as T;
+}
+
 // Completes a password reset. `token` comes from the emailed link
 // (`<PUBLIC_BASE_URL>/reset-password?token=…`); Better Auth mounts this at
 // `/v1/auth/reset-password` and expects `{ newPassword, token }`.

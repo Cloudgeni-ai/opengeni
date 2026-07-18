@@ -319,7 +319,13 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
         <MemorySettingsSection workspaceId={workspaceId} canManage={canRename} />
 
         {/* Codex (ChatGPT) subscriptions (multi-account) */}
-        <CodexSubscriptionsCard workspaceId={workspaceId} canManage={canDeleteWorkspace} />
+        {/* Its live provider overview is intentionally once-per-mount. Remount at
+            the tenant boundary so stale async state can never cross workspaces. */}
+        <CodexSubscriptionsCard
+          key={workspaceId}
+          workspaceId={workspaceId}
+          canManage={canDeleteWorkspace}
+        />
 
         {/* API keys (moved from the old account page) */}
         <section className="grid gap-3 rounded-lg border border-border bg-surface p-4">

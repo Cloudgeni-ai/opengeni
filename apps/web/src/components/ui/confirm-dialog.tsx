@@ -28,6 +28,7 @@ export function ConfirmDialog({
   children,
   confirmLabel,
   cancelLabel = "Cancel",
+  cancelAutoFocus = false,
   destructive = true,
   onConfirm,
 }: {
@@ -42,6 +43,8 @@ export function ConfirmDialog({
   /** Verb + object: "Delete environment", "Revoke key". */
   confirmLabel: string;
   cancelLabel?: string;
+  /** Opt in when the safe/default action must receive initial focus. */
+  cancelAutoFocus?: boolean;
   destructive?: boolean;
   /**
    * May be async; the dialog shows pending state while it runs. The dialog
@@ -79,6 +82,8 @@ export function ConfirmDialog({
           <Button
             type="button"
             variant="ghost"
+            autoFocus={cancelAutoFocus}
+            className="min-h-11"
             disabled={pending}
             onClick={() => onOpenChange(false)}
           >
@@ -87,6 +92,7 @@ export function ConfirmDialog({
           <Button
             type="button"
             variant={destructive ? "destructive" : "default"}
+            className="min-h-11"
             disabled={pending}
             onClick={() => void confirm()}
           >

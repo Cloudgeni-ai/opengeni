@@ -1254,6 +1254,8 @@ export type CodexUsagePayload = {
   weekly: CodexUsageWindow | null;
   limitReached: boolean;
   fetchedAt: string;
+  /** Authoritative count-only summary from /wham/usage; never synthesized rows. */
+  rateLimitResetCredits?: { availableCount: number; credits: null } | null;
   /** Present only on an auth/refresh failure path. */
   reason?: "needs_relogin";
   additionalLimits?: Array<{
@@ -1290,6 +1292,62 @@ export type CodexAccount = {
   // P3 rotation cooldown: ISO timestamp until which this account is cooling-down
   // (rotated-off after a usage cap). null/absent ⇒ not cooling.
   exhaustedUntil?: string | null;
+  /** Controls only NEW automatic allocations. */
+  allocatorEnabled: boolean;
+  /** Independent OCC sequence; credential/token `version` is never exposed. */
+  allocatorVersion: number;
+  allocatorUpdatedAt?: string | null;
+  /** Cached authoritative summary count, never detailed redemption authority. */
+  resetCreditAvailableCount?: number | null;
+  resetCreditsCheckedAt?: string | null;
+};
+
+export type CodexResetCredit = {
+  id: string;
+  resetType: "codexRateLimits" | "unknown";
+  status: "available" | "redeeming" | "redeemed" | "unknown";
+  /** Unix seconds from the provider contract. */
+  grantedAt: number;
+  /** Unix seconds, or null when the provider reports no expiry. */
+  expiresAt: number | null;
+  title: string | null;
+  description: string | null;
+  /** True only for fresh, complete, owning-human provider detail. */
+  actionable: boolean;
+};
+
+export type CodexAccountOverview = {
+  accountId: string;
+  usage: {
+    source: "provider" | "cache" | "none";
+    fetchedAt: string | null;
+    stale: boolean;
+    error: string | null;
+    value: CodexUsagePayload | null;
+  };
+  resetCredits: {
+    source: "provider" | "cache" | "none";
+    fetchedAt: string | null;
+    stale: boolean;
+    error: string | null;
+    detailState: "detailed" | "count_only" | "capped" | "unsupported" | "unknown" | "error";
+    detailsComplete: boolean;
+    availableCount: number | null;
+    credits: CodexResetCredit[];
+  };
+  canRedeem: boolean;
+  /** Owning managed-cookie human may replay durable completion without a healthy provider token. */
+  canResumeRedemption: boolean;
+};
+
+/** Independently settled live overview keyed by workspace credential id. */
+export type CodexOverviewResponse = { accounts: Record<string, CodexAccountOverview> };
+
+export type CodexAllocatorUpdate = {
+  allocatorEnabled: boolean;
+  allocatorVersion: number;
+  allocatorUpdatedAt: string | null;
+  changed: boolean;
 };
 
 /** Per-workspace Codex rotation/active settings. P1: rotation inert, only activeCredentialId loads. */

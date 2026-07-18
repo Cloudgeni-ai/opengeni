@@ -26,6 +26,10 @@ import {
   CodexReloginRequired,
   type CodexTokenSnapshot,
   type CodexUsagePayload,
+  type CodexFetch,
+  type CodexRateLimitResetCreditsDetails,
+  type ResetCreditFetchFailureReason,
+  fetchCodexRateLimitResetCredits,
   fetchCodexUsage,
   normalizeCodexUsage,
   refreshCodexToken,
@@ -219,6 +223,7 @@ function errorUsagePayload(reason?: "needs_relogin"): CodexUsagePayload {
     weekly: null,
     limitReached: false,
     fetchedAt: new Date().toISOString(),
+    rateLimitResetCredits: null,
     ...(reason ? { reason } : {}),
   };
 }
@@ -242,6 +247,7 @@ export async function fetchCodexUsageForAccount(
   settings: Settings,
   workspaceId: string,
   credentialId: string,
+  fetchImpl: CodexFetch = fetch,
 ): Promise<CodexUsagePayload> {
   const resolver = buildCodexTokenResolver(db, settings, workspaceId, credentialId);
   let token: CodexTokenSnapshot;
@@ -253,12 +259,15 @@ export async function fetchCodexUsageForAccount(
 
   let normalized: CodexUsagePayload;
   try {
-    const usage = await fetchCodexUsage({
-      accessToken: token.accessToken,
-      chatgptAccountId: token.chatgptAccountId,
-      isFedramp: token.isFedramp,
-      clientVersion: CODEX_CLIENT_VERSION,
-    });
+    const usage = await fetchCodexUsage(
+      {
+        accessToken: token.accessToken,
+        chatgptAccountId: token.chatgptAccountId,
+        isFedramp: token.isFedramp,
+        clientVersion: CODEX_CLIENT_VERSION,
+      },
+      fetchImpl,
+    );
     normalized = normalizeCodexUsage(usage.status, usage.payload);
   } catch {
     // A network throw on the /wham/usage read must surface as an error PAYLOAD
@@ -266,7 +275,7 @@ export async function fetchCodexUsageForAccount(
     return errorUsagePayload();
   }
 
-  if (normalized.fiveHour || normalized.weekly) {
+  if (normalized.fiveHour || normalized.weekly || normalized.rateLimitResetCredits) {
     // Cache-write is best-effort: a disconnect under us (false) or a transient
     // write error must NOT sink the freshly-read usage we are about to return.
     await recordCodexAccountUsage(db, workspaceId, credentialId, {
@@ -275,8 +284,57 @@ export async function fetchCodexUsageForAccount(
       secondaryUsedPercent: normalized.weekly?.percent ?? null,
       secondaryResetAt: normalized.weekly?.resetAt ? new Date(normalized.weekly.resetAt) : null,
       checkedAt: new Date(),
+      ...(normalized.rateLimitResetCredits
+        ? {
+            resetCreditAvailableCount: normalized.rateLimitResetCredits.availableCount,
+            resetCreditsCheckedAt: new Date(),
+          }
+        : {}),
     }).catch(() => undefined);
   }
 
   return normalized;
+}
+
+export type CodexRateLimitResetCreditsAccountResult =
+  | { ok: true; status: number; details: CodexRateLimitResetCreditsDetails }
+  | {
+      ok: false;
+      status: number;
+      reason: ResetCreditFetchFailureReason | "needs_relogin";
+    };
+
+/**
+ * Fresh detailed reset-credit inventory for one exact workspace credential.
+ * The token is refreshed through the same resolver as usage and never escapes
+ * this server-side function. Detailed rows are returned to the route only and
+ * are never persisted as redemption authority.
+ */
+export async function fetchCodexRateLimitResetCreditsForAccount(
+  db: Database,
+  settings: Settings,
+  workspaceId: string,
+  credentialId: string,
+  fetchImpl: CodexFetch = fetch,
+): Promise<CodexRateLimitResetCreditsAccountResult> {
+  const resolver = buildCodexTokenResolver(db, settings, workspaceId, credentialId);
+  let token: CodexTokenSnapshot;
+  try {
+    token = await resolver.getToken();
+  } catch (error) {
+    return {
+      ok: false,
+      status: 0,
+      reason: error instanceof CodexReloginRequired ? "needs_relogin" : "network_error",
+    };
+  }
+  return await fetchCodexRateLimitResetCredits(
+    {
+      accessToken: token.accessToken,
+      chatgptAccountId: token.chatgptAccountId,
+      isFedramp: token.isFedramp,
+      clientVersion: CODEX_CLIENT_VERSION,
+    },
+    fetchImpl,
+  );
 }

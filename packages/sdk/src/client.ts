@@ -16,6 +16,8 @@ import type {
   CodexAccount,
   CodexAccountsResponse,
   CodexRotationSettings,
+  CodexOverviewResponse,
+  CodexAllocatorUpdate,
   CodexConnectionStatus,
   CodexConnectPoll,
   CodexConnectStart,
@@ -2219,6 +2221,14 @@ export class OpenGeniClient {
     );
   }
 
+  /** Live independently-settled quota + reset-credit overview for every account. */
+  async codexOverview(workspaceId: string): Promise<CodexOverviewResponse> {
+    return await this.requestJson<CodexOverviewResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/codex/overview`,
+    );
+  }
+
   /** Disconnect ALL accounts (legacy workspace-wide). Prefer `disconnectCodexAccount`. */
   async codexDisconnect(workspaceId: string): Promise<{ disconnected: boolean }> {
     return await this.requestJson<{ disconnected: boolean }>(
@@ -2258,6 +2268,19 @@ export class OpenGeniClient {
       "PATCH",
       `/v1/workspaces/${workspaceId}/codex/settings`,
       patch,
+    );
+  }
+
+  /** Toggle only NEW automatic allocations under independent allocator OCC. */
+  async setCodexAccountAllocator(
+    workspaceId: string,
+    accountId: string,
+    input: { enabled: boolean; expectedVersion: number },
+  ): Promise<CodexAllocatorUpdate> {
+    return await this.requestJson<CodexAllocatorUpdate>(
+      "PATCH",
+      `/v1/workspaces/${workspaceId}/codex/accounts/${accountId}/allocator`,
+      input,
     );
   }
 

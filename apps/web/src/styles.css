@@ -72,6 +72,10 @@
   --color-accent-foreground: var(--color-fg);
 
   --color-destructive: var(--og-color-danger);
+  /* Danger is tuned as a readable foreground token. Filled destructive
+     controls need a darker opaque surface to preserve AA white-text contrast
+     in both themes. */
+  --color-destructive-filled: color-mix(in oklch, var(--og-color-danger) 70%, black);
   --color-destructive-foreground: var(--og-color-accent-fg);
 
   --color-input: var(--color-surface-2);
@@ -102,8 +106,13 @@
 /* ---------------------------------------------------------------------------
    Base
    --------------------------------------------------------------------------- */
-:root {
+:root,
+[data-og-theme="dark"] {
   color-scheme: dark;
+}
+
+[data-og-theme="light"] {
+  color-scheme: light;
 }
 
 html,

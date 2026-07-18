@@ -288,6 +288,19 @@ export const codexSubscriptionCredentials = pgTable(
     // refresh, encrypted material, and already-frozen/in-flight turns are
     // intentionally independent. OPE-24 owns toggle OCC/audit and product UI.
     allocatorEnabled: boolean("allocator_enabled").notNull().default(true),
+    // Independent OCC/audit sequence for the allocator toggle. Token refresh
+    // continues to own `version`; quota/cache writes own neither counter.
+    allocatorVersion: integer("allocator_version").notNull().default(1),
+    allocatorUpdatedBySubjectId: text("allocator_updated_by_subject_id"),
+    allocatorUpdatedAt: timestamp("allocator_updated_at", { withTimezone: true }),
+    // Authoritative count-only summary cached from /wham/usage. Detailed rows
+    // are never persisted as redemption authority; every first POST preflights
+    // the provider's fresh detail endpoint.
+    resetCreditAvailableCount: integer("reset_credit_available_count"),
+    resetCreditsCheckedAt: timestamp("reset_credits_checked_at", { withTimezone: true }),
+    // Set only by a direct Better Auth cookie connection/reconnection. Legacy,
+    // configured, delegated, API-key, and agent-created rows remain view-only.
+    connectedBySubjectId: text("connected_by_subject_id"),
     selectionCount: integer("selection_count").notNull().default(0),
     lastSelectedAt: timestamp("last_selected_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -308,6 +321,55 @@ export const codexSubscriptionCredentials = pgTable(
       table.workspaceId,
       table.id,
     ),
+  }),
+);
+
+// One durable logical human redemption. `processing` means the fresh provider
+// detail preflight is still owed; `provider_started` means the POST may have
+// reached upstream and every retry must reuse upstreamIdempotencyKey without
+// requiring the credit to remain visible as available.
+export const codexResetRedemptionAttempts = pgTable(
+  "codex_reset_redemption_attempts",
+  {
+    id: uuid("id").primaryKey(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    credentialId: uuid("credential_id").notNull(),
+    subjectId: text("subject_id").notNull(),
+    browserSessionHash: text("browser_session_hash").notNull(),
+    creditId: text("credit_id").notNull(),
+    upstreamIdempotencyKey: uuid("upstream_idempotency_key").notNull().defaultRandom(),
+    status: text("status").notNull().default("processing"),
+    outcome: text("outcome"),
+    claimHolderId: uuid("claim_holder_id"),
+    claimExpiresAt: timestamp("claim_expires_at", { withTimezone: true }),
+    confirmationExpiresAt: timestamp("confirmation_expires_at", { withTimezone: true }).notNull(),
+    providerStartedAt: timestamp("provider_started_at", { withTimezone: true }),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    lastFailureKind: text("last_failure_kind"),
+    retryCount: integer("retry_count").notNull().default(0),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    upstreamKey: uniqueIndex("codex_reset_redemption_upstream_key_idx").on(
+      table.upstreamIdempotencyKey,
+    ),
+    credentialCredit: uniqueIndex("codex_reset_redemption_credential_credit_idx")
+      .on(table.workspaceId, table.credentialId, table.creditId)
+      .where(
+        sql`${table.status} <> 'completed' or ${table.outcome} in ('reset', 'alreadyRedeemed')`,
+      ),
+    workspaceCredential: index("codex_reset_redemption_workspace_credential_idx").on(
+      table.workspaceId,
+      table.credentialId,
+      table.createdAt,
+    ),
+    claimExpiry: index("codex_reset_redemption_claim_expiry_idx").on(table.claimExpiresAt),
   }),
 );
 
