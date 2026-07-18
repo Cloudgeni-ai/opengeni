@@ -28,10 +28,17 @@ The complete command surface is:
 ```text
 opengeni-agent [--api-url <origin>] run [run options]
 opengeni-agent [--api-url <origin>] enroll [enroll options]
+opengeni-agent status [--timeout-seconds <1-60>]
 opengeni-agent service install|uninstall|start|stop|status|logs
-opengeni-agent update [--check] [--base-url <origin>] [--channel <channel>]
+opengeni-agent update|upgrade [--check] [--base-url <origin>] [--channel <channel>]
 opengeni-agent uninstall [--purge [--local-only]]
 ```
+
+Top-level `status` reads the local enrollment and performs a bounded,
+authenticated control-plane round trip with its stored bearer. It exits non-zero
+when the machine is not enrolled, its credentials are unreadable/rejected, or the
+control plane is unreachable. This is deliberately different from `service
+status`, which reports only whether the opt-in systemd/launchd service is active.
 
 The service verbs are real on Linux (systemd) and macOS (a per-user LaunchAgent).
 On Windows every service verb, including `install --print`, returns one explicit
@@ -40,16 +47,17 @@ foreground `opengeni-agent run`. A direct `uninstall` attempts service cleanup a
 can purge enrollment credentials/state, but retains the running executable.
 `install/uninstall.sh` removes the file after that process exits.
 
-There are currently **no CLI compatibility aliases**. Existing persisted-state
-compatibility (for example the legacy `nats_credentials` JSON field) is unrelated
-to the executable command surface and remains unchanged.
+`upgrade` is the one visible compatibility alias: it executes the exact same
+signed-manifest path as `update`. Existing persisted-state compatibility (for
+example the legacy `nats_credentials` JSON field) is unrelated to the executable
+command surface and remains unchanged.
 
 ## Crates
 
 | Crate | Role |
 |---|---|
 | `opengeni-agent-proto` | Generated wire-protocol types (Rust side of the codegen). |
-| `opengeni-agent` | The binary: `run`/`enroll`/`service`/`update`/`uninstall`; dial, RPC dispatch, supervisor. |
+| `opengeni-agent` | The binary: `run`/`enroll`/`status`/`service`/`update` (`upgrade`)/`uninstall`; dial, RPC dispatch, supervisor. |
 | `opengeni-agent-platform` | Per-OS `Platform` + systemd/launchd service definitions; explicit Windows SCM unsupported contract. |
 | `opengeni-agent-stream` | Relay-edge stream transport + pty/framebuffer pumps. |
 | `opengeni-agent-update` | Self-update: signed-manifest discovery, minisign+sha256 verify, atomic replace, rollback. |
@@ -77,7 +85,8 @@ The agent reaches a user's machine via one trusted line and keeps itself current
   embedded in both install scripts + `opengeni-agent-update` (one key, one verify
   routine for install AND self-update). The **private** key is the GitHub Actions
   secret `OPENGENI_AGENT_MINISIGN_KEY` — never in the repo.
-- **Self-update** — `opengeni-agent update [--check]` fetches the signed stable
+- **Self-update** — `opengeni-agent update [--check]` (or the visible `upgrade`
+  alias) fetches the signed stable
   manifest at `<base>/agent/stable/manifest.json` and fully downloads/verifies the
   candidate with minisign + sha256 + version monotonicity. On Linux/Windows, apply
   atomically self-replaces (including Windows rename-self-aside) and retains the

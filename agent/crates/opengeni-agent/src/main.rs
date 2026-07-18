@@ -12,6 +12,7 @@
 //! * [`enrollment`] — the device-flow client; **the single module owning the
 //!   enrollment HTTP wire shape** (the M5 reconciliation seam).
 //! * [`config`] — the config dir + persisted credentials (`0600`) + resume token.
+//! * [`status`] — local enrollment + authenticated control-plane reachability.
 //! * [`dispatch`] — the `ControlRequest` → [`Platform`](opengeni_agent_platform::Platform)
 //!   → `ControlResponse` table; a handler error is a typed `AgentError`, never a
 //!   panic.
@@ -50,6 +51,7 @@ mod metrics;
 mod ops;
 mod overrides;
 mod service;
+mod status;
 mod supervisor;
 mod uninstall;
 mod update;
@@ -132,6 +134,7 @@ async fn dispatch_command(cli: Cli) -> anyhow_lite::Result {
                 .await
                 .map(|_| ())
         }
+        Command::Status(args) => status::run(&args).await.map_err(string_err),
         Command::Service(args) => service::run(&args).map_err(string_err),
         Command::Update(args) => {
             // The updater is synchronous (download → verify → swap); run it on a

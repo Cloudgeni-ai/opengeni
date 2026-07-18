@@ -190,7 +190,8 @@ Recording and Accessibility TCC grants, and whole-machine enrollment consent mus
 all be demonstrated on a real consenting Mac. Cross-compilation and CI cannot
 substitute for that human gate.
 
-`opengeni-agent update --check` may discover and verify a macOS candidate. Apply
+`opengeni-agent update --check` (also exposed as `opengeni-agent upgrade
+--check`) may discover and verify a macOS candidate. Apply
 does not mutate `.app/Contents/MacOS/opengeni-agent`: it fails before any temp or
 backup write and directs the user to rerun `<base>/install.sh` with
 `OPENGENI_INSTALL_REPLACE_APP=1`, replacing the complete verified app bundle. A

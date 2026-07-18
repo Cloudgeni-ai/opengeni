@@ -365,6 +365,28 @@ describe("M10 GET /machines — dashboard list + states + metrics", () => {
     expect(group!.sandboxId).toBe(session.sandboxGroupId);
     // Both the group box + the enrolled machine are present.
     expect(sessBody.machines.length).toBe(2);
+
+    // Revocation keeps the durable enrollment/sandbox rows for audit and later
+    // re-enrollment, but removes the machine from both dashboard projections.
+    expect(
+      await revokeEnrollment(db, {
+        accountId,
+        workspaceId,
+        enrollmentId: enrollment.id,
+      }),
+    ).toEqual({ revoked: true });
+    const afterWorkspace = (await (
+      await app.request(`/v1/workspaces/${workspaceId}/machines`, {
+        headers: { authorization: auth },
+      })
+    ).json()) as { machines: unknown[] };
+    expect(afterWorkspace.machines).toEqual([]);
+    const afterSession = (await (
+      await app.request(`/v1/workspaces/${workspaceId}/machines?sessionId=${session.id}`, {
+        headers: { authorization: auth },
+      })
+    ).json()) as { machines: Array<{ isSessionGroup: boolean }> };
+    expect(afterSession.machines).toEqual([expect.objectContaining({ isSessionGroup: true })]);
   }, 90_000);
 
   test("clean going-offline round-trip: online → GoingOffline reads OFFLINE immediately (probe still responds) → heartbeat reads ONLINE again", async () => {
@@ -455,7 +477,7 @@ describe("M10 GET /machines — dashboard list + states + metrics", () => {
     }
   }, 120_000);
 
-  test("probes enrolled machines in parallel while preserving sandbox order", async () => {
+  test("probes active enrolled machines in parallel while preserving sandbox order", async () => {
     if (!available) return;
     const { accountId, workspaceId } = await freshWorkspace();
     const enrollments = [];
@@ -485,7 +507,9 @@ describe("M10 GET /machines — dashboard list + states + metrics", () => {
       enrollmentId: enrollments[3]!.id,
     });
 
-    const expectedOrder = (await listSandboxes(db, workspaceId)).map((sandbox) => sandbox.id);
+    const expectedOrder = (await listSandboxes(db, workspaceId))
+      .filter((sandbox) => sandbox.enrollmentId !== enrollments[3]!.id)
+      .map((sandbox) => sandbox.id);
     const bus = new SlowProbeBus(150);
     const app = appFor(bus);
     const auth = `Bearer ${await bearer(accountId, workspaceId, ["enrollments:read"])}`;

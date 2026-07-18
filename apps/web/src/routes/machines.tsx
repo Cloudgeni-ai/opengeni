@@ -12,6 +12,7 @@ import {
   connectionStatusForState,
   useMachines,
   type DeviceFlowPhase,
+  type MachineView,
   type MetricSample,
   type MetricWindow,
 } from "@opengeni/react/machines";
@@ -33,6 +34,7 @@ import { apiBaseUrl } from "@/api";
 import { PageHeader } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { Notice } from "@/components/ui/notice";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { deviceVerificationUri, installOneLiner } from "@/lib/deployment";
 import {
   Dialog,
@@ -42,6 +44,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { useAppContext } from "@/context";
+import { hasWorkspacePermission } from "@/lib/permissions";
 
 /** Copy to the clipboard and toast the outcome — clipboard access can be denied
  *  (permissions, insecure context), so failures surface instead of vanishing. */
@@ -57,8 +60,16 @@ async function copyToClipboard(text: string, successMessage: string) {
 }
 
 export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
+  const context = useAppContext();
   const machines = useMachines({ pollIntervalMs: 5000 });
   const [enrollOpen, setEnrollOpen] = useState(false);
+  const [revokeTarget, setRevokeTarget] = useState<MachineView | null>(null);
+  const revokeButtonRef = useRef<HTMLButtonElement>(null);
+  const canManageEnrollments = hasWorkspacePermission(
+    context.accessContext,
+    workspaceId,
+    "enrollments:manage",
+  );
 
   // The machine whose telemetry detail is open (by sandboxId), and its history.
   const [detailId, setDetailId] = useState<string | null>(null);
@@ -207,6 +218,16 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
             onWindowChange={setDetailWindow}
             loadingSeries={detailLoading}
             onBack={() => setDetailId(null)}
+            {...(canManageEnrollments &&
+            machines.canRevoke &&
+            !selectedMachine.isSessionGroup &&
+            selectedMachine.enrollmentId
+              ? {
+                  onRevoke: () => setRevokeTarget(selectedMachine),
+                  revokeButtonRef,
+                  revoking: machines.revokingEnrollmentId === selectedMachine.enrollmentId,
+                }
+              : {})}
             now={now}
           />
         ) : (
@@ -244,6 +265,31 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
           {enrollOpen ? <EnrollDialogBody workspaceId={workspaceId} origin={origin} /> : null}
         </DialogContent>
       </Dialog>
+
+      <ConfirmDialog
+        open={revokeTarget !== null}
+        onOpenChange={(next) => setRevokeTarget(next ? revokeTarget : null)}
+        title={`Unenroll machine “${revokeTarget?.name ?? ""}”?`}
+        description="Its credential stops working immediately and sessions can no longer attach to it. Run opengeni-agent enroll --force on the machine to enroll it again."
+        confirmLabel="Unenroll machine"
+        returnFocusRef={revokeButtonRef}
+        onConfirm={async () => {
+          const enrollmentId = revokeTarget?.enrollmentId;
+          if (!enrollmentId) return false;
+          const revoked = await machines.revoke(enrollmentId);
+          if (!revoked) {
+            toast.error("Could not unenroll the machine", {
+              description: "The enrollment is unchanged. Try again.",
+            });
+            return false;
+          }
+          setDetailId(null);
+          toast.success("Machine unenrolled", {
+            description: "Its stored credential can no longer connect.",
+          });
+          return true;
+        }}
+      />
     </div>
   );
 }

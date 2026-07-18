@@ -7,6 +7,8 @@
 //!   this runs and offline when it stops.
 //! * [`Command::Enroll`] — the device-flow enrollment only (print a user-code +
 //!   URL, poll to completion, persist credentials `0600`), then exit.
+//! * [`Command::Status`] — report local enrollment identity and prove that its
+//!   stored bearer can reach the control plane; fail non-zero when it cannot.
 //! * [`Command::Service`] — the opt-in always-on daemon path (systemd-user /
 //!   LaunchAgent). Windows service actions are explicitly unsupported until the
 //!   binary is a real SCM host; foreground `run` remains supported everywhere.
@@ -47,6 +49,8 @@ pub enum Command {
     Run(RunArgs),
     /// Run the device-flow enrollment only and persist credentials, then exit.
     Enroll(EnrollArgs),
+    /// Report local enrollment and authenticated control-plane reachability.
+    Status(StatusArgs),
     /// Manage the OPT-IN always-on service (install/uninstall/start/stop/status/logs).
     ///
     /// The default, supported run model is FOREGROUND `opengeni-agent run`. A
@@ -55,6 +59,7 @@ pub enum Command {
     /// an SCM service host; use foreground `opengeni-agent run` there.
     Service(ServiceArgs),
     /// Check for and apply a signed self-update for this channel + target.
+    #[command(visible_alias = "upgrade")]
     Update(UpdateArgs),
     /// Attempt service cleanup. With `--purge`, remove local credentials after a
     /// confirmed revoke (or explicit `--local-only` override). The running
@@ -131,6 +136,14 @@ pub struct EnrollArgs {
     /// Do not prompt or print a device-flow code; fail if a token is not provided.
     #[arg(long)]
     pub non_interactive: bool,
+}
+
+/// Arguments for the top-level `status` command.
+#[derive(Debug, clap::Args)]
+pub struct StatusArgs {
+    /// Maximum seconds to wait for an authenticated control-plane round trip.
+    #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u64).range(1..=60))]
+    pub timeout_seconds: u64,
 }
 
 /// Arguments for the `service` subcommand (the opt-in always-on daemon).
@@ -277,7 +290,7 @@ mod tests {
                 .get_subcommands()
                 .map(clap::Command::get_name)
                 .collect::<Vec<_>>(),
-            ["run", "enroll", "service", "update", "uninstall"]
+            ["run", "enroll", "status", "service", "update", "uninstall"]
         );
         assert_eq!(AGENT_CARGO_TOML.matches("[[bin]]").count(), 1);
         assert!(AGENT_CARGO_TOML.contains("name = \"opengeni-agent\""));
@@ -416,6 +429,29 @@ mod tests {
     }
 
     #[test]
+    fn upgrade_is_a_visible_alias_for_the_signed_update_path() {
+        let cli = Cli::parse_from(["opengeni-agent", "upgrade", "--check"]);
+        match cli.command {
+            Some(Command::Update(args)) => assert!(args.check),
+            other => panic!("expected update through upgrade alias, got {other:?}"),
+        }
+        let help = Cli::command().render_long_help().to_string();
+        assert!(help.contains("upgrade"));
+    }
+
+    #[test]
+    fn status_parses_bounded_timeout() {
+        let cli = Cli::parse_from(["opengeni-agent", "status", "--timeout-seconds", "9"]);
+        match cli.command {
+            Some(Command::Status(args)) => assert_eq!(args.timeout_seconds, 9),
+            other => panic!("expected status, got {other:?}"),
+        }
+        assert!(
+            Cli::try_parse_from(["opengeni-agent", "status", "--timeout-seconds", "0"]).is_err()
+        );
+    }
+
+    #[test]
     fn uninstall_parses_purge() {
         let cli = Cli::parse_from(["opengeni-agent", "uninstall", "--purge"]);
         match cli.command {
@@ -439,6 +475,7 @@ mod tests {
         let mut root = Cli::command();
         let help = root.render_long_help().to_string();
         assert!(help.contains("uninstall"));
+        assert!(help.contains("status"));
 
         let service = root
             .find_subcommand_mut("service")

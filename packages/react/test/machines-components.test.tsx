@@ -10,6 +10,7 @@ import { registerDom, renderComponent, flush } from "./render-hook";
 import { MachineCard } from "../src/components/machine-card";
 import { MachinesDashboard } from "../src/components/machines-dashboard";
 import { MachineMetrics } from "../src/components/machine-metrics";
+import { MachineDetail } from "../src/components/machines/machine-detail";
 import { ConnectionStatusPill, MachineStatusPill } from "../src/components/machine-status-pill";
 import { MachineDockBar, SharedMachineDisclosure } from "../src/components/machine-dock-bar";
 import { EnrollmentConsent } from "../src/components/enrollment-consent";
@@ -253,6 +254,40 @@ describe("MachinesDashboard", () => {
     expect(r.container.querySelector("[data-machines-error]")).not.toBeNull();
     expect(r.container.textContent).toContain("nats down");
     await r.unmount();
+  });
+});
+
+describe("MachineDetail — enrollment lifecycle", () => {
+  test("renders an accessible unenroll action only when the host wires it", async () => {
+    let requested = false;
+    const m = machine({ sandboxId: "sh-revoke", enrollmentId: "enr-revoke", state: "online" });
+    const withAction = await renderComponent(
+      <MachineDetail
+        machine={m}
+        series={[]}
+        window="1h"
+        onWindowChange={() => {}}
+        onRevoke={() => {
+          requested = true;
+        }}
+      />,
+    );
+    await flush();
+    const button = withAction.container.querySelector(
+      "[data-revoke-machine]",
+    ) as HTMLButtonElement | null;
+    expect(button?.textContent).toContain("Unenroll");
+    button!.click();
+    await flush();
+    expect(requested).toBe(true);
+    await withAction.unmount();
+
+    const readOnly = await renderComponent(
+      <MachineDetail machine={m} series={[]} window="1h" onWindowChange={() => {}} />,
+    );
+    await flush();
+    expect(readOnly.container.querySelector("[data-revoke-machine]")).toBeNull();
+    await readOnly.unmount();
   });
 });
 

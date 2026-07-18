@@ -157,6 +157,60 @@ describe("useMachines", () => {
     await hook.unmount();
   });
 
+  test("revoke permanently unenrolls through the SDK surface and refreshes", async () => {
+    const revoked: string[] = [];
+    let current = response;
+    const machinesClient: MachinesClientLike = {
+      listMachines: async () => current,
+      revokeEnrollment: async (_workspaceId, enrollmentId) => {
+        revoked.push(enrollmentId);
+        current = {
+          ...response,
+          machines: response.machines.filter((item) => item.enrollmentId !== enrollmentId),
+        };
+        return { revoked: false }; // lost-response retry: already terminal is success
+      },
+    };
+    const hook = await renderHook(
+      () => useMachines({ client, workspaceId: WORKSPACE_ID, machinesClient }),
+      undefined,
+    );
+    await flush();
+    expect(hook.result.current.canRevoke).toBe(true);
+    const ok = await actRun(() => hook.result.current.revoke("enr-sh-1"));
+    await flush();
+    expect(ok).toBe(true);
+    expect(revoked).toEqual(["enr-sh-1"]);
+    expect(hook.result.current.machines.some((item) => item.enrollmentId === "enr-sh-1")).toBe(
+      false,
+    );
+    await hook.unmount();
+  });
+
+  test("a revoke failure resets its spinner without reporting attach progress", async () => {
+    const machinesClient: MachinesClientLike = {
+      listMachines: async () => response,
+      revokeEnrollment: async () => {
+        throw new Error("revoke unavailable");
+      },
+    };
+    const hook = await renderHook(
+      () => useMachines({ client, workspaceId: WORKSPACE_ID, machinesClient }),
+      undefined,
+    );
+    await flush();
+
+    const ok = await actRun(() => hook.result.current.revoke("enr-sh-1"));
+    await flush();
+
+    expect(ok).toBe(false);
+    expect(hook.result.current.revokingEnrollmentId).toBeNull();
+    expect(hook.result.current.attaching).toBe(false);
+    expect(hook.result.current.attachingSandboxId).toBeNull();
+    expect(hook.result.current.mutationError?.message).toBe("revoke unavailable");
+    await hook.unmount();
+  });
+
   test("a load error is surfaced", async () => {
     const machinesClient: MachinesClientLike = {
       listMachines: async () => {
