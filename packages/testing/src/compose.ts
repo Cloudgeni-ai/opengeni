@@ -3,7 +3,8 @@ import { Connection } from "@temporalio/client";
 import { connect as connectNats } from "nats";
 import postgres from "postgres";
 import { writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { makeTempDir, removeTempDir, runCommand, waitFor } from "./process";
 
@@ -155,6 +156,13 @@ async function stopTestServices(
   if (pinCleanupFailure) {
     diagnostics.push(pinCleanupFailure);
   }
+  const sandboxCleanup = await removeAttachedSandboxContainers(projectName);
+  if (sandboxCleanup.note) {
+    diagnostics.push(sandboxCleanup.note);
+  }
+  if (sandboxCleanup.failure) {
+    diagnostics.push(sandboxCleanup.failure);
+  }
   for (const stopTimeoutSeconds of ["5", "0"] as const) {
     const result = await runCommand(
       [
@@ -180,16 +188,140 @@ async function stopTestServices(
     }
 
     const residue = await testServiceResidue(projectName);
-    if (residue.length === 0) {
+    if (residue.length === 0 && !sandboxCleanup.failure) {
       await removeTempDir(cwd);
       return;
     }
-    diagnostics.push(`residue after down --timeout ${stopTimeoutSeconds}:\n${residue.join("\n")}`);
+    if (residue.length > 0) {
+      diagnostics.push(
+        `residue after down --timeout ${stopTimeoutSeconds}:\n${residue.join("\n")}`,
+      );
+    }
   }
 
   throw new Error(
     `failed to remove owned test-service project ${projectName}; compose file retained at ${composeFile}\n${diagnostics.join("\n")}`,
   );
+}
+
+type AttachedSandboxCleanup = {
+  note?: string;
+  failure?: string;
+};
+
+/**
+ * Ownership-mode Docker sandboxes intentionally remain warm after the worker
+ * exits. E2E stacks attach those boxes to their one-off Compose network so the
+ * box can reach MinIO; leaving one attached makes `docker compose down` retain
+ * the network and leaks the box, its generated volume(s), and host workspace.
+ *
+ * Only remove containers carrying the upstream SDK's explicit ownership label.
+ * The Compose network name is random per test run, and every removed filesystem
+ * path/volume is additionally constrained to the SDK's generated name contract.
+ */
+async function removeAttachedSandboxContainers(
+  projectName: string,
+): Promise<AttachedSandboxCleanup> {
+  const network = `${projectName}_default`;
+  const list = await runCommand(
+    [
+      "docker",
+      "ps",
+      "-aq",
+      "--filter",
+      `network=${network}`,
+      "--filter",
+      "label=openai-agents-sandbox=true",
+    ],
+    { timeoutMs: 5_000 },
+  );
+  if (list.timedOut || list.exitCode !== 0) {
+    return {
+      failure: `attached sandbox inspection failed: exit=${list.exitCode} timedOut=${String(list.timedOut)}\n${list.stdout}\n${list.stderr}`,
+    };
+  }
+
+  const containerIds = list.stdout.trim().split("\n").filter(Boolean);
+  if (containerIds.length === 0) {
+    return {};
+  }
+
+  const workspaceDirs = new Set<string>();
+  const volumeNames = new Set<string>();
+  for (const containerId of containerIds) {
+    const inspect = await runCommand(
+      ["docker", "inspect", "--format", "{{json .Mounts}}", containerId],
+      { timeoutMs: 5_000 },
+    );
+    if (inspect.timedOut || inspect.exitCode !== 0) {
+      return {
+        failure: `attached sandbox mount inspection failed for ${containerId}: exit=${inspect.exitCode} timedOut=${String(inspect.timedOut)}\n${inspect.stdout}\n${inspect.stderr}`,
+      };
+    }
+
+    let mounts: unknown;
+    try {
+      mounts = JSON.parse(inspect.stdout.trim());
+    } catch (error) {
+      return {
+        failure: `attached sandbox mount inspection returned invalid JSON for ${containerId}: ${String(error)}`,
+      };
+    }
+    if (!Array.isArray(mounts)) {
+      return {
+        failure: `attached sandbox mount inspection returned a non-array for ${containerId}`,
+      };
+    }
+    for (const mount of mounts) {
+      if (!mount || typeof mount !== "object") continue;
+      const record = mount as { Type?: unknown; Source?: unknown; Name?: unknown };
+      if (
+        record.Type === "bind" &&
+        typeof record.Source === "string" &&
+        dirname(record.Source) === tmpdir() &&
+        record.Source.startsWith(join(tmpdir(), "openai-agents-docker-sandbox-"))
+      ) {
+        workspaceDirs.add(record.Source);
+      }
+      if (
+        record.Type === "volume" &&
+        typeof record.Name === "string" &&
+        record.Name.startsWith("openai-agents-sandbox-")
+      ) {
+        volumeNames.add(record.Name);
+      }
+    }
+  }
+
+  const removeContainers = await runCommand(["docker", "rm", "-f", "-v", ...containerIds], {
+    timeoutMs: 30_000,
+  });
+  if (removeContainers.timedOut || removeContainers.exitCode !== 0) {
+    return {
+      failure: `attached sandbox removal failed: exit=${removeContainers.exitCode} timedOut=${String(removeContainers.timedOut)}\n${removeContainers.stdout}\n${removeContainers.stderr}`,
+    };
+  }
+
+  if (volumeNames.size > 0) {
+    const removeVolumes = await runCommand(["docker", "volume", "rm", "-f", ...volumeNames], {
+      timeoutMs: 15_000,
+    });
+    if (removeVolumes.timedOut || removeVolumes.exitCode !== 0) {
+      return {
+        failure: `attached sandbox volume removal failed: exit=${removeVolumes.exitCode} timedOut=${String(removeVolumes.timedOut)}\n${removeVolumes.stdout}\n${removeVolumes.stderr}`,
+      };
+    }
+  }
+
+  try {
+    await Promise.all([...workspaceDirs].map((path) => removeTempDir(path)));
+  } catch (error) {
+    return { failure: `attached sandbox workspace removal failed: ${String(error)}` };
+  }
+
+  return {
+    note: `removed ${containerIds.length} attached OpenAI sandbox container(s), ${volumeNames.size} generated volume(s), and ${workspaceDirs.size} generated workspace(s) from ${network}`,
+  };
 }
 
 async function testServiceResidue(projectName: string): Promise<string[]> {
