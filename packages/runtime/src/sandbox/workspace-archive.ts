@@ -65,7 +65,6 @@ type WorkspaceSession = {
 
 const SHA256 = /^[a-f0-9]{64}$/;
 const REVISION = /^wa1:[0-9]{13}:[a-f0-9]{64}$/;
-const FINGERPRINT_MARKER = "OPENGENI_WORKSPACE_FINGERPRINT_V1";
 
 function sha256(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
