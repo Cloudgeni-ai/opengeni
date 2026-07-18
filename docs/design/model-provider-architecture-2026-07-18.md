@@ -11,9 +11,10 @@
 - **Baseline:** `a906a06881036b7d005ab33940f5ec6c91938482`
 - **Issue:** Linear OPE-12
 - **Owner:** OPE-12 Model Provider Architecture
-- **Review:** Independent Sol/xhigh review of `7a86fb08909045e79207193a8f97d88afaa021f5`
-  requested changes; this revision addresses those findings and still requires
-  exact-head approval before implementation
+- **Review:** Independent Sol/xhigh reviews of `7a86fb08909045e79207193a8f97d88afaa021f5`
+  and `0efab9bff651f33907f7b29e127989cce835cbfa` requested changes; this
+  revision addresses those findings and still requires exact-head approval
+  before implementation
 
 ## Context
 
@@ -193,8 +194,8 @@ of these normalized fields:
 
 - schema version, canonical product id, provider id, deployment upstream model
   id, and wire API;
-- provider adapter kind/API, normalized base URL, and non-secret static
-  query/header names and values that alter requests;
+- provider adapter kind/API, normalized base URL, and normalized static
+  query/header entries as classified below;
 - credential-source class/mechanism and billing attribution, but never a
   resolved key/token, key environment-variable value, concrete Codex credential
   id, account label, authorization header, or credential-bearing query value;
@@ -205,24 +206,47 @@ of these normalized fields:
   efforts; and
 - the complete normalized pricing schedule.
 
-The digest input omits `definitionVersion` itself. Credential-bearing header
-names are matched case-insensitively (`authorization`, `proxy-authorization`,
-`api-key`, and `x-api-key`); credential-bearing query names are
-`api_key`, `key`, `access_token`, and `token`. Their names participate but their
-values do not. Built-in key/token fields and registry `apiKey`/`apiKeyEnv` are
-credential material regardless of name.
+The digest input omits `definitionVersion` itself. Registry
+`defaultHeaders`/`defaultQuery` retain their existing string-map syntax and
+request behavior. Additive `publicDefaultHeaderNames` and
+`publicDefaultQueryNames` arrays classify only the named map entries as
+non-secret executable configuration. Every unlisted entry is secret by default,
+including every entry in legacy registry JSON. Classification is explicit and
+fail-closed:
 
-Registry credential fields (`apiKey`, the value resolved through `apiKeyEnv`,
-and recognized authorization/query credential material) are excluded so a key
-rotation inside the same accepted credential class does not rebind a model.
-Registry default headers or query parameters that are not credential material
-are executable configuration and therefore participate. Labels, aliases,
-health/availability observations, policy results, and secret values are
-excluded: aliases have completed their job before persistence, and mutable
-observations are rechecked independently. Any change to a participating value
-changes the digest and makes an already-present snapshot fail closed. Tests must
-pin canonical serialization and prove each participating field changes the
-digest while excluded labels, aliases, health, and credential rotations do not.
+- HTTP header names are validated as ASCII field names and lowercased before
+  classification or hashing. Two raw names that collide after normalization are
+  a boot error. Query names remain exact and case-sensitive. A public-name entry
+  that is duplicated or absent from its corresponding map is a boot error; there
+  is no collision precedence.
+- Names containing, case-insensitively, a credential-like token delimited by
+  `-`, `_`, or `.` (`apikey`, `auth`, `authorization`, `bearer`, `credential`,
+  `cookie`, `key`, `password`, `secret`, `session`, `signature`, or `token`)
+  cannot be declared public. Built-in key/token fields, registry
+  `apiKey`/`apiKeyEnv`, and SDK-managed authorization fields are secret regardless
+  of name and cannot be overridden by a default map.
+- The canonical digest entry always includes the normalized name and its
+  `public` or `secret` classification. A public entry also includes its value; a
+  secret entry never does. Secret values are passed to the provider only at
+  client construction and are never copied, hashed, logged, projected, or
+  persisted by this contract.
+- Registry base URLs are parsed with the WHATWG URL algorithm and serialized
+  canonically after validation. Userinfo, query, and fragment components are
+  rejected at boot; query parameters belong in `defaultQuery`, where their
+  sensitivity is explicit. This prevents a credential-bearing URL from entering
+  either the definition digest or secret-safe evidence.
+
+This preserves parsing and routing for legacy request maps while conservatively
+treating their values as secret. An operator may opt a truly non-secret static
+value into definition binding with the additive public-name arrays; changing
+that public value changes the digest. Labels, aliases, health/availability
+observations, policy results, and secret values are excluded: aliases have
+completed their job before persistence, and mutable observations are rechecked
+independently. Any change to a participating value changes the digest and makes
+an already-present snapshot fail closed. Tests must pin canonical serialization,
+header normalization and collision rejection, URL rejection, and public/secret
+classification, and prove each participating field changes the digest while
+excluded labels, aliases, health, and same-class secret rotations do not.
 
 `allowedModels` and the existing top-level `ClientModel` fields remain additive
 compatibility surfaces. New clients consume the normalized fields; old clients
@@ -558,8 +582,10 @@ integration, or realtime lifecycle belongs in this slice.
 
 The implementation must prove:
 
-- old registry JSON parses unchanged and old product ids route to the same
-  upstream model/provider;
+- legacy registry JSON and request maps continue parsing without annotations and
+  valid configurations keep the same product/provider routing; a schema-compatible
+  base URL with userinfo, query, or fragment fails startup validation with an
+  instruction to move query entries into `defaultQuery`;
 - old `allowedModels` and `ClientModel` clients remain compatible;
 - aliases canonicalize exactly once and collision/cross-provider ambiguity fails
   at boot;
@@ -573,8 +599,9 @@ The implementation must prove:
   preference, and goal/child semantics match this ADR;
 - approval resume, capacity wait, and worker recovery retain the same V1 policy;
 - a new turn re-resolves the current definition;
-- every normative definition input changes `definitionVersion`, while label,
-  alias, health, and same-class credential rotation do not;
+- every normative definition input and explicitly public request-metadata value
+  changes `definitionVersion`, while label, alias, health, and same-class secret
+  rotation do not;
 - malformed/mismatched present policy fails before any provider call;
 - unknown, unavailable, and OPE-35-blocked models never silently fall through to
   the built-in provider;
