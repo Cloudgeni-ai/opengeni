@@ -13,6 +13,7 @@ export default defineConfig({
       input: {
         main: resolve(__dirname, "index.html"),
         timeline: resolve(__dirname, "timeline.html"),
+        fleetPolicy: resolve(__dirname, "fleet-policy.html"),
         machines: resolve(__dirname, "machines.html"),
         workbench: resolve(__dirname, "workbench.html"),
         workbenchDock: resolve(__dirname, "workbench-dock.html"),

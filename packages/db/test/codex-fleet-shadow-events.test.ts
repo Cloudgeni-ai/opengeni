@@ -5,10 +5,7 @@ import {
   type CodexFleetDecisionInputV1,
   type CodexFleetReplayRecordV1,
 } from "@opengeni/contracts";
-import {
-  acquireSharedTestDatabase,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import { eq } from "drizzle-orm";
 import {
   appendSessionEventsForTurnAttempt,
@@ -126,10 +123,7 @@ function fleetEventPayload(observedAtMs: number) {
   } as const;
 }
 
-async function createWorkspace(
-  db: Database,
-  label: string,
-): Promise<WorkspaceGrant> {
+async function createWorkspace(db: Database, label: string): Promise<WorkspaceGrant> {
   const suffix = crypto.randomUUID();
   const access = await bootstrapWorkspace(db, {
     accountExternalSource: "test",
@@ -159,27 +153,23 @@ async function createRunningTurn(db: Database, grant: WorkspaceGrant) {
     model: "scripted-model",
     sandboxBackend: "none",
   });
-  await withWorkspaceSubjectRls(
-    db,
-    grant.workspaceId,
-    grant.subjectId,
-    (scoped) =>
-      scoped.transaction((tx) =>
-        submitHumanPromptInTransaction(tx as typeof scoped, {
-          accountId: grant.accountId,
-          workspaceId: grant.workspaceId,
-          sessionId: session.id,
-          subjectId: grant.subjectId,
-          actor: { type: "human", subjectId: grant.subjectId },
-          operationKey: crypto.randomUUID(),
-          delivery: "send",
-          text: "record a fleet shadow decision",
-          resources: [],
-          tools: [],
-          reasoningEffortFallback: "low",
-          source: "user",
-        }),
-      ),
+  await withWorkspaceSubjectRls(db, grant.workspaceId, grant.subjectId, (scoped) =>
+    scoped.transaction((tx) =>
+      submitHumanPromptInTransaction(tx as typeof scoped, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        subjectId: grant.subjectId,
+        actor: { type: "human", subjectId: grant.subjectId },
+        operationKey: crypto.randomUUID(),
+        delivery: "send",
+        text: "record a fleet shadow decision",
+        resources: [],
+        tools: [],
+        reasoningEffortFallback: "low",
+        source: "user",
+      }),
+    ),
   );
   const attemptId = crypto.randomUUID();
   const claimed = await claimSessionWorkForAttempt(db, grant.workspaceId, {
@@ -190,8 +180,7 @@ async function createRunningTurn(db: Database, grant: WorkspaceGrant) {
     dispatchId: `dispatch-${crypto.randomUUID()}`,
     trigger: { kind: "next" },
   });
-  if (claimed.action !== "claimed")
-    throw new Error("fleet test turn was not claimed");
+  if (claimed.action !== "claimed") throw new Error("fleet test turn was not claimed");
   return { session, turn: claimed.turn, attemptId };
 }
 
@@ -204,9 +193,7 @@ beforeAll(async () => {
       );
     }
     available = false;
-    console.warn(
-      "[codex-fleet-shadow-events] PostgreSQL unavailable, skipping",
-    );
+    console.warn("[codex-fleet-shadow-events] PostgreSQL unavailable, skipping");
     return;
   }
   replicaA = createDb(shared.appUrl, { max: 1 });
@@ -224,10 +211,7 @@ describe("OPE-32 durable Codex fleet shadow decisions", () => {
     if (!available) return;
     const grant = await createWorkspace(replicaA.db, "fleet-a");
     const isolatedGrant = await createWorkspace(replicaB.db, "fleet-b");
-    const { session, turn, attemptId } = await createRunningTurn(
-      replicaA.db,
-      grant,
-    );
+    const { session, turn, attemptId } = await createRunningTurn(replicaA.db, grant);
 
     const [left, right] = await Promise.all([
       appendSessionEventsForTurnAttempt(
@@ -262,9 +246,7 @@ describe("OPE-32 durable Codex fleet shadow decisions", () => {
 
     expect(left.accepted).toBe(true);
     expect(right.accepted).toBe(true);
-    const appended = [...left.events, ...right.events].sort(
-      (a, b) => a.sequence - b.sequence,
-    );
+    const appended = [...left.events, ...right.events].sort((a, b) => a.sequence - b.sequence);
     expect(appended).toHaveLength(2);
     expect(new Set(appended.map((event) => event.id)).size).toBe(2);
     expect(appended[1]!.sequence).toBe(appended[0]!.sequence + 1);
@@ -280,9 +262,9 @@ describe("OPE-32 durable Codex fleet shadow decisions", () => {
       });
     }
 
-    const durable = (
-      await listSessionEvents(replicaB.db, grant.workspaceId, session.id)
-    ).filter((event) => event.type === "codex.fleet.decision");
+    const durable = (await listSessionEvents(replicaB.db, grant.workspaceId, session.id)).filter(
+      (event) => event.type === "codex.fleet.decision",
+    );
     expect(durable.map((event) => event.id).sort()).toEqual(
       appended.map((event) => event.id).sort(),
     );
@@ -303,18 +285,14 @@ describe("OPE-32 durable Codex fleet shadow decisions", () => {
       }),
     ).toMatchObject({ action: "recovering" });
     const nextAttemptId = crypto.randomUUID();
-    const nextClaim = await claimSessionWorkForAttempt(
-      replicaB.db,
-      grant.workspaceId,
-      {
-        sessionId: session.id,
-        workflowId: `session-${session.id}`,
-        workflowRunId: crypto.randomUUID(),
-        attemptId: nextAttemptId,
-        dispatchId: `dispatch-${crypto.randomUUID()}`,
-        trigger: { kind: "next" },
-      },
-    );
+    const nextClaim = await claimSessionWorkForAttempt(replicaB.db, grant.workspaceId, {
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: nextAttemptId,
+      dispatchId: `dispatch-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
     expect(nextClaim).toMatchObject({
       action: "claimed",
       turn: { id: turn.id, executionGeneration: turn.executionGeneration + 1 },
@@ -350,16 +328,10 @@ describe("OPE-32 durable Codex fleet shadow decisions", () => {
         },
       ],
     });
-    const afterRecovery = await listSessionEvents(
-      replicaB.db,
-      grant.workspaceId,
-      session.id,
-    );
+    const afterRecovery = await listSessionEvents(replicaB.db, grant.workspaceId, session.id);
     expect(
       afterRecovery.filter(
-        (event) =>
-          event.type === "codex.fleet.decision" &&
-          event.turnAssociation === "current",
+        (event) => event.type === "codex.fleet.decision" && event.turnAssociation === "current",
       ),
     ).toHaveLength(2);
 
@@ -377,14 +349,10 @@ describe("OPE-32 durable Codex fleet shadow decisions", () => {
 
   test("uses a non-bypass app role and FORCE RLS on the durable event table", async () => {
     if (!available || !shared) return;
-    const [role] = await shared.admin<
-      { rolsuper: boolean; rolbypassrls: boolean }[]
-    >`
+    const [role] = await shared.admin<{ rolsuper: boolean; rolbypassrls: boolean }[]>`
       select rolsuper, rolbypassrls from pg_roles where rolname = 'opengeni_app'`;
     expect(role).toEqual({ rolsuper: false, rolbypassrls: false });
-    const [table] = await shared.admin<
-      { relrowsecurity: boolean; relforcerowsecurity: boolean }[]
-    >`
+    const [table] = await shared.admin<{ relrowsecurity: boolean; relforcerowsecurity: boolean }[]>`
       select relrowsecurity, relforcerowsecurity
       from pg_class
       where oid = 'session_events'::regclass`;
