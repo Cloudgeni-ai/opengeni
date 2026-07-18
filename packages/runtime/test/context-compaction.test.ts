@@ -17,6 +17,7 @@ import {
   clampCompactionThresholdRatio,
   decideCompaction,
   estimateCompleteModelInput,
+  estimateSerializedValueTokens,
   findCompactionNeededError,
   compactionReplacementFingerprint,
   latestCompactionReplacementFingerprint,
@@ -24,8 +25,10 @@ import {
   isEphemeralInternalContext,
   isUserMessage,
   jsonSerializedLength,
+  jsonSerializedUtf8ByteLength,
   renderCompactionPromptInputForChat,
   type CompactionItem,
+  utf8ByteLength,
 } from "../src/context-compaction";
 import { extractResponseOutputText, summarizeForCompaction } from "../src/index";
 import { sanitizeHistoryItemsForModel } from "../src/history-sanitizer";
@@ -94,15 +97,53 @@ describe("allocation-free JSON length", () => {
 
     for (const value of values) {
       expect(jsonSerializedLength(value)).toBe(JSON.stringify(value)!.length);
+      expect(jsonSerializedUtf8ByteLength(value)).toBe(
+        Buffer.byteLength(JSON.stringify(value)!, "utf8"),
+      );
+    }
+  });
+
+  test("matches raw UTF-8 instruction and serialized descriptor token estimates", () => {
+    const rawStrings = [
+      "plain",
+      'quotes " slash \\ controls \b\f\n\r\t\u0000',
+      "unicode 🦄 café 中文",
+      "lone-high-\ud800",
+      "lone-low-\udfff",
+    ];
+    for (const value of rawStrings) {
+      expect(utf8ByteLength(value)).toBe(Buffer.byteLength(value, "utf8"));
+      expect(estimateSerializedValueTokens(value)).toBe(
+        Math.ceil(Buffer.byteLength(value, "utf8") / 4),
+      );
+    }
+
+    const descriptors: unknown[] = [
+      { name: "shell", description: "ASCII" },
+      { name: "搜索🦄", inputSchema: { type: "object", description: "café 中文" } },
+      { escaped: 'quotes " slash \\ controls \u0000', lone: "\ud800" },
+      [undefined, "three", null],
+      new Date("2026-07-18T00:00:00.000Z"),
+    ];
+    for (const value of descriptors) {
+      expect(estimateSerializedValueTokens(value)).toBe(
+        Math.ceil(Buffer.byteLength(JSON.stringify(value)!, "utf8") / 4),
+      );
     }
   });
 
   test("rejects values JSON.stringify cannot represent at the root", () => {
     expect(() => jsonSerializedLength(undefined)).toThrow();
+    expect(() => jsonSerializedUtf8ByteLength(undefined)).toThrow();
     expect(() => jsonSerializedLength(1n)).toThrow();
+    expect(() => jsonSerializedUtf8ByteLength(1n)).toThrow();
     const cyclic: Record<string, unknown> = {};
     cyclic.self = cyclic;
     expect(() => jsonSerializedLength(cyclic)).toThrow();
+    expect(() => jsonSerializedUtf8ByteLength(cyclic)).toThrow();
+    expect(estimateSerializedValueTokens(undefined)).toBe(0);
+    expect(estimateSerializedValueTokens(1n)).toBe(1);
+    expect(estimateSerializedValueTokens(cyclic)).toBe(4);
   });
 });
 

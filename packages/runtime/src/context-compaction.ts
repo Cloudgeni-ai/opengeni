@@ -130,6 +130,15 @@ export function jsonSerializedLength(value: unknown): number {
   return length;
 }
 
+/** Count the UTF-8 bytes JSON.stringify would emit without materializing it. */
+export function jsonSerializedUtf8ByteLength(value: unknown): number {
+  const length = jsonValueUtf8ByteLength(value, "", new Set<object>());
+  if (length === undefined) {
+    throw new TypeError("value has no JSON representation");
+  }
+  return length;
+}
+
 function jsonValueLength(input: unknown, key: string, ancestors: Set<object>): number | undefined {
   let value = input;
   if (value && typeof value === "object") {
@@ -218,6 +227,134 @@ function jsonStringLength(value: string): number {
   return length;
 }
 
+function jsonValueUtf8ByteLength(
+  input: unknown,
+  key: string,
+  ancestors: Set<object>,
+): number | undefined {
+  let value = input;
+  if (value && typeof value === "object") {
+    const toJSON = (value as { toJSON?: unknown }).toJSON;
+    if (typeof toJSON === "function") {
+      value = toJSON.call(value, key);
+    } else if (value instanceof Number || value instanceof String || value instanceof Boolean) {
+      value = value.valueOf();
+    }
+  }
+
+  switch (typeof value) {
+    case "string":
+      return jsonStringUtf8ByteLength(value);
+    case "number":
+      return Number.isFinite(value) ? String(Object.is(value, -0) ? 0 : value).length : 4;
+    case "boolean":
+      return value ? 4 : 5;
+    case "undefined":
+    case "function":
+    case "symbol":
+      return undefined;
+    case "bigint":
+      throw new TypeError("BigInt is not JSON serializable");
+    case "object": {
+      if (value === null) return 4;
+      if (ancestors.has(value)) {
+        throw new TypeError("Converting circular structure to JSON");
+      }
+      ancestors.add(value);
+      try {
+        if (Array.isArray(value)) {
+          let length = 2;
+          for (let index = 0; index < value.length; index += 1) {
+            if (index > 0) length += 1;
+            length += jsonValueUtf8ByteLength(value[index], String(index), ancestors) ?? 4;
+          }
+          return length;
+        }
+
+        let length = 2;
+        let emitted = 0;
+        for (const property of Object.keys(value)) {
+          const childLength = jsonValueUtf8ByteLength(
+            (value as Record<string, unknown>)[property],
+            property,
+            ancestors,
+          );
+          if (childLength === undefined) continue;
+          if (emitted > 0) length += 1;
+          length += jsonStringUtf8ByteLength(property) + 1 + childLength;
+          emitted += 1;
+        }
+        return length;
+      } finally {
+        ancestors.delete(value);
+      }
+    }
+  }
+}
+
+/** Count raw UTF-8 bytes using the same lone-surrogate replacement as Buffer. */
+export function utf8ByteLength(value: string): number {
+  let length = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code <= 0x7f) {
+      length += 1;
+    } else if (code <= 0x7ff) {
+      length += 2;
+    } else if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        length += 4;
+        index += 1;
+      } else {
+        length += 3;
+      }
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      length += 3;
+    } else {
+      length += 3;
+    }
+  }
+  return length;
+}
+
+function jsonStringUtf8ByteLength(value: string): number {
+  let length = 2;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (
+      code === 0x22 ||
+      code === 0x5c ||
+      code === 0x08 ||
+      code === 0x0c ||
+      code === 0x0a ||
+      code === 0x0d ||
+      code === 0x09
+    ) {
+      length += 2;
+    } else if (code <= 0x1f) {
+      length += 6;
+    } else if (code <= 0x7f) {
+      length += 1;
+    } else if (code <= 0x7ff) {
+      length += 2;
+    } else if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        length += 4;
+        index += 1;
+      } else {
+        length += 6;
+      }
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      length += 6;
+    } else {
+      length += 3;
+    }
+  }
+  return length;
+}
+
 export function estimateTokens(items: readonly CompactionItem[]): number {
   let total = 0;
   for (const item of items) {
@@ -227,13 +364,25 @@ export function estimateTokens(items: readonly CompactionItem[]): number {
 }
 
 export function estimateSerializedValueTokens(value: unknown): number {
-  let serialized: string;
+  let bytes: number;
   try {
-    serialized = typeof value === "string" ? value : JSON.stringify(value);
+    if (typeof value === "string") {
+      bytes = utf8ByteLength(value);
+    } else {
+      try {
+        bytes = jsonSerializedUtf8ByteLength(value);
+      } catch (error) {
+        if (error instanceof TypeError && error.message === "value has no JSON representation") {
+          bytes = 0;
+        } else {
+          throw error;
+        }
+      }
+    }
   } catch {
-    serialized = String(value);
+    bytes = utf8ByteLength(String(value));
   }
-  return Math.ceil(Buffer.byteLength(serialized ?? "", "utf8") / 4);
+  return Math.ceil(bytes / 4);
 }
 
 export type CompleteModelInputFootprint = {
