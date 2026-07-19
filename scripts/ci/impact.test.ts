@@ -577,19 +577,38 @@ describe("deterministic sharding and isolation", () => {
     expect(profile.mode).toBe("profile");
     expect(profile.weights?.size).toBe(integration.length);
     const shards = deterministicShards(process.cwd(), integration, 6, profile.weights ?? undefined);
+    const criticalPath = "test/integration/durable-queue-control.integration.ts";
     const restartShard = shards.findIndex((files) =>
       files.includes("test/integration/worker-restart.integration.ts"),
     );
     const temporalShard = shards.findIndex((files) =>
       files.includes("test/integration/temporal-workflow.integration.ts"),
     );
+    const criticalShard = shards.findIndex((files) => files.includes(criticalPath));
+    expect(profile.weights?.get(criticalPath)).toBe(165_639);
+    expect(profile.weights?.get("test/integration/temporal-workflow.integration.ts")).toBe(
+      126_807,
+    );
+    expect(profile.weights?.get("test/integration/worker-restart.integration.ts")).toBe(36_286);
+    expect(criticalShard).not.toBe(temporalShard);
+    expect(shards[criticalShard]).toEqual([criticalPath]);
     expect(restartShard).not.toBe(temporalShard);
-    expect(shards[restartShard]).toEqual(["test/integration/worker-restart.integration.ts"]);
+    expect(shards[restartShard]).toEqual([
+      "test/integration/worker-restart.integration.ts",
+      "test/integration/workspace-isolation.integration.ts",
+    ]);
     expect(shards[temporalShard]).toEqual(["test/integration/temporal-workflow.integration.ts"]);
     const shardWeights = shards.map((files) =>
       files.reduce((total, path) => total + (profile.weights?.get(path) ?? 0), 0),
     );
-    expect(Math.max(...shardWeights)).toBe(240_000);
+    expect([...shardWeights].sort((a, b) => b - a)).toEqual([
+      165_639,
+      126_807,
+      60_986,
+      42_977,
+      42_749,
+      41_305,
+    ]);
   });
 
   test("a stale or incomplete timing profile is rejected as a whole", () => {
