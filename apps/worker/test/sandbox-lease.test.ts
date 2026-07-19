@@ -33,7 +33,6 @@ import postgres from "postgres";
 import { getSettings, type Settings } from "@opengeni/config";
 import {
   claimSessionWorkForAttempt,
-  createSession,
   createDb,
   initializeSessionStartAtomically,
   mutateSessionControlInTransaction,
@@ -141,26 +140,33 @@ async function freshWarmSnapshotAttempt(ids: {
   accountId: string;
   workspaceId: string;
 }): Promise<{ sessionId: string; turnId: string; attemptId: string }> {
-  const session = await createSession(db, {
+  const sessionId = crypto.randomUUID();
+  const initialized = await initializeSessionStartAtomically(db, {
     accountId: ids.accountId,
     workspaceId: ids.workspaceId,
-    initialMessage: "persist this workspace",
-    resources: [],
-    metadata: {},
-    model: "scripted-model",
-    sandboxBackend: "none",
-  });
-  await initializeSessionStartAtomically(db, {
-    accountId: ids.accountId,
-    workspaceId: ids.workspaceId,
-    sessionId: session.id,
-    reasoningEffortFallback: "low",
+    sessionId,
+    createRequestFingerprint: `v1:${"0".repeat(64)}`,
+    session: {
+      initialMessage: "persist this workspace",
+      resources: [],
+      tools: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    },
     createdEventPayload: {},
+    goal: null,
+    admission: {
+      kind: "user",
+      clientEventId: `initial:${sessionId}`,
+      reasoningEffort: "low",
+    },
+    usage: { sourceResourceType: "session" },
   });
   const attemptId = crypto.randomUUID();
   const claim = await claimSessionWorkForAttempt(db, ids.workspaceId, {
-    sessionId: session.id,
-    workflowId: `session-${session.id}`,
+    sessionId: initialized.session.id,
+    workflowId: initialized.temporalWorkflowId,
     workflowRunId: crypto.randomUUID(),
     attemptId,
     dispatchId: `snapshot-${crypto.randomUUID()}`,
@@ -169,7 +175,7 @@ async function freshWarmSnapshotAttempt(ids: {
   if (claim.action !== "claimed") {
     throw new Error(`Warm snapshot fixture did not claim its turn: ${claim.reason}`);
   }
-  return { sessionId: session.id, turnId: claim.turn.id, attemptId };
+  return { sessionId: initialized.session.id, turnId: claim.turn.id, attemptId };
 }
 
 type LeaseFixture = {

@@ -2310,6 +2310,94 @@ describe("worker activities integration", () => {
     });
   });
 
+  test("scheduled response-loss replay bypasses mutable task and quota checks", async () => {
+    const grant = await testGrant(dbClient.db);
+    const task = await createOwnedScheduledTask(dbClient.db, grant, {
+      name: "scheduled-canonical-replay",
+      status: "active",
+      schedule: { type: "interval", everySeconds: 3600 },
+      temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
+      runMode: "new_session_per_run",
+      overlapPolicy: "allow_concurrent",
+      agentConfig: {
+        prompt: "committed request",
+        resources: [],
+        tools: [],
+        metadata: { version: 1 },
+      },
+      metadata: {},
+    });
+    const producerKey = `response-loss:${crypto.randomUUID()}`;
+    const workflowWakes: unknown[] = [];
+    const firstActivities = createWorkerActivities({
+      settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl }),
+      db: dbClient.db,
+      bus,
+      wakeSessionWorkflow: async (input) => {
+        workflowWakes.push(input);
+      },
+      runtime: createProductionAgentRuntime({ model: new ScriptedModel([{ outputText: "ok" }]) }),
+    });
+    const first = await firstActivities.dispatchScheduledTaskRun({
+      workspaceId: grant.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled",
+      producerKey,
+    });
+
+    await updateScheduledTask(dbClient.db, grant.workspaceId, task.id, {
+      runMode: "reusable_session",
+      agentConfig: {
+        ...task.agentConfig,
+        prompt: "mutated request that must not replace the receipt",
+        metadata: { version: 2 },
+      },
+    });
+    const retryActivities = createWorkerActivities({
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        natsUrl: services.natsUrl,
+        usageLimitsMode: "static",
+        staticUsageLimitsJson: JSON.stringify({ maxMonthlyAgentRunsPerWorkspace: 1 }),
+      }),
+      db: dbClient.db,
+      bus,
+      wakeSessionWorkflow: async (input) => {
+        workflowWakes.push(input);
+      },
+      runtime: createProductionAgentRuntime({ model: new ScriptedModel([{ outputText: "ok" }]) }),
+    });
+    const replayed = await retryActivities.dispatchScheduledTaskRun({
+      workspaceId: grant.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled",
+      producerKey,
+    });
+
+    expect(replayed).toEqual(first);
+    expect(replayed.action).toBe("start");
+    expect(workflowWakes).toEqual([
+      {
+        accountId: first.accountId,
+        workspaceId: first.workspaceId,
+        sessionId: first.sessionId,
+        workflowId: first.workflowId,
+        wakeRevision: first.workflowWakeRevision,
+      },
+      {
+        accountId: first.accountId,
+        workspaceId: first.workspaceId,
+        sessionId: first.sessionId,
+        workflowId: first.workflowId,
+        wakeRevision: first.workflowWakeRevision,
+      },
+    ]);
+    expect(await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id)).toHaveLength(1);
+    expect(
+      await listSessionEvents(dbClient.db, grant.workspaceId, first.sessionId, 0, 10),
+    ).toHaveLength(3);
+  });
+
   test("blocks scheduled task dispatch when the account monthly model cost cap is reached", async () => {
     const grant = await testGrant(dbClient.db);
     const task = await createOwnedScheduledTask(dbClient.db, grant, {

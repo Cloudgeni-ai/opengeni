@@ -603,6 +603,24 @@ export const sessions = pgTable(
     // workspace to a single session row — the dedup that closes the
     // double-submit/double-dispatch stuck-queued bug.
     createIdempotencyKey: text("create_idempotency_key"),
+    // Versioned digest of the normalized create-request identity. It is
+    // deliberately opaque: the core layer HMACs credential-bearing MCP
+    // configuration before this value reaches persistence, so low-entropy
+    // header values can never be recovered from the receipt. NULL means a
+    // pre-OPE-51 legacy session whose original request cannot be compared safely.
+    createRequestFingerprint: text("create_request_fingerprint"),
+    // 0 = legacy or an explicitly fenced repair candidate; 1 = the canonical
+    // session row, initial history/admission, usage, and wake obligation all
+    // committed in one transaction. Existing rows stay 0: migration must not
+    // fabricate history or bless a formerly partial start.
+    initializationVersion: integer("initialization_version").notNull().default(0),
+    // Exact first workflow-wake revision owned by the initialization
+    // transaction. A response-loss retry re-delivers this revision rather than
+    // incrementing the coalescing outbox and manufacturing a second admission.
+    // NULL is valid when effective control was paused at creation.
+    initialWorkflowWakeRevision: bigint("initial_workflow_wake_revision", {
+      mode: "number",
+    }),
     temporalWorkflowId: text("temporal_workflow_id"),
     activeTurnId: uuid("active_turn_id"),
     // Actual input tokens reported for the last model call of the most recent

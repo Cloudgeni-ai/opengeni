@@ -531,23 +531,33 @@ describe("standalone context compaction execution", () => {
       subjectId: `subject-${suffix}`,
     });
     const grant = access.workspaceGrants[0]!;
-    const session = await createSession(client.db, {
+    const sessionId = crypto.randomUUID();
+    const initialized = await initializeSessionStartAtomically(client.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId!,
-      initialMessage: "continue after the checkpoint provider recovers",
-      resources: [],
-      metadata: {},
-      model: "scripted-compactor",
-      sandboxBackend: "none",
-    });
-    await initializeSessionStartAtomically(client.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId!,
-      sessionId: session.id,
-      reasoningEffortFallback: "medium",
+      sessionId,
+      createRequestFingerprint: `v1:${"0".repeat(64)}`,
+      session: {
+        initialMessage: "continue after the checkpoint provider recovers",
+        resources: [],
+        tools: [],
+        metadata: {},
+        model: "scripted-compactor",
+        sandboxBackend: "none",
+      },
       createdEventPayload: {},
       goal: null,
+      admission: {
+        kind: "user",
+        clientEventId: `initial:${sessionId}`,
+        reasoningEffort: "medium",
+      },
+      usage: {
+        subjectId: grant.subjectId,
+        sourceResourceType: "session",
+      },
     });
+    const session = initialized.session;
     await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
       await db.insert(schema.sessionHistoryItems).values({
         accountId: grant.accountId,

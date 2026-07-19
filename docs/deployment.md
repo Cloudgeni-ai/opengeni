@@ -394,7 +394,7 @@ The secret must provide runtime values such as:
 - `OPENGENI_BILLING_MODE=disabled|stripe`, `OPENGENI_ENTITLEMENTS_MODE=none|static|managed`, and `OPENGENI_USAGE_LIMITS_MODE=none|static|managed`
 - `OPENGENI_AUTH_REQUIRED=true` and `OPENGENI_ACCESS_KEY` only when using the optional deployment shared-key boundary
 - `OPENGENI_BETTER_AUTH_SECRET`, trusted origins, public base URL, Resend key, and delegation secret when `OPENGENI_PRODUCT_ACCESS_MODE=managed`
-- `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY` (base64, exactly 32 bytes; generate with `openssl rand -base64 32`) for workspace variable sets; required when `OPENGENI_PRODUCT_ACCESS_MODE=managed` outside local/test, optional otherwise (variable set routes return 503 until it is set). See `docs/variable-sets.md`.
+- `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY` (base64, exactly 32 bytes; generate with `openssl rand -base64 32`) for workspace variable sets and per-session MCP credentials; required when `OPENGENI_PRODUCT_ACCESS_MODE=managed` outside local/test, optional otherwise (secret-bearing routes return 503 until it is set). Its decoded bytes also key secret-safe MCP-header HMACs inside idempotent session-create fingerprints. Keep it stable through outstanding create-retry windows: rotation changes those HMACs and requires a coordinated compatibility/re-encryption plan. See `docs/variable-sets.md` and `docs/session-mcp-servers.md`.
 - `OPENGENI_STRIPE_SECRET_KEY`, publishable key, webhook secret, and model pricing JSON when `OPENGENI_BILLING_MODE=stripe`
 - sandbox backend credentials when required
 
@@ -408,6 +408,42 @@ Sandbox file mount support is also backend-specific:
 | --- | --- | --- | --- | --- |
 | Docker/local in-container sandboxes | rclone mount | rclone mount | signed download materialization | signed download materialization |
 | Modal | SDK cloud bucket mount | signed download materialization | signed download materialization | signed download materialization |
+
+### Atomic session initialization rollout
+
+Use an observation-first rollout for migration 0076 and the canonical
+initializer. Before any live create, use read-only database and Temporal
+evidence to verify:
+
+- the ordered migration ledger contains 0076 and its receipt constraints have
+  the checked-in definitions (they are intentionally `NOT VALID` and existing
+  rows remain `initialization_version = 0`);
+- no sampled or newly written version-1 receipt is missing its Temporal workflow
+  identity, canonical event prefix, first user turn or scheduled update, and
+  source/usage settlement;
+- each non-null `initial_workflow_wake_revision` has a matching wake-outbox row
+  at that revision or later, and pending wake count/oldest age are not growing;
+- initializer conflicts/invariant failures, wake-delivery/reaper failures,
+  worker replays, `opengeni_turns_total{outcome}`, and exact one-turn admission
+  readbacks remain within the rollout expectation.
+
+Do not backfill or "repair" version-0 sessions: they remain normal existing
+sessions, but their original create semantics are not durable enough to
+fabricate a canonical receipt. Do not classify a null initial wake as partial
+without checking recursive control: a control-blocked version-1 create has no
+immediately eligible wake and receives the ordinary revision when admission
+opens.
+
+A live create/retry canary requires explicit release authorization and a
+disposable, isolated workspace with billing/usage charging disabled or isolated
+from real accounts. Send one request with a stable explicit idempotency key,
+simulate response loss at the client boundary, retry the exact body, then read
+back one session id, one canonical trigger, one initial turn, one initial wake
+revision/delivery, and one Temporal admission/completion. A different body with
+the same key should 409. Never run the canary in a shared production session,
+manually mutate ledger rows, or use a release/deployment lane merely to produce
+evidence. Retain sanitized query/log/Temporal evidence against the exact image
+SHA for the authorized operator to assess.
 
 ## Terraform Registry MCP Docs
 

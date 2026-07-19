@@ -80,6 +80,7 @@ For a map of every app, package, and how the parts fit together, start at [`docs
 - Core NATS is the realtime bus between producers and API instances.
 - Postgres is the durable event store and replay source.
 - Temporal is orchestration only. Token streams do not go through workflow history.
+- Initial session creation is one Postgres transaction: the session and reference/sandbox state, optional goal, canonical event prefix, first turn or scheduled update, queue/source/usage state, workflow identity, and any immediately eligible revisioned wake obligation commit together. A version-1 create receipt is set only after that shape is complete; exact keyed retries verify it and re-deliver the same post-commit wake revision. Temporal `signalWithStart` is never inside the create transaction and never substitutes for the wake outbox. Legacy version-0 sessions continue normally, but a keyed create retry must not reinterpret or synthesize their missing initialization history.
 - OpenAI Agents SDK execution happens inside non-retryable worker activities.
 - Agent activities are side-effectful. Do not add automatic Temporal retries around full agent turns unless each model/tool/sandbox boundary has been made idempotent.
 
