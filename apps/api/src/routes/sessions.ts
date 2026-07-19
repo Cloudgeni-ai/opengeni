@@ -114,7 +114,7 @@ import {
   workflowIdForSession,
 } from "@opengeni/core";
 import { assertSessionExists, boundedLimit } from "../http/common";
-import { sseSessionStream } from "../http/sse";
+import { MAX_SESSION_EVENT_SEQUENCE, sseSessionStream } from "../http/sse";
 import { serveWorkspaceCapture, serveWorkspaceCaptureFile } from "./workspace-capture";
 
 export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
@@ -489,15 +489,8 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     await requireAccessGrant(c, deps, workspaceId, "sessions:read");
     const sessionId = c.req.param("sessionId");
     await assertSessionExists(db, workspaceId, sessionId);
-    const after = Number(c.req.query("after") ?? c.req.header("Last-Event-ID") ?? 0);
-    return sseSessionStream(
-      db,
-      bus,
-      workspaceId,
-      sessionId,
-      Number.isFinite(after) ? after : 0,
-      c.req.raw.signal,
-    );
+    const after = eventSequence(c.req.query("after") ?? c.req.header("Last-Event-ID"), 0);
+    return sseSessionStream(db, bus, workspaceId, sessionId, after, c.req.raw.signal);
   });
 
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/turns", async (c) => {
@@ -1635,7 +1628,7 @@ function eventSequence(raw: string | undefined, fallback: number): number {
   if (!Number.isFinite(sequence)) {
     return fallback;
   }
-  return Math.floor(sequence);
+  return Math.min(MAX_SESSION_EVENT_SEQUENCE, Math.max(0, Math.floor(sequence)));
 }
 
 function optionalEventSequence(raw: string | undefined): number | undefined {
@@ -1646,7 +1639,7 @@ function optionalEventSequence(raw: string | undefined): number | undefined {
   if (!Number.isFinite(sequence)) {
     return undefined;
   }
-  return Math.floor(sequence);
+  return Math.max(0, Math.floor(sequence));
 }
 
 function hasOwnProperty(value: unknown, key: string): boolean {

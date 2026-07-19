@@ -14,12 +14,13 @@
 //   • This module NEVER calls close()/terminate()/kill() on the session handle.
 //     session.close() == terminate() on Modal and would kill the user's box.
 //     Only the reaper terminates. We drop references, nothing more.
-//   • The whole capture is time-capped (60s) and best-effort: ANY failure logs
-//     "workspace capture failed — turn outcome unaffected" and returns; nothing
-//     throws past captureWorkspaceRevision.
-//   • The DB write is fenced on the exact attempt, accepted control requests,
-//     and lease epoch — a cancelled attempt or superseded lease writes zero rows
-//     (insertWorkspaceCapture).
+//   • The whole capture is time-capped (60s) and best-effort: an authority-proof
+//     failure commits a degraded marker while the exact attempt, accepted control
+//     revision, and live lease epoch still own the box; other failures only log
+//     "workspace capture failed — turn outcome unaffected". Nothing escapes.
+//   • Every DB write is fenced on that exact attempt, accepted control requests,
+//     and lease epoch — cancelled/replaced work or a superseded lease writes zero
+//     rows (insertWorkspaceCapture / insertFailedWorkspaceCapture).
 //   • F9 storage ordering: blobs + manifest are PUT and the row is committed
 //     BEFORE any GC delete runs.
 //
@@ -50,6 +51,7 @@ import {
   type RepositoryDiscoveryDegradedReason,
 } from "@opengeni/runtime/sandbox";
 import type {
+  FsReadResponse,
   FsTreeNode,
   GitFileStatus,
   GitFileStatusCode,
@@ -201,6 +203,8 @@ export type CaptureWorkspaceRevisionInput = {
   signal?: AbortSignal;
   /** Test-only: override keep-latest-N GC threshold (default 10). */
   keepLatest?: number;
+  /** Test-only: override the whole-capture byte guard (default 200 MiB). */
+  maxCaptureBytes?: number;
 };
 
 let loggedStorageNullOnce = false;
@@ -381,201 +385,123 @@ async function runCapture(
     return;
   }
   const repoRoots = discovery.repos;
-  const repos: WorkspaceCaptureRepo[] = [];
-  // workspace-relative path → touched-file descriptor
-  const touched = new Map<string, { status: GitFileStatusCode; deleted: boolean }>();
-  let additions = 0;
-  let deletions = 0;
-
-  for (const root of repoRoots) {
-    throwIfCaptureAborted(signal);
-    // Per-repo resilience: a box death aborts the whole capture (BoxExitingError
-    // propagates); any other single-repo failure (a repo that vanished, a
-    // transient git error) SKIPS that repo and the capture continues with the
-    // rest. One flaky repo must never kill the capture.
-    let status: Awaited<ReturnType<typeof svc.gitStatus>>;
-    try {
-      status = await svc.gitStatus({ path: root });
-      throwIfCaptureAborted(signal);
-    } catch (error) {
-      const boxExiting = classifyCaptureEntryError(error);
-      if (boxExiting) throw boxExiting;
-      continue;
-    }
-    if (!status.isRepo) continue;
-    // `git diff HEAD`: combined staged+unstaged tracked changes vs HEAD (the
-    // review diff). Untracked files are absent here but present in status.files
-    // and captured as after-images. A repo with no commits yields an empty diff
-    // (git diff HEAD errors → empty numstat) and everything reads as untracked.
-    let diff: Awaited<ReturnType<typeof svc.gitDiff>>;
-    try {
-      diff = await svc.gitDiff({
-        path: root,
-        staged: false,
-        includeUntracked: true,
-        fromRef: "HEAD",
-        pathspec: [],
-        contextLines: 3,
-        maxBytesPerFile: PER_FILE_DIFF_GUARD_BYTES,
-      });
-      throwIfCaptureAborted(signal);
-    } catch (error) {
-      const boxExiting = classifyCaptureEntryError(error);
-      if (boxExiting) throw boxExiting;
-      diff = { files: [], revision: 0 };
-    }
-    // Drop residue churn from the review diff too. On a desktop box the seed's
-    // `git add -A` in $HOME commits ~/.config/xfce4/* into HEAD, so `git diff HEAD`
-    // lists the continuously-rewritten desktop dotfiles as changed — noise the
-    // Changes tab must not show. The status/after-image loop already excludes them
-    // (isUnderResidueDir); exclude them here so the diff surface agrees.
-    const diffFiles = diff.files.filter((f) => !isUnderResidueDir(joinRepoPath(root, f.path)));
-    // Also drop residue-only status entries below; status.files is filtered in the
-    // touched loop (isUnderResidueDir), so `status: status.files` would still carry
-    // residue rows — filter for a consistent captured status surface.
-    const statusFiles = status.files.filter((f) => !isUnderResidueDir(joinRepoPath(root, f.path)));
-    repos.push({
-      root,
-      head: status.head,
-      detached: status.detached,
-      upstream: status.upstream,
-      ahead: status.ahead,
-      behind: status.behind,
-      status: statusFiles,
-      diff: diffFiles,
-    });
-    for (const f of diffFiles) {
-      additions += f.additions;
-      deletions += f.deletions;
-    }
-    for (const f of status.files) {
-      const wsPath = joinRepoPath(root, f.path);
-      // Skip desktop/system residue churn (~/.config/xfce4/…): on a desktop box
-      // the workspace root is $HOME, so git reports the continuously-rewritten
-      // XFCE/cache dotfiles as untracked. They are never review content — dropping
-      // them here keeps the after-image loop off churn AND matches the tree BFS's
-      // residue collapse (Changes tab and tree agree on what is workspace content).
-      if (isUnderResidueDir(wsPath)) continue;
-      touched.set(wsPath, {
-        status: statusCodeOf(f),
-        deleted: f.worktree === "deleted" || f.index === "deleted",
-      });
-    }
-  }
-
-  // Previous revision (for the empty-turn gate + revision assignment). The gate
-  // itself fires AFTER the after-image loop, once the change fingerprint is known
-  // (§10.1 / B3): uncommitted changes persist in the box across turns, so a
-  // literal "skip when git status is clean" gate would re-capture an identical
-  // dirty tree on every read-only turn. Instead we skip when the change surface
-  // is byte-identical to the previous revision — "no new revision when nothing
-  // changed" holds even with a persistently dirty tree, and content-addressed
-  // blobs already dedupe storage. (Deviation from the dossier's literal "clean"
-  // wording — same intent, strictly better; recorded in PROGRESS.)
-  // ── 3. after-images of touched files (size-gated), content-addressed ───────
-  const files: WorkspaceCaptureFile[] = [];
-  const blobKeys = new Set<string>();
-  let totalBytes = 0;
-  let tooLargeCount = 0;
-  let binaryCount = 0;
-
-  for (const [wsPath, info] of touched) {
-    throwIfCaptureAborted(signal);
-    if (info.deleted) {
-      files.push({
-        path: wsPath,
-        status: "deleted",
-        hash: null,
-        baseHash: null,
-        contentRef: null,
-        sizeBytes: 0,
-        isBinary: false,
-        tooLarge: false,
-        deleted: true,
-      });
-      continue;
-    }
-    // Always request base64 so we get raw bytes uniformly (text or binary) for
-    // content-addressing. maxBytes caps the read at the 5MB guard; `truncated`
-    // means the file is ≥5MB → we record a tooLarge marker (no content blob).
-    //
-    // Per-file resilience: a file the box reported as changed can VANISH or turn
-    // unreadable between git-status and this read (fs churn, a follow-up mutation,
-    // a race). That must NEVER abort the whole capture — skip the one entry and
-    // keep the rest. A box-death error is different: it aborts (BoxExitingError),
-    // because every remaining read would fail too and we must not commit a partial
-    // revision for a dead box.
-    let read: Awaited<ReturnType<typeof svc.fsRead>>;
-    try {
-      read = await svc.fsRead({
-        path: wsPath,
+  // ── 2. prove status/diff and after-image bytes as one stable surface ───────
+  // This is also the only empty-turn proof. A status-only pre-gate is unsafe for
+  // untracked files because their contents can change while porcelain and diff
+  // remain identical. Content-addressed blob PUTs are idempotent, so correctness
+  // takes precedence over avoiding that bounded proof on a persistently dirty
+  // but unchanged workspace.
+  const finalized = await stabilizeWorkspaceCaptureFiles({
+    observe: async () => await observeCaptureRepositories(svc, repoRoots, signal),
+    readFile: async (path) =>
+      await svc.fsRead({
+        path,
         encoding: "base64",
         maxBytes: PER_FILE_CONTENT_GUARD_BYTES,
+      }),
+    putBlob: async (key, bytes) => {
+      await storage.putObject({
+        key,
+        contentType: "application/octet-stream",
+        body: bytes,
       });
-      throwIfCaptureAborted(signal);
-    } catch (error) {
-      const boxExiting = classifyCaptureEntryError(error);
-      if (boxExiting) throw boxExiting;
-      continue; // vanished/unreadable single file — omit it, capture continues
-    }
-    if (read.truncated) {
-      tooLargeCount += 1;
-      files.push({
-        path: wsPath,
-        status: info.status,
-        hash: null,
-        baseHash: null,
-        contentRef: null,
-        sizeBytes: read.sizeBytes,
-        isBinary: read.isBinary,
-        tooLarge: true,
-        deleted: false,
-      });
-      continue;
-    }
-    const bytes = Buffer.from(read.content, "base64");
-    const hash = sha256(bytes);
-    const contentRef = blobKey(input.workspaceId, input.sessionId, hash);
-    if (read.isBinary) binaryCount += 1;
-    if (!blobKeys.has(contentRef)) {
-      totalBytes += bytes.byteLength;
-      // Whole-capture guard: bail before writing anything (fall back to live).
-      if (totalBytes > WHOLE_CAPTURE_GUARD_BYTES) {
-        observability.warn("workspace capture skipped — whole-capture guard tripped", {
-          "opengeni.session_id": input.sessionId,
-          "workspace_capture.total_bytes": totalBytes,
-        });
-        observability.incrementCounter({
-          name: "opengeni_workspace_capture_total",
-          labels: { result: "guard_tripped" },
-        });
-        return;
-      }
-    }
-    blobKeys.add(contentRef);
-    files.push({
-      // baseHash (git HEAD blob sha) is intentionally null in M1: the wake-on-edit
-      // flush guard (M3/C2) compares live content against the after-image `hash`,
-      // not the HEAD blob, so baseHash is not load-bearing yet. Populating it would
-      // cost an extra per-file round-trip at turn end (latency risk #1). Deferred.
-      path: wsPath,
-      status: info.status,
-      hash,
-      baseHash: null,
-      contentRef,
-      sizeBytes: bytes.byteLength,
-      isBinary: read.isBinary,
-      tooLarge: false,
-      deleted: false,
+    },
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    signal,
+    ...(input.maxCaptureBytes === undefined ? {} : { maxTotalBytes: input.maxCaptureBytes }),
+  });
+  if (finalized.kind === "unstable") {
+    const capturedAt = new Date();
+    const reason = finalized.reason;
+    const stats = {
+      degradedReason: reason,
+      stabilizationAttempts: finalized.attempts,
+      durationMs: Date.now() - startedAt,
+    };
+    const inserted = await insertFailedWorkspaceCapture(input.db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      attemptId: input.attemptId,
+      sandboxGroupId: input.sandboxGroupId,
+      expectedEpoch: input.leaseEpoch,
+      revision,
+      stats,
+      capturedAt,
     });
+    throwIfCaptureAborted(signal);
+    if (!inserted) {
+      observability.incrementCounter({
+        name: "opengeni_workspace_capture_total",
+        labels: { result: "superseded" },
+      });
+      return;
+    }
+    observability.warn("workspace capture degraded — workspace remained unstable", {
+      "opengeni.session_id": input.sessionId,
+      "opengeni.turn_id": input.turnId ?? "",
+      "workspace_capture.degraded_reason": reason,
+      "workspace_capture.stabilization_attempts": finalized.attempts,
+    });
+    observability.incrementCounter({
+      name: "opengeni_workspace_capture_total",
+      labels: { result: "degraded_workspace_unstable" },
+    });
+    if (input.publish) {
+      await input.publish(inserted.events).catch(() => undefined);
+    }
+    return;
   }
-
-  // ── 4. empty-turn gate (dossier §10.1 / B3) ───────────────────────────────
-  // Skip when the change surface is byte-identical to the previous revision.
-  // Fires BEFORE the tree BFS + storage PUTs (the expensive parts) so a no-op
-  // read-only turn on a persistently dirty tree costs only the (small) status/
-  // diff/after-image probes.
-  let fingerprint = changeFingerprint(repos, files);
+  if (finalized.kind === "guard_tripped") {
+    const capturedAt = new Date();
+    const reason = "workspace_capture_size_limit_exceeded" as const;
+    const stats = {
+      degradedReason: reason,
+      totalBytes: finalized.totalBytes,
+      sizeLimitBytes: input.maxCaptureBytes ?? WHOLE_CAPTURE_GUARD_BYTES,
+      durationMs: Date.now() - startedAt,
+    };
+    const inserted = await insertFailedWorkspaceCapture(input.db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      attemptId: input.attemptId,
+      sandboxGroupId: input.sandboxGroupId,
+      expectedEpoch: input.leaseEpoch,
+      revision,
+      stats,
+      capturedAt,
+    });
+    throwIfCaptureAborted(signal);
+    if (!inserted) {
+      observability.incrementCounter({
+        name: "opengeni_workspace_capture_total",
+        labels: { result: "superseded" },
+      });
+      return;
+    }
+    observability.warn("workspace capture degraded — whole-capture guard tripped", {
+      "opengeni.session_id": input.sessionId,
+      "workspace_capture.total_bytes": finalized.totalBytes,
+      "workspace_capture.size_limit_bytes": stats.sizeLimitBytes,
+    });
+    observability.incrementCounter({
+      name: "opengeni_workspace_capture_total",
+      labels: { result: "degraded_size_limit" },
+    });
+    if (input.publish) {
+      await input.publish(inserted.events).catch(() => undefined);
+    }
+    return;
+  }
+  const { repos, additions, deletions } = finalized.observation;
+  const { files, blobKeys, totalBytes } = finalized;
+  const tooLargeCount = files.filter((file) => file.tooLarge).length;
+  const binaryCount = files.filter((file) => !file.deleted && file.isBinary).length;
+  const fingerprint = changeFingerprint(repos, files);
   if (prev && prev.stats.fingerprint === fingerprint) {
     observability.incrementCounter({
       name: "opengeni_workspace_capture_total",
@@ -584,123 +510,16 @@ async function runCapture(
     return;
   }
 
-  // ── 5. tree index (one bounded listing; residue dirs pruned at source) ─────
+  // ── 3. tree index (one bounded listing; residue dirs pruned at source) ─────
   const tree = await buildTreeIndex(svc, startedAt, signal);
   throwIfCaptureAborted(signal);
 
-  // ── 6. PUT blobs + tree + manifest (F9: all writes BEFORE any delete) ──────
+  // ── 4. serialize the exact uploaded after-images ──────────────────────────
   // Key manifest/tree by the turn (one capture per turn) so the key is known
   // before the revision is committed; content blobs are content-addressed.
   const turnKey = input.turnId;
   const treeKey = `workspace-captures/${input.workspaceId}/${input.sessionId}/trees/${turnKey}.json`;
   const manifestKey = `workspace-captures/${input.workspaceId}/${input.sessionId}/manifests/${turnKey}.json`;
-
-  // Re-read and upload ONE after-image at a time. The first pass above computes
-  // the stable capture fingerprint without retaining every changed file. This
-  // second pass takes the actual after-image that will be uploaded, refreshing
-  // metadata when a live process changed a file between passes. Peak worker
-  // memory is bounded by PER_FILE_CONTENT_GUARD_BYTES instead of
-  // WHOLE_CAPTURE_GUARD_BYTES per concurrent turn.
-  const uploadedKeys = new Set<string>();
-  blobKeys.clear();
-  totalBytes = 0;
-  let refreshedFiles = 0;
-  const omittedFiles = new Set<string>();
-  for (const file of files) {
-    throwIfCaptureAborted(signal);
-    if (file.deleted || file.tooLarge || !file.contentRef || !file.hash) {
-      continue;
-    }
-    let reread: Awaited<ReturnType<typeof svc.fsRead>>;
-    try {
-      reread = await svc.fsRead({
-        path: file.path,
-        encoding: "base64",
-        maxBytes: PER_FILE_CONTENT_GUARD_BYTES,
-      });
-      throwIfCaptureAborted(signal);
-    } catch (error) {
-      if (signal.aborted) throw error;
-      const boxExiting = classifyCaptureEntryError(error);
-      if (boxExiting) throw boxExiting;
-      // Match the first pass: a single vanished or unreadable file is omitted,
-      // never misreported as deleted and never allowed to fail the full capture.
-      omittedFiles.add(file.path);
-      refreshedFiles += 1;
-      continue;
-    }
-    if (reread.truncated) {
-      file.hash = null;
-      file.contentRef = null;
-      file.sizeBytes = reread.sizeBytes;
-      file.isBinary = reread.isBinary;
-      file.tooLarge = true;
-      refreshedFiles += 1;
-      continue;
-    }
-    const bytes = Buffer.from(reread.content, "base64");
-    const hash = sha256(bytes);
-    const contentRef = blobKey(input.workspaceId, input.sessionId, hash);
-    if (
-      hash !== file.hash ||
-      bytes.byteLength !== file.sizeBytes ||
-      reread.isBinary !== file.isBinary
-    ) {
-      file.hash = hash;
-      file.contentRef = contentRef;
-      file.sizeBytes = bytes.byteLength;
-      file.isBinary = reread.isBinary;
-      refreshedFiles += 1;
-    }
-    if (!blobKeys.has(contentRef)) {
-      totalBytes += bytes.byteLength;
-      if (totalBytes > WHOLE_CAPTURE_GUARD_BYTES) {
-        observability.warn("workspace capture skipped — whole-capture guard tripped", {
-          "opengeni.session_id": input.sessionId,
-          "workspace_capture.total_bytes": totalBytes,
-        });
-        observability.incrementCounter({
-          name: "opengeni_workspace_capture_total",
-          labels: { result: "guard_tripped" },
-        });
-        return;
-      }
-    }
-    blobKeys.add(contentRef);
-    if (!uploadedKeys.has(contentRef)) {
-      await storage.putObject({
-        key: contentRef,
-        contentType: "application/octet-stream",
-        body: bytes,
-      });
-      throwIfCaptureAborted(signal);
-      uploadedKeys.add(contentRef);
-    }
-  }
-  if (omittedFiles.size > 0) {
-    for (let index = files.length - 1; index >= 0; index -= 1) {
-      const file = files[index];
-      if (file && omittedFiles.has(file.path)) files.splice(index, 1);
-    }
-  }
-  if (refreshedFiles > 0) {
-    observability.incrementCounter({
-      name: "opengeni_workspace_capture_files_refreshed_total",
-      amount: refreshedFiles,
-    });
-  }
-  tooLargeCount = files.filter((file) => file.tooLarge).length;
-  binaryCount = files.filter((file) => !file.deleted && file.isBinary).length;
-  fingerprint = changeFingerprint(repos, files);
-  if (prev && prev.stats.fingerprint === fingerprint) {
-    observability.incrementCounter({
-      name: "opengeni_workspace_capture_total",
-      labels: { result: "skipped_empty" },
-    });
-    return;
-  }
-
-  // ── 7. serialize the exact uploaded after-images ──────────────────────────
   const capturedAt = new Date();
   const stats: WorkspaceCaptureStats = {
     repoCount: repos.length,
@@ -747,7 +566,7 @@ async function runCapture(
   throwIfCaptureAborted(signal);
   const sizeBytes = totalBytes + treeBytes.byteLength + manifestBytes.byteLength;
 
-  // ── 8. epoch-fenced insert (superseded lease → zero rows) ─────────────────
+  // ── 5. epoch-fenced insert (superseded lease → zero rows) ─────────────────
   const inserted = await insertWorkspaceCapture(input.db, {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
@@ -786,7 +605,7 @@ async function runCapture(
     await input.publish(inserted.events).catch(() => undefined);
   }
 
-  // ── 9. inline keep-latest-N GC (best-effort; F9 — after the commit) ────────
+  // ── 6. inline keep-latest-N GC (best-effort; F9 — after the commit) ────────
   let gcDeleted = 0;
   try {
     throwIfCaptureAborted(signal);
@@ -823,7 +642,7 @@ async function runCapture(
     });
   }
 
-  // ── 10. observe completion ────────────────────────────────────────────────
+  // ── 7. observe completion ─────────────────────────────────────────────────
   const durationMs = Date.now() - startedAt;
   observability.incrementCounter({
     name: "opengeni_workspace_capture_total",
@@ -861,6 +680,365 @@ function statusCodeOf(f: GitFileStatus): GitFileStatusCode {
   return f.worktree ?? f.index ?? "modified";
 }
 
+export function isDeletedAfterImage(f: GitFileStatus): boolean {
+  // A staged deletion can coexist with a recreated worktree file (`DM`). In
+  // that case the path has an after-image and the worktree status wins. It is
+  // absent only when the worktree itself reports deletion, or the index reports
+  // deletion with no subsequent worktree state.
+  return f.worktree === "deleted" || (f.index === "deleted" && f.worktree === null);
+}
+
+export type WorkspaceCaptureObservation = {
+  repos: WorkspaceCaptureRepo[];
+  touched: Map<string, { status: GitFileStatusCode; deleted: boolean }>;
+  additions: number;
+  deletions: number;
+};
+
+type CaptureRepositoryPort = Pick<SandboxChannelAService, "gitStatus" | "gitDiff">;
+
+async function observeCaptureRepositories(
+  svc: CaptureRepositoryPort,
+  repoRoots: string[],
+  signal: AbortSignal,
+): Promise<WorkspaceCaptureObservation> {
+  const repos: WorkspaceCaptureRepo[] = [];
+  const touched: WorkspaceCaptureObservation["touched"] = new Map();
+  let additions = 0;
+  let deletions = 0;
+
+  for (const root of repoRoots) {
+    throwIfCaptureAborted(signal);
+    // A repository that cannot be inspected completely cannot participate in
+    // an authoritative projection. Surface the failure to the stabilizer so a
+    // newer degraded marker replaces any older successful capture.
+    let status: Awaited<ReturnType<CaptureRepositoryPort["gitStatus"]>>;
+    try {
+      status = await svc.gitStatus({ path: root });
+      throwIfCaptureAborted(signal);
+    } catch (error) {
+      const boxExiting = classifyCaptureEntryError(error);
+      if (boxExiting) throw boxExiting;
+      throw new CaptureAuthorityError(
+        "workspace_repository_unreadable",
+        `workspace capture could not read git status for ${root || "."}`,
+        error,
+      );
+    }
+    if (!status.isRepo) {
+      throw new CaptureAuthorityError(
+        "workspace_repository_unreadable",
+        `workspace capture repository vanished during inspection: ${root || "."}`,
+      );
+    }
+
+    let diff: Awaited<ReturnType<CaptureRepositoryPort["gitDiff"]>>;
+    try {
+      diff = await svc.gitDiff({
+        path: root,
+        staged: false,
+        includeUntracked: true,
+        fromRef: "HEAD",
+        pathspec: [],
+        contextLines: 3,
+        maxBytesPerFile: PER_FILE_DIFF_GUARD_BYTES,
+      });
+      throwIfCaptureAborted(signal);
+    } catch (error) {
+      const boxExiting = classifyCaptureEntryError(error);
+      if (boxExiting) throw boxExiting;
+      throw new CaptureAuthorityError(
+        "workspace_repository_unreadable",
+        `workspace capture could not read git diff for ${root || "."}`,
+        error,
+      );
+    }
+
+    // The status, diff, and after-image surfaces all apply the same residue
+    // filter so desktop/system churn cannot leak into only one projection.
+    const diffFiles = diff.files.filter(
+      (file) => !isUnderResidueDir(joinRepoPath(root, file.path)),
+    );
+    const statusFiles = status.files.filter(
+      (file) => !isUnderResidueDir(joinRepoPath(root, file.path)),
+    );
+    repos.push({
+      root,
+      head: status.head,
+      detached: status.detached,
+      upstream: status.upstream,
+      ahead: status.ahead,
+      behind: status.behind,
+      status: statusFiles,
+      diff: diffFiles,
+    });
+    for (const file of diffFiles) {
+      additions += file.additions;
+      deletions += file.deletions;
+    }
+    for (const file of statusFiles) {
+      touched.set(joinRepoPath(root, file.path), {
+        status: statusCodeOf(file),
+        deleted: isDeletedAfterImage(file),
+      });
+    }
+  }
+
+  return { repos, touched, additions, deletions };
+}
+
+type StableWorkspaceCaptureFilesInput = {
+  observe: () => Promise<WorkspaceCaptureObservation>;
+  readFile: (path: string) => Promise<FsReadResponse>;
+  putBlob: (key: string, bytes: Uint8Array) => Promise<void>;
+  workspaceId: string;
+  sessionId: string;
+  signal: AbortSignal;
+  /** Test-only override for the production whole-capture guard. */
+  maxTotalBytes?: number;
+};
+
+export type StableWorkspaceCaptureFilesResult =
+  | {
+      kind: "captured";
+      observation: WorkspaceCaptureObservation;
+      files: WorkspaceCaptureFile[];
+      blobKeys: Set<string>;
+      totalBytes: number;
+    }
+  | { kind: "guard_tripped"; totalBytes: number }
+  | {
+      kind: "unstable";
+      attempts: number;
+      reason: Extract<
+        WorkspaceCaptureDegradedReason,
+        | "workspace_changed_during_capture"
+        | "workspace_file_unreadable"
+        | "workspace_repository_unreadable"
+      >;
+    };
+
+class CaptureAuthorityError extends Error {
+  constructor(
+    readonly reason: Extract<WorkspaceCaptureDegradedReason, "workspace_repository_unreadable">,
+    message: string,
+    cause?: unknown,
+  ) {
+    super(message, { cause });
+    this.name = "CaptureAuthorityError";
+  }
+}
+
+/**
+ * Build the persisted after-images from a fresh repo observation, then prove
+ * both the repository surface and every non-deleted after-image stayed stable
+ * across two serial read passes. The two passes have a common interval (the
+ * last first-pass read precedes the first verification read), so matching byte
+ * evidence plus the surrounding status/diff observations is stronger than Git
+ * metadata alone: untracked content can change without changing porcelain or
+ * diff output. One retry covers an ordinary status/read race; persistent churn
+ * returns an explicit unstable result so the activity can commit a newer,
+ * epoch-fenced degraded revision rather than leaving an older capture looking
+ * authoritative.
+ */
+export async function stabilizeWorkspaceCaptureFiles(
+  input: StableWorkspaceCaptureFilesInput,
+): Promise<StableWorkspaceCaptureFilesResult> {
+  const uploadedKeys = new Set<string>();
+  let unstableReason: Extract<
+    WorkspaceCaptureDegradedReason,
+    | "workspace_changed_during_capture"
+    | "workspace_file_unreadable"
+    | "workspace_repository_unreadable"
+  > = "workspace_changed_during_capture";
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    throwIfCaptureAborted(input.signal);
+    let before: WorkspaceCaptureObservation;
+    try {
+      before = await input.observe();
+    } catch (error) {
+      if (input.signal.aborted) throw error;
+      const boxExiting = classifyCaptureEntryError(error);
+      if (boxExiting) throw boxExiting;
+      unstableReason =
+        error instanceof CaptureAuthorityError ? error.reason : "workspace_repository_unreadable";
+      continue;
+    }
+    throwIfCaptureAborted(input.signal);
+    const files: WorkspaceCaptureFile[] = [];
+    const blobKeys = new Set<string>();
+    const readEvidence = new Map<string, string>();
+    let totalBytes = 0;
+    let readFailed = false;
+
+    for (const [path, info] of before.touched) {
+      throwIfCaptureAborted(input.signal);
+      if (info.deleted) {
+        files.push({
+          path,
+          status: "deleted",
+          hash: null,
+          baseHash: null,
+          contentRef: null,
+          sizeBytes: 0,
+          isBinary: false,
+          tooLarge: false,
+          deleted: true,
+        });
+        continue;
+      }
+
+      let read: FsReadResponse;
+      try {
+        read = await input.readFile(path);
+        throwIfCaptureAborted(input.signal);
+      } catch (error) {
+        if (input.signal.aborted) throw error;
+        const boxExiting = classifyCaptureEntryError(error);
+        if (boxExiting) throw boxExiting;
+        // Re-observe below. If the file truly vanished, the next attempt will
+        // project its new deleted/absent status; if it remains unreadable, no
+        // internally incomplete capture is committed.
+        unstableReason = "workspace_file_unreadable";
+        readFailed = true;
+        break;
+      }
+
+      const bytes = Buffer.from(read.content, "base64");
+      const hash = sha256(bytes);
+      readEvidence.set(path, captureReadEvidence(read, hash));
+      if (read.truncated) {
+        files.push({
+          path,
+          status: info.status,
+          hash: null,
+          baseHash: null,
+          contentRef: null,
+          sizeBytes: read.sizeBytes,
+          isBinary: read.isBinary,
+          tooLarge: true,
+          deleted: false,
+        });
+        continue;
+      }
+
+      const contentRef = blobKey(input.workspaceId, input.sessionId, hash);
+      if (!blobKeys.has(contentRef)) {
+        totalBytes += bytes.byteLength;
+        if (totalBytes > (input.maxTotalBytes ?? WHOLE_CAPTURE_GUARD_BYTES)) {
+          return { kind: "guard_tripped", totalBytes };
+        }
+        blobKeys.add(contentRef);
+      }
+      files.push({
+        path,
+        status: info.status,
+        hash,
+        baseHash: null,
+        contentRef,
+        sizeBytes: bytes.byteLength,
+        isBinary: read.isBinary,
+        tooLarge: false,
+        deleted: false,
+      });
+    }
+
+    // Re-read every non-deleted entry before the final repository observation.
+    // Upload the verified second-read bytes, not the earlier candidates, while
+    // retaining at most one file's contents in memory at a time.
+    if (!readFailed) {
+      for (const [path, info] of before.touched) {
+        throwIfCaptureAborted(input.signal);
+        if (info.deleted) continue;
+        let verified: FsReadResponse;
+        try {
+          verified = await input.readFile(path);
+          throwIfCaptureAborted(input.signal);
+        } catch (error) {
+          if (input.signal.aborted) throw error;
+          const boxExiting = classifyCaptureEntryError(error);
+          if (boxExiting) throw boxExiting;
+          unstableReason = "workspace_file_unreadable";
+          readFailed = true;
+          break;
+        }
+        const verifiedBytes = Buffer.from(verified.content, "base64");
+        const verifiedHash = sha256(verifiedBytes);
+        if (readEvidence.get(path) !== captureReadEvidence(verified, verifiedHash)) {
+          unstableReason = "workspace_changed_during_capture";
+          readFailed = true;
+          break;
+        }
+        if (!verified.truncated) {
+          const contentRef = blobKey(input.workspaceId, input.sessionId, verifiedHash);
+          if (!uploadedKeys.has(contentRef)) {
+            await input.putBlob(contentRef, verifiedBytes);
+            throwIfCaptureAborted(input.signal);
+            uploadedKeys.add(contentRef);
+          }
+        }
+      }
+    }
+
+    let after: WorkspaceCaptureObservation;
+    try {
+      after = await input.observe();
+    } catch (error) {
+      if (input.signal.aborted) throw error;
+      const boxExiting = classifyCaptureEntryError(error);
+      if (boxExiting) throw boxExiting;
+      unstableReason =
+        error instanceof CaptureAuthorityError ? error.reason : "workspace_repository_unreadable";
+      continue;
+    }
+    throwIfCaptureAborted(input.signal);
+    const repoSurfaceStable = captureRepoSurface(before.repos) === captureRepoSurface(after.repos);
+    if (!repoSurfaceStable) {
+      unstableReason = "workspace_changed_during_capture";
+    }
+    if (!readFailed && repoSurfaceStable) {
+      return {
+        kind: "captured",
+        observation: after,
+        files,
+        blobKeys,
+        totalBytes,
+      };
+    }
+  }
+
+  return { kind: "unstable", attempts: 2, reason: unstableReason };
+}
+
+function captureReadEvidence(read: FsReadResponse, hash: string): string {
+  return JSON.stringify({
+    hash,
+    sizeBytes: read.sizeBytes,
+    isBinary: read.isBinary,
+    truncated: read.truncated,
+  });
+}
+
+function captureRepoSurface(repos: WorkspaceCaptureRepo[]): string {
+  const normalized = repos
+    .map((repo) => ({
+      ...repo,
+      status: [...repo.status].sort((left, right) =>
+        `${left.path}\u0000${left.oldPath ?? ""}`.localeCompare(
+          `${right.path}\u0000${right.oldPath ?? ""}`,
+        ),
+      ),
+      diff: [...repo.diff].sort((left, right) =>
+        `${left.path}\u0000${left.oldPath ?? ""}`.localeCompare(
+          `${right.path}\u0000${right.oldPath ?? ""}`,
+        ),
+      ),
+    }))
+    .sort((left, right) => left.root.localeCompare(right.root));
+  return sha256(utf8(JSON.stringify(normalized)));
+}
+
 /**
  * sha256 over the CHANGE SURFACE only — per-file (path, status, hash, deleted,
  * tooLarge) and per-repo diff summary (path, status, additions, deletions).
@@ -876,6 +1054,14 @@ function changeFingerprint(repos: WorkspaceCaptureRepo[], files: WorkspaceCaptur
     .map(
       (r) =>
         `${r.root}#${r.head ?? ""}#` +
+        r.status
+          .map(
+            (s) =>
+              `${s.path}:${s.oldPath ?? ""}:${s.index ?? ""}:${s.worktree ?? ""}:${s.isConflicted ? 1 : 0}`,
+          )
+          .sort()
+          .join(",") +
+        "#" +
         r.diff
           .map((d) => `${d.path}:${d.status}:${d.additions}:${d.deletions}:${d.truncated ? 1 : 0}`)
           .sort()

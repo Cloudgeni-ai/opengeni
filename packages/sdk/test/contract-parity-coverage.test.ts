@@ -26,6 +26,7 @@ import {
   EnablePackRequest as ContractEnablePackRequest,
   FileAsset as ContractFileAsset,
   FileStatus as ContractFileStatus,
+  GetWorkspaceCaptureResponse as ContractGetWorkspaceCaptureResponse,
   GitHubAppManifestCreate as ContractGitHubAppManifestCreate,
   GitHubRepository as ContractGitHubRepository,
   PackInstallation as ContractPackInstallation,
@@ -47,8 +48,10 @@ import {
   UsageEvent as ContractUsageEvent,
   UsageEventType as ContractUsageEventType,
   Workspace as ContractWorkspace,
+  WorkspaceCaptureDegradedReason as ContractWorkspaceCaptureDegradedReason,
   WorkspaceEnvironment as ContractWorkspaceEnvironment,
   WorkspaceRegisteredPack as ContractWorkspaceRegisteredPack,
+  WorkspaceRevisionDegradedPayload as ContractWorkspaceRevisionDegradedPayload,
 } from "@opengeni/contracts";
 import type { z } from "zod";
 import { KNOWN_PERMISSIONS, KNOWN_USAGE_EVENT_TYPES } from "../src/types";
@@ -80,6 +83,7 @@ import type {
   EnablePackRequest,
   FileAsset,
   FileStatus,
+  GetWorkspaceCaptureResponse,
   GitHubRepository,
   PackInstallation,
   PackInstallationStatus,
@@ -97,8 +101,10 @@ import type {
   UpdateWorkspaceRequest,
   UsageEvent,
   Workspace,
+  WorkspaceCaptureDegradedReason,
   WorkspaceEnvironment,
   WorkspaceRegisteredPack,
+  WorkspaceRevisionDegradedPayload,
 } from "../src/types";
 
 // Parity pins for the full-coverage SDK types, in the same style as
@@ -127,6 +133,8 @@ describe("SDK / contracts parity (full coverage)", () => {
     const packStatuses: readonly PackInstallationStatus[] = ContractPackInstallationStatus.options;
     const capabilityKinds: readonly CapabilityKind[] = ContractCapabilityKind.options;
     const capabilitySources: readonly CapabilitySource[] = ContractCapabilitySource.options;
+    const captureDegradedReasons: readonly WorkspaceCaptureDegradedReason[] =
+      ContractWorkspaceCaptureDegradedReason.options;
     expect(accessModes).toEqual(ContractProductAccessMode.options);
     expect(goalStatuses).toEqual(ContractSessionGoalStatus.options);
     expect(goalCreators).toEqual(ContractSessionGoalCreatedBy.options);
@@ -137,6 +145,7 @@ describe("SDK / contracts parity (full coverage)", () => {
     expect(packStatuses).toEqual(ContractPackInstallationStatus.options);
     expect(capabilityKinds).toEqual(ContractCapabilityKind.options);
     expect(capabilitySources).toEqual(ContractCapabilitySource.options);
+    expect(captureDegradedReasons).toEqual(ContractWorkspaceCaptureDegradedReason.options);
   });
 
   test("contract-parsed responses are assignable to SDK types (compile-time)", () => {
@@ -175,6 +184,12 @@ describe("SDK / contracts parity (full coverage)", () => {
       value;
     const acceptBalance = (value: z.infer<typeof ContractBillingBalance>): BillingBalance => value;
     const acceptUsageEvent = (value: z.infer<typeof ContractUsageEvent>): UsageEvent => value;
+    const acceptWorkspaceRevisionDegraded = (
+      value: z.infer<typeof ContractWorkspaceRevisionDegradedPayload>,
+    ): WorkspaceRevisionDegradedPayload => value;
+    const acceptWorkspaceCaptureResponse = (
+      value: z.infer<typeof ContractGetWorkspaceCaptureResponse>,
+    ): GetWorkspaceCaptureResponse => value;
     const acceptCheckout = (
       value: z.infer<typeof ContractCreateCheckoutResponse>,
     ): CreateCheckoutResponse => value;
@@ -198,6 +213,8 @@ describe("SDK / contracts parity (full coverage)", () => {
       acceptRepository,
       acceptBalance,
       acceptUsageEvent,
+      acceptWorkspaceRevisionDegraded,
+      acceptWorkspaceCaptureResponse,
       acceptCheckout,
     ];
     expect(checks.every((fn) => typeof fn === "function")).toBe(true);

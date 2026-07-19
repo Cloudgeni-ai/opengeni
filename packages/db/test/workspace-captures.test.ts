@@ -232,6 +232,52 @@ describe("workspace capture revisions (real PostgreSQL + FORCE RLS)", () => {
       ),
     ).toEqual([...captureCommit!.events, ...availableCommit!.events]);
 
+    expect(
+      await listSessionEvents(db, workspace.workspaceId, session.id, {
+        before: -1e100,
+        limit: 10,
+      }),
+    ).toEqual([]);
+
+    const unstableCommit = await insertFailedWorkspaceCapture(db, {
+      ...workspace,
+      sessionId: session.id,
+      turnId: turn!.id,
+      attemptId,
+      sandboxGroupId,
+      expectedEpoch: liveEpoch,
+      revision: 2,
+      stats: {
+        degradedReason: "workspace_changed_during_capture",
+        stabilizationAttempts: 2,
+        durationMs: 25,
+      },
+    });
+    expect(unstableCommit).not.toBeNull();
+    expect(unstableCommit!.events).toEqual([
+      expect.objectContaining({
+        sequence: availableCommit!.events[0]!.sequence + 1,
+        type: "workspace.revision.degraded",
+        turnId: turn!.id,
+        turnGeneration: turn!.execution_generation,
+        turnAttemptId: attemptId,
+        clientEventId: "opengeni:workspace-capture:2",
+        payload: expect.objectContaining({
+          revision: 2,
+          reason: "workspace_changed_during_capture",
+        }),
+      }),
+    ]);
+    expect(await latestWorkspaceCapture(db, workspace.workspaceId, session.id)).toMatchObject({
+      revision: 2,
+      state: "failed",
+      manifestKey: null,
+      treeIndexKey: null,
+      stats: expect.objectContaining({
+        degradedReason: "workspace_changed_during_capture",
+      }),
+    });
+
     await admin`
       update session_turn_attempts
       set outcome = 'lease_lost_recoverable'
@@ -248,7 +294,7 @@ describe("workspace capture revisions (real PostgreSQL + FORCE RLS)", () => {
         attemptId,
         sandboxGroupId,
         expectedEpoch: liveEpoch,
-        revision: 2,
+        revision: 3,
         manifestKey: "workspace/manifests/recovery.json",
         treeIndexKey: "workspace/trees/recovery.json",
         blobKeys: [],
@@ -305,9 +351,9 @@ describe("workspace capture revisions (real PostgreSQL + FORCE RLS)", () => {
       attemptId,
       sandboxGroupId,
       expectedEpoch: liveEpoch,
-      revision: 2,
-      manifestKey: "workspace/manifests/2.json",
-      treeIndexKey: "workspace/trees/2.json",
+      revision: 3,
+      manifestKey: "workspace/manifests/3.json",
+      treeIndexKey: "workspace/trees/3.json",
       blobKeys: [],
       sizeBytes: 1,
       stats: { fingerprint: "must-not-commit" },
@@ -327,9 +373,9 @@ describe("workspace capture revisions (real PostgreSQL + FORCE RLS)", () => {
         attemptId,
         sandboxGroupId,
         expectedEpoch: liveEpoch,
-        revision: 2,
-        manifestKey: "workspace/manifests/2.json",
-        treeIndexKey: "workspace/trees/2.json",
+        revision: 3,
+        manifestKey: "workspace/manifests/3.json",
+        treeIndexKey: "workspace/trees/3.json",
         blobKeys: [],
         sizeBytes: 1,
         stats: { fingerprint: "must-not-commit" },
@@ -337,6 +383,6 @@ describe("workspace capture revisions (real PostgreSQL + FORCE RLS)", () => {
     ).toBeNull();
     const [afterInterruption] = await admin<{ count: number }[]>`
       select count(*)::int as count from workspace_captures where session_id = ${session.id}`;
-    expect(afterInterruption?.count).toBe(2);
+    expect(afterInterruption?.count).toBe(3);
   }, 60_000);
 });

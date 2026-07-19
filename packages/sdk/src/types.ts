@@ -927,7 +927,11 @@ export type WorkspaceCaptureRepo = {
 export type WorkspaceCaptureDegradedReason =
   | "repository_discovery_command_failed"
   | "repository_discovery_timed_out"
-  | "repository_discovery_result_limit_exceeded";
+  | "repository_discovery_result_limit_exceeded"
+  | "workspace_changed_during_capture"
+  | "workspace_file_unreadable"
+  | "workspace_repository_unreadable"
+  | "workspace_capture_size_limit_exceeded";
 export type WorkspaceCaptureStats = {
   repoCount: number;
   fileCount: number;
@@ -939,7 +943,7 @@ export type WorkspaceCaptureStats = {
   treeEntryCount: number;
   treeTruncated: boolean;
   durationMs: number;
-  fingerprint?: string;
+  fingerprint?: string | undefined;
 };
 export type WorkspaceCaptureManifest = {
   version: 1;
@@ -972,11 +976,11 @@ export type WorkspaceCaptureSignedUrl = { url: string; expiresAt: string };
 export type GetWorkspaceCaptureResponse =
   | {
       available: false;
-      degradedReason?: WorkspaceCaptureDegradedReason | null;
-      revision?: number | null;
-      capturedAt?: string | null;
-      turnId?: string | null;
-      leaseEpoch?: number | null;
+      degradedReason?: WorkspaceCaptureDegradedReason | null | undefined;
+      revision?: number | null | undefined;
+      capturedAt?: string | null | undefined;
+      turnId?: string | null | undefined;
+      leaseEpoch?: number | null | undefined;
     }
   | {
       available: true;

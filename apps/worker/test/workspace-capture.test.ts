@@ -13,7 +13,10 @@ import { createObservability } from "@opengeni/observability";
 import { testSettings } from "@opengeni/testing";
 import { computeWorkspaceCaptureGcPlan, type Database } from "@opengeni/db";
 import {
+  type FsReadResponse,
+  type GitFileStatus,
   WorkspaceCaptureManifest,
+  type WorkspaceCaptureRepo,
   WorkspaceRevisionCapturedPayload,
   WorkspaceRevisionDegradedPayload,
 } from "@opengeni/contracts";
@@ -24,12 +27,15 @@ import {
   BoxExitingError,
   captureWorkspaceRevision,
   isBoxExitingError,
+  isDeletedAfterImage,
   isUnderResidueDir,
   joinRepoPath,
   KEEP_LATEST_REVISIONS,
   PER_FILE_CONTENT_GUARD_BYTES,
   PER_FILE_DIFF_GUARD_BYTES,
   RESIDUE_DIRS,
+  stabilizeWorkspaceCaptureFiles,
+  type WorkspaceCaptureObservation,
   WHOLE_CAPTURE_GUARD_BYTES,
 } from "../src/activities/workspace-capture";
 
@@ -48,6 +54,7 @@ function forbiddenStorage(): ObjectStorage {
     createPutUrl: boom as never,
     createGetUrl: boom as never,
     headFile: boom as never,
+    headObject: boom as never,
     getFileBytes: boom as never,
     getObjectBytes: boom as never,
     putObject: boom as never,
@@ -176,6 +183,306 @@ describe("workspace-capture — path & key helpers", () => {
   });
   test("blobKey is content-addressed under the session prefix", () => {
     expect(blobKey("ws", "sess", "abc123")).toBe("workspace-captures/ws/sess/blobs/abc123");
+  });
+});
+
+function captureObservation(status: GitFileStatus[]): WorkspaceCaptureObservation {
+  const repo: WorkspaceCaptureRepo = {
+    root: "",
+    head: "main",
+    detached: false,
+    upstream: null,
+    ahead: 0,
+    behind: 0,
+    status,
+    diff: [],
+  };
+  return {
+    repos: [repo],
+    touched: new Map(
+      status.map((file) => [
+        file.path,
+        {
+          status: file.worktree ?? file.index ?? "modified",
+          deleted: isDeletedAfterImage(file),
+        },
+      ]),
+    ),
+    additions: 0,
+    deletions: 0,
+  };
+}
+
+function gitFile(path: string, worktree: GitFileStatus["worktree"]): GitFileStatus {
+  return { path, oldPath: null, index: null, worktree, isConflicted: false };
+}
+
+function fileRead(path: string, content: string): FsReadResponse {
+  const bytes = new TextEncoder().encode(content);
+  return {
+    path,
+    encoding: "base64",
+    content: Buffer.from(bytes).toString("base64"),
+    sizeBytes: bytes.byteLength,
+    truncated: false,
+    isBinary: false,
+    revision: 1,
+  };
+}
+
+describe("workspace-capture — stabilized final Files/Changes projection", () => {
+  const signal = new AbortController().signal;
+
+  test("a first-pass too-large file that shrinks is captured as a normal after-image", async () => {
+    const final = captureObservation([gitFile("big.txt", "modified")]);
+    const uploads: string[] = [];
+    const result = await stabilizeWorkspaceCaptureFiles({
+      observe: async () => final,
+      readFile: async (path) => fileRead(path, "now small\n"),
+      putBlob: async (key) => {
+        uploads.push(key);
+      },
+      workspaceId: "ws",
+      sessionId: "sess",
+      signal,
+    });
+
+    expect(result.kind).toBe("captured");
+    if (result.kind !== "captured") throw new Error("capture guard unexpectedly tripped");
+    expect(result.files).toHaveLength(1);
+    expect(result.files[0]).toMatchObject({
+      path: "big.txt",
+      tooLarge: false,
+      deleted: false,
+      sizeBytes: 10,
+    });
+    expect(result.files[0]!.contentRef).toBeTruthy();
+    expect(uploads).toEqual([result.files[0]!.contentRef]);
+  });
+
+  test("a deleted file recreated identically to HEAD disappears from both projections", async () => {
+    const clean = captureObservation([]);
+    let reads = 0;
+    const result = await stabilizeWorkspaceCaptureFiles({
+      observe: async () => clean,
+      readFile: async (path) => {
+        reads += 1;
+        return fileRead(path, "unchanged\n");
+      },
+      putBlob: async () => undefined,
+      workspaceId: "ws",
+      sessionId: "sess",
+      signal,
+    });
+
+    expect(result.kind).toBe("captured");
+    if (result.kind !== "captured") throw new Error("capture guard unexpectedly tripped");
+    expect(result.observation.repos[0]!.status).toEqual([]);
+    expect(result.files).toEqual([]);
+    expect(reads).toBe(0);
+  });
+
+  test("a deleted file recreated with changes becomes a modified after-image", async () => {
+    const modified = captureObservation([gitFile("tracked.txt", "modified")]);
+    const result = await stabilizeWorkspaceCaptureFiles({
+      observe: async () => modified,
+      readFile: async (path) => fileRead(path, "changed\n"),
+      putBlob: async () => undefined,
+      workspaceId: "ws",
+      sessionId: "sess",
+      signal,
+    });
+
+    expect(result.kind).toBe("captured");
+    if (result.kind !== "captured") throw new Error("capture guard unexpectedly tripped");
+    expect(result.files[0]).toMatchObject({
+      path: "tracked.txt",
+      status: "modified",
+      deleted: false,
+      tooLarge: false,
+    });
+  });
+
+  test("a staged deletion with a recreated worktree file keeps its after-image", async () => {
+    const recreated = captureObservation([
+      {
+        path: "tracked.txt",
+        oldPath: null,
+        index: "deleted",
+        worktree: "modified",
+        isConflicted: false,
+      },
+    ]);
+    const result = await stabilizeWorkspaceCaptureFiles({
+      observe: async () => recreated,
+      readFile: async (path) => fileRead(path, "recreated\n"),
+      putBlob: async () => undefined,
+      workspaceId: "ws",
+      sessionId: "sess",
+      signal,
+    });
+
+    expect(result.kind).toBe("captured");
+    if (result.kind !== "captured") throw new Error("capture guard unexpectedly tripped");
+    expect(result.files).toEqual([
+      expect.objectContaining({
+        path: "tracked.txt",
+        status: "modified",
+        deleted: false,
+        tooLarge: false,
+      }),
+    ]);
+  });
+
+  test("a normal file that vanishes during the read is retried as deleted", async () => {
+    const modified = captureObservation([gitFile("tracked.txt", "modified")]);
+    const deleted = captureObservation([gitFile("tracked.txt", "deleted")]);
+    const observations = [modified, deleted, deleted, deleted];
+    let reads = 0;
+    const result = await stabilizeWorkspaceCaptureFiles({
+      observe: async () => observations.shift()!,
+      readFile: async () => {
+        reads += 1;
+        throw new Error("ENOENT: tracked.txt vanished");
+      },
+      putBlob: async () => undefined,
+      workspaceId: "ws",
+      sessionId: "sess",
+      signal,
+    });
+
+    expect(result.kind).toBe("captured");
+    if (result.kind !== "captured") throw new Error("capture guard unexpectedly tripped");
+    expect(reads).toBe(1);
+    expect(result.observation.repos[0]!.status[0]!.worktree).toBe("deleted");
+    expect(result.files).toEqual([
+      {
+        path: "tracked.txt",
+        status: "deleted",
+        hash: null,
+        baseHash: null,
+        contentRef: null,
+        sizeBytes: 0,
+        isBinary: false,
+        tooLarge: false,
+        deleted: true,
+      },
+    ]);
+  });
+
+  test("unchanged Git status cannot hide untracked byte churn", async () => {
+    const untracked = captureObservation([gitFile("status-only.txt", "untracked")]);
+    const contents = ["stale\n", "changed\n", "changed\n", "changed\n"];
+    const uploads: string[] = [];
+    const result = await stabilizeWorkspaceCaptureFiles({
+      observe: async () => untracked,
+      readFile: async (path) => fileRead(path, contents.shift()!),
+      putBlob: async (_key, bytes) => {
+        uploads.push(new TextDecoder().decode(bytes));
+      },
+      workspaceId: "ws",
+      sessionId: "sess",
+      signal,
+    });
+
+    expect(result.kind).toBe("captured");
+    if (result.kind !== "captured") throw new Error("capture guard unexpectedly tripped");
+    expect(contents).toEqual([]);
+    expect(uploads).toEqual(["changed\n"]);
+    expect(result.files[0]).toMatchObject({
+      path: "status-only.txt",
+      sizeBytes: 8,
+      deleted: false,
+      tooLarge: false,
+    });
+  });
+
+  test("persistent byte churn returns an unstable result instead of stale files", async () => {
+    const untracked = captureObservation([gitFile("status-only.txt", "untracked")]);
+    const contents = ["one", "two", "three", "four"];
+    const result = await stabilizeWorkspaceCaptureFiles({
+      observe: async () => untracked,
+      readFile: async (path) => fileRead(path, contents.shift()!),
+      putBlob: async () => {
+        throw new Error("mismatched bytes must not upload");
+      },
+      workspaceId: "ws",
+      sessionId: "sess",
+      signal,
+    });
+    expect(result).toEqual({
+      kind: "unstable",
+      attempts: 2,
+      reason: "workspace_changed_during_capture",
+    });
+    expect(contents).toEqual([]);
+  });
+
+  test("persistent read failures report an unreadable file instead of inventing churn", async () => {
+    const untracked = captureObservation([gitFile("unreadable.txt", "untracked")]);
+    let reads = 0;
+    const result = await stabilizeWorkspaceCaptureFiles({
+      observe: async () => untracked,
+      readFile: async () => {
+        reads += 1;
+        throw new Error("permission denied");
+      },
+      putBlob: async () => {
+        throw new Error("unreadable bytes must not upload");
+      },
+      workspaceId: "ws",
+      sessionId: "sess",
+      signal,
+    });
+    expect(result).toEqual({
+      kind: "unstable",
+      attempts: 2,
+      reason: "workspace_file_unreadable",
+    });
+    expect(reads).toBe(2);
+  });
+
+  test("persistent repository observation failures never commit an incomplete projection", async () => {
+    let observations = 0;
+    const result = await stabilizeWorkspaceCaptureFiles({
+      observe: async () => {
+        observations += 1;
+        throw new Error("git diff failed");
+      },
+      readFile: async () => {
+        throw new Error("repository failure must prevent file reads");
+      },
+      putBlob: async () => {
+        throw new Error("repository failure must prevent uploads");
+      },
+      workspaceId: "ws",
+      sessionId: "sess",
+      signal,
+    });
+    expect(result).toEqual({
+      kind: "unstable",
+      attempts: 2,
+      reason: "workspace_repository_unreadable",
+    });
+    expect(observations).toBe(2);
+  });
+
+  test("the whole-capture byte guard remains fail-closed before blob upload", async () => {
+    const modified = captureObservation([gitFile("large.txt", "modified")]);
+    let uploads = 0;
+    const result = await stabilizeWorkspaceCaptureFiles({
+      observe: async () => modified,
+      readFile: async (path) => fileRead(path, "four"),
+      putBlob: async () => {
+        uploads += 1;
+      },
+      workspaceId: "ws",
+      sessionId: "sess",
+      signal,
+      maxTotalBytes: 3,
+    });
+    expect(result).toEqual({ kind: "guard_tripped", totalBytes: 4 });
+    expect(uploads).toBe(0);
   });
 });
 
@@ -381,6 +688,42 @@ describe("workspace-capture — manifest & event serialization", () => {
         reason: "repository_discovery_result_limit_exceeded",
       }),
     ).not.toThrow();
+    expect(() =>
+      WorkspaceRevisionDegradedPayload.parse({
+        revision: 5,
+        turnId: "t3",
+        capturedAt: new Date().toISOString(),
+        leaseEpoch: 9,
+        reason: "workspace_changed_during_capture",
+      }),
+    ).not.toThrow();
+    expect(() =>
+      WorkspaceRevisionDegradedPayload.parse({
+        revision: 6,
+        turnId: "t4",
+        capturedAt: new Date().toISOString(),
+        leaseEpoch: 10,
+        reason: "workspace_file_unreadable",
+      }),
+    ).not.toThrow();
+    expect(() =>
+      WorkspaceRevisionDegradedPayload.parse({
+        revision: 7,
+        turnId: "t5",
+        capturedAt: new Date().toISOString(),
+        leaseEpoch: 11,
+        reason: "workspace_repository_unreadable",
+      }),
+    ).not.toThrow();
+    expect(() =>
+      WorkspaceRevisionDegradedPayload.parse({
+        revision: 8,
+        turnId: "t6",
+        capturedAt: new Date().toISOString(),
+        leaseEpoch: 12,
+        reason: "workspace_capture_size_limit_exceeded",
+      }),
+    ).not.toThrow();
   });
 });
 
@@ -458,5 +801,13 @@ describe("workspace-capture — B7 static safety guard", () => {
     expect(source).toMatch(/from ["']@opengeni\/runtime\/sandbox["']/);
     // never the bare barrel (would pull the agent loop into the capture path).
     expect(source).not.toMatch(/from ["']@opengeni\/runtime["']/);
+  });
+
+  test("the empty-turn fingerprint is computed only from byte-stabilized files", () => {
+    const proof = source.indexOf("const finalized = await stabilizeWorkspaceCaptureFiles");
+    const fingerprint = source.indexOf("const fingerprint = changeFingerprint");
+    expect(proof).toBeGreaterThan(-1);
+    expect(fingerprint).toBeGreaterThan(proof);
+    expect(source).not.toContain("const initialObservation =");
   });
 });

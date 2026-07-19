@@ -3987,6 +3987,10 @@ export const WorkspaceCaptureDegradedReason = z.enum([
   "repository_discovery_command_failed",
   "repository_discovery_timed_out",
   "repository_discovery_result_limit_exceeded",
+  "workspace_changed_during_capture",
+  "workspace_file_unreadable",
+  "workspace_repository_unreadable",
+  "workspace_capture_size_limit_exceeded",
 ]);
 export type WorkspaceCaptureDegradedReason = z.infer<typeof WorkspaceCaptureDegradedReason>;
 
