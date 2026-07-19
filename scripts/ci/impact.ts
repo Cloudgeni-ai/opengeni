@@ -29,6 +29,7 @@ export type ImpactPlan = {
   integrationTests: string[];
   e2eTests: string[];
   buildPackages: string[];
+  exampleBuildProjects: string[];
   guards: string[];
   reasons: ImpactReason[];
 };
@@ -216,6 +217,17 @@ function matchesAny(path: string, patterns: readonly RegExp[]): boolean {
   return patterns.some((pattern) => pattern.test(path));
 }
 
+function exampleBuildProjects(
+  graph: WorkspaceGraph,
+  selected: (pkg: WorkspaceGraph["packages"][number]) => boolean = () => true,
+): string[] {
+  return graph.packages
+    .filter((pkg) => pkg.dir.startsWith("examples/") && selected(pkg))
+    .filter((pkg) => typeof pkg.packageJson.scripts?.build === "string")
+    .map((pkg) => pkg.dir)
+    .sort();
+}
+
 function fullPlan(
   graph: WorkspaceGraph,
   changedFiles: string[],
@@ -225,6 +237,7 @@ function fullPlan(
 ): ImpactPlan {
   const tests = discoverTestFiles();
   const ignoredBuildPackages = changesetIgnoreSet();
+  const examples = exampleBuildProjects(graph);
   return {
     schemaVersion: 1,
     mode: "full",
@@ -241,7 +254,15 @@ function fullPlan(
       .filter((pkg) => !ignoredBuildPackages.has(pkg.name))
       .map((pkg) => pkg.name)
       .sort(),
-    guards: ["lint", "format", "workspace-billing", "docs-refs", "publish-closure"],
+    exampleBuildProjects: examples,
+    guards: [
+      "lint",
+      "format",
+      "workspace-billing",
+      "docs-refs",
+      "publish-closure",
+      ...(examples.length > 0 ? ["example-builds"] : []),
+    ],
     reasons,
   };
 }
@@ -298,6 +319,7 @@ export function createImpactPlan(
       integrationTests: [],
       e2eTests: [],
       buildPackages: [],
+      exampleBuildProjects: [],
       guards: ["format", "docs-refs"],
       reasons: changedFiles.map((path) => ({ path, reason: "documentation-only change" })),
     };
@@ -391,8 +413,10 @@ export function createImpactPlan(
     }
     buildPackages.sort();
   }
+  const examples = exampleBuildProjects(graph, (pkg) => affected.has(pkg.name));
   const guards = ["lint", "format", "workspace-billing", "docs-refs"];
   if (buildPackages.length > 0) guards.push("publish-closure");
+  if (examples.length > 0) guards.push("example-builds");
 
   return {
     schemaVersion: 1,
@@ -406,6 +430,7 @@ export function createImpactPlan(
     integrationTests: rootTests(tests.integration),
     e2eTests: rootTests(tests.e2e),
     buildPackages,
+    exampleBuildProjects: examples,
     guards,
     reasons,
   };

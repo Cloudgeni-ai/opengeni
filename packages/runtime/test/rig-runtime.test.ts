@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AGENT_INSTRUCTIONS_CORE_PLACEHOLDER, DEFAULT_AGENT_INSTRUCTIONS } from "@opengeni/config";
@@ -71,7 +71,7 @@ describe("rig doctrine block (M3)", () => {
 });
 
 describe("rigSetupScriptCommand (M3)", () => {
-  test("guards on the per-version marker and only touches it on success", () => {
+  test("guards on the per-version marker and only persists it on success", () => {
     const command = rigSetupScriptCommand(
       "echo hi",
       "22222222-2222-4222-8222-222222222222",
@@ -84,16 +84,18 @@ describe("rigSetupScriptCommand (M3)", () => {
       `__OG_RIG_MARKER="$__OG_RIG_ROOT"/'rig-setup-22222222-2222-4222-8222-222222222222.done'`,
     );
     expect(command).toContain('case "$__OG_RIG_ROOT" in /*)');
-    expect(command).toContain('if [ ! -d "$__OG_RIG_ROOT" ] || [ ! -w "$__OG_RIG_ROOT" ]');
+    expect(command).toContain("stat -c '%u %a' -- \"$__OG_RIG_ROOT\"");
+    expect(command).toContain('"$__OG_RIG_UID 700"');
     // Skip path prints the sentinel and exits 0 without running the script.
     expect(command).toContain("__OPENGENI_RIG_SETUP_SKIPPED__");
     // The script is hard-killed by coreutils timeout (NOT bash -e), and the
-    // marker is touched only on rc 0. User output is hidden on success so the
-    // wrapper's skip sentinel cannot be forged by the setup script.
+    // marker is atomically persisted only on rc 0. User output is hidden on
+    // success so the wrapper's skip sentinel cannot be forged by the setup script.
     expect(command).toContain(
       'timeout -k 5s "${__OG_RIG_TIMEOUT_SECS}s" bash "$__OG_RIG_SCRIPT" >"$__OG_RIG_OUTPUT" 2>&1',
     );
-    expect(command).toContain('if [ "$__OG_RIG_RC" -eq 0 ]; then touch "$__OG_RIG_MARKER"; fi');
+    expect(command).toContain('ln -- "$__OG_RIG_MARKER_TMP" "$__OG_RIG_MARKER"');
+    expect(command).toContain('"$__OG_RIG_UID 600"');
     // First attach is atomically claimed with a mkdir lockdir.
     expect(command).toContain('if mkdir "$__OG_RIG_LOCK" 2>/dev/null; then');
     // The user script rides a collision-free shell-quoted printf transport.
@@ -164,6 +166,71 @@ describe("rigSetupScriptCommand (M3)", () => {
       await rm(root, { recursive: true, force: true });
     }
   }, 15_000);
+
+  test("a successful setup fails closed when it removes the marker root", async () => {
+    const root = await mkdtemp(join(tmpdir(), "opengeni-rig-removed-root-"));
+    try {
+      const versionId = "22222222-2222-4222-8222-222222222222";
+      const command = rigSetupScriptCommand(
+        `rm -rf ${JSON.stringify(root)}`,
+        versionId,
+        10_000,
+        root,
+      );
+      const proc = Bun.spawn(["bash", "-lc", command], { stdout: "pipe", stderr: "pipe" });
+      expect(await proc.exited).not.toBe(0);
+      expect(existsSync(join(root, `rig-setup-${versionId}.done`))).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a symlinked marker is rejected instead of being accepted as a skip", async () => {
+    const root = await mkdtemp(join(tmpdir(), "opengeni-rig-symlink-marker-"));
+    try {
+      const versionId = "22222222-2222-4222-8222-222222222222";
+      const target = join(root, "target");
+      const marker = join(root, `rig-setup-${versionId}.done`);
+      const proof = join(root, "setup-ran");
+      await writeFile(target, "", { mode: 0o600 });
+      await symlink(target, marker);
+      const command = rigSetupScriptCommand(
+        `printf ran > ${JSON.stringify(proof)}`,
+        versionId,
+        10_000,
+        root,
+      );
+      const proc = Bun.spawn(["bash", "-lc", command], { stdout: "pipe", stderr: "pipe" });
+      expect(await proc.exited).not.toBe(0);
+      expect(existsSync(proof)).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a symlinked marker root is rejected without running setup", async () => {
+    const parent = await mkdtemp(join(tmpdir(), "opengeni-rig-symlink-root-"));
+    try {
+      const versionId = "22222222-2222-4222-8222-222222222222";
+      const realRoot = join(parent, "real");
+      const linkedRoot = join(parent, "linked");
+      const proof = join(parent, "setup-ran");
+      await mkdir(realRoot, { mode: 0o700 });
+      await writeFile(join(realRoot, `rig-setup-${versionId}.done`), "");
+      await symlink(realRoot, linkedRoot);
+      const command = rigSetupScriptCommand(
+        `printf ran > ${JSON.stringify(proof)}`,
+        versionId,
+        10_000,
+        linkedRoot,
+      );
+      const proc = Bun.spawn(["bash", "-lc", command], { stdout: "pipe", stderr: "pipe" });
+      expect(await proc.exited).not.toBe(0);
+      expect(existsSync(proof)).toBe(false);
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
 
   test("an exact user sentinel is not wrapper-authentic and does not skip", async () => {
     const root = await mkdtemp(join(tmpdir(), "opengeni-rig-sentinel-"));

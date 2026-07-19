@@ -51,7 +51,7 @@ export function changesetIgnoreSet(): Set<string> {
 
 export function workspacePackages(): WorkspacePackage[] {
   const packages: WorkspacePackage[] = [];
-  for (const group of ["apps", "packages"]) {
+  for (const group of ["apps", "examples", "packages"]) {
     const groupDir = join(repoRoot, group);
     let entries: string[];
     try {

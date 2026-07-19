@@ -5565,16 +5565,18 @@ function isExactRigSetupSkipOutput(result: unknown): boolean {
 
 /**
  * The rig-setup command (M3). One idempotent bash program:
- *   1. create a UID-scoped directory below XDG_RUNTIME_DIR/TMPDIR (or use the
- *      explicit test root) and, if the per-version marker already exists,
- *      print the SKIP sentinel and exit 0 (a warm box re-running the hook).
+ *   1. create and validate a private UID-scoped directory below
+ *      XDG_RUNTIME_DIR/TMPDIR (or use the explicit test root) and, if a private
+ *      regular per-version marker already exists, print the SKIP sentinel and
+ *      exit 0 (a warm box re-running the hook).
  *   2. otherwise atomically claim a per-version lock directory. A loser waits
  *      for the winner's marker, then skips; if the winner fails and releases the
  *      lock, the loser retries the claim.
  *   3. the winner writes the rig's setup script to a temp file and runs it under
  *      coreutils `timeout` (NOT `bash -e` — the script opts into `set -e`
- *      itself if it wants), then captures the exit code and `touch`es the marker
- *      ONLY on success (exit 0) so a failed/timed-out setup re-runs next turn.
+ *      itself if it wants), then captures the exit code and atomically persists
+ *      the marker ONLY on success (exit 0) so a failed/timed-out setup or marker
+ *      write re-runs next turn.
  * The script is transported as one rigorously shell-quoted printf argument, so
  * every character is written verbatim with no delimiter collision or host-side
  * expansion. Setup output is captured while the script runs: successful user
@@ -5597,17 +5599,38 @@ export function rigSetupScriptCommand(
       ? `__OG_RIG_ROOT=${shellQuote(markerRoot.replace(/\/+$/, ""))}`
       : '__OG_RIG_ROOT="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/opengeni-rig-setup-$(id -u)"',
     'case "$__OG_RIG_ROOT" in /*) ;; *) printf \'%s\\n\' "rig setup marker root must be absolute: $__OG_RIG_ROOT" >&2; exit 73 ;; esac',
-    'mkdir -p "$__OG_RIG_ROOT"',
-    'if [ ! -d "$__OG_RIG_ROOT" ] || [ ! -w "$__OG_RIG_ROOT" ]; then printf \'%s\\n\' "rig setup marker root is not a writable directory: $__OG_RIG_ROOT" >&2; exit 73; fi',
+    '__OG_RIG_UID="$(id -u)"',
+    'if [ -L "$__OG_RIG_ROOT" ]; then printf \'%s\\n\' "rig setup marker root must not be a symlink: $__OG_RIG_ROOT" >&2; exit 73; fi',
+    'if [ ! -e "$__OG_RIG_ROOT" ]; then mkdir -m 700 "$__OG_RIG_ROOT" 2>/dev/null || true; fi',
+    "__og_rig_validate_root() {",
+    '  if [ -L "$__OG_RIG_ROOT" ] || [ ! -d "$__OG_RIG_ROOT" ] || [ ! -w "$__OG_RIG_ROOT" ]; then printf \'%s\\n\' "rig setup marker root is not a private writable directory: $__OG_RIG_ROOT" >&2; return 73; fi',
+    '  __OG_RIG_ROOT_STAT="$(stat -c \'%u %a\' -- "$__OG_RIG_ROOT" 2>/dev/null)" || { printf \'%s\\n\' "cannot stat rig setup marker root: $__OG_RIG_ROOT" >&2; return 73; }',
+    '  if [ "$__OG_RIG_ROOT_STAT" != "$__OG_RIG_UID 700" ]; then printf \'%s\\n\' "rig setup marker root must be owned by uid $__OG_RIG_UID with mode 700: $__OG_RIG_ROOT" >&2; return 73; fi',
+    "}",
+    '__og_rig_validate_root || exit "$?"',
     `__OG_RIG_MARKER="$__OG_RIG_ROOT"/${shellQuote(markerName)}`,
     '__OG_RIG_LOCK="$__OG_RIG_MARKER.lock"',
     `__OG_RIG_TIMEOUT_SECS=${timeoutSecs}`,
     `__OG_RIG_LOCK_WAIT_SECS=${lockWaitSecs}`,
-    `if [ -f "$__OG_RIG_MARKER" ]; then printf '%s\\n' ${shellQuote(RIG_SETUP_SKIPPED_SENTINEL)}; exit 0; fi`,
+    "__og_rig_marker_state() {",
+    '  if [ ! -e "$__OG_RIG_MARKER" ] && [ ! -L "$__OG_RIG_MARKER" ]; then return 1; fi',
+    '  if [ -L "$__OG_RIG_MARKER" ] || [ ! -f "$__OG_RIG_MARKER" ]; then printf \'%s\\n\' "rig setup marker must be a regular file: $__OG_RIG_MARKER" >&2; return 73; fi',
+    '  __OG_RIG_MARKER_STAT="$(stat -c \'%u %a\' -- "$__OG_RIG_MARKER" 2>/dev/null)" || { printf \'%s\\n\' "cannot stat rig setup marker: $__OG_RIG_MARKER" >&2; return 73; }',
+    '  if [ "$__OG_RIG_MARKER_STAT" != "$__OG_RIG_UID 600" ]; then printf \'%s\\n\' "rig setup marker must be owned by uid $__OG_RIG_UID with mode 600: $__OG_RIG_MARKER" >&2; return 73; fi',
+    "}",
+    "__og_rig_skip_if_ready() {",
+    "  __og_rig_marker_state",
+    "  __OG_RIG_MARKER_STATE=$?",
+    `  if [ "$__OG_RIG_MARKER_STATE" -eq 0 ]; then printf '%s\\n' ${shellQuote(RIG_SETUP_SKIPPED_SENTINEL)}; exit 0; fi`,
+    '  if [ "$__OG_RIG_MARKER_STATE" -ne 1 ]; then return "$__OG_RIG_MARKER_STATE"; fi',
+    "  return 0",
+    "}",
+    '__og_rig_skip_if_ready || exit "$?"',
     "while :; do",
     '  if mkdir "$__OG_RIG_LOCK" 2>/dev/null; then',
-    "    trap 'rm -rf \"$__OG_RIG_LOCK\"' EXIT",
-    `    if [ -f "$__OG_RIG_MARKER" ]; then printf '%s\\n' ${shellQuote(RIG_SETUP_SKIPPED_SENTINEL)}; exit 0; fi`,
+    '    __OG_RIG_MARKER_TMP=""',
+    '    trap \'rm -f "${__OG_RIG_MARKER_TMP:-}"; rm -rf "$__OG_RIG_LOCK"\' EXIT',
+    '    __og_rig_skip_if_ready || exit "$?"',
     '__OG_RIG_SCRIPT="$(mktemp)"',
     `    printf '%s' ${shellQuote(script)} > "$__OG_RIG_SCRIPT"`,
     '    __OG_RIG_OUTPUT="$(mktemp)"',
@@ -5615,17 +5638,27 @@ export function rigSetupScriptCommand(
     "__OG_RIG_RC=$?",
     '    if [ "$__OG_RIG_RC" -ne 0 ]; then cat "$__OG_RIG_OUTPUT" >&2 || true; fi',
     '    rm -f "$__OG_RIG_SCRIPT" "$__OG_RIG_OUTPUT"',
-    '    if [ "$__OG_RIG_RC" -eq 0 ]; then touch "$__OG_RIG_MARKER"; fi',
+    '    if [ "$__OG_RIG_RC" -eq 0 ]; then',
+    '      __og_rig_validate_root || exit "$?"',
+    '      __OG_RIG_MARKER_TMP="$(mktemp "$__OG_RIG_ROOT/.rig-setup-marker.XXXXXX")" || { printf \'%s\\n\' "cannot create rig setup marker temporary file" >&2; exit 73; }',
+    '      chmod 600 "$__OG_RIG_MARKER_TMP" || { printf \'%s\\n\' "cannot secure rig setup marker temporary file" >&2; exit 73; }',
+    '      ln -- "$__OG_RIG_MARKER_TMP" "$__OG_RIG_MARKER" || { printf \'%s\\n\' "cannot persist rig setup marker" >&2; exit 73; }',
+    '      rm -f "$__OG_RIG_MARKER_TMP" || { printf \'%s\\n\' "cannot remove rig setup marker temporary link" >&2; exit 73; }',
+    '      __OG_RIG_MARKER_TMP=""',
+    "      __og_rig_marker_state",
+    "      __OG_RIG_MARKER_STATE=$?",
+    '      if [ "$__OG_RIG_MARKER_STATE" -ne 0 ]; then printf \'%s\\n\' "persisted rig setup marker failed validation" >&2; exit 73; fi',
+    "    fi",
     '    exit "$__OG_RIG_RC"',
     "  fi",
     "  __OG_RIG_WAITED=0",
     '  while [ "$__OG_RIG_WAITED" -lt "$__OG_RIG_LOCK_WAIT_SECS" ]; do',
-    `    if [ -f "$__OG_RIG_MARKER" ]; then printf '%s\\n' ${shellQuote(RIG_SETUP_SKIPPED_SENTINEL)}; exit 0; fi`,
+    '    __og_rig_skip_if_ready || exit "$?"',
     '    if [ ! -d "$__OG_RIG_LOCK" ]; then break; fi',
     "    sleep 1",
     "    __OG_RIG_WAITED=$((__OG_RIG_WAITED + 1))",
     "  done",
-    `  if [ -f "$__OG_RIG_MARKER" ]; then printf '%s\\n' ${shellQuote(RIG_SETUP_SKIPPED_SENTINEL)}; exit 0; fi`,
+    '  __og_rig_skip_if_ready || exit "$?"',
     '  if [ ! -d "$__OG_RIG_LOCK" ]; then continue; fi',
     '  rmdir "$__OG_RIG_LOCK" 2>/dev/null || true',
     "done",

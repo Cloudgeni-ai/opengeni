@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { readFileSync } from "node:fs";
+import { lstatSync, readFileSync } from "node:fs";
 
 import type { ImpactPlan } from "./impact";
 
@@ -10,6 +10,30 @@ const COMMANDS: Readonly<Record<string, readonly string[]>> = {
   "docs-refs": ["bun", "scripts/check-docs-refs.ts"],
   "publish-closure": ["bun", "scripts/publish-closure-guard.ts"],
 };
+
+function exampleBuildCommands(projects: readonly string[]): string[][] {
+  return projects.map((project) => {
+    if (!/^examples\/[^/]+$/.test(project)) {
+      throw new Error(`invalid example build project: ${project}`);
+    }
+    if (!lstatSync(project).isDirectory()) {
+      throw new Error(`example build project is not a directory: ${project}`);
+    }
+    return ["bun", "run", "--cwd", project, "build"];
+  });
+}
+
+async function runCommand(command: readonly string[]): Promise<void> {
+  const child = Bun.spawn([...command], {
+    cwd: process.cwd(),
+    env: process.env,
+    stdin: "inherit",
+    stdout: "inherit",
+    stderr: "inherit",
+  });
+  const status = await child.exited;
+  if (status !== 0) process.exit(status);
+}
 
 async function main(): Promise<void> {
   const planIndex = process.argv.indexOf("--plan");
@@ -24,12 +48,23 @@ async function main(): Promise<void> {
     throw new Error("usage: run-guards-plan.ts --plan <json> [--exclude <guard>]...");
   }
   const plan = JSON.parse(readFileSync(planPath, "utf8")) as ImpactPlan;
-  if (plan.schemaVersion !== 1 || !Array.isArray(plan.guards)) {
+  if (
+    plan.schemaVersion !== 1 ||
+    !Array.isArray(plan.guards) ||
+    !Array.isArray(plan.exampleBuildProjects)
+  ) {
     throw new Error("unsupported or malformed impact plan");
   }
   for (const guard of plan.guards) {
     if (excluded.has(guard)) {
       process.stdout.write(`[guard] ${guard} deferred to its output-producing job\n`);
+      continue;
+    }
+    if (guard === "example-builds") {
+      for (const command of exampleBuildCommands(plan.exampleBuildProjects)) {
+        process.stdout.write(`[guard] example build: ${command[3]}\n`);
+        await runCommand(command);
+      }
       continue;
     }
     let command = COMMANDS[guard];
@@ -41,15 +76,7 @@ async function main(): Promise<void> {
       command = [...command, "--require-client-dist"];
     }
     process.stdout.write(`[guard] ${guard}\n`);
-    const child = Bun.spawn([...command], {
-      cwd: process.cwd(),
-      env: process.env,
-      stdin: "inherit",
-      stdout: "inherit",
-      stderr: "inherit",
-    });
-    const status = await child.exited;
-    if (status !== 0) process.exit(status);
+    await runCommand(command);
   }
   process.stdout.write(`[guard] passed: ${plan.guards.join(", ") || "none"}\n`);
 }

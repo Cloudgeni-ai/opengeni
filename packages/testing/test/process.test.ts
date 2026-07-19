@@ -3,7 +3,34 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runCommand, startProcess, waitFor } from "../src/process";
+import { runCommand, startProcess, stopStartedProcesses, waitFor } from "../src/process";
+
+test("process teardown attempts every stop and reports all supervisor failures", async () => {
+  const stopped: string[] = [];
+  const firstFailure = new Error("control process survived");
+
+  await expect(
+    stopStartedProcesses([
+      {
+        stop: async () => {
+          stopped.push("control");
+          throw firstFailure;
+        },
+      },
+      {
+        stop: async () => {
+          stopped.push("turns");
+        },
+      },
+    ]),
+  ).rejects.toEqual(
+    expect.objectContaining({
+      errors: [firstFailure],
+      message: "1 test process stop operation(s) failed",
+    }),
+  );
+  expect(stopped).toEqual(["control", "turns"]);
+});
 
 test("waitFor enforces its deadline when one predicate attempt never settles", async () => {
   const startedAt = Date.now();

@@ -54,10 +54,23 @@ describe("fail-closed change impact", () => {
     expect(plan.affectedPackages).toContain("@opengeni/sdk");
     expect(plan.affectedPackages).toContain("@opengeni/react");
     expect(plan.affectedPackages).toContain("opengeni-web");
+    expect(plan.affectedPackages).toContain("@opengeni/example-northstar-support");
     expect(plan.typecheckProjects).toContain("packages/sdk");
     expect(plan.unitTests).toContain("packages/sdk/test/client.test.ts");
     expect(plan.e2eTests).toContain("test/e2e/browser.e2e.ts");
+    expect(plan.exampleBuildProjects).toContain("examples/northstar-support");
     expect(plan.integrationTests.every((path) => !path.startsWith("packages/db/"))).toBe(true);
+  });
+
+  test("example-only and full plans typecheck and build the example workspace", () => {
+    for (const plan of [
+      createImpactPlan(["examples/northstar-support/src/main.tsx"]),
+      createImpactPlan([], { forceFull: true }),
+    ]) {
+      expect(plan.typecheckProjects).toContain("examples/northstar-support");
+      expect(plan.exampleBuildProjects).toContain("examples/northstar-support");
+      expect(plan.guards).toContain("example-builds");
+    }
   });
 
   test("the version-linked SDK and React outputs are selected atomically", () => {
@@ -252,13 +265,53 @@ describe("fail-closed change impact", () => {
     expect(() => Bun.YAML.parse(readFileSync(".github/workflows/ci.yml", "utf8"))).not.toThrow();
   });
 
-  test("typecheck discovery contains every current app/package project", () => {
+  test("every pull-request workflow checks out and fingerprints the exact PR head", () => {
+    const exactHead = "${{ github.event.pull_request.head.sha || github.sha }}";
+    type Workflow = {
+      jobs?: Record<
+        string,
+        {
+          steps?: Array<{
+            uses?: string;
+            with?: Record<string, unknown>;
+            env?: Record<string, unknown>;
+          }>;
+        }
+      >;
+    };
+    const parsed = new Map<string, Workflow>();
+    for (const path of [
+      ".github/workflows/ci.yml",
+      ".github/workflows/agent-ci.yml",
+      ".github/workflows/desktop-e2e.yml",
+    ]) {
+      const workflow = Bun.YAML.parse(readFileSync(path, "utf8")) as Workflow;
+      parsed.set(path, workflow);
+      const checkouts = Object.values(workflow.jobs ?? {})
+        .flatMap((job) => job.steps ?? [])
+        .filter((step) => step.uses === "actions/checkout@v6");
+      expect(checkouts.length).toBeGreaterThan(0);
+      for (const checkout of checkouts) expect(checkout.with?.ref).toBe(exactHead);
+    }
+
+    const ci = parsed.get(".github/workflows/ci.yml")!;
+    const packageSteps = ci.jobs?.packages?.steps ?? [];
+    const cacheKey = packageSteps.find((step) => step.uses === "actions/cache@v4")?.with?.key;
+    expect(cacheKey).toBeString();
+    expect(String(cacheKey).endsWith(exactHead)).toBe(true);
+    const sourceSha = ci.jobs?.images?.steps?.find((step) => step.uses === "docker/bake-action@v6")
+      ?.env?.SOURCE_SHA;
+    expect(sourceSha).toBe(exactHead);
+  });
+
+  test("typecheck discovery contains every current app/example/package project", () => {
     const projects = typecheckProjects();
     expect(projects).toContain("scripts/ci");
     expect(projects).not.toContain("scripts/operator");
     expect(projects).toContain("apps/api");
     expect(projects).toContain("apps/worker");
     expect(projects).toContain("apps/web");
+    expect(projects).toContain("examples/northstar-support");
     expect(new Set(projects).size).toBe(projects.length);
   });
 

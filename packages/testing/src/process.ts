@@ -176,6 +176,20 @@ export type StartedE2eWorkerTopology = {
   stop: () => Promise<void>;
 };
 
+export async function stopStartedProcesses(
+  processes: readonly Pick<StartedProcess, "stop">[],
+): Promise<void> {
+  const results = await Promise.allSettled(
+    processes.map((process) => Promise.resolve().then(() => process.stop())),
+  );
+  const failures = results.flatMap((result) =>
+    result.status === "rejected" ? [result.reason] : [],
+  );
+  if (failures.length > 0) {
+    throw new AggregateError(failures, `${failures.length} test process stop operation(s) failed`);
+  }
+}
+
 /** Start the same isolated control/turn worker topology used in production. */
 export async function startE2eWorkerTopology(options: {
   cwd: string;
@@ -213,9 +227,7 @@ export async function startE2eWorkerTopology(options: {
     ready: () =>
       control.logs().includes("OpenGeni control test worker listening") &&
       turns.logs().includes("OpenGeni turn test worker listening"),
-    stop: async () => {
-      await Promise.allSettled([control.stop(), turns.stop()]);
-    },
+    stop: () => stopStartedProcesses([control, turns]),
   };
 }
 

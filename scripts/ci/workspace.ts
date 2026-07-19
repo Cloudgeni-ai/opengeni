@@ -20,6 +20,7 @@ export const UNIT_TEST_PATTERN = /(?:^|\/)\S+\.test\.tsx?$/;
 export const INTEGRATION_TEST_PATTERN = /(?:^|\/)\S+\.integration\.ts$/;
 export const E2E_TEST_PATTERN = /(?:^|\/)\S+\.e2e\.ts$/;
 export const INTEGRATION_SHARD_PROFILE = "scripts/ci/integration-shard-profile.json";
+const TEST_SOURCE_DIRECTORIES = ["apps", "examples", "packages", "scripts", "test"];
 
 export type ShardWeightResolution = {
   mode: "profile" | "source-bytes";
@@ -142,7 +143,7 @@ export function discoverTestFiles(root = process.cwd()): {
   e2e: string[];
 } {
   const files: string[] = [];
-  for (const directory of ["apps", "packages", "scripts", "test"]) {
+  for (const directory of TEST_SOURCE_DIRECTORIES) {
     walkFiles(root, join(root, directory), files);
   }
   return {
@@ -156,7 +157,7 @@ export function discoverTestFiles(root = process.cwd()): {
 
 export function assertTestTierMapComplete(root = process.cwd()): void {
   const files: string[] = [];
-  for (const directory of ["apps", "packages", "scripts", "test"]) {
+  for (const directory of TEST_SOURCE_DIRECTORIES) {
     walkFiles(root, join(root, directory), files);
   }
   for (const path of Object.keys(OPT_IN_TESTS)) {
