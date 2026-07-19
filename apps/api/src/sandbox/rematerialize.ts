@@ -14,49 +14,13 @@ import {
 import {
   establishSandboxSessionFromEnvelope,
   isProviderSandboxNotFoundError,
-  serializeEstablishedSandboxEnvelope,
+  serializeReplacementSandboxEnvelope,
   tagModalSandbox,
   verifySandboxExecReadiness,
   WorkspaceArchiveIntegrityError,
   type EstablishedSandboxSession,
   type WorkspaceArchiveDescriptor,
 } from "@opengeni/runtime/sandbox";
-
-const ARCHIVE_FIELDS = [
-  "workspaceArchive",
-  "workspaceArchiveMeta",
-  "workspaceArchivePrev",
-  "workspaceArchivePrevMeta",
-  "workspaceArchiveAt",
-] as const;
-
-function preserveWorkspaceArchives(
-  target: Record<string, unknown> | null,
-  source: Record<string, unknown> | null,
-): Record<string, unknown> | null {
-  const sourceSession =
-    source?.sessionState && typeof source.sessionState === "object"
-      ? (source.sessionState as Record<string, unknown>)
-      : undefined;
-  if (!sourceSession || typeof sourceSession.workspaceArchive !== "string") return target;
-  const fields: Record<string, unknown> = {};
-  for (const key of ARCHIVE_FIELDS) {
-    if (sourceSession[key] !== undefined && sourceSession[key] !== null) {
-      fields[key] = sourceSession[key];
-    }
-  }
-  const targetSession =
-    target?.sessionState && typeof target.sessionState === "object"
-      ? (target.sessionState as Record<string, unknown>)
-      : {};
-  return {
-    ...(target ?? {}),
-    ...(target?.backendId === undefined && source?.backendId !== undefined
-      ? { backendId: source.backendId }
-      : {}),
-    sessionState: { ...targetSession, ...fields },
-  };
-}
 
 function hasWorkspaceArchive(envelope: Record<string, unknown> | null): boolean {
   const sessionState =
@@ -188,9 +152,7 @@ export async function establishApiSandboxSpawner(input: {
       environment: input.environment,
       onSandboxCreated: async (created) => {
         established = created;
-        const serialized =
-          (await serializeEstablishedSandboxEnvelope(created)) ?? input.fallbackEnvelope;
-        const resumeState = preserveWorkspaceArchives(serialized ?? null, spawnEnvelope);
+        const resumeState = await serializeReplacementSandboxEnvelope(created, spawnEnvelope);
         const recorded = await recordWarmingSandboxCreated(input.db, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
@@ -244,12 +206,7 @@ export async function establishApiSandboxSpawner(input: {
         "sandbox restore completed without the exact selected durable archive revision",
       );
     }
-    const serialized =
-      (await serializeEstablishedSandboxEnvelope(established)) ?? input.fallbackEnvelope;
-    const resumeState =
-      established.origin === "restored"
-        ? preserveWorkspaceArchives(serialized ?? null, spawnEnvelope)
-        : serialized;
+    const resumeState = await serializeReplacementSandboxEnvelope(established, spawnEnvelope);
     const committed = await commitWarmingToWarm(input.db, {
       accountId: input.accountId,
       workspaceId: input.workspaceId,

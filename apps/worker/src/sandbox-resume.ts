@@ -45,7 +45,7 @@ import {
   WorkspaceArchiveIntegrityError,
   establishSandboxSessionFromEnvelope,
   isProviderSandboxNotFoundError,
-  serializeEstablishedSandboxEnvelope,
+  serializeReplacementSandboxEnvelope,
   deletePriorPersistedSnapshot,
   tagModalSandbox,
   verifySandboxExecReadiness,
@@ -349,30 +349,6 @@ function withoutProviderIdentity(
   return { ...envelope, sessionState: providerIndependentState };
 }
 
-function preserveWorkspaceArchivesOnResumeState(
-  resumeState: Record<string, unknown> | null,
-  archiveSource: Record<string, unknown> | null,
-): Record<string, unknown> | null {
-  const archiveFields = workspaceArchiveFieldsFromEnvelope(archiveSource);
-  if (!archiveFields) {
-    return resumeState;
-  }
-  const existingSessionState =
-    resumeState && typeof resumeState.sessionState === "object" && resumeState.sessionState !== null
-      ? (resumeState.sessionState as Record<string, unknown>)
-      : {};
-  return {
-    ...(resumeState ?? {}),
-    ...(resumeState?.backendId === undefined && archiveSource?.backendId !== undefined
-      ? { backendId: archiveSource.backendId }
-      : {}),
-    sessionState: {
-      ...existingSessionState,
-      ...archiveFields,
-    },
-  };
-}
-
 /**
  * MID-SESSION /workspace snapshot (sandbox-file-persistence). The reaper's
  * drain-persist only protects boxes the reaper itself kills; anything else —
@@ -673,8 +649,8 @@ export async function resumeBoxForTurn(
         ...(services.sandboxMetrics ? { metrics: services.sandboxMetrics } : {}),
         onSandboxCreated: async (created) => {
           createdEstablished = created;
-          const resumeEnvelope = preserveWorkspaceArchivesOnResumeState(
-            (await serializeEstablishedSandboxEnvelope(created)) ?? null,
+          const resumeEnvelope = await serializeReplacementSandboxEnvelope(
+            created,
             spawnEnvelope,
           );
           const recorded = await recordWarmingSandboxCreated(db, {
@@ -732,10 +708,10 @@ export async function resumeBoxForTurn(
       // viewer.ts). Without this the turn committed the ORIGINAL session manifest
       // as resume_state, so every LATER op off this lease (Channel-A fs/git/
       // terminal, the desktop viewer, the reaper) cold-restored a FRESH rival box
-      // and never saw the turn's live box. Fall back to the session envelope only
-      // when the client cannot serialize live state.
-      const serializedResumeEnvelope =
-        (await serializeEstablishedSandboxEnvelope(established)) ?? envelope;
+      // and never saw the turn's live box. Historical state may contribute only
+      // durable archive pointers: if live serialization fails, publishing its
+      // dead provider identity would pair the replacement instance with the box
+      // that initiated recovery.
       // A successful cold hydrate has already proved this archive usable and the
       // replacement box now contains its files. Keep the current + fallback
       // archive pointers on the committed live envelope until a later warm
@@ -744,10 +720,10 @@ export async function resumeBoxForTurn(
       // fires would otherwise make truthful recovery impossible. Failed hydrate
       // attempts terminate the replacement and fail closed; they never publish a
       // clean or mixed workspace.
-      const resumeEnvelope =
-        established.origin === "restored"
-          ? preserveWorkspaceArchivesOnResumeState(serializedResumeEnvelope, spawnEnvelope)
-          : serializedResumeEnvelope;
+      const resumeEnvelope = await serializeReplacementSandboxEnvelope(
+        established,
+        spawnEnvelope,
+      );
       if (
         rematerialization &&
         established.restoredArchive?.revision !== rematerialization.selectedRevision

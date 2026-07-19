@@ -1285,3 +1285,69 @@ export async function serializeEstablishedSandboxEnvelope(
     return null;
   }
 }
+
+const DURABLE_WORKSPACE_ARCHIVE_FIELDS = [
+  "workspaceArchive",
+  "workspaceArchiveMeta",
+  "workspaceArchivePrev",
+  "workspaceArchivePrevMeta",
+  "workspaceArchiveAt",
+] as const;
+
+function durableWorkspaceArchiveFields(
+  envelope: Record<string, unknown> | null,
+): Record<string, unknown> | null {
+  const sessionState =
+    envelope?.sessionState && typeof envelope.sessionState === "object"
+      ? (envelope.sessionState as Record<string, unknown>)
+      : null;
+  if (
+    !sessionState ||
+    typeof sessionState.workspaceArchive !== "string" ||
+    sessionState.workspaceArchive.length === 0
+  ) {
+    return null;
+  }
+  const fields: Record<string, unknown> = {};
+  for (const key of DURABLE_WORKSPACE_ARCHIVE_FIELDS) {
+    if (sessionState[key] !== undefined && sessionState[key] !== null) {
+      fields[key] = sessionState[key];
+    }
+  }
+  return fields;
+}
+
+/**
+ * Build the only resume envelope that may be published for a newly-created
+ * replacement sandbox. Historical state contributes durable archive pointers
+ * only; it can never substitute for serialization of the replacement's provider
+ * identity. If replacement serialization is unavailable or fails, publication
+ * keeps an archive-only envelope (when one exists) or null. The new instance id
+ * remains separately fenced on the lease, while later attach/resume fails closed
+ * rather than targeting the dead provider that initiated rematerialization.
+ */
+export async function serializeReplacementSandboxEnvelope(
+  established: EstablishedSandboxSession,
+  archiveSource: Record<string, unknown> | null,
+): Promise<Record<string, unknown> | null> {
+  const serialized = await serializeEstablishedSandboxEnvelope(established);
+  const archiveFields = durableWorkspaceArchiveFields(archiveSource);
+  if (!serialized && !archiveFields) {
+    return null;
+  }
+  const serializedSessionState =
+    serialized?.sessionState && typeof serialized.sessionState === "object"
+      ? (serialized.sessionState as Record<string, unknown>)
+      : {};
+  return {
+    ...(serialized ?? {}),
+    // Never inherit a historical backend marker when the replacement could not
+    // serialize. The separately-persisted resume_backend_id and this envelope
+    // must both describe the replacement.
+    backendId: established.backendId,
+    sessionState: {
+      ...serializedSessionState,
+      ...(archiveFields ?? {}),
+    },
+  };
+}
