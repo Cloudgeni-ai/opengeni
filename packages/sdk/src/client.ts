@@ -55,6 +55,7 @@ import type {
   DeviceEnrollmentDenyResponse,
   DeviceEnrollmentLookupResponse,
   MintEnrollTokenResponse,
+  RevokeEnrollmentResponse,
   DiscoverMcpCapabilitiesResponse,
   Document,
   DocumentBase,
@@ -450,6 +451,22 @@ export class OpenGeniClient {
       "POST",
       `/v1/workspaces/${workspaceId}/enrollments/token`,
       { allowScreenControl: request.allowScreenControl ?? false },
+    );
+  }
+
+  /**
+   * Permanently revoke one connected-machine enrollment. The machine's stored
+   * bearer stops authenticating immediately; enrolling it again requires an
+   * explicit `opengeni-agent enroll --force`. A successful `{ revoked: false }`
+   * is the idempotent already-revoked outcome.
+   */
+  async revokeEnrollment(
+    workspaceId: string,
+    enrollmentId: string,
+  ): Promise<RevokeEnrollmentResponse> {
+    return await this.requestJson<RevokeEnrollmentResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/enrollments/${enrollmentId}/revoke`,
     );
   }
 
@@ -1484,7 +1501,7 @@ export class OpenGeniClient {
 
   // --- Rigs ------------------------------------------------------------------
   // Workspace-scoped, versioned sandbox machine definitions. rigs:use gates read
-  // + proposeRigChange; rigs:manage gates create / update / delete / activate.
+  // + propose/verify; rigs:manage gates every create/update/delete/activation.
 
   async listRigs(workspaceId: string): Promise<Rig[]> {
     return await this.requestJson<Rig[]>("GET", `/v1/workspaces/${workspaceId}/rigs`);
@@ -1569,9 +1586,8 @@ export class OpenGeniClient {
   }
 
   /**
-   * Promote a verified `definition_edit` change into a new active rig version
-   * (rigs:manage). Only valid once the change's verification passed; returns the
-   * newly minted version.
+   * Promote either verified change kind into a new active rig version
+   * (rigs:manage). Retries return the version already minted for this change.
    */
   async promoteRigChange(
     workspaceId: string,

@@ -33,7 +33,9 @@ pub trait RelayTransport: Send {
     /// [`StreamError::Transport`] if the underlying socket errored / closed.
     async fn send(&mut self, msg: &RelayMessage) -> StreamResult<()>;
 
-    /// Receives the next relay message, or `Ok(None)` on a clean close.
+    /// Receives the next relay message. Implementations may use `Ok(None)` to
+    /// report raw EOF; [`RelayChannel`](crate::channel::RelayChannel) classifies
+    /// that untyped close as retryable transport loss.
     ///
     /// # Errors
     ///
@@ -136,7 +138,11 @@ pub mod wss {
                     Some(Ok(WsMessage::Binary(bytes))) => {
                         return RelayMessage::decode(&bytes).map(Some);
                     }
-                    Some(Ok(WsMessage::Close(_))) | None => return Ok(None),
+                    Some(Ok(WsMessage::Close(_))) | None => {
+                        return Err(StreamError::Transport(
+                            "wss closed without a typed StreamClose".to_string(),
+                        ));
+                    }
                     // Ignore control/non-binary frames (ping/pong/text/raw); tungstenite
                     // answers pings itself, so we continue reading for the next binary.
                     Some(Ok(

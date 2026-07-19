@@ -160,6 +160,45 @@ oversized-reply wall does not apply on this path; output is instead bounded by
 the runner's retention quotas, and exceeding them fails typed with exact
 counters, never silently truncated.
 
+## Windows support boundary
+
+Foreground `opengeni-agent run` is the supported Windows lifecycle. The binary
+does not currently enter the Windows Service Control Manager dispatcher or report
+SCM state transitions. Therefore every `opengeni-agent service` action—including
+`install --print`, uninstall, status, and logs—returns an explicit unsupported
+error before invoking `sc.exe`; no broken service registration is left behind.
+Windows compilation/unit tests prove compatibility only. A real service may be
+claimed only after a native Windows host demonstrates dispatcher startup, control
+handling, state transitions, restart/recovery, logs, uninstall, and foreground-run
+regression coverage.
+
+## macOS support boundary
+
+macOS command and service code can be built and unit-tested from another
+platform, but that is **compatibility coverage only**. The persistent service is
+deliberately a user `LaunchAgent` in the logged-in `gui/<uid>` Aqua domain, never
+a system LaunchDaemon: it must share the user's GUI/TCC identity. `service logs`
+reads the LaunchAgent's configured user-owned stdout/stderr files; it does not
+claim a system-wide logging scope.
+
+The source contains an experimental ScreenCaptureKit/CGEvent backend behind the
+`macos-desktop` Cargo feature, but stable releases intentionally leave that feature
+off. Stable macOS agents therefore report `display_unavailable` and do not claim
+live screen capture/input or prompt for TCC grants. Before enabling it, a
+signed/notarized stable bundle identity, a logged-in Aqua user, human Screen
+Recording and Accessibility TCC grants, and whole-machine enrollment consent must
+all be demonstrated on a real consenting Mac. Cross-compilation and CI cannot
+substitute for that human gate.
+
+`opengeni-agent update --check` (also exposed as `opengeni-agent upgrade
+--check`) may discover and verify a macOS candidate. Apply
+does not mutate `.app/Contents/MacOS/opengeni-agent`: it fails before any temp or
+backup write and directs the user to rerun `<base>/install.sh` with
+`OPENGENI_INSTALL_REPLACE_APP=1`, replacing the complete verified app bundle. A
+stable Developer ID/designated requirement can preserve TCC identity only when the
+whole replacement bundle is signed and verified; an in-place Mach-O swap would
+invalidate that claim.
+
 ## Swap the active sandbox
 
 A session points at one active sandbox at a time. `swapActiveSandbox` re-points
@@ -203,12 +242,15 @@ const { token, expiresAt, expiresInSeconds } =
 // Run on the machine (the installer dials OpenGeni and exchanges the token for
 // its own long-lived agent credentials — the token exchange happens on the
 // machine, not through this client):
-//   curl -fsSL https://…/install.sh | sh -s -- --token <token>
+//   curl -fsSL https://…/install.sh |
+//     OPENGENI_API_URL=https://… OPENGENI_ENROLL_TOKEN='<token>' sh
 ```
 
 `allowScreenControl` bakes the (optional) screen-control consent into the token;
 whole-machine access — exec, files, terminal — is implicit and mandatory for any
-enrollment.
+enrollment. The token is a secret workspace-scoped fleet grant that may enroll
+multiple machine public keys until its one-hour expiry; the installer keeps it in
+the child environment and never copies it into process arguments.
 
 ### Device flow (interactive, in-session)
 
@@ -255,6 +297,18 @@ target.
 - **Permanently un-enroll** a machine (so it can never be attached again) is a
   workspace administration action; it is not wrapped as a typed method on the
   `@opengeni/sdk` client as of 0.5.0.
+- **A machine may self-revoke** during a local purge via the exact public
+  `POST /v1/enrollments/self/revoke` route and its own `oge_` bearer. This cannot
+  revoke another enrollment or cross a workspace. A matching already-revoked row
+  returns the normal idempotent no-op response to recover a lost first response,
+  but only while the row still has that bearer's credential generation. Every
+  re-enrollment atomically increments the generation: the old bearer can neither
+  authenticate nor revoke the new generation.
+
+Revocation immediately blocks the next NATS authorization/reconnect; it does not
+claim to synchronously disconnect an already-live NATS socket. The user JWT minted
+by auth-callout expires at the earlier of the bearer expiry or five minutes from
+authorization, so existing NATS access terminates within that bounded interval.
 
 ## React components
 

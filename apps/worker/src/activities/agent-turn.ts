@@ -87,7 +87,7 @@ import {
   ensureModalRegistryImage,
   findCompactionNeededError,
   materializeSandboxFileDownloads,
-  refreshGitProviderTokenFiles,
+  invalidateGitProviderTokenFiles,
   sandboxFileDownloadFailureNote,
   SUMMARY_BUFFER_TOKENS,
   runOwnedSandboxSetup,
@@ -159,7 +159,6 @@ import { maybeCompactContext } from "./context-compaction";
 import { TurnAttemptFencedError } from "./turn-attempt-fenced";
 import {
   loadWorkspaceEnvironmentForRunWithCredentials,
-  mintRunGitCredentials,
   sandboxEnvironmentForRun,
   type MintedRunGitCredentials,
 } from "./environment";
@@ -167,6 +166,17 @@ import {
   startGitCredentialRenewalLoop,
   type GitCredentialRenewalController,
 } from "./git-credential-renewal";
+import {
+  assertMintedGitCredentialBindingCoverage,
+  expireResolvedGitCredentialBinding,
+  GitCredentialLifecycleError,
+  installResolvedGitCredentialBinding,
+  invalidateResolvedGitCredentialBinding,
+  mintResolvedGitCredentialBinding,
+  refreshResolvedGitCredentialBinding,
+  resolveGitCredentialBindingForSession,
+  type ResolvedGitCredentialBinding,
+} from "./git-credential-binding";
 import { withCodexAppsTool, withFirstPartyTools } from "./goals";
 import {
   mergeRigDefaultVariableSetEnvironment,
@@ -819,6 +829,13 @@ export async function resolveActiveSandboxBackend(
   }
 }
 
+/** Connected Machines use only the human machine's own Git authorization. */
+export function platformManagesGitCredentialsForTurn(
+  activeSandboxBackend: Settings["sandboxBackend"] | undefined,
+): boolean {
+  return activeSandboxBackend !== "selfhosted";
+}
+
 /**
  * Classify a persisted active-sandbox pointer for TURN-START RECONCILE (issue #341
  * invariant B). Returns the typed reason to RESET the pointer to the session HOME,
@@ -832,8 +849,27 @@ export async function resolveActiveSandboxBackend(
  * agent_offline lazily, so the user's explicit machine target is never abandoned for
  * a transient control-plane blip (that is #339's concern, not this one).
  */
+/**
+ * A session whose configured home is a Connected Machine has no cloud fallback.
+ * This check deliberately runs before any group-box create/resume path.
+ */
+export function requireActiveMachineHome(
+  homeBackend: Settings["sandboxBackend"],
+  machinePrimary: boolean,
+): void {
+  if (homeBackend === "selfhosted" && !machinePrimary) {
+    throw new Error(
+      "Connected Machine target is no longer active; attach another active machine before running this session",
+    );
+  }
+}
+
 export function pointerReconcileReason(
-  record: { kind: string; enrollmentId: string | null } | null,
+  record: {
+    kind: string;
+    enrollmentId: string | null;
+    enrollmentStatus?: "active" | "revoked" | null;
+  } | null,
 ): BackendUnresolvableCode | null {
   if (!record) {
     return "stale_pointer";
@@ -848,6 +884,13 @@ export function pointerReconcileReason(
   if (record.kind === "selfhosted" && !record.enrollmentId) {
     return "offline_enrollment";
   }
+  if (
+    record.kind === "selfhosted" &&
+    record.enrollmentStatus !== undefined &&
+    record.enrollmentStatus !== "active"
+  ) {
+    return "offline_enrollment";
+  }
   return null;
 }
 
@@ -856,7 +899,11 @@ export function pointerReconcileReason(
  *  values with no second query. */
 export type LoadedActivePointer = {
   pointer: ActiveSandboxPointer | null;
-  record: SandboxRecord | null;
+  record: ActiveSandboxRoutingRecord | null;
+};
+
+export type ActiveSandboxRoutingRecord = SandboxRecord & {
+  enrollmentStatus?: "active" | "revoked" | null;
 };
 
 /**
@@ -879,7 +926,7 @@ export async function reconcileActiveSandboxPointer(
   db: ActivityServices["db"],
   ids: { accountId: string; workspaceId: string; sessionId: string },
   pointer: ActiveSandboxPointer | null,
-  loadRecord: (sandboxId: string) => Promise<SandboxRecord | null>,
+  loadRecord: (sandboxId: string) => Promise<ActiveSandboxRoutingRecord | null>,
   publish?: (events: Array<{ type: SessionEventType; payload: unknown }>) => Promise<void> | void,
 ): Promise<LoadedActivePointer> {
   if (!pointer?.activeSandboxId) {
@@ -887,7 +934,7 @@ export async function reconcileActiveSandboxPointer(
   }
   // Re-fetch the row WITHOUT error swallowing. A throw here (a transient DB blip) is NOT
   // "row absent": fail open — skip reconciliation, leave the pointer untouched.
-  let record: SandboxRecord | null;
+  let record: ActiveSandboxRoutingRecord | null;
   try {
     record = await loadRecord(pointer.activeSandboxId);
   } catch {
@@ -925,7 +972,7 @@ export async function reconcileActiveSandboxPointer(
   if (!reread) {
     return { pointer, record: null };
   }
-  let rereadRecord: SandboxRecord | null = null;
+  let rereadRecord: ActiveSandboxRoutingRecord | null = null;
   if (reread.activeSandboxId) {
     try {
       rereadRecord = await loadRecord(reread.activeSandboxId);
@@ -3125,6 +3172,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // across the session's turns (the same guarantee the session's own variable
       // set already relies on), keeping validateNoEnvironmentDelta empty.
       const rigDefaultEnvironmentValues: Record<string, string> = {};
+      if (
+        (rigVersion?.defaultVariableSetIds.length ?? 0) > 0 &&
+        session.rigDefaultVariableSetsAuthorized !== true
+      ) {
+        throw new Error(
+          "rig default variable sets were not authorized with variable-sets:use; refusing decryption",
+        );
+      }
       for (const rigDefaultVariableSetId of rigVersion?.defaultVariableSetIds ?? []) {
         const rigDefaultSet = await waitForTurnOperation(
           loadWorkspaceEnvironmentForRunWithCredentials(
@@ -3173,7 +3228,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // (which would wrongly clear a healthy user-chosen pointer). On a lookup throw the
       // reconcile fails open — pointer untouched, record null (machinePrimary:false),
       // no event — and the establish branch below reads the returned values.
-      let activeSandboxRecord: SandboxRecord | null = null;
+      let activeSandboxRecord: ActiveSandboxRoutingRecord | null = null;
       if (routingOn) {
         const reconciled = await reconcileActiveSandboxPointer(
           db,
@@ -3183,7 +3238,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             sessionId: input.sessionId,
           },
           activeSandboxPointer,
-          (sandboxId) => getSandbox(db, input.workspaceId, sandboxId),
+          async (sandboxId) => {
+            const sandbox = await getSandbox(db, input.workspaceId, sandboxId);
+            if (!sandbox || sandbox.kind !== "selfhosted" || !sandbox.enrollmentId) {
+              return sandbox;
+            }
+            const enrollment = await getEnrollment(db, input.workspaceId, sandbox.enrollmentId);
+            return { ...sandbox, enrollmentStatus: enrollment?.status ?? null };
+          },
           publish
             ? async (events) => {
                 await publish!(events);
@@ -3207,14 +3269,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         activeSandboxBackend === "selfhosted" &&
         Boolean(activeSandboxPointer?.activeSandboxId) &&
         Boolean(activeSandboxRecord?.enrollmentId);
-      // The backend that can actually create a sandbox for this turn. In the
-      // common path this is runSettings.sandboxBackend. A selfhosted home turn
-      // that is NOT machine-primary falls back to the deployment cloud backend
-      // so swap-away / flag-off degrade to a real group box.
-      const groupBoxBackend: Settings["sandboxBackend"] =
-        runSettings.sandboxBackend === "selfhosted" && !machinePrimary
-          ? settings.sandboxBackend
-          : runSettings.sandboxBackend;
+      requireActiveMachineHome(runSettings.sandboxBackend, machinePrimary);
+      // The backend that can actually create a sandbox for this turn. A session
+      // whose home is a Connected Machine must have an active machine target;
+      // loss/revocation is loud and never creates a phantom cloud group box.
+      // A cloud-home session explicitly swapped back away from a machine still
+      // resolves its normal cloud backend before reaching this branch.
+      const groupBoxBackend: Settings["sandboxBackend"] = runSettings.sandboxBackend;
       const sandboxCreationBackend: Settings["sandboxBackend"] =
         settings.sandboxOwnershipEnabled && runSettings.sandboxBackend !== "none"
           ? groupBoxBackend
@@ -3285,34 +3346,190 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         tokenSession: GitCredentialTokenWriterSession,
         initial: MintedRunGitCredentials | undefined,
       ): Promise<void> => {
-        if (!initial || Object.keys(initial.gitTokens).length === 0) return;
+        // Connected Machines use the human machine's own Git auth. This guard is
+        // intentionally before discovery/DB/mint so no platform credential path
+        // can touch a selfhosted session even if a caller registers the callback.
+        if (!platformManagesGitCredentialsForTurn(activeSandboxBackend)) return;
+        const runAs = sandboxRunAs(runSettings);
+        const turnToolCancellationFence = toolCancellationFenceRef.current;
+        const commandRunner = turnToolCancellationFence
+          ? turnToolCancellationFence.runSandboxCommand.bind(turnToolCancellationFence)
+          : undefined;
         const previous = gitCredentialRenewal;
         gitCredentialRenewal = null;
         await previous?.stop();
         if (gitCredentialRenewalClosed) return;
 
-        const providers = Object.keys(initial.gitTokens) as GitCredentialProvider[];
+        const bindingScope = { ...connectionScope, sessionId: input.sessionId };
+        let resolution: Awaited<ReturnType<typeof resolveGitCredentialBindingForSession>>;
+        try {
+          resolution = await resolveGitCredentialBindingForSession({
+            db,
+            settings: runSettings,
+            scope: bindingScope,
+            session: tokenSession,
+            resources: turnResources,
+            ...(connectionCredentials ? { connectionCredentials } : {}),
+            ...(runAs ? { runAs } : {}),
+            ...(commandRunner ? { commandRunner } : {}),
+          });
+        } catch {
+          throw new GitCredentialLifecycleError("binding_resolution_failed");
+        }
+        if (resolution.status !== "bound") {
+          // No checkout means there is nothing to authorize and no token file to
+          // manage. Any observed/indeterminate checkout fails closed instead of
+          // leaving a stale platform token that later surfaces as an unexplained
+          // provider 401.
+          if ((resolution.legacyInvalidationProviders?.length ?? 0) > 0) {
+            try {
+              await invalidateGitProviderTokenFiles(
+                tokenSession,
+                resolution.legacyInvalidationProviders!,
+                {
+                  ...(runAs ? { runAs } : {}),
+                  ...(commandRunner ? { commandRunner } : {}),
+                },
+              );
+            } catch {
+              throw new GitCredentialLifecycleError("token_cleanup_failed");
+            }
+          }
+          if (resolution.reasonCode === "no_repository_observed") return;
+          throw new GitCredentialLifecycleError("authorization_unproven");
+        }
+        const binding: ResolvedGitCredentialBinding = resolution;
+        const invalidateBinding = async (reasonCode: string): Promise<void> => {
+          await invalidateResolvedGitCredentialBinding(db, bindingScope, tokenSession, binding, {
+            status: "unavailable",
+            reasonCode,
+            ...(runAs ? { runAs } : {}),
+            ...(commandRunner ? { commandRunner } : {}),
+          });
+        };
+        const mintBinding = async (
+          terminalOnFailure: boolean,
+          prepared?: MintedRunGitCredentials,
+        ): Promise<MintedRunGitCredentials> => {
+          try {
+            const minted = assertMintedGitCredentialBindingCoverage(
+              binding,
+              prepared ??
+                (await mintResolvedGitCredentialBinding(
+                  runSettings,
+                  connectionScope,
+                  binding,
+                  connectionCredentials?.gitCredentials,
+                )),
+            );
+            return minted;
+          } catch {
+            let cleanupFailed = false;
+            if (terminalOnFailure) {
+              // Initial setup cannot proceed without a currently proven token.
+              // Mark the binding unavailable so the next turn rediscovers it.
+              await invalidateBinding("token_mint_failed").catch((error) => {
+                if (
+                  !(error instanceof GitCredentialLifecycleError) ||
+                  error.code !== "binding_fence_rejected"
+                ) {
+                  cleanupFailed = true;
+                }
+              });
+            } else {
+              // A running turn may recover from a transient broker outage. Keep
+              // the authorization binding active for retries, but immediately
+              // unlink the prior token while proof is unavailable (including
+              // providers that expose no expiry deadline).
+              await expireResolvedGitCredentialBinding(
+                db,
+                bindingScope,
+                tokenSession,
+                binding,
+                Object.keys(binding.expectedGenerations) as GitCredentialProvider[],
+                {
+                  ...(runAs ? { runAs } : {}),
+                  ...(commandRunner ? { commandRunner } : {}),
+                },
+              ).catch((error) => {
+                if (
+                  !(error instanceof GitCredentialLifecycleError) ||
+                  error.code !== "binding_fence_rejected"
+                ) {
+                  cleanupFailed = true;
+                }
+              });
+            }
+            throw new GitCredentialLifecycleError(
+              cleanupFailed ? "token_cleanup_failed" : "token_mint_failed",
+            );
+          }
+        };
+
+        const prepared = await mintBinding(true, initial);
+        try {
+          await installResolvedGitCredentialBinding(
+            db,
+            bindingScope,
+            tokenSession,
+            binding,
+            prepared,
+            {
+              ...(runAs ? { runAs } : {}),
+              ...(commandRunner ? { commandRunner } : {}),
+            },
+          );
+        } catch (error) {
+          if (
+            error instanceof GitCredentialLifecycleError &&
+            error.code === "binding_fence_rejected"
+          ) {
+            throw error;
+          }
+          try {
+            await invalidateBinding("token_install_failed");
+          } catch (cleanupError) {
+            if (
+              !(cleanupError instanceof GitCredentialLifecycleError) ||
+              cleanupError.code !== "binding_fence_rejected"
+            ) {
+              throw new GitCredentialLifecycleError("token_cleanup_failed");
+            }
+          }
+          throw new GitCredentialLifecycleError("token_install_failed");
+        }
+        if (gitCredentialRenewalClosed) return;
+
+        const providers = Object.keys(binding.expectedGenerations) as GitCredentialProvider[];
         const controller = startGitCredentialRenewalLoop({
           expectedProviders: providers,
-          initialExpiresAt: initial.expiresAt,
-          mint: async () =>
-            await mintRunGitCredentials(runSettings, turnResources, {
-              scope: connectionScope,
-              gitCredentials: connectionCredentials?.gitCredentials,
-            }),
+          initialExpiresAt: prepared.expiresAt,
+          mint: async () => await mintBinding(false),
           write: async (tokens) => {
-            const runAs = sandboxRunAs(runSettings);
-            await refreshGitProviderTokenFiles(tokenSession, tokens, {
-              ...(runAs ? { runAs } : {}),
-              ...(toolCancellationFenceRef.current
-                ? {
-                    commandRunner: toolCancellationFenceRef.current.runSandboxCommand.bind(
-                      toolCancellationFenceRef.current,
-                    ),
-                  }
-                : {}),
-            });
+            await refreshResolvedGitCredentialBinding(
+              db,
+              bindingScope,
+              tokenSession,
+              binding,
+              { gitTokens: tokens, expiresAt: {} },
+              {
+                ...(runAs ? { runAs } : {}),
+                ...(commandRunner ? { commandRunner } : {}),
+              },
+            );
           },
+          invalidate: async (expiredProviders) =>
+            await expireResolvedGitCredentialBinding(
+              db,
+              bindingScope,
+              tokenSession,
+              binding,
+              expiredProviders,
+              {
+                ...(runAs ? { runAs } : {}),
+                ...(commandRunner ? { commandRunner } : {}),
+              },
+            ),
           onSuccess: ({ providers: renewedProviders }) => {
             for (const provider of renewedProviders) {
               observability.incrementCounter({
@@ -3780,14 +3997,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           async () => {
             throwIfWorkerShuttingDown();
             throwIfTurnCancelled();
-            const lazyGitCredentials =
-              activeSandboxBackend === "selfhosted"
-                ? undefined
-                : await mintRunGitCredentials(runSettings, turnResources, {
-                    scope: connectionScope,
-                    gitCredentials: connectionCredentials?.gitCredentials,
-                  });
-            const lazyGitTokens = lazyGitCredentials?.gitTokens;
             const provisioned = await resumeBoxForTurn(
               {
                 db,
@@ -3823,7 +4032,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 onRuntimeEvent: async (event) => {
                   await publish?.([{ type: event.type, payload: event.payload }], true);
                 },
-                ...(lazyGitTokens ? { gitTokenSeedsOverride: lazyGitTokens } : {}),
+                ...(platformManagesGitCredentialsForTurn(activeSandboxBackend)
+                  ? {
+                      onGitCredentialSessionReady: async (tokenSession) => {
+                        await attachGitCredentialRenewal(tokenSession, undefined);
+                      },
+                    }
+                  : {}),
                 ...(toolCancellationFenceRef.current
                   ? {
                       commandRunner: toolCancellationFenceRef.current.runSandboxCommand.bind(
@@ -3832,10 +4047,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                     }
                   : {}),
               },
-            );
-            await attachGitCredentialRenewal(
-              provisioned.established.session as GitCredentialTokenWriterSession,
-              lazyGitCredentials,
             );
             // Return the REAL established box (NOT a copy whose session is the routing
             // proxy). resolveActiveBackend dispatches ops to `provisioned.established.session`;
@@ -4241,7 +4452,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   },
                 }
               : {}),
-            ...(initialGitCredentials
+            ...(platformManagesGitCredentialsForTurn(activeSandboxBackend)
               ? {
                   onGitCredentialSessionReady: async (
                     tokenSession: GitCredentialTokenWriterSession,

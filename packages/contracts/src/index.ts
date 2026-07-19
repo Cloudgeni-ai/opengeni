@@ -497,10 +497,9 @@ export const Permission = z.enum([
   "enrollments:read",
   "enrollments:manage",
   // Rigs (workspace-scoped, versioned sandbox machine definitions). rigs:use is
-  // read + propose-change (the agent-native, additive path a sandboxed session
-  // is trusted with); rigs:manage is create/edit/activate/promote/delete (the
-  // admin-shaped path that mints or rolls versions). workspace:admin is the
-  // super-wildcard over both.
+  // read + propose + clean verification; rigs:manage is every durable version
+  // mint/activation/promotion/delete. A verified agent proposal never activates
+  // by itself. workspace:admin is the super-wildcard over both.
   "rigs:use",
   "rigs:manage",
 ]);
@@ -715,6 +714,11 @@ export const EnrollmentBearerPayload = z.object({
   workspaceId: z.string().uuid(),
   agentId: z.string().uuid(),
   enrollmentId: z.string().uuid(),
+  // Backward-compatible credential-family fence. Generationless bearers minted
+  // before migration 0061 parse ONLY as generation 1, matching the migration's
+  // default for existing rows. signEnrollmentBearer serializes the parsed output,
+  // so every newly signed bearer carries this claim explicitly.
+  credentialGeneration: z.number().int().positive().default(1),
   // The Account-scoped control-plane subject prefix the agent subscribes to.
   subjectPrefix: z.string().min(1),
   exp: z.number().int().positive(),
@@ -749,7 +753,13 @@ export async function verifyEnrollmentBearer(
   if (!constantTimeEqual(signature, expected)) {
     return null;
   }
-  const payload = EnrollmentBearerPayload.safeParse(JSON.parse(base64UrlDecode(encodedPayload)));
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(base64UrlDecode(encodedPayload));
+  } catch {
+    return null;
+  }
+  const payload = EnrollmentBearerPayload.safeParse(decoded);
   if (!payload.success || payload.data.exp < nowSeconds) {
     return null;
   }
@@ -761,7 +771,9 @@ export async function verifyEnrollmentBearer(
 // The SHORT-TTL, secret, workspace-scoped token the headless/fleet enroll path
 // presents to /v1/enrollments/token/exchange. The token IS the grant — there is
 // no human approve step — so it is stateless-signed (no DB row): the holder of an
-// unexpired token can enroll ONE machine identity into ONE workspace.
+// unexpired token can enroll machine identities into ONE workspace. Reuse within
+// the TTL is intentional for bounded fleet rollout; every exchange still binds
+// the resulting long-lived credential family to the supplied public key.
 //
 // It REUSES the SAME HMAC envelope as signEnrollmentBearer (base64Url payload +
 // hmacSha256Base64Url) with a DISTINCT `oget_` prefix and a `typ: "enroll"` claim.
@@ -933,10 +945,11 @@ export async function verifyStreamToken(
 // from the StreamOpen and asserts the producer token claims the SAME pair, so a
 // producer token for workspace A can never register a channel for workspace B.
 // Signed with resolveRelayTokenSecret (the relay-token HMAC secret); the value is
-// NEVER logged. Long-lived by design (it is enrollment-scoped, not per-stream —
-// the agent presents it on every channel registration for the life of the
-// enrollment); the relay additionally validates the channel key + (for the
-// viewer's `ogs_`) the lease/active-epoch fence.
+// NEVER logged. Its identity is enrollment-scoped rather than per-stream, but its
+// credential lifetime is bounded to five minutes. The agent refreshes it before
+// expiry and presents the current immutable snapshot on each channel registration;
+// the relay additionally validates the channel key + (for the viewer's `ogs_`) the
+// lease/active-epoch fence and disconnects a live socket at token expiry.
 //
 // The Rust relay re-implements this verify (the same base64url(JSON) + HMAC-SHA256
 // + prefix split) so TS-mint and Rust-verify provably agree — see the cross-stack
@@ -947,7 +960,7 @@ export const RelayTokenPayload = z.object({
   workspaceId: z.string().uuid(),
   // The agent (machine) id — the relay asserts this equals the channel-key's agent.
   agentId: z.string().uuid(),
-  // Expiry (unix seconds). Enrollment-scoped horizon (re-minted on re-enroll).
+  // Expiry (unix seconds). Five-minute credential, re-minted by self-refresh.
   exp: z.number().int().positive(),
 });
 export type RelayTokenPayload = z.infer<typeof RelayTokenPayload>;
@@ -1213,6 +1226,38 @@ export const GitCredentialRepositoryRef = z.object({
 });
 export type GitCredentialRepositoryRef = z.infer<typeof GitCredentialRepositoryRef>;
 
+/** A repository identity observed inside a sandbox after all URL secrets are removed. */
+export const ObservedGitRepositoryIdentity = z.object({
+  provider: GitCredentialProvider,
+  canonical: z.string().min(1).max(1024),
+});
+export type ObservedGitRepositoryIdentity = z.infer<typeof ObservedGitRepositoryIdentity>;
+
+export type RebindGitCredentialsRequest = {
+  accountId: string;
+  workspaceId: string;
+  repositories: ObservedGitRepositoryIdentity[];
+};
+
+export const RebindGitCredentialsResult = z.discriminatedUnion("status", [
+  z.object({
+    status: z.literal("bound"),
+    workspaceId: z.string().uuid(),
+    repositoryRefs: z.array(GitCredentialRepositoryRef).min(1),
+  }),
+  ...(["not_found", "ambiguous", "unavailable", "revoked"] as const).map((status) =>
+    z.object({
+      status: z.literal(status),
+      workspaceId: z.string().uuid(),
+      reasonCode: z
+        .string()
+        .regex(/^[a-z0-9_]{1,64}$/)
+        .optional(),
+    }),
+  ),
+]);
+export type RebindGitCredentialsResult = z.infer<typeof RebindGitCredentialsResult>;
+
 // ============ P4a — Connection-credential provider (§7.6) ============
 //
 // The host-providable per-run credential-mint seam over OpenGeni's TWO
@@ -1302,6 +1347,10 @@ export type ConnectionCredentialsPort = {
   // and leave sandbox secrets to OpenGeni's local decrypt, or vice-versa. An
   // unset leg falls through to today's self-mint for THAT leg only.
   gitCredentials?(input: GitCredentialsRequest): Promise<GitCredentials>;
+  // Secret-free authorization recovery for an existing checkout whose session
+  // no longer carries explicit repository resources. This operation never
+  // returns a token; token minting remains on gitCredentials.
+  rebindGitCredentials?(input: RebindGitCredentialsRequest): Promise<RebindGitCredentialsResult>;
   sandboxSecrets?(input: SandboxSecretsRequest): Promise<SandboxSecrets>;
 };
 
@@ -2431,7 +2480,7 @@ export const RigVersion = z.object({
 export type RigVersion = z.infer<typeof RigVersion>;
 
 export const RigVerificationHealth = z.object({
-  checkHealth: z.enum(["passing", "failing", "unknown"]),
+  checkHealth: z.enum(["passing", "failing", "unknown", "not_configured"]),
   lastVerifiedAt: z.string().nullable(),
 });
 export type RigVerificationHealth = z.infer<typeof RigVerificationHealth>;
@@ -2461,14 +2510,33 @@ export type RigChangeKind = z.infer<typeof RigChangeKind>;
 export const RigChangeStatus = z.enum(["proposed", "verifying", "merged", "rejected", "failed"]);
 export type RigChangeStatus = z.infer<typeof RigChangeStatus>;
 
-// A single check's outcome inside a verification run (populated in M4).
+export const RigVerificationStepStatus = z.enum(["passed", "failed", "skipped"]);
+export type RigVerificationStepStatus = z.infer<typeof RigVerificationStepStatus>;
+
+// A single setup/check outcome inside a verification run. New writers always
+// populate status + durationMs; both stay optional so historical verification
+// JSON remains readable.
 export const RigCheckResult = z.object({
   name: z.string(),
   command: z.string(),
   exitCode: z.number().int().nullable(),
   output: z.string().optional(),
+  status: RigVerificationStepStatus.optional(),
+  durationMs: z.number().int().nonnegative().optional(),
+  timedOut: z.boolean().optional(),
+  skippedReason: z.string().optional(),
 });
 export type RigCheckResult = z.infer<typeof RigCheckResult>;
+
+export const RigSetupResult = z.object({
+  exitCode: z.number().int().nullable(),
+  output: z.string().optional(),
+  status: RigVerificationStepStatus,
+  durationMs: z.number().int().nonnegative(),
+  timedOut: z.boolean().optional(),
+  skippedReason: z.string().optional(),
+});
+export type RigSetupResult = z.infer<typeof RigSetupResult>;
 
 // The verification record a rig-CI run writes onto a change (M4). Open-ended
 // (passthrough) so M4 can enrich it without a contracts break.
@@ -2478,6 +2546,11 @@ export const RigChangeVerification = z
     finishedAt: z.string().optional(),
     log: z.string().optional(),
     checkResults: z.array(RigCheckResult).optional(),
+    setupResult: RigSetupResult.optional(),
+    checksConfigured: z.boolean().optional(),
+    passed: z.boolean().nullable().optional(),
+    attempt: z.number().int().positive().optional(),
+    error: z.string().nullable().optional(),
   })
   .passthrough();
 export type RigChangeVerification = z.infer<typeof RigChangeVerification>;
@@ -2490,6 +2563,8 @@ export const RigChange = z.object({
   payload: z.record(z.string(), z.unknown()),
   status: RigChangeStatus,
   proposedBy: z.string().nullable(),
+  // Workspace-scoped client retry key. Nullable on historical/keyless rows.
+  idempotencyKey: z.string().nullable().default(null),
   verification: RigChangeVerification.nullable(),
   resultVersionId: z.string().uuid().nullable(),
   createdAt: z.string(),
@@ -2535,8 +2610,16 @@ export const RigDefinitionEditPayload = z.object({
 export type RigDefinitionEditPayload = z.infer<typeof RigDefinitionEditPayload>;
 
 export const ProposeRigChangeRequest = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("setup_append"), payload: RigSetupAppendPayload }),
-  z.object({ kind: z.literal("definition_edit"), payload: RigDefinitionEditPayload }),
+  z.object({
+    kind: z.literal("setup_append"),
+    payload: RigSetupAppendPayload,
+    idempotencyKey: z.string().min(1).max(200).optional(),
+  }),
+  z.object({
+    kind: z.literal("definition_edit"),
+    payload: RigDefinitionEditPayload,
+    idempotencyKey: z.string().min(1).max(200).optional(),
+  }),
 ]);
 export type ProposeRigChangeRequest = z.infer<typeof ProposeRigChangeRequest>;
 
@@ -2611,6 +2694,9 @@ export const ScheduledTask = z.object({
   // resolved PER FIRE (at dispatch), so a task always runs the rig's current
   // version rather than one frozen at task-create time. Null ⇒ rig-less runs.
   rigId: z.string().uuid().nullable().default(null),
+  // Persisted proof that this mutable rig binding was authorized with
+  // variable-sets:use. Legacy rows are false and fail closed if defaults exist.
+  rigDefaultVariableSetsAuthorized: z.boolean().optional(),
   metadata: z.record(z.string(), z.unknown()),
   createdAt: z.string(),
   updatedAt: z.string(),
@@ -3273,6 +3359,9 @@ export const Session = z.object({
   // Both null ⇒ a rig-less session (byte-for-byte today's behavior).
   rigId: z.string().uuid().nullable().default(null),
   rigVersionId: z.string().uuid().nullable().default(null),
+  // Persisted proof that the create path authorized rig-default secret use.
+  // The worker treats missing/false as unauthorized when defaults exist.
+  rigDefaultVariableSetsAuthorized: z.boolean().optional(),
   // Non-default first-party MCP token permissions (manager-style sessions);
   // null means the fixed worker default set.
   firstPartyMcpPermissions: z.array(Permission).nullable(),
@@ -4707,6 +4796,9 @@ export const EnrollmentCredentialsResponse = z.object({
   workspaceId: z.string().uuid(),
   // The signed bearer the agent presents to the control plane (the `oge_` token).
   bearer: z.string(),
+  // Absolute expiry metadata lets the agent refresh before a bounded relay token
+  // expires without decoding or logging either opaque credential.
+  bearerExpiresAtUnixSeconds: z.number().int().positive(),
   // The Account-scoped control-plane subject prefix the agent subscribes to:
   // agent.<workspaceId>.<agentId>.
   subjectPrefix: z.string(),
@@ -4721,6 +4813,9 @@ export const EnrollmentCredentialsResponse = z.object({
   // deployment (graceful degrade — the agent then presents an empty token the relay
   // rejects, surfacing the gap loudly rather than silently producing a dead stream).
   relayToken: z.string(),
+  // Zero only when the relay-token plane is intentionally unconfigured and the
+  // corresponding token is empty.
+  relayTokenExpiresAtUnixSeconds: z.number().int().nonnegative(),
   // VESTIGIAL (M-AUTH): there is no per-machine NATS Account creds file. The agent
   // presents the `bearer` above as the NATS connect AUTH-TOKEN; the server's
   // auth-callout responder validates it and mints a workspace-scoped user JWT. This
@@ -4733,6 +4828,13 @@ export const EnrollmentCredentialsResponse = z.object({
   consentedScreenControl: z.boolean(),
 });
 export type EnrollmentCredentialsResponse = z.infer<typeof EnrollmentCredentialsResponse>;
+
+export const RefreshEnrollmentCredentialsResponse = z.object({
+  credentials: EnrollmentCredentialsResponse,
+});
+export type RefreshEnrollmentCredentialsResponse = z.infer<
+  typeof RefreshEnrollmentCredentialsResponse
+>;
 
 export const DeviceEnrollmentPollResponse = z.object({
   state: DeviceEnrollmentState,

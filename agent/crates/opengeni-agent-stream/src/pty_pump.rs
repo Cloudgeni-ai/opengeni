@@ -18,12 +18,13 @@
 
 use std::io::{Read as _, Write as _};
 
-use opengeni_agent_platform::{PlatformResult, PtyProcess};
+use opengeni_agent_platform::{PlatformError, PlatformResult, PtyProcess};
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 
 use crate::channel::RelayChannel;
 use crate::codec::RelayMessage;
-use crate::error::StreamResult;
+use crate::error::{StreamError, StreamResult};
 
 /// The bound on in-flight PTY output chunks (the backpressure point). A slow relay
 /// blocks the blocking reader once this fills, so the agent never buffers tty
@@ -70,17 +71,169 @@ pub enum PtyCommand {
 /// `pty_write`/`pty_resize`/`pty_close` ops reach the running pump.
 pub type PtyControlTx = mpsc::Sender<PtyCommand>;
 
-/// Runs the PTY pump until the PTY process exits or the relay transport drops.
+/// A terminal reason from one connected PTY pump run. Transport loss is never an
+/// exit: it is returned as [`StreamError::Transport`] so the hub reconnects with
+/// this same process-owned IO state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PtyPumpExit {
+    /// The PTY reader/writer reached local EOF or failed because the child ended.
+    ProcessExited,
+    /// The peer sent an explicit typed [`StreamClose`](opengeni_agent_proto::v1::StreamClose).
+    RemoteClosed,
+    /// A local `pty_close` command explicitly killed the process.
+    UserClosed,
+}
+
+/// Process-owned PTY IO that outlives every relay transport registration.
+///
+/// The blocking reader/writer are taken exactly once, and their bounded channels
+/// remain alive until the PTY itself reaches a terminal condition. A reconnect
+/// therefore swaps only [`RelayChannel`]'s socket; it never consumes new handles,
+/// drops the workers, or kills a still-live child.
+pub struct PtyIo {
+    out_rx: mpsc::Receiver<bytes::Bytes>,
+    in_tx: Option<mpsc::Sender<Vec<u8>>>,
+    pending_output: Option<bytes::Bytes>,
+    reader_task: Option<JoinHandle<()>>,
+    writer_task: Option<JoinHandle<()>>,
+    commands_open: bool,
+}
+
+impl PtyIo {
+    /// Takes the process reader/writer once and starts the lifetime-owned blocking
+    /// workers. The initial prompt nudge is also sent exactly once here rather than
+    /// once per relay reconnect.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed platform error if either once-only PTY handle was already
+    /// consumed before this owner was created.
+    pub async fn start(process: &mut PtyProcess) -> StreamResult<Self> {
+        let mut reader = process.take_reader().ok_or_else(|| {
+            StreamError::Platform(PlatformError::os("pty output reader was already taken"))
+        })?;
+        let mut writer = process.take_writer().ok_or_else(|| {
+            StreamError::Platform(PlatformError::os("pty input writer was already taken"))
+        })?;
+
+        let (out_tx, out_rx) = mpsc::channel::<bytes::Bytes>(OUTPUT_CHANNEL_BOUND);
+        let reader_task = tokio::task::spawn_blocking(move || {
+            let mut buf = [0u8; READ_CHUNK];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(n) if n > 0 => {
+                        // A full bounded channel blocks here = backpressure.
+                        if out_tx
+                            .blocking_send(bytes::Bytes::copy_from_slice(&buf[..n]))
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    // EOF (Ok(0): child exited + closed the master) or a read error
+                    // both terminally end local PTY output.
+                    _ => break,
+                }
+            }
+        });
+
+        let (in_tx, mut in_rx) = mpsc::channel::<Vec<u8>>(OUTPUT_CHANNEL_BOUND);
+        let writer_task = tokio::task::spawn_blocking(move || {
+            while let Some(bytes) = in_rx.blocking_recv() {
+                if writer.write_all(&bytes).is_err() || writer.flush().is_err() {
+                    break;
+                }
+            }
+        });
+
+        let io = Self {
+            out_rx,
+            in_tx: Some(in_tx),
+            pending_output: None,
+            reader_task: Some(reader_task),
+            writer_task: Some(writer_task),
+            commands_open: true,
+        };
+        // Best-effort prompt nudge. It belongs to the PTY lifetime, not to a socket
+        // registration, so credential rotation never injects extra newlines.
+        if let Some(tx) = io.in_tx.as_ref() {
+            let _ = tx.send(b"\n".to_vec()).await;
+        }
+        Ok(io)
+    }
+
+    /// Whether the optional out-of-band command sender still exists.
+    #[must_use]
+    pub(crate) fn commands_open(&self) -> bool {
+        self.commands_open
+    }
+
+    /// Whether the process-owned reader reached a real local EOF/error. The
+    /// reconnect supervisor polls this while no relay socket exists so a child
+    /// that exits during a prolonged outage is still settled and reaped rather
+    /// than retained until the relay eventually returns.
+    #[must_use]
+    pub(crate) fn output_closed(&self) -> bool {
+        self.out_rx.is_closed()
+    }
+
+    /// Applies a command while connected or while waiting to redial. Returning an
+    /// exit makes user close and true local IO failure terminal without conflating
+    /// either with transport loss.
+    pub(crate) async fn handle_command(
+        &mut self,
+        process: &mut PtyProcess,
+        command: Option<PtyCommand>,
+    ) -> Option<PtyPumpExit> {
+        match command {
+            Some(PtyCommand::Write(bytes)) => {
+                let Some(in_tx) = self.in_tx.as_ref() else {
+                    return Some(PtyPumpExit::ProcessExited);
+                };
+                if in_tx.send(bytes).await.is_err() {
+                    return Some(PtyPumpExit::ProcessExited);
+                }
+            }
+            Some(PtyCommand::Resize { cols, rows }) => {
+                let _ = apply_resize(process, cols, rows);
+            }
+            Some(PtyCommand::Close(reply)) => {
+                let code = process.try_exit_code().unwrap_or(-1);
+                let _ = process.kill();
+                let _ = reply.send(code);
+                return Some(PtyPumpExit::UserClosed);
+            }
+            None => self.commands_open = false,
+        }
+        None
+    }
+
+    /// Ends the process-owned workers after a true terminal settlement. The child
+    /// is killed by the hub first so a blocking PTY read is released on platforms
+    /// that wait for process teardown before surfacing EOF.
+    pub(crate) async fn shutdown(&mut self) {
+        self.in_tx.take();
+        self.out_rx.close();
+        if let Some(task) = self.writer_task.take() {
+            let _ = task.await;
+        }
+        if let Some(task) = self.reader_task.take() {
+            task.abort();
+        }
+    }
+}
+
+/// Runs one connected PTY pump until the PTY terminates or the relay transport drops.
 ///
 /// Pumps tty output → relay frames, relay input frames → tty, and applies the
 /// out-of-band [`PtyCommand`]s (the `pty_write`/`pty_resize`/`pty_close` control
-/// ops) against the owned process. Returns `Ok(())` on a clean PTY exit (the caller
-/// closes the channel `PROCESS_EXIT`); a transport error propagates so the caller
-/// can reconnect + resume and re-enter the pump.
+/// ops) against the owned process. Returns a typed terminal reason for local PTY
+/// exit, explicit peer close, or user close; a transport error propagates so the
+/// caller can reconnect + resume with the same [`PtyIo`].
 ///
 /// `ready` is fired once the loop is live AND the first output frame has been
 /// shipped to the relay (so the owner's mint is gated on a serveable channel). It is
-/// only passed on the FIRST run — a reconnect re-enters the pump with `ready = None`.
+/// retained across reconnect attempts until the first output send actually succeeds.
 ///
 /// # Errors
 ///
@@ -88,113 +241,49 @@ pub type PtyControlTx = mpsc::Sender<PtyCommand>;
 /// from the relay send/recv so the owner reconnects.
 pub async fn run(
     process: &mut PtyProcess,
+    io: &mut PtyIo,
     channel: &mut RelayChannel,
     commands: &mut mpsc::Receiver<PtyCommand>,
-    ready: Option<ReadyTx>,
-) -> StreamResult<()> {
-    // --- output: blocking reader → bounded channel ---------------------------
-    let reader = process.take_reader();
-    let (out_tx, mut out_rx) = mpsc::channel::<Vec<u8>>(OUTPUT_CHANNEL_BOUND);
-    let reader_task = reader.map(|mut reader| {
-        tokio::task::spawn_blocking(move || {
-            let mut buf = [0u8; READ_CHUNK];
-            loop {
-                match reader.read(&mut buf) {
-                    Ok(n) if n > 0 => {
-                        // A full bounded channel blocks here = backpressure.
-                        if out_tx.blocking_send(buf[..n].to_vec()).is_err() {
-                            break; // the pump dropped the receiver.
-                        }
-                    }
-                    // EOF (Ok(0): child exited + closed the master) or a read error
-                    // both end the reader.
-                    _ => break,
-                }
-            }
-        })
-    });
-
-    // --- input: PTY writer driven on the blocking pool -----------------------
-    // The writer is moved into a blocking task fed by a channel so async-side
-    // inbound frames never block on the synchronous write.
-    let writer = process.take_writer();
-    let (in_tx, mut in_rx) = mpsc::channel::<Vec<u8>>(OUTPUT_CHANNEL_BOUND);
-    let writer_task = writer.map(|mut writer| {
-        tokio::task::spawn_blocking(move || {
-            while let Some(bytes) = in_rx.blocking_recv() {
-                if writer.write_all(&bytes).is_err() || writer.flush().is_err() {
-                    break;
-                }
-            }
-        })
-    });
-
-    // Nudge the shell to print a fresh prompt so a freshly-attaching consumer sees
-    // output WITHOUT having to type: writing a lone newline to the PTY master makes
-    // an interactive login shell re-emit its prompt. This produces the first real
-    // byte(s) the readiness barrier waits on. Best-effort — if the writer task has
-    // already ended (a command-only PTY that exits instantly) the pump still serves
-    // whatever the command printed, and EOF resolves readiness via the first frame.
-    let _ = in_tx.send(b"\n".to_vec()).await;
-
-    let result = pump_loop(process, channel, commands, &mut out_rx, &in_tx, ready).await;
-
-    // Tear down: dropping the senders/receivers ends the blocking tasks.
-    drop(in_tx);
-    drop(out_rx);
-    if let Some(t) = reader_task {
-        t.abort();
-    }
-    if let Some(t) = writer_task {
-        let _ = t.await;
-    }
-    result
-}
-
-/// The select loop: forward tty output frames out, apply inbound frames + control
-/// commands to the PTY. Ends when output EOFs (PTY exit) or the relay drops.
-///
-/// `ready` (when `Some`) is fired the first time an output frame is shipped to the
-/// relay (or, defensively, on an immediate PTY EOF that produced no output) — the
-/// loop is already selecting on `channel.recv()` by then, so inbound keystrokes are
-/// received the instant a consumer sends them.
-async fn pump_loop(
-    process: &mut PtyProcess,
-    channel: &mut RelayChannel,
-    commands: &mut mpsc::Receiver<PtyCommand>,
-    out_rx: &mut mpsc::Receiver<Vec<u8>>,
-    in_tx: &mpsc::Sender<Vec<u8>>,
-    mut ready: Option<ReadyTx>,
-) -> StreamResult<()> {
-    // Once the command sender is dropped, stop selecting on it so a closed channel
-    // (which resolves immediately) does not spin the loop.
-    let mut commands_open = true;
+    ready: &mut Option<ReadyTx>,
+) -> StreamResult<PtyPumpExit> {
     loop {
+        // Keep a chunk until send succeeds. A transport error therefore retries the
+        // same PTY bytes after reconnect instead of silently consuming them.
+        if let Some(bytes) = io.pending_output.clone() {
+            channel.send_frame(bytes).await?;
+            io.pending_output = None;
+            fire_ready(ready);
+        }
+
         tokio::select! {
             // tty output → relay frame.
-            chunk = out_rx.recv() => {
+            chunk = io.out_rx.recv() => {
                 let Some(bytes) = chunk else {
                     // The reader task ended (PTY EOF) — clean exit. Release a
                     // still-pending readiness waiter so the owner's mint does not
                     // stall on a PTY that exited before printing anything.
-                    fire_ready(&mut ready);
-                    return Ok(());
+                    fire_ready(ready);
+                    return Ok(PtyPumpExit::ProcessExited);
                 };
-                channel.send_frame(bytes::Bytes::from(bytes)).await?;
-                // First real byte(s) are now buffered in the relay ring — a consumer
-                // dialing the minted URL will replay them. Signal ready.
-                fire_ready(&mut ready);
+                io.pending_output = Some(bytes);
             }
             // relay inbound → tty input (or ignore non-frame control).
             inbound = channel.recv() => {
                 match inbound? {
                     Some(RelayMessage::Frame(frame)) => {
-                        // Best-effort: if the writer task ended, stop pumping input.
+                        let Some(in_tx) = io.in_tx.as_ref() else {
+                            return Ok(PtyPumpExit::ProcessExited);
+                        };
                         if in_tx.send(frame.data.to_vec()).await.is_err() {
-                            return Ok(());
+                            return Ok(PtyPumpExit::ProcessExited);
                         }
                     }
-                    Some(RelayMessage::Close(_)) | None => return Ok(()),
+                    Some(RelayMessage::Close(_)) => return Ok(PtyPumpExit::RemoteClosed),
+                    // RelayChannel converts an untyped EOF into Transport. Retain a
+                    // defensive guard for alternate transports that violate it.
+                    None => return Err(StreamError::Transport(
+                        "relay closed without a typed StreamClose".to_string(),
+                    )),
                     // Open/OpenAck/DesktopInput are not expected on a live PTY data
                     // channel; ignore them defensively rather than tearing down.
                     Some(_) => {}
@@ -202,23 +291,9 @@ async fn pump_loop(
             }
             // out-of-band control op (pty_write/resize/close over NATS). Disabled
             // once the sender drops so a closed channel does not spin the select.
-            command = commands.recv(), if commands_open => {
-                match command {
-                    Some(PtyCommand::Write(bytes)) => {
-                        let _ = in_tx.send(bytes).await;
-                    }
-                    Some(PtyCommand::Resize { cols, rows }) => {
-                        let _ = apply_resize(process, cols, rows);
-                    }
-                    Some(PtyCommand::Close(reply)) => {
-                        let code = process.try_exit_code().unwrap_or(-1);
-                        let _ = process.kill();
-                        let _ = reply.send(code);
-                        return Ok(());
-                    }
-                    // The control sender was dropped; keep pumping the stream
-                    // (control ops are optional) but stop selecting on the channel.
-                    None => commands_open = false,
+            command = commands.recv(), if io.commands_open => {
+                if let Some(exit) = io.handle_command(process, command).await {
+                    return Ok(exit);
                 }
             }
         }
@@ -276,17 +351,17 @@ mod tests {
     }
 
     fn pty_channel_config() -> ChannelConfig {
-        ChannelConfig {
-            channel: v1::StreamChannel {
+        ChannelConfig::new(
+            v1::StreamChannel {
                 channel_id: "pty-ch".to_string(),
                 workspace_id: "ws".to_string(),
                 agent_id: "ag".to_string(),
                 kind: v1::StreamKind::Pty as i32,
                 port: 7681,
             },
-            token: "ogs_x".to_string(),
-            relay_url: "wss://relay/stream".to_string(),
-        }
+            "ogs_x".to_string(),
+            "wss://relay/stream".to_string(),
+        )
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -334,7 +409,9 @@ mod tests {
         });
 
         let (_cmd_tx, mut cmd_rx) = mpsc::channel::<PtyCommand>(8);
-        let pump = run(&mut proc, &mut channel, &mut cmd_rx, None);
+        let mut io = PtyIo::start(&mut proc).await.expect("start pty io");
+        let mut ready = None;
+        let pump = run(&mut proc, &mut io, &mut channel, &mut cmd_rx, &mut ready);
         // The PTY exits quickly; bound the test so a hang fails loudly.
         let _ = tokio::time::timeout(std::time::Duration::from_secs(10), pump).await;
         let seen = tokio::time::timeout(std::time::Duration::from_secs(2), collector)
@@ -381,12 +458,14 @@ mod tests {
         let mut channel = RelayChannel::with_transport(pty_channel_config(), Box::new(agent_side));
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         let (_cmd_tx, mut cmd_rx) = mpsc::channel::<PtyCommand>(8);
+        let mut io = PtyIo::start(&mut proc).await.expect("start pty io");
+        let mut ready = Some(ready_tx);
 
         // Drive the pump inline (it borrows locals); `cat` keeps it alive (it reads
         // stdin forever) so it never returns on its own, and `relay_side` is held by
         // THIS task so the pump always has a live peer — readiness firing is the only
         // thing that resolves the race.
-        let pump = run(&mut proc, &mut channel, &mut cmd_rx, Some(ready_tx));
+        let pump = run(&mut proc, &mut io, &mut channel, &mut cmd_rx, &mut ready);
         tokio::select! {
             _ = pump => panic!("the cat-backed pump should not exit on its own"),
             r = tokio::time::timeout(std::time::Duration::from_secs(3), ready_rx) => {

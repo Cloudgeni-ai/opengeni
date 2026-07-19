@@ -106,6 +106,32 @@ export async function validateVariableSetAttachment(
   return variableSet;
 }
 
+/**
+ * Authorize every default variable set a rig version would cause the worker to
+ * decrypt. This is the same secret boundary as a direct session/task attachment:
+ * require variable-sets:use (or an explicitly preauthorized trusted server
+ * path), require encryption to be configured, and validate workspace ownership.
+ */
+export async function validateRigDefaultVariableSetAttachments(
+  deps: { settings: Settings; db: Database },
+  grant: AccessGrant,
+  workspaceId: string,
+  variableSetIds: readonly string[],
+  options: { preauthorized?: boolean } = {},
+): Promise<void> {
+  if (variableSetIds.length === 0) return;
+  requireVariableSetEncryption(deps.settings);
+  if (!options.preauthorized) requirePermission(grant, "variable-sets:use");
+  for (const variableSetId of new Set(variableSetIds)) {
+    const variableSet = await getVariableSet(deps.db, workspaceId, variableSetId);
+    if (!variableSet) {
+      throw new HTTPException(422, {
+        message: `unknown rig defaultVariableSetId: ${variableSetId}`,
+      });
+    }
+  }
+}
+
 export async function recordVariableSetAuditEvent(
   db: Database,
   input: {

@@ -195,23 +195,33 @@ export async function createTemporalWorkflowClient(
         throw error;
       }
     },
-    startRigVerification: async ({ workspaceId, changeId, versionId, workflowId }) => {
+    startRigVerification: async ({ workspaceId, changeId, versionId, attempt, workflowId }) => {
       const targetId = changeId ?? versionId;
       if (!targetId) {
         throw new Error("rig verification requires changeId or versionId");
       }
-      await temporal.workflow.start("rigVerificationWorkflow", {
-        taskQueue: settings.temporalTaskQueue,
-        workflowId: workflowId ?? `rig-verification-${targetId}-${crypto.randomUUID()}`,
-        workflowIdReusePolicy: "ALLOW_DUPLICATE",
-        args: [
-          {
-            workspaceId,
-            ...(changeId ? { changeId } : {}),
-            ...(versionId ? { versionId } : {}),
-          },
-        ],
-      });
+      try {
+        await temporal.workflow.start("rigVerificationWorkflow", {
+          taskQueue: settings.temporalTaskQueue,
+          workflowId: workflowId ?? `rig-verification-${targetId}-${crypto.randomUUID()}`,
+          // Deterministic change-attempt ids collapse starts while a run is
+          // active/successful, but permit repair of the SAME DB attempt if a
+          // failed/cancelled workflow could not reach its cleanup activity.
+          workflowIdReusePolicy: "ALLOW_DUPLICATE_FAILED_ONLY",
+          args: [
+            {
+              workspaceId,
+              ...(changeId ? { changeId, ...(attempt ? { attempt } : {}) } : {}),
+              ...(versionId ? { versionId } : {}),
+            },
+          ],
+        });
+      } catch (error) {
+        if (isWorkflowAlreadyStarted(error)) {
+          return;
+        }
+        throw error;
+      }
     },
     check: async () => {
       await connection.workflowService.getSystemInfo({});

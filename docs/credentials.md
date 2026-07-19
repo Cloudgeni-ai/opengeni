@@ -13,10 +13,10 @@ everything else is machinery you receive from OpenGeni rather than choose.
 | Delegated access token | `ogd_…` bearer | Host with the deployment's delegation secret (HMAC) | HMAC + embedded workspace/account/permissions | Short (embedded expiry) | An embedding host acting as one of its users; also self-minted internally for first-party MCP |
 | Managed web session | Better Auth cookie | Managed auth (email/password) | Better Auth session lookup | Session | Humans in the hosted web console |
 | Stream token | `ogs_…` (query/header) | API, on viewer/stream mint | HMAC, scope+TTL embedded | Minutes | Browsers attaching to desktop/terminal streams |
-| Machine enrollment bearer | `oge_…` | Enrollment flow (click-Grant or device flow) | Stored credential + NATS auth-callout | Until revoked | A self-hosted/connected machine agent |
-| Headless enrollment token | `oget_…` | Operator via enrollment API | One-time exchange for `oge_…` | Single use | Provisioning scripts for headless machines |
+| Machine enrollment bearer | `oge_…` | Enrollment flow (click-Grant or device flow) | HMAC + active enrollment row + exact credential generation | 30 days; generation-rotated on every re-enrollment | A self-hosted/connected machine agent |
+| Headless enrollment token | `oget_…` | Operator via enrollment API | HMAC + embedded workspace/account/consent/expiry | Multi-use within its one-hour TTL | Fleet provisioning scripts for headless machines; passed to the agent through `OPENGENI_ENROLL_TOKEN`, never installer argv |
 | Relay producer token | `ogr_…` | API for self-hosted relay producers | HMAC | Short | The relay forwarding desktop frames |
-| NATS user JWT / callout | NATS credentials | API auth-callout service | NATS server (callout account) | Connection | Machine agents and internal services on the message bus |
+| NATS user JWT / callout | NATS credentials | API auth-callout service | NATS server (callout account) | At most 5 minutes, capped by the enrollment bearer's remaining life | Machine agents and internal services on the message bus |
 | Session MCP headers | Arbitrary headers, encrypted at rest | Embedding host per session (`mcpServers` on create; rotatable per user turn) | Never read back — write-only, decrypted only in the worker | Host-defined; version-bumped on rotation | Host's own MCP server called from a session |
 | Capability MCP headers | Arbitrary headers, encrypted at rest | Workspace admin when configuring a capability | Write-only, worker-side decrypt | Until reconfigured | Third-party MCP servers enabled workspace-wide |
 | Codex subscription tokens | ChatGPT access/refresh/id tokens, encrypted | Device-code login flow | OpenAI; OpenGeni stores encrypted, never returns them | Provider-defined, auto-refreshed | Workspaces using a ChatGPT/Codex subscription as a model provider |
@@ -38,8 +38,29 @@ Rules that hold across the table:
   `GIT_ASKPASS` reads those files for git, and the `gh`, `glab`, and `az`
   wrappers read them at invocation time before setting child-process-only token
   env vars. Renewal atomically replaces the same files, so multi-day turns see
-  current credentials without model action or manifest mutation. Missing token
-  files are clean passthroughs.
+  current credentials without model action or manifest mutation. Setup on a
+  managed box is ordered as rig setup → deployment/rig credential hooks →
+  Toolspace token → Git binding/mint/install → repository clone. The Git step
+  receives the established real session, so lazy materialization resumes the
+  box before discovery or mint and credentials are installed before clone. A
+  token file is never authorization: explicit GitHub metadata must identify a
+  standard HTTPS or SSH `github.com` endpoint, while a
+  resource-less/rematerialized box requires every
+  discovered repository root to produce one sanitized supported origin and
+  binds the complete set to exact workspace-authorized catalog/host refs. Every
+  install, refresh, expiry unlink, and controller deactivation checks the full
+  active binding-generation set under row locks; one concurrent rebind fences
+  the whole stale mutation. Multi-provider token bundles must be complete.
+  Failed install/refresh scripts remove every selected final and PID-temporary
+  token file, and lifecycle failures surface fixed typed codes rather than raw
+  provider/sandbox errors. Revocation, an unprovable refresh, or exact token
+  expiry unlinks the provider file. Missing token files are clean passthroughs.
 - **The perimeter is not identity.** The deployment access key gates who can
   talk to a deployment at all; workspace identity and permissions always come
   from one of the identity-bearing credentials above it.
+- **Machine revocation is bounded, not a claimed synchronous disconnect.** A DB
+  revoke immediately denies the next NATS authorization/reconnect. A connection
+  that already holds a callout-minted user JWT may remain live until that JWT
+  expires; the control plane caps that residual interval at five minutes. A
+  re-enrollment atomically advances the row's credential generation, so the old
+  `oge_` bearer can neither authenticate nor self-revoke the new generation.

@@ -36,6 +36,7 @@ import type {
   FsTreeNode,
   FsWriteRequest,
   FsWriteResponse,
+  GitCredentialProvider,
   GitChangedPayload,
   GitCommit,
   GitDiffHunk,
@@ -168,15 +169,29 @@ export const REPOSITORY_DISCOVERY_LIMIT = 256;
 export type RepositoryDiscoveryDegradedReason =
   | "command_failed"
   | "command_timed_out"
-  | "result_limit_exceeded";
+  | "result_limit_exceeded"
+  | "identity_incomplete";
 export type RepositoryDiscoveryResult = {
   repos: string[];
   complete: boolean;
   degradedReason: RepositoryDiscoveryDegradedReason | null;
 };
 
+/** A secret-free, provider-qualified repository identity observed in-box. */
+export type ObservedGitRepositoryIdentity = {
+  provider: GitCredentialProvider;
+  canonical: string;
+};
+export type GitRepositoryIdentityDiscoveryResult = {
+  repositories: ObservedGitRepositoryIdentity[];
+  complete: boolean;
+  degradedReason: RepositoryDiscoveryDegradedReason | null;
+};
+
 const REPOSITORY_DISCOVERY_TRUNCATED_SENTINEL = "__OPENGENI_REPOSITORY_DISCOVERY_TRUNCATED__";
 const REPOSITORY_DISCOVERY_STATUS_PREFIX = "__OPENGENI_REPOSITORY_DISCOVERY_STATUS__:";
+const REPOSITORY_IDENTITY_INCOMPLETE_SENTINEL = "__OPENGENI_REPOSITORY_IDENTITY_INCOMPLETE__";
+const REPOSITORY_IDENTITY_STATUS_PREFIX = "__OPENGENI_REPOSITORY_IDENTITY_STATUS__:";
 
 const NUL = String.fromCharCode(0); // \0 NUL — find/porcelain/numstat -z separator
 const FS_LIST_TRUNCATED_MARKER = "__OPENGENI_FS_LIST_TRUNCATED__";
@@ -1127,6 +1142,123 @@ export class SandboxChannelAService {
   /** Detect repo roots within the workspace (for the Git.repos capability). */
   async detectRepos(): Promise<string[]> {
     return (await this.detectReposDetailed()).repos;
+  }
+
+  /**
+   * Discover only normalized, non-secret origin identities.
+   *
+   * Raw remotes can contain HTTPS userinfo or query credentials. They are read
+   * and sanitized inside the sandbox process; neither stdout nor thrown errors
+   * ever contain the original remote. An incomplete root scan is not eligible
+   * for authorization rebinding and therefore returns no identities.
+   */
+  async detectGitRepositoryIdentities(): Promise<GitRepositoryIdentityDiscoveryResult> {
+    const roots = await this.detectReposDetailed();
+    if (!roots.complete) {
+      return {
+        repositories: [],
+        complete: false,
+        degradedReason: roots.degradedReason,
+      };
+    }
+    if (roots.repos.length === 0) {
+      return { repositories: [], complete: true, degradedReason: null };
+    }
+    try {
+      const rootArguments = roots.repos.map((root) => shellQuote(root || ".")).join(" ");
+      const sanitizer = [
+        "emit_sanitized_origin() {",
+        '  repo="$1"',
+        '  remote="$(git -C "$repo" config --get remote.origin.url 2>/dev/null)" || return 1',
+        '  [ -n "$remote" ] || return 1',
+        '  case "$remote" in',
+        '    *://*) rest="${remote#*://}"; authority="${rest%%/*}"; path="${rest#*/}"; host="${authority##*@}"; host="${host%%:*}" ;;',
+        '    *@*:*|*:*) authority="${remote%%:*}"; path="${remote#*:}"; host="${authority##*@}" ;;',
+        "    *) return 1 ;;",
+        "  esac",
+        "  host=\"$(printf '%s' \"$host\" | tr '[:upper:]' '[:lower:]')\"",
+        '  path="${path%%#*}"',
+        '  path="${path%%\\?*}"',
+        '  path="${path#/}"',
+        '  path="${path%.git}"',
+        '  case "$host" in *[!a-z0-9._-]*|"") return 1 ;; esac',
+        '  case "$path" in *[!A-Za-z0-9._~%+@/-]*|""|*".."*) return 1 ;; esac',
+        '  case "$host" in',
+        "    github.com) printf 'github\\tgithub.com/%s\\n' \"$path\"; return 0 ;;",
+        '    *gitlab*) printf \'gitlab\\t%s/%s\\n\' "$host" "$path"; return 0 ;;',
+        "    ssh.dev.azure.com)",
+        '      case "$path" in v3/*/*/*) path="${path#v3/}"; org="${path%%/*}"; rest="${path#*/}"; project="${rest%%/*}"; repo="${rest#*/}"; printf \'azure_devops\\tdev.azure.com/%s/%s/_git/%s\\n\' "$org" "$project" "$repo"; return 0 ;; esac ;;',
+        '    dev.azure.com) case "$path" in */*/_git/*) printf \'azure_devops\\tdev.azure.com/%s\\n\' "$path"; return 0 ;; esac ;;',
+        '    *.visualstudio.com) org="${host%.visualstudio.com}"; case "$path" in */_git/*) printf \'azure_devops\\tdev.azure.com/%s/%s\\n\' "$org" "$path"; return 0 ;; esac ;;',
+        "  esac",
+        "  return 1",
+        "}",
+        "identity_status=0",
+        "identity_count=0",
+        `for repo in ${rootArguments}; do`,
+        "  identity_count=$((identity_count + 1))",
+        `  if ! emit_sanitized_origin "$repo"; then printf '%s\\n' ${shellQuote(
+          REPOSITORY_IDENTITY_INCOMPLETE_SENTINEL,
+        )}; identity_status=1; fi`,
+        "done",
+        `printf '${REPOSITORY_IDENTITY_STATUS_PREFIX}%s:%s\\n' "$identity_status" "$identity_count"`,
+      ].join("\n");
+      const { stdout } = await this.run({
+        cmd: `bash -lc ${shellQuote(sanitizer)}`,
+        workdir: this.workspaceRoot || undefined,
+        yieldTimeMs: 20_000,
+        // The fixed completion trailer distinguishes a complete snapshot from
+        // provider-side output truncation. Keep the same bounded allowance as
+        // root discovery because canonical identities may approach PATH_MAX.
+        maxOutputTokens: 300_000,
+      });
+      const lines = stdout
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean);
+      const statusLines = lines.filter((line) =>
+        line.startsWith(REPOSITORY_IDENTITY_STATUS_PREFIX),
+      );
+      const statusMatch =
+        statusLines.length === 1
+          ? /^(\d+):(\d+)$/.exec(statusLines[0]!.slice(REPOSITORY_IDENTITY_STATUS_PREFIX.length))
+          : null;
+      const identityLines = lines.filter(
+        (line) => !line.startsWith(REPOSITORY_IDENTITY_STATUS_PREFIX),
+      );
+      if (
+        !statusMatch ||
+        statusMatch[1] !== "0" ||
+        Number.parseInt(statusMatch[2]!, 10) !== roots.repos.length ||
+        identityLines.length !== roots.repos.length ||
+        identityLines.includes(REPOSITORY_IDENTITY_INCOMPLETE_SENTINEL)
+      ) {
+        return { repositories: [], complete: false, degradedReason: "identity_incomplete" };
+      }
+      const parsed: ObservedGitRepositoryIdentity[] = [];
+      for (const line of identityLines) {
+        const [provider, canonical, ...extra] = line.split("\t");
+        if (
+          extra.length > 0 ||
+          !canonical ||
+          (provider !== "github" && provider !== "gitlab" && provider !== "azure_devops") ||
+          !/^[A-Za-z0-9._~%+@/-]+$/.test(canonical)
+        ) {
+          return { repositories: [], complete: false, degradedReason: "identity_incomplete" };
+        }
+        parsed.push({ provider, canonical });
+      }
+      const repositories = [
+        ...new Map(
+          parsed.map((identity) => [`${identity.provider}:${identity.canonical}`, identity]),
+        ).values(),
+      ].sort((left, right) =>
+        `${left.provider}:${left.canonical}`.localeCompare(`${right.provider}:${right.canonical}`),
+      );
+      return { repositories, complete: true, degradedReason: null };
+    } catch {
+      return { repositories: [], complete: false, degradedReason: "command_failed" };
+    }
   }
 
   // ════════════════════════ Terminal exec + PTY (A2) ════════════════════════

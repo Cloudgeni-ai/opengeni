@@ -1,6 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { ScriptedModel, testSettings } from "@opengeni/testing";
-import { buildManifest, buildOpenGeniAgent, runOwnedSandboxSetup } from "../src/index";
+import {
+  buildManifest,
+  buildOpenGeniAgent,
+  installGitCredentialHelpersAndTokens,
+  invalidateGitProviderTokenFiles,
+  refreshGitProviderTokenFiles,
+  runOwnedSandboxSetup,
+} from "../src/index";
 import { RoutingSandboxSession, type RoutableBackendSession } from "../src/sandbox";
 
 const agentsCoreEntry = import.meta.resolve("@openai/agents-core");
@@ -180,7 +187,44 @@ describe("lazy provisioning synthetic manifest", () => {
     });
 
     expect(commands).toHaveLength(1);
-    expect(commands[0]).toContain("sleep 60");
+    expect(commands[0]).toContain(Buffer.from("sleep 60").toString("base64"));
+  });
+
+  test("credential install, refresh, and invalidation route through the attempt cancellation fence", async () => {
+    const backend = {
+      exec: async () => {
+        throw new Error("credential mutation bypassed the cancellation fence");
+      },
+    };
+    const commands: string[] = [];
+    const commandRunner = async (session: never, args: { cmd: string }) => {
+      expect(session).toBe(backend);
+      commands.push(args.cmd);
+      return { exitCode: 0, output: "" };
+    };
+    const repository = {
+      provider: "github" as const,
+      uri: "https://github.com/acme/private.git",
+      ref: "main",
+      repositoryId: 456,
+      installationId: 123,
+    };
+
+    await installGitCredentialHelpersAndTokens(
+      backend,
+      [repository],
+      { github: "install-token" },
+      {
+        commandRunner,
+      },
+    );
+    await refreshGitProviderTokenFiles(backend, { github: "refresh-token" }, { commandRunner });
+    await invalidateGitProviderTokenFiles(backend, ["github"], { commandRunner });
+
+    expect(commands).toHaveLength(3);
+    expect(commands[0]).toContain("core.askPass");
+    expect(commands[1]).toContain("OPENGENI_GIT_TOKEN_SEED");
+    expect(commands[2]).toContain("git_credential_invalidation_status");
   });
 
   // REGRESSION (caught live on staging 2026-07-08): the SDK's FilesystemCapability

@@ -1,4 +1,5 @@
 import { sql } from "drizzle-orm";
+import type { GitCredentialRepositoryRef } from "@opengeni/contracts";
 import {
   bigint,
   boolean,
@@ -587,6 +588,12 @@ export const sessions = pgTable(
     // file (forward-reference pattern, same as activeSandboxId). Consumed in M3.
     rigId: uuid("rig_id"),
     rigVersionId: uuid("rig_version_id"),
+    // Provenance fence for rig default variable-set decryption (migration
+    // 0066). Missing/false legacy rows may keep using secret-free rigs, but the
+    // worker refuses to decrypt defaults for them.
+    rigDefaultVariableSetsAuthorized: boolean("rig_default_variable_sets_authorized")
+      .notNull()
+      .default(false),
     // Non-default first-party MCP token permissions (manager-style sessions);
     // null means the fixed worker default set in @opengeni/runtime.
     firstPartyMcpPermissions: jsonb("first_party_mcp_permissions").$type<string[]>(),
@@ -1920,6 +1927,76 @@ export const sandboxSessionEnvelopes = pgTable(
   }),
 );
 
+export const sandboxGitCredentialBindingSourceValues = [
+  "explicit_resource",
+  "observed_checkout",
+] as const;
+export const sandboxGitCredentialBindingStatusValues = [
+  "active",
+  "rebind_required",
+  "revoked",
+  "unavailable",
+] as const;
+
+// Secret-free authorization recovered for a session's existing checkout. A
+// token value is never stored here. `generation` fences every final sandbox
+// token-file mutation against concurrent revocation/rebinding.
+export const sandboxGitCredentialBindings = pgTable(
+  "sandbox_git_credential_bindings",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    sessionId: uuid("session_id")
+      .notNull()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    provider: text("provider", { enum: ["github", "gitlab", "azure_devops"] }).notNull(),
+    source: text("source", { enum: sandboxGitCredentialBindingSourceValues }).notNull(),
+    status: text("status", { enum: sandboxGitCredentialBindingStatusValues })
+      .notNull()
+      .default("active"),
+    repositoryRefs: jsonb("repository_refs").$type<GitCredentialRepositoryRef[]>().notNull(),
+    generation: integer("generation").notNull().default(1),
+    reasonCode: text("reason_code"),
+    lastValidatedAt: timestamp("last_validated_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "sandbox_git_credential_bindings_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    workspaceSession: foreignKey({
+      name: "sandbox_git_credential_bindings_workspace_session_fk",
+      columns: [table.workspaceId, table.sessionId],
+      foreignColumns: [sessions.workspaceId, sessions.id],
+    }).onDelete("cascade"),
+    sessionProvider: uniqueIndex("sandbox_git_credential_bindings_session_provider_idx").on(
+      table.workspaceId,
+      table.sessionId,
+      table.provider,
+    ),
+    workspace: index("sandbox_git_credential_bindings_workspace_idx").on(
+      table.workspaceId,
+      table.updatedAt,
+    ),
+    repositoryRefsNonempty: check(
+      "sandbox_git_credential_bindings_repository_refs_check",
+      sql`jsonb_typeof(${table.repositoryRefs}) = 'array' and jsonb_array_length(${table.repositoryRefs}) > 0`,
+    ),
+    generationPositive: check(
+      "sandbox_git_credential_bindings_generation_check",
+      sql`${table.generation} > 0`,
+    ),
+  }),
+);
+
 // The 4 liveness states of the singleton lease. Exported so the query layer and
 // the stateless resume-by-id path share one source of truth for the domain.
 export const sandboxLeaseLivenessValues = ["cold", "warming", "warm", "draining"] as const;
@@ -2245,6 +2322,10 @@ export const enrollments = pgTable(
     desktopUnavailableReason: text("desktop_unavailable_reason"),
     allowScreenControl: boolean("allow_screen_control").notNull().default(false),
     status: text("status", { enum: enrollmentStatusValues }).notNull().default("active"),
+    // Credential-family fence. Existing rows/migration-era bearers are generation
+    // 1; every successful re-enrollment increments this atomically before a new
+    // bearer is signed. Auth and self-revoke require an exact row/claim match.
+    credentialGeneration: integer("credential_generation").notNull().default(1),
     os: text("os", { enum: enrollmentOsValues }).notNull().default("linux"),
     arch: text("arch").notNull().default("x86_64"),
     // Heartbeat liveness cursor. Null until the first connect.
@@ -2336,7 +2417,12 @@ export const deviceEnrollmentRequests = pgTable(
     // row AND a sandbox row appear). Null until approved.
     enrollmentId: uuid("enrollment_id").references(() => enrollments.id, { onDelete: "set null" }),
     sandboxId: uuid("sandbox_id").references(() => sandboxes.id, { onDelete: "set null" }),
-    // The short-TTL expiry; a pending row past this is EXPIRED on poll.
+    // Exact credential family finalized by this approval. It remains nullable so
+    // pre-0068 approved/consumed rows fail closed rather than inheriting the
+    // enrollment row's current (possibly re-enrolled) generation.
+    credentialGeneration: integer("credential_generation"),
+    // The original short-TTL expiry applies to every status, including legitimate
+    // retries of approved/consumed polls.
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -2354,6 +2440,10 @@ export const deviceEnrollmentRequests = pgTable(
       table.createdAt,
     ),
     expires: index("device_enrollment_requests_expires_idx").on(table.expiresAt),
+    credentialGenerationPositive: check(
+      "device_enrollment_requests_credential_generation_positive",
+      sql`${table.credentialGeneration} IS NULL OR ${table.credentialGeneration} > 0`,
+    ),
   }),
 );
 
@@ -2493,6 +2583,11 @@ export const scheduledTasks = pgTable(
     // (migration 0047). NULL ⇒ no rig. FK (-> rigs(id) ON DELETE SET NULL) lives
     // in migration 0047 (forward-reference pattern). Consumed in M3.
     rigId: uuid("rig_id"),
+    // Set only by validated create/update paths whose grant held
+    // variable-sets:use. Copied onto each dispatched session.
+    rigDefaultVariableSetsAuthorized: boolean("rig_default_variable_sets_authorized")
+      .notNull()
+      .default(false),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -3019,7 +3114,7 @@ export const rigVersions = pgTable(
 );
 
 // Proposed/verified rig changes (M4 substrate). M2 creates the table + CRUD only;
-// verification/auto-merge/promotion land in M4.
+// verification/manager-promotion land in M4.
 export const rigChanges = pgTable(
   "rig_changes",
   {
@@ -3042,6 +3137,9 @@ export const rigChanges = pgTable(
     // 'proposed' | 'verifying' | 'merged' | 'rejected' | 'failed' (CHECK in 0047).
     status: text("status").notNull().default("proposed"),
     proposedBy: text("proposed_by"),
+    // Workspace-scoped proposal retry key (migration 0066). Null means each
+    // proposal is independent.
+    idempotencyKey: text("idempotency_key"),
     verification: jsonb("verification").$type<Record<string, unknown>>(),
     resultVersionId: uuid("result_version_id").references(() => rigVersions.id, {
       onDelete: "set null",
@@ -3055,6 +3153,9 @@ export const rigChanges = pgTable(
       table.rigId,
       table.createdAt,
     ),
+    idempotency: uniqueIndex("rig_changes_workspace_idempotency_idx")
+      .on(table.workspaceId, table.idempotencyKey)
+      .where(sql`${table.idempotencyKey} is not null`),
     workspaceStatus: index("rig_changes_workspace_status_idx").on(table.workspaceId, table.status),
   }),
 );

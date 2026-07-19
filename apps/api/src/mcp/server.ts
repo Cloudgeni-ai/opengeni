@@ -63,7 +63,6 @@ import type { ApiRouteDeps } from "@opengeni/core";
 import {
   listRigChangesForApi,
   listRigVersionsForApi,
-  promoteVerifiedDefinitionEditChangeForApi,
   proposeRigChangeForApi,
   requireRigChangeForApi,
   requireRigForApi,
@@ -1059,6 +1058,7 @@ async function beginMcpRigVerificationAttempt(
   try {
     return await beginRigChangeVerificationAttempt(deps.db, workspaceId, changeId, {
       startedAt: new Date().toISOString(),
+      allowAlreadyVerifying: true,
     });
   } catch (error) {
     if (
@@ -1071,12 +1071,12 @@ async function beginMcpRigVerificationAttempt(
   }
 }
 
-function verificationAttempt(change: {
-  verification?: Record<string, unknown> | null;
-}): number | string {
-  return typeof change.verification?.attempt === "number"
-    ? change.verification.attempt
-    : crypto.randomUUID();
+function verificationAttempt(change: { verification?: Record<string, unknown> | null }): number {
+  const attempt = change.verification?.attempt;
+  if (typeof attempt !== "number" || !Number.isInteger(attempt) || attempt < 1) {
+    throw new Error("rig verification attempt was not persisted");
+  }
+  return attempt;
 }
 
 function registerRigTools(
@@ -1125,30 +1125,41 @@ function registerRigTools(
       "rig_propose_change",
       {
         description:
-          "Propose an additive rig setup command for clean verification. Use the exact command that already worked in this sandbox.",
+          "Propose an additive rig setup command for clean verification. Use the exact command that already worked in this sandbox. A pass becomes verified and awaits manager promotion; it never activates automatically.",
         inputSchema: {
           rigId: z4.string().uuid(),
           command: z4.string().min(1).max(8192),
           note: z4.string().max(2000).optional(),
+          idempotencyKey: z4.string().min(1).max(200).optional(),
         },
       },
-      async ({ rigId, command, note }) => {
+      async ({ rigId, command, note, idempotencyKey }) => {
         const rig = await requireRigForApi(deps.db, grant.workspaceId, rigId);
-        const change = await proposeRigChangeForApi(
+        const { change, created } = await proposeRigChangeForApi(
           { db: deps.db },
           grant,
           rig,
           {
             kind: "setup_append",
             payload: { command, ...(note ? { note } : {}) },
+            ...(idempotencyKey ? { idempotencyKey } : {}),
           },
           sessionId ? { proposedBy: `session:${sessionId}` } : {},
         );
+        if (
+          !created &&
+          change.status !== "verifying" &&
+          !(change.status === "proposed" && change.verification?.passed !== true)
+        ) {
+          return json({ change, verificationStarted: false });
+        }
         const verifying = await beginMcpRigVerificationAttempt(deps, grant.workspaceId, change.id);
+        const attempt = verificationAttempt(verifying);
         await deps.workflowClient.startRigVerification({
           workspaceId: grant.workspaceId,
           changeId: change.id,
-          workflowId: `rig-verification-change-${change.id}-attempt-${verificationAttempt(verifying)}`,
+          attempt,
+          workflowId: `rig-verification-change-${change.id}-attempt-${attempt}`,
         });
         return json({ change: verifying, verificationStarted: true });
       },
@@ -1158,7 +1169,7 @@ function registerRigTools(
       "rig_verify",
       {
         description:
-          "Trigger rig verification. Pass changeId for a proposed change, or omit it to re-verify the active version's checks.",
+          "Trigger clean rig verification. Pass changeId for a proposed change (a pass awaits manager promotion), or omit it to re-verify an active version that has checks.",
         inputSchema: {
           rigId: z4.string().uuid(),
           changeId: z4.string().uuid().optional(),
@@ -1173,15 +1184,20 @@ function registerRigTools(
             grant.workspaceId,
             change.id,
           );
+          const attempt = verificationAttempt(verifying);
           await deps.workflowClient.startRigVerification({
             workspaceId: grant.workspaceId,
             changeId: change.id,
-            workflowId: `rig-verification-change-${change.id}-attempt-${verificationAttempt(verifying)}`,
+            attempt,
+            workflowId: `rig-verification-change-${change.id}-attempt-${attempt}`,
           });
           return json({ ok: true, changeId: change.id });
         }
         if (!rig.activeVersion) {
           throw new Error("rig has no active version");
+        }
+        if (rig.activeVersion.checks.length === 0) {
+          throw new Error("rig has no checks configured");
         }
         await deps.workflowClient.startRigVerification({
           workspaceId: grant.workspaceId,
@@ -1193,26 +1209,8 @@ function registerRigTools(
     );
   }
 
-  if (can("rigs:manage")) {
-    server.registerTool(
-      "rig_promote",
-      {
-        description:
-          "Promote a verified definition_edit rig change to a new active immutable version. Requires rigs:manage.",
-        inputSchema: {
-          rigId: z4.string().uuid(),
-          changeId: z4.string().uuid(),
-        },
-      },
-      async ({ rigId, changeId }) => {
-        const rig = await requireRigForApi(deps.db, grant.workspaceId, rigId);
-        const change = await requireRigChangeForApi(deps.db, grant.workspaceId, rig.id, changeId);
-        return json(
-          await promoteVerifiedDefinitionEditChangeForApi({ db: deps.db }, grant, rig, change),
-        );
-      },
-    );
-  }
+  // Deliberately no manager promotion tool. Durable activation stays on the
+  // human/operator REST + UI surface even for grants that carry rigs:manage.
 }
 
 // Workspace orchestration for manager-style agents. Session-authenticated

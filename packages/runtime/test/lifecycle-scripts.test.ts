@@ -6,6 +6,8 @@
 import { describe, expect, test } from "bun:test";
 import {
   azureCliLoginCommand,
+  gitCredentialHelperInstallCommand,
+  gitProviderTokenInvalidationCommand,
   gitProviderTokenRefreshCommand,
   repositoryCloneCommand,
 } from "../src/index";
@@ -69,10 +71,19 @@ describe("lifecycle scripts — real sh execution semantics", () => {
     script: string,
     env: Record<string, string>,
   ): { status: number; output: string } {
+    const inherited = { ...process.env };
+    for (const name of [
+      "OPENGENI_GIT_TOKEN_FILE",
+      "OPENGENI_GIT_CREDENTIALS_DIR",
+      "OPENGENI_GIT_CLI_WRAPPER_DIR",
+      "GIT_ASKPASS",
+    ]) {
+      if (!(name in env)) delete inherited[name];
+    }
     try {
       // merge stderr into stdout so diagnostics like "Re-materializing..." are visible
       const output = execFileSync("sh", ["-c", `{\n${script}\n} 2>&1`], {
-        env: { ...process.env, ...env },
+        env: { ...inherited, ...env },
         encoding: "utf8",
         stdio: ["ignore", "pipe", "pipe"],
       });
@@ -81,6 +92,15 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       const e = error as { status?: number; stdout?: string; stderr?: string };
       return { status: e.status ?? 1, output: `${e.stdout ?? ""}${e.stderr ?? ""}` };
     }
+  }
+
+  function isolatedSandboxEnv(home: string): NodeJS.ProcessEnv {
+    const env = { ...process.env, HOME: home };
+    delete env.OPENGENI_GIT_TOKEN_FILE;
+    delete env.OPENGENI_GIT_CREDENTIALS_DIR;
+    delete env.OPENGENI_GIT_CLI_WRAPPER_DIR;
+    delete env.GIT_ASKPASS;
+    return env;
   }
 
   test("seed block: provider token files 600 + askpass/wrappers 755, atomic, askpass reads current provider token", () => {
@@ -121,22 +141,74 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       expect(
         readdirSync(join(home, ".opengeni", "bin")).filter((f) => f.includes(".tmp.")),
       ).toEqual([]);
-      // the askpass Password branch reads the token file
-      const askOut = execFileSync("sh", [askpass, "Password for host"], {
-        env: { ...process.env, HOME: home },
+      // Reinstall the helper with an exact authorized host for each provider.
+      expect(
+        runScript(
+          gitCredentialHelperInstallCommand(
+            [
+              {
+                provider: "github",
+                uri: "https://github.com/acme/private.git",
+                ref: "main",
+                repositoryId: 456,
+                installationId: 123,
+              },
+              {
+                provider: "gitlab",
+                uri: "https://gitlab.com/acme/private.git",
+                ref: "main",
+              },
+              {
+                provider: "azure_devops",
+                uri: "https://dev.azure.com/acme/project/_git/private",
+                ref: "main",
+              },
+            ],
+            {
+              github: "tok-atomic-123",
+              gitlab: "glpat-atomic-456",
+              azure_devops: "azdo-atomic-789",
+            },
+          ),
+          { HOME: home },
+        ).status,
+      ).toBe(0);
+
+      // Exact authorized hosts read the current provider token files.
+      const askOut = execFileSync("sh", [askpass, "Password for 'https://github.com':"], {
+        env: isolatedSandboxEnv(home),
         encoding: "utf8",
       });
       expect(askOut).toBe("tok-atomic-123");
       const gitlabOut = execFileSync("sh", [askpass, "Password for https://gitlab.com"], {
-        env: { ...process.env, HOME: home },
+        env: isolatedSandboxEnv(home),
         encoding: "utf8",
       });
       expect(gitlabOut).toBe("glpat-atomic-456");
       const azureOut = execFileSync("sh", [askpass, "Password for https://dev.azure.com/acme"], {
-        env: { ...process.env, HOME: home },
+        env: isolatedSandboxEnv(home),
         encoding: "utf8",
       });
       expect(azureOut).toBe("azdo-atomic-789");
+
+      // A global askpass must never disclose a provider token for an unknown,
+      // malformed, hostless, substring-only, or suffix-confusion prompt.
+      for (const prompt of [
+        "Password for host",
+        "Password for 'https://attacker.example':",
+        "Password for 'https://notgithub.com':",
+        "Password for 'https://github.com.evil':",
+        "Password for 'https://gitlab.attacker.example':",
+        "Password for 'https://dev.azure.com.attacker.example':",
+        "Password for 'https://':",
+      ]) {
+        expect(
+          execFileSync("sh", [askpass, prompt], {
+            env: isolatedSandboxEnv(home),
+            encoding: "utf8",
+          }),
+        ).toBe("\n");
+      }
       // and the clone landed as a real work tree
       expect(existsSync(join(target, "README.md"))).toBe(true);
     } finally {
@@ -181,6 +253,168 @@ describe("lifecycle scripts — real sh execution semantics", () => {
     }
   });
 
+  test("helper install failure removes selected token files and every PID temp without leaking", () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-git-install-failure-"));
+    try {
+      const home = join(root, "home");
+      mkdirSync(home, { recursive: true });
+      const blocked = join(home, "blocked-wrapper-parent");
+      writeFileSync(blocked, "not-a-directory");
+      const secret = "install-secret-must-not-leak";
+      const run = runScript(
+        gitCredentialHelperInstallCommand(
+          [
+            {
+              provider: "github",
+              uri: "https://github.com/acme/private.git",
+              ref: "main",
+              repositoryId: 456,
+              installationId: 123,
+            },
+          ],
+          { github: secret },
+        ),
+        { HOME: home, OPENGENI_GIT_CLI_WRAPPER_DIR: join(blocked, "children") },
+      );
+      expect(run.status).not.toBe(0);
+      expect(run.output).not.toContain(secret);
+      expect(existsSync(join(home, ".opengeni", "git-token"))).toBe(false);
+      expect(existsSync(join(home, ".opengeni", "git-credentials", "github-token"))).toBe(false);
+      expect(
+        readdirSync(home, { recursive: true })
+          .map(String)
+          .filter((path) => path.includes(".tmp.")),
+      ).toEqual([]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("refresh failure removes a partially replaced token and its temp without leaking", () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-git-refresh-failure-"));
+    try {
+      const home = join(root, "home");
+      mkdirSync(join(home, ".opengeni"), { recursive: true });
+      const blocked = join(home, "blocked-credential-dir");
+      writeFileSync(blocked, "not-a-directory");
+      const secret = "refresh-secret-must-not-leak";
+      const run = runScript(gitProviderTokenRefreshCommand({ github: secret }), {
+        HOME: home,
+        OPENGENI_GIT_CREDENTIALS_DIR: blocked,
+      });
+      expect(run.status).not.toBe(0);
+      expect(run.output).not.toContain(secret);
+      expect(existsSync(join(home, ".opengeni", "git-token"))).toBe(false);
+      expect(
+        readdirSync(home, { recursive: true })
+          .map(String)
+          .filter((path) => path.includes(".tmp.")),
+      ).toEqual([]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("invalidation attempts every selected provider after one unlink fails", () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-git-invalidation-failure-"));
+    try {
+      const home = join(root, "home");
+      const credentialsDir = join(home, ".opengeni", "git-credentials");
+      const blockedGitHubFile = join(home, "blocked-github-token");
+      mkdirSync(credentialsDir, { recursive: true });
+      mkdirSync(blockedGitHubFile);
+      writeFileSync(join(credentialsDir, "github-token"), "github-secret");
+      writeFileSync(join(credentialsDir, "gitlab-token"), "gitlab-secret");
+      const run = runScript(gitProviderTokenInvalidationCommand(["github", "gitlab"]), {
+        HOME: home,
+        OPENGENI_GIT_TOKEN_FILE: blockedGitHubFile,
+        OPENGENI_GIT_CREDENTIALS_DIR: credentialsDir,
+      });
+      expect(run.status).not.toBe(0);
+      expect(run.output).not.toContain("github-secret");
+      expect(run.output).not.toContain("gitlab-secret");
+      expect(existsSync(blockedGitHubFile)).toBe(true);
+      expect(existsSync(join(credentialsDir, "github-token"))).toBe(false);
+      expect(existsSync(join(credentialsDir, "gitlab-token"))).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("resource-less helper bootstrap installs Git fallback and invalidation unlinks only selected providers", () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-git-bootstrap-"));
+    try {
+      const home = join(root, "home");
+      mkdirSync(home, { recursive: true });
+      const installed = runScript(
+        gitCredentialHelperInstallCommand(
+          [
+            {
+              provider: "github",
+              uri: "https://github.com/acme/private.git",
+              ref: "main",
+              repositoryId: 456,
+              installationId: 123,
+            },
+            {
+              provider: "gitlab",
+              uri: "https://git.company.com/acme/private.git",
+              ref: "main",
+            },
+          ],
+          { github: "gh-bootstrap", gitlab: "gl-bootstrap" },
+        ),
+        { HOME: home },
+      );
+      expect(installed.status).toBe(0);
+      expect(
+        execFileSync("git", ["config", "--global", "--get", "core.askPass"], {
+          env: { ...process.env, HOME: home },
+          encoding: "utf8",
+        }).trim(),
+      ).toBe(join(home, ".opengeni", "askpass"));
+
+      expect(
+        runScript(gitProviderTokenInvalidationCommand(["github"]), { HOME: home }).status,
+      ).toBe(0);
+      expect(existsSync(join(home, ".opengeni", "git-token"))).toBe(false);
+      expect(existsSync(join(home, ".opengeni", "git-credentials", "github-token"))).toBe(false);
+      expect(readFileSync(join(home, ".opengeni", "git-credentials", "gitlab-token"), "utf8")).toBe(
+        "gl-bootstrap",
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("concurrent token-file readers observe complete old or new values during rotation", () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-git-atomic-read-"));
+    try {
+      const home = join(root, "home");
+      mkdirSync(home, { recursive: true });
+      const oldToken = `old-${"a".repeat(4096)}`;
+      const newToken = `new-${"b".repeat(4096)}`;
+      expect(
+        runScript(gitProviderTokenRefreshCommand({ github: oldToken }), { HOME: home }).status,
+      ).toBe(0);
+      const tokenFile = join(home, ".opengeni", "git-token");
+      const observations = join(root, "observations");
+      const rotation = gitProviderTokenRefreshCommand({ github: newToken });
+      const shell = [
+        `: > '${observations}'`,
+        `(i=0; while [ "$i" -lt 250 ]; do { cat '${tokenFile}'; printf '\\n'; } >> '${observations}'; i=$((i+1)); done) & reader=$!`,
+        rotation,
+        'wait "$reader"',
+      ].join("\n");
+      expect(runScript(shell, { HOME: home }).status).toBe(0);
+      const values = readFileSync(observations, "utf8").trim().split("\n");
+      expect(values.length).toBe(250);
+      expect(values.every((value) => value === oldToken || value === newToken)).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test("askpass maps custom GitLab hosts from repository resources before fallback heuristics", () => {
     const root = mkdtempSync(join(tmpdir(), "opengeni-custom-git-host-"));
     try {
@@ -202,7 +436,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       expect(run.status).toBe(0);
 
       const askpass = join(home, ".opengeni", "askpass");
-      const askEnv = { ...process.env, HOME: home };
+      const askEnv = isolatedSandboxEnv(home);
       expect(
         execFileSync("sh", [askpass, "Username for 'https://git.company.com':"], {
           env: askEnv,
@@ -284,6 +518,8 @@ describe("lifecycle scripts — real sh execution semantics", () => {
         HOME: home,
         PATH: `${wrapperPath}:${realbin}:${process.env.PATH ?? "/usr/bin:/bin"}`,
       };
+      delete wrapperEnv.OPENGENI_GIT_TOKEN_FILE;
+      delete wrapperEnv.OPENGENI_GIT_CREDENTIALS_DIR;
       delete wrapperEnv.GH_TOKEN;
       delete wrapperEnv.GITLAB_TOKEN;
       delete wrapperEnv.AZURE_DEVOPS_EXT_PAT;

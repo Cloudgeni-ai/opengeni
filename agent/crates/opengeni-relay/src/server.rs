@@ -136,7 +136,7 @@ async fn stream_upgrade(
 /// The per-connection handshake + splice driver.
 pub(crate) mod conn {
     use super::{DialQuery, RelayState, WebSocket, WsMessage};
-    use std::time::Instant;
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use futures_util::{SinkExt as _, StreamExt as _};
     use opengeni_agent_proto::v1;
@@ -174,6 +174,7 @@ pub(crate) mod conn {
         key: ChannelKey,
         role: Role,
         conn_gen: crate::registry::ConnGen,
+        expires_at_unix_seconds: i64,
         peer_rx: tokio::sync::mpsc::Receiver<RelayMessage>,
     }
 
@@ -197,7 +198,9 @@ pub(crate) mod conn {
         };
 
         // 2. Resolve + authorize the key (token + channel-key scope).
-        let (key, role, resume_from_seq) = match authorize(&open, query, state) {
+        let (key, role, resume_from_seq, expires_at_unix_seconds) = match authorize(
+            &open, query, state,
+        ) {
             Ok(parts) => parts,
             Err(reason) => {
                 tracing::warn!(reason = %reason, ws = %query.ws, agent = %query.agent, port = query.port, "relay open rejected");
@@ -249,6 +252,7 @@ pub(crate) mod conn {
             key,
             role,
             conn_gen,
+            expires_at_unix_seconds,
             peer_rx,
         })
     }
@@ -262,8 +266,17 @@ pub(crate) mod conn {
         mut est: Established,
         state: &RelayState,
     ) {
+        let expiry = tokio::time::sleep(duration_until_expiry(
+            est.expires_at_unix_seconds,
+            SystemTime::now(),
+        ));
+        tokio::pin!(expiry);
         loop {
             tokio::select! {
+                () = &mut expiry => {
+                    tracing::debug!(role = ?est.role, "relay credential expired; detaching live socket");
+                    break;
+                }
                 outbound = est.peer_rx.recv() => {
                     match outbound {
                         Some(msg) => {
@@ -351,7 +364,7 @@ pub(crate) mod conn {
         open: &v1::StreamOpen,
         query: &DialQuery,
         state: &RelayState,
-    ) -> Result<(ChannelKey, Role, u64), String> {
+    ) -> Result<(ChannelKey, Role, u64, i64), String> {
         let channel = open
             .channel
             .as_ref()
@@ -382,7 +395,7 @@ pub(crate) mod conn {
 
         // (b) Validate the token on its own merits + assert it claims THIS key.
         let now = unix_now();
-        match role {
+        let expires_at_unix_seconds = match role {
             Role::Agent => {
                 let secret = state.config.effective_relay_token_secret();
                 if secret.is_empty() {
@@ -393,6 +406,7 @@ pub(crate) mod conn {
                 if claims.workspace_id != key.workspace_id || claims.agent_id != key.agent_id {
                     return Err("agent token scope does not match the channel key".to_string());
                 }
+                claims.exp
             }
             Role::Client => {
                 let secret = &state.config.stream_token_secret;
@@ -411,10 +425,22 @@ pub(crate) mod conn {
                     return Err("viewer token port does not match the channel key".to_string());
                 }
                 // The epoch fence is applied at attach (the floor); see client_epoch.
+                claims.exp
             }
-        }
+        };
 
-        Ok((key, role, open.resume_from_seq))
+        Ok((key, role, open.resume_from_seq, expires_at_unix_seconds))
+    }
+
+    /// Converts a verified absolute expiry into a monotonic sleep duration. A
+    /// credential that reaches its boundary between verify and splice expires
+    /// immediately rather than gaining another second of live access.
+    fn duration_until_expiry(expires_at_unix_seconds: i64, now: SystemTime) -> Duration {
+        let Ok(expires_at_unix_seconds) = u64::try_from(expires_at_unix_seconds) else {
+            return Duration::ZERO;
+        };
+        let now_since_epoch = now.duration_since(UNIX_EPOCH).unwrap_or(Duration::ZERO);
+        Duration::from_secs(expires_at_unix_seconds).saturating_sub(now_since_epoch)
     }
 
     /// The viewer epoch (the fence floor source) from the token. Returns None when
@@ -466,5 +492,34 @@ pub(crate) mod conn {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::duration_until_expiry;
+        use std::time::{Duration, UNIX_EPOCH};
+
+        #[test]
+        fn expiry_duration_is_exact_before_the_deadline() {
+            assert_eq!(
+                duration_until_expiry(
+                    1_300,
+                    UNIX_EPOCH + Duration::from_secs(1_000) + Duration::from_millis(250)
+                ),
+                Duration::from_millis(299_750)
+            );
+        }
+
+        #[test]
+        fn expiry_duration_is_immediate_at_or_after_the_deadline() {
+            assert_eq!(
+                duration_until_expiry(1_000, UNIX_EPOCH + Duration::from_secs(1_000)),
+                Duration::ZERO
+            );
+            assert_eq!(
+                duration_until_expiry(999, UNIX_EPOCH + Duration::from_secs(1_000)),
+                Duration::ZERO
+            );
+        }
     }
 }

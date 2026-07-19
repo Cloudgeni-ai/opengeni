@@ -2,7 +2,7 @@
 // versioned sandbox-machine-definition business logic the REST routes (M2) and
 // (later) the MCP rig tools (M4) both call. Validation + audit events live here;
 // the raw RLS-scoped persistence lives in @opengeni/db. M4 adds verification /
-// auto-merge / promotion on top of the change substrate created here.
+// manager-only promotion on top of the change substrate here.
 
 import type {
   AccessGrant,
@@ -19,6 +19,7 @@ import {
   countRigs,
   createRig,
   createRigChange,
+  createRigChangeWithIdempotencyKey,
   createRigVersion,
   createRigVersionForChangePromotion,
   deleteRigIfNoActiveSessions,
@@ -31,11 +32,13 @@ import {
   listRigVersions,
   recordAuditEvent,
   RigActiveVersionChangedError,
+  RigChangeIdempotencyConflictError,
   RigChangeTransitionError,
   updateRig,
   type Database,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
+import { requirePermission } from "../access";
 
 export const MAX_RIGS_PER_WORKSPACE = 50;
 export const MAX_CHECKS_PER_RIG = 100;
@@ -58,6 +61,7 @@ type RigAuditAction =
   | "rig.verification.started"
   | "rig.verification.passed"
   | "rig.verification.failed"
+  | "rig.verification.no_checks"
   | "rig.version.activated"
   | "rig.version.promoted";
 
@@ -160,6 +164,7 @@ export async function createRigForApi(
   grant: AccessGrant,
   payload: CreateRigRequest,
 ): Promise<Rig> {
+  requirePermission(grant, "rigs:manage");
   const workspaceId = grant.workspaceId;
   const name = trimmedRigName(payload.name);
   assertUniqueCheckNames(payload.checks);
@@ -199,6 +204,7 @@ export async function updateRigForApi(
   rig: Rig,
   payload: UpdateRigRequest,
 ): Promise<Rig> {
+  requirePermission(grant, "rigs:manage");
   const workspaceId = grant.workspaceId;
   const name = payload.name !== undefined ? trimmedRigName(payload.name) : undefined;
   if (name !== undefined && name !== rig.name) {
@@ -220,6 +226,7 @@ export async function deleteRigForApi(
   grant: AccessGrant,
   rig: Rig,
 ): Promise<void> {
+  requirePermission(grant, "rigs:manage");
   const workspaceId = grant.workspaceId;
   const deleted = await deleteRigIfNoActiveSessions(deps.db, workspaceId, rig.id);
   if (deleted.activeSessionCount > 0) {
@@ -234,8 +241,8 @@ export async function deleteRigForApi(
 }
 
 // Records a proposed change against the rig's CURRENT active version (the base
-// clean-replay minted new versions from). Verification / auto-merge is M4; here
-// the row is created in `proposed`. `proposedBy` overrides the actor string for
+// clean-replay validates against). Verification never activates; here the row
+// is created in `proposed`. `proposedBy` overrides the actor string for
 // the session-scoped MCP path (M4).
 export async function proposeRigChangeForApi(
   deps: RigServices,
@@ -243,7 +250,8 @@ export async function proposeRigChangeForApi(
   rig: Rig,
   request: ProposeRigChangeRequest,
   options: { proposedBy?: string } = {},
-): Promise<RigChange> {
+): Promise<{ change: RigChange; created: boolean }> {
+  requirePermission(grant, request.kind === "definition_edit" ? "rigs:manage" : "rigs:use");
   const workspaceId = grant.workspaceId;
   if (!rig.activeVersion) {
     throw new HTTPException(422, { message: "rig has no active version to base a change on" });
@@ -256,7 +264,7 @@ export async function proposeRigChangeForApi(
       request.payload.defaultVariableSetIds ?? undefined,
     );
   }
-  const change = await createRigChange(deps.db, {
+  const proposal = {
     accountId: grant.accountId,
     workspaceId,
     rigId: rig.id,
@@ -264,18 +272,33 @@ export async function proposeRigChangeForApi(
     kind: request.kind,
     payload: request.payload as Record<string, unknown>,
     proposedBy: options.proposedBy ?? rigActorForGrant(grant),
-  });
-  await recordRigAuditEvent(deps.db, {
-    grant,
-    action: "rig.change.proposed",
-    rigId: rig.id,
-    metadata: { changeId: change.id, kind: change.kind },
-  });
-  return change;
+  };
+  let result: { change: RigChange; created: boolean };
+  try {
+    result = request.idempotencyKey
+      ? await createRigChangeWithIdempotencyKey(deps.db, {
+          ...proposal,
+          idempotencyKey: request.idempotencyKey,
+        })
+      : { change: await createRigChange(deps.db, proposal), created: true };
+  } catch (error) {
+    if (error instanceof RigChangeIdempotencyConflictError) {
+      throw new HTTPException(409, { message: error.message });
+    }
+    throw error;
+  }
+  if (result.created) {
+    await recordRigAuditEvent(deps.db, {
+      grant,
+      action: "rig.change.proposed",
+      rigId: rig.id,
+      metadata: { changeId: result.change.id, kind: result.change.kind },
+    });
+  }
+  return result;
 }
 
 export type RigVerificationClassification =
-  | { status: "merged"; action: "auto_promote" }
   | { status: "proposed"; action: "await_manage_promote" }
   | { status: "rejected"; action: "reject" }
   | { status: "failed"; action: "retryable_failure" };
@@ -291,9 +314,6 @@ export function classifyRigVerificationOutcome(input: {
   if (!input.passed) {
     return { status: "rejected", action: "reject" };
   }
-  if (input.kind === "setup_append") {
-    return { status: "merged", action: "auto_promote" };
-  }
   return { status: "proposed", action: "await_manage_promote" };
 }
 
@@ -305,13 +325,61 @@ export function appendRigSetupCommand(
   return base ? `${base}\n${command}` : command;
 }
 
+/**
+ * Build the exact immutable candidate artifact shared by verification and
+ * manager promotion. setup_append is not a second shell command: it is appended
+ * to the base setup script and the resulting bytes run once in one Bash process,
+ * exactly as the promoted version will run on a cold box.
+ */
+export function candidateRigVersionForChange(base: RigVersion, change: RigChange): RigVersion {
+  if (change.kind === "setup_append") {
+    const payload = change.payload as { command?: unknown; note?: unknown };
+    if (typeof payload.command !== "string" || !payload.command.trim()) {
+      throw new HTTPException(422, { message: "setup_append change is missing command" });
+    }
+    return {
+      ...base,
+      setupScript: appendRigSetupCommand(base.setupScript, payload.command),
+      changelog:
+        typeof payload.note === "string" && payload.note.trim()
+          ? payload.note
+          : "Verified setup append",
+    };
+  }
+  const payload = change.payload as {
+    image?: unknown;
+    setupScript?: unknown;
+    checks?: unknown;
+    credentialHooks?: unknown;
+    defaultVariableSetIds?: unknown;
+    changelog?: unknown;
+  };
+  return {
+    ...base,
+    image: payload.image === undefined ? base.image : (payload.image as string | null),
+    setupScript:
+      payload.setupScript === undefined ? base.setupScript : (payload.setupScript as string | null),
+    checks: Array.isArray(payload.checks) ? (payload.checks as RigVersion["checks"]) : base.checks,
+    credentialHooks: Array.isArray(payload.credentialHooks)
+      ? (payload.credentialHooks as string[])
+      : base.credentialHooks,
+    defaultVariableSetIds: Array.isArray(payload.defaultVariableSetIds)
+      ? (payload.defaultVariableSetIds as string[])
+      : base.defaultVariableSetIds,
+    changelog:
+      typeof payload.changelog === "string" && payload.changelog.trim()
+        ? payload.changelog
+        : "Verified definition edit",
+  };
+}
+
 async function promoteChangeWithActiveCas(
   deps: RigServices,
   workspaceId: string,
   rigId: string,
   changeId: string,
   input: Parameters<typeof createRigVersionForChangePromotion>[4],
-): Promise<{ version: RigVersion; change: RigChange }> {
+): Promise<{ version: RigVersion; change: RigChange; promoted: boolean }> {
   try {
     return await createRigVersionForChangePromotion(deps.db, workspaceId, rigId, changeId, input);
   } catch (error) {
@@ -327,80 +395,31 @@ async function promoteChangeWithActiveCas(
   }
 }
 
-export async function promoteSetupAppendChange(
+export async function promoteVerifiedRigChangeForApi(
   deps: RigServices,
   grant: AccessGrant,
   rig: Rig,
   change: RigChange,
-): Promise<{ change: RigChange; version: RigVersion }> {
-  if (change.kind !== "setup_append") {
-    throw new HTTPException(422, {
-      message: "only setup_append changes auto-promote through this path",
-    });
-  }
-  if (change.status !== "proposed" && change.status !== "verifying") {
-    throw new HTTPException(409, { message: `rig change is ${change.status}; cannot promote` });
-  }
-  if (!change.baseVersionId) {
-    throw new HTTPException(422, { message: "rig change has no base version" });
-  }
-  const base = await getRigVersion(deps.db, grant.workspaceId, rig.id, change.baseVersionId);
-  if (!base) {
-    throw new HTTPException(404, { message: "base rig version not found" });
-  }
-  const payload = change.payload as { command?: unknown; note?: unknown };
-  if (typeof payload.command !== "string" || !payload.command.trim()) {
-    throw new HTTPException(422, { message: "setup_append change is missing command" });
-  }
-  const { version, change: updated } = await promoteChangeWithActiveCas(
-    deps,
-    grant.workspaceId,
-    rig.id,
-    change.id,
-    {
-      expectedActiveVersionId: change.baseVersionId,
-      image: base.image,
-      setupScript: appendRigSetupCommand(base.setupScript, payload.command),
-      checks: base.checks,
-      credentialHooks: base.credentialHooks,
-      defaultVariableSetIds: base.defaultVariableSetIds,
-      changelog:
-        typeof payload.note === "string" && payload.note.trim()
-          ? payload.note
-          : "Verified setup append",
-      createdBy: change.proposedBy ?? rigActorForGrant(grant),
-    },
-  );
-  await recordRigAuditEvent(deps.db, {
-    grant,
-    action: "rig.change.merged",
-    rigId: rig.id,
-    metadata: { changeId: change.id, versionId: version.id, version: version.version },
-  });
-  await recordRigAuditEvent(deps.db, {
-    grant,
-    action: "rig.version.promoted",
-    rigId: rig.id,
-    metadata: { changeId: change.id, versionId: version.id, version: version.version },
-  });
-  return { change: updated, version };
-}
-
-export async function promoteVerifiedDefinitionEditChangeForApi(
-  deps: RigServices,
-  grant: AccessGrant,
-  rig: Rig,
-  change: RigChange,
-): Promise<{ change: RigChange; version: RigVersion }> {
-  if (change.kind !== "definition_edit") {
-    throw new HTTPException(422, { message: "only definition_edit changes use explicit promote" });
+): Promise<{ change: RigChange; version: RigVersion; promoted: boolean }> {
+  requirePermission(grant, "rigs:manage");
+  if (change.status === "merged" && change.resultVersionId) {
+    const existing = await getRigVersion(
+      deps.db,
+      grant.workspaceId,
+      rig.id,
+      change.resultVersionId,
+    );
+    if (!existing) {
+      throw new HTTPException(409, { message: "promoted rig version no longer exists" });
+    }
+    return { change, version: existing, promoted: false };
   }
   if (change.status !== "proposed") {
     throw new HTTPException(409, { message: `rig change is ${change.status}; cannot promote` });
   }
   if (change.verification?.passed !== true) {
     throw new HTTPException(422, {
-      message: "definition_edit change must pass verification before promote",
+      message: "rig change must pass verification before promotion",
     });
   }
   if (!change.baseVersionId) {
@@ -410,55 +429,36 @@ export async function promoteVerifiedDefinitionEditChangeForApi(
   if (!base) {
     throw new HTTPException(404, { message: "base rig version not found" });
   }
-  const payload = change.payload as {
-    image?: unknown;
-    setupScript?: unknown;
-    checks?: unknown;
-    credentialHooks?: unknown;
-    defaultVariableSetIds?: unknown;
-    changelog?: unknown;
-  };
-  const { version, change: updated } = await promoteChangeWithActiveCas(
-    deps,
-    grant.workspaceId,
-    rig.id,
-    change.id,
-    {
-      expectedActiveVersionId: change.baseVersionId,
-      image: payload.image === undefined ? base.image : (payload.image as string | null),
-      setupScript:
-        payload.setupScript === undefined
-          ? base.setupScript
-          : (payload.setupScript as string | null),
-      checks: Array.isArray(payload.checks)
-        ? (payload.checks as RigVersion["checks"])
-        : base.checks,
-      credentialHooks: Array.isArray(payload.credentialHooks)
-        ? (payload.credentialHooks as string[])
-        : base.credentialHooks,
-      defaultVariableSetIds: Array.isArray(payload.defaultVariableSetIds)
-        ? (payload.defaultVariableSetIds as string[])
-        : base.defaultVariableSetIds,
-      changelog:
-        typeof payload.changelog === "string" && payload.changelog.trim()
-          ? payload.changelog
-          : "Verified definition edit",
-      createdBy: rigActorForGrant(grant),
-    },
-  );
-  await recordRigAuditEvent(deps.db, {
-    grant,
-    action: "rig.change.merged",
-    rigId: rig.id,
-    metadata: { changeId: change.id, versionId: version.id, version: version.version },
+  const candidate = candidateRigVersionForChange(base, change);
+  const {
+    version,
+    change: updated,
+    promoted,
+  } = await promoteChangeWithActiveCas(deps, grant.workspaceId, rig.id, change.id, {
+    expectedActiveVersionId: change.baseVersionId,
+    image: candidate.image,
+    setupScript: candidate.setupScript,
+    checks: candidate.checks,
+    credentialHooks: candidate.credentialHooks,
+    defaultVariableSetIds: candidate.defaultVariableSetIds,
+    changelog: candidate.changelog,
+    createdBy: rigActorForGrant(grant),
   });
-  await recordRigAuditEvent(deps.db, {
-    grant,
-    action: "rig.version.promoted",
-    rigId: rig.id,
-    metadata: { changeId: change.id, versionId: version.id, version: version.version },
-  });
-  return { change: updated, version };
+  if (promoted) {
+    await recordRigAuditEvent(deps.db, {
+      grant,
+      action: "rig.change.merged",
+      rigId: rig.id,
+      metadata: { changeId: change.id, versionId: version.id, version: version.version },
+    });
+    await recordRigAuditEvent(deps.db, {
+      grant,
+      action: "rig.version.promoted",
+      rigId: rig.id,
+      metadata: { changeId: change.id, versionId: version.id, version: version.version },
+    });
+  }
+  return { change: updated, version, promoted };
 }
 
 export async function createRigVersionForApi(
@@ -467,6 +467,7 @@ export async function createRigVersionForApi(
   rig: Rig,
   payload: RigDefinitionEditPayload,
 ): Promise<RigVersion> {
+  requirePermission(grant, "rigs:manage");
   if (!rig.activeVersion) {
     throw new HTTPException(422, { message: "rig has no active version" });
   }
@@ -509,6 +510,7 @@ export async function activateRigVersionForApi(
   rig: Rig,
   versionId: string,
 ): Promise<RigVersion> {
+  requirePermission(grant, "rigs:manage");
   const workspaceId = grant.workspaceId;
   const version = await activateRigVersion(deps.db, workspaceId, rig.id, versionId);
   await recordRigAuditEvent(deps.db, {

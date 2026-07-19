@@ -12,7 +12,9 @@
 //! resume token, the install secret-key seed) that never travel on the wire.
 //! [`StoredCredentials::from_proto`] is the one conversion point.
 
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
 
 use opengeni_agent_proto::v1::EnrollmentCredentials;
 use serde::{Deserialize, Serialize};
@@ -21,6 +23,11 @@ use thiserror::Error;
 /// The environment variable overriding the config directory (used by the
 /// non-interactive CI harness and tests so they never touch the real user dir).
 const CONFIG_DIR_ENV: &str = "OPENGENI_CONFIG_DIR";
+
+/// The hosted public origin. The hosted API and download endpoints are served
+/// from this origin; callers can still select a deployment with `--api-url` or
+/// `$OPENGENI_API_URL`.
+pub const DEFAULT_PUBLIC_ORIGIN: &str = "https://app.opengeni.ai";
 
 /// Errors from loading/persisting agent state.
 #[derive(Debug, Error)]
@@ -44,6 +51,20 @@ pub enum ConfigError {
         /// The deserialization error.
         source: serde_json::Error,
     },
+}
+
+/// A refresh response was valid JSON but did not describe this exact enrolled
+/// machine. No token value is ever included in this error.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum CredentialRotationError {
+    /// The control plane returned a different workspace/agent identity, or no
+    /// longer asserted the required whole-machine consent grant.
+    #[error("refreshed credentials did not match this enrolled machine")]
+    IdentityMismatch,
+    /// The response omitted required control-plane material or paired a relay
+    /// token with inconsistent endpoint/expiry metadata.
+    #[error("refreshed credentials were incomplete")]
+    IncompleteMaterial,
 }
 
 impl ConfigError {
@@ -97,8 +118,12 @@ const CREDENTIALS_FILE: &str = "credentials.json";
 /// proto [`EnrollmentCredentials`] plus the agent-local rotating
 /// [`resume_token`](Self::resume_token), which the control plane mints per
 /// connection and which never appears in install scripts or logs.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StoredCredentials {
+    /// The deployment that issued this enrollment. Keeping it makes lifecycle
+    /// requests continue to target a private/custom deployment after install.
+    #[serde(default = "default_api_base_url")]
+    pub api_base_url: String,
     /// This agent's stable id within the workspace.
     pub agent_id: String,
     /// The workspace this agent is scoped to.
@@ -113,6 +138,10 @@ pub struct StoredCredentials {
     /// token, only the field's meaning was clarified.)
     #[serde(alias = "nats_credentials")]
     pub nats_bearer: String,
+    /// Absolute expiry of the recovery bearer. Zero means the credentials were
+    /// written by an older agent/control plane and should be refreshed promptly.
+    #[serde(default)]
+    pub bearer_expires_at_unix_seconds: u64,
     /// NATS server URL(s) to dial — `wss://` for the relay-symmetric TLS ingress.
     pub nats_urls: Vec<String>,
     /// The relay edge base URL for stream channels (M8).
@@ -126,6 +155,11 @@ pub struct StoredCredentials {
     /// silently failing).
     #[serde(default)]
     pub relay_token: String,
+    /// Absolute expiry of the relay producer token. Zero means either legacy
+    /// credentials (when `relay_token` is non-empty) or an intentionally disabled
+    /// relay-token plane (when `relay_token` is empty).
+    #[serde(default)]
+    pub relay_token_expires_at_unix_seconds: u64,
     /// The minisign public key pinned for self-update verification (M11).
     pub update_pubkey: String,
     /// Whether the user consented to whole-machine access.
@@ -145,8 +179,76 @@ pub struct StoredCredentials {
     pub last_known_epoch: u32,
 }
 
+impl std::fmt::Debug for StoredCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StoredCredentials")
+            .field("agent_id", &self.agent_id)
+            .field("workspace_id", &self.workspace_id)
+            .field(
+                "bearer_expires_at_unix_seconds",
+                &self.bearer_expires_at_unix_seconds,
+            )
+            .field(
+                "relay_token_expires_at_unix_seconds",
+                &self.relay_token_expires_at_unix_seconds,
+            )
+            .field("consented_whole_machine", &self.consented_whole_machine)
+            .field("consented_screen_control", &self.consented_screen_control)
+            .field("last_known_epoch", &self.last_known_epoch)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Cloneable, redacted shared access to the current persisted credentials. The
+/// inner value is never exposed through `Debug`; callers take a short-lived clone
+/// and must not hold a lock across an await.
+#[derive(Clone)]
+pub struct SharedCredentials {
+    inner: Arc<RwLock<StoredCredentials>>,
+}
+
+impl SharedCredentials {
+    /// Starts a shared credential source from one persisted snapshot.
+    #[must_use]
+    pub fn new(credentials: StoredCredentials) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(credentials)),
+        }
+    }
+
+    /// Returns the current snapshot, recovering a poisoned lock rather than
+    /// terminating the agent. The returned clone contains secrets and must never
+    /// be logged with `Debug`.
+    #[must_use]
+    pub fn snapshot(&self) -> StoredCredentials {
+        self.inner
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Publishes a candidate that has already been durably persisted. Persistence
+    /// MUST happen first so a crash cannot leave memory newer than disk.
+    pub fn publish_persisted(&self, credentials: StoredCredentials) {
+        *self
+            .inner
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = credentials;
+    }
+}
+
+impl std::fmt::Debug for SharedCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SharedCredentials").finish_non_exhaustive()
+    }
+}
+
 fn default_channel() -> String {
     "stable".to_string()
+}
+
+fn default_api_base_url() -> String {
+    DEFAULT_PUBLIC_ORIGIN.to_string()
 }
 
 impl StoredCredentials {
@@ -154,18 +256,25 @@ impl StoredCredentials {
     /// flow) plus the selected `update_channel` into the persisted shape. The
     /// resume token starts empty and is filled by the first connect.
     #[must_use]
-    pub fn from_proto(proto: EnrollmentCredentials, update_channel: impl Into<String>) -> Self {
+    pub fn from_proto(
+        proto: EnrollmentCredentials,
+        update_channel: impl Into<String>,
+        api_base_url: impl Into<String>,
+    ) -> Self {
         Self {
+            api_base_url: api_base_url.into(),
             agent_id: proto.agent_id,
             workspace_id: proto.workspace_id,
             // The proto `nats_credentials` field now carries the connect bearer.
             nats_bearer: proto.nats_credentials,
+            bearer_expires_at_unix_seconds: proto.bearer_expires_at_unix_seconds,
             nats_urls: proto.nats_urls,
             relay_url: proto.relay_url,
             // The proto EnrollmentCredentials now carries the relay producer token
             // (M8b reconciled the relay-dial seam): thread it straight through so a
             // freshly-enrolled agent presents it on its first channel registration.
             relay_token: proto.relay_token,
+            relay_token_expires_at_unix_seconds: proto.relay_token_expires_at_unix_seconds,
             update_pubkey: proto.update_pubkey,
             consented_whole_machine: proto.consented_whole_machine,
             consented_screen_control: proto.consented_screen_control,
@@ -173,6 +282,49 @@ impl StoredCredentials {
             resume_token: String::new(),
             last_known_epoch: 0,
         }
+    }
+
+    /// Builds the candidate persisted after a successful self-refresh. Exact
+    /// machine identity and the loud whole-machine consent grant are immutable;
+    /// agent-local channel/resume state is preserved while server-issued connect
+    /// material and consent details rotate.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CredentialRotationError::IdentityMismatch`] before any write if
+    /// the response is scoped to another machine/workspace or drops the mandatory
+    /// whole-machine consent assertion.
+    pub fn refreshed_candidate(
+        &self,
+        refreshed: EnrollmentCredentials,
+    ) -> Result<Self, CredentialRotationError> {
+        if refreshed.agent_id != self.agent_id
+            || refreshed.workspace_id != self.workspace_id
+            || !refreshed.consented_whole_machine
+        {
+            return Err(CredentialRotationError::IdentityMismatch);
+        }
+        let relay_is_disabled =
+            refreshed.relay_token.is_empty() && refreshed.relay_token_expires_at_unix_seconds == 0;
+        let relay_is_complete = !refreshed.relay_token.is_empty()
+            && !refreshed.relay_url.is_empty()
+            && refreshed.relay_token_expires_at_unix_seconds > 0;
+        if refreshed.nats_credentials.is_empty()
+            || refreshed.bearer_expires_at_unix_seconds == 0
+            || refreshed.nats_urls.is_empty()
+            || refreshed.nats_urls.iter().any(String::is_empty)
+            || (!relay_is_disabled && !relay_is_complete)
+        {
+            return Err(CredentialRotationError::IncompleteMaterial);
+        }
+        let mut candidate = Self::from_proto(
+            refreshed,
+            self.update_channel.clone(),
+            self.api_base_url.clone(),
+        );
+        candidate.resume_token.clone_from(&self.resume_token);
+        candidate.last_known_epoch = self.last_known_epoch;
+        Ok(candidate)
     }
 
     /// The NATS RPC subject this agent subscribes to: `agent.<ws>.<id>.rpc`
@@ -247,12 +399,44 @@ pub fn save_credentials(creds: &StoredCredentials) -> Result<PathBuf, ConfigErro
     let path = dir.join(CREDENTIALS_FILE);
     let body = serde_json::to_vec_pretty(creds).expect("StoredCredentials serializes");
 
-    // Write then tighten the mode to 0600. We write first (creating the file),
-    // then set permissions, so the secret never momentarily exists world-readable
-    // on platforms where create honors the umask loosely.
-    std::fs::write(&path, &body).map_err(|e| ConfigError::io(&path, e))?;
-    restrict_permissions(&path)?;
+    // Stage in the SAME directory, owner-only, sync the bytes, then atomically
+    // replace the destination. `tempfile::persist` uses the platform's replace
+    // primitive, so a failed refresh leaves the prior credentials file intact.
+    // Persist before publishing to SharedCredentials: disk is always authoritative
+    // across a crash/restart.
+    let mut staged = tempfile::Builder::new()
+        .prefix(".credentials-")
+        .suffix(".tmp")
+        .tempfile_in(&dir)
+        .map_err(|e| ConfigError::io(&dir, e))?;
+    restrict_permissions(staged.path())?;
+    staged
+        .write_all(&body)
+        .map_err(|e| ConfigError::io(staged.path(), e))?;
+    staged
+        .as_file()
+        .sync_all()
+        .map_err(|e| ConfigError::io(staged.path(), e))?;
+    staged
+        .persist(&path)
+        .map_err(|e| ConfigError::io(&path, e.error))?;
+    sync_parent_directory(&dir)?;
     Ok(path)
+}
+
+/// Syncs the parent directory after the atomic rename on Unix so the replacement
+/// itself is durable. Directory fsync is not portable to Windows; there the file
+/// sync + atomic replacement are the strongest standard contract available.
+#[cfg(unix)]
+fn sync_parent_directory(dir: &Path) -> Result<(), ConfigError> {
+    std::fs::File::open(dir)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|e| ConfigError::io(dir, e))
+}
+
+#[cfg(not(unix))]
+fn sync_parent_directory(_dir: &Path) -> Result<(), ConfigError> {
+    Ok(())
 }
 
 /// Tightens a file to owner-only read/write (`0600`) on unix; a no-op elsewhere
@@ -295,12 +479,15 @@ mod tests {
 
     fn sample() -> StoredCredentials {
         StoredCredentials {
+            api_base_url: DEFAULT_PUBLIC_ORIGIN.to_string(),
             agent_id: "agent-123".to_string(),
             workspace_id: "ws-abc".to_string(),
             nats_bearer: "oge_example.bearer".to_string(),
+            bearer_expires_at_unix_seconds: 4_102_444_800,
             nats_urls: vec!["wss://nats.example:443".to_string()],
             relay_url: "https://relay.example".to_string(),
             relay_token: "agent-relay-token".to_string(),
+            relay_token_expires_at_unix_seconds: 4_102_444_500,
             update_pubkey: "RWQ...".to_string(),
             consented_whole_machine: true,
             consented_screen_control: false,
@@ -364,6 +551,8 @@ mod tests {
         }"#;
         let creds: StoredCredentials = serde_json::from_str(legacy).expect("parse legacy");
         assert_eq!(creds.nats_bearer, "oge_legacy.bearer");
+        assert_eq!(creds.bearer_expires_at_unix_seconds, 0);
+        assert_eq!(creds.relay_token_expires_at_unix_seconds, 0);
     }
 
     #[test]
@@ -386,18 +575,123 @@ mod tests {
             agent_id: "a".to_string(),
             workspace_id: "w".to_string(),
             nats_credentials: "creds".to_string(),
+            bearer_expires_at_unix_seconds: 4_102_444_800,
             nats_urls: vec!["tls://x:4222".to_string()],
             relay_url: "https://r".to_string(),
             relay_token: "ogr_producer".to_string(),
+            relay_token_expires_at_unix_seconds: 4_102_444_500,
             update_pubkey: "k".to_string(),
             consented_whole_machine: true,
             consented_screen_control: true,
         };
-        let stored = StoredCredentials::from_proto(proto, "beta");
+        let stored = StoredCredentials::from_proto(proto, "beta", "https://private.example");
         assert_eq!(stored.update_channel, "beta");
+        assert_eq!(stored.api_base_url, "https://private.example");
         assert!(stored.resume_token.is_empty());
         assert!(stored.consented_screen_control);
         // The proto relay producer token now threads straight through (M8b).
         assert_eq!(stored.relay_token, "ogr_producer");
+        assert_eq!(stored.bearer_expires_at_unix_seconds, 4_102_444_800);
+        assert_eq!(stored.relay_token_expires_at_unix_seconds, 4_102_444_500);
+    }
+
+    #[test]
+    fn refreshed_candidate_preserves_local_state_and_rejects_identity_changes() {
+        let mut current = sample();
+        current.resume_token = "resume-7".to_string();
+        current.last_known_epoch = 7;
+        let refreshed = EnrollmentCredentials {
+            agent_id: current.agent_id.clone(),
+            workspace_id: current.workspace_id.clone(),
+            nats_credentials: "oge_rotated".to_string(),
+            bearer_expires_at_unix_seconds: 4_202_444_800,
+            nats_urls: vec!["wss://nats-new.example:443".to_string()],
+            relay_url: "https://relay-new.example".to_string(),
+            relay_token: "ogr_rotated".to_string(),
+            relay_token_expires_at_unix_seconds: 4_202_444_500,
+            update_pubkey: "RWNEW".to_string(),
+            consented_whole_machine: true,
+            consented_screen_control: true,
+        };
+        let candidate = current
+            .refreshed_candidate(refreshed.clone())
+            .expect("same identity");
+        assert_eq!(candidate.nats_bearer, "oge_rotated");
+        assert_eq!(candidate.relay_token, "ogr_rotated");
+        assert_eq!(candidate.resume_token, "resume-7");
+        assert_eq!(candidate.last_known_epoch, 7);
+        assert_eq!(candidate.update_channel, current.update_channel);
+        assert_eq!(candidate.api_base_url, current.api_base_url);
+
+        let mut wrong_agent = refreshed;
+        wrong_agent.agent_id = "some-other-agent".to_string();
+        assert_eq!(
+            current.refreshed_candidate(wrong_agent),
+            Err(CredentialRotationError::IdentityMismatch)
+        );
+    }
+
+    #[test]
+    fn refreshed_candidate_rejects_incomplete_connect_material() {
+        let current = sample();
+        let valid = EnrollmentCredentials {
+            agent_id: current.agent_id.clone(),
+            workspace_id: current.workspace_id.clone(),
+            nats_credentials: "oge_rotated".to_string(),
+            bearer_expires_at_unix_seconds: 4_202_444_800,
+            nats_urls: vec!["wss://nats-new.example:443".to_string()],
+            relay_url: "https://relay-new.example/stream".to_string(),
+            relay_token: "ogr_rotated".to_string(),
+            relay_token_expires_at_unix_seconds: 4_202_444_500,
+            update_pubkey: String::new(),
+            consented_whole_machine: true,
+            consented_screen_control: false,
+        };
+
+        let mut cases = Vec::new();
+        let mut empty_bearer = valid.clone();
+        empty_bearer.nats_credentials.clear();
+        cases.push(empty_bearer);
+        let mut no_bearer_expiry = valid.clone();
+        no_bearer_expiry.bearer_expires_at_unix_seconds = 0;
+        cases.push(no_bearer_expiry);
+        let mut no_nats_urls = valid.clone();
+        no_nats_urls.nats_urls.clear();
+        cases.push(no_nats_urls);
+        let mut relay_without_expiry = valid.clone();
+        relay_without_expiry.relay_token_expires_at_unix_seconds = 0;
+        cases.push(relay_without_expiry);
+        let mut relay_expiry_without_token = valid;
+        relay_expiry_without_token.relay_token.clear();
+        cases.push(relay_expiry_without_token);
+
+        for malformed in cases {
+            assert_eq!(
+                current.refreshed_candidate(malformed),
+                Err(CredentialRotationError::IncompleteMaterial)
+            );
+        }
+    }
+
+    #[test]
+    fn shared_credentials_publish_only_changes_future_snapshots() {
+        let initial = sample();
+        let shared = SharedCredentials::new(initial.clone());
+        let before = shared.snapshot();
+        let mut rotated = initial;
+        rotated.nats_bearer = "oge_rotated".to_string();
+        shared.publish_persisted(rotated);
+        assert_eq!(before.nats_bearer, "oge_example.bearer");
+        assert_eq!(shared.snapshot().nats_bearer, "oge_rotated");
+    }
+
+    #[test]
+    fn credential_debug_output_is_redacted() {
+        let credentials = sample();
+        let debug = format!("{credentials:?}");
+        assert!(!debug.contains(&credentials.nats_bearer));
+        assert!(!debug.contains(&credentials.relay_token));
+        assert!(!debug.contains(&credentials.api_base_url));
+        assert!(!debug.contains("wss://nats.example"));
     }
 }

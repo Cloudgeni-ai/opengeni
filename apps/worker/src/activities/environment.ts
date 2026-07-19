@@ -19,6 +19,7 @@ import {
   type VariableSetForRun as WorkspaceEnvironmentForRun,
 } from "@opengeni/db";
 import { createGitHubAppInstallationTokenWithExpiry, githubAppBotIdentity } from "@opengeni/github";
+import { assertExplicitCredentialRepositoryRef } from "./git-credential-identity";
 
 // Re-exported from the shared @opengeni/db leaf (moved there so the API-direct
 // attach paths can load the SAME decrypted workspace environment the turn
@@ -174,17 +175,21 @@ export async function sandboxEnvironmentForRun(
       options.scope.workspaceId,
     );
   }
-  const selections = gitCredentialSelections(resources);
   // NO-TOKEN SKIP (Stage D, change B): when the turn's EFFECTIVE compute backend is
   // a connected machine (selfhosted), platform git provider tokens are INERT: exec
   // routes over NATS to the user's machine, which uses ITS OWN git credentials, and
-  // the box those tokens would auth is never created. So skip the token mint entirely
-  // and return the STABLE base env (no gitToken/gitTokens). Env-
+  // the box those tokens would auth is never created. Skip all platform repository
+  // discovery, validation, and token minting and return the STABLE base env (no
+  // gitToken/gitTokens). Env-
   // parity holds: the SAME base object still feeds buildManifest + the SelfhostedSession
   // manifest, so the SDK's per-turn provided-session env delta stays empty
   // (validateNoEnvironmentDelta). The API-direct viewer attach path already drops the
   // token under this exact contract — proof a box runs fine without it.
-  if (selections.length === 0 || options.skipGitHubToken) {
+  if (options.skipGitHubToken) {
+    return { environment, ...(toolspaceToken ? { toolspaceToken } : {}) };
+  }
+  const selections = gitCredentialSelections(resources);
+  if (selections.length === 0) {
     return { environment, ...(toolspaceToken ? { toolspaceToken } : {}) };
   }
   if (options.deferGitHubToken) {
@@ -231,6 +236,22 @@ export async function mintRunGitCredentials(
   if (selections.length === 0) {
     return undefined;
   }
+  const minted = await mintRunGitTokensWithIdentity(settings, selections, options);
+  return Object.keys(minted.gitTokens).length > 0
+    ? { gitTokens: minted.gitTokens, expiresAt: minted.expiresAt }
+    : undefined;
+}
+
+export async function mintRunGitCredentialsFromRepositoryRefs(
+  settings: Settings,
+  repositoryRefs: readonly GitCredentialRepositoryRef[],
+  options: {
+    scope?: ConnectionScope;
+    gitCredentials?: ConnectionCredentialsPort["gitCredentials"];
+  } = {},
+): Promise<MintedRunGitCredentials | undefined> {
+  const selections = gitCredentialSelectionsFromRepositoryRefs(repositoryRefs);
+  if (selections.length === 0) return undefined;
   const minted = await mintRunGitTokensWithIdentity(settings, selections, options);
   return Object.keys(minted.gitTokens).length > 0
     ? { gitTokens: minted.gitTokens, expiresAt: minted.expiresAt }
@@ -400,28 +421,38 @@ function gitCredentialsRequestForSelection(
 }
 
 function gitCredentialSelections(resources: ResourceRef[]): GitCredentialSelection[] {
-  const byProvider = new Map<GitCredentialProvider, GitCredentialSelection>();
-  for (const resource of resources) {
-    if (resource.kind !== "repository") {
-      continue;
-    }
+  return gitCredentialSelectionsFromRepositoryRefs(gitCredentialRepositoryRefs(resources));
+}
+
+/** Convert explicit resource attachments to the token-free durable ref shape. */
+export function gitCredentialRepositoryRefs(
+  resources: readonly ResourceRef[],
+): GitCredentialRepositoryRef[] {
+  const refs = resources.flatMap((resource) => {
+    if (resource.kind !== "repository") return [];
     const provider = repositoryCredentialProvider(resource);
-    if (!provider) {
-      continue;
-    }
+    return provider ? [gitCredentialRepositoryRefForResource(resource, provider)] : [];
+  });
+  return refs.map(assertExplicitCredentialRepositoryRef);
+}
+
+function gitCredentialSelectionsFromRepositoryRefs(
+  repositoryRefs: readonly GitCredentialRepositoryRef[],
+): GitCredentialSelection[] {
+  const byProvider = new Map<GitCredentialProvider, GitCredentialSelection>();
+  for (const ref of repositoryRefs) {
+    const provider = ref.provider;
+    if (!provider) continue;
     const entry = byProvider.get(provider) ?? {
       provider,
       installationId: 0,
       repositoryIds: [],
       repositoryRefs: [],
     };
-    const ref = gitCredentialRepositoryRef(resource, provider);
     entry.repositoryRefs.push(ref);
     if (provider === "github") {
-      const installationId = positiveInteger(
-        resource.githubInstallationId ?? resource.installationId,
-      );
-      const repositoryId = positiveInteger(resource.githubRepositoryId ?? resource.repositoryId);
+      const installationId = positiveInteger(ref.installationId);
+      const repositoryId = positiveInteger(ref.repositoryId);
       if (installationId && repositoryId) {
         if (entry.installationId > 0 && entry.installationId !== installationId) {
           throw new Error("GitHub App repository resources must belong to one installation");
@@ -450,7 +481,7 @@ function repositoryCredentialProvider(
   return null;
 }
 
-function gitCredentialRepositoryRef(
+function gitCredentialRepositoryRefForResource(
   resource: Extract<ResourceRef, { kind: "repository" }>,
   provider: GitCredentialProvider,
 ): GitCredentialRepositoryRef {

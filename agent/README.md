@@ -16,13 +16,53 @@ under a **per-session working directory** (the control plane's `sessions.working
 threaded to the agent as `workingDir`); the agent's reported `workspace_root` is the
 default base, and the control plane never `git clone`s a repo onto the machine.
 
+## Canonical command inventory
+
+The only installed executable is **`opengeni-agent`**. It is not a subcommand of
+another OpenGeni CLI: there is no standalone `opengeni` executable, and neither
+`opengeni agent` nor `opengeni agents` is a supported command. Do not add a
+wrapper, spaced form, plural alias, or documentation shortcut for them.
+
+The complete command surface is:
+
+```text
+opengeni-agent [--api-url <origin>] run [run options]
+opengeni-agent [--api-url <origin>] enroll [enroll options]
+opengeni-agent status [--timeout-seconds <1-60>]
+opengeni-agent service install|uninstall|start|stop|status|logs
+opengeni-agent update|upgrade [--check] [--base-url <origin>] [--channel <channel>]
+opengeni-agent uninstall [--purge [--local-only]]
+```
+
+Top-level `status` reads the local enrollment and performs a bounded,
+authenticated control-plane round trip with its stored bearer. It exits non-zero
+when the machine is not enrolled, its credentials are unreadable/rejected, or the
+control plane is unreachable. This is deliberately different from `service
+status`, which reports only whether the opt-in systemd/launchd service is active.
+
+The service verbs are real on Linux (systemd) and macOS (a per-user LaunchAgent).
+Linux uninstall probes the user and system unit paths independently; macOS owns
+the exact plist and uses `launchctl bootout gui/<uid> <plist>` / `bootstrap
+gui/<uid> <plist>`. On Windows every service verb, including `install --print`,
+returns one explicit unsupported error without invoking `sc.exe`; the supported
+Windows lifecycle is foreground `opengeni-agent run`. Cleanup is fail-closed: an
+ambiguous native-service result preserves the binary and credentials and blocks
+remote revoke. A direct successful `uninstall` can purge enrollment state but
+retains its running executable; `install/uninstall.sh` removes the file after that
+process exits.
+
+`upgrade` is the one visible compatibility alias: it executes the exact same
+signed-manifest path as `update`. Existing persisted-state compatibility (for
+example the legacy `nats_credentials` JSON field) is unrelated to the executable
+command surface and remains unchanged.
+
 ## Crates
 
 | Crate | Role |
 |---|---|
 | `opengeni-agent-proto` | Generated wire-protocol types (Rust side of the codegen). |
-| `opengeni-agent` | The binary: `run`/`enroll`/`service`/`update`/`uninstall`; dial, RPC dispatch, supervisor. |
-| `opengeni-agent-platform` | Per-OS `Platform` + the `service` (systemd/launchd/SCM) renderer. |
+| `opengeni-agent` | The binary: `run`/`enroll`/`status`/`service`/`update` (`upgrade`)/`uninstall`; dial, RPC dispatch, supervisor. |
+| `opengeni-agent-platform` | Per-OS `Platform` + systemd/launchd service definitions; explicit Windows SCM unsupported contract. |
 | `opengeni-agent-stream` | Relay-edge stream transport + pty/framebuffer pumps. |
 | `opengeni-agent-update` | Self-update: signed-manifest discovery, minisign+sha256 verify, atomic replace, rollback. |
 | `opengeni-relay` | The stateless stream-relay edge image. |
@@ -38,22 +78,77 @@ The agent reaches a user's machine via one trusted line and keeps itself current
   the script body** + a sha256 — then installs to a per-user path and prints the
   enroll+run command. It installs **no service by default** (foreground `run` is
   the default run model, dossier §23.0) and contains **no secrets**. Read it before
-  piping. `OPENGENI_INSTALL_BASE_URL` overrides the asset base (e.g. a local mock
-  dir or the direct GitHub-Releases URL). [`install/uninstall.sh`](install/uninstall.sh)
-  removes it (`--purge` also deletes credentials + deactivates the enrollment).
+  piping. `OPENGENI_INSTALL_BASE_URL` overrides the asset base with an origin that
+  implements `/agent/latest/*` and `/agent/v<ver>/*` (for example a local mock).
+  The installer itself exists only at `<base>/install.sh`; direct GitHub Release
+  assets are an archive, not a route-compatible installer base.
+  [`install/uninstall.sh`](install/uninstall.sh) removes the executable/bundle
+  (`--purge` also deletes credentials + deactivates the enrollment).
 - **Signing key** — the minisign **public** key is committed at
   [`install/opengeni-agent-minisign.pub`](install/opengeni-agent-minisign.pub) and
   embedded in both install scripts + `opengeni-agent-update` (one key, one verify
   routine for install AND self-update). The **private** key is the GitHub Actions
   secret `OPENGENI_AGENT_MINISIGN_KEY` — never in the repo.
-- **Self-update** — `opengeni-agent update [--check]` fetches a signed channel
-  manifest, verifies minisign + sha256 + version-monotonicity, atomically self-
-  replaces (incl. the Windows rename-self-aside), and rolls back to the prior
-  binary on a failed boot health-gate. A tampered artifact is always rejected.
-- **Service (opt-in)** — `opengeni-agent service install|uninstall|start|stop|status`
-  installs an always-on service (systemd user/system unit, macOS LaunchAgent,
-  Windows Service). `--print` dry-runs the generated unit/plist. The default
-  remains foreground `run`.
+- **Self-update** — `opengeni-agent update [--check]` (or the visible `upgrade`
+  alias) fetches the signed stable
+  manifest at `<base>/agent/stable/manifest.json` and fully downloads/verifies the
+  candidate with minisign + sha256 + version monotonicity. On Linux/Windows, apply
+  atomically self-replaces (including Windows rename-self-aside) and retains the
+  previous binary as a **manual** rollback copy; the foreground user or supervisor
+  must restart it. On macOS, check-only works but apply fails **before any write**:
+  mutating only `.app/Contents/MacOS/opengeni-agent` would invalidate the signed
+  bundle/TCC identity, so the error directs the user to reinstall the complete
+  verified bundle with `curl -fsSL '<base>/install.sh' |
+  OPENGENI_INSTALL_REPLACE_APP=1 sh`. This command does not claim an automatic
+  post-restart health gate or rollback. A tampered artifact is always rejected.
+  `beta` requires an explicit custom publication origin.
+- **Service (opt-in)** — `opengeni-agent service install|uninstall|start|stop|status|logs`
+  installs an always-on service on Linux (systemd user/system unit) or macOS
+  (per-user LaunchAgent). `logs` is bounded by default and `--follow` is explicit;
+  `--print` dry-runs the generated unit/plist. Windows service hosting is not
+  implemented and every service action fails without mutation. The default remains
+  foreground `run` on every OS.
+
+## Credential rotation and revocation
+
+Enrollment returns a 30-day `oge_` recovery bearer, while the NATS user JWT and
+relay `ogr_` producer token each last at most five minutes. The running agent calls
+the bearer-only `POST /v1/enrollments/self/refresh` one minute before the earliest
+absolute expiry. It rejects any changed identity or consent, atomically replaces
+the credentials file in the same directory, and only then publishes the new
+in-memory snapshot. NATS and relay connections keep immutable snapshots; relay
+sockets are disconnected at the token's exact expiry and reconnect with current
+credentials.
+
+Self-refresh and self-revoke require the exact active enrollment generation and
+serialize on the same database row lock, so no refresh can mint past a committed
+revoke. Revocation clears only session pointers still targeting that enrollment
+and increments their active epochs. The revoked row remains administrator-visible
+history, but is omitted from fleet targets; a revoked or missing machine-home
+enrollment reports `offline_enrollment` instead of creating cloud compute.
+
+`uninstall --purge` first proves every native service scope is gone, then requires
+a confirmed remote revoke before deleting local credentials. If Linux user/system
+cleanup, macOS plist bootout, or remote revoke is ambiguous, both the binary and
+credentials remain for retry. `--local-only` is the explicit loud escape hatch and
+may leave the dashboard enrollment active.
+
+### macOS compatibility versus live acceptance
+
+The source contains a ScreenCaptureKit/CGEvent backend behind the experimental
+`macos-desktop` Cargo feature. Stable release artifacts intentionally build with
+default features, so that backend is disabled and stable macOS agents report
+`display_unavailable`. Native compilation and unit tests are **compatibility
+evidence only**, not proof that a Mac is ready for desktop use. Service persistence
+is deliberately a per-user `LaunchAgent` in the logged-in `gui/<uid>` Aqua domain
+— never a LaunchDaemon or system scope.
+
+Enabling the feature in stable requires all of: a signed and notarized stable app
+bundle, full-bundle update/reinstall verification (never an in-place Mach-O swap),
+a live Mac with a logged-in Aqua user, human Screen Recording and Accessibility
+grants, and human whole-machine enrollment consent. A live consenting Mac must
+accept capture, input, relaunch, and full-bundle replacement while preserving the
+expected identity/grants; CI/cross-compilation cannot grant or prove them.
 - **Pipelines** — `.github/workflows/agent-ci.yml` (fmt/clippy/test/build +
   install-smoke across ubuntu/macOS/Windows per PR) and `.github/workflows/agent-release.yml`
   (matrix build → minisign-sign + sha256 → GitHub Release; macOS notarize + Windows

@@ -30,6 +30,7 @@ import {
   createSandbox,
   createSession,
   readActiveSandbox,
+  revokeEnrollment,
   type Database,
   type DbClient,
 } from "@opengeni/db";
@@ -253,6 +254,21 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
     expect(result.sandboxes.filter((s) => s.active).length).toBe(1);
   }, 60_000);
 
+  test("revoked enrollments remain history but disappear from the agent-facing fleet", async () => {
+    if (!available) return;
+    const { ctx, services, enrollment, sandbox, accountId, workspaceId } = await seedFleet();
+    expect(
+      (await listFleet(services, ctx)).sandboxes.some((entry) => entry.id === sandbox.id),
+    ).toBe(true);
+
+    expect(
+      (await revokeEnrollment(db, { accountId, workspaceId, enrollmentId: enrollment.id })).revoked,
+    ).toBe(true);
+    const after = await listFleet(services, ctx);
+    expect(after.sandboxes.some((entry) => entry.id === sandbox.id)).toBe(false);
+    expect(after.sandboxes.some((entry) => entry.isSessionGroup)).toBe(true);
+  }, 60_000);
+
   test("attach/swap: the epoch-fenced CAS flips active_sandbox_id + bumps active_epoch", async () => {
     if (!available) return;
     const { ctx, services, sandbox } = await seedFleet();
@@ -364,8 +380,15 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
     const self = await provisionSandbox(services, ctx, { kind: "selfhosted" });
     expect(self.kind).toBe("selfhosted");
     if (self.kind === "selfhosted") {
-      expect(self.installCommandUnix).toContain("install.sh");
-      expect(self.verificationUri).toContain("/device");
+      expect(self.installCommandUnix).toBe(
+        `curl -fsSL 'https://app.example/install.sh' | OPENGENI_API_URL='https://app.example' OPENGENI_WORKSPACE_ID='${ctx.workspaceId}' sh`,
+      );
+      expect(self.installCommandWindows).toBe(
+        `$env:OPENGENI_API_URL = 'https://app.example'; $env:OPENGENI_WORKSPACE_ID = '${ctx.workspaceId}'; irm 'https://app.example/install.ps1' | iex`,
+      );
+      expect(self.verificationUri).toBe("https://app.example/device");
+      expect(self.instructions).toContain("human operator");
+      expect(self.note).toContain("cannot self-consent");
     }
 
     const modal = await provisionSandbox(services, ctx, { kind: "modal", name: "extra-box" });
@@ -419,4 +442,18 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
     expect(r.swapped).toBe(false);
     expect(r.code).toBe("offline_enrollment");
   }, 60_000);
+
+  test("selfhosted provisioning uses the hosted app origin fallback", async () => {
+    if (!available) return;
+    const { ctx, services } = await seedFleet();
+    services.settings = { ...services.settings, publicBaseUrl: undefined };
+    const self = await provisionSandbox(services, ctx, { kind: "selfhosted" });
+    expect(self.kind).toBe("selfhosted");
+    if (self.kind === "selfhosted") {
+      expect(self.installCommandUnix).toStartWith(
+        "curl -fsSL 'https://app.opengeni.ai/install.sh'",
+      );
+      expect(self.verificationUri).toBe("https://app.opengeni.ai/device");
+    }
+  });
 });

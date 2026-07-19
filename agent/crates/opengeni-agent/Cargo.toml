@@ -16,13 +16,12 @@ name = "opengeni-agent"
 path = "src/main.rs"
 
 [features]
-# Ship the real macOS display backend + its TCC consent flow. OFF by default; the
-# agent-release workflow enables it ONLY on the macOS build leg
-# (.github/workflows/agent-release.yml). Forwards to the platform crate's feature
-# of the same name so `-p opengeni-agent --features macos-desktop` lights up the
-# ScreenCaptureKit/CGEvent backend and the startup grant request. The feature-on
-# path compiles only on macOS (the objc2 Apple FFI has no Linux/Windows target),
-# so it is gated by the macos-26 CI leg; the default/non-macOS build is unchanged.
+# Experimental macOS display backend + TCC consent flow. OFF by default, including
+# stable releases, until a signed bundle on a live consenting Mac passes the TCC,
+# capture/input, relaunch, and full-bundle replacement gates. Forwards to the
+# platform crate's feature of the same name so CI can compile/test the
+# ScreenCaptureKit/CGEvent source with `--all-features`; that is compatibility
+# evidence only, never live-OS acceptance.
 macos-desktop = ["opengeni-agent-platform/macos-desktop"]
 
 [dependencies]
@@ -57,6 +56,7 @@ reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 base64 = { workspace = true }
+tempfile = { workspace = true }
 
 # Per-channel output digests in the op-stream Exit frame (byte-exact assembly
 # proof, PROTOCOL.md §Wire messages). Already a workspace dep (update cohorting).
@@ -71,4 +71,3 @@ nix = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "rt-multi-thread", "macros"] }
-tempfile = { workspace = true }

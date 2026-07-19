@@ -32,8 +32,10 @@ import {
   recordCompletedModelCallBeforeOwnershipFences,
   modelUsageSourceKey,
   pointerReconcileReason,
+  platformManagesGitCredentialsForTurn,
   PROVIDER_BACKPRESSURE_DELAY_MS,
   providerRecoveryResult,
+  requireActiveMachineHome,
   resolveActiveSandboxBackend,
   shouldRecoverCompactionProviderFailure,
   shouldStartOnTurnRecording,
@@ -728,6 +730,18 @@ describe("model call usage observability", () => {
   });
 });
 
+describe("platform Git credential management gate", () => {
+  test("Connected Machines take the structural zero path", () => {
+    expect(platformManagesGitCredentialsForTurn("selfhosted")).toBe(false);
+  });
+
+  test("managed cloud boxes retain platform credential management", () => {
+    for (const backend of ["modal", "docker", "daytona", "runloop", "e2b"] as const) {
+      expect(platformManagesGitCredentialsForTurn(backend)).toBe(true);
+    }
+  });
+});
+
 describe("active sandbox backend resolution (Case B: clone-onto-real-disk gate)", () => {
   const selfhostedPointer = async () => ({ activeSandboxId: "sbx_machine" });
   const selfhostedKind = async () => "selfhosted";
@@ -844,10 +858,32 @@ describe("turn-start pointer reconcile classification (issue #341 invariant B)",
     );
   });
 
+  test("a revoked or missing enrollment is reconciled as offline_enrollment", () => {
+    expect(
+      pointerReconcileReason({
+        kind: "selfhosted",
+        enrollmentId: "enroll-1",
+        enrollmentStatus: "revoked",
+      }),
+    ).toBe("offline_enrollment");
+    expect(
+      pointerReconcileReason({
+        kind: "selfhosted",
+        enrollmentId: "enroll-1",
+        enrollmentStatus: null,
+      }),
+    ).toBe("offline_enrollment");
+  });
+
   test("an enrolled machine is LEFT IN PLACE (null) even if momentarily offline — never reconciled", () => {
     // The user's explicit machine target is not abandoned for a transient control-
     // plane blip; the machine may recover mid-turn and surfaces agent_offline lazily.
     expect(pointerReconcileReason({ kind: "selfhosted", enrollmentId: "enroll-1" })).toBeNull();
+  });
+  test("a selfhosted home without an active machine fails instead of selecting cloud compute", () => {
+    expect(() => requireActiveMachineHome("selfhosted", false)).toThrow(/Connected Machine/);
+    expect(() => requireActiveMachineHome("selfhosted", true)).not.toThrow();
+    expect(() => requireActiveMachineHome("modal", false)).not.toThrow();
   });
 });
 

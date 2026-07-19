@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useState, type ReactNode, type RefObject } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -29,6 +29,7 @@ export function ConfirmDialog({
   confirmLabel,
   cancelLabel = "Cancel",
   destructive = true,
+  returnFocusRef,
   onConfirm,
 }: {
   open: boolean;
@@ -43,6 +44,8 @@ export function ConfirmDialog({
   confirmLabel: string;
   cancelLabel?: string;
   destructive?: boolean;
+  /** Restore focus here after the controlled dialog closes without a Radix trigger. */
+  returnFocusRef?: RefObject<HTMLElement | null>;
   /**
    * May be async; the dialog shows pending state while it runs. The dialog
    * closes on success — returning `false` (or throwing) keeps it open so a
@@ -69,7 +72,16 @@ export function ConfirmDialog({
 
   return (
     <Dialog open={open} onOpenChange={(next) => (pending ? undefined : onOpenChange(next))}>
-      <DialogContent showCloseButton={false} className="sm:max-w-md">
+      <DialogContent
+        showCloseButton={false}
+        className="sm:max-w-md"
+        onCloseAutoFocus={(event) => {
+          const target = returnFocusRef?.current;
+          if (!target) return;
+          event.preventDefault();
+          target.focus();
+        }}
+      >
         <DialogHeader>
           <DialogTitle className="text-base">{title}</DialogTitle>
           {description ? <DialogDescription>{description}</DialogDescription> : null}

@@ -34,7 +34,7 @@ Non-secret. Keeps the human device-approve step.
   - Interactive (workspaceId): `` curl -fsSL ${origin}/install.sh | OPENGENI_API_URL=${origin} OPENGENI_WORKSPACE_ID=${ws} sh ``
   - Headless (enrollToken, see A2): `` curl -fsSL ${origin}/install.sh | OPENGENI_API_URL=${origin} OPENGENI_ENROLL_TOKEN=${tok} sh ``
   - `origin` is `originOf(baseUrl)` exactly as today. Always include `OPENGENI_API_URL=${origin}`
-    so the agent targets *this* deployment, not the `api.opengeni.ai` default (latent bug).
+    so the agent targets *this* deployment rather than any unrelated hosted origin.
   - Keep `deviceVerificationUri` returning `${origin}/device` (page resolves workspace from the code, see B — no workspace in the URL needed).
 - `src/routes/machines.tsx`: drop `void workspaceId` (line 30); call
   `installOneLiner(origin, { workspaceId })` at line 35. The default rendered command is the
@@ -184,15 +184,17 @@ human approve). Stateless-signed — **no DB table, no migration**.
 
 ### A2.6 install.sh
 
-- Already invokes `enroll --token "$OPENGENI_ENROLL_TOKEN" --non-interactive` (line 315) and
-  documents `OPENGENI_ENROLL_TOKEN` (line 38). Only add `OPENGENI_API_URL` forwarding (A1).
+- Invokes `enroll --non-interactive`; Clap reads the inherited
+  `OPENGENI_ENROLL_TOKEN` environment variable. The secret grant is never copied
+  into child argv. `OPENGENI_API_URL` may still be forwarded explicitly (A1).
 
 ---
 
 ## Security notes (owner analysis)
 
-- The enroll token grants enrollment of **one machine identity (the agent's pubkey) into one
-  workspace** until expiry. Holding it ⇒ can enroll a rogue machine into that workspace.
+- The enroll token grants enrollment of **machine identities (agent public keys) into one
+  workspace** until expiry and is intentionally reusable for a bounded fleet rollout.
+  Holding it ⇒ can enroll a rogue machine into that workspace.
   This is the intended fleet semantic and is the same trust class as the existing `oge_`
   bearer (also a stateless bearer secret). Bounded by: short TTL (1h), workspace scope (not
   account-wide), post-hoc revocation (revoke endpoint, `enrollments.ts:174`), and copy-once

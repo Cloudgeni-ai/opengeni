@@ -15,7 +15,8 @@
 //      (an enrollments row AND a sandboxes row appear — acceptance #2). Idempotent
 //      via the M2 upsert.
 //   3. poll   (agent-side, with device_code): pending → {pending}; approved → the
-//      EnrollmentCredentials (agent_id + workspace + a SIGNED bearer the agent
+//      atomically consumes that exact request generation and returns the single
+//      EnrollmentCredentials mint (agent_id + workspace + a SIGNED bearer the agent
 //      presents to the control plane + the subject prefix agent.<ws>.<id> + a
 //      placeholder for the per-workspace NATS Account creds [infra-deferred]);
 //      denied/expired/disabled → the typed state.
@@ -39,6 +40,7 @@ import {
   signEnrollmentBearer,
   signEnrollToken,
   signRelayToken,
+  verifyEnrollmentBearer,
   verifyEnrollToken,
   type DeviceEnrollmentLookupResponse,
   type DeviceEnrollmentPollResponse,
@@ -49,14 +51,14 @@ import {
 } from "@opengeni/contracts";
 import {
   approveDeviceEnrollmentRequest,
-  consumeDeviceEnrollmentRequest,
+  consumeApprovedDeviceEnrollmentRequest,
   createDeviceEnrollmentRequest,
   denyDeviceEnrollmentRequest,
   finalizeEnrollmentByToken,
   getDeviceEnrollmentRequestByDeviceCode,
-  getEnrollment,
   getPendingDeviceEnrollmentRequestByUserCode,
   getPendingDeviceEnrollmentRequestByUserCodeGlobal,
+  withActiveEnrollmentGeneration,
   type Database,
   type DeviceEnrollmentRequestRecord,
   type EnrollmentOs,
@@ -70,22 +72,21 @@ export const DEVICE_CODE_TTL_SECONDS = 600; // 10 minutes
 export const DEVICE_POLL_INTERVAL_SECONDS = 5;
 // The bearer the agent presents to the NATS auth-callout. A bring-your-own-compute
 // machine is PERSISTENT (unlike an ephemeral Modal box, whose lifetime ~= an agent
-// token's hour), so this is long-lived — 30 days, matching the relay token below —
-// and re-minted on every poll/re-enroll. The old 1-hour value (sized for a Modal
-// box) caused a self-hosted agent to drop PERMANENTLY one hour after connecting: the
-// bearer expired and the auth-callout rejected every reconnect ("re-enroll may be
-// required"). A long-lived bearer is safe because the auth-callout RE-CHECKS the
-// enrollment status on every (re)connect (auth-callout.ts) — a revoked machine is
-// denied regardless of bearer life — exactly as the long-lived relay token relies on.
+// token's hour), so this is a 30-day recovery credential, independently of the
+// five-minute connection/channel credentials below. It is re-minted on poll,
+// re-enrollment, and authenticated self-refresh. The old 1-hour value (sized for
+// a Modal box) caused a self-hosted agent to drop PERMANENTLY one hour after
+// connecting: the bearer expired and the auth-callout rejected every reconnect
+// ("re-enroll may be required"). A long-lived bearer is safe because the
+// auth-callout RE-CHECKS the enrollment status AND credential generation on every
+// (re)connect
+// (auth-callout.ts) — a revoked machine or an old pre-re-enrollment bearer is denied
+// regardless of bearer life. The short NATS user-JWT cap bounds already-live access.
 export const ENROLLMENT_BEARER_TTL_SECONDS = 30 * 24 * 3600;
-// The relay PRODUCER token (the `ogr_` token; M8b/dossier §10.5) is ENROLLMENT-scoped,
-// NOT per-stream: the agent presents it on every channel registration for the life
-// of its run, and the producer side has no per-viewer epoch fence (that is the
-// VIEWER's `ogs_` token's job). So it is long-lived — 30 days — re-minted on every
-// poll/re-enroll. The relay re-verifies it (authenticity + the channel-key ws+agent
-// scope) on every StreamOpen; a revoked enrollment's machine goes offline at the
-// control plane regardless, so a long-lived relay token cannot reach a dead agent.
-export const RELAY_TOKEN_TTL_SECONDS = 30 * 24 * 3600;
+// Short-lived connection/channel credentials bound post-revoke residual access.
+// The agent keeps the independently long-lived, DB-rechecked bearer as its recovery
+// credential and refreshes this relay producer token before expiry.
+export const RELAY_TOKEN_TTL_SECONDS = 5 * 60;
 // The headless enroll token (`oget_`; design 11 §A2.1) TTL. 1h: long enough to
 // script a fleet rollout, short enough to bound exposure of a workspace-scoped
 // secret that IS the grant (no human approve). Re-mintable by an authorized user.
@@ -95,6 +96,10 @@ export type EnrollmentServices = {
   db: Database;
   settings: Settings;
 };
+
+export type RefreshEnrollmentCredentialsResult =
+  | { ok: true; credentials: EnrollmentCredentialsResponse }
+  | { ok: false; reason: "disabled" | "invalid" };
 
 /** A workspace-scoped flow START context (the route resolves the workspace the
  *  agent's flow binds to from the deployment edge / a workspace hint). */
@@ -107,7 +112,7 @@ export type DeviceStartInput = {
   machineName?: string | null;
   canOfferDisplay: boolean;
   requestsScreenControl: boolean;
-  // Where the user goes to approve (same origin as the request).
+  // Public web origin where the user goes to approve (may differ from the API).
   verificationOrigin: string;
 };
 
@@ -171,7 +176,7 @@ export async function startDeviceEnrollment(
     throw lastError instanceof Error ? lastError : new Error("failed to start device enrollment");
   }
 
-  const base = input.verificationOrigin.replace(/\/$/, "");
+  const base = input.verificationOrigin.replace(/\/+$/, "");
   const verificationUri = `${base}/device`;
   const verificationUriComplete = `${verificationUri}?user_code=${encodeURIComponent(request.userCode)}`;
   return {
@@ -370,6 +375,7 @@ export async function exchangeEnrollToken(
     secret,
     workspaceId: claims.workspaceId,
     agentId: enrollment.id,
+    credentialGeneration: enrollment.credentialGeneration,
     consentedScreenControl: enrollment.allowScreenControl,
   });
   return { ok: true, credentials };
@@ -380,11 +386,10 @@ export async function exchangeEnrollToken(
  *   - unknown code              → "expired" (do not leak existence; an unknown code
  *                                  behaves like an expired one to the agent).
  *   - pending + within TTL      → "pending".
- *   - pending + past TTL        → "expired".
+ *   - any status past TTL       → "expired".
  *   - denied                    → "denied".
- *   - approved | consumed       → "authorized" + the EnrollmentCredentials (the
- *                                  approved row is flipped to consumed; a legitimate
- *                                  re-poll of a consumed row still returns the creds).
+ *   - approved                  → atomically consume + return EnrollmentCredentials.
+ *   - consumed                  → "denied" (the single-use grant already minted).
  * When the credential plane is disabled (no resolvable signing secret), an
  * otherwise-authorized poll returns "disabled" so the agent surfaces a clear reason
  * rather than half-enrolling.
@@ -401,16 +406,20 @@ export async function pollDeviceEnrollment(
   if (request.status === "denied") {
     return { state: "denied" };
   }
+  if (new Date(request.expiresAt).getTime() <= Date.now()) {
+    return { state: "expired" };
+  }
   if (request.status === "pending") {
-    if (new Date(request.expiresAt).getTime() <= Date.now()) {
-      return { state: "expired" };
-    }
     return { state: "pending" };
   }
+  if (request.status === "consumed") {
+    return { state: "denied" };
+  }
 
-  // approved | consumed → AUTHORIZED. Build the credentials.
-  if (!request.enrollmentId) {
-    // Defensive: an approved row must carry the enrollment id.
+  // APPROVED → AUTHORIZED only once, for the exact credential family that approval
+  // finalized. Migration-era and already-consumed rows fail closed rather than
+  // inheriting or re-minting the enrollment's current generation.
+  if (!request.enrollmentId || !request.credentialGeneration) {
     return { state: "expired" };
   }
   const secret = resolveEnrollmentSigningSecret(settings);
@@ -420,30 +429,31 @@ export async function pollDeviceEnrollment(
     return { state: "disabled" };
   }
 
-  const enrollment = await getEnrollment(db, request.workspaceId, request.enrollmentId);
-  if (!enrollment || enrollment.status !== "active") {
-    // The machine was revoked between approve and poll — treat as denied.
-    return { state: "denied" };
-  }
-
-  const credentials = await buildEnrollmentCredentials(services, {
-    secret,
-    workspaceId: request.workspaceId,
-    agentId: enrollment.id,
-    consentedScreenControl: enrollment.allowScreenControl,
-  });
-
-  // Single-use: flip approved → consumed (idempotent; a re-poll of an already-
-  // consumed row still returns the creds above — the agent may legitimately retry).
-  if (request.status === "approved") {
-    await consumeDeviceEnrollmentRequest(db, {
+  const minted = await consumeApprovedDeviceEnrollmentRequest(
+    db,
+    {
       accountId: request.accountId,
       workspaceId: request.workspaceId,
       requestId: request.id,
-    });
+    },
+    async (enrollment) => {
+      return await buildEnrollmentCredentials(services, {
+        secret,
+        workspaceId: enrollment.workspaceId,
+        agentId: enrollment.id,
+        credentialGeneration: enrollment.credentialGeneration,
+        consentedScreenControl: enrollment.allowScreenControl,
+      });
+    },
+  );
+  if (minted.status === "expired") {
+    return { state: "expired" };
   }
-
-  return { state: DeviceEnrollmentState.enum.authorized, credentials };
+  if (minted.status !== "minted") {
+    // Consumed, revoked, re-enrolled, stale-generation, or identity-mismatched.
+    return { state: "denied" };
+  }
+  return { state: DeviceEnrollmentState.enum.authorized, credentials: minted.value };
 }
 
 /** Build the EnrollmentCredentials the poll returns: the signed `oge_` bearer +
@@ -455,7 +465,13 @@ export async function pollDeviceEnrollment(
  *  bearer so an agent using it as the connect-token credential works uniformly. */
 async function buildEnrollmentCredentials(
   services: EnrollmentServices,
-  input: { secret: string; workspaceId: string; agentId: string; consentedScreenControl: boolean },
+  input: {
+    secret: string;
+    workspaceId: string;
+    agentId: string;
+    credentialGeneration: number;
+    consentedScreenControl: boolean;
+  },
 ): Promise<EnrollmentCredentialsResponse> {
   const { settings } = services;
   // The control-plane subject prefix the agent subscribes to: agent.<ws>.<id>.
@@ -466,6 +482,7 @@ async function buildEnrollmentCredentials(
     workspaceId: input.workspaceId,
     agentId: input.agentId,
     enrollmentId: input.agentId,
+    credentialGeneration: input.credentialGeneration,
     subjectPrefix,
     exp,
   });
@@ -476,17 +493,19 @@ async function buildEnrollmentCredentials(
   // is unavailable until the secret is provisioned via ops-repo IaC). The token binds
   // (workspaceId, agentId) so the agent can only register ITS OWN channels.
   const relayTokenSecret = resolveRelayTokenSecret(settings);
+  const relayExp = relayTokenSecret ? nowSeconds + RELAY_TOKEN_TTL_SECONDS : 0;
   const relayToken = relayTokenSecret
     ? await signRelayToken(relayTokenSecret, {
         workspaceId: input.workspaceId,
         agentId: input.agentId,
-        exp: nowSeconds + RELAY_TOKEN_TTL_SECONDS,
+        exp: relayExp,
       })
     : "";
   return {
     agentId: input.agentId,
     workspaceId: input.workspaceId,
     bearer,
+    bearerExpiresAtUnixSeconds: exp,
     subjectPrefix,
     natsUrls,
     // Hand the agent the canonical `/stream` dial base, NOT the raw configured URL.
@@ -495,6 +514,7 @@ async function buildEnrollmentCredentials(
     // makes the terminal/desktop streams unreachable (dossier §V5/§V6).
     relayUrl: relayDialBaseFromSettings(settings),
     relayToken,
+    relayTokenExpiresAtUnixSeconds: relayExp,
     // M-AUTH closes the placeholder: there is NO per-machine NATS Account creds
     // file. The agent presents the BEARER as the NATS connect auth-token; the
     // server's auth-callout responder validates it and mints a workspace-scoped
@@ -505,4 +525,49 @@ async function buildEnrollmentCredentials(
     consentedWholeMachine: true,
     consentedScreenControl: input.consentedScreenControl,
   };
+}
+
+/**
+ * Rotate one active enrollment's credentials using its existing long-lived
+ * `oge_` bearer as the complete authentication mechanism. Verification is exact:
+ * signature/expiry, workspace/agent/enrollment/subject identity, active DB row,
+ * and credential generation must all match before anything is minted. The token
+ * values are never returned in an error or log.
+ */
+export async function refreshEnrollmentCredentials(
+  services: EnrollmentServices,
+  input: { bearer: string },
+): Promise<RefreshEnrollmentCredentialsResult> {
+  const secret = resolveEnrollmentSigningSecret(services.settings);
+  if (!secret) {
+    return { ok: false, reason: "disabled" };
+  }
+  const claims = await verifyEnrollmentBearer(secret, input.bearer);
+  if (
+    !claims ||
+    claims.agentId !== claims.enrollmentId ||
+    claims.subjectPrefix !== `agent.${claims.workspaceId}.${claims.agentId}`
+  ) {
+    return { ok: false, reason: "invalid" };
+  }
+  const minted = await withActiveEnrollmentGeneration(
+    services.db,
+    {
+      workspaceId: claims.workspaceId,
+      enrollmentId: claims.enrollmentId,
+      credentialGeneration: claims.credentialGeneration,
+    },
+    async (enrollment) =>
+      await buildEnrollmentCredentials(services, {
+        secret,
+        workspaceId: enrollment.workspaceId,
+        agentId: enrollment.id,
+        credentialGeneration: enrollment.credentialGeneration,
+        consentedScreenControl: enrollment.allowScreenControl,
+      }),
+  );
+  if (!minted.matched) {
+    return { ok: false, reason: "invalid" };
+  }
+  return { ok: true, credentials: minted.value };
 }

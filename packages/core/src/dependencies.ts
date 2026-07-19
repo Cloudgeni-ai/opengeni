@@ -54,6 +54,7 @@ export type SessionWorkflowClient = {
     workspaceId: string;
     changeId?: string;
     versionId?: string;
+    attempt?: number;
     workflowId?: string;
   }) => Promise<void>;
   check?: () => Promise<void>;

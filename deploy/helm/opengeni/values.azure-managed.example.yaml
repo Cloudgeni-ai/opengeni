@@ -179,12 +179,11 @@ ingress:
         - path: /metrics
           pathType: Exact
           service: api
-        # get.<domain> install-script + device-enrollment routes served by the
+        # Installer and device-enrollment routes served by the
         # API (same origin / single trust root; dossier §23.1). These ride the
-        # SAME app host here; point the get.<domain> DNS record at this ingress —
-        # OR add a dedicated `get.opengeni.example.com` host block routing the
-        # same /install.sh|/install.ps1|/uninstall.sh|/opengeni-agent-minisign.pub|
-        # /device|/v/ paths to the api service.
+        # SAME app host here. An optional dedicated asset host must route the same
+        # install assets, /agent/*, and enrollment bootstrap routes to the API
+        # service (not the web SPA).
         - path: /install.sh
           pathType: Exact
           service: api
@@ -195,6 +194,21 @@ ingress:
           pathType: Exact
           service: api
         - path: /opengeni-agent-minisign.pub
+          pathType: Exact
+          service: api
+        - path: /agent
+          pathType: Prefix
+          service: api
+        - path: /v1/enrollments/device/start
+          pathType: Exact
+          service: api
+        - path: /v1/enrollments/device/poll
+          pathType: Exact
+          service: api
+        - path: /v1/enrollments/token/exchange
+          pathType: Exact
+          service: api
+        - path: /v1/enrollments/self/revoke
           pathType: Exact
           service: api
     # The bring-your-own-compute stream relay — wss long-lived sockets. The

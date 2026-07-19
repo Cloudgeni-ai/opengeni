@@ -182,4 +182,105 @@ describe("host-managed Git credential renewal", () => {
     await Promise.all([refresh, stopping]);
     expect(stopped).toBe(true);
   });
+
+  test("invalidates a known-expired provider at its exact deadline", async () => {
+    const scheduler = fakeScheduler();
+    let now = Date.parse("2026-07-19T04:00:00.000Z");
+    let resolveInvalidated!: (providers: readonly GitCredentialProvider[]) => void;
+    const invalidated = new Promise<readonly GitCredentialProvider[]>((resolve) => {
+      resolveInvalidated = resolve;
+    });
+    const controller = startGitCredentialRenewalLoop({
+      expectedProviders: ["github"],
+      initialExpiresAt: { github: "2026-07-19T04:00:10.000Z" },
+      mint: async () => ({ gitTokens: { github: "gh-new" }, expiresAt: {} }),
+      write: async () => undefined,
+      invalidate: async (providers) => resolveInvalidated(providers),
+      now: () => now,
+      schedule: scheduler.schedule,
+      clearSchedule: scheduler.clearSchedule,
+    });
+
+    const expiry = scheduler.scheduled.find((entry) => entry.delayMs === 10_000);
+    expect(expiry).toBeDefined();
+    now += 10_000;
+    expiry!.callback();
+
+    expect(await invalidated).toEqual(["github"]);
+    await controller.stop();
+  });
+
+  test("a refresh write racing the old expiry deterministically preserves the new token", async () => {
+    const scheduler = fakeScheduler();
+    let now = Date.parse("2026-07-19T04:00:00.000Z");
+    let releaseWrite!: () => void;
+    const writeGate = new Promise<void>((resolve) => {
+      releaseWrite = resolve;
+    });
+    const mutations: string[] = [];
+    const controller = startGitCredentialRenewalLoop({
+      expectedProviders: ["github"],
+      initialExpiresAt: { github: "2026-07-19T04:00:10.000Z" },
+      mint: async () => ({
+        gitTokens: { github: "gh-new" },
+        expiresAt: { github: "2026-07-19T05:00:00.000Z" },
+      }),
+      write: async () => {
+        mutations.push("write:start");
+        await writeGate;
+        mutations.push("write:end");
+      },
+      invalidate: async () => {
+        mutations.push("invalidate");
+      },
+      now: () => now,
+      schedule: scheduler.schedule,
+      clearSchedule: scheduler.clearSchedule,
+    });
+
+    const oldExpiry = scheduler.scheduled.find((entry) => entry.delayMs === 10_000)!;
+    const refresh = controller.refreshNow();
+    await Promise.resolve();
+    now += 10_000;
+    oldExpiry.callback();
+    releaseWrite();
+    await refresh;
+    await Promise.resolve();
+
+    expect(mutations).toEqual(["write:start", "write:end"]);
+    await controller.stop();
+  });
+
+  test("immediate invalidation is serialized with writes and drains on stop", async () => {
+    const scheduler = fakeScheduler();
+    let releaseWrite!: () => void;
+    const writeGate = new Promise<void>((resolve) => {
+      releaseWrite = resolve;
+    });
+    const mutations: string[] = [];
+    const controller = startGitCredentialRenewalLoop({
+      expectedProviders: ["github"],
+      mint: async () => ({ gitTokens: { github: "gh-new" }, expiresAt: {} }),
+      write: async () => {
+        mutations.push("write:start");
+        await writeGate;
+        mutations.push("write:end");
+      },
+      invalidate: async () => {
+        mutations.push("invalidate");
+      },
+      schedule: scheduler.schedule,
+      clearSchedule: scheduler.clearSchedule,
+    });
+
+    const refresh = controller.refreshNow();
+    await Promise.resolve();
+    const invalidate = controller.invalidateNow(["github"]);
+    await Promise.resolve();
+    expect(mutations).toEqual(["write:start"]);
+    releaseWrite();
+    await Promise.all([refresh, invalidate, controller.stop()]);
+
+    expect(mutations).toEqual(["write:start", "write:end", "invalidate"]);
+  });
 });

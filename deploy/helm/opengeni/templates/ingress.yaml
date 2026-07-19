@@ -45,7 +45,7 @@ spec:
 # so these more-specific un-gated locations win for EXACTLY these paths while the
 # primary Ingress keeps everything else (the web app, /v1/config/client, the
 # /device approval page, the rest of /v1) behind its basic-auth gate. This
-# mirrors how prod `get.opengeni.ai` serves these same assets ungated.
+# mirrors how hosted `app.opengeni.ai` serves these same-origin assets ungated.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:

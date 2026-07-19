@@ -62,7 +62,11 @@ import type {
 } from "../dependencies";
 import { swapActiveSandbox, type FleetContext } from "../sandbox/fleet";
 import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
-import { requireVariableSetEncryption, validateVariableSetAttachment } from "./environments";
+import {
+  requireVariableSetEncryption,
+  validateRigDefaultVariableSetAttachments,
+  validateVariableSetAttachment,
+} from "./environments";
 import {
   mergeToolRefs,
   normalizeResources,
@@ -278,6 +282,7 @@ export async function createAndStartSession(input: {
   // rig promote never moves an existing session's version.
   rigId?: string | null;
   rigVersionId?: string | null;
+  rigDefaultVariableSetsAuthorized?: boolean;
   goal?: GoalSpec | null;
   // Per-session agent persona/system instructions (org-visible metadata, not a
   // secret). Persisted on the session row and composed system-level AFTER the
@@ -355,6 +360,7 @@ export async function createAndStartSession(input: {
       variableSetId: input.variableSet?.id ?? null,
       rigId: input.rigId ?? null,
       rigVersionId: input.rigVersionId ?? null,
+      rigDefaultVariableSetsAuthorized: input.rigDefaultVariableSetsAuthorized ?? false,
       firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
       instructions: input.instructions ?? null,
       parentSessionId: input.parentSessionId ?? null,
@@ -383,6 +389,7 @@ export async function createAndStartSession(input: {
     variableSetId: input.variableSet?.id ?? null,
     rigId: input.rigId ?? null,
     rigVersionId: input.rigVersionId ?? null,
+    rigDefaultVariableSetsAuthorized: input.rigDefaultVariableSetsAuthorized ?? false,
     firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
     instructions: input.instructions ?? null,
     parentSessionId: input.parentSessionId ?? null,
@@ -784,6 +791,7 @@ export async function createSessionForRequest(
   const requestedRigId = payload.rigId ?? (await getWorkspaceDefaultRigId(db, workspaceId));
   let frozenRigId: string | null = null;
   let frozenRigVersionId: string | null = null;
+  let rigDefaultVariableSetsAuthorized = false;
   if (requestedRigId) {
     const rig = await getRig(db, workspaceId, requestedRigId);
     if (!rig || !rig.activeVersion) {
@@ -796,8 +804,15 @@ export async function createSessionForRequest(
       }
       // else: workspace-default fallback that no longer resolves → rig-less.
     } else {
+      await validateRigDefaultVariableSetAttachments(
+        { settings, db },
+        grant,
+        workspaceId,
+        rig.activeVersion.defaultVariableSetIds,
+      );
       frozenRigId = rig.id;
       frozenRigVersionId = rig.activeVersion.id;
+      rigDefaultVariableSetsAuthorized = hasPermission(grant.permissions, "variable-sets:use");
     }
   }
   assertConfiguredModel(settings, payload.model);
@@ -1103,6 +1118,7 @@ export async function createSessionForRequest(
     // Frozen rig binding (M3): both null for a rig-less session (today's path).
     rigId: frozenRigId,
     rigVersionId: frozenRigVersionId,
+    rigDefaultVariableSetsAuthorized,
     goal: payload.goal ?? null,
     // Per-session persona instructions (already trimmed/validated by the
     // contracts schema). Persisted on the row; composed system-level at turn

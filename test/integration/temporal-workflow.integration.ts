@@ -227,6 +227,62 @@ describe("Temporal workflow integration", () => {
   );
 
   test(
+    "rig verification cancellation settles the exact DB attempt through a non-cancellable activity",
+    async () => {
+      const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+      const scope = workflowScope();
+      const changeId = crypto.randomUUID();
+      let started = false;
+      const failures: Array<{ changeId: string; attempt: number; reason: string }> = [];
+      const worker = await testWorker(nativeConnection, taskQueue, {
+        // testWorker normally hosts both the control and turn queues. This
+        // rig-only workflow never dispatches a turn, but the helper keeps the
+        // turn activity explicit so session-workflow tests fail fast when they
+        // accidentally omit it.
+        runAgentTurn: async () => ({ status: "idle" }),
+        verifyRigChange: async () => {
+          started = true;
+          await new Promise<void>((resolve) => {
+            const signal = currentActivityContext()?.cancellationSignal;
+            if (!signal || signal.aborted) {
+              resolve();
+              return;
+            }
+            signal.addEventListener("abort", () => resolve(), { once: true });
+          });
+          throw new Error("verification activity cancelled");
+        },
+        failRigChangeVerification: async (input: {
+          changeId: string;
+          attempt: number;
+          reason: string;
+        }) => {
+          failures.push(input);
+        },
+      });
+      const run = worker.run();
+      try {
+        const client = new Client({ connection });
+        const handle = await client.workflow.start("rigVerificationWorkflow", {
+          taskQueue,
+          workflowId: `rig-verification-change-${changeId}-attempt-7`,
+          args: [{ workspaceId: scope.workspaceId, changeId, attempt: 7 }],
+        });
+        await waitFor(() => started);
+        await handle.cancel();
+        await handle.result().catch(() => undefined);
+        await waitFor(() => failures.length === 1);
+        expect(failures[0]).toMatchObject({ changeId, attempt: 7 });
+        expect(failures[0]?.reason).toMatch(/cancel|failed/i);
+      } finally {
+        worker.shutdown();
+        await run;
+      }
+    },
+    temporalWorkflowTestTimeoutMs,
+  );
+
+  test(
     "re-dispatches the same recovering inference instead of failing the session",
     async () => {
       const taskQueue = `workflow-test-${crypto.randomUUID()}`;

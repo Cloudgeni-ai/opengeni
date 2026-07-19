@@ -35,6 +35,12 @@ import {
 } from "@opengeni/runtime/sandbox";
 import { HTTPException } from "hono/http-exception";
 import { relayConfigFromSettings } from "./routing";
+import {
+  buildSelfhostedProvisioningInstructions,
+  type SelfhostedProvisioningInstructions,
+} from "./selfhosted-provisioning";
+
+export { buildSelfhostedProvisioningInstructions } from "./selfhosted-provisioning";
 
 export type FleetServices = {
   db: Database;
@@ -221,9 +227,13 @@ export async function listFleet(
       continue;
     }
     const enrollment = await getEnrollment(db, ctx.workspaceId, sandbox.enrollmentId);
-    const probe = enrollment
-      ? await probeEnrollment(services, ctx.workspaceId, enrollment)
-      : { liveness: "offline" as FleetLiveness, consented: false, hasDisplay: false };
+    // Revoked enrollments remain available through the administrative enrollment
+    // history, but they are not compute targets and must never remain in the
+    // agent-facing fleet (including as an apparently active pointer).
+    if (!enrollment || enrollment.status !== "active") {
+      continue;
+    }
+    const probe = await probeEnrollment(services, ctx.workspaceId, enrollment);
     entries.push({
       id: sandbox.id,
       kind: "selfhosted",
@@ -235,7 +245,7 @@ export async function listFleet(
       attachable: probe.liveness === "online",
       consented: probe.consented,
       hasDisplay: probe.hasDisplay,
-      lastSeenAt: enrollment?.lastSeenAt ?? null,
+      lastSeenAt: enrollment.lastSeenAt ?? null,
     });
   }
 
@@ -480,14 +490,7 @@ export async function runOnSandbox(
 }
 
 export type ProvisionResult =
-  | {
-      kind: "selfhosted";
-      instructions: string;
-      installCommandUnix: string;
-      installCommandWindows: string;
-      verificationUri: string;
-      note: string;
-    }
+  | SelfhostedProvisioningInstructions
   | { kind: "modal"; sandbox: SandboxRecord; note: string };
 
 /**
@@ -505,20 +508,10 @@ export async function provisionSandbox(
   input: { kind: "selfhosted" | "modal"; name?: string },
 ): Promise<ProvisionResult> {
   if (input.kind === "selfhosted") {
-    const base = (services.settings.publicBaseUrl ?? "https://get.opengeni.ai").replace(/\/+$/, "");
-    return {
-      kind: "selfhosted",
-      instructions:
-        "Share these instructions with a human operator. They install the OpenGeni agent on the machine, run `opengeni-agent enroll`, complete the device-flow at the verification URL (the loud whole-machine + screen-control consent), and the machine then appears here as an attachable selfhosted sandbox.",
-      // Install from THIS control plane's origin (not a hardcoded public CDN): the
-      // served install script is rewritten to pull the per-SHA agent baked into
-      // this exact deployment (see apps/api/src/routes/install.ts), so a deployed
-      // env is self-contained and a private/air-gapped one works with no public DNS.
-      installCommandUnix: `curl -fsSL ${base}/install.sh | sh`,
-      installCommandWindows: `irm ${base}/install.ps1 | iex`,
-      verificationUri: `${base}/device`,
-      note: "Whole-machine access requires explicit human consent in the device-flow web page; the agent cannot self-consent.",
-    };
+    return buildSelfhostedProvisioningInstructions({
+      publicBaseUrl: services.settings.publicBaseUrl,
+      workspaceId: ctx.workspaceId,
+    });
   }
   // modal: create a first-class named modal sandbox record. NOTE: a session cannot
   // yet be swapped onto a second Modal box — cross-group Modal routing is not built,

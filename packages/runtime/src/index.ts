@@ -17,6 +17,7 @@ import {
   prefixedMcpToolName as sharedPrefixedMcpToolName,
   signDelegatedAccessToken,
   type GitCredentialProvider,
+  type GitCredentialRepositoryRef,
   type McpServerConnectionRef,
   type Permission,
   type ReasoningEffort,
@@ -3060,10 +3061,10 @@ export type RunAgentStreamOptions = {
   onRuntimeEvent?: (event: NormalizedRuntimeEvent) => Promise<void> | void;
   contextCompactionSignal?: () => ProviderContextTokenSignal | null | undefined;
   contextCompactionRequested?: () => boolean | Promise<boolean>;
-  // Host-managed git credential renewal registration. Called only after the
-  // initial token-file seed completed on a real provisioned box. The worker
-  // owns the multi-day timer and uses this pinned, un-proxied session to
-  // atomically replace token files; runtime never mints credentials itself.
+  // Host-managed git credential binding + renewal registration. Called on the
+  // real provisioned box after rig/credential/toolspace setup and before any
+  // repository clone. The worker resolves authorization, installs the initial
+  // token files, and owns the multi-day timer; runtime never mints credentials.
   onGitCredentialSessionReady?: (session: GitCredentialTokenWriterSession) => Promise<void> | void;
   // OWNERSHIP INVERSION (P1.2): an externally-owned, already-live sandbox
   // session resolved by the per-turn resume-by-id path. When present,
@@ -3394,6 +3395,9 @@ export async function runAgentStream(
           ? { fileDownloadsMaterialized: true }
           : {}),
         ...(overrides.onRuntimeEvent ? { onRuntimeEvent: overrides.onRuntimeEvent } : {}),
+        ...(overrides.onGitCredentialSessionReady
+          ? { onGitCredentialSessionReady: overrides.onGitCredentialSessionReady }
+          : {}),
         ...(overrides.turnToolCancellationFence
           ? {
               commandRunner: overrides.turnToolCancellationFence.runSandboxCommand.bind(
@@ -3402,7 +3406,6 @@ export async function runAgentStream(
             }
           : {}),
       });
-      await overrides.onGitCredentialSessionReady?.(setupSession);
     }
     const runAs = sandboxRunAs(settings);
     const fileDownloads = sandboxFileDownloadsForAgent(agent);
@@ -3435,8 +3438,8 @@ export async function runAgentStream(
         rigCredentialHooksForAgent(agent),
       ),
       ...sandboxToolspaceTokenHooksForAgent(agent),
-      ...sandboxRepositoryCloneHooksForAgent(agent),
       ...gitCredentialSessionRegistrationHooks(overrides.onGitCredentialSessionReady),
+      ...sandboxRepositoryCloneHooksForAgent(agent),
     ];
     const ownedHookContext: SandboxLifecycleHookContext = {
       environment,
@@ -3522,8 +3525,8 @@ export async function runAgentStream(
             rigCredentialHooksForAgent(agent),
           ),
           ...sandboxToolspaceTokenHooksForAgent(agent),
-          ...sandboxRepositoryCloneHooksForAgent(agent),
           ...gitCredentialSessionRegistrationHooks(overrides.onGitCredentialSessionReady),
+          ...sandboxRepositoryCloneHooksForAgent(agent),
         ],
         {
           environment,
@@ -3944,9 +3947,10 @@ export async function pinProvidedSessionManifestEnvironment(
  * refresh, az login is idempotent). The connected-machine (selfhosted) branch
  * keeps platform setup OFF the user's real box and seeds ONLY the toolspace token.
  *
- * `gitTokenSeedsOverride` lets the lazy provisioner pass its own freshly-minted
- * run-scoped provider tokens (minted at establish time, not turn start);
- * unset ⇒ read the seeds off the agent exactly as the eager path does.
+ * `gitTokenSeedsOverride` remains available to direct callers that already own
+ * a complete token bundle. The worker's lazy path instead uses
+ * `onGitCredentialSessionReady`, so authorization and minting happen only after
+ * the real session exists and before the repository-clone hook.
  */
 export async function runOwnedSandboxSetup(
   agent: Agent<any, any>,
@@ -3958,6 +3962,7 @@ export async function runOwnedSandboxSetup(
     preparedInput?: PreparedAgentInput;
     fileDownloadsMaterialized?: boolean;
     onRuntimeEvent?: SandboxLifecycleHookContext["onRuntimeEvent"];
+    onGitCredentialSessionReady?: RunAgentStreamOptions["onGitCredentialSessionReady"];
     gitTokenSeedsOverride?: GitTokenSeeds;
     gitTokenSeedOverride?: string;
     commandRunner?: SandboxLifecycleCommandRunner;
@@ -3997,6 +4002,7 @@ export async function runOwnedSandboxSetup(
       rigCredentialHooksForAgent(agent),
     ),
     ...sandboxToolspaceTokenHooksForAgent(agent),
+    ...gitCredentialSessionRegistrationHooks(opts.onGitCredentialSessionReady),
     ...sandboxRepositoryCloneHooksForAgent(agent),
   ];
   const ownedHookContext: SandboxLifecycleHookContext = {
@@ -5161,14 +5167,14 @@ function gitTokenSeedExportPrefix(seeds: GitTokenSeeds): string {
   return lines.join("\n");
 }
 
-function repositoryCredentialProvider(
-  resource: Extract<ResourceRef, { kind: "repository" }>,
-): GitCredentialProvider {
+function repositoryCredentialProvider(resource: {
+  provider?: GitCredentialProvider | undefined;
+}): GitCredentialProvider {
   return resource.provider ?? "github";
 }
 
 function gitAskpassHostProviderCaseLines(
-  resources: Extract<ResourceRef, { kind: "repository" }>[],
+  resources: readonly { uri: string; provider?: GitCredentialProvider | undefined }[],
 ): string[] {
   const hosts = new Map<string, GitCredentialProvider>();
   for (const resource of resources) {
@@ -5230,7 +5236,7 @@ function gitCredentialTokenWriterCommandLines(): string[] {
 }
 
 function gitCredentialHelperCommandLines(
-  resources: Extract<ResourceRef, { kind: "repository" }>[] = [],
+  resources: readonly { uri: string; provider?: GitCredentialProvider | undefined }[] = [],
 ): string[] {
   const hostProviderCases = gitAskpassHostProviderCaseLines(resources);
   return [
@@ -5259,12 +5265,7 @@ function gitCredentialHelperCommandLines(
     '  host="$(prompt_host "$1")"',
     '  case "$host" in',
     ...(hostProviderCases.length > 0 ? hostProviderCases : ['    "") : ;;']),
-    "  esac",
-    "  case \"$(printf '%s\\n' \"$1\" | tr '[:upper:]' '[:lower:]')\" in",
-    "    *github.com*|*githubusercontent.com*) printf '%s\\n' github ;;",
-    "    *gitlab*) printf '%s\\n' gitlab ;;",
-    "    *dev.azure.com*|*.visualstudio.com*) printf '%s\\n' azure_devops ;;",
-    "    *) printf '%s\\n' github ;;",
+    "    *) printf '\\n' ;;",
     "  esac",
     "}",
     "token_file_for_provider() {",
@@ -5283,8 +5284,8 @@ function gitCredentialHelperCommandLines(
     "}",
     'provider="$(provider_for_prompt "$1")"',
     'case "$1" in',
-    '  *Username*) username_for_provider "$provider" ;;',
-    '  *Password*) cat "$(token_file_for_provider "$provider")" 2>/dev/null || printf \'\\n\' ;;',
+    '  *Username*) if [ -n "$provider" ]; then username_for_provider "$provider"; else printf \'\\n\'; fi ;;',
+    '  *Password*) if [ -n "$provider" ]; then cat "$(token_file_for_provider "$provider")" 2>/dev/null || printf \'\\n\'; else printf \'\\n\'; fi ;;',
     "  *) printf '\\n' ;;",
     "esac",
     "ASKPASS_EOF",
@@ -5339,7 +5340,103 @@ function gitCredentialHelperCommandLines(
     '  chmod 0755 "$wrapper.tmp.$$"',
     '  mv -f "$wrapper.tmp.$$" "$wrapper"',
     "done",
+    // Resource-less recovery happens after the agent manifest was built, so an
+    // older warm box may not carry GIT_ASKPASS in its process environment. A
+    // managed-box global config provides the same stable file pointer for Git;
+    // provider CLI wrappers already ride the stable PATH pointer on every box.
+    'if command -v git >/dev/null 2>&1; then git config --global core.askPass "$git_askpass"; fi',
   ];
+}
+
+function selectedGitCredentialProviders(seeds: GitTokenSeeds): GitCredentialProvider[] {
+  return GIT_CREDENTIAL_PROVIDERS.filter((provider) => Boolean(seeds[provider]));
+}
+
+/** Shared final/temp removal used by invalidation and failure-clean mutation traps. */
+function gitProviderTokenRemovalCommandLines(
+  providers: readonly GitCredentialProvider[],
+  includePidTemps: boolean,
+): string[] {
+  return [...new Set(providers)]
+    .filter((provider) => GIT_CREDENTIAL_PROVIDERS.includes(provider))
+    .flatMap((provider) => {
+      const paths =
+        provider === "github"
+          ? [
+              "${OPENGENI_GIT_TOKEN_FILE:-$HOME/.opengeni/git-token}",
+              "${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}/github-token",
+            ]
+          : [`\${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}/${provider}-token`];
+      return paths.flatMap((path) => [
+        `rm -f -- "${path}"`,
+        ...(includePidTemps ? [`rm -f -- "${path}.tmp.$$"`] : []),
+      ]);
+    });
+}
+
+/**
+ * A shell mutation is complete only after every selected token and helper write
+ * succeeds. EXIT/signal cleanup removes all selected final token files and PID
+ * temps, so a partial install/refresh can never leave a plausibly usable token.
+ */
+function gitCredentialFailureCleanupGuardCommandLines(
+  providers: readonly GitCredentialProvider[],
+  includeHelperTemps: boolean,
+): string[] {
+  return [
+    "git_credential_mutation_complete=0",
+    "cleanup_failed_git_credential_mutation() {",
+    "  mutation_status=$?",
+    "  trap - EXIT HUP INT TERM",
+    '  if [ "$git_credential_mutation_complete" -ne 1 ]; then',
+    "    set +e",
+    ...gitProviderTokenRemovalCommandLines(providers, true).map((line) => `    ${line}`),
+    ...(includeHelperTemps
+      ? [
+          '    git_askpass_cleanup="${GIT_ASKPASS:-$HOME/.opengeni/askpass}"',
+          '    wrapper_dir_cleanup="${OPENGENI_GIT_CLI_WRAPPER_DIR:-$HOME/.opengeni/bin}"',
+          '    rm -f -- "$git_askpass_cleanup.tmp.$$"',
+          '    for cleanup_tool in gh glab az; do rm -f -- "$wrapper_dir_cleanup/$cleanup_tool.tmp.$$"; done',
+        ]
+      : []),
+    "  fi",
+    '  exit "$mutation_status"',
+    "}",
+    "trap cleanup_failed_git_credential_mutation EXIT",
+    "trap 'exit 143' HUP INT TERM",
+  ];
+}
+
+function gitCredentialFailureCleanupSuccessCommandLines(): string[] {
+  return ["git_credential_mutation_complete=1", "trap - EXIT HUP INT TERM"];
+}
+
+/** Install stable git/CLI helpers and optionally seed provider token files. */
+export function gitCredentialHelperInstallCommand(
+  repositoryRefs: readonly GitCredentialRepositoryRef[],
+  seeds: GitTokenSeeds = {},
+): string {
+  const seedPrefix = gitTokenSeedExportPrefix(seeds);
+  return [
+    seedPrefix,
+    "set -eu",
+    'export HOME="${HOME:-/workspace}"',
+    ...gitCredentialFailureCleanupGuardCommandLines(selectedGitCredentialProviders(seeds), true),
+    ...gitCredentialHelperCommandLines(repositoryRefs),
+    ...gitCredentialFailureCleanupSuccessCommandLines(),
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+export async function installGitCredentialHelpersAndTokens(
+  session: GitCredentialTokenWriterSession,
+  repositoryRefs: readonly GitCredentialRepositoryRef[],
+  seeds: GitTokenSeeds = {},
+  options: { runAs?: string; commandRunner?: SandboxLifecycleCommandRunner } = {},
+): Promise<void> {
+  const command = gitCredentialHelperInstallCommand(repositoryRefs, seeds);
+  await runGitCredentialMutation(session, command, "Git credential helper installation", options);
 }
 
 /**
@@ -5359,7 +5456,9 @@ export function gitProviderTokenRefreshCommand(seeds: GitTokenSeeds): string {
     seedPrefix,
     "set -eu",
     'export HOME="${HOME:-/workspace}"',
+    ...gitCredentialFailureCleanupGuardCommandLines(selectedGitCredentialProviders(seeds), false),
     ...gitCredentialTokenWriterCommandLines(),
+    ...gitCredentialFailureCleanupSuccessCommandLines(),
   ].join("\n");
 }
 
@@ -5372,6 +5471,44 @@ export async function refreshGitProviderTokenFiles(
   if (!command) {
     return;
   }
+  await runGitCredentialMutation(session, command, "Git credential refresh", options);
+}
+
+export function gitProviderTokenInvalidationCommand(
+  providers: readonly GitCredentialProvider[],
+): string {
+  const selected = [...new Set(providers)].filter((provider) =>
+    GIT_CREDENTIAL_PROVIDERS.includes(provider),
+  );
+  if (selected.length === 0) return "";
+  return [
+    "set -eu",
+    'export HOME="${HOME:-/workspace}"',
+    "git_credential_invalidation_status=0",
+    ...gitProviderTokenRemovalCommandLines(selected, true).map(
+      (line) => `${line} || git_credential_invalidation_status=1`,
+    ),
+    'exit "$git_credential_invalidation_status"',
+  ].join("\n");
+}
+
+/** Atomically unlink only OpenGeni-owned provider token files. */
+export async function invalidateGitProviderTokenFiles(
+  session: GitCredentialTokenWriterSession,
+  providers: readonly GitCredentialProvider[],
+  options: { runAs?: string; commandRunner?: SandboxLifecycleCommandRunner } = {},
+): Promise<void> {
+  const command = gitProviderTokenInvalidationCommand(providers);
+  if (!command) return;
+  await runGitCredentialMutation(session, command, "Git credential invalidation", options);
+}
+
+async function runGitCredentialMutation(
+  session: GitCredentialTokenWriterSession,
+  command: string,
+  label: string,
+  options: { runAs?: string; commandRunner?: SandboxLifecycleCommandRunner },
+): Promise<void> {
   const args = {
     cmd: command,
     workdir: "/workspace",
@@ -5381,7 +5518,7 @@ export async function refreshGitProviderTokenFiles(
   };
   assertSandboxCommandSucceeded(
     await runSandboxLifecycleCommand(session, args, options.commandRunner),
-    "Git credential refresh",
+    label,
   );
 }
 
@@ -5554,8 +5691,8 @@ const RIG_SETUP_SKIPPED_SENTINEL = "__OPENGENI_RIG_SETUP_SKIPPED__";
  *      coreutils `timeout` (NOT `bash -e` — the script opts into `set -e`
  *      itself if it wants), then captures the exit code and `touch`es the marker
  *      ONLY on success (exit 0) so a failed/timed-out setup re-runs next turn.
- * The heredoc delimiter is quoted, so the script content is executed verbatim
- * with no host-side expansion.
+ * The setup artifact is base64-transported into a temp file, so its bytes are
+ * executed verbatim with no host-side expansion or heredoc delimiter hazard.
  */
 export function rigSetupScriptCommand(
   script: string,
@@ -5578,11 +5715,7 @@ export function rigSetupScriptCommand(
     '  if mkdir "$__OG_RIG_LOCK" 2>/dev/null; then',
     "    trap 'rm -rf \"$__OG_RIG_LOCK\"' EXIT",
     `    if [ -f "$__OG_RIG_MARKER" ]; then printf '%s\\n' ${shellQuote(RIG_SETUP_SKIPPED_SENTINEL)}; exit 0; fi`,
-    '__OG_RIG_SCRIPT="$(mktemp)"',
-    "cat > \"$__OG_RIG_SCRIPT\" <<'__OPENGENI_RIG_SETUP_SCRIPT_EOF__'",
-    script,
-    "__OPENGENI_RIG_SETUP_SCRIPT_EOF__",
-    '    timeout -k 5s "${__OG_RIG_TIMEOUT_SECS}s" bash "$__OG_RIG_SCRIPT"',
+    rigSetupArtifactExecutionCommand(script, timeoutMs),
     "__OG_RIG_RC=$?",
     '    rm -f "$__OG_RIG_SCRIPT"',
     '    if [ "$__OG_RIG_RC" -eq 0 ]; then touch "$__OG_RIG_MARKER"; fi',
@@ -5599,6 +5732,26 @@ export function rigSetupScriptCommand(
     '  if [ ! -d "$__OG_RIG_LOCK" ]; then continue; fi',
     '  rmdir "$__OG_RIG_LOCK" 2>/dev/null || true',
     "done",
+  ].join("\n");
+}
+
+/**
+ * Materialize and execute one immutable rig setup artifact. Both cold runtime
+ * setup and clean verification use these exact lines, so delimiter-like input,
+ * shell state, `exit`, traps, and `pipefail` have identical child-Bash
+ * semantics. Base64 is transport only; the decoded bytes are the promoted
+ * setupScript bytes without interpolation or a heredoc delimiter collision.
+ */
+export function rigSetupArtifactExecutionCommand(script: string, timeoutMs: number): string {
+  const encoded = Buffer.from(script, "utf8").toString("base64");
+  // Coreutils accepts fractional seconds. Preserve the millisecond budget so a
+  // short configured timeout or the final slice of the aggregate verification
+  // deadline is not silently rounded up to a full second.
+  const timeoutSecs = Math.max(1, Math.ceil(timeoutMs)) / 1000;
+  return [
+    '__OG_RIG_SCRIPT="$(mktemp)" || exit $?',
+    `printf '%s' ${shellQuote(encoded)} | base64 -d > "$__OG_RIG_SCRIPT" || { __OG_RIG_RC=$?; rm -f "$__OG_RIG_SCRIPT"; exit "$__OG_RIG_RC"; }`,
+    `timeout -k 5s '${timeoutSecs}s' bash "$__OG_RIG_SCRIPT"`,
   ].join("\n");
 }
 
@@ -5670,7 +5823,8 @@ export async function runRigSetupHook(
       output.length > RIG_SETUP_OUTPUT_TAIL_LIMIT
         ? output.slice(-RIG_SETUP_OUTPUT_TAIL_LIMIT)
         : output;
-    const reason = stillRunning
+    const timedOut = stillRunning || exitCode === 124 || exitCode === 137;
+    const reason = timedOut
       ? `did not finish within the rig setup timeout (${rigSetup.timeoutMs}ms)`
       : exitCode === null
         ? "did not report an exit code"

@@ -46,8 +46,7 @@ use block2::RcBlock;
 use objc2::AnyThread;
 use objc2_core_foundation::CGPoint;
 use objc2_core_graphics::{
-    CGDataProvider, CGDisplayCopyDisplayMode, CGDisplayModeGetHeight, CGDisplayModeGetPixelHeight,
-    CGDisplayModeGetPixelWidth, CGDisplayModeGetWidth, CGEvent, CGEventSource,
+    CGDataProvider, CGDisplayCopyDisplayMode, CGDisplayMode, CGEvent, CGEventSource,
     CGEventSourceStateID, CGEventTapLocation, CGEventType, CGImage, CGMainDisplayID, CGMouseButton,
     CGPreflightScreenCaptureAccess, CGRequestScreenCaptureAccess, CGScrollEventUnit,
 };
@@ -116,8 +115,8 @@ pub(super) fn probe_display() -> Option<DisplayInfo> {
 /// The main display's backing pixel dimensions from its current `CGDisplayMode`.
 fn display_pixel_dims(did: u32) -> Option<(u32, u32)> {
     let mode = CGDisplayCopyDisplayMode(did)?;
-    let w = CGDisplayModeGetPixelWidth(Some(&mode));
-    let h = CGDisplayModeGetPixelHeight(Some(&mode));
+    let w = CGDisplayMode::pixel_width(Some(&mode));
+    let h = CGDisplayMode::pixel_height(Some(&mode));
     if w == 0 || h == 0 {
         None
     } else {
@@ -128,10 +127,10 @@ fn display_pixel_dims(did: u32) -> Option<(u32, u32)> {
 /// Per-axis pixel/point scale (backing scale factor) for pixel→point conversion.
 fn display_scale(did: u32) -> (f64, f64) {
     if let Some(mode) = CGDisplayCopyDisplayMode(did) {
-        let pw = CGDisplayModeGetPixelWidth(Some(&mode));
-        let ph = CGDisplayModeGetPixelHeight(Some(&mode));
-        let ptw = CGDisplayModeGetWidth(Some(&mode));
-        let pth = CGDisplayModeGetHeight(Some(&mode));
+        let pw = CGDisplayMode::pixel_width(Some(&mode));
+        let ph = CGDisplayMode::pixel_height(Some(&mode));
+        let ptw = CGDisplayMode::width(Some(&mode));
+        let pth = CGDisplayMode::height(Some(&mode));
         let sx = if ptw > 0 { pw as f64 / ptw as f64 } else { 1.0 };
         let sy = if pth > 0 { ph as f64 / pth as f64 } else { 1.0 };
         (sx, sy)

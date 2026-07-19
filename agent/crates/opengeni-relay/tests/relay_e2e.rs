@@ -19,14 +19,22 @@
 //! `cross_stack_token.rs`).
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
 
+use async_trait::async_trait;
 use base64::Engine as _;
 use futures_util::{SinkExt as _, StreamExt as _};
 use hmac::{Hmac, Mac};
+use opengeni_agent_platform::{
+    spawn_pty, CapturedFrame, DesktopBackend, PlatformResult, StreamRegistry,
+};
 use opengeni_agent_proto::v1;
 use opengeni_agent_stream::channel::{ChannelConfig, RelayChannel};
 use opengeni_agent_stream::codec::RelayMessage;
+use opengeni_agent_stream::{RelayHub, RelayHubConfig};
 use opengeni_relay::{serve, RelayConfig, RelayMetrics};
 use sha2::Sha256;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
@@ -48,9 +56,13 @@ fn mint(prefix: &str, payload_json: &str) -> String {
 }
 
 fn agent_token() -> String {
+    agent_token_exp(4_102_444_800)
+}
+
+fn agent_token_exp(exp: i64) -> String {
     mint(
         "ogr_",
-        &format!(r#"{{"workspaceId":"{WORKSPACE}","agentId":"{AGENT}","exp":4102444800}}"#),
+        &format!(r#"{{"workspaceId":"{WORKSPACE}","agentId":"{AGENT}","exp":{exp}}}"#),
     )
 }
 
@@ -105,17 +117,17 @@ async fn start_relay_on(
 
 /// Build the producer's channel config (the agent's RelayChannel dials this).
 fn producer_config(base: &str, port: u32) -> ChannelConfig {
-    ChannelConfig {
-        channel: v1::StreamChannel {
+    ChannelConfig::new(
+        v1::StreamChannel {
             channel_id: format!("ch-{port}"),
             workspace_id: WORKSPACE.to_string(),
             agent_id: AGENT.to_string(),
             kind: v1::StreamKind::Pty as i32,
             port,
         },
-        token: agent_token(),
-        relay_url: base.to_string(),
-    }
+        agent_token(),
+        base.to_string(),
+    )
 }
 
 /// A raw viewer: dial wss, send the StreamOpen (role CLIENT), await the ack.
@@ -161,12 +173,16 @@ impl Viewer {
 
     async fn recv_frame(&mut self) -> Option<v1::StreamFrame> {
         loop {
-            match next_msg(&mut self.socket).await {
+            match self.recv_message().await {
                 Some(RelayMessage::Frame(f)) => return Some(f),
                 Some(_) => {}
                 None => return None,
             }
         }
+    }
+
+    async fn recv_message(&mut self) -> Option<RelayMessage> {
+        next_msg(&mut self.socket).await
     }
 
     async fn send_frame(&mut self, seq: u64, data: &[u8]) {
@@ -177,6 +193,71 @@ impl Viewer {
             produced_at_ms: 0,
         });
         let _ = self.socket.send(WsMessage::Binary(frame.encode())).await;
+    }
+}
+
+fn unix_now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| {
+            i64::try_from(duration.as_secs()).unwrap_or(i64::MAX)
+        })
+}
+
+fn metric_value(metrics: &RelayMetrics, name: &str) -> u64 {
+    metrics
+        .render_prometheus()
+        .lines()
+        .find_map(|line| {
+            let (metric, value) = line.split_once(' ')?;
+            (metric == name)
+                .then(|| value.parse::<u64>().ok())
+                .flatten()
+        })
+        .unwrap_or(0)
+}
+
+async fn wait_for_metric(metrics: &RelayMetrics, name: &str, minimum: u64) {
+    tokio::time::timeout(Duration::from_secs(12), async {
+        while metric_value(metrics, name) < minimum {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "metric {name} never reached {minimum}; last value was {}",
+            metric_value(metrics, name)
+        )
+    });
+}
+
+struct SequencedDesktop {
+    captures: AtomicU64,
+}
+
+#[async_trait]
+impl DesktopBackend for SequencedDesktop {
+    fn probe(&self) -> Option<v1::Display> {
+        Some(v1::Display {
+            id: ":test".to_string(),
+            width: 4,
+            height: 4,
+            r#virtual: true,
+        })
+    }
+
+    async fn capture(&self) -> PlatformResult<CapturedFrame> {
+        let sequence = self.captures.fetch_add(1, Ordering::SeqCst) + 1;
+        Ok(CapturedFrame {
+            png: format!("desktop-frame-{sequence}").into_bytes(),
+            width: 4,
+            height: 4,
+        })
+    }
+
+    async fn inject(&self, _input: &v1::DesktopInput) -> PlatformResult<()> {
+        Ok(())
     }
 }
 
@@ -418,4 +499,135 @@ async fn producer_reconnect_resumes_from_its_cursor() {
         .expect("post-reconnect frame")
         .unwrap();
     assert_eq!(&got.data[..], b"b");
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn producer_credential_rotation_keeps_the_same_long_lived_pty() {
+    let port = free_port().await;
+    let (base, _shutdown, metrics) = start_relay_on(port, |_| {}).await;
+    let first_expiry = unix_now() + 3;
+    let hub = RelayHub::new(RelayHubConfig {
+        workspace_id: WORKSPACE.to_string(),
+        agent_id: AGENT.to_string(),
+        relay_url: base.clone(),
+        agent_token: agent_token_exp(first_expiry),
+        allow_screen_control: true,
+    });
+
+    let request = v1::PtyOpenRequest {
+        command: vec!["cat".to_string()],
+        cols: 80,
+        rows: 24,
+        ..Default::default()
+    };
+    let process = spawn_pty(&request, &["/bin/sh".to_string()]).expect("spawn long-lived cat");
+    let opened = hub.register_pty(process).await.expect("register real PTY");
+
+    // Publish the replacement before the first socket expires. The live socket
+    // keeps its immutable old credential; reconnect must snapshot this new one.
+    hub.update_credentials(base.clone(), agent_token_exp(unix_now() + 60), true);
+    let (mut viewer, ack) = Viewer::connect(&base, PTY_PORT, 0, 0)
+        .await
+        .expect("viewer connect");
+    assert!(ack.accepted);
+
+    // Initial producer + viewer opens are 2. The relay forcibly detaches the
+    // producer at first_expiry; the supervised pump must register a third socket
+    // instead of settling PROCESS_EXIT and killing `cat`.
+    wait_for_metric(&metrics, "opengeni_relay_opens_accepted_total", 3).await;
+
+    let marker = b"pty-survived-credential-rotation\n";
+    viewer.send_frame(1, marker).await;
+    let mut output = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match viewer.recv_message().await {
+                Some(RelayMessage::Frame(frame)) => {
+                    output.extend_from_slice(&frame.data);
+                    if String::from_utf8_lossy(&output).contains("pty-survived-credential-rotation")
+                    {
+                        break;
+                    }
+                }
+                Some(RelayMessage::Close(close)) => {
+                    assert_ne!(
+                        close.reason,
+                        v1::StreamCloseReason::ProcessExit as i32,
+                        "credential expiry must not emit false PROCESS_EXIT"
+                    );
+                    panic!("PTY closed before post-rotation IO: {close:?}");
+                }
+                Some(_) => {}
+                None => panic!("viewer socket ended before post-rotation PTY output"),
+            }
+        }
+    })
+    .await
+    .expect("same PTY must echo input after credential rotation");
+
+    // The registry entry also remains live; a false terminal settlement would have
+    // removed it and made this return NotFound.
+    hub.pty_write(&opened.pty_id, b"control-path-still-live\n")
+        .await
+        .expect("same PTY control handle survives reconnect");
+    let _ = hub.pty_close(&opened.pty_id).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn desktop_frames_continue_across_repeated_credential_reconnects() {
+    let port = free_port().await;
+    let (base, _shutdown, metrics) = start_relay_on(port, |_| {}).await;
+    let now = unix_now();
+    let hub = RelayHub::new(RelayHubConfig {
+        workspace_id: WORKSPACE.to_string(),
+        agent_id: AGENT.to_string(),
+        relay_url: base.clone(),
+        agent_token: agent_token_exp(now + 3),
+        allow_screen_control: false,
+    });
+    let concrete = Arc::new(SequencedDesktop {
+        captures: AtomicU64::new(0),
+    });
+    let desktop: Arc<dyn DesktopBackend> = concrete.clone();
+    let display = desktop.probe().expect("fake display");
+    let channel = hub
+        .register_desktop(desktop, &display, &v1::DesktopEnsureRequest::default())
+        .await
+        .expect("register desktop");
+
+    // The first reconnect will use this second short-lived credential; after it is
+    // accepted, publish the long-lived third generation for a second forced expiry.
+    hub.update_credentials(base.clone(), agent_token_exp(now + 6), false);
+    let (mut viewer, ack) = Viewer::connect(&base, channel.port, 0, 0)
+        .await
+        .expect("desktop viewer connect");
+    assert!(ack.accepted);
+    wait_for_metric(&metrics, "opengeni_relay_opens_accepted_total", 3).await;
+    hub.update_credentials(base, agent_token_exp(unix_now() + 60), false);
+    wait_for_metric(&metrics, "opengeni_relay_opens_accepted_total", 4).await;
+
+    // Require a frame captured after the second registration, not buffered output
+    // from before it. The sequence is encoded into the fake PNG payload.
+    let before = concrete.captures.load(Ordering::SeqCst);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let frame = viewer
+                .recv_frame()
+                .await
+                .expect("desktop viewer remains live");
+            let payload = String::from_utf8_lossy(&frame.data);
+            let Some(sequence) = payload
+                .strip_prefix("desktop-frame-")
+                .and_then(|value| value.parse::<u64>().ok())
+            else {
+                continue;
+            };
+            if sequence > before {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("desktop must emit a new frame after the second reconnect");
 }

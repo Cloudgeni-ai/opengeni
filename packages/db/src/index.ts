@@ -74,8 +74,11 @@ import type {
   RigChangeKind,
   RigChangeStatus,
   RigCheck,
+  GitCredentialProvider,
+  GitCredentialRepositoryRef,
 } from "@opengeni/contracts";
 import {
+  GitCredentialRepositoryRef as GitCredentialRepositoryRefContract,
   reasoningEffortForMetadata,
   resolveWorkspaceMemoryEnabled,
   RigChange as RigChangeContract,
@@ -105,6 +108,7 @@ import {
 } from "drizzle-orm";
 import type { PgDatabase, PgTransactionConfig } from "drizzle-orm/pg-core";
 import { drizzle } from "drizzle-orm/postgres-js";
+import { isDeepStrictEqual } from "node:util";
 import postgres from "postgres";
 import { decryptEnvironmentValue } from "./environment-crypto";
 import { sanitizeEventPayload, sanitizeModelPayload } from "./event-payload-sanitizer";
@@ -1802,6 +1806,7 @@ export type CreateScheduledTaskInput = {
   variableSetId?: string | null;
   // The rig each run binds to (M3); active version resolved per fire at dispatch.
   rigId?: string | null;
+  rigDefaultVariableSetsAuthorized?: boolean;
   metadata: Record<string, unknown>;
 };
 
@@ -1815,6 +1820,7 @@ export type UpdateScheduledTaskInput = Partial<{
   reusableSessionId: string | null;
   variableSetId: string | null;
   rigId: string | null;
+  rigDefaultVariableSetsAuthorized: boolean;
   metadata: Record<string, unknown>;
 }>;
 
@@ -5203,6 +5209,11 @@ export async function updateScheduledTask(
           : {}),
         ...(input.variableSetId !== undefined ? { variableSetId: input.variableSetId } : {}),
         ...(input.rigId !== undefined ? { rigId: input.rigId } : {}),
+        ...(input.rigDefaultVariableSetsAuthorized !== undefined
+          ? {
+              rigDefaultVariableSetsAuthorized: input.rigDefaultVariableSetsAuthorized,
+            }
+          : {}),
         ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
         updatedAt: new Date(),
       })
@@ -5802,15 +5813,15 @@ export async function deleteVariableSetVariable(
 // boolean. Every function runs through withWorkspaceRls / withRlsContext.
 // ---------------------------------------------------------------------------
 
-// Thrown when a rig_change status transition is illegal (merged/rejected are
-// terminal). The domain/route layer maps this to a 409.
+// Thrown when a rig_change status transition is illegal. The domain/route layer
+// maps this to a 409.
 export class RigChangeTransitionError extends Error {
   constructor(
     public readonly changeId: string,
     public readonly fromStatus: string,
     public readonly toStatus: string,
   ) {
-    super(`Rig change ${changeId} is ${fromStatus} (terminal); cannot transition to ${toStatus}`);
+    super(`Rig change ${changeId} is ${fromStatus}; cannot transition to ${toStatus}`);
     this.name = "RigChangeTransitionError";
   }
 }
@@ -5832,6 +5843,27 @@ export class RigChangeAlreadyVerifyingError extends Error {
   constructor(public readonly changeId: string) {
     super(`Rig change ${changeId} is already verifying`);
     this.name = "RigChangeAlreadyVerifyingError";
+  }
+}
+
+export class RigChangeIdempotencyConflictError extends Error {
+  constructor(public readonly idempotencyKey: string) {
+    super("Rig change idempotency key was already used with different proposal content");
+    this.name = "RigChangeIdempotencyConflictError";
+  }
+}
+
+export class RigVerificationAttemptChangedError extends Error {
+  constructor(
+    public readonly changeId: string,
+    public readonly expectedAttempt: number,
+    public readonly actualAttempt: number | null,
+    public readonly actualStatus: string,
+  ) {
+    super(
+      `Rig change ${changeId} verification attempt moved: expected ${expectedAttempt}, current ${actualAttempt ?? "none"} (${actualStatus})`,
+    );
+    this.name = "RigVerificationAttemptChangedError";
   }
 }
 
@@ -5863,7 +5895,12 @@ function mapRigVersion(row: typeof schema.rigVersions.$inferSelect): RigVersion 
 }
 
 function unknownRigHealth(activeVersion: RigVersion | null): RigVerificationHealth | null {
-  return activeVersion ? { checkHealth: "unknown", lastVerifiedAt: null } : null;
+  return activeVersion
+    ? {
+        checkHealth: activeVersion.checks.length === 0 ? "not_configured" : "unknown",
+        lastVerifiedAt: null,
+      }
+    : null;
 }
 
 function mapRig(
@@ -5896,6 +5933,7 @@ function mapRigChange(row: typeof schema.rigChanges.$inferSelect): RigChange {
     payload: RigChangeContract.shape.payload.parse(row.payload),
     status: row.status as RigChangeStatus,
     proposedBy: row.proposedBy,
+    idempotencyKey: row.idempotencyKey ?? null,
     verification: (row.verification ?? null) as RigChange["verification"],
     resultVersionId: row.resultVersionId,
     createdAt: row.createdAt.toISOString(),
@@ -5965,8 +6003,9 @@ async function loadRigHealthByActiveVersion(
   activeVersions: RigVersion[],
 ): Promise<Map<string, RigVerificationHealth>> {
   const versionIds = activeVersions.map((version) => version.id);
+  const versionById = new Map(activeVersions.map((version) => [version.id, version]));
   const healthByVersion: Map<string, RigVerificationHealth> = new Map(
-    versionIds.map((versionId) => [versionId, { checkHealth: "unknown", lastVerifiedAt: null }]),
+    activeVersions.map((version) => [version.id, unknownRigHealth(version)!]),
   );
   if (versionIds.length === 0) {
     return healthByVersion;
@@ -6048,7 +6087,13 @@ async function loadRigHealthByActiveVersion(
   }
 
   for (const versionId of versionIds) {
-    healthByVersion.set(versionId, latestRigHealth(candidatesByVersion.get(versionId) ?? []));
+    const version = versionById.get(versionId)!;
+    healthByVersion.set(
+      versionId,
+      version.checks.length === 0
+        ? { checkHealth: "not_configured", lastVerifiedAt: null }
+        : latestRigHealth(candidatesByVersion.get(versionId) ?? []),
+    );
   }
   return healthByVersion;
 }
@@ -6418,7 +6463,7 @@ export async function createRigVersionForChangePromotion(
   input: RigVersionContentInput & {
     expectedActiveVersionId: string;
   },
-): Promise<{ version: RigVersion; change: RigChange }> {
+): Promise<{ version: RigVersion; change: RigChange; promoted: boolean }> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [rig] = await scopedDb
       .select({ id: schema.rigs.id, accountId: schema.rigs.accountId })
@@ -6444,7 +6489,35 @@ export async function createRigVersionForChangePromotion(
     if (!currentChange) {
       throw new Error(`Rig change not found: ${changeId}`);
     }
-    if (currentChange.status === "merged" || currentChange.status === "rejected") {
+    if (currentChange.status === "merged") {
+      if (!currentChange.resultVersionId) {
+        throw new RigChangeTransitionError(changeId, currentChange.status, "merged");
+      }
+      const [existingVersion] = await scopedDb
+        .select()
+        .from(schema.rigVersions)
+        .where(
+          and(
+            eq(schema.rigVersions.workspaceId, workspaceId),
+            eq(schema.rigVersions.rigId, rigId),
+            eq(schema.rigVersions.id, currentChange.resultVersionId),
+          ),
+        )
+        .limit(1);
+      if (!existingVersion) {
+        throw new Error(`Promoted rig version not found: ${currentChange.resultVersionId}`);
+      }
+      return {
+        version: mapRigVersion(existingVersion),
+        change: mapRigChange(currentChange),
+        promoted: false,
+      };
+    }
+    if (currentChange.status === "rejected") {
+      throw new RigChangeTransitionError(changeId, currentChange.status, "merged");
+    }
+    const verification = (currentChange.verification ?? null) as Record<string, unknown> | null;
+    if (currentChange.status !== "proposed" || verification?.passed !== true) {
       throw new RigChangeTransitionError(changeId, currentChange.status, "merged");
     }
     if (currentChange.baseVersionId !== input.expectedActiveVersionId) {
@@ -6529,7 +6602,11 @@ export async function createRigVersionForChangePromotion(
       .update(schema.rigs)
       .set({ updatedAt: new Date() })
       .where(and(eq(schema.rigs.workspaceId, workspaceId), eq(schema.rigs.id, rigId)));
-    return { version: mapRigVersion(versionRow), change: mapRigChange(changeRow) };
+    return {
+      version: mapRigVersion(versionRow),
+      change: mapRigChange(changeRow),
+      promoted: true,
+    };
   });
 }
 
@@ -6708,6 +6785,77 @@ export async function createRigChange(
   );
 }
 
+/**
+ * Idempotent proposal insert. The key is unique per workspace; a retry with the
+ * exact same rig/base/kind/payload/actor returns the existing row, while key
+ * reuse for different content fails closed instead of silently aliasing two
+ * proposals.
+ */
+export async function createRigChangeWithIdempotencyKey(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    rigId: string;
+    baseVersionId?: string | null;
+    kind: RigChangeKind;
+    payload: Record<string, unknown>;
+    proposedBy?: string | null;
+    idempotencyKey: string;
+  },
+): Promise<{ change: RigChange; created: boolean }> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const [inserted] = await scopedDb
+        .insert(schema.rigChanges)
+        .values({
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          rigId: input.rigId,
+          baseVersionId: input.baseVersionId ?? null,
+          kind: input.kind,
+          payload: input.payload,
+          status: "proposed",
+          proposedBy: input.proposedBy ?? null,
+          idempotencyKey: input.idempotencyKey,
+        })
+        .onConflictDoNothing({
+          target: [schema.rigChanges.workspaceId, schema.rigChanges.idempotencyKey],
+          where: sql`${schema.rigChanges.idempotencyKey} is not null`,
+        })
+        .returning();
+      if (inserted) {
+        return { change: mapRigChange(inserted), created: true };
+      }
+      const [existing] = await scopedDb
+        .select()
+        .from(schema.rigChanges)
+        .where(
+          and(
+            eq(schema.rigChanges.workspaceId, input.workspaceId),
+            eq(schema.rigChanges.idempotencyKey, input.idempotencyKey),
+          ),
+        )
+        .limit(1);
+      if (!existing) {
+        throw new Error("Failed to create rig change under idempotency key");
+      }
+      const sameProposal =
+        existing.rigId === input.rigId &&
+        existing.baseVersionId === (input.baseVersionId ?? null) &&
+        existing.kind === input.kind &&
+        existing.proposedBy === (input.proposedBy ?? null) &&
+        isDeepStrictEqual(existing.payload, input.payload);
+      if (!sameProposal) {
+        throw new RigChangeIdempotencyConflictError(input.idempotencyKey);
+      }
+      return { change: mapRigChange(existing), created: false };
+    },
+  );
+}
+
 export async function listRigChanges(
   db: Database,
   workspaceId: string,
@@ -6798,6 +6946,62 @@ export async function updateRigChangeStatus(
   });
 }
 
+/**
+ * Attempt-fenced verification settlement. A cancelled/lost workflow may race a
+ * late activity completion; only the still-current `verifying` attempt may
+ * write its terminal outcome, so a zombie can never overwrite recovery.
+ */
+export async function settleRigChangeVerificationAttempt(
+  db: Database,
+  workspaceId: string,
+  changeId: string,
+  expectedAttempt: number,
+  input: {
+    status: "proposed" | "rejected" | "failed";
+    verification: Record<string, unknown>;
+  },
+): Promise<RigChange> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [current] = await scopedDb
+      .select()
+      .from(schema.rigChanges)
+      .where(
+        and(eq(schema.rigChanges.workspaceId, workspaceId), eq(schema.rigChanges.id, changeId)),
+      )
+      .for("update")
+      .limit(1);
+    if (!current) {
+      throw new Error(`Rig change not found: ${changeId}`);
+    }
+    const currentVerification = (current.verification as Record<string, unknown> | null) ?? {};
+    const actualAttempt =
+      typeof currentVerification.attempt === "number" ? currentVerification.attempt : null;
+    if (current.status !== "verifying" || actualAttempt !== expectedAttempt) {
+      throw new RigVerificationAttemptChangedError(
+        changeId,
+        expectedAttempt,
+        actualAttempt,
+        current.status,
+      );
+    }
+    const [row] = await scopedDb
+      .update(schema.rigChanges)
+      .set({
+        status: input.status,
+        verification: { ...currentVerification, ...input.verification },
+        updatedAt: new Date(),
+      })
+      .where(
+        and(eq(schema.rigChanges.workspaceId, workspaceId), eq(schema.rigChanges.id, changeId)),
+      )
+      .returning();
+    if (!row) {
+      throw new Error(`Rig change not found: ${changeId}`);
+    }
+    return mapRigChange(row);
+  });
+}
+
 export async function beginRigChangeVerificationAttempt(
   db: Database,
   workspaceId: string,
@@ -6819,18 +7023,27 @@ export async function beginRigChangeVerificationAttempt(
     if (!current) {
       throw new Error(`Rig change not found: ${changeId}`);
     }
+    const previousVerification = (current.verification as Record<string, unknown> | null) ?? {};
+    const previousAttempt =
+      typeof previousVerification.attempt === "number" &&
+      Number.isInteger(previousVerification.attempt) &&
+      previousVerification.attempt > 0
+        ? previousVerification.attempt
+        : 0;
     if (current.status === "verifying") {
-      if (input.allowAlreadyVerifying) {
+      if (input.allowAlreadyVerifying && previousAttempt > 0) {
         return mapRigChange(current);
       }
-      throw new RigChangeAlreadyVerifyingError(changeId);
+      if (!input.allowAlreadyVerifying) {
+        throw new RigChangeAlreadyVerifyingError(changeId);
+      }
+      // A historical/pre-attempt row may have committed `verifying` before its
+      // Temporal start was lost. Adopt it under attempt 1 while holding the row
+      // lock so retries converge on one deterministic workflow id.
     }
     if (current.status === "merged") {
       throw new RigChangeTransitionError(changeId, current.status, "verifying");
     }
-    const previousVerification = (current.verification as Record<string, unknown> | null) ?? {};
-    const previousAttempt =
-      typeof previousVerification.attempt === "number" ? previousVerification.attempt : 0;
     const [row] = await scopedDb
       .update(schema.rigChanges)
       .set({
@@ -10376,6 +10589,7 @@ export async function createSession(
     // ⇒ a rig-less session (byte-for-byte today's behavior).
     rigId?: string | null;
     rigVersionId?: string | null;
+    rigDefaultVariableSetsAuthorized?: boolean;
     firstPartyMcpPermissions?: Permission[] | null;
     // Per-session agent persona/system instructions (org-visible, not a secret).
     // Null/omitted ⇒ the session carries none (composed instructions unchanged).
@@ -10416,6 +10630,7 @@ export async function createSession(
             variableSetId: input.variableSetId ?? null,
             rigId: input.rigId ?? null,
             rigVersionId: input.rigVersionId ?? null,
+            rigDefaultVariableSetsAuthorized: input.rigDefaultVariableSetsAuthorized ?? false,
             firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
             instructions: input.instructions ?? null,
             parentSessionId: input.parentSessionId ?? null,
@@ -10463,6 +10678,7 @@ export async function createSessionWithIdempotencyKey(
     // ⇒ a rig-less session (byte-for-byte today's behavior).
     rigId?: string | null;
     rigVersionId?: string | null;
+    rigDefaultVariableSetsAuthorized?: boolean;
     firstPartyMcpPermissions?: Permission[] | null;
     // Per-session agent persona/system instructions (org-visible, not a secret).
     instructions?: string | null;
@@ -10501,6 +10717,7 @@ export async function createSessionWithIdempotencyKey(
             variableSetId: input.variableSetId ?? null,
             rigId: input.rigId ?? null,
             rigVersionId: input.rigVersionId ?? null,
+            rigDefaultVariableSetsAuthorized: input.rigDefaultVariableSetsAuthorized ?? false,
             firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
             instructions: input.instructions ?? null,
             parentSessionId: input.parentSessionId ?? null,
@@ -13161,6 +13378,306 @@ export async function getSandboxSessionEnvelope(
       .limit(1);
     return row?.envelope ?? null;
   });
+}
+
+export type SandboxGitCredentialBindingSource =
+  (typeof schema.sandboxGitCredentialBindingSourceValues)[number];
+export type SandboxGitCredentialBindingStatus =
+  (typeof schema.sandboxGitCredentialBindingStatusValues)[number];
+export type SandboxGitCredentialBinding = {
+  id: string;
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  provider: GitCredentialProvider;
+  source: SandboxGitCredentialBindingSource;
+  status: SandboxGitCredentialBindingStatus;
+  repositoryRefs: GitCredentialRepositoryRef[];
+  generation: number;
+  reasonCode: string | null;
+  lastValidatedAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
+function normalizedGitCredentialRepositoryRefs(
+  refs: readonly GitCredentialRepositoryRef[],
+): GitCredentialRepositoryRef[] {
+  return [...GitCredentialRepositoryRefContract.array().min(1).parse(refs)].sort((left, right) =>
+    JSON.stringify(left).localeCompare(JSON.stringify(right)),
+  );
+}
+
+function checkedGitCredentialBindingReason(reasonCode: string | null | undefined): string | null {
+  if (reasonCode === null || reasonCode === undefined) return null;
+  if (!/^[a-z0-9_]{1,64}$/.test(reasonCode)) {
+    throw new Error("Git credential binding reasonCode must match [a-z0-9_]{1,64}");
+  }
+  return reasonCode;
+}
+
+function mapSandboxGitCredentialBinding(
+  row: typeof schema.sandboxGitCredentialBindings.$inferSelect,
+): SandboxGitCredentialBinding {
+  return {
+    ...row,
+    provider: row.provider as GitCredentialProvider,
+    repositoryRefs: normalizedGitCredentialRepositoryRefs(row.repositoryRefs),
+  };
+}
+
+export async function listSandboxGitCredentialBindings(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<SandboxGitCredentialBinding[]> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select()
+      .from(schema.sandboxGitCredentialBindings)
+      .where(
+        and(
+          eq(schema.sandboxGitCredentialBindings.workspaceId, workspaceId),
+          eq(schema.sandboxGitCredentialBindings.sessionId, sessionId),
+        ),
+      )
+      .orderBy(asc(schema.sandboxGitCredentialBindings.provider));
+    return rows.map(mapSandboxGitCredentialBinding);
+  });
+}
+
+/**
+ * Validate or replace one secret-free binding under its row lock. Identical
+ * validation updates the timestamp without rotating the generation; any
+ * authorization identity/source/status change advances the fence exactly once.
+ */
+export async function upsertSandboxGitCredentialBinding(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    provider: GitCredentialProvider;
+    source: SandboxGitCredentialBindingSource;
+    repositoryRefs: readonly GitCredentialRepositoryRef[];
+    status?: SandboxGitCredentialBindingStatus;
+    reasonCode?: string | null;
+    validatedAt?: Date;
+  },
+): Promise<SandboxGitCredentialBinding> {
+  const repositoryRefs = normalizedGitCredentialRepositoryRefs(input.repositoryRefs);
+  const status = input.status ?? "active";
+  const reasonCode = checkedGitCredentialBindingReason(input.reasonCode);
+  const validatedAt = input.validatedAt ?? new Date();
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      await scopedDb
+        .insert(schema.sandboxGitCredentialBindings)
+        .values({
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          provider: input.provider,
+          source: input.source,
+          status,
+          repositoryRefs,
+          generation: 1,
+          reasonCode,
+          lastValidatedAt: validatedAt,
+        })
+        .onConflictDoNothing({
+          target: [
+            schema.sandboxGitCredentialBindings.workspaceId,
+            schema.sandboxGitCredentialBindings.sessionId,
+            schema.sandboxGitCredentialBindings.provider,
+          ],
+        });
+      const [current] = await scopedDb
+        .select()
+        .from(schema.sandboxGitCredentialBindings)
+        .where(
+          and(
+            eq(schema.sandboxGitCredentialBindings.workspaceId, input.workspaceId),
+            eq(schema.sandboxGitCredentialBindings.sessionId, input.sessionId),
+            eq(schema.sandboxGitCredentialBindings.provider, input.provider),
+          ),
+        )
+        .for("update")
+        .limit(1);
+      if (!current) throw new Error("Failed to lock sandbox Git credential binding");
+      const changed =
+        current.source !== input.source ||
+        current.status !== status ||
+        current.reasonCode !== reasonCode ||
+        !isDeepStrictEqual(
+          normalizedGitCredentialRepositoryRefs(current.repositoryRefs),
+          repositoryRefs,
+        );
+      const [row] = await scopedDb
+        .update(schema.sandboxGitCredentialBindings)
+        .set({
+          source: input.source,
+          status,
+          repositoryRefs,
+          reasonCode,
+          lastValidatedAt: validatedAt,
+          generation: changed ? current.generation + 1 : current.generation,
+          updatedAt: new Date(),
+        })
+        .where(eq(schema.sandboxGitCredentialBindings.id, current.id))
+        .returning();
+      if (!row) throw new Error("Failed to update sandbox Git credential binding");
+      return mapSandboxGitCredentialBinding(row);
+    },
+  );
+}
+
+export async function markSandboxGitCredentialBindingStatus(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    provider: GitCredentialProvider;
+    status: Exclude<SandboxGitCredentialBindingStatus, "active">;
+    reasonCode: string;
+    /** Optional sandbox invalidation performed while the binding row is locked. */
+    mutateSandbox?: () => Promise<void>;
+  },
+): Promise<SandboxGitCredentialBinding | null> {
+  const [row] = await markSandboxGitCredentialBindingsStatus(db, {
+    ...input,
+    providers: [input.provider],
+  });
+  return row ?? null;
+}
+
+/**
+ * Revoke or deactivate a provider set under one deterministic lock set. The
+ * sandbox mutation runs while every matching row is locked, so a concurrent
+ * final write either completes first and is then invalidated, or observes the
+ * committed replacement generation/status and cannot write.
+ */
+export async function markSandboxGitCredentialBindingsStatus(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    providers: readonly GitCredentialProvider[];
+    status: Exclude<SandboxGitCredentialBindingStatus, "active">;
+    reasonCode: string;
+    /** Optional exact active-generation fence for controller-owned deactivation. */
+    expectedGenerations?: Readonly<Partial<Record<GitCredentialProvider, number>>>;
+    /** Optional one-shot sandbox invalidation while all provider rows are locked. */
+    mutateSandbox?: () => Promise<void>;
+  },
+): Promise<SandboxGitCredentialBinding[]> {
+  const providers = [...new Set(input.providers)].sort();
+  if (providers.length === 0) return [];
+  const reasonCode = checkedGitCredentialBindingReason(input.reasonCode);
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const current = await scopedDb
+        .select()
+        .from(schema.sandboxGitCredentialBindings)
+        .where(
+          and(
+            eq(schema.sandboxGitCredentialBindings.workspaceId, input.workspaceId),
+            eq(schema.sandboxGitCredentialBindings.sessionId, input.sessionId),
+            inArray(schema.sandboxGitCredentialBindings.provider, providers),
+          ),
+        )
+        .orderBy(asc(schema.sandboxGitCredentialBindings.provider))
+        .for("update");
+      if (current.length === 0) return [];
+      if (
+        input.expectedGenerations &&
+        ((Object.keys(input.expectedGenerations) as GitCredentialProvider[]).sort().join("\0") !==
+          providers.join("\0") ||
+          current.length !== providers.length ||
+          current.some(
+            (binding) =>
+              binding.status !== "active" ||
+              binding.generation !== input.expectedGenerations?.[binding.provider],
+          ))
+      ) {
+        return [];
+      }
+      await input.mutateSandbox?.();
+      const rows: SandboxGitCredentialBinding[] = [];
+      for (const binding of current) {
+        const changed = binding.status !== input.status || binding.reasonCode !== reasonCode;
+        const [row] = await scopedDb
+          .update(schema.sandboxGitCredentialBindings)
+          .set({
+            status: input.status,
+            reasonCode,
+            generation: changed ? binding.generation + 1 : binding.generation,
+            updatedAt: new Date(),
+          })
+          .where(eq(schema.sandboxGitCredentialBindings.id, binding.id))
+          .returning();
+        if (!row) throw new Error("Failed to update sandbox Git credential binding status");
+        rows.push(mapSandboxGitCredentialBinding(row));
+      }
+      return rows;
+    },
+  );
+}
+
+export type SandboxGitCredentialMutationResult =
+  | { applied: true }
+  | { applied: false; reason: "missing" | "not_active" | "stale_generation" };
+
+/**
+ * Final sandbox mutation fence. Token minting may happen before this call, but
+ * no file write can occur unless every provider row is still active at the
+ * exact generation while all rows are locked in deterministic provider order.
+ */
+export async function withActiveSandboxGitCredentialBindings(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    expectedGenerations: Readonly<Partial<Record<GitCredentialProvider, number>>>;
+  },
+  mutateSandbox: () => Promise<void>,
+): Promise<SandboxGitCredentialMutationResult> {
+  const providers = (Object.keys(input.expectedGenerations) as GitCredentialProvider[]).sort();
+  if (providers.length === 0) return { applied: false, reason: "missing" };
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await scopedDb
+        .select()
+        .from(schema.sandboxGitCredentialBindings)
+        .where(
+          and(
+            eq(schema.sandboxGitCredentialBindings.workspaceId, input.workspaceId),
+            eq(schema.sandboxGitCredentialBindings.sessionId, input.sessionId),
+            inArray(schema.sandboxGitCredentialBindings.provider, providers),
+          ),
+        )
+        .orderBy(asc(schema.sandboxGitCredentialBindings.provider))
+        .for("update");
+      if (rows.length !== providers.length) return { applied: false, reason: "missing" };
+      if (rows.some((row) => row.status !== "active")) {
+        return { applied: false, reason: "not_active" };
+      }
+      if (rows.some((row) => row.generation !== input.expectedGenerations[row.provider])) {
+        return { applied: false, reason: "stale_generation" };
+      }
+      await mutateSandbox();
+      return { applied: true };
+    },
+  );
 }
 
 // ============================================================================
@@ -15886,6 +16403,7 @@ export type EnrollmentRecord = {
   desktopUnavailableReason: string | null;
   allowScreenControl: boolean;
   status: EnrollmentStatus;
+  credentialGeneration: number;
   os: EnrollmentOs;
   arch: string;
   lastSeenAt: string | null;
@@ -15912,6 +16430,7 @@ function mapEnrollment(row: typeof schema.enrollments.$inferSelect): EnrollmentR
     desktopUnavailableReason: row.desktopUnavailableReason ?? null,
     allowScreenControl: row.allowScreenControl,
     status: row.status as EnrollmentStatus,
+    credentialGeneration: Number(row.credentialGeneration),
     os: row.os as EnrollmentOs,
     arch: row.arch,
     lastSeenAt: row.lastSeenAt ? row.lastSeenAt.toISOString() : null,
@@ -15952,8 +16471,10 @@ function mapSandbox(row: typeof schema.sandboxes.$inferSelect): SandboxRecord {
 // Register (or idempotently re-register) a machine. A re-enroll of the SAME
 // (workspace, pubkey) is an UPSERT — it refreshes the consent/OS fields and, if
 // the machine was previously revoked, re-activates it (status->active, revoked_at
-// cleared) — never a duplicate machine row. The agent's ed25519 pubkey is the
-// machine identity; the unique (workspace, pubkey) index is the conflict target.
+// cleared) — never a duplicate machine row. Every conflict is a fresh
+// re-enrollment and atomically advances credential_generation, invalidating every
+// older bearer. The agent's ed25519 pubkey is the machine identity; the unique
+// (workspace, pubkey) index is the conflict target.
 export async function createEnrollment(
   db: Database,
   input: {
@@ -15995,6 +16516,7 @@ export async function createEnrollment(
             // A re-enroll re-activates a previously revoked machine.
             status: "active",
             revokedAt: null,
+            credentialGeneration: sql`${schema.enrollments.credentialGeneration} + 1`,
             updatedAt: new Date(),
           },
         })
@@ -16027,6 +16549,128 @@ export async function getEnrollment(
   });
 }
 
+/**
+ * Runs a short credential-mint callback while holding a shared row lock on one
+ * exact active enrollment generation. Revocation and re-enrollment both update
+ * this row, so they must either commit before the guarded read (the callback is
+ * skipped) or wait until the callback has minted and the transaction commits.
+ * This gives self-refresh a real linearization point instead of allowing a
+ * stateless relay token to be minted after a concurrent revoke committed.
+ */
+export async function withActiveEnrollmentGeneration<T>(
+  db: Database,
+  input: {
+    workspaceId: string;
+    enrollmentId: string;
+    credentialGeneration: number;
+  },
+  fn: (enrollment: EnrollmentRecord) => Promise<T>,
+): Promise<{ matched: false } | { matched: true; value: T }> {
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select()
+      .from(schema.enrollments)
+      .where(
+        and(
+          eq(schema.enrollments.workspaceId, input.workspaceId),
+          eq(schema.enrollments.id, input.enrollmentId),
+          eq(schema.enrollments.status, "active"),
+          eq(schema.enrollments.credentialGeneration, input.credentialGeneration),
+        ),
+      )
+      .for("share")
+      .limit(1);
+    if (!row) {
+      return { matched: false };
+    }
+    return { matched: true, value: await fn(mapEnrollment(row)) };
+  });
+}
+
+/**
+ * Atomically accepts one approved device-code request and mints credentials for
+ * the exact active enrollment generation that approval created.
+ *
+ * The request row is the single-use authorization grant. Holding it FOR UPDATE
+ * across the generation check, callback, and `approved -> consumed` transition
+ * gives concurrent pollers one linearization point: exactly one may mint. The
+ * callback runs inside the transaction, so a failed mint rolls the consume back;
+ * expired, denied, pending, consumed, generationless, stale-generation, revoked,
+ * or identity-mismatched requests fail closed without invoking it.
+ */
+export async function consumeApprovedDeviceEnrollmentRequest<T>(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    requestId: string;
+    now?: Date;
+  },
+  fn: (enrollment: EnrollmentRecord) => Promise<T>,
+): Promise<{ status: "minted"; value: T } | { status: "expired" } | { status: "denied" }> {
+  const now = input.now ?? new Date();
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const [request] = await scopedDb
+        .select()
+        .from(schema.deviceEnrollmentRequests)
+        .where(
+          and(
+            eq(schema.deviceEnrollmentRequests.workspaceId, input.workspaceId),
+            eq(schema.deviceEnrollmentRequests.id, input.requestId),
+          ),
+        )
+        .for("update")
+        .limit(1);
+      if (!request) {
+        return { status: "denied" } as const;
+      }
+      if (request.expiresAt.getTime() <= now.getTime()) {
+        return { status: "expired" } as const;
+      }
+      if (request.status !== "approved" || !request.enrollmentId || !request.credentialGeneration) {
+        return { status: "denied" } as const;
+      }
+
+      const [enrollment] = await scopedDb
+        .select()
+        .from(schema.enrollments)
+        .where(
+          and(
+            eq(schema.enrollments.workspaceId, input.workspaceId),
+            eq(schema.enrollments.id, request.enrollmentId),
+            eq(schema.enrollments.status, "active"),
+            eq(schema.enrollments.credentialGeneration, request.credentialGeneration),
+          ),
+        )
+        .for("share")
+        .limit(1);
+      if (!enrollment || enrollment.pubkey !== request.pubkey) {
+        return { status: "denied" } as const;
+      }
+
+      const value = await fn(mapEnrollment(enrollment));
+      const consumed = await scopedDb
+        .update(schema.deviceEnrollmentRequests)
+        .set({ status: "consumed", updatedAt: now })
+        .where(
+          and(
+            eq(schema.deviceEnrollmentRequests.workspaceId, input.workspaceId),
+            eq(schema.deviceEnrollmentRequests.id, request.id),
+            eq(schema.deviceEnrollmentRequests.status, "approved"),
+          ),
+        )
+        .returning({ id: schema.deviceEnrollmentRequests.id });
+      if (consumed.length !== 1) {
+        throw new Error("Device enrollment request changed while its row lock was held");
+      }
+      return { status: "minted", value } as const;
+    },
+  );
+}
+
 // List a workspace's enrollments, newest first. `status` filters the lifecycle
 // (omit for all; 'active' for the Machines dashboard's live list).
 export async function listEnrollments(
@@ -16052,6 +16696,9 @@ export async function listEnrollments(
 
 // Revoke a machine (uninstall --purge / dashboard revoke). Idempotent: an already
 // -revoked row is a no-op (revoked:false). status->revoked, revoked_at stamped.
+// The same transaction clears every session pointer targeting this enrollment and
+// advances its epoch, so no agent-facing route can keep treating a revoked machine
+// as active after the revoke commits.
 export async function revokeEnrollment(
   db: Database,
   input: {
@@ -16075,9 +16722,94 @@ export async function revokeEnrollment(
           ),
         )
         .returning({ id: schema.enrollments.id });
+      if (rows.length > 0) {
+        await invalidateEnrollmentSessionPointers(scopedDb, {
+          workspaceId: input.workspaceId,
+          enrollmentId: input.enrollmentId,
+        });
+      }
       return { revoked: rows.length > 0 };
     },
   );
+}
+
+// Self-revoke is credential-family scoped, unlike the administrator revoke above.
+// The row is locked before checking generation/status so a concurrent re-enroll
+// cannot slip between validation and mutation. A revoked row is an idempotent
+// success only for the SAME generation (lost-response retry); an old bearer after
+// re-enrollment returns matched:false and cannot revoke the new credential family.
+export async function revokeEnrollmentByGeneration(
+  db: Database,
+  input: {
+    workspaceId: string;
+    enrollmentId: string;
+    credentialGeneration: number;
+  },
+): Promise<{ matched: boolean; revoked: boolean }> {
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({
+        status: schema.enrollments.status,
+        credentialGeneration: schema.enrollments.credentialGeneration,
+      })
+      .from(schema.enrollments)
+      .where(
+        and(
+          eq(schema.enrollments.workspaceId, input.workspaceId),
+          eq(schema.enrollments.id, input.enrollmentId),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    if (!row || Number(row.credentialGeneration) !== input.credentialGeneration) {
+      return { matched: false, revoked: false };
+    }
+    if (row.status === "revoked") {
+      return { matched: true, revoked: false };
+    }
+    if (row.status !== "active") {
+      return { matched: false, revoked: false };
+    }
+    const updated = await scopedDb
+      .update(schema.enrollments)
+      .set({ status: "revoked", revokedAt: new Date(), updatedAt: new Date() })
+      .where(
+        and(
+          eq(schema.enrollments.workspaceId, input.workspaceId),
+          eq(schema.enrollments.id, input.enrollmentId),
+          eq(schema.enrollments.status, "active"),
+          eq(schema.enrollments.credentialGeneration, input.credentialGeneration),
+        ),
+      )
+      .returning({ id: schema.enrollments.id });
+    if (updated.length !== 1) {
+      throw new Error("Enrollment generation changed while row lock was held");
+    }
+    await invalidateEnrollmentSessionPointers(scopedDb, {
+      workspaceId: input.workspaceId,
+      enrollmentId: input.enrollmentId,
+    });
+    return { matched: true, revoked: true };
+  });
+}
+
+async function invalidateEnrollmentSessionPointers(
+  scopedDb: Pick<Database, "execute">,
+  input: { workspaceId: string; enrollmentId: string },
+): Promise<void> {
+  await scopedDb.execute(sql`
+    update sessions
+       set active_sandbox_id = null,
+           active_epoch = active_epoch + 1,
+           updated_at = now()
+     where workspace_id = ${input.workspaceId}
+       and active_sandbox_id in (
+         select id
+           from sandboxes
+          where workspace_id = ${input.workspaceId}
+            and enrollment_id = ${input.enrollmentId}
+       )
+  `);
 }
 
 // Heartbeat liveness cursor: the agent reports it is alive. last_seen_at is read
@@ -16320,6 +17052,7 @@ export type DeviceEnrollmentRequestRecord = {
   approvedAt: string | null;
   enrollmentId: string | null;
   sandboxId: string | null;
+  credentialGeneration: number | null;
   expiresAt: string;
   createdAt: string;
   updatedAt: string;
@@ -16348,6 +17081,8 @@ function mapDeviceEnrollmentRequest(
     approvedAt: row.approvedAt ? row.approvedAt.toISOString() : null,
     enrollmentId: row.enrollmentId ?? null,
     sandboxId: row.sandboxId ?? null,
+    credentialGeneration:
+      row.credentialGeneration == null ? null : Number(row.credentialGeneration),
     expiresAt: row.expiresAt.toISOString(),
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
@@ -16505,8 +17240,10 @@ export async function getPendingDeviceEnrollmentRequestByUserCodeGlobal(
 //     re-read fence + the request stamp stay in ONE txn — semantics unchanged), and
 //   * finalizeEnrollmentByToken calls it inside its OWN txn (no pending row exists
 //     for a stateless token).
-// Idempotent: a re-run for the same (workspace, pubkey) re-activates the existing
-// enrollment (M2 upsert) and REUSES its selfhosted sandbox — never a duplicate.
+// A fresh finalize for the same (workspace, pubkey) re-activates the existing
+// enrollment, atomically increments its credential generation, and REUSES its
+// selfhosted sandbox — never a duplicate. Device-approval retries are intercepted
+// before this helper so replaying one already-approved request does not rotate.
 async function finalizeEnrollmentInScope(
   scopedDb: Database,
   input: {
@@ -16548,6 +17285,7 @@ async function finalizeEnrollmentInScope(
         arch: input.arch,
         status: "active",
         revokedAt: null,
+        credentialGeneration: sql`${schema.enrollments.credentialGeneration} + 1`,
         updatedAt: input.now,
       },
     })
@@ -16640,9 +17378,10 @@ export async function finalizeEnrollmentByToken(
 //   4. stamp the request approved + the consent record (WHO approved WHEN to WHAT)
 //      + the resulting enrollment_id / sandbox_id.
 // IDEMPOTENT: a re-approve of an ALREADY-approved row (same user_code re-submitted)
-// re-runs the enrollment upsert (M2 reactivate semantics) and returns the existing
-// enrollment/sandbox — never a duplicate. An expired / denied / consumed row is a
-// no-op (approved:false). Returns the enrollment + sandbox so the route echoes them.
+// returns the existing enrollment/sandbox WITHOUT re-running the enrollment upsert,
+// so a lost approval response cannot rotate the credential generation. A genuinely
+// fresh request for the same pubkey does run the upsert and rotates. An expired /
+// denied / consumed row is a no-op (approved:false).
 export async function approveDeviceEnrollmentRequest(
   db: Database,
   input: {
@@ -16681,13 +17420,54 @@ export async function approveDeviceEnrollmentRequest(
       if (!pending) {
         return { approved: false, enrollment: null, sandbox: null };
       }
-      // Already terminally approved → idempotent return of the existing rows (re-run
-      // the consent fields in case allow_screen_control changed on re-approve).
       const expired = pending.expiresAt.getTime() <= now.getTime();
-      if (pending.status === "denied" || pending.status === "consumed") {
+      if (expired) {
         return { approved: false, enrollment: null, sandbox: null };
       }
-      if (pending.status === "pending" && expired) {
+      // Already approved → idempotent return of the exact existing rows. Do not run
+      // the finalize upsert again: that operation is the credential-generation
+      // rotation boundary for a genuinely new enrollment request. Generationless
+      // migration-era rows and any identity/generation drift fail closed.
+      if (pending.status === "approved") {
+        if (!pending.enrollmentId || !pending.sandboxId || !pending.credentialGeneration) {
+          return { approved: false, enrollment: null, sandbox: null };
+        }
+        const [existingEnrollment] = await scopedDb
+          .select()
+          .from(schema.enrollments)
+          .where(
+            and(
+              eq(schema.enrollments.workspaceId, input.workspaceId),
+              eq(schema.enrollments.id, pending.enrollmentId),
+            ),
+          )
+          .limit(1);
+        const [existingSandbox] = await scopedDb
+          .select()
+          .from(schema.sandboxes)
+          .where(
+            and(
+              eq(schema.sandboxes.workspaceId, input.workspaceId),
+              eq(schema.sandboxes.id, pending.sandboxId),
+              eq(schema.sandboxes.enrollmentId, pending.enrollmentId),
+            ),
+          )
+          .limit(1);
+        if (
+          !existingEnrollment ||
+          !existingSandbox ||
+          existingEnrollment.pubkey !== pending.pubkey ||
+          Number(existingEnrollment.credentialGeneration) !== pending.credentialGeneration
+        ) {
+          return { approved: false, enrollment: null, sandbox: null };
+        }
+        return {
+          approved: true,
+          enrollment: mapEnrollment(existingEnrollment),
+          sandbox: mapSandbox(existingSandbox),
+        };
+      }
+      if (pending.status === "denied" || pending.status === "consumed") {
         return { approved: false, enrollment: null, sandbox: null };
       }
 
@@ -16720,6 +17500,7 @@ export async function approveDeviceEnrollmentRequest(
           approvedAt: now,
           enrollmentId: enrollment.id,
           sandboxId: sandbox.id,
+          credentialGeneration: enrollment.credentialGeneration,
           updatedAt: now,
         })
         .where(eq(schema.deviceEnrollmentRequests.id, pending.id));
@@ -16761,9 +17542,9 @@ export async function denyDeviceEnrollmentRequest(
 
 // Flip an APPROVED request to CONSUMED once the agent has polled its credentials
 // (single-use). Fenced on status='approved' so a double-poll consumes exactly once;
-// a second poll then re-reads the consumed row and still returns credentials (the
-// agent may legitimately retry the same poll) — the route decides. Returns whether
-// THIS call performed the consume transition.
+// a second poll then observes the consumed row and is denied by the route. Returns
+// whether THIS call performed the consume transition. New credential-minting paths
+// must use consumeApprovedDeviceEnrollmentRequest so mint + consume are atomic.
 export async function consumeDeviceEnrollmentRequest(
   db: Database,
   input: {
@@ -23926,6 +24707,7 @@ function mapSession(
     // rig-less session; frozen at create so a later promote never moves them.
     rigId: row.rigId ?? null,
     rigVersionId: row.rigVersionId ?? null,
+    rigDefaultVariableSetsAuthorized: row.rigDefaultVariableSetsAuthorized,
     firstPartyMcpPermissions: (row.firstPartyMcpPermissions as Permission[] | null) ?? null,
     mcpServers,
     parentSessionId: row.parentSessionId ?? null,
@@ -24060,6 +24842,7 @@ function mapScheduledTask(row: typeof schema.scheduledTasks.$inferSelect): Sched
     variableSetId: row.variableSetId,
     environmentId: row.variableSetId,
     rigId: row.rigId ?? null,
+    rigDefaultVariableSetsAuthorized: row.rigDefaultVariableSetsAuthorized,
     metadata: row.metadata,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),

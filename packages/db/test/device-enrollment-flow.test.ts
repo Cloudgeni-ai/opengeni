@@ -3,6 +3,7 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import postgres from "postgres";
 import {
   approveDeviceEnrollmentRequest,
+  consumeApprovedDeviceEnrollmentRequest,
   consumeDeviceEnrollmentRequest,
   createDeviceEnrollmentRequest,
   denyDeviceEnrollmentRequest,
@@ -11,6 +12,7 @@ import {
   getPendingDeviceEnrollmentRequestByUserCode,
   listEnrollments,
   listSandboxes,
+  withActiveEnrollmentGeneration,
   createDb,
   type Database,
   type DbClient,
@@ -60,7 +62,7 @@ afterAll(async () => {
   await shared?.release();
 }, 180_000);
 
-describe("0025 device-enrollment-requests migration shape", () => {
+describe("device-enrollment-requests migration shape", () => {
   test("the table exists with the consent + lifecycle columns, the partial unique user_code index, and RLS", async () => {
     if (!available) return;
     const cols = await admin<{ column_name: string; is_nullable: string; data_type: string }[]>`
@@ -87,10 +89,20 @@ describe("0025 device-enrollment-requests migration shape", () => {
       "approved_at",
       "enrollment_id",
       "sandbox_id",
+      "credential_generation",
       "expires_at",
     ]) {
       expect(names.has(required)).toBe(true);
     }
+    expect(cols.find((column) => column.column_name === "credential_generation")?.is_nullable).toBe(
+      "YES",
+    );
+    const generationConstraint = await admin<{ definition: string }[]>`
+      SELECT pg_get_constraintdef(oid) AS definition
+        FROM pg_constraint
+       WHERE conname = 'device_enrollment_requests_credential_generation_positive'`;
+    expect(generationConstraint[0]?.definition).toContain("credential_generation");
+    expect(generationConstraint[0]?.definition).toContain("> 0");
     // The partial unique index on user_code (pending-only).
     const idx = await admin<{ indexname: string }[]>`
       SELECT indexname FROM pg_indexes
@@ -119,7 +131,9 @@ describe("0025 device-enrollment-requests migration shape", () => {
     let gone = await admin<{ n: number }[]>`
       SELECT count(*)::int as n FROM information_schema.tables WHERE table_name = 'device_enrollment_requests'`;
     expect(Number(gone[0]!.n)).toBe(0);
-    // UP again: re-run the 0025 SQL body verbatim (re-applies clean — IF NOT EXISTS).
+    // UP again: re-run the 0025 SQL body verbatim (re-applies clean — IF NOT EXISTS),
+    // then the additive 0068 request-generation migration so subsequent DAO tests
+    // exercise the current schema rather than a historical partial chain.
     // Re-running migrate() is a no-op (schema_migrations marks it applied), so apply
     // the file body directly to prove idempotent re-application.
     const { readFileSync } = await import("node:fs");
@@ -131,6 +145,13 @@ describe("0025 device-enrollment-requests migration shape", () => {
       "utf8",
     );
     await admin.unsafe(body);
+    const generationBody = readFileSync(
+      join(here, "..", "drizzle", "0068_device_enrollment_request_generation.sql"),
+      "utf8",
+    );
+    expect(generationBody.startsWith("-- deployment-mode: rolling\n")).toBe(true);
+    expect(generationBody).not.toMatch(/\bUPDATE\s+"?device_enrollment_requests"?/i);
+    await admin.unsafe(generationBody);
     gone = await admin<{ n: number }[]>`
       SELECT count(*)::int as n FROM information_schema.tables WHERE table_name = 'device_enrollment_requests'`;
     expect(Number(gone[0]!.n)).toBe(1);
@@ -209,6 +230,7 @@ describe("device-flow DAOs (start -> approve -> poll-consume + deny + lookups)",
     expect((await listSandboxes(db, workspaceId)).length).toBe(1);
     expect(approved.enrollment!.allowScreenControl).toBe(true);
     expect(approved.enrollment!.hasDisplay).toBe(true);
+    expect(approved.enrollment!.credentialGeneration).toBe(1);
     expect(approved.sandbox!.kind).toBe("selfhosted");
     expect(approved.sandbox!.enrollmentId).toBe(approved.enrollment!.id);
 
@@ -221,6 +243,7 @@ describe("device-flow DAOs (start -> approve -> poll-consume + deny + lookups)",
     expect(reread?.approvedAt).not.toBeNull();
     expect(reread?.enrollmentId).toBe(approved.enrollment!.id);
     expect(reread?.sandboxId).toBe(approved.sandbox!.id);
+    expect(reread?.credentialGeneration).toBe(1);
 
     // Idempotent re-approve (same request) reuses the SAME enrollment + sandbox — no
     // duplicate machine.
@@ -234,6 +257,7 @@ describe("device-flow DAOs (start -> approve -> poll-consume + deny + lookups)",
     });
     expect(reApproved.approved).toBe(true);
     expect(reApproved.enrollment!.id).toBe(approved.enrollment!.id);
+    expect(reApproved.enrollment!.credentialGeneration).toBe(1);
     expect(reApproved.sandbox!.id).toBe(approved.sandbox!.id);
     expect((await listEnrollments(db, workspaceId)).length).toBe(1);
     expect((await listSandboxes(db, workspaceId)).length).toBe(1);
@@ -299,6 +323,238 @@ describe("device-flow DAOs (start -> approve -> poll-consume + deny + lookups)",
     expect(c2.consumed).toBe(false); // already consumed
     const reread = await getDeviceEnrollmentRequestByDeviceCode(db, "dev-code-4");
     expect(reread?.status).toBe("consumed");
+    expect(reread?.credentialGeneration).toBe(1);
+  }, 60_000);
+
+  test("concurrent credential acceptance consumes one request and mints exactly once", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const req = await createDeviceEnrollmentRequest(db, {
+      accountId,
+      workspaceId,
+      deviceCode: "dev-code-concurrent-accept",
+      userCode: "RACE-ONCE",
+      pubkey: "ed25519:CONCURRENT-ACCEPT",
+      expiresAt: new Date(Date.now() + 600_000),
+    });
+    await approveDeviceEnrollmentRequest(db, {
+      accountId,
+      workspaceId,
+      requestId: req.id,
+      allowScreenControl: false,
+      approvedBySubjectId: "u",
+      sandboxName: "concurrent-accept",
+    });
+
+    // Use a second physical pool so this is an authoritative cross-replica row-
+    // lock race rather than two promises serialized by one client connection.
+    const contender = createDb(shared!.appUrl);
+    let mintCallbacks = 0;
+    try {
+      const accept = (candidateDb: Database, winner: string) =>
+        consumeApprovedDeviceEnrollmentRequest(
+          candidateDb,
+          { accountId, workspaceId, requestId: req.id },
+          async () => {
+            mintCallbacks += 1;
+            await Bun.sleep(25);
+            return winner;
+          },
+        );
+      const results = await Promise.all([accept(db, "A"), accept(contender.db, "B")]);
+      expect(results.filter((result) => result.status === "minted")).toHaveLength(1);
+      expect(results.filter((result) => result.status === "denied")).toHaveLength(1);
+      expect(mintCallbacks).toBe(1);
+      expect((await getDeviceEnrollmentRequestByDeviceCode(db, req.deviceCode))?.status).toBe(
+        "consumed",
+      );
+    } finally {
+      await contender.close();
+    }
+  }, 60_000);
+
+  test("credential acceptance denies expired, consumed, and stale request generations", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    let mintCallbacks = 0;
+    const accept = (requestId: string) =>
+      consumeApprovedDeviceEnrollmentRequest(
+        db,
+        { accountId, workspaceId, requestId },
+        async () => {
+          mintCallbacks += 1;
+          return "minted";
+        },
+      );
+
+    const expired = await createDeviceEnrollmentRequest(db, {
+      accountId,
+      workspaceId,
+      deviceCode: "dev-code-accept-expired",
+      userCode: "EXPD-ONCE",
+      pubkey: "ed25519:ACCEPT-EXPIRED",
+      expiresAt: new Date(Date.now() - 1_000),
+    });
+    expect((await accept(expired.id)).status).toBe("expired");
+
+    const first = await createDeviceEnrollmentRequest(db, {
+      accountId,
+      workspaceId,
+      deviceCode: "dev-code-accept-first",
+      userCode: "OLDG-ONCE",
+      pubkey: "ed25519:ACCEPT-GENERATION",
+      expiresAt: new Date(Date.now() + 600_000),
+    });
+    await approveDeviceEnrollmentRequest(db, {
+      accountId,
+      workspaceId,
+      requestId: first.id,
+      allowScreenControl: false,
+      approvedBySubjectId: "u",
+      sandboxName: "accept-generation",
+    });
+    expect((await accept(first.id)).status).toBe("minted");
+    expect((await accept(first.id)).status).toBe("denied");
+
+    const stale = await createDeviceEnrollmentRequest(db, {
+      accountId,
+      workspaceId,
+      deviceCode: "dev-code-accept-stale",
+      userCode: "STAL-ONCE",
+      pubkey: "ed25519:ACCEPT-GENERATION",
+      expiresAt: new Date(Date.now() + 600_000),
+    });
+    await approveDeviceEnrollmentRequest(db, {
+      accountId,
+      workspaceId,
+      requestId: stale.id,
+      allowScreenControl: false,
+      approvedBySubjectId: "u",
+      sandboxName: "accept-generation",
+    });
+    const newest = await createDeviceEnrollmentRequest(db, {
+      accountId,
+      workspaceId,
+      deviceCode: "dev-code-accept-newest",
+      userCode: "NEWG-ONCE",
+      pubkey: "ed25519:ACCEPT-GENERATION",
+      expiresAt: new Date(Date.now() + 600_000),
+    });
+    await approveDeviceEnrollmentRequest(db, {
+      accountId,
+      workspaceId,
+      requestId: newest.id,
+      allowScreenControl: false,
+      approvedBySubjectId: "u",
+      sandboxName: "accept-generation",
+    });
+    expect((await accept(stale.id)).status).toBe("denied");
+    expect(mintCallbacks).toBe(1);
+  }, 60_000);
+
+  test("an exact-generation mint serializes a same-pubkey re-enrollment and leaves the old request stale", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const firstRequest = await createDeviceEnrollmentRequest(db, {
+      accountId,
+      workspaceId,
+      deviceCode: "dev-code-generation-lock-1",
+      userCode: "LOCK-ONE1",
+      pubkey: "ed25519:DEVICE-CODE-GENERATION-LOCK",
+      expiresAt: new Date(Date.now() + 600_000),
+    });
+    const firstApproval = await approveDeviceEnrollmentRequest(db, {
+      accountId,
+      workspaceId,
+      requestId: firstRequest.id,
+      allowScreenControl: false,
+      approvedBySubjectId: "u",
+      sandboxName: "generation-lock",
+    });
+    const stampedFirst = await getDeviceEnrollmentRequestByDeviceCode(db, firstRequest.deviceCode);
+    expect(stampedFirst?.credentialGeneration).toBe(1);
+
+    let enterMint!: () => void;
+    const mintEntered = new Promise<void>((resolve) => {
+      enterMint = resolve;
+    });
+    let releaseMint!: () => void;
+    const mintRelease = new Promise<void>((resolve) => {
+      releaseMint = resolve;
+    });
+    const mint = withActiveEnrollmentGeneration(
+      db,
+      {
+        workspaceId,
+        enrollmentId: firstApproval.enrollment!.id,
+        credentialGeneration: stampedFirst!.credentialGeneration!,
+      },
+      async () => {
+        enterMint();
+        await mintRelease;
+        return "generation-1-minted";
+      },
+    );
+    await mintEntered;
+
+    const secondRequest = await createDeviceEnrollmentRequest(db, {
+      accountId,
+      workspaceId,
+      deviceCode: "dev-code-generation-lock-2",
+      userCode: "LOCK-TWO2",
+      pubkey: "ed25519:DEVICE-CODE-GENERATION-LOCK",
+      expiresAt: new Date(Date.now() + 600_000),
+    });
+    let approvalSettled = false;
+    const secondApproval = approveDeviceEnrollmentRequest(db, {
+      accountId,
+      workspaceId,
+      requestId: secondRequest.id,
+      allowScreenControl: false,
+      approvedBySubjectId: "u",
+      sandboxName: "generation-lock",
+    }).finally(() => {
+      approvalSettled = true;
+    });
+
+    let blocked = false;
+    const deadline = Date.now() + 5_000;
+    while (!blocked && Date.now() < deadline) {
+      const rows = await admin<{ blocked: boolean }[]>`
+        SELECT EXISTS (
+          SELECT 1
+            FROM pg_stat_activity
+           WHERE datname = current_database()
+             AND usename = 'opengeni_app'
+             AND wait_event_type = 'Lock'
+             AND query ILIKE '%enrollments%on conflict%'
+        ) AS blocked`;
+      blocked = rows[0]?.blocked ?? false;
+      if (!blocked) await Bun.sleep(10);
+    }
+    expect(blocked).toBe(true);
+    expect(approvalSettled).toBe(false);
+
+    releaseMint();
+    expect(await mint).toEqual({ matched: true, value: "generation-1-minted" });
+    const approvedSecond = await secondApproval;
+    expect(approvedSecond.enrollment?.id).toBe(firstApproval.enrollment?.id);
+    expect(approvedSecond.enrollment?.credentialGeneration).toBe(2);
+    expect(
+      (await getDeviceEnrollmentRequestByDeviceCode(db, secondRequest.deviceCode))
+        ?.credentialGeneration,
+    ).toBe(2);
+    expect(
+      await withActiveEnrollmentGeneration(
+        db,
+        {
+          workspaceId,
+          enrollmentId: firstApproval.enrollment!.id,
+          credentialGeneration: stampedFirst!.credentialGeneration!,
+        },
+        async () => "must-not-mint",
+      ),
+    ).toEqual({ matched: false });
   }, 60_000);
 
   test("deny: pending -> denied; approve of an expired or denied row is a no-op", async () => {

@@ -6,6 +6,7 @@ import {
   createDb,
   createRigVersion,
   getRigChange,
+  listRigChanges,
   listRigVersions,
   updateRigChangeStatus,
   type DbClient,
@@ -62,14 +63,18 @@ function app() {
 }
 
 function appWithWorkflow(calls: unknown[]) {
+  return appWithRigStart(async (input) => {
+    calls.push(input);
+  });
+}
+
+function appWithRigStart(startRigVerification: (input: unknown) => Promise<void>) {
   return createApp({
     settings,
     db: client.db,
     bus: {} as never,
     workflowClient: {
-      startRigVerification: async (input: unknown) => {
-        calls.push(input);
-      },
+      startRigVerification,
     } as never,
     managedAuth: null,
   } as never);
@@ -182,6 +187,25 @@ describe("rig route permission matrix", () => {
     const change = await proposed.json();
     expect(change.status).toBe("verifying");
     expect(change.baseVersionId).toBe(versionId);
+    const definitionDenied = await app().request(changesPath, {
+      method: "POST",
+      headers: useOnly,
+      body: JSON.stringify({
+        kind: "definition_edit",
+        payload: { setupScript: "manager authored" },
+      }),
+    });
+    expect(definitionDenied.status).toBe(403);
+    const manageOnly = { authorization: await bearer(ws, "user:manager", ["rigs:manage"]) };
+    const definitionAllowed = await app().request(changesPath, {
+      method: "POST",
+      headers: manageOnly,
+      body: JSON.stringify({
+        kind: "definition_edit",
+        payload: { setupScript: "manager authored" },
+      }),
+    });
+    expect(definitionAllowed.status).toBe(201);
 
     // Get change: rigs:use OK.
     expect((await app().request(`${changesPath}/${change.id}`, { headers: useOnly })).status).toBe(
@@ -193,6 +217,7 @@ describe("rig route permission matrix", () => {
       "rig.created",
       "rig.updated",
       "rig.version.activated",
+      "rig.change.proposed",
       "rig.change.proposed",
     ]);
   });
@@ -224,7 +249,7 @@ describe("rig route permission matrix", () => {
     expect(await auditActions(ws.workspaceId, rig.id)).toContain("rig.deleted");
   });
 
-  test("verify retries a failed change with a unique attempt workflow and rejects concurrent verifying", async () => {
+  test("verify retries a failed change and re-ensures the current deterministic attempt", async () => {
     if (!available) return;
     const ws = await freshWorkspace();
     const calls: unknown[] = [];
@@ -248,6 +273,7 @@ describe("rig route permission matrix", () => {
     expect((calls[0] as { workflowId: string }).workflowId).toBe(
       `rig-verification-change-${change.id}-attempt-1`,
     );
+    expect(calls[0]).toMatchObject({ attempt: 1 });
 
     await updateRigChangeStatus(client.db, ws.workspaceId, change.id, {
       status: "failed",
@@ -264,14 +290,16 @@ describe("rig route permission matrix", () => {
     expect((calls[1] as { workflowId: string }).workflowId).toBe(
       `rig-verification-change-${change.id}-attempt-2`,
     );
+    expect(calls[1]).toMatchObject({ attempt: 2 });
     expect((await getRigChange(client.db, ws.workspaceId, change.id))?.status).toBe("verifying");
 
     const duplicate = await http.request(`${base}/${rig.id}/changes/${change.id}/verify`, {
       method: "POST",
       headers: use,
     });
-    expect(duplicate.status).toBe(409);
-    expect(calls).toHaveLength(2);
+    expect(duplicate.status).toBe(202);
+    expect(calls).toHaveLength(3);
+    expect(calls[2]).toEqual(calls[1]);
   });
 
   test("definition_edit promote rejects a stale active base without minting", async () => {
@@ -316,6 +344,96 @@ describe("rig route permission matrix", () => {
     const versions = await listRigVersions(client.db, ws.workspaceId, rig.id);
     expect(versions).toHaveLength(2);
     expect((await getRigChange(client.db, ws.workspaceId, change.id))?.status).toBe("proposed");
+  });
+
+  test("rigs:use cannot promote; a manager promotes a verified setup_append exactly once", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const calls: unknown[] = [];
+    const http = appWithWorkflow(calls);
+    const useOnly = { authorization: await bearer(ws, "user:u", ["rigs:use"]) };
+    const manage = { authorization: await bearer(ws, "user:m", ["rigs:use", "rigs:manage"]) };
+    const base = `/v1/workspaces/${ws.workspaceId}/rigs`;
+    const created = await http.request(base, {
+      method: "POST",
+      headers: manage,
+      body: JSON.stringify({ name: "manager-only", setupScript: "mkdir -p /opt/rig" }),
+    });
+    const rig = await created.json();
+    const proposed = await http.request(`${base}/${rig.id}/changes`, {
+      method: "POST",
+      headers: useOnly,
+      body: JSON.stringify({
+        kind: "setup_append",
+        payload: { command: "touch /opt/rig/tool" },
+      }),
+    });
+    const change = await proposed.json();
+    await updateRigChangeStatus(client.db, ws.workspaceId, change.id, {
+      status: "proposed",
+      verification: { passed: true, checksConfigured: false },
+    });
+    const promotePath = `${base}/${rig.id}/changes/${change.id}/promote`;
+    expect((await http.request(promotePath, { method: "POST", headers: useOnly })).status).toBe(
+      403,
+    );
+    expect(await listRigVersions(client.db, ws.workspaceId, rig.id)).toHaveLength(1);
+
+    const first = await http.request(promotePath, { method: "POST", headers: manage });
+    expect(first.status).toBe(201);
+    const v2 = await first.json();
+    expect(v2.setupScript).toBe("mkdir -p /opt/rig\ntouch /opt/rig/tool");
+    const retry = await http.request(promotePath, { method: "POST", headers: manage });
+    expect(retry.status).toBe(200);
+    expect((await retry.json()).id).toBe(v2.id);
+    expect(await listRigVersions(client.db, ws.workspaceId, rig.id)).toHaveLength(2);
+  });
+
+  test("an idempotent proposal retry repairs a lost Temporal start without duplicating rows", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const starts: unknown[] = [];
+    let failFirst = true;
+    const http = appWithRigStart(async (input) => {
+      starts.push(input);
+      if (failFirst) {
+        failFirst = false;
+        throw new Error("Temporal start response lost");
+      }
+    });
+    const manage = { authorization: await bearer(ws, "user:m", ["rigs:use", "rigs:manage"]) };
+    const base = `/v1/workspaces/${ws.workspaceId}/rigs`;
+    const created = await http.request(base, {
+      method: "POST",
+      headers: manage,
+      body: JSON.stringify({ name: "start-repair" }),
+    });
+    const rig = await created.json();
+    const body = JSON.stringify({
+      kind: "setup_append",
+      payload: { command: "true" },
+      idempotencyKey: "repair-proposal-1",
+    });
+    const first = await http.request(`${base}/${rig.id}/changes`, {
+      method: "POST",
+      headers: manage,
+      body,
+    });
+    expect(first.status).toBe(500);
+    const [stranded] = await listRigChanges(client.db, ws.workspaceId, rig.id);
+    expect(stranded?.status).toBe("verifying");
+    expect(stranded?.verification?.attempt).toBe(1);
+
+    const repaired = await http.request(`${base}/${rig.id}/changes`, {
+      method: "POST",
+      headers: manage,
+      body,
+    });
+    expect(repaired.status).toBe(200);
+    expect((await repaired.json()).id).toBe(stranded!.id);
+    expect(await listRigChanges(client.db, ws.workspaceId, rig.id)).toHaveLength(1);
+    expect(starts).toHaveLength(2);
+    expect(starts[0]).toEqual(starts[1]);
   });
 
   test("workspace default rig setter is rigs:manage gated, validates rigId, and clears", async () => {
