@@ -10,6 +10,7 @@ import {
   composeAgentInstructions,
   coreInstructions,
   rigInstructions,
+  rigSetupArtifactExecutionCommand,
   rigSetupScriptCommand,
   runRigSetupHook,
   type RigSetupDescriptor,
@@ -83,12 +84,28 @@ describe("rigSetupScriptCommand (M3)", () => {
     expect(command).toContain("__OPENGENI_RIG_SETUP_SKIPPED__");
     // The script is hard-killed by coreutils timeout (NOT bash -e), and the
     // marker is touched only on rc 0.
-    expect(command).toContain('timeout -k 5s "${__OG_RIG_TIMEOUT_SECS}s" bash "$__OG_RIG_SCRIPT"');
+    expect(command).toContain("timeout -k 5s '600s' bash \"$__OG_RIG_SCRIPT\"");
     expect(command).toContain('if [ "$__OG_RIG_RC" -eq 0 ]; then touch "$__OG_RIG_MARKER"; fi');
     // First attach is atomically claimed with a mkdir lockdir.
     expect(command).toContain('if mkdir "$__OG_RIG_LOCK" 2>/dev/null; then');
-    // The user script rides a quoted heredoc so it is executed verbatim.
-    expect(command).toContain("echo hi");
+    // The user script is transported without a delimiter-sensitive heredoc.
+    expect(command).toContain(Buffer.from("echo hi", "utf8").toString("base64"));
+    expect(command).not.toContain("__OPENGENI_RIG_SETUP_SCRIPT_EOF__");
+  });
+
+  test("cold setup and verification can share delimiter-safe exact artifact execution", async () => {
+    const script = [
+      "echo before",
+      "__OPENGENI_RIG_SETUP_SCRIPT_EOF__",
+      "printf '%s' 'after delimiter'",
+    ].join("\n");
+    const artifactCommand = rigSetupArtifactExecutionCommand(script, 2_000);
+    const coldCommand = rigSetupScriptCommand(script, "version-delimiter", 2_000, "/tmp/rig");
+    expect(coldCommand).toContain(artifactCommand);
+    expect(artifactCommand).not.toContain(script);
+    expect(artifactCommand).toContain(Buffer.from(script, "utf8").toString("base64"));
+    expect(artifactCommand).toContain('base64 -d > "$__OG_RIG_SCRIPT" || { __OG_RIG_RC=$?;');
+    expect(rigSetupArtifactExecutionCommand("sleep 1", 150)).toContain("timeout -k 5s '0.15s'");
   });
 
   test("hard timeout kills setup and leaves the marker absent", async () => {
@@ -202,6 +219,19 @@ describe("runRigSetupHook (M3)", () => {
         },
       }),
     ).rejects.toThrow(/did not finish within the rig setup timeout \(2000ms\)/);
+    expect(events.at(-1)!.type).toBe("rig.setup.failed");
+  });
+
+  test("coreutils timeout exit is reported as a timeout, not a generic nonzero", async () => {
+    const events: Array<{ type: string; payload: any }> = [];
+    const { session } = fakeSession({ status: 124, output: "" });
+    await expect(
+      runRigSetupHook(session as any, {
+        environment: {},
+        rigSetup: rigSetup({ timeoutMs: 2_000 }),
+        onRuntimeEvent: (event) => events.push(event as any),
+      }),
+    ).rejects.toThrow(/rig setup timeout \(2000ms\)/);
     expect(events.at(-1)!.type).toBe("rig.setup.failed");
   });
 

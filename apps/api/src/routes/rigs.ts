@@ -12,7 +12,7 @@ import {
 } from "@opengeni/db";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { requireAccessGrant } from "@opengeni/core";
+import { requireAccessGrant, requirePermission } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
   activateRigVersionForApi,
@@ -21,7 +21,7 @@ import {
   deleteRigForApi,
   listRigChangesForApi,
   listRigVersionsForApi,
-  promoteVerifiedDefinitionEditChangeForApi,
+  promoteVerifiedRigChangeForApi,
   proposeRigChangeForApi,
   requireRigChangeForApi,
   requireRigForApi,
@@ -36,7 +36,10 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
     const startedAt = new Date().toISOString();
     let change;
     try {
-      change = await beginRigChangeVerificationAttempt(db, workspaceId, changeId, { startedAt });
+      change = await beginRigChangeVerificationAttempt(db, workspaceId, changeId, {
+        startedAt,
+        allowAlreadyVerifying: true,
+      });
     } catch (error) {
       if (
         error instanceof RigChangeAlreadyVerifyingError ||
@@ -46,11 +49,14 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
       }
       throw error;
     }
-    const attempt =
-      typeof change.verification?.attempt === "number" ? change.verification.attempt : Date.now();
+    const attempt = change.verification?.attempt;
+    if (typeof attempt !== "number" || !Number.isInteger(attempt) || attempt < 1) {
+      throw new HTTPException(500, { message: "rig verification attempt was not persisted" });
+    }
     await workflowClient.startRigVerification({
       workspaceId,
       changeId,
+      attempt,
       workflowId: `rig-verification-change-${changeId}-attempt-${attempt}`,
     });
     return change;
@@ -133,17 +139,26 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
     );
   });
 
-  // Propose a change (rigs:use — the additive, agent-trusted path). The change
-  // is recorded `proposed`; verification + auto-merge (setup_append) and the
-  // promote gate (definition_edit) land in M4.
+  // rigs:use may propose and verify, but never activate. Both change kinds land
+  // verified/awaiting-manager on green.
   app.post("/v1/workspaces/:workspaceId/rigs/:rigId/changes", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "rigs:use");
+    const grant = await requireAccessGrant(c, deps, workspaceId);
     const rig = await requireRigForApi(db, workspaceId, c.req.param("rigId"));
     const request = ProposeRigChangeRequest.parse(await c.req.json());
-    const change = await proposeRigChangeForApi({ db }, grant, rig, request);
-    const verifying = await startChangeVerification(workspaceId, change.id);
-    return c.json(verifying, 201);
+    requirePermission(grant, request.kind === "definition_edit" ? "rigs:manage" : "rigs:use");
+    const { change, created } = await proposeRigChangeForApi({ db }, grant, rig, request);
+    // A retry after the workflow start became ambiguous repairs the exact
+    // DB-committed attempt. A retry after a terminal/verified outcome is a pure
+    // read: never create a fresh attempt implicitly.
+    const shouldEnsureWorkflow =
+      created ||
+      change.status === "verifying" ||
+      (change.status === "proposed" && change.verification?.passed !== true);
+    const result = shouldEnsureWorkflow
+      ? await startChangeVerification(workspaceId, change.id)
+      : change;
+    return created ? c.json(result, 201) : c.json(result, 200);
   });
 
   app.get("/v1/workspaces/:workspaceId/rigs/:rigId/changes/:changeId", async (c) => {
@@ -172,8 +187,8 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
     const grant = await requireAccessGrant(c, deps, workspaceId, "rigs:manage");
     const rig = await requireRigForApi(db, workspaceId, c.req.param("rigId"));
     const change = await requireRigChangeForApi(db, workspaceId, rig.id, c.req.param("changeId"));
-    const promoted = await promoteVerifiedDefinitionEditChangeForApi({ db }, grant, rig, change);
-    return c.json(promoted.version, 201);
+    const promoted = await promoteVerifiedRigChangeForApi({ db }, grant, rig, change);
+    return promoted.promoted ? c.json(promoted.version, 201) : c.json(promoted.version, 200);
   });
 
   app.post("/v1/workspaces/:workspaceId/rigs/:rigId/verify", async (c) => {
@@ -182,6 +197,9 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
     const rig = await requireRigForApi(db, workspaceId, c.req.param("rigId"));
     if (!rig.activeVersion) {
       return c.json({ error: "rig has no active version" }, 422);
+    }
+    if (rig.activeVersion.checks.length === 0) {
+      return c.json({ error: "rig has no checks configured" }, 422);
     }
     await startVersionVerification(workspaceId, rig.activeVersion.id);
     return c.json({ ok: true, versionId: rig.activeVersion.id }, 202);

@@ -7,6 +7,7 @@ import {
   createDb,
   createRig,
   createRigChange,
+  createRigChangeWithIdempotencyKey,
   createRigVersion,
   createRigVersionForChangePromotion,
   deleteRig,
@@ -20,6 +21,10 @@ import {
   listRigs,
   RigActiveVersionChangedError,
   RigChangeTransitionError,
+  RigChangeIdempotencyConflictError,
+  RigVerificationAttemptChangedError,
+  beginRigChangeVerificationAttempt,
+  settleRigChangeVerificationAttempt,
   updateRig,
   updateRigChangeStatus,
   type Database,
@@ -125,6 +130,7 @@ describe("rig CRUD lifecycle", () => {
     expect(listed).toHaveLength(1);
     expect(listed[0]!.activeVersion?.version).toBe(1);
     expect(listed[0]!.versionCount).toBe(1);
+    expect(listed[0]!.activeVersionHealth?.checkHealth).toBe("unknown");
 
     expect(await countRigs(db, ws.workspaceId)).toBe(1);
   });
@@ -272,6 +278,10 @@ describe("rig change lifecycle", () => {
       payload: { command: "apt-get install -y jq", note: "need jq" },
       proposedBy: "session:s1",
     });
+    await updateRigChangeStatus(db, ws.workspaceId, change.id, {
+      status: "proposed",
+      verification: { passed: true },
+    });
     expect(change.status).toBe("proposed");
     expect(change.kind).toBe("setup_append");
 
@@ -325,6 +335,10 @@ describe("rig change lifecycle", () => {
       payload: { command: "touch /opt/tool" },
       proposedBy: "session:s1",
     });
+    await updateRigChangeStatus(db, ws.workspaceId, change.id, {
+      status: "proposed",
+      verification: { passed: true },
+    });
     await createRigVersion(
       db,
       ws.workspaceId,
@@ -363,6 +377,10 @@ describe("rig change lifecycle", () => {
       payload: { setupScript: "echo v2" },
       proposedBy: "user:m",
     });
+    await updateRigChangeStatus(db, ws.workspaceId, change.id, {
+      status: "proposed",
+      verification: { passed: true },
+    });
 
     const promote = () =>
       createRigVersionForChangePromotion(db, ws.workspaceId, rig.id, change.id, {
@@ -370,21 +388,104 @@ describe("rig change lifecycle", () => {
         setupScript: "echo v2",
         changelog: "verified edit",
       });
-    const results = await Promise.allSettled([promote(), promote()]);
-    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
-    expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
+    const results = await Promise.all([promote(), promote()]);
+    expect(results.filter((result) => result.promoted)).toHaveLength(1);
+    expect(results.filter((result) => !result.promoted)).toHaveLength(1);
 
     const versions = await listRigVersions(db, ws.workspaceId, rig.id);
     expect(versions).toHaveLength(2);
     const stored = await getRigChange(db, ws.workspaceId, change.id);
     expect(stored?.status).toBe("merged");
-    expect(stored?.resultVersionId).toBe(
-      (
-        results.find((result) => result.status === "fulfilled") as PromiseFulfilledResult<{
-          version: { id: string };
-        }>
-      ).value.version.id,
+    expect(stored?.resultVersionId).toBe(results[0]!.version.id);
+  });
+
+  test("proposal idempotency returns one row and rejects key reuse for different content", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const rig = await createRig(db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      name: "proposal-idempotency",
+    });
+    const input = {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      rigId: rig.id,
+      baseVersionId: rig.activeVersion!.id,
+      kind: "setup_append" as const,
+      payload: { command: "true" },
+      proposedBy: "session:s1",
+      idempotencyKey: "proposal-retry-1",
+    };
+    const [first, retry] = await Promise.all([
+      createRigChangeWithIdempotencyKey(db, input),
+      createRigChangeWithIdempotencyKey(db, input),
+    ]);
+    expect(first.change.id).toBe(retry.change.id);
+    expect([first.created, retry.created].sort()).toEqual([false, true]);
+    expect(await listRigChanges(db, ws.workspaceId, rig.id)).toHaveLength(1);
+    await expect(
+      createRigChangeWithIdempotencyKey(db, {
+        ...input,
+        payload: { command: "false" },
+      }),
+    ).rejects.toBeInstanceOf(RigChangeIdempotencyConflictError);
+  });
+
+  test("verification settlement is fenced to the current attempt", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const rig = await createRig(db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      name: "attempt-fence",
+    });
+    const change = await createRigChange(db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      rigId: rig.id,
+      baseVersionId: rig.activeVersion!.id,
+      kind: "setup_append",
+      payload: { command: "true" },
+    });
+    const attempt1 = await beginRigChangeVerificationAttempt(db, ws.workspaceId, change.id, {
+      startedAt: "2026-07-10T00:00:00.000Z",
+    });
+    expect(attempt1.verification?.attempt).toBe(1);
+    await settleRigChangeVerificationAttempt(db, ws.workspaceId, change.id, 1, {
+      status: "failed",
+      verification: { passed: false, error: "cancelled" },
+    });
+    const attempt2 = await beginRigChangeVerificationAttempt(db, ws.workspaceId, change.id, {
+      startedAt: "2026-07-10T00:01:00.000Z",
+    });
+    expect(attempt2.verification?.attempt).toBe(2);
+    await expect(
+      settleRigChangeVerificationAttempt(db, ws.workspaceId, change.id, 1, {
+        status: "proposed",
+        verification: { passed: true },
+      }),
+    ).rejects.toBeInstanceOf(RigVerificationAttemptChangedError);
+    expect((await getRigChange(db, ws.workspaceId, change.id))?.status).toBe("verifying");
+    expect((await getRig(db, ws.workspaceId, rig.id))?.activeVersion?.id).toBe(
+      rig.activeVersion!.id,
     );
+
+    await shared!.admin`
+      update rig_changes
+      set status = 'verifying', verification = '{}'::jsonb
+      where id = ${change.id}`;
+    const repaired = await beginRigChangeVerificationAttempt(db, ws.workspaceId, change.id, {
+      startedAt: "2026-07-10T00:02:00.000Z",
+      allowAlreadyVerifying: true,
+    });
+    expect(repaired.verification?.attempt).toBe(1);
+    const ensuredAgain = await beginRigChangeVerificationAttempt(db, ws.workspaceId, change.id, {
+      startedAt: "2026-07-10T00:03:00.000Z",
+      allowAlreadyVerifying: true,
+    });
+    expect(ensuredAgain.verification?.attempt).toBe(1);
+    expect(ensuredAgain.verification?.startedAt).toBe("2026-07-10T00:02:00.000Z");
   });
 
   test("list/get expose active version verification health", async () => {
@@ -394,12 +495,21 @@ describe("rig change lifecycle", () => {
       accountId: ws.accountId,
       workspaceId: ws.workspaceId,
       name: "health-unknown",
+      initialVersion: { checks: [{ name: "ready", command: "true" }] },
+    });
+    const noChecks = await createRig(db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      name: "health-not-configured",
     });
     const verifiedRig = await createRig(db, {
       accountId: ws.accountId,
       workspaceId: ws.workspaceId,
       name: "health-passing",
-      initialVersion: { setupScript: "mkdir -p /opt/health" },
+      initialVersion: {
+        setupScript: "mkdir -p /opt/health",
+        checks: [{ name: "tool", command: "test -f /opt/health/tool" }],
+      },
     });
     const change = await createRigChange(db, {
       accountId: ws.accountId,
@@ -416,7 +526,16 @@ describe("rig change lifecycle", () => {
         startedAt: "2026-07-08T00:00:00.000Z",
         finishedAt: "2026-07-08T00:01:00.000Z",
         passed: true,
-        checkResults: [],
+        checksConfigured: true,
+        checkResults: [
+          {
+            name: "tool",
+            command: "test -f /opt/health/tool",
+            exitCode: 0,
+            status: "passed",
+            durationMs: 1,
+          },
+        ],
       },
     });
     const promoted = await createRigVersionForChangePromotion(
@@ -427,12 +546,17 @@ describe("rig change lifecycle", () => {
       {
         expectedActiveVersionId: verifiedRig.activeVersion!.id,
         setupScript: "mkdir -p /opt/health\ntouch /opt/health/tool",
+        checks: [{ name: "tool", command: "test -f /opt/health/tool" }],
       },
     );
 
     const listed = await listRigs(db, ws.workspaceId);
     expect(listed.find((rig) => rig.id === neverVerified.id)?.activeVersionHealth).toEqual({
       checkHealth: "unknown",
+      lastVerifiedAt: null,
+    });
+    expect(listed.find((rig) => rig.id === noChecks.id)?.activeVersionHealth).toEqual({
+      checkHealth: "not_configured",
       lastVerifiedAt: null,
     });
     expect(listed.find((rig) => rig.id === verifiedRig.id)?.activeVersion?.id).toBe(

@@ -5479,8 +5479,8 @@ const RIG_SETUP_SKIPPED_SENTINEL = "__OPENGENI_RIG_SETUP_SKIPPED__";
  *      coreutils `timeout` (NOT `bash -e` — the script opts into `set -e`
  *      itself if it wants), then captures the exit code and `touch`es the marker
  *      ONLY on success (exit 0) so a failed/timed-out setup re-runs next turn.
- * The heredoc delimiter is quoted, so the script content is executed verbatim
- * with no host-side expansion.
+ * The setup artifact is base64-transported into a temp file, so its bytes are
+ * executed verbatim with no host-side expansion or heredoc delimiter hazard.
  */
 export function rigSetupScriptCommand(
   script: string,
@@ -5503,11 +5503,7 @@ export function rigSetupScriptCommand(
     '  if mkdir "$__OG_RIG_LOCK" 2>/dev/null; then',
     "    trap 'rm -rf \"$__OG_RIG_LOCK\"' EXIT",
     `    if [ -f "$__OG_RIG_MARKER" ]; then printf '%s\\n' ${shellQuote(RIG_SETUP_SKIPPED_SENTINEL)}; exit 0; fi`,
-    '__OG_RIG_SCRIPT="$(mktemp)"',
-    "cat > \"$__OG_RIG_SCRIPT\" <<'__OPENGENI_RIG_SETUP_SCRIPT_EOF__'",
-    script,
-    "__OPENGENI_RIG_SETUP_SCRIPT_EOF__",
-    '    timeout -k 5s "${__OG_RIG_TIMEOUT_SECS}s" bash "$__OG_RIG_SCRIPT"',
+    rigSetupArtifactExecutionCommand(script, timeoutMs),
     "__OG_RIG_RC=$?",
     '    rm -f "$__OG_RIG_SCRIPT"',
     '    if [ "$__OG_RIG_RC" -eq 0 ]; then touch "$__OG_RIG_MARKER"; fi',
@@ -5524,6 +5520,26 @@ export function rigSetupScriptCommand(
     '  if [ ! -d "$__OG_RIG_LOCK" ]; then continue; fi',
     '  rmdir "$__OG_RIG_LOCK" 2>/dev/null || true',
     "done",
+  ].join("\n");
+}
+
+/**
+ * Materialize and execute one immutable rig setup artifact. Both cold runtime
+ * setup and clean verification use these exact lines, so delimiter-like input,
+ * shell state, `exit`, traps, and `pipefail` have identical child-Bash
+ * semantics. Base64 is transport only; the decoded bytes are the promoted
+ * setupScript bytes without interpolation or a heredoc delimiter collision.
+ */
+export function rigSetupArtifactExecutionCommand(script: string, timeoutMs: number): string {
+  const encoded = Buffer.from(script, "utf8").toString("base64");
+  // Coreutils accepts fractional seconds. Preserve the millisecond budget so a
+  // short configured timeout or the final slice of the aggregate verification
+  // deadline is not silently rounded up to a full second.
+  const timeoutSecs = Math.max(1, Math.ceil(timeoutMs)) / 1000;
+  return [
+    '__OG_RIG_SCRIPT="$(mktemp)" || exit $?',
+    `printf '%s' ${shellQuote(encoded)} | base64 -d > "$__OG_RIG_SCRIPT" || { __OG_RIG_RC=$?; rm -f "$__OG_RIG_SCRIPT"; exit "$__OG_RIG_RC"; }`,
+    `timeout -k 5s '${timeoutSecs}s' bash "$__OG_RIG_SCRIPT"`,
   ].join("\n");
 }
 
@@ -5601,7 +5617,8 @@ export async function runRigSetupHook(
       output.length > RIG_SETUP_OUTPUT_TAIL_LIMIT
         ? output.slice(-RIG_SETUP_OUTPUT_TAIL_LIMIT)
         : output;
-    const reason = stillRunning
+    const timedOut = stillRunning || exitCode === 124 || exitCode === 137;
+    const reason = timedOut
       ? `did not finish within the rig setup timeout (${rigSetup.timeoutMs}ms)`
       : exitCode === null
         ? "did not report an exit code"

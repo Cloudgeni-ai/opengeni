@@ -55,9 +55,11 @@ export function RigOverview({
     ? null
     : (rig.activeVersionHealth?.checkHealth ??
       (latestVerification
-        ? latestVerification.passed === false
-          ? "failing"
-          : "passing"
+        ? latestVerification.passed === true
+          ? "passing"
+          : latestVerification.passed === false
+            ? "failing"
+            : "unknown"
         : "unknown"));
 
   return (
@@ -105,7 +107,7 @@ export function RigOverview({
             <h3 className="text-sm font-medium">Health checks</h3>
             {health ? <RigStatusChip view={rigCheckHealthView(health)} /> : null}
           </div>
-          {canUse ? (
+          {canUse && versionHasChecks(active) ? (
             <Button
               type="button"
               variant="ghost"
@@ -134,8 +136,8 @@ export function RigOverview({
 
         {!versionHasChecks(active) ? (
           <p className="text-xs text-fg-subtle">
-            This version declares no checks. Add checks via a definition edit to make the machine
-            self-verifying.
+            No checks configured. This version has no health signal; add checks via a definition
+            edit before treating it as healthy.
           </p>
         ) : latestVerification ? (
           <div className="rounded-md border border-border/70 bg-bg/20 p-2.5">
