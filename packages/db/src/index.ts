@@ -19895,9 +19895,10 @@ export type SessionAttemptInterruptionSettlement = {
  * boundary: after this transaction it has no inference, user-visible output,
  * or workspace-persistence authority. Fenced/idempotent cleanup and telemetry
  * may still finish. This may race the workflow's logical settlement transaction
- * in either order; both use the same session-first lock order and require the
- * durable interruption. Temporal separately waits for the activity promise to
- * terminate before the workflow dispatches its replacement.
+ * in either order; both use the canonical control -> workspace -> session ->
+ * exact turn -> exact attempt lock order and require the durable interruption.
+ * Temporal separately waits for the activity promise to terminate before the
+ * workflow dispatches its replacement.
  */
 export async function markSessionAttemptQuiesced(
   db: Database,
@@ -19913,31 +19914,52 @@ export async function markSessionAttemptQuiesced(
   },
 ): Promise<SessionEvent[]> {
   return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
-    await lockWorkspaceInferenceControl(scopedDb, input.workspaceId, "share");
-    const [session] = await scopedDb
-      .select()
-      .from(schema.sessions)
-      .where(
-        and(
-          eq(schema.sessions.workspaceId, input.workspaceId),
-          eq(schema.sessions.id, input.sessionId),
-        ),
-      )
-      .for("update")
-      .limit(1);
-    const [attempt] = await scopedDb
-      .select()
+    await lockSessionEventWriteRows(scopedDb, {
+      workspaceId: input.workspaceId,
+      controlLock: "share",
+      sessionIds: [],
+    });
+    // The attempt's turn identity is immutable. Read it only to discover the
+    // exact suffix, then lock and revalidate every ownership edge below.
+    const [attemptPreview] = await scopedDb
+      .select({ turnId: schema.sessionTurnAttempts.turnId })
       .from(schema.sessionTurnAttempts)
       .where(
         and(
           eq(schema.sessionTurnAttempts.workspaceId, input.workspaceId),
-          eq(schema.sessionTurnAttempts.sessionId, input.sessionId),
           eq(schema.sessionTurnAttempts.id, input.attemptId),
-          eq(schema.sessionTurnAttempts.temporalWorkflowId, input.temporalWorkflowId),
         ),
       )
-      .for("update")
       .limit(1);
+    const locks = await lockSessionEventWriteRows(scopedDb, {
+      workspaceId: input.workspaceId,
+      controlLock: "already_locked",
+      workspaceLock: "already_locked",
+      sessionIds: [input.sessionId],
+      turnIds: attemptPreview ? [attemptPreview.turnId] : [],
+      attemptIds: attemptPreview ? [input.attemptId] : [],
+    });
+    const session = locks.sessions[0];
+    const turn = locks.turns[0];
+    const attempt = locks.attempts[0];
+    if (
+      !session ||
+      !turn ||
+      !attempt ||
+      session.temporalWorkflowId !== input.temporalWorkflowId ||
+      turn.accountId !== session.accountId ||
+      turn.sessionId !== session.id ||
+      turn.temporalWorkflowId !== input.temporalWorkflowId ||
+      attempt.accountId !== session.accountId ||
+      attempt.sessionId !== session.id ||
+      attempt.turnId !== turn.id ||
+      attempt.executionGeneration !== turn.executionGeneration ||
+      attempt.temporalWorkflowId !== input.temporalWorkflowId
+    ) {
+      throw new SessionControlInvariantError(
+        `Attempt ${input.attemptId} cannot acknowledge quiescence without its session ownership`,
+      );
+    }
     const [interruption] = attempt
       ? await scopedDb
           .select({
@@ -19955,11 +19977,6 @@ export async function markSessionAttemptQuiesced(
           .orderBy(asc(schema.sessionAttemptInterruptions.requestedAt))
           .limit(1)
       : [];
-    if (!session || !attempt) {
-      throw new SessionControlInvariantError(
-        `Attempt ${input.attemptId} cannot acknowledge quiescence without its session ownership`,
-      );
-    }
     if (!interruption) {
       if (input.allowUninterrupted) return [];
       throw new SessionControlInvariantError(

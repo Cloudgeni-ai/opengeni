@@ -19,6 +19,7 @@ import {
   canonicalSessionCommandHash,
   createDb,
   getOrCreateSessionSystemUpdateOutbox,
+  markSessionAttemptQuiesced,
   mutateSessionControlInTransaction,
   QueueCommandConflictError,
   recoverSessionDispatch,
@@ -221,6 +222,38 @@ async function seedRecording(fixture: RunningFixture): Promise<string> {
     )
   `;
   return recordingId;
+}
+
+async function seedPendingInterruption(fixture: RunningFixture): Promise<void> {
+  const [receipt] = await admin<{ id: string }[]>`
+    insert into session_command_receipts (
+      account_id, workspace_id, actor_type, actor_subject_id, action,
+      target_session_id, target_turn_id, operation_key, canonical_request_hash
+    ) values (
+      ${fixture.accountId}, ${fixture.workspaceId}, 'human', 'ope-63-race',
+      'session.queue.steer', ${fixture.sessionId}, ${fixture.turnId},
+      ${crypto.randomUUID()}, 'ope-63-quiescence-race'
+    )
+    returning id
+  `;
+  await admin`
+    insert into session_attempt_interruptions (
+      account_id, workspace_id, session_id, operation_id, attempt_id,
+      kind, control_revision
+    ) values (
+      ${fixture.accountId}, ${fixture.workspaceId}, ${fixture.sessionId}, ${receipt!.id},
+      ${fixture.attemptId}, 'steer', 1
+    )
+  `;
+}
+
+async function quiescenceWriter(fixture: RunningFixture): Promise<unknown> {
+  return await markSessionAttemptQuiesced(db, {
+    workspaceId: fixture.workspaceId,
+    sessionId: fixture.sessionId,
+    attemptId: fixture.attemptId,
+    temporalWorkflowId: `session-${fixture.sessionId}`,
+  });
 }
 
 async function activityWriter(
@@ -810,6 +843,30 @@ describe("OPE-63 canonical session-event lock order", () => {
         );
         await assertCommittedSequence(activityFirst, 2);
       }
+    }
+  }, 180_000);
+
+  test("serializes the quiescence event writer with every generic writer in both arrival orders", async () => {
+    for (const generic of genericWriters) {
+      const genericFirst = await seedRunningSession();
+      await seedPendingInterruption(genericFirst);
+      await raceInOrder(
+        generic.eventType,
+        async () => await generic.write(genericFirst),
+        async () => await quiescenceWriter(genericFirst),
+      );
+      const genericFirstEvents = await assertCommittedSequence(genericFirst, 2);
+      expect(genericFirstEvents.map((event) => event.type)).toContain("session.queue.changed");
+
+      const quiescenceFirst = await seedRunningSession();
+      await seedPendingInterruption(quiescenceFirst);
+      await raceInOrder(
+        "session.queue.changed",
+        async () => await quiescenceWriter(quiescenceFirst),
+        async () => await generic.write(quiescenceFirst),
+      );
+      const quiescenceFirstEvents = await assertCommittedSequence(quiescenceFirst, 2);
+      expect(quiescenceFirstEvents.map((event) => event.type)).toContain("session.queue.changed");
     }
   }, 180_000);
 

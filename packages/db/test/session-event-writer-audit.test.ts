@@ -43,6 +43,10 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 3,
     contract: "canonical",
   },
+  "packages/db/src/index.ts#markSessionAttemptQuiesced": {
+    inserts: 1,
+    contract: "canonical",
+  },
   "packages/db/src/index.ts#settleSessionAttemptInterruptions": {
     inserts: 1,
     contract: "canonical",
