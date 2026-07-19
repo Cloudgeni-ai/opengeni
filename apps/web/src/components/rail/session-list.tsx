@@ -65,8 +65,6 @@ import {
   buildPinnedRailSections,
   groupSessionsForRail,
   mergeSessionForRail,
-  nodeIsActive,
-  recencyGroupFor,
   relativeTimeLabel,
   visibleForestRows,
   visibleTreeRows,
