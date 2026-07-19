@@ -147,6 +147,42 @@ describe("lazy provisioning synthetic manifest", () => {
     expect(execCmds.some((cmd) => cmd.includes("/var/opengeni/rig-setup-ver-9.done"))).toBe(true);
   });
 
+  test("runOwnedSandboxSetup routes lifecycle commands through the attempt cancellation fence", async () => {
+    const settings = testSettings({ sandboxBackend: "modal", webSearchEnabled: false });
+    const environment = { HOME: "/workspace" };
+    const agent = buildOpenGeniAgent(settings, [], {
+      model: new ScriptedModel([]),
+      sandboxEnvironment: environment,
+      rigSetup: {
+        rigId: "rig-1",
+        rigName: "dev-machine",
+        versionId: "ver-cancellable",
+        script: "sleep 60",
+        timeoutMs: 60_000,
+      },
+    });
+    const backend = {
+      state: { manifest: buildManifest(settings, [], environment) },
+      exec: async () => {
+        throw new Error("lifecycle command bypassed the cancellation fence");
+      },
+    };
+    const commands: string[] = [];
+
+    await runOwnedSandboxSetup(agent, backend as never, backend as never, {
+      settings,
+      environment,
+      commandRunner: async (session, args) => {
+        expect(session).toBe(backend);
+        commands.push(args.cmd);
+        return { exitCode: 0, output: "" };
+      },
+    });
+
+    expect(commands).toHaveLength(1);
+    expect(commands[0]).toContain("sleep 60");
+  });
+
   // REGRESSION (caught live on staging 2026-07-08): the SDK's FilesystemCapability
   // calls session.createEditor() SYNCHRONOUSLY at tool-BIND time (every turn, before
   // any tool runs) and throws "Filesystem sandbox sessions must provide createEditor()"

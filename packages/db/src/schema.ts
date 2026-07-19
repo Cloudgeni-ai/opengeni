@@ -1153,6 +1153,12 @@ export const sessionTurnAttempts = pgTable(
     startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
     closedAt: timestamp("closed_at", { withTimezone: true }),
+    // The cancelled activity writes this after losing inference, user-visible
+    // output, and workspace-persistence authority. Fenced/idempotent cleanup
+    // and telemetry may still finish; Temporal independently waits for physical
+    // activity termination. Queue clients use this durable receipt to
+    // distinguish cancellation cleanup from ordinary worker-capacity queueing.
+    quiescedAt: timestamp("quiesced_at", { withTimezone: true }),
   },
   (table) => ({
     workspaceAccount: foreignKey({

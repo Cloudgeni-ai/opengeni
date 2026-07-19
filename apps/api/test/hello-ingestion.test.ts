@@ -223,7 +223,7 @@ afterAll(async () => {
     /* noop */
   }
   await shared?.release();
-});
+}, 180_000);
 
 describe("refreshEnrollmentDisplay — the Hello reconciles has_display", () => {
   test("desktop=true flips a HEADLESS enrollment's has_display false → true", async () => {

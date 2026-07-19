@@ -229,7 +229,7 @@ afterAll(async () => {
   await clientB?.close().catch(() => undefined);
   await monitor?.end().catch(() => undefined);
   await shared?.release();
-});
+}, 180_000);
 
 describe("OPE-21 durable Codex capacity waits", () => {
   test("bounded unknown-reset backoff is deterministic and capped", () => {

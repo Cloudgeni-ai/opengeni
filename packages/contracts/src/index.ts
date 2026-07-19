@@ -2218,6 +2218,15 @@ export type ComposerDraft = z.infer<typeof ComposerDraft>;
 export const SessionQueueSnapshot = z.object({
   version: z.number().int().nonnegative(),
   effectiveControl: EffectiveSessionControl,
+  /**
+   * True while saved queued work is waiting for an interrupted predecessor to
+   * reach durable quiescence: no more inference, user-visible output, or
+   * workspace-persistence authority. Temporal still waits for physical
+   * activity termination before dispatch. This is distinct from ordinary
+   * capacity queueing and remains true if the original Steer row is reordered
+   * or removed while another prompt is waiting.
+   */
+  stoppingPreviousAttempt: z.boolean(),
   items: z.array(SessionTurn),
 });
 export type SessionQueueSnapshot = z.infer<typeof SessionQueueSnapshot>;
@@ -4043,6 +4052,9 @@ export const GitDiffRequest = z.object({
   path: z.string().default(""), // repo root
   // diff selectors, mutually exclusive precedence: refs > staged > worktree
   staged: z.boolean().default(false), // --cached (index vs HEAD)
+  // Workspace review includes after-images that ordinary `git diff` omits.
+  // Explicit so commit/staged consumers keep native Git semantics by default.
+  includeUntracked: z.boolean().default(false),
   fromRef: z.string().optional(),
   toRef: z.string().optional(),
   pathspec: z.array(z.string()).default([]),

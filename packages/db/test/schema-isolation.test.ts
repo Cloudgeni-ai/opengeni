@@ -25,8 +25,10 @@ import { migrate, runMigrations } from "../src/migrate";
 // embedded leg also pre-creates opengeni_app so the migration grant blocks run
 // and a non-owner insert can prove dedicated-schema app-role privileges.
 
-const CONTAINER = "ogbuild-pg-schema-iso";
-const PORT = 55471;
+// Fixed Docker listeners stay above Linux's default ephemeral client-port range;
+// the container name binds the listener contract across worktrees.
+const PORT = 61442;
+const CONTAINER = `ogbuild-pg-schema-iso-${PORT}`;
 const PASSWORD = "x";
 const APP_PASSWORD = "apppw";
 const ADMIN_URL = `postgres://postgres:${PASSWORD}@127.0.0.1:${PORT}/postgres`;
@@ -39,7 +41,7 @@ function docker(args: string[]): string {
 
 function removeContainer(): void {
   try {
-    docker(["rm", "-f", CONTAINER]);
+    docker(["rm", "-f", "-v", CONTAINER]);
   } catch {
     // already gone
   }

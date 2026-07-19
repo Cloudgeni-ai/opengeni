@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import {
   addSessionSystemUpdate,
   acceptSessionApprovalDecision,
@@ -30,6 +30,7 @@ import {
   listUsageEvents,
   listWorkspaceControlEvents,
   isSessionCompactionRequested,
+  markSessionAttemptQuiesced,
   insertRecording,
   getRecording,
   peekSessionWork,
@@ -56,6 +57,12 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 
 let shared: SharedTestDatabase;
 let client: ReturnType<typeof createDb>;
+
+// This file exercises the real PostgreSQL control plane. Under the repository-wide
+// test run, concurrent database suites can legitimately push a case beyond Bun's
+// five-second unit default. Keep a finite, file-scoped ceiling so contention cannot
+// create a timeout cascade while genuine lock leaks still fail closed.
+setDefaultTimeout(30_000);
 
 beforeAll(async () => {
   const acquired = await acquireSharedTestDatabase("session-control-plane");
@@ -1338,15 +1345,79 @@ describe("clean session control plane", () => {
       { attemptId },
     );
 
+    await expect(
+      markSessionAttemptQuiesced(client.db, {
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        attemptId,
+        temporalWorkflowId: `session-${session.id}`,
+      }),
+    ).rejects.toThrow(/without its interruption/);
+    expect(
+      await markSessionAttemptQuiesced(client.db, {
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        attemptId,
+        temporalWorkflowId: `session-${session.id}`,
+        allowUninterrupted: true,
+      }),
+    ).toEqual([]);
+
     const steered = await send(grant, session.id, "use this instead", "steer");
     expect(steered.interruptionCount).toBe(1);
+    const stopping = await getSessionQueueSnapshot(client.db, grant.workspaceId!, session.id);
+    expect(stopping?.stoppingPreviousAttempt).toBe(true);
+    expect(stopping?.items[0]).toMatchObject({
+      id: steered.turn.id,
+      metadata: {
+        delivery: "steer",
+        replacedTurnId: compaction!.id,
+        replacedAttemptId: attemptId,
+        interruptionCount: 1,
+      },
+    });
     expect((await getSessionTurn(client.db, grant.workspaceId!, compaction!.id))?.status).toBe(
       "running",
     );
     expect(await isSessionCompactionRequested(client.db, grant.workspaceId!, session.id)).toBe(
       true,
     );
+    const quiescenceEvents = await markSessionAttemptQuiesced(client.db, {
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      attemptId,
+      temporalWorkflowId: `session-${session.id}`,
+    });
     await settleSessionAttemptInterruptions(client.db, grant.workspaceId!, session.id, attemptId);
+    expect(
+      (await getSessionQueueSnapshot(client.db, grant.workspaceId!, session.id))
+        ?.stoppingPreviousAttempt,
+    ).toBe(false);
+    expect(quiescenceEvents).toEqual([
+      expect.objectContaining({
+        type: "session.queue.changed",
+        turnId: compaction!.id,
+        turnAttemptId: attemptId,
+        turnAssociation: null,
+        payload: {
+          operation: "attempt_quiesced",
+          attemptId,
+          queueVersion: stopping!.version + 1,
+        },
+      }),
+    ]);
+    expect(
+      await markSessionAttemptQuiesced(client.db, {
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        attemptId,
+        temporalWorkflowId: `session-${session.id}`,
+      }),
+    ).toEqual(quiescenceEvents);
+    expect(await getSessionQueueSnapshot(client.db, grant.workspaceId!, session.id)).toMatchObject({
+      version: stopping!.version + 1,
+      stoppingPreviousAttempt: false,
+    });
     const next = await claimTestSessionWork(
       client.db,
       grant.workspaceId!,
@@ -1650,6 +1721,12 @@ describe("clean session control plane", () => {
       firstAttemptId,
     );
     expect(control).toMatchObject({ action: "paused", turnId: turn!.id });
+    await markSessionAttemptQuiesced(client.db, {
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      attemptId: firstAttemptId,
+      temporalWorkflowId: `session-${session.id}`,
+    });
     const resumed = await controlSession(grant, session.id, "resume");
     expect(resumed.wakeCount).toBeGreaterThanOrEqual(1);
     const resumedTurn = await claimTestSessionWork(

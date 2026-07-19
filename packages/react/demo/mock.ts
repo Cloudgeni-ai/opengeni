@@ -80,6 +80,15 @@ import type { MachinesResponse } from "../src/machines";
 const WORKSPACE_ID = "11111111-2222-4333-8444-555555555555";
 export const MANAGER_SESSION_ID = "3f6e1a2b-4c5d-4e6f-8a9b-0c1d2e3f4a5b";
 const WORKER_SESSION_ID = "7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d";
+let nextDemoUuid = 0;
+
+/** Stable UUIDs keep screenshots deterministic and work in Vite's module
+ *  evaluation context, where the browser-only `crypto.randomUUID` API is not
+ *  guaranteed to exist. */
+function demoUuid(): string {
+  nextDemoUuid += 1;
+  return `00000000-0000-4000-8000-${String(nextDemoUuid).padStart(12, "0")}`;
+}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -445,6 +454,7 @@ export class MockOpenGeniClient implements SessionClientLike {
     return {
       version: this.queueVersions.get(sessionId) ?? 0,
       effectiveControl: this.effectiveControl(sessionId),
+      stoppingPreviousAttempt: false,
       items: this.sessionTurns(sessionId).filter((turn) => turn.status === "queued"),
     };
   }
@@ -460,9 +470,9 @@ export class MockOpenGeniClient implements SessionClientLike {
 
   private receipt(action: string, turnId: string | null) {
     return {
-      id: crypto.randomUUID(),
+      id: demoUuid(),
       action,
-      operationKey: crypto.randomUUID(),
+      operationKey: demoUuid(),
       targetSessionId: MANAGER_SESSION_ID,
       targetTurnId: turnId,
       appliedControlRevision: 1,
@@ -949,7 +959,7 @@ export class MockOpenGeniClient implements SessionClientLike {
   ): Promise<PackInstallation> {
     const now = new Date().toISOString();
     const installation: PackInstallation = {
-      id: crypto.randomUUID(),
+      id: demoUuid(),
       accountId: ACCOUNT_ID,
       workspaceId: WORKSPACE_ID,
       packId,
@@ -1813,10 +1823,10 @@ const CLIENT_CONFIG: ClientConfig = {
 function fabricateTurn(sessionId: string, position: number, prompt: string): SessionTurn {
   const now = new Date(Date.now() - (10 - position) * 60_000).toISOString();
   return {
-    id: crypto.randomUUID(),
+    id: demoUuid(),
     workspaceId: WORKSPACE_ID,
     sessionId,
-    triggerEventId: crypto.randomUUID(),
+    triggerEventId: demoUuid(),
     temporalWorkflowId: `wf-${sessionId.slice(0, 8)}`,
     status: "queued",
     source: "user",
@@ -1843,7 +1853,7 @@ function fabricateTurn(sessionId: string, position: number, prompt: string): Ses
 function fabricateGoal(sessionId: string): SessionGoal {
   const now = new Date().toISOString();
   return {
-    id: crypto.randomUUID(),
+    id: demoUuid(),
     accountId: ACCOUNT_ID,
     workspaceId: WORKSPACE_ID,
     sessionId,
@@ -1870,7 +1880,7 @@ function fabricateEnvironment(
 ): WorkspaceEnvironment {
   const now = new Date().toISOString();
   return {
-    id: crypto.randomUUID(),
+    id: demoUuid(),
     accountId: ACCOUNT_ID,
     workspaceId: WORKSPACE_ID,
     name,
@@ -1916,7 +1926,7 @@ const DEVOPS_PACK: CapabilityPack = fabricatePack({
 function fabricateWorkspace(name: string): Workspace {
   const now = new Date().toISOString();
   return {
-    id: crypto.randomUUID(),
+    id: demoUuid(),
     accountId: ACCOUNT_ID,
     name,
     slug: name.toLowerCase().replace(/[^a-z0-9]+/g, "-"),
@@ -2002,7 +2012,7 @@ function scheduledTask(
 ): ScheduledTask {
   const now = new Date().toISOString();
   return {
-    id: crypto.randomUUID(),
+    id: demoUuid(),
     accountId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
     workspaceId: WORKSPACE_ID,
     name,
