@@ -60,7 +60,8 @@ pub struct InputPolicy {
 ///
 /// `ready` (when `Some`) is fired once the FIRST real frame has been captured AND
 /// forwarded to the relay ring, so the owner's mint is gated on a serveable channel.
-/// It is only passed on the FIRST run — a reconnect re-enters with `ready = None`.
+/// The sender remains in the caller-owned option across retryable transport errors
+/// and is consumed only after a real frame is forwarded.
 ///
 /// # Errors
 ///
@@ -70,7 +71,7 @@ pub async fn run(
     desktop: &Arc<dyn DesktopBackend>,
     channel: &mut RelayChannel,
     policy: InputPolicy,
-    ready: Option<ReadyTx>,
+    ready: &mut Option<ReadyTx>,
 ) -> StreamResult<()> {
     run_with_interval(desktop, channel, policy, DEFAULT_FRAME_INTERVAL, ready).await
 }
@@ -88,16 +89,18 @@ pub async fn run_with_interval(
     channel: &mut RelayChannel,
     policy: InputPolicy,
     interval: Duration,
-    ready: Option<ReadyTx>,
+    ready: &mut Option<ReadyTx>,
 ) -> StreamResult<()> {
     // First frame: retry transient capture failures against Xvfb readiness (the X
     // server can still be settling right after `desktop_ensure` probed the display)
-    // rather than skipping the frame. Only the FIRST run carries `ready`; a reconnect
-    // resumes the steady-state loop directly.
-    if let Some(ready) = ready {
+    // rather than skipping the frame. Once readiness fires, reconnects resume the
+    // steady-state loop directly; a pre-ready transport loss retains the sender.
+    if ready.is_some() {
         capture_and_forward_first_frame(desktop, channel).await?;
         // The first real frame is now buffered in the relay ring — signal ready.
-        let _ = ready.send(());
+        if let Some(ready) = ready.take() {
+            let _ = ready.send(());
+        }
     }
 
     let mut ticker = tokio::time::interval(interval);
@@ -130,7 +133,10 @@ pub async fn run_with_interval(
                             tracing::trace!("dropping desktop input: screen-control not consented");
                         }
                     }
-                    Some(RelayMessage::Close(_)) | None => return Ok(()),
+                    Some(RelayMessage::Close(_)) => return Ok(()),
+                    None => return Err(StreamError::Transport(
+                        "relay closed without a typed StreamClose".to_string(),
+                    )),
                     // A raw frame or open/ack on a desktop channel is unexpected;
                     // ignore defensively (desktop input is typed, not opaque bytes).
                     Some(_) => {}
@@ -268,12 +274,13 @@ mod tests {
             frames
         });
 
+        let mut ready = None;
         let pump = run_with_interval(
             &desktop,
             &mut channel,
             InputPolicy { allow_input: true },
             Duration::from_millis(10),
-            None,
+            &mut ready,
         );
         // Bound the pump; we only need a couple frames + the inject to land.
         let _ = tokio::time::timeout(Duration::from_secs(2), pump).await;
@@ -328,12 +335,13 @@ mod tests {
                 .ok();
         });
 
+        let mut ready = None;
         let pump = run_with_interval(
             &desktop,
             &mut channel,
             InputPolicy { allow_input: false },
             Duration::from_secs(1), // long interval: no capture noise
-            None,
+            &mut ready,
         );
         let _ = tokio::time::timeout(Duration::from_secs(2), pump).await;
         let _ = relay.await;
@@ -389,6 +397,7 @@ mod tests {
         let mut channel =
             RelayChannel::with_transport(desktop_channel_config(), Box::new(agent_side));
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let mut ready = Some(ready_tx);
 
         // The pump borrows locals, so drive it inline (not spawned). A long interval
         // means it never produces a SECOND frame; the relay (unbounded mock) is held
@@ -399,7 +408,7 @@ mod tests {
             &mut channel,
             InputPolicy { allow_input: false },
             Duration::from_secs(3600), // no steady-state ticks: isolate the first frame
-            Some(ready_tx),
+            &mut ready,
         );
         tokio::select! {
             _ = pump => panic!("the long-interval pump should not return on its own"),
@@ -428,13 +437,14 @@ mod tests {
         let mut channel =
             RelayChannel::with_transport(desktop_channel_config(), Box::new(agent_side));
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let mut ready = Some(ready_tx);
 
         let pump = run_with_interval(
             &desktop,
             &mut channel,
             InputPolicy { allow_input: false },
             Duration::from_secs(3600),
-            Some(ready_tx),
+            &mut ready,
         );
         tokio::select! {
             _ = pump => panic!("the long-interval pump should not return on its own"),
@@ -485,18 +495,22 @@ mod tests {
         let mut channel =
             RelayChannel::with_transport(desktop_channel_config(), Box::new(agent_side));
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let mut ready = Some(ready_tx);
 
         let err = run_with_interval(
             &desktop,
             &mut channel,
             InputPolicy { allow_input: false },
             Duration::from_secs(3600),
-            Some(ready_tx),
+            &mut ready,
         )
         .await
         .expect_err("a never-settling display must error the first-frame barrier");
         assert!(matches!(err, StreamError::Platform(_)), "got {err:?}");
-        // Readiness was never fired (the sender was dropped with the pump).
+        // Readiness was never fired. The hub retains it only across retryable
+        // transport errors; this typed platform error is terminal, so model the
+        // hub task ending by dropping the retained sender before observing closure.
+        drop(ready);
         assert!(
             ready_rx.await.is_err(),
             "readiness must NOT fire when the first frame never lands"

@@ -3,6 +3,7 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import postgres from "postgres";
 import {
   approveDeviceEnrollmentRequest,
+  consumeApprovedDeviceEnrollmentRequest,
   consumeDeviceEnrollmentRequest,
   createDeviceEnrollmentRequest,
   denyDeviceEnrollmentRequest,
@@ -323,6 +324,132 @@ describe("device-flow DAOs (start -> approve -> poll-consume + deny + lookups)",
     const reread = await getDeviceEnrollmentRequestByDeviceCode(db, "dev-code-4");
     expect(reread?.status).toBe("consumed");
     expect(reread?.credentialGeneration).toBe(1);
+  }, 60_000);
+
+  test("concurrent credential acceptance consumes one request and mints exactly once", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const req = await createDeviceEnrollmentRequest(db, {
+      accountId,
+      workspaceId,
+      deviceCode: "dev-code-concurrent-accept",
+      userCode: "RACE-ONCE",
+      pubkey: "ed25519:CONCURRENT-ACCEPT",
+      expiresAt: new Date(Date.now() + 600_000),
+    });
+    await approveDeviceEnrollmentRequest(db, {
+      accountId,
+      workspaceId,
+      requestId: req.id,
+      allowScreenControl: false,
+      approvedBySubjectId: "u",
+      sandboxName: "concurrent-accept",
+    });
+
+    // Use a second physical pool so this is an authoritative cross-replica row-
+    // lock race rather than two promises serialized by one client connection.
+    const contender = createDb(shared!.appUrl);
+    let mintCallbacks = 0;
+    try {
+      const accept = (candidateDb: Database, winner: string) =>
+        consumeApprovedDeviceEnrollmentRequest(
+          candidateDb,
+          { accountId, workspaceId, requestId: req.id },
+          async () => {
+            mintCallbacks += 1;
+            await Bun.sleep(25);
+            return winner;
+          },
+        );
+      const results = await Promise.all([accept(db, "A"), accept(contender.db, "B")]);
+      expect(results.filter((result) => result.status === "minted")).toHaveLength(1);
+      expect(results.filter((result) => result.status === "denied")).toHaveLength(1);
+      expect(mintCallbacks).toBe(1);
+      expect((await getDeviceEnrollmentRequestByDeviceCode(db, req.deviceCode))?.status).toBe(
+        "consumed",
+      );
+    } finally {
+      await contender.close();
+    }
+  }, 60_000);
+
+  test("credential acceptance denies expired, consumed, and stale request generations", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    let mintCallbacks = 0;
+    const accept = (requestId: string) =>
+      consumeApprovedDeviceEnrollmentRequest(
+        db,
+        { accountId, workspaceId, requestId },
+        async () => {
+          mintCallbacks += 1;
+          return "minted";
+        },
+      );
+
+    const expired = await createDeviceEnrollmentRequest(db, {
+      accountId,
+      workspaceId,
+      deviceCode: "dev-code-accept-expired",
+      userCode: "EXPD-ONCE",
+      pubkey: "ed25519:ACCEPT-EXPIRED",
+      expiresAt: new Date(Date.now() - 1_000),
+    });
+    expect((await accept(expired.id)).status).toBe("expired");
+
+    const first = await createDeviceEnrollmentRequest(db, {
+      accountId,
+      workspaceId,
+      deviceCode: "dev-code-accept-first",
+      userCode: "OLDG-ONCE",
+      pubkey: "ed25519:ACCEPT-GENERATION",
+      expiresAt: new Date(Date.now() + 600_000),
+    });
+    await approveDeviceEnrollmentRequest(db, {
+      accountId,
+      workspaceId,
+      requestId: first.id,
+      allowScreenControl: false,
+      approvedBySubjectId: "u",
+      sandboxName: "accept-generation",
+    });
+    expect((await accept(first.id)).status).toBe("minted");
+    expect((await accept(first.id)).status).toBe("denied");
+
+    const stale = await createDeviceEnrollmentRequest(db, {
+      accountId,
+      workspaceId,
+      deviceCode: "dev-code-accept-stale",
+      userCode: "STAL-ONCE",
+      pubkey: "ed25519:ACCEPT-GENERATION",
+      expiresAt: new Date(Date.now() + 600_000),
+    });
+    await approveDeviceEnrollmentRequest(db, {
+      accountId,
+      workspaceId,
+      requestId: stale.id,
+      allowScreenControl: false,
+      approvedBySubjectId: "u",
+      sandboxName: "accept-generation",
+    });
+    const newest = await createDeviceEnrollmentRequest(db, {
+      accountId,
+      workspaceId,
+      deviceCode: "dev-code-accept-newest",
+      userCode: "NEWG-ONCE",
+      pubkey: "ed25519:ACCEPT-GENERATION",
+      expiresAt: new Date(Date.now() + 600_000),
+    });
+    await approveDeviceEnrollmentRequest(db, {
+      accountId,
+      workspaceId,
+      requestId: newest.id,
+      allowScreenControl: false,
+      approvedBySubjectId: "u",
+      sandboxName: "accept-generation",
+    });
+    expect((await accept(stale.id)).status).toBe("denied");
+    expect(mintCallbacks).toBe(1);
   }, 60_000);
 
   test("an exact-generation mint serializes a same-pubkey re-enrollment and leaves the old request stale", async () => {

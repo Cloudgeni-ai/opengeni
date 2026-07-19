@@ -316,8 +316,8 @@ describe("M5 device-flow happy path: start -> approve -> poll -> EnrollmentCrede
     expect(verified!.credentialGeneration).toBe(1);
     expect(verified!.subjectPrefix).toBe(creds.subjectPrefix);
 
-    // A lost authorized response may be retried while the ORIGINAL device-code
-    // TTL remains live. The consumed row stays bound to the same generation.
+    // The device-code grant is single-use: a concurrent/lost-response retry cannot
+    // mint a second bearer after the request was consumed.
     const retryWithinTtl = await app.request("/v1/enrollments/device/poll", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -328,11 +328,8 @@ describe("M5 device-flow happy path: start -> approve -> poll -> EnrollmentCrede
       state: string;
       credentials?: EnrollmentCredentials;
     };
-    expect(retried.state).toBe("authorized");
-    expect(
-      (await verifyEnrollmentBearer(SIGNING_SECRET, retried.credentials!.bearer))
-        ?.credentialGeneration,
-    ).toBe(1);
+    expect(retried.state).toBe("denied");
+    expect(retried.credentials).toBeUndefined();
 
     // Consumed is not an expiry bypass: retries stop at the original request TTL.
     await admin`
@@ -345,6 +342,46 @@ describe("M5 device-flow happy path: start -> approve -> poll -> EnrollmentCrede
       body: JSON.stringify({ deviceCode: start.deviceCode }),
     });
     expect(((await retryAfterTtl.json()) as { state: string }).state).toBe("expired");
+  }, 90_000);
+
+  test("two concurrent polls accept one approved request generation exactly once", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const app = appFor();
+    const start = (await (
+      await app.request("/v1/enrollments/device/start", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ publicKey: "ed25519:CONCURRENT-POLL", workspaceId }),
+      })
+    ).json()) as { deviceCode: string; userCode: string };
+    expect(
+      (
+        await app.request(`/v1/workspaces/${workspaceId}/enrollments/device/approve`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${await bearer(accountId, workspaceId, ["enrollments:manage"])}`,
+          },
+          body: JSON.stringify({ userCode: start.userCode, allowScreenControl: false }),
+        })
+      ).status,
+    ).toBe(201);
+
+    const poll = async () =>
+      (await (
+        await app.request("/v1/enrollments/device/poll", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ deviceCode: start.deviceCode }),
+        })
+      ).json()) as { state: string; credentials?: EnrollmentCredentials };
+    const results = await Promise.all([poll(), poll()]);
+    expect(results.map((result) => result.state).sort()).toEqual(["authorized", "denied"]);
+    expect(results.filter((result) => result.credentials !== undefined)).toHaveLength(1);
+    const [row] = await admin<{ status: string }[]>`
+      SELECT status FROM device_enrollment_requests WHERE device_code = ${start.deviceCode}`;
+    expect(row?.status).toBe("consumed");
   }, 90_000);
 
   test("approved and generationless device codes fail closed before credential mint", async () => {

@@ -40,10 +40,16 @@ use tokio::sync::{mpsc, oneshot};
 use crate::backoff::ChannelBackoff;
 use crate::channel::{ChannelConfig, RelayChannel, SharedRelayCredentials};
 use crate::framebuffer_pump::{self, InputPolicy};
-use crate::pty_pump::{self, PtyCommand, PtyControlTx};
+use crate::pty_pump::{self, PtyCommand, PtyControlTx, PtyIo, PtyPumpExit};
+use crate::StreamResult;
 
 /// The control-channel buffer per PTY (write/resize/close commands).
 const PTY_COMMAND_BUFFER: usize = 32;
+
+/// Local PTY termination remains observable while a relay registration is in
+/// backoff or dialing. This is deliberately short relative to the 30s reconnect
+/// cap while still avoiding a busy poll of the portable-pty child handle.
+const PTY_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// How long `register_pty`/`register_desktop` wait for the spawned pump to confirm
 /// it is LIVE and has buffered its first real byte(s)/frame before giving up. The
@@ -280,26 +286,60 @@ fn spawn_pty_pump(
     ready: oneshot::Sender<()>,
 ) {
     tokio::spawn(async move {
-        // The readiness signal is fired by the pump on its FIRST run only; a
-        // reconnect re-enters the pump with `None`.
         let mut ready = Some(ready);
         let mut backoff = ChannelBackoff::standard();
+        let mut io = match PtyIo::start(&mut process).await {
+            Ok(io) => io,
+            Err(error) => {
+                tracing::error!(%error, "failed to start process-owned PTY IO");
+                let _ = process.kill();
+                if let Ok(mut map) = ptys.lock() {
+                    map.remove(&pty_id);
+                }
+                return;
+            }
+        };
         loop {
-            match pty_pump::run(&mut process, &mut channel, &mut commands, ready.take()).await {
-                Ok(()) => {
-                    // Clean PTY exit: tear the channel down with PROCESS_EXIT.
+            match pty_pump::run(
+                &mut process,
+                &mut io,
+                &mut channel,
+                &mut commands,
+                &mut ready,
+            )
+            .await
+            {
+                Ok(PtyPumpExit::ProcessExited) => {
                     channel
                         .close(v1::StreamCloseReason::ProcessExit, "pty exited")
                         .await;
                     break;
                 }
+                Ok(PtyPumpExit::UserClosed) => {
+                    channel
+                        .close(v1::StreamCloseReason::Normal, "pty closed")
+                        .await;
+                    break;
+                }
+                Ok(PtyPumpExit::RemoteClosed) => break,
                 Err(e) if e.retryable() => {
                     tracing::warn!(error = %e, "pty relay channel dropped; reconnecting");
-                    if channel.reconnect(backoff.next_delay()).await.is_err() {
-                        // The owner gave up (rejected open); stop the pump.
-                        break;
+                    match reconnect_pty_until_ready(
+                        &mut channel,
+                        &mut backoff,
+                        &mut process,
+                        &mut io,
+                        &mut commands,
+                    )
+                    .await
+                    {
+                        Ok(None) => {}
+                        Ok(Some(_terminal)) => break,
+                        Err(error) => {
+                            tracing::error!(%error, "pty relay reconnect terminal error");
+                            break;
+                        }
                     }
-                    backoff.reset();
                 }
                 Err(e) => {
                     tracing::error!(error = %e, "pty pump terminal error");
@@ -308,6 +348,7 @@ fn spawn_pty_pump(
             }
         }
         let _ = process.kill();
+        io.shutdown().await;
         if let Ok(mut map) = ptys.lock() {
             map.remove(&pty_id);
         }
@@ -323,12 +364,10 @@ fn spawn_desktop_pump(
     ready: oneshot::Sender<()>,
 ) {
     tokio::spawn(async move {
-        // The readiness signal is fired by the pump on its FIRST run only (after the
-        // first frame is captured + forwarded); a reconnect re-enters with `None`.
         let mut ready = Some(ready);
         let mut backoff = ChannelBackoff::standard();
         loop {
-            match framebuffer_pump::run(&desktop, &mut channel, policy, ready.take()).await {
+            match framebuffer_pump::run(&desktop, &mut channel, policy, &mut ready).await {
                 Ok(()) => {
                     channel
                         .close(v1::StreamCloseReason::Normal, "desktop closed")
@@ -337,10 +376,12 @@ fn spawn_desktop_pump(
                 }
                 Err(e) if e.retryable() => {
                     tracing::warn!(error = %e, "desktop relay channel dropped; reconnecting");
-                    if channel.reconnect(backoff.next_delay()).await.is_err() {
+                    if let Err(error) =
+                        reconnect_until_ready(&mut channel, &mut backoff, "desktop").await
+                    {
+                        tracing::error!(%error, "desktop relay reconnect terminal error");
                         break;
                     }
-                    backoff.reset();
                 }
                 Err(e) => {
                     tracing::error!(error = %e, "desktop pump terminal error");
@@ -349,6 +390,88 @@ fn spawn_desktop_pump(
             }
         }
     });
+}
+
+/// The reconnect seam shared by PTY and desktop supervisors. Production uses
+/// `RelayChannel`; tests use a scripted target to prove repeated transport/dial
+/// failures remain retryable while protocol/open rejection is terminal.
+#[async_trait]
+trait ReconnectTarget {
+    async fn reconnect_target(&mut self, delay: Duration) -> StreamResult<()>;
+}
+
+#[async_trait]
+impl ReconnectTarget for RelayChannel {
+    async fn reconnect_target(&mut self, delay: Duration) -> StreamResult<()> {
+        self.reconnect(delay).await
+    }
+}
+
+/// Retries transport/redial failures indefinitely with bounded full-jitter
+/// backoff. A successful registration resets the window; typed protocol/open
+/// rejection remains terminal.
+async fn reconnect_until_ready<T: ReconnectTarget + Send>(
+    target: &mut T,
+    backoff: &mut ChannelBackoff,
+    kind: &str,
+) -> StreamResult<()> {
+    loop {
+        match target.reconnect_target(backoff.next_delay()).await {
+            Ok(()) => {
+                backoff.reset();
+                return Ok(());
+            }
+            Err(error) if error.retryable() => {
+                tracing::warn!(%error, kind, attempt = backoff.attempt(), "relay redial failed; retrying");
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+/// PTY reconnect supervision also continues servicing out-of-band commands. A
+/// user can write, resize, or close the same process while the relay is down;
+/// command handling never consumes its persistent reader/writer workers.
+async fn reconnect_pty_until_ready<T: ReconnectTarget + Send>(
+    channel: &mut T,
+    backoff: &mut ChannelBackoff,
+    process: &mut PtyProcess,
+    io: &mut PtyIo,
+    commands: &mut mpsc::Receiver<PtyCommand>,
+) -> StreamResult<Option<PtyPumpExit>> {
+    let mut exit_poll = tokio::time::interval(PTY_EXIT_POLL_INTERVAL);
+    exit_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        let reconnect = channel.reconnect_target(backoff.next_delay());
+        tokio::pin!(reconnect);
+        loop {
+            tokio::select! {
+                result = &mut reconnect => {
+                    match result {
+                        Ok(()) => {
+                            backoff.reset();
+                            return Ok(None);
+                        }
+                        Err(error) if error.retryable() => {
+                            tracing::warn!(%error, attempt = backoff.attempt(), "pty relay redial failed; retrying");
+                            break;
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+                command = commands.recv(), if io.commands_open() => {
+                    if let Some(exit) = io.handle_command(process, command).await {
+                        return Ok(Some(exit));
+                    }
+                }
+                _ = exit_poll.tick() => {
+                    if process.try_exit_code().is_some() || io.output_closed() {
+                        return Ok(Some(PtyPumpExit::ProcessExited));
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Awaits the pump's readiness signal with a bounded timeout, mapping the two
@@ -398,6 +521,45 @@ fn stream_to_platform(e: crate::error::StreamError) -> PlatformError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::StreamError;
+    use std::collections::VecDeque;
+
+    enum ReconnectStep {
+        Transport,
+        Accepted,
+        Rejected,
+    }
+
+    struct ScriptedReconnect {
+        steps: VecDeque<ReconnectStep>,
+        calls: usize,
+    }
+
+    struct PendingReconnect;
+
+    #[async_trait]
+    impl ReconnectTarget for ScriptedReconnect {
+        async fn reconnect_target(&mut self, delay: Duration) -> StreamResult<()> {
+            tokio::time::sleep(delay).await;
+            self.calls += 1;
+            match self.steps.pop_front().expect("scripted reconnect step") {
+                ReconnectStep::Transport => {
+                    Err(StreamError::Transport("relay unavailable".to_string()))
+                }
+                ReconnectStep::Accepted => Ok(()),
+                ReconnectStep::Rejected => {
+                    Err(StreamError::OpenRejected("credential rejected".to_string()))
+                }
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ReconnectTarget for PendingReconnect {
+        async fn reconnect_target(&mut self, _delay: Duration) -> StreamResult<()> {
+            std::future::pending().await
+        }
+    }
 
     #[test]
     fn channel_ids_are_unique() {
@@ -485,5 +647,75 @@ mod tests {
             .await
             .expect_err("a dropped sender must error");
         assert!(matches!(err, PlatformError::Os { .. }), "got {err:?}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reconnect_retries_repeated_transport_failures_then_resets_backoff() {
+        let mut target = ScriptedReconnect {
+            steps: VecDeque::from([
+                ReconnectStep::Transport,
+                ReconnectStep::Transport,
+                ReconnectStep::Transport,
+                ReconnectStep::Accepted,
+            ]),
+            calls: 0,
+        };
+        let mut backoff = ChannelBackoff::new(Duration::from_millis(10), Duration::from_secs(1));
+        reconnect_until_ready(&mut target, &mut backoff, "test")
+            .await
+            .expect("transport failures remain retryable");
+        assert_eq!(target.calls, 4);
+        assert_eq!(backoff.attempt(), 0, "success resets the jitter window");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reconnect_stops_on_typed_open_rejection() {
+        let mut target = ScriptedReconnect {
+            steps: VecDeque::from([ReconnectStep::Rejected]),
+            calls: 0,
+        };
+        let mut backoff = ChannelBackoff::standard();
+        let error = reconnect_until_ready(&mut target, &mut backoff, "test")
+            .await
+            .expect_err("open rejection is terminal");
+        assert!(matches!(error, StreamError::OpenRejected(_)));
+        assert_eq!(target.calls, 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reconnect_stops_when_the_local_pty_exits_during_a_relay_outage() {
+        let request = v1::PtyOpenRequest {
+            command: vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "exit 0".to_string(),
+            ],
+            cols: 80,
+            rows: 24,
+            ..Default::default()
+        };
+        let mut process = opengeni_agent_platform::spawn_pty(&request, &["/bin/sh".to_string()])
+            .expect("spawn short-lived PTY");
+        let mut io = PtyIo::start(&mut process).await.expect("start PTY IO");
+        let (_command_tx, mut commands) = mpsc::channel(1);
+        let mut target = PendingReconnect;
+        let mut backoff = ChannelBackoff::new(Duration::ZERO, Duration::ZERO);
+
+        let exit = tokio::time::timeout(
+            Duration::from_secs(2),
+            reconnect_pty_until_ready(
+                &mut target,
+                &mut backoff,
+                &mut process,
+                &mut io,
+                &mut commands,
+            ),
+        )
+        .await
+        .expect("local exit must interrupt an indefinitely pending redial")
+        .expect("local exit is not a stream error");
+        assert_eq!(exit, Some(PtyPumpExit::ProcessExited));
+        io.shutdown().await;
     }
 }

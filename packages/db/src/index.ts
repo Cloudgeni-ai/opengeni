@@ -16587,6 +16587,90 @@ export async function withActiveEnrollmentGeneration<T>(
   });
 }
 
+/**
+ * Atomically accepts one approved device-code request and mints credentials for
+ * the exact active enrollment generation that approval created.
+ *
+ * The request row is the single-use authorization grant. Holding it FOR UPDATE
+ * across the generation check, callback, and `approved -> consumed` transition
+ * gives concurrent pollers one linearization point: exactly one may mint. The
+ * callback runs inside the transaction, so a failed mint rolls the consume back;
+ * expired, denied, pending, consumed, generationless, stale-generation, revoked,
+ * or identity-mismatched requests fail closed without invoking it.
+ */
+export async function consumeApprovedDeviceEnrollmentRequest<T>(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    requestId: string;
+    now?: Date;
+  },
+  fn: (enrollment: EnrollmentRecord) => Promise<T>,
+): Promise<{ status: "minted"; value: T } | { status: "expired" } | { status: "denied" }> {
+  const now = input.now ?? new Date();
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const [request] = await scopedDb
+        .select()
+        .from(schema.deviceEnrollmentRequests)
+        .where(
+          and(
+            eq(schema.deviceEnrollmentRequests.workspaceId, input.workspaceId),
+            eq(schema.deviceEnrollmentRequests.id, input.requestId),
+          ),
+        )
+        .for("update")
+        .limit(1);
+      if (!request) {
+        return { status: "denied" } as const;
+      }
+      if (request.expiresAt.getTime() <= now.getTime()) {
+        return { status: "expired" } as const;
+      }
+      if (request.status !== "approved" || !request.enrollmentId || !request.credentialGeneration) {
+        return { status: "denied" } as const;
+      }
+
+      const [enrollment] = await scopedDb
+        .select()
+        .from(schema.enrollments)
+        .where(
+          and(
+            eq(schema.enrollments.workspaceId, input.workspaceId),
+            eq(schema.enrollments.id, request.enrollmentId),
+            eq(schema.enrollments.status, "active"),
+            eq(schema.enrollments.credentialGeneration, request.credentialGeneration),
+          ),
+        )
+        .for("share")
+        .limit(1);
+      if (!enrollment || enrollment.pubkey !== request.pubkey) {
+        return { status: "denied" } as const;
+      }
+
+      const value = await fn(mapEnrollment(enrollment));
+      const consumed = await scopedDb
+        .update(schema.deviceEnrollmentRequests)
+        .set({ status: "consumed", updatedAt: now })
+        .where(
+          and(
+            eq(schema.deviceEnrollmentRequests.workspaceId, input.workspaceId),
+            eq(schema.deviceEnrollmentRequests.id, request.id),
+            eq(schema.deviceEnrollmentRequests.status, "approved"),
+          ),
+        )
+        .returning({ id: schema.deviceEnrollmentRequests.id });
+      if (consumed.length !== 1) {
+        throw new Error("Device enrollment request changed while its row lock was held");
+      }
+      return { status: "minted", value } as const;
+    },
+  );
+}
+
 // List a workspace's enrollments, newest first. `status` filters the lifecycle
 // (omit for all; 'active' for the Machines dashboard's live list).
 export async function listEnrollments(
@@ -17458,9 +17542,9 @@ export async function denyDeviceEnrollmentRequest(
 
 // Flip an APPROVED request to CONSUMED once the agent has polled its credentials
 // (single-use). Fenced on status='approved' so a double-poll consumes exactly once;
-// a second poll then re-reads the consumed row and still returns credentials (the
-// agent may legitimately retry the same poll) — the route decides. Returns whether
-// THIS call performed the consume transition.
+// a second poll then observes the consumed row and is denied by the route. Returns
+// whether THIS call performed the consume transition. New credential-minting paths
+// must use consumeApprovedDeviceEnrollmentRequest so mint + consume are atomic.
 export async function consumeDeviceEnrollmentRequest(
   db: Database,
   input: {

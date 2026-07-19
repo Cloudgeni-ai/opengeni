@@ -337,14 +337,20 @@ impl RelayChannel {
     }
 
     /// Receives the next inbound relay message (a client→agent frame or input).
-    /// `Ok(None)` on a clean close.
+    /// A socket EOF/close without a typed `StreamClose` is transport loss, never a
+    /// terminal channel settlement, and is converted to a retryable error here.
     ///
     /// # Errors
     ///
     /// [`StreamError::Transport`] on a drop, [`StreamError::Protocol`] on a bad
     /// datagram.
     pub async fn recv(&mut self) -> StreamResult<Option<RelayMessage>> {
-        self.transport.recv().await
+        match self.transport.recv().await? {
+            Some(message) => Ok(Some(message)),
+            None => Err(StreamError::Transport(
+                "relay transport closed without a typed StreamClose".to_string(),
+            )),
+        }
     }
 
     /// Sends a [`StreamClose`] then closes the transport (a clean channel teardown).

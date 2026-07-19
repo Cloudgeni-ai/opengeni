@@ -15,7 +15,8 @@
 //      (an enrollments row AND a sandboxes row appear — acceptance #2). Idempotent
 //      via the M2 upsert.
 //   3. poll   (agent-side, with device_code): pending → {pending}; approved → the
-//      EnrollmentCredentials (agent_id + workspace + a SIGNED bearer the agent
+//      atomically consumes that exact request generation and returns the single
+//      EnrollmentCredentials mint (agent_id + workspace + a SIGNED bearer the agent
 //      presents to the control plane + the subject prefix agent.<ws>.<id> + a
 //      placeholder for the per-workspace NATS Account creds [infra-deferred]);
 //      denied/expired/disabled → the typed state.
@@ -50,7 +51,7 @@ import {
 } from "@opengeni/contracts";
 import {
   approveDeviceEnrollmentRequest,
-  consumeDeviceEnrollmentRequest,
+  consumeApprovedDeviceEnrollmentRequest,
   createDeviceEnrollmentRequest,
   denyDeviceEnrollmentRequest,
   finalizeEnrollmentByToken,
@@ -387,9 +388,8 @@ export async function exchangeEnrollToken(
  *   - pending + within TTL      → "pending".
  *   - any status past TTL       → "expired".
  *   - denied                    → "denied".
- *   - approved | consumed       → "authorized" + the EnrollmentCredentials (the
- *                                  approved row is flipped to consumed; a legitimate
- *                                  re-poll of a consumed row still returns the creds).
+ *   - approved                  → atomically consume + return EnrollmentCredentials.
+ *   - consumed                  → "denied" (the single-use grant already minted).
  * When the credential plane is disabled (no resolvable signing secret), an
  * otherwise-authorized poll returns "disabled" so the agent surfaces a clear reason
  * rather than half-enrolling.
@@ -412,14 +412,16 @@ export async function pollDeviceEnrollment(
   if (request.status === "pending") {
     return { state: "pending" };
   }
+  if (request.status === "consumed") {
+    return { state: "denied" };
+  }
 
-  // approved | consumed → AUTHORIZED only for the exact credential family that
-  // approval finalized. Migration-era rows intentionally have no generation and
-  // fail closed rather than inheriting the enrollment's current generation.
+  // APPROVED → AUTHORIZED only once, for the exact credential family that approval
+  // finalized. Migration-era and already-consumed rows fail closed rather than
+  // inheriting or re-minting the enrollment's current generation.
   if (!request.enrollmentId || !request.credentialGeneration) {
     return { state: "expired" };
   }
-  const credentialGeneration = request.credentialGeneration;
   const secret = resolveEnrollmentSigningSecret(settings);
   if (!secret) {
     // The credential plane is off for this deployment (no signing secret) — surface
@@ -427,43 +429,30 @@ export async function pollDeviceEnrollment(
     return { state: "disabled" };
   }
 
-  const minted = await withActiveEnrollmentGeneration(
+  const minted = await consumeApprovedDeviceEnrollmentRequest(
     db,
     {
+      accountId: request.accountId,
       workspaceId: request.workspaceId,
-      enrollmentId: request.enrollmentId,
-      credentialGeneration,
+      requestId: request.id,
     },
     async (enrollment) => {
-      // The public key is the durable machine identity. Even a corrupt request
-      // reference must not mint credentials for a different enrollment row.
-      if (enrollment.pubkey !== request.pubkey) {
-        return null;
-      }
       return await buildEnrollmentCredentials(services, {
         secret,
         workspaceId: enrollment.workspaceId,
         agentId: enrollment.id,
-        credentialGeneration,
+        credentialGeneration: enrollment.credentialGeneration,
         consentedScreenControl: enrollment.allowScreenControl,
       });
     },
   );
-  if (!minted.matched || !minted.value) {
-    // Revoked, re-enrolled, stale-generation, or identity-mismatched request.
+  if (minted.status === "expired") {
+    return { state: "expired" };
+  }
+  if (minted.status !== "minted") {
+    // Consumed, revoked, re-enrolled, stale-generation, or identity-mismatched.
     return { state: "denied" };
   }
-
-  // Single-use: flip approved → consumed (idempotent; a re-poll of an already-
-  // consumed row still returns the creds above — the agent may legitimately retry).
-  if (request.status === "approved") {
-    await consumeDeviceEnrollmentRequest(db, {
-      accountId: request.accountId,
-      workspaceId: request.workspaceId,
-      requestId: request.id,
-    });
-  }
-
   return { state: DeviceEnrollmentState.enum.authorized, credentials: minted.value };
 }
 

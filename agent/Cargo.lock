@@ -1747,6 +1747,7 @@ dependencies = [
  "clap",
  "futures-util",
  "hmac",
+ "opengeni-agent-platform",
  "opengeni-agent-proto",
  "opengeni-agent-stream",
  "prost",
