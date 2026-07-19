@@ -1359,12 +1359,14 @@ export type AgentTurnTestHooks = {
   /**
    * Deterministic crash-window failpoint for integration tests. Production
    * constructors never pass hooks. Throwing here simulates worker loss after
-   * the atomic history/no-replay checkpoint and before lifecycle settlement.
+   * the durable no-replay boundary and before lifecycle settlement, including
+   * the case where final conversation reconciliation remained incomplete.
    */
   afterNoReplayCheckpoint?: (input: {
     attemptId: string;
     turnId: string;
     reason: "provider_invalid_content" | "transport_acceptance_unknown";
+    checkpointSucceeded: boolean;
   }) => Promise<void> | void;
 };
 
@@ -1929,6 +1931,33 @@ export function createRunAgentTurnActivity(
     // inserts a fractional summary position, so total rows no longer equal
     // max(position)+1 and the slice index can no longer double as the position.
     let nextHistoryPosition = 0;
+    const persistNoReplayBoundary = async (
+      reason: "provider_invalid_content" | "transport_acceptance_unknown",
+    ): Promise<void> => {
+      if (!turnId || executionGeneration <= 0) {
+        throw new Error("no-replay boundary unavailable before turn attempt initialization");
+      }
+      const appended = await appendSessionHistoryItems(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId,
+        expectedExecutionGeneration: executionGeneration,
+        expectedAttemptId: input.attemptId,
+        producerCodexCredentialId: effectiveCodexCredentialId,
+        modelToolOutputTruncationTokens: modelRunSettings.modelToolOutputTruncationTokens,
+        items: [],
+        noReplayCheckpoint: {
+          reason,
+          conversationCheckpoint: "incomplete",
+        },
+      });
+      if (!appended) {
+        throw new TurnAttemptFencedError(
+          "turn execution generation was fenced while checkpointing no-replay intent",
+        );
+      }
+    };
     const reconcileConversationTruth = async (
       options: {
         skipInputOnlyRows?: boolean;
@@ -1943,6 +1972,24 @@ export function createRunAgentTurnActivity(
         return;
       }
       try {
+        // For a terminal no-replay checkpoint, every potentially-failing
+        // companion write must finish before the history transaction upgrades
+        // the durable marker to `complete`. Once that upgrade commits, this
+        // function has no later awaited operation that can make the caller
+        // report a false checkpoint failure.
+        let terminalEnvelopeHandled = false;
+        if (options.noReplayCheckpointReason) {
+          const envelope = sandboxStateEntryFromRunState(stream.state);
+          if (envelope) {
+            await upsertSandboxSessionEnvelope(db, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              envelope,
+            });
+          }
+          terminalEnvelopeHandled = true;
+        }
         const rawHistory = (stream.state as { history?: unknown[] }).history;
         if (Array.isArray(rawHistory)) {
           const { rows, nextWatermark, nextPosition } = historyRowsToAppend(
@@ -1975,6 +2022,7 @@ export function createRunAgentTurnActivity(
                 ? {
                     noReplayCheckpoint: {
                       reason: options.noReplayCheckpointReason,
+                      conversationCheckpoint: "complete",
                     },
                   }
                 : {}),
@@ -1990,34 +2038,18 @@ export function createRunAgentTurnActivity(
             nextHistoryPosition = nextPosition;
           }
         } else if (options.noReplayCheckpointReason) {
-          const appended = await appendSessionHistoryItems(db, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            turnId,
-            expectedExecutionGeneration: executionGeneration,
-            expectedAttemptId: input.attemptId,
-            producerCodexCredentialId: effectiveCodexCredentialId,
-            modelToolOutputTruncationTokens: modelRunSettings.modelToolOutputTruncationTokens,
-            items: [],
-            noReplayCheckpoint: {
-              reason: options.noReplayCheckpointReason,
-            },
-          });
-          if (!appended) {
-            throw new TurnAttemptFencedError(
-              "turn execution generation was fenced while checkpointing no-replay intent",
-            );
-          }
+          throw new Error("final conversation history was unavailable for durable checkpointing");
         }
-        const envelope = sandboxStateEntryFromRunState(stream.state);
-        if (envelope) {
-          await upsertSandboxSessionEnvelope(db, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            envelope,
-          });
+        if (!terminalEnvelopeHandled) {
+          const envelope = sandboxStateEntryFromRunState(stream.state);
+          if (envelope) {
+            await upsertSandboxSessionEnvelope(db, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              envelope,
+            });
+          }
         }
       } catch (persistError) {
         console.error("session history dual-write failed (run unaffected)", persistError);
@@ -5048,15 +5080,22 @@ export function createRunAgentTurnActivity(
       // provider execution with an unusable terminal frame. It is neither a
       // pre-accept transport failure nor a safe same-turn retry: replaying the
       // original trigger could duplicate model, tool, history, billing, or
-      // command effects. Persist one final exact-attempt checkpoint, fail this
-      // turn, and allow only an independently-admitted goal continuation or a
-      // later user message.
+      // command effects. Establish one exact-attempt no-replay boundary before
+      // final history access, fail this turn, and allow only a checkpoint-gated
+      // independently-admitted goal continuation or a later user message.
       const providerInvalidContent =
         activeProviderApi === "responses" ? classifyProviderInvalidContentError(error) : null;
       if (providerInvalidContent && publish && turnId && turnStartedPublished) {
-        await flushRuntimeBatcher();
+        let noReplayBoundaryPersisted = false;
         let checkpointSucceeded = false;
         try {
+          // The accepted execution becomes non-replayable before touching the
+          // SDK's computed history getter. If history extraction or its final
+          // write fails, heartbeat recovery consumes the still-incomplete
+          // marker terminally instead of redispatching this logical turn.
+          await persistNoReplayBoundary("provider_invalid_content");
+          noReplayBoundaryPersisted = true;
+          await flushRuntimeBatcher();
           await reconcileConversationTruth({
             requireDurable: true,
             noReplayCheckpointReason: "provider_invalid_content",
@@ -5078,11 +5117,12 @@ export function createRunAgentTurnActivity(
             },
           );
         }
-        if (checkpointSucceeded) {
+        if (noReplayBoundaryPersisted) {
           await testHooks.afterNoReplayCheckpoint?.({
             attemptId: input.attemptId,
             turnId,
             reason: "provider_invalid_content",
+            checkpointSucceeded,
           });
         }
 
@@ -5134,6 +5174,13 @@ export function createRunAgentTurnActivity(
           checkpointSucceeded,
           recovery,
         });
+        if (!checkpointSucceeded) {
+          // End this workflow run before its idle branch can synthesize an
+          // active-goal continuation from incomplete conversation truth. A
+          // later user/control wake may start a fresh, independently-admitted
+          // turn after inspection.
+          return claimedResult({ status: "idle", deferredUntilWake: true });
+        }
         return goalActive
           ? claimedResult({
               status: "idle",
@@ -5877,14 +5924,20 @@ export function createRunAgentTurnActivity(
       // stream boundary without a provider execution identity that OpenGeni can
       // reattach to. Even when the condition is transient, replaying this turn
       // could duplicate a provider debit, model output, completed tool, history
-      // item, or command effect. Persist one final exact-attempt checkpoint,
-      // fail this turn to idle, and permit only a NEW paced goal continuation or
-      // a later user message. If the checkpoint itself fails, suppress every
-      // automatic continuation.
+      // item, or command effect. Establish one exact-attempt no-replay boundary
+      // before final history access, fail this turn to idle, and permit only a
+      // NEW paced goal continuation from complete history or a later user
+      // message. If final history remains incomplete, suppress every automatic
+      // continuation.
       if (failure.retryable && publish && turnId && turnStartedPublished) {
-        await flushRuntimeBatcher();
+        let noReplayBoundaryPersisted = false;
         let checkpointSucceeded = false;
         try {
+          // Acceptance is unknown, so make the exact attempt/generation
+          // terminal before reading a computed history getter that can throw.
+          await persistNoReplayBoundary("transport_acceptance_unknown");
+          noReplayBoundaryPersisted = true;
+          await flushRuntimeBatcher();
           await reconcileConversationTruth({
             requireDurable: true,
             noReplayCheckpointReason: "transport_acceptance_unknown",
@@ -5903,11 +5956,12 @@ export function createRunAgentTurnActivity(
             },
           );
         }
-        if (checkpointSucceeded) {
+        if (noReplayBoundaryPersisted) {
           await testHooks.afterNoReplayCheckpoint?.({
             attemptId: input.attemptId,
             turnId,
             reason: "transport_acceptance_unknown",
+            checkpointSucceeded,
           });
         }
         const goalActive = checkpointSucceeded
@@ -5955,6 +6009,9 @@ export function createRunAgentTurnActivity(
           checkpointSucceeded,
           recovery,
         });
+        if (!checkpointSucceeded) {
+          return claimedResult({ status: "idle", deferredUntilWake: true });
+        }
         return goalActive
           ? claimedResult({
               status: "idle",

@@ -40,16 +40,20 @@ survive them, but they do not all settle the current turn the same way. Hitting
 the model-call cap (if configured) and budget/credit exhaustion end the turn
 gracefully and idle the session. By contrast, provider rate-limit/5xx/network
 uncertainty and escaped MCP request timeouts may arrive after external work was
-accepted: the worker requires one final exact-attempt conversation checkpoint,
+accepted. Before potentially failing final SDK-history access, the worker
 atomically stores an allow-listed `failed_idle` no-replay disposition carrying
-the exact attempt and execution generation, truthfully marks that current turn
-`failed`, and leaves the session `idle` rather than replaying it. If the worker
-dies after that checkpoint but before ordinary settlement, heartbeat recovery
-consumes the fence into the same failed/idle truth; it never increments the
-worker-death redispatch counter or reclaims the logical turn. When that
-checkpoint succeeds, an active goal may
-start a **new** follow-up turn after pacing; without a goal, a later user
-message may continue. A checkpoint failure suppresses automatic continuation.
+the exact attempt and execution generation with
+`conversationCheckpoint: incomplete`. The final-history transaction can only
+upgrade that same marker to `complete` atomically with the conversation rows;
+an idempotent late `incomplete` write cannot downgrade it. The worker then
+truthfully marks the current turn `failed` and leaves the session `idle` rather
+than replaying it. If the worker dies after either durable boundary but before
+ordinary settlement, heartbeat recovery consumes the fence into the same
+failed/idle truth; it never increments the worker-death redispatch counter or
+reclaims the logical turn. A `complete` checkpoint may let an active goal start
+a **new** follow-up turn after pacing; `incomplete` reports checkpoint failure
+and suppresses automatic continuation. Without a goal, a later user message
+may continue.
 For an MCP timeout after a successful tool output, the durable call/result
 lineage remains exactly once — neither the completed tool call nor the full
 turn is blindly replayed. Budget/credit exhaustion likewise leaves the session
@@ -227,9 +231,15 @@ truth was still dual-written after every model response during the turn. When
 the exact attempt has no accepted/acceptance-unknown terminal checkpoint, the
 fenced `recoverSessionDispatch` activity atomically closes the lost attempt,
 marks the same logical turn `recovering`, and the loop dispatches its next
-attempt. When the final history transaction already stored the exact
+attempt. When the exact attempt already stored an accepted/acceptance-unknown
 `failed_idle` no-replay disposition, that same recovery activity atomically
 fails the turn and idles the session instead; no replacement attempt exists.
+This is true for both the pre-history `incomplete` marker and its atomic
+final-history `complete` upgrade. Recovery reports checkpoint success only for
+`complete`; `incomplete` also refuses automatic goal continuation. The exact
+closed attempt keeps this result idempotently recognizable when either the
+ordinary terminal settlement or recovery settlement commits but its activity
+response is lost.
 This is not
 prompt-queue work and not an automatic Temporal retry of side-effectful work:
 the resumed attempt sees everything durably checkpointed, including explicit

@@ -153,13 +153,18 @@ export type RecoverDispatchResult =
   // queue; the next claim creates a new attempt for this exact turn.
   | { action: "unclaimed" }
   | { action: "recovering"; turnId: string; redispatches: number }
-  // Final conversation truth and a typed no-replay disposition committed
-  // before the worker died. The recovery activity atomically failed the turn
-  // to idle instead of redispatching accepted/acceptance-unknown work.
+  // A typed no-replay disposition committed before the worker died. The
+  // recovery activity atomically failed the turn to idle instead of
+  // redispatching accepted/acceptance-unknown work; checkpointSucceeded says
+  // whether final conversation truth committed too.
   | {
       action: "settled_no_replay";
       turnId: string;
       reason: "provider_invalid_content" | "transport_acceptance_unknown";
+      // False means only the exact no-replay boundary committed before worker
+      // death; final conversation history remained incomplete, so the workflow
+      // must close without synthesizing an active-goal continuation.
+      checkpointSucceeded: boolean;
     }
   // The turn is no longer running/requires_action: the timed-out attempt was
   // a zombie that actually settled the turn after the server gave up on its

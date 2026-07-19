@@ -12257,6 +12257,8 @@ export type SessionTurnNoReplayCheckpointReason =
   | "provider_invalid_content"
   | "transport_acceptance_unknown";
 
+export type SessionTurnNoReplayConversationCheckpoint = "incomplete" | "complete";
+
 /**
  * Append conversation items (verbatim SDK AgentInputItems) to the session's
  * history. Idempotent on (workspace, session, position): concurrent or
@@ -12279,13 +12281,16 @@ export async function appendSessionHistoryItems(
     modelToolOutputTruncationTokens?: number;
     items: Array<{ position: number; item: Record<string, unknown> }>;
     // Accepted or acceptance-unknown external work may never be replayed on a
-    // replacement worker. Persist this exact-attempt terminal intent in the
-    // same transaction as the final conversation rows so heartbeat recovery
-    // cannot observe the checkpoint without also observing the no-replay
-    // boundary. The reason is deliberately a closed enum: no provider payload,
-    // transcript, header, credential, or backend cause belongs in turn metadata.
+    // replacement worker. Persist the exact-attempt terminal intent as
+    // `incomplete` before inspecting potentially-failing final history, then
+    // atomically upgrade it to `complete` with the final conversation rows.
+    // Heartbeat recovery consumes either state without replay and reports the
+    // checkpoint truth exactly. Both fields are deliberately closed enums: no
+    // provider payload, transcript, header, credential, or backend cause belongs
+    // in turn metadata.
     noReplayCheckpoint?: {
       reason: SessionTurnNoReplayCheckpointReason;
+      conversationCheckpoint: SessionTurnNoReplayConversationCheckpoint;
     };
   },
 ): Promise<boolean> {
@@ -12313,6 +12318,7 @@ export async function appendSessionHistoryItems(
             executionGeneration: input.expectedExecutionGeneration,
             disposition: "failed_idle" as const,
             reason: input.noReplayCheckpoint.reason,
+            conversationCheckpoint: input.noReplayCheckpoint.conversationCheckpoint,
           };
           if (existing.kind === "malformed") return false;
           if (existing.kind === "valid") {
@@ -12324,7 +12330,24 @@ export async function appendSessionHistoryItems(
             ) {
               return false;
             }
+            // An idempotent retry of the initial boundary must never downgrade
+            // a final history checkpoint that already committed. The only
+            // permitted state transition is incomplete -> complete.
+            if (
+              existing.checkpoint.conversationCheckpoint === "incomplete" &&
+              expected.conversationCheckpoint === "complete"
+            ) {
+              checkpointMetadata = metadataWithTurnNoReplayCheckpoint(
+                allowed.turn.metadata,
+                expected,
+              );
+            }
           } else {
+            // Every accepted/acceptance-unknown path must establish the
+            // pre-history boundary first. Refuse a direct absent -> complete
+            // transition so a future caller cannot silently reopen the crash
+            // window this state machine exists to close.
+            if (expected.conversationCheckpoint === "complete") return false;
             checkpointMetadata = metadataWithTurnNoReplayCheckpoint(
               allowed.turn.metadata,
               expected,
@@ -22222,6 +22245,7 @@ type TurnNoReplayCheckpoint = {
   executionGeneration: number;
   disposition: "failed_idle";
   reason: SessionTurnNoReplayCheckpointReason;
+  conversationCheckpoint: SessionTurnNoReplayConversationCheckpoint;
 };
 
 type TurnNoReplayCheckpointMetadata =
@@ -22248,7 +22272,9 @@ function readTurnNoReplayCheckpoint(metadata: unknown): TurnNoReplayCheckpointMe
     checkpoint.executionGeneration < 1 ||
     checkpoint.disposition !== "failed_idle" ||
     (checkpoint.reason !== "provider_invalid_content" &&
-      checkpoint.reason !== "transport_acceptance_unknown")
+      checkpoint.reason !== "transport_acceptance_unknown") ||
+    (checkpoint.conversationCheckpoint !== "incomplete" &&
+      checkpoint.conversationCheckpoint !== "complete")
   ) {
     return { kind: "malformed", reason: "noReplayCheckpoint has an invalid shape" };
   }
@@ -22259,6 +22285,7 @@ function readTurnNoReplayCheckpoint(metadata: unknown): TurnNoReplayCheckpointMe
       executionGeneration: checkpoint.executionGeneration,
       disposition: checkpoint.disposition,
       reason: checkpoint.reason,
+      conversationCheckpoint: checkpoint.conversationCheckpoint,
     },
   };
 }
@@ -23482,6 +23509,7 @@ export type RecoverSessionDispatchResult =
       action: "settled_no_replay";
       turnId: string;
       reason: SessionTurnNoReplayCheckpointReason;
+      checkpointSucceeded: boolean;
       events: SessionEvent[];
     }
   | {
@@ -23554,14 +23582,85 @@ export async function recoverSessionDispatch(
         .for("update")
         .limit(1);
       if (!turn) {
-        return input.timeoutType === "SCHEDULE_TO_START"
-          ? { action: "unclaimed", events: [] }
-          : {
-              action: "stale",
-              events: [],
-              turnStatus: null,
-              activeTurnId: session.activeTurnId,
+        if (input.timeoutType === "SCHEDULE_TO_START") {
+          return { action: "unclaimed", events: [] };
+        }
+
+        // The terminal settlement can commit immediately before the worker
+        // loses its activity completion response. Locate that exact durable
+        // attempt without taking an attempt lock first, then preserve the
+        // canonical workspace -> session -> turn -> attempt lock order while
+        // re-reading authoritative state. An already-settled incomplete marker
+        // must still suppress automatic goal continuation; generic `stale`
+        // would incorrectly allow the workflow's idle branch to synthesize it.
+        const [attemptLocator] = await tx
+          .select({ turnId: schema.sessionTurnAttempts.turnId })
+          .from(schema.sessionTurnAttempts)
+          .where(
+            and(
+              eq(schema.sessionTurnAttempts.workspaceId, workspaceId),
+              eq(schema.sessionTurnAttempts.sessionId, input.sessionId),
+              eq(schema.sessionTurnAttempts.id, input.attemptId),
+            ),
+          )
+          .limit(1);
+        if (attemptLocator) {
+          const [settledTurn] = await tx
+            .select()
+            .from(schema.sessionTurns)
+            .where(
+              and(
+                eq(schema.sessionTurns.workspaceId, workspaceId),
+                eq(schema.sessionTurns.sessionId, input.sessionId),
+                eq(schema.sessionTurns.id, attemptLocator.turnId),
+              ),
+            )
+            .for("update")
+            .limit(1);
+          const [settledAttempt] = settledTurn
+            ? await tx
+                .select()
+                .from(schema.sessionTurnAttempts)
+                .where(
+                  and(
+                    eq(schema.sessionTurnAttempts.workspaceId, workspaceId),
+                    eq(schema.sessionTurnAttempts.sessionId, input.sessionId),
+                    eq(schema.sessionTurnAttempts.id, input.attemptId),
+                    eq(schema.sessionTurnAttempts.turnId, settledTurn.id),
+                  ),
+                )
+                .for("update")
+                .limit(1)
+            : [];
+          const checkpoint = readTurnNoReplayCheckpoint(settledTurn?.metadata);
+          if (
+            workspace &&
+            settledTurn?.status === "failed" &&
+            settledTurn.activeAttemptId === null &&
+            settledAttempt?.state === "closed" &&
+            settledAttempt.outcome === "failed" &&
+            settledAttempt.accountId === session.accountId &&
+            settledAttempt.executionGeneration === settledTurn.executionGeneration &&
+            checkpoint.kind === "valid" &&
+            checkpoint.checkpoint.attemptId === input.attemptId &&
+            checkpoint.checkpoint.executionGeneration === settledTurn.executionGeneration &&
+            checkpoint.checkpoint.disposition === "failed_idle"
+          ) {
+            return {
+              action: "settled_no_replay" as const,
+              turnId: settledTurn.id,
+              reason: checkpoint.checkpoint.reason,
+              checkpointSucceeded: checkpoint.checkpoint.conversationCheckpoint === "complete",
+              events: [] as SessionEvent[],
             };
+          }
+        }
+        return {
+          action: "stale",
+          events: [],
+          turnStatus: null,
+          activeTurnId: session.activeTurnId,
+        };
       }
       const turnStatus = (turn?.status as SessionTurnStatus | undefined) ?? null;
       const parsedMetadata = readTurnDispatchMetadata(turn?.metadata);
@@ -23606,11 +23705,11 @@ export async function recoverSessionDispatch(
           };
         }
 
-        // The accepted/acceptance-unknown execution crossed its final durable
-        // conversation checkpoint before this worker vanished. Consuming the
-        // exact attempt/generation fence is terminal: never advance the crash
-        // redispatch counter and never expose this logical turn to a new model,
-        // tool, billing, history, or command execution.
+        // The accepted/acceptance-unknown execution crossed its durable
+        // no-replay boundary before this worker vanished. Its final conversation
+        // checkpoint may still be incomplete; either state is terminal. Never
+        // advance the crash redispatch counter or expose this logical turn to a
+        // new model, tool, billing, history, or command execution.
         const now = new Date();
         await closeSessionTurnAttemptInTransaction(tx as unknown as Database, {
           id: input.attemptId,
@@ -23650,6 +23749,7 @@ export async function recoverSessionDispatch(
           .limit(1);
         const effectiveSessionStatus = waitingPrompt ? "queued" : "idle";
         const acceptedInvalidContent = checkpoint.reason === "provider_invalid_content";
+        const checkpointSucceeded = checkpoint.conversationCheckpoint === "complete";
         const inserted = await tx
           .insert(schema.sessionEvents)
           .values([
@@ -23669,12 +23769,17 @@ export async function recoverSessionDispatch(
                   ? "provider_invalid_content"
                   : "transport_acceptance_unknown",
                 error: acceptedInvalidContent
-                  ? "The model provider produced invalid content after accepting the request. Conversation truth was checkpointed before the worker stopped; the accepted provider call was not replayed."
-                  : "The external model or tool transport failed after acceptance became uncertain. Conversation truth was checkpointed before the worker stopped; the original execution was not replayed.",
+                  ? checkpointSucceeded
+                    ? "The model provider produced invalid content after accepting the request. Conversation truth was checkpointed before the worker stopped; the accepted provider call was not replayed."
+                    : "The model provider produced invalid content after accepting the request. The final conversation checkpoint was incomplete when the worker stopped; automatic continuation was refused and the accepted provider call was not replayed."
+                  : checkpointSucceeded
+                    ? "The external model or tool transport failed after acceptance became uncertain. Conversation truth was checkpointed before the worker stopped; the original execution was not replayed."
+                    : "The external model or tool transport failed after acceptance became uncertain. The final conversation checkpoint was incomplete when the worker stopped; automatic continuation was refused and the original execution was not replayed.",
                 retryable: !acceptedInvalidContent,
-                checkpointSucceeded: true,
+                checkpointSucceeded,
                 recovery: "worker_death_terminal_settlement",
                 sameTurnReplay: "refused",
+                automaticContinuationRefused: !checkpointSucceeded,
               }),
               occurredAt: now,
             },
@@ -23752,6 +23857,7 @@ export async function recoverSessionDispatch(
           action: "settled_no_replay" as const,
           turnId: turn.id,
           reason: checkpoint.reason,
+          checkpointSucceeded,
           events: [...closedTools.events, ...inserted.map(mapEvent)],
         };
       }

@@ -373,7 +373,12 @@ describe("Temporal workflow integration", () => {
           recoverDispatch: async (input: { attemptId: string; timeoutType: string }) => {
             recoveries.push(input);
             admission.settleNoReplay();
-            return { action: "settled_no_replay", turnId: turn.id, reason };
+            return {
+              action: "settled_no_replay",
+              turnId: turn.id,
+              reason,
+              checkpointSucceeded: true,
+            };
           },
           failSessionAttempt: async (input: unknown) => {
             failures.push(input);
@@ -404,6 +409,79 @@ describe("Temporal workflow integration", () => {
               timeoutType: "HEARTBEAT",
             }),
           ]);
+          expect(failures).toHaveLength(0);
+        } finally {
+          worker.shutdown();
+          await run;
+        }
+      },
+      workerDeathTestTimeoutMs,
+    );
+  }
+
+  for (const reason of ["provider_invalid_content", "transport_acceptance_unknown"] as const) {
+    test(
+      `a real heartbeat timeout terminally consumes incomplete ${reason} history without goal continuation`,
+      async () => {
+        const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+        const scope = workflowScope();
+        const turn = queuedTurn("event-1");
+        const queuedTurns = [turn];
+        const runs: Array<{ attemptId: string }> = [];
+        const recoveries: Array<{ attemptId: string; timeoutType: string }> = [];
+        const goalChecks: unknown[] = [];
+        const failures: unknown[] = [];
+        const admission = createTurnAdmission(queuedTurns, async (input) => {
+          runs.push(input as (typeof runs)[number]);
+          return await hangWithoutHeartbeating();
+        });
+        const worker = await testWorker(nativeConnection, taskQueue, {
+          ...admission.activities,
+          markSessionIdle: async () => undefined,
+          maybeContinueGoal: async (input: unknown) => {
+            goalChecks.push(input);
+            return { action: "none" as const };
+          },
+          recoverDispatch: async (input: { attemptId: string; timeoutType: string }) => {
+            recoveries.push(input);
+            admission.settleNoReplay();
+            return {
+              action: "settled_no_replay",
+              turnId: turn.id,
+              reason,
+              checkpointSucceeded: false,
+            };
+          },
+          failSessionAttempt: async (input: unknown) => {
+            failures.push(input);
+          },
+          settleSessionInterruptions: async () => ({
+            action: "continue" as const,
+          }),
+        });
+        const run = worker.run();
+        try {
+          const client = new Client({ connection });
+          const handle = await client.workflow.start("sessionWorkflow", {
+            taskQueue,
+            workflowId: `wf-${crypto.randomUUID()}`,
+            args: [
+              {
+                ...scope,
+                sessionId: crypto.randomUUID(),
+                initialEventId: "event-1",
+              },
+            ],
+          });
+          await handle.result();
+          expect(runs).toHaveLength(1);
+          expect(recoveries).toEqual([
+            expect.objectContaining({
+              attemptId: runs[0]!.attemptId,
+              timeoutType: "HEARTBEAT",
+            }),
+          ]);
+          expect(goalChecks).toHaveLength(0);
           expect(failures).toHaveLength(0);
         } finally {
           worker.shutdown();

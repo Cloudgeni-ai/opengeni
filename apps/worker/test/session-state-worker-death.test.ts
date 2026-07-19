@@ -11,6 +11,7 @@ let recoveryResult:
       action: "settled_no_replay";
       turnId: string;
       reason: "provider_invalid_content" | "transport_acceptance_unknown";
+      checkpointSucceeded: boolean;
       events: any[];
     }
   | { action: "recovering"; turnId: string; redispatches: number; events: any[] }
@@ -119,12 +120,14 @@ describe("recoverDispatch: exact attempt ownership fence", () => {
       action: "settled_no_replay",
       turnId: "turn-1",
       reason: "transport_acceptance_unknown",
+      checkpointSucceeded: false,
       events: [{ id: "failed-1", type: "turn.failed" }],
     };
     expect(await runRecovery()).toEqual({
       action: "settled_no_replay",
       turnId: "turn-1",
       reason: "transport_acceptance_unknown",
+      checkpointSucceeded: false,
     });
     expect(publishedEvents).toEqual([{ id: "failed-1", type: "turn.failed" }]);
     expect(parentWakeCalls).toHaveLength(0);

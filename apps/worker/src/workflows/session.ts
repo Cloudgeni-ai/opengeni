@@ -529,7 +529,10 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
           // terminal and only a new goal/user turn may run. "stale": the
           // timed-out attempt actually settled the turn (a zombie finished
           // after the server gave up on its heartbeats); nothing to redo.
-          return true;
+          // If worker death exposed an incomplete final conversation checkpoint,
+          // stop this workflow run before the idle branch can synthesize a goal
+          // continuation. A later external wake is independently admitted.
+          return !(recovery.action === "settled_no_replay" && !recovery.checkpointSucceeded);
         }
         // The worker-death activity atomically committed failed turn/session
         // truth when the bounded redispatch ceiling was exceeded.
