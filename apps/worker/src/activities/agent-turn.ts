@@ -42,7 +42,6 @@ import {
   clearDurablePendingSessionToolCalls,
   appendSessionHistoryItems,
   isSessionCompactionRequested,
-  recordSkippedContextCompaction,
   countSessionHistoryItems,
   getActiveSessionHistoryItems,
   nextSessionHistoryPosition,
@@ -82,6 +81,8 @@ import {
   appendWorkspaceMemory,
   composeAgentInstructions,
   summarizeForCompaction,
+  CompactionProviderResponseError,
+  EmptyCompactionSummaryError,
   ensureModalRegistryImage,
   findCompactionNeededError,
   materializeSandboxFileDownloads,
@@ -307,6 +308,29 @@ function compactionFailureReason(reason: string): string {
   return reason.startsWith("compaction summarization failed:")
     ? reason
     : `compaction summarization failed: ${reason}`;
+}
+
+function compactionFailureReasonFromError(error: unknown): string {
+  if (
+    error instanceof CompactionProviderResponseError ||
+    error instanceof EmptyCompactionSummaryError
+  ) {
+    return compactionFailureReason(error.message);
+  }
+  const errorName = error instanceof Error && error.name ? error.name : "unknown error";
+  return compactionFailureReason(`unexpected ${errorName}`);
+}
+
+function isCompactionSummaryFailure(error: unknown): boolean {
+  return (
+    error instanceof CompactionProviderResponseError || error instanceof EmptyCompactionSummaryError
+  );
+}
+
+export function shouldRecoverCompactionProviderFailure(error: unknown): boolean {
+  if (!(error instanceof CompactionProviderResponseError)) return false;
+  if (isCodexTransportError(error) && classifyCodexUsageLimitError(error)) return true;
+  return agentRunFailurePayload(error).retryable === true;
 }
 
 export function classifyContextWindowOverflowError(
@@ -1386,6 +1410,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             | "requires_action";
           sessionStatus: SessionStatus;
           activeTurnId: string | null;
+          consumeRequestedCompactionFailure?: boolean;
         }) => Promise<boolean>)
       | null = null;
     let turnStartedPublished = false;
@@ -1888,6 +1913,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   producerSeq: ++producerSeq,
                 };
         }
+        const compactionRequestFailure = inputSettlement.consumeRequestedCompactionFailure
+          ? {
+              reason: "summarization_failed" as const,
+              producerId,
+              producerSeq: ++producerSeq,
+            }
+          : undefined;
         const inputs = inputSettlement.events.map((event) => ({
           ...event,
           payload: redact(event.payload),
@@ -1905,6 +1937,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           activeTurnId: inputSettlement.activeTurnId,
           events: inputs,
           ...(recordingMutation ? { recording: recordingMutation } : {}),
+          ...(compactionRequestFailure ? { compactionRequestFailure } : {}),
         });
         if (result.action === "stale") {
           if (recordingForSettlement) {
@@ -2730,25 +2763,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 ...(promptCacheKey ? { promptCacheKey } : {}),
               });
 
-      const consumeFailedRequestedCompaction = async (failedTurnId: string): Promise<void> => {
-        const skipped = await recordSkippedContextCompaction(db, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          turnId: failedTurnId,
-          expectedExecutionGeneration: executionGeneration,
-          expectedAttemptId: input.attemptId,
-          reason: "summarization_failed",
-        });
-        if (!skipped.recorded) {
-          if (skipped.reason === "request_not_pending") return;
-          throw new TurnAttemptFencedError(
-            "turn attempt was fenced while consuming a failed context compaction request",
-          );
-        }
-        await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, skipped.events);
-      };
-
       if (turn.source === "compaction") {
         const persistentSessionSettings = {
           titleIsSet: Boolean(session.title?.trim()),
@@ -2795,8 +2809,40 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               },
             );
           } catch (error) {
-            await consumeFailedRequestedCompaction(turn.id);
-            throw error;
+            // Codex retries retryable checkpoint-provider failures rather than
+            // treating them as a semantic compaction result. Keep the operator
+            // request pending and let the ordinary same-turn provider/capacity
+            // recovery path re-dispatch this exact maintenance execution.
+            if (shouldRecoverCompactionProviderFailure(error)) throw error;
+            if (!isCompactionSummaryFailure(error)) throw error;
+            const errorMessage = compactionFailureReasonFromError(error);
+            if (
+              !(await settle!({
+                events: [
+                  {
+                    type: "turn.failed",
+                    payload: {
+                      error: errorMessage,
+                      code: "context_compaction_failed",
+                      retryable: false,
+                      recovery: "user_message",
+                      compacted: false,
+                    },
+                  },
+                  { type: "session.status.changed", payload: { status: "idle" } },
+                ],
+                turnStatus: "failed",
+                sessionStatus: "idle",
+                activeTurnId: null,
+                consumeRequestedCompactionFailure: true,
+              }))
+            ) {
+              return claimedResult({ status: "cancelled" });
+            }
+            turnMetricOutcome = "failed";
+            activityStatus = "idle";
+            activityError = error;
+            return claimedResult({ status: "idle" });
           }
           if (outcome.events.length > 0) {
             if (outcome.compacted) {
@@ -3663,15 +3709,41 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             );
           }
         } catch (compactError) {
-          if (forced && turnId) {
-            await consumeFailedRequestedCompaction(turnId);
-          }
+          if (shouldRecoverCompactionProviderFailure(compactError)) throw compactError;
+          if (!isCompactionSummaryFailure(compactError)) throw compactError;
+          const errorMessage = compactionFailureReasonFromError(compactError);
           observability.error("context compaction failed", {
             sessionId: input.sessionId,
             turnId,
-            error: compactError instanceof Error ? compactError.message : String(compactError),
+            error: errorMessage,
           });
-          throw compactError;
+          if (
+            !(await settle!({
+              events: [
+                {
+                  type: "turn.failed",
+                  payload: {
+                    error: errorMessage,
+                    code: "context_compaction_failed",
+                    retryable: false,
+                    recovery: "user_message",
+                    compacted: false,
+                  },
+                },
+                { type: "session.status.changed", payload: { status: "idle" } },
+              ],
+              turnStatus: "failed",
+              sessionStatus: "idle",
+              activeTurnId: null,
+              ...(forced ? { consumeRequestedCompactionFailure: true } : {}),
+            }))
+          ) {
+            return claimedResult({ status: "cancelled" });
+          }
+          turnMetricOutcome = "failed";
+          activityStatus = "idle";
+          activityError = compactError;
+          return claimedResult({ status: "idle" });
         }
       }
       let fileMaterializationFailures: SandboxFileDownloadFailure[] = [];
@@ -3798,38 +3870,30 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         triggerLabel: "overflow" | "proactive" | "operator",
         recoverySignalTokens: number | null,
       ) => {
-        let outcome: Awaited<ReturnType<typeof maybeCompactContext>>;
-        try {
-          outcome = await maybeCompactContext(
-            db,
-            modelRunSettings,
-            {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-              turnId: activeTurnId,
-              executionGeneration,
-              attemptId: input.attemptId,
-            },
-            // Never reuse the persisted prior-turn signal for recovery. Proactive
-            // guards provide their exact current signal; provider overflows do not,
-            // so null derives decision metadata from active history. Forced
-            // recovery proves progress separately by comparing the replacement
-            // with the current active-history estimate in maybeCompactContext.
-            recoverySignalTokens,
-            compactSummarizer,
-            {
-              force: true,
-              ...(triggerLabel === "operator" ? { clearRequestedCompaction: true } : {}),
-              trigger: triggerLabel,
-            },
-          );
-        } catch (error) {
-          if (triggerLabel === "operator") {
-            await consumeFailedRequestedCompaction(activeTurnId);
-          }
-          throw error;
-        }
+        const outcome = await maybeCompactContext(
+          db,
+          modelRunSettings,
+          {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: activeTurnId,
+            executionGeneration,
+            attemptId: input.attemptId,
+          },
+          // Never reuse the persisted prior-turn signal for recovery. Proactive
+          // guards provide their exact current signal; provider overflows do not,
+          // so null derives decision metadata from active history. Forced
+          // recovery proves progress separately by comparing the replacement
+          // with the current active-history estimate in maybeCompactContext.
+          recoverySignalTokens,
+          compactSummarizer,
+          {
+            force: true,
+            ...(triggerLabel === "operator" ? { clearRequestedCompaction: true } : {}),
+            trigger: triggerLabel,
+          },
+        );
         if (outcome.events.length > 0) {
           if (outcome.compacted) {
             recordContextCompaction(observability, triggerLabel);
@@ -4329,9 +4393,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               }
             }
           } catch (compactError) {
-            compactionFailureMessage = compactionFailureReason(
-              compactError instanceof Error ? compactError.message : String(compactError),
-            );
+            // Transient checkpoint-provider failures recover this same accepted
+            // turn through the normal provider/capacity path. They are not an
+            // empty summary and must not create a new goal continuation.
+            if (shouldRecoverCompactionProviderFailure(compactError)) throw compactError;
+            if (!isCompactionSummaryFailure(compactError)) throw compactError;
+            compactionFailureMessage = compactionFailureReasonFromError(compactError);
             observability.warn("context compaction recovery compaction failed", {
               sessionId: input.sessionId,
               turnId: activeTurnId,
@@ -4363,6 +4430,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 turnStatus: "failed",
                 sessionStatus: "idle",
                 activeTurnId: null,
+                ...(recoveryKind === "operator" ? { consumeRequestedCompactionFailure: true } : {}),
               }))
             ) {
               return claimedResult({ status: "cancelled" });
