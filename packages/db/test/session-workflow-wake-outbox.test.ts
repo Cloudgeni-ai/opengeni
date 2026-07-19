@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { and, eq } from "drizzle-orm";
+import { readTurnExecutionPolicyV1, TurnExecutionPolicyV1 } from "@opengeni/contracts";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import {
   bootstrapWorkspace,
@@ -122,6 +123,20 @@ async function wakeRow(workspaceId: string, sessionId: string) {
 describe("transactional session workflow wake outbox", () => {
   test("initial session state, first turn, and wake commit once under concurrent retries", async () => {
     const ctx = await fixture();
+    const turnExecutionPolicy = TurnExecutionPolicyV1.parse({
+      schemaVersion: 1,
+      productModelId: "scripted-model",
+      requestedModelId: null,
+      modelSource: "deployment",
+      reasoningEffort: "low",
+      reasoningSource: "deployment",
+      providerId: "scripted-provider",
+      upstreamModelId: "scripted-upstream",
+      wireApi: "responses",
+      credentialSource: { kind: "deployment", mechanism: "api_key" },
+      billing: { upstreamPayer: "deployment", metering: "opengeni_credits" },
+      definitionVersion: `sha256:${"a".repeat(64)}`,
+    });
     const initialize = () =>
       initializeSessionStartAtomically(client.db, {
         accountId: ctx.grant.accountId,
@@ -129,6 +144,7 @@ describe("transactional session workflow wake outbox", () => {
         sessionId: ctx.session.id,
         clientEventId: `initial:${ctx.session.id}`,
         reasoningEffortFallback: "low",
+        turnExecutionPolicy,
         createdEventPayload: {},
         goal: { text: "Finish exactly once" },
       });
@@ -157,6 +173,14 @@ describe("transactional session workflow wake outbox", () => {
     expect(await listSessionTurns(client.db, ctx.grant.workspaceId!, ctx.session.id)).toHaveLength(
       1,
     );
+    expect(readTurnExecutionPolicyV1(results[0]!.turn!.metadata)).toEqual({
+      kind: "valid",
+      policy: turnExecutionPolicy,
+    });
+    expect(readTurnExecutionPolicyV1(results[1]!.turn!.metadata)).toEqual({
+      kind: "valid",
+      policy: turnExecutionPolicy,
+    });
     expect(await wakeRow(ctx.grant.workspaceId!, ctx.session.id)).toMatchObject({
       wakeRevision: 2,
       deliveredRevision: 0,
