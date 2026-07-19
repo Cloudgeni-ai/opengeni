@@ -24,11 +24,11 @@ import { sanitizedTestEnvironment } from "./run-unit-shard";
 import { explicitBunTestPath } from "./run-test-shard";
 
 describe("fail-closed change impact", () => {
-  test("documentation-only changes run only documentation guards", () => {
+  test("documentation-only changes run only non-runtime guards", () => {
     const plan = createImpactPlan(["docs/toolchain.md", "README.md"]);
     expect(plan.mode).toBe("docs");
     expect(plan.unitTests).toEqual([]);
-    expect(plan.guards).toEqual(["format", "docs-refs"]);
+    expect(plan.guards).toEqual(["format", "docs-refs", "generated-fonts"]);
   });
 
   test.each([
@@ -334,6 +334,7 @@ describe("fail-closed change impact", () => {
     expect(tests.e2e).not.toContain("test/e2e/opstream-runner.e2e.ts");
     expect(tests.e2e).toContain("test/e2e/rig-verification.e2e.ts");
     expect(tests.e2e).toContain("test/e2e/session-pins.browser.e2e.ts");
+    expect(tests.e2e).toContain("test/e2e/sandbox.e2e.ts");
   });
 
   test("the current Temporal workflow monolith stays in the full safety net exactly once", () => {
@@ -378,6 +379,33 @@ describe("fail-closed change impact", () => {
     expect(ci).toContain("run: bun run test:react:clean");
     expect(packageJson.scripts?.["test:react:clean"]).toBe("bun scripts/test-react-clean.ts");
     expect(warningGate).toContain("React tests emitted runtime warnings:");
+  });
+
+  test("current-main release, generated-source, consumer, and capture gates remain required", () => {
+    const ci = readFileSync(".github/workflows/ci.yml", "utf8");
+    const guards = readFileSync("scripts/ci/run-guards-plan.ts", "utf8");
+    const packageJson = JSON.parse(readFileSync("package.json", "utf8")) as {
+      scripts?: Record<string, string>;
+    };
+    const full = createImpactPlan([], { forceFull: true });
+
+    expect(full.guards).toContain("generated-fonts");
+    expect(guards).toContain('"generated-fonts": ["bun", "run", "check:generated-fonts"]');
+    expect(packageJson.scripts?.["check:generated-fonts"]).toBe(
+      "bun scripts/generate-noto-jp-loader.ts --check",
+    );
+    expect(ci).toContain("Validate changeset release plan");
+    expect(ci).toContain("Version PR tree does not exactly reproduce 'changeset version'");
+    expect(ci).toContain("pending changesets target only ignored/private packages");
+    expect(ci).toContain("Clean published consumer");
+    expect(ci).toContain("-- bun run test:publish-consumer");
+    expect(ci.indexOf("Restore or build content-addressed package outputs")).toBeLessThan(
+      ci.indexOf("Clean published consumer"),
+    );
+    expect(full.e2eTests).toContain("test/e2e/sandbox.e2e.ts");
+    expect(readFileSync("test/e2e/sandbox.e2e.ts", "utf8")).toContain(
+      "captures a real turn-end multi-repository workspace through the public API",
+    );
   });
 
   test("OPE-26 session-pin boundaries select its browser acceptance", () => {

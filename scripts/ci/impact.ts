@@ -260,6 +260,7 @@ function fullPlan(
       "format",
       "workspace-billing",
       "docs-refs",
+      "generated-fonts",
       "publish-closure",
       ...(examples.length > 0 ? ["example-builds"] : []),
     ],
@@ -320,7 +321,7 @@ export function createImpactPlan(
       e2eTests: [],
       buildPackages: [],
       exampleBuildProjects: [],
-      guards: ["format", "docs-refs"],
+      guards: ["format", "docs-refs", "generated-fonts"],
       reasons: changedFiles.map((path) => ({ path, reason: "documentation-only change" })),
     };
   }
@@ -414,7 +415,7 @@ export function createImpactPlan(
     buildPackages.sort();
   }
   const examples = exampleBuildProjects(graph, (pkg) => affected.has(pkg.name));
-  const guards = ["lint", "format", "workspace-billing", "docs-refs"];
+  const guards = ["lint", "format", "workspace-billing", "docs-refs", "generated-fonts"];
   if (buildPackages.length > 0) guards.push("publish-closure");
   if (examples.length > 0) guards.push("example-builds");
 

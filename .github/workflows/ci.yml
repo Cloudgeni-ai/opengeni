@@ -107,7 +107,7 @@ jobs:
           mv ci-profile/dependencies.json.tmp ci-profile/dependencies.json
 
       - name: Upload exact impact plan
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: ci-impact-plan
           path: impact-plan.json
@@ -116,7 +116,7 @@ jobs:
 
       - name: Upload dependency resource profile
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: ci-profile-dependencies
           path: ci-profile/dependencies.json
@@ -153,7 +153,7 @@ jobs:
           -- bun scripts/ci/run-typecheck-plan.ts --plan impact-plan.json
       - name: Upload typecheck resource profile
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: ci-profile-typecheck
           path: ci-profile/typecheck.json
@@ -169,6 +169,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version-file: .bun-version
@@ -182,6 +183,43 @@ jobs:
         with:
           name: ci-impact-plan
           path: ${{ runner.temp }}/opengeni-impact-plan
+      - name: Validate changeset release plan
+        shell: bash
+        run: |
+          set -euo pipefail
+          plan="$RUNNER_TEMP/changeset-status.json"
+          git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
+          git update-ref refs/heads/main refs/remotes/origin/main
+
+          # A generated Version PR has consumed its changeset, so reproduce
+          # `changeset version` from the exact base and compare complete trees.
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ] && [ "${GITHUB_HEAD_REF:-}" = "changeset-release/main" ]; then
+            expected="$RUNNER_TEMP/changeset-version-expected"
+            git worktree add --detach "$expected" refs/remotes/origin/main
+            trap 'git worktree remove --force "$expected"' EXIT
+            (
+              cd "$expected"
+              bun "$GITHUB_WORKSPACE/node_modules/@changesets/cli/bin.js" version
+              git add -A
+              git diff --cached --check
+            )
+            expected_tree="$(git -C "$expected" write-tree)"
+            actual_tree="$(git rev-parse 'HEAD^{tree}')"
+            if [ "$actual_tree" != "$expected_tree" ]; then
+              echo "::error::Version PR tree does not exactly reproduce 'changeset version' from origin/main"
+              git -C "$expected" diff --cached --stat
+              exit 1
+            fi
+            exit 0
+          fi
+
+          bunx changeset status --output "$plan"
+          changeset_count="$(jq -er '.changesets | length' "$plan")"
+          release_count="$(jq -er '.releases | length' "$plan")"
+          if [ "$changeset_count" -gt 0 ] && [ "$release_count" -eq 0 ]; then
+            echo "::error::pending changesets target only ignored/private packages and cannot produce a Version PR"
+            exit 1
+          fi
       - name: Run exactly the explained guards
         run: >-
           bun scripts/ci/profile-command.ts
@@ -203,7 +241,7 @@ jobs:
         run: bun run test:react:clean
       - name: Upload guard resource profile
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: ci-profile-guards
           path: ci-profile/guards.json
@@ -248,7 +286,7 @@ jobs:
           --shard ${{ matrix.index }} --shards ${{ matrix.total }}
       - name: Upload unit resource profile
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: ci-profile-unit-${{ matrix.number }}
           path: ci-profile/unit-${{ matrix.number }}.json
@@ -292,7 +330,7 @@ jobs:
           --file-profile ci-profile/integration-${{ matrix.number }}-files.json
       - name: Upload integration resource profile
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: ci-profile-integration-${{ matrix.number }}
           path: |
@@ -373,7 +411,7 @@ jobs:
             /tmp/workbench-desktop-light-files.png
       - name: Upload E2E resource profile
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: ci-profile-e2e-${{ matrix.number }}
           path: |
@@ -401,7 +439,7 @@ jobs:
         run: |
           rm -rf node_modules "$BUN_INSTALL_CACHE_DIR"
           bun install --frozen-lockfile --backend=copyfile
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6.1.0
         with:
           path: .cache/opengeni/build-packages
           key: package-build-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bun-version') }}-${{ hashFiles('.npmrc', 'bunfig.toml', 'bun.lock', 'package.json', 'patches/**', 'tsconfig.base.json', 'scripts/build-publishable-packages.ts', 'scripts/publishable-workspaces.ts', 'scripts/ci/content-cache.ts', 'scripts/ci/workspace.ts') }}-${{ github.event.pull_request.head.sha || github.sha }}
@@ -426,6 +464,17 @@ jobs:
             args+=(--require-client-dist)
           fi
           bun scripts/publish-closure-guard.ts "${args[@]}"
+      - name: Clean published consumer
+        run: |
+          if jq -e '.buildPackages | any(. == "@opengeni/sdk" or . == "@opengeni/react")' impact-plan.json >/dev/null; then
+            bun scripts/ci/profile-command.ts \
+              --name publish-consumer \
+              --output ci-profile/publish-consumer.json \
+              --timeout-seconds 1200 \
+              -- bun run test:publish-consumer
+          else
+            echo "SDK/React are not impacted; clean published consumer not selected"
+          fi
       - name: Build React demo when the client surface is impacted
         run: |
           if jq -e '.affectedPackages | index("@opengeni/react")' impact-plan.json >/dev/null; then
@@ -435,12 +484,13 @@ jobs:
           fi
       - name: Upload package-build resource profile
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: ci-profile-packages
           path: |
             ci-profile/packages.json
             ci-profile/package-cache.json
+            ci-profile/publish-consumer.json
           if-no-files-found: error
           retention-days: 14
 
