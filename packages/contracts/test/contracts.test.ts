@@ -21,6 +21,8 @@ import {
   KnowledgeMemorySearchRequest,
   MarketingDailyAnalysisTaskRequest,
   mergeToolRefs,
+  ModelBillingAttributionV1,
+  ModelCredentialSourceV1,
   OAuthStartRequest,
   OPENGENI_API_CONTRACT_REVISION,
   TURN_EXECUTION_POLICY_METADATA_KEY,
@@ -93,6 +95,84 @@ describe("contracts", () => {
     }
     expect(message).toContain("policy.definitionVersion");
     expect(message).not.toContain(sensitiveMarker);
+  });
+
+  test("rejects unknown nested execution-policy identity without reflecting sensitive values", () => {
+    const adversarialCases = [
+      {
+        directSchema: ModelCredentialSourceV1,
+        nestedPath: "credentialSource" as const,
+        nestedValue: {
+          kind: "deployment",
+          mechanism: "api_key",
+          apiKey: "api-key-do-not-reflect",
+        },
+        sensitiveMarkers: ["api-key-do-not-reflect"],
+      },
+      {
+        directSchema: ModelCredentialSourceV1,
+        nestedPath: "credentialSource" as const,
+        nestedValue: {
+          kind: "connected_subscription",
+          provider: "codex",
+          token: "subscription-token-do-not-reflect",
+        },
+        sensitiveMarkers: ["subscription-token-do-not-reflect"],
+      },
+      {
+        directSchema: ModelCredentialSourceV1,
+        nestedPath: "credentialSource" as const,
+        nestedValue: {
+          kind: "workspace_connection",
+          mechanism: "api_key",
+          credentialId: "credential-id-do-not-reflect",
+        },
+        sensitiveMarkers: ["credential-id-do-not-reflect"],
+      },
+      {
+        directSchema: ModelBillingAttributionV1,
+        nestedPath: "billing" as const,
+        nestedValue: {
+          upstreamPayer: "connected_subscription",
+          metering: "external",
+          accountId: "account-id-do-not-reflect",
+        },
+        sensitiveMarkers: ["account-id-do-not-reflect"],
+      },
+      {
+        directSchema: ModelBillingAttributionV1,
+        nestedPath: "billing" as const,
+        nestedValue: {
+          upstreamPayer: "connected_subscription",
+          metering: "external",
+          accountLabel: "account-label-do-not-reflect",
+          labels: ["private-label-do-not-reflect"],
+        },
+        sensitiveMarkers: ["account-label-do-not-reflect", "private-label-do-not-reflect"],
+      },
+    ];
+
+    for (const testCase of adversarialCases) {
+      expect(testCase.directSchema.safeParse(testCase.nestedValue).success).toBe(false);
+      const malformedPolicy = {
+        ...turnExecutionPolicy,
+        [testCase.nestedPath]: testCase.nestedValue,
+      };
+      expect(TurnExecutionPolicyV1.safeParse(malformedPolicy).success).toBe(false);
+
+      let message = "";
+      try {
+        readTurnExecutionPolicyV1({
+          [TURN_EXECUTION_POLICY_METADATA_KEY]: malformedPolicy,
+        });
+      } catch (error) {
+        message = error instanceof Error ? error.message : String(error);
+      }
+      expect(message).toContain(`policy.${testCase.nestedPath}`);
+      for (const marker of testCase.sensitiveMarkers) {
+        expect(message).not.toContain(marker);
+      }
+    }
   });
 
   test("enforces requested-model/source consistency and emits explicit audit identity", () => {

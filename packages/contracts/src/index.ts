@@ -5076,16 +5076,20 @@ export const ModelCapabilitiesV1 = z.object({
 export type ModelCapabilitiesV1 = z.infer<typeof ModelCapabilitiesV1>;
 
 export const ModelCredentialSourceV1 = z.union([
-  z.object({ kind: z.literal("deployment"), mechanism: z.enum(["api_key", "azure_ad_bearer"]) }),
-  z.object({ kind: z.literal("connected_subscription"), provider: z.literal("codex") }),
-  z.object({ kind: z.literal("workspace_connection"), mechanism: z.literal("api_key") }),
+  z
+    .object({ kind: z.literal("deployment"), mechanism: z.enum(["api_key", "azure_ad_bearer"]) })
+    .strict(),
+  z.object({ kind: z.literal("connected_subscription"), provider: z.literal("codex") }).strict(),
+  z.object({ kind: z.literal("workspace_connection"), mechanism: z.literal("api_key") }).strict(),
 ]);
 export type ModelCredentialSourceV1 = z.infer<typeof ModelCredentialSourceV1>;
 
-export const ModelBillingAttributionV1 = z.object({
-  upstreamPayer: z.enum(["deployment", "workspace", "connected_subscription"]),
-  metering: z.enum(["opengeni_credits", "external"]),
-});
+export const ModelBillingAttributionV1 = z
+  .object({
+    upstreamPayer: z.enum(["deployment", "workspace", "connected_subscription"]),
+    metering: z.enum(["opengeni_credits", "external"]),
+  })
+  .strict();
 export type ModelBillingAttributionV1 = z.infer<typeof ModelBillingAttributionV1>;
 
 export const TURN_EXECUTION_POLICY_METADATA_KEY = "turnExecutionPolicyV1" as const;

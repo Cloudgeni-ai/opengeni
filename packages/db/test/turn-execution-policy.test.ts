@@ -215,16 +215,77 @@ describe("OPE-12 accepted turn execution policy", () => {
 
   test("fails closed without replacing malformed present metadata", async () => {
     if (!available) return;
-    const value = await fixture({ [TURN_EXECUTION_POLICY_METADATA_KEY]: null });
-    const claimed = await claim(value);
+    const malformedPolicies = [
+      {
+        ...acceptedPolicy,
+        credentialSource: {
+          kind: "deployment",
+          mechanism: "api_key",
+          apiKey: "api-key-do-not-reflect",
+        },
+        sensitiveMarkers: ["api-key-do-not-reflect"],
+      },
+      {
+        ...acceptedPolicy,
+        credentialSource: {
+          kind: "connected_subscription",
+          provider: "codex",
+          token: "subscription-token-do-not-reflect",
+        },
+        sensitiveMarkers: ["subscription-token-do-not-reflect"],
+      },
+      {
+        ...acceptedPolicy,
+        credentialSource: {
+          kind: "workspace_connection",
+          mechanism: "api_key",
+          credentialId: "credential-id-do-not-reflect",
+        },
+        sensitiveMarkers: ["credential-id-do-not-reflect"],
+      },
+      {
+        ...acceptedPolicy,
+        billing: {
+          upstreamPayer: "connected_subscription",
+          metering: "external",
+          accountId: "account-id-do-not-reflect",
+        },
+        sensitiveMarkers: ["account-id-do-not-reflect"],
+      },
+      {
+        ...acceptedPolicy,
+        billing: {
+          upstreamPayer: "connected_subscription",
+          metering: "external",
+          accountLabel: "account-label-do-not-reflect",
+          labels: ["private-label-do-not-reflect"],
+        },
+        sensitiveMarkers: ["account-label-do-not-reflect", "private-label-do-not-reflect"],
+      },
+    ];
 
-    await expect(install(value, claimed)).rejects.toThrow(
-      "Malformed turn execution policy metadata",
-    );
-    const stored = await getSessionTurn(client.db, value.workspaceId, value.turnId);
-    expect((stored!.metadata as Record<string, unknown>)[TURN_EXECUTION_POLICY_METADATA_KEY]).toBe(
-      null,
-    );
+    for (const malformedPolicy of malformedPolicies) {
+      const { sensitiveMarkers, ...storedPolicy } = malformedPolicy;
+      const value = await fixture({
+        [TURN_EXECUTION_POLICY_METADATA_KEY]: storedPolicy,
+      });
+      const claimed = await claim(value);
+
+      let message = "";
+      try {
+        await install(value, claimed);
+      } catch (error) {
+        message = error instanceof Error ? error.message : String(error);
+      }
+      expect(message).toContain("Malformed turn execution policy metadata");
+      for (const marker of sensitiveMarkers) {
+        expect(message).not.toContain(marker);
+      }
+      const stored = await getSessionTurn(client.db, value.workspaceId, value.turnId);
+      expect(
+        (stored!.metadata as Record<string, unknown>)[TURN_EXECUTION_POLICY_METADATA_KEY],
+      ).toEqual(storedPolicy);
+    }
   });
 
   test("rejects stale attempt and generation fences without installing", async () => {
