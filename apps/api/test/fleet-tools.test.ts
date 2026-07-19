@@ -222,7 +222,7 @@ afterAll(async () => {
     /* noop */
   }
   await shared?.release();
-});
+}, 180_000);
 
 describe("M7 fleet service — list / attach / swap / run_on / provision", () => {
   test("sandboxes_list: the session Modal box + the enrolled machine, each with liveness + active marker", async () => {

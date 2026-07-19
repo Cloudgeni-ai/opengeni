@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/react",
-  "version": "0.15.0",
+  "version": "0.16.0",
   "description": "React hooks and styled components for OpenGeni: live session streaming, chat composer, message timeline, session status, and fleet views — token-themed (CSS variables), dark-first, built on Tailwind v4 + Radix + Motion.",
   "license": "Apache-2.0",
   "repository": {
@@ -27,8 +27,14 @@
       "types": "./src/machines.ts",
       "default": "./src/machines.ts"
     },
-    "./styles.css": "./styles/index.css",
-    "./tokens.css": "./styles/tokens.css"
+    "./styles.css": {
+      "types": "./styles/index.d.ts",
+      "default": "./styles/index.css"
+    },
+    "./tokens.css": {
+      "types": "./styles/tokens.d.ts",
+      "default": "./styles/tokens.css"
+    }
   },
   "publishConfig": {
     "access": "public",
@@ -46,6 +52,8 @@
     "@dnd-kit/core": "6.3.1",
     "@dnd-kit/sortable": "10.0.0",
     "@dnd-kit/utilities": "3.2.2",
+    "@fontsource-variable/noto-sans-arabic": "5.2.10",
+    "@fontsource-variable/noto-sans-jp": "5.2.10",
     "@opengeni/sdk": "workspace:*",
     "clsx": "^2.1.1",
     "lucide-react": "^1.8.0",

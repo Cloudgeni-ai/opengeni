@@ -132,7 +132,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await client?.close().catch(() => undefined);
   await shared?.release();
-});
+}, 180_000);
 
 describe("session pins (real PostgreSQL + FORCE RLS)", () => {
   test("rejects an unbounded tree-stat root set before issuing SQL", async () => {

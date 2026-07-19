@@ -14,7 +14,7 @@ export type AsyncListState<T> = {
  * responses (superseded by a newer load or an unmount) are dropped.
  */
 export function usePolledValue<T>(
-  load: () => Promise<T>,
+  load: (signal?: AbortSignal) => Promise<T>,
   options: { pollIntervalMs?: number | undefined; enabled?: boolean | undefined } = {},
 ): AsyncListState<T> {
   const enabled = options.enabled ?? true;
@@ -23,31 +23,52 @@ export function usePolledValue<T>(
   const [loading, setLoading] = useState(enabled);
   const [error, setError] = useState<Error | null>(null);
   const generation = useRef(0);
-  const loadRef = useRef(load);
+  const activeLoadRef = useRef(load);
+  activeLoadRef.current = load;
+  const requestAbortRef = useRef<AbortController | null>(null);
+  const [stateIdentity, setStateIdentity] = useState<{ load: typeof load }>(() => ({ load }));
 
   // A new loader identity means a new query (different session/workspace/...):
   // drop the previous result instead of showing it as the new query's data.
   useEffect(() => {
-    if (loadRef.current !== load) {
-      loadRef.current = load;
+    if (stateIdentity.load !== load) {
+      setStateIdentity({ load });
       setData(null);
       setError(null);
     }
-  }, [load]);
+  }, [load, stateIdentity.load]);
 
   const run = useCallback(async () => {
+    // A callback retained by a completed mutation from the previous query must
+    // not supersede or settle the current query's request.
+    if (activeLoadRef.current !== load) return;
     const ticket = ++generation.current;
+    requestAbortRef.current?.abort();
+    const requestAbort = new AbortController();
+    requestAbortRef.current = requestAbort;
     try {
-      const result = await load();
-      if (ticket === generation.current) {
+      const result = await load(requestAbort.signal);
+      if (
+        ticket === generation.current &&
+        activeLoadRef.current === load &&
+        !requestAbort.signal.aborted
+      ) {
         setData(result);
         setError(null);
         setLoading(false);
       }
     } catch (cause) {
-      if (ticket === generation.current) {
+      if (
+        ticket === generation.current &&
+        activeLoadRef.current === load &&
+        !requestAbort.signal.aborted
+      ) {
         setError(cause instanceof Error ? cause : new Error(String(cause)));
         setLoading(false);
+      }
+    } finally {
+      if (requestAbortRef.current === requestAbort) {
+        requestAbortRef.current = null;
       }
     }
   }, [load]);
@@ -62,16 +83,24 @@ export function usePolledValue<T>(
     if (pollIntervalMs === undefined || pollIntervalMs <= 0) {
       return () => {
         generation.current += 1;
+        requestAbortRef.current?.abort();
       };
     }
     const timer = setInterval(() => void run(), pollIntervalMs);
     return () => {
       clearInterval(timer);
       generation.current += 1;
+      requestAbortRef.current?.abort();
     };
   }, [run, enabled, pollIntervalMs]);
 
-  return { data, loading, error, refresh: run };
+  const identityMatches = stateIdentity.load === load;
+  return {
+    data: identityMatches ? data : null,
+    loading: identityMatches ? loading : enabled,
+    error: identityMatches ? error : null,
+    refresh: run,
+  };
 }
 
 export type MutationState = {
@@ -85,12 +114,20 @@ export type MutationState = {
  * operation's value, or `null` after capturing the error in `mutationError`
  * (callers then roll back optimistic state).
  */
-export function useMutationRunner(): MutationState & {
+export function useMutationRunner(identity: unknown = undefined): MutationState & {
   run: <T>(operation: () => Promise<T>) => Promise<T | null>;
 } {
   const [mutating, setMutating] = useState(false);
   const [mutationError, setMutationError] = useState<Error | null>(null);
+  const [stateIdentity, setStateIdentity] = useState<unknown>(() => identity);
   const inFlight = useRef(0);
+  const generation = useRef(0);
+  const identityRef = useRef(identity);
+  if (!Object.is(identityRef.current, identity)) {
+    identityRef.current = identity;
+    generation.current += 1;
+    inFlight.current = 0;
+  }
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
@@ -98,30 +135,55 @@ export function useMutationRunner(): MutationState & {
       mounted.current = false;
     };
   }, []);
-  const run = useCallback(async <T>(operation: () => Promise<T>): Promise<T | null> => {
-    inFlight.current += 1;
-    if (mounted.current) {
-      setMutating(true);
+  useEffect(() => {
+    if (!Object.is(stateIdentity, identity)) {
+      setStateIdentity(() => identity);
+      setMutating(false);
       setMutationError(null);
     }
-    try {
-      return await operation();
-    } catch (cause) {
+  }, [identity, stateIdentity]);
+  const run = useCallback(
+    async <T>(operation: () => Promise<T>): Promise<T | null> => {
+      const ownedIdentity = identity;
+      const ownedGeneration = generation.current;
+      if (!Object.is(identityRef.current, ownedIdentity)) return null;
+      inFlight.current += 1;
       if (mounted.current) {
-        setMutationError(cause instanceof Error ? cause : new Error(String(cause)));
+        setMutating(true);
+        setMutationError(null);
       }
-      return null;
-    } finally {
-      inFlight.current -= 1;
-      if (mounted.current && inFlight.current === 0) {
-        setMutating(false);
+      try {
+        return await operation();
+      } catch (cause) {
+        if (
+          mounted.current &&
+          generation.current === ownedGeneration &&
+          Object.is(identityRef.current, ownedIdentity)
+        ) {
+          setMutationError(cause instanceof Error ? cause : new Error(String(cause)));
+        }
+        return null;
+      } finally {
+        if (
+          generation.current === ownedGeneration &&
+          Object.is(identityRef.current, ownedIdentity)
+        ) {
+          inFlight.current -= 1;
+          if (mounted.current && inFlight.current === 0) {
+            setMutating(false);
+          }
+        }
       }
-    }
-  }, []);
+    },
+    [identity],
+  );
+  const identityMatches = Object.is(stateIdentity, identity);
   return {
-    mutating,
-    mutationError,
-    clearMutationError: useCallback(() => setMutationError(null), []),
+    mutating: identityMatches && mutating,
+    mutationError: identityMatches ? mutationError : null,
+    clearMutationError: useCallback(() => {
+      if (Object.is(identityRef.current, identity)) setMutationError(null);
+    }, [identity]),
     run,
   };
 }

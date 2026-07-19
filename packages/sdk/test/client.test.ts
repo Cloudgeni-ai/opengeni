@@ -51,6 +51,57 @@ function makeClient(responder: (request: RecordedRequest) => Response): {
 }
 
 describe("OpenGeniClient", () => {
+  test("identity-scoped workspace reads forward AbortSignal cancellation", async () => {
+    let receivedSignal: AbortSignal | undefined;
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      fetch: async (_input, init) => {
+        receivedSignal = init?.signal ?? undefined;
+        return await new Promise<Response>((_resolve, reject) => {
+          receivedSignal?.addEventListener(
+            "abort",
+            () => reject(receivedSignal?.reason ?? new DOMException("Aborted", "AbortError")),
+            { once: true },
+          );
+        });
+      },
+    });
+    const abort = new AbortController();
+    const request = client.getWorkspaceCapture(WORKSPACE_ID, SESSION_ID, {
+      signal: abort.signal,
+    });
+    abort.abort();
+
+    expect(receivedSignal).toBe(abort.signal);
+    await expect(request).rejects.toHaveProperty("name", "AbortError");
+  });
+
+  test("machine polling forwards AbortSignal cancellation", async () => {
+    let receivedSignal: AbortSignal | undefined;
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      fetch: async (_input, init) => {
+        receivedSignal = init?.signal ?? undefined;
+        return await new Promise<Response>((_resolve, reject) => {
+          receivedSignal?.addEventListener(
+            "abort",
+            () => reject(receivedSignal?.reason ?? new DOMException("Aborted", "AbortError")),
+            { once: true },
+          );
+        });
+      },
+    });
+    const abort = new AbortController();
+    const request = client.listMachines(WORKSPACE_ID, {
+      sessionId: SESSION_ID,
+      signal: abort.signal,
+    });
+    abort.abort();
+
+    expect(receivedSignal).toBe(abort.signal);
+    await expect(request).rejects.toHaveProperty("name", "AbortError");
+  });
+
   test("createSession posts the request with bearer auth and strips the trailing base slash", async () => {
     const session = { id: SESSION_ID, workspaceId: WORKSPACE_ID, status: "queued" };
     const { client, requests } = makeClient(() => jsonResponse(session, 202));

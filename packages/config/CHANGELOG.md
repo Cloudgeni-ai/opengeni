@@ -1,5 +1,18 @@
 # @opengeni/config
 
+## 0.5.2
+
+### Patch Changes
+
+- 14ce2e3: Bound model-facing textual tool output with Codex-compatible, replay-idempotent semantics, account
+  for complete current model input, make compaction failure/progress transitions
+  durable and convergent, and replace recursive session discovery with a compact
+  paginated projection.
+- Updated dependencies [14ce2e3]
+- Updated dependencies [ec0697a]
+  - @opengeni/codex@0.2.4
+  - @opengeni/contracts@0.11.0
+
 ## 0.5.1
 
 ### Patch Changes

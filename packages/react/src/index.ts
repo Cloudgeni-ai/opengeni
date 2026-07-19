@@ -130,15 +130,25 @@ export type {
   UseSandboxTerminalOptions,
   UseSandboxTerminalResult,
 } from "./hooks/use-sandbox-terminal";
-export { useSandboxFiles } from "./hooks/use-sandbox-files";
+export {
+  CapturedFileUnavailableError,
+  FileWriteConflictError,
+  useSandboxFiles,
+} from "./hooks/use-sandbox-files";
 export type {
+  CapturedFileUnavailableReason,
   FileTreeNode,
   FileTreeStatus,
+  SandboxWriteFileOptions,
   UseSandboxFilesOptions,
   UseSandboxFilesResult,
 } from "./hooks/use-sandbox-files";
 export { useSandboxGit } from "./hooks/use-sandbox-git";
-export type { UseSandboxGitOptions, UseSandboxGitResult } from "./hooks/use-sandbox-git";
+export type {
+  SandboxGitFileDiff,
+  UseSandboxGitOptions,
+  UseSandboxGitResult,
+} from "./hooks/use-sandbox-git";
 
 // Workbench v2 turn-end capture (the cold-paint data layer)
 export { useWorkspaceCapture } from "./hooks/use-workspace-capture";

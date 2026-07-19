@@ -886,6 +886,7 @@ export async function steerQueuedTurnInTransaction(
   });
   const interruptionCount = supersession.interruptionCount;
   const supersededTurnId = supersession.replacedTurn?.id ?? null;
+  const supersededAttemptId = supersession.replacedTurn?.activeAttemptId ?? null;
   const liveCurrentTurnId = supersession.liveCurrentTurnId;
 
   const withoutTarget = rows.filter((row) => row.id !== target.id);
@@ -900,7 +901,17 @@ export async function steerQueuedTurnInTransaction(
   const queueVersion = session.queueVersion + 1;
   await db
     .update(schema.sessionTurns)
-    .set({ version: target.version + 1, updatedAt: now })
+    .set({
+      version: target.version + 1,
+      metadata: {
+        ...target.metadata,
+        delivery: "steer",
+        replacedTurnId: supersededTurnId,
+        replacedAttemptId: supersededAttemptId,
+        interruptionCount,
+      },
+      updatedAt: now,
+    })
     .where(eq(schema.sessionTurns.id, target.id));
   let sequence = supersession.lastSequence;
   const actor =
@@ -1239,7 +1250,35 @@ export async function submitHumanPromptInTransaction(
   for (const event of eventValues) event.sequence = ++sequence;
   const interruptionCount = supersession.interruptionCount;
   const replacedTurnId = supersession.replacedTurn?.id ?? null;
+  const replacedAttemptId = supersession.replacedTurn?.activeAttemptId ?? null;
   const liveCurrentTurnId = supersession.liveCurrentTurnId;
+  // Durable provenance for the queue projection. Until the superseded attempt
+  // loses inference, user-visible output, and workspace-persistence authority,
+  // its exact first-class attempt has no quiescence receipt. Pairing that
+  // attempt with the replacement lets every client render "Stopping previous
+  // attempt…" truthfully across refresh/reconnect, even though logical
+  // settlement has already cleared sessions.active_turn_id. Do not infer this
+  // state from a local request spinner or queue position.
+  if (input.delivery === "steer") {
+    await db
+      .update(schema.sessionTurns)
+      .set({
+        metadata: {
+          delivery: "steer",
+          replacedTurnId,
+          replacedAttemptId,
+          interruptionCount,
+        },
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(schema.sessionTurns.workspaceId, input.workspaceId),
+          eq(schema.sessionTurns.sessionId, input.sessionId),
+          eq(schema.sessionTurns.id, turnId),
+        ),
+      );
+  }
   if (supersession.replacedTurn) {
     const current = supersession.replacedTurn;
     if (!liveCurrentTurnId) {

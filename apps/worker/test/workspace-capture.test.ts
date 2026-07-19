@@ -77,6 +77,7 @@ function baseInput() {
     workspaceId: "00000000-0000-0000-0000-0000000000b1",
     sessionId: "00000000-0000-0000-0000-0000000000c1",
     turnId: "00000000-0000-0000-0000-0000000000d1",
+    attemptId: "00000000-0000-4000-8000-0000000000e1",
     observability,
   };
 }
@@ -384,6 +385,18 @@ describe("workspace-capture — manifest & event serialization", () => {
 });
 
 describe("workspace-capture — pre-service skip gates", () => {
+  test("an already-cancelled Steer/Pause owner returns before touching storage or db", async () => {
+    const controller = new AbortController();
+    controller.abort(new Error("STEER"));
+    await expect(
+      captureWorkspaceRevision({
+        ...baseInput(),
+        objectStorage: forbiddenStorage(),
+        signal: controller.signal,
+      }),
+    ).resolves.toBeUndefined();
+  });
+
   test("flag off → returns without touching storage or db", async () => {
     await expect(
       captureWorkspaceRevision({

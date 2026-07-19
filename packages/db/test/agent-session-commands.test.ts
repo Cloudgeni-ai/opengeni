@@ -10,6 +10,7 @@ import {
   createSession,
   listOutstandingSessionSystemUpdates,
   listSessionSystemUpdatesForTurn,
+  markSessionAttemptQuiesced,
   mutateSessionControlInTransaction,
   sendAgentMessageInTransaction,
   settleSessionAttemptInterruptions,
@@ -302,7 +303,7 @@ describe("attempt-fenced Agent session commands", () => {
     ).toHaveLength(1);
   });
 
-  test("Agent Steer settles the old owner then runs before an unchanged human queue", async () => {
+  test("Agent Steer waits for the old owner to quiesce then runs before an unchanged human queue", async () => {
     const grant = await fixture();
     const caller = await activeAgent(grant);
     const target = await makeSession(grant);
@@ -367,14 +368,32 @@ describe("attempt-fenced Agent session commands", () => {
       targetAttemptId,
     );
     const internalAttemptId = crypto.randomUUID();
-    const internalClaim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
+    const internalClaimInput = {
       sessionId: target.id,
       workflowId: `session-${target.id}`,
       workflowRunId: crypto.randomUUID(),
       attemptId: internalAttemptId,
       dispatchId: crypto.randomUUID(),
-      trigger: { kind: "next" },
+      trigger: { kind: "next" as const },
+    };
+    const blockedClaim = await claimSessionWorkForAttempt(
+      client.db,
+      grant.workspaceId!,
+      internalClaimInput,
+    );
+    expect(blockedClaim).toEqual({ action: "unclaimed", reason: "control-pending" });
+
+    await markSessionAttemptQuiesced(client.db, {
+      workspaceId: grant.workspaceId!,
+      sessionId: target.id,
+      attemptId: targetAttemptId,
+      temporalWorkflowId: `session-${target.id}`,
     });
+    const internalClaim = await claimSessionWorkForAttempt(
+      client.db,
+      grant.workspaceId!,
+      internalClaimInput,
+    );
     if (internalClaim.action !== "claimed") throw new Error("Agent Steer was not claimed");
     expect(internalClaim.turn.source).toBe("system");
     expect(

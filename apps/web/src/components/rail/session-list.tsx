@@ -54,6 +54,7 @@ import {
   SESSION_GROUP_ORDER,
   buildRailForest,
   groupSessionsForRail,
+  mergeSessionForRail,
   nodeIsActive,
   recencyGroupFor,
   relativeTimeLabel,
@@ -182,9 +183,13 @@ export function SessionList() {
       ...lineageSessions,
       ...pinned,
     ]) {
-      source.set(session.id, session);
+      const current = source.get(session.id);
+      source.set(session.id, current ? mergeSessionForRail(current, session) : session);
     }
-    for (const [id, override] of pinOverrides) source.set(id, override.session);
+    for (const [id, override] of pinOverrides) {
+      const current = source.get(id);
+      source.set(id, current ? mergeSessionForRail(current, override.session) : override.session);
+    }
     return [...source.values()];
   }, [
     activeLineage.lineage?.ancestors,
@@ -1199,7 +1204,7 @@ function SessionRow(props: {
     props.depth > 0 ? { paddingLeft: visualTreeDepth(props.depth) * 12 } : undefined;
 
   const rowClassName = cn(
-    "group relative flex h-8 w-full items-center gap-1.5 rounded-md py-1 pl-2.5 pr-1.5 text-left text-sm transition-colors pointer-coarse:h-11 pointer-coarse:py-0",
+    "group relative flex h-8 w-full items-center gap-1.5 rounded-md py-1 pl-2.5 pr-1.5 text-left text-sm pointer-coarse:h-11 pointer-coarse:py-0",
     rail.isMobile && "h-12 py-1.5 pointer-coarse:h-12",
     "hover:bg-surface-2",
     props.active ? "bg-surface-3 font-medium text-fg" : "text-fg-muted",
@@ -1318,7 +1323,7 @@ function SessionRow(props: {
                 and steps aside on hover/focus so the rename overflow can slot in.
                 On coarse pointers there is no hover, so the time stays visible. */}
             {!rail.isMobile ? (
-              <span className="shrink-0 text-2xs tabular-nums text-fg transition-opacity group-hover:opacity-0 group-focus-within:opacity-0 pointer-coarse:group-hover:opacity-100">
+              <span className="shrink-0 text-2xs tabular-nums text-fg group-hover:invisible group-focus-within:invisible pointer-coarse:group-hover:visible">
                 {relativeTime}
               </span>
             ) : null}

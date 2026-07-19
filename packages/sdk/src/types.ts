@@ -892,6 +892,7 @@ export type GitFileDiff = {
 export type GitDiffRequest = {
   path?: string;
   staged?: boolean;
+  includeUntracked?: boolean;
   fromRef?: string;
   toRef?: string;
   pathspec?: string[];
@@ -1684,6 +1685,8 @@ export type ComposerDraft = {
 export type SessionQueueSnapshot = {
   version: number;
   effectiveControl: EffectiveSessionControl;
+  /** Saved queue work is waiting for its interrupted predecessor to reach quiescence. */
+  stoppingPreviousAttempt: boolean;
   items: SessionTurn[];
 };
 

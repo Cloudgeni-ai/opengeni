@@ -33,6 +33,7 @@ import {
   isCompactionSummary,
   isEphemeralInternalContext,
   isUserMessage,
+  prepareCompactionPromptInput,
   renderCompactionPromptInputForChat,
   type CompactionItem,
 } from "../src/context-compaction";
@@ -477,6 +478,68 @@ describe("codex-parity rebuild", () => {
       "summary",
     );
     expect(sanitizeHistoryItemsForModel(rebuilt)).toEqual(rebuilt);
+  });
+});
+
+describe("bounded checkpoint input", () => {
+  test("rewrites oldest aggregate tool output while preserving recent detail", () => {
+    const oldOutput = "x".repeat(80_000);
+    const recentOutput = "recent result";
+    const prepared = prepareCompactionPromptInput(
+      [
+        user("old request"),
+        call("old-call"),
+        result("old-call", oldOutput),
+        user("recent request"),
+        call("recent-call"),
+        result("recent-call", recentOutput),
+      ],
+      4_000,
+    );
+
+    expect(prepared.estimatedInputTokens).toBeLessThanOrEqual(4_000);
+    expect(prepared.rewrittenToolOutputs).toBe(1);
+    expect(prepared.droppedHistoryItems).toBe(0);
+    expect(String(prepared.input[2]!.output)).toContain("tokens truncated");
+    expect(prepared.input[5]!.output).toBe(recentOutput);
+    expect(prepared.input.at(-1)).toMatchObject({
+      type: "message",
+      role: "user",
+      content: COMPACTION_PROMPT,
+    });
+  });
+
+  test("drops whole oldest user-delimited units without orphaning protocol items", () => {
+    const recent = [user("recent request"), call("recent-call"), result("recent-call", "ok")];
+    const prepared = prepareCompactionPromptInput(
+      [
+        user("x".repeat(40_000)),
+        { type: "reasoning", id: "reasoning-old" },
+        call("old-call"),
+        result("old-call", "old result"),
+        ...recent,
+      ],
+      1_000,
+    );
+    const history = prepared.input.slice(0, -1);
+
+    expect(prepared.estimatedInputTokens).toBeLessThanOrEqual(1_000);
+    expect(prepared.droppedHistoryItems).toBe(4);
+    expect(history).toEqual(recent);
+    expect(sanitizeHistoryItemsForModel(history)).toEqual(history);
+  });
+
+  test("never mutates the raw history used to build the durable replacement", () => {
+    const rawResult = result("call-1", "z".repeat(80_000));
+    const raw = [user("request"), call("call-1"), rawResult];
+    prepareCompactionPromptInput(raw, 1_000);
+
+    expect(raw[2]).toBe(rawResult);
+    expect(rawResult.output).toBe("z".repeat(80_000));
+    expect(buildCompactionReplacementHistory(raw, "summary")).toMatchObject([
+      user("request"),
+      expect.objectContaining({ [COMPACTION_SUMMARY_MARKER]: true }),
+    ]);
   });
 });
 

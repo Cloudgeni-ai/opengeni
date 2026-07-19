@@ -60,6 +60,7 @@ import {
   buildConnectionTokenResolver,
   getEnrollment,
   abandonRecordingForTurnAttempt,
+  markSessionAttemptQuiesced,
   type AppendEventInput,
   type ActiveSandboxPointer,
   type SandboxRecord,
@@ -97,6 +98,7 @@ import {
   type ComputerToolMode,
   type ModelResponseUsage,
   type BuildAgentOptions,
+  type TurnToolCancellationFence,
   type BackendUnresolvableCode,
   type EstablishedSandboxSession,
   type GitCredentialTokenWriterSession,
@@ -302,6 +304,80 @@ export function codexWorkspaceMetricKey(workspaceId: string): string {
  */
 export function isWorkerShutdownCancellation(error: unknown): boolean {
   return error instanceof CancelledFailure && error.message === "WORKER_SHUTDOWN";
+}
+
+/**
+ * Review captures and protective snapshots are cache/persistence housekeeping,
+ * never part of cancellation correctness. A control-fenced or Temporal-cancelled
+ * attempt must release its physical activity promptly so Steer/Pause can advance.
+ */
+export function shouldRunTurnEndWorkspacePersistence(input: {
+  activityStatus: RunAgentTurnResult["status"] | "unknown";
+  cancellationRequested: boolean;
+}): boolean {
+  return input.activityStatus !== "cancelled" && !input.cancellationRequested;
+}
+
+/**
+ * A Temporal cancellation is accepted by the workflow as proof that the dying
+ * activity crossed its mandatory sandbox-tool fence. Never let a fence failure
+ * retain that cancellation shape: the workflow would otherwise publish its
+ * fallback quiescence receipt and admit a replacement while a remote side
+ * effect may still be alive.
+ */
+export function assertPhysicalToolQuiescenceForCancellation(input: {
+  acknowledgeQuiescence: boolean;
+  physicalToolQuiescenceConfirmed: boolean;
+  failure: unknown;
+}): void {
+  if (!input.acknowledgeQuiescence || input.physicalToolQuiescenceConfirmed) return;
+  if (input.failure instanceof Error) throw input.failure;
+  throw new Error("Physical sandbox-tool quiescence could not be confirmed", {
+    cause: input.failure,
+  });
+}
+
+/**
+ * Await a finalizer operation only while this Temporal activity still owns its
+ * execution window. Once Pause/Steer cancellation arrives, the operation keeps
+ * its own rejection handler and may finish its idempotent, attempt-scoped
+ * cleanup in the background, but it cannot hold the replacement dispatch
+ * behind WAIT_CANCELLATION_COMPLETED.
+ */
+export async function waitForTurnFinalizerStep<T>(
+  operation: Promise<T>,
+  signal: AbortSignal | undefined,
+): Promise<T | undefined> {
+  if (!signal) return await operation;
+  if (signal.aborted) {
+    void operation.catch(() => undefined);
+    return undefined;
+  }
+
+  let resolveCancellation: (() => void) | undefined;
+  const cancelled = new Promise<undefined>((resolve) => {
+    resolveCancellation = () => resolve(undefined);
+  });
+  const cancel = (): void => {
+    void operation.catch(() => undefined);
+    resolveCancellation?.();
+  };
+  signal.addEventListener("abort", cancel, { once: true });
+  try {
+    return await Promise.race([operation, cancelled]);
+  } finally {
+    signal.removeEventListener("abort", cancel);
+  }
+}
+
+function turnFinalizerCancellationSignal(
+  temporalSignal: AbortSignal | undefined,
+  activityStatus: RunAgentTurnResult["status"] | "unknown",
+): AbortSignal | undefined {
+  if (activityStatus !== "cancelled" || temporalSignal?.aborted) return temporalSignal;
+  const fenced = new AbortController();
+  fenced.abort(new Error("TURN_ATTEMPT_FENCED"));
+  return fenced.signal;
 }
 
 function compactionFailureReason(reason: string): string {
@@ -964,6 +1040,86 @@ export type TurnSandboxProvisioner<T> = {
   waitForSettled(timeoutMs: number): Promise<T | null>;
 };
 
+export class TurnOperationCancelledError extends Error {
+  readonly name = "TurnOperationCancelledError";
+
+  constructor(readonly reason: unknown) {
+    super("Turn operation was cancelled with its owning turn", {
+      ...(reason instanceof Error ? { cause: reason } : {}),
+    });
+  }
+}
+
+/**
+ * Normalize a preparation/provisioning cancellation race back to the Temporal
+ * cancellation that owns the activity. Several provider APIs expose no portable
+ * abort primitive, so the worker stops awaiting them and disposes any late
+ * resource. The wrapper error must never fall through as an ordinary turn
+ * failure: doing so would omit the quiescence receipt and strand a committed
+ * Steer/Pause behind `control-pending`.
+ */
+export function turnOperationCancellationFailure(error: unknown): CancelledFailure | null {
+  if (error instanceof CancelledFailure) return error;
+  if (!(error instanceof TurnOperationCancelledError)) return null;
+  return error.reason instanceof CancelledFailure
+    ? error.reason
+    : new CancelledFailure("TURN_SANDBOX_PROVISION_CANCELLED", [], error);
+}
+
+function throwIfTurnOperationCancelled(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) {
+    throw new TurnOperationCancelledError(signal.reason);
+  }
+}
+
+export async function waitForTurnOperation<T>(
+  operation: Promise<T>,
+  signal: AbortSignal | undefined,
+  disposeLateResult: ((result: T) => Promise<void> | void) | undefined,
+): Promise<T> {
+  if (!signal) return await operation;
+
+  let rejectCancellation: ((error: TurnOperationCancelledError) => void) | undefined;
+  const cancelled = new Promise<never>((_resolve, reject) => {
+    rejectCancellation = reject;
+  });
+  const cancel = (): void => {
+    rejectCancellation?.(new TurnOperationCancelledError(signal.reason));
+  };
+  signal.addEventListener("abort", cancel, { once: true });
+  if (signal.aborted) cancel();
+
+  try {
+    const result = await Promise.race([operation, cancelled]);
+    // Cancellation owns an exact turn boundary even when the provider result
+    // and AbortSignal settle in the same microtask checkpoint. Never let a
+    // just-resolved lease escape after the control was already committed.
+    if (signal.aborted) {
+      throw new TurnOperationCancelledError(signal.reason);
+    }
+    return result;
+  } catch (error) {
+    if (signal.aborted) {
+      // The provider establish call has no universal cancellation seam. It may
+      // finish after the Temporal activity has correctly stopped; dispose its
+      // late lease instead of letting a cancelled turn resurrect a holder/box.
+      void operation
+        .then(async (result) => await disposeLateResult?.(result))
+        .catch(() => undefined);
+      // A provider failure may settle in the same checkpoint as the committed
+      // control. The control is authoritative; retain its cancellation shape
+      // so the activity publishes quiescence instead of looking like an
+      // unrelated turn failure.
+      if (!(error instanceof TurnOperationCancelledError)) {
+        throw new TurnOperationCancelledError(signal.reason);
+      }
+    }
+    throw error;
+  } finally {
+    signal.removeEventListener("abort", cancel);
+  }
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -986,9 +1142,11 @@ export function createTurnSandboxProvisioner<T>(
   options: {
     maxRetries?: number;
     backoffMs?: number;
+    signal?: AbortSignal;
     onStarted?: () => Promise<void> | void;
-    onCompleted?: () => Promise<void> | void;
+    onCompleted?: (result: T) => Promise<void> | void;
     onFailed?: (error: unknown) => Promise<void> | void;
+    disposeResult?: (result: T) => Promise<void> | void;
   } = {},
 ): TurnSandboxProvisioner<T> {
   const maxRetries = options.maxRetries ?? 2;
@@ -999,9 +1157,15 @@ export function createTurnSandboxProvisioner<T>(
     let attempt = 0;
     while (true) {
       try {
-        return await establish();
+        throwIfTurnOperationCancelled(options.signal);
+        const operation = establish();
+        return await waitForTurnOperation(operation, options.signal, options.disposeResult);
       } catch (error) {
-        if (attempt >= maxRetries || !isLazySandboxProvisionRetryable(error)) {
+        if (
+          error instanceof TurnOperationCancelledError ||
+          attempt >= maxRetries ||
+          !isLazySandboxProvisionRetryable(error)
+        ) {
           throw error;
         }
         attempt += 1;
@@ -1014,13 +1178,24 @@ export function createTurnSandboxProvisioner<T>(
     get(): Promise<T> {
       if (!memo) {
         memo = (async () => {
+          throwIfTurnOperationCancelled(options.signal);
           await options.onStarted?.();
+          throwIfTurnOperationCancelled(options.signal);
+          let result: T | undefined;
+          let hasResult = false;
           try {
-            const result = await run();
-            await options.onCompleted?.();
+            result = await run();
+            hasResult = true;
+            throwIfTurnOperationCancelled(options.signal);
+            await options.onCompleted?.(result);
             return result;
           } catch (error) {
-            await options.onFailed?.(error);
+            if (hasResult) {
+              await options.disposeResult?.(result as T);
+            }
+            if (!(error instanceof TurnOperationCancelledError)) {
+              await options.onFailed?.(error);
+            }
             throw error;
           }
         })().catch((error) => {
@@ -1150,6 +1325,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       connectionCredentials,
     } = await services();
     const activityContext = currentActivityContext();
+    const cancellationSignal = activityContext?.cancellationSignal;
+    let cancellationRequestedAt: number | null = cancellationSignal?.aborted
+      ? performance.now()
+      : null;
+    const noteCancellationRequested = (): void => {
+      cancellationRequestedAt ??= performance.now();
+    };
+    cancellationSignal?.addEventListener("abort", noteCancellationRequested, { once: true });
     const dispatchId = activityContext?.info.activityId ?? randomUUID();
     const activityStarted = performance.now();
     const activitySpan = observability.startSpan("worker.run_agent_segment", {
@@ -1160,6 +1343,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     let activityStatus: RunAgentTurnResult["status"] | "unknown" = "unknown";
     let turnMetricOutcome: TurnOutcome | null = null;
     let activityError: unknown;
+    let acknowledgeQuiescence = false;
     let turnId: string | undefined;
     let triggerEventId: string | undefined;
     const claimedResult = (
@@ -1397,6 +1581,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       await current?.flush().catch(() => undefined);
     };
     let preparedTools: Awaited<ReturnType<OpenGeniRuntime["prepareTools"]>> | null = null;
+    const toolCancellationFenceRef: { current: TurnToolCancellationFence | null } = {
+      current: null,
+    };
     let publish: TurnEventPublisher | null = null;
     let settle:
       | ((input: {
@@ -1518,16 +1705,21 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // selfhosted target has no persistWorkspace anyway. Best-effort +
         // single-flight; throttling lives in the helper.
         const snapshotSession = setupBoxSession;
-        if (snapshotSession && !snapshotInFlight) {
+        const snapshotTurnId = turnId;
+        if (snapshotSession && snapshotTurnId && !snapshotInFlight) {
           snapshotInFlight = maybePersistWarmWorkspaceSnapshot(
             { db, settings },
             {
               accountId: input.accountId,
               workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              turnId: snapshotTurnId,
+              attemptId: input.attemptId,
               sandboxGroupId: heartbeatGroupId,
             },
             snapshotSession,
             heartbeatEpoch,
+            activityContext?.cancellationSignal,
           )
             .then(async (persisted) => {
               if (persisted && publish) {
@@ -1800,13 +1992,17 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // §7.5 P3 — pass BOTH the codex predicate (codex-plan turns bypass the gate)
       // AND the optional host `entitlements` port (when bound, its admitRun replaces
       // the local credit read). Unset port → today's local-ledger path.
-      await ensureRunAllowed(
-        settings,
-        db,
-        input.accountId,
-        input.workspaceId,
-        isCodexTurn,
-        entitlements,
+      await waitForTurnOperation(
+        ensureRunAllowed(
+          settings,
+          db,
+          input.accountId,
+          input.workspaceId,
+          isCodexTurn,
+          entitlements,
+        ),
+        cancellationSignal,
+        undefined,
       );
       // Setup (variableSet load, MCP connects, sandbox restore) does not
       // stream and so never observes cancellation on its own; these explicit
@@ -1818,6 +2014,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           throw reason;
         }
       };
+      const throwIfTurnCancelled = () => throwIfTurnOperationCancelled(cancellationSignal);
       // ONE shared details object for every heartbeat this activity sends (each
       // site spreads it + its own phase), so cross-site fields — the op-stream
       // settled roster in particular — survive last-write-wins instead of being
@@ -1980,6 +2177,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // visibly starts: nothing ran yet, so the same inference starts cleanly
       // on a healthy worker.
       throwIfWorkerShuttingDown();
+      throwIfTurnCancelled();
       if (
         !(await settle({
           events: [
@@ -2789,24 +2987,28 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         let outcome: Awaited<ReturnType<typeof maybeCompactContext>> | null = null;
         if (requested) {
           try {
-            outcome = await maybeCompactContext(
-              db,
-              modelRunSettings,
-              {
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                sessionId: input.sessionId,
-                turnId: turn.id,
-                executionGeneration,
-                attemptId: input.attemptId,
-              },
-              session.lastInputTokens,
-              compactionSummarizerFor(compactionInstructions),
-              {
-                force: true,
-                clearRequestedCompaction: true,
-                trigger: "operator",
-              },
+            outcome = await waitForTurnOperation(
+              maybeCompactContext(
+                db,
+                modelRunSettings,
+                {
+                  accountId: input.accountId,
+                  workspaceId: input.workspaceId,
+                  sessionId: input.sessionId,
+                  turnId: turn.id,
+                  executionGeneration,
+                  attemptId: input.attemptId,
+                },
+                session.lastInputTokens,
+                compactionSummarizerFor(compactionInstructions),
+                {
+                  force: true,
+                  clearRequestedCompaction: true,
+                  trigger: "operator",
+                },
+              ),
+              cancellationSignal,
+              undefined,
             );
           } catch (error) {
             // Codex retries retryable checkpoint-provider failures rather than
@@ -2900,12 +3102,16 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         accountId: input.accountId,
         workspaceId: input.workspaceId,
       };
-      const workspaceVariableSet = await loadWorkspaceEnvironmentForRunWithCredentials(
-        db,
-        runSettings,
-        connectionScope,
-        session.variableSetId,
-        connectionCredentials?.sandboxSecrets,
+      const workspaceVariableSet = await waitForTurnOperation(
+        loadWorkspaceEnvironmentForRunWithCredentials(
+          db,
+          runSettings,
+          connectionScope,
+          session.variableSetId,
+          connectionCredentials?.sandboxSecrets,
+        ),
+        cancellationSignal,
+        undefined,
       );
       variableSetId = workspaceVariableSet?.id ?? "";
       // RIG DEFAULT VARIABLE SETS (M3): decrypt the frozen rig version's default
@@ -2920,12 +3126,16 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // set already relies on), keeping validateNoEnvironmentDelta empty.
       const rigDefaultEnvironmentValues: Record<string, string> = {};
       for (const rigDefaultVariableSetId of rigVersion?.defaultVariableSetIds ?? []) {
-        const rigDefaultSet = await loadWorkspaceEnvironmentForRunWithCredentials(
-          db,
-          runSettings,
-          connectionScope,
-          rigDefaultVariableSetId,
-          connectionCredentials?.sandboxSecrets,
+        const rigDefaultSet = await waitForTurnOperation(
+          loadWorkspaceEnvironmentForRunWithCredentials(
+            db,
+            runSettings,
+            connectionScope,
+            rigDefaultVariableSetId,
+            connectionCredentials?.sandboxSecrets,
+          ),
+          cancellationSignal,
+          undefined,
         );
         Object.assign(rigDefaultEnvironmentValues, rigDefaultSet?.values ?? {});
       }
@@ -3009,7 +3219,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         settings.sandboxOwnershipEnabled && runSettings.sandboxBackend !== "none"
           ? groupBoxBackend
           : runSettings.sandboxBackend;
-      await ensureTurnModalRegistryImage(runSettings, sandboxCreationBackend);
+      throwIfTurnOperationCancelled(cancellationSignal);
+      await waitForTurnOperation(
+        ensureTurnModalRegistryImage(runSettings, sandboxCreationBackend),
+        cancellationSignal,
+        undefined,
+      );
       const establishPolicy: "eager" | "on-demand" =
         lazyProvisionEnabled(settings) && !machinePrimary && runSettings.sandboxBackend !== "none"
           ? "on-demand"
@@ -3039,21 +3254,25 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         gitTokens: sandboxGitTokens,
         gitTokenExpiresAt: sandboxGitTokenExpiresAt,
         toolspaceToken: sandboxToolspaceToken,
-      } = await sandboxEnvironmentForRun(
-        runSettings,
-        turnResources,
-        // Rig default sets merged BELOW the session set (session wins); rig-less
-        // turns pass exactly workspaceVariableSet?.values (byte-for-byte today).
-        sandboxWorkspaceEnvironmentValues,
-        {
-          skipGitHubToken: activeSandboxBackend === "selfhosted",
-          deferGitHubToken:
-            activeSandboxBackend !== "selfhosted" && establishPolicy === "on-demand",
-          scope: connectionScope,
-          gitCredentials: connectionCredentials?.gitCredentials,
-          sessionId: input.sessionId,
-          runId: turnId,
-        },
+      } = await waitForTurnOperation(
+        sandboxEnvironmentForRun(
+          runSettings,
+          turnResources,
+          // Rig default sets merged BELOW the session set (session wins); rig-less
+          // turns pass exactly workspaceVariableSet?.values (byte-for-byte today).
+          sandboxWorkspaceEnvironmentValues,
+          {
+            skipGitHubToken: activeSandboxBackend === "selfhosted",
+            deferGitHubToken:
+              activeSandboxBackend !== "selfhosted" && establishPolicy === "on-demand",
+            scope: connectionScope,
+            gitCredentials: connectionCredentials?.gitCredentials,
+            sessionId: input.sessionId,
+            runId: turnId,
+          },
+        ),
+        cancellationSignal,
+        undefined,
       );
 
       const initialGitCredentials: MintedRunGitCredentials | undefined = sandboxGitTokens
@@ -3085,6 +3304,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             const runAs = sandboxRunAs(runSettings);
             await refreshGitProviderTokenFiles(tokenSession, tokens, {
               ...(runAs ? { runAs } : {}),
+              ...(toolCancellationFenceRef.current
+                ? {
+                    commandRunner: toolCancellationFenceRef.current.runSandboxCommand.bind(
+                      toolCancellationFenceRef.current,
+                    ),
+                  }
+                : {}),
             });
           },
           onSuccess: ({ providers: renewedProviders }) => {
@@ -3183,16 +3409,20 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // (buildSelfhostedBackendSession); EstablishedSandboxSession widens it.
           machinePrimarySession =
             established.session as import("@opengeni/runtime").SelfhostedSession;
-          const lease = await acquireSelfhostedLeaseForTurn(
-            { db, settings },
-            {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              sandboxGroupId: session.sandboxGroupId,
-              sessionId: input.sessionId,
-            },
-            "turn",
-            sandboxHolderId,
+          const lease = await waitForTurnOperation(
+            acquireSelfhostedLeaseForTurn(
+              { db, settings },
+              {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sandboxGroupId: session.sandboxGroupId,
+                sessionId: input.sessionId,
+              },
+              "turn",
+              sandboxHolderId,
+            ),
+            cancellationSignal,
+            async (lateLease) => await lateLease.release(),
           );
           setupBoxSession = established.session;
           resolvedSandbox = {
@@ -3237,45 +3467,49 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // proxy's first default-pointer op. A chat-only turn never calls it, so
           // no lease row, no provider box, no warm-meter interval.
         } else {
-          resolvedSandbox = await resumeBoxForTurn(
-            {
-              db,
-              settings,
-              sandboxMetrics: runtimeMetricsHooksForObservability(observability),
-              onSandboxLost: publishSandboxLost,
-            },
-            {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              sandboxGroupId: session.sandboxGroupId,
-              sessionId: input.sessionId,
-              // groupBoxBackend, not turn.sandboxBackend: a machine-home turn that
-              // is not machine-primary resumes a real cloud group box (the
-              // deployment default), never a "selfhosted" box (which would throw
-              // for lack of a bound agentId).
-              backend: groupBoxBackend,
-              os: session.sandboxOs,
-              environment: sandboxEnvironment,
-              // IMAGE IS SHARED STATE (B3, Modal warm-box path only): the container image
-              // this run resolves. The lease stamps it + conflicts on a live shared box
-              // running a DIFFERENT image (solo → recreate on the new image; N-holders →
-              // SandboxImageConflictError surfaced as an actionable turn error). Prefer the
-              // explicit Modal image ref, else the docker image. The selfhosted branch
-              // (establishSelfhostedTurnSession/acquireSelfhostedLeaseForTurn) NEVER passes
-              // an image — B3 lives only on this Modal else-branch.
-              ...((runSettings.modalImageRef ?? runSettings.dockerImage)
-                ? {
-                    image: runSettings.modalImageRef ?? runSettings.dockerImage,
-                  }
-                : {}),
-              // RIG IS SHARED STATE (M3): stamp the frozen rig version so the lease
-              // conflicts on a live shared box set up under a different rig (solo
-              // recreate / N-holders SandboxRigConflictError). Omitted for a rig-less
-              // turn -> never stamped or enforced (shares exactly as today).
-              ...(rigVersion ? { rigVersionId: rigVersion.id } : {}),
-            },
-            "turn",
-            sandboxHolderId,
+          resolvedSandbox = await waitForTurnOperation(
+            resumeBoxForTurn(
+              {
+                db,
+                settings,
+                sandboxMetrics: runtimeMetricsHooksForObservability(observability),
+                onSandboxLost: publishSandboxLost,
+              },
+              {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sandboxGroupId: session.sandboxGroupId,
+                sessionId: input.sessionId,
+                // groupBoxBackend, not turn.sandboxBackend: a machine-home turn that
+                // is not machine-primary resumes a real cloud group box (the
+                // deployment default), never a "selfhosted" box (which would throw
+                // for lack of a bound agentId).
+                backend: groupBoxBackend,
+                os: session.sandboxOs,
+                environment: sandboxEnvironment,
+                // IMAGE IS SHARED STATE (B3, Modal warm-box path only): the container image
+                // this run resolves. The lease stamps it + conflicts on a live shared box
+                // running a DIFFERENT image (solo → recreate on the new image; N-holders →
+                // SandboxImageConflictError surfaced as an actionable turn error). Prefer the
+                // explicit Modal image ref, else the docker image. The selfhosted branch
+                // (establishSelfhostedTurnSession/acquireSelfhostedLeaseForTurn) NEVER passes
+                // an image — B3 lives only on this Modal else-branch.
+                ...((runSettings.modalImageRef ?? runSettings.dockerImage)
+                  ? {
+                      image: runSettings.modalImageRef ?? runSettings.dockerImage,
+                    }
+                  : {}),
+                // RIG IS SHARED STATE (M3): stamp the frozen rig version so the lease
+                // conflicts on a live shared box set up under a different rig (solo
+                // recreate / N-holders SandboxRigConflictError). Omitted for a rig-less
+                // turn -> never stamped or enforced (shares exactly as today).
+                ...(rigVersion ? { rigVersionId: rigVersion.id } : {}),
+              },
+              "turn",
+              sandboxHolderId,
+            ),
+            cancellationSignal,
+            async (lateSandbox) => await lateSandbox.release(),
           );
           setupBoxSession = resolvedSandbox.established.session;
           // Durable box-lifecycle events (sandbox-file-persistence observability):
@@ -3316,42 +3550,51 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         }
       }
 
-      const fileResourceDownloads = await sandboxFileDownloadsForRun(
-        runSettings,
-        db,
-        objectStorage,
-        input.workspaceId,
-        turnResources,
+      const fileResourceDownloads = await waitForTurnOperation(
+        sandboxFileDownloadsForRun(
+          runSettings,
+          db,
+          objectStorage,
+          input.workspaceId,
+          turnResources,
+        ),
+        cancellationSignal,
+        undefined,
       );
       throwIfWorkerShuttingDown();
+      throwIfTurnCancelled();
       // Wrap MCP prep in the codex ALS so the codex_apps connect handshake
       // (initialize + tools/list) can resolve the per-workspace bearer from
       // codexRequestStorage (runtime/codexAppsMcpRequestInit). withCodex is the
       // identity on every non-codex turn, so this is a no-op for existing paths.
       const resolveCredential = buildConnectionTokenResolver(db, runSettings);
-      preparedTools = await withCodex(() =>
-        runtime.prepareTools(runSettings, turnTools, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          // Sign the calling turn into the first-party token so tools classify
-          // the caller by its own identity (sacred-pause guard), not the racy
-          // live active pointer.
-          ...(turnId ? { turnId } : {}),
-          attemptId: input.attemptId,
-          executionGeneration,
-          subjectId: "worker:first-party-mcp",
-          subjectLabel: "OpenGeni worker",
-          resolveCredential,
-          onAuthNeeded: async (payload) => {
-            await publish!([{ type: "tool.auth_needed", payload }], true);
-          },
-          // Manager-style sessions carry a creation-validated permission set
-          // for their first-party MCP token; null keeps the fixed default.
-          ...(session.firstPartyMcpPermissions?.length
-            ? { firstPartyPermissions: session.firstPartyMcpPermissions }
-            : {}),
-        }),
+      preparedTools = await waitForTurnOperation(
+        withCodex(() =>
+          runtime.prepareTools(runSettings, turnTools, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            // Sign the calling turn into the first-party token so tools classify
+            // the caller by its own identity (sacred-pause guard), not the racy
+            // live active pointer.
+            ...(turnId ? { turnId } : {}),
+            attemptId: input.attemptId,
+            executionGeneration,
+            subjectId: "worker:first-party-mcp",
+            subjectLabel: "OpenGeni worker",
+            resolveCredential,
+            onAuthNeeded: async (payload) => {
+              await publish!([{ type: "tool.auth_needed", payload }], true);
+            },
+            // Manager-style sessions carry a creation-validated permission set
+            // for their first-party MCP token; null keeps the fixed default.
+            ...(session.firstPartyMcpPermissions?.length
+              ? { firstPartyPermissions: session.firstPartyMcpPermissions }
+              : {}),
+          }),
+        ),
+        cancellationSignal,
+        async (latePreparedTools) => await latePreparedTools.close().catch(() => undefined),
       );
       // Genesis turn = the first user turn (no assistant history reconciled
       // yet). Durable Postgres state (countSessionHistoryItems includes
@@ -3397,6 +3640,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           titleIsSet: Boolean(session.title?.trim()),
         },
         sandboxEnvironment,
+        ...(cancellationSignal ? { turnCancellationSignal: cancellationSignal } : {}),
+        onToolCancellationFence: (fence) => {
+          toolCancellationFenceRef.current = fence;
+        },
         // TOKEN-BROKER (B1): forward the per-turn git token OFF-MANIFEST as the clone
         // seed. ONLY when the effective backend is NOT selfhosted (the connected
         // machine uses its own git creds — mirrors the skipGitHubToken gate above)
@@ -3514,6 +3761,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             }
           : {}),
       });
+      if (modelRunSettings.sandboxBackend !== "none" && toolCancellationFenceRef.current === null) {
+        throw new Error(
+          "Sandbox agent construction did not install the mandatory turn tool cancellation fence",
+        );
+      }
       if (establishPolicy === "on-demand" && sandboxHolderId && sandboxGroupId) {
         const lazyHolderId = sandboxHolderId;
         const lazyGroupId = sandboxGroupId;
@@ -3524,10 +3776,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         const lazyClient = {
           backendId: sdkBackendIdForSandboxBackend(groupBoxBackend),
         } as EstablishedSandboxSession["client"];
-        let lazyEstablishmentOrigin: EstablishedSandboxSession["origin"] | null = null;
         turnSandboxProvisioner = createTurnSandboxProvisioner<ResumedTurnSandbox>(
           async () => {
             throwIfWorkerShuttingDown();
+            throwIfTurnCancelled();
             const lazyGitCredentials =
               activeSandboxBackend === "selfhosted"
                 ? undefined
@@ -3560,8 +3812,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               "turn",
               lazyHolderId,
             );
-            lazyEstablishmentOrigin = provisioned.established.origin ?? null;
-            setupBoxSession = provisioned.established.session;
             await publishSandboxLifecycleEvents(provisioned);
             await runOwnedSandboxSetup(
               agent,
@@ -3574,6 +3824,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   await publish?.([{ type: event.type, payload: event.payload }], true);
                 },
                 ...(lazyGitTokens ? { gitTokenSeedsOverride: lazyGitTokens } : {}),
+                ...(toolCancellationFenceRef.current
+                  ? {
+                      commandRunner: toolCancellationFenceRef.current.runSandboxCommand.bind(
+                        toolCancellationFenceRef.current,
+                      ),
+                    }
+                  : {}),
               },
             );
             await attachGitCredentialRenewal(
@@ -3588,11 +3845,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             // already holds the proxy directly (injected as lazyOwnedSandbox.session), so it
             // gets per-op routing; the worker-side handle (resolvedSandbox: release,
             // heartbeat, computer-use recording) wants the real box, unproxied.
-            resolvedSandbox = provisioned;
-            startLeaseHeartbeat(provisioned, activeSandboxBackend ?? groupBoxBackend);
             return provisioned;
           },
           {
+            ...(activityContext ? { signal: activityContext.cancellationSignal } : {}),
             onStarted: async () => {
               await publish?.(
                 [
@@ -3604,19 +3860,25 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 true,
               );
             },
-            onCompleted: async () => {
+            onCompleted: async (provisioned) => {
               await publish?.(
                 [
                   {
                     type: "sandbox.operation.completed",
                     payload: {
                       name: "sandbox.provision",
-                      ...(lazyEstablishmentOrigin ? { origin: lazyEstablishmentOrigin } : {}),
+                      ...(provisioned.established.origin
+                        ? { origin: provisioned.established.origin }
+                        : {}),
                     },
                   },
                 ],
                 true,
               );
+              throwIfTurnOperationCancelled(activityContext?.cancellationSignal);
+              startLeaseHeartbeat(provisioned, activeSandboxBackend ?? groupBoxBackend);
+              setupBoxSession = provisioned.established.session;
+              resolvedSandbox = provisioned;
             },
             onFailed: async (error) => {
               await publish?.(
@@ -3631,6 +3893,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 ],
                 true,
               );
+            },
+            disposeResult: async (provisioned) => {
+              await provisioned.release().catch(() => undefined);
             },
           },
         );
@@ -3672,31 +3937,35 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // observe it without consuming it so a failed/stale attempt cannot
           // lose the request. The replacement transaction clears it on success.
           forced = await isSessionCompactionRequested(db, input.workspaceId, input.sessionId);
-          const outcome = await maybeCompactContext(
-            db,
-            modelRunSettings,
-            {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-              turnId: turnId!,
-              executionGeneration,
-              attemptId: input.attemptId,
-            },
-            session.lastInputTokens,
-            // Provider-aware summarizer: when the turn's model resolved to a
-            // registry provider, summarize on THAT provider's client + wire API
-            // (a chat provider can't summarize through OpenAI/Azure). Null
-            // resolution uses the built-in Responses summarizer with the same
-            // session prompt-cache key as the main model calls.
-            compactSummarizer,
-            forced
-              ? {
-                  force: true,
-                  clearRequestedCompaction: true,
-                  trigger: "operator",
-                }
-              : { trigger: "auto" },
+          const outcome = await waitForTurnOperation(
+            maybeCompactContext(
+              db,
+              modelRunSettings,
+              {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                turnId: turnId!,
+                executionGeneration,
+                attemptId: input.attemptId,
+              },
+              session.lastInputTokens,
+              // Provider-aware summarizer: when the turn's model resolved to a
+              // registry provider, summarize on THAT provider's client + wire API
+              // (a chat provider can't summarize through OpenAI/Azure). Null
+              // resolution uses the built-in Responses summarizer with the same
+              // session prompt-cache key as the main model calls.
+              compactSummarizer,
+              forced
+                ? {
+                    force: true,
+                    clearRequestedCompaction: true,
+                    trigger: "operator",
+                  }
+                : { trigger: "auto" },
+            ),
+            cancellationSignal,
+            undefined,
           );
           if (outcome.compacted) {
             const compactionTrigger = forced ? "operator" : undefined;
@@ -3776,6 +4045,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 await publish!([{ type: event.type, payload: event.payload }], true);
               },
               ...(runAs ? { runAs } : {}),
+              ...(toolCancellationFenceRef.current
+                ? {
+                    commandRunner: toolCancellationFenceRef.current.runSandboxCommand.bind(
+                      toolCancellationFenceRef.current,
+                    ),
+                  }
+                : {}),
             },
           );
           fileMaterializationFailures = materialized.failures;
@@ -3870,29 +4146,33 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         triggerLabel: "overflow" | "proactive" | "operator",
         recoverySignalTokens: number | null,
       ) => {
-        const outcome = await maybeCompactContext(
-          db,
-          modelRunSettings,
-          {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            turnId: activeTurnId,
-            executionGeneration,
-            attemptId: input.attemptId,
-          },
-          // Never reuse the persisted prior-turn signal for recovery. Proactive
-          // guards provide their exact current signal; provider overflows do not,
-          // so null derives decision metadata from active history. Forced
-          // recovery proves progress separately by comparing the replacement
-          // with the current active-history estimate in maybeCompactContext.
-          recoverySignalTokens,
-          compactSummarizer,
-          {
-            force: true,
-            ...(triggerLabel === "operator" ? { clearRequestedCompaction: true } : {}),
-            trigger: triggerLabel,
-          },
+        const outcome = await waitForTurnOperation(
+          maybeCompactContext(
+            db,
+            modelRunSettings,
+            {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              turnId: activeTurnId,
+              executionGeneration,
+              attemptId: input.attemptId,
+            },
+            // Never reuse the persisted prior-turn signal for recovery. Proactive
+            // guards provide their exact current signal; provider overflows do not,
+            // so null derives decision metadata from active history. Forced
+            // recovery proves progress separately by comparing the replacement
+            // with the current active-history estimate in maybeCompactContext.
+            recoverySignalTokens,
+            compactSummarizer,
+            {
+              force: true,
+              ...(triggerLabel === "operator" ? { clearRequestedCompaction: true } : {}),
+              trigger: triggerLabel,
+            },
+          ),
+          cancellationSignal,
+          undefined,
         );
         if (outcome.events.length > 0) {
           if (outcome.compacted) {
@@ -3915,11 +4195,19 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         stream = undefined;
         batcher = null;
         let responseUsageCount = 0;
+        // The SDK emits every processed call item for one model response before
+        // it emits any result for that response. Keep that response-local batch
+        // in memory so an orphan from an older response cannot pin later stable
+        // calls. Durable recovery remains call/result based and needs no batch
+        // schema or compatibility state.
+        let currentToolBatchCallIds = new Set<string>();
+        let currentToolBatchCompletedCallIds = new Set<string>();
         // Actual input tokens of the most recent model response this turn; the
         // pre-read trigger for the NEXT turn. Persisted at every turn-end path.
         let lastProviderContextTokensObserved: number | null = null;
         let providerContextRevision = 0;
         throwIfWorkerShuttingDown();
+        throwIfTurnCancelled();
         const ownedEstablished = resolvedSandbox?.established ?? lazyOwnedSandbox;
         const runStreamOnce = (): ReturnType<OpenGeniRuntime["runStream"]> =>
           runtime.runStream(agent, runInput!, modelRunSettings, {
@@ -3971,6 +4259,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   },
             contextCompactionRequested: () =>
               isSessionCompactionRequested(db, input.workspaceId, input.sessionId),
+            ...(toolCancellationFenceRef.current
+              ? { turnToolCancellationFence: toolCancellationFenceRef.current }
+              : {}),
           });
         if (codexLeaseLost) {
           throw new Error("Codex credential lease expired before the model run");
@@ -4002,6 +4293,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               streamDone = true;
               break;
             }
+            let stableToolCallIdsToClear: string[] | null = null;
+            let completedCurrentToolBatch = false;
             const responseUsage = modelResponseUsageFromSdkEvent(next.value);
             if (responseUsage) {
               await recordCompletedModelCallBeforeOwnershipFences({
@@ -4072,6 +4365,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   }
                 },
               });
+              currentToolBatchCallIds = new Set<string>();
+              currentToolBatchCompletedCallIds = new Set<string>();
               await reconcileConversationTruth();
               try {
                 await ensureRunAllowed(
@@ -4114,6 +4409,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   "turn attempt ended while recording an in-flight tool call",
                 );
               }
+              currentToolBatchCallIds.add(pendingToolCall.callId);
             }
             const completedToolCall = completedToolCallFromSdkEvent(next.value);
             if (completedToolCall) {
@@ -4137,31 +4433,52 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   "turn attempt ended while recording a tool-call result",
                 );
               }
-              if (recorded.allResultsRecorded) {
-                // Persist the SDK's now-stable complete call/result batch before
-                // clearing its receipts. A crash between these transactions is
-                // harmless: settlement finds both raw results and merely
-                // consumes them without fabricating an interruption.
+              const belongsToCurrentBatch = currentToolBatchCallIds.has(completedToolCall.callId);
+              if (belongsToCurrentBatch) {
+                currentToolBatchCompletedCallIds.add(completedToolCall.callId);
+              }
+              const currentBatchIsStable =
+                belongsToCurrentBatch &&
+                currentToolBatchCallIds.size > 0 &&
+                currentToolBatchCompletedCallIds.size === currentToolBatchCallIds.size;
+              const standaloneStableResult =
+                !belongsToCurrentBatch && currentToolBatchCallIds.size === 0;
+              if (currentBatchIsStable || standaloneStableResult) {
+                // Persist the SDK's now-stable complete call/result batch. Keep
+                // the receipts until the normalized tool-output event below is
+                // durably flushed: recovery then covers every crash boundary
+                // without either losing or duplicating the UI projection.
                 await reconcileConversationTruth({ requireDurable: true });
-                const cleared = await clearDurablePendingSessionToolCalls(db, {
-                  accountId: input.accountId,
-                  workspaceId: input.workspaceId,
-                  sessionId: input.sessionId,
-                  turnId: activeTurnId,
-                  executionGeneration,
-                  attemptId: input.attemptId,
-                });
-                if (!cleared.accepted) {
-                  throw new TurnAttemptFencedError(
-                    "turn attempt ended while finalizing tool-call results",
-                  );
-                }
+                stableToolCallIdsToClear = currentBatchIsStable
+                  ? [...currentToolBatchCallIds]
+                  : [completedToolCall.callId];
+                completedCurrentToolBatch = currentBatchIsStable;
               }
             }
             const normalized = normalizeSdkEvent(next.value);
             for (const event of normalized) {
               streamTiming.onEvent(event.type);
               await batcher.push(event);
+            }
+            if (stableToolCallIdsToClear) {
+              const cleared = await clearDurablePendingSessionToolCalls(db, {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                turnId: activeTurnId,
+                executionGeneration,
+                attemptId: input.attemptId,
+                callIds: stableToolCallIdsToClear,
+              });
+              if (!cleared.accepted) {
+                throw new TurnAttemptFencedError(
+                  "turn attempt ended while finalizing tool-call results",
+                );
+              }
+              if (completedCurrentToolBatch) {
+                currentToolBatchCallIds = new Set<string>();
+                currentToolBatchCompletedCallIds = new Set<string>();
+              }
             }
           }
         } finally {
@@ -4506,7 +4823,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           throw recoveryError;
         }
       }
-      if (isWorkerShutdownCancellation(error) && recoveryTurnId) {
+      const cancellationFailure = turnOperationCancellationFailure(error);
+      if (
+        cancellationFailure &&
+        isWorkerShutdownCancellation(cancellationFailure) &&
+        recoveryTurnId
+      ) {
         try {
           await flushRuntimeBatcher();
           await reconcileConversationTruth();
@@ -4549,7 +4871,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       if (error instanceof TurnAttemptFencedError) {
         activityStatus = "cancelled";
         activityError = error;
-        await flushRuntimeBatcher();
+        acknowledgeQuiescence = true;
+        noteCancellationRequested();
+        await waitForTurnFinalizerStep(
+          flushRuntimeBatcher(),
+          turnFinalizerCancellationSignal(cancellationSignal, activityStatus),
+        );
         // Ownership already moved to a newer attempt or an authoritative
         // control transaction. Surface a transport cancellation instead of a
         // normal activity result: with WAIT_CANCELLATION_COMPLETED, Temporal
@@ -4559,16 +4886,21 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         turnMetricOutcome = "cancelled";
         throw new CancelledFailure("TURN_ATTEMPT_FENCED", [], error);
       }
-      if (error instanceof CancelledFailure) {
+      if (cancellationFailure) {
         activityStatus = "cancelled";
         activityError = error;
-        await flushRuntimeBatcher();
+        acknowledgeQuiescence = true;
+        noteCancellationRequested();
+        await waitForTurnFinalizerStep(
+          flushRuntimeBatcher(),
+          turnFinalizerCancellationSignal(cancellationSignal, activityStatus),
+        );
         // The workflow owns cancellation settlement: Pause/Steer controls use
         // settleSessionControl, and heartbeat timeouts use worker-death
         // recovery. A dying activity must never append a
         // competing cancellation or mutate the turn/session on its own.
         turnMetricOutcome = "cancelled";
-        throw error;
+        throw cancellationFailure;
       }
       // The SDK's per-segment turn cap is a pacing valve, not a failure: end
       // the turn gracefully and idle the session so an active goal continues
@@ -5335,210 +5667,348 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       );
       return claimedResult({ status: "failed" });
     } finally {
-      gitCredentialRenewalClosed = true;
-      const renewalToStop = gitCredentialRenewal as GitCredentialRenewalController | null;
-      gitCredentialRenewal = null;
-      await renewalToStop?.stop();
-      const durationSeconds = (performance.now() - activityStarted) / 1000;
-      observability.recordWorkerActivity({
-        activity: "runAgentTurn",
-        status: activityStatus,
-        durationSeconds,
-      });
-      if (turnId && activityStatus !== "unknown") {
-        turnLifecycleMetricsFor(observability).finish(turnId, turnMetricOutcome, durationSeconds);
-      }
-      activitySpan.end({
-        attributes: {
-          "opengeni.turn_id": turnId ?? "",
-          "opengeni.status": activityStatus,
-          "opengeni.variable_set_id": variableSetId,
-          "opengeni.rig_id": rigId,
-          "opengeni.rig_version_id": rigVersionId,
-          "opengeni.codex_credential_id": effectiveCodexCredentialId ?? "",
-          "opengeni.duration_ms": Math.round(durationSeconds * 1000),
-        },
-        error: activityError,
-      });
-      // Drain the buffered Connected Machine op events (infra failures + healed
-      // recoveries) to durable session events — awaited, best-effort, never blocking
-      // the turn. Sync observer → buffer → single awaited append here (no unawaited
-      // DB write inside the activity). Scoped to this turn; skipped if no turnId
-      // (the op ran under a turn, so on the normal path turnId is set).
-      const machineOpEvents = machineOpObserver.drainEvents();
-      if (machineOpEvents.length > 0 && turnId && executionGeneration > 0) {
-        await appendAndPublishTurnEventsFenced(
-          db,
-          bus,
-          input.workspaceId,
-          input.sessionId,
-          turnId,
-          executionGeneration,
-          input.attemptId,
-          machineOpEvents.map((event) => ({
-            ...event,
-            turnId: turnId ?? null,
-          })),
-        ).catch(() => undefined);
-      }
-      // Multi-account P4: flush the serving account's free per-turn caches ONCE,
-      // best-effort (same discipline as today's usage write). Both writers skip
-      // version/updatedAt, so neither can race the token-refresh CAS.
-      if (effectiveCodexCredentialId) {
-        // Part A: the latest scraped usage-header snapshot → the P2 usage cache. A
-        // full both-windows snapshot (parseCodexUsageHeaders gates on both), so this
-        // is byte-identical to the /wham/usage write — no partial-window clobber.
-        if (latestCodexUsage) {
-          const usageMutation = await recordCodexAccountUsageWithWakeTargets(
-            db,
-            input.workspaceId,
-            effectiveCodexCredentialId,
-            latestCodexUsage,
-          ).catch(() => null);
-          if (usageMutation) {
-            await signalCodexCapacityWakeTargets(
-              { signalCodexCapacityWorkflow, wakeSessionWorkflow },
-              usageMutation.wakeTargets,
+      const finalizationStarted = performance.now();
+      let finalizationError: unknown;
+      let physicalToolQuiescenceConfirmed = !acknowledgeQuiescence;
+      const finalizerSignal = turnFinalizerCancellationSignal(cancellationSignal, activityStatus);
+      try {
+        const toolCancellationFence = toolCancellationFenceRef.current;
+        if (acknowledgeQuiescence && toolCancellationFence) {
+          // This is an AUTHORITATIVE safety wait, not best-effort housekeeping.
+          // It actively interrupts any turn-owned shell process and drains
+          // parallel filesystem/computer operations. Never race it against the
+          // already-aborted Temporal signal: the replacement queue may open only
+          // after the old attempt can no longer mutate the workspace.
+          toolCancellationFence.cancel(
+            cancellationSignal?.reason ?? new Error("TURN_ATTEMPT_FENCED"),
+          );
+          await toolCancellationFence.waitForQuiescence();
+          physicalToolQuiescenceConfirmed = true;
+        } else if (acknowledgeQuiescence) {
+          // A cancellation can arrive before sandbox-backed capabilities exist.
+          // At that boundary there are no tool calls to drain. Sandbox agent
+          // construction itself fails closed when a backend is present but no
+          // controller was installed.
+          physicalToolQuiescenceConfirmed = true;
+        }
+        gitCredentialRenewalClosed = true;
+        const renewalToStop = gitCredentialRenewal as GitCredentialRenewalController | null;
+        gitCredentialRenewal = null;
+        if (renewalToStop) {
+          await waitForTurnFinalizerStep(renewalToStop.stop(), finalizerSignal);
+        }
+        // Drain the buffered Connected Machine op events (infra failures + healed
+        // recoveries) to durable session events — awaited, best-effort, never blocking
+        // the turn. Sync observer → buffer → single awaited append here (no unawaited
+        // DB write inside the activity). Scoped to this turn; skipped if no turnId
+        // (the op ran under a turn, so on the normal path turnId is set).
+        const machineOpEvents = machineOpObserver.drainEvents();
+        if (machineOpEvents.length > 0 && turnId && executionGeneration > 0) {
+          await waitForTurnFinalizerStep(
+            appendAndPublishTurnEventsFenced(
+              db,
+              bus,
+              input.workspaceId,
+              input.sessionId,
+              turnId,
+              executionGeneration,
+              input.attemptId,
+              machineOpEvents.map((event) => ({
+                ...event,
+                turnId: turnId ?? null,
+              })),
+            ).catch(() => undefined),
+            finalizerSignal,
+          );
+        }
+        // Multi-account P4: flush the serving account's free per-turn caches ONCE,
+        // best-effort (same discipline as today's usage write). Both writers skip
+        // version/updatedAt, so neither can race the token-refresh CAS.
+        if (effectiveCodexCredentialId) {
+          // Part A: the latest scraped usage-header snapshot → the P2 usage cache. A
+          // full both-windows snapshot (parseCodexUsageHeaders gates on both), so this
+          // is byte-identical to the /wham/usage write — no partial-window clobber.
+          if (latestCodexUsage) {
+            const usageMutation = await waitForTurnFinalizerStep(
+              recordCodexAccountUsageWithWakeTargets(
+                db,
+                input.workspaceId,
+                effectiveCodexCredentialId,
+                latestCodexUsage,
+              ).catch(() => null),
+              finalizerSignal,
+            );
+            if (usageMutation) {
+              await waitForTurnFinalizerStep(
+                signalCodexCapacityWakeTargets(
+                  { signalCodexCapacityWorkflow, wakeSessionWorkflow },
+                  usageMutation.wakeTargets,
+                ),
+                finalizerSignal,
+              );
+            }
+          }
+          // Part B.1: the connector namespaces codex_apps listed this turn → the
+          // connector-set cache. NON-EMPTY-only: a flaky/empty tools/list must never
+          // overwrite a known set with [] (false coverage drop). Read by reference
+          // AFTER the run, so every tools/list this turn has accumulated.
+          const connectorNamespaces = preparedTools?.codexConnectorNamespaces;
+          if (connectorNamespaces && connectorNamespaces.size > 0) {
+            await waitForTurnFinalizerStep(
+              recordCodexAccountConnectors(db, input.workspaceId, effectiveCodexCredentialId, [
+                ...connectorNamespaces,
+              ]).catch(() => undefined),
+              finalizerSignal,
             );
           }
         }
-        // Part B.1: the connector namespaces codex_apps listed this turn → the
-        // connector-set cache. NON-EMPTY-only: a flaky/empty tools/list must never
-        // overwrite a known set with [] (false coverage drop). Read by reference
-        // AFTER the run, so every tools/list this turn has accumulated.
-        const connectorNamespaces = preparedTools?.codexConnectorNamespaces;
-        if (connectorNamespaces && connectorNamespaces.size > 0) {
-          await recordCodexAccountConnectors(db, input.workspaceId, effectiveCodexCredentialId, [
-            ...connectorNamespaces,
-          ]).catch(() => undefined);
+        if (codexLeaseHeartbeatTimer) {
+          clearInterval(codexLeaseHeartbeatTimer);
+          codexLeaseHeartbeatTimer = undefined;
         }
-      }
-      if (codexLeaseHeartbeatTimer) {
-        clearInterval(codexLeaseHeartbeatTimer);
-        codexLeaseHeartbeatTimer = undefined;
-      }
-      if (codexLeaseHeld && turnId && codexLeaseHolderId && codexLeaseGeneration !== null) {
-        await releaseCodexCredentialLease(
-          db,
-          input.accountId,
-          input.workspaceId,
-          turnId,
-          codexLeaseHolderId,
-          codexLeaseGeneration,
-        ).catch(() => undefined);
-        codexLeaseHeld = false;
-      }
-      // Workbench v2 turn-end workspace capture (dossier §10.1) — runs FIRST in
-      // the turn-end finally, while the box is MAXIMALLY ALIVE. The agent's last
-      // tool ran before this finally, so /workspace is already final; capture is
-      // FS-equivalent to the already-settled recording preparation and the warm
-      // snapshot (neither mutates workspace files). Running it here — BEFORE
-      // preparedTools.close() (which tears down tools / computer-use / the display
-      // stack and is what starts the Modal box exiting a few seconds later) —
-      // gives capture the full live-box margin instead of racing the teardown
-      // tail, which was dropping 100% of captures on real Modal desktop boxes
-      // ("request cancelled due to container exiting", 0 rows). External module:
-      // self-capped at 60s, best-effort (never throws past its boundary),
-      // epoch-fenced, and it NEVER closes the box. The emitted
-      // workspace.revision.captured event is ANNOUNCE-ONLY (metadata, never
-      // content).
-      if (resolvedSandbox && setupBoxSession && sandboxGroupId) {
-        // Stop new heartbeat snapshot/meter ticks so a mid-turn snapshot cannot
-        // start concurrently with capture, then drain any in-flight snapshot
-        // (bounded) — capture and the warm snapshot both exec on the box, so
-        // sequence them, exactly as the turn-end snapshot placement did.
+        if (codexLeaseHeld && turnId && codexLeaseHolderId && codexLeaseGeneration !== null) {
+          await waitForTurnFinalizerStep(
+            releaseCodexCredentialLease(
+              db,
+              input.accountId,
+              input.workspaceId,
+              turnId,
+              codexLeaseHolderId,
+              codexLeaseGeneration,
+            ).catch(() => undefined),
+            finalizerSignal,
+          );
+          codexLeaseHeld = false;
+        }
+        // Workbench v2 turn-end workspace capture (dossier §10.1) — runs FIRST in
+        // the turn-end finally, while the box is MAXIMALLY ALIVE. The agent's last
+        // tool ran before this finally, so /workspace is already final; capture is
+        // FS-equivalent to the already-settled recording preparation and the warm
+        // snapshot (neither mutates workspace files). Running it here — BEFORE
+        // preparedTools.close() (which tears down tools / computer-use / the display
+        // stack and is what starts the Modal box exiting a few seconds later) —
+        // gives capture the full live-box margin instead of racing the teardown
+        // tail, which was dropping 100% of captures on real Modal desktop boxes
+        // ("request cancelled due to container exiting", 0 rows). External module:
+        // self-capped at 60s, best-effort (never throws past its boundary),
+        // epoch-fenced, and it NEVER closes the box. The emitted
+        // workspace.revision.captured event is ANNOUNCE-ONLY (metadata, never
+        // content).
+        if (process.env.OPENGENI_TEST_SCENARIO === "sandbox") {
+          console.log(
+            `[sandbox-e2e] capture preflight ownership=${settings.sandboxOwnershipEnabled} enabled=${settings.workspaceCaptureEnabled} resolved=${Boolean(resolvedSandbox)} session=${Boolean(setupBoxSession)} group=${Boolean(sandboxGroupId)} storage=${Boolean(objectStorage)}`,
+          );
+        }
+        const runTurnEndPersistence = shouldRunTurnEndWorkspacePersistence({
+          activityStatus,
+          cancellationRequested: finalizerSignal?.aborted === true,
+        });
+        if (
+          runTurnEndPersistence &&
+          turnId &&
+          resolvedSandbox &&
+          setupBoxSession &&
+          sandboxGroupId
+        ) {
+          // Stop new heartbeat snapshot/meter ticks so a mid-turn snapshot cannot
+          // start concurrently with capture, then drain any in-flight snapshot
+          // (bounded) — capture and the warm snapshot both exec on the box, so
+          // sequence them, exactly as the turn-end snapshot placement did.
+          if (leaseHeartbeatTimer) {
+            clearInterval(leaseHeartbeatTimer);
+            leaseHeartbeatTimer = undefined;
+          }
+          if (snapshotInFlight) {
+            await waitForWarmSnapshot(
+              snapshotInFlight,
+              settings.sandboxSnapshotTimeoutMs,
+              finalizerSignal,
+            );
+          }
+          await captureWorkspaceRevision({
+            db,
+            objectStorage,
+            settings,
+            publish: async (events) => {
+              await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, events);
+            },
+            session: setupBoxSession as ChannelASession,
+            leaseEpoch: resolvedSandbox.leaseEpoch,
+            sandboxGroupId,
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId,
+            attemptId: input.attemptId,
+            observability,
+            ...(finalizerSignal ? { signal: finalizerSignal } : {}),
+          });
+        }
+        if (preparedTools) {
+          await waitForTurnFinalizerStep(
+            preparedTools.close().catch(() => undefined),
+            finalizerSignal,
+          );
+        }
+        if (heartbeatTimer) {
+          clearInterval(heartbeatTimer);
+        }
+        if (turnSandboxProvisioner?.hasStarted()) {
+          await waitForTurnFinalizerStep(
+            turnSandboxProvisioner.waitForSettled(30_000),
+            finalizerSignal,
+          );
+        }
+        // P1.2: stop the lease-TTL refresh, release the turn holder (idempotent
+        // delete-my-row; refcount-- and warm->draining if it hit 0 with no turns),
+        // and DROP the in-memory handle. Release NEVER stops the box — the reaper
+        // (P1.3) issues the provider stop() past the drain grace at refcount 0; the
+        // box rides the provider idle-timeout in the meantime. Best-effort: a
+        // release failure must never mask the turn's real outcome.
         if (leaseHeartbeatTimer) {
           clearInterval(leaseHeartbeatTimer);
-          leaseHeartbeatTimer = undefined;
         }
-        if (snapshotInFlight) {
-          await waitForWarmSnapshot(snapshotInFlight, settings.sandboxSnapshotTimeoutMs);
-        }
-        await captureWorkspaceRevision({
-          db,
-          objectStorage,
-          settings,
-          publish: async (events) => {
-            await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, events);
-          },
-          session: setupBoxSession as ChannelASession,
-          leaseEpoch: resolvedSandbox.leaseEpoch,
-          sandboxGroupId,
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          turnId: turnId ?? null,
-          observability,
-        });
-      }
-      await preparedTools?.close().catch(() => undefined);
-      if (heartbeatTimer) {
-        clearInterval(heartbeatTimer);
-      }
-      if (turnSandboxProvisioner?.hasStarted()) {
-        await turnSandboxProvisioner.waitForSettled(30_000);
-      }
-      // P1.2: stop the lease-TTL refresh, release the turn holder (idempotent
-      // delete-my-row; refcount-- and warm->draining if it hit 0 with no turns),
-      // and DROP the in-memory handle. Release NEVER stops the box — the reaper
-      // (P1.3) issues the provider stop() past the drain grace at refcount 0; the
-      // box rides the provider idle-timeout in the meantime. Best-effort: a
-      // release failure must never mask the turn's real outcome.
-      if (leaseHeartbeatTimer) {
-        clearInterval(leaseHeartbeatTimer);
-      }
-      // A recording normally closes inside the attempt-fenced turn settlement.
-      // Reaching finally with one still active means settlement threw, never ran,
-      // or lost ownership. Stop ffmpeg and mark only this exact attempt-owned row
-      // failed; publish no event and leave the artifact recoverable on the box.
-      await abandonActiveRecording(
-        "activity ended without recording settlement",
-        didComputerUse ? "failed" : "discard",
-      );
-      if (resolvedSandbox) {
-        // TURN-END mid-session snapshot (sandbox-file-persistence): fold the
-        // turn's finished /workspace onto the lease before releasing the holder,
-        // so the work this turn just produced survives any unclean box death in
-        // the idle window ahead. Throttled by the same interval as the heartbeat
-        // tick (a short turn right after a snapshot skips — bounded-loss contract
-        // is the interval, not per-turn). Best-effort and time-capped by the
-        // helper's own failure discipline; never delays release on failure.
-        if (setupBoxSession && sandboxGroupId) {
-          // Single-flight vs the heartbeat capture: the timer is already cleared
-          // above, but a capture it launched may still be in flight — and that
-          // capture predates the turn's final writes. Wait for it, but only up
-          // to the snapshot timeout: release must never depend on an unbounded
-          // provider capture.
-          if (snapshotInFlight) {
-            await waitForWarmSnapshot(snapshotInFlight, settings.sandboxSnapshotTimeoutMs);
-          }
-          const persisted = await maybePersistWarmWorkspaceSnapshot(
-            { db, settings },
-            {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              sandboxGroupId,
-            },
-            setupBoxSession,
-            resolvedSandbox.leaseEpoch,
-          );
-          if (persisted && publish) {
-            await publish([
+        // A recording normally closes inside the attempt-fenced turn settlement.
+        // Reaching finally with one still active means settlement threw, never ran,
+        // or lost ownership. Stop ffmpeg and mark only this exact attempt-owned row
+        // failed; publish no event and leave the artifact recoverable on the box.
+        await waitForTurnFinalizerStep(
+          abandonActiveRecording(
+            "activity ended without recording settlement",
+            didComputerUse ? "failed" : "discard",
+          ),
+          finalizerSignal,
+        );
+        if (resolvedSandbox) {
+          // TURN-END mid-session snapshot (sandbox-file-persistence): fold the
+          // turn's finished /workspace onto the lease before releasing the holder,
+          // so the work this turn just produced survives any unclean box death in
+          // the idle window ahead. Throttled by the same interval as the heartbeat
+          // tick (a short turn right after a snapshot skips — bounded-loss contract
+          // is the interval, not per-turn). Best-effort and time-capped by the
+          // helper's own failure discipline; never delays release on failure.
+          const settledTurnId = turnId;
+          if (runTurnEndPersistence && setupBoxSession && sandboxGroupId && settledTurnId) {
+            // Single-flight vs the heartbeat capture: the timer is already cleared
+            // above, but a capture it launched may still be in flight — and that
+            // capture predates the turn's final writes. Wait for it, but only up
+            // to the snapshot timeout: release must never depend on an unbounded
+            // provider capture.
+            if (snapshotInFlight) {
+              await waitForWarmSnapshot(
+                snapshotInFlight,
+                settings.sandboxSnapshotTimeoutMs,
+                finalizerSignal,
+              );
+            }
+            const persisted = await maybePersistWarmWorkspaceSnapshot(
+              { db, settings },
               {
-                type: "sandbox.box.snapshot",
-                payload: { trigger: "turn-end" },
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                turnId: settledTurnId,
+                attemptId: input.attemptId,
+                sandboxGroupId,
               },
-            ]).catch(() => undefined);
+              setupBoxSession,
+              resolvedSandbox.leaseEpoch,
+              finalizerSignal,
+            );
+            if (persisted && publish) {
+              await publish([
+                {
+                  type: "sandbox.box.snapshot",
+                  payload: { trigger: "turn-end" },
+                },
+              ]).catch(() => undefined);
+            }
+            // NB workspace capture (dossier §10.1) no longer runs here — it moved to
+            // the TOP of this finally (before preparedTools.close) so it completes
+            // while the box is still solidly alive, instead of racing the turn-end
+            // teardown that was killing 100% of captures on real Modal desktop boxes.
           }
-          // NB workspace capture (dossier §10.1) no longer runs here — it moved to
-          // the TOP of this finally (before preparedTools.close) so it completes
-          // while the box is still solidly alive, instead of racing the turn-end
-          // teardown that was killing 100% of captures on real Modal desktop boxes.
+          const sandboxToRelease = resolvedSandbox;
+          resolvedSandbox = null; // drop ownership now; the exact-holder release may finish later
+          await waitForTurnFinalizerStep(
+            sandboxToRelease.release().catch((releaseError) => {
+              console.error("sandbox lease release failed (turn outcome unaffected)", releaseError);
+            }),
+            finalizerSignal,
+          );
         }
-        await resolvedSandbox.release().catch((releaseError) => {
-          console.error("sandbox lease release failed (turn outcome unaffected)", releaseError);
+      } catch (error) {
+        finalizationError = error;
+        console.error("agent turn finalization failed (turn outcome unaffected)", error);
+      } finally {
+        if (acknowledgeQuiescence && physicalToolQuiescenceConfirmed) {
+          try {
+            const events = await markSessionAttemptQuiesced(db, {
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              attemptId: input.attemptId,
+              temporalWorkflowId: input.workflowId,
+              allowUninterrupted: true,
+            });
+            await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, events);
+          } catch (error) {
+            finalizationError ??= error;
+            console.error("agent turn quiescence receipt failed", error);
+          }
+        }
+        cancellationSignal?.removeEventListener("abort", noteCancellationRequested);
+        const completedAt = performance.now();
+        const durationSeconds = (completedAt - activityStarted) / 1000;
+        const finalizationDurationSeconds = (completedAt - finalizationStarted) / 1000;
+        observability.observeHistogram({
+          name: "opengeni_turn_finalization_duration_seconds",
+          help: "Agent turn finalization duration, including workspace housekeeping and lease release.",
+          labels: { cancellation_requested: String(cancellationRequestedAt !== null) },
+          value: finalizationDurationSeconds,
         });
-        resolvedSandbox = null; // drop the handle; the box survives the turn
+        if (cancellationRequestedAt !== null) {
+          const physicalCancellationDurationSeconds =
+            (completedAt - cancellationRequestedAt) / 1000;
+          observability.observeHistogram({
+            name: "opengeni_turn_physical_cancellation_duration_seconds",
+            help: "Time from Temporal cancellation delivery until the activity physically stops.",
+            value: physicalCancellationDurationSeconds,
+          });
+          observability.info("agent turn physical cancellation completed", {
+            "opengeni.session_id": input.sessionId,
+            "opengeni.turn_id": turnId ?? "",
+            "opengeni.attempt_id": input.attemptId,
+            "opengeni.physical_cancellation_duration_ms": Math.round(
+              physicalCancellationDurationSeconds * 1000,
+            ),
+          });
+        }
+        observability.recordWorkerActivity({
+          activity: "runAgentTurn",
+          status: finalizationError ? "cleanup_failed" : activityStatus,
+          durationSeconds,
+        });
+        if (turnId && activityStatus !== "unknown") {
+          turnLifecycleMetricsFor(observability).finish(turnId, turnMetricOutcome, durationSeconds);
+        }
+        activitySpan.end({
+          attributes: {
+            "opengeni.turn_id": turnId ?? "",
+            "opengeni.status": activityStatus,
+            "opengeni.variable_set_id": variableSetId,
+            "opengeni.rig_id": rigId,
+            "opengeni.rig_version_id": rigVersionId,
+            "opengeni.codex_credential_id": effectiveCodexCredentialId ?? "",
+            "opengeni.duration_ms": Math.round(durationSeconds * 1000),
+            "opengeni.finalization_duration_ms": Math.round(finalizationDurationSeconds * 1000),
+          },
+          error: finalizationError ?? activityError,
+        });
+        assertPhysicalToolQuiescenceForCancellation({
+          acknowledgeQuiescence,
+          physicalToolQuiescenceConfirmed,
+          failure: finalizationError,
+        });
       }
     }
   };
