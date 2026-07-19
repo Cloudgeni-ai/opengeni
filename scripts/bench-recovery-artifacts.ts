@@ -69,13 +69,17 @@ try {
       )`;
     if (sessionCount > 1) {
       await tx`
+        with generated as materialized (
+          select i, gen_random_uuid() as id
+          from generate_series(1, ${sessionCount - 1}) as series(i)
+        )
         insert into sessions (
           id, account_id, workspace_id, status, initial_message, title,
           resources, tools, metadata, model, sandbox_backend, sandbox_group_id,
           parent_session_id, temporal_workflow_id
         )
         select
-          md5(${workspaceId} || ':session:' || generated.i::text)::uuid,
+          generated.id,
           ${accountId}::uuid,
           ${workspaceId}::uuid,
           'idle',
@@ -86,10 +90,10 @@ try {
           jsonb_build_object('bench_index', generated.i),
           'benchmark-model',
           'none',
-          md5(${workspaceId} || ':session:' || generated.i::text)::uuid,
+          generated.id,
           ${rootSessionId}::uuid,
-          'session-' || md5(${workspaceId} || ':session:' || generated.i::text)::uuid::text
-        from generate_series(1, ${sessionCount - 1}) as generated(i)`;
+          'session-' || generated.id::text
+        from generated`;
     }
     await tx`
       insert into session_events (
