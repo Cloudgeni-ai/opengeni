@@ -39,6 +39,34 @@ jobs:
           plan="$RUNNER_TEMP/changeset-status.json"
           git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
           git update-ref refs/heads/main refs/remotes/origin/main
+
+          # `changeset status` deliberately exits non-zero on the generated
+          # Version PR: its package files changed and the consumed changeset is
+          # gone. Prove that special branch by reproducing `changeset version`
+          # from the exact base tree and comparing complete Git trees instead
+          # of skipping release-plan validation.
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ] && [ "${GITHUB_HEAD_REF:-}" = "changeset-release/main" ]; then
+            expected="$RUNNER_TEMP/changeset-version-expected"
+            git worktree add --detach "$expected" refs/remotes/origin/main
+            trap 'git worktree remove --force "$expected"' EXIT
+
+            (
+              cd "$expected"
+              bun "$GITHUB_WORKSPACE/node_modules/@changesets/cli/bin.js" version
+              git add -A
+              git diff --cached --check
+            )
+
+            expected_tree="$(git -C "$expected" write-tree)"
+            actual_tree="$(git rev-parse 'HEAD^{tree}')"
+            if [ "$actual_tree" != "$expected_tree" ]; then
+              echo "::error::Version PR tree does not exactly reproduce 'changeset version' from origin/main"
+              git -C "$expected" diff --cached --stat
+              exit 1
+            fi
+            exit 0
+          fi
+
           bunx changeset status --output "$plan"
           changeset_count="$(jq -er '.changesets | length' "$plan")"
           release_count="$(jq -er '.releases | length' "$plan")"
