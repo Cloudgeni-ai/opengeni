@@ -41,11 +41,15 @@ control plane is unreachable. This is deliberately different from `service
 status`, which reports only whether the opt-in systemd/launchd service is active.
 
 The service verbs are real on Linux (systemd) and macOS (a per-user LaunchAgent).
-On Windows every service verb, including `install --print`, returns one explicit
-unsupported error without invoking `sc.exe`; the supported Windows lifecycle is
-foreground `opengeni-agent run`. A direct `uninstall` attempts service cleanup and
-can purge enrollment credentials/state, but retains the running executable.
-`install/uninstall.sh` removes the file after that process exits.
+Linux uninstall probes the user and system unit paths independently; macOS owns
+the exact plist and uses `launchctl bootout gui/<uid> <plist>` / `bootstrap
+gui/<uid> <plist>`. On Windows every service verb, including `install --print`,
+returns one explicit unsupported error without invoking `sc.exe`; the supported
+Windows lifecycle is foreground `opengeni-agent run`. Cleanup is fail-closed: an
+ambiguous native-service result preserves the binary and credentials and blocks
+remote revoke. A direct successful `uninstall` can purge enrollment state but
+retains its running executable; `install/uninstall.sh` removes the file after that
+process exits.
 
 `upgrade` is the one visible compatibility alias: it executes the exact same
 signed-manifest path as `update`. Existing persisted-state compatibility (for
@@ -104,6 +108,30 @@ The agent reaches a user's machine via one trusted line and keeps itself current
   `--print` dry-runs the generated unit/plist. Windows service hosting is not
   implemented and every service action fails without mutation. The default remains
   foreground `run` on every OS.
+
+## Credential rotation and revocation
+
+Enrollment returns a 30-day `oge_` recovery bearer, while the NATS user JWT and
+relay `ogr_` producer token each last at most five minutes. The running agent calls
+the bearer-only `POST /v1/enrollments/self/refresh` one minute before the earliest
+absolute expiry. It rejects any changed identity or consent, atomically replaces
+the credentials file in the same directory, and only then publishes the new
+in-memory snapshot. NATS and relay connections keep immutable snapshots; relay
+sockets are disconnected at the token's exact expiry and reconnect with current
+credentials.
+
+Self-refresh and self-revoke require the exact active enrollment generation and
+serialize on the same database row lock, so no refresh can mint past a committed
+revoke. Revocation clears only session pointers still targeting that enrollment
+and increments their active epochs. The revoked row remains administrator-visible
+history, but is omitted from fleet targets; a revoked or missing machine-home
+enrollment reports `offline_enrollment` instead of creating cloud compute.
+
+`uninstall --purge` first proves every native service scope is gone, then requires
+a confirmed remote revoke before deleting local credentials. If Linux user/system
+cleanup, macOS plist bootout, or remote revoke is ambiguous, both the binary and
+credentials remain for retry. `--local-only` is the explicit loud escape hatch and
+may leave the dashboard enrollment active.
 
 ### macOS compatibility versus live acceptance
 

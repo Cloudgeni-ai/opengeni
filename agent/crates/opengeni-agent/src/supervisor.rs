@@ -45,7 +45,7 @@ use tokio::task::JoinSet;
 use tracing::{debug, error, info, warn};
 
 use crate::backoff::Backoff;
-use crate::config::StoredCredentials;
+use crate::config::{SharedCredentials, StoredCredentials};
 use crate::dispatch::{self, DispatchContext};
 use crate::engine::Engine;
 
@@ -167,7 +167,7 @@ impl ShutdownSignal {
 /// credentials file; the structure (a `Vec`, per-link subjects/epochs) is
 /// multi-enrollment-ready (task #9). Links SHARE the one [`Engine`].
 struct WorkspaceLink {
-    creds: StoredCredentials,
+    creds: SharedCredentials,
     epoch: Arc<EpochCell>,
     /// The CURRENT generation's bulk frame channel (op-frame publishes ride a
     /// second NATS connection so saturated op flow cannot head-of-line-block
@@ -206,7 +206,20 @@ impl<P: Platform + 'static> Supervisor<P> {
         creds: StoredCredentials,
         agent_version: impl Into<String>,
     ) -> Self {
-        let spool_root = std::env::temp_dir().join(format!("opengeni-runner-{}", creds.agent_id));
+        Self::with_shared_credentials(platform, SharedCredentials::new(creds), agent_version)
+    }
+
+    /// Builds a supervisor over the same redacted, atomically published credential
+    /// source used by the refresh loop. Each connection generation takes one
+    /// consistent snapshot; a later reconnect observes the newest persisted value.
+    #[must_use]
+    pub fn with_shared_credentials(
+        platform: Arc<P>,
+        creds: SharedCredentials,
+        agent_version: impl Into<String>,
+    ) -> Self {
+        let initial = creds.snapshot();
+        let spool_root = std::env::temp_dir().join(format!("opengeni-runner-{}", initial.agent_id));
         let capacity = sampled_capacity(&spool_root);
         let engine = Engine::new(spool_root, capacity);
         Self {
@@ -280,9 +293,10 @@ impl<P: Platform + 'static> Supervisor<P> {
     /// shutdown is requested.
     async fn run_link(&self, link: &WorkspaceLink) {
         let mut backoff = Backoff::standard();
+        let initial = link.creds.snapshot();
         info!(
-            agent_id = %link.creds.agent_id,
-            subject = %link.creds.rpc_subject(),
+            agent_id = %initial.agent_id,
+            subject = %initial.rpc_subject(),
             "agent supervisor starting (foreground run model)"
         );
 
@@ -330,12 +344,16 @@ impl<P: Platform + 'static> Supervisor<P> {
         link: &WorkspaceLink,
         backoff: &mut Backoff,
     ) -> ConnectionOutcome {
+        // One immutable snapshot owns the whole connection generation. This keeps
+        // bearer, URLs, subjects, hello, and both NATS lanes internally consistent
+        // while allowing the next generation to observe a published refresh.
+        let creds = link.creds.snapshot();
         // The dial has no client yet, so a shutdown here just exits (nothing to
         // announce) — but race it so a hung/slow dial cannot delay a clean stop.
         let connect = tokio::select! {
             biased;
             () = self.shutdown.notified() => return ConnectionOutcome::CleanShutdown,
-            result = self.connect(link) => result,
+            result = self.connect(&creds) => result,
         };
         let client = match connect {
             Ok(client) => client,
@@ -349,7 +367,7 @@ impl<P: Platform + 'static> Supervisor<P> {
             }
             Err(e) => return ConnectionOutcome::Disconnected(e.to_string()),
         };
-        info!(agent_id = %link.creds.agent_id, "connected to control plane");
+        info!(agent_id = %creds.agent_id, "connected to control plane");
 
         // T-derived sizing: the negotiated max_payload drives the engine's
         // per-frame data size (LIMITS-DOCTRINE rule T — query, never assume).
@@ -363,7 +381,7 @@ impl<P: Platform + 'static> Supervisor<P> {
         }
 
         // Send the connect hello. A failure here is just a disconnect (retry).
-        if let Err(e) = self.send_hello(link, &client).await {
+        if let Err(e) = self.send_hello(link, &creds, &client).await {
             return ConnectionOutcome::Disconnected(format!("hello failed: {e}"));
         }
 
@@ -371,15 +389,15 @@ impl<P: Platform + 'static> Supervisor<P> {
         backoff.reset();
 
         // Subscribe to the RPC subject — this IS the registry.
-        let subscription = match client.subscribe(link.creds.rpc_subject()).await {
+        let subscription = match client.subscribe(creds.rpc_subject()).await {
             Ok(sub) => sub,
             Err(e) => return ConnectionOutcome::Disconnected(format!("subscribe failed: {e}")),
         };
-        debug!(subject = %link.creds.rpc_subject(), "subscribed to rpc subject");
+        debug!(subject = %creds.rpc_subject(), "subscribed to rpc subject");
 
         // The ack subject rides the SAME control connection (PROTOCOL.md
         // §Subjects: subscribed alongside rpc at establishment).
-        let ack_subscription = match client.subscribe(link.creds.ack_subject()).await {
+        let ack_subscription = match client.subscribe(creds.ack_subject()).await {
             Ok(sub) => sub,
             Err(e) => return ConnectionOutcome::Disconnected(format!("ack subscribe failed: {e}")),
         };
@@ -387,7 +405,7 @@ impl<P: Platform + 'static> Supervisor<P> {
         // The BULK connection: op frames publish here so a saturated stream
         // can never head-of-line-block control liveness (invariant #4). Its
         // loss is a generation loss (conservative: detach + reconnect).
-        let bulk_client = match self.connect(link).await {
+        let bulk_client = match self.connect(&creds).await {
             Ok(client) => client,
             Err(e) => return ConnectionOutcome::Disconnected(format!("bulk dial failed: {e}")),
         };
@@ -408,7 +426,7 @@ impl<P: Platform + 'static> Supervisor<P> {
         *link.bulk_tx.write().expect("bulk lock") = Some(bulk_tx);
 
         let outcome = self
-            .serve_connection_generation(link, &client, subscription, ack_subscription)
+            .serve_connection_generation(link, &creds, &client, subscription, ack_subscription)
             .await;
 
         // Tear the bulk lane down with the generation: hooks see None and
@@ -424,6 +442,7 @@ impl<P: Platform + 'static> Supervisor<P> {
     async fn serve_connection_generation(
         &self,
         link: &WorkspaceLink,
+        creds: &StoredCredentials,
         client: &async_nats::Client,
         mut subscription: async_nats::Subscriber,
         mut ack_subscription: async_nats::Subscriber,
@@ -453,7 +472,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                 // select. A ready subscription can never starve the liveness tick.
                 _ = heartbeat.tick() => {
                     hb_seq = hb_seq.wrapping_add(1);
-                    if let Err(e) = self.send_heartbeat(link, client, hb_seq).await {
+                    if let Err(e) = self.send_heartbeat(creds, client, hb_seq).await {
                         break ConnectionOutcome::Disconnected(format!("heartbeat failed: {e}"));
                     }
                 }
@@ -484,7 +503,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                 // inline; everything else runs on its own task through engine
                 // admission (fair ordering + derived breakers — never a cap).
                 msg = subscription.next() => match msg {
-                    Some(message) => self.route_message(link, client, message, &mut rpc_tasks).await,
+                    Some(message) => self.route_message(link, creds, client, message, &mut rpc_tasks).await,
                     None => {
                         break ConnectionOutcome::Disconnected(
                             "rpc subscription ended".to_string(),
@@ -519,7 +538,7 @@ impl<P: Platform + 'static> Supervisor<P> {
         self.engine.detach_all();
 
         if matches!(&outcome, ConnectionOutcome::CleanShutdown) {
-            self.announce_going_offline(link, client).await;
+            self.announce_going_offline(creds, client).await;
         }
         outcome
     }
@@ -532,6 +551,7 @@ impl<P: Platform + 'static> Supervisor<P> {
     async fn route_message(
         &self,
         link: &WorkspaceLink,
+        creds: &StoredCredentials,
         client: &async_nats::Client,
         message: async_nats::Message,
         rpc_tasks: &mut JoinSet<()>,
@@ -548,7 +568,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                 let payload = dispatch::dispatch_bytes(
                     message.payload.as_ref(),
                     &self.platform,
-                    &self.ctx(link, max_payload),
+                    &self.ctx(link, creds, max_payload),
                 );
                 if let Err(publish_error) = client.publish(reply, payload.into()).await {
                     warn!(error = %publish_error, "failed to publish protocol error reply");
@@ -566,13 +586,15 @@ impl<P: Platform + 'static> Supervisor<P> {
                     reply,
                     request,
                     &self.platform,
-                    &self.ctx(link, max_payload),
+                    &self.ctx(link, creds, max_payload),
                     max_payload,
                 )
                 .await;
             }
             Route::OpStart(start) => {
-                self.spawn_op_start(link, client, &request, start, reply, label, rpc_tasks);
+                self.spawn_op_start(
+                    link, creds, client, &request, start, reply, label, rpc_tasks,
+                );
             }
             Route::OpControl => {
                 use v1::control_request::Op;
@@ -593,6 +615,7 @@ impl<P: Platform + 'static> Supervisor<P> {
             Route::LegacyExec(exec) => {
                 self.spawn_adapter(
                     link,
+                    creds,
                     client,
                     &request,
                     AdapterWork::Exec(exec),
@@ -604,6 +627,7 @@ impl<P: Platform + 'static> Supervisor<P> {
             Route::LegacyGit(git) => {
                 self.spawn_adapter(
                     link,
+                    creds,
                     client,
                     &request,
                     AdapterWork::Git(git),
@@ -616,7 +640,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                 let client = client.clone();
                 let platform = self.platform.clone();
                 let engine = self.engine.clone();
-                let ctx = self.ctx(link, max_payload);
+                let ctx = self.ctx(link, creds, max_payload);
                 rpc_tasks.spawn(async move {
                     let op = OpId::new(request_id.clone());
                     let ticket = match engine.admit(&op, class, crate::engine::LEGACY_ORIGIN).await
@@ -642,6 +666,7 @@ impl<P: Platform + 'static> Supervisor<P> {
     fn spawn_adapter(
         &self,
         link: &WorkspaceLink,
+        creds: &StoredCredentials,
         client: &async_nats::Client,
         request: &ControlRequest,
         work: AdapterWork,
@@ -653,7 +678,7 @@ impl<P: Platform + 'static> Supervisor<P> {
         let client = client.clone();
         let platform = self.platform.clone();
         let engine = self.engine.clone();
-        let (request_epoch, held_epoch) = (request.epoch, self.ctx(link, max_payload).epoch);
+        let (request_epoch, held_epoch) = (request.epoch, self.ctx(link, creds, max_payload).epoch);
         let request_id = request.request_id.clone();
         rpc_tasks.spawn(async move {
             let response = if request_epoch != 0 && request_epoch < held_epoch {
@@ -680,6 +705,7 @@ impl<P: Platform + 'static> Supervisor<P> {
     fn spawn_op_start(
         &self,
         link: &WorkspaceLink,
+        creds: &StoredCredentials,
         client: &async_nats::Client,
         request: &ControlRequest,
         start: v1::OpStart,
@@ -691,10 +717,10 @@ impl<P: Platform + 'static> Supervisor<P> {
         let client = client.clone();
         let engine = self.engine.clone();
         let platform = self.platform.clone();
-        let ctx = self.ctx(link, max_payload);
+        let ctx = self.ctx(link, creds, max_payload);
         let request_id = request.request_id.clone();
         let (request_epoch, held_epoch) = (request.epoch, ctx.epoch);
-        let subject = link.creds.op_subject(&request_id);
+        let subject = creds.op_subject(&request_id);
         let bulk = link.bulk_tx.clone();
         let sink_engine = self.engine.clone();
         let sink: crate::ops::FrameSink = Arc::new(move |bytes: Vec<u8>| {
@@ -739,8 +765,11 @@ impl<P: Platform + 'static> Supervisor<P> {
     /// as a connect error → [`SupervisorError::Connect`], which the supervise loop
     /// treats as a transient disconnect and backs off + retries with the SAME
     /// (possibly rotated, on re-enroll) bearer — never a panic.
-    async fn connect(&self, link: &WorkspaceLink) -> Result<async_nats::Client, SupervisorError> {
-        if link.creds.nats_bearer.is_empty() {
+    async fn connect(
+        &self,
+        creds: &StoredCredentials,
+    ) -> Result<async_nats::Client, SupervisorError> {
+        if creds.nats_bearer.is_empty() {
             // No bearer means the control plane never minted one (an enrollment from
             // before the credential plane was configured). Surface a clear, typed
             // disconnect rather than dial with an empty token the callout will deny.
@@ -749,8 +778,8 @@ impl<P: Platform + 'static> Supervisor<P> {
             ));
         }
         let opts = async_nats::ConnectOptions::new()
-            .token(link.creds.nats_bearer.clone())
-            .name(format!("opengeni-agent/{}", link.creds.agent_id))
+            .token(creds.nats_bearer.clone())
+            .name(format!("opengeni-agent/{}", creds.agent_id))
             // See the note above: Some(1), NOT 0 (which means unlimited).
             .max_reconnects(Some(1))
             .event_callback(|event| async move {
@@ -763,7 +792,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                 }
             });
 
-        async_nats::connect_with_options(link.creds.nats_urls.clone(), opts)
+        async_nats::connect_with_options(creds.nats_urls.clone(), opts)
             .await
             .map_err(|e| {
                 if is_authentication_error(&e) {
@@ -780,28 +809,29 @@ impl<P: Platform + 'static> Supervisor<P> {
     async fn send_hello(
         &self,
         link: &WorkspaceLink,
+        creds: &StoredCredentials,
         client: &async_nats::Client,
     ) -> Result<(), async_nats::PublishError> {
         let identity = self.platform.host_identity();
         let hello = Hello {
-            agent_id: link.creds.agent_id.clone(),
-            workspace_id: link.creds.workspace_id.clone(),
+            agent_id: creds.agent_id.clone(),
+            workspace_id: creds.workspace_id.clone(),
             agent_version: self.agent_version.clone(),
             os: identity.os as i32,
             arch: identity.arch as i32,
             machine_name: hostname_or_default(),
             workspace_root: self.platform.workspace_root(),
-            capabilities: Some(self.capabilities(link).await),
-            update_channel: link.creds.update_channel.clone(),
-            resume_token: link.creds.resume_token.clone(),
+            capabilities: Some(self.capabilities(creds).await),
+            update_channel: creds.update_channel.clone(),
+            resume_token: creds.resume_token.clone(),
         };
         // The hello is its own message (not an AgentEvent oneof member): it is
         // published on the dedicated hello subject the control plane listens on,
         // which replies (out of band) with a HelloAck whose epoch we adopt. Until
         // that arrives we hold the last persisted epoch so dispatch can fence.
-        link.epoch.store(link.creds.last_known_epoch);
+        link.epoch.store(creds.last_known_epoch);
         client
-            .publish(hello_subject(link), hello.encode_to_vec().into())
+            .publish(hello_subject(creds), hello.encode_to_vec().into())
             .await?;
         client.flush().await.ok();
         debug!(epoch = link.epoch.load(), "sent hello");
@@ -815,7 +845,7 @@ impl<P: Platform + 'static> Supervisor<P> {
     /// screen or an Xvfb virtual framebuffer) — otherwise the control plane degrades
     /// the desktop cell to `display_unavailable`. The probed [`Display`] detail
     /// rides along so the UI can size the viewer + show the virtual flag.
-    async fn capabilities(&self, link: &WorkspaceLink) -> v1::Capabilities {
+    async fn capabilities(&self, creds: &StoredCredentials) -> v1::Capabilities {
         // `probe()` does a synchronous x11rb connect; run it on the blocking pool so
         // a wedged X server cannot stall this async connect task (mirrors
         // `Platform::desktop_ensure`).
@@ -844,8 +874,8 @@ impl<P: Platform + 'static> Supervisor<P> {
             // A PTY can be opened whenever the relay registrar is wired.
             pty: has_relay,
             desktop: has_relay && can_capture,
-            consented_whole_machine: link.creds.consented_whole_machine,
-            consented_screen_control: link.creds.consented_screen_control,
+            consented_whole_machine: creds.consented_whole_machine,
+            consented_screen_control: creds.consented_screen_control,
             display,
             desktop_unavailable_reason: capture_blocked.unwrap_or_default(),
             // The op engine is wired: OpStart/OpCancel/OpQuery/OpAttach are
@@ -860,15 +890,20 @@ impl<P: Platform + 'static> Supervisor<P> {
     /// connection's NEGOTIATED max payload (from `server_info()`), threaded so an op
     /// that produces a large reply (the screenshot) can fit it under the budget
     /// agent-side rather than emit an un-publishable reply the caller waits out.
-    fn ctx(&self, link: &WorkspaceLink, max_reply_bytes: usize) -> DispatchContext {
+    fn ctx(
+        &self,
+        link: &WorkspaceLink,
+        creds: &StoredCredentials,
+        max_reply_bytes: usize,
+    ) -> DispatchContext {
         DispatchContext {
-            agent_id: link.creds.agent_id.clone(),
+            agent_id: creds.agent_id.clone(),
             epoch: link.epoch.load(),
             started: self.started,
             // The computer-use input consent gate reads the SAME enrollment grant
             // the relay pump's `allow_input` uses.
-            consented_screen_control: link.creds.consented_screen_control,
-            consented_whole_machine: link.creds.consented_whole_machine,
+            consented_screen_control: creds.consented_screen_control,
+            consented_whole_machine: creds.consented_whole_machine,
             max_reply_bytes,
         }
     }
@@ -876,7 +911,7 @@ impl<P: Platform + 'static> Supervisor<P> {
     /// Publishes a heartbeat AgentEvent carrying a metrics sample (§10.7).
     async fn send_heartbeat(
         &self,
-        link: &WorkspaceLink,
+        creds: &StoredCredentials,
         client: &async_nats::Client,
         seq: u64,
     ) -> Result<(), async_nats::PublishError> {
@@ -891,7 +926,7 @@ impl<P: Platform + 'static> Supervisor<P> {
         let capacity = self.engine.capacity();
         let admission = self.engine.admission_snapshot();
         let event = AgentEvent {
-            agent_id: link.creds.agent_id.clone(),
+            agent_id: creds.agent_id.clone(),
             event: Some(Event::Heartbeat(Heartbeat {
                 seq,
                 uptime_ms: millis_u64(self.started.elapsed()),
@@ -917,22 +952,22 @@ impl<P: Platform + 'static> Supervisor<P> {
             })),
         };
         client
-            .publish(link.creds.events_subject(), event.encode_to_vec().into())
+            .publish(creds.events_subject(), event.encode_to_vec().into())
             .await
     }
 
     /// Publishes a clean [`GoingOffline`] event so the lease flips offline
     /// immediately (§23.0), then flushes so the message leaves before we close.
-    async fn announce_going_offline(&self, link: &WorkspaceLink, client: &async_nats::Client) {
+    async fn announce_going_offline(&self, creds: &StoredCredentials, client: &async_nats::Client) {
         let event = AgentEvent {
-            agent_id: link.creds.agent_id.clone(),
+            agent_id: creds.agent_id.clone(),
             event: Some(Event::GoingOffline(GoingOffline {
                 reason: GoingOfflineReason::UserStop as i32,
                 message: "agent stopped (foreground run ended)".to_string(),
             })),
         };
         if let Err(e) = client
-            .publish(link.creds.events_subject(), event.encode_to_vec().into())
+            .publish(creds.events_subject(), event.encode_to_vec().into())
             .await
         {
             warn!(error = %e, "failed to publish going-offline");
@@ -944,11 +979,8 @@ impl<P: Platform + 'static> Supervisor<P> {
 }
 
 /// The subject the control plane listens on for an agent's connect hello.
-fn hello_subject(link: &WorkspaceLink) -> String {
-    format!(
-        "agent.{}.{}.hello",
-        link.creds.workspace_id, link.creds.agent_id
-    )
+fn hello_subject(creds: &StoredCredentials) -> String {
+    format!("agent.{}.{}.hello", creds.workspace_id, creds.agent_id)
 }
 
 /// A legacy op the adapter serves as an engine job.
@@ -1606,9 +1638,11 @@ mod tests {
                 agent_id: "hx-test-agent".to_string(),
                 workspace_id: "hx-test-ws".to_string(),
                 nats_bearer: "test-bearer".to_string(),
+                bearer_expires_at_unix_seconds: 4_102_444_800,
                 nats_urls: vec![url.to_string()],
                 relay_url: "http://127.0.0.1:9".to_string(),
                 relay_token: String::new(),
+                relay_token_expires_at_unix_seconds: 0,
                 update_pubkey: String::new(),
                 consented_whole_machine: true,
                 consented_screen_control: false,

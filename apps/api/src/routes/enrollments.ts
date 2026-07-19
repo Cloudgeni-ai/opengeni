@@ -35,6 +35,7 @@ import {
   ListEnrollmentsResponse,
   MintEnrollTokenRequest,
   MintEnrollTokenResponse,
+  RefreshEnrollmentCredentialsResponse,
   RevokeEnrollmentResponse,
   verifyEnrollmentBearer,
   type EnrollmentArch,
@@ -58,6 +59,7 @@ import {
   lookupDeviceEnrollment,
   mintEnrollToken,
   pollDeviceEnrollment,
+  refreshEnrollmentCredentials,
   startDeviceEnrollment,
   toLookupResponse,
 } from "../sandbox/enrollment";
@@ -92,6 +94,9 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
   // this route separately bounded because an attacker can submit arbitrary bearer
   // candidates without first holding a user or deployment credential.
   const selfRevokeLimiter = new TokenBucket({ capacity: 10, refillPerSecond: 0.25 });
+  // Credential rotation is expected every few minutes, but is independently
+  // bounded from poll/revoke so one path cannot starve another.
+  const refreshLimiter = new TokenBucket({ capacity: 30, refillPerSecond: 0.2 });
 
   function rateLimit(c: Context, limiter: TokenBucket): void {
     const ip = clientIp(c);
@@ -218,6 +223,34 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw new HTTPException(401, { message: "invalid or expired enroll token" });
     }
     return c.json(EnrollTokenExchangeResponse.parse({ credentials: result.credentials }), 201);
+  });
+
+  // ── POST /enrollments/self/refresh (ENROLLMENT-bearer authenticated) ──────
+  // The existing long-lived `oge_` bearer is the recovery credential. The service
+  // verifies its exact active enrollment identity + generation before rotating a
+  // fresh long bearer and short relay token. No credential is accepted in a URL or
+  // body and no token value is ever logged.
+  app.post("/v1/enrollments/self/refresh", async (c) => {
+    assertSelfhostedEnabled();
+    rateLimit(c, refreshLimiter);
+    const authorization = c.req.header("authorization");
+    const bearer = authorization?.startsWith("Bearer ")
+      ? authorization.slice("Bearer ".length)
+      : undefined;
+    if (!bearer) {
+      throw new HTTPException(401, { message: "invalid or expired enrollment bearer" });
+    }
+    const result = await refreshEnrollmentCredentials({ db, settings }, { bearer });
+    if (!result.ok) {
+      if (result.reason === "disabled") {
+        throw new HTTPException(503, { message: "enrollment credential plane is not configured" });
+      }
+      throw new HTTPException(401, { message: "enrollment identity is not valid" });
+    }
+    return c.json(
+      RefreshEnrollmentCredentialsResponse.parse({ credentials: result.credentials }),
+      200,
+    );
   });
 
   // ── POST /enrollments/self/revoke (ENROLLMENT-bearer authenticated) ───────

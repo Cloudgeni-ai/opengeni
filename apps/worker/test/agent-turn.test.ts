@@ -33,6 +33,7 @@ import {
   pointerReconcileReason,
   PROVIDER_BACKPRESSURE_DELAY_MS,
   providerRecoveryResult,
+  requireActiveMachineHome,
   resolveActiveSandboxBackend,
   shouldRecoverCompactionProviderFailure,
   shouldStartOnTurnRecording,
@@ -838,10 +839,32 @@ describe("turn-start pointer reconcile classification (issue #341 invariant B)",
     );
   });
 
+  test("a revoked or missing enrollment is reconciled as offline_enrollment", () => {
+    expect(
+      pointerReconcileReason({
+        kind: "selfhosted",
+        enrollmentId: "enroll-1",
+        enrollmentStatus: "revoked",
+      }),
+    ).toBe("offline_enrollment");
+    expect(
+      pointerReconcileReason({
+        kind: "selfhosted",
+        enrollmentId: "enroll-1",
+        enrollmentStatus: null,
+      }),
+    ).toBe("offline_enrollment");
+  });
+
   test("an enrolled machine is LEFT IN PLACE (null) even if momentarily offline — never reconciled", () => {
     // The user's explicit machine target is not abandoned for a transient control-
     // plane blip; the machine may recover mid-turn and surfaces agent_offline lazily.
     expect(pointerReconcileReason({ kind: "selfhosted", enrollmentId: "enroll-1" })).toBeNull();
+  });
+  test("a selfhosted home without an active machine fails instead of selecting cloud compute", () => {
+    expect(() => requireActiveMachineHome("selfhosted", false)).toThrow(/Connected Machine/);
+    expect(() => requireActiveMachineHome("selfhosted", true)).not.toThrow();
+    expect(() => requireActiveMachineHome("modal", false)).not.toThrow();
   });
 });
 

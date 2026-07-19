@@ -16110,6 +16110,44 @@ export async function getEnrollment(
   });
 }
 
+/**
+ * Runs a short credential-mint callback while holding a shared row lock on one
+ * exact active enrollment generation. Revocation and re-enrollment both update
+ * this row, so they must either commit before the guarded read (the callback is
+ * skipped) or wait until the callback has minted and the transaction commits.
+ * This gives self-refresh a real linearization point instead of allowing a
+ * stateless relay token to be minted after a concurrent revoke committed.
+ */
+export async function withActiveEnrollmentGeneration<T>(
+  db: Database,
+  input: {
+    workspaceId: string;
+    enrollmentId: string;
+    credentialGeneration: number;
+  },
+  fn: (enrollment: EnrollmentRecord) => Promise<T>,
+): Promise<{ matched: false } | { matched: true; value: T }> {
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select()
+      .from(schema.enrollments)
+      .where(
+        and(
+          eq(schema.enrollments.workspaceId, input.workspaceId),
+          eq(schema.enrollments.id, input.enrollmentId),
+          eq(schema.enrollments.status, "active"),
+          eq(schema.enrollments.credentialGeneration, input.credentialGeneration),
+        ),
+      )
+      .for("share")
+      .limit(1);
+    if (!row) {
+      return { matched: false };
+    }
+    return { matched: true, value: await fn(mapEnrollment(row)) };
+  });
+}
+
 // List a workspace's enrollments, newest first. `status` filters the lifecycle
 // (omit for all; 'active' for the Machines dashboard's live list).
 export async function listEnrollments(
@@ -16135,6 +16173,9 @@ export async function listEnrollments(
 
 // Revoke a machine (uninstall --purge / dashboard revoke). Idempotent: an already
 // -revoked row is a no-op (revoked:false). status->revoked, revoked_at stamped.
+// The same transaction clears every session pointer targeting this enrollment and
+// advances its epoch, so no agent-facing route can keep treating a revoked machine
+// as active after the revoke commits.
 export async function revokeEnrollment(
   db: Database,
   input: {
@@ -16158,6 +16199,12 @@ export async function revokeEnrollment(
           ),
         )
         .returning({ id: schema.enrollments.id });
+      if (rows.length > 0) {
+        await invalidateEnrollmentSessionPointers(scopedDb, {
+          workspaceId: input.workspaceId,
+          enrollmentId: input.enrollmentId,
+        });
+      }
       return { revoked: rows.length > 0 };
     },
   );
@@ -16215,8 +16262,31 @@ export async function revokeEnrollmentByGeneration(
     if (updated.length !== 1) {
       throw new Error("Enrollment generation changed while row lock was held");
     }
+    await invalidateEnrollmentSessionPointers(scopedDb, {
+      workspaceId: input.workspaceId,
+      enrollmentId: input.enrollmentId,
+    });
     return { matched: true, revoked: true };
   });
+}
+
+async function invalidateEnrollmentSessionPointers(
+  scopedDb: Pick<Database, "execute">,
+  input: { workspaceId: string; enrollmentId: string },
+): Promise<void> {
+  await scopedDb.execute(sql`
+    update sessions
+       set active_sandbox_id = null,
+           active_epoch = active_epoch + 1,
+           updated_at = now()
+     where workspace_id = ${input.workspaceId}
+       and active_sandbox_id in (
+         select id
+           from sandboxes
+          where workspace_id = ${input.workspaceId}
+            and enrollment_id = ${input.enrollmentId}
+       )
+  `);
 }
 
 // Heartbeat liveness cursor: the agent reports it is alive. last_seen_at is read

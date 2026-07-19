@@ -10,7 +10,7 @@
 //! `run` process is not an SCM service host, and registering it would be false.
 
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, ExitStatus};
 
 use opengeni_agent_platform::service::{self, ServiceBackend, ServiceScope, ServiceSpec};
 use tracing::info;
@@ -141,6 +141,13 @@ fn install_systemd(spec: &ServiceSpec) -> Result<(), String> {
 fn install_launchd(spec: &ServiceSpec) -> Result<(), String> {
     require_launchagent_scope(spec.scope)?;
     let plist_path = service::launchd_plist_path(&home()?);
+    let uid = unsafe_uid();
+    // KeepAlive jobs are replaced by unloading the exact plist before it is
+    // rewritten. A genuinely absent job is idempotent; every other launchctl
+    // failure is ambiguous and preserves the prior plist for recovery.
+    let bootout = service::launchctl_bootout_args(&uid, &plist_path);
+    run_tool_owned_allow_absent("launchctl", &bootout)?;
+
     let body = service::render_launchd_plist(spec);
     if let Some(parent) = plist_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
@@ -154,11 +161,6 @@ fn install_launchd(spec: &ServiceSpec) -> Result<(), String> {
         .as_ref()
         .expect("launchd log dir is configured");
     std::fs::create_dir_all(log_dir).map_err(|e| format!("mkdir {}: {e}", log_dir.display()))?;
-    // Idempotent reinstall: unload a prior instance if present. A not-loaded
-    // target is harmless; the following bootstrap is strict and must succeed.
-    let uid = unsafe_uid();
-    let bootout = service::launchctl_bootout_args(&uid, &plist_path);
-    let _ = run_tool_owned("launchctl", &bootout);
     let bootstrap = service::launchctl_bootstrap_args(&uid, &plist_path);
     run_tool_owned("launchctl", &bootstrap)?;
     println!(
@@ -175,40 +177,86 @@ fn install_windows(_spec: &ServiceSpec) -> Result<(), String> {
     Err(windows_service_error())
 }
 
-fn uninstall(install_scope: ServiceScope) -> Result<(), String> {
+fn uninstall(_requested_scope: ServiceScope) -> Result<(), String> {
     match ServiceSpec::backend() {
-        ServiceBackend::Systemd => {
-            let unit = service::ids::SYSTEMD_UNIT;
-            match install_scope {
-                ServiceScope::User => {
-                    let _ = systemctl(&["--user", "disable", "--now", unit]);
-                }
-                ServiceScope::System => {
-                    let _ = systemctl(&["disable", "--now", unit]);
-                }
-            }
-            let unit_path = service::systemd_unit_path(install_scope, &home()?);
-            let _ = std::fs::remove_file(&unit_path);
-            let _ = match install_scope {
-                ServiceScope::User => systemctl(&["--user", "daemon-reload"]),
-                ServiceScope::System => systemctl(&["daemon-reload"]),
-            };
-            println!("uninstalled the opengeni-agent service.");
-            Ok(())
-        }
-        ServiceBackend::Launchd => {
-            require_launchagent_scope(install_scope)?;
-            let plist_path = service::launchd_plist_path(&home()?);
-            let uid = unsafe_uid();
-            let args = service::launchctl_bootout_args(&uid, &plist_path);
-            let _ = run_tool_owned("launchctl", &args);
-            let _ = std::fs::remove_file(&plist_path);
-            println!("uninstalled the opengeni-agent LaunchAgent.");
-            Ok(())
-        }
+        ServiceBackend::Systemd => uninstall_systemd_all_scopes(),
+        ServiceBackend::Launchd => uninstall_launchd(),
         ServiceBackend::WindowsScm => Err(windows_service_error()),
         ServiceBackend::Unsupported => Err(service::unsupported_backend().to_string()),
     }
+}
+
+/// The POSIX installer does not retain which systemd scope was selected, so an
+/// uninstall probes BOTH canonical unit paths. Each scope is attempted even when
+/// the other fails, and the deterministic aggregate remains an error until every
+/// installed scope was confirmed disabled and removed.
+fn uninstall_systemd_all_scopes() -> Result<(), String> {
+    let results = [ServiceScope::User, ServiceScope::System]
+        .into_iter()
+        .map(|scope| (scope, uninstall_systemd_scope(scope)))
+        .collect::<Vec<_>>();
+    aggregate_scope_cleanup(&results)?;
+    println!("uninstalled the opengeni-agent service from all installed systemd scopes.");
+    Ok(())
+}
+
+fn uninstall_systemd_scope(scope: ServiceScope) -> Result<(), String> {
+    let home = if scope == ServiceScope::User {
+        home()?
+    } else {
+        PathBuf::new()
+    };
+    let unit_path = service::systemd_unit_path(scope, &home);
+    if !unit_path
+        .try_exists()
+        .map_err(|e| format!("inspect {}: {e}", unit_path.display()))?
+    {
+        return Ok(());
+    }
+
+    let disable = service::systemctl_disable_args(scope);
+    run_tool_owned_allow_absent("systemctl", &disable)?;
+    match std::fs::remove_file(&unit_path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("remove {}: {error}", unit_path.display())),
+    }
+    let reload = service::systemctl_daemon_reload_args(scope);
+    run_tool_owned("systemctl", &reload)
+}
+
+fn aggregate_scope_cleanup(results: &[(ServiceScope, Result<(), String>)]) -> Result<(), String> {
+    let failures = results
+        .iter()
+        .filter_map(|(scope, result)| {
+            result
+                .as_ref()
+                .err()
+                .map(|error| format!("{} scope: {error}", scope_label(*scope)))
+        })
+        .collect::<Vec<_>>();
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "service cleanup was not confirmed; {}",
+            failures.join("; ")
+        ))
+    }
+}
+
+fn uninstall_launchd() -> Result<(), String> {
+    let plist_path = service::launchd_plist_path(&home()?);
+    let uid = unsafe_uid();
+    let args = service::launchctl_bootout_args(&uid, &plist_path);
+    run_tool_owned_allow_absent("launchctl", &args)?;
+    match std::fs::remove_file(&plist_path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("remove {}: {error}", plist_path.display())),
+    }
+    println!("uninstalled the opengeni-agent LaunchAgent.");
+    Ok(())
 }
 
 fn lifecycle(action: &str, install_scope: ServiceScope) -> Result<(), String> {
@@ -225,12 +273,22 @@ fn lifecycle(action: &str, install_scope: ServiceScope) -> Result<(), String> {
         ServiceBackend::Launchd => {
             require_launchagent_scope(install_scope)?;
             let uid = unsafe_uid();
-            let args = if action == "start" {
-                service::launchctl_kickstart_args(&uid)
+            let plist = service::launchd_plist_path(&home()?);
+            if action == "start" {
+                let print = service::launchctl_print_args(&uid);
+                let refs = print.iter().map(String::as_str).collect::<Vec<_>>();
+                let current = invoke("launchctl", &refs)?;
+                if !current.status.success() && !output_indicates_absent(&current) {
+                    return Err(tool_failure("launchctl", &refs, &current));
+                }
+                if !current.status.success() {
+                    let bootstrap = service::launchctl_bootstrap_args(&uid, &plist);
+                    run_tool_owned("launchctl", &bootstrap)?;
+                }
             } else {
-                service::launchctl_kill_args(&uid)
-            };
-            run_tool_owned("launchctl", &args)?;
+                let bootout = service::launchctl_bootout_args(&uid, &plist);
+                run_tool_owned_allow_absent("launchctl", &bootout)?;
+            }
             println!("{action}ed the opengeni-agent LaunchAgent.");
             Ok(())
         }
@@ -243,26 +301,38 @@ fn status(install_scope: ServiceScope) -> Result<(), String> {
     match ServiceSpec::backend() {
         ServiceBackend::Systemd => {
             let unit = service::ids::SYSTEMD_UNIT;
-            let out = match install_scope {
-                ServiceScope::User => capture("systemctl", &["--user", "is-active", unit]),
-                ServiceScope::System => capture("systemctl", &["is-active", unit]),
+            let args = match install_scope {
+                ServiceScope::User => vec!["--user", "is-active", unit],
+                ServiceScope::System => vec!["is-active", unit],
             };
-            match out {
-                Ok(s) => println!("opengeni-agent service: {}", s.trim()),
-                Err(_) => println!("opengeni-agent service: not installed"),
+            let out = invoke("systemctl", &args)?;
+            let state = out.stdout.trim();
+            if out.status.success()
+                || matches!(state, "inactive" | "failed" | "activating" | "deactivating")
+            {
+                println!("opengeni-agent service: {state}");
+                Ok(())
+            } else if output_indicates_absent(&out) || state == "unknown" {
+                println!("opengeni-agent service: not installed");
+                Ok(())
+            } else {
+                Err(tool_failure("systemctl", &args, &out))
             }
-            Ok(())
         }
         ServiceBackend::Launchd => {
             require_launchagent_scope(install_scope)?;
             let args = service::launchctl_print_args(&unsafe_uid());
             let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
-            let out = capture("launchctl", &refs);
-            match out {
-                Ok(_) => println!("opengeni-agent LaunchAgent: loaded"),
-                Err(_) => println!("opengeni-agent LaunchAgent: not loaded"),
+            let out = invoke("launchctl", &refs)?;
+            if out.status.success() {
+                println!("opengeni-agent LaunchAgent: loaded");
+                Ok(())
+            } else if output_indicates_absent(&out) {
+                println!("opengeni-agent LaunchAgent: not loaded");
+                Ok(())
+            } else {
+                Err(tool_failure("launchctl", &refs, &out))
             }
-            Ok(())
         }
         ServiceBackend::WindowsScm => Err(windows_service_error()),
         ServiceBackend::Unsupported => Err(service::unsupported_backend().to_string()),
@@ -309,6 +379,54 @@ fn scope_label(s: ServiceScope) -> &'static str {
     }
 }
 
+/// Captured tool result used to distinguish a genuinely absent service from
+/// permission, bus, and unknown failures. The latter must fail closed.
+#[derive(Debug)]
+struct ToolOutput {
+    status: ExitStatus,
+    stdout: String,
+    stderr: String,
+}
+
+fn invoke(tool: &str, args: &[&str]) -> Result<ToolOutput, String> {
+    let out = Command::new(tool)
+        .args(args)
+        .output()
+        .map_err(|e| format!("could not run {tool}: {e}"))?;
+    Ok(ToolOutput {
+        status: out.status,
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+    })
+}
+
+fn output_indicates_absent(out: &ToolOutput) -> bool {
+    let text = format!("{}\n{}", out.stdout, out.stderr).to_ascii_lowercase();
+    [
+        "not loaded",
+        "not found",
+        "could not find service",
+        "could not be found",
+        "does not exist",
+        "no such file or directory",
+    ]
+    .iter()
+    .any(|marker| text.contains(marker))
+}
+
+fn tool_failure(tool: &str, args: &[&str], out: &ToolOutput) -> String {
+    let detail = if out.stderr.trim().is_empty() {
+        out.stdout.trim()
+    } else {
+        out.stderr.trim()
+    };
+    if detail.is_empty() {
+        format!("{tool} {args:?} exited with {}", out.status)
+    } else {
+        format!("{tool} {args:?} exited with {}: {detail}", out.status)
+    }
+}
+
 /// Runs `systemctl` with args, mapping a non-zero exit to an error string.
 fn systemctl(args: &[&str]) -> Result<(), String> {
     run_tool("systemctl", args)
@@ -316,14 +434,11 @@ fn systemctl(args: &[&str]) -> Result<(), String> {
 
 /// Runs an external tool, erroring on a non-zero exit or a spawn failure.
 fn run_tool(tool: &str, args: &[&str]) -> Result<(), String> {
-    let status = Command::new(tool)
-        .args(args)
-        .status()
-        .map_err(|e| format!("could not run {tool}: {e}"))?;
-    if status.success() {
+    let out = invoke(tool, args)?;
+    if out.status.success() {
         Ok(())
     } else {
-        Err(format!("{tool} {args:?} exited with {status}"))
+        Err(tool_failure(tool, args, &out))
     }
 }
 
@@ -332,16 +447,23 @@ fn run_tool_owned(tool: &str, args: &[String]) -> Result<(), String> {
     run_tool(tool, &refs)
 }
 
+fn run_tool_owned_allow_absent(tool: &str, args: &[String]) -> Result<(), String> {
+    let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+    let out = invoke(tool, &refs)?;
+    if out.status.success() || output_indicates_absent(&out) {
+        Ok(())
+    } else {
+        Err(tool_failure(tool, &refs, &out))
+    }
+}
+
 /// Runs an external tool and captures its stdout.
 fn capture(tool: &str, args: &[&str]) -> Result<String, String> {
-    let out = Command::new(tool)
-        .args(args)
-        .output()
-        .map_err(|e| format!("could not run {tool}: {e}"))?;
+    let out = invoke(tool, args)?;
     if out.status.success() {
-        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        Ok(out.stdout)
     } else {
-        Err(format!("{tool} {args:?} exited with {}", out.status))
+        Err(tool_failure(tool, args, &out))
     }
 }
 
@@ -411,5 +533,57 @@ mod tests {
         assert_eq!(error, windows_service_error());
         assert!(ensure_supported_service_backend(ServiceBackend::Systemd).is_ok());
         assert!(ensure_supported_service_backend(ServiceBackend::Launchd).is_ok());
+    }
+
+    #[cfg(unix)]
+    fn output(code: i32, stdout: &str, stderr: &str) -> ToolOutput {
+        use std::os::unix::process::ExitStatusExt;
+        ToolOutput {
+            status: ExitStatus::from_raw(code << 8),
+            stdout: stdout.to_string(),
+            stderr: stderr.to_string(),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn absence_classifier_never_masks_bus_or_permission_failures() {
+        assert!(output_indicates_absent(&output(
+            5,
+            "",
+            "Could not find service"
+        )));
+        assert!(output_indicates_absent(&output(
+            5,
+            "",
+            "Unit file does not exist"
+        )));
+        assert!(!output_indicates_absent(&output(
+            1,
+            "",
+            "Failed to connect to bus"
+        )));
+        assert!(!output_indicates_absent(&output(
+            1,
+            "",
+            "Permission denied"
+        )));
+    }
+
+    #[test]
+    fn dual_scope_cleanup_errors_are_aggregated_in_stable_order() {
+        let results = vec![
+            (ServiceScope::User, Err("user bus unavailable".to_string())),
+            (ServiceScope::System, Err("permission denied".to_string())),
+        ];
+        assert_eq!(
+            aggregate_scope_cleanup(&results),
+            Err("service cleanup was not confirmed; user scope: user bus unavailable; system scope: permission denied".to_string())
+        );
+        assert!(aggregate_scope_cleanup(&[
+            (ServiceScope::User, Ok(())),
+            (ServiceScope::System, Ok(())),
+        ])
+        .is_ok());
     }
 }

@@ -127,6 +127,7 @@ describe("handleAuthorizationRequest", () => {
     expect(userClaims.aud).toBe("APP");
     const now = Math.floor(Date.now() / 1000);
     expect(userClaims.exp).toBeGreaterThan(now);
+    expect(userClaims.exp).toBeLessThanOrEqual(now + 300);
     expect(userClaims.exp).toBeLessThanOrEqual(bearerExp);
   });
 

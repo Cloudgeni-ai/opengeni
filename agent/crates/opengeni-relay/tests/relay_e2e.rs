@@ -105,17 +105,17 @@ async fn start_relay_on(
 
 /// Build the producer's channel config (the agent's RelayChannel dials this).
 fn producer_config(base: &str, port: u32) -> ChannelConfig {
-    ChannelConfig {
-        channel: v1::StreamChannel {
+    ChannelConfig::new(
+        v1::StreamChannel {
             channel_id: format!("ch-{port}"),
             workspace_id: WORKSPACE.to_string(),
             agent_id: AGENT.to_string(),
             kind: v1::StreamKind::Pty as i32,
             port,
         },
-        token: agent_token(),
-        relay_url: base.to_string(),
-    }
+        agent_token(),
+        base.to_string(),
+    )
 }
 
 /// A raw viewer: dial wss, send the StreamOpen (role CLIENT), await the ack.

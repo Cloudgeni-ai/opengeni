@@ -70,6 +70,16 @@ bin="$install_dir/opengeni-agent"
 # strand an active dashboard enrollment. `--local-only` is the explicit recovery
 # escape hatch and is intentionally loud.
 if [ -x "$bin" ]; then
+  # Cleanup is a hard precondition for every destructive step. The native binary
+  # probes both systemd scopes independently (or the exact LaunchAgent plist) and
+  # distinguishes a missing unit from bus/permission/unknown failures. Never
+  # revoke or delete while a KeepAlive service may still be running.
+  log "stopping + removing every installed native service scope"
+  "$bin" service uninstall || {
+    log "service cleanup was not confirmed; keeping binary and credentials for recovery"
+    exit 1
+  }
+
   if [ "$PURGE" = "1" ]; then
     if [ "$LOCAL_ONLY" = "1" ]; then
       log "WARNING: --local-only skips remote revoke; the dashboard enrollment may remain active."
@@ -85,9 +95,6 @@ if [ -x "$bin" ]; then
       }
     fi
   fi
-
-  log "stopping + removing any opt-in service (no-op if none installed)"
-  "$bin" service uninstall >/dev/null 2>&1 || true
 elif [ "$PURGE" = "1" ] && [ "$LOCAL_ONLY" != "1" ]; then
   log "cannot remotely revoke: no executable at $bin; keeping local credentials for retry"
   exit 1

@@ -47,6 +47,7 @@ const AGENT_ROUTES = [
   { method: "post", path: "/v1/enrollments/device/start" },
   { method: "post", path: "/v1/enrollments/device/poll" },
   { method: "post", path: "/v1/enrollments/token/exchange" },
+  { method: "post", path: "/v1/enrollments/self/refresh" },
   { method: "post", path: "/v1/enrollments/self/revoke" },
 ];
 const USER_ROUTES = [
@@ -62,6 +63,7 @@ const USER_ROUTES = [
 // AFTER the parse); exchange is UNAUTHENTICATED (the `oget_` token is the auth).
 const LOOKUP_ROUTE = { method: "post", path: "/v1/enrollments/device/lookup" };
 const EXCHANGE_ROUTE = { method: "post", path: "/v1/enrollments/token/exchange" };
+const SELF_REFRESH_ROUTE = { method: "post", path: "/v1/enrollments/self/refresh" };
 const SELF_REVOKE_ROUTE = { method: "post", path: "/v1/enrollments/self/revoke" };
 
 describe("M5 enrollment route discipline", () => {
@@ -165,6 +167,18 @@ describe("M5 enrollment route discipline", () => {
     expect(body.includes("requireAccessGrant("), "exchange must NOT user-authenticate").toBe(false);
     expect(body).toContain(".safeParse(");
     expect(body).toContain("HTTPException(400");
+  });
+
+  test("self-refresh is bearer-only, rate-limited, and deployment-auth exempt", () => {
+    const body = handlerBody(routesSrc, SELF_REFRESH_ROUTE.method, SELF_REFRESH_ROUTE.path);
+    expect(body).toContain("rateLimit(");
+    expect(body).toContain("assertSelfhostedEnabled");
+    expect(body).toContain('c.req.header("authorization")');
+    expect(body).toContain("refreshEnrollmentCredentials");
+    expect(body.includes("c.req.json("), "refresh must not accept a body credential").toBe(false);
+    expect(body.includes("requireAccessGrant("), "refresh must NOT user-authenticate").toBe(false);
+    expect(appSrc).toContain('label: "/v1/enrollments/self/refresh"');
+    expect(appSrc).toContain('pathname === "/v1/enrollments/self/refresh"');
   });
 
   test("self-revoke is bearer-authenticated, rate-limited, and never user-authenticates", () => {

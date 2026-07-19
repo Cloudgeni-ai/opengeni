@@ -45,6 +45,9 @@ const POLL_PATH: &str = "/v1/enrollments/device/poll";
 /// this exchanges it directly for the SAME credential shape the `poll` authorized
 /// branch returns (spec §A2.3).
 const EXCHANGE_PATH: &str = "/v1/enrollments/token/exchange";
+/// The authenticated self-refresh endpoint. The long-lived enrollment bearer is
+/// the recovery credential and is sent only in the Authorization header.
+const SELF_REFRESH_PATH: &str = "/v1/enrollments/self/refresh";
 /// The authenticated self-revoke endpoint. It is deployment-key exempt: the
 /// stored enrollment bearer is the sole credential and must only ever be sent in
 /// the Authorization header.
@@ -136,6 +139,22 @@ pub enum RevokeError {
     /// not proof that the remote enrollment was revoked.
     #[error("remote revoke returned an invalid confirmation; credentials were retained so you can retry")]
     InvalidConfirmation,
+}
+
+/// Errors from credential refresh. These variants intentionally omit the
+/// response body, request URL, and transport's nested message so an upstream
+/// reflection or library formatting change can never expose a bearer/token.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum RefreshError {
+    /// The request could not be built/completed or timed out.
+    #[error("credential refresh transport failed")]
+    Transport,
+    /// The endpoint rejected the current enrollment identity or was unavailable.
+    #[error("credential refresh returned HTTP {status}")]
+    Status { status: u16 },
+    /// A 2xx response did not carry the required credential object.
+    #[error("credential refresh returned an invalid response")]
+    InvalidResponse,
 }
 
 /// Errors raised while loading or persisting the durable install identity.
@@ -431,6 +450,50 @@ pub async fn exchange_token(
     Ok(exchange.credentials.into_proto())
 }
 
+/// Rotates the currently enrolled machine's server-issued credentials using its
+/// existing long-lived `oge_` bearer. The bearer is accepted only as an
+/// Authorization header; it is never placed in a URL/body/log/error.
+///
+/// # Errors
+///
+/// Returns a deliberately non-reflective [`RefreshError`] on transport, status,
+/// or response-shape failure. The caller must keep the previous credentials and
+/// retry; this function never mutates durable state.
+pub async fn refresh_self(
+    api_base_url: &str,
+    bearer: &str,
+) -> Result<EnrollmentCredentials, RefreshError> {
+    refresh_self_with_timeout(api_base_url, bearer, Duration::from_secs(10)).await
+}
+
+async fn refresh_self_with_timeout(
+    api_base_url: &str,
+    bearer: &str,
+    timeout: Duration,
+) -> Result<EnrollmentCredentials, RefreshError> {
+    let client = reqwest::Client::builder()
+        .timeout(timeout)
+        .user_agent(concat!("opengeni-agent/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|_| RefreshError::Transport)?;
+    let response = client
+        .post(join_url(api_base_url, SELF_REFRESH_PATH))
+        .bearer_auth(bearer)
+        .send()
+        .await
+        .map_err(|_| RefreshError::Transport)?;
+    if !response.status().is_success() {
+        return Err(RefreshError::Status {
+            status: response.status().as_u16(),
+        });
+    }
+    response
+        .json::<wire::RefreshResponse>()
+        .await
+        .map(|response| response.credentials.into_proto())
+        .map_err(|_| RefreshError::InvalidResponse)
+}
+
 /// Revokes the currently enrolled machine with its persisted `oge_` bearer.
 ///
 /// Success includes an idempotent already-revoked response as defined by the
@@ -546,6 +609,13 @@ mod wire {
     #[derive(Debug, Deserialize)]
     pub(super) struct RevokeResponse {
         pub revoked: bool,
+    }
+
+    /// Response of `POST /v1/enrollments/self/refresh`. The wrapper deliberately
+    /// reuses the exact enrollment credential shape.
+    #[derive(Debug, Deserialize)]
+    pub(super) struct RefreshResponse {
+        pub credentials: Credentials,
     }
 
     /// Body of `POST /v1/enrollments/device/start`. Matches the API's
@@ -675,6 +745,10 @@ mod wire {
         /// auth-token (the API's `bearer`). This IS the credential — there is no
         /// per-machine creds file (the API's `natsAccountCreds` merely echoes it).
         pub bearer: String,
+        /// Absolute expiry of the long recovery bearer. Zero is accepted for
+        /// compatibility with an older control plane and triggers prompt refresh.
+        #[serde(default)]
+        pub bearer_expires_at_unix_seconds: u64,
         #[serde(default)]
         pub nats_urls: Vec<String>,
         #[serde(default)]
@@ -685,6 +759,10 @@ mod wire {
         /// deployment (the agent then presents an empty token the relay rejects).
         #[serde(default)]
         pub relay_token: String,
+        /// Absolute relay producer-token expiry. Zero means legacy when a token
+        /// is present, or an intentionally disabled plane when it is absent.
+        #[serde(default)]
+        pub relay_token_expires_at_unix_seconds: u64,
         /// The minisign public key pinned for self-update verification (the API's
         /// `updatePublicKey`).
         #[serde(default, rename = "updatePublicKey")]
@@ -704,9 +782,11 @@ mod wire {
                 agent_id: self.agent_id,
                 workspace_id: self.workspace_id,
                 nats_credentials: self.bearer,
+                bearer_expires_at_unix_seconds: self.bearer_expires_at_unix_seconds,
                 nats_urls: self.nats_urls,
                 relay_url: self.relay_url,
                 relay_token: self.relay_token,
+                relay_token_expires_at_unix_seconds: self.relay_token_expires_at_unix_seconds,
                 update_pubkey: self.update_pubkey,
                 consented_whole_machine: self.consented_whole_machine,
                 consented_screen_control: self.consented_screen_control,
@@ -827,8 +907,10 @@ mod tests {
         let json = r#"{
             "agentId": "a", "workspaceId": "w",
             "bearer": "oge_bearer", "subjectPrefix": "agent.w.a",
+            "bearerExpiresAtUnixSeconds": 4102444800,
             "natsUrls": ["tls://x:4222"], "relayUrl": "https://r",
-            "relayToken": "ogr_x", "natsAccountCreds": "oge_bearer",
+            "relayToken": "ogr_x", "relayTokenExpiresAtUnixSeconds": 4102444500,
+            "natsAccountCreds": "oge_bearer",
             "updatePublicKey": "k",
             "consentedWholeMachine": true, "consentedScreenControl": false
         }"#;
@@ -838,8 +920,10 @@ mod tests {
         // The API's `bearer` maps into the proto's `nats_credentials` (the connect
         // auth-token under M-AUTH).
         assert_eq!(proto.nats_credentials, "oge_bearer");
+        assert_eq!(proto.bearer_expires_at_unix_seconds, 4_102_444_800);
         assert_eq!(proto.nats_urls, vec!["tls://x:4222".to_string()]);
         assert_eq!(proto.relay_token, "ogr_x");
+        assert_eq!(proto.relay_token_expires_at_unix_seconds, 4_102_444_500);
         assert_eq!(proto.update_pubkey, "k");
         assert!(proto.consented_whole_machine);
         assert!(!proto.consented_screen_control);
@@ -979,8 +1063,10 @@ mod tests {
         let json = r#"{
             "credentials": {
                 "agentId": "a", "workspaceId": "w", "bearer": "oge_bearer",
+                "bearerExpiresAtUnixSeconds": 4102444800,
                 "subjectPrefix": "agent.w.a", "natsUrls": ["tls://x:4222"],
                 "relayUrl": "https://r", "relayToken": "ogr_x",
+                "relayTokenExpiresAtUnixSeconds": 4102444500,
                 "natsAccountCreds": "oge_bearer", "updatePublicKey": "k",
                 "consentedWholeMachine": true, "consentedScreenControl": true
             }
@@ -990,8 +1076,10 @@ mod tests {
         assert_eq!(proto.agent_id, "a");
         assert_eq!(proto.workspace_id, "w");
         assert_eq!(proto.nats_credentials, "oge_bearer");
+        assert_eq!(proto.bearer_expires_at_unix_seconds, 4_102_444_800);
         assert_eq!(proto.nats_urls, vec!["tls://x:4222".to_string()]);
         assert_eq!(proto.relay_token, "ogr_x");
+        assert_eq!(proto.relay_token_expires_at_unix_seconds, 4_102_444_500);
         assert_eq!(proto.update_pubkey, "k");
         assert!(proto.consented_whole_machine);
         assert!(proto.consented_screen_control);
@@ -1015,7 +1103,12 @@ mod tests {
         assert_eq!(arch_str(Arch::Aarch64), "aarch64");
     }
 
-    fn mock_once(status: u16, body: &'static str, expected_bearer: &'static str) -> String {
+    fn mock_post_once(
+        path: &'static str,
+        status: u16,
+        body: &'static str,
+        expected_bearer: &'static str,
+    ) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock");
         let address = listener.local_addr().expect("address");
         std::thread::spawn(move || {
@@ -1023,7 +1116,7 @@ mod tests {
             let mut request = [0_u8; 4096];
             let count = socket.read(&mut request).expect("read request");
             let request = String::from_utf8_lossy(&request[..count]);
-            assert!(request.starts_with("POST /v1/enrollments/self/revoke HTTP/1.1"));
+            assert!(request.starts_with(&format!("POST {path} HTTP/1.1")));
             assert!(request
                 .to_ascii_lowercase()
                 .contains(&format!("authorization: bearer {expected_bearer}")));
@@ -1042,7 +1135,7 @@ mod tests {
     #[tokio::test]
     async fn revoke_uses_bearer_header_and_accepts_success_and_already_revoked() {
         for body in [r#"{"revoked":true}"#, r#"{"revoked":false}"#] {
-            let base = mock_once(200, body, "oge_test_bearer");
+            let base = mock_post_once(SELF_REVOKE_PATH, 200, body, "oge_test_bearer");
             revoke_self(&base, "oge_test_bearer")
                 .await
                 .expect("revoked");
@@ -1052,7 +1145,7 @@ mod tests {
     #[tokio::test]
     async fn revoke_failure_never_leaks_the_bearer() {
         let secret = "oge_do_not_log";
-        let base = mock_once(401, r#"{"error":"forged"}"#, secret);
+        let base = mock_post_once(SELF_REVOKE_PATH, 401, r#"{"error":"forged"}"#, secret);
         let error = revoke_self(&base, secret).await.expect_err("unauthorized");
         assert!(matches!(error, RevokeError::Status { status: 401 }));
         assert!(!error.to_string().contains(secret));
@@ -1061,18 +1154,54 @@ mod tests {
     #[tokio::test]
     async fn revoke_rejects_forged_success_and_server_errors_without_leaking_bearer() {
         let secret = "oge_never_print_this";
-        let malformed = mock_once(200, r"{}", secret);
+        let malformed = mock_post_once(SELF_REVOKE_PATH, 200, r"{}", secret);
         let error = revoke_self(&malformed, secret)
             .await
             .expect_err("malformed success");
         assert!(matches!(error, RevokeError::InvalidConfirmation));
         assert!(!error.to_string().contains(secret));
 
-        let unavailable = mock_once(503, r#"{"revoked":false}"#, secret);
+        let unavailable = mock_post_once(SELF_REVOKE_PATH, 503, r#"{"revoked":false}"#, secret);
         let error = revoke_self(&unavailable, secret)
             .await
             .expect_err("server failure");
         assert!(matches!(error, RevokeError::Status { status: 503 }));
+        assert!(!error.to_string().contains(secret));
+    }
+
+    #[tokio::test]
+    async fn refresh_uses_only_the_bearer_header_and_returns_expiry_metadata() {
+        let body = r#"{
+            "credentials": {
+                "agentId": "a", "workspaceId": "w", "bearer": "oge_rotated",
+                "bearerExpiresAtUnixSeconds": 4102444800,
+                "subjectPrefix": "agent.w.a", "natsUrls": ["tls://x:4222"],
+                "relayUrl": "https://r", "relayToken": "ogr_rotated",
+                "relayTokenExpiresAtUnixSeconds": 4102444500,
+                "natsAccountCreds": "oge_rotated", "updatePublicKey": "k",
+                "consentedWholeMachine": true, "consentedScreenControl": false
+            }
+        }"#;
+        let base = mock_post_once(SELF_REFRESH_PATH, 200, body, "oge_recovery");
+        let refreshed = refresh_self(&base, "oge_recovery").await.expect("refresh");
+        assert_eq!(refreshed.agent_id, "a");
+        assert_eq!(refreshed.nats_credentials, "oge_rotated");
+        assert_eq!(refreshed.bearer_expires_at_unix_seconds, 4_102_444_800);
+        assert_eq!(refreshed.relay_token, "ogr_rotated");
+        assert_eq!(refreshed.relay_token_expires_at_unix_seconds, 4_102_444_500);
+    }
+
+    #[tokio::test]
+    async fn refresh_errors_never_reflect_the_bearer_or_response_body() {
+        let secret = "oge_never_reflect";
+        let base = mock_post_once(
+            SELF_REFRESH_PATH,
+            401,
+            r#"{"error":"oge_never_reflect"}"#,
+            secret,
+        );
+        let error = refresh_self(&base, secret).await.expect_err("rejected");
+        assert_eq!(error, RefreshError::Status { status: 401 });
         assert!(!error.to_string().contains(secret));
     }
 

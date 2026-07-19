@@ -30,6 +30,7 @@ import {
   createSandbox,
   createSession,
   readActiveSandbox,
+  revokeEnrollment,
   type Database,
   type DbClient,
 } from "@opengeni/db";
@@ -251,6 +252,21 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
 
     // Single-active invariant: exactly ONE active entry.
     expect(result.sandboxes.filter((s) => s.active).length).toBe(1);
+  }, 60_000);
+
+  test("revoked enrollments remain history but disappear from the agent-facing fleet", async () => {
+    if (!available) return;
+    const { ctx, services, enrollment, sandbox, accountId, workspaceId } = await seedFleet();
+    expect(
+      (await listFleet(services, ctx)).sandboxes.some((entry) => entry.id === sandbox.id),
+    ).toBe(true);
+
+    expect(
+      (await revokeEnrollment(db, { accountId, workspaceId, enrollmentId: enrollment.id })).revoked,
+    ).toBe(true);
+    const after = await listFleet(services, ctx);
+    expect(after.sandboxes.some((entry) => entry.id === sandbox.id)).toBe(false);
+    expect(after.sandboxes.some((entry) => entry.isSessionGroup)).toBe(true);
   }, 60_000);
 
   test("attach/swap: the epoch-fenced CAS flips active_sandbox_id + bumps active_epoch", async () => {

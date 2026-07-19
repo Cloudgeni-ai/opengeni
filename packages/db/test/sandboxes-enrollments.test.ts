@@ -25,6 +25,7 @@ import {
   setEnrollmentWentOffline,
   touchEnrollmentLastSeen,
   upsertMachineMetricsLatest,
+  withActiveEnrollmentGeneration,
   type Database,
   type DbClient,
 } from "../src/index";
@@ -237,6 +238,197 @@ describe("0024 sandboxes / enrollments / metrics DAOs + active-sandbox pointer",
         credentialGeneration: 2,
       }),
     ).toEqual({ matched: true, revoked: true });
+  }, 60_000);
+
+  test("revocation clears only matching active machine pointers and advances each epoch once", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+
+    const createMachine = async (pubkey: string, name: string) => {
+      const enrollment = await createEnrollment(db, { accountId, workspaceId, pubkey });
+      const sandbox = await createSandbox(db, {
+        accountId,
+        workspaceId,
+        kind: "selfhosted",
+        name,
+        enrollmentId: enrollment.id,
+      });
+      return { enrollment, sandbox };
+    };
+    const createPointedSession = async (sandboxId: string) => {
+      const session = await createSession(db, {
+        accountId,
+        workspaceId,
+        initialMessage: "hi",
+        resources: [],
+        metadata: {},
+        model: "gpt",
+        sandboxBackend: "modal",
+      });
+      expect(
+        (
+          await setActiveSandbox(db, {
+            accountId,
+            workspaceId,
+            sessionId: session.id,
+            targetSandboxId: sandboxId,
+            expectedEpoch: 0,
+          })
+        ).swapped,
+      ).toBe(true);
+      return session;
+    };
+
+    // Administrator revoke invalidates a matching pointer and bumps its epoch in
+    // the same transaction. An idempotent retry must not invalidate it again.
+    const adminMachine = await createMachine("ed25519:ADMIN-POINTER", "admin-machine");
+    const adminSession = await createPointedSession(adminMachine.sandbox.id);
+    expect(await readActiveSandbox(db, workspaceId, adminSession.id)).toEqual({
+      activeSandboxId: adminMachine.sandbox.id,
+      activeEpoch: 1,
+      workingDir: null,
+    });
+    expect(
+      await revokeEnrollment(db, {
+        accountId,
+        workspaceId,
+        enrollmentId: adminMachine.enrollment.id,
+      }),
+    ).toEqual({ revoked: true });
+    expect(await readActiveSandbox(db, workspaceId, adminSession.id)).toEqual({
+      activeSandboxId: null,
+      activeEpoch: 2,
+      workingDir: null,
+    });
+    expect(
+      await revokeEnrollment(db, {
+        accountId,
+        workspaceId,
+        enrollmentId: adminMachine.enrollment.id,
+      }),
+    ).toEqual({ revoked: false });
+    expect((await readActiveSandbox(db, workspaceId, adminSession.id))?.activeEpoch).toBe(2);
+
+    // Generation-fenced self-revoke has the same one-time pointer invalidation.
+    const selfMachine = await createMachine("ed25519:SELF-POINTER", "self-machine");
+    const selfSession = await createPointedSession(selfMachine.sandbox.id);
+    expect(
+      await revokeEnrollmentByGeneration(db, {
+        workspaceId,
+        enrollmentId: selfMachine.enrollment.id,
+        credentialGeneration: selfMachine.enrollment.credentialGeneration,
+      }),
+    ).toEqual({ matched: true, revoked: true });
+    expect(await readActiveSandbox(db, workspaceId, selfSession.id)).toEqual({
+      activeSandboxId: null,
+      activeEpoch: 2,
+      workingDir: null,
+    });
+    expect(
+      await revokeEnrollmentByGeneration(db, {
+        workspaceId,
+        enrollmentId: selfMachine.enrollment.id,
+        credentialGeneration: selfMachine.enrollment.credentialGeneration,
+      }),
+    ).toEqual({ matched: true, revoked: false });
+    expect((await readActiveSandbox(db, workspaceId, selfSession.id))?.activeEpoch).toBe(2);
+
+    // A session may have moved from A to B after another actor observed A.
+    // Revoking A must match the pointer at mutation time and leave B + its epoch
+    // untouched; this is the lost/newer CAS safety boundary.
+    const machineA = await createMachine("ed25519:OLD-POINTER", "machine-a");
+    const machineB = await createMachine("ed25519:NEW-POINTER", "machine-b");
+    const movedSession = await createPointedSession(machineA.sandbox.id);
+    expect(
+      (
+        await setActiveSandbox(db, {
+          accountId,
+          workspaceId,
+          sessionId: movedSession.id,
+          targetSandboxId: machineB.sandbox.id,
+          expectedEpoch: 1,
+        })
+      ).swapped,
+    ).toBe(true);
+    expect(
+      await revokeEnrollment(db, {
+        accountId,
+        workspaceId,
+        enrollmentId: machineA.enrollment.id,
+      }),
+    ).toEqual({ revoked: true });
+    expect(await readActiveSandbox(db, workspaceId, movedSession.id)).toEqual({
+      activeSandboxId: machineB.sandbox.id,
+      activeEpoch: 2,
+      workingDir: null,
+    });
+  }, 60_000);
+
+  test("credential mint holds the enrollment generation stable until its transaction commits", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const enrollment = await createEnrollment(db, {
+      accountId,
+      workspaceId,
+      pubkey: "ed25519:REFRESH-REVOKE-LOCK",
+    });
+
+    let enterMint!: () => void;
+    const mintEntered = new Promise<void>((resolve) => {
+      enterMint = resolve;
+    });
+    let releaseMint!: () => void;
+    const mintRelease = new Promise<void>((resolve) => {
+      releaseMint = resolve;
+    });
+    const mint = withActiveEnrollmentGeneration(
+      db,
+      {
+        workspaceId,
+        enrollmentId: enrollment.id,
+        credentialGeneration: enrollment.credentialGeneration,
+      },
+      async () => {
+        enterMint();
+        await mintRelease;
+        return "minted";
+      },
+    );
+    await mintEntered;
+
+    let revokeSettled = false;
+    const revoke = revokeEnrollment(db, {
+      accountId,
+      workspaceId,
+      enrollmentId: enrollment.id,
+    }).finally(() => {
+      revokeSettled = true;
+    });
+
+    // Observe PostgreSQL itself reporting the conflicting UPDATE as lock-blocked;
+    // this avoids treating a fixed sleep as proof of transaction serialization.
+    let blocked = false;
+    const deadline = Date.now() + 5_000;
+    while (!blocked && Date.now() < deadline) {
+      const rows = await admin<{ blocked: boolean }[]>`
+        select exists (
+          select 1
+            from pg_stat_activity
+           where datname = current_database()
+             and usename = 'opengeni_app'
+             and wait_event_type = 'Lock'
+             and query ilike '%update%enrollments%'
+        ) as blocked`;
+      blocked = rows[0]?.blocked ?? false;
+      if (!blocked) await Bun.sleep(10);
+    }
+    expect(blocked).toBe(true);
+    expect(revokeSettled).toBe(false);
+
+    releaseMint();
+    expect(await mint).toEqual({ matched: true, value: "minted" });
+    expect(await revoke).toEqual({ revoked: true });
+    expect((await getEnrollment(db, workspaceId, enrollment.id))?.status).toBe("revoked");
   }, 60_000);
 
   test("clean going-offline marker: set → clear-on-heartbeat and clear-on-Hello (change-guarded)", async () => {

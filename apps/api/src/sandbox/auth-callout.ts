@@ -48,6 +48,9 @@ import { observabilityEventLogger } from "../observability";
 
 /** The NATS subject nats-server publishes authorization requests on (ADR-26). */
 export const AUTH_CALLOUT_SUBJECT = "$SYS.REQ.USER.AUTH";
+/** Maximum lifetime of one already-live NATS authorization. New connections still
+ * require the long-lived bearer and an exact active/generation DB check. */
+export const NATS_USER_JWT_TTL_SECONDS = 5 * 60;
 
 export interface AuthCalloutDeps {
   db: Database;
@@ -149,9 +152,12 @@ export async function handleAuthorizationRequest(
     // the privileged control plane share this account so subjects route; the
     // per-workspace isolation is carried by the subject permissions above.
     audienceAccount: deps.callout.accountName,
-    // Tie the credential's life to the bearer's remaining life: a revoked/expired
-    // enrollment cannot outlive its bearer at the NATS layer either.
-    expiresAtSeconds: claims.exp,
+    // Bound already-live post-revoke access independently from the long-lived
+    // recovery bearer. The server re-authenticates every reconnect against DB.
+    expiresAtSeconds: Math.min(
+      claims.exp,
+      Math.floor(Date.now() / 1000) + NATS_USER_JWT_TTL_SECONDS,
+    ),
   });
   const response = mintAuthResponse({
     userPublicKey: decoded.userNkey,

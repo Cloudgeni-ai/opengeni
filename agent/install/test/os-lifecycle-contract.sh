@@ -45,6 +45,18 @@ if grep -Fq 'service install' "$INSTALL_PS1"; then
   fail "Windows installer still recommends unsupported service install"
 fi
 
+AGENT_SERVICE="$AGENT_DIR/crates/opengeni-agent/src/service.rs"
+PLATFORM_SERVICE="$AGENT_DIR/crates/opengeni-agent-platform/src/service.rs"
+grep -Fq 'launchctl_bootout_args(&uid, &plist)' "$AGENT_SERVICE" \
+  || fail "macOS stop is not plist-based bootout"
+grep -Fq 'launchctl_bootstrap_args(&uid, &plist)' "$AGENT_SERVICE" \
+  || fail "macOS start is not plist-based bootstrap"
+if grep -Eq 'launchctl_(kickstart|kill)_args' "$AGENT_SERVICE" "$PLATFORM_SERVICE"; then
+  fail "KeepAlive LaunchAgent lifecycle still uses kill/kickstart"
+fi
+grep -Fq 'ServiceScope::User, ServiceScope::System' "$AGENT_SERVICE" \
+  || fail "Linux uninstall does not probe both service scopes"
+
 sh -n "$INSTALL_SH"
 sh -n "$AGENT_DIR/install/uninstall.sh"
 printf '%s\n' 'os-lifecycle-contract OK: URLs, stable macOS feature gate, Windows foreground boundary'

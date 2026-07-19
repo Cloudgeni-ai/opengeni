@@ -943,10 +943,11 @@ export async function verifyStreamToken(
 // from the StreamOpen and asserts the producer token claims the SAME pair, so a
 // producer token for workspace A can never register a channel for workspace B.
 // Signed with resolveRelayTokenSecret (the relay-token HMAC secret); the value is
-// NEVER logged. Long-lived by design (it is enrollment-scoped, not per-stream —
-// the agent presents it on every channel registration for the life of the
-// enrollment); the relay additionally validates the channel key + (for the
-// viewer's `ogs_`) the lease/active-epoch fence.
+// NEVER logged. Its identity is enrollment-scoped rather than per-stream, but its
+// credential lifetime is bounded to five minutes. The agent refreshes it before
+// expiry and presents the current immutable snapshot on each channel registration;
+// the relay additionally validates the channel key + (for the viewer's `ogs_`) the
+// lease/active-epoch fence and disconnects a live socket at token expiry.
 //
 // The Rust relay re-implements this verify (the same base64url(JSON) + HMAC-SHA256
 // + prefix split) so TS-mint and Rust-verify provably agree — see the cross-stack
@@ -957,7 +958,7 @@ export const RelayTokenPayload = z.object({
   workspaceId: z.string().uuid(),
   // The agent (machine) id — the relay asserts this equals the channel-key's agent.
   agentId: z.string().uuid(),
-  // Expiry (unix seconds). Enrollment-scoped horizon (re-minted on re-enroll).
+  // Expiry (unix seconds). Five-minute credential, re-minted by self-refresh.
   exp: z.number().int().positive(),
 });
 export type RelayTokenPayload = z.infer<typeof RelayTokenPayload>;
@@ -4745,6 +4746,9 @@ export const EnrollmentCredentialsResponse = z.object({
   workspaceId: z.string().uuid(),
   // The signed bearer the agent presents to the control plane (the `oge_` token).
   bearer: z.string(),
+  // Absolute expiry metadata lets the agent refresh before a bounded relay token
+  // expires without decoding or logging either opaque credential.
+  bearerExpiresAtUnixSeconds: z.number().int().positive(),
   // The Account-scoped control-plane subject prefix the agent subscribes to:
   // agent.<workspaceId>.<agentId>.
   subjectPrefix: z.string(),
@@ -4759,6 +4763,9 @@ export const EnrollmentCredentialsResponse = z.object({
   // deployment (graceful degrade — the agent then presents an empty token the relay
   // rejects, surfacing the gap loudly rather than silently producing a dead stream).
   relayToken: z.string(),
+  // Zero only when the relay-token plane is intentionally unconfigured and the
+  // corresponding token is empty.
+  relayTokenExpiresAtUnixSeconds: z.number().int().nonnegative(),
   // VESTIGIAL (M-AUTH): there is no per-machine NATS Account creds file. The agent
   // presents the `bearer` above as the NATS connect AUTH-TOKEN; the server's
   // auth-callout responder validates it and mints a workspace-scoped user JWT. This
@@ -4771,6 +4778,13 @@ export const EnrollmentCredentialsResponse = z.object({
   consentedScreenControl: z.boolean(),
 });
 export type EnrollmentCredentialsResponse = z.infer<typeof EnrollmentCredentialsResponse>;
+
+export const RefreshEnrollmentCredentialsResponse = z.object({
+  credentials: EnrollmentCredentialsResponse,
+});
+export type RefreshEnrollmentCredentialsResponse = z.infer<
+  typeof RefreshEnrollmentCredentialsResponse
+>;
 
 export const DeviceEnrollmentPollResponse = z.object({
   state: DeviceEnrollmentState,

@@ -756,8 +756,27 @@ export async function resolveActiveSandboxBackend(
  * agent_offline lazily, so the user's explicit machine target is never abandoned for
  * a transient control-plane blip (that is #339's concern, not this one).
  */
+/**
+ * A session whose configured home is a Connected Machine has no cloud fallback.
+ * This check deliberately runs before any group-box create/resume path.
+ */
+export function requireActiveMachineHome(
+  homeBackend: Settings["sandboxBackend"],
+  machinePrimary: boolean,
+): void {
+  if (homeBackend === "selfhosted" && !machinePrimary) {
+    throw new Error(
+      "Connected Machine target is no longer active; attach another active machine before running this session",
+    );
+  }
+}
+
 export function pointerReconcileReason(
-  record: { kind: string; enrollmentId: string | null } | null,
+  record: {
+    kind: string;
+    enrollmentId: string | null;
+    enrollmentStatus?: "active" | "revoked" | null;
+  } | null,
 ): BackendUnresolvableCode | null {
   if (!record) {
     return "stale_pointer";
@@ -772,6 +791,13 @@ export function pointerReconcileReason(
   if (record.kind === "selfhosted" && !record.enrollmentId) {
     return "offline_enrollment";
   }
+  if (
+    record.kind === "selfhosted" &&
+    record.enrollmentStatus !== undefined &&
+    record.enrollmentStatus !== "active"
+  ) {
+    return "offline_enrollment";
+  }
   return null;
 }
 
@@ -780,7 +806,11 @@ export function pointerReconcileReason(
  *  values with no second query. */
 export type LoadedActivePointer = {
   pointer: ActiveSandboxPointer | null;
-  record: SandboxRecord | null;
+  record: ActiveSandboxRoutingRecord | null;
+};
+
+export type ActiveSandboxRoutingRecord = SandboxRecord & {
+  enrollmentStatus?: "active" | "revoked" | null;
 };
 
 /**
@@ -803,7 +833,7 @@ export async function reconcileActiveSandboxPointer(
   db: ActivityServices["db"],
   ids: { accountId: string; workspaceId: string; sessionId: string },
   pointer: ActiveSandboxPointer | null,
-  loadRecord: (sandboxId: string) => Promise<SandboxRecord | null>,
+  loadRecord: (sandboxId: string) => Promise<ActiveSandboxRoutingRecord | null>,
   publish?: (events: Array<{ type: SessionEventType; payload: unknown }>) => Promise<void> | void,
 ): Promise<LoadedActivePointer> {
   if (!pointer?.activeSandboxId) {
@@ -811,7 +841,7 @@ export async function reconcileActiveSandboxPointer(
   }
   // Re-fetch the row WITHOUT error swallowing. A throw here (a transient DB blip) is NOT
   // "row absent": fail open — skip reconciliation, leave the pointer untouched.
-  let record: SandboxRecord | null;
+  let record: ActiveSandboxRoutingRecord | null;
   try {
     record = await loadRecord(pointer.activeSandboxId);
   } catch {
@@ -849,7 +879,7 @@ export async function reconcileActiveSandboxPointer(
   if (!reread) {
     return { pointer, record: null };
   }
-  let rereadRecord: SandboxRecord | null = null;
+  let rereadRecord: ActiveSandboxRoutingRecord | null = null;
   if (reread.activeSandboxId) {
     try {
       rereadRecord = await loadRecord(reread.activeSandboxId);
@@ -2971,7 +3001,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // (which would wrongly clear a healthy user-chosen pointer). On a lookup throw the
       // reconcile fails open — pointer untouched, record null (machinePrimary:false),
       // no event — and the establish branch below reads the returned values.
-      let activeSandboxRecord: SandboxRecord | null = null;
+      let activeSandboxRecord: ActiveSandboxRoutingRecord | null = null;
       if (routingOn) {
         const reconciled = await reconcileActiveSandboxPointer(
           db,
@@ -2981,7 +3011,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             sessionId: input.sessionId,
           },
           activeSandboxPointer,
-          (sandboxId) => getSandbox(db, input.workspaceId, sandboxId),
+          async (sandboxId) => {
+            const sandbox = await getSandbox(db, input.workspaceId, sandboxId);
+            if (!sandbox || sandbox.kind !== "selfhosted" || !sandbox.enrollmentId) {
+              return sandbox;
+            }
+            const enrollment = await getEnrollment(db, input.workspaceId, sandbox.enrollmentId);
+            return { ...sandbox, enrollmentStatus: enrollment?.status ?? null };
+          },
           publish
             ? async (events) => {
                 await publish!(events);
@@ -3005,14 +3042,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         activeSandboxBackend === "selfhosted" &&
         Boolean(activeSandboxPointer?.activeSandboxId) &&
         Boolean(activeSandboxRecord?.enrollmentId);
-      // The backend that can actually create a sandbox for this turn. In the
-      // common path this is runSettings.sandboxBackend. A selfhosted home turn
-      // that is NOT machine-primary falls back to the deployment cloud backend
-      // so swap-away / flag-off degrade to a real group box.
-      const groupBoxBackend: Settings["sandboxBackend"] =
-        runSettings.sandboxBackend === "selfhosted" && !machinePrimary
-          ? settings.sandboxBackend
-          : runSettings.sandboxBackend;
+      requireActiveMachineHome(runSettings.sandboxBackend, machinePrimary);
+      // The backend that can actually create a sandbox for this turn. A session
+      // whose home is a Connected Machine must have an active machine target;
+      // loss/revocation is loud and never creates a phantom cloud group box.
+      // A cloud-home session explicitly swapped back away from a machine still
+      // resolves its normal cloud backend before reaching this branch.
+      const groupBoxBackend: Settings["sandboxBackend"] = runSettings.sandboxBackend;
       const sandboxCreationBackend: Settings["sandboxBackend"] =
         settings.sandboxOwnershipEnabled && runSettings.sandboxBackend !== "none"
           ? groupBoxBackend

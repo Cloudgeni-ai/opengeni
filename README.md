@@ -380,6 +380,8 @@ Connected Machine endpoints (all return `404` unless `OPENGENI_SANDBOX_SELFHOSTE
 - `POST /v1/enrollments/device/poll` (agent-side, unauthenticated)
 - `POST /v1/enrollments/device/lookup`
 - `POST /v1/enrollments/token/exchange` (agent-side headless enroll-token redemption)
+- `POST /v1/enrollments/self/refresh` (agent-side, enrollment-bearer authenticated)
+- `POST /v1/enrollments/self/revoke` (agent-side, enrollment-bearer authenticated)
 - `POST /v1/workspaces/:workspaceId/enrollments/device/approve`
 - `POST /v1/workspaces/:workspaceId/enrollments/device/deny`
 - `POST /v1/workspaces/:workspaceId/enrollments/token` (mint a headless enroll token)

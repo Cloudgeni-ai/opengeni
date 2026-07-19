@@ -801,6 +801,7 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
     label: "/v1/enrollments/device/poll",
   },
   { pattern: /^\/v1\/enrollments\/token\/exchange$/, label: "/v1/enrollments/token/exchange" },
+  { pattern: /^\/v1\/enrollments\/self\/refresh$/, label: "/v1/enrollments/self/refresh" },
   { pattern: /^\/v1\/enrollments\/self\/revoke$/, label: "/v1/enrollments/self/revoke" },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/enrollments\/device\/approve$/,
@@ -864,7 +865,9 @@ export function isApiContractProtectedMutation(method: string, pathname: string)
     pathname.startsWith("/v1/github/") ||
     pathname === "/v1/enrollments/device/start" ||
     pathname === "/v1/enrollments/device/poll" ||
-    pathname === "/v1/enrollments/token/exchange"
+    pathname === "/v1/enrollments/token/exchange" ||
+    pathname === "/v1/enrollments/self/refresh" ||
+    pathname === "/v1/enrollments/self/revoke"
   ) {
     return false;
   }

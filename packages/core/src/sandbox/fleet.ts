@@ -227,9 +227,13 @@ export async function listFleet(
       continue;
     }
     const enrollment = await getEnrollment(db, ctx.workspaceId, sandbox.enrollmentId);
-    const probe = enrollment
-      ? await probeEnrollment(services, ctx.workspaceId, enrollment)
-      : { liveness: "offline" as FleetLiveness, consented: false, hasDisplay: false };
+    // Revoked enrollments remain available through the administrative enrollment
+    // history, but they are not compute targets and must never remain in the
+    // agent-facing fleet (including as an apparently active pointer).
+    if (!enrollment || enrollment.status !== "active") {
+      continue;
+    }
+    const probe = await probeEnrollment(services, ctx.workspaceId, enrollment);
     entries.push({
       id: sandbox.id,
       kind: "selfhosted",
@@ -241,7 +245,7 @@ export async function listFleet(
       attachable: probe.liveness === "online",
       consented: probe.consented,
       hasDisplay: probe.hasDisplay,
-      lastSeenAt: enrollment?.lastSeenAt ?? null,
+      lastSeenAt: enrollment.lastSeenAt ?? null,
     });
   }
 

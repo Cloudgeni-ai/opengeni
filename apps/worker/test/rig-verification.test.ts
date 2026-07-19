@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { rm, readFile } from "node:fs/promises";
+import { rm, readFile, stat } from "node:fs/promises";
 import type { RigVersion } from "@opengeni/contracts";
 import type { EstablishedSandboxSession } from "@opengeni/runtime";
 import {
@@ -9,12 +9,17 @@ import {
 } from "../src/activities/rig-verification";
 
 const cleanup: string[] = [];
+const LOCAL_BASH = "/bin/bash";
 
 afterEach(async () => {
   await Promise.all(cleanup.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
 
 describe("rig verification Bash execution", () => {
+  test("the local verification harness has the same absolute Bash contract as Linux sandboxes", async () => {
+    expect((await stat(LOCAL_BASH)).isFile()).toBe(true);
+  });
+
   test("preserves cd, exports, functions, set/pipefail, traps, and exit semantics in one context", async () => {
     const root = `/tmp/opengeni-rig-state-${crypto.randomUUID()}`;
     cleanup.push(root);
@@ -263,7 +268,7 @@ function establishedSandbox(client: unknown, session: unknown): EstablishedSandb
 function localSession() {
   return {
     exec: async (args: Record<string, unknown>) => {
-      const process = Bun.spawn(["bash", "-lc", String(args.cmd)], {
+      const process = Bun.spawn([LOCAL_BASH, "-lc", String(args.cmd)], {
         cwd: String(args.workdir ?? "/workspace"),
         stdout: "pipe",
         stderr: "pipe",

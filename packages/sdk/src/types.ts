@@ -2856,10 +2856,12 @@ export type EnrollmentCredentials = {
   agentId: string;
   workspaceId: string;
   bearer: string;
+  bearerExpiresAtUnixSeconds: number;
   subjectPrefix: string;
   natsUrls: string[];
   relayUrl: string;
   relayToken: string;
+  relayTokenExpiresAtUnixSeconds: number;
   natsAccountCreds: string;
   updatePublicKey: string;
   consentedWholeMachine: boolean;

@@ -26,6 +26,7 @@
 //! tokens pass (see the crate-level relay-dial protocol doc).
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -37,7 +38,7 @@ use opengeni_agent_proto::v1::{self, DesktopEnsureRequest, PtyOpenResponse, Stre
 use tokio::sync::{mpsc, oneshot};
 
 use crate::backoff::ChannelBackoff;
-use crate::channel::{ChannelConfig, RelayChannel};
+use crate::channel::{ChannelConfig, RelayChannel, SharedRelayCredentials};
 use crate::framebuffer_pump::{self, InputPolicy};
 use crate::pty_pump::{self, PtyCommand, PtyControlTx};
 
@@ -61,7 +62,7 @@ pub const DESKTOP_STREAM_PORT: u32 = 6080;
 
 /// Static configuration for the relay hub: the agent identity, the relay URL, and
 /// the agent's relay token + consent policy.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RelayHubConfig {
     /// The workspace this agent is scoped to (the channel key + token scope).
     pub workspace_id: String,
@@ -78,12 +79,24 @@ pub struct RelayHubConfig {
     pub allow_screen_control: bool,
 }
 
+impl std::fmt::Debug for RelayHubConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RelayHubConfig")
+            .field("workspace_id", &self.workspace_id)
+            .field("agent_id", &self.agent_id)
+            .field("allow_screen_control", &self.allow_screen_control)
+            .finish_non_exhaustive()
+    }
+}
+
 /// The agent-side relay hub. Cheap to clone (an `Arc` over the immutable config +
 /// the shared PTY control table), so it can be shared with the platform and spawned
 /// tasks.
 #[derive(Clone)]
 pub struct RelayHub {
     config: Arc<RelayHubConfig>,
+    credentials: SharedRelayCredentials,
+    allow_screen_control: Arc<AtomicBool>,
     /// Live PTYs by `pty_id`, each with the control-channel sender the
     /// `pty_write`/`pty_resize`/`pty_close` ops reach. Entries are removed when the
     /// pump ends.
@@ -104,10 +117,28 @@ impl RelayHub {
     /// Builds a hub over the static config.
     #[must_use]
     pub fn new(config: RelayHubConfig) -> Self {
+        let credentials =
+            SharedRelayCredentials::new(config.agent_token.clone(), config.relay_url.clone());
         Self {
+            allow_screen_control: Arc::new(AtomicBool::new(config.allow_screen_control)),
             config: Arc::new(config),
+            credentials,
             ptys: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Atomically publishes a refreshed relay endpoint/token pair. Existing pumps
+    /// keep their current socket; their next reconnect, and every new channel,
+    /// snapshot this source immediately before dialing and opening.
+    pub fn update_credentials(
+        &self,
+        relay_url: String,
+        agent_token: String,
+        allow_screen_control: bool,
+    ) {
+        self.credentials.update(agent_token, relay_url);
+        self.allow_screen_control
+            .store(allow_screen_control, Ordering::Release);
     }
 
     /// Builds a [`StreamChannel`] descriptor for `(kind, port)` with a fresh
@@ -124,11 +155,7 @@ impl RelayHub {
 
     /// The channel config (descriptor + token + relay url) for a descriptor.
     fn channel_config(&self, channel: StreamChannel) -> ChannelConfig {
-        ChannelConfig {
-            channel,
-            token: self.config.agent_token.clone(),
-            relay_url: self.config.relay_url.clone(),
-        }
+        ChannelConfig::with_shared_credentials(channel, self.credentials.clone())
     }
 }
 
@@ -192,7 +219,7 @@ impl StreamRegistry for RelayHub {
             .map_err(stream_to_platform)?;
 
         let policy = InputPolicy {
-            allow_input: self.config.allow_screen_control,
+            allow_input: self.allow_screen_control.load(Ordering::Acquire),
         };
         // Gate the mint on the framebuffer pump having captured + forwarded its first
         // real frame (retrying a transient first-capture against Xvfb readiness), so
@@ -394,6 +421,30 @@ mod tests {
         assert_eq!(d.agent_id, "ag");
         assert_eq!(d.port, PTY_STREAM_PORT);
         assert_eq!(d.kind(), v1::StreamKind::Pty);
+    }
+
+    #[test]
+    fn channel_configs_observe_atomically_rotated_credentials() {
+        let hub = RelayHub::new(RelayHubConfig {
+            workspace_id: "ws".to_string(),
+            agent_id: "ag".to_string(),
+            relay_url: "wss://old.example/stream".to_string(),
+            agent_token: "old-token".to_string(),
+            allow_screen_control: true,
+        });
+        let existing = hub.channel_config(hub.descriptor(v1::StreamKind::Pty, PTY_STREAM_PORT));
+        assert!(existing.dial_url().starts_with("wss://old.example/stream?"));
+
+        hub.update_credentials(
+            "wss://new.example/stream".to_string(),
+            "rotated-token".to_string(),
+            false,
+        );
+
+        assert!(existing.dial_url().starts_with("wss://new.example/stream?"));
+        let fresh = hub.channel_config(hub.descriptor(v1::StreamKind::Pty, PTY_STREAM_PORT));
+        assert!(fresh.dial_url().starts_with("wss://new.example/stream?"));
+        assert!(!hub.allow_screen_control.load(Ordering::Acquire));
     }
 
     #[tokio::test]

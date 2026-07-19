@@ -276,17 +276,17 @@ mod tests {
     }
 
     fn pty_channel_config() -> ChannelConfig {
-        ChannelConfig {
-            channel: v1::StreamChannel {
+        ChannelConfig::new(
+            v1::StreamChannel {
                 channel_id: "pty-ch".to_string(),
                 workspace_id: "ws".to_string(),
                 agent_id: "ag".to_string(),
                 kind: v1::StreamKind::Pty as i32,
                 port: 7681,
             },
-            token: "ogs_x".to_string(),
-            relay_url: "wss://relay/stream".to_string(),
-        }
+            "ogs_x".to_string(),
+            "wss://relay/stream".to_string(),
+        )
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

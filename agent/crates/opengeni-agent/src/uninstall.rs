@@ -5,9 +5,9 @@
 //!
 //! The binary-level uninstall complements the `uninstall.sh` script: the script
 //! calls `opengeni-agent service uninstall` + `opengeni-agent uninstall --purge`.
-//! Here we tear down the service (best-effort) and, only with `--purge`, revoke
-//! remotely before deleting the persisted credentials. A failed/ambiguous revoke
-//! preserves local state so the human can safely retry.
+//! Here we first REQUIRE confirmed service cleanup and, only with `--purge`,
+//! revoke remotely before deleting persisted credentials. A failed/ambiguous
+//! cleanup or revoke preserves every retry input so the human can safely retry.
 
 use tracing::info;
 
@@ -26,13 +26,15 @@ pub async fn run(args: &UninstallArgs, api_url_override: Option<&str>) -> Result
         |path| path.display().to_string(),
     );
 
-    // Best-effort: stop + remove any opt-in service first.
+    // Fail closed: a still-running KeepAlive/systemd service can immediately
+    // recreate state or keep using credentials. Never revoke or delete anything
+    // until every installed native service scope is confirmed removed.
     let service_args = ServiceArgs {
         action: ServiceAction::Uninstall(ServiceScopeArgs { system: false }),
     };
-    if let Err(e) = crate::service::run(&service_args) {
-        info!(error = %e, "no service to uninstall (or already removed)");
-    }
+    crate::service::run(&service_args).map_err(|error| {
+        format!("service cleanup was not confirmed; binary and credentials were retained: {error}")
+    })?;
 
     if args.purge {
         let dir =
@@ -71,9 +73,9 @@ pub async fn run(args: &UninstallArgs, api_url_override: Option<&str>) -> Result
 
 fn uninstall_summary(purge: bool, retained_binary: &str) -> String {
     let state = if purge {
-        "service cleanup attempted and local credentials purged"
+        "service removed and local credentials purged"
     } else {
-        "service cleanup attempted; credentials kept so a reinstall can reconnect (pass --purge to remove them and deactivate the enrollment)"
+        "service removed; credentials kept so a reinstall can reconnect (pass --purge to remove them and deactivate the enrollment)"
     };
     format!(
         "opengeni-agent {state}. This direct command retained the running executable at {retained_binary}; run the installer uninstaller or remove that file after the process exits."
@@ -98,7 +100,7 @@ mod tests {
     #[test]
     fn purge_summary_distinguishes_state_cleanup_from_executable_removal() {
         let summary = uninstall_summary(true, "opengeni-agent.exe");
-        assert!(summary.contains("service cleanup attempted"));
+        assert!(summary.contains("service removed"));
         assert!(summary.contains("local credentials purged"));
         assert!(!summary.contains("enrollment state removed"));
         assert!(summary.contains("remove that file after the process exits"));

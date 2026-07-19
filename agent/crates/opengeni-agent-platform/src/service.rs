@@ -253,24 +253,30 @@ pub fn launchctl_bootout_args(uid: &str, plist: &std::path::Path) -> Vec<String>
     ]
 }
 
-/// Exact modern launchctl argv for restarting a loaded LaunchAgent.
+/// Exact `systemctl disable --now` argv for one systemd scope.
 #[must_use]
-pub fn launchctl_kickstart_args(uid: &str) -> Vec<String> {
-    vec![
-        "kickstart".to_string(),
-        "-k".to_string(),
-        format!("gui/{uid}/{}", ids::LAUNCHD_LABEL),
-    ]
+pub fn systemctl_disable_args(scope: ServiceScope) -> Vec<String> {
+    let mut args = Vec::new();
+    if scope == ServiceScope::User {
+        args.push("--user".to_string());
+    }
+    args.extend([
+        "disable".to_string(),
+        "--now".to_string(),
+        ids::SYSTEMD_UNIT.to_string(),
+    ]);
+    args
 }
 
-/// Exact modern launchctl argv for stopping a loaded LaunchAgent cleanly.
+/// Exact `systemctl daemon-reload` argv for one systemd scope.
 #[must_use]
-pub fn launchctl_kill_args(uid: &str) -> Vec<String> {
-    vec![
-        "kill".to_string(),
-        "SIGTERM".to_string(),
-        format!("gui/{uid}/{}", ids::LAUNCHD_LABEL),
-    ]
+pub fn systemctl_daemon_reload_args(scope: ServiceScope) -> Vec<String> {
+    let mut args = Vec::new();
+    if scope == ServiceScope::User {
+        args.push("--user".to_string());
+    }
+    args.push("daemon-reload".to_string());
+    args
 }
 
 /// Exact modern launchctl argv for inspecting a user LaunchAgent.
@@ -506,12 +512,20 @@ mod tests {
             ]
         );
         assert_eq!(
-            launchctl_kickstart_args("501"),
-            ["kickstart", "-k", "gui/501/ai.opengeni.agent"]
+            systemctl_disable_args(ServiceScope::User),
+            ["--user", "disable", "--now", "opengeni-agent.service"]
         );
         assert_eq!(
-            launchctl_kill_args("501"),
-            ["kill", "SIGTERM", "gui/501/ai.opengeni.agent"]
+            systemctl_disable_args(ServiceScope::System),
+            ["disable", "--now", "opengeni-agent.service"]
+        );
+        assert_eq!(
+            systemctl_daemon_reload_args(ServiceScope::User),
+            ["--user", "daemon-reload"]
+        );
+        assert_eq!(
+            systemctl_daemon_reload_args(ServiceScope::System),
+            ["daemon-reload"]
         );
         assert_eq!(
             launchctl_print_args("501"),

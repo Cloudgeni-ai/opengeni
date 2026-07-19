@@ -12,6 +12,7 @@ const enrollmentBootstrapRoutes = new Set([
   "POST /v1/enrollments/device/start",
   "POST /v1/enrollments/device/poll",
   "POST /v1/enrollments/token/exchange",
+  "POST /v1/enrollments/self/refresh",
   "POST /v1/enrollments/self/revoke",
 ]);
 

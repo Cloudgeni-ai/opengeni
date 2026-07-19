@@ -57,6 +57,7 @@ mod uninstall;
 mod update;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use clap::{CommandFactory as _, Parser as _};
 use opengeni_agent_platform::{NativePlatform, Platform};
@@ -65,13 +66,23 @@ use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 use cli::{Cli, Command, EnrollArgs, RunArgs};
-use config::{StoredCredentials, DEFAULT_PUBLIC_ORIGIN};
+use config::{SharedCredentials, StoredCredentials, DEFAULT_PUBLIC_ORIGIN};
 use enrollment::{EnrollmentOffer, EnrollmentRequest, InstallIdentity};
 use supervisor::Supervisor;
 
 /// The default control-plane API base URL when neither `--api-url` nor
 /// `$OPENGENI_API_URL` is set.
 const DEFAULT_API_URL: &str = DEFAULT_PUBLIC_ORIGIN;
+/// Refresh short-lived credentials this far before their absolute expiry.
+const CREDENTIAL_REFRESH_LEAD_SECONDS: u64 = 60;
+/// A deployment with no relay producer-token plane is rechecked periodically so
+/// enabling it does not require re-enrollment or an agent restart.
+const DISABLED_RELAY_RECHECK: Duration = Duration::from_secs(5 * 60);
+/// A successful legacy response that still omits required expiry metadata must
+/// not create a tight success loop. Retry soon, but with a fixed floor.
+const LEGACY_REFRESH_RECHECK: Duration = Duration::from_secs(30);
+/// Failure retries use full jitter, but never spin on a zero-length draw.
+const MIN_REFRESH_FAILURE_DELAY: Duration = Duration::from_millis(250);
 
 /// Process entry point. Parses the CLI, initializes tracing, and dispatches to
 /// the selected subcommand. Returns a non-zero exit code on a fatal error.
@@ -248,19 +259,22 @@ async fn run(args: RunArgs, api_url_override: Option<&str>) -> anyhow_lite::Resu
     // lifetime; dropping it (on stop) tears the virtual display down. Linux-only.
     let _virtual_desktop = maybe_spawn_virtual_desktop(&args);
 
+    let shared_credentials = SharedCredentials::new(creds);
+    let initial_credentials = shared_credentials.snapshot();
+
     // Wire the relay stream hub so pty/desktop ops serve over the relay. The hub
     // presents the agent's enrollment-scoped relay token on channel registration.
     let hub = RelayHub::new(RelayHubConfig {
-        workspace_id: creds.workspace_id.clone(),
-        agent_id: creds.agent_id.clone(),
-        relay_url: creds.relay_url.clone(),
-        agent_token: creds.relay_token.clone(),
-        allow_screen_control: creds.consented_screen_control,
+        workspace_id: initial_credentials.workspace_id.clone(),
+        agent_id: initial_credentials.agent_id.clone(),
+        relay_url: initial_credentials.relay_url.clone(),
+        agent_token: initial_credentials.relay_token.clone(),
+        allow_screen_control: initial_credentials.consented_screen_control,
     });
     // Build the platform with the relay registrar wired; its desktop backend is
     // (re)resolved against the now-present $DISPLAY (a real screen or the Xvfb one).
     // Wire the per-op cgroup manager in when the startup dance established one.
-    let mut platform = NativePlatform::new().with_stream_registry(Arc::new(hub));
+    let mut platform = NativePlatform::new().with_stream_registry(Arc::new(hub.clone()));
     if let Some(cgroups) = op_cgroups {
         platform = platform.with_oom_isolation(cgroups);
     }
@@ -269,20 +283,178 @@ async fn run(args: RunArgs, api_url_override: Option<&str>) -> anyhow_lite::Resu
     // The engine's disk spool lives under the config dir — a real filesystem
     // (a tmpfs temp dir would spool "to disk" in RAM and defeat the budgets).
     let supervisor = match config::config_dir() {
-        Ok(dir) => Supervisor::new(platform.clone(), creds, env!("CARGO_PKG_VERSION"))
-            .with_spool_root(dir.join("spool")),
-        Err(_) => Supervisor::new(platform.clone(), creds, env!("CARGO_PKG_VERSION")),
+        Ok(dir) => Supervisor::with_shared_credentials(
+            platform.clone(),
+            shared_credentials.clone(),
+            env!("CARGO_PKG_VERSION"),
+        )
+        .with_spool_root(dir.join("spool")),
+        Err(_) => Supervisor::with_shared_credentials(
+            platform.clone(),
+            shared_credentials.clone(),
+            env!("CARGO_PKG_VERSION"),
+        ),
     };
     let shutdown = supervisor.shutdown_handle();
+
+    // The recovery bearer rotates the short-lived relay producer token and the
+    // NATS auth material in place. Persistence happens before either live source
+    // is published, so disk remains authoritative across a crash.
+    let refresh_task = tokio::spawn(credential_refresh_loop(
+        shared_credentials,
+        hub,
+        shutdown.clone(),
+    ));
 
     // Wire SIGINT/SIGTERM to a clean shutdown so the lease flips offline
     // immediately (§23.0) rather than waiting on heartbeat dead-detect.
     spawn_signal_handler(shutdown);
 
     info!("agent online — press Ctrl-C to stop (the machine goes offline cleanly)");
-    supervisor.run().await.map_err(to_boxed)?;
+    let result = supervisor.run().await.map_err(to_boxed);
+    refresh_task.abort();
+    let _ = refresh_task.await;
+    result?;
     info!("agent stopped");
     Ok(())
+}
+
+/// Keeps server-issued credentials fresh for the lifetime of the supervisor.
+/// Every iteration snapshots without holding the lock across an await. A refresh
+/// is published only after exact identity/consent validation and durable atomic
+/// persistence; every failure retains the previous working snapshot.
+async fn credential_refresh_loop(
+    shared: SharedCredentials,
+    hub: RelayHub,
+    shutdown: supervisor::ShutdownSignal,
+) {
+    let mut backoff = backoff::Backoff::standard();
+    loop {
+        if shutdown.is_requested() {
+            return;
+        }
+
+        let current = shared.snapshot();
+        let delay = credential_refresh_delay(&current, unix_now_seconds());
+        if !delay.is_zero() && sleep_or_shutdown(&shutdown, delay).await {
+            return;
+        }
+        if shutdown.is_requested() {
+            return;
+        }
+
+        // Re-snapshot after the wait: another local publisher may have rotated the
+        // value while this task slept. This clone is the exact validation base.
+        let current = shared.snapshot();
+        if current.nats_bearer.is_empty() {
+            warn!("credential refresh unavailable: enrollment bearer is empty");
+            if sleep_refresh_failure(&shutdown, &mut backoff).await {
+                return;
+            }
+            continue;
+        }
+
+        let refreshed = tokio::select! {
+            biased;
+            () = shutdown.notified() => return,
+            result = enrollment::refresh_self(&current.api_base_url, &current.nats_bearer) => result,
+        };
+        let refreshed = match refreshed {
+            Ok(credentials) => credentials,
+            Err(error) => {
+                warn!(error = %error, "credential refresh failed; retaining previous credentials");
+                if sleep_refresh_failure(&shutdown, &mut backoff).await {
+                    return;
+                }
+                continue;
+            }
+        };
+        let candidate = match current.refreshed_candidate(refreshed) {
+            Ok(candidate) => candidate,
+            Err(error) => {
+                error!(error = %error, "credential refresh failed validation; retaining previous credentials");
+                if sleep_refresh_failure(&shutdown, &mut backoff).await {
+                    return;
+                }
+                continue;
+            }
+        };
+        if let Err(error) = config::save_credentials(&candidate) {
+            error!(error = %error, "credential refresh could not be persisted; retaining previous credentials");
+            if sleep_refresh_failure(&shutdown, &mut backoff).await {
+                return;
+            }
+            continue;
+        }
+
+        let relay_url = candidate.relay_url.clone();
+        let relay_token = candidate.relay_token.clone();
+        let allow_screen_control = candidate.consented_screen_control;
+        let needs_legacy_floor = credential_refresh_delay(&candidate, unix_now_seconds()).is_zero();
+        shared.publish_persisted(candidate);
+        hub.update_credentials(relay_url, relay_token, allow_screen_control);
+        backoff.reset();
+        info!("refreshed and durably published enrollment credentials");
+
+        if needs_legacy_floor && sleep_or_shutdown(&shutdown, LEGACY_REFRESH_RECHECK).await {
+            return;
+        }
+    }
+}
+
+/// Computes when the next refresh should start from absolute expiry metadata.
+/// A zero expiry on a present credential is legacy and refreshes immediately. An
+/// empty relay token plus zero expiry is an intentionally disabled plane, which is
+/// rechecked periodically instead of spinning.
+fn credential_refresh_delay(creds: &StoredCredentials, now_unix_seconds: u64) -> Duration {
+    let bearer = refresh_delay_for_expiry(creds.bearer_expires_at_unix_seconds, now_unix_seconds);
+    let relay = if creds.relay_token.is_empty() && creds.relay_token_expires_at_unix_seconds == 0 {
+        DISABLED_RELAY_RECHECK
+    } else {
+        refresh_delay_for_expiry(creds.relay_token_expires_at_unix_seconds, now_unix_seconds)
+    };
+    bearer.min(relay)
+}
+
+fn refresh_delay_for_expiry(expires_at: u64, now: u64) -> Duration {
+    if expires_at == 0 {
+        return Duration::ZERO;
+    }
+    Duration::from_secs(
+        expires_at
+            .saturating_sub(now)
+            .saturating_sub(CREDENTIAL_REFRESH_LEAD_SECONDS),
+    )
+}
+
+async fn sleep_refresh_failure(
+    shutdown: &supervisor::ShutdownSignal,
+    backoff: &mut backoff::Backoff,
+) -> bool {
+    let delay = backoff.next_delay().max(MIN_REFRESH_FAILURE_DELAY);
+    warn!(
+        attempt = backoff.attempt(),
+        delay_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+        "retrying credential refresh after backoff"
+    );
+    sleep_or_shutdown(shutdown, delay).await
+}
+
+async fn sleep_or_shutdown(shutdown: &supervisor::ShutdownSignal, duration: Duration) -> bool {
+    if shutdown.is_requested() {
+        return true;
+    }
+    tokio::select! {
+        biased;
+        () = shutdown.notified() => true,
+        () = tokio::time::sleep(duration) => shutdown.is_requested(),
+    }
+}
+
+fn unix_now_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs())
 }
 
 /// Spawns an Xvfb virtual framebuffer when `--virtual-desktop` is set on Linux,
@@ -593,4 +765,77 @@ mod anyhow_lite {
     pub type Result = std::result::Result<(), BoxError>;
     /// A handler result returning a value.
     pub type ResultOf<T> = std::result::Result<T, BoxError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn credentials() -> StoredCredentials {
+        StoredCredentials {
+            api_base_url: "https://api.example.test".to_string(),
+            agent_id: "agent-1".to_string(),
+            workspace_id: "workspace-1".to_string(),
+            nats_bearer: "oge_test".to_string(),
+            bearer_expires_at_unix_seconds: 10_000,
+            nats_urls: vec!["wss://nats.example.test".to_string()],
+            relay_url: "wss://relay.example.test".to_string(),
+            relay_token: "ogr_test".to_string(),
+            relay_token_expires_at_unix_seconds: 9_000,
+            update_pubkey: String::new(),
+            consented_whole_machine: true,
+            consented_screen_control: false,
+            update_channel: "stable".to_string(),
+            resume_token: String::new(),
+            last_known_epoch: 0,
+        }
+    }
+
+    #[test]
+    fn refresh_uses_the_earliest_expiry_minus_the_lead() {
+        let credentials = credentials();
+        assert_eq!(
+            credential_refresh_delay(&credentials, 8_000),
+            Duration::from_secs(940)
+        );
+    }
+
+    #[test]
+    fn legacy_present_credentials_refresh_immediately() {
+        let mut credentials = credentials();
+        credentials.relay_token_expires_at_unix_seconds = 0;
+        assert_eq!(
+            credential_refresh_delay(&credentials, 8_000),
+            Duration::ZERO
+        );
+
+        credentials.relay_token_expires_at_unix_seconds = 9_000;
+        credentials.bearer_expires_at_unix_seconds = 0;
+        assert_eq!(
+            credential_refresh_delay(&credentials, 8_000),
+            Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn disabled_relay_plane_rechecks_without_spinning() {
+        let mut credentials = credentials();
+        credentials.relay_token.clear();
+        credentials.relay_token_expires_at_unix_seconds = 0;
+        credentials.bearer_expires_at_unix_seconds = 20_000;
+        assert_eq!(
+            credential_refresh_delay(&credentials, 8_000),
+            DISABLED_RELAY_RECHECK
+        );
+    }
+
+    #[test]
+    fn expired_or_inside_lead_refreshes_immediately() {
+        assert_eq!(refresh_delay_for_expiry(8_000, 8_000), Duration::ZERO);
+        assert_eq!(refresh_delay_for_expiry(8_030, 8_000), Duration::ZERO);
+        assert_eq!(
+            refresh_delay_for_expiry(8_061, 8_000),
+            Duration::from_secs(1)
+        );
+    }
 }

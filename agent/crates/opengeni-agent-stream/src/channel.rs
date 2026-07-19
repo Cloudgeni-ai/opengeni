@@ -18,6 +18,7 @@
 //! The channel itself is transport-agnostic ([`RelayTransport`]); the pumps drive
 //! the registered transport.
 
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use opengeni_agent_proto::v1::{self, StreamChannel, StreamOpen, StreamRole};
@@ -51,20 +52,81 @@ impl ChannelKey {
     }
 }
 
+/// The rotatable relay endpoint/token pair. It is always shared through
+/// [`SharedRelayCredentials`], whose `Debug` implementation never exposes it.
+#[derive(Clone)]
+struct RelayCredentials {
+    token: String,
+    relay_url: String,
+}
+
+/// Redacted shared credentials read at every channel registration and
+/// re-registration. A short synchronous clone avoids holding a lock across await.
+#[derive(Clone)]
+pub(crate) struct SharedRelayCredentials {
+    inner: Arc<RwLock<RelayCredentials>>,
+}
+
+impl SharedRelayCredentials {
+    pub(crate) fn new(token: String, relay_url: String) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(RelayCredentials { token, relay_url })),
+        }
+    }
+
+    fn snapshot(&self) -> RelayCredentials {
+        self.inner
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    pub(crate) fn update(&self, token: String, relay_url: String) {
+        *self
+            .inner
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            RelayCredentials { token, relay_url };
+    }
+}
+
+impl std::fmt::Debug for SharedRelayCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SharedRelayCredentials")
+            .finish_non_exhaustive()
+    }
+}
+
 /// Configuration to establish + maintain one relay channel.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ChannelConfig {
     /// The channel descriptor (id, key, kind, port) sent in the [`StreamOpen`].
     pub channel: StreamChannel,
-    /// The scoped `ogs_` stream token authorizing the channel. Presented on every
-    /// (re)registration; the relay validates it. NEVER logged.
-    pub token: String,
-    /// The relay base URL to dial (`wss://relay…`). The channel appends the
-    /// [`ChannelKey::query`] so the relay can route.
-    pub relay_url: String,
+    /// The current token + URL source. Every (re)registration snapshots it anew.
+    credentials: SharedRelayCredentials,
 }
 
 impl ChannelConfig {
+    /// Builds a standalone channel configuration over a rotatable credential
+    /// source. Tests and non-hub callers use this convenience constructor.
+    #[must_use]
+    pub fn new(channel: StreamChannel, token: String, relay_url: String) -> Self {
+        Self {
+            channel,
+            credentials: SharedRelayCredentials::new(token, relay_url),
+        }
+    }
+
+    pub(crate) fn with_shared_credentials(
+        channel: StreamChannel,
+        credentials: SharedRelayCredentials,
+    ) -> Self {
+        Self {
+            channel,
+            credentials,
+        }
+    }
+
     /// The channel key derived from the descriptor.
     #[must_use]
     pub fn key(&self) -> ChannelKey {
@@ -78,12 +140,26 @@ impl ChannelConfig {
     /// The full relay dial URL for this channel (`relay_url` + the routing query).
     #[must_use]
     pub fn dial_url(&self) -> String {
-        let sep = if self.relay_url.contains('?') {
+        let endpoint = self.credentials.snapshot();
+        self.dial_url_for(&endpoint)
+    }
+
+    fn dial_url_for(&self, endpoint: &RelayCredentials) -> String {
+        let sep = if endpoint.relay_url.contains('?') {
             '&'
         } else {
             '?'
         };
-        format!("{}{}{}", self.relay_url, sep, self.key().query())
+        format!("{}{}{}", endpoint.relay_url, sep, self.key().query())
+    }
+}
+
+impl std::fmt::Debug for ChannelConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChannelConfig")
+            .field("channel", &self.channel)
+            .field("credentials", &self.credentials)
+            .finish()
     }
 }
 
@@ -126,8 +202,9 @@ impl RelayChannel {
 
     /// Registers (or re-registers) presenting an explicit `resume_from_seq`.
     async fn register_from(config: ChannelConfig, resume_from_seq: u64) -> StreamResult<Self> {
-        let transport = transport::dial(&config.dial_url()).await?;
-        Self::open_on(transport, config, resume_from_seq).await
+        let endpoint = config.credentials.snapshot();
+        let transport = transport::dial(&config.dial_url_for(&endpoint)).await?;
+        Self::open_on_with_credentials(transport, config, endpoint, resume_from_seq).await
     }
 
     /// Performs the registration handshake over an already-dialed `transport`:
@@ -135,14 +212,25 @@ impl RelayChannel {
     /// `resume_from_seq`), then awaits the relay's [`StreamOpenAck`]. Factored out
     /// of [`register_from`] so the handshake — the M8b relay contract — is testable
     /// against an in-process mock relay double.
+    #[cfg(any(test, feature = "test-support"))]
     async fn open_on(
+        transport: Box<dyn RelayTransport>,
+        config: ChannelConfig,
+        resume_from_seq: u64,
+    ) -> StreamResult<Self> {
+        let endpoint = config.credentials.snapshot();
+        Self::open_on_with_credentials(transport, config, endpoint, resume_from_seq).await
+    }
+
+    async fn open_on_with_credentials(
         mut transport: Box<dyn RelayTransport>,
         config: ChannelConfig,
+        endpoint: RelayCredentials,
         resume_from_seq: u64,
     ) -> StreamResult<Self> {
         let open = RelayMessage::Open(StreamOpen {
             channel: Some(config.channel.clone()),
-            token: config.token.clone(),
+            token: endpoint.token,
             role: StreamRole::Agent as i32,
             resume_from_seq,
         });
@@ -295,17 +383,17 @@ mod tests {
     use super::*;
 
     fn config() -> ChannelConfig {
-        ChannelConfig {
-            channel: StreamChannel {
+        ChannelConfig::new(
+            StreamChannel {
                 channel_id: "ch-1".to_string(),
                 workspace_id: "ws-1".to_string(),
                 agent_id: "ag-1".to_string(),
                 kind: v1::StreamKind::Pty as i32,
                 port: 7681,
             },
-            token: "ogs_secret".to_string(),
-            relay_url: "wss://relay.example/stream".to_string(),
-        }
+            "ogs_secret".to_string(),
+            "wss://relay.example/stream".to_string(),
+        )
     }
 
     #[test]
@@ -323,11 +411,41 @@ mod tests {
             "wss://relay.example/stream?ws=ws-1&agent=ag-1&port=7681"
         );
         // A relay_url that already has a query gets an `&` separator.
-        let mut c = config();
-        c.relay_url = "wss://relay.example/stream?x=1".to_string();
+        let c = ChannelConfig::new(
+            config().channel,
+            "ogs_secret".to_string(),
+            "wss://relay.example/stream?x=1".to_string(),
+        );
         assert_eq!(
             c.dial_url(),
             "wss://relay.example/stream?x=1&ws=ws-1&agent=ag-1&port=7681"
+        );
+    }
+
+    #[test]
+    fn shared_credentials_are_resolved_for_every_registration() {
+        let credentials = SharedRelayCredentials::new(
+            "old-token".to_string(),
+            "wss://old.example/stream".to_string(),
+        );
+        let config = ChannelConfig::with_shared_credentials(config().channel, credentials.clone());
+
+        let first = config.credentials.snapshot();
+        assert_eq!(first.token, "old-token");
+        assert_eq!(
+            config.dial_url_for(&first),
+            "wss://old.example/stream?ws=ws-1&agent=ag-1&port=7681"
+        );
+
+        credentials.update(
+            "rotated-token".to_string(),
+            "wss://new.example/stream".to_string(),
+        );
+        let rotated = config.credentials.snapshot();
+        assert_eq!(rotated.token, "rotated-token");
+        assert_eq!(
+            config.dial_url_for(&rotated),
+            "wss://new.example/stream?ws=ws-1&agent=ag-1&port=7681"
         );
     }
 

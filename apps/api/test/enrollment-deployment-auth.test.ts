@@ -14,6 +14,7 @@ const BOOTSTRAP_POSTS = [
   "/v1/enrollments/device/start",
   "/v1/enrollments/device/poll",
   "/v1/enrollments/token/exchange",
+  "/v1/enrollments/self/refresh",
   "/v1/enrollments/self/revoke",
 ];
 
@@ -36,7 +37,7 @@ const PROTECTED_ENROLLMENT_ROUTES = [
 ];
 
 describe("deployment-key enrollment bootstrap matrix", () => {
-  test("permits exactly the unauthenticated bootstrap POST routes", async () => {
+  test("permits exactly the five bearer/bootstrap POST routes", async () => {
     const app = appForDeploymentGate();
     for (const path of BOOTSTRAP_POSTS) {
       expect((await app.request(path, { method: "POST" })).status, path).toBe(204);

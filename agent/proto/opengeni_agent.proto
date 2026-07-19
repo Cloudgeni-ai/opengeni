@@ -273,6 +273,12 @@ message EnrollmentCredentials {
   // enrollment minted before the relay-token plane is configured (the agent then
   // presents an empty token the relay rejects, surfacing the gap loudly).
   string relay_token = 9;
+  // Absolute expiry metadata for proactive rotation. The opaque credentials are
+  // never decoded or logged by the agent. Zero means an older control plane did
+  // not provide expiry metadata (refresh immediately when supported).
+  uint64 bearer_expires_at_unix_seconds = 10;
+  // Zero when the relay-token plane is intentionally unconfigured.
+  uint64 relay_token_expires_at_unix_seconds = 11;
 }
 
 // =============================================================================

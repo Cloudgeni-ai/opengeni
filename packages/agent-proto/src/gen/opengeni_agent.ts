@@ -1018,6 +1018,14 @@ export interface EnrollmentCredentials {
    * presents an empty token the relay rejects, surfacing the gap loudly).
    */
   relayToken: string;
+  /**
+   * Absolute expiry metadata for proactive rotation. The opaque credentials are
+   * never decoded or logged by the agent. Zero means an older control plane did
+   * not provide expiry metadata (refresh immediately when supported).
+   */
+  bearerExpiresAtUnixSeconds: string;
+  /** Zero when the relay-token plane is intentionally unconfigured. */
+  relayTokenExpiresAtUnixSeconds: string;
 }
 
 export interface ExecRequest {
@@ -3230,6 +3238,8 @@ function createBaseEnrollmentCredentials(): EnrollmentCredentials {
     consentedWholeMachine: false,
     consentedScreenControl: false,
     relayToken: "",
+    bearerExpiresAtUnixSeconds: "0",
+    relayTokenExpiresAtUnixSeconds: "0",
   };
 }
 
@@ -3261,6 +3271,12 @@ export const EnrollmentCredentials: MessageFns<EnrollmentCredentials> = {
     }
     if (message.relayToken !== "") {
       writer.uint32(74).string(message.relayToken);
+    }
+    if (message.bearerExpiresAtUnixSeconds !== "0") {
+      writer.uint32(80).uint64(message.bearerExpiresAtUnixSeconds);
+    }
+    if (message.relayTokenExpiresAtUnixSeconds !== "0") {
+      writer.uint32(88).uint64(message.relayTokenExpiresAtUnixSeconds);
     }
     return writer;
   },
@@ -3344,6 +3360,22 @@ export const EnrollmentCredentials: MessageFns<EnrollmentCredentials> = {
           message.relayToken = reader.string();
           continue;
         }
+        case 10: {
+          if (tag !== 80) {
+            break;
+          }
+
+          message.bearerExpiresAtUnixSeconds = reader.uint64().toString();
+          continue;
+        }
+        case 11: {
+          if (tag !== 88) {
+            break;
+          }
+
+          message.relayTokenExpiresAtUnixSeconds = reader.uint64().toString();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -3400,6 +3432,16 @@ export const EnrollmentCredentials: MessageFns<EnrollmentCredentials> = {
         : isSet(object.relay_token)
           ? globalThis.String(object.relay_token)
           : "",
+      bearerExpiresAtUnixSeconds: isSet(object.bearerExpiresAtUnixSeconds)
+        ? globalThis.String(object.bearerExpiresAtUnixSeconds)
+        : isSet(object.bearer_expires_at_unix_seconds)
+          ? globalThis.String(object.bearer_expires_at_unix_seconds)
+          : "0",
+      relayTokenExpiresAtUnixSeconds: isSet(object.relayTokenExpiresAtUnixSeconds)
+        ? globalThis.String(object.relayTokenExpiresAtUnixSeconds)
+        : isSet(object.relay_token_expires_at_unix_seconds)
+          ? globalThis.String(object.relay_token_expires_at_unix_seconds)
+          : "0",
     };
   },
 
@@ -3432,6 +3474,12 @@ export const EnrollmentCredentials: MessageFns<EnrollmentCredentials> = {
     if (message.relayToken !== "") {
       obj.relayToken = message.relayToken;
     }
+    if (message.bearerExpiresAtUnixSeconds !== "0") {
+      obj.bearerExpiresAtUnixSeconds = message.bearerExpiresAtUnixSeconds;
+    }
+    if (message.relayTokenExpiresAtUnixSeconds !== "0") {
+      obj.relayTokenExpiresAtUnixSeconds = message.relayTokenExpiresAtUnixSeconds;
+    }
     return obj;
   },
 
@@ -3451,6 +3499,8 @@ export const EnrollmentCredentials: MessageFns<EnrollmentCredentials> = {
     message.consentedWholeMachine = object.consentedWholeMachine ?? false;
     message.consentedScreenControl = object.consentedScreenControl ?? false;
     message.relayToken = object.relayToken ?? "";
+    message.bearerExpiresAtUnixSeconds = object.bearerExpiresAtUnixSeconds ?? "0";
+    message.relayTokenExpiresAtUnixSeconds = object.relayTokenExpiresAtUnixSeconds ?? "0";
     return message;
   },
 };
