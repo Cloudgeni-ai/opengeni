@@ -16,6 +16,7 @@ import {
   deleteScheduledTask,
   encryptVariableSetValue,
   getSession,
+  getSessionMemoryContext,
   getSessionGoal,
   getSessionQueueSnapshot,
   getSessionTurn,
@@ -829,6 +830,52 @@ function registerGoalTools(
 type JsonResult = (value: unknown) => { content: Array<{ type: "text"; text: string }> };
 
 const MemoryKindSchema = z4.enum(["preference", "semantic", "procedural", "decision", "episodic"]);
+const MemoryScopeKindSchema = z4.enum(["workspace", "user", "role", "session", "ephemeral"]);
+const MemoryScopeTypeSchema = z4.enum(["workspace", "user", "role", "session", "ephemeral"]);
+const MemoryLabelSchema = z4
+  .string()
+  .min(1)
+  .max(64)
+  .regex(/^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$/);
+
+type TrustedMemoryContext = NonNullable<Awaited<ReturnType<typeof getSessionMemoryContext>>>;
+
+async function trustedMemoryContext(
+  deps: ApiRouteDeps,
+  workspaceId: string,
+  sessionId: string,
+): Promise<TrustedMemoryContext> {
+  const context = await getSessionMemoryContext(deps.db, workspaceId, sessionId);
+  if (!context) {
+    throw new Error("Signed memory session was not found in this workspace.");
+  }
+  return context;
+}
+
+function bindSessionMemoryScope(
+  scope: z4.infer<typeof MemoryScopeKindSchema>,
+  context: TrustedMemoryContext,
+): Parameters<typeof saveWorkspaceMemory>[1]["scopeSpec"] {
+  switch (scope) {
+    case "workspace":
+      return { type: "workspace" };
+    case "user": {
+      const subjectId = context.access?.subjectId;
+      if (!subjectId) {
+        throw new Error("User-scoped memory requires a persisted session creator.");
+      }
+      return { type: "user", subjectId };
+    }
+    case "role":
+      if (!context.roleKey) {
+        throw new Error("Role-scoped memory requires persisted session metadata.role.");
+      }
+      return { type: "role", roleKey: context.roleKey };
+    case "session":
+    case "ephemeral":
+      return { type: scope, sessionId: context.sessionId! };
+  }
+}
 
 function memoryPreview(text: string): string {
   const normalized = text.replace(/\s+/g, " ").trim();
@@ -849,22 +896,31 @@ function registerMemoryTools(
       inputSchema: {
         query: z4.string().min(1),
         kind: MemoryKindSchema.optional(),
+        scope_types: z4.array(MemoryScopeTypeSchema).max(5).optional(),
+        labels: z4.array(MemoryLabelSchema).max(16).optional(),
+        include_expired: z4.boolean().optional(),
         limit: z4.number().int().positive().max(20).optional(),
       },
     },
-    async ({ query, kind, limit }) =>
-      json({
+    async ({ query, kind, scope_types, labels, include_expired, limit }) => {
+      const context = await trustedMemoryContext(deps, grant.workspaceId, sessionId);
+      return json({
         results: await searchWorkspaceMemories(
           deps.db,
           grant.workspaceId,
           {
             query,
             ...(kind ? { kind } : {}),
+            ...(scope_types ? { scopeTypes: scope_types } : {}),
+            ...(labels ? { labels } : {}),
+            ...(include_expired !== undefined ? { includeExpired: include_expired } : {}),
             ...(limit ? { limit } : {}),
+            context,
           },
           deps.getDocumentServices().embedder,
         ),
-      }),
+      });
+    },
   );
 
   server.registerTool(
@@ -874,11 +930,19 @@ function registerMemoryTools(
       inputSchema: {
         text: z4.string().min(1),
         kind: MemoryKindSchema,
+        scope: MemoryScopeKindSchema.optional(),
+        labels: z4.array(MemoryLabelSchema).max(16).optional(),
+        valid_until: z4.string().datetime({ offset: true }).optional(),
         confidence: z4.number().min(0).max(1).optional(),
         replaces_id: z4.string().min(1).optional(),
       },
     },
-    async ({ text, kind, confidence, replaces_id }) => {
+    async ({ text, kind, scope, labels, valid_until, confidence, replaces_id }) => {
+      const context = await trustedMemoryContext(deps, grant.workspaceId, sessionId);
+      const scopeKind = scope ?? "workspace";
+      if (scopeKind === "ephemeral" && !valid_until) {
+        throw new Error("Ephemeral memory requires valid_until.");
+      }
       const result = await saveWorkspaceMemory(
         deps.db,
         {
@@ -887,9 +951,13 @@ function registerMemoryTools(
           sessionId,
           text,
           kind,
+          scopeSpec: bindSessionMemoryScope(scopeKind, context),
+          ...(labels ? { labels } : {}),
+          ...(valid_until ? { validUntil: new Date(valid_until) } : {}),
           ...(confidence !== undefined ? { confidence } : {}),
           ...(replaces_id ? { replacesId: replaces_id } : {}),
           origin: "agent",
+          access: context.access,
         },
         deps.getDocumentServices().embedder,
       );
@@ -920,6 +988,7 @@ function registerMemoryTools(
       },
     },
     async ({ id, reason, replacement_text }) => {
+      const context = await trustedMemoryContext(deps, grant.workspaceId, sessionId);
       const result = await correctWorkspaceMemory(
         deps.db,
         {
@@ -929,6 +998,7 @@ function registerMemoryTools(
           id,
           ...(reason ? { reason } : {}),
           ...(replacement_text ? { replacementText: replacement_text } : {}),
+          access: context.access,
         },
         deps.getDocumentServices().embedder,
       );

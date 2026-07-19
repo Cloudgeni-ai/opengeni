@@ -1687,7 +1687,6 @@ export const CreateKnowledgeMemoryRequest = z
     sourceRefs: z.array(KnowledgeSourceRef).default([]),
     confidence: z.number().min(0).max(1).default(0.5),
     metadata: z.record(z.string(), z.unknown()).default({}),
-    createdBySessionId: z.string().uuid().optional(),
     pinned: z.boolean().optional(),
     replacesId: z.string().min(1).optional(),
     validFrom: z.string().datetime({ offset: true }).optional(),
@@ -1714,7 +1713,6 @@ export const UpdateKnowledgeMemoryRequest = z.object({
   sourceRefs: z.array(KnowledgeSourceRef).optional(),
   confidence: z.number().min(0).max(1).optional(),
   metadata: z.record(z.string(), z.unknown()).optional(),
-  reviewedBy: z.string().min(1).optional(),
   // Human audit action: pin (never decays) / unpin.
   pinned: z.boolean().optional(),
   validFrom: z.string().datetime({ offset: true }).optional(),
@@ -1744,8 +1742,6 @@ export const WorkspaceMemorySearchRequest = z.object({
   kind: KnowledgeMemoryKind.optional(),
   scopeTypes: z.array(MemoryScopeType).max(6).optional(),
   labels: z.array(z.string().min(1).max(64)).max(16).optional(),
-  roleKey: z.string().min(1).max(64).optional(),
-  sessionId: z.string().uuid().optional(),
   includeExpired: z.boolean().optional(),
   limit: z.number().int().positive().max(20).optional(),
   mode: WorkspaceMemorySearchMode.optional(),
@@ -1795,7 +1791,6 @@ export const CreateMemoryRelationshipRequest = z.object({
   sourceMemoryId: z.string().uuid(),
   targetMemoryId: z.string().uuid(),
   type: MemoryRelationshipType,
-  actorSessionId: z.string().uuid().optional(),
 });
 export type CreateMemoryRelationshipRequest = z.infer<typeof CreateMemoryRelationshipRequest>;
 

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type {
   AccessContext,
   AccessGrant,
@@ -20,6 +21,7 @@ import type {
   KnowledgeMemoryKind,
   KnowledgeMemoryStatus,
   KnowledgeSourceRef,
+  DeleteMemoryResponse,
   MemoryExportResponse,
   MemoryMaintenanceOperation,
   MemoryRelationship,
@@ -3909,7 +3911,9 @@ export async function consumeIntegrationOAuthStateNonce(
           expiresAt: input.expiresAt,
           usedAt: input.now,
         })
-        .onConflictDoNothing({ target: schema.integrationOauthStateNonces.nonce })
+        .onConflictDoNothing({
+          target: schema.integrationOauthStateNonces.nonce,
+        })
         .returning({ nonce: schema.integrationOauthStateNonces.nonce });
       return inserted.length > 0;
     },
@@ -4354,7 +4358,9 @@ export async function updateKnowledgeMemory(
         nextScope,
         memoryId,
       );
-      throw new Error(visibleTextHashConflictMessage(duplicate), { cause: error });
+      throw new Error(visibleTextHashConflictMessage(duplicate), {
+        cause: error,
+      });
     }
     if (!row) {
       throw new Error(`Knowledge memory not found: ${memoryId}`);
@@ -4420,13 +4426,21 @@ export async function listKnowledgeMemories(
     }
     if (!options.includeExpired) {
       const now = options.now ?? new Date();
-      conditions.push(sql`(
-        ${schema.knowledgeMemories.status} not in ('active', 'approved')
-        or (
-          ${schema.knowledgeMemories.validFrom} <= ${now}
-          and (${schema.knowledgeMemories.validUntil} is null or ${schema.knowledgeMemories.validUntil} > ${now})
-        )
-      )`);
+      conditions.push(
+        or(
+          and(
+            ne(schema.knowledgeMemories.status, "active"),
+            ne(schema.knowledgeMemories.status, "approved"),
+          ),
+          and(
+            lte(schema.knowledgeMemories.validFrom, now),
+            or(
+              isNull(schema.knowledgeMemories.validUntil),
+              gt(schema.knowledgeMemories.validUntil, now),
+            ),
+          ),
+        )!,
+      );
     }
     const limit = Math.min(Math.max(options.limit ?? 20, 1), 100);
     const rows = await scopedDb
@@ -4467,6 +4481,7 @@ export type SaveWorkspaceMemoryInput = {
   validUntil?: Date | null | undefined;
   replacesId?: string | null | undefined; // short or full id of the record this supersedes
   sessionId?: string | null | undefined; // provenance + event linkage
+  sourceRefs?: KnowledgeSourceRef[] | undefined;
   origin?: WorkspaceMemoryOrigin | undefined;
   metadata?: Record<string, unknown> | undefined;
   access?: MemoryAccessContext | undefined;
@@ -4577,6 +4592,7 @@ function memoryVectorLiteral(values: number[]): string {
 }
 
 const agentVisibleMemoryStatuses = [...AGENT_VISIBLE_MEMORY_STATUSES];
+const correctableMemoryStatuses = ["active", "approved", "proposed"] as const;
 const visibleTextHashUniqueIndexName = "knowledge_memories_scope_visible_text_hash_uq";
 
 function isVisibleTextHashUniqueViolation(error: unknown): boolean {
@@ -4665,6 +4681,22 @@ function inPlaceSaveMemoryMetadata(
     merged.origin = input.origin;
   }
   return merged;
+}
+
+function saveMemorySourceRefs(input: SaveWorkspaceMemoryInput): KnowledgeSourceRef[] {
+  const trustedSessionRef: KnowledgeSourceRef[] = input.sessionId
+    ? [{ kind: "session_event", id: input.sessionId, metadata: {} }]
+    : [];
+  const unique = new Map<string, KnowledgeSourceRef>();
+  for (const sourceRef of [...trustedSessionRef, ...(input.sourceRefs ?? [])]) {
+    const key = [sourceRef.kind, sourceRef.id, sourceRef.uri ?? ""].join("\u0000");
+    if (!unique.has(key)) {
+      unique.set(key, sourceRef);
+    }
+  }
+  return [...unique.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([, sourceRef]) => sourceRef);
 }
 
 // Resolve a short prefix or full uuid to the full id within a workspace. Full
@@ -4793,11 +4825,19 @@ export async function saveWorkspaceMemory(
             eq(schema.knowledgeMemories.id, replacesFullId),
           ),
         )
+        .for("update")
         .limit(1);
       if (!row) {
         throw new Error(
           `replaces_id "${input.replacesId}" does not match a memory in this workspace.`,
         );
+      }
+      if (
+        !correctableMemoryStatuses.includes(
+          row.status as (typeof correctableMemoryStatuses)[number],
+        )
+      ) {
+        throw new Error(`Memory "${input.replacesId}" is no longer correctable.`);
       }
       replacesRow = row;
       if (!memoryScopesEqual(requestedScope, storedScopeFromRow(row))) {
@@ -5037,9 +5077,7 @@ export async function saveWorkspaceMemory(
       );
     }
 
-    const sourceRefs: KnowledgeSourceRef[] = input.sessionId
-      ? [{ kind: "session_event", id: input.sessionId, metadata: {} }]
-      : [];
+    const sourceRefs = saveMemorySourceRefs(input);
     let inserted: typeof schema.knowledgeMemories.$inferSelect | undefined;
     try {
       const rows = await scopedDb.transaction(
@@ -5131,17 +5169,19 @@ export async function correctWorkspaceMemory(
 ): Promise<CorrectWorkspaceMemoryResult> {
   const replacementText = input.replacementText?.trim();
   if (replacementText) {
-    // Correction WITH a replacement is a full supersede through the one write gate.
-    const [old] = await withWorkspaceMemoryRls(
+    // Correction WITH a replacement is a full supersede through the one write
+    // gate under one outer transaction. The predecessor lock serializes racing
+    // corrections; a later contender observes the terminal status and fails.
+    return await withWorkspaceMemoryRls(
       db,
       input.workspaceId,
       input.access ?? {},
       async (scopedDb) => {
         const fullId = await resolveWorkspaceMemoryId(scopedDb, input.workspaceId, input.id);
         if (!fullId) {
-          return [] as (typeof schema.knowledgeMemories.$inferSelect)[];
+          throw new Error(`Memory "${input.id}" not found in this workspace.`);
         }
-        return await scopedDb
+        const [old] = await scopedDb
           .select()
           .from(schema.knowledgeMemories)
           .where(
@@ -5150,47 +5190,57 @@ export async function correctWorkspaceMemory(
               eq(schema.knowledgeMemories.id, fullId),
             ),
           )
+          .for("update")
           .limit(1);
+        if (!old) {
+          throw new Error(`Memory "${input.id}" not found in this workspace.`);
+        }
+        if (
+          !correctableMemoryStatuses.includes(
+            old.status as (typeof correctableMemoryStatuses)[number],
+          )
+        ) {
+          throw new Error(`Memory "${input.id}" is no longer correctable.`);
+        }
+        const oldScope = storedScopeFromRow(old);
+        const correctionReason = cleanDbString(input.reason);
+        const result = await saveWorkspaceMemory(
+          scopedDb,
+          {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            text: replacementText,
+            kind: old.kind as KnowledgeMemoryKind,
+            confidence: confidenceFromStorage(old.confidence),
+            pinned: old.pinned,
+            scopeSpec: scopeInputFromStored(oldScope),
+            labels: old.labels,
+            validFrom: old.validFrom,
+            validUntil: old.validUntil,
+            replacesId: old.id,
+            sessionId: input.sessionId ?? null,
+            origin: "agent",
+            ...(correctionReason
+              ? { metadata: { correctionReason, correctedMemoryId: old.id } }
+              : {}),
+            access: input.access,
+          },
+          embedder,
+        );
+        if (result.superseded) {
+          return {
+            action: "superseded" as const,
+            memory: result.superseded,
+            replacement: result.memory,
+          };
+        }
+        return {
+          action: "updated" as const,
+          memory: result.memory,
+          replacement: null,
+        };
       },
     );
-    if (!old) {
-      throw new Error(`Memory "${input.id}" not found in this workspace.`);
-    }
-    const oldScope = storedScopeFromRow(old);
-    const correctionReason = cleanDbString(input.reason);
-    const result = await saveWorkspaceMemory(
-      db,
-      {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        text: replacementText,
-        kind: old.kind as KnowledgeMemoryKind,
-        confidence: confidenceFromStorage(old.confidence),
-        pinned: old.pinned,
-        scopeSpec: scopeInputFromStored(oldScope),
-        labels: old.labels,
-        validFrom: old.validFrom,
-        validUntil: old.validUntil,
-        replacesId: old.id,
-        sessionId: input.sessionId ?? null,
-        origin: "agent",
-        ...(correctionReason ? { metadata: { correctionReason, correctedMemoryId: old.id } } : {}),
-        access: input.access,
-      },
-      embedder,
-    );
-    if (result.superseded) {
-      return {
-        action: "superseded",
-        memory: result.superseded,
-        replacement: result.memory,
-      };
-    }
-    return {
-      action: "updated",
-      memory: result.memory,
-      replacement: null,
-    };
   }
 
   // No replacement → archive the record.
@@ -5212,9 +5262,17 @@ export async function correctWorkspaceMemory(
             eq(schema.knowledgeMemories.id, fullId),
           ),
         )
+        .for("update")
         .limit(1);
       if (!existing) {
         throw new Error(`Memory "${input.id}" not found in this workspace.`);
+      }
+      if (
+        !correctableMemoryStatuses.includes(
+          existing.status as (typeof correctableMemoryStatuses)[number],
+        )
+      ) {
+        throw new Error(`Memory "${input.id}" is no longer correctable.`);
       }
       const correctionReason = cleanDbString(input.reason);
       const now = new Date();
@@ -5240,7 +5298,11 @@ export async function correctWorkspaceMemory(
       if (!archived) {
         throw new Error(`Memory "${input.id}" not found in this workspace.`);
       }
-      return { action: "archived", memory: mapKnowledgeMemory(archived), replacement: null };
+      return {
+        action: "archived",
+        memory: mapKnowledgeMemory(archived),
+        replacement: null,
+      };
     },
   );
 }
@@ -5380,7 +5442,10 @@ export async function searchWorkspaceMemories(
         const keywordScore =
           Number.isFinite(rankValue) && rankValue > 0 ? rankValue / (rankValue + 1) : 0;
         const prev = scored.get(row.id);
-        scored.set(row.id, { vectorScore: prev?.vectorScore ?? null, keywordScore });
+        scored.set(row.id, {
+          vectorScore: prev?.vectorScore ?? null,
+          keywordScore,
+        });
       }
     }
 
@@ -5623,8 +5688,8 @@ export async function resolveWorkspaceMemoryBlock(
     db,
     workspaceId,
     context.access ?? {},
-    async (scopedDb) =>
-      await scopedDb
+    async (scopedDb) => {
+      const rows = await scopedDb
         .select({
           id: schema.knowledgeMemories.id,
           kind: schema.knowledgeMemories.kind,
@@ -5671,7 +5736,87 @@ export async function resolveWorkspaceMemoryBlock(
           desc(schema.knowledgeMemories.updatedAt),
           schema.knowledgeMemories.id,
         )
-        .limit(MEMORY_BLOCK_RECORD_LIMIT),
+        .limit(MEMORY_BLOCK_RECORD_LIMIT);
+      if (rows.length === 0) {
+        return [];
+      }
+      const rowIds = rows.map((row) => row.id);
+      const edges = await scopedDb
+        .select({
+          sourceMemoryId: schema.knowledgeMemoryRelationships.sourceMemoryId,
+          targetMemoryId: schema.knowledgeMemoryRelationships.targetMemoryId,
+        })
+        .from(schema.knowledgeMemoryRelationships)
+        .where(
+          and(
+            eq(schema.knowledgeMemoryRelationships.workspaceId, workspaceId),
+            eq(schema.knowledgeMemoryRelationships.relationshipType, "contradicts"),
+            or(
+              inArray(schema.knowledgeMemoryRelationships.sourceMemoryId, rowIds),
+              inArray(schema.knowledgeMemoryRelationships.targetMemoryId, rowIds),
+            ),
+          ),
+        );
+      const endpointIds = [
+        ...new Set(edges.flatMap((edge) => [edge.sourceMemoryId, edge.targetMemoryId])),
+      ];
+      const endpointRows =
+        endpointIds.length === 0
+          ? []
+          : await scopedDb
+              .select()
+              .from(schema.knowledgeMemories)
+              .where(
+                and(
+                  eq(schema.knowledgeMemories.workspaceId, workspaceId),
+                  inArray(schema.knowledgeMemories.id, endpointIds),
+                  inArray(schema.knowledgeMemories.status, agentVisibleMemoryStatuses),
+                ),
+              );
+      const applicabilityContext = {
+        now,
+        trustedUserSubjectId: subjectId ?? null,
+        roleKey,
+        sessionId: sessionId ?? null,
+        memoryLabels,
+        mode: "standing" as const,
+      };
+      const applicableEndpointIds = new Set(
+        endpointRows
+          .filter((row) =>
+            isMemoryApplicable(
+              {
+                scopeSpec: storedScopeFromRow(row),
+                labels: row.labels,
+                status: row.status,
+                validFrom: row.validFrom,
+                validUntil: row.validUntil,
+              },
+              applicabilityContext,
+            ),
+          )
+          .map((row) => row.id),
+      );
+      const conflictIdsByMemory = new Map<string, Set<string>>();
+      for (const edge of edges) {
+        if (
+          !applicableEndpointIds.has(edge.sourceMemoryId) ||
+          !applicableEndpointIds.has(edge.targetMemoryId)
+        ) {
+          continue;
+        }
+        const source = conflictIdsByMemory.get(edge.sourceMemoryId) ?? new Set<string>();
+        source.add(edge.targetMemoryId);
+        conflictIdsByMemory.set(edge.sourceMemoryId, source);
+        const target = conflictIdsByMemory.get(edge.targetMemoryId) ?? new Set<string>();
+        target.add(edge.sourceMemoryId);
+        conflictIdsByMemory.set(edge.targetMemoryId, target);
+      }
+      return rows.map((row) => ({
+        ...row,
+        conflictCount: conflictIdsByMemory.get(row.id)?.size ?? 0,
+      }));
+    },
   );
   if (records.length === 0) {
     return WORKSPACE_MEMORY_BLOCK_EMPTY;
@@ -5691,6 +5836,8 @@ export async function resolveWorkspaceMemoryBlock(
     confidence: confidenceFromStorage(row.confidence),
     sourceRefs: row.sourceRefs,
     createdBySessionId: row.createdBySessionId,
+    conflictCount: row.conflictCount,
+    unresolvedConflict: row.conflictCount > 0,
   }));
   return (
     renderWorkspaceMemoryBlock(blockRecords, {
@@ -5702,6 +5849,636 @@ export async function resolveWorkspaceMemoryBlock(
       mode: "standing",
     }) ?? WORKSPACE_MEMORY_BLOCK_EMPTY
   );
+}
+
+export type CreateMemoryRelationshipInput = {
+  accountId: string;
+  workspaceId: string;
+  sourceMemoryId: string;
+  targetMemoryId: string;
+  type: MemoryRelationshipType;
+  actorSessionId?: string | null;
+  access: MemoryAccessContext;
+};
+
+const symmetricMemoryRelationshipTypes = new Set<MemoryRelationshipType>([
+  "contradicts",
+  "related_to",
+]);
+
+function canonicalMemoryRelationshipEndpoints(
+  sourceMemoryId: string,
+  targetMemoryId: string,
+  type: MemoryRelationshipType,
+): { sourceMemoryId: string; targetMemoryId: string } {
+  return symmetricMemoryRelationshipTypes.has(type) && sourceMemoryId > targetMemoryId
+    ? { sourceMemoryId: targetMemoryId, targetMemoryId: sourceMemoryId }
+    : { sourceMemoryId, targetMemoryId };
+}
+
+export async function createMemoryRelationship(
+  db: Database,
+  input: CreateMemoryRelationshipInput,
+): Promise<MemoryRelationship> {
+  const actorSubjectId = requireDbString(
+    input.access.subjectId ?? "",
+    "memory relationship actor subject",
+  );
+  const endpoints = canonicalMemoryRelationshipEndpoints(
+    input.sourceMemoryId,
+    input.targetMemoryId,
+    input.type,
+  );
+  if (endpoints.sourceMemoryId === endpoints.targetMemoryId) {
+    throw new Error("A memory relationship requires two distinct memories.");
+  }
+  return await withWorkspaceMemoryRls(db, input.workspaceId, input.access, async (scopedDb) => {
+    const visibleEndpoints = await scopedDb
+      .select({ id: schema.knowledgeMemories.id })
+      .from(schema.knowledgeMemories)
+      .where(
+        and(
+          eq(schema.knowledgeMemories.workspaceId, input.workspaceId),
+          inArray(schema.knowledgeMemories.id, [
+            endpoints.sourceMemoryId,
+            endpoints.targetMemoryId,
+          ]),
+        ),
+      );
+    if (new Set(visibleEndpoints.map((row) => row.id)).size !== 2) {
+      throw new Error("Both relationship endpoints must be visible memories in this workspace.");
+    }
+    const [inserted] = await scopedDb
+      .insert(schema.knowledgeMemoryRelationships)
+      .values({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        ...endpoints,
+        relationshipType: input.type,
+        actorSubjectId,
+        actorSessionId: input.actorSessionId ?? null,
+      })
+      .onConflictDoNothing()
+      .returning();
+    if (inserted) {
+      return mapMemoryRelationship(inserted);
+    }
+    const endpointPredicate = symmetricMemoryRelationshipTypes.has(input.type)
+      ? or(
+          and(
+            eq(schema.knowledgeMemoryRelationships.sourceMemoryId, endpoints.sourceMemoryId),
+            eq(schema.knowledgeMemoryRelationships.targetMemoryId, endpoints.targetMemoryId),
+          ),
+          and(
+            eq(schema.knowledgeMemoryRelationships.sourceMemoryId, endpoints.targetMemoryId),
+            eq(schema.knowledgeMemoryRelationships.targetMemoryId, endpoints.sourceMemoryId),
+          ),
+        )
+      : and(
+          eq(schema.knowledgeMemoryRelationships.sourceMemoryId, endpoints.sourceMemoryId),
+          eq(schema.knowledgeMemoryRelationships.targetMemoryId, endpoints.targetMemoryId),
+        );
+    const [existing] = await scopedDb
+      .select()
+      .from(schema.knowledgeMemoryRelationships)
+      .where(
+        and(
+          eq(schema.knowledgeMemoryRelationships.workspaceId, input.workspaceId),
+          eq(schema.knowledgeMemoryRelationships.relationshipType, input.type),
+          endpointPredicate,
+        ),
+      )
+      .limit(1);
+    if (!existing) {
+      throw new Error("Failed to create memory relationship.");
+    }
+    return mapMemoryRelationship(existing);
+  });
+}
+
+export async function listMemoryRelationships(
+  db: Database,
+  workspaceId: string,
+  options: {
+    memoryId?: string;
+    type?: MemoryRelationshipType;
+    access?: MemoryAccessContext;
+  } = {},
+): Promise<MemoryRelationship[]> {
+  return await withWorkspaceMemoryRls(db, workspaceId, options.access ?? {}, async (scopedDb) => {
+    const conditions: SQL[] = [eq(schema.knowledgeMemoryRelationships.workspaceId, workspaceId)];
+    if (options.memoryId) {
+      conditions.push(
+        or(
+          eq(schema.knowledgeMemoryRelationships.sourceMemoryId, options.memoryId),
+          eq(schema.knowledgeMemoryRelationships.targetMemoryId, options.memoryId),
+        )!,
+      );
+    }
+    if (options.type) {
+      conditions.push(eq(schema.knowledgeMemoryRelationships.relationshipType, options.type));
+    }
+    const rows = await scopedDb
+      .select()
+      .from(schema.knowledgeMemoryRelationships)
+      .where(and(...conditions))
+      .orderBy(
+        schema.knowledgeMemoryRelationships.relationshipType,
+        schema.knowledgeMemoryRelationships.sourceMemoryId,
+        schema.knowledgeMemoryRelationships.targetMemoryId,
+        schema.knowledgeMemoryRelationships.id,
+      );
+    return rows.map(mapMemoryRelationship);
+  });
+}
+
+export async function deleteMemoryRelationship(
+  db: Database,
+  workspaceId: string,
+  relationshipId: string,
+  access: MemoryAccessContext,
+): Promise<boolean> {
+  return await withWorkspaceMemoryRls(db, workspaceId, access, async (scopedDb) => {
+    const deleted = await scopedDb
+      .delete(schema.knowledgeMemoryRelationships)
+      .where(
+        and(
+          eq(schema.knowledgeMemoryRelationships.workspaceId, workspaceId),
+          eq(schema.knowledgeMemoryRelationships.id, relationshipId),
+        ),
+      )
+      .returning({ id: schema.knowledgeMemoryRelationships.id });
+    return deleted.length === 1;
+  });
+}
+
+export async function exportWorkspaceMemories(
+  db: Database,
+  workspaceId: string,
+  options: {
+    accountId?: string;
+    access?: MemoryAccessContext;
+    includeEphemeral?: boolean;
+    generatedAt?: Date;
+    actorSessionId?: string | null;
+  } = {},
+): Promise<MemoryExportResponse> {
+  const privateAdmin = options.access?.privateAdmin === true;
+  const actorSubjectId = privateAdmin
+    ? requireDbString(options.access?.subjectId ?? "", "private memory export actor")
+    : null;
+  const accountId = privateAdmin
+    ? requireDbString(options.accountId ?? "", "private memory export account")
+    : null;
+  return await withWorkspaceMemoryRls(db, workspaceId, options.access ?? {}, async (scopedDb) => {
+    const conditions: SQL[] = [eq(schema.knowledgeMemories.workspaceId, workspaceId)];
+    if (!options.includeEphemeral) {
+      conditions.push(ne(schema.knowledgeMemories.scopeType, "ephemeral"));
+    }
+    const rows = await scopedDb
+      .select()
+      .from(schema.knowledgeMemories)
+      .where(and(...conditions))
+      .orderBy(schema.knowledgeMemories.id);
+    const memoryIds = rows.map((row) => row.id);
+    const relationships =
+      memoryIds.length === 0
+        ? []
+        : await scopedDb
+            .select()
+            .from(schema.knowledgeMemoryRelationships)
+            .where(
+              and(
+                eq(schema.knowledgeMemoryRelationships.workspaceId, workspaceId),
+                inArray(schema.knowledgeMemoryRelationships.sourceMemoryId, memoryIds),
+                inArray(schema.knowledgeMemoryRelationships.targetMemoryId, memoryIds),
+              ),
+            )
+            .orderBy(
+              schema.knowledgeMemoryRelationships.relationshipType,
+              schema.knowledgeMemoryRelationships.sourceMemoryId,
+              schema.knowledgeMemoryRelationships.targetMemoryId,
+              schema.knowledgeMemoryRelationships.id,
+            );
+    const generatedAt = options.generatedAt ?? new Date();
+    const response: MemoryExportResponse = {
+      version: 1,
+      workspaceId,
+      generatedAt: generatedAt.toISOString(),
+      includesEphemeral: options.includeEphemeral === true,
+      memories: rows.map(mapKnowledgeMemory),
+      relationships: relationships.map(mapMemoryRelationship),
+    };
+    if (privateAdmin) {
+      await scopedDb.insert(schema.knowledgeMemoryExportAudits).values({
+        accountId: accountId!,
+        workspaceId,
+        actorSubjectId: actorSubjectId!,
+        actorSessionId: options.actorSessionId ?? null,
+        includedPrivate: true,
+        includedEphemeral: options.includeEphemeral === true,
+        memoryCount: response.memories.length,
+        relationshipCount: response.relationships.length,
+        exportedAt: generatedAt,
+      });
+    }
+    return response;
+  });
+}
+
+export async function deleteWorkspaceMemory(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    memoryId: string;
+    actorSessionId?: string | null;
+    access: MemoryAccessContext;
+  },
+): Promise<DeleteMemoryResponse> {
+  const actorSubjectId = requireDbString(input.access.subjectId ?? "", "memory deletion actor");
+  return await withWorkspaceMemoryRls(db, input.workspaceId, input.access, async (scopedDb) => {
+    const fullId = await resolveWorkspaceMemoryId(scopedDb, input.workspaceId, input.memoryId);
+    if (!fullId) {
+      throw new Error(`Memory "${input.memoryId}" not found in this workspace.`);
+    }
+    const [{ count } = { count: 0 }] = await scopedDb
+      .select({ count: sql<number>`count(*)::int` })
+      .from(schema.knowledgeMemoryRelationships)
+      .where(
+        and(
+          eq(schema.knowledgeMemoryRelationships.workspaceId, input.workspaceId),
+          or(
+            eq(schema.knowledgeMemoryRelationships.sourceMemoryId, fullId),
+            eq(schema.knowledgeMemoryRelationships.targetMemoryId, fullId),
+          ),
+        ),
+      );
+    const deletedRelationshipCount = Number(count);
+    const deleted = await scopedDb
+      .delete(schema.knowledgeMemories)
+      .where(
+        and(
+          eq(schema.knowledgeMemories.workspaceId, input.workspaceId),
+          eq(schema.knowledgeMemories.id, fullId),
+        ),
+      )
+      .returning({ id: schema.knowledgeMemories.id });
+    if (deleted.length !== 1) {
+      throw new Error(`Memory "${input.memoryId}" not found in this workspace.`);
+    }
+    await scopedDb.insert(schema.knowledgeMemoryDeletionAudits).values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      memoryId: fullId,
+      actorSubjectId,
+      actorSessionId: input.actorSessionId ?? null,
+      deletedRelationshipCount,
+    });
+    return { deleted: true, memoryId: fullId, deletedRelationshipCount };
+  });
+}
+
+type MemoryMaintenanceChange = {
+  memoryId: string;
+  fromStatus: string;
+  toStatus: "archived";
+  fromValidUntil: string | null;
+  toValidUntil: string | null;
+  expectedUpdatedAt: string;
+  expectedRowVersion: string;
+  reasonCode: string;
+};
+
+type MemoryMaintenancePlan = {
+  version: 1;
+  operationType: "retention" | "reconcile";
+  workspaceId: string;
+  generatedAt: string;
+  changes: MemoryMaintenanceChange[];
+};
+
+type MemoryMaintenanceInversePlan = {
+  version: 1;
+  changes: Array<{
+    memoryId: string;
+    status: string;
+    validUntil: string | null;
+    expectedRowVersion: string;
+  }>;
+};
+
+function canonicalMemoryMaintenanceJson(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(canonicalMemoryMaintenanceJson);
+  }
+  if (!value || typeof value !== "object") {
+    return value;
+  }
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .filter(([, entry]) => entry !== undefined)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => [key, canonicalMemoryMaintenanceJson(entry)]),
+  );
+}
+
+function memoryMaintenancePlanHash(plan: MemoryMaintenancePlan): string {
+  // PostgreSQL JSONB does not preserve JavaScript object-key insertion order.
+  // Hash the recursive canonical form so the preview retains the same identity
+  // after its audited durable round trip.
+  return createHash("sha256")
+    .update(JSON.stringify(canonicalMemoryMaintenanceJson(plan)), "utf8")
+    .digest("hex");
+}
+
+function parseMemoryMaintenancePlan(value: Record<string, unknown>): MemoryMaintenancePlan {
+  if (value.version !== 1 || !Array.isArray(value.changes)) {
+    throw new Error("Stored memory maintenance plan is invalid.");
+  }
+  return value as MemoryMaintenancePlan;
+}
+
+function parseMemoryMaintenanceInversePlan(
+  value: Record<string, unknown> | null,
+): MemoryMaintenanceInversePlan {
+  if (!value || value.version !== 1 || !Array.isArray(value.changes)) {
+    throw new Error("Stored memory maintenance inverse plan is invalid.");
+  }
+  return value as MemoryMaintenanceInversePlan;
+}
+
+export async function previewMemoryMaintenance(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    type: "retention" | "reconcile";
+    terminalBefore?: Date;
+    expiredBefore?: Date;
+    memoryIds?: string[];
+    actorSessionId?: string | null;
+    now?: Date;
+    access: MemoryAccessContext;
+  },
+): Promise<MemoryMaintenanceOperation> {
+  const actorSubjectId = requireDbString(input.access.subjectId ?? "", "memory maintenance actor");
+  if (input.type === "retention" && !input.terminalBefore && !input.expiredBefore) {
+    throw new Error("Retention preview requires terminalBefore or expiredBefore.");
+  }
+  const requestedIds = [...new Set(input.memoryIds ?? [])];
+  if (input.type === "reconcile" && requestedIds.length === 0) {
+    throw new Error("Reconciliation preview requires explicit memory ids.");
+  }
+  if (requestedIds.length > 500) {
+    throw new Error("Memory maintenance preview accepts at most 500 memory ids.");
+  }
+  const now = input.now ?? new Date();
+  return await withWorkspaceMemoryRls(db, input.workspaceId, input.access, async (scopedDb) => {
+    const conditions: SQL[] = [eq(schema.knowledgeMemories.workspaceId, input.workspaceId)];
+    if (requestedIds.length > 0) {
+      conditions.push(inArray(schema.knowledgeMemories.id, requestedIds));
+    }
+    const rows = await scopedDb
+      .select({
+        id: schema.knowledgeMemories.id,
+        status: schema.knowledgeMemories.status,
+        validFrom: schema.knowledgeMemories.validFrom,
+        validUntil: schema.knowledgeMemories.validUntil,
+        updatedAt: schema.knowledgeMemories.updatedAt,
+        // PostgreSQL timestamps can retain microseconds that JavaScript Date
+        // truncates. xmin is the exact row-version fence for preview/apply.
+        rowVersion: sql<string>`xmin::text`,
+      })
+      .from(schema.knowledgeMemories)
+      .where(and(...conditions))
+      .orderBy(schema.knowledgeMemories.id)
+      .limit(501);
+    if (rows.length > 500) {
+      throw new Error("Memory maintenance preview exceeds the 500-record safety bound.");
+    }
+    if (requestedIds.length > 0 && rows.length !== requestedIds.length) {
+      throw new Error("One or more requested memories are not visible in this workspace.");
+    }
+    const changes: MemoryMaintenanceChange[] = [];
+    for (const row of rows) {
+      let reasonCode: string | null = null;
+      if (
+        input.type === "retention" &&
+        input.expiredBefore &&
+        row.validUntil &&
+        row.validUntil <= input.expiredBefore &&
+        ["active", "approved"].includes(row.status)
+      ) {
+        reasonCode = "retention.expired";
+      } else if (
+        input.type === "retention" &&
+        input.terminalBefore &&
+        row.status === "proposed" &&
+        row.updatedAt <= input.terminalBefore
+      ) {
+        reasonCode = "retention.stale_proposal";
+      } else if (
+        input.type === "reconcile" &&
+        ["active", "approved", "proposed"].includes(row.status)
+      ) {
+        reasonCode = "reconcile.explicit_archive";
+      }
+      if (!reasonCode) {
+        continue;
+      }
+      const retiredAt = row.validFrom >= now ? new Date(row.validFrom.getTime() + 1) : now;
+      changes.push({
+        memoryId: row.id,
+        fromStatus: row.status,
+        toStatus: "archived",
+        fromValidUntil: row.validUntil?.toISOString() ?? null,
+        toValidUntil:
+          row.validUntil && row.validUntil <= retiredAt
+            ? row.validUntil.toISOString()
+            : retiredAt.toISOString(),
+        expectedUpdatedAt: row.updatedAt.toISOString(),
+        expectedRowVersion: row.rowVersion,
+        reasonCode,
+      });
+    }
+    const plan: MemoryMaintenancePlan = {
+      version: 1,
+      operationType: input.type,
+      workspaceId: input.workspaceId,
+      generatedAt: now.toISOString(),
+      changes,
+    };
+    const planHash = memoryMaintenancePlanHash(plan);
+    const [operation] = await scopedDb
+      .insert(schema.knowledgeMemoryOperations)
+      .values({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        operationType: input.type,
+        status: "previewed",
+        actorSubjectId,
+        actorSessionId: input.actorSessionId ?? null,
+        planHash,
+        plan,
+      })
+      .returning();
+    if (!operation) {
+      throw new Error("Failed to record memory maintenance preview.");
+    }
+    return mapMemoryMaintenanceOperation(operation);
+  });
+}
+
+export async function applyMemoryMaintenance(
+  db: Database,
+  workspaceId: string,
+  operationId: string,
+  planHash: string,
+  access: MemoryAccessContext,
+  now = new Date(),
+): Promise<MemoryMaintenanceOperation> {
+  return await withWorkspaceMemoryRls(db, workspaceId, access, async (scopedDb) => {
+    const [operation] = await scopedDb
+      .select()
+      .from(schema.knowledgeMemoryOperations)
+      .where(
+        and(
+          eq(schema.knowledgeMemoryOperations.workspaceId, workspaceId),
+          eq(schema.knowledgeMemoryOperations.id, operationId),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    if (!operation) {
+      throw new Error("Memory maintenance operation not found.");
+    }
+    if (operation.status !== "previewed" || operation.planHash !== planHash) {
+      throw new Error("Memory maintenance plan hash or status no longer matches the preview.");
+    }
+    const plan = parseMemoryMaintenancePlan(operation.plan);
+    if (
+      plan.workspaceId !== workspaceId ||
+      plan.operationType !== operation.operationType ||
+      memoryMaintenancePlanHash(plan) !== operation.planHash
+    ) {
+      throw new Error("Stored memory maintenance plan failed integrity validation.");
+    }
+    const inverseChanges: MemoryMaintenanceInversePlan["changes"] = [];
+    for (const change of plan.changes) {
+      const updated = await scopedDb
+        .update(schema.knowledgeMemories)
+        .set({
+          status: change.toStatus,
+          validUntil: change.toValidUntil ? new Date(change.toValidUntil) : null,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(schema.knowledgeMemories.workspaceId, workspaceId),
+            eq(schema.knowledgeMemories.id, change.memoryId),
+            eq(schema.knowledgeMemories.status, change.fromStatus),
+            sql`xmin::text = ${change.expectedRowVersion}`,
+          ),
+        )
+        .returning({
+          id: schema.knowledgeMemories.id,
+          rowVersion: sql<string>`xmin::text`,
+        });
+      if (updated.length !== 1) {
+        throw new Error(`Memory maintenance precondition changed for ${change.memoryId}.`);
+      }
+      inverseChanges.push({
+        memoryId: change.memoryId,
+        status: change.fromStatus,
+        validUntil: change.fromValidUntil,
+        expectedRowVersion: updated[0]!.rowVersion,
+      });
+    }
+    const inversePlan: MemoryMaintenanceInversePlan = {
+      version: 1,
+      changes: inverseChanges,
+    };
+    const [applied] = await scopedDb
+      .update(schema.knowledgeMemoryOperations)
+      .set({ status: "applied", inversePlan, appliedAt: now })
+      .where(
+        and(
+          eq(schema.knowledgeMemoryOperations.id, operation.id),
+          eq(schema.knowledgeMemoryOperations.status, "previewed"),
+        ),
+      )
+      .returning();
+    if (!applied) {
+      throw new Error("Failed to apply memory maintenance operation.");
+    }
+    return mapMemoryMaintenanceOperation(applied);
+  });
+}
+
+export async function revertMemoryMaintenance(
+  db: Database,
+  workspaceId: string,
+  operationId: string,
+  planHash: string,
+  access: MemoryAccessContext,
+  now = new Date(),
+): Promise<MemoryMaintenanceOperation> {
+  return await withWorkspaceMemoryRls(db, workspaceId, access, async (scopedDb) => {
+    const [operation] = await scopedDb
+      .select()
+      .from(schema.knowledgeMemoryOperations)
+      .where(
+        and(
+          eq(schema.knowledgeMemoryOperations.workspaceId, workspaceId),
+          eq(schema.knowledgeMemoryOperations.id, operationId),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    if (!operation) {
+      throw new Error("Memory maintenance operation not found.");
+    }
+    if (operation.status !== "applied" || operation.planHash !== planHash) {
+      throw new Error("Applied memory maintenance plan hash or status no longer matches.");
+    }
+    const inversePlan = parseMemoryMaintenanceInversePlan(operation.inversePlan);
+    for (const change of inversePlan.changes) {
+      const restored = await scopedDb
+        .update(schema.knowledgeMemories)
+        .set({
+          status: change.status,
+          validUntil: change.validUntil ? new Date(change.validUntil) : null,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(schema.knowledgeMemories.workspaceId, workspaceId),
+            eq(schema.knowledgeMemories.id, change.memoryId),
+            eq(schema.knowledgeMemories.status, "archived"),
+            sql`xmin::text = ${change.expectedRowVersion}`,
+          ),
+        )
+        .returning({ id: schema.knowledgeMemories.id });
+      if (restored.length !== 1) {
+        throw new Error(`Memory maintenance revert precondition changed for ${change.memoryId}.`);
+      }
+    }
+    const [reverted] = await scopedDb
+      .update(schema.knowledgeMemoryOperations)
+      .set({ status: "reverted", revertedAt: now })
+      .where(
+        and(
+          eq(schema.knowledgeMemoryOperations.id, operation.id),
+          eq(schema.knowledgeMemoryOperations.status, "applied"),
+        ),
+      )
+      .returning();
+    if (!reverted) {
+      throw new Error("Failed to revert memory maintenance operation.");
+    }
+    return mapMemoryMaintenanceOperation(reverted);
+  });
 }
 
 export async function createSocialConnection(
@@ -24541,6 +25318,38 @@ function mapKnowledgeMemory(row: typeof schema.knowledgeMemories.$inferSelect): 
     validUntil: row.validUntil ? row.validUntil.toISOString() : null,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
+  };
+}
+
+function mapMemoryRelationship(
+  row: typeof schema.knowledgeMemoryRelationships.$inferSelect,
+): MemoryRelationship {
+  return {
+    id: row.id,
+    workspaceId: row.workspaceId,
+    sourceMemoryId: row.sourceMemoryId,
+    targetMemoryId: row.targetMemoryId,
+    type: row.relationshipType as MemoryRelationshipType,
+    actorSessionId: row.actorSessionId,
+    createdAt: row.createdAt.toISOString(),
+  };
+}
+
+function mapMemoryMaintenanceOperation(
+  row: typeof schema.knowledgeMemoryOperations.$inferSelect,
+): MemoryMaintenanceOperation {
+  const plan = parseMemoryMaintenancePlan(row.plan);
+  return {
+    id: row.id,
+    workspaceId: row.workspaceId,
+    type: row.operationType as MemoryMaintenanceOperation["type"],
+    status: row.status as MemoryMaintenanceOperation["status"],
+    planHash: row.planHash,
+    candidateMemoryIds: [...new Set(plan.changes.map((change) => change.memoryId))].sort(),
+    reasonCodes: [...new Set(plan.changes.map((change) => change.reasonCode))].sort(),
+    createdAt: row.createdAt.toISOString(),
+    appliedAt: row.appliedAt?.toISOString() ?? null,
+    revertedAt: row.revertedAt?.toISOString() ?? null,
   };
 }
 

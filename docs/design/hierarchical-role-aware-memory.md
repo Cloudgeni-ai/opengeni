@@ -1,13 +1,14 @@
 <!-- docs-refs: record -->
 
-> **Point-in-time design record.** Written against `origin/main` at
-> `a906a06881036b7d005ab33940f5ec6c91938482` on 2026-07-18. Paths, names, and
-> implementation status may move; code and migrations win.
+> **Point-in-time design record.** Baseline audited against `origin/main` at
+> `a906a06881036b7d005ab33940f5ec6c91938482` on 2026-07-18; implementation
+> checkpoint updated on the OPE-29 branch on 2026-07-19. Paths, names, and final
+> merge status may move; code and migrations win.
 
 # ADR: Labeled, hierarchical, role-aware memory
 
-Status: proposed for OPE-29 implementation and exact-head review  
-Owners: OPE-29 (semantics/data contract); OPE-15 (responsive presentation)  
+Status: implemented and rebased on the OPE-29 branch; pending exact-head CI, browser evidence, and independent review
+Owners: OPE-29 (semantics/data contract); OPE-15 (responsive presentation)
 Related: OPE-17 (product concept map), OPE-16 (capability discovery)
 
 ## Context
@@ -55,6 +56,36 @@ had an embedding; only two returned-search uses had been recorded. Memory was
 actively written and corrected, but standing injection—not explicit search—was
 the dominant consumption path. The deployed API/web/worker/relay revision matched
 the audited SHA. These values are a point-in-time observation, not a live SLO.
+
+### OPE-29 implementation checkpoint
+
+Implemented on the focused branch after the audited baseline:
+
+- rolling migration `0065_hierarchical_role_aware_memory.sql` adds trusted session
+  creator provenance, typed scopes, bounded labels, relationships, reversible
+  maintenance operations, and text-free deletion/private-export audit tables;
+  all five memory tables are FORCE RLS;
+- DB applicability/ranking, bounded standing injection, atomic correction edges,
+  deterministic export, hard delete, and hash/row-version-fenced maintenance are
+  wired through REST, capability-first MCP tools, contracts, and the SDK;
+- REST/MCP adapters bind user/role/session/actor selectors from signed grants and
+  persisted session context, never caller-controlled identity fields;
+- a fresh PostgreSQL 17 + pgvector 0.8.5 migration and non-owner role probe proved
+  multi-subject RLS, role/session/ephemeral retrieval, symmetric edge identity,
+  private export audit, deletion tombstone, maintenance apply/revert, creator
+  inheritance, and exactly one concurrent correction winner; committed domain,
+  API, DB integration, and SDK parity tests retain that coverage for CI.
+
+Still open at this checkpoint:
+
+- rebase onto current `origin/main`, exact-head CI, and independent Sol/xhigh
+  privacy/product review;
+- OPE-15-owned `/memory` presentation and real desktop/mobile browser evidence
+  against the additive SDK contract;
+- policy-configured scheduling or autonomous consolidation beyond the explicit,
+  audited primitives. No opaque background rewriting has been introduced;
+- merge/release/production acceptance, owned by the root delivery lane and OPE-25,
+  not OPE-29.
 
 ## Decisions
 
@@ -298,7 +329,7 @@ Required database evidence uses a non-owner app role and at least:
 
 ## Migration and rollout
 
-The implementation is an additive rolling migration after `0064`:
+The implementation uses additive rolling migration `0065` after `0064`:
 
 1. add nullable session creator provenance and typed memory columns with safe
    defaults;

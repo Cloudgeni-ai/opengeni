@@ -4631,7 +4631,7 @@ describe("API component integration", () => {
     };
     expect(approved.id).toBe(proposed.id);
     expect(approved.status).toBe("approved");
-    expect(approved.reviewedBy).toBe("operator");
+    expect(approved.reviewedBy).toBe("Local dev");
     expect(approved.reviewedAt).toBeTruthy();
 
     const approvedSearchAfter = await app.request(
@@ -4671,6 +4671,378 @@ describe("API component integration", () => {
     expect(reproposed.status).toBe("proposed");
     expect(reproposed.reviewedBy).toBeNull();
     expect(reproposed.reviewedAt).toBeNull();
+  });
+
+  test("binds REST user memory to trusted subjects and audits explicit private-admin export", async () => {
+    const delegationSecret = "test-memory-subject-delegation-secret";
+    const settings = testSettings({
+      databaseUrl: services.databaseUrl,
+      delegationSecret,
+    });
+    const app = createApp({
+      settings: { ...settings, productAccessMode: "configured" },
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+      documentServices: createDocumentServices(settings),
+    });
+    const grant = await bootstrapMcpGrant(dbClient.db);
+    const subjectA = `user:memory-a:${crypto.randomUUID()}`;
+    const subjectB = `user:memory-b:${crypto.randomUUID()}`;
+    const forgedSessionId = crypto.randomUUID();
+    const tokenA = await signDelegatedBearer(delegationSecret, grant, {
+      subjectId: subjectA,
+      permissions: ["documents:search", "documents:manage"],
+    });
+    const tokenB = await signDelegatedBearer(delegationSecret, grant, {
+      subjectId: subjectB,
+      permissions: ["documents:search", "documents:manage"],
+    });
+    const adminToken = await signDelegatedBearer(delegationSecret, grant, {
+      subjectId: `admin:memory:${crypto.randomUUID()}`,
+      permissions: ["workspace:admin"],
+    });
+    const jsonHeaders = (authorization: string) => ({
+      authorization,
+      "content-type": "application/json",
+    });
+
+    const createResponse = await app.request(
+      workspacePath(grant.workspaceId, "/knowledge/memories"),
+      {
+        method: "POST",
+        headers: jsonHeaders(tokenA),
+        body: JSON.stringify({
+          text: "Subject A privately prefers concise rollback evidence.",
+          kind: "preference",
+          scopeSpec: { type: "user" },
+          labels: ["private", "rollback"],
+          sourceRefs: [
+            {
+              kind: "external",
+              id: "subject-a-preference",
+              uri: "https://example.test/preferences/subject-a",
+            },
+          ],
+          createdBySessionId: forgedSessionId,
+        }),
+      },
+    );
+    expect(createResponse.status).toBe(201);
+    const created = (await createResponse.json()) as {
+      id: string;
+      scopeSpec: { type: string; subjectId?: string };
+      labels: string[];
+      sourceRefs: Array<{ kind: string; id: string }>;
+      createdBySessionId: string | null;
+    };
+    expect(created.scopeSpec).toEqual({ type: "user" });
+    expect(created.labels).toEqual(["private", "rollback"]);
+    expect(created.sourceRefs).toEqual([
+      {
+        kind: "external",
+        id: "subject-a-preference",
+        uri: "https://example.test/preferences/subject-a",
+        metadata: {},
+      },
+    ]);
+    expect(created.createdBySessionId).toBeNull();
+    expect(created.createdBySessionId).not.toBe(forgedSessionId);
+    const [stored] = await dbClient.db.execute<{
+      scopeSubjectId: string | null;
+      createdBySessionId: string | null;
+    }>(dbSql`
+      select scope_subject_id as "scopeSubjectId",
+             created_by_session_id as "createdBySessionId"
+      from knowledge_memories
+      where id = ${created.id}::uuid
+    `);
+    expect(stored).toEqual({ scopeSubjectId: subjectA, createdBySessionId: null });
+
+    const reviewResponse = await app.request(
+      workspacePath(grant.workspaceId, `/knowledge/memories/${created.id}`),
+      {
+        method: "PATCH",
+        headers: jsonHeaders(tokenA),
+        body: JSON.stringify({ status: "approved", reviewedBy: "forged-reviewer" }),
+      },
+    );
+    expect(reviewResponse.status).toBe(200);
+    expect(((await reviewResponse.json()) as { reviewedBy: string | null }).reviewedBy).toBe(
+      subjectA,
+    );
+
+    const listA = await app.request(
+      workspacePath(
+        grant.workspaceId,
+        "/knowledge/memories?scopeType=user&labels=private&includeExpired=false",
+      ),
+      { headers: { authorization: tokenA } },
+    );
+    expect(listA.status).toBe(200);
+    expect(((await listA.json()) as Array<{ id: string }>).map((memory) => memory.id)).toContain(
+      created.id,
+    );
+    const listB = await app.request(
+      workspacePath(grant.workspaceId, "/knowledge/memories?scopeType=user"),
+      { headers: { authorization: tokenB } },
+    );
+    expect(listB.status).toBe(200);
+    expect(
+      ((await listB.json()) as Array<{ id: string }>).map((memory) => memory.id),
+    ).not.toContain(created.id);
+    const getB = await app.request(
+      workspacePath(grant.workspaceId, `/knowledge/memories/${created.id}`),
+      { headers: { authorization: tokenB } },
+    );
+    expect(getB.status).toBe(404);
+    const searchB = await app.request(
+      workspacePath(grant.workspaceId, "/knowledge/memories/search"),
+      {
+        method: "POST",
+        headers: jsonHeaders(tokenB),
+        body: JSON.stringify({
+          query: "rollback evidence",
+          roleKey: "forged-role",
+          sessionId: forgedSessionId,
+        }),
+      },
+    );
+    expect(searchB.status).toBe(200);
+    expect(
+      (
+        (await searchB.json()) as {
+          results: Array<{ memory: { id: string } }>;
+        }
+      ).results.map((result) => result.memory.id),
+    ).not.toContain(created.id);
+    const exportB = await app.request(
+      workspacePath(grant.workspaceId, "/knowledge/memories/export"),
+      { headers: { authorization: tokenB } },
+    );
+    expect(exportB.status).toBe(200);
+    expect(
+      ((await exportB.json()) as { memories: Array<{ id: string }> }).memories.map(
+        (memory) => memory.id,
+      ),
+    ).not.toContain(created.id);
+
+    const deniedPrivate = await app.request(
+      workspacePath(grant.workspaceId, "/knowledge/memories/export?includePrivate=true"),
+      { headers: { authorization: tokenA } },
+    );
+    expect(deniedPrivate.status).toBe(403);
+    const privateExport = await app.request(
+      workspacePath(grant.workspaceId, "/knowledge/memories/export?includePrivate=true"),
+      { headers: { authorization: adminToken } },
+    );
+    expect(privateExport.status).toBe(200);
+    expect(
+      ((await privateExport.json()) as { memories: Array<{ id: string }> }).memories.map(
+        (memory) => memory.id,
+      ),
+    ).toContain(created.id);
+    const [exportAudit] = await dbClient.db.execute<{
+      includedPrivate: boolean;
+      memoryCount: number;
+    }>(dbSql`
+      select included_private as "includedPrivate", memory_count as "memoryCount"
+      from knowledge_memory_export_audits
+      where workspace_id = ${grant.workspaceId}::uuid
+      order by exported_at desc
+      limit 1
+    `);
+    expect(exportAudit?.includedPrivate).toBe(true);
+    expect(Number(exportAudit?.memoryCount ?? 0)).toBeGreaterThan(0);
+
+    const deniedMaintenance = await app.request(
+      workspacePath(grant.workspaceId, "/knowledge/memories/maintenance/preview"),
+      {
+        method: "POST",
+        headers: jsonHeaders(tokenA),
+        body: JSON.stringify({
+          type: "reconcile",
+          memoryIds: [created.id],
+        }),
+      },
+    );
+    expect(deniedMaintenance.status).toBe(403);
+
+    const deleted = await app.request(
+      workspacePath(grant.workspaceId, `/knowledge/memories/${created.id}`),
+      { method: "DELETE", headers: { authorization: tokenA } },
+    );
+    expect(deleted.status).toBe(200);
+  });
+
+  test("serves relationship, export, delete, and reversible maintenance memory routes", async () => {
+    const app = createApp({
+      settings: objectStorageSettings(services.databaseUrl, services.objectStorageEndpoint!),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+    });
+    const workspaceId = await defaultWorkspaceId(app);
+    const createMemory = async (text: string, status: "active" | "proposed" = "active") => {
+      const response = await app.request(workspacePath(workspaceId, "/knowledge/memories"), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text, status }),
+      });
+      expect(response.status).toBe(201);
+      return (await response.json()) as { id: string; status: string };
+    };
+    const first = await createMemory("Lifecycle relationship source marker.");
+    const second = await createMemory("Lifecycle relationship target marker.");
+
+    const relationshipResponse = await app.request(
+      workspacePath(workspaceId, "/knowledge/memories/relationships"),
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          sourceMemoryId: first.id,
+          targetMemoryId: second.id,
+          type: "related_to",
+          actorSessionId: crypto.randomUUID(),
+        }),
+      },
+    );
+    expect(relationshipResponse.status).toBe(201);
+    const relationship = (await relationshipResponse.json()) as {
+      id: string;
+      actorSessionId: string | null;
+    };
+    expect(relationship.actorSessionId).toBeNull();
+    const relationshipsResponse = await app.request(
+      workspacePath(
+        workspaceId,
+        `/knowledge/memories/relationships?memoryId=${first.id}&type=related_to`,
+      ),
+    );
+    expect(relationshipsResponse.status).toBe(200);
+    expect(
+      ((await relationshipsResponse.json()) as Array<{ id: string }>).map((edge) => edge.id),
+    ).toEqual([relationship.id]);
+
+    const exportResponse = await app.request(
+      workspacePath(workspaceId, "/knowledge/memories/export?includeEphemeral=false"),
+    );
+    expect(exportResponse.status).toBe(200);
+    const exported = (await exportResponse.json()) as {
+      memories: Array<{ id: string }>;
+      relationships: Array<{ id: string }>;
+      includesEphemeral: boolean;
+    };
+    expect(exported.memories.map((memory) => memory.id)).toEqual(
+      expect.arrayContaining([first.id, second.id]),
+    );
+    expect(exported.relationships.map((edge) => edge.id)).toContain(relationship.id);
+    expect(exported.includesEphemeral).toBe(false);
+
+    const relationshipDelete = await app.request(
+      workspacePath(workspaceId, `/knowledge/memories/relationships/${relationship.id}`),
+      { method: "DELETE" },
+    );
+    expect(relationshipDelete.status).toBe(204);
+    expect(
+      (
+        await app.request(
+          workspacePath(workspaceId, `/knowledge/memories/relationships/${relationship.id}`),
+          { method: "DELETE" },
+        )
+      ).status,
+    ).toBe(404);
+
+    const relationshipForCascade = await app.request(
+      workspacePath(workspaceId, "/knowledge/memories/relationships"),
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          sourceMemoryId: first.id,
+          targetMemoryId: second.id,
+          type: "depends_on",
+        }),
+      },
+    );
+    expect(relationshipForCascade.status).toBe(201);
+    const deleteSecond = await app.request(
+      workspacePath(workspaceId, `/knowledge/memories/${second.id}`),
+      { method: "DELETE" },
+    );
+    expect(deleteSecond.status).toBe(200);
+    expect(await deleteSecond.json()).toMatchObject({
+      deleted: true,
+      memoryId: second.id,
+      deletedRelationshipCount: 1,
+    });
+
+    const candidate = await createMemory("Maintenance preview candidate marker.", "proposed");
+    const previewResponse = await app.request(
+      workspacePath(workspaceId, "/knowledge/memories/maintenance/preview"),
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          type: "retention",
+          terminalBefore: new Date(Date.now() + 60_000).toISOString(),
+          memoryIds: [candidate.id],
+        }),
+      },
+    );
+    expect(previewResponse.status).toBe(201);
+    const preview = (await previewResponse.json()) as {
+      id: string;
+      status: string;
+      planHash: string;
+      candidateMemoryIds: string[];
+    };
+    expect(preview.status).toBe("previewed");
+    expect(preview.candidateMemoryIds).toEqual([candidate.id]);
+
+    const staleApply = await app.request(
+      workspacePath(workspaceId, `/knowledge/memories/maintenance/${preview.id}/apply`),
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ planHash: "b".repeat(64) }),
+      },
+    );
+    expect(staleApply.status).toBe(409);
+    const applyResponse = await app.request(
+      workspacePath(workspaceId, `/knowledge/memories/maintenance/${preview.id}/apply`),
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ planHash: preview.planHash }),
+      },
+    );
+    expect(applyResponse.status).toBe(200);
+    expect(((await applyResponse.json()) as { status: string }).status).toBe("applied");
+    const revertResponse = await app.request(
+      workspacePath(workspaceId, `/knowledge/memories/maintenance/${preview.id}/revert`),
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ planHash: preview.planHash }),
+      },
+    );
+    expect(revertResponse.status).toBe(200);
+    expect(((await revertResponse.json()) as { status: string }).status).toBe("reverted");
+    expect(await getKnowledgeMemory(dbClient.db, workspaceId, candidate.id)).toMatchObject({
+      status: "proposed",
+    });
+
+    for (const memoryId of [first.id, candidate.id]) {
+      expect(
+        (
+          await app.request(workspacePath(workspaceId, `/knowledge/memories/${memoryId}`), {
+            method: "DELETE",
+          })
+        ).status,
+      ).toBe(200);
+    }
   });
 
   test("workspace memory REST lifecycle: create(active)/list/search/pin/archive/edit + settings", async () => {
@@ -5432,14 +5804,16 @@ describe("API component integration", () => {
       const grant = await bootstrapMcpGrant(dbClient.db);
       const workspaceId = grant.workspaceId;
       const accountId = grant.accountId;
+      const memoryOwnerSubject = `human:memory-owner:${crypto.randomUUID()}`;
       const session = await createSession(dbClient.db, {
         accountId,
         workspaceId,
         initialMessage: "workspace memory MCP session",
         resources: [],
-        metadata: {},
+        metadata: { role: "Release Manager", memoryLabels: ["deploy", "release"] },
         model: "scripted-model",
         sandboxBackend: "none",
+        createdBySubjectId: memoryOwnerSubject,
       });
 
       prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: "opengeni" }], {
@@ -5511,6 +5885,87 @@ describe("API component integration", () => {
         createdBySessionId: session.id,
         metadata: { origin: "agent" },
       });
+
+      const privateSaved = JSON.parse(
+        mcpText(
+          await prepared.mcpServers[0]!.callTool("opengeni__memory_save", {
+            text: "The memory owner prefers release summaries with rollback evidence.",
+            kind: "preference",
+            scope: "user",
+            labels: ["release"],
+            subjectId: "forged:subject",
+            sessionId: crypto.randomUUID(),
+          }),
+        ),
+      ) as {
+        memory: {
+          id: string;
+          scopeSpec: { type: string; subjectId?: string };
+          labels: string[];
+        };
+      };
+      expect(privateSaved.memory.scopeSpec).toEqual({ type: "user" });
+      expect(privateSaved.memory.labels).toEqual(["release"]);
+      expect(
+        await getKnowledgeMemory(dbClient.db, workspaceId, privateSaved.memory.id, {
+          subjectId: memoryOwnerSubject,
+        }),
+      ).toMatchObject({ id: privateSaved.memory.id, scopeSpec: { type: "user" } });
+      expect(
+        await getKnowledgeMemory(dbClient.db, workspaceId, privateSaved.memory.id, {
+          subjectId: "worker:first-party-mcp",
+        }),
+      ).toBeNull();
+
+      const roleSaved = JSON.parse(
+        mcpText(
+          await prepared.mcpServers[0]!.callTool("opengeni__memory_save", {
+            text: "Release managers verify rollback steps before approving a deploy.",
+            kind: "procedural",
+            scope: "role",
+            labels: ["deploy"],
+            roleKey: "forged-role",
+          }),
+        ),
+      ) as {
+        memory: { id: string; scopeSpec: { type: string; roleKey?: string } };
+      };
+      expect(roleSaved.memory.scopeSpec).toEqual({
+        type: "role",
+        roleKey: "release-manager",
+      });
+
+      const ephemeralSaved = JSON.parse(
+        mcpText(
+          await prepared.mcpServers[0]!.callTool("opengeni__memory_save", {
+            text: "This release-session checkpoint expires after the review window.",
+            kind: "episodic",
+            scope: "ephemeral",
+            labels: ["release"],
+            valid_until: new Date(Date.now() + 60_000).toISOString(),
+            sessionId: crypto.randomUUID(),
+          }),
+        ),
+      ) as {
+        memory: { id: string; scopeSpec: { type: string; sessionId?: string } };
+      };
+      expect(ephemeralSaved.memory.scopeSpec).toEqual({
+        type: "ephemeral",
+        sessionId: session.id,
+      });
+
+      const privateSearch = JSON.parse(
+        mcpText(
+          await prepared.mcpServers[0]!.callTool("opengeni__memory_search", {
+            query: "rollback evidence summaries",
+            scope_types: ["user"],
+            labels: ["release"],
+          }),
+        ),
+      ) as { results: Array<{ memory: { id: string } }> };
+      expect(privateSearch.results.map((result) => result.memory.id)).toContain(
+        privateSaved.memory.id,
+      );
 
       const saveEvents = (await listSessionEvents(dbClient.db, workspaceId, session.id)).filter(
         (event) => event.type === "memory.saved",

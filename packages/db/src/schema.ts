@@ -1130,6 +1130,56 @@ export const knowledgeMemoryOperations = pgTable(
   }),
 );
 
+// Irreversible deletion intentionally retains only a text-free audit tombstone.
+// The deleted memory has no FK: the purpose of this row is to prove who deleted
+// which id, when, and how many visible relationships cascaded with it.
+export const knowledgeMemoryDeletionAudits = pgTable(
+  "knowledge_memory_deletion_audits",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    memoryId: uuid("memory_id").notNull(),
+    actorSubjectId: text("actor_subject_id").notNull(),
+    actorSessionId: uuid("actor_session_id"),
+    deletedRelationshipCount: integer("deleted_relationship_count").notNull().default(0),
+    deletedAt: timestamp("deleted_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    actorDeleted: index("knowledge_memory_deletion_audits_actor_deleted_idx").on(
+      table.workspaceId,
+      table.actorSubjectId,
+      table.deletedAt,
+    ),
+  }),
+);
+
+// Private-admin exports are exceptional reads across user scopes. Audit only
+// text-free operational facts so export accountability cannot itself retain
+// memory content, labels, source metadata, or search terms.
+export const knowledgeMemoryExportAudits = pgTable(
+  "knowledge_memory_export_audits",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    actorSubjectId: text("actor_subject_id").notNull(),
+    actorSessionId: uuid("actor_session_id"),
+    includedPrivate: boolean("included_private").notNull().default(true),
+    includedEphemeral: boolean("included_ephemeral").notNull().default(false),
+    memoryCount: integer("memory_count").notNull(),
+    relationshipCount: integer("relationship_count").notNull(),
+    exportedAt: timestamp("exported_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    actorExported: index("knowledge_memory_export_audits_actor_exported_idx").on(
+      table.workspaceId,
+      table.actorSubjectId,
+      table.exportedAt,
+    ),
+  }),
+);
+
 export const sessionTurns = pgTable(
   "session_turns",
   {

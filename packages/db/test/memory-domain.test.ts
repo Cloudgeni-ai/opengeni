@@ -145,6 +145,27 @@ describe("hierarchical scope applicability", () => {
     ).toContain("scope.ephemeral_expired");
   });
 
+  test("recomposes a persisted ephemeral row from its scope and validity columns", () => {
+    const persisted = {
+      scopeSpec: {
+        scopeType: "ephemeral" as const,
+        scopeSessionId: sessionId,
+      },
+      validFrom: "2026-07-18T11:00:00.000Z",
+      validUntil: "2026-07-18T13:00:00.000Z",
+    };
+    expect(isMemoryApplicable(persisted, context)).toBe(true);
+    expect(
+      isMemoryApplicable(
+        {
+          ...persisted,
+          validUntil: null,
+        },
+        context,
+      ),
+    ).toBe(false);
+  });
+
   test("legacy workspace rows preserve V1 applicability while other legacy scopes do not", () => {
     expect(isMemoryApplicable({ scope: "workspace" }, context)).toBe(true);
     expect(isMemoryApplicable({ scope: "historical-role" }, context)).toBe(false);

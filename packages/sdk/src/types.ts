@@ -2130,6 +2130,17 @@ export type KnowledgeMemoryKind =
   | "decision"
   | "preference";
 
+export type MemoryScopeType = "workspace" | "user" | "role" | "session" | "ephemeral" | "legacy";
+export type MemoryLabel = string;
+export type MemoryScopeSpec =
+  | { type: "workspace" }
+  | { type: "user" }
+  | { type: "role"; roleKey: MemoryLabel }
+  | { type: "session"; sessionId: string }
+  | { type: "ephemeral"; sessionId: string }
+  | { type: "legacy"; legacyScope: string };
+export type WritableMemoryScopeSpec = Exclude<MemoryScopeSpec, { type: "legacy" }>;
+
 export type KnowledgeSourceRef = {
   kind: "document_chunk" | "document" | "session_event" | "memory" | "external";
   id: string;
@@ -2144,6 +2155,8 @@ export type KnowledgeMemory = {
   status: KnowledgeMemoryStatus;
   kind: KnowledgeMemoryKind;
   scope: string;
+  scopeSpec: MemoryScopeSpec;
+  labels: MemoryLabel[];
   text: string;
   sourceRefs: KnowledgeSourceRef[];
   confidence: number;
@@ -2166,25 +2179,31 @@ export type CreateKnowledgeMemoryRequest = {
   status?: KnowledgeMemoryStatus | undefined;
   kind?: KnowledgeMemoryKind | undefined;
   scope?: string | undefined;
+  scopeSpec?: WritableMemoryScopeSpec | undefined;
+  labels?: MemoryLabel[] | undefined;
   text: string;
   sourceRefs?: KnowledgeSourceRef[] | undefined;
   confidence?: number | undefined;
   metadata?: Record<string, unknown> | undefined;
-  createdBySessionId?: string | undefined;
   pinned?: boolean | undefined;
   replacesId?: string | undefined;
+  validFrom?: string | undefined;
+  validUntil?: string | null | undefined;
 };
 
 export type UpdateKnowledgeMemoryRequest = {
   status?: KnowledgeMemoryStatus | undefined;
   kind?: KnowledgeMemoryKind | undefined;
   scope?: string | undefined;
+  scopeSpec?: WritableMemoryScopeSpec | undefined;
+  labels?: MemoryLabel[] | undefined;
   text?: string | undefined;
   sourceRefs?: KnowledgeSourceRef[] | undefined;
   confidence?: number | undefined;
   metadata?: Record<string, unknown> | undefined;
-  reviewedBy?: string | undefined;
   pinned?: boolean | undefined;
+  validFrom?: string | undefined;
+  validUntil?: string | null | undefined;
 };
 
 export type KnowledgeMemorySearchRequest = {
@@ -2192,6 +2211,9 @@ export type KnowledgeMemorySearchRequest = {
   status?: KnowledgeMemoryStatus | undefined;
   kind?: KnowledgeMemoryKind | undefined;
   scope?: string | undefined;
+  scopeType?: MemoryScopeType | undefined;
+  labels?: MemoryLabel[] | undefined;
+  includeExpired?: boolean | undefined;
   limit?: number | undefined;
 };
 
@@ -2200,8 +2222,21 @@ export type WorkspaceMemorySearchMode = "hybrid" | "vector" | "keyword";
 export type WorkspaceMemorySearchRequest = {
   query: string;
   kind?: KnowledgeMemoryKind | undefined;
+  scopeTypes?: MemoryScopeType[] | undefined;
+  labels?: MemoryLabel[] | undefined;
+  includeExpired?: boolean | undefined;
   limit?: number | undefined;
   mode?: WorkspaceMemorySearchMode | undefined;
+};
+
+export type WorkspaceMemoryScoreComponents = {
+  text: number;
+  scope: number;
+  labels: number;
+  freshness: number;
+  confidence: number;
+  provenance: number;
+  conflict: number;
 };
 
 export type WorkspaceMemorySearchResult = {
@@ -2210,11 +2245,92 @@ export type WorkspaceMemorySearchResult = {
   matchType: WorkspaceMemorySearchMode;
   vectorScore: number | null;
   keywordScore: number | null;
+  components?: WorkspaceMemoryScoreComponents | undefined;
+  reasonCodes: string[];
+  conflictMemoryIds: string[];
 };
 
 export type WorkspaceMemorySearchResponse = {
   results: WorkspaceMemorySearchResult[];
 };
+
+export type MemoryRelationshipType =
+  | "derived_from"
+  | "supersedes"
+  | "contradicts"
+  | "related_to"
+  | "applies_to"
+  | "depends_on";
+
+export type MemoryRelationship = {
+  id: string;
+  workspaceId: string;
+  sourceMemoryId: string;
+  targetMemoryId: string;
+  type: MemoryRelationshipType;
+  actorSessionId: string | null;
+  createdAt: string;
+};
+
+export type CreateMemoryRelationshipRequest = {
+  sourceMemoryId: string;
+  targetMemoryId: string;
+  type: MemoryRelationshipType;
+};
+
+export type ListMemoryRelationshipsRequest = {
+  memoryId?: string | undefined;
+  type?: MemoryRelationshipType | undefined;
+};
+
+export type MemoryExportRequest = {
+  includeEphemeral?: boolean | undefined;
+  includePrivate?: boolean | undefined;
+};
+
+export type MemoryExportResponse = {
+  version: 1;
+  workspaceId: string;
+  generatedAt: string;
+  includesEphemeral: boolean;
+  memories: KnowledgeMemory[];
+  relationships: MemoryRelationship[];
+};
+
+export type DeleteMemoryRequest = {
+  includePrivate?: boolean | undefined;
+};
+
+export type DeleteMemoryResponse = {
+  deleted: true;
+  memoryId: string;
+  deletedRelationshipCount: number;
+};
+
+export type MemoryMaintenanceOperationType = "retention" | "reconcile";
+export type MemoryMaintenanceOperationStatus = "previewed" | "applied" | "reverted";
+
+export type PreviewMemoryMaintenanceRequest = {
+  type?: MemoryMaintenanceOperationType | undefined;
+  terminalBefore?: string | undefined;
+  expiredBefore?: string | undefined;
+  memoryIds?: string[] | undefined;
+};
+
+export type MemoryMaintenanceOperation = {
+  id: string;
+  workspaceId: string;
+  type: MemoryMaintenanceOperationType;
+  status: MemoryMaintenanceOperationStatus;
+  planHash: string;
+  candidateMemoryIds: string[];
+  reasonCodes: string[];
+  createdAt: string;
+  appliedAt: string | null;
+  revertedAt: string | null;
+};
+
+export type ApplyMemoryMaintenanceRequest = { planHash: string };
 
 // --- Capability packs ---------------------------------------------------------
 

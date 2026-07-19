@@ -13,6 +13,15 @@ import {
   getKnowledgeMemory,
   saveWorkspaceMemory,
   correctWorkspaceMemory,
+  createMemoryRelationship,
+  listMemoryRelationships,
+  deleteMemoryRelationship,
+  exportWorkspaceMemories,
+  deleteWorkspaceMemory,
+  previewMemoryMaintenance,
+  applyMemoryMaintenance,
+  revertMemoryMaintenance,
+  getSessionMemoryContext,
   searchWorkspaceMemories,
   resolveWorkspaceMemoryBlock,
   updateKnowledgeMemory,
@@ -50,6 +59,7 @@ import {
   updateScheduledTaskRun,
   updateSessionMcpServerCredentials,
   withRlsContext,
+  withWorkspaceMemoryRls,
   upsertCapabilityCatalogItem,
 } from "@opengeni/db";
 import { submitTestHumanPrompt } from "./helpers/session-control";
@@ -1322,6 +1332,7 @@ describe("DB integration", () => {
         status: "proposed",
         kind: "semantic",
         scope: "workspace",
+        scopeType: "workspace",
         text,
         textHash: hashMemoryText(text),
       })
@@ -1518,6 +1529,7 @@ describe("DB integration", () => {
         status: "active",
         kind: "semantic",
         scope: "workspace",
+        scopeType: "workspace",
         text: "Active row with a colliding short id.",
         textHash: hashMemoryText("Active row with a colliding short id."),
       },
@@ -1528,6 +1540,7 @@ describe("DB integration", () => {
         status: "archived",
         kind: "semantic",
         scope: "workspace",
+        scopeType: "workspace",
         text: "Archived row with the same short id.",
         textHash: hashMemoryText("Archived row with the same short id."),
       },
@@ -1560,6 +1573,7 @@ describe("DB integration", () => {
         status: "active",
         kind: "semantic",
         scope: "workspace",
+        scopeType: "workspace",
         text: "First live row with a colliding short id.",
         textHash: hashMemoryText("First live row with a colliding short id."),
       },
@@ -1570,6 +1584,7 @@ describe("DB integration", () => {
         status: "approved",
         kind: "semantic",
         scope: "workspace",
+        scopeType: "workspace",
         text: "Second live row with a colliding short id.",
         textHash: hashMemoryText("Second live row with a colliding short id."),
       },
@@ -2069,6 +2084,679 @@ describe("DB integration", () => {
     await enableWorkspaceMemory(empty.workspaceId);
     const emptyBlock = await resolveWorkspaceMemoryBlock(dbClient.db, empty.workspaceId);
     expect(emptyBlock).toContain("currently empty");
+  });
+
+  test("hierarchical scope applicability and FORCE RLS isolate user memory by subject", async () => {
+    const appRoleUrl = await createRlsAppRole(dbClient.db, services.databaseUrl);
+    const appDbClient = createDb(appRoleUrl);
+    try {
+      const grant = await testGrant(dbClient.db);
+      const subjectA = grant.subjectId;
+      const subjectB = `test:db:subject-b:${crypto.randomUUID()}`;
+      const accessA = { subjectId: subjectA };
+      const accessB = { subjectId: subjectB };
+      const session = await createSession(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        initialMessage: "hierarchical memory context",
+        resources: [],
+        metadata: {
+          role: "Release Manager",
+          memoryLabels: ["ope-29", "Deploy"],
+        },
+        model: "scripted-model",
+        sandboxBackend: "none",
+        createdBySubjectId: subjectA,
+      });
+      await enableWorkspaceMemory(grant.workspaceId);
+
+      const save = async (
+        text: string,
+        scopeSpec: Parameters<typeof saveWorkspaceMemory>[1]["scopeSpec"],
+        access = accessA,
+        labels?: string[],
+        validUntil?: Date,
+      ) =>
+        await saveWorkspaceMemory(appDbClient.db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          text,
+          scopeSpec,
+          access,
+          labels,
+          validUntil,
+        });
+
+      const workspace = await save("OPE29 scope marker workspace", {
+        type: "workspace",
+      });
+      const matchingLabel = await save(
+        "OPE29 scope marker matching label",
+        { type: "workspace" },
+        accessA,
+        ["deploy"],
+      );
+      const mismatchedLabel = await save(
+        "OPE29 scope marker mismatched label",
+        { type: "workspace" },
+        accessA,
+        ["unrelated"],
+      );
+      const userA = await save("OPE29 scope marker user A", {
+        type: "user",
+        subjectId: subjectA,
+      });
+      const userB = await save(
+        "OPE29 scope marker user B",
+        { type: "user", subjectId: subjectB },
+        accessB,
+      );
+      const role = await save("OPE29 scope marker role", {
+        type: "role",
+        roleKey: "release-manager",
+      });
+      const wrongRole = await save("OPE29 scope marker wrong role", {
+        type: "role",
+        roleKey: "support",
+      });
+      const sessionOnly = await save("OPE29 scope marker session", {
+        type: "session",
+        sessionId: session.id,
+      });
+      const ephemeral = await save(
+        "OPE29 scope marker ephemeral",
+        { type: "ephemeral", sessionId: session.id },
+        accessA,
+        undefined,
+        new Date(Date.now() + 60_000),
+      );
+
+      await expect(
+        save("OPE29 scope marker forged user", { type: "user", subjectId: subjectB }, accessA),
+      ).rejects.toThrow(/authenticated subject/i);
+
+      const context = await getSessionMemoryContext(appDbClient.db, grant.workspaceId, session.id);
+      expect(context).toMatchObject({
+        access: accessA,
+        roleKey: "release-manager",
+        sessionId: session.id,
+        memoryLabels: ["deploy", "ope-29"],
+      });
+      const hits = await searchWorkspaceMemories(appDbClient.db, grant.workspaceId, {
+        query: "OPE29 scope marker",
+        mode: "keyword",
+        limit: 20,
+        context: context!,
+      });
+      const hitIds = new Set(hits.map((hit) => hit.memory.id));
+      for (const expected of [
+        workspace,
+        matchingLabel,
+        mismatchedLabel,
+        userA,
+        role,
+        sessionOnly,
+        ephemeral,
+      ]) {
+        expect(hitIds.has(expected.memory.id)).toBe(true);
+      }
+      expect(hitIds.has(userB.memory.id)).toBe(false);
+      expect(hitIds.has(wrongRole.memory.id)).toBe(false);
+
+      const block = await resolveWorkspaceMemoryBlock(appDbClient.db, grant.workspaceId, context!);
+      expect(block).toContain(workspace.memory.text);
+      expect(block).toContain(matchingLabel.memory.text);
+      expect(block).toContain(userA.memory.text);
+      expect(block).toContain(role.memory.text);
+      expect(block).toContain(sessionOnly.memory.text);
+      expect(block).toContain(ephemeral.memory.text);
+      expect(block).not.toContain(mismatchedLabel.memory.text);
+      expect(block).not.toContain(userB.memory.text);
+      expect(block).not.toContain(wrongRole.memory.text);
+
+      const visibleToA = await listKnowledgeMemories(appDbClient.db, grant.workspaceId, {
+        access: accessA,
+        limit: 100,
+      });
+      const visibleToB = await listKnowledgeMemories(appDbClient.db, grant.workspaceId, {
+        access: accessB,
+        limit: 100,
+      });
+      const visibleWithoutSubject = await listKnowledgeMemories(appDbClient.db, grant.workspaceId, {
+        limit: 100,
+      });
+      expect(visibleToA.map((memory) => memory.id)).toContain(userA.memory.id);
+      expect(visibleToA.map((memory) => memory.id)).not.toContain(userB.memory.id);
+      expect(visibleToB.map((memory) => memory.id)).toContain(userB.memory.id);
+      expect(visibleToB.map((memory) => memory.id)).not.toContain(userA.memory.id);
+      expect(visibleWithoutSubject.map((memory) => memory.id)).not.toContain(userA.memory.id);
+      expect(visibleWithoutSubject.map((memory) => memory.id)).not.toContain(userB.memory.id);
+
+      const forced = await appDbClient.db.execute<{
+        relname: string;
+        forced: boolean;
+      }>(dbSql`
+        select relname, relforcerowsecurity as forced
+        from pg_class
+        where relname in (
+          'knowledge_memories',
+          'knowledge_memory_relationships',
+          'knowledge_memory_operations',
+          'knowledge_memory_deletion_audits',
+          'knowledge_memory_export_audits'
+        )
+        order by relname
+      `);
+      expect(forced).toHaveLength(5);
+      expect(forced.every((row) => row.forced)).toBe(true);
+    } finally {
+      await appDbClient.close();
+    }
+  });
+
+  test("memory relationships canonicalize symmetric edges and surface unresolved conflicts", async () => {
+    const grant = await testGrant(dbClient.db);
+    const access = { subjectId: grant.subjectId };
+    await enableWorkspaceMemory(grant.workspaceId);
+    const first = await saveWorkspaceMemory(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      text: "OPE29 conflict marker uses blue deployments.",
+      access,
+    });
+    const second = await saveWorkspaceMemory(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      text: "OPE29 conflict marker forbids blue deployments.",
+      access,
+    });
+
+    const edge = await createMemoryRelationship(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sourceMemoryId: first.memory.id,
+      targetMemoryId: second.memory.id,
+      type: "contradicts",
+      access,
+    });
+    const reverse = await createMemoryRelationship(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sourceMemoryId: second.memory.id,
+      targetMemoryId: first.memory.id,
+      type: "contradicts",
+      access,
+    });
+    expect(reverse.id).toBe(edge.id);
+    expect(await listMemoryRelationships(dbClient.db, grant.workspaceId, { access })).toHaveLength(
+      1,
+    );
+
+    const hits = await searchWorkspaceMemories(dbClient.db, grant.workspaceId, {
+      query: "OPE29 conflict marker",
+      mode: "keyword",
+      context: { access },
+    });
+    for (const memory of [first.memory, second.memory]) {
+      const hit = hits.find((candidate) => candidate.memory.id === memory.id);
+      expect(hit?.components.conflict).toBe(0.85);
+      expect(hit?.reasonCodes).toContain("conflict.unresolved");
+      expect(hit?.conflictMemoryIds).toEqual([
+        memory.id === first.memory.id ? second.memory.id : first.memory.id,
+      ]);
+    }
+    expect(
+      await resolveWorkspaceMemoryBlock(dbClient.db, grant.workspaceId, {
+        access,
+      }),
+    ).toContain("conflict");
+
+    const related = await createMemoryRelationship(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sourceMemoryId: first.memory.id,
+      targetMemoryId: second.memory.id,
+      type: "related_to",
+      access,
+    });
+    expect(await deleteMemoryRelationship(dbClient.db, grant.workspaceId, related.id, access)).toBe(
+      true,
+    );
+    expect(await deleteMemoryRelationship(dbClient.db, grant.workspaceId, related.id, access)).toBe(
+      false,
+    );
+
+    const foreign = await testGrant(dbClient.db);
+    const foreignMemory = await saveWorkspaceMemory(dbClient.db, {
+      accountId: foreign.accountId,
+      workspaceId: foreign.workspaceId,
+      text: "Foreign endpoint",
+    });
+    await expect(
+      createMemoryRelationship(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sourceMemoryId: first.memory.id,
+        targetMemoryId: foreignMemory.memory.id,
+        type: "related_to",
+        access,
+      }),
+    ).rejects.toThrow(/both relationship endpoints/i);
+  });
+
+  test("deterministic export is subject-safe and hard delete leaves only a text-free audit tombstone", async () => {
+    const appRoleUrl = await createRlsAppRole(dbClient.db, services.databaseUrl);
+    const appDbClient = createDb(appRoleUrl);
+    try {
+      const grant = await testGrant(dbClient.db);
+      const subjectA = grant.subjectId;
+      const subjectB = `test:db:subject-b:${crypto.randomUUID()}`;
+      const accessA = { subjectId: subjectA };
+      const accessB = { subjectId: subjectB };
+      const session = await createSession(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        initialMessage: "export fixture",
+        resources: [],
+        metadata: {},
+        model: "scripted-model",
+        sandboxBackend: "none",
+        createdBySubjectId: subjectA,
+      });
+      const shared = await saveWorkspaceMemory(appDbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        text: "Export shared marker",
+        sessionId: session.id,
+        sourceRefs: [
+          {
+            kind: "external",
+            id: "source-export-shared",
+            uri: "https://example.com/export-shared",
+            metadata: {},
+          },
+        ],
+        access: accessA,
+      });
+      expect(shared.memory.sourceRefs).toEqual([
+        {
+          kind: "external",
+          id: "source-export-shared",
+          uri: "https://example.com/export-shared",
+          metadata: {},
+        },
+        {
+          kind: "session_event",
+          id: session.id,
+          metadata: {},
+        },
+      ]);
+      const userA = await saveWorkspaceMemory(appDbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        text: "Export subject A marker",
+        scopeSpec: { type: "user", subjectId: subjectA },
+        access: accessA,
+      });
+      const userB = await saveWorkspaceMemory(appDbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        text: "Export subject B marker",
+        scopeSpec: { type: "user", subjectId: subjectB },
+        access: accessB,
+      });
+      const ephemeral = await saveWorkspaceMemory(appDbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        text: "Export ephemeral marker",
+        scopeSpec: { type: "ephemeral", sessionId: session.id },
+        validUntil: new Date(Date.now() + 60_000),
+        access: accessA,
+      });
+      await createMemoryRelationship(appDbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sourceMemoryId: shared.memory.id,
+        targetMemoryId: userA.memory.id,
+        type: "related_to",
+        access: accessA,
+      });
+
+      const generatedAt = new Date("2026-07-19T00:00:00.000Z");
+      const first = await exportWorkspaceMemories(appDbClient.db, grant.workspaceId, {
+        access: accessA,
+        generatedAt,
+      });
+      const second = await exportWorkspaceMemories(appDbClient.db, grant.workspaceId, {
+        access: accessA,
+        generatedAt,
+      });
+      expect(second).toEqual(first);
+      expect(first.memories.map((memory) => memory.id)).toEqual(
+        [...first.memories.map((memory) => memory.id)].sort(),
+      );
+      expect(first.memories.map((memory) => memory.id)).toContain(userA.memory.id);
+      expect(first.memories.map((memory) => memory.id)).not.toContain(userB.memory.id);
+      expect(first.memories.map((memory) => memory.id)).not.toContain(ephemeral.memory.id);
+
+      const withEphemeral = await exportWorkspaceMemories(appDbClient.db, grant.workspaceId, {
+        access: accessA,
+        generatedAt,
+        includeEphemeral: true,
+      });
+      expect(withEphemeral.memories.map((memory) => memory.id)).toContain(ephemeral.memory.id);
+      expect(withEphemeral.includesEphemeral).toBe(true);
+
+      const privateExport = await exportWorkspaceMemories(appDbClient.db, grant.workspaceId, {
+        accountId: grant.accountId,
+        access: { subjectId: subjectA, privateAdmin: true },
+        generatedAt,
+        includeEphemeral: true,
+        actorSessionId: session.id,
+      });
+      expect(privateExport.memories.map((memory) => memory.id)).toContain(userA.memory.id);
+      expect(privateExport.memories.map((memory) => memory.id)).toContain(userB.memory.id);
+      expect(privateExport.memories.map((memory) => memory.id)).toContain(ephemeral.memory.id);
+
+      const exportAudits = await withWorkspaceMemoryRls(
+        appDbClient.db,
+        grant.workspaceId,
+        accessA,
+        async (scopedDb) =>
+          await scopedDb.execute<{
+            actorSubjectId: string;
+            actorSessionId: string | null;
+            includedPrivate: boolean;
+            includedEphemeral: boolean;
+            memoryCount: number;
+            relationshipCount: number;
+          }>(dbSql`
+            select actor_subject_id as "actorSubjectId",
+                   actor_session_id as "actorSessionId",
+                   included_private as "includedPrivate",
+                   included_ephemeral as "includedEphemeral",
+                   memory_count as "memoryCount",
+                   relationship_count as "relationshipCount"
+            from knowledge_memory_export_audits
+          `),
+      );
+      expect(exportAudits).toEqual([
+        {
+          actorSubjectId: subjectA,
+          actorSessionId: session.id,
+          includedPrivate: true,
+          includedEphemeral: true,
+          memoryCount: privateExport.memories.length,
+          relationshipCount: privateExport.relationships.length,
+        },
+      ]);
+      const exportAuditColumns = await appDbClient.db.execute<{
+        columnName: string;
+      }>(dbSql`
+        select column_name as "columnName"
+        from information_schema.columns
+        where table_schema = current_schema()
+          and table_name = 'knowledge_memory_export_audits'
+      `);
+      expect(exportAuditColumns.map((column) => column.columnName)).not.toContain("text");
+      expect(exportAuditColumns.map((column) => column.columnName)).not.toContain("metadata");
+
+      const deletion = await deleteWorkspaceMemory(appDbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        memoryId: userA.memory.id,
+        access: accessA,
+      });
+      expect(deletion).toEqual({
+        deleted: true,
+        memoryId: userA.memory.id,
+        deletedRelationshipCount: 1,
+      });
+      expect(
+        await getKnowledgeMemory(appDbClient.db, grant.workspaceId, userA.memory.id, accessA),
+      ).toBeNull();
+      expect(
+        await listMemoryRelationships(appDbClient.db, grant.workspaceId, {
+          access: accessA,
+        }),
+      ).toHaveLength(0);
+
+      const auditA = await withWorkspaceMemoryRls(
+        appDbClient.db,
+        grant.workspaceId,
+        accessA,
+        async (scopedDb) =>
+          await scopedDb.execute<{
+            memoryId: string;
+            actorSubjectId: string;
+            deletedRelationshipCount: number;
+          }>(dbSql`
+            select memory_id as "memoryId",
+                   actor_subject_id as "actorSubjectId",
+                   deleted_relationship_count as "deletedRelationshipCount"
+            from knowledge_memory_deletion_audits
+          `),
+      );
+      expect(auditA).toEqual([
+        {
+          memoryId: userA.memory.id,
+          actorSubjectId: subjectA,
+          deletedRelationshipCount: 1,
+        },
+      ]);
+      const auditB = await withWorkspaceMemoryRls(
+        appDbClient.db,
+        grant.workspaceId,
+        accessB,
+        async (scopedDb) =>
+          await scopedDb.execute<{ count: number }>(dbSql`
+            select count(*)::int as count from knowledge_memory_deletion_audits
+          `),
+      );
+      expect(Number(auditB[0]?.count ?? 0)).toBe(0);
+      const auditColumns = await appDbClient.db.execute<{
+        columnName: string;
+      }>(dbSql`
+        select column_name as "columnName"
+        from information_schema.columns
+        where table_schema = current_schema()
+          and table_name = 'knowledge_memory_deletion_audits'
+      `);
+      expect(auditColumns.map((column) => column.columnName)).not.toContain("text");
+      expect(auditColumns.map((column) => column.columnName)).not.toContain("metadata");
+    } finally {
+      await appDbClient.close();
+    }
+  });
+
+  test("maintenance preview/apply/revert is hash-fenced, optimistic, atomic, and text-free", async () => {
+    const appRoleUrl = await createRlsAppRole(dbClient.db, services.databaseUrl);
+    const appDbClient = createDb(appRoleUrl);
+    try {
+      const grant = await testGrant(dbClient.db);
+      const access = { subjectId: grant.subjectId };
+      const first = await saveWorkspaceMemory(appDbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        text: "Maintenance secret marker first",
+        validFrom: new Date("2026-01-01T00:00:00.000Z"),
+        validUntil: new Date("2026-01-02T00:00:00.000Z"),
+        access,
+      });
+      const second = await saveWorkspaceMemory(appDbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        text: "Maintenance secret marker second",
+        validFrom: new Date("2026-01-01T00:00:00.000Z"),
+        validUntil: new Date("2026-01-02T00:00:00.000Z"),
+        access,
+      });
+      const preview = await previewMemoryMaintenance(appDbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        type: "retention",
+        expiredBefore: new Date("2026-02-01T00:00:00.000Z"),
+        now: new Date("2026-03-01T00:00:00.000Z"),
+        access,
+      });
+      expect(preview.candidateMemoryIds).toEqual([first.memory.id, second.memory.id].sort());
+      expect(preview.reasonCodes).toEqual(["retention.expired"]);
+      await expect(
+        applyMemoryMaintenance(
+          appDbClient.db,
+          grant.workspaceId,
+          preview.id,
+          "0".repeat(64),
+          access,
+        ),
+      ).rejects.toThrow(/hash or status/i);
+
+      await updateKnowledgeMemory(appDbClient.db, grant.workspaceId, second.memory.id, {
+        labels: ["changed-after-preview"],
+        access,
+      });
+      await expect(
+        applyMemoryMaintenance(
+          appDbClient.db,
+          grant.workspaceId,
+          preview.id,
+          preview.planHash,
+          access,
+          new Date("2026-03-02T00:00:00.000Z"),
+        ),
+      ).rejects.toThrow(/precondition changed/i);
+      expect(
+        await getKnowledgeMemory(appDbClient.db, grant.workspaceId, first.memory.id, access),
+      ).toMatchObject({
+        status: "active",
+      });
+      expect(
+        await getKnowledgeMemory(appDbClient.db, grant.workspaceId, second.memory.id, access),
+      ).toMatchObject({
+        status: "active",
+      });
+
+      const retry = await previewMemoryMaintenance(appDbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        type: "retention",
+        expiredBefore: new Date("2026-02-01T00:00:00.000Z"),
+        now: new Date("2026-03-03T00:00:00.000Z"),
+        access,
+      });
+      const applied = await applyMemoryMaintenance(
+        appDbClient.db,
+        grant.workspaceId,
+        retry.id,
+        retry.planHash,
+        access,
+        new Date("2026-03-04T00:00:00.000Z"),
+      );
+      expect(applied.status).toBe("applied");
+      expect(
+        await getKnowledgeMemory(appDbClient.db, grant.workspaceId, first.memory.id, access),
+      ).toMatchObject({
+        status: "archived",
+      });
+      const reverted = await revertMemoryMaintenance(
+        appDbClient.db,
+        grant.workspaceId,
+        retry.id,
+        retry.planHash,
+        access,
+        new Date("2026-03-05T00:00:00.000Z"),
+      );
+      expect(reverted.status).toBe("reverted");
+      expect(
+        await getKnowledgeMemory(appDbClient.db, grant.workspaceId, first.memory.id, access),
+      ).toMatchObject({
+        status: "active",
+      });
+
+      const storedPlans = await withWorkspaceMemoryRls(
+        appDbClient.db,
+        grant.workspaceId,
+        access,
+        async (scopedDb) =>
+          await scopedDb.execute<{
+            plan: string;
+            inversePlan: string | null;
+          }>(dbSql`
+            select plan::text as plan, inverse_plan::text as "inversePlan"
+            from knowledge_memory_operations
+            order by created_at
+          `),
+      );
+      expect(JSON.stringify(storedPlans)).not.toContain("Maintenance secret marker");
+    } finally {
+      await appDbClient.close();
+    }
+  });
+
+  test("concurrent corrections select exactly one replacement winner", async () => {
+    const grant = await testGrant(dbClient.db);
+    const access = { subjectId: grant.subjectId };
+    const original = await saveWorkspaceMemory(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      text: "Concurrent correction predecessor",
+      access,
+    });
+    const results = await Promise.allSettled([
+      correctWorkspaceMemory(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        id: original.memory.id,
+        replacementText: "Concurrent correction winner alpha",
+        access,
+      }),
+      correctWorkspaceMemory(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        id: original.memory.id,
+        replacementText: "Concurrent correction winner beta",
+        access,
+      }),
+    ]);
+    const fulfilled = results.filter(
+      (
+        result,
+      ): result is PromiseFulfilledResult<Awaited<ReturnType<typeof correctWorkspaceMemory>>> =>
+        result.status === "fulfilled",
+    );
+    const rejected = results.filter(
+      (result): result is PromiseRejectedResult => result.status === "rejected",
+    );
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect(String(rejected[0]!.reason)).toMatch(/no longer correctable/i);
+
+    const predecessor = await getKnowledgeMemory(
+      dbClient.db,
+      grant.workspaceId,
+      original.memory.id,
+      access,
+    );
+    expect(predecessor).toMatchObject({
+      status: "superseded",
+      supersededById: fulfilled[0]!.value.replacement!.id,
+    });
+    const active = await listKnowledgeMemories(dbClient.db, grant.workspaceId, {
+      status: "active",
+      access,
+      limit: 100,
+    });
+    expect(active).toHaveLength(1);
+    expect(active[0]?.id).toBe(fulfilled[0]!.value.replacement!.id);
+    const edges = await listMemoryRelationships(dbClient.db, grant.workspaceId, {
+      type: "supersedes",
+      access,
+    });
+    expect(edges).toHaveLength(1);
+    expect(edges[0]).toMatchObject({
+      sourceMemoryId: fulfilled[0]!.value.replacement!.id,
+      targetMemoryId: original.memory.id,
+    });
   });
 
   test("RLS policies isolate capability, pack, and social rows for a non-owner app role", async () => {

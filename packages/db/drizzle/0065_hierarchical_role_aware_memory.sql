@@ -201,6 +201,17 @@ CREATE UNIQUE INDEX IF NOT EXISTS "knowledge_memory_relationships_edge_uq"
   ON "knowledge_memory_relationships" (
     "workspace_id", "source_memory_id", "target_memory_id", "relationship_type"
   );
+-- Symmetric relationships have one database identity regardless of endpoint
+-- order. Application canonicalization makes normal writes deterministic; this
+-- expression index also protects against reverse edges from raw/older writers.
+CREATE UNIQUE INDEX IF NOT EXISTS "knowledge_memory_relationships_symmetric_edge_uq"
+  ON "knowledge_memory_relationships" (
+    "workspace_id",
+    "relationship_type",
+    LEAST("source_memory_id", "target_memory_id"),
+    GREATEST("source_memory_id", "target_memory_id")
+  )
+  WHERE "relationship_type" IN ('contradicts', 'related_to');
 CREATE INDEX IF NOT EXISTS "knowledge_memory_relationships_source_idx"
   ON "knowledge_memory_relationships" ("workspace_id", "source_memory_id", "created_at");
 CREATE INDEX IF NOT EXISTS "knowledge_memory_relationships_target_idx"
@@ -239,6 +250,58 @@ CREATE TABLE IF NOT EXISTS "knowledge_memory_operations" (
 CREATE INDEX IF NOT EXISTS "knowledge_memory_operations_actor_created_idx"
   ON "knowledge_memory_operations" ("workspace_id", "actor_subject_id", "created_at" DESC);
 
+CREATE TABLE IF NOT EXISTS "knowledge_memory_deletion_audits" (
+  "id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+  "account_id" uuid NOT NULL,
+  "workspace_id" uuid NOT NULL,
+  "memory_id" uuid NOT NULL,
+  "actor_subject_id" text NOT NULL,
+  "actor_session_id" uuid,
+  "deleted_relationship_count" integer NOT NULL DEFAULT 0,
+  "deleted_at" timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT "knowledge_memory_deletion_audits_workspace_account_fk"
+    FOREIGN KEY ("workspace_id", "account_id")
+    REFERENCES "workspaces"("id", "account_id") ON DELETE CASCADE,
+  CONSTRAINT "knowledge_memory_deletion_audits_actor_session_fk"
+    FOREIGN KEY ("workspace_id", "actor_session_id")
+    REFERENCES "sessions"("workspace_id", "id") ON DELETE SET NULL ("actor_session_id"),
+  CONSTRAINT "knowledge_memory_deletion_audits_subject_nonempty"
+    CHECK (length(btrim("actor_subject_id")) > 0),
+  CONSTRAINT "knowledge_memory_deletion_audits_relationship_count_check"
+    CHECK ("deleted_relationship_count" >= 0)
+);
+
+CREATE INDEX IF NOT EXISTS "knowledge_memory_deletion_audits_actor_deleted_idx"
+  ON "knowledge_memory_deletion_audits" ("workspace_id", "actor_subject_id", "deleted_at" DESC);
+
+CREATE TABLE IF NOT EXISTS "knowledge_memory_export_audits" (
+  "id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+  "account_id" uuid NOT NULL,
+  "workspace_id" uuid NOT NULL,
+  "actor_subject_id" text NOT NULL,
+  "actor_session_id" uuid,
+  "included_private" boolean NOT NULL DEFAULT true,
+  "included_ephemeral" boolean NOT NULL DEFAULT false,
+  "memory_count" integer NOT NULL,
+  "relationship_count" integer NOT NULL,
+  "exported_at" timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT "knowledge_memory_export_audits_workspace_account_fk"
+    FOREIGN KEY ("workspace_id", "account_id")
+    REFERENCES "workspaces"("id", "account_id") ON DELETE CASCADE,
+  CONSTRAINT "knowledge_memory_export_audits_actor_session_fk"
+    FOREIGN KEY ("workspace_id", "actor_session_id")
+    REFERENCES "sessions"("workspace_id", "id") ON DELETE SET NULL ("actor_session_id"),
+  CONSTRAINT "knowledge_memory_export_audits_subject_nonempty"
+    CHECK (length(btrim("actor_subject_id")) > 0),
+  CONSTRAINT "knowledge_memory_export_audits_private_check"
+    CHECK ("included_private"),
+  CONSTRAINT "knowledge_memory_export_audits_counts_check"
+    CHECK ("memory_count" >= 0 AND "relationship_count" >= 0)
+);
+
+CREATE INDEX IF NOT EXISTS "knowledge_memory_export_audits_actor_exported_idx"
+  ON "knowledge_memory_export_audits" ("workspace_id", "actor_subject_id", "exported_at" DESC);
+
 CREATE OR REPLACE FUNCTION opengeni_private.current_memory_private_admin()
 RETURNS boolean
 LANGUAGE sql
@@ -251,6 +314,10 @@ ALTER TABLE "knowledge_memory_relationships" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "knowledge_memory_relationships" FORCE ROW LEVEL SECURITY;
 ALTER TABLE "knowledge_memory_operations" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "knowledge_memory_operations" FORCE ROW LEVEL SECURITY;
+ALTER TABLE "knowledge_memory_deletion_audits" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "knowledge_memory_deletion_audits" FORCE ROW LEVEL SECURITY;
+ALTER TABLE "knowledge_memory_export_audits" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "knowledge_memory_export_audits" FORCE ROW LEVEL SECURITY;
 
 DO $$
 BEGIN
@@ -271,6 +338,18 @@ BEGIN
     WHERE schemaname = current_schema() AND tablename = 'knowledge_memory_operations' AND policyname = 'workspace_isolation'
   ) THEN
     DROP POLICY workspace_isolation ON "knowledge_memory_operations";
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM pg_policies
+    WHERE schemaname = current_schema() AND tablename = 'knowledge_memory_deletion_audits' AND policyname = 'workspace_isolation'
+  ) THEN
+    DROP POLICY workspace_isolation ON "knowledge_memory_deletion_audits";
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM pg_policies
+    WHERE schemaname = current_schema() AND tablename = 'knowledge_memory_export_audits' AND policyname = 'workspace_isolation'
+  ) THEN
+    DROP POLICY workspace_isolation ON "knowledge_memory_export_audits";
   END IF;
 END $$;
 
@@ -321,6 +400,38 @@ CREATE POLICY workspace_isolation ON "knowledge_memory_relationships"
   );
 
 CREATE POLICY workspace_isolation ON "knowledge_memory_operations"
+  USING (
+    opengeni_private.workspace_rls_visible(account_id, workspace_id)
+    AND (
+      actor_subject_id = opengeni_private.current_subject_id()
+      OR opengeni_private.current_memory_private_admin()
+    )
+  )
+  WITH CHECK (
+    opengeni_private.workspace_rls_visible(account_id, workspace_id)
+    AND (
+      actor_subject_id = opengeni_private.current_subject_id()
+      OR opengeni_private.current_memory_private_admin()
+    )
+  );
+
+CREATE POLICY workspace_isolation ON "knowledge_memory_deletion_audits"
+  USING (
+    opengeni_private.workspace_rls_visible(account_id, workspace_id)
+    AND (
+      actor_subject_id = opengeni_private.current_subject_id()
+      OR opengeni_private.current_memory_private_admin()
+    )
+  )
+  WITH CHECK (
+    opengeni_private.workspace_rls_visible(account_id, workspace_id)
+    AND (
+      actor_subject_id = opengeni_private.current_subject_id()
+      OR opengeni_private.current_memory_private_admin()
+    )
+  );
+
+CREATE POLICY workspace_isolation ON "knowledge_memory_export_audits"
   USING (
     opengeni_private.workspace_rls_visible(account_id, workspace_id)
     AND (

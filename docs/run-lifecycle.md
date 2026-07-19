@@ -223,6 +223,39 @@ the session's sandbox on its next turn — decoupled from the RunState blob.
 See issue #35 for the rationale and the dual-write → flagged-read → default-flip
 migration history.
 
+### Workspace knowledge memory is bounded retrieval context
+
+`knowledge_memories` is a fourth, separate continuity surface, not conversation
+truth. Agent-visible `active ∪ approved` records compose typed workspace, user,
+role, session, and ephemeral scopes. Applicability derives only from the signed
+session id, the session's persisted creator subject, and normalized persisted
+`metadata.role`/`metadata.memoryLabels`; public payloads cannot select another
+subject, role, session, or actor. Role/label matches affect relevance and never
+grant access. Missing trusted user context fails closed under subject-aware FORCE
+RLS.
+
+When `settings.memoryEnabled` is on, `resolveWorkspaceMemoryBlock` filters before
+ranking, considers at most 50 candidates, excludes episodic records, and emits
+only whole records within an estimated 2,500-token budget. Labeled workspace
+records enter standing context only on a persisted task-label match; explicit
+search may still find them. Search results expose bounded text/scope/label/
+freshness/confidence/provenance/conflict components and stable reason codes.
+Unresolved contradictions remain visible and penalized rather than silently
+choosing a winner.
+
+All writes continue through the sanitizing/deduplicating memory gate. Corrections
+atomically supersede or archive. Relationships make derivation, supersession, and
+conflict provenance explicit. Retention/reconciliation are audited
+preview → exact plan-hash and row-version-fenced apply → preconditioned revert
+capabilities; hard delete is deliberately irreversible and leaves only a
+text-free audit tombstone. Private export is workspace-admin-only, deterministic,
+and audited without memory text or metadata. These primitives compose existing
+users, workspaces, roles, and sessions; they do not define a durable Agent/profile.
+
+> Canonical live shapes: `packages/contracts/src/index.ts`,
+> `packages/db/src/schema.ts`, `packages/db/src/index.ts`. Rationale and rejected
+> alternatives: `docs/design/hierarchical-role-aware-memory.md`.
+
 One consequence of client-side conversation truth: model calls must not depend
 on the provider's server-side response store. Provider-assigned item ids
 (`rs_`/`msg_`/`fc_`…) are resolved against that store, and a response that

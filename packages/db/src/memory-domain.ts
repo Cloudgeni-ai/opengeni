@@ -353,7 +353,17 @@ export function normalizeMemoryScopeSpec(
  */
 export function memoryScopeSpecForRecord(record: MemoryDomainRecord): MemoryScopeSpec {
   if (record.scopeSpec !== undefined && record.scopeSpec !== null) {
-    const normalized = normalizeMemoryScopeSpec(record.scopeSpec);
+    const scope = record.scopeSpec;
+    // Persisted rows keep validity in dedicated columns rather than duplicating
+    // it inside scopeSpec. Recompose the expiry for domain normalization so an
+    // ephemeral row remains applicable, while still failing closed when neither
+    // representation contains a valid expiry.
+    const persistedValidUntil = record.validUntil;
+    const scopeForNormalization: MemoryScopeSpec =
+      scopeTypeOf(scope) === "ephemeral" && scope.validUntil == null && persistedValidUntil != null
+        ? { ...scope, validUntil: persistedValidUntil }
+        : scope;
+    const normalized = normalizeMemoryScopeSpec(scopeForNormalization);
     return normalized ?? { scopeType: "legacy", legacyScope: "invalid" };
   }
   const legacyScope = record.scope?.trim();
