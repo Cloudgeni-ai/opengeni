@@ -422,24 +422,28 @@ export async function sseWorkspaceControlStream(
   const send = async (event: WorkspaceControlEvent) => {
     if (event.sequence <= lastSent) return;
     if (event.sequence > lastSent + 1) {
-      while (lastSent + 1 < event.sequence) {
+      while (lastSent < event.sequence) {
         const previousLastSent = lastSent;
-        const missing = await listWorkspaceControlEvents(
-          db,
-          workspaceId,
-          lastSent,
-          Math.min(WORKSPACE_CONTROL_REPLAY_PAGE_SIZE, event.sequence - lastSent - 1),
+        const limit = Math.min(
+          WORKSPACE_CONTROL_REPLAY_PAGE_SIZE,
+          Math.max(1, event.sequence - lastSent),
         );
-        for (const missed of missing) {
-          if (missed.sequence >= event.sequence) break;
+        const missing = await listWorkspaceControlEvents(db, workspaceId, lastSent, limit);
+        let reachedIncoming = false;
+        for (const missed of missing.sort((a, b) => a.sequence - b.sequence)) {
+          if (missed.sequence >= event.sequence) {
+            reachedIncoming = true;
+            break;
+          }
           if (missed.sequence > lastSent) {
             await writeFrame(formatWorkspaceControlEventSse(missed));
             lastSent = missed.sequence;
           }
         }
+        if (reachedIncoming || missing.length < limit) break;
         if (lastSent === previousLastSent) {
           throw new Error(
-            `Workspace control replay made no progress before sequence ${event.sequence}; last sent ${lastSent}`,
+            `Workspace control gap fill returned a full stale page before sequence ${event.sequence}; last sent ${lastSent}`,
           );
         }
       }

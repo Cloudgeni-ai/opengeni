@@ -4,6 +4,7 @@ export type {
   OpenGeniClientOptions,
   SendMessageInput,
   SteerMessageResult,
+  WorkspaceControlEventPage,
 } from "./client";
 export {
   OpenGeniApiContractMismatchError,

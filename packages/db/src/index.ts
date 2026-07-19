@@ -123,10 +123,13 @@ import {
   closeSessionTurnAttemptInTransaction,
   evaluateSessionControl,
   evaluateSessionControls,
+  evaluateSessionDiscoveryControls,
   lockWorkspaceInferenceControl,
   registerInternalUpdateWakeInTransaction,
+  SESSION_DISCOVERY_CONTROL_TITLE_MAX_CHARS,
   registerSessionTurnAttemptClaim,
   serializeEffectiveSessionControl,
+  type SessionDiscoveryControl,
   type SessionTurnAttemptOutcome,
 } from "./session-control";
 import * as schema from "./schema";
@@ -11532,16 +11535,23 @@ export async function listSessions(
 }
 
 export type SessionDiscoveryCursor = { createdAt: Date; id: string };
+export const SESSION_DISCOVERY_GOAL_MAX_CHARS = 600;
+export const SESSION_DISCOVERY_MESSAGE_MAX_CHARS = 600;
 export type SessionDiscoverySummary = {
   id: string;
   title: string | null;
+  titleOriginalChars: number | null;
   parentSessionId: string | null;
   status: SessionStatus;
-  effectiveControl: Session["effectiveControl"];
-  goal: { status: SessionGoalStatus; text: string } | null;
+  effectiveControl: SessionDiscoveryControl;
+  goal: { status: SessionGoalStatus; text: string; textOriginalChars: number } | null;
   queuedPromptCount: number;
   treeStats: NonNullable<Session["treeStats"]>;
-  latestMessage: { type: SessionEventType; preview: string | null } | null;
+  latestMessage: {
+    type: SessionEventType;
+    preview: string | null;
+    previewOriginalChars: number | null;
+  } | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -11579,7 +11589,10 @@ export async function listSessionDiscoverySummaries(
     const rows = await scopedDb
       .select({
         id: schema.sessions.id,
-        title: schema.sessions.title,
+        title: sql<
+          string | null
+        >`left(${schema.sessions.title}, ${SESSION_DISCOVERY_CONTROL_TITLE_MAX_CHARS})`,
+        titleOriginalChars: sql<number | null>`char_length(${schema.sessions.title})::integer`,
         parentSessionId: schema.sessions.parentSessionId,
         status: schema.sessions.status,
         createdAt: schema.sessions.createdAt,
@@ -11605,13 +11618,14 @@ export async function listSessionDiscoverySummaries(
       };
     }
 
-    const controls = await sessionControlProjections(scopedDb, workspaceId, ids);
+    const controls = await evaluateSessionDiscoveryControls(scopedDb, workspaceId, ids);
     const treeStats = await sessionTreeStatsForSessions(scopedDb, workspaceId, ids);
     const goals = await scopedDb
       .select({
         sessionId: schema.sessionGoals.sessionId,
         status: schema.sessionGoals.status,
-        text: schema.sessionGoals.text,
+        text: sql<string>`left(${schema.sessionGoals.text}, ${SESSION_DISCOVERY_GOAL_MAX_CHARS})`,
+        textOriginalChars: sql<number>`char_length(${schema.sessionGoals.text})::integer`,
       })
       .from(schema.sessionGoals)
       .where(
@@ -11651,7 +11665,12 @@ export async function listSessionDiscoverySummaries(
               ${schema.sessionEvents.payload}->>'text',
               ${schema.sessionEvents.payload}->>'message',
               ${schema.sessionEvents.payload}->>'content'
-            ), 1200)`,
+            ), ${SESSION_DISCOVERY_MESSAGE_MAX_CHARS})`,
+            previewOriginalChars: sql<number | null>`char_length(coalesce(
+              ${schema.sessionEvents.payload}->>'text',
+              ${schema.sessionEvents.payload}->>'message',
+              ${schema.sessionEvents.payload}->>'content'
+            ))::integer`,
           })
           .from(schema.sessionEvents)
           .where(
@@ -11672,10 +11691,17 @@ export async function listSessionDiscoverySummaries(
       return {
         id: row.id,
         title: row.title,
+        titleOriginalChars: row.titleOriginalChars === null ? null : Number(row.titleOriginalChars),
         parentSessionId: row.parentSessionId,
         status: row.status as SessionStatus,
         effectiveControl: control,
-        goal: goal ? { status: goal.status as SessionGoalStatus, text: goal.text } : null,
+        goal: goal
+          ? {
+              status: goal.status as SessionGoalStatus,
+              text: goal.text,
+              textOriginalChars: Number(goal.textOriginalChars),
+            }
+          : null,
         queuedPromptCount: queueBySession.get(row.id) ?? 0,
         treeStats: treeStats.get(row.id) ?? {
           directChildren: 0,
@@ -11687,7 +11713,12 @@ export async function listSessionDiscoverySummaries(
           failedDescendants: 0,
         },
         latestMessage: latest
-          ? { type: latest.type as SessionEventType, preview: latest.preview }
+          ? {
+              type: latest.type as SessionEventType,
+              preview: latest.preview,
+              previewOriginalChars:
+                latest.previewOriginalChars === null ? null : Number(latest.previewOriginalChars),
+            }
           : null,
         createdAt: row.createdAt.toISOString(),
         updatedAt: row.updatedAt.toISOString(),

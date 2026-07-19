@@ -194,15 +194,13 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "workspace:read");
     const after = Math.max(0, Number.parseInt(c.req.query("after") ?? "0", 10) || 0);
-    const events = await listWorkspaceControlEvents(
-      deps.db,
-      workspaceId,
-      after,
-      boundedLimit(c.req.query("limit")),
-    );
-    const page = boundWorkspaceControlHttpPage(events);
+    const limit = boundedLimit(c.req.query("limit"));
+    const fetched = await listWorkspaceControlEvents(deps.db, workspaceId, after, limit + 1);
+    const countHasMore = fetched.length > limit;
+    const page = boundWorkspaceControlHttpPage(fetched.slice(0, limit));
+    const truncated = countHasMore || page.truncated;
     c.header("X-OpenGeni-Page-Bytes", String(page.bytes));
-    c.header("X-OpenGeni-Page-Truncated", String(page.truncated));
+    c.header("X-OpenGeni-Page-Truncated", String(truncated));
     if (page.nextSequence !== null) {
       c.header("X-OpenGeni-Next-After", String(page.nextSequence));
     }

@@ -176,6 +176,13 @@ import { OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION } from "./
 
 export type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
+export type WorkspaceControlEventPage = {
+  events: WorkspaceControlEvent[];
+  bytes: number;
+  truncated: boolean;
+  nextAfter: number | null;
+};
+
 export type OpenGeniClientOptions = {
   /** Base URL of the OpenGeni API, e.g. `https://api.example.com`. */
   baseUrl: string;
@@ -753,16 +760,38 @@ export class OpenGeniClient {
   async listWorkspaceControlEvents(
     workspaceId: string,
     options: { after?: number; limit?: number } = {},
-  ): Promise<WorkspaceControlEvent[]> {
-    return await this.requestJson<WorkspaceControlEvent[]>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/control-events`,
-      undefined,
-      {
+  ): Promise<WorkspaceControlEventPage> {
+    const response = await this.fetchImpl(
+      this.url(`/v1/workspaces/${workspaceId}/control-events`, {
         ...(options.after !== undefined ? { after: String(options.after) } : {}),
         ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
+      }),
+      {
+        method: "GET",
+        headers: { ...this.headers(), Accept: "application/json" },
       },
     );
+    assertApiContractResponse(response);
+    if (!response.ok) {
+      throw new OpenGeniApiError(response.status, await safeText(response));
+    }
+    const events = (await response.json()) as WorkspaceControlEvent[];
+    const bytesHeader = response.headers.get("X-OpenGeni-Page-Bytes");
+    const nextHeader = response.headers.get("X-OpenGeni-Next-After");
+    const parsedBytes = bytesHeader === null ? Number.NaN : Number(bytesHeader);
+    const parsedNext = nextHeader === null ? null : Number(nextHeader);
+    return {
+      events,
+      bytes:
+        Number.isSafeInteger(parsedBytes) && parsedBytes >= 0
+          ? parsedBytes
+          : new TextEncoder().encode(JSON.stringify(events)).byteLength,
+      truncated: response.headers.get("X-OpenGeni-Page-Truncated") === "true",
+      nextAfter:
+        parsedNext !== null && Number.isSafeInteger(parsedNext) && parsedNext >= 0
+          ? parsedNext
+          : null,
+    };
   }
 
   streamWorkspaceControlEvents(

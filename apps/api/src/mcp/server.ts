@@ -1960,16 +1960,34 @@ function decodeSessionDiscoveryCursor(value: string): { createdAt: Date; id: str
   }
 }
 
-function capSessionDiscoveryText(value: string | null, maxChars = SESSION_DISCOVERY_TEXT_CHARS) {
-  if (value === null || value.length <= maxChars) {
+function capSessionDiscoveryText(
+  value: string | null,
+  maxChars = SESSION_DISCOVERY_TEXT_CHARS,
+  originalChars?: number | null,
+) {
+  if (value === null) {
     return { text: value, truncated: false };
   }
-  const marker = `…[${value.length - maxChars} chars truncated]…`;
-  const body = Math.max(0, maxChars - marker.length);
-  const head = Math.ceil(body * 0.7);
-  const tail = body - head;
+  const projectedChars = Array.from(value);
+  const sourceChars = Math.max(projectedChars.length, originalChars ?? projectedChars.length);
+  if (sourceChars <= maxChars) {
+    return { text: value, truncated: false };
+  }
+
+  // The database supplies only a bounded prefix plus the original character
+  // count. Iterate to a stable marker width so the reported omission includes
+  // the characters replaced by the marker itself.
+  let bodyChars = maxChars;
+  let marker = "";
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const omittedChars = Math.max(0, sourceChars - bodyChars);
+    marker = `…[${omittedChars} chars truncated]…`;
+    const nextBodyChars = Math.max(0, maxChars - Array.from(marker).length);
+    if (nextBodyChars === bodyChars) break;
+    bodyChars = nextBodyChars;
+  }
   return {
-    text: `${value.slice(0, head)}${marker}${tail > 0 ? value.slice(-tail) : ""}`,
+    text: `${projectedChars.slice(0, bodyChars).join("")}${marker}`,
     truncated: true,
   };
 }
@@ -1979,12 +1997,25 @@ export function capSessionDiscoveryPage(
   includeLastMessage: boolean,
 ) {
   const projected = page.sessions.map((session) => {
-    const title = capSessionDiscoveryText(session.title, 200);
-    const goal = session.goal ? capSessionDiscoveryText(session.goal.text) : null;
+    const title = capSessionDiscoveryText(session.title, 200, session.titleOriginalChars);
+    const goal = session.goal
+      ? capSessionDiscoveryText(
+          session.goal.text,
+          SESSION_DISCOVERY_TEXT_CHARS,
+          session.goal.textOriginalChars,
+        )
+      : null;
     const preview = includeLastMessage
-      ? capSessionDiscoveryText(session.latestMessage?.preview ?? null)
+      ? capSessionDiscoveryText(
+          session.latestMessage?.preview ?? null,
+          SESSION_DISCOVERY_TEXT_CHARS,
+          session.latestMessage?.previewOriginalChars,
+        )
       : null;
     const blocker = session.effectiveControl.primaryBlocker;
+    const blockerDisplayName = blocker
+      ? capSessionDiscoveryText(blocker.displayName, 200, blocker.displayNameOriginalChars)
+      : null;
     return {
       id: session.id,
       title: title.text,
@@ -1994,11 +2025,13 @@ export function capSessionDiscoveryPage(
       status: session.status,
       pause: {
         state: session.effectiveControl.state,
+        additionalBlockerCount: session.effectiveControl.additionalBlockerCount,
         source: blocker
           ? {
               kind: blocker.kind,
               ...(blocker.sessionId ? { sessionId: blocker.sessionId } : {}),
-              displayName: capSessionDiscoveryText(blocker.displayName, 200).text,
+              displayName: blockerDisplayName!.text,
+              displayNameTruncated: blockerDisplayName!.truncated,
             }
           : null,
       },

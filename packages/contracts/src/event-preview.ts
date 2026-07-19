@@ -17,10 +17,12 @@ const RETRY_ARRAY_ENTRIES = 12;
 const DEFAULT_OBJECT_FIELDS = 80;
 const RETRY_OBJECT_FIELDS = 32;
 const MAX_PREVIEW_DEPTH = 12;
+const MAX_PREVIEW_NODES = 512;
+const MAX_MEASUREMENT_NODES = 2_048;
+const MAX_MEASUREMENT_DEPTH = 64;
 const MAX_DETAIL_RECORDS = 24;
 const APPROX_BYTES_PER_TOKEN = 4;
 const encoder = new TextEncoder();
-const decoder = new TextDecoder();
 
 const IDENTITY_FIELDS = new Set([
   "id",
@@ -40,6 +42,7 @@ const IDENTITY_FIELDS = new Set([
 export type SessionEventBoundarySurface =
   | "durable_audit"
   | "database_guard"
+  | "database_read_projection"
   | "http_projection"
   | "nats_legacy_guard"
   | "sse_legacy_guard"
@@ -51,6 +54,7 @@ export type SessionEventPayloadTruncation = {
   reason:
     | "payload_bytes_exceeded"
     | "payload_not_serializable"
+    | "payload_measurement_bounded"
     | "inline_media_not_retained"
     | "database_guard";
   originalBytes: number | null;
@@ -64,10 +68,18 @@ export type SessionEventPayloadTruncation = {
   };
   details: Array<{
     path: string;
-    kind: "string" | "array" | "object" | "depth" | "media" | "binary" | "unserializable";
+    kind:
+      | "string"
+      | "array"
+      | "object"
+      | "depth"
+      | "budget"
+      | "media"
+      | "binary"
+      | "unserializable";
     originalBytes?: number;
     deliveredBytes?: number;
-    omittedEntries?: number;
+    omittedEntries?: number | null;
     mediaType?: string;
   }>;
 };
@@ -92,6 +104,7 @@ type PreviewState = {
   stringBytes: number;
   arrayEntries: number;
   objectFields: number;
+  remainingNodes: number;
 };
 
 /** UTF-8 bytes used by the JSON wire/storage representation. */
@@ -157,31 +170,22 @@ export function boundSessionEventPayload<T>(
 ): T {
   const maxBytes = Math.max(1024, Math.floor(options.maxBytes ?? SESSION_EVENT_PAYLOAD_MAX_BYTES));
   const surface = options.surface ?? "durable_audit";
-  const originalSerialization = serializeForBoundary(payload);
-  const originalSerializedBytes = encoder.encode(originalSerialization.value).byteLength;
-  const originalBytes = originalSerialization.serializable ? originalSerializedBytes : null;
+  const originalMeasurement = measureJsonBytes(payload);
+  const originalBytes = originalMeasurement.bytes;
 
   let state = previewState(DEFAULT_STRING_BYTES, DEFAULT_ARRAY_ENTRIES, DEFAULT_OBJECT_FIELDS);
   let preview = previewValue(payload, state, "$", 0);
-  if (!state.changed && originalSerialization.serializable && originalSerializedBytes <= maxBytes) {
+  if (!state.changed && originalBytes !== null && originalBytes <= maxBytes) {
     return payload;
   }
 
-  let reason: SessionEventPayloadTruncation["reason"] = !originalSerialization.serializable
-    ? "payload_not_serializable"
-    : state.sawMedia
-      ? "inline_media_not_retained"
-      : "payload_bytes_exceeded";
+  let reason = payloadTruncationReason(originalMeasurement, state);
   let bounded = attachTruncation(preview, boundaryMetadata(surface, reason, originalBytes, state));
 
   if (sessionEventJsonBytes(bounded) > Math.min(maxBytes, TARGET_PAYLOAD_BYTES)) {
     state = previewState(RETRY_STRING_BYTES, RETRY_ARRAY_ENTRIES, RETRY_OBJECT_FIELDS);
     preview = previewValue(payload, state, "$", 0);
-    reason = !originalSerialization.serializable
-      ? "payload_not_serializable"
-      : state.sawMedia
-        ? "inline_media_not_retained"
-        : "payload_bytes_exceeded";
+    reason = payloadTruncationReason(originalMeasurement, state);
     bounded = attachTruncation(preview, boundaryMetadata(surface, reason, originalBytes, state));
   }
 
@@ -218,10 +222,25 @@ function previewState(
     stringBytes,
     arrayEntries,
     objectFields,
+    remainingNodes: MAX_PREVIEW_NODES,
   };
 }
 
+function payloadTruncationReason(
+  measurement: JsonMeasurement,
+  state: PreviewState,
+): SessionEventPayloadTruncation["reason"] {
+  if (state.sawMedia) return "inline_media_not_retained";
+  return measurement.bytes === null ? measurement.reason : "payload_bytes_exceeded";
+}
+
 function previewValue(value: unknown, state: PreviewState, path: string, depth: number): unknown {
+  if (state.remainingNodes <= 0) {
+    state.changed = true;
+    recordDetail(state, { path, kind: "budget" });
+    return "[nested value omitted at audit preview traversal boundary]";
+  }
+  state.remainingNodes -= 1;
   if (typeof value === "string") {
     const media = inlineMediaFact(value);
     if (media) {
@@ -298,33 +317,86 @@ function previewValue(value: unknown, state: PreviewState, path: string, depth: 
     ];
   }
 
+  if (value instanceof Date) {
+    try {
+      const epoch = Date.prototype.getTime.call(value);
+      return Number.isFinite(epoch) ? Date.prototype.toISOString.call(value) : null;
+    } catch {
+      state.changed = true;
+      recordDetail(state, { path, kind: "unserializable" });
+      return "[Date value omitted at audit serialization boundary]";
+    }
+  }
+
   const record = value as Record<string, unknown>;
-  const entries = orderedObjectEntries(record);
-  const kept = entries.slice(0, state.objectFields);
-  if (entries.length > kept.length) {
+  const { entries, omitted, accessorKeys } = selectObjectEntries(record, state.objectFields);
+  for (const key of accessorKeys) {
+    state.changed = true;
+    recordDetail(state, {
+      path: `${path}.${key}`,
+      kind: "unserializable",
+    });
+  }
+  if (omitted) {
     state.changed = true;
     recordDetail(state, {
       path,
       kind: "object",
-      omittedEntries: entries.length - kept.length,
+      // Counting every remaining field would defeat the traversal bound. `null`
+      // is deliberate: at least one field was omitted, but its exact count is
+      // unknown because the source was not fully enumerated.
+      omittedEntries: null,
     });
   }
   const out: Record<string, unknown> = {};
-  for (const [key, entry] of kept) {
+  for (const [key, entry] of entries) {
     out[key] = previewValue(entry, state, `${path}.${key}`, depth + 1);
   }
-  if (entries.length > kept.length) {
-    out.omittedFields = entries.length - kept.length;
+  if (omitted) {
+    out.omittedFields = "additional fields omitted; exact count not measured";
   }
   return out;
 }
 
-function orderedObjectEntries(record: Record<string, unknown>): Array<[string, unknown]> {
-  const entries = Object.entries(record);
-  return [
-    ...entries.filter(([key]) => IDENTITY_FIELDS.has(key)),
-    ...entries.filter(([key]) => !IDENTITY_FIELDS.has(key)),
-  ];
+function selectObjectEntries(
+  record: Record<string, unknown>,
+  maxFields: number,
+): {
+  entries: Array<[string, unknown]>;
+  omitted: boolean;
+  accessorKeys: string[];
+} {
+  const entries: Array<[string, unknown]> = [];
+  const selected = new Set<string>();
+  const accessorKeys: string[] = [];
+  const select = (key: string): boolean => {
+    const descriptor = Object.getOwnPropertyDescriptor(record, key);
+    if (!descriptor?.enumerable) return false;
+    selected.add(key);
+    if ("value" in descriptor) {
+      entries.push([key, descriptor.value]);
+    } else {
+      entries.push([key, "[accessor value omitted at audit serialization boundary]"]);
+      accessorKeys.push(key);
+    }
+    return true;
+  };
+  try {
+    for (const key of IDENTITY_FIELDS) {
+      if (entries.length >= maxFields) break;
+      select(key);
+    }
+    for (const key in record) {
+      if (!Object.prototype.hasOwnProperty.call(record, key) || selected.has(key)) continue;
+      if (entries.length >= maxFields) {
+        return { entries, omitted: true, accessorKeys };
+      }
+      select(key);
+    }
+  } catch {
+    return { entries, omitted: true, accessorKeys };
+  }
+  return { entries, omitted: false, accessorKeys };
 }
 
 function attachTruncation(
@@ -413,7 +485,14 @@ function identityPreview(value: unknown): Record<string, unknown> {
   if (!isPlainRecord(value)) return {};
   const out: Record<string, unknown> = {};
   for (const key of IDENTITY_FIELDS) {
-    const field = value[key];
+    let field: unknown;
+    try {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor?.enumerable || !("value" in descriptor)) continue;
+      field = descriptor.value;
+    } catch {
+      continue;
+    }
     if (typeof field === "string") {
       out[key] = truncateUtf8Middle(field, 256, utf8Bytes(field));
     } else if (typeof field === "number" || typeof field === "boolean" || field === null) {
@@ -467,28 +546,287 @@ function truncateUtf8Middle(
   knownBytes = utf8Bytes(value),
 ): string {
   if (knownBytes <= maxBytes) return value;
-  const marker = `…[${knownBytes - maxBytes} bytes omitted]…`;
+  let omittedBytes = Math.max(0, knownBytes - maxBytes);
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const marker = `…[${omittedBytes} bytes omitted]…`;
+    const contentBudget = Math.max(0, maxBytes - utf8Bytes(marker));
+    if (contentBudget === 0) return marker;
+    const left = utf8Prefix(value, Math.floor(contentBudget / 2));
+    const right = utf8Suffix(value, contentBudget - left.bytes);
+    const exactOmittedBytes = Math.max(0, knownBytes - left.bytes - right.bytes);
+    if (exactOmittedBytes === omittedBytes) {
+      return `${value.slice(0, left.end)}${marker}${value.slice(right.start)}`;
+    }
+    omittedBytes = exactOmittedBytes;
+  }
+
+  const marker = `…[${omittedBytes} bytes omitted]…`;
   const contentBudget = Math.max(0, maxBytes - utf8Bytes(marker));
-  if (contentBudget === 0) return marker;
-  const bytes = encoder.encode(value);
-  const leftBudget = Math.floor(contentBudget / 2);
-  const rightBudget = contentBudget - leftBudget;
-  let leftEnd = Math.min(leftBudget, bytes.length);
-  while (leftEnd > 0 && leftEnd < bytes.length && isUtf8Continuation(bytes[leftEnd]!)) leftEnd -= 1;
-  let rightStart = Math.max(0, bytes.length - rightBudget);
-  while (rightStart < bytes.length && isUtf8Continuation(bytes[rightStart]!)) rightStart += 1;
-  return `${decoder.decode(bytes.subarray(0, leftEnd))}${marker}${decoder.decode(bytes.subarray(rightStart))}`;
+  const left = utf8Prefix(value, Math.floor(contentBudget / 2));
+  const right = utf8Suffix(value, contentBudget - left.bytes);
+  return `${value.slice(0, left.end)}${marker}${value.slice(right.start)}`;
 }
 
-function isUtf8Continuation(value: number): boolean {
-  return (value & 0xc0) === 0x80;
+function utf8Prefix(value: string, maxBytes: number): { end: number; bytes: number } {
+  let end = 0;
+  let bytes = 0;
+  while (end < value.length) {
+    const unit = utf8UnitAt(value, end);
+    if (bytes + unit.bytes > maxBytes) break;
+    bytes += unit.bytes;
+    end += unit.codeUnits;
+  }
+  return { end, bytes };
+}
+
+function utf8Suffix(value: string, maxBytes: number): { start: number; bytes: number } {
+  let start = value.length;
+  let bytes = 0;
+  while (start > 0) {
+    const unit = utf8UnitBefore(value, start);
+    if (bytes + unit.bytes > maxBytes) break;
+    bytes += unit.bytes;
+    start -= unit.codeUnits;
+  }
+  return { start, bytes };
+}
+
+function utf8UnitAt(value: string, index: number): { codeUnits: number; bytes: number } {
+  const code = value.charCodeAt(index);
+  if (code <= 0x7f) return { codeUnits: 1, bytes: 1 };
+  if (code <= 0x7ff) return { codeUnits: 1, bytes: 2 };
+  if (code >= 0xd800 && code <= 0xdbff) {
+    const next = index + 1 < value.length ? value.charCodeAt(index + 1) : 0;
+    if (next >= 0xdc00 && next <= 0xdfff) {
+      return { codeUnits: 2, bytes: 4 };
+    }
+  }
+  return { codeUnits: 1, bytes: 3 };
+}
+
+function utf8UnitBefore(value: string, end: number): { codeUnits: number; bytes: number } {
+  const code = value.charCodeAt(end - 1);
+  if (code >= 0xdc00 && code <= 0xdfff && end >= 2) {
+    const previous = value.charCodeAt(end - 2);
+    if (previous >= 0xd800 && previous <= 0xdbff) {
+      return { codeUnits: 2, bytes: 4 };
+    }
+  }
+  if (code <= 0x7f) return { codeUnits: 1, bytes: 1 };
+  if (code <= 0x7ff) return { codeUnits: 1, bytes: 2 };
+  return { codeUnits: 1, bytes: 3 };
 }
 
 function utf8Bytes(value: string): number {
-  return encoder.encode(value).byteLength;
+  let bytes = 0;
+  for (let index = 0; index < value.length;) {
+    const unit = utf8UnitAt(value, index);
+    bytes += unit.bytes;
+    index += unit.codeUnits;
+  }
+  return bytes;
 }
 
-function serializeForBoundary(value: unknown): { value: string; serializable: boolean } {
+/**
+ * Count the JSON wire bytes without first allocating the complete JSON string.
+ * A global node budget prevents an adversarial broad graph from moving the
+ * durable 64 KiB bound into an unbounded measurement pass. `null` means exact
+ * source size is unknown; callers expose that truth instead of measuring a
+ * placeholder or claiming a lower bound is exact.
+ */
+type JsonMeasurement =
+  | { bytes: number; reason: null }
+  | {
+      bytes: null;
+      reason: "payload_not_serializable" | "payload_measurement_bounded";
+    };
+
+function measureJsonBytes(value: unknown): JsonMeasurement {
+  const state: JsonMeasurementState = {
+    remainingNodes: MAX_MEASUREMENT_NODES,
+    seen: new WeakSet<object>(),
+    failureReason: null,
+  };
+  try {
+    const bytes = measureJsonValue(value, state, "top", 0);
+    return bytes === null
+      ? {
+          bytes: null,
+          reason: state.failureReason ?? "payload_measurement_bounded",
+        }
+      : { bytes, reason: null };
+  } catch {
+    return { bytes: null, reason: "payload_measurement_bounded" };
+  }
+}
+
+type JsonMeasurementState = {
+  remainingNodes: number;
+  seen: WeakSet<object>;
+  failureReason: "payload_not_serializable" | "payload_measurement_bounded" | null;
+};
+
+function measureJsonValue(
+  value: unknown,
+  state: JsonMeasurementState,
+  position: "top" | "array" | "object",
+  depth: number,
+): number | null {
+  if (state.remainingNodes <= 0 || depth > MAX_MEASUREMENT_DEPTH) {
+    return failJsonMeasurement(state, "payload_measurement_bounded");
+  }
+  state.remainingNodes -= 1;
+  if (value === null) return 4;
+  if (typeof value === "string") return jsonStringBytes(value);
+  if (typeof value === "boolean") return value ? 4 : 5;
+  if (typeof value === "number") {
+    const serialized = JSON.stringify(value);
+    return serialized === undefined ? null : serialized.length;
+  }
+  if (typeof value === "undefined" || typeof value === "function" || typeof value === "symbol") {
+    return position === "array" ? 4 : failJsonMeasurement(state, "payload_not_serializable");
+  }
+  if (typeof value === "bigint") {
+    return failJsonMeasurement(state, "payload_not_serializable");
+  }
+  if (typeof value !== "object") {
+    return failJsonMeasurement(state, "payload_not_serializable");
+  }
+  if (value instanceof Date) {
+    try {
+      const epoch = Date.prototype.getTime.call(value);
+      return Number.isFinite(epoch) ? jsonStringBytes(Date.prototype.toISOString.call(value)) : 4;
+    } catch {
+      return failJsonMeasurement(state, "payload_not_serializable");
+    }
+  }
+  if (ArrayBuffer.isView(value) || value instanceof ArrayBuffer) {
+    return failJsonMeasurement(state, "payload_measurement_bounded");
+  }
+  if (state.seen.has(value)) {
+    return failJsonMeasurement(state, "payload_not_serializable");
+  }
+  state.seen.add(value);
+  try {
+    if (Array.isArray(value)) {
+      if (Object.getPrototypeOf(value) !== Array.prototype) {
+        return failJsonMeasurement(state, "payload_measurement_bounded");
+      }
+      const toJson = Object.getOwnPropertyDescriptor(value, "toJSON");
+      if (toJson && ("get" in toJson || typeof toJson.value === "function")) {
+        return failJsonMeasurement(state, "payload_measurement_bounded");
+      }
+      if (value.length > state.remainingNodes) {
+        return failJsonMeasurement(state, "payload_measurement_bounded");
+      }
+      let bytes = 2;
+      for (let index = 0; index < value.length; index += 1) {
+        if (index > 0) bytes += 1;
+        const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+        if (descriptor && !("value" in descriptor)) {
+          return failJsonMeasurement(state, "payload_measurement_bounded");
+        }
+        const entry = descriptor && "value" in descriptor ? descriptor.value : undefined;
+        const measured = measureJsonValue(entry, state, "array", depth + 1);
+        if (measured === null) return null;
+        bytes += measured;
+      }
+      return bytes;
+    }
+
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) {
+      return failJsonMeasurement(state, "payload_measurement_bounded");
+    }
+    const toJson = Object.getOwnPropertyDescriptor(value, "toJSON");
+    if (toJson && ("get" in toJson || typeof toJson.value === "function")) {
+      return failJsonMeasurement(state, "payload_measurement_bounded");
+    }
+    let bytes = 2;
+    let fields = 0;
+    try {
+      for (const key in value as Record<string, unknown>) {
+        if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+        if (state.remainingNodes <= 0) {
+          return failJsonMeasurement(state, "payload_measurement_bounded");
+        }
+        const descriptor = Object.getOwnPropertyDescriptor(value, key);
+        if (!descriptor || !("value" in descriptor)) {
+          return failJsonMeasurement(state, "payload_measurement_bounded");
+        }
+        const entry = descriptor.value;
+        if (
+          typeof entry === "undefined" ||
+          typeof entry === "function" ||
+          typeof entry === "symbol"
+        ) {
+          continue;
+        }
+        const measured = measureJsonValue(entry, state, "object", depth + 1);
+        if (measured === null) return null;
+        if (fields > 0) bytes += 1;
+        bytes += jsonStringBytes(key) + 1 + measured;
+        fields += 1;
+      }
+    } catch {
+      return null;
+    }
+    return bytes;
+  } finally {
+    state.seen.delete(value);
+  }
+}
+
+function failJsonMeasurement(
+  state: JsonMeasurementState,
+  reason: Exclude<JsonMeasurement, { bytes: number }>["reason"],
+): null {
+  state.failureReason ??= reason;
+  return null;
+}
+
+function jsonStringBytes(value: string): number {
+  let bytes = 2;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (
+      code === 0x22 ||
+      code === 0x5c ||
+      code === 0x08 ||
+      code === 0x09 ||
+      code === 0x0a ||
+      code === 0x0c ||
+      code === 0x0d
+    ) {
+      bytes += 2;
+    } else if (code <= 0x1f) {
+      bytes += 6;
+    } else if (code <= 0x7f) {
+      bytes += 1;
+    } else if (code <= 0x7ff) {
+      bytes += 2;
+    } else if (code >= 0xd800 && code <= 0xdbff) {
+      const next = index + 1 < value.length ? value.charCodeAt(index + 1) : 0;
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        bytes += 4;
+        index += 1;
+      } else {
+        // JSON.stringify escapes lone surrogates as six ASCII bytes.
+        bytes += 6;
+      }
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      bytes += 6;
+    } else {
+      bytes += 3;
+    }
+  }
+  return bytes;
+}
+
+function serializeForBoundary(value: unknown): {
+  value: string;
+  serializable: boolean;
+} {
   try {
     const serialized = JSON.stringify(value);
     return {

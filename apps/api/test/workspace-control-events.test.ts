@@ -191,5 +191,25 @@ describe("workspace control event API", () => {
     expect(await afterFailure.json()).toEqual([
       expect.objectContaining({ revision: 2, action: "resume" }),
     ]);
+
+    const countBoundFirst = await app.request(
+      `http://x/v1/workspaces/${grant.workspaceId}/control-events?after=0&limit=1`,
+      { headers: { authorization: auth } },
+    );
+    expect(await countBoundFirst.json()).toEqual([
+      expect.objectContaining({ revision: 1, action: "pause" }),
+    ]);
+    expect(countBoundFirst.headers.get("X-OpenGeni-Page-Truncated")).toBe("true");
+    expect(countBoundFirst.headers.get("X-OpenGeni-Next-After")).toBe("1");
+
+    const countBoundSecond = await app.request(
+      `http://x/v1/workspaces/${grant.workspaceId}/control-events?after=1&limit=1`,
+      { headers: { authorization: auth } },
+    );
+    expect(await countBoundSecond.json()).toEqual([
+      expect.objectContaining({ revision: 2, action: "resume" }),
+    ]);
+    expect(countBoundSecond.headers.get("X-OpenGeni-Page-Truncated")).toBe("false");
+    expect(countBoundSecond.headers.get("X-OpenGeni-Next-After")).toBe("2");
   });
 });

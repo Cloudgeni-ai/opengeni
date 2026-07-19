@@ -13,7 +13,18 @@ describe("sessions_list compact discovery projection", () => {
       title: huge,
       parentSessionId: index === 0 ? null : uuid(1),
       status: "idle",
-      effectiveControl: { state: "running", primaryBlocker: null },
+      effectiveControl: {
+        state: index === 0 ? "paused" : "active",
+        primaryBlocker:
+          index === 0
+            ? {
+                kind: "workspace",
+                displayName: huge,
+                displayNameOriginalChars: huge.length,
+              }
+            : null,
+        additionalBlockerCount: index === 0 ? 7 : 0,
+      },
       goal: { status: "active", text: huge },
       queuedPromptCount: index,
       treeStats: {
@@ -46,6 +57,14 @@ describe("sessions_list compact discovery projection", () => {
     expect(result.sessions[0]!.title).toContain("chars truncated");
     expect(result.sessions[0]!.goal!.summary).toContain("chars truncated");
     expect(result.sessions[0]!.latestMessage!.preview).toContain("chars truncated");
+    expect(result.sessions[0]!.pause).toMatchObject({
+      state: "paused",
+      additionalBlockerCount: 7,
+      source: {
+        kind: "workspace",
+        displayNameTruncated: true,
+      },
+    });
     expect(serialized).not.toContain(huge);
   });
 
@@ -58,7 +77,11 @@ describe("sessions_list compact discovery projection", () => {
             title: "one",
             parentSessionId: null,
             status: "idle",
-            effectiveControl: { state: "running", primaryBlocker: null },
+            effectiveControl: {
+              state: "active",
+              primaryBlocker: null,
+              additionalBlockerCount: 0,
+            },
             goal: null,
             queuedPromptCount: 0,
             treeStats: {

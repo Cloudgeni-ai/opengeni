@@ -103,6 +103,9 @@ function sanitizeEventPayloadDeep<T>(payload: T): T {
   if (Array.isArray(payload)) {
     return payload.map((item) => sanitizeEventPayloadDeep(item)) as unknown as T;
   }
+  if (payload instanceof Date) {
+    return safeDateIso(payload) as unknown as T;
+  }
   if (payload && typeof payload === "object") {
     const entries = Object.entries(payload as Record<string, unknown>).map(
       ([key, value]) =>
@@ -135,6 +138,9 @@ function sanitizeModelPayloadDeep<T>(payload: T, seen: WeakSet<object>, depth: n
     return sanitizeEventString(payload) as unknown as T;
   }
   if (!payload || typeof payload !== "object") return payload;
+  if (payload instanceof Date) {
+    return safeDateIso(payload) as unknown as T;
+  }
   if (depth >= MODEL_PAYLOAD_SANITIZE_MAX_DEPTH) {
     return MODEL_PAYLOAD_DEPTH_MARKER as unknown as T;
   }
@@ -152,6 +158,15 @@ function sanitizeModelPayloadDeep<T>(payload: T, seen: WeakSet<object>, depth: n
     ) as unknown as T;
   } finally {
     seen.delete(payload);
+  }
+}
+
+function safeDateIso(value: Date): string | null {
+  try {
+    const epoch = Date.prototype.getTime.call(value);
+    return Number.isFinite(epoch) ? Date.prototype.toISOString.call(value) : null;
+  } catch {
+    return null;
   }
 }
 

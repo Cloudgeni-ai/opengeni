@@ -22,6 +22,7 @@ import {
   createSessionGoal,
   evaluateSessionControl,
   evaluateSessionControls,
+  evaluateSessionDiscoveryControls,
   evaluateGoalContinuation,
   getSessionQueueSnapshot,
   getBillingBalance,
@@ -195,6 +196,8 @@ async function claimTestSessionWork(
 describe("clean session control plane", () => {
   test("session discovery is compact-by-query and cursor-stable", async () => {
     const { grant, session: first } = await fixture();
+    const hugeTitle = "界😀".repeat(100_000);
+    const hugeGoal = "goal-😀".repeat(100_000);
     const second = await createSession(client.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId!,
@@ -212,7 +215,36 @@ describe("clean session control plane", () => {
       metadata: {},
       model: "scripted-model",
       sandboxBackend: "none",
+      parentSessionId: second.id,
     });
+    await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
+      await db
+        .update(schema.sessions)
+        .set({ title: hugeTitle })
+        .where(
+          and(
+            eq(schema.sessions.workspaceId, grant.workspaceId!),
+            eq(schema.sessions.id, second.id),
+          ),
+        );
+      await db
+        .update(schema.sessions)
+        .set({ title: hugeTitle })
+        .where(
+          and(
+            eq(schema.sessions.workspaceId, grant.workspaceId!),
+            eq(schema.sessions.id, third.id),
+          ),
+        );
+    });
+    await createSessionGoal(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: third.id,
+      text: hugeGoal,
+      createdBy: "api",
+    });
+    await controlSession(grant, second.id, "pause");
     await appendSessionEvents(client.db, grant.workspaceId!, second.id, [
       { type: "user.message", payload: { text: "p".repeat(20_000) } },
     ]);
@@ -222,7 +254,27 @@ describe("clean session control plane", () => {
       includeLastMessage: true,
     });
     const projectedSecond = all.sessions.find((entry) => entry.id === second.id)!;
-    expect(projectedSecond.latestMessage?.preview).toHaveLength(1_200);
+    const projectedThird = all.sessions.find((entry) => entry.id === third.id)!;
+    expect(projectedSecond.latestMessage?.preview).toHaveLength(600);
+    expect(projectedSecond.latestMessage?.previewOriginalChars).toBeGreaterThan(600);
+    expect(projectedSecond.latestMessage?.previewOriginalChars).toBeLessThan(20_000);
+    expect(Array.from(projectedSecond.title!)).toHaveLength(200);
+    expect(projectedSecond.titleOriginalChars).toBe(200_000);
+    expect(Array.from(projectedThird.goal!.text)).toHaveLength(600);
+    expect(projectedThird.goal?.textOriginalChars).toBe(600_000);
+    expect(projectedThird.effectiveControl).toEqual({
+      state: "paused",
+      primaryBlocker: {
+        kind: "session",
+        sessionId: second.id,
+        displayName: projectedSecond.title!,
+        displayNameOriginalChars: 200_000,
+      },
+      additionalBlockerCount: 0,
+    });
+    expect(projectedThird.effectiveControl).not.toHaveProperty("blockers");
+    expect(projectedThird.effectiveControl).not.toHaveProperty("resumeOptions");
+    expect(Buffer.byteLength(JSON.stringify(all), "utf8")).toBeLessThan(10_000);
     expect(JSON.stringify(projectedSecond)).not.toContain("mustNeverLeak");
 
     const pageOne = await listSessionDiscoverySummaries(client.db, grant.workspaceId!, {
@@ -448,6 +500,73 @@ describe("clean session control plane", () => {
       state: "paused",
       primaryBlocker: { kind: "session", sessionId: root.id },
     });
+  });
+
+  test("compact discovery control matches full blocker truth across pause overrides", async () => {
+    const { grant, session: root } = await fixture();
+    const child = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      initialMessage: "child",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+      parentSessionId: root.id,
+    });
+    await controlSession(grant, root.id, "pause");
+    await controlSession(grant, child.id, "pause");
+    await controlWorkspace(grant, "pause", "aggregate parity");
+
+    const expectCompactParity = async (ids: string[]) => {
+      const { compact, full } = await withWorkspaceRls(
+        client.db,
+        grant.workspaceId!,
+        async (db) => ({
+          compact: await evaluateSessionDiscoveryControls(db, grant.workspaceId!, ids),
+          full: await evaluateSessionControls(db, grant.workspaceId!, ids, { lock: "share" }),
+        }),
+      );
+      for (const id of ids) {
+        const detailed = full.get(id)!;
+        const blocker = detailed.primaryBlocker;
+        expect(compact.get(id)).toEqual({
+          state: detailed.state,
+          primaryBlocker: blocker
+            ? {
+                kind: blocker.kind,
+                ...(blocker.sessionId ? { sessionId: blocker.sessionId } : {}),
+                displayName: blocker.displayName,
+                displayNameOriginalChars: Array.from(blocker.displayName).length,
+              }
+            : null,
+          additionalBlockerCount: detailed.additionalBlockerCount,
+        });
+      }
+    };
+
+    await expectCompactParity([root.id, child.id]);
+    expect(
+      (
+        await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+          evaluateSessionDiscoveryControls(db, grant.workspaceId!, [child.id]),
+        )
+      ).get(child.id),
+    ).toMatchObject({
+      state: "paused",
+      primaryBlocker: { kind: "session", sessionId: child.id },
+      additionalBlockerCount: 2,
+    });
+
+    await controlSession(grant, child.id, "resume");
+    await expectCompactParity([root.id, child.id]);
+    expect(
+      (
+        await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+          evaluateSessionDiscoveryControls(db, grant.workspaceId!, [child.id]),
+        )
+      ).get(child.id),
+    ).toEqual({ state: "active", primaryBlocker: null, additionalBlockerCount: 0 });
   });
 
   test("recovery closes an in-flight tool call with explicit unknown outcome exactly once", async () => {

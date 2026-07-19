@@ -255,6 +255,47 @@ describe("OpenGeniClient", () => {
     );
   });
 
+  test("workspace-control list exposes truthful continuation metadata", async () => {
+    const event = {
+      id: "33333333-3333-4333-8333-333333333333",
+      workspaceId: WORKSPACE_ID,
+      sequence: 7,
+      revision: 7,
+      type: "workspace.control.changed" as const,
+      scope: "workspace" as const,
+      rootSessionId: null,
+      action: "pause" as const,
+      automatic: false,
+      reason: null,
+      actor: "operator",
+      occurredAt: new Date().toISOString(),
+    };
+    const body = JSON.stringify([event]);
+    const { client, requests } = makeClient(
+      () =>
+        new Response(body, {
+          headers: {
+            "Content-Type": "application/json",
+            "X-OpenGeni-Page-Bytes": String(new TextEncoder().encode(body).byteLength),
+            "X-OpenGeni-Page-Truncated": "true",
+            "X-OpenGeni-Next-After": "7",
+          },
+        }),
+    );
+
+    await expect(
+      client.listWorkspaceControlEvents(WORKSPACE_ID, { after: 3, limit: 1 }),
+    ).resolves.toEqual({
+      events: [event],
+      bytes: new TextEncoder().encode(body).byteLength,
+      truncated: true,
+      nextAfter: 7,
+    });
+    expect(requests[0]!.url).toBe(
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/control-events?after=3&limit=1`,
+    );
+  });
+
   test("streamEvents consumes the SSE endpoint end to end through fetch", async () => {
     const wire = [makeEvent(1), makeEvent(2)].map(sseBlock).join("");
     const { client, requests } = makeClient((request) => {

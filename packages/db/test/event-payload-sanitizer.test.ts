@@ -130,7 +130,10 @@ describe("sanitizeEventPayload (deep walk)", () => {
       mcpCredentialUpdates: [
         {
           id: "crm",
-          headers: { Authorization: "Bearer rotated-secret", "X-Session": "turn-2" },
+          headers: {
+            Authorization: "Bearer rotated-secret",
+            "X-Session": "turn-2",
+          },
         },
       ],
     }) as unknown as {
@@ -197,6 +200,23 @@ describe("sanitizeEventPayload (deep walk)", () => {
     expect(cleaned.truncation).toMatchObject({
       truncated: true,
       fullEvidence: { available: false, reason: "not_retained" },
+    });
+  });
+
+  test("preserves Date JSON semantics across audit and model sanitizers", () => {
+    const timestamp = new Date("2026-07-19T03:00:00.000Z");
+    const invalid = new Date(Number.NaN);
+    expect(sanitizeEventPayload({ timestamp }) as unknown).toEqual({
+      timestamp: timestamp.toISOString(),
+    });
+    expect(sanitizeModelPayload({ timestamp }) as unknown).toEqual({
+      timestamp: timestamp.toISOString(),
+    });
+    expect(sanitizeEventPayload({ invalid }) as unknown).toEqual({
+      invalid: null,
+    });
+    expect(sanitizeModelPayload({ invalid }) as unknown).toEqual({
+      invalid: null,
     });
   });
 });

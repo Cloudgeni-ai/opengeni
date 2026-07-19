@@ -58,6 +58,26 @@ export type EffectiveSessionControl = {
   settlement: { state: "stopping"; attemptCount: number } | null;
 };
 
+export const SESSION_DISCOVERY_CONTROL_TITLE_MAX_CHARS = 200;
+export const SESSION_DISCOVERY_CONTROL_TARGET_LIMIT = 100;
+
+/**
+ * Purpose-built control projection for session discovery. Full blocker evidence,
+ * actors/reasons, resume options, etags, and settlement state remain available
+ * from the ordinary session detail APIs; this shape is intentionally only what
+ * `sessions_list` renders.
+ */
+export type SessionDiscoveryControl = {
+  state: EffectiveControlState;
+  primaryBlocker: {
+    kind: "session" | "workspace";
+    sessionId?: string;
+    displayName: string;
+    displayNameOriginalChars: number;
+  } | null;
+  additionalBlockerCount: number;
+};
+
 export function serializeEffectiveSessionControl(control: EffectiveSessionControl) {
   const blocker = (
     value: EffectiveControlBlocker,
@@ -881,6 +901,221 @@ export async function evaluateSessionControls(
         stopping.get(sessionId) ?? 0,
       ),
     );
+  }
+  return result;
+}
+
+type SessionDiscoveryControlRow = {
+  targetId: string;
+  ancestryCount: number | string;
+  reachedRoot: boolean;
+  maxDepth: number | string | null;
+  blockerCount: number | string;
+  primaryKind: "session" | "workspace" | null;
+  primarySessionId: string | null;
+  primaryDisplayName: string | null;
+  primaryDisplayNameOriginalChars: number | string | null;
+};
+
+/**
+ * Return one compact aggregate row per target for `sessions_list`.
+ *
+ * Unlike `evaluateSessionControls`, the database boundary never returns a row
+ * per blocker/ancestor, nor does application code construct blocker or resume
+ * option arrays. The recursive walk carries no growing visited-path array: a
+ * missing ancestor stops below the limit, while a cycle cannot reach a root and
+ * therefore runs into the hard `SESSION_ANCESTRY_LIMIT`. The externally
+ * supplied target set is capped by `SESSION_DISCOVERY_CONTROL_TARGET_LIMIT`.
+ */
+export async function evaluateSessionDiscoveryControls(
+  db: Database,
+  workspaceId: string,
+  sessionIds: string[],
+): Promise<Map<string, SessionDiscoveryControl>> {
+  const uniqueIds = [...new Set(sessionIds)];
+  if (uniqueIds.length === 0) return new Map();
+  if (uniqueIds.length > SESSION_DISCOVERY_CONTROL_TARGET_LIMIT) {
+    throw new SessionControlInvariantError(
+      `Session discovery control projection exceeds ${SESSION_DISCOVERY_CONTROL_TARGET_LIMIT} targets`,
+    );
+  }
+
+  const workspace = await lockWorkspaceInferenceControl(db, workspaceId, "share");
+  const workspacePauseRevision = asSafeRevision(
+    workspace.workspacePauseRevision,
+    "workspace pause revision",
+  );
+  if (workspace.workspaceState === "paused" && workspacePauseRevision === null) {
+    throw new SessionControlInvariantError("Paused workspace is missing its pause revision");
+  }
+
+  const rows = await db.execute<SessionDiscoveryControlRow>(sql`
+    with recursive targets(id) as (values ${targetValues(uniqueIds)}),
+    ancestry as (
+      select
+        target.id as target_id,
+        session.id as session_id,
+        session.parent_session_id,
+        left(coalesce(nullif(btrim(session.title), ''), 'Untitled session'), ${SESSION_DISCOVERY_CONTROL_TITLE_MAX_CHARS}) as display_name,
+        char_length(coalesce(nullif(btrim(session.title), ''), 'Untitled session'))::integer as display_name_original_chars,
+        session.direct_control_state,
+        session.direct_pause_revision,
+        session.subtree_run_override_revision,
+        0::integer as depth
+      from targets target
+      join ${schema.sessions} session
+        on session.workspace_id = ${workspaceId} and session.id = target.id
+      union all
+      select
+        child.target_id,
+        parent.id,
+        parent.parent_session_id,
+        left(coalesce(nullif(btrim(parent.title), ''), 'Untitled session'), ${SESSION_DISCOVERY_CONTROL_TITLE_MAX_CHARS}),
+        char_length(coalesce(nullif(btrim(parent.title), ''), 'Untitled session'))::integer,
+        parent.direct_control_state,
+        parent.direct_pause_revision,
+        parent.subtree_run_override_revision,
+        child.depth + 1
+      from ancestry child
+      join ${schema.sessions} parent
+        on parent.workspace_id = ${workspaceId} and parent.id = child.parent_session_id
+      where child.parent_session_id is not null
+        and child.depth < ${SESSION_ANCESTRY_LIMIT}
+    ),
+    path as (
+      select
+        ancestry.*,
+        max(ancestry.subtree_run_override_revision) over (
+          partition by ancestry.target_id
+          order by ancestry.depth
+          rows between unbounded preceding and 1 preceding
+        ) as descendant_override_revision
+      from ancestry
+    ),
+    session_blockers as (
+      select
+        path.target_id,
+        'session'::text as kind,
+        path.session_id,
+        path.display_name,
+        path.display_name_original_chars,
+        path.depth
+      from path
+      where path.direct_control_state = 'paused'
+        and path.direct_pause_revision is not null
+        and (
+          path.descendant_override_revision is null
+          or path.descendant_override_revision <= path.direct_pause_revision
+        )
+    ),
+    workspace_blockers as (
+      select
+        target.id as target_id,
+        'workspace'::text as kind,
+        null::uuid as session_id,
+        'Workspace'::text as display_name,
+        9::integer as display_name_original_chars,
+        ${SESSION_ANCESTRY_LIMIT + 1}::integer as depth
+      from targets target
+      where ${workspace.workspaceState === "paused"}
+        and not exists (
+          select 1
+          from path
+          where path.target_id = target.id
+            and path.subtree_run_override_revision is not null
+            and path.subtree_run_override_revision > ${workspacePauseRevision}
+        )
+    ),
+    blockers as (
+      select * from session_blockers
+      union all
+      select * from workspace_blockers
+    ),
+    primary_blockers as (
+      select distinct on (blockers.target_id)
+        blockers.target_id,
+        blockers.kind,
+        blockers.session_id,
+        blockers.display_name,
+        blockers.display_name_original_chars
+      from blockers
+      order by blockers.target_id, blockers.depth
+    ),
+    blocker_counts as (
+      select blockers.target_id, count(*)::integer as blocker_count
+      from blockers
+      group by blockers.target_id
+    ),
+    ancestry_metadata as (
+      select
+        ancestry.target_id,
+        count(*)::integer as ancestry_count,
+        bool_or(ancestry.parent_session_id is null) as reached_root,
+        max(ancestry.depth)::integer as max_depth
+      from ancestry
+      group by ancestry.target_id
+    )
+    select
+      target.id as "targetId",
+      coalesce(metadata.ancestry_count, 0)::integer as "ancestryCount",
+      coalesce(metadata.reached_root, false) as "reachedRoot",
+      metadata.max_depth as "maxDepth",
+      coalesce(counts.blocker_count, 0)::integer as "blockerCount",
+      primary_blocker.kind as "primaryKind",
+      primary_blocker.session_id as "primarySessionId",
+      primary_blocker.display_name as "primaryDisplayName",
+      primary_blocker.display_name_original_chars as "primaryDisplayNameOriginalChars"
+    from targets target
+    left join ancestry_metadata metadata on metadata.target_id = target.id
+    left join blocker_counts counts on counts.target_id = target.id
+    left join primary_blockers primary_blocker on primary_blocker.target_id = target.id
+    order by target.id
+  `);
+
+  const result = new Map<string, SessionDiscoveryControl>();
+  for (const row of rows) {
+    const ancestryCount = Number(row.ancestryCount);
+    const maxDepth = row.maxDepth === null ? null : Number(row.maxDepth);
+    if (ancestryCount === 0) {
+      throw new SessionControlInvariantError(
+        `Session ${row.targetId} does not exist in its workspace`,
+      );
+    }
+    if (!row.reachedRoot) {
+      throw new SessionControlInvariantError(
+        maxDepth !== null && maxDepth >= SESSION_ANCESTRY_LIMIT
+          ? `Session ${row.targetId} ancestry exceeds ${SESSION_ANCESTRY_LIMIT}`
+          : `Session ${row.targetId} has a missing ancestor`,
+      );
+    }
+
+    const blockerCount = Number(row.blockerCount);
+    const primaryBlocker = row.primaryKind
+      ? {
+          kind: row.primaryKind,
+          ...(row.primarySessionId ? { sessionId: row.primarySessionId } : {}),
+          displayName:
+            row.primaryDisplayName ??
+            (row.primaryKind === "workspace" ? "Workspace" : "Untitled session"),
+          displayNameOriginalChars: Number(
+            row.primaryDisplayNameOriginalChars ??
+              (row.primaryKind === "workspace" ? 9 : "Untitled session".length),
+          ),
+        }
+      : null;
+    if (blockerCount > 0 !== (primaryBlocker !== null)) {
+      throw new SessionControlInvariantError(
+        `Session ${row.targetId} discovery blocker aggregate is inconsistent`,
+      );
+    }
+    result.set(row.targetId, {
+      state: blockerCount > 0 ? "paused" : "active",
+      primaryBlocker,
+      additionalBlockerCount: Math.max(0, blockerCount - 1),
+    });
+  }
+  if (result.size !== uniqueIds.length) {
+    throw new SessionControlInvariantError("Session discovery control projection is incomplete");
   }
   return result;
 }

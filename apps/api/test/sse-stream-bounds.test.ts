@@ -271,6 +271,56 @@ test("workspace-control replay bounds a poison row and reconnect advances past i
   await resumedReader.cancel();
 });
 
+test("workspace-control SSE accepts a migration-created sparse first revision", async () => {
+  durableControlEvents = [controlEvent(7)];
+  durableControlReads.length = 0;
+  const bus = {
+    subscribeWorkspaceControl: async () => () => {},
+  } as unknown as EventBus;
+  const response = await sseWorkspaceControlStream(
+    fakeDb as never,
+    bus,
+    WORKSPACE_ID,
+    0,
+    new AbortController().signal,
+    { stallTimeoutMs: 100 },
+  );
+  const reader = response.body!.getReader();
+
+  expect((await readControlEvents(reader, 1)).map((candidate) => candidate.sequence)).toEqual([7]);
+  expect(durableControlReads).toEqual([
+    { after: 0, limit: 100 },
+    { after: 0, limit: 7 },
+  ]);
+  await reader.cancel();
+});
+
+test("workspace-control SSE reconnects across a legitimate sparse revision gap", async () => {
+  durableControlEvents = [controlEvent(1), controlEvent(7)];
+  durableControlReads.length = 0;
+  const bus = {
+    subscribeWorkspaceControl: async () => () => {},
+  } as unknown as EventBus;
+  const response = await sseWorkspaceControlStream(
+    fakeDb as never,
+    bus,
+    WORKSPACE_ID,
+    0,
+    new AbortController().signal,
+    { stallTimeoutMs: 100 },
+  );
+  const reader = response.body!.getReader();
+
+  expect((await readControlEvents(reader, 2)).map((candidate) => candidate.sequence)).toEqual([
+    1, 7,
+  ]);
+  expect(durableControlReads).toEqual([
+    { after: 0, limit: 100 },
+    { after: 1, limit: 6 },
+  ]);
+  await reader.cancel();
+});
+
 async function readSequences(
   reader: ReadableStreamDefaultReader<Uint8Array>,
   count: number,
