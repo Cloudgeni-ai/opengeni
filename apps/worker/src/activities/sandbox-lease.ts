@@ -888,8 +888,10 @@ export async function terminateProviderBox(
       await session.terminate();
       return { terminated: true, providerMissingBeforeCapture: false };
     }
-    if (session?.close && !session.closed) {
-      await session.close();
+    if (session?.close) {
+      if (!session.closed) {
+        await session.close();
+      }
       return { terminated: true, providerMissingBeforeCapture: false };
     }
   } catch (error) {

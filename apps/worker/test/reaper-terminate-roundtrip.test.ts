@@ -153,6 +153,61 @@ describe("reaper terminate envelope→resume round-trip preserves sandboxId", ()
     expect(deleteCalls).toEqual(["sb-live-123"]); // and terminated BY ID, AFTER persist
   });
 
+  test("an already-closed resumable session is successful after its verified archive is folded", async () => {
+    const closeCalls: string[] = [];
+    const persistedArchives: string[] = [];
+    const closeOnlyClient = {
+      backendId: "modal",
+      async deserializeSessionState(state: Record<string, unknown>) {
+        return { ...state };
+      },
+      async resume() {
+        return {
+          closed: true,
+          close: async () => {
+            closeCalls.push("close");
+          },
+          exec: async () => ({ stdout: TEST_WORKSPACE_FINGERPRINT }),
+          persistWorkspace: async () =>
+            new TextEncoder().encode(
+              'MODAL_SANDBOX_FS_SNAPSHOT_V1\n{"snapshot_id":"im-already-closed"}',
+            ),
+        };
+      },
+      async serializeSessionState(state: Record<string, unknown>) {
+        return { ...state };
+      },
+    };
+
+    const outcome = await terminateProviderBox(
+      testSettings({ sandboxBackend: "modal", sandboxOwnershipEnabled: true }),
+      {
+        sandboxGroupId: "group-already-closed",
+        leaseEpoch: 3,
+        backend: "modal",
+        resumeBackendId: "modal",
+        resumeState: {
+          backendId: "modal",
+          sessionState: { providerState: { sandboxId: "sb-already-closed" } },
+        },
+      } as never,
+      observability,
+      async (archiveBase64) => {
+        expect(archiveBase64).not.toBeNull();
+        persistedArchives.push(archiveBase64!);
+        return { wrote: true, priorArchiveForGc: null };
+      },
+      (() => closeOnlyClient) as never,
+    );
+
+    expect(outcome).toEqual({
+      terminated: true,
+      providerMissingBeforeCapture: false,
+    });
+    expect(persistedArchives).toHaveLength(1);
+    expect(closeCalls).toEqual([]);
+  });
+
   test("CRITICAL: a selfhosted lease is NEVER provider-stopped by the reaper (drain-to-cold only)", async () => {
     // The catastrophic-if-violated invariant (dossier §19/§21): a selfhosted box is
     // a user's PHYSICAL machine. The reaper must drain its lease to cold WITHOUT
