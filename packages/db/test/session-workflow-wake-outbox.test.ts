@@ -5,10 +5,12 @@ import {
   bootstrapWorkspace,
   claimPendingSessionWorkflowWakes,
   claimSessionWorkForAttempt,
+  clearSessionGoal,
   createDb,
   createScheduledTask,
   createScheduledTaskRun,
   createSession,
+  getSessionGoal,
   initializeSessionStartAtomically,
   listSessionEvents,
   listSessionTurns,
@@ -489,6 +491,75 @@ describe("transactional session workflow wake outbox", () => {
       wakeRevision: 2,
       deliveredRevision: 1,
     });
+  });
+
+  test("response-loss replay accepts an initial goal that was durably cleared", async () => {
+    const { grant } = await workspaceFixture();
+    const input = canonicalInput(grant, { goal: { text: "clear after response loss" } });
+    const initialized = await initializeSessionStartAtomically(client.db, input);
+    const originalGoal = await getSessionGoal(
+      client.db,
+      grant.workspaceId!,
+      initialized.session.id,
+    );
+    expect(originalGoal).not.toBeNull();
+
+    const cleared = await clearSessionGoal(client.db, grant.workspaceId!, initialized.session.id);
+    expect(cleared).toMatchObject({
+      cleared: true,
+      goal: { id: originalGoal!.id },
+      event: { type: "goal.cleared" },
+    });
+
+    const replayed = await initializeSessionStartAtomically(client.db, input);
+
+    expect(replayed).toMatchObject({
+      created: false,
+      temporalWorkflowId: initialized.temporalWorkflowId,
+      workflowWakeRevision: initialized.workflowWakeRevision,
+      triggerEventId: initialized.triggerEventId,
+    });
+    expect(replayed.session.id).toBe(initialized.session.id);
+    expect(replayed.turn?.id).toBe(initialized.turn?.id);
+    expect(replayed.events).toEqual([]);
+    expect(await getSessionGoal(client.db, grant.workspaceId!, initialized.session.id)).toBeNull();
+
+    const events = await listSessionEvents(
+      client.db,
+      grant.workspaceId!,
+      initialized.session.id,
+      0,
+      20,
+    );
+    expect(events.filter((event) => event.type === "goal.set")).toHaveLength(1);
+    expect(events.filter((event) => event.type === "goal.cleared")).toHaveLength(1);
+    expect(cleared.event!.sequence).toBeGreaterThan(
+      events.find((event) => event.type === "goal.set")!.sequence,
+    );
+    expect(cleared.event?.payload).toMatchObject({ goalId: originalGoal!.id });
+  });
+
+  test("response-loss replay rejects a missing initial goal without a durable clear event", async () => {
+    const { grant } = await workspaceFixture();
+    const input = canonicalInput(grant, { goal: { text: "corrupted initial goal" } });
+    const initialized = await initializeSessionStartAtomically(client.db, input);
+    await shared.admin`
+      delete from session_goals
+      where workspace_id = ${grant.workspaceId!}
+        and session_id = ${initialized.session.id}
+    `;
+
+    await expect(initializeSessionStartAtomically(client.db, input)).rejects.toMatchObject({
+      code: "session_initialization_invariant",
+    });
+    const events = await listSessionEvents(
+      client.db,
+      grant.workspaceId!,
+      initialized.session.id,
+      0,
+      20,
+    );
+    expect(events.filter((event) => event.type === "goal.cleared")).toEqual([]);
   });
 
   test("legacy version-0 keyed rows fail closed instead of fabricating initialization", async () => {

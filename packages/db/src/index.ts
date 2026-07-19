@@ -19125,24 +19125,42 @@ async function verifyCanonicalSessionStartInTransaction(
   if (hasInitialGoal) {
     const goalEvent = initialPrefix[1];
     const goalPayload = eventPayloadRecord(goalEvent?.payload);
-    const [goal] =
-      typeof goalPayload?.goalId === "string"
-        ? await tx
-            .select({ id: schema.sessionGoals.id })
-            .from(schema.sessionGoals)
-            .where(
-              and(
-                eq(schema.sessionGoals.workspaceId, input.workspaceId),
-                eq(schema.sessionGoals.sessionId, session.id),
-                eq(schema.sessionGoals.id, goalPayload.goalId),
-              ),
-            )
-            .limit(1)
-        : [];
-    if (!goal) {
+    const goalId = typeof goalPayload?.goalId === "string" ? goalPayload.goalId : null;
+    if (!goalEvent || !goalId) {
       throw new SessionInitializationInvariantError(
         "canonical session receipt has invalid initial goal state",
       );
+    }
+    const [goal] = await tx
+      .select({ id: schema.sessionGoals.id })
+      .from(schema.sessionGoals)
+      .where(
+        and(
+          eq(schema.sessionGoals.workspaceId, input.workspaceId),
+          eq(schema.sessionGoals.sessionId, session.id),
+          eq(schema.sessionGoals.id, goalId),
+        ),
+      )
+      .limit(1);
+    if (!goal) {
+      const [cleared] = await tx
+        .select({ id: schema.sessionEvents.id })
+        .from(schema.sessionEvents)
+        .where(
+          and(
+            eq(schema.sessionEvents.workspaceId, input.workspaceId),
+            eq(schema.sessionEvents.sessionId, session.id),
+            eq(schema.sessionEvents.type, "goal.cleared"),
+            gt(schema.sessionEvents.sequence, goalEvent.sequence),
+            eq(sql<string>`${schema.sessionEvents.payload} ->> 'goalId'`, goalId),
+          ),
+        )
+        .limit(1);
+      if (!cleared) {
+        throw new SessionInitializationInvariantError(
+          "canonical session receipt has invalid initial goal state",
+        );
+      }
     }
   }
   const triggerEvent = initialPrefix.find((event) =>

@@ -7,7 +7,9 @@ import {
   applySessionTurnSettlement,
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
+  clearSessionGoal,
   createDb,
+  getSessionGoal,
   listSessionEvents,
   listSessionTurns,
   peekSessionWork,
@@ -255,6 +257,87 @@ describe("atomic session creation across PostgreSQL and Temporal", () => {
     integrationTimeoutMs,
   );
 
+  test(
+    "retries a response-lost create after its initial goal was durably cleared",
+    async () => {
+      const grant = await workspaceFixture(dbClient.db, "cleared-goal-replay");
+      const sessionId = crypto.randomUUID();
+      const idempotencyKey = `cleared-goal:${crypto.randomUUID()}`;
+      const fingerprint = requestFingerprint(idempotencyKey);
+      const request = createRequest(grant, {
+        sessionId,
+        idempotencyKey,
+        fingerprint,
+        initialMessage: "retry without resurrecting the cleared goal",
+        goal: { text: "initial goal that is later cleared" },
+      });
+      const created = await createAndStartSession(request);
+      const originalGoal = await getSessionGoal(dbClient.db, grant.workspaceId, created.id);
+      expect(originalGoal).not.toBeNull();
+      const initialTurns = await listSessionTurns(dbClient.db, grant.workspaceId, created.id);
+      const [initialWake] = await shared.admin<
+        Array<{
+          temporal_workflow_id: string;
+          wake_revision: number;
+          delivered_revision: number;
+        }>
+      >`
+        select temporal_workflow_id, wake_revision::integer, delivered_revision::integer
+        from session_workflow_wake_outbox
+        where workspace_id = ${grant.workspaceId}
+          and session_id = ${created.id}
+      `;
+      expect(initialTurns).toHaveLength(1);
+      expect(initialWake).toMatchObject({
+        temporal_workflow_id: `session-${created.id}`,
+        wake_revision: 1,
+        delivered_revision: 1,
+      });
+
+      const cleared = await clearSessionGoal(dbClient.db, grant.workspaceId, created.id);
+      expect(cleared).toMatchObject({
+        cleared: true,
+        goal: { id: originalGoal!.id },
+        event: { type: "goal.cleared" },
+      });
+      const publishedBeforeRetry = bus.published.length;
+
+      const replayed = await createAndStartSession(request);
+
+      expect(replayed.id).toBe(created.id);
+      expect(await getSessionGoal(dbClient.db, grant.workspaceId, created.id)).toBeNull();
+      expect(await listSessionTurns(dbClient.db, grant.workspaceId, created.id)).toEqual(
+        initialTurns,
+      );
+      const events = await listSessionEvents(dbClient.db, grant.workspaceId, created.id, 0, 20);
+      expect(events.filter((event) => event.type === "session.created")).toHaveLength(1);
+      expect(events.filter((event) => event.type === "goal.set")).toHaveLength(1);
+      expect(events.filter((event) => event.type === "goal.cleared")).toHaveLength(1);
+      expect(events.filter((event) => event.type === "user.message")).toHaveLength(1);
+      expect(events.filter((event) => event.type === "turn.queued")).toHaveLength(1);
+      expect(cleared.event!.sequence).toBeGreaterThan(
+        events.find((event) => event.type === "goal.set")!.sequence,
+      );
+      expect(cleared.event?.payload).toMatchObject({ goalId: originalGoal!.id });
+      const [replayedWake] = await shared.admin<
+        Array<{
+          temporal_workflow_id: string;
+          wake_revision: number;
+          delivered_revision: number;
+        }>
+      >`
+        select temporal_workflow_id, wake_revision::integer, delivered_revision::integer
+        from session_workflow_wake_outbox
+        where workspace_id = ${grant.workspaceId}
+          and session_id = ${created.id}
+      `;
+      expect(replayedWake).toEqual(initialWake);
+      expect(bus.published).toHaveLength(publishedBeforeRetry);
+      await expectWorkflowPresent(initialWake!.temporal_workflow_id);
+    },
+    integrationTimeoutMs,
+  );
+
   async function sessionWorker(admissions: Map<string, number>) {
     const activities = {
       peekSessionWork: async (input: { workspaceId: string; sessionId: string }) =>
@@ -398,6 +481,7 @@ describe("atomic session creation across PostgreSQL and Temporal", () => {
       idempotencyKey: string;
       fingerprint: string;
       initialMessage: string;
+      goal?: Parameters<typeof createAndStartSession>[0]["goal"];
     },
   ): Parameters<typeof createAndStartSession>[0] {
     return {
@@ -417,6 +501,7 @@ describe("atomic session creation across PostgreSQL and Temporal", () => {
       reasoningEffort: "low",
       sandboxBackend: "none",
       metadata: {},
+      goal: input.goal ?? null,
       createIdempotencyKey: input.idempotencyKey,
       usageSubjectId: grant.subjectId,
     };
