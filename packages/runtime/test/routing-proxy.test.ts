@@ -148,6 +148,49 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
     expect(lossCallbacks).toBe(1);
   });
 
+  test("transient home transport consults liveness first, then refuses mutation replay", async () => {
+    const order: string[] = [];
+    let writes = 0;
+    const unavailable = Object.assign(new Error("transport payload must not escape"), {
+      code: "UNAVAILABLE",
+    });
+    const backend: RoutableBackendSession = {
+      async writeFile() {
+        writes += 1;
+        order.push("invoked");
+        throw unavailable;
+      },
+    };
+    const proxy = new RoutingSandboxSession({
+      defaultResolved: { session: backend, sandboxId: null, kind: "modal" },
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 17 }),
+      resolveActiveBackend: async () => ({ session: backend, sandboxId: null, kind: "modal" }),
+      onDefaultBackendError: async ({ error, op, kind }) => {
+        order.push("liveness-consulted");
+        expect(error).toBe(unavailable);
+        expect({ op, kind }).toEqual({ op: "writeFile", kind: "modal" });
+        return null;
+      },
+    });
+
+    const error = await proxy.writeFile({ path: "maybe-written" }).catch((caught) => {
+      order.push("acceptance-settled");
+      return caught;
+    });
+
+    expect(error).toBeInstanceOf(SandboxMutationAcceptanceUnknownError);
+    expect((error as SandboxMutationAcceptanceUnknownError).checkpoint).toEqual({
+      op: "writeFile",
+      backend: "modal",
+      activeEpoch: 17,
+      acceptance: "unknown",
+      transportCode: "UNAVAILABLE",
+    });
+    expect(String(error)).not.toContain("transport payload");
+    expect(order).toEqual(["invoked", "liveness-consulted", "acceptance-settled"]);
+    expect(writes).toBe(1);
+  });
+
   test("(1) active-epoch fence: a swap mid-turn routes the NEXT op to the new backend", async () => {
     const modal = new FakeBackend("modal");
     const selfhosted = new FakeBackend("selfhosted");
