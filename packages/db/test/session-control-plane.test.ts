@@ -333,6 +333,23 @@ describe("clean session control plane", () => {
       callId: "structured-call",
       output: structuredOutput,
     };
+    const mixedOutput = Array.from({ length: 360 }, (_, index): Record<string, unknown> => {
+      if (index % 3 === 0) return { type: "input_text", text: `text-${index}` };
+      if (index % 3 === 1) {
+        return { type: "input_image", image: `data:image/png;base64,a${index}` };
+      }
+      return {
+        type: "input_file",
+        file: { id: `file_${index}` },
+        filename: `${index}.txt`,
+      };
+    });
+    const canonicalMixedItem = {
+      type: "function_call_result",
+      callId: "canonical-mixed-call",
+      status: "completed",
+      output: mixedOutput,
+    };
     expect(
       await appendSessionHistoryItems(client.db, {
         accountId: grant.accountId,
@@ -364,6 +381,29 @@ describe("clean session control plane", () => {
         ],
       }),
     ).toBe(true);
+    expect(
+      await appendSessionHistoryItems(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn!.id,
+        expectedExecutionGeneration: turn!.executionGeneration,
+        expectedAttemptId: attemptId,
+        items: [
+          {
+            position: 3,
+            item: {
+              type: "function_call",
+              callId: "canonical-mixed-call",
+              name: "mixed_tool",
+              arguments: "{}",
+              status: "completed",
+            },
+          },
+          { position: 4, item: canonicalMixedItem },
+        ],
+      }),
+    ).toBe(true);
     const canonical = await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id);
     const canonicalText = (canonical[1]!.item.output as { text: string }).text;
     expect(canonicalText).toContain("tokens truncated");
@@ -373,6 +413,23 @@ describe("clean session control plane", () => {
       "maximum structured tool-output depth exceeded",
     );
     expect(Buffer.byteLength(JSON.stringify(canonical[2]!.item), "utf8")).toBeLessThan(10_000);
+    const canonicalMixed = canonical[4]!.item;
+    const canonicalMixedOutput = canonicalMixed.output as Array<Record<string, unknown>>;
+    expect(canonicalMixed).toEqual(boundModelToolOutputItem(canonicalMixedItem));
+    expect(canonicalMixedOutput.length).toBeLessThanOrEqual(256);
+    expect(
+      canonicalMixedOutput.every(
+        (part) =>
+          part.type === "input_text" || part.type === "input_image" || part.type === "input_file",
+      ),
+    ).toBe(true);
+    expect(canonicalMixedOutput.at(-1)).toEqual({
+      type: "input_text",
+      text: "[OpenGeni omitted 105 structured array items]",
+    });
+    expect(JSON.stringify(boundModelToolOutputItem(canonicalMixed))).toBe(
+      JSON.stringify(canonicalMixed),
+    );
 
     expect(
       await registerPendingSessionToolCall(client.db, {
@@ -406,6 +463,40 @@ describe("clean session control plane", () => {
         output: { type: "text", text: huge },
       },
     });
+    expect(
+      await registerPendingSessionToolCall(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn!.id,
+        executionGeneration: turn!.executionGeneration,
+        attemptId,
+        callId: "pending-mixed-call",
+        callType: "function_call",
+        callItem: {
+          type: "function_call",
+          callId: "pending-mixed-call",
+          name: "mixed_tool",
+          arguments: "{}",
+          status: "completed",
+        },
+      }),
+    ).toEqual({ accepted: true, registered: true });
+    await recordPendingSessionToolCallResult(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      turnId: turn!.id,
+      executionGeneration: turn!.executionGeneration,
+      attemptId,
+      callId: "pending-mixed-call",
+      resultItem: {
+        type: "function_call_result",
+        callId: "pending-mixed-call",
+        status: "completed",
+        output: mixedOutput,
+      },
+    });
     const [pending] = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
       db
         .select({ resultItem: schema.sessionPendingToolCalls.resultItem })
@@ -413,6 +504,13 @@ describe("clean session control plane", () => {
         .where(eq(schema.sessionPendingToolCalls.callId, "pending-call")),
     );
     expect(((pending!.resultItem as any).output as { text: string }).text).toBe(huge);
+    const [pendingMixed] = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      db
+        .select({ resultItem: schema.sessionPendingToolCalls.resultItem })
+        .from(schema.sessionPendingToolCalls)
+        .where(eq(schema.sessionPendingToolCalls.callId, "pending-mixed-call")),
+    );
+    expect((pendingMixed!.resultItem as { output: unknown[] }).output).toHaveLength(360);
 
     const recovery = await requestSessionTurnRecovery(client.db, grant.workspaceId!, {
       sessionId: session.id,
@@ -436,6 +534,17 @@ describe("clean session control plane", () => {
       ) as { output: { text: string } };
     expect(recoveredResult.output.text).toContain("tokens truncated");
     expect(recoveredResult.output.text.length).toBeLessThan(50_000);
+    const recoveredMixedResult = recoveredHistory
+      .map((row) => row.item)
+      .find(
+        (item) =>
+          item.type === "function_call_result" &&
+          (item as { callId?: unknown }).callId === "pending-mixed-call",
+      ) as { output: Array<Record<string, unknown>> };
+    expect(recoveredMixedResult.output).toEqual(canonicalMixedOutput);
+    expect(JSON.stringify(boundModelToolOutputItem(recoveredMixedResult))).toBe(
+      JSON.stringify(recoveredMixedResult),
+    );
     const recoveryOutput = recovery.events.find(
       (event) =>
         event.type === "agent.toolCall.output" &&
@@ -455,12 +564,37 @@ describe("clean session control plane", () => {
         expect.objectContaining({ path: "$.output.text", kind: "string" }),
       ]),
     });
+    const mixedRecoveryOutput = recovery.events.find(
+      (event) =>
+        event.type === "agent.toolCall.output" &&
+        (event.payload as { id?: unknown }).id === "pending-mixed-call",
+    )?.payload as {
+      output: Array<Record<string, unknown>>;
+      recovery: { outcome: string };
+    };
+    expect(mixedRecoveryOutput.output.length).toBeLessThan(360);
+    expect(mixedRecoveryOutput.recovery.outcome).toBe("durable_result_found");
+    expect(sessionEventJsonBytes(mixedRecoveryOutput)).toBeLessThanOrEqual(
+      SESSION_EVENT_PAYLOAD_MAX_BYTES,
+    );
+    expect(sessionEventPayloadTruncation(mixedRecoveryOutput)).toMatchObject({
+      truncated: true,
+      surface: "durable_audit",
+      fullEvidence: { available: false, reason: "not_retained" },
+      details: expect.arrayContaining([
+        expect.objectContaining({
+          path: "$.output",
+          kind: "array",
+          omittedEntries: expect.any(Number),
+        }),
+      ]),
+    });
     expect(
       await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
         db
           .select({ id: schema.sessionPendingToolCalls.id })
           .from(schema.sessionPendingToolCalls)
-          .where(eq(schema.sessionPendingToolCalls.callId, "pending-call")),
+          .where(eq(schema.sessionPendingToolCalls.sessionId, session.id)),
       ),
     ).toEqual([]);
   });

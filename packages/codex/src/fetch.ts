@@ -488,6 +488,45 @@ function codexSseFailureResponse(
     responseStatus?: unknown;
   } = {},
 ): Response {
+  const projection = codexSseFailureProjection(
+    source,
+    rawError,
+    fallbackCode,
+    fallbackMessage,
+    metadata,
+  );
+  return new Response(JSON.stringify({ error: projection.error }), {
+    status: projection.status,
+    headers: projection.headers,
+  });
+}
+
+export type CodexSseFailureProjection = {
+  status: number;
+  error: {
+    type: string;
+    code: string;
+    message: string;
+    param?: string;
+    event_type?: string;
+    response_id?: string;
+    response_status?: string;
+    diagnostic_truncated?: true;
+  };
+  headers: Headers;
+};
+
+function codexSseFailureProjection(
+  source: Response,
+  rawError: unknown,
+  fallbackCode: string,
+  fallbackMessage: string,
+  metadata: {
+    eventType?: unknown;
+    responseId?: unknown;
+    responseStatus?: unknown;
+  } = {},
+): CodexSseFailureProjection {
   const record =
     rawError && typeof rawError === "object" && !Array.isArray(rawError)
       ? (rawError as Record<string, unknown>)
@@ -534,7 +573,7 @@ function codexSseFailureResponse(
       rawError !== undefined &&
       typeof rawError !== "string" &&
       (typeof rawError !== "object" || Array.isArray(rawError)));
-  const error = {
+  const error: CodexSseFailureProjection["error"] = {
     type: providerType?.length ? providerType : code,
     code,
     message: messageField.value?.length ? messageField.value : fallbackMessage,
@@ -561,7 +600,71 @@ function codexSseFailureResponse(
   headers.set("x-should-retry", "false");
   headers.delete("content-length");
   headers.delete("content-encoding");
-  return new Response(JSON.stringify({ error }), { status, headers });
+  return { status, error, headers };
+}
+
+/**
+ * A provider terminal carried inside an accepted HTTP-200 stream. The OpenAI
+ * SDK cannot turn that late terminal into a non-2xx APIError because headers
+ * have already been accepted, so the body transform throws this equivalent
+ * bounded shape. Provider-supplied message/param text is intentionally absent:
+ * the worker may persist Error.message, while identifiers/classifications are
+ * sufficient for retry, compaction, and incident diagnostics.
+ */
+export class CodexStreamingTerminalError extends Error {
+  readonly status: number;
+  readonly code: string;
+  readonly type: string;
+  readonly eventType?: string;
+  readonly responseId?: string;
+  readonly responseStatus?: string;
+  readonly headers: Headers;
+  readonly error: Record<string, unknown>;
+
+  constructor(projection: CodexSseFailureProjection, publicMessage: string) {
+    super(publicMessage);
+    this.name = "CodexStreamingTerminalError";
+    this.status = projection.status;
+    this.code = projection.error.code;
+    this.type = projection.error.type;
+    if (projection.error.event_type !== undefined) {
+      this.eventType = projection.error.event_type;
+    }
+    if (projection.error.response_id !== undefined) {
+      this.responseId = projection.error.response_id;
+    }
+    if (projection.error.response_status !== undefined) {
+      this.responseStatus = projection.error.response_status;
+    }
+    this.headers = projection.headers;
+    this.error = {
+      type: projection.error.type,
+      code: projection.error.code,
+      ...(projection.error.event_type ? { event_type: projection.error.event_type } : {}),
+      ...(projection.error.response_id ? { response_id: projection.error.response_id } : {}),
+      ...(projection.error.response_status
+        ? { response_status: projection.error.response_status }
+        : {}),
+      ...(projection.error.diagnostic_truncated ? { diagnostic_truncated: true } : {}),
+    };
+  }
+}
+
+function codexSseFailureError(
+  source: Response,
+  rawError: unknown,
+  fallbackCode: string,
+  publicMessage: string,
+  metadata: {
+    eventType?: unknown;
+    responseId?: unknown;
+    responseStatus?: unknown;
+  } = {},
+): CodexStreamingTerminalError {
+  return new CodexStreamingTerminalError(
+    codexSseFailureProjection(source, rawError, fallbackCode, publicMessage, metadata),
+    publicMessage,
+  );
 }
 
 /**
@@ -577,6 +680,7 @@ function repairCodexStream(res: Response): Response {
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
   let buffer = "";
+  let successfulTerminalSeen = false;
   const emitCompleteBlocks = (
     controller: TransformStreamDefaultController<Uint8Array>,
     final: boolean,
@@ -586,7 +690,9 @@ function repairCodexStream(res: Response): Response {
       const block = buffer.slice(0, boundary.start);
       const separator = buffer.slice(boundary.start, boundary.end);
       buffer = buffer.slice(boundary.end);
-      controller.enqueue(encoder.encode(`${patchSseBlock(block, items)}${separator}`));
+      const patched = patchSseBlock(block, items, res);
+      successfulTerminalSeen ||= patched.successfulTerminal;
+      controller.enqueue(encoder.encode(`${patched.block}${separator}`));
       boundary = findSseBlockBoundary(buffer, final);
     }
   };
@@ -599,8 +705,18 @@ function repairCodexStream(res: Response): Response {
       buffer += decoder.decode();
       emitCompleteBlocks(controller, true);
       if (buffer.length > 0) {
-        controller.enqueue(encoder.encode(patchSseBlock(buffer, items)));
+        const patched = patchSseBlock(buffer, items, res);
+        successfulTerminalSeen ||= patched.successfulTerminal;
+        controller.enqueue(encoder.encode(patched.block));
         buffer = "";
+      }
+      if (!successfulTerminalSeen) {
+        throw codexSseFailureError(
+          res,
+          null,
+          "invalid_sse_terminal",
+          "The Codex response stream ended without a terminal response",
+        );
       }
     },
   });
@@ -643,39 +759,121 @@ function sseLineEndingEnd(value: string, index: number, final: boolean): number 
   return final ? index + 1 : null;
 }
 
-/** Collect output_item.done items (mutating `items`); rewrite the terminal event's empty output. */
-function patchSseBlock(block: string, items: unknown[]): string {
+type PatchedSseBlock = { block: string; successfulTerminal: boolean };
+
+/**
+ * Collect output_item.done items and rewrite only a successful terminal event.
+ * Failed/error/incomplete terminals throw before their provider message can be
+ * exposed to Agents as an ordinary response_done event.
+ */
+function patchSseBlock(block: string, items: unknown[], source: Response): PatchedSseBlock {
   const lines = block.split(/\r\n|\r|\n/);
   const dataStr = lines
     .filter((l) => l.startsWith("data:"))
     .map((l) => l.slice(5).trim())
     .join("\n");
   if (!dataStr || dataStr === "[DONE]") {
-    return block;
+    return { block, successfulTerminal: false };
   }
-  let ev: { type?: string; item?: unknown; response?: Record<string, unknown> };
+  let ev: {
+    type?: string;
+    item?: unknown;
+    response?: Record<string, unknown>;
+    error?: unknown;
+    code?: unknown;
+    message?: unknown;
+    param?: unknown;
+  };
   try {
     ev = JSON.parse(dataStr);
   } catch {
-    return block;
+    return { block, successfulTerminal: false };
   }
   if (ev.type === "response.output_item.done" && ev.item !== undefined) {
     items.push(ev.item);
-    return block;
+    return { block, successfulTerminal: false };
   }
-  if (
-    (ev.type === "response.completed" ||
-      ev.type === "response.done" ||
-      ev.type === "response.incomplete") &&
-    ev.response
-  ) {
+  if (ev.type === "response.failed") {
+    throw codexSseFailureError(
+      source,
+      ev.response?.error,
+      "response_failed",
+      "The Codex response failed",
+      {
+        eventType: ev.type,
+        responseId: ev.response?.id,
+        responseStatus: ev.response?.status,
+      },
+    );
+  }
+  if (ev.type === "error" || ev.type === "response.error") {
+    throw codexSseFailureError(
+      source,
+      ev.error ?? ev.response?.error ?? ev,
+      "response_error",
+      "The Codex response stream reported an error",
+      {
+        eventType: ev.type,
+        responseId: ev.response?.id,
+        responseStatus: ev.response?.status,
+      },
+    );
+  }
+  if (ev.type === "response.incomplete") {
+    const details = ev.response?.incomplete_details;
+    const reason =
+      details && typeof details === "object"
+        ? (details as Record<string, unknown>).reason
+        : undefined;
+    throw codexSseFailureError(
+      source,
+      {
+        code: "response_incomplete",
+        message:
+          typeof reason === "string" && reason.length > 0
+            ? `The Codex response was incomplete (${reason})`
+            : "The Codex response was incomplete",
+      },
+      "response_incomplete",
+      "The Codex response was incomplete",
+      {
+        eventType: ev.type,
+        responseId: ev.response?.id,
+        responseStatus: ev.response?.status,
+      },
+    );
+  }
+  if ((ev.type === "response.completed" || ev.type === "response.done") && ev.response) {
+    if (
+      ev.response.status === "failed" ||
+      ev.response.status === "incomplete" ||
+      (ev.response.error !== null && ev.response.error !== undefined)
+    ) {
+      throw codexSseFailureError(
+        source,
+        ev.response.error,
+        ev.response.status === "incomplete" ? "response_incomplete" : "response_failed",
+        ev.response.status === "incomplete"
+          ? "The Codex response was incomplete"
+          : "The Codex response failed",
+        {
+          eventType: ev.type,
+          responseId: ev.response.id,
+          responseStatus: ev.response.status,
+        },
+      );
+    }
     const out = ev.response.output;
     if ((!Array.isArray(out) || out.length === 0) && items.length > 0) {
       ev.response = { ...ev.response, output: items };
       const nonData = lines.filter((l) => !l.startsWith("data:"));
       const lineEnding = block.match(/\r\n|\r|\n/)?.[0] ?? "\n";
-      return [...nonData, `data: ${JSON.stringify(ev)}`].join(lineEnding);
+      return {
+        block: [...nonData, `data: ${JSON.stringify(ev)}`].join(lineEnding),
+        successfulTerminal: true,
+      };
     }
+    return { block, successfulTerminal: true };
   }
-  return block;
+  return { block, successfulTerminal: false };
 }

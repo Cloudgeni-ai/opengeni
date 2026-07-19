@@ -17,6 +17,8 @@ export type { UseSessionOptions, UseSessionResult } from "./hooks/use-session";
 export {
   SESSION_EVENT_BROWSER_MAX_BYTES,
   SESSION_EVENT_BROWSER_MAX_COUNT,
+  SESSION_EVENT_BROWSER_PENDING_MAX_BYTES,
+  SESSION_EVENT_BROWSER_PENDING_MAX_COUNT,
   SESSION_EVENT_BROWSER_SINGLE_EVENT_MAX_BYTES,
   boundBrowserSessionEventWindow,
   useSessionEvents,

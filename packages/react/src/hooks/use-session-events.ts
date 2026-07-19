@@ -81,6 +81,8 @@ const BROWSER_EVENT_PAYLOAD_IDENTITY_FIELDS = [
 export const SESSION_EVENT_BROWSER_MAX_BYTES = 8 * 1024 * 1024;
 export const SESSION_EVENT_BROWSER_MAX_COUNT = 10_000;
 export const SESSION_EVENT_BROWSER_SINGLE_EVENT_MAX_BYTES = 96 * 1024;
+export const SESSION_EVENT_BROWSER_PENDING_MAX_BYTES = 1024 * 1024;
+export const SESSION_EVENT_BROWSER_PENDING_MAX_COUNT = 256;
 
 export type BrowserSessionEventWindow = {
   events: SessionEvent[];
@@ -179,13 +181,19 @@ export function useSessionEvents(
     const isCurrent = () => generationRef.current === generation && !controller.signal.aborted;
     streamAbortRef.current = controller;
     // Batch yielded events into one React update per flush window so a long
-    // replay (thousands of events) does not render per event.
+    // replay (thousands of events) does not render per event. Project every
+    // event before retaining it here and synchronously flush at independent
+    // count+byte high-water marks: a synchronously yielding async iterator can
+    // otherwise starve the 16 ms timer and grow this pre-React buffer without
+    // bound even though the final browser window is bounded.
     let pending: SessionEvent[] = [];
+    let pendingBytes = 2; // []
     let flushTimer: ReturnType<typeof setTimeout> | null = null;
     const flush = () => {
       flushTimer = null;
       if (!isCurrent()) {
         pending = [];
+        pendingBytes = 2;
         return;
       }
       if (pending.length === 0) {
@@ -193,6 +201,7 @@ export function useSessionEvents(
       }
       const batch = pending;
       pending = [];
+      pendingBytes = 2;
       // The resume cursor only advances with delivered batches: events still
       // sitting in `pending` when the stream is torn down are re-fetched on
       // the next connect instead of being skipped.
@@ -269,8 +278,27 @@ export function useSessionEvents(
         });
         for await (const event of stream) {
           if (!isCurrent()) break;
-          pending.push(event);
-          scheduleFlush();
+          const boundedEvent = boundBrowserLegacyEvent(event);
+          const boundedEventBytes = browserJsonBytes(boundedEvent);
+          const separatorBytes = pending.length === 0 ? 0 : 1;
+          if (
+            pending.length > 0 &&
+            (pending.length >= SESSION_EVENT_BROWSER_PENDING_MAX_COUNT ||
+              pendingBytes + separatorBytes + boundedEventBytes >
+                SESSION_EVENT_BROWSER_PENDING_MAX_BYTES)
+          ) {
+            flush();
+          }
+          pending.push(boundedEvent);
+          pendingBytes += (pending.length === 1 ? 0 : 1) + boundedEventBytes;
+          if (
+            pending.length >= SESSION_EVENT_BROWSER_PENDING_MAX_COUNT ||
+            pendingBytes >= SESSION_EVENT_BROWSER_PENDING_MAX_BYTES
+          ) {
+            flush();
+          } else {
+            scheduleFlush();
+          }
         }
         if (isCurrent()) {
           flush();

@@ -5,8 +5,11 @@ import { fakeClient, SESSION_ID, WORKSPACE_ID } from "./fake-client";
 import {
   SESSION_EVENT_BROWSER_MAX_BYTES,
   SESSION_EVENT_BROWSER_MAX_COUNT,
+  SESSION_EVENT_BROWSER_PENDING_MAX_BYTES,
+  SESSION_EVENT_BROWSER_PENDING_MAX_COUNT,
   SESSION_EVENT_BROWSER_SINGLE_EVENT_MAX_BYTES,
   boundBrowserSessionEventWindow,
+  type UseSessionEventsResult,
   useSessionEvents,
 } from "../src/hooks/use-session-events";
 import { buildTimeline, type TimelineItem } from "../src/timeline";
@@ -584,6 +587,146 @@ describe("useSessionEvents", () => {
     ).toBeTrue();
 
     await hook.unmount();
+  });
+
+  test("flushes a synchronously yielded pending batch at its count high-water mark", async () => {
+    let releaseStream!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      releaseStream = resolve;
+    });
+    const heldTimers = new Map<number, () => void>();
+    const originalSetTimeout = globalThis.setTimeout;
+    const originalClearTimeout = globalThis.clearTimeout;
+    let nextTimer = 1_000_000;
+    globalThis.setTimeout = ((callback: TimerHandler, delay?: number, ...args: unknown[]) => {
+      if (delay === 16 && typeof callback === "function") {
+        const timer = nextTimer++;
+        heldTimers.set(timer, () => callback(...args));
+        return timer;
+      }
+      return originalSetTimeout(callback, delay, ...args);
+    }) as typeof setTimeout;
+    globalThis.clearTimeout = ((timer: ReturnType<typeof setTimeout>) => {
+      if (typeof timer === "number" && heldTimers.delete(timer)) return;
+      originalClearTimeout(timer);
+    }) as typeof clearTimeout;
+
+    let hook: Awaited<ReturnType<typeof renderHook<UseSessionEventsResult, undefined>>> | null =
+      null;
+    try {
+      const client = fakeClient({
+        streamEvents: () =>
+          (async function* () {
+            for (let index = 0; index < SESSION_EVENT_BROWSER_PENDING_MAX_COUNT + 1; index += 1) {
+              yield event(index + 1, "machine.op.recovered", { attempt: index + 1 });
+            }
+            await blocked;
+          })(),
+      });
+      hook = await renderHook(
+        () =>
+          useSessionEvents(SESSION_ID, {
+            client,
+            workspaceId: WORKSPACE_ID,
+            replay: "full",
+          }),
+        undefined,
+      );
+      await flush(1);
+
+      expect(heldTimers.size).toBeGreaterThan(0);
+      expect(hook.result.current.events).toHaveLength(SESSION_EVENT_BROWSER_PENDING_MAX_COUNT);
+      expect(hook.result.current.lastSequence).toBe(SESSION_EVENT_BROWSER_PENDING_MAX_COUNT);
+
+      releaseStream();
+      await flush(1);
+      expect(hook.result.current.events).toHaveLength(SESSION_EVENT_BROWSER_PENDING_MAX_COUNT + 1);
+    } finally {
+      releaseStream();
+      if (hook) await hook.unmount();
+      globalThis.setTimeout = originalSetTimeout;
+      globalThis.clearTimeout = originalClearTimeout;
+    }
+  });
+
+  test("projects oversized events and flushes pending bytes before the timer can run", async () => {
+    let releaseStream!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      releaseStream = resolve;
+    });
+    const heldTimers = new Map<number, () => void>();
+    const originalSetTimeout = globalThis.setTimeout;
+    const originalClearTimeout = globalThis.clearTimeout;
+    let nextTimer = 2_000_000;
+    globalThis.setTimeout = ((callback: TimerHandler, delay?: number, ...args: unknown[]) => {
+      if (delay === 16 && typeof callback === "function") {
+        const timer = nextTimer++;
+        heldTimers.set(timer, () => callback(...args));
+        return timer;
+      }
+      return originalSetTimeout(callback, delay, ...args);
+    }) as typeof setTimeout;
+    globalThis.clearTimeout = ((timer: ReturnType<typeof setTimeout>) => {
+      if (typeof timer === "number" && heldTimers.delete(timer)) return;
+      originalClearTimeout(timer);
+    }) as typeof clearTimeout;
+
+    let hook: Awaited<ReturnType<typeof renderHook<UseSessionEventsResult, undefined>>> | null =
+      null;
+    try {
+      const streamed = [
+        event(1, "agent.toolCall.output", {
+          id: "multi-megabyte",
+          output: `HEAD-${"界".repeat(1024 * 1024)}-TAIL`,
+        }),
+        ...Array.from({ length: 20 }, (_, index) =>
+          event(index + 2, "agent.message.completed", { text: "x".repeat(80 * 1024) }),
+        ),
+      ];
+      const client = fakeClient({
+        streamEvents: () =>
+          (async function* () {
+            yield* streamed;
+            await blocked;
+          })(),
+      });
+      hook = await renderHook(
+        () =>
+          useSessionEvents(SESSION_ID, {
+            client,
+            workspaceId: WORKSPACE_ID,
+            replay: "full",
+          }),
+        undefined,
+      );
+      await flush(1);
+
+      expect(heldTimers.size).toBeGreaterThan(0);
+      expect(hook.result.current.events.length).toBeGreaterThan(0);
+      expect(hook.result.current.events.length).toBeLessThan(
+        SESSION_EVENT_BROWSER_PENDING_MAX_COUNT,
+      );
+      expect(hook.result.current.lastSequence).toBeLessThan(streamed.length);
+      expect(hook.result.current.windowBytes).toBeLessThanOrEqual(
+        SESSION_EVENT_BROWSER_PENDING_MAX_BYTES,
+      );
+      const firstPayload = hook.result.current.events[0]!.payload as Record<string, unknown>;
+      expect(firstPayload.truncation).toMatchObject({
+        truncated: true,
+        surface: "browser_legacy_guard",
+        fullEvidence: { available: false, reason: "not_retained" },
+      });
+
+      releaseStream();
+      await flush(1);
+      expect(hook.result.current.lastSequence).toBe(streamed.length);
+      expect(hook.result.current.windowBytes).toBeLessThanOrEqual(SESSION_EVENT_BROWSER_MAX_BYTES);
+    } finally {
+      releaseStream();
+      if (hook) await hook.unmount();
+      globalThis.setTimeout = originalSetTimeout;
+      globalThis.clearTimeout = originalClearTimeout;
+    }
   });
 
   test("backward paging reconnects from the retained tail before appending live events", async () => {

@@ -86,6 +86,8 @@ type ModelOutputBoundState = {
   remainingStructural: number;
   remainingEntries: number;
   remainingOpaqueBytes: number;
+  opaqueOmissions: number;
+  lastOpaqueOmissionMarker: string | null;
   omitted: number;
   seen: WeakSet<object>;
 };
@@ -186,15 +188,10 @@ function boundToolOutputValue(output: unknown, budgetTokens: number): unknown {
     // follow Codex's sequential item policy exactly. Shell/apply adapters can
     // instead return arrays of objects containing stdout/stderr; those share
     // the same total text budget through the generic leaf walker.
-    const isProtocolContent =
-      output.length <= MODEL_TOOL_OUTPUT_MAX_CONTAINER_ENTRIES &&
-      output.every(
-        (item) =>
-          item &&
-          typeof item === "object" &&
-          (isTextContentItem(item as Record<string, unknown>) ||
-            isNonTextContentItem(item as Record<string, unknown>)),
-      );
+    // Inspect only the prefix the boundary can retain. Cardinality itself does
+    // not make an otherwise-valid Responses content list invalid, and scanning
+    // an untrusted 100k-item tail merely to classify it defeats the bound.
+    const isProtocolContent = isResponsesProtocolContentPrefix(output);
     return isProtocolContent
       ? boundStructuredOutputItems(output, state)
       : boundTextLeaves(output, state);
@@ -215,6 +212,8 @@ function modelOutputBoundState(budgetTokens: number): ModelOutputBoundState {
     remainingStructural: MODEL_TOOL_OUTPUT_STRUCTURAL_STRING_BUDGET_TOKENS,
     remainingEntries: MODEL_TOOL_OUTPUT_MAX_TOTAL_ENTRIES,
     remainingOpaqueBytes: MODEL_TOOL_OUTPUT_OPAQUE_PAYLOAD_MAX_BYTES,
+    opaqueOmissions: 0,
+    lastOpaqueOmissionMarker: null,
     omitted: 0,
     seen: new WeakSet(),
   };
@@ -225,31 +224,44 @@ function boundStructuredOutputItems(items: unknown[], state: ModelOutputBoundSta
   let changed = false;
   const out: unknown[] = [];
   let processed = 0;
-  for (const item of items) {
+  // A canonical first pass can contain one typed structural trailer beyond the
+  // ordinary 255 retained parts. Preserve that exact terminal trailer when a
+  // durable/provider/recovery boundary applies the function again. Limiting
+  // this exception to an already-bounded array prevents an arbitrary huge tail
+  // with a marker-shaped last element from bypassing the first-pass count.
+  const terminalStructuralMarker =
+    items.length <= MODEL_TOOL_OUTPUT_MAX_CONTAINER_ENTRIES + 1 &&
+    isTypedStructuralArrayOmissionMarker(items.at(-1))
+      ? items.at(-1)
+      : null;
+  let preservedTerminalStructuralMarker = false;
+  for (let index = 0; index < items.length; index += 1) {
+    const item = items[index];
     if (processed >= MODEL_TOOL_OUTPUT_MAX_CONTAINER_ENTRIES || state.remainingEntries <= 0) {
+      if (terminalStructuralMarker && index <= items.length - 1) {
+        out.push(terminalStructuralMarker);
+        preservedTerminalStructuralMarker = true;
+      }
       break;
     }
     processed += 1;
     state.remainingEntries -= 1;
-    if (!item || typeof item !== "object" || !isTextContentItem(item as Record<string, unknown>)) {
+    const record = item as Record<string, unknown>;
+    if (record.type === "input_text" && isGeneratedModelOutputMarker(record.text)) {
       const bounded = boundTextLeaves(item, state, 1);
       out.push(bounded);
+      if (item === terminalStructuralMarker) preservedTerminalStructuralMarker = true;
       if (bounded !== item) changed = true;
       continue;
     }
-    const record = item as Record<string, unknown>;
-    const text = record.text as string;
-    if (isGeneratedModelOutputMarker(text)) {
-      out.push(boundTextLeaves(item, state, 1));
-      continue;
-    }
-    if (state.remaining === 0 && !isImageDataUrl(text)) {
+    if (record.type === "input_text" && state.remaining === 0) {
       omitted += 1;
       changed = true;
       continue;
     }
-    const bounded = boundTextLeaves(item, state, 1);
+    const bounded = boundResponsesProtocolContentItem(record, state);
     out.push(bounded);
+    if (item === terminalStructuralMarker) preservedTerminalStructuralMarker = true;
     if (bounded !== item) changed = true;
   }
   if (omitted > 0) {
@@ -258,12 +270,31 @@ function boundStructuredOutputItems(items: unknown[], state: ModelOutputBoundSta
       text: `[omitted ${omitted} text items ...]`,
     });
   }
-  const structurallyOmitted = items.length - processed;
+  const structurallyOmitted = preservedTerminalStructuralMarker ? 0 : items.length - processed;
   if (structurallyOmitted > 0) {
-    out.push(structuredEntriesOmissionMarker(structurallyOmitted, "array"));
+    out.push(typedStructuredArrayOmissionMarker(structurallyOmitted));
     changed = true;
   }
   return changed ? out : items;
+}
+
+function boundResponsesProtocolContentItem(
+  item: Record<string, unknown>,
+  state: ModelOutputBoundState,
+): Record<string, unknown> {
+  const opaqueOmissionsBefore = state.opaqueOmissions;
+  const bounded = boundTextLeaves(item, state, 1) as Record<string, unknown>;
+  // A marker string in `input_file.file` is interpreted by pinned Agents as a
+  // file_url. Replace the whole content part instead, so every generated
+  // omission remains inside the Responses text/image/file union without
+  // inventing a URL or file ID. This also covers cumulative opaque exhaustion.
+  if (item.type === "input_file" && state.opaqueOmissions > opaqueOmissionsBefore) {
+    return typedProtocolTextMarker(
+      state.lastOpaqueOmissionMarker ??
+        "[OpenGeni omitted file payload: 0 bytes exceeded the bounded model-input allowance]",
+    );
+  }
+  return bounded;
 }
 
 function boundTextLeaves(
@@ -359,18 +390,20 @@ function boundTextLeaves(
       changed = true;
       continue;
     }
+    const childOpaqueKind = opaqueKindForChild(recordOpaqueKind, key);
+    if (typeof entry === "string" && childOpaqueKind) {
+      const bounded = boundTextLeaves(entry, state, depth + 1, childOpaqueKind);
+      out[key] = bounded;
+      if (bounded !== entry) changed = true;
+      continue;
+    }
     if (typeof entry === "string" && STRUCTURAL_STRING_KEYS.has(key)) {
       const bounded = boundStructuralString(entry, state);
       out[key] = bounded;
       if (bounded !== entry) changed = true;
       continue;
     }
-    const bounded = boundTextLeaves(
-      entry,
-      state,
-      depth + 1,
-      opaqueKindForChild(recordOpaqueKind, key),
-    );
+    const bounded = boundTextLeaves(entry, state, depth + 1, childOpaqueKind);
     out[key] = bounded;
     if (bounded !== entry) changed = true;
   }
@@ -420,7 +453,10 @@ function boundOpaqueProtocolString(
   }
   state.remainingOpaqueBytes = 0;
   if (kind === "image") return MODEL_TOOL_OUTPUT_OVERSIZED_IMAGE_CARD_DATA_URL;
-  return `[OpenGeni omitted ${kind} payload: ${bytes} bytes exceeded the bounded model-input allowance]`;
+  const marker = `[OpenGeni omitted ${kind} payload: ${bytes} bytes exceeded the bounded model-input allowance]`;
+  state.opaqueOmissions += 1;
+  state.lastOpaqueOmissionMarker = marker;
+  return marker;
 }
 
 function nonTextProtocolKind(value: unknown): OpaqueProtocolKind | null {
@@ -439,15 +475,47 @@ function opaqueKindForChild(
   if (!kind) return null;
   const opaqueKeys =
     kind === "image"
-      ? ["image", "image_url", "data", "url", "source"]
+      ? ["image", "image_url", "imageUrl", "file_id", "fileId", "id", "data", "url", "source"]
       : kind === "file"
-        ? ["file", "file_data", "data", "url", "content", "source"]
+        ? [
+            "file",
+            "file_data",
+            "fileData",
+            "file_url",
+            "fileUrl",
+            "file_id",
+            "fileId",
+            "id",
+            "data",
+            "url",
+            "content",
+            "source",
+          ]
         : ["encrypted_content", "content", "data"];
   return opaqueKeys.includes(key) ? kind : null;
 }
 
 function structuredEntriesOmissionMarker(count: number, container: "array" | "object"): string {
   return `[OpenGeni omitted ${count} structured ${container === "array" ? "array items" : "object properties"}]`;
+}
+
+function typedProtocolTextMarker(text: string): Record<string, unknown> {
+  return { type: "input_text", text };
+}
+
+function typedStructuredArrayOmissionMarker(count: number): Record<string, unknown> {
+  return typedProtocolTextMarker(structuredEntriesOmissionMarker(count, "array"));
+}
+
+function isTypedStructuralArrayOmissionMarker(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return (
+    record.type === "input_text" &&
+    typeof record.text === "string" &&
+    STRUCTURAL_ENTRIES_OMISSION_MARKER.test(record.text) &&
+    record.text.includes("structured array items")
+  );
 }
 
 function isGeneratedModelOutputMarker(value: unknown): value is string {
@@ -489,21 +557,19 @@ function uniqueStructuralMarkerKey(record: Record<string, unknown>): string {
   return key;
 }
 
-function isTextContentItem(value: Record<string, unknown>): boolean {
-  return (
-    typeof value.text === "string" &&
-    (value.type === "text" || value.type === "input_text" || value.type === "output_text")
-  );
-}
-
-function isNonTextContentItem(value: Record<string, unknown>): boolean {
-  return (
-    value.type === "image" ||
-    value.type === "input_image" ||
-    value.type === "file" ||
-    value.type === "input_file" ||
-    value.type === "encrypted_content"
-  );
+function isResponsesProtocolContentPrefix(output: unknown[]): boolean {
+  if (output.length === 0) return false;
+  const retainedPrefixLength = Math.min(output.length, MODEL_TOOL_OUTPUT_MAX_CONTAINER_ENTRIES);
+  for (let index = 0; index < retainedPrefixLength; index += 1) {
+    const item = output[index];
+    if (!item || typeof item !== "object" || Array.isArray(item)) return false;
+    const record = item as Record<string, unknown>;
+    if (record.type === "input_text" && typeof record.text === "string") continue;
+    if (record.type === "input_image") continue;
+    if (record.type === "input_file") continue;
+    return false;
+  }
+  return true;
 }
 
 function isImageDataUrl(value: string): boolean {

@@ -82,6 +82,87 @@ describe("Codex-parity model tool-output truncation", () => {
     ]);
   });
 
+  test("keeps 256+ Responses content parts schema-valid with typed idempotent omission evidence", () => {
+    const item = {
+      type: "function_call_result",
+      name: "large_structured_result",
+      callId: "call-256-parts",
+      status: "completed",
+      output: Array.from({ length: 10_000 }, (_, index) => ({
+        type: "input_text",
+        text: `part-${index}`,
+      })),
+    };
+
+    const bounded = boundModelToolOutputItem(item);
+    const output = bounded.output as Array<Record<string, unknown>>;
+    expect(output).toHaveLength(256);
+    expect(output.slice(0, 255)).toEqual(item.output.slice(0, 255));
+    expect(output[255]).toEqual({
+      type: "input_text",
+      text: "[OpenGeni omitted 9745 structured array items]",
+    });
+    expect(output.every((part) => part.type === "input_text")).toBe(true);
+    expect(boundModelToolOutputItem(bounded)).toEqual(bounded);
+  });
+
+  test("keeps large mixed Responses text/image/file arrays in the pinned content union", () => {
+    const parts = Array.from({ length: 300 }, (_, index): Record<string, unknown> => {
+      if (index % 3 === 0) return { type: "input_text", text: `text-${index}` };
+      if (index % 3 === 1) {
+        return { type: "input_image", image: `data:image/png;base64,a${index}` };
+      }
+      return { type: "input_file", file: { id: `file_${index}` }, filename: `${index}.txt` };
+    });
+    const bounded = boundModelToolOutputItem({
+      type: "function_call_result",
+      callId: "call-mixed-parts",
+      output: parts,
+    });
+    const output = bounded.output as Array<Record<string, unknown>>;
+
+    expect(output).toHaveLength(256);
+    expect(
+      output.every(
+        (part) =>
+          part.type === "input_text" || part.type === "input_image" || part.type === "input_file",
+      ),
+    ).toBe(true);
+    expect(output.at(-1)).toEqual({
+      type: "input_text",
+      text: "[OpenGeni omitted 45 structured array items]",
+    });
+    expect(boundModelToolOutputItem(bounded)).toEqual(bounded);
+  });
+
+  test("uses typed protocol evidence when structural entry exhaustion truncates content parts", () => {
+    const providerData = Object.fromEntries(
+      Array.from({ length: 300 }, (_, index) => [`property-${index}`, `value-${index}`]),
+    );
+    const item = {
+      type: "function_call_result",
+      callId: "call-structural-exhaustion",
+      output: Array.from({ length: 300 }, (_, index) => ({
+        type: "input_text",
+        text: `part-${index}`,
+        providerData,
+      })),
+    };
+
+    const bounded = boundModelToolOutputItem(item, 50_000);
+    const output = bounded.output as Array<Record<string, unknown>>;
+    expect(output.length).toBeLessThanOrEqual(256);
+    expect(
+      output.every(
+        (part) =>
+          part.type === "input_text" || part.type === "input_image" || part.type === "input_file",
+      ),
+    ).toBe(true);
+    expect(output.at(-1)?.type).toBe("input_text");
+    expect(String(output.at(-1)?.text)).toContain("structured array items");
+    expect(boundModelToolOutputItem(bounded, 50_000)).toEqual(bounded);
+  });
+
   test("bounds stdout and stderr inside structured shell results", () => {
     const item = {
       type: "shell_call_output",
@@ -305,6 +386,61 @@ describe("Codex-parity model tool-output truncation", () => {
     expect(bounded.output).toBe(MODEL_TOOL_OUTPUT_OVERSIZED_IMAGE_CARD_DATA_URL);
     expect(Buffer.byteLength(bounded.output, "utf8")).toBeLessThan(16 * 1024);
     expect(boundModelToolOutputItem(bounded, 5)).toEqual(bounded);
+  });
+
+  test("replaces oversized and cumulatively exhausted files with typed text, never fake URLs", () => {
+    const firstFile = `data:text/plain;base64,${"a".repeat(
+      MODEL_TOOL_OUTPUT_OPAQUE_PAYLOAD_MAX_BYTES - 512,
+    )}`;
+    const item = {
+      type: "function_call_result",
+      callId: "opaque-mixed-overflow",
+      output: [
+        { type: "input_file", file: firstFile, filename: "retained.txt" },
+        { type: "input_file", fileData: "b".repeat(1_024), filename: "omitted.txt" },
+        { type: "input_image", imageUrl: "data:image/png;base64,abc" },
+      ],
+    };
+
+    const bounded = boundModelToolOutputItem(item, 50_000);
+    const output = bounded.output as Array<Record<string, unknown>>;
+    expect(output[0]).toEqual(item.output[0]);
+    expect(output[1]).toEqual({
+      type: "input_text",
+      text: expect.stringMatching(/^\[OpenGeni omitted file payload: \d+ bytes exceeded/),
+    });
+    expect(output[2]).toEqual({
+      type: "input_image",
+      imageUrl: MODEL_TOOL_OUTPUT_OVERSIZED_IMAGE_CARD_DATA_URL,
+    });
+    expect(JSON.stringify(output[1])).not.toContain("file_url");
+    expect(boundModelToolOutputItem(bounded, 50_000)).toEqual(bounded);
+  });
+
+  test("replaces a single oversized file content part as a schema-valid typed text part", () => {
+    const item = {
+      type: "function_call_result",
+      callId: "opaque-file-overflow",
+      output: [
+        {
+          type: "input_file",
+          file: `data:application/pdf;base64,${"a".repeat(
+            MODEL_TOOL_OUTPUT_OPAQUE_PAYLOAD_MAX_BYTES,
+          )}`,
+          filename: "too-large.pdf",
+        },
+      ],
+    };
+
+    const bounded = boundModelToolOutputItem(item);
+    expect(bounded.output as unknown).toEqual([
+      {
+        type: "input_text",
+        text: expect.stringMatching(/^\[OpenGeni omitted file payload: \d+ bytes exceeded/),
+      },
+    ]);
+    expect(Buffer.byteLength(JSON.stringify(bounded), "utf8")).toBeLessThan(2_000);
+    expect(boundModelToolOutputItem(bounded)).toEqual(bounded);
   });
 
   test("replaces cyclic structured output with explicit bounded evidence", () => {

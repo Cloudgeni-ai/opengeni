@@ -620,6 +620,142 @@ describe("codexSubscriptionFetch", () => {
   });
 
   test.each([
+    [
+      "response.failed",
+      {
+        type: "response.failed",
+        response: {
+          id: "resp_stream_failed",
+          status: "failed",
+          error: {
+            type: "server_error",
+            code: "upstream_failed",
+            message: "provider secret failure detail",
+          },
+        },
+      },
+      502,
+      "upstream_failed",
+    ],
+    [
+      "nested response.error",
+      {
+        type: "response.error",
+        response: {
+          id: "resp_stream_error",
+          status: "failed",
+          error: {
+            type: "server_error",
+            code: "nested_stream_error",
+            message: "provider secret nested detail",
+          },
+        },
+      },
+      502,
+      "nested_stream_error",
+    ],
+    [
+      "top-level error",
+      {
+        type: "error",
+        code: "service_unavailable",
+        message: "provider secret top-level detail",
+      },
+      502,
+      "service_unavailable",
+    ],
+    [
+      "response.incomplete",
+      {
+        type: "response.incomplete",
+        response: {
+          id: "resp_stream_incomplete",
+          status: "incomplete",
+          incomplete_details: { reason: "max_output_tokens" },
+        },
+      },
+      502,
+      "response_incomplete",
+    ],
+    [
+      "non-retryable failed request",
+      {
+        type: "response.failed",
+        response: {
+          id: "resp_stream_context",
+          status: "failed",
+          error: {
+            code: "context_length_exceeded",
+            message: "provider echoed private input",
+          },
+        },
+      },
+      400,
+      "context_length_exceeded",
+    ],
+  ] as const)(
+    "streaming caller: %s becomes a bounded marked provider failure without replay",
+    async (_name, event, expectedStatus, expectedCode) => {
+      let calls = 0;
+      const response = await codexRequestStorage.run(ctx(), () =>
+        codexSubscriptionFetch(async () => {
+          calls += 1;
+          return new Response(`data: ${JSON.stringify(event)}\n\n`, {
+            status: 200,
+            headers: { "content-type": "text/event-stream", "x-request-id": "req-stream" },
+          });
+        })("https://chatgpt.com/backend-api/responses", {
+          method: "POST",
+          body: JSON.stringify({ model: "gpt-5.6-sol", stream: true, input: [] }),
+        }),
+      );
+
+      let observed: unknown;
+      try {
+        await response.text();
+      } catch (error) {
+        observed = error;
+      }
+      expect(observed).toBeInstanceOf(Error);
+      expect(observed).toMatchObject({
+        status: expectedStatus,
+        code: expectedCode,
+      });
+      expect(isCodexTransportError(observed)).toBe(true);
+      expect(String((observed as Error).message)).not.toContain("provider secret");
+      expect(JSON.stringify(observed)).not.toContain("provider secret");
+      expect(Buffer.byteLength(JSON.stringify(observed), "utf8")).toBeLessThan(4 * 1024);
+      expect(calls).toBe(1);
+    },
+  );
+
+  test("streaming caller: a missing terminal fails as invalid_sse_terminal", async () => {
+    let calls = 0;
+    const response = await codexRequestStorage.run(ctx(), () =>
+      codexSubscriptionFetch(async () => {
+        calls += 1;
+        return new Response('data: {"type":"response.created","response":{"id":"r1"}}\n\n', {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      })("https://chatgpt.com/backend-api/responses", {
+        method: "POST",
+        body: JSON.stringify({ model: "gpt-5.6-sol", stream: true, input: [] }),
+      }),
+    );
+
+    let observed: unknown;
+    try {
+      await response.text();
+    } catch (error) {
+      observed = error;
+    }
+    expect(observed).toMatchObject({ status: 502, code: "invalid_sse_terminal" });
+    expect(isCodexTransportError(observed)).toBe(true);
+    expect(calls).toBe(1);
+  });
+
+  test.each([
     ["CRLF", "\r\n"],
     ["bare CR", "\r"],
   ] as const)(
