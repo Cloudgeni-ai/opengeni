@@ -127,6 +127,94 @@ describe("QueueSurface", () => {
     expect(mounted.container.textContent).toContain("second queued prompt");
   });
 
+  test("bounds hostile prompt previews and discloses the exact source only on demand", async () => {
+    const prompt = [
+      "# Multiline prompt 👩🏽‍💻",
+      "```sh",
+      `curl https://example.test/${"unbroken".repeat(300)}`,
+      "```",
+      `Bidirectional source: ${String.fromCodePoint(0x202e)}isolated${String.fromCodePoint(0x202c)}`,
+      "Exact trailing line.",
+    ].join("\n");
+    const state = queue({
+      queue: [
+        fakeTurn({
+          id: "33333333-3333-4333-8333-333333333333",
+          prompt,
+        }),
+      ],
+    });
+    mounted = await renderComponent(<QueueSurface queue={state} composer={composer()} />);
+
+    const collapsed = mounted.container.querySelector('[data-testid="queue-collapsed-preview"]');
+    expect(collapsed?.getAttribute("aria-hidden")).toBe("true");
+    expect(collapsed?.textContent?.endsWith("…")).toBe(true);
+    expect(collapsed?.textContent).not.toBe(prompt);
+
+    await click(mounted.container.querySelector('button[aria-expanded="false"]'));
+    const preview = mounted.container.querySelector('[data-testid="queue-prompt-preview-1"]');
+    expect(preview?.classList.contains("line-clamp-1")).toBe(true);
+    expect(preview?.classList.contains("sm:line-clamp-3")).toBe(true);
+    expect(preview?.classList.contains("break-all")).toBe(true);
+    expect(preview?.getAttribute("aria-hidden")).toBe("true");
+    expect(preview?.getAttribute("dir")).toBe("auto");
+    expect(preview?.textContent?.endsWith("…")).toBe(true);
+    expect(preview?.textContent).not.toBe(prompt);
+    expect(mounted.container.querySelector('[data-testid="queue-prompt-full-1"]')).toBeNull();
+
+    const disclosure = mounted.container.querySelector(
+      'button[aria-label="Show full content for queued prompt 1"]',
+    );
+    await click(disclosure);
+    expect(disclosure?.getAttribute("aria-expanded")).toBe("true");
+
+    const full = mounted.container.querySelector('[data-testid="queue-prompt-full-1"]');
+    expect(full?.textContent).toBe(prompt);
+    expect(full?.getAttribute("role")).toBe("region");
+    expect(full?.getAttribute("aria-label")).toBe("Full content for queued prompt 1");
+    expect(full?.getAttribute("tabindex")).toBe("0");
+    expect(full?.getAttribute("dir")).toBe("auto");
+    expect(full?.classList.contains("max-h-64")).toBe(true);
+    expect(full?.classList.contains("max-w-full")).toBe(true);
+    expect(full?.classList.contains("overflow-auto")).toBe(true);
+    expect(full?.classList.contains("whitespace-pre-wrap")).toBe(true);
+    expect(full?.classList.contains("break-all")).toBe(true);
+    expect(mounted.container.textContent).toContain("Full content for queued prompt 1 shown.");
+
+    await click(disclosure);
+    expect(mounted.container.querySelector('[data-testid="queue-prompt-full-1"]')).toBeNull();
+    expect(mounted.container.textContent).toContain("Full content for queued prompt 1 hidden.");
+  });
+
+  test("keeps a 100-row queue inside one bounded scroll region", async () => {
+    const items = Array.from({ length: 100 }, (_, index) =>
+      fakeTurn({
+        id: `${String(index + 1).padStart(8, "0")}-1111-4111-8111-111111111111`,
+        prompt: `${index + 1}: ${"x".repeat(2_000)}`,
+      }),
+    );
+    mounted = await renderComponent(
+      <QueueSurface queue={queue({ queue: items })} composer={composer()} />,
+    );
+
+    await click(mounted.container.querySelector('button[aria-expanded="false"]'));
+    const list = mounted.container.querySelector('[data-testid="queue-list"]');
+    expect(list?.className).toContain("max-h-[min(30rem,60dvh)]");
+    expect(list?.classList.contains("overflow-y-auto")).toBe(true);
+    expect(list?.classList.contains("overscroll-contain")).toBe(true);
+    expect(
+      mounted.container.querySelectorAll('[data-testid^="queue-prompt-preview-"]'),
+    ).toHaveLength(100);
+    expect(mounted.container.querySelectorAll('[data-testid^="queue-prompt-full-"]')).toHaveLength(
+      0,
+    );
+    for (const preview of mounted.container.querySelectorAll(
+      '[data-testid^="queue-prompt-preview-"]',
+    )) {
+      expect(Array.from(preview.textContent ?? "").length).toBeLessThanOrEqual(361);
+    }
+  });
+
   test("explains the durable Steer shutdown fence instead of looking stuck in an ordinary queue", async () => {
     mounted = await renderComponent(
       <QueueSurface queue={queue({ stoppingPreviousAttempt: true })} composer={composer()} />,
