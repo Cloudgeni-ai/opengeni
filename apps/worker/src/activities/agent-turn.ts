@@ -175,7 +175,12 @@ import {
 } from "./packs";
 import { deliverFailedChildTurnToParent } from "./parent-wake";
 import { createSecretRedactor, identityRedactor } from "./redaction";
-import { applyCodexHistoryStrip, turnInput, type TurnCodexAccount } from "./run-input";
+import {
+  applyCodexHistoryStrip,
+  turnInput,
+  type ModelHistorySeed,
+  type TurnCodexAccount,
+} from "./run-input";
 import {
   createRuntimeBatcher,
   currentActivityContext,
@@ -655,25 +660,23 @@ function isModelOrToolProgressHistoryItem(item: Record<string, unknown>): boolea
  * (re-sanitized) `state.history` at to find this turn's genuinely-new items, so it
  * must equal the length of `state.history`'s already-persisted leading prefix.
  *
- * The cross-account reasoning strip drops foreign reasoning items, so the prefix
- * length is PATH-DEPENDENT, captured by `modelHistoryFromItems`:
+ * The prefix length is path-dependent, captured by `modelHistorySeed`:
  *
- *  - items read path (`modelHistoryFromItems === true`) — `state.history` was seeded
+ *  - `history_items` — `state.history` was seeded
  *    from the cross-account-STRIPPED active items (foreign reasoning DROPPED), so it
  *    starts K shorter than the raw active-row count. Seed from the SAME strip
  *    (HOLE D); seeding from the un-stripped count would slice K genuinely-new items
  *    off the reconcile and silently lose them (incl. the user's switch-turn message).
  *
- *  - approval RunState path (`modelHistoryFromItems === false`) — `state.history` was seeded
- *    from the blob, where foreign reasoning is NEUTRALIZED-IN-PLACE (the item is
- *    KEPT, only its id/encrypted_content go — see resumeRunStateForCodexAccount), so
- *    the blob's history length still COUNTS those items. Applying the strip here
- *    under-counts by K and the reconcile re-appends K already-persisted items at
- *    fresh positions — HOLE E. So the blob path must NOT strip: count the raw
- *    sanitized active length, which mirrors the blob's completed prefix.
+ *  - `run_state_same_account` — the RunState prefix is byte-identical to the raw
+ *    active history, so count that raw sanitized prefix.
  *
- * On a same-account / non-codex turn the strip is a no-op, so both branches reduce
- * to the same raw sanitized count (byte-identical to the pre-strip behaviour).
+ *  - `run_state_foreign_account` — the RunState transformer drops EVERY reasoning
+ *    item whole because the blob has only one freezing-account identity. Apply the
+ *    same whole-item filter here while retaining tool-search pairs (their execution
+ *    metadata is neutralized in place, so their count does not change).
+ *
+ * Provider-managed `compaction` items are rejected by the sanitizer in every path.
  * Pure; exported for unit testing the D/E seed invariant.
  */
 export function reconcileSeedCount(
@@ -681,14 +684,17 @@ export function reconcileSeedCount(
     item: Record<string, unknown>;
     producerCodexCredentialId: string | null;
   }>,
-  modelHistoryFromItems: boolean,
+  modelHistorySeed: ModelHistorySeed,
   current: TurnCodexAccount,
 ): number {
-  return sanitizeHistoryItemsForModel(
-    modelHistoryFromItems
+  const rawItems = activeSeedRows.map((row) => row.item);
+  const seedItems =
+    modelHistorySeed === "history_items"
       ? applyCodexHistoryStrip(activeSeedRows, current)
-      : activeSeedRows.map((row) => row.item),
-  ).length;
+      : modelHistorySeed === "run_state_foreign_account"
+        ? rawItems.filter((item) => item.type !== "reasoning")
+        : rawItems;
+  return sanitizeHistoryItemsForModel(seedItems).length;
 }
 
 /**
@@ -2285,43 +2291,42 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           const goal = await getSessionGoal(db, input.workspaceId, input.sessionId).catch(
             () => null,
           );
-          if (goal?.status === "active") {
-            const armed = await armCodexCapacityWait(db, {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-              turnId,
-              attemptId: input.attemptId,
-              workflowId: input.workflowId,
-              goalId: goal.id,
-              goalVersion: goal.version,
-              earliestResetAt: null,
-              resetKind: "bounded_refresh",
-              failurePayload: {
-                error: "All connected Codex subscriptions are disabled for new allocations.",
-                code: "codex_allocator_disabled",
-                detail: "waiting for a credential to be re-enabled, reconnected, or added",
+          const activeGoal = goal?.status === "active" ? goal : null;
+          const armed = await armCodexCapacityWait(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId,
+            attemptId: input.attemptId,
+            workflowId: input.workflowId,
+            goalId: activeGoal?.id ?? null,
+            goalVersion: activeGoal?.version ?? null,
+            earliestResetAt: null,
+            resetKind: "bounded_refresh",
+            failurePayload: {
+              error: "All connected Codex subscriptions are disabled for new allocations.",
+              code: "codex_allocator_disabled",
+              detail: "waiting for a credential to be re-enabled or reconnected",
+            },
+          });
+          if (armed.action === "waiting") {
+            await publishDurableSessionEvents(
+              bus,
+              input.workspaceId,
+              input.sessionId,
+              armed.events,
+            );
+            turnMetricOutcome = "recovering";
+            activityStatus = "waiting_capacity";
+            return claimedResult({
+              status: "waiting_capacity",
+              capacityWait: {
+                waiterId: armed.waiter.id,
+                generation: armed.waiter.generation,
+                nextCheckAt: armed.waiter.nextCheckAt.toISOString(),
+                wakeRevision: armed.waiter.wakeRevision,
               },
             });
-            if (armed.action === "waiting") {
-              await publishDurableSessionEvents(
-                bus,
-                input.workspaceId,
-                input.sessionId,
-                armed.events,
-              );
-              turnMetricOutcome = "failed";
-              activityStatus = "idle";
-              return claimedResult({
-                status: "idle",
-                capacityWait: {
-                  waiterId: armed.waiter.id,
-                  generation: armed.waiter.generation,
-                  nextCheckAt: armed.waiter.nextCheckAt.toISOString(),
-                  wakeRevision: armed.waiter.wakeRevision,
-                },
-              });
-            }
           }
           if (
             !(await settle!({
@@ -2400,44 +2405,42 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             "all connected Codex subscriptions are rate-limited",
             { allAccounts: true },
           );
-          if (goalActive && goal) {
-            const authoritativeResetAt = authoritativeCodexCapacityResetAt(
-              leased.accounts,
-              settings.codexRotationNearExhaustionPct,
-              new Date(),
+          const authoritativeResetAt = authoritativeCodexCapacityResetAt(
+            leased.accounts,
+            settings.codexRotationNearExhaustionPct,
+            new Date(),
+          );
+          const armed = await armCodexCapacityWait(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId,
+            attemptId: input.attemptId,
+            workflowId: input.workflowId,
+            goalId: goalActive && goal ? goal.id : null,
+            goalVersion: goalActive && goal ? goal.version : null,
+            earliestResetAt: authoritativeResetAt,
+            resetKind: authoritativeResetAt ? "authoritative" : "bounded_refresh",
+            failurePayload,
+          });
+          if (armed.action === "waiting") {
+            await publishDurableSessionEvents(
+              bus,
+              input.workspaceId,
+              input.sessionId,
+              armed.events,
             );
-            const armed = await armCodexCapacityWait(db, {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-              turnId,
-              attemptId: input.attemptId,
-              workflowId: input.workflowId,
-              goalId: goal.id,
-              goalVersion: goal.version,
-              earliestResetAt: authoritativeResetAt,
-              resetKind: authoritativeResetAt ? "authoritative" : "bounded_refresh",
-              failurePayload,
+            turnMetricOutcome = "recovering";
+            activityStatus = "waiting_capacity";
+            return claimedResult({
+              status: "waiting_capacity",
+              capacityWait: {
+                waiterId: armed.waiter.id,
+                generation: armed.waiter.generation,
+                nextCheckAt: armed.waiter.nextCheckAt.toISOString(),
+                wakeRevision: armed.waiter.wakeRevision,
+              },
             });
-            if (armed.action === "waiting") {
-              await publishDurableSessionEvents(
-                bus,
-                input.workspaceId,
-                input.sessionId,
-                armed.events,
-              );
-              turnMetricOutcome = "failed";
-              activityStatus = "idle";
-              return claimedResult({
-                status: "idle",
-                capacityWait: {
-                  waiterId: armed.waiter.id,
-                  generation: armed.waiter.generation,
-                  nextCheckAt: armed.waiter.nextCheckAt.toISOString(),
-                  wakeRevision: armed.waiter.wakeRevision,
-                },
-              });
-            }
           }
           if (
             !(await settle!({
@@ -2799,6 +2802,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 turnId: turn.id,
                 executionGeneration,
                 attemptId: input.attemptId,
+                currentCodexCredentialId: effectiveCodexCredentialId,
               },
               session.lastInputTokens,
               compactionSummarizerFor(compactionInstructions),
@@ -3682,6 +3686,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               turnId: turnId!,
               executionGeneration,
               attemptId: input.attemptId,
+              currentCodexCredentialId: effectiveCodexCredentialId,
             },
             session.lastInputTokens,
             // Provider-aware summarizer: when the turn's model resolved to a
@@ -3852,11 +3857,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           input.workspaceId,
           input.sessionId,
         );
-        // Seed the reconcile watermark from EXACTLY the view the model's
-        // `state.history` was seeded from (items strip on the items path = HOLE D; NO
-        // strip on the run-state blob path, where foreign reasoning is neutralized but
-        // KEPT = HOLE E), so the model-input length and the watermark never disagree.
-        persistedHistoryCount = reconcileSeedCount(activeSeedRows, prepared.modelHistoryFromItems, {
+        // Seed the reconcile watermark from exactly the transformed view that
+        // initialized `state.history`, including whole reasoning removal on a
+        // foreign-account RunState resume.
+        persistedHistoryCount = reconcileSeedCount(activeSeedRows, prepared.modelHistorySeed, {
           currentCodexCredentialId: effectiveCodexCredentialId,
         });
         nextHistoryPosition = await nextSessionHistoryPosition(
@@ -3880,6 +3884,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             turnId: activeTurnId,
             executionGeneration,
             attemptId: input.attemptId,
+            currentCodexCredentialId: effectiveCodexCredentialId,
           },
           // Never reuse the persisted prior-turn signal for recovery. Proactive
           // guards provide their exact current signal; provider overflows do not,
@@ -5099,7 +5104,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // same-policy continuation path. When no alternate exists (all capped,
         // or a single non-rotating account), persist the native capacity wait
         // instead of an in-memory delay/user-message recovery.
-        if (goalActive && goal && rotationResumeMs === null) {
+        if (rotationResumeMs === null) {
           const providerResetAt =
             capacityAuthoritativeResetAt ??
             (usageLimit.resetsInSeconds !== null &&
@@ -5114,8 +5119,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             turnId,
             attemptId: input.attemptId,
             workflowId: input.workflowId,
-            goalId: goal.id,
-            goalVersion: goal.version,
+            goalId: goalActive && goal ? goal.id : null,
+            goalVersion: goalActive && goal ? goal.version : null,
             earliestResetAt: providerResetAt,
             resetKind: providerResetAt ? "authoritative" : "bounded_refresh",
             failurePayload,
@@ -5136,11 +5141,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               input.sessionId,
               armed.events,
             );
-            turnMetricOutcome = "failed";
-            activityStatus = "idle";
+            turnMetricOutcome = "recovering";
+            activityStatus = "waiting_capacity";
             activityError = error;
             return claimedResult({
-              status: "idle",
+              status: "waiting_capacity",
               capacityWait: {
                 waiterId: armed.waiter.id,
                 generation: armed.waiter.generation,

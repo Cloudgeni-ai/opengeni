@@ -24,7 +24,6 @@ import {
   isCompactionSummary,
   isEphemeralInternalContext,
   isUserMessage,
-  renderCompactionPromptInputForChat,
   type CompactionItem,
 } from "../src/context-compaction";
 import { extractResponseOutputText, summarizeForCompaction } from "../src/index";
@@ -598,19 +597,69 @@ describe("provider-proof compaction transcript", () => {
     });
   });
 
-  test("renders the full checkpoint input without silently dropping old records", () => {
-    const rendered = renderCompactionPromptInputForChat(
+  test("uses the SDK Chat adapter with structured history, base instructions, and no tools", async () => {
+    let seenRequest: Record<string, unknown> | undefined;
+    const fakeClient = {
+      chat: {
+        completions: {
+          create: async (request: Record<string, unknown>) => {
+            seenRequest = request;
+            return {
+              id: "chat_summary",
+              choices: [
+                {
+                  finish_reason: "stop",
+                  message: { role: "assistant", content: "chat structured summary" },
+                },
+              ],
+              usage: { prompt_tokens: 44, completion_tokens: 5, total_tokens: 49 },
+            };
+          },
+        },
+      },
+    };
+
+    const summary = await summarizeForCompaction(
+      testSettings({ openaiProvider: "openai" }),
       buildCompactionPromptInput([
-        user("old ".repeat(400)),
-        assistant("middle ".repeat(400)),
-        user("recent user message"),
+        user("deploy it"),
+        call("call_chat"),
+        result("call_chat", "deployed"),
       ]),
+      {
+        client: fakeClient as any,
+        api: "chat",
+        model: "chat-model",
+        systemInstructions: "base agent instructions",
+        promptCacheKey: "session-chat",
+      },
     );
 
-    expect(rendered).toContain("old old");
-    expect(rendered).toContain("middle middle");
-    expect(rendered).toContain("recent user message");
-    expect(rendered).toContain("CONTEXT CHECKPOINT COMPACTION");
+    expect(summary).toBe("chat structured summary");
+    expect(seenRequest?.tools).toBeUndefined();
+    expect(seenRequest?.store).toBeUndefined();
+    expect(seenRequest?.prompt_cache_key).toBe("session-chat");
+    const messages = seenRequest?.messages as Array<Record<string, unknown>>;
+    expect(messages.map((message) => message.role)).toEqual([
+      "system",
+      "user",
+      "assistant",
+      "tool",
+      "user",
+    ]);
+    expect(messages[0]?.content).toBe("base agent instructions");
+    expect(messages[1]?.content).toBe("deploy it");
+    expect(messages[2]).toMatchObject({
+      role: "assistant",
+      tool_calls: [{ id: "call_chat", function: { name: "shell", arguments: "{}" } }],
+    });
+    expect(messages[3]).toMatchObject({
+      role: "tool",
+      tool_call_id: "call_chat",
+      content: "deployed",
+    });
+    expect(messages[4]?.content).toBe(COMPACTION_PROMPT);
+    expect(JSON.stringify(messages)).not.toContain("[tool_call");
   });
 });
 

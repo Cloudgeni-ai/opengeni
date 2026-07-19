@@ -37,6 +37,20 @@ import {
 export type HistoryItem = Record<string, unknown>;
 
 /**
+ * Provider-managed encrypted compaction items are not portable conversation
+ * truth. OpenGeni checkpoints are always local plaintext `message` items, so a
+ * replayed provider `compaction` item means an obsolete/foreign history path
+ * escaped into the canonical model input. Fail loudly instead of stripping its
+ * ciphertext or fabricating a plaintext summary.
+ */
+export class RemoteCompactionReplayError extends Error {
+  constructor(readonly location: string) {
+    super(`Provider compaction item cannot be replayed from ${location}`);
+    this.name = "RemoteCompactionReplayError";
+  }
+}
+
+/**
  * Tool-call item types and the result-item type that settles them. Kept in
  * sync with the SDK's `TOOL_CALL_RESULT_TYPE_BY_CALL_TYPE`; `function_call` is
  * the one observed live, the rest are included so the same pairing logic holds
@@ -65,6 +79,20 @@ function itemType(item: unknown): string | undefined {
   }
   const type = (item as { type?: unknown }).type;
   return typeof type === "string" ? type : undefined;
+}
+
+function rejectRemoteCompactionItem(item: unknown, location: string): void {
+  if (itemType(item) === "compaction") {
+    throw new RemoteCompactionReplayError(location);
+  }
+}
+
+/** Reject provider-managed compaction items before any model-history replay. */
+export function assertNoRemoteCompactionItems(
+  items: readonly unknown[],
+  location = "model history",
+): void {
+  items.forEach((item, index) => rejectRemoteCompactionItem(item, `${location}[${index}]`));
 }
 
 /**
@@ -236,6 +264,8 @@ export function sanitizeHistoryItemsForModel<T extends HistoryItem>(
     return [];
   }
 
+  assertNoRemoteCompactionItems(items);
+
   // Pre-scan: for every (call-type, call_id) record the index of a RESULT that
   // appears strictly after the call. A call is valid only when such a result
   // exists; a result is valid only when its call appears strictly before it.
@@ -391,25 +421,22 @@ export function stripInternalResumeMarker<T extends HistoryItem>(item: T): T {
  * continuity optimization — dropping it costs at most one turn of lost CoT
  * continuity and never any message content.
  *
- * USED FOR `compaction` items only on the history-items read path: a foreign
- * `compaction` summary carries account-bound `encrypted_content` but its summary
- * is real conversation content that must be preserved, so we strip only the blob
- * (we do NOT drop the whole item). Foreign `reasoning` items are instead dropped
- * WHOLESALE by the caller (id + blob), because the Responses backend validates
- * the foreign `rs_…` id and rejects a reasoning item that has a foreign id and no
- * encrypted_content (so blanking the blob alone is not enough — see
- * {@link applyCodexHistoryStrip}).
+ * Foreign `reasoning` items are dropped wholesale by the provider-portability
+ * caller; this lower-level helper remains useful for non-replay transforms that
+ * need to remove only the encrypted reasoning payload. Provider `compaction`
+ * items are never modified here: replay paths reject them via
+ * {@link assertNoRemoteCompactionItems}.
  *
  * The SDK's Responses converter reads the blob via `providerData.encryptedContent`
  * (camel) or `providerData.encrypted_content` (snake); persisted rows use the
  * snake form, but we delete both casings defensively. We also clear a top-level
- * `encrypted_content` (the `compaction`-item shape) belt-and-braces — that blob
- * is likewise source-bound. Only `reasoning` and `compaction` items are touched;
- * messages, tool calls, and tool outputs pass through untouched by reference.
+ * `encrypted_content` defensively. Only `reasoning` items are touched; messages,
+ * tool calls, and tool outputs pass through by reference. Provider compaction is
+ * left untouched by this helper so replay callers can reject it explicitly.
  */
 export function stripReasoningEncryptedContent<T extends HistoryItem>(item: T): T {
   const type = itemType(item);
-  if (type !== "reasoning" && type !== "compaction") {
+  if (type !== "reasoning") {
     return item;
   }
   const record = item as Record<string, unknown>;
@@ -437,114 +464,112 @@ export function stripReasoningEncryptedContent<T extends HistoryItem>(item: T): 
   return clone as unknown as T;
 }
 
-/**
- * Neutralize the account/org-bound identity of EVERY `reasoning` item embedded
- * in a serialized RunState JSON string, returning the re-serialized string. Pure:
- * a parse failure or a no-op returns the SAME string reference (so an unchanged
- * or non-codex run-state replays byte-for-byte).
- *
- * WHY (HOLE C — approval replay). An approval decision resumes the serialized
- * RunState blob. That blob round-trips `reasoning.encrypted_content` minted by the ChatGPT/Codex
- * backend (bound to the freezing account/org — a foreign account 400s it) AND the
- * foreign `rs_…` reasoning ids the Responses backend validates (rejected once the
- * blob is gone). Unlike `session_history_items`, the blob carries NO per-item
- * producer tag, so foreign-ness cannot be decided per item; the worker instead
- * records the FREEZING codex account on the run-state row and calls this only when
- * the resuming turn's codex account DIFFERS from it. When the accounts differ we
- * conservatively neutralize every reasoning item: delete its provider id and its
- * `encrypted_content` (both casings, in `providerData`). The visible reasoning
- * `content`/`summary` and every message / tool-call / tool-output item are left
- * intact (message and tool content are never account-bound).
- *
- * A reasoning item with no id and no encrypted_content is exactly the shape the
- * production Azure path already sends (see `stripProviderItemIdsFilter`), so it
- * deserializes and replays cleanly. Reasoning items live in several places in the
- * blob — `originalInput` (when an array), each `modelResponses[].output`,
- * `lastModelResponse.output`, and the `generatedItems` wrappers (`reasoning_item`
- * → `rawItem`) — and we scrub all of them. `compaction` items are deliberately
- * left untouched: their `encrypted_content` is a protocol-REQUIRED field whose
- * removal would fail the SDK's run-state schema validation on deserialize.
- */
-export function stripReasoningIdentityFromSerializedRunState(serialized: string): string {
+type ParsedRunState = Record<string, unknown>;
+
+function parseSerializedRunState(serialized: string): ParsedRunState | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(serialized);
   } catch {
-    // Not JSON (e.g. a cleared-state sentinel handled elsewhere): forward as-is.
-    return serialized;
+    return null;
   }
   if (!parsed || typeof parsed !== "object") {
-    return serialized;
+    return null;
   }
-  let changed = false;
-  const scrubReasoning = (candidate: unknown): void => {
-    if (!candidate || typeof candidate !== "object") {
-      return;
-    }
-    const record = candidate as Record<string, unknown>;
-    if (record.type !== "reasoning") {
-      return;
-    }
-    if ("id" in record) {
-      delete record.id;
-      changed = true;
-    }
-    const providerData = record.providerData;
-    if (providerData && typeof providerData === "object") {
-      const provider = providerData as Record<string, unknown>;
-      if ("encryptedContent" in provider) {
-        delete provider.encryptedContent;
-        changed = true;
-      }
-      if ("encrypted_content" in provider) {
-        delete provider.encrypted_content;
-        changed = true;
-      }
-    }
-    if ("encrypted_content" in record) {
-      delete record.encrypted_content;
-      changed = true;
-    }
+  return parsed as ParsedRunState;
+}
+
+function forEachSerializedRunStateItem(
+  root: ParsedRunState,
+  visit: (item: unknown, location: string) => void,
+): void {
+  const visitArray = (value: unknown, location: string): void => {
+    if (!Array.isArray(value)) return;
+    value.forEach((item, index) => visit(item, `${location}[${index}]`));
   };
-  const scrubItemArray = (arr: unknown): void => {
-    if (Array.isArray(arr)) {
-      for (const item of arr) {
-        scrubReasoning(item);
-      }
-    }
-  };
-  const root = parsed as Record<string, unknown>;
-  // 1. originalInput is either a string (no items) or an array of protocol items.
-  scrubItemArray(root.originalInput);
-  // 2. generatedItems are SDK run-item wrappers; a `reasoning_item` carries the
-  //    protocol reasoning shape under `rawItem`.
+
+  visitArray(root.originalInput, "RunState.originalInput");
   if (Array.isArray(root.generatedItems)) {
-    for (const wrapper of root.generatedItems) {
-      if (
-        wrapper &&
-        typeof wrapper === "object" &&
-        "rawItem" in (wrapper as Record<string, unknown>)
-      ) {
-        scrubReasoning((wrapper as Record<string, unknown>).rawItem);
-      }
-    }
+    root.generatedItems.forEach((wrapper, index) => {
+      if (!wrapper || typeof wrapper !== "object") return;
+      const record = wrapper as Record<string, unknown>;
+      visit("rawItem" in record ? record.rawItem : wrapper, `RunState.generatedItems[${index}]`);
+    });
   }
-  // 3. modelResponses[].output and lastModelResponse.output hold protocol items.
-  const scrubResponseOutput = (response: unknown): void => {
+  const visitResponse = (response: unknown, location: string): void => {
+    if (!response || typeof response !== "object") return;
+    visitArray((response as Record<string, unknown>).output, `${location}.output`);
+  };
+  if (Array.isArray(root.modelResponses)) {
+    root.modelResponses.forEach((response, index) =>
+      visitResponse(response, `RunState.modelResponses[${index}]`),
+    );
+  }
+  visitResponse(root.lastModelResponse, "RunState.lastModelResponse");
+}
+
+/** Reject provider-managed compaction before a serialized RunState is replayed. */
+export function assertNoRemoteCompactionItemsInSerializedRunState(serialized: string): void {
+  const root = parseSerializedRunState(serialized);
+  if (!root) return;
+  forEachSerializedRunStateItem(root, rejectRemoteCompactionItem);
+}
+
+/**
+ * Drop EVERY account-bound `reasoning` item embedded in a serialized RunState.
+ *
+ * Approval RunState blobs carry only the account that froze the whole state, not
+ * per-item producer identities. When that account differs from the resuming
+ * account, every reasoning item in `originalInput`, `generatedItems`,
+ * `modelResponses[].output`, and `lastModelResponse.output` is therefore foreign
+ * and is removed whole (including provider id, encrypted content, and visible
+ * reasoning summary). Messages and tool records remain unchanged. Provider
+ * `compaction` items are rejected rather than replayed.
+ *
+ * A parse failure or a no-op returns the same string. The caller invokes this
+ * only for a cross-account resume; same-account resumes use
+ * {@link assertNoRemoteCompactionItemsInSerializedRunState} and otherwise remain
+ * byte-identical.
+ */
+export function dropReasoningItemsFromSerializedRunState(serialized: string): string {
+  const root = parseSerializedRunState(serialized);
+  if (!root) return serialized;
+
+  assertNoRemoteCompactionItemsInSerializedRunState(serialized);
+  let changed = false;
+  const dropReasoning = (arr: unknown): unknown => {
+    if (!Array.isArray(arr)) return arr;
+    const filtered = arr.filter((item) => itemType(item) !== "reasoning");
+    if (filtered.length !== arr.length) changed = true;
+    return filtered;
+  };
+
+  root.originalInput = dropReasoning(root.originalInput);
+  if (Array.isArray(root.generatedItems)) {
+    const filtered = root.generatedItems.filter((wrapper) => {
+      if (!wrapper || typeof wrapper !== "object") return true;
+      const record = wrapper as Record<string, unknown>;
+      const rawItem = "rawItem" in record ? record.rawItem : undefined;
+      return record.type !== "reasoning_item" && itemType(rawItem) !== "reasoning";
+    });
+    if (filtered.length !== root.generatedItems.length) changed = true;
+    root.generatedItems = filtered;
+  }
+
+  const dropResponseReasoning = (response: unknown): void => {
     if (response && typeof response === "object") {
-      scrubItemArray((response as Record<string, unknown>).output);
+      const record = response as Record<string, unknown>;
+      record.output = dropReasoning(record.output);
     }
   };
   if (Array.isArray(root.modelResponses)) {
     for (const response of root.modelResponses) {
-      scrubResponseOutput(response);
+      dropResponseReasoning(response);
     }
   }
-  scrubResponseOutput(root.lastModelResponse);
-  if (!changed) {
-    return serialized;
-  }
-  return JSON.stringify(parsed);
+  dropResponseReasoning(root.lastModelResponse);
+
+  return changed ? JSON.stringify(root) : serialized;
 }
 
 /**
@@ -567,7 +592,7 @@ export function stripReasoningIdentityFromSerializedRunState(serialized: string)
  * accepted (200) and its disclosure still holds. The account-bound `tsc_…` id is
  * separately stripped by the codex transport normalizer (all input item ids).
  *
- * Walks the same blob locations as {@link stripReasoningIdentityFromSerializedRunState}:
+ * Walks the same blob locations as {@link dropReasoningItemsFromSerializedRunState}:
  * `originalInput` (array form), `generatedItems` (SDK run-item wrappers — the
  * raw shape under `rawItem`), every `modelResponses[].output`, and
  * `lastModelResponse.output`. Returns the input string unchanged when nothing

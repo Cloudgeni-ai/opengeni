@@ -8168,12 +8168,13 @@ export type CodexCapacityWait = {
   accountId: string;
   workspaceId: string;
   sessionId: string;
-  goalId: string;
+  goalId: string | null;
   blockedTurnId: string;
+  blockedTurnGeneration: number;
   workflowId: string;
   generation: number;
   status: CodexCapacityWaitStatus;
-  goalVersion: number;
+  goalVersion: number | null;
   policyHash: string | null;
   earliestResetAt: Date | null;
   nextCheckAt: Date;
@@ -8204,7 +8205,11 @@ export type CodexCapacityMutationResult<T> = {
 };
 
 export type CodexCapacityAvailabilityDecision =
-  | { kind: "available"; credentialId: string; diagnostic?: Record<string, unknown> }
+  | {
+      kind: "available";
+      credentialId: string;
+      diagnostic?: Record<string, unknown>;
+    }
   | {
       kind: "unavailable";
       earliestResetAt: Date | null;
@@ -8225,18 +8230,26 @@ export type CodexCapacitySelectionContext<
 
 export type ArmCodexCapacityWaitResult =
   | { action: "waiting"; waiter: CodexCapacityWait; events: SessionEvent[] }
-  | { action: "stale"; waiter: CodexCapacityWait | null; events: SessionEvent[] };
+  | {
+      action: "stale";
+      waiter: CodexCapacityWait | null;
+      events: SessionEvent[];
+    };
 
 export type ReconcileCodexCapacityWaitResult =
   | { action: "waiting"; waiter: CodexCapacityWait; events: SessionEvent[] }
   | {
       action: "resumed";
       waiter: CodexCapacityWait;
-      update: SessionSystemUpdate;
       events: SessionEvent[];
     }
+  | { action: "paused"; waiter: CodexCapacityWait; events: SessionEvent[] }
   | { action: "superseded"; waiter: CodexCapacityWait; events: SessionEvent[] }
-  | { action: "stale"; waiter: CodexCapacityWait | null; events: SessionEvent[] };
+  | {
+      action: "stale";
+      waiter: CodexCapacityWait | null;
+      events: SessionEvent[];
+    };
 
 export const CODEX_CAPACITY_REFRESH_MIN_MS = 60_000;
 export const CODEX_CAPACITY_REFRESH_MAX_MS = 15 * 60_000;
@@ -8261,6 +8274,7 @@ function mapCodexCapacityWaiter(
     sessionId: row.sessionId,
     goalId: row.goalId,
     blockedTurnId: row.blockedTurnId,
+    blockedTurnGeneration: row.blockedTurnGeneration,
     workflowId: row.workflowId,
     generation: row.generation,
     status: row.status as CodexCapacityWaitStatus,
@@ -8338,12 +8352,12 @@ function nextCodexCapacityCheckAt(
 }
 
 /**
- * Atomically settle one all-unavailable turn and arm exactly one durable wait.
- * Lock order is allocator rotation row -> session -> goal -> blocked turn ->
- * live lease (when a reactive failure owns one) -> waiter. The failed turn,
- * idle/capacity-paused session, durable events, lease release, and waiter
- * generation commit together; a crash cannot leave only half of the boundary
- * visible.
+ * Atomically close one all-unavailable attempt and arm exactly one durable wait
+ * for the same logical turn. Lock order is workspace control -> allocator
+ * rotation row -> session -> optional goal -> blocked turn -> live lease (when
+ * a reactive failure owns one) -> waiter. The waiting turn/session pointer,
+ * durable events, exact lease release, and waiter generation commit together;
+ * a crash cannot leave only half of the boundary visible.
  */
 export async function armCodexCapacityWait(
   db: Database,
@@ -8354,8 +8368,8 @@ export async function armCodexCapacityWait(
     turnId: string;
     attemptId: string;
     workflowId: string;
-    goalId: string;
-    goalVersion: number;
+    goalId?: string | null;
+    goalVersion?: number | null;
     policyHash?: string | null;
     earliestResetAt: Date | null;
     resetKind: CodexCapacityResetKind;
@@ -8368,12 +8382,27 @@ export async function armCodexCapacityWait(
   },
 ): Promise<ArmCodexCapacityWaitResult> {
   const now = input.now ?? new Date();
+  const goalId = input.goalId ?? null;
+  const goalVersion = input.goalVersion ?? null;
+  if (
+    (goalId === null) !== (goalVersion === null) ||
+    (goalVersion !== null && (!Number.isSafeInteger(goalVersion) || goalVersion < 1))
+  ) {
+    throw new Error("Codex capacity goal fence must be absent or contain a positive version");
+  }
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
       await scopedDb.transaction(async (rawTx) => {
         const tx = rawTx as unknown as Database;
+        await lockWorkspaceInferenceControl(tx, input.workspaceId, "share");
+        const effectiveControl = await evaluateSessionControl(
+          tx,
+          input.workspaceId,
+          input.sessionId,
+          { lock: "share" },
+        );
         const rotation = await lockExistingCodexRotationSettingsForCapacity(tx, input.workspaceId);
         if (!rotation || rotation.accountId !== input.accountId) {
           return { action: "stale", waiter: null, events: [] } as const;
@@ -8390,18 +8419,20 @@ export async function armCodexCapacityWait(
           )
           .for("update")
           .limit(1);
-        const [goal] = await tx
-          .select()
-          .from(schema.sessionGoals)
-          .where(
-            and(
-              eq(schema.sessionGoals.workspaceId, input.workspaceId),
-              eq(schema.sessionGoals.id, input.goalId),
-              eq(schema.sessionGoals.sessionId, input.sessionId),
-            ),
-          )
-          .for("update")
-          .limit(1);
+        const [goal] = goalId
+          ? await tx
+              .select()
+              .from(schema.sessionGoals)
+              .where(
+                and(
+                  eq(schema.sessionGoals.workspaceId, input.workspaceId),
+                  eq(schema.sessionGoals.id, goalId),
+                  eq(schema.sessionGoals.sessionId, input.sessionId),
+                ),
+              )
+              .for("update")
+              .limit(1)
+          : [];
         const [turn] = await tx
           .select()
           .from(schema.sessionTurns)
@@ -8440,7 +8471,10 @@ export async function armCodexCapacityWait(
         if (
           existing?.status === "waiting" &&
           existing.blockedTurnId === input.turnId &&
-          turn?.status === "failed"
+          existing.blockedTurnGeneration === turn?.executionGeneration &&
+          turn?.status === "waiting_capacity" &&
+          session?.status === "waiting_capacity" &&
+          session.activeTurnId === input.turnId
         ) {
           return {
             action: "waiting",
@@ -8459,12 +8493,12 @@ export async function armCodexCapacityWait(
             currentRedispatches === (input.expectedRedispatches ?? currentRedispatches));
         if (
           !session ||
-          !goal ||
           !turn ||
+          effectiveControl.state !== "active" ||
           session.activeTurnId !== input.turnId ||
           session.status !== "running" ||
-          goal.status !== "active" ||
-          goal.version !== input.goalVersion ||
+          (goalId !== null &&
+            (!goal || goal.status !== "active" || goal.version !== goalVersion)) ||
           turn.status !== "running" ||
           turn.activeAttemptId !== input.attemptId ||
           !leaseFenceValid ||
@@ -8484,7 +8518,7 @@ export async function armCodexCapacityWait(
           sessionId: input.sessionId,
           turnId: input.turnId,
           executionGeneration: turn.executionGeneration,
-          outcome: "failed",
+          outcome: "waiting_capacity",
           closedAt: now,
         });
 
@@ -8500,12 +8534,13 @@ export async function armCodexCapacityWait(
           accountId: input.accountId,
           workspaceId: input.workspaceId,
           sessionId: input.sessionId,
-          goalId: input.goalId,
+          goalId,
           blockedTurnId: input.turnId,
+          blockedTurnGeneration: turn.executionGeneration,
           workflowId: input.workflowId,
           generation,
           status: "waiting",
-          goalVersion: input.goalVersion,
+          goalVersion,
           policyHash,
           earliestResetAt: input.earliestResetAt,
           nextCheckAt,
@@ -8550,32 +8585,17 @@ export async function armCodexCapacityWait(
               workspaceId: input.workspaceId,
               sessionId: input.sessionId,
               sequence: ++sequence,
-              type: "turn.failed",
+              type: "codex.capacity.waiting",
               payload: sanitizeEventPayload({
                 ...input.failurePayload,
                 recovery: "codex_capacity",
-                retryable: false,
+                retryable: true,
                 rotated: true,
-                capacityWaiterId: waiterRow.id,
-                capacityWaitGeneration: waiterRow.generation,
-              }),
-              turnId: input.turnId,
-              turnGeneration: turn.executionGeneration,
-              turnAttemptId: input.attemptId,
-              turnAssociation: "current",
-              occurredAt: now,
-            },
-            {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-              sequence: ++sequence,
-              type: "codex.capacity.waiting",
-              payload: sanitizeEventPayload({
                 waiterId: waiterRow.id,
                 generation: waiterRow.generation,
-                goalId: input.goalId,
-                goalVersion: input.goalVersion,
+                goalId,
+                goalVersion,
+                blockedTurnGeneration: turn.executionGeneration,
                 policyHash,
                 resetKind: input.resetKind,
                 earliestResetAt: input.earliestResetAt?.toISOString() ?? null,
@@ -8593,7 +8613,7 @@ export async function armCodexCapacityWait(
               sessionId: input.sessionId,
               sequence: ++sequence,
               type: "session.status.changed",
-              payload: { status: "idle", reason: "codex_capacity" },
+              payload: { status: "waiting_capacity", reason: "codex_capacity" },
               turnId: input.turnId,
               turnGeneration: turn.executionGeneration,
               turnAttemptId: input.attemptId,
@@ -8602,13 +8622,14 @@ export async function armCodexCapacityWait(
             },
           ])
           .returning();
-        await tx
+        const [waitingTurn] = await tx
           .update(schema.sessionTurns)
           .set({
-            status: "failed",
+            status: "waiting_capacity",
             activeAttemptId: null,
+            metadata: metadataWithoutTurnDispatchAttempt(turn.metadata),
             version: turn.version + 1,
-            finishedAt: now,
+            finishedAt: null,
             updatedAt: now,
           })
           .where(
@@ -8616,13 +8637,18 @@ export async function armCodexCapacityWait(
               eq(schema.sessionTurns.workspaceId, input.workspaceId),
               eq(schema.sessionTurns.id, input.turnId),
               eq(schema.sessionTurns.status, "running"),
+              eq(schema.sessionTurns.activeAttemptId, input.attemptId),
             ),
-          );
-        await tx
+          )
+          .returning({ id: schema.sessionTurns.id });
+        if (!waitingTurn) {
+          throw new Error("Codex capacity blocked turn changed during atomic arm");
+        }
+        const [waitingSession] = await tx
           .update(schema.sessions)
           .set({
-            status: "idle",
-            activeTurnId: null,
+            status: "waiting_capacity",
+            activeTurnId: input.turnId,
             lastSequence: sequence,
             updatedAt: now,
           })
@@ -8630,15 +8656,24 @@ export async function armCodexCapacityWait(
             and(
               eq(schema.sessions.workspaceId, input.workspaceId),
               eq(schema.sessions.id, input.sessionId),
+              eq(schema.sessions.status, "running"),
               eq(schema.sessions.activeTurnId, input.turnId),
             ),
-          );
-        await tx.execute(sql`
-          delete from codex_credential_leases
-          where account_id = ${input.accountId}
-            and workspace_id = ${input.workspaceId}
-            and turn_id = ${input.turnId}
-        `);
+          )
+          .returning({ id: schema.sessions.id });
+        if (!waitingSession) {
+          throw new Error("Codex capacity session changed during atomic arm");
+        }
+        if (input.leaseFence) {
+          await tx.execute(sql`
+            delete from codex_credential_leases
+            where account_id = ${input.accountId}
+              and workspace_id = ${input.workspaceId}
+              and turn_id = ${input.turnId}
+              and holder_id = ${input.leaseFence.holderId}
+              and generation = ${input.leaseFence.generation}
+          `);
+        }
         return {
           action: "waiting",
           waiter: mapCodexCapacityWaiter(waiterRow),
@@ -8786,6 +8821,7 @@ async function supersedeCodexCapacityWaitInTransaction(
   tx: Database,
   input: {
     session: typeof schema.sessions.$inferSelect;
+    blockedTurn: typeof schema.sessionTurns.$inferSelect;
     waiter: typeof schema.codexCapacityWaiters.$inferSelect;
     reason: string;
     now: Date;
@@ -8809,9 +8845,52 @@ async function supersedeCodexCapacityWaitInTransaction(
   if (!updated) {
     return { waiter: mapCodexCapacityWaiter(input.waiter), events: [] };
   }
-  const inserted = await tx
-    .insert(schema.sessionEvents)
-    .values({
+  const turnWasCurrent = input.session.activeTurnId === input.blockedTurn.id;
+  const turnStillWaiting = input.blockedTurn.status === "waiting_capacity";
+  const terminalTurnStatus = input.session.status === "cancelled" ? "cancelled" : "superseded";
+  if (turnStillWaiting) {
+    const [supersededTurn] = await tx
+      .update(schema.sessionTurns)
+      .set({
+        status: terminalTurnStatus,
+        activeAttemptId: null,
+        cancelledBy: "codex_capacity_reconcile",
+        cancelReason: input.reason,
+        version: input.blockedTurn.version + 1,
+        finishedAt: input.now,
+        updatedAt: input.now,
+      })
+      .where(
+        and(
+          eq(schema.sessionTurns.workspaceId, input.session.workspaceId),
+          eq(schema.sessionTurns.id, input.blockedTurn.id),
+          eq(schema.sessionTurns.status, "waiting_capacity"),
+          isNull(schema.sessionTurns.activeAttemptId),
+          eq(schema.sessionTurns.executionGeneration, input.waiter.blockedTurnGeneration),
+        ),
+      )
+      .returning({ id: schema.sessionTurns.id });
+    if (!supersededTurn) {
+      throw new Error("Codex capacity blocked turn changed during atomic supersession");
+    }
+  }
+  const [queued] = turnWasCurrent
+    ? await tx
+        .select({ id: schema.sessionTurns.id })
+        .from(schema.sessionTurns)
+        .where(
+          and(
+            eq(schema.sessionTurns.workspaceId, input.session.workspaceId),
+            eq(schema.sessionTurns.sessionId, input.session.id),
+            eq(schema.sessionTurns.status, "queued"),
+          ),
+        )
+        .limit(1)
+    : [];
+  const nextSessionStatus =
+    input.session.status === "cancelled" ? "cancelled" : queued ? "queued" : "idle";
+  const eventValues: Array<typeof schema.sessionEvents.$inferInsert> = [
+    {
       accountId: input.session.accountId,
       workspaceId: input.session.workspaceId,
       sessionId: input.session.id,
@@ -8823,28 +8902,59 @@ async function supersedeCodexCapacityWaitInTransaction(
         reason: input.reason,
       }),
       turnId: updated.blockedTurnId,
+      turnGeneration: input.blockedTurn.executionGeneration,
+      ...(turnWasCurrent ? { turnAssociation: "current" } : {}),
       occurredAt: input.now,
-    })
-    .returning();
-  await tx
+    },
+  ];
+  if (turnWasCurrent && input.session.status !== nextSessionStatus) {
+    eventValues.push({
+      accountId: input.session.accountId,
+      workspaceId: input.session.workspaceId,
+      sessionId: input.session.id,
+      sequence: input.session.lastSequence + 2,
+      type: "session.status.changed",
+      payload: { status: nextSessionStatus, reason: input.reason },
+      turnId: updated.blockedTurnId,
+      turnGeneration: input.blockedTurn.executionGeneration,
+      turnAssociation: "current",
+      occurredAt: input.now,
+    });
+  }
+  const inserted = await tx.insert(schema.sessionEvents).values(eventValues).returning();
+  const lastSequence = input.session.lastSequence + inserted.length;
+  const [updatedSession] = await tx
     .update(schema.sessions)
-    .set({ lastSequence: input.session.lastSequence + 1, updatedAt: input.now })
+    .set({
+      ...(turnWasCurrent ? { status: nextSessionStatus, activeTurnId: null } : {}),
+      lastSequence,
+      updatedAt: input.now,
+    })
     .where(
       and(
         eq(schema.sessions.workspaceId, input.session.workspaceId),
         eq(schema.sessions.id, input.session.id),
+        ...(turnWasCurrent ? [eq(schema.sessions.activeTurnId, input.blockedTurn.id)] : []),
       ),
-    );
-  return { waiter: mapCodexCapacityWaiter(updated), events: inserted.map(mapEvent) };
+    )
+    .returning({ id: schema.sessions.id });
+  if (!updatedSession) {
+    throw new Error("Codex capacity session changed during atomic supersession");
+  }
+  return {
+    waiter: mapCodexCapacityWaiter(updated),
+    events: inserted.map(mapEvent),
+  };
 }
 
 /**
  * Row-lock and re-evaluate one waiter. Availability is decided by a pure
  * caller supplied policy over the same rotation-row transaction as normal
- * acquisition. If available, one system goal-continuation event and one turn
- * are committed; duplicate timers/signals observe status=resumed and do no
- * work. If any goal/control/policy/turn/queue fence changed, the waiter is
- * superseded without inference.
+ * acquisition. If available, the exact blocked turn becomes `recovering`;
+ * duplicate timers/signals observe status=resumed and do no work. Effective
+ * Pause leaves the waiter untouched, ordinary queued prompts remain behind the
+ * current inference, and only an explicit semantic fence change supersedes the
+ * waiter/blocked turn without inference.
  */
 export async function reconcileCodexCapacityWait<
   TPolicyScope = never,
@@ -8877,6 +8987,13 @@ export async function reconcileCodexCapacityWait<
     async (scopedDb) =>
       await scopedDb.transaction(async (rawTx) => {
         const tx = rawTx as unknown as Database;
+        await lockWorkspaceInferenceControl(tx, input.workspaceId, "share");
+        const effectiveControl = await evaluateSessionControl(
+          tx,
+          input.workspaceId,
+          input.sessionId,
+          { lock: "share" },
+        );
         const rotation = await lockExistingCodexRotationSettingsForCapacity(tx, input.workspaceId);
         if (!rotation || rotation.accountId !== input.accountId) {
           return { action: "stale", waiter: null, events: [] } as const;
@@ -8911,18 +9028,20 @@ export async function reconcileCodexCapacityWait<
           )
           .for("update")
           .limit(1);
-        const [goal] = await tx
-          .select()
-          .from(schema.sessionGoals)
-          .where(
-            and(
-              eq(schema.sessionGoals.workspaceId, input.workspaceId),
-              eq(schema.sessionGoals.id, waiterRead.goalId),
-              eq(schema.sessionGoals.sessionId, input.sessionId),
-            ),
-          )
-          .for("update")
-          .limit(1);
+        const [goal] = waiterRead.goalId
+          ? await tx
+              .select()
+              .from(schema.sessionGoals)
+              .where(
+                and(
+                  eq(schema.sessionGoals.workspaceId, input.workspaceId),
+                  eq(schema.sessionGoals.id, waiterRead.goalId),
+                  eq(schema.sessionGoals.sessionId, input.sessionId),
+                ),
+              )
+              .for("update")
+              .limit(1)
+          : [];
         const [blockedTurn] = await tx
           .select()
           .from(schema.sessionTurns)
@@ -8943,7 +9062,6 @@ export async function reconcileCodexCapacityWait<
           .limit(1);
         if (
           !session ||
-          !goal ||
           !blockedTurn ||
           !waiter ||
           waiter.generation !== input.generation ||
@@ -8955,53 +9073,40 @@ export async function reconcileCodexCapacityWait<
             events: [],
           } as const;
         }
+        if (effectiveControl.state !== "active") {
+          return {
+            action: "paused",
+            waiter: mapCodexCapacityWaiter(waiter),
+            events: [],
+          } as const;
+        }
 
-        const [pending] = await tx
-          .select({ id: schema.sessionTurns.id })
-          .from(schema.sessionTurns)
-          .where(
-            and(
-              eq(schema.sessionTurns.workspaceId, input.workspaceId),
-              eq(schema.sessionTurns.sessionId, input.sessionId),
-              inArray(schema.sessionTurns.status, [
-                "queued",
-                "running",
-                "requires_action",
-                "recovering",
-                "waiting_capacity",
-              ]),
-            ),
-          )
-          .limit(1);
-        const [laterTurn] = await tx
-          .select({ id: schema.sessionTurns.id })
-          .from(schema.sessionTurns)
-          .where(
-            and(
-              eq(schema.sessionTurns.workspaceId, input.workspaceId),
-              eq(schema.sessionTurns.sessionId, input.sessionId),
-              gt(schema.sessionTurns.position, blockedTurn.position),
-            ),
-          )
-          .limit(1);
         const currentPolicyHash = codexCapacityPolicyHashFromTurnMetadata(blockedTurn.metadata);
         let supersedeReason: string | null = null;
-        if (goal.status !== "active" || goal.version !== waiter.goalVersion) {
+        if (session.status === "cancelled") {
+          supersedeReason = "session_cancelled";
+        } else if (
+          waiter.goalId !== null &&
+          (!goal || goal.status !== "active" || goal.version !== waiter.goalVersion)
+        ) {
           supersedeReason = "goal_changed";
         } else if (currentPolicyHash !== waiter.policyHash) {
           supersedeReason = "credential_policy_changed";
-        } else if (session.status !== "idle" || session.activeTurnId !== null) {
-          supersedeReason = "session_not_capacity_idle";
-        } else if (blockedTurn.status !== "failed") {
+        } else if (session.activeTurnId !== blockedTurn.id) {
+          supersedeReason = "active_turn_changed";
+        } else if (session.status !== "waiting_capacity") {
+          supersedeReason = "session_not_waiting_capacity";
+        } else if (
+          blockedTurn.status !== "waiting_capacity" ||
+          blockedTurn.activeAttemptId !== null ||
+          blockedTurn.executionGeneration !== waiter.blockedTurnGeneration
+        ) {
           supersedeReason = "blocked_turn_changed";
-        } else if (pending) {
-          supersedeReason = "pending_work_exists";
-        } else if (laterTurn) {
-          supersedeReason = "newer_turn_exists";
         }
         if (supersedeReason) {
           const superseded = await supersedeCodexCapacityWaitInTransaction(tx, {
             session,
+            blockedTurn,
             waiter,
             reason: supersedeReason,
             now,
@@ -9073,64 +9178,6 @@ export async function reconcileCodexCapacityWait<
           } as const;
         }
 
-        const prompt = [
-          "[CODEX CAPACITY RESUME] Codex subscription capacity is available again.",
-          `Continue the existing active goal from durable conversation history: ${goal.text}`,
-          `Success criteria: ${goal.successCriteria ?? "none specified"}.`,
-          "Do not replay completed tool side effects; verify any ambiguous in-flight effect before repeating it.",
-          "If the goal is complete, call opengeni__goal_complete. If blocked for another reason, call opengeni__goal_pause.",
-        ].join("\n");
-        const [update] = await tx
-          .insert(schema.sessionSystemUpdates)
-          .values({
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            kind: "goal_continuation",
-            classification: "info",
-            sourceId: goal.id,
-            dedupeKey: `codex-capacity-resume:${waiter.id}:${waiter.generation}`,
-            summary: prompt,
-            payload: {
-              type: "goal_continuation",
-              goalId: goal.id,
-              goalVersion: goal.version,
-              prompt,
-              reason: "codex_capacity",
-              capacityWaiterId: waiter.id,
-              capacityWaitGeneration: waiter.generation,
-              policy: {
-                model: blockedTurn.model,
-                reasoningEffort: blockedTurn.reasoningEffort,
-                tools: blockedTurn.tools,
-                sandboxBackend: blockedTurn.sandboxBackend,
-              },
-            },
-            lineage: {
-              goalId: goal.id,
-              blockedTurnId: blockedTurn.id,
-              capacityWaiterId: waiter.id,
-            },
-            state: "pending",
-          })
-          .returning();
-        if (!update) {
-          throw new Error("Codex capacity resume did not create an internal update");
-        }
-        await tx
-          .insert(schema.usageEvents)
-          .values({
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            eventType: "agent_run.created",
-            quantity: 1,
-            unit: "run",
-            sourceResourceType: "session_system_update",
-            sourceResourceId: update.id,
-            idempotencyKey: `agent_run.created:codex-capacity:${input.workspaceId}:${update.id}`,
-            occurredAt: now,
-          })
-          .onConflictDoNothing({ target: schema.usageEvents.idempotencyKey });
         const events = await tx
           .insert(schema.sessionEvents)
           .values([
@@ -9139,14 +9186,20 @@ export async function reconcileCodexCapacityWait<
               workspaceId: input.workspaceId,
               sessionId: input.sessionId,
               sequence: session.lastSequence + 1,
-              type: "system.update.pending",
+              type: "codex.capacity.resumed",
               payload: sanitizeEventPayload({
-                updateId: update.id,
-                kind: update.kind,
-                classification: update.classification,
-                sourceId: update.sourceId,
-                summary: update.summary,
+                waiterId: waiter.id,
+                generation: waiter.generation,
+                wakeRevision: waiter.wakeRevision,
+                goalId: waiter.goalId,
+                goalVersion: waiter.goalVersion,
+                blockedTurnGeneration: waiter.blockedTurnGeneration,
+                policyHash: waiter.policyHash,
+                diagnostic: decision.diagnostic ?? null,
               }),
+              turnId: blockedTurn.id,
+              turnGeneration: blockedTurn.executionGeneration,
+              turnAssociation: "current",
               occurredAt: now,
             },
             {
@@ -9154,18 +9207,11 @@ export async function reconcileCodexCapacityWait<
               workspaceId: input.workspaceId,
               sessionId: input.sessionId,
               sequence: session.lastSequence + 2,
-              type: "codex.capacity.resumed",
-              payload: sanitizeEventPayload({
-                waiterId: waiter.id,
-                generation: waiter.generation,
-                wakeRevision: waiter.wakeRevision,
-                goalId: goal.id,
-                goalVersion: goal.version,
-                policyHash: waiter.policyHash,
-                diagnostic: decision.diagnostic ?? null,
-                updateId: update.id,
-              }),
+              type: "session.status.changed",
+              payload: { status: "recovering", reason: "codex_capacity" },
               turnId: blockedTurn.id,
+              turnGeneration: blockedTurn.executionGeneration,
+              turnAssociation: "current",
               occurredAt: now,
             },
           ])
@@ -9174,7 +9220,7 @@ export async function reconcileCodexCapacityWait<
           .update(schema.codexCapacityWaiters)
           .set({
             status: "resumed",
-            resumedUpdateId: update.id,
+            resumedUpdateId: null,
             observedWakeRevision: waiter.wakeRevision,
             lastWakeReason: "capacity_available",
             updatedAt: now,
@@ -9190,11 +9236,34 @@ export async function reconcileCodexCapacityWait<
         if (!updatedWaiter) {
           throw new Error("Codex capacity waiter changed during atomic resume");
         }
-        await tx
+        const [recoveringTurn] = await tx
+          .update(schema.sessionTurns)
+          .set({
+            status: "recovering",
+            activeAttemptId: null,
+            metadata: metadataWithoutTurnDispatchAttempt(blockedTurn.metadata),
+            version: blockedTurn.version + 1,
+            finishedAt: null,
+            updatedAt: now,
+          })
+          .where(
+            and(
+              eq(schema.sessionTurns.workspaceId, input.workspaceId),
+              eq(schema.sessionTurns.id, blockedTurn.id),
+              eq(schema.sessionTurns.status, "waiting_capacity"),
+              isNull(schema.sessionTurns.activeAttemptId),
+              eq(schema.sessionTurns.executionGeneration, waiter.blockedTurnGeneration),
+            ),
+          )
+          .returning({ id: schema.sessionTurns.id });
+        if (!recoveringTurn) {
+          throw new Error("Codex capacity blocked turn changed during atomic resume");
+        }
+        const [recoveringSession] = await tx
           .update(schema.sessions)
           .set({
-            status: "queued",
-            activeTurnId: null,
+            status: "recovering",
+            activeTurnId: blockedTurn.id,
             lastSequence: session.lastSequence + 2,
             updatedAt: now,
           })
@@ -9202,13 +9271,17 @@ export async function reconcileCodexCapacityWait<
             and(
               eq(schema.sessions.workspaceId, input.workspaceId),
               eq(schema.sessions.id, input.sessionId),
-              isNull(schema.sessions.activeTurnId),
+              eq(schema.sessions.status, "waiting_capacity"),
+              eq(schema.sessions.activeTurnId, blockedTurn.id),
             ),
-          );
+          )
+          .returning({ id: schema.sessions.id });
+        if (!recoveringSession) {
+          throw new Error("Codex capacity session changed during atomic resume");
+        }
         return {
           action: "resumed",
           waiter: mapCodexCapacityWaiter(updatedWaiter),
-          update: mapSessionSystemUpdate(update),
           events: events.map(mapEvent),
         } as const;
       }),

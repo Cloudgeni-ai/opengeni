@@ -22,6 +22,7 @@ export type SessionTurnAttemptOutcome =
   | "cancelled"
   | "superseded"
   | "requires_action"
+  | "waiting_capacity"
   | "interrupted_recoverable"
   | "lease_lost_recoverable"
   | "pre_cutover_closed";
