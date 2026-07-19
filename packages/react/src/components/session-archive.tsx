@@ -63,9 +63,11 @@ function trapTab(event: KeyboardEvent<HTMLDivElement>, dialog: HTMLDivElement): 
   if (event.key !== "Tab") {
     return;
   }
-  const focusable = [...dialog.querySelectorAll<HTMLElement>("button:not([disabled])")].filter(
-    (element) => !element.hidden,
-  );
+  const focusable = [
+    ...dialog.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    ),
+  ].filter((element) => !element.hidden && element.getAttribute("aria-hidden") !== "true");
   if (focusable.length === 0) {
     event.preventDefault();
     dialog.focus();
@@ -205,7 +207,7 @@ export function SessionArchiveDialog(props: SessionArchiveDialogProps) {
             aria-label="Close archive review"
             disabled={archive.applying}
             onClick={close}
-            className="flex size-9 shrink-0 items-center justify-center rounded-og-sm text-og-fg-muted hover:bg-og-surface-2 hover:text-og-fg disabled:opacity-50 pointer-coarse:min-h-10 pointer-coarse:min-w-10"
+            className="flex size-9 shrink-0 items-center justify-center rounded-og-sm text-og-fg-muted hover:bg-og-surface-2 hover:text-og-fg disabled:opacity-50 pointer-coarse:min-h-11 pointer-coarse:min-w-11"
           >
             <XIcon className="size-4" aria-hidden />
           </button>
@@ -247,7 +249,11 @@ export function SessionArchiveDialog(props: SessionArchiveDialogProps) {
                 Settle {blockers.length.toLocaleString()} live-work{" "}
                 {blockers.length === 1 ? "blocker" : "blockers"}, then check again.
               </p>
-              <ul className="mt-2 max-h-44 space-y-1.5 overflow-y-auto pl-6 text-og-xs text-og-fg-muted">
+              <ul
+                aria-label="Archive blockers"
+                tabIndex={0}
+                className="mt-2 max-h-44 space-y-1.5 overflow-y-auto pl-6 text-og-xs text-og-fg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-og-accent"
+              >
                 {blockers.slice(0, MAX_VISIBLE_BLOCKERS).map((blocker, index) => (
                   <li key={`${blocker.code}:${blocker.sessionId}:${blocker.resourceId ?? index}`}>
                     <span className="font-medium text-og-fg">{blockerLabel(blocker)}</span>
@@ -292,7 +298,7 @@ export function SessionArchiveDialog(props: SessionArchiveDialogProps) {
             type="button"
             disabled={archive.applying}
             onClick={close}
-            className="min-h-10 rounded-og-sm border border-og-border px-3 py-2 text-og-sm font-medium text-og-fg-muted hover:border-og-border-strong hover:text-og-fg disabled:opacity-50"
+            className="min-h-11 rounded-og-sm border border-og-border px-3 py-2 text-og-sm font-medium text-og-fg-muted hover:border-og-border-strong hover:text-og-fg disabled:opacity-50"
           >
             Cancel
           </button>
@@ -302,10 +308,10 @@ export function SessionArchiveDialog(props: SessionArchiveDialogProps) {
             disabled={!canApply || busy}
             onClick={() => void confirm()}
             className={cn(
-              "min-h-10 rounded-og-sm px-3 py-2 text-og-sm font-semibold disabled:cursor-not-allowed disabled:opacity-50",
+              "min-h-11 rounded-og-sm px-3 py-2 text-og-sm font-semibold disabled:cursor-not-allowed disabled:border disabled:border-og-border disabled:bg-og-surface-3 disabled:text-og-fg",
               action === "archive"
-                ? "bg-og-status-failed text-og-accent-fg"
-                : "bg-og-accent text-og-accent-fg",
+                ? "bg-og-fg text-og-bg ring-1 ring-inset ring-og-status-failed"
+                : "bg-og-fg text-og-bg",
             )}
           >
             {archive.applying
@@ -355,7 +361,7 @@ export function SessionArchiveBanner({
         <button
           type="button"
           onClick={onReviewUnarchive}
-          className="min-h-10 shrink-0 rounded-og-sm border border-og-border px-3 py-2 text-og-sm font-medium text-og-fg hover:border-og-border-strong hover:bg-og-surface-3"
+          className="min-h-11 shrink-0 rounded-og-sm border border-og-border px-3 py-2 text-og-sm font-medium text-og-fg hover:border-og-border-strong hover:bg-og-surface-3"
         >
           Review unarchive
         </button>

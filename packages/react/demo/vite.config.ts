@@ -27,6 +27,7 @@ export default defineConfig({
         workbenchEmbed: resolve(__dirname, "workbench-embed.html"),
         terminal: resolve(__dirname, "terminal.html"),
         transcription: resolve(__dirname, "transcription.html"),
+        sessionArchive: resolve(__dirname, "session-archive.html"),
       },
     },
   },

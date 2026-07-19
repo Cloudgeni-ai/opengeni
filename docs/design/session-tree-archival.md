@@ -34,8 +34,8 @@ only denormalized values and must agree with active membership count.
 
 ## 2. Locking and atomicity
 
-Every apply transaction follows the canonical writer prefix introduced by
-OPE-63:
+Every archive apply transaction follows the canonical writer prefix introduced
+by OPE-63:
 
 1. workspace inference-control row (`FOR UPDATE` for archive apply);
 2. workspace row (`FOR KEY SHARE`);
@@ -44,11 +44,29 @@ OPE-63:
 5. exact attempts, UUID ordered (`FOR UPDATE`);
 6. feature-owned rows in a documented stable order.
 
-Session creation takes the same workspace-control prefix and must evaluate the
-OPE-61 ancestry guard inside OPE-53's authoritative creation admission before
-inserting a session or any first-turn artifact. Consequently an archive cannot
-miss a concurrent child: either creation commits first and appears in the
-closure, or archive commits first and creation receives `archived_ancestry`.
+Session creation deliberately does **not** copy that entire prefix. OPE-53's
+authoritative creation transaction has a stricter established order:
+
+1. workspace inference-control row (`FOR SHARE`);
+2. workspace validation without a workspace-row lock;
+3. deployment depth-policy singleton (`FOR SHARE`);
+4. keyed-create advisory lock and committed success/denial replay, when keyed;
+5. direct parent plus the OPE-61 ancestry fence in one deterministic order;
+6. admission decision and either durable typed denial or session insert.
+
+Adding a workspace-row lock after the control row would invert the depth-policy
+settings writer and is forbidden. Moving the keyed-create advisory lock after
+parent/ancestry locks is also forbidden. OPE-61 composes at the private OPE-53
+admission boundary rather than adding an HTTP-, MCP-, or SDK-only preflight.
+The archive writer's `FOR UPDATE` control lock conflicts with creation's
+`FOR SHARE` control lock. The ancestry guard then reads and locks the canonical
+archive state before insert. If the integrated implementation locks multiple
+ancestors, create and archive both use the same root-to-leaf deterministic order
+and never walk leaf-to-root. Consequently an archive cannot miss a concurrent
+child: either creation commits first and appears in the locked closure, or
+archive commits first and creation records one `archived_ancestry` denial.
+The rolling old-writer database guard participates in the same serialization;
+an application-only check is insufficient.
 
 The recursive closure is recomputed after locks are acquired and compared with
 the manifest's exact `(sessionId, parentSessionId, depth, archiveRevision,
@@ -82,6 +100,22 @@ complete/pause a goal, explicitly stop/cancel a turn, close a PTY, or pause a
 schedule), then regenerate the manifest. Archive itself does not perform those
 mutations. This makes every side effect visible and keeps the archive transaction
 bounded and rollback-safe.
+
+Subsystem composition is fail-closed and uses owner-provided seams:
+
+- any `active` goal is a blocker even when its observed and wake revisions are
+  equal; archive never clears the shared workflow-wake outbox, advances an
+  observed revision, or edits goal status directly;
+- `waiting` durable waits and `queued`, `starting`, `running`, or `cancelling`
+  background jobs are blockers; unknown future wait kinds or job states also
+  block until the owning subsystem defines their settlement contract;
+- an active or indeterminate sandbox lease/provider attachment is a blocker.
+  Archive never reuses provider-`NOT_FOUND` loss helpers, and an external
+  read-then-retire preflight is not sufficient. Lease admission,
+  rematerialization, attach/swap, viewer, PTY, and route establishment must read
+  the ancestry fence inside their authoritative transaction before side
+  effects. The archive transaction locks affected lease rows only after the
+  canonical archive/session prefix and rolls back the entire root on a blocker.
 
 ## 4. Fail-closed execution boundary
 
