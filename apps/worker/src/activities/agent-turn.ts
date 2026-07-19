@@ -1355,7 +1355,23 @@ export function codexCredentialLeaseDeadlineExpired(
   );
 }
 
-export function createRunAgentTurnActivity(services: () => Promise<ActivityServices>) {
+export type AgentTurnTestHooks = {
+  /**
+   * Deterministic crash-window failpoint for integration tests. Production
+   * constructors never pass hooks. Throwing here simulates worker loss after
+   * the atomic history/no-replay checkpoint and before lifecycle settlement.
+   */
+  afterNoReplayCheckpoint?: (input: {
+    attemptId: string;
+    turnId: string;
+    reason: "provider_invalid_content" | "transport_acceptance_unknown";
+  }) => Promise<void> | void;
+};
+
+export function createRunAgentTurnActivity(
+  services: () => Promise<ActivityServices>,
+  testHooks: AgentTurnTestHooks = {},
+) {
   return async function runAgentTurn(input: RunAgentTurnInput): Promise<RunAgentTurnResult> {
     const {
       settings,
@@ -1914,7 +1930,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // max(position)+1 and the slice index can no longer double as the position.
     let nextHistoryPosition = 0;
     const reconcileConversationTruth = async (
-      options: { skipInputOnlyRows?: boolean; requireDurable?: boolean } = {},
+      options: {
+        skipInputOnlyRows?: boolean;
+        requireDurable?: boolean;
+        noReplayCheckpointReason?: "provider_invalid_content" | "transport_acceptance_unknown";
+      } = {},
     ) => {
       if (!stream || !turnId) {
         if (options.requireDurable) {
@@ -1936,7 +1956,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           );
           const shouldAppendRows =
             rows.length > 0 && (!options.skipInputOnlyRows || hasModelOrToolProgress);
-          if (shouldAppendRows) {
+          if (shouldAppendRows || options.noReplayCheckpointReason) {
             const appended = await appendSessionHistoryItems(db, {
               accountId: input.accountId,
               workspaceId: input.workspaceId,
@@ -1950,7 +1970,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               // it to strip cross-account reasoning.encrypted_content next turn.
               producerCodexCredentialId: effectiveCodexCredentialId,
               modelToolOutputTruncationTokens: modelRunSettings.modelToolOutputTruncationTokens,
-              items: rows,
+              items: shouldAppendRows ? rows : [],
+              ...(options.noReplayCheckpointReason
+                ? {
+                    noReplayCheckpoint: {
+                      reason: options.noReplayCheckpointReason,
+                    },
+                  }
+                : {}),
             });
             if (!appended) {
               throw new TurnAttemptFencedError(
@@ -1961,6 +1988,26 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           if (shouldAppendRows || !options.skipInputOnlyRows) {
             persistedHistoryCount = nextWatermark;
             nextHistoryPosition = nextPosition;
+          }
+        } else if (options.noReplayCheckpointReason) {
+          const appended = await appendSessionHistoryItems(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId,
+            expectedExecutionGeneration: executionGeneration,
+            expectedAttemptId: input.attemptId,
+            producerCodexCredentialId: effectiveCodexCredentialId,
+            modelToolOutputTruncationTokens: modelRunSettings.modelToolOutputTruncationTokens,
+            items: [],
+            noReplayCheckpoint: {
+              reason: options.noReplayCheckpointReason,
+            },
+          });
+          if (!appended) {
+            throw new TurnAttemptFencedError(
+              "turn execution generation was fenced while checkpointing no-replay intent",
+            );
           }
         }
         const envelope = sandboxStateEntryFromRunState(stream.state);
@@ -5010,7 +5057,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         await flushRuntimeBatcher();
         let checkpointSucceeded = false;
         try {
-          await reconcileConversationTruth({ requireDurable: true });
+          await reconcileConversationTruth({
+            requireDurable: true,
+            noReplayCheckpointReason: "provider_invalid_content",
+          });
           checkpointSucceeded = true;
         } catch (checkpointError) {
           observability.warn(
@@ -5027,6 +5077,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 checkpointError instanceof Error ? checkpointError.name : "unknown",
             },
           );
+        }
+        if (checkpointSucceeded) {
+          await testHooks.afterNoReplayCheckpoint?.({
+            attemptId: input.attemptId,
+            turnId,
+            reason: "provider_invalid_content",
+          });
         }
 
         const goalActive = checkpointSucceeded
@@ -5828,7 +5885,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         await flushRuntimeBatcher();
         let checkpointSucceeded = false;
         try {
-          await reconcileConversationTruth({ requireDurable: true });
+          await reconcileConversationTruth({
+            requireDurable: true,
+            noReplayCheckpointReason: "transport_acceptance_unknown",
+          });
           checkpointSucceeded = true;
         } catch (checkpointError) {
           observability.warn(
@@ -5842,6 +5902,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 checkpointError instanceof Error ? checkpointError.name : "unknown",
             },
           );
+        }
+        if (checkpointSucceeded) {
+          await testHooks.afterNoReplayCheckpoint?.({
+            attemptId: input.attemptId,
+            turnId,
+            reason: "transport_acceptance_unknown",
+          });
         }
         const goalActive = checkpointSucceeded
           ? await getSessionGoal(db, input.workspaceId, input.sessionId)

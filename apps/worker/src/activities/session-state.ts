@@ -147,9 +147,11 @@ export function createSessionStateActivities(
   /**
    * Recover the same current inference when its worker dies without completing
    * a graceful checkpoint (heartbeat timeout, SIGKILL, OOM, or node loss).
-   * Durable conversation truth and the original trigger stay attached to the
-   * same turn; recovery creates a new fenced attempt, never a prompt-queue row
-   * or a synthetic resume message. Repeated worker deaths are bounded per turn.
+   * Before provider acceptance/progress, durable conversation truth and the
+   * original trigger stay attached to the same turn; recovery creates a new
+   * fenced attempt, never a prompt-queue row or synthetic resume message.
+   * A final accepted/acceptance-unknown no-replay checkpoint instead settles
+   * failed/idle atomically here and never redispatches the turn.
    */
   async function recoverDispatch(input: RecoverDispatchInput): Promise<RecoverDispatchResult> {
     const { settings, db, bus, observability, wakeSessionWorkflow } = await services();
@@ -175,6 +177,13 @@ export function createSessionStateActivities(
         action: "exceeded",
         turnId: result.turnId,
         redispatches: result.redispatches,
+      };
+    }
+    if (result.action === "settled_no_replay") {
+      return {
+        action: "settled_no_replay",
+        turnId: result.turnId,
+        reason: result.reason,
       };
     }
     return {

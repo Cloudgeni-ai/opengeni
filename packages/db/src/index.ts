@@ -12253,6 +12253,10 @@ async function lockTurnAttemptWriteFenceTx(
   return { allowed: true, workspace, session, turn };
 }
 
+export type SessionTurnNoReplayCheckpointReason =
+  | "provider_invalid_content"
+  | "transport_acceptance_unknown";
+
 /**
  * Append conversation items (verbatim SDK AgentInputItems) to the session's
  * history. Idempotent on (workspace, session, position): concurrent or
@@ -12274,9 +12278,18 @@ export async function appendSessionHistoryItems(
     producerCodexCredentialId?: string | null;
     modelToolOutputTruncationTokens?: number;
     items: Array<{ position: number; item: Record<string, unknown> }>;
+    // Accepted or acceptance-unknown external work may never be replayed on a
+    // replacement worker. Persist this exact-attempt terminal intent in the
+    // same transaction as the final conversation rows so heartbeat recovery
+    // cannot observe the checkpoint without also observing the no-replay
+    // boundary. The reason is deliberately a closed enum: no provider payload,
+    // transcript, header, credential, or backend cause belongs in turn metadata.
+    noReplayCheckpoint?: {
+      reason: SessionTurnNoReplayCheckpointReason;
+    };
   },
 ): Promise<boolean> {
-  if (input.items.length === 0) {
+  if (input.items.length === 0 && input.noReplayCheckpoint === undefined) {
     return true;
   }
   return await withRlsContext(
@@ -12292,31 +12305,83 @@ export async function appendSessionHistoryItems(
           attemptId: input.expectedAttemptId,
         });
         if (!allowed.allowed) return false;
-        await tx
-          .insert(schema.sessionHistoryItems)
-          .values(
-            input.items.map((entry) => ({
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-              turnId: input.turnId,
-              producerCodexCredentialId: input.producerCodexCredentialId ?? null,
-              position: entry.position,
-              // This is the canonical model-memory boundary. The pending-call
-              // ledger and audit event may retain their separate raw/preview
-              // forms, but conversation truth is always the bounded Codex form.
-              item: sanitizeModelPayload(
-                boundModelToolOutputItem(entry.item, input.modelToolOutputTruncationTokens),
+        let checkpointMetadata: Record<string, unknown> | null = null;
+        if (input.noReplayCheckpoint) {
+          const existing = readTurnNoReplayCheckpoint(allowed.turn.metadata);
+          const expected = {
+            attemptId: input.expectedAttemptId,
+            executionGeneration: input.expectedExecutionGeneration,
+            disposition: "failed_idle" as const,
+            reason: input.noReplayCheckpoint.reason,
+          };
+          if (existing.kind === "malformed") return false;
+          if (existing.kind === "valid") {
+            if (
+              existing.checkpoint.attemptId !== expected.attemptId ||
+              existing.checkpoint.executionGeneration !== expected.executionGeneration ||
+              existing.checkpoint.disposition !== expected.disposition ||
+              existing.checkpoint.reason !== expected.reason
+            ) {
+              return false;
+            }
+          } else {
+            checkpointMetadata = metadataWithTurnNoReplayCheckpoint(
+              allowed.turn.metadata,
+              expected,
+            );
+          }
+        }
+        if (input.items.length > 0) {
+          await tx
+            .insert(schema.sessionHistoryItems)
+            .values(
+              input.items.map((entry) => ({
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                turnId: input.turnId,
+                producerCodexCredentialId: input.producerCodexCredentialId ?? null,
+                position: entry.position,
+                // This is the canonical model-memory boundary. The pending-call
+                // ledger and audit event may retain their separate raw/preview
+                // forms, but conversation truth is always the bounded Codex form.
+                item: sanitizeModelPayload(
+                  boundModelToolOutputItem(entry.item, input.modelToolOutputTruncationTokens),
+                ),
+              })),
+            )
+            .onConflictDoNothing({
+              target: [
+                schema.sessionHistoryItems.workspaceId,
+                schema.sessionHistoryItems.sessionId,
+                schema.sessionHistoryItems.position,
+              ],
+            });
+        }
+        if (checkpointMetadata) {
+          const [updatedTurn] = await tx
+            .update(schema.sessionTurns)
+            .set({
+              metadata: checkpointMetadata,
+              version: allowed.turn.version + 1,
+              updatedAt: new Date(),
+            })
+            .where(
+              and(
+                eq(schema.sessionTurns.workspaceId, input.workspaceId),
+                eq(schema.sessionTurns.sessionId, input.sessionId),
+                eq(schema.sessionTurns.id, input.turnId),
+                eq(schema.sessionTurns.executionGeneration, input.expectedExecutionGeneration),
+                eq(schema.sessionTurns.activeAttemptId, input.expectedAttemptId),
               ),
-            })),
-          )
-          .onConflictDoNothing({
-            target: [
-              schema.sessionHistoryItems.workspaceId,
-              schema.sessionHistoryItems.sessionId,
-              schema.sessionHistoryItems.position,
-            ],
-          });
+            )
+            .returning({ id: schema.sessionTurns.id });
+          if (!updatedTurn) {
+            throw new Error(
+              `Session turn changed while checkpointing no-replay intent: ${input.turnId}`,
+            );
+          }
+        }
         return true;
       });
     },
@@ -22045,6 +22110,7 @@ export async function setTemporalWorkflowId(
 
 const TURN_DISPATCH_ATTEMPT_METADATA_KEY = "dispatchAttempt";
 const TURN_DISPATCH_GENERATION_METADATA_KEY = "dispatchGeneration";
+const TURN_NO_REPLAY_CHECKPOINT_METADATA_KEY = "noReplayCheckpoint";
 
 type TurnDispatchAttempt = {
   id: string;
@@ -22149,6 +22215,62 @@ function metadataWithoutTurnDispatchAttempt(
   const next = { ...(metadata ?? {}) };
   delete next[TURN_DISPATCH_ATTEMPT_METADATA_KEY];
   return next;
+}
+
+type TurnNoReplayCheckpoint = {
+  attemptId: string;
+  executionGeneration: number;
+  disposition: "failed_idle";
+  reason: SessionTurnNoReplayCheckpointReason;
+};
+
+type TurnNoReplayCheckpointMetadata =
+  | { kind: "absent" }
+  | { kind: "valid"; checkpoint: TurnNoReplayCheckpoint }
+  | { kind: "malformed"; reason: string };
+
+function readTurnNoReplayCheckpoint(metadata: unknown): TurnNoReplayCheckpointMetadata {
+  if (metadata === null || metadata === undefined) return { kind: "absent" };
+  if (typeof metadata !== "object" || Array.isArray(metadata)) {
+    return { kind: "malformed", reason: "turn metadata is not an object" };
+  }
+  const raw = (metadata as Record<string, unknown>)[TURN_NO_REPLAY_CHECKPOINT_METADATA_KEY];
+  if (raw === undefined) return { kind: "absent" };
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return { kind: "malformed", reason: "noReplayCheckpoint is not an object" };
+  }
+  const checkpoint = raw as Record<string, unknown>;
+  if (
+    typeof checkpoint.attemptId !== "string" ||
+    checkpoint.attemptId.length === 0 ||
+    typeof checkpoint.executionGeneration !== "number" ||
+    !Number.isSafeInteger(checkpoint.executionGeneration) ||
+    checkpoint.executionGeneration < 1 ||
+    checkpoint.disposition !== "failed_idle" ||
+    (checkpoint.reason !== "provider_invalid_content" &&
+      checkpoint.reason !== "transport_acceptance_unknown")
+  ) {
+    return { kind: "malformed", reason: "noReplayCheckpoint has an invalid shape" };
+  }
+  return {
+    kind: "valid",
+    checkpoint: {
+      attemptId: checkpoint.attemptId,
+      executionGeneration: checkpoint.executionGeneration,
+      disposition: checkpoint.disposition,
+      reason: checkpoint.reason,
+    },
+  };
+}
+
+function metadataWithTurnNoReplayCheckpoint(
+  metadata: Record<string, unknown> | null | undefined,
+  checkpoint: TurnNoReplayCheckpoint,
+): Record<string, unknown> {
+  return {
+    ...(metadata ?? {}),
+    [TURN_NO_REPLAY_CHECKPOINT_METADATA_KEY]: checkpoint,
+  };
 }
 
 type WorkerDeathRedispatchMetadata =
@@ -23357,6 +23479,12 @@ export type RecoverSessionDispatchInput = {
 export type RecoverSessionDispatchResult =
   | { action: "unclaimed"; events: [] }
   | {
+      action: "settled_no_replay";
+      turnId: string;
+      reason: SessionTurnNoReplayCheckpointReason;
+      events: SessionEvent[];
+    }
+  | {
       action: "recovering";
       turnId: string;
       redispatches: number;
@@ -23451,6 +23579,180 @@ export async function recoverSessionDispatch(
           events: [] as [],
           turnStatus,
           activeTurnId: session.activeTurnId,
+        };
+      }
+
+      const noReplayCheckpoint = readTurnNoReplayCheckpoint(turn.metadata);
+      if (noReplayCheckpoint.kind === "malformed") {
+        return {
+          action: "stale" as const,
+          events: [] as [],
+          turnStatus,
+          activeTurnId: session.activeTurnId,
+        };
+      }
+      if (noReplayCheckpoint.kind === "valid") {
+        const checkpoint = noReplayCheckpoint.checkpoint;
+        if (
+          checkpoint.attemptId !== input.attemptId ||
+          checkpoint.executionGeneration !== turn.executionGeneration ||
+          checkpoint.disposition !== "failed_idle"
+        ) {
+          return {
+            action: "stale" as const,
+            events: [] as [],
+            turnStatus,
+            activeTurnId: session.activeTurnId,
+          };
+        }
+
+        // The accepted/acceptance-unknown execution crossed its final durable
+        // conversation checkpoint before this worker vanished. Consuming the
+        // exact attempt/generation fence is terminal: never advance the crash
+        // redispatch counter and never expose this logical turn to a new model,
+        // tool, billing, history, or command execution.
+        const now = new Date();
+        await closeSessionTurnAttemptInTransaction(tx as unknown as Database, {
+          id: input.attemptId,
+          accountId: session.accountId,
+          workspaceId,
+          sessionId: input.sessionId,
+          turnId: turn.id,
+          executionGeneration: turn.executionGeneration,
+          outcome: "failed",
+          closedAt: now,
+        });
+        let sequence = session.lastSequence;
+        const closedTools = await closePendingSessionToolCallsInTransaction(
+          tx as unknown as Database,
+          {
+            accountId: session.accountId,
+            workspaceId,
+            sessionId: input.sessionId,
+            turnId: turn.id,
+            reason: "turn_failed",
+            sequence,
+            now,
+          },
+        );
+        sequence = closedTools.sequence;
+        const [waitingPrompt] = await tx
+          .select({ id: schema.sessionTurns.id })
+          .from(schema.sessionTurns)
+          .where(
+            and(
+              eq(schema.sessionTurns.workspaceId, workspaceId),
+              eq(schema.sessionTurns.sessionId, input.sessionId),
+              eq(schema.sessionTurns.status, "queued"),
+              inArray(schema.sessionTurns.source, ["user", "api"]),
+            ),
+          )
+          .limit(1);
+        const effectiveSessionStatus = waitingPrompt ? "queued" : "idle";
+        const acceptedInvalidContent = checkpoint.reason === "provider_invalid_content";
+        const inserted = await tx
+          .insert(schema.sessionEvents)
+          .values([
+            {
+              accountId: session.accountId,
+              workspaceId,
+              sessionId: input.sessionId,
+              sequence: ++sequence,
+              type: "turn.failed",
+              turnId: turn.id,
+              turnGeneration: turn.executionGeneration,
+              turnAttemptId: input.attemptId,
+              turnAssociation: "current",
+              payload: sanitizeEventPayload({
+                triggerEventId: turn.triggerEventId,
+                code: acceptedInvalidContent
+                  ? "provider_invalid_content"
+                  : "transport_acceptance_unknown",
+                error: acceptedInvalidContent
+                  ? "The model provider produced invalid content after accepting the request. Conversation truth was checkpointed before the worker stopped; the accepted provider call was not replayed."
+                  : "The external model or tool transport failed after acceptance became uncertain. Conversation truth was checkpointed before the worker stopped; the original execution was not replayed.",
+                retryable: !acceptedInvalidContent,
+                checkpointSucceeded: true,
+                recovery: "worker_death_terminal_settlement",
+                sameTurnReplay: "refused",
+              }),
+              occurredAt: now,
+            },
+            {
+              accountId: session.accountId,
+              workspaceId,
+              sessionId: input.sessionId,
+              sequence: ++sequence,
+              type: "session.status.changed",
+              turnId: turn.id,
+              turnGeneration: turn.executionGeneration,
+              turnAttemptId: input.attemptId,
+              turnAssociation: "current",
+              payload: sanitizeEventPayload({ status: effectiveSessionStatus }),
+              occurredAt: now,
+            },
+          ])
+          .returning();
+        const [updatedTurn] = await tx
+          .update(schema.sessionTurns)
+          .set({
+            status: "failed",
+            activeAttemptId: null,
+            metadata: metadataWithoutTurnDispatchAttempt(turn.metadata),
+            version: turn.version + 1,
+            finishedAt: now,
+            updatedAt: now,
+          })
+          .where(
+            and(
+              eq(schema.sessionTurns.workspaceId, workspaceId),
+              eq(schema.sessionTurns.sessionId, input.sessionId),
+              eq(schema.sessionTurns.id, turn.id),
+              eq(schema.sessionTurns.executionGeneration, checkpoint.executionGeneration),
+              eq(schema.sessionTurns.activeAttemptId, checkpoint.attemptId),
+            ),
+          )
+          .returning({ id: schema.sessionTurns.id });
+        if (!updatedTurn) {
+          throw new Error(`No-replay session turn changed while locked: ${turn.id}`);
+        }
+        await enqueueFailedChildOutboxForTurnTx(
+          tx as unknown as Database,
+          workspaceId,
+          session,
+          turn,
+        );
+        await deferFailedSessionSystemUpdatesForTurnTx(
+          tx as unknown as Database,
+          workspaceId,
+          input.sessionId,
+          turn.id,
+        );
+        const [updatedSession] = await tx
+          .update(schema.sessions)
+          .set({
+            status: effectiveSessionStatus,
+            activeTurnId: null,
+            lastSequence: sequence,
+            queueVersion: session.queueVersion + 1,
+            updatedAt: now,
+          })
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, workspaceId),
+              eq(schema.sessions.id, input.sessionId),
+              eq(schema.sessions.activeTurnId, turn.id),
+            ),
+          )
+          .returning({ id: schema.sessions.id });
+        if (!updatedSession) {
+          throw new Error(`No-replay active session turn changed while locked: ${turn.id}`);
+        }
+        return {
+          action: "settled_no_replay" as const,
+          turnId: turn.id,
+          reason: checkpoint.reason,
+          events: [...closedTools.events, ...inserted.map(mapEvent)],
         };
       }
 

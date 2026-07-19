@@ -153,6 +153,14 @@ export type RecoverDispatchResult =
   // queue; the next claim creates a new attempt for this exact turn.
   | { action: "unclaimed" }
   | { action: "recovering"; turnId: string; redispatches: number }
+  // Final conversation truth and a typed no-replay disposition committed
+  // before the worker died. The recovery activity atomically failed the turn
+  // to idle instead of redispatching accepted/acceptance-unknown work.
+  | {
+      action: "settled_no_replay";
+      turnId: string;
+      reason: "provider_invalid_content" | "transport_acceptance_unknown";
+    }
   // The turn is no longer running/requires_action: the timed-out attempt was
   // a zombie that actually settled the turn after the server gave up on its
   // heartbeats. Nothing to redo; the workflow just continues its loop.

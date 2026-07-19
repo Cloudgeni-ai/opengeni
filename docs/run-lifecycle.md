@@ -41,8 +41,13 @@ the model-call cap (if configured) and budget/credit exhaustion end the turn
 gracefully and idle the session. By contrast, provider rate-limit/5xx/network
 uncertainty and escaped MCP request timeouts may arrive after external work was
 accepted: the worker requires one final exact-attempt conversation checkpoint,
-truthfully marks that current turn `failed`, and leaves the session `idle`
-rather than replaying it. When that checkpoint succeeds, an active goal may
+atomically stores an allow-listed `failed_idle` no-replay disposition carrying
+the exact attempt and execution generation, truthfully marks that current turn
+`failed`, and leaves the session `idle` rather than replaying it. If the worker
+dies after that checkpoint but before ordinary settlement, heartbeat recovery
+consumes the fence into the same failed/idle truth; it never increments the
+worker-death redispatch counter or reclaims the logical turn. When that
+checkpoint succeeds, an active goal may
 start a **new** follow-up turn after pacing; without a goal, a later user
 message may continue. A checkpoint failure suppresses automatic continuation.
 For an MCP timeout after a successful tool output, the durable call/result
@@ -215,14 +220,17 @@ revision, terminal state, or successor attempt wins instead of being
 overwritten.
 
 **Ungraceful worker death is also survivable — bounded, never blind.** A hard
-kill (SIGKILL, OOM, node loss, a rollout whose grace period expired) never
-runs the graceful checkpoint; it surfaces to the session workflow as a
+kill (SIGKILL, OOM, node loss, a rollout whose grace period expired) surfaces to the session workflow as a
 heartbeat-timeout `ActivityFailure` carrying the exact dead activity id. The
 workflow does not fail the session independently for that shape: conversation
-truth was still dual-written after every model response during the turn, so
-the fenced `recoverTurnAfterWorkerDeath` activity atomically closes the lost
-attempt, marks the same
-logical turn `recovering` and the loop dispatches its next attempt. This is not
+truth was still dual-written after every model response during the turn. When
+the exact attempt has no accepted/acceptance-unknown terminal checkpoint, the
+fenced `recoverSessionDispatch` activity atomically closes the lost attempt,
+marks the same logical turn `recovering`, and the loop dispatches its next
+attempt. When the final history transaction already stored the exact
+`failed_idle` no-replay disposition, that same recovery activity atomically
+fails the turn and idles the session instead; no replacement attempt exists.
+This is not
 prompt-queue work and not an automatic Temporal retry of side-effectful work:
 the resumed attempt sees everything durably checkpointed, including explicit
 `interrupted / outcome unknown` tool results when an effect cannot be proven.

@@ -1182,6 +1182,113 @@ describe("clean session control plane", () => {
     });
   });
 
+  test("heartbeat recovery consumes exact final no-replay checkpoints instead of redispatching", async () => {
+    for (const reason of ["provider_invalid_content", "transport_acceptance_unknown"] as const) {
+      const { grant, session } = await fixture();
+      await send(grant, session.id, `checkpoint ${reason}`);
+      const attemptId = crypto.randomUUID();
+      const turn = await claimTestSessionWork(
+        client.db,
+        grant.workspaceId!,
+        session.id,
+        `session-${session.id}`,
+        { attemptId },
+      );
+      if (!turn) throw new Error(`no-replay ${reason} turn was not claimed`);
+      const items =
+        reason === "provider_invalid_content"
+          ? []
+          : [
+              {
+                position: 1,
+                item: {
+                  type: "message",
+                  role: "assistant",
+                  content: `durable-${reason}`,
+                },
+              },
+            ];
+      const checkpoint = {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn.id,
+        expectedExecutionGeneration: turn.executionGeneration,
+        expectedAttemptId: attemptId,
+        items,
+        noReplayCheckpoint: { reason },
+      };
+
+      // Retrying an acceptance-unknown database response is idempotent: the
+      // exact history position and exact no-replay fence converge once.
+      expect(await appendSessionHistoryItems(client.db, checkpoint)).toBe(true);
+      expect(await appendSessionHistoryItems(client.db, checkpoint)).toBe(true);
+      expect(
+        await appendSessionHistoryItems(client.db, {
+          ...checkpoint,
+          noReplayCheckpoint: {
+            reason:
+              reason === "provider_invalid_content"
+                ? "transport_acceptance_unknown"
+                : "provider_invalid_content",
+          },
+        }),
+      ).toBe(false);
+
+      const recovery = await recoverSessionDispatch(client.db, grant.workspaceId!, {
+        sessionId: session.id,
+        attemptId,
+        timeoutType: "HEARTBEAT",
+        maxRedispatches: 3,
+      });
+      expect(recovery).toMatchObject({
+        action: "settled_no_replay",
+        turnId: turn.id,
+        reason,
+      });
+      expect(recovery.events.filter((event) => event.type === "turn.failed")).toHaveLength(1);
+      expect(recovery.events.some((event) => event.type === "turn.recovery.requested")).toBe(false);
+      expect(await getSessionTurn(client.db, grant.workspaceId!, turn.id)).toMatchObject({
+        status: "failed",
+        activeAttemptId: null,
+        executionGeneration: turn.executionGeneration,
+        metadata: {
+          noReplayCheckpoint: {
+            attemptId,
+            executionGeneration: turn.executionGeneration,
+            disposition: "failed_idle",
+            reason,
+          },
+        },
+      });
+      expect(await getSession(client.db, grant.workspaceId!, session.id)).toMatchObject({
+        status: "idle",
+        activeTurnId: null,
+      });
+      expect(
+        (await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id)).filter(
+          (row) => (row.item as Record<string, unknown>).content === `durable-${reason}`,
+        ),
+      ).toHaveLength(items.length);
+      expect(
+        await recoverSessionDispatch(client.db, grant.workspaceId!, {
+          sessionId: session.id,
+          attemptId,
+          timeoutType: "HEARTBEAT",
+          maxRedispatches: 3,
+        }),
+      ).toMatchObject({ action: "stale", activeTurnId: null });
+      expect(
+        await claimTestSessionWork(
+          client.db,
+          grant.workspaceId!,
+          session.id,
+          `session-${session.id}`,
+        ),
+      ).toBeNull();
+    }
+  });
+
   test("a waiting prompt can only be deleted with exact queue and row versions", async () => {
     const { grant, session } = await fixture();
     const queued = await send(grant, session.id, "delete me");

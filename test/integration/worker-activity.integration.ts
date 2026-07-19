@@ -843,6 +843,91 @@ describe("worker activities integration", () => {
     expect(model.calls).toBe(2);
   });
 
+  test("worker death after accepted invalid-content checkpoint settles without a second model call", async () => {
+    const grant = await testGrant(dbClient.db);
+    const session = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "accepted invalid content exactly once",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    await appendOwnedEvents(dbClient.db, grant, session.id, [
+      { type: "user.message", payload: { text: "accepted invalid content exactly once" } },
+    ]);
+    const model = new ScriptedModel([
+      { error: providerInvalidContentApiError("req_checkpoint_then_worker_death") },
+    ]);
+    const failpoints: unknown[] = [];
+    const activities = createWorkerActivities(
+      {
+        settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl }),
+        db: dbClient.db,
+        bus,
+        runtime: createProductionAgentRuntime({ model }),
+      },
+      {
+        afterNoReplayCheckpoint: (checkpoint) => {
+          failpoints.push(checkpoint);
+          throw new Error("simulated worker death after invalid-content checkpoint");
+        },
+      },
+    );
+    const attemptId = crypto.randomUUID();
+    await expect(
+      activities.runAgentTurn({
+        attemptId,
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        trigger: { kind: "next" },
+        workflowId: "workflow-invalid-content-checkpoint-worker-death",
+        workflowRunId: crypto.randomUUID(),
+      }),
+    ).rejects.toThrow("simulated worker death after invalid-content checkpoint");
+    expect(failpoints).toEqual([
+      expect.objectContaining({ attemptId, reason: "provider_invalid_content" }),
+    ]);
+    expect(model.calls).toBe(1);
+
+    const recovery = await activities.recoverDispatch({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      attemptId,
+      timeoutType: "HEARTBEAT",
+    });
+    expect(recovery).toMatchObject({
+      action: "settled_no_replay",
+      reason: "provider_invalid_content",
+    });
+    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("idle");
+    expect(
+      (await listSessionTurns(dbClient.db, grant.workspaceId, session.id, 10)).at(-1),
+    ).toMatchObject({ status: "failed", activeAttemptId: null });
+    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100);
+    expect(events.some((event) => event.type === "turn.recovery.requested")).toBe(false);
+    expect(events.find((event) => event.type === "turn.failed")?.payload).toMatchObject({
+      code: "provider_invalid_content",
+      checkpointSucceeded: true,
+      recovery: "worker_death_terminal_settlement",
+      sameTurnReplay: "refused",
+    });
+
+    await expect(
+      activities.runAgentTurn({
+        attemptId: crypto.randomUUID(),
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        trigger: { kind: "next" },
+        workflowId: "workflow-invalid-content-no-reclaim",
+        workflowRunId: crypto.randomUUID(),
+      }),
+    ).resolves.toMatchObject({ status: "unclaimed" });
+    expect(model.calls).toBe(1);
+  });
+
   test("accepted Responses invalid content paces an active goal but never reclaims the failed turn", async () => {
     const grant = await testGrant(dbClient.db);
     const session = await createOwnedSession(dbClient.db, grant, {
@@ -1507,6 +1592,140 @@ describe("worker activities integration", () => {
     expect((await getSessionGoal(dbClient.db, grant.workspaceId, session.id))?.status).toBe(
       "active",
     );
+  });
+
+  test("worker death after acceptance-unknown checkpoint preserves one tool, history result, and debit", async () => {
+    const grant = await testGrant(dbClient.db);
+    const mcp = startTestMcpServer();
+    try {
+      const session = await createOwnedSession(dbClient.db, grant, {
+        initialMessage: "one external effect before uncertain transport",
+        resources: [],
+        tools: [{ kind: "mcp", id: "docs" }],
+        metadata: {},
+        model: "scripted-model",
+        sandboxBackend: "none",
+      });
+      await appendOwnedEvents(dbClient.db, grant, session.id, [
+        {
+          type: "user.message",
+          payload: { text: "one external effect before uncertain transport" },
+        },
+      ]);
+      const callId = "transport-checkpoint-command-once";
+      const priorResponseId = "transport-checkpoint-response-once";
+      const transportError = Object.assign(
+        new Error("raw provider payload must not persist after worker death"),
+        { status: 503 },
+      );
+      const model = new ScriptedModel([
+        {
+          id: priorResponseId,
+          output: [functionCall("docs__search_documents", { query: "exactly once" }, callId)],
+        },
+        { error: transportError },
+      ]);
+      const activities = createWorkerActivities(
+        {
+          settings: testSettings({
+            databaseUrl: services.databaseUrl,
+            natsUrl: services.natsUrl,
+            mcpServers: [
+              {
+                id: "docs",
+                name: "Documents",
+                url: mcp.url,
+                allowedTools: ["search_documents"],
+                cacheToolsList: false,
+              },
+            ],
+          }),
+          db: dbClient.db,
+          bus,
+          runtime: createProductionAgentRuntime({ model }),
+        },
+        {
+          afterNoReplayCheckpoint: () => {
+            throw new Error("simulated worker death after transport checkpoint");
+          },
+        },
+      );
+      const attemptId = crypto.randomUUID();
+      await expect(
+        activities.runAgentTurn({
+          attemptId,
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId: session.id,
+          trigger: { kind: "next" },
+          workflowId: "workflow-transport-checkpoint-worker-death",
+          workflowRunId: crypto.randomUUID(),
+        }),
+      ).rejects.toThrow("simulated worker death after transport checkpoint");
+      expect(model.calls).toBe(2);
+      expect(mcp.calls).toEqual([{ tool: "search_documents", args: { query: "exactly once" } }]);
+
+      expect(
+        await activities.recoverDispatch({
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId: session.id,
+          attemptId,
+          timeoutType: "HEARTBEAT",
+        }),
+      ).toMatchObject({
+        action: "settled_no_replay",
+        reason: "transport_acceptance_unknown",
+      });
+      const history = await getActiveSessionHistoryItems(
+        dbClient.db,
+        grant.workspaceId,
+        session.id,
+      );
+      expect(
+        history.filter(
+          (row) =>
+            (row.item as Record<string, unknown>).type === "function_call_result" &&
+            (row.item as Record<string, unknown>).callId === callId,
+        ),
+      ).toHaveLength(1);
+      const usage = await listUsageEvents(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        limit: 30,
+      });
+      expect(
+        usage.filter(
+          (event) =>
+            event.eventType === "model.tokens" && event.sourceResourceId?.endsWith(priorResponseId),
+        ),
+      ).toHaveLength(1);
+      const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100);
+      const failure = events.find((event) => event.type === "turn.failed")?.payload;
+      expect(failure).toMatchObject({
+        code: "transport_acceptance_unknown",
+        checkpointSucceeded: true,
+        recovery: "worker_death_terminal_settlement",
+        sameTurnReplay: "refused",
+      });
+      expect(JSON.stringify(failure)).not.toContain("raw provider payload");
+
+      await expect(
+        activities.runAgentTurn({
+          attemptId: crypto.randomUUID(),
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId: session.id,
+          trigger: { kind: "next" },
+          workflowId: "workflow-transport-no-reclaim",
+          workflowRunId: crypto.randomUUID(),
+        }),
+      ).resolves.toMatchObject({ status: "unclaimed" });
+      expect(model.calls).toBe(2);
+      expect(mcp.calls).toEqual([{ tool: "search_documents", args: { query: "exactly once" } }]);
+    } finally {
+      mcp.close();
+    }
   });
 
   test("records worker observability when setup fails before a turn starts", async () => {

@@ -348,6 +348,72 @@ describe("Temporal workflow integration", () => {
     workerDeathTestTimeoutMs,
   );
 
+  for (const reason of ["provider_invalid_content", "transport_acceptance_unknown"] as const) {
+    test(
+      `a real heartbeat timeout settles ${reason} checkpoint without re-running the turn`,
+      async () => {
+        // Database integration proves the exact history/attempt/generation
+        // transaction. This workflow proof supplies the real Temporal
+        // ActivityFailure -> HEARTBEAT TimeoutFailure shape and verifies that
+        // the terminal recovery result cannot dispatch runAgentTurn twice.
+        const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+        const scope = workflowScope();
+        const turn = queuedTurn("event-1");
+        const queuedTurns = [turn];
+        const runs: Array<{ attemptId: string }> = [];
+        const recoveries: Array<{ attemptId: string; timeoutType: string }> = [];
+        const failures: unknown[] = [];
+        const admission = createTurnAdmission(queuedTurns, async (input) => {
+          runs.push(input as (typeof runs)[number]);
+          return await hangWithoutHeartbeating();
+        });
+        const worker = await testWorker(nativeConnection, taskQueue, {
+          ...admission.activities,
+          markSessionIdle: async () => undefined,
+          recoverDispatch: async (input: { attemptId: string; timeoutType: string }) => {
+            recoveries.push(input);
+            admission.settleNoReplay();
+            return { action: "settled_no_replay", turnId: turn.id, reason };
+          },
+          failSessionAttempt: async (input: unknown) => {
+            failures.push(input);
+          },
+          settleSessionInterruptions: async () => ({
+            action: "continue" as const,
+          }),
+        });
+        const run = worker.run();
+        try {
+          const client = new Client({ connection });
+          const handle = await client.workflow.start("sessionWorkflow", {
+            taskQueue,
+            workflowId: `wf-${crypto.randomUUID()}`,
+            args: [
+              {
+                ...scope,
+                sessionId: crypto.randomUUID(),
+                initialEventId: "event-1",
+              },
+            ],
+          });
+          await handle.result();
+          expect(runs).toHaveLength(1);
+          expect(recoveries).toEqual([
+            expect.objectContaining({
+              attemptId: runs[0]!.attemptId,
+              timeoutType: "HEARTBEAT",
+            }),
+          ]);
+          expect(failures).toHaveLength(0);
+        } finally {
+          worker.shutdown();
+          await run;
+        }
+      },
+      workerDeathTestTimeoutMs,
+    );
+  }
+
   test(
     "stops after atomic worker-death settlement exceeds the re-dispatch ceiling",
     async () => {
@@ -1679,6 +1745,12 @@ function createTurnAdmission(
     recover() {
       if (!current) throw new Error("cannot recover without a current turn");
       currentState = "recovering";
+    },
+    settleNoReplay() {
+      if (!current) throw new Error("cannot terminally settle without a current turn");
+      current = null;
+      currentAttemptId = null;
+      currentState = null;
     },
     requestInterruption() {
       if (!currentAttemptId) throw new Error("cannot interrupt without a current attempt");

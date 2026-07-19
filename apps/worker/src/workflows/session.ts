@@ -508,9 +508,12 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       }
       // An ungraceful worker death never reaches the activity's graceful
       // recovery path — it surfaces here as a heartbeat-timeout failure.
-      // Conversation truth was still dual-written during the turn, so the
-      // same turn is marked recovering and the loop re-claims it on a healthy worker —
-      // bounded by a per-turn redispatch counter persisted on the turn row.
+      // Before provider acceptance/progress, conversation truth was still
+      // dual-written during the turn, so the same turn is marked recovering
+      // and re-claimed on a healthy worker, bounded by the durable redispatch
+      // counter. If the dead worker had already atomically checkpointed an
+      // accepted/acceptance-unknown no-replay disposition, recoverDispatch
+      // instead settles failed/idle and this loop can admit only new work.
       const workerDeath = workerDeathFailure(outcome.error);
       if (workerDeath) {
         const recovery = await activity.recoverDispatch({
@@ -522,7 +525,8 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
         });
         if (recovery.action !== "exceeded") {
           // "recovering": the next claim creates a new attempt for this same
-          // current inference. "stale": the
+          // current inference. "settled_no_replay": the accepted execution is
+          // terminal and only a new goal/user turn may run. "stale": the
           // timed-out attempt actually settled the turn (a zombie finished
           // after the server gave up on its heartbeats); nothing to redo.
           return true;

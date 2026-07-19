@@ -7,6 +7,12 @@ const recoveryCalls: unknown[] = [];
 const parentWakeCalls: unknown[] = [];
 let recoveryResult:
   | { action: "unclaimed"; events: [] }
+  | {
+      action: "settled_no_replay";
+      turnId: string;
+      reason: "provider_invalid_content" | "transport_acceptance_unknown";
+      events: any[];
+    }
   | { action: "recovering"; turnId: string; redispatches: number; events: any[] }
   | { action: "exceeded"; turnId: string; redispatches: number; events: any[] }
   | { action: "stale"; events: []; turnStatus: string | null; activeTurnId: string | null };
@@ -103,6 +109,25 @@ describe("recoverDispatch: exact attempt ownership fence", () => {
     expect(await runRecovery()).toEqual({ action: "stale" });
     expect(recoveryCalls).toHaveLength(1);
     expect(publishedEvents).toHaveLength(0);
+  });
+
+  test("publishes atomic no-replay settlement without redispatch metadata", async () => {
+    recoveryCalls.length = 0;
+    publishedEvents.length = 0;
+    parentWakeCalls.length = 0;
+    recoveryResult = {
+      action: "settled_no_replay",
+      turnId: "turn-1",
+      reason: "transport_acceptance_unknown",
+      events: [{ id: "failed-1", type: "turn.failed" }],
+    };
+    expect(await runRecovery()).toEqual({
+      action: "settled_no_replay",
+      turnId: "turn-1",
+      reason: "transport_acceptance_unknown",
+    });
+    expect(publishedEvents).toEqual([{ id: "failed-1", type: "turn.failed" }]);
+    expect(parentWakeCalls).toHaveLength(0);
   });
 
   test("exhaustion is already terminal and wakes the parent once", async () => {
