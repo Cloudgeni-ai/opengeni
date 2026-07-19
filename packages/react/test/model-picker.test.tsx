@@ -55,6 +55,7 @@ function makeComposer(overrides: Partial<ComposerState> = {}): ComposerState {
   return {
     value: "hello",
     setValue: () => {},
+    hasDraftContent: () => true,
     send: async () => true,
     steer: async () => true,
     sending: false,

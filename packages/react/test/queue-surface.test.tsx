@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { act } from "react";
 
-import { QueueSurface } from "../src/components/queue-surface";
+import { QueueSurface, requestQueueDraftEdit } from "../src/components/queue-surface";
 import type { ComposerState } from "../src/hooks/use-composer";
 import type { UseTurnQueueResult } from "../src/hooks/use-turn-queue";
 import { fakeTurn } from "./fake-client";
@@ -24,6 +24,7 @@ function composer(overrides: Partial<ComposerState> = {}): ComposerState {
   return {
     value: "",
     setValue: () => {},
+    hasDraftContent: () => false,
     send: async () => true,
     steer: async () => true,
     sending: false,
@@ -174,5 +175,16 @@ describe("QueueSurface", () => {
     expect(status?.textContent).toContain("Stopping current attempt…");
     expect(status?.textContent).toContain("Queued work stays saved until you resume.");
     expect(status?.textContent).not.toContain("starts automatically");
+  });
+
+  test("requests confirmation without checkout when current draft state is newer than the render", () => {
+    const actions: string[] = [];
+    requestQueueDraftEdit(
+      composer({ value: "", hasDraftContent: () => true }),
+      () => actions.push("confirm replacement"),
+      () => actions.push("checkout queued prompt"),
+    );
+
+    expect(actions).toEqual(["confirm replacement"]);
   });
 });

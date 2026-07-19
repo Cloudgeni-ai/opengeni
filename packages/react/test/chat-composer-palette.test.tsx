@@ -31,6 +31,7 @@ function makeComposer(
   return {
     value,
     setValue,
+    hasDraftContent: () => value.length > 0,
     send: async () => true,
     steer: async () => true,
     sending: false,

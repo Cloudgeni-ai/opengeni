@@ -759,6 +759,24 @@ describe("useComposer queue-vs-steer", () => {
 });
 
 describe("useComposer durable draft and control binding", () => {
+  test("reports typed draft content synchronously before React commits the value", async () => {
+    const hook = await renderHook(
+      () => useComposer(null, { client: fakeClient({}), workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    expect(hook.result.current.hasDraftContent()).toBe(false);
+
+    await flushing(() => {
+      const staleRender = hook.result.current;
+      staleRender.setValue("not yet committed");
+      expect(staleRender.value).toBe("");
+      expect(staleRender.hasDraftContent()).toBe(true);
+    });
+
+    expect(hook.result.current.value).toBe("not yet committed");
+    await hook.unmount();
+  });
+
   test("a live queue mutation reloads the authoritative draft in another tab", async () => {
     let current: ComposerDraft = {
       revision: 1,
