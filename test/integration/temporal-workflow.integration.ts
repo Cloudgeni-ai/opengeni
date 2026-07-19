@@ -10,7 +10,7 @@ import {
 import { turnTaskQueue } from "../../apps/worker/src/workflows/activities";
 
 const acceleratedTemporalWorkflowPath = new URL(
-  "./temporal-workflow.test-workflows.ts",
+  "../../apps/worker/test/temporal-workflow.test-workflows.ts",
   import.meta.url,
 ).pathname;
 const acceleratedSessionWorkflowName = "sessionWorkflowWithAcceleratedHeartbeat";
