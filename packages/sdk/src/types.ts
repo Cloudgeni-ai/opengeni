@@ -1970,6 +1970,8 @@ export type ComposerDraft = {
   text: string;
   resources: ResourceRef[];
   tools: ToolRef[];
+  /** False inherits the session policy; true preserves an explicit array. */
+  toolsProvided: boolean;
   model: string;
   reasoningEffort: ReasoningEffort;
   sourceTurnId: string | null;
@@ -2845,6 +2847,17 @@ export type CapabilityRuntime = {
   mcpServerId?: string | undefined;
   transport?: string | undefined;
   notes: string | null;
+  /** Secret-safe server-derived registry exposure state. */
+  catalogTrust?:
+    | {
+        state: "trusted" | "legacy_active" | "unverified";
+        reason:
+          | "trusted_source"
+          | "verified_probe"
+          | "active_installation_compatibility"
+          | "missing_verification";
+      }
+    | undefined;
 };
 
 export type CapabilityCatalogItem = {

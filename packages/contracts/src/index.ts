@@ -3373,6 +3373,9 @@ export const ComposerDraft = z.object({
   text: z.string(),
   resources: z.array(ResourceRef),
   tools: z.array(ToolRef),
+  // False means the draft inherits the session policy. True preserves an
+  // explicit array, including [], across autosave/reload and queue checkout.
+  toolsProvided: z.boolean().default(false),
   model: z.string().min(1),
   reasoningEffort: ReasoningEffort,
   sourceTurnId: z.string().uuid().nullable(),
@@ -3429,6 +3432,7 @@ export const SaveComposerDraftRequest = ComposerDraft.pick({
   text: true,
   resources: true,
   tools: true,
+  toolsProvided: true,
   model: true,
   reasoningEffort: true,
 }).extend({ expectedRevision: z.number().int().nonnegative() });
@@ -4524,6 +4528,19 @@ export const CapabilityRuntime = z.object({
   mcpServerId: z.string().min(1).optional(),
   transport: z.string().min(1).optional(),
   notes: z.string().nullable().default(null),
+  // Registry exposure provenance is server-derived and contains no endpoint or
+  // credential material.
+  catalogTrust: z
+    .object({
+      state: z.enum(["trusted", "legacy_active", "unverified"]),
+      reason: z.enum([
+        "trusted_source",
+        "verified_probe",
+        "active_installation_compatibility",
+        "missing_verification",
+      ]),
+    })
+    .optional(),
 });
 export type CapabilityRuntime = z.infer<typeof CapabilityRuntime>;
 

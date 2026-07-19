@@ -379,6 +379,7 @@ function draftIsNonEmpty(draft: ComposerDraftRow): boolean {
     draft.text.length > 0 ||
     draft.resources.length > 0 ||
     draft.tools.length > 0 ||
+    draft.toolsProvided ||
     draft.sourceTurnId !== null
   );
 }
@@ -418,6 +419,7 @@ export async function saveComposerDraftInTransaction(
     text: string;
     resources: ResourceRef[];
     tools: ToolRef[];
+    toolsProvided: boolean;
     model: string;
     reasoningEffort: ReasoningEffort;
   },
@@ -449,6 +451,7 @@ export async function saveComposerDraftInTransaction(
     text: input.text,
     resources: input.resources,
     tools: input.tools,
+    toolsProvided: input.toolsProvided,
     model: input.model,
     reasoningEffort: input.reasoningEffort,
     // A queue edit is still the same accepted work item. Preserve its frozen
@@ -820,6 +823,7 @@ export async function editQueuedTurnInTransaction(
     text: turn.prompt,
     resources: turn.resources,
     tools: turn.tools,
+    toolsProvided: turn.toolsProvided,
     model: turn.model,
     reasoningEffort: turn.reasoningEffort,
     sourceTurnId: turn.id,
@@ -1275,6 +1279,7 @@ export async function submitHumanPromptInTransaction(
         text: draft.text,
         resources: draft.resources,
         tools: draft.tools,
+        toolsProvided: draft.toolsProvided,
         model: draft.model,
         reasoningEffort: draft.reasoningEffort,
       }) !==
@@ -1282,6 +1287,7 @@ export async function submitHumanPromptInTransaction(
           text: input.text,
           resources: input.resources,
           tools: input.tools,
+          toolsProvided: input.toolsProvided === true,
           model: input.model ?? session.model,
           reasoningEffort: input.reasoningEffort ?? input.reasoningEffortFallback,
         })

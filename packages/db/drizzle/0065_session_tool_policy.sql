@@ -30,3 +30,9 @@ ALTER TABLE "sessions"
 -- their effective allow-list during the rolling upgrade.
 ALTER TABLE "session_turns"
   ADD COLUMN IF NOT EXISTS "tools_provided" boolean NOT NULL DEFAULT false;
+
+-- Human composer drafts need the same provenance across reloads. Without this,
+-- [] cannot distinguish "inherit the session policy" from an intentional
+-- per-turn empty selection.
+ALTER TABLE "composer_drafts"
+  ADD COLUMN IF NOT EXISTS "tools_provided" boolean NOT NULL DEFAULT false;
