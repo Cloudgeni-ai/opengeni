@@ -300,7 +300,8 @@ describe("worker restart resilience", () => {
                 modelToolOutputTruncationTokens: 4_096,
                 items: [
                   {
-                    position: 0,
+                    // The initial user prompt already owns canonical position 0.
+                    position: 1,
                     item: {
                       type: "message",
                       role: "assistant",
