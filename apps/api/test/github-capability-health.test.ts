@@ -41,7 +41,7 @@ afterAll(async () => {
 }, 180_000);
 
 describe("GitHub capability health", () => {
-  test("workspace and repository projections distinguish configuration, binding, and readiness", () => {
+  test("workspace metadata never claims readiness before a provider-backed repository check", () => {
     expect(githubWorkspaceCapabilityHealth({ configured: false, installationCount: 0 })).toEqual({
       state: "unavailable",
       reason: "not_configured",
@@ -52,6 +52,12 @@ describe("GitHub capability health", () => {
       state: "unavailable",
       reason: "no_repository_binding",
       action: "connect",
+      renewal: "inactive",
+    });
+    expect(githubWorkspaceCapabilityHealth({ configured: true, installationCount: 2 })).toEqual({
+      state: "unavailable",
+      reason: "unknown",
+      action: "retry",
       renewal: "inactive",
     });
     expect(githubRepositoryCapabilityHealth(2)).toEqual({

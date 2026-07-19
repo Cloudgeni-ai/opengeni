@@ -395,7 +395,16 @@ export function githubWorkspaceCapabilityHealth(input: {
       renewal: "inactive",
     };
   }
-  return { state: "ready", reason: null, action: "none", renewal: "automatic" };
+  // Installation rows prove only a durable workspace binding. They can outlive
+  // a suspended/uninstalled App or broken provider credentials, so do not claim
+  // host delivery or automatic renewal until a provider-backed operation has
+  // succeeded. The repository endpoint supplies that live projection.
+  return {
+    state: "unavailable",
+    reason: "unknown",
+    action: "retry",
+    renewal: "inactive",
+  };
 }
 
 /** A successful provider list still distinguishes usable rows from an empty binding. */
