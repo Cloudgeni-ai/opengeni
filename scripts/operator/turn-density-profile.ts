@@ -6,10 +6,13 @@ import { dbSearchPath, getSettings, type Settings } from "@opengeni/config";
 import {
   appendSessionEvents,
   bootstrapWorkspace,
+  countActiveSessionHistoryItems,
   createDb,
   createSession,
   deleteWorkspace,
   enqueueSessionTurn,
+  isSessionCompactionRequested,
+  requestSessionCompaction,
   ACTIVE_SESSION_HISTORY_MAX_JSON_BYTES,
   withWorkspaceRls,
 } from "@opengeni/db";
@@ -38,6 +41,13 @@ export const SYNTHETIC_SCENARIOS = [
   "wait",
   "drain",
 ] as const;
+
+export const FORCED_COMPACTION_RULE = {
+  trigger: "operator",
+  scenario: "streaming",
+  selectionRule: "turnIndex % 6 === 0",
+  expectedCallsPerWave: "ceil(density / 6)",
+} as const;
 
 export type SyntheticScenario = (typeof SYNTHETIC_SCENARIOS)[number];
 
@@ -88,6 +98,7 @@ export type DensityMemorySample = ReturnType<typeof process.memoryUsage>;
 export type WaveMeasurement = {
   wave: number;
   compactionCalls: number;
+  verifiedCompactionHistoryShrinks: number;
   baseline: MemorySummary;
   plateau: MemorySummary;
   settled: MemorySummary;
@@ -141,6 +152,18 @@ export function scenarioForTurn(turnIndex: number): SyntheticScenario {
     throw new Error(`turnIndex must be a nonnegative safe integer; got ${turnIndex}`);
   }
   return SYNTHETIC_SCENARIOS[turnIndex % SYNTHETIC_SCENARIOS.length]!;
+}
+
+/** Force the real pre-turn compaction path on one stable scenario per cycle. */
+export function shouldForceCompactionForTurn(turnIndex: number): boolean {
+  return scenarioForTurn(turnIndex) === FORCED_COMPACTION_RULE.scenario;
+}
+
+export function expectedCompactionCallsForDensity(density: number): number {
+  if (!Number.isSafeInteger(density) || density < 1) {
+    throw new Error(`density must be a positive safe integer; got ${density}`);
+  }
+  return Math.ceil(density / SYNTHETIC_SCENARIOS.length);
 }
 
 /**
@@ -392,6 +415,10 @@ export async function runWave(input: {
     objectStorage: null,
   });
   const turnInputs = [];
+  const forcedCompactionSessions: Array<{
+    sessionId: string;
+    activeHistoryItemsBefore: number;
+  }> = [];
   let allRuns: Promise<PromiseSettledResult<unknown>[]> | null = null;
   let allRunsSettled = false;
   const deadlineAt = Date.now() + config.timeoutMs;
@@ -459,6 +486,17 @@ export async function runWave(input: {
         }),
         "turn enqueue",
       );
+      if (shouldForceCompactionForTurn(index)) {
+        const activeHistoryItemsBefore = await phase(
+          countActiveSessionHistoryItems(db, workspaceId, session.id),
+          "seeded active-history count",
+        );
+        await phase(
+          requestSessionCompaction(db, workspaceId, session.id),
+          "forced compaction request",
+        );
+        forcedCompactionSessions.push({ sessionId: session.id, activeHistoryItemsBefore });
+      }
       turnInputs.push({
         accountId,
         workspaceId,
@@ -522,6 +560,38 @@ export async function runWave(input: {
       throw new Error(`Density activity failures: ${JSON.stringify(failures)}`);
     }
 
+    const compactionChecks = await phase(
+      Promise.all(
+        forcedCompactionSessions.map(async ({ sessionId, activeHistoryItemsBefore }) => {
+          const [activeHistoryItemsAfter, requestStillPending] = await Promise.all([
+            countActiveSessionHistoryItems(db, workspaceId, sessionId),
+            isSessionCompactionRequested(db, workspaceId, sessionId),
+          ]);
+          if (requestStillPending) {
+            throw new Error(`Forced compaction request was not consumed for session ${sessionId}`);
+          }
+          if (activeHistoryItemsAfter >= activeHistoryItemsBefore) {
+            throw new Error(
+              `Forced compaction did not shrink active history for session ${sessionId}: ` +
+                `${activeHistoryItemsBefore} -> ${activeHistoryItemsAfter}`,
+            );
+          }
+          return { sessionId, activeHistoryItemsBefore, activeHistoryItemsAfter };
+        }),
+      ),
+      "forced compaction verification",
+    );
+    const expectedCompactionCalls = expectedCompactionCallsForDensity(density);
+    if (
+      model.compactionCalls !== expectedCompactionCalls ||
+      compactionChecks.length !== expectedCompactionCalls
+    ) {
+      throw new Error(
+        `Density ${density} wave ${wave} expected ${expectedCompactionCalls} verified ` +
+          `compactions, got ${model.compactionCalls} calls and ${compactionChecks.length} shrinks`,
+      );
+    }
+
     model.clearRequests();
     bus.published.length = 0;
     await settleAndCollect(config.settleDelayMs, deadlineAt);
@@ -543,6 +613,7 @@ export async function runWave(input: {
     return {
       wave,
       compactionCalls: model.compactionCalls,
+      verifiedCompactionHistoryShrinks: compactionChecks.length,
       baseline,
       plateau,
       settled,
@@ -844,6 +915,7 @@ export function buildProfileResult(input: {
       waves: waves.map((wave) => ({
         wave: wave.wave,
         compactionCalls: wave.compactionCalls,
+        verifiedCompactionHistoryShrinks: wave.verifiedCompactionHistoryShrinks,
         memory: {
           baseline: wave.baseline,
           plateau: wave.plateau,
@@ -916,6 +988,8 @@ export function buildProfileResult(input: {
         drainSteps: config.syntheticDrainSteps,
         modelProvider: "ScriptedModel",
         compactionSummarizer: "injected deterministic density gate",
+        forcedCompaction: FORCED_COMPACTION_RULE,
+        activeHistoryShrinkVerified: true,
         externalModelProviderCalled: false,
         azureInferenceCalled: false,
         realSandboxProviderCalled: false,
@@ -1029,6 +1103,8 @@ export type DensityProfileVerification = {
   wavesPerDensity: number;
   rawMemorySamples: number;
   sessionsCreated: number;
+  compactionCalls: number;
+  verifiedCompactionHistoryShrinks: number;
   targetMet: boolean;
   hardLimitMet: boolean;
 };
@@ -1117,6 +1193,14 @@ export function verifyDensityProfileArtifactText(
     syntheticAllocatedWorkBytesByScenario(configuredWorkBytes),
     "artifact.workload.syntheticMix.allocatedWorkBytesByScenario",
   );
+  assertArtifactEqual(
+    syntheticMix.forcedCompaction,
+    FORCED_COMPACTION_RULE,
+    "artifact.workload.syntheticMix.forcedCompaction",
+  );
+  if (syntheticMix.activeHistoryShrinkVerified !== true) {
+    throw new Error("Density artifact must verify active-history shrink after forced compaction");
+  }
 
   const rootThresholds = artifactRecord(root.thresholds, "artifact.thresholds");
   const targetMiBPerTurn = artifactNumber(
@@ -1161,6 +1245,26 @@ export function verifyDensityProfileArtifactText(
       const wave = artifactRecord(waveValue, wavePath);
       if (artifactInteger(wave.wave, `${wavePath}.wave`) !== waveIndex) {
         throw new Error(`${wavePath}.wave is not the expected zero-based wave index`);
+      }
+      const expectedCompactionCalls = expectedCompactionCallsForDensity(density);
+      if (
+        artifactInteger(wave.compactionCalls, `${wavePath}.compactionCalls`) !==
+        expectedCompactionCalls
+      ) {
+        throw new Error(
+          `${wavePath}.compactionCalls must equal ${expectedCompactionCalls} for density ${density}`,
+        );
+      }
+      if (
+        artifactInteger(
+          wave.verifiedCompactionHistoryShrinks,
+          `${wavePath}.verifiedCompactionHistoryShrinks`,
+        ) !== expectedCompactionCalls
+      ) {
+        throw new Error(
+          `${wavePath}.verifiedCompactionHistoryShrinks must equal ${expectedCompactionCalls} ` +
+            `for density ${density}`,
+        );
       }
       const rawSamples = artifactRecord(wave.rawSamples, `${wavePath}.rawSamples`);
       const rawMemory = artifactRecord(rawSamples.memory, `${wavePath}.rawSamples.memory`);
@@ -1275,6 +1379,10 @@ export function verifyDensityProfileArtifactText(
     (total, density) => total + density * wavesPerDensity,
     0,
   );
+  const expectedCompactionCalls = configuredDensities.reduce(
+    (total, density) => total + expectedCompactionCallsForDensity(density) * wavesPerDensity,
+    0,
+  );
   assertArtifactEqual(
     cleanup,
     { workspacesCreated: 1, workspacesDeleted: 1, sessionsCreated: expectedSessions },
@@ -1288,6 +1396,8 @@ export function verifyDensityProfileArtifactText(
     wavesPerDensity,
     rawMemorySamples,
     sessionsCreated: expectedSessions,
+    compactionCalls: expectedCompactionCalls,
+    verifiedCompactionHistoryShrinks: expectedCompactionCalls,
     targetMet: expectedRootThresholds.targetMet,
     hardLimitMet: expectedRootThresholds.hardLimitMet,
   };

@@ -4,11 +4,14 @@ import {
   buildProfileResult,
   cleanupDensityWorkspace,
   DEFAULT_DENSITIES,
+  expectedCompactionCallsForDensity,
+  FORCED_COMPACTION_RULE,
   SYNTHETIC_SCENARIOS,
   parseDensitySweep,
   profileConfigFromEnv,
   quantile,
   scenarioForTurn,
+  shouldForceCompactionForTurn,
   summarizeNumbers,
   syntheticAllocatedWorkBytesByScenario,
   verifyDensityProfileArtifactText,
@@ -49,6 +52,30 @@ describe("turn density profile release-gate helpers", () => {
     expect(SYNTHETIC_SCENARIOS.map((_, index) => scenarioForTurn(index))).toEqual(
       SYNTHETIC_SCENARIOS,
     );
+    expect(Array.from({ length: 13 }, (_, index) => shouldForceCompactionForTurn(index))).toEqual([
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+    ]);
+    expect(DEFAULT_DENSITIES.map(expectedCompactionCallsForDensity)).toEqual([
+      1, 1, 1, 2, 2, 3, 4, 6,
+    ]);
+    expect(FORCED_COMPACTION_RULE).toEqual({
+      trigger: "operator",
+      scenario: "streaming",
+      selectionRule: "turnIndex % 6 === 0",
+      expectedCallsPerWave: "ceil(density / 6)",
+    });
   });
 
   test("rejects unbounded profile controls and inconsistent thresholds", () => {
@@ -134,6 +161,8 @@ describe("turn density profile release-gate helpers", () => {
       wavesPerDensity: 1,
       rawMemorySamples: 6,
       sessionsCreated: 2,
+      compactionCalls: 1,
+      verifiedCompactionHistoryShrinks: 1,
       targetMet: true,
       hardLimitMet: true,
     });
@@ -158,6 +187,21 @@ describe("turn density profile release-gate helpers", () => {
     expect(() => verifyDensityProfileArtifactText(`${JSON.stringify(cleanupAltered)}\n`)).toThrow(
       "artifact.cleanup does not match",
     );
+    const compactionCallsAltered = JSON.parse(profileArtifactText());
+    compactionCallsAltered.densities[0].waves[0].compactionCalls = 0;
+    expect(() =>
+      verifyDensityProfileArtifactText(`${JSON.stringify(compactionCallsAltered)}\n`),
+    ).toThrow("compactionCalls must equal 1");
+    const compactionShrinksAltered = JSON.parse(profileArtifactText());
+    compactionShrinksAltered.densities[0].waves[0].verifiedCompactionHistoryShrinks = 0;
+    expect(() =>
+      verifyDensityProfileArtifactText(`${JSON.stringify(compactionShrinksAltered)}\n`),
+    ).toThrow("verifiedCompactionHistoryShrinks must equal 1");
+    const compactionRuleAltered = JSON.parse(profileArtifactText());
+    compactionRuleAltered.workload.syntheticMix.forcedCompaction.selectionRule = "all turns";
+    expect(() =>
+      verifyDensityProfileArtifactText(`${JSON.stringify(compactionRuleAltered)}\n`),
+    ).toThrow("forcedCompaction does not match");
   });
 });
 
@@ -178,7 +222,8 @@ function profileArtifactText(): string {
     waves: [
       {
         wave: 0,
-        compactionCalls: 2,
+        compactionCalls: 1,
+        verifiedCompactionHistoryShrinks: 1,
         baseline: {
           sampleCount: 2,
           rssMiBMedian: 100,

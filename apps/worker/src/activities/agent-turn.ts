@@ -80,7 +80,6 @@ import {
   appendSessionInstructions,
   appendWorkspaceMemory,
   composeAgentInstructions,
-  summarizeForCompaction,
   CompactionProviderResponseError,
   EmptyCompactionSummaryError,
   ensureModalRegistryImage,

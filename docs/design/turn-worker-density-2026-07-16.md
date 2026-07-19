@@ -77,12 +77,20 @@ Each activity uses `sandboxBackend: "none"`, a zero-priced
 The model wrapper holds each request at a deterministic gate, then drains it
 only after plateau sampling. The turn-indexed synthetic mix cycles through:
 
-1. streamed deltas;
+1. streamed deltas plus a forced operator compaction;
 2. a bounded tool-call/tool-output burst-shaped object set;
 3. bounded sandbox manifest/operation envelopes;
 4. bounded fan-out promises;
 5. a bounded wait before the gate; and
 6. unresolved drain promises that settle after release.
+
+The forced-compaction selection rule is exactly `turnIndex % 6 === 0`, so each
+wave must make `ceil(density / 6)` compaction calls. After activity settlement,
+the harness also requires every selected request to be consumed and each
+selected session to have fewer active history rows than it had before the
+turn. This gives density 1 a real compaction boundary and larger densities a
+stable mix of compacting and ordinary turns even when the default 750,000-byte
+history would remain below the automatic token threshold.
 
 The tool and sandbox entries are deliberately **in-process shapes**, not real
 tool calls, MCP traffic, sandbox operations, provider calls, or Azure inference.
@@ -107,8 +115,10 @@ bun run verify:turn-density -- artifacts/turn-density.json \
 The verifier hashes the exact UTF-8 file, then recomputes every memory summary,
 per-turn value, percentile, retained/leak statistic, per-density and aggregate
 threshold, raw sample count, truthful synthetic-buffer allocation, and expected
-workspace/session cleanup total. Stored summaries are never accepted as proof
-of their own raw samples.
+workspace/session cleanup total. It also derives `ceil(density / 6)` rather
+than trusting stored compaction counts and requires the matching verified
+active-history-shrink count in every wave. Stored summaries are never accepted
+as proof of their own raw samples.
 
 For each plateau RSS sample, incremental RSS per active turn is:
 
@@ -134,7 +144,7 @@ profile is not a production approval: CPU throttling, event-loop lag, turn
 latency, real sandbox latency, capture residency, recording residency, and
 worker restarts require separate provider/deployment evidence.
 
-## Exact implementation-head isolated profile evidence (2026-07-18)
+## Historical isolated profile evidence (2026-07-18, before schema v3)
 
 The exact implementation commit `206da6c0` was profiled in this non-serving
 Linux/x64 sandbox with Bun 1.3.14 and local PostgreSQL 17. The profile used no
@@ -159,10 +169,12 @@ left zero profiling workspaces or sessions. Its artifact SHA-256 is
 | 32 | 0.2 | 18.0 |
 
 Across all 744 canonical plateau samples, incremental RSS per turn was 0.2 MiB
-p50, 3.6 MiB p95, and 8.0 MiB p99/worst. The ordinary 750,000-byte active
-history is below the compaction threshold, so this sweep correctly made zero
-compaction calls. Settled slopes are reported rather than hidden; they vary in
-both directions as Bun's allocator retains and releases process arenas. No
+p50, 3.6 MiB p95, and 8.0 MiB p99/worst. That historical harness did not force
+compaction, and the ordinary 750,000-byte active history was below the
+automatic threshold, so the artifact made zero compaction calls. It is useful
+ordinary-path evidence but does **not** satisfy the current schema-v3
+compaction-mix gate. Settled slopes are reported rather than hidden; they vary
+in both directions as Bun's allocator retains and releases process arenas. No
 density breached the target or hard gate, but three waves are not a proof that
 allocator RSS will monotonically return to the first baseline.
 
