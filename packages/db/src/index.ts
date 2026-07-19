@@ -18271,6 +18271,44 @@ export async function evaluateGoalContinuation(
             ? ({ decision: "queue" } as const)
             : ({ decision: "none" } as const);
         }
+        const [latestFinished] = await tx
+          .select({ id: schema.sessionTurns.id })
+          .from(schema.sessionTurns)
+          .where(
+            and(
+              eq(schema.sessionTurns.workspaceId, input.workspaceId),
+              eq(schema.sessionTurns.sessionId, input.sessionId),
+              sql`${schema.sessionTurns.finishedAt} is not null`,
+            ),
+          )
+          .orderBy(desc(schema.sessionTurns.position), desc(schema.sessionTurns.createdAt))
+          .limit(1);
+        const [contextCompactionFailure] = latestFinished
+          ? await tx
+              .select({
+                id: schema.sessionEvents.id,
+              })
+              .from(schema.sessionEvents)
+              .where(
+                and(
+                  eq(schema.sessionEvents.workspaceId, input.workspaceId),
+                  eq(schema.sessionEvents.sessionId, input.sessionId),
+                  eq(schema.sessionEvents.turnId, latestFinished.id),
+                  eq(schema.sessionEvents.type, "turn.failed"),
+                  sql`${schema.sessionEvents.payload} ->> 'code' = 'context_compaction_failed'`,
+                ),
+              )
+              .limit(1)
+          : [];
+        // A provider could not produce a durable checkpoint for the latest
+        // inference. Re-running the unchanged active history autonomously only
+        // repeats the same failure. Keep the active goal intact but inert until
+        // a human prompt, a new internal update, or an explicit /compact attempt
+        // creates newer finished-turn truth. Queued human work already won in
+        // the branch above; this never creates queue work or consumes counters.
+        if (contextCompactionFailure) {
+          return { decision: "none" } as const;
+        }
         let autoContinuations = row.autoContinuations;
         let noProgressStreak = row.noProgressStreak;
         // P3: a 429-failover continuation (the last continuation turn carried the `rotated`
@@ -18279,18 +18317,7 @@ export async function evaluateGoalContinuation(
         // mirroring the budget-pause precedent that a limits pause never consumes budget.
         let rotatedFailover = false;
         if (row.lastContinuationTurnId) {
-          const [lastFinished] = await tx
-            .select({ id: schema.sessionTurns.id })
-            .from(schema.sessionTurns)
-            .where(
-              and(
-                eq(schema.sessionTurns.workspaceId, input.workspaceId),
-                eq(schema.sessionTurns.sessionId, input.sessionId),
-                sql`${schema.sessionTurns.finishedAt} is not null`,
-              ),
-            )
-            .orderBy(desc(schema.sessionTurns.position), desc(schema.sessionTurns.createdAt))
-            .limit(1);
+          const lastFinished = latestFinished;
           if (lastFinished && lastFinished.id !== row.lastContinuationTurnId) {
             // A user/scheduled turn ran since the last continuation: human
             // re-engagement re-arms the auto-continuation budget.
@@ -20422,6 +20449,18 @@ export type ApplySessionTurnSettlementInput = {
   activeTurnId: string | null;
   events: AppendEventInput[];
   recording?: SessionTurnRecordingSettlement;
+  /**
+   * Atomically consume an operator /compact request and record why it could
+   * not install a replacement. This lives on the terminal turn settlement so
+   * a worker crash can never clear the request without also publishing the
+   * attempt-owned failure truth.
+   */
+  compactionRequestFailure?: {
+    reason: "summarization_failed";
+    producerId?: string | null;
+    producerSeq?: number | null;
+    occurredAt?: Date;
+  };
 };
 
 export type ApplySessionTurnSettlementResult =
@@ -20524,7 +20563,8 @@ export async function applySessionTurnSettlement(
         pendingInterruption !== undefined ||
         session.activeTurnId !== input.turnId ||
         !fromStatuses.includes(turnStatus as SessionTurnStatus) ||
-        turn.activeAttemptId !== input.attemptId
+        turn.activeAttemptId !== input.attemptId ||
+        (input.compactionRequestFailure !== undefined && !session.compactRequested)
       ) {
         return {
           action: "stale" as const,
@@ -20665,7 +20705,26 @@ export async function applySessionTurnSettlement(
           })
         : { sequence, events: [] as SessionEvent[], closed: 0 };
       sequence = closedTools.sequence;
-      const settlementEvents = recordingEvent ? [recordingEvent, ...input.events] : input.events;
+      const compactionRequestEvent: AppendEventInput | null = input.compactionRequestFailure
+        ? {
+            type: "session.context.compaction.skipped",
+            payload: { reason: input.compactionRequestFailure.reason },
+            ...(input.compactionRequestFailure.producerId != null
+              ? { producerId: input.compactionRequestFailure.producerId }
+              : {}),
+            ...(input.compactionRequestFailure.producerSeq != null
+              ? { producerSeq: input.compactionRequestFailure.producerSeq }
+              : {}),
+            ...(input.compactionRequestFailure.occurredAt
+              ? { occurredAt: input.compactionRequestFailure.occurredAt }
+              : {}),
+          }
+        : null;
+      const settlementEvents = [
+        ...(recordingEvent ? [recordingEvent] : []),
+        ...(compactionRequestEvent ? [compactionRequestEvent] : []),
+        ...input.events,
+      ];
       const values = settlementEvents.map((event) => {
         const payload =
           event.payload && typeof event.payload === "object"
@@ -20765,6 +20824,7 @@ export async function applySessionTurnSettlement(
         .set({
           status: effectiveSessionStatus,
           activeTurnId: input.activeTurnId,
+          ...(input.compactionRequestFailure ? { compactRequested: false } : {}),
           lastSequence: sequence,
           queueVersion: session.queueVersion + 1,
           updatedAt: now,

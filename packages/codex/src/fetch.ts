@@ -301,8 +301,9 @@ async function bufferCodexErrorResponse(res: Response): Promise<Response> {
  * event carries the full `response` payload.
  */
 async function sseToJsonResponse(res: Response): Promise<Response> {
-  const text = await res.text();
+  const text = (await res.text()).replace(/\r\n/g, "\n");
   let final: Record<string, unknown> | null = null;
+  let terminalError: Response | null = null;
   const items: unknown[] = []; // assembled from output_item.done (the codex backend
   // leaves response.completed.response.output empty and emits the items separately).
   for (const block of text.split("\n\n")) {
@@ -318,20 +319,63 @@ async function sseToJsonResponse(res: Response): Promise<Response> {
       const ev = JSON.parse(data) as {
         type?: string;
         response?: Record<string, unknown>;
+        error?: unknown;
+        code?: unknown;
+        message?: unknown;
+        param?: unknown;
         item?: unknown;
       };
       if (ev.type === "response.output_item.done" && ev.item !== undefined) {
         items.push(ev.item);
-      } else if (
-        ev.type === "response.completed" ||
-        ev.type === "response.done" ||
-        ev.type === "response.incomplete"
-      ) {
+      } else if (ev.type === "response.failed") {
+        terminalError = codexSseFailureResponse(
+          res,
+          ev.response?.error,
+          "response_failed",
+          "The Codex response failed",
+        );
+      } else if (ev.type === "error" || ev.type === "response.error") {
+        terminalError = codexSseFailureResponse(
+          res,
+          ev.error ?? ev.response?.error ?? ev,
+          "response_error",
+          "The Codex response stream reported an error",
+        );
+      } else if (ev.type === "response.incomplete") {
+        const details = ev.response?.incomplete_details;
+        const reason =
+          details && typeof details === "object"
+            ? (details as Record<string, unknown>).reason
+            : undefined;
+        terminalError = codexSseFailureResponse(
+          res,
+          {
+            code: "response_incomplete",
+            message:
+              typeof reason === "string" && reason.length > 0
+                ? `The Codex response was incomplete (${reason})`
+                : "The Codex response was incomplete",
+          },
+          "response_incomplete",
+          "The Codex response was incomplete",
+        );
+      } else if (ev.type === "response.completed" || ev.type === "response.done") {
         final = ev.response ?? null;
       }
     } catch {
       /* ignore non-JSON keepalive lines */
     }
+  }
+  if (terminalError) {
+    return terminalError;
+  }
+  if (!final) {
+    return codexSseFailureResponse(
+      res,
+      null,
+      "invalid_sse_terminal",
+      "The Codex response stream ended without a terminal response",
+    );
   }
   if (final && items.length > 0) {
     final = { ...final, output: items }; // prefer the assembled items over an empty output array
@@ -344,7 +388,63 @@ async function sseToJsonResponse(res: Response): Promise<Response> {
   const headers = new Headers(res.headers);
   headers.set("content-type", "application/json");
   headers.delete("content-length");
-  return new Response(JSON.stringify(final ?? {}), { status: 200, headers });
+  return new Response(JSON.stringify(final), { status: 200, headers });
+}
+
+const NON_RETRYABLE_SSE_ERROR_CODES = new Set([
+  "bio_policy",
+  "context_length_exceeded",
+  "cyber_policy",
+  "insufficient_quota",
+  "invalid_prompt",
+  "usage_limit_reached",
+]);
+
+/**
+ * Convert a terminal error carried inside an HTTP-200 SSE stream into the
+ * ordinary non-2xx JSON error contract expected by the OpenAI SDK. Codex CLI
+ * treats the same events as provider failures; returning a successful `{}`
+ * loses the actual cause and makes compaction look semantically empty.
+ */
+function codexSseFailureResponse(
+  source: Response,
+  rawError: unknown,
+  fallbackCode: string,
+  fallbackMessage: string,
+): Response {
+  const record =
+    rawError && typeof rawError === "object" ? (rawError as Record<string, unknown>) : {};
+  const code =
+    (typeof record.code === "string" && record.code.length > 0 ? record.code : undefined) ??
+    (typeof record.type === "string" && record.type.length > 0 ? record.type : undefined) ??
+    fallbackCode;
+  const message =
+    typeof record.message === "string" && record.message.length > 0
+      ? record.message
+      : fallbackMessage;
+  const error = {
+    type: typeof record.type === "string" && record.type.length > 0 ? record.type : code,
+    code,
+    message,
+    ...(typeof record.param === "string" ? { param: record.param } : {}),
+  };
+  const status =
+    code === "rate_limit_exceeded" ||
+    code === "usage_limit_reached" ||
+    code === "insufficient_quota"
+      ? 429
+      : NON_RETRYABLE_SSE_ERROR_CODES.has(code)
+        ? 400
+        : 502;
+  const headers = new Headers(source.headers);
+  headers.set("content-type", "application/json");
+  headers.set(CODEX_TRANSPORT_ERROR_HEADER, "1");
+  headers.delete("content-length");
+  headers.delete("content-encoding");
+  if (NON_RETRYABLE_SSE_ERROR_CODES.has(code)) {
+    headers.set("x-should-retry", "false");
+  }
+  return new Response(JSON.stringify({ error }), { status, headers });
 }
 
 /**

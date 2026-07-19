@@ -4,6 +4,7 @@ import {
   COMPACTION_PROMPT,
   COMPACTION_SUMMARY_MARKER,
   CompactionNeededError,
+  CompactionProviderResponseError,
   EmptyCompactionSummaryError,
   DEFAULT_COMPACTION_THRESHOLD_RATIO,
   MAX_COMPACTION_THRESHOLD_RATIO,
@@ -488,8 +489,7 @@ describe("provider-proof compaction transcript", () => {
       responses: {
         create: async () => ({
           id: "resp_empty",
-          status: "incomplete",
-          incomplete_details: { reason: "max_output_tokens" },
+          status: "completed",
           usage: { input_tokens: 321, output_tokens: 0, total_tokens: 321 },
           output: [{ type: "reasoning", content: [] }],
         }),
@@ -510,14 +510,91 @@ describe("provider-proof compaction transcript", () => {
       expect(error).toBeInstanceOf(EmptyCompactionSummaryError);
       expect((error as EmptyCompactionSummaryError).diagnostics).toMatchObject({
         responseId: "resp_empty",
-        status: "incomplete",
-        incompleteReason: "max_output_tokens",
+        status: "completed",
+        incompleteReason: null,
         extractedTextLength: 0,
       });
       expect(JSON.stringify((error as EmptyCompactionSummaryError).diagnostics)).not.toContain(
         "deploy it",
       );
     }
+  });
+
+  test("classifies a thrown provider failure without persisting its message or model input", async () => {
+    const providerError = Object.assign(
+      new Error("provider echoed deploy it and other sensitive request content"),
+      {
+        status: 502,
+        code: "server_error",
+        type: "server_error",
+        error: { code: "server_error", message: "nested sensitive provider text" },
+        headers: new Headers({ "x-request-id": "req_compaction_failed" }),
+      },
+    );
+    const fakeClient = {
+      responses: {
+        create: async () => {
+          throw providerError;
+        },
+      },
+    };
+    try {
+      await summarizeForCompaction(
+        testSettings({ openaiProvider: "azure" }),
+        buildCompactionPromptInput([user("deploy it")]),
+        {
+          client: fakeClient as any,
+          api: "responses",
+          model: "scripted-model",
+        },
+      );
+      throw new Error("expected provider compaction failure");
+    } catch (error) {
+      expect(error).toBeInstanceOf(CompactionProviderResponseError);
+      expect((error as CompactionProviderResponseError).diagnostics).toEqual({
+        errorName: "Error",
+        httpStatus: 502,
+        responseStatus: null,
+        responseId: null,
+        code: "server_error",
+        type: "server_error",
+        requestId: "req_compaction_failed",
+      });
+      expect(JSON.stringify(error)).not.toContain("deploy it");
+      expect(JSON.stringify(error)).not.toContain("nested sensitive provider text");
+      expect((error as Error).message).not.toContain("sensitive request content");
+    }
+  });
+
+  test("classifies a failed Responses object even when a custom client returns HTTP-200 data", async () => {
+    const fakeClient = {
+      responses: {
+        create: async () => ({
+          id: "resp_failed",
+          status: "failed",
+          error: { code: "server_error", message: "must not persist this provider text" },
+          output: [],
+        }),
+      },
+    };
+    await expect(
+      summarizeForCompaction(
+        testSettings({ openaiProvider: "azure" }),
+        buildCompactionPromptInput([user("deploy it")]),
+        {
+          client: fakeClient as any,
+          api: "responses",
+          model: "scripted-model",
+        },
+      ),
+    ).rejects.toMatchObject({
+      name: "CompactionProviderResponseError",
+      diagnostics: {
+        responseStatus: "failed",
+        responseId: "resp_failed",
+        code: "server_error",
+      },
+    });
   });
 
   test("uses the SDK Chat adapter with structured history, base instructions, and no tools", async () => {
