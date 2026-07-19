@@ -110,7 +110,10 @@ export function classifyProviderSandboxFailure(
   if (signals.numbers.some((status) => GRPC_TRANSIENT.has(status))) {
     return { kind: "transient_transport", diagnostic };
   }
-  if (signals.numbers.some((status) => status === 404) || signals.codes.some((code) => NOT_FOUND_CODES.has(code))) {
+  if (
+    signals.numbers.some((status) => status === 404) ||
+    signals.codes.some((code) => NOT_FOUND_CODES.has(code))
+  ) {
     return { kind: "not_found", diagnostic };
   }
 

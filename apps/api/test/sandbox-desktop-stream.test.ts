@@ -99,7 +99,10 @@ function fakeEstablish(epoch: number): () => Promise<EstablishedSandboxSession> 
   };
 }
 
-async function freshWorkspace(): Promise<{ accountId: string; workspaceId: string }> {
+async function freshWorkspace(): Promise<{
+  accountId: string;
+  workspaceId: string;
+}> {
   const [a] = await admin<
     { id: string }[]
   >`insert into managed_accounts (name) values ('acct') returning id`;
@@ -115,7 +118,10 @@ async function freshWorkspace(): Promise<{ accountId: string; workspaceId: strin
 async function seedWarmModalBox(
   accountId: string,
   workspaceId: string,
-): Promise<{ session: Awaited<ReturnType<typeof getSession>>; lease: LeaseSnapshot }> {
+): Promise<{
+  session: Awaited<ReturnType<typeof getSession>>;
+  lease: LeaseSnapshot;
+}> {
   const created = await createSession(db, {
     accountId,
     workspaceId,
@@ -427,7 +433,7 @@ describe("P4.2 desktop pixel data plane (real lease + RLS + fence)", () => {
   test("CACHED DESKTOP URL + authoritative provider NOT_FOUND retires the exact instance and discloses no capability", async () => {
     if (!available) return;
     const { accountId, workspaceId } = await freshWorkspace();
-    const { session, lease } = await seedWarmModalBox(accountId, workspaceId);
+    const { session } = await seedWarmModalBox(accountId, workspaceId);
     const cachedUrl = "wss://stale-box.modal.host/";
     await admin`update sandbox_leases set data_plane_url = ${cachedUrl}
       where workspace_id = ${workspaceId} and sandbox_group_id = ${session!.sandboxGroupId}`;
@@ -458,7 +464,7 @@ describe("P4.2 desktop pixel data plane (real lease + RLS + fence)", () => {
   test("CACHED TERMINAL URL + authoritative provider NOT_FOUND retires the exact instance and discloses no capability", async () => {
     if (!available) return;
     const { accountId, workspaceId } = await freshWorkspace();
-    const { session, lease } = await seedWarmModalBox(accountId, workspaceId);
+    const { session } = await seedWarmModalBox(accountId, workspaceId);
     const cachedUrl = "wss://stale-terminal.modal.host/";
     await admin`update sandbox_leases set terminal_data_plane_url = ${cachedUrl}
       where workspace_id = ${workspaceId} and sandbox_group_id = ${session!.sandboxGroupId}`;
@@ -489,10 +495,17 @@ describe("P4.2 desktop pixel data plane (real lease + RLS + fence)", () => {
   test("transient and missing local resume state preserve desktop liveness, identity, epoch, and keeper holder", async () => {
     if (!available) return;
     for (const [label, establish] of [
-      ["transient", async () => { throw new Error("provider temporarily unavailable"); }],
+      [
+        "transient",
+        async () => {
+          throw new Error("provider temporarily unavailable");
+        },
+      ],
       [
         "missing-resume-state",
-        async () => { throw new SandboxResumeStateUnavailableError("modal"); },
+        async () => {
+          throw new SandboxResumeStateUnavailableError("modal");
+        },
       ],
     ] as const) {
       const { accountId, workspaceId } = await freshWorkspace();
@@ -641,7 +654,9 @@ describe.if(LIVE)("P4.2 GATED live-Modal — RFB pixels through the real Modal t
       const BOX_TIMEOUT_MS = 12 * 60 * 1000;
 
       const modal = new ModalClient({ logLevel: "info" });
-      const app = await modal.apps.fromName(APP_NAME, { createIfMissing: true });
+      const app = await modal.apps.fromName(APP_NAME, {
+        createIfMissing: true,
+      });
 
       const aptRetry = (pkgs: string) =>
         `export DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC; set -eux; for attempt in 1 2 3; do ` +
