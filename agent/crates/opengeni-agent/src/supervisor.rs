@@ -200,6 +200,7 @@ impl<P: Platform + 'static> Supervisor<P> {
     /// sample (LIMITS-DOCTRINE) against the default spool root; callers that
     /// know a better disk (the config dir) override it via
     /// [`with_spool_root`](Self::with_spool_root) BEFORE running.
+    #[cfg(test)]
     #[must_use]
     pub fn new(
         platform: Arc<P>,
@@ -637,26 +638,46 @@ impl<P: Platform + 'static> Supervisor<P> {
                 );
             }
             Route::Work(class) => {
-                let client = client.clone();
-                let platform = self.platform.clone();
-                let engine = self.engine.clone();
-                let ctx = self.ctx(link, creds, max_payload);
-                rpc_tasks.spawn(async move {
-                    let op = OpId::new(request_id.clone());
-                    let ticket = match engine.admit(&op, class, crate::engine::LEGACY_ORIGIN).await
-                    {
-                        Ok(ticket) => ticket,
-                        Err(reason) => {
-                            let response = dispatch::breaker_reply_error(request_id, label, reason);
-                            publish_response(&client, reply, response, label, max_payload).await;
-                            return;
-                        }
-                    };
-                    serve_request(&client, reply, request, &platform, &ctx, max_payload).await;
-                    drop(ticket);
-                });
+                self.spawn_admitted_work(
+                    link, creds, client, request, class, reply, label, rpc_tasks,
+                );
             }
         }
+    }
+
+    /// Spawns an ordinary admitted request while keeping liveness and op-control
+    /// requests on their dedicated paths.
+    #[allow(clippy::too_many_arguments)] // a routing seam; bundling would just rename the parts
+    fn spawn_admitted_work(
+        &self,
+        link: &WorkspaceLink,
+        creds: &StoredCredentials,
+        client: &async_nats::Client,
+        request: ControlRequest,
+        class: JobClass,
+        reply: async_nats::Subject,
+        label: &'static str,
+        rpc_tasks: &mut JoinSet<()>,
+    ) {
+        let max_payload = client.server_info().max_payload;
+        let client = client.clone();
+        let platform = self.platform.clone();
+        let engine = self.engine.clone();
+        let ctx = self.ctx(link, creds, max_payload);
+        rpc_tasks.spawn(async move {
+            let request_id = request.request_id.clone();
+            let op = OpId::new(request_id.clone());
+            let ticket = match engine.admit(&op, class, crate::engine::LEGACY_ORIGIN).await {
+                Ok(ticket) => ticket,
+                Err(reason) => {
+                    let response = dispatch::breaker_reply_error(request_id, label, reason);
+                    publish_response(&client, reply, response, label, max_payload).await;
+                    return;
+                }
+            };
+            serve_request(&client, reply, request, &platform, &ctx, max_payload).await;
+            drop(ticket);
+        });
     }
 
     /// Spawns a legacy-adapter op (exec/git as an engine job) onto its own
