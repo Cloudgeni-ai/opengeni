@@ -16,7 +16,7 @@ try {
   @'
 @echo off
 echo %* > "%OPENGENI_TEST_ARGV_LOG%"
-<nul set /p =%OPENGENI_ENROLL_TOKEN% > "%OPENGENI_TEST_TOKEN_LOG%"
+<nul set /p "=%OPENGENI_ENROLL_TOKEN%">"%OPENGENI_TEST_TOKEN_LOG%"
 '@ | Set-Content -Path $fake -Encoding ASCII
 
   $env:OPENGENI_ENROLL_TOKEN = 'oget_test-secret-never-in-argv'
