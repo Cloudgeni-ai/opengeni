@@ -132,7 +132,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     expect(typeof row?.lease_epoch).toBe("number");
   }, 60_000);
 
-  test("(0a) recovery fence rejects markerless legacy updates and mixed-version inserts", async () => {
+  test("(0a) maintenance fence rejects markerless legacy transitions and acquisition inserts", async () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
     await admin`
@@ -151,6 +151,23 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
             update sandbox_leases
             set liveness = 'warming'
             where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}
+          `;
+        }),
+      ).rejects.toMatchObject({ code: "55000" });
+
+      // Exact origin/main acquireLease shape: PostgreSQL runs BEFORE INSERT
+      // triggers before ON CONFLICT resolution, so an old pod cannot even
+      // acquire an existing row after maintenance activation.
+      await expect(
+        legacy.begin(async (tx) => {
+          await tx`select set_config('opengeni.account_id', ${accountId}, true)`;
+          await tx`select set_config('opengeni.workspace_id', ${workspaceId}, true)`;
+          await tx`
+            insert into sandbox_leases
+              (account_id, workspace_id, sandbox_group_id, liveness, backend, expires_at)
+            values
+              (${accountId}, ${workspaceId}, ${groupId}, 'cold', 'modal', now() + interval '60 seconds')
+            on conflict (workspace_id, sandbox_group_id) do nothing
           `;
         }),
       ).rejects.toMatchObject({ code: "55000" });

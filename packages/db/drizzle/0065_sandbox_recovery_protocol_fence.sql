@@ -1,9 +1,43 @@
--- deployment-mode: rolling
--- OPE-60: protect durable sandbox recovery transitions from old writers.
+-- deployment-mode: maintenance
+-- OPE-60: one-way sandbox recovery protocol activation. Old API, control-worker,
+-- and turn-worker pods MUST be stopped before this migration runs: their lease
+-- writes do not set the protocol-v1 marker and are intentionally rejected after
+-- activation. The migration takes an exclusive lease-table lock and refuses to
+-- activate while any opengeni_app session is still connected, making a normal
+-- pre-upgrade rolling migration fail closed instead of interrupting old pods
+-- mid-roll or permitting an unsafe mixed-version restore writer.
+
+SET lock_timeout = '5s';
+SET statement_timeout = '30min';
+
+-- Serialize protocol activation against every in-flight lease read/write. An
+-- old writer already in a transaction makes this bounded lock fail; an idle old
+-- pool is rejected by the pg_stat_activity preflight below. The migration file
+-- is one transaction, so no trigger/function change becomes visible on failure.
+LOCK TABLE sandbox_leases IN ACCESS EXCLUSIVE MODE;
+
+DO $maintenance_guard$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app')
+    AND EXISTS (
+      SELECT 1
+      FROM pg_stat_activity
+      WHERE datname = current_database()
+        AND usename = 'opengeni_app'
+        AND pid <> pg_backend_pid()
+    )
+  THEN
+    RAISE EXCEPTION
+      'sandbox recovery protocol v1 activation requires all opengeni_app sessions to be stopped'
+      USING ERRCODE = '55000';
+  END IF;
+END
+$maintenance_guard$;
+
 -- Every lease insert and every protected transition, including legacy rows
 -- without recovery metadata, requires an explicit protocol-v1 opt-in in the
 -- current transaction. Superusers remain available for maintenance and
--- emergency recovery.
+-- emergency recovery after activation.
 
 CREATE OR REPLACE FUNCTION opengeni_private.enforce_sandbox_recovery_protocol_v1()
 RETURNS trigger
