@@ -330,12 +330,7 @@ async function validateScheduledTaskAgentConfig(input: {
   const model = canonicalConfiguredModel(input.settings, input.payload.agentConfig.model);
   // Same policy vetting as the session choke points; an omitted model flows
   // through session creation later, where the effective default is vetted.
-  await assertWorkspaceModelPolicyAllows(
-    input.db,
-    input.settings,
-    input.workspaceId,
-    model,
-  );
+  await assertWorkspaceModelPolicyAllows(input.db, input.settings, input.workspaceId, model);
   const resources = normalizeResources(input.payload.agentConfig.resources ?? []);
   const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(
     input.db,

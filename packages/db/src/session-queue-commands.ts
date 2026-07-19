@@ -1629,10 +1629,7 @@ export async function submitHumanPromptInTransaction(
       workspaceControlEventId: resumed.workspaceControlEventId,
       ...(input.turnExecutionPolicy
         ? {
-            executionPolicy: turnExecutionPolicyAuditMetadata(
-              input.turnExecutionPolicy,
-              turnId,
-            ),
+            executionPolicy: turnExecutionPolicyAuditMetadata(input.turnExecutionPolicy, turnId),
           }
         : {}),
     },

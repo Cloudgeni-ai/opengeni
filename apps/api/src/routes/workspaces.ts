@@ -62,9 +62,7 @@ export function canonicalWorkspacePolicyModelIds(
   if (modelIds === null || modelIds === undefined) {
     return null;
   }
-  return [
-    ...new Set(modelIds.map((modelId) => canonicalizeConfiguredModelId(settings, modelId))),
-  ];
+  return [...new Set(modelIds.map((modelId) => canonicalizeConfiguredModelId(settings, modelId)))];
 }
 
 export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
