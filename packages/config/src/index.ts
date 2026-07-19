@@ -169,6 +169,11 @@ const SettingsSchema = z.object({
   streamControlEnabled: EnvBoolean.default(false),
   toolspaceEnabled: EnvBoolean.default(false),
   toolspaceMaxCallsPerTurn: z.coerce.number().int().positive().default(200),
+  // Rolling-deploy fence for explicit `tools` replacement on existing-session
+  // user turns. Old workers merge those turns with the durable session policy,
+  // so API admission must remain off until every poller understands exact turn
+  // provenance. Initial create-time explicit tool policies are unaffected.
+  sessionTurnToolReplacementEnabled: EnvBoolean.default(false),
   environmentsEncryptionKey: z.string().optional(),
   integrationsEnabled: EnvBoolean.default(false),
   integrationsStateSecret: z.string().optional(),
@@ -1003,6 +1008,7 @@ export function getSettings(): Settings {
     streamControlEnabled: optional("OPENGENI_STREAM_CONTROL_ENABLED"),
     toolspaceEnabled: optional("OPENGENI_TOOLSPACE_ENABLED"),
     toolspaceMaxCallsPerTurn: optional("OPENGENI_TOOLSPACE_MAX_CALLS_PER_TURN"),
+    sessionTurnToolReplacementEnabled: optional("OPENGENI_SESSION_TURN_TOOL_REPLACEMENT_ENABLED"),
     environmentsEncryptionKey: optional("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY"),
     integrationsEnabled: optional("OPENGENI_INTEGRATIONS_ENABLED"),
     integrationsStateSecret: optional("OPENGENI_INTEGRATIONS_STATE_SECRET"),

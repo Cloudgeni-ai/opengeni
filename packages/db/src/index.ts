@@ -11865,6 +11865,13 @@ export type ToolspaceCallReservation =
   | { reserved: true; count: number }
   | { reserved: false; reason: "inactive" | "budget_exhausted" };
 
+export type AdmittedToolspaceTurnPolicy = {
+  sessionTools: ToolRef[];
+  toolPolicy: SessionToolPolicy | null;
+  turnTools: ToolRef[];
+  toolsProvided: boolean;
+};
+
 /**
  * Admit one exact Toolspace bearer before any session credential is decrypted or
  * any upstream schema is enumerated. This intentionally reuses the canonical
@@ -11876,7 +11883,7 @@ export async function admitToolspaceTurnAttempt(
   db: Database,
   workspaceId: string,
   claims: ToolspaceTurnAttemptClaims,
-): Promise<boolean> {
+): Promise<AdmittedToolspaceTurnPolicy | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     return await scopedDb.transaction(async (tx) => {
       const fence = await lockTurnAttemptWriteFenceTx(tx, {
@@ -11886,7 +11893,18 @@ export async function admitToolspaceTurnAttempt(
         attemptId: claims.attemptId,
         executionGeneration: claims.executionGeneration,
       });
-      return fence.allowed && fence.turn.status === "running";
+      if (!fence.allowed || fence.turn.status !== "running") {
+        return null;
+      }
+      // Return the exact admitted turn plus the session-policy snapshot while
+      // both rows are held by the canonical attempt fence. Toolspace must not
+      // reconstruct selection from a later, mutable session read.
+      return {
+        sessionTools: fence.session.tools as ToolRef[],
+        toolPolicy: (fence.session.toolPolicy as SessionToolPolicy | null) ?? null,
+        turnTools: fence.turn.tools as ToolRef[],
+        toolsProvided: fence.turn.toolsProvided,
+      };
     });
   });
 }

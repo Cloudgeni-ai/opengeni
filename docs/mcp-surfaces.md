@@ -22,10 +22,12 @@ First-party OpenGeni MCP memory tools:
 GitHub recovery is also first-party and permission-scoped:
 
 - `github_connect_link` returns a short-lived workspace-bound human install link.
-- `github_credential_status` reports whether the exact session has a host-managed,
-  automatically renewed repository binding, or a typed configure/connect/rebind
-  action. It never returns a provider token; the old model-visible `github_token`
-  surface is intentionally absent.
+- `github_credential_status` reports secret-safe configuration and repository
+  binding metadata plus a typed configure/connect/rebind/retry action. Binding
+  presence alone never proves that a host credential is live or automatically
+  renewed; without authoritative controller health it reports
+  `unavailable/unknown/retry`. It never returns a provider token; the old
+  model-visible `github_token` surface is intentionally absent.
 
 The memory tools are session-scoped: they register only when the delegated bearer
 carries a worker-signed `sessionId` claim and the workspace's
@@ -49,6 +51,14 @@ attempt before listing or dialing upstreams, atomically reserves each call
 against that same attempt/generation, and fences audit events the same way. A
 recovered, replaced, paused, or settled attempt receives an empty/unavailable
 surface even while its signed token has time remaining.
+
+The same admission lock returns the session-policy snapshot and the exact
+turn's `tools`/`tools_provided` provenance. Toolspace resolves from that admitted
+turn—not from a later session read—and freezes the resulting server-id allow-list
+for listing and calls. An explicit empty turn exposes nothing; an explicit
+subset cannot regain a session sibling; an attached-but-unselected per-session
+MCP never enters the surface. Omitted workspace-default turns may resolve the
+currently enabled dynamic capability set, as required by that policy mode.
 
 Delivery is compute-target-neutral. Managed sandboxes and Connected Machines
 receive the token off-manifest in `OPENGENI_TOOLSPACE_TOKEN_FILE`; Connected

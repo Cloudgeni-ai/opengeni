@@ -255,6 +255,18 @@ Key transitions (canonical: `apps/worker/src/workflows/session.ts`):
 - **Send appends; Steer inserts at the head and supersedes the current attempt.** Both result in ordinary prompt execution once admitted by the session/workspace gate.
 - **Pause and Resume operate one recursive admission gate, separate from lifecycle.** Pause preserves the visible queue, approval, goal, and current lifecycle truth; if an attempt is live, an exact durable interruption closes it as recoverable. Resume creates no prompt and no queue row: it merely admits the preserved logical turn. Explicitly resuming a selected descendant through a paused ancestor records an override for the current control revision; any later Pause at that controlling scope invalidates the override.
 - **Send and Steer into a paused session explicitly resume the selected branch in the same transaction.** Send appends the human prompt. Steer puts the human prompt first and supersedes the live attempt. Neither silently resumes siblings or the whole workspace.
+- **Turn tool provenance is durable and exact.** Every accepted user turn owns
+  both `session_turns.tools` and `tools_provided`: omitted means inherit the
+  session policy, while an explicit array (including `[]`) is a per-turn
+  replacement/narrowing. Runtime and Toolspace resolve the locked exact turn;
+  they never merge a replacement with a later session read. Because pre-cutover
+  workers used merge semantics, existing-session explicit replacement is
+  admission-gated by
+  `OPENGENI_SESSION_TURN_TOOL_REPLACEMENT_ENABLED` (default false) until the
+  API-first/worker-drain sequence in [deployment.md](deployment.md) completes.
+  Initial session creation and reusable scheduled-run inheritance do not need
+  that follow-up gate. Legacy `tools_provided=false` rows are never globally
+  reinterpreted.
 - **`continueAsNew` runs only at a settled turn boundary.** Queue rows, attempts, interruptions, approvals, effective controls, internal updates, and recovery state are durable in Postgres. Temporal signals are replaceable wake hints and carry no authoritative state across the boundary.
 - **Session control uses `signalWithStart`.** Product, source, and Temporal wire semantics use the single `sessionControl` signal.
 - **Workflow wakes are transactional revisions, not inferred repair scans.** Every transaction that creates or re-enables session work increments the session's coalescing `session_workflow_wake_outbox` row. Single-target producers use direct `signalWithStart`; recursive controls trigger the one bounded dispatcher without materializing descendant ids in the API. Successful delivery acknowledges the exact revision. The same dedicated 10-second control-worker Schedule runs bounded `SKIP LOCKED` repair for due undelivered revisions. It derives any unsettled exact-attempt interruption from Postgres before delivery, while ordinary repaired wakes also wake approval/capacity waits. Wake repair is independent of sandbox cleanup and child-agent feature flags. A final signal-version close gate prevents a wake accepted during workflow completion from being closed into the old run.
@@ -485,7 +497,21 @@ The current map:
 - **The deployment shared-key boundary.** `x-opengeni-access-key` gates the whole deployment (with an exempt-path allow-list: `config/client`, auth, Stripe webhook, GitHub callbacks, install). This is a *different header* from product/delegated `Authorization: Bearer`.
 - **Billing/entitlements surface.** Usage limits and entitlements are governed by `UsageLimitsMode`/`EntitlementsMode` (§5.7); Stripe is confined to `routes/billing.ts` and the Stripe webhook is on the access-key exempt-path allow-list. The `check-workspace-billing-static.ts` guard enforces both confinement and route-scoping.
 - **Sandbox preparation profiles + env allowlist (footgun).** `OPENGENI_SANDBOX_PREPARATION_PROFILES` (`none`/`azure`/`github`/…) and `OPENGENI_SANDBOX_ENV_ALLOWLIST` can make host credentials available **inside agent sandboxes**. Prefer short-lived credentials; review `.env` before live sessions. **No model provider credentials appear in the sandbox unless explicitly allowed.**
-- **Write-only variable-sets and session MCP credentials.** No API response, event, log, span, or audit record ever contains a workspace variable set variable value or a per-session MCP header value; both are AES-256-GCM-encrypted under `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY` held outside Postgres. **Agents cannot self-attach secrets** — the worker's default first-party MCP token never carries `variable-sets:use`/`manage` or `mcp_servers:attach`; a stronger token exists only when the creator granted it at creation (`firstPartyMcpPermissions`), capped by the creating grant. (Residual: `agent_run_states` may still contain echoed values — RLS-protected, never API-returned, deliberately not redacted so resume works.)
+- **Write-only variable-sets and session MCP credentials.** No API response,
+  event, log, span, or audit record ever contains a workspace variable-set
+  value or a per-session MCP header value; both are AES-256-GCM-encrypted under
+  `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY` held outside Postgres. The
+  capability-first owner-agent default includes `variable-sets:use`/`manage`,
+  so attaching a variable set to a managed-sandbox child is deliberately a
+  secret grant; untrusted or task-bounded sessions must receive an explicit
+  least-privilege `firstPartyMcpPermissions` subset at creation. Explicit sets
+  are capped by the creating grant, worker-created children cannot exceed their
+  parent's effective subset or their worker-signed creator grant, and a running
+  session cannot widen its fixed set. The default still excludes
+  `mcp_servers:attach`, so credentialed per-session MCP headers require explicit
+  creator authority. (Residual: `agent_run_states` may still contain echoed
+  values — RLS-protected, never API-returned, deliberately not redacted so
+  resume works.)
 - **Toolspace attenuation.** A compute-target Toolspace token carries only `toolspace:call`, UUID session/turn/attempt claims, a positive execution generation, and subject `sandbox:<turnId>`; it cannot attach MCP servers, mint tokens, or use ordinary REST routes. API admission, the atomic per-turn call budget, and audit appends all fence the exact active running attempt, so recovery/replacement revokes a still-unexpired token. Upstream proxy targets come only from validated selected workspace capability/per-session MCP rows; first-party recursive targets and approval-required calls are excluded, and decrypted upstream headers never cross into sandbox/Connected Machine env or manifests. Tool arguments/results are audit-redacted to byte size + SHA-256.
 - **Credential-bearing egress is pinned, bounded, and destination-bound.** `@opengeni/network` resolves each MCP/OAuth destination once, rejects private/special-use answers unless explicitly allowed, and supplies only that answer to the final Undici request while TLS verifies the original hostname. Redirects are manual and every hop is revalidated. The connection broker receives the exact per-request destination; bound `mcp_url`/OAuth resource must match before refresh, usage recording, or headers are returned. Legacy API-key rows without an MCP URL remain limited to the provider domain/subdomains.
 - **Env layering precedence (fixed):** deployment allowlist < git identity < workspace variable set < run-scoped git auth (later wins); reserved/loader-injection names are rejected.

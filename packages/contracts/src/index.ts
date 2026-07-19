@@ -506,6 +506,30 @@ export const Permission = z.enum([
 ]);
 export type Permission = z.infer<typeof Permission>;
 
+/**
+ * Capability-first permissions signed into a session's first-party OpenGeni
+ * MCP token when a top-level creator does not explicitly narrow them.
+ *
+ * Keep this contract shared by admission and runtime signing: a worker-signed
+ * child whose parent was narrowed must inherit the parent's effective subset,
+ * never fall back to a different runtime-local default.
+ */
+export const DEFAULT_FIRST_PARTY_MCP_PERMISSIONS = [
+  "workspace:read",
+  "files:read",
+  "documents:search",
+  "scheduled_tasks:manage",
+  "scheduled_tasks:run",
+  "goals:manage",
+  "sessions:read",
+  "sessions:create",
+  "sessions:control",
+  "variable-sets:use",
+  "variable-sets:manage",
+  "rigs:use",
+  "github:use",
+] as const satisfies readonly Permission[];
+
 export function prefixedMcpToolName(registryId: string, toolName: string): string {
   return `${registryId}__${toolName}`;
 }

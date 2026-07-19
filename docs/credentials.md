@@ -46,7 +46,11 @@ Rules that hold across the table:
   renewal, unavailable, connect, or session-rebind truth. The historical
   `github_token` tool is not registered. Token minting and atomic file updates
   remain worker/host responsibilities and token values never appear in MCP
-  results, model output, events, or audit text.
+  results, model output, events, or audit text. A durable repository binding is
+  only identity/provenance: by itself it never proves that a broker credential
+  is currently live or renewed. Without an authoritative controller-health
+  result the diagnostic reports `unavailable/unknown/retry`; persistent unknown
+  state directs the caller to reconnect or rebind rather than claiming success.
 - **Toolspace is attenuated and attempt-fenced.** Its delegated token carries
   only `toolspace:call`; exact session, turn, attempt, and execution-generation
   claims; and subject `sandbox:<turnId>`. Every Toolspace admission, call-budget

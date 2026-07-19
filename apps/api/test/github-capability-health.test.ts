@@ -68,14 +68,19 @@ describe("GitHub capability health", () => {
     });
   });
 
-  test("session projection reports host renewal or an exact connect/rebind action", () => {
+  test("session projection never infers live host renewal from repository bindings", () => {
     expect(
       githubCredentialHealthForBindings({
         configured: true,
         workspaceInstallationCount: 1,
         sessionInstallationIds: [41, 41],
       }),
-    ).toEqual({ state: "ready", reason: null, action: "none", renewal: "automatic" });
+    ).toEqual({
+      state: "unavailable",
+      reason: "unknown",
+      action: "retry",
+      renewal: "inactive",
+    });
     expect(
       githubCredentialHealthForBindings({
         configured: true,
@@ -197,15 +202,16 @@ describe("GitHub capability health", () => {
     });
     const boundStatus = await status(bound.id);
     expect(GitHubCapabilityHealth.parse(boundStatus.health)).toEqual({
-      state: "ready",
-      reason: null,
-      action: "none",
-      renewal: "automatic",
+      state: "unavailable",
+      reason: "unknown",
+      action: "retry",
+      renewal: "inactive",
     });
     expect(boundStatus).toMatchObject({
       provider: "github",
       credentialDelivery: "host_managed",
       repositoryBindings: 1,
+      recovery: { action: "retry" },
     });
     expect(JSON.stringify([unboundStatus, boundStatus])).not.toMatch(/token/i);
   }, 180_000);

@@ -3,9 +3,11 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { FetchLike, Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { environmentsEncryptionKeyBytes, type McpServerConfig } from "@opengeni/config";
-import { prefixedMcpToolName, type AccessGrant, type ToolRef } from "@opengeni/contracts";
+import { prefixedMcpToolName, type AccessGrant } from "@opengeni/contracts";
 import {
+  enabledCapabilityMcpToolRefs,
   hasPermission,
+  resolveSessionToolPolicy,
   settingsWithEnabledCapabilityMcpServers,
   type ApiRouteDeps,
 } from "@opengeni/core";
@@ -14,7 +16,6 @@ import {
   buildConnectionTokenResolver,
   listSessionMcpServerMetadata,
   listSessionMcpServersForRun,
-  requireSession,
   reserveToolspaceCallForTurn,
   type ResolveConnectionCredentialResult,
   type ToolspaceTurnAttemptClaims,
@@ -193,17 +194,33 @@ export async function prepareToolspaceMcpSurface(input: {
   }
   const claims = toolspaceClaims(grant);
   const sessionId = claims.sessionId;
-  if (!(await admitToolspaceTurnAttempt(deps.db, grant.workspaceId, claims))) {
+  const admittedPolicy = await admitToolspaceTurnAttempt(deps.db, grant.workspaceId, claims);
+  if (!admittedPolicy) {
     return emptyToolspaceSurface(sessionId, grant.subjectId);
   }
-  const session = await requireSession(deps.db, grant.workspaceId, sessionId);
-  const selectedIds = selectedMcpServerIds(
-    session.tools,
-    session.mcpServers.map((server) => server.id),
-  );
+  const [runtimeSettings, sessionServers] = await Promise.all([
+    settingsWithEnabledCapabilityMcpServers(deps.db, grant.workspaceId, deps.settings),
+    listSessionMcpServerMetadata(deps.db, grant.workspaceId, sessionId),
+  ]);
+  const availableIds = new Set(runtimeSettings.mcpServers.map((server) => server.id));
+  for (const server of sessionServers) {
+    availableIds.add(server.id);
+  }
+  const effectiveTools = resolveSessionToolPolicy({
+    ...(admittedPolicy.toolPolicy ? { toolPolicy: admittedPolicy.toolPolicy } : {}),
+    sessionTools: admittedPolicy.sessionTools,
+    turnTools: admittedPolicy.turnTools,
+    turnToolsProvided: admittedPolicy.toolsProvided,
+    availableMcpServerIds: availableIds,
+    defaultMcpServerIds: enabledCapabilityMcpToolRefs(deps.settings, runtimeSettings).map(
+      (tool) => tool.id,
+    ),
+  }).toolRefs;
   // Proxyable ids: everything selected except the first-party OpenGeni tool
   // server and the first-party MCP proxies, both of which would re-enter /mcp.
-  const proxyableIds = [...selectedIds].filter((id) => toolspaceCanProxyServerId(id));
+  const proxyableIds = effectiveTools
+    .filter((tool) => tool.kind === "mcp" && toolspaceCanProxyServerId(tool.id))
+    .map((tool) => tool.id);
   assertMcpServerSelectionWithinBounds(proxyableIds);
   if (proxyableIds.length === 0) {
     return emptyToolspaceSurface(sessionId, grant.subjectId);
@@ -224,8 +241,9 @@ export async function prepareToolspaceMcpSurface(input: {
     proxyableIds,
     getRegistry,
   });
+  const allowedServerIds = new Set(proxyableIds);
   const tools = listing.map((entry) =>
-    toolspaceToolFor({ deps, grant, claims, entry, getRegistry }),
+    toolspaceToolFor({ deps, grant, claims, entry, allowedServerIds, getRegistry }),
   );
 
   return {
@@ -440,9 +458,10 @@ function toolspaceToolFor(input: {
   grant: AccessGrant;
   claims: ToolspaceTurnAttemptClaims;
   entry: ToolListingEntry;
+  allowedServerIds: ReadonlySet<string>;
   getRegistry: () => Promise<Map<string, McpServerConfig>>;
 }): ToolspaceRegisteredTool {
-  const { deps, grant, claims, entry, getRegistry } = input;
+  const { deps, grant, claims, entry, allowedServerIds, getRegistry } = input;
   const { sessionId } = claims;
   const { serverId, tool } = entry;
   const name = prefixedMcpToolName(serverId, tool.name);
@@ -455,6 +474,12 @@ function toolspaceToolFor(input: {
     ...(description ? { description } : {}),
     ...(tool.inputSchema ? { inputSchema: tool.inputSchema } : {}),
     call: async (args) => {
+      // A cached listing entry is never authority. Preserve the exact admitted
+      // turn's policy through the call boundary before consuming budget or
+      // decrypting/dialing any upstream credential.
+      if (!allowedServerIds.has(serverId)) {
+        return mcpError(`upstream tool failed: ${name}`);
+      }
       if (approvalRequired) {
         return mcpError(APPROVAL_REQUIRED_MESSAGE);
       }
@@ -472,7 +497,12 @@ function toolspaceToolFor(input: {
       // have been served from a slightly stale cache entry).
       const registry = await getRegistry();
       const config = registry.get(serverId);
-      if (!config || !toolspaceCanProxyServer(config) || !allowedByConfig(config, tool.name)) {
+      if (
+        !allowedServerIds.has(serverId) ||
+        !config ||
+        !toolspaceCanProxyServer(config) ||
+        !allowedByConfig(config, tool.name)
+      ) {
         return mcpError(`upstream tool failed: ${name}`);
       }
       if (mcpToolRequiresApproval(config.requireApproval, tool.name)) {
@@ -642,16 +672,6 @@ function isUuid(value: unknown): value is string {
     typeof value === "string" &&
     /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
   );
-}
-
-function selectedMcpServerIds(tools: ToolRef[], sessionServerIds: string[]): Set<string> {
-  const out = new Set<string>(sessionServerIds);
-  for (const tool of tools) {
-    if (tool.kind === "mcp") {
-      out.add(tool.id);
-    }
-  }
-  return out;
 }
 
 // Whether a selected server id may enter the toolspace proxy at all. The

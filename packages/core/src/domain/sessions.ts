@@ -1,6 +1,7 @@
 import { CODEX_MODEL_ID_PREFIX } from "@opengeni/codex";
 import { configuredAllowedModels, policyProviderIdForModel, type Settings } from "@opengeni/config";
 import {
+  DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   CreateSessionRequest,
   evaluateWorkspaceModelPolicy,
   reasoningEffortForMetadata,
@@ -816,42 +817,6 @@ export async function createSessionForRequest(
   );
   const model = payload.model ?? settings.openaiModel;
   const reasoningEffort = payload.reasoningEffort ?? settings.openaiReasoningEffort;
-  // A session's first-party MCP token can carry a non-default permission set
-  // (how an operator hands a manager-style session the orchestration tools),
-  // but never one out-ranking its creator: every requested permission must be
-  // held by the creating grant.
-  let firstPartyMcpPermissions = payload.firstPartyMcpPermissions ?? null;
-  if (firstPartyMcpPermissions && firstPartyMcpPermissions.length === 0) {
-    // An empty set would sign an unusable zero-permission token; the default
-    // worker set is expressed by omitting the field.
-    throw new HTTPException(422, {
-      message:
-        "firstPartyMcpPermissions must not be empty; omit it for the default worker permission set",
-    });
-  }
-  for (const permission of firstPartyMcpPermissions ?? []) {
-    if (!hasPermission(grant.permissions, permission)) {
-      throw new HTTPException(403, {
-        message: `cannot grant first-party MCP permission beyond the creating grant: ${permission}`,
-      });
-    }
-  }
-  // Invariant: a goal-bearing session always carries goals:manage in its
-  // effective first-party permissions. Without it the worker's delegated
-  // token never sees the goal tools (goal_complete/goal_pause/...), so the
-  // agent cannot stop its own goal and the continuation loop runs until an
-  // operator intervenes. The auto-added permission is deliberately exempt
-  // from the creating-grant check above: goal tools are scoped to the
-  // spawned session itself via the worker-signed sessionId claim, so a
-  // worker managing its OWN goal is not an escalation of the spawner's
-  // authority.
-  if (
-    payload.goal &&
-    firstPartyMcpPermissions &&
-    !firstPartyMcpPermissions.includes("goals:manage")
-  ) {
-    firstPartyMcpPermissions = [...firstPartyMcpPermissions, "goals:manage"];
-  }
   // Parent linkage: a worker is linked to its manager ONLY from the
   // worker-signed sessionId claim on the creating grant — the manager
   // session's own id, signed into the delegated token by the worker and never
@@ -874,6 +839,65 @@ export async function createSessionForRequest(
     });
   }
 
+  // A session's first-party MCP token can carry an explicit permission set
+  // (how an operator narrows a task agent or adds non-default owner/admin
+  // capabilities), but never one out-ranking its creator. Explicit requests
+  // must be held by the creating grant. An omitted worker-child request freezes the
+  // intersection of the parent's effective permissions and the worker-signed
+  // creating grant; persisting that intersection prevents runtime `null`
+  // defaults from widening either boundary later.
+  const explicitlyProvidedFirstPartyPermissions = payload.firstPartyMcpPermissions !== undefined;
+  const parentEffectiveFirstPartyPermissions = parentSession
+    ? [...(parentSession.firstPartyMcpPermissions ?? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS)]
+    : null;
+  let firstPartyMcpPermissions =
+    payload.firstPartyMcpPermissions ??
+    parentEffectiveFirstPartyPermissions?.filter((permission) =>
+      hasPermission(grant.permissions, permission),
+    ) ??
+    null;
+  if (explicitlyProvidedFirstPartyPermissions && firstPartyMcpPermissions?.length === 0) {
+    // An empty set would sign an unusable zero-permission token. Omission uses
+    // the top-level default or, for a worker-created child, the bounded
+    // inherited intersection.
+    throw new HTTPException(422, {
+      message:
+        "firstPartyMcpPermissions must not be empty; omit it to use the session's default or inherited permission policy",
+    });
+  }
+  for (const permission of firstPartyMcpPermissions ?? []) {
+    if (!hasPermission(grant.permissions, permission)) {
+      throw new HTTPException(403, {
+        message: `cannot grant first-party MCP permission beyond the creating grant: ${permission}`,
+      });
+    }
+  }
+  if (parentSession && explicitlyProvidedFirstPartyPermissions) {
+    const parentEffectivePermissions = new Set<Permission>(parentEffectiveFirstPartyPermissions!);
+    for (const permission of firstPartyMcpPermissions ?? []) {
+      if (!parentEffectivePermissions.has(permission)) {
+        throw new HTTPException(403, {
+          message: `child first-party MCP permissions may only narrow the parent session grant: ${permission}`,
+        });
+      }
+    }
+  }
+  // Invariant: a goal-bearing session always carries goals:manage in its
+  // effective first-party permissions. Without it the worker's delegated
+  // token never sees the goal tools (goal_complete/goal_pause/...), so the
+  // agent cannot stop its own goal and the continuation loop runs until an
+  // operator intervenes. The auto-added permission is deliberately exempt
+  // from the creating-grant check above: goal tools are scoped to the
+  // spawned session itself via the worker-signed sessionId claim, so a
+  // worker managing its OWN goal is not an escalation of the spawner's
+  // authority.
+  if (
+    payload.goal &&
+    firstPartyMcpPermissions &&
+    !firstPartyMcpPermissions.includes("goals:manage")
+  ) {
+    firstPartyMcpPermissions = [...firstPartyMcpPermissions, "goals:manage"];
+  }
   // OPE-16 policy admission. The raw payload is retained so omitted `tools`
   // differs from explicit `tools: []`. Child policy is based only on the
   // worker-signed parent claim; caller-supplied parent metadata is ignored.
@@ -1216,6 +1240,12 @@ export async function acceptSessionUserMessage(
     expectedDraftRevision?: number | null;
   },
 ): Promise<{ accepted: SessionEvent; turn: SessionTurn }> {
+  if (input.toolsProvided && !deps.settings.sessionTurnToolReplacementEnabled) {
+    throw new HTTPException(503, {
+      message:
+        "explicit follow-up tool replacement is temporarily unavailable until provenance-aware turn workers finish rolling out; omit tools to inherit the session policy and retry",
+    });
+  }
   const { settings, db, bus, workflowClient, objectStorage } = deps;
   const capabilityRuntimeSettings = await settingsWithEnabledCapabilityMcpServers(
     db,

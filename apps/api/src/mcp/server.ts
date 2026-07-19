@@ -1824,9 +1824,9 @@ function registerGitHubConnectTool(
 }
 
 // Secret-safe OPE-41 recovery surface. Token mint/write/renewal belongs to the
-// worker host and never crosses MCP/model output. This tool reports whether the
-// exact session has a renewable repository binding and names the human action
-// needed when it does not.
+// worker host and never crosses MCP/model output. Repository binding metadata
+// alone does not prove that the broker token is currently live or renewable,
+// so this tool fails closed unless an authoritative health seam says otherwise.
 function registerGitHubCredentialStatusTool(
   server: McpServer,
   deps: ApiRouteDeps,
@@ -1838,7 +1838,7 @@ function registerGitHubCredentialStatusTool(
     "github_credential_status",
     {
       description:
-        "Check secret-safe GitHub credential availability for this session. The host renews selected repository credentials automatically; this returns typed connect/rebind guidance and never returns a token.",
+        "Check secret-safe GitHub credential availability for this session. Repository binding metadata alone never proves a live or renewable host credential; this returns typed retry/connect/rebind guidance and never returns a token.",
       inputSchema: {},
     },
     async () => {
@@ -1885,11 +1885,17 @@ function registerGitHubCredentialStatusTool(
                         action: "configure",
                         message: "A deployment administrator must configure the GitHub App.",
                       }
-                    : {
-                        action: "rebind",
-                        message:
-                          "Select one installation's repositories when starting a session; this session has no usable GitHub repository binding.",
-                      },
+                    : health.action === "retry"
+                      ? {
+                          action: "retry",
+                          message:
+                            "Retry the host-managed credential operation; if the unknown state persists, reconnect the GitHub App or rebind this session's repository.",
+                        }
+                      : {
+                          action: "rebind",
+                          message:
+                            "Select repositories from one GitHub App installation/account scope when starting a session; this session has no usable GitHub repository binding.",
+                        },
             }
           : {}),
       });
@@ -1912,7 +1918,12 @@ export function githubCredentialHealthForBindings(input: {
   }
   const sessionInstallations = new Set(input.sessionInstallationIds);
   if (sessionInstallations.size === 1 && input.sessionInstallationIds.length > 0) {
-    return { state: "ready", reason: null, action: "none", renewal: "automatic" };
+    return {
+      state: "unavailable",
+      reason: "unknown",
+      action: "retry",
+      renewal: "inactive",
+    };
   }
   if (sessionInstallations.size > 1 || input.workspaceInstallationCount > 0) {
     return {

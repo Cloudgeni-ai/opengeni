@@ -26,9 +26,16 @@ import {
   type TestMcpServer,
 } from "@opengeni/testing";
 import type { Observability } from "@opengeni/observability";
-import type { AccessGrant } from "@opengeni/contracts";
+import type { AccessGrant, SessionToolPolicy } from "@opengeni/contracts";
 import type { ApiRouteDeps } from "@opengeni/core";
-import { createDb, createSession, type Database, type DbClient } from "@opengeni/db";
+import {
+  createDb,
+  createSession,
+  enableCapabilityInstallation,
+  upsertCapabilityCatalogItem,
+  type Database,
+  type DbClient,
+} from "@opengeni/db";
 import {
   isToolspaceGrant,
   prepareToolspaceMcpSurface,
@@ -78,10 +85,12 @@ function makeDeps(maxCallsPerTurn: number): ApiRouteDeps {
     toolspaceMaxCallsPerTurn: maxCallsPerTurn,
     mcpServers: [
       { id: "thirdparty", url: upstream!.url, cacheToolsList: false },
+      { id: "sibling", url: upstream!.url, cacheToolsList: false },
       // A first-party proxy id, configured + reachable, as a recursion trap: if
       // the exclusion filter regressed, its tools would show up in the surface.
       { id: "files", url: upstream!.url, cacheToolsList: false },
     ],
+    environmentsEncryptionKey: Buffer.alloc(32, 17).toString("base64"),
   });
   return {
     settings,
@@ -91,7 +100,15 @@ function makeDeps(maxCallsPerTurn: number): ApiRouteDeps {
   } as unknown as ApiRouteDeps;
 }
 
-async function seedSession(input: { selects: string[]; withActiveTurn: boolean }): Promise<{
+async function seedSession(input: {
+  selects: string[];
+  withActiveTurn: boolean;
+  toolPolicy?: SessionToolPolicy;
+  turnSelects?: string[];
+  turnToolsProvided?: boolean;
+  attachedServerIds?: string[];
+  dynamicCapabilityId?: string;
+}): Promise<{
   workspaceId: string;
   sessionId: string;
   turnId: string;
@@ -102,15 +119,41 @@ async function seedSession(input: { selects: string[]; withActiveTurn: boolean }
   const [workspace] = await admin<{ id: string }[]>`
     insert into workspaces (account_id, name) values (${account!.id}, 'ws') returning id`;
   await admin`insert into workspace_inference_controls (workspace_id, account_id) values (${workspace!.id}, ${account!.id})`;
+  if (input.dynamicCapabilityId) {
+    await upsertCapabilityCatalogItem(db, {
+      accountId: account!.id,
+      workspaceId: workspace!.id,
+      id: `mcp:test:${input.dynamicCapabilityId}`,
+      kind: "mcp",
+      source: "manual",
+      name: `Dynamic ${input.dynamicCapabilityId}`,
+      endpointUrl: upstream!.url,
+      category: "test",
+      metadata: { mcpServerId: input.dynamicCapabilityId },
+    });
+    await enableCapabilityInstallation(db, {
+      accountId: account!.id,
+      workspaceId: workspace!.id,
+      capabilityId: `mcp:test:${input.dynamicCapabilityId}`,
+      kind: "mcp",
+      metadata: { mcpConnectivity: { status: "ok" } },
+    });
+  }
   const session = await createSession(db, {
     accountId: account!.id,
     workspaceId: workspace!.id,
     initialMessage: "hi",
     resources: [],
     tools: input.selects.map((id) => ({ kind: "mcp", id })),
+    ...(input.toolPolicy ? { toolPolicy: input.toolPolicy } : {}),
     metadata: {},
     model: "gpt-5.6-sol",
     sandboxBackend: "none",
+    mcpServers: (input.attachedServerIds ?? []).map((id) => ({
+      id,
+      url: upstream!.url,
+      headersEncrypted: {},
+    })),
   });
   const turnId = crypto.randomUUID();
   const attemptId = crypto.randomUUID();
@@ -119,11 +162,12 @@ async function seedSession(input: { selects: string[]; withActiveTurn: boolean }
       await tx`
       insert into session_turns
         (id, account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
-         status, position, prompt, model, reasoning_effort, sandbox_backend,
+         status, position, prompt, tools, tools_provided, model, reasoning_effort, sandbox_backend,
          execution_generation, active_attempt_id)
       values
         (${turnId}, ${account!.id}, ${workspace!.id}, ${session.id}, gen_random_uuid(), 'wf-1',
-         'running', 0, 'hi', 'gpt-5.6-sol', 'medium', 'none', 1, ${attemptId})`;
+         'running', 0, 'hi', ${admin.json((input.turnSelects ?? []).map((id) => ({ kind: "mcp", id })))},
+         ${input.turnToolsProvided ?? false}, 'gpt-5.6-sol', 'medium', 'none', 1, ${attemptId})`;
       await tx`
         insert into session_turn_attempts
           (id, account_id, workspace_id, session_id, turn_id, execution_generation,
@@ -278,6 +322,76 @@ describe("prepareToolspaceMcpSurface", () => {
       grant: grantFor(workspaceId, sessionId, turnId, attemptId),
     });
     expect(surface!.tools).toHaveLength(0);
+    await surface!.close();
+  }, 60_000);
+
+  test("an explicit empty exact turn hides a write-capable session-selected MCP", async () => {
+    if (!available) return;
+    const { workspaceId, sessionId, turnId, attemptId } = await seedSession({
+      selects: ["thirdparty"],
+      toolPolicy: { mode: "explicit", inheritedFromSessionId: null },
+      turnSelects: [],
+      turnToolsProvided: true,
+      withActiveTurn: true,
+    });
+    const surface = await prepareToolspaceMcpSurface({
+      deps: makeDeps(200),
+      grant: grantFor(workspaceId, sessionId, turnId, attemptId),
+    });
+    expect(toolNames(surface!)).toEqual([]);
+    await surface!.close();
+  }, 60_000);
+
+  test("an exact-turn subset hides its selected session sibling from listing and call routing", async () => {
+    if (!available) return;
+    const { workspaceId, sessionId, turnId, attemptId } = await seedSession({
+      selects: ["thirdparty", "sibling"],
+      toolPolicy: { mode: "explicit", inheritedFromSessionId: null },
+      turnSelects: ["thirdparty"],
+      turnToolsProvided: true,
+      withActiveTurn: true,
+    });
+    const surface = await prepareToolspaceMcpSurface({
+      deps: makeDeps(200),
+      grant: grantFor(workspaceId, sessionId, turnId, attemptId),
+    });
+    expect(toolNames(surface!).some((name) => name.startsWith("thirdparty__"))).toBe(true);
+    expect(toolNames(surface!).some((name) => name.startsWith("sibling__"))).toBe(false);
+    expect(surface!.tools.find((tool) => tool.name.startsWith("sibling__"))).toBeUndefined();
+    await surface!.close();
+  }, 60_000);
+
+  test("an attached-but-unselected session MCP never enters Toolspace", async () => {
+    if (!available) return;
+    const { workspaceId, sessionId, turnId, attemptId } = await seedSession({
+      selects: ["thirdparty"],
+      toolPolicy: { mode: "explicit", inheritedFromSessionId: null },
+      attachedServerIds: ["attached"],
+      withActiveTurn: true,
+    });
+    const surface = await prepareToolspaceMcpSurface({
+      deps: makeDeps(200),
+      grant: grantFor(workspaceId, sessionId, turnId, attemptId),
+    });
+    expect(toolNames(surface!).some((name) => name.startsWith("thirdparty__"))).toBe(true);
+    expect(toolNames(surface!).some((name) => name.startsWith("attached__"))).toBe(false);
+    await surface!.close();
+  }, 60_000);
+
+  test("an omitted workspace-default turn mirrors the currently enabled dynamic capability", async () => {
+    if (!available) return;
+    const { workspaceId, sessionId, turnId, attemptId } = await seedSession({
+      selects: ["opengeni"],
+      toolPolicy: { mode: "workspace_default", inheritedFromSessionId: null },
+      dynamicCapabilityId: "dynamic",
+      turnToolsProvided: false,
+      withActiveTurn: true,
+    });
+    const surface = await prepareToolspaceMcpSurface({
+      deps: makeDeps(200),
+      grant: grantFor(workspaceId, sessionId, turnId, attemptId),
+    });
+    expect(toolNames(surface!).some((name) => name.startsWith("dynamic__"))).toBe(true);
     await surface!.close();
   }, 60_000);
 

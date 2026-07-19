@@ -11,6 +11,7 @@
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import type { SessionToolPolicy, ToolRef } from "@opengeni/contracts";
 import {
   admitToolspaceTurnAttempt,
   createDb,
@@ -101,6 +102,32 @@ async function currentCount(turnId: string): Promise<number> {
 }
 
 describe("reserveToolspaceCallForTurn", () => {
+  test("admission returns the exact locked session and turn tool provenance", async () => {
+    if (!available) return;
+    const { workspaceId, claims } = await freshTurn();
+    const sessionTools = [{ kind: "mcp", id: "session-selected" }] satisfies ToolRef[];
+    const toolPolicy = {
+      mode: "explicit",
+      inheritedFromSessionId: null,
+    } satisfies SessionToolPolicy;
+    const turnTools = [{ kind: "mcp", id: "turn-selected" }] satisfies ToolRef[];
+    await admin`
+      update sessions
+      set tools = ${admin.json(sessionTools)}, tool_policy = ${admin.json(toolPolicy)}
+      where id = ${claims.sessionId}`;
+    await admin`
+      update session_turns
+      set tools = ${admin.json(turnTools)}, tools_provided = true
+      where id = ${claims.turnId}`;
+
+    expect(await admitToolspaceTurnAttempt(db, workspaceId, claims)).toEqual({
+      sessionTools,
+      toolPolicy,
+      turnTools,
+      toolsProvided: true,
+    });
+  }, 60_000);
+
   test("N parallel reservations with limit < N: exactly `limit` succeed", async () => {
     if (!available) return;
     const { workspaceId, claims } = await freshTurn();
@@ -159,8 +186,8 @@ describe("reserveToolspaceCallForTurn", () => {
     const wrongAttempt = { ...claims, attemptId: crypto.randomUUID() };
     const wrongGeneration = { ...claims, executionGeneration: claims.executionGeneration + 1 };
 
-    expect(await admitToolspaceTurnAttempt(db, workspaceId, wrongAttempt)).toBe(false);
-    expect(await admitToolspaceTurnAttempt(db, workspaceId, wrongGeneration)).toBe(false);
+    expect(await admitToolspaceTurnAttempt(db, workspaceId, wrongAttempt)).toBeNull();
+    expect(await admitToolspaceTurnAttempt(db, workspaceId, wrongGeneration)).toBeNull();
     expect(await reserveToolspaceCallForTurn(db, workspaceId, wrongAttempt, 10)).toEqual({
       reserved: false,
       reason: "inactive",
@@ -177,7 +204,7 @@ describe("reserveToolspaceCallForTurn", () => {
     const { workspaceId, claims } = await freshTurn();
     await admin`update sessions set active_turn_id = null where id = ${claims.sessionId}`;
 
-    expect(await admitToolspaceTurnAttempt(db, workspaceId, claims)).toBe(false);
+    expect(await admitToolspaceTurnAttempt(db, workspaceId, claims)).toBeNull();
     expect(await reserveToolspaceCallForTurn(db, workspaceId, claims, 10)).toEqual({
       reserved: false,
       reason: "inactive",
