@@ -821,6 +821,52 @@ describe("useComposer durable draft and control binding", () => {
     await hook.unmount();
   });
 
+  test("a live queue mutation preserves an unsaved local draft", async () => {
+    let current: ComposerDraft = {
+      revision: 1,
+      text: "initial server draft",
+      resources: [],
+      tools: [],
+      toolsProvided: false,
+      model: "model-x",
+      reasoningEffort: "medium",
+      sourceTurnId: null,
+      sourceTurnVersion: null,
+      updatedAt: new Date().toISOString(),
+    };
+    let reads = 0;
+    const client = fakeClient({
+      getComposerDraft: async () => {
+        reads += 1;
+        return current;
+      },
+    });
+    const hook = await renderHook(
+      (events: SessionEvent[]) =>
+        useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events }),
+      noEvents,
+    );
+    await flush();
+
+    await flushing(() => {
+      hook.result.current.setValue("Unsent local draft that must not be overwritten");
+    });
+    current = {
+      ...current,
+      revision: 2,
+      text: "",
+    };
+    await hook.rerender([
+      makeEvent(1, "session.queue.changed", { operation: "edit", queueVersion: 2 }),
+    ]);
+    await flush();
+
+    expect(reads).toBe(2);
+    expect(hook.result.current.draftRevision).toBe(2);
+    expect(hook.result.current.value).toBe("Unsent local draft that must not be overwritten");
+    await hook.unmount();
+  });
+
   test("hydrates, autosaves with OCC, and sends the acknowledged draft/control revision", async () => {
     const saved: unknown[] = [];
     const sent: unknown[] = [];

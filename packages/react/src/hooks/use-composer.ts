@@ -142,6 +142,22 @@ export function useComposer(
       if (!sessionId) return;
       const generation = targetGeneration.current;
       const localAtStart = localEditRevision.current;
+      const baseAtStart = draftRef.current;
+      const extrasAtStart = resolveSendExtras(sendExtrasRef.current);
+      const localSignatureAtStart = baseAtStart
+        ? draftSignature(
+            composerDraftPayload(
+              baseAtStart,
+              valueRef.current,
+              restoredResourcesRef.current,
+              extrasAtStart,
+            ),
+          )
+        : null;
+      const localWasDirtyAtStart =
+        localSignatureAtStart === null
+          ? localAtStart !== 0
+          : localSignatureAtStart !== lastSavedSignature.current;
       setDraftLoading(true);
       try {
         const fetched = await client.getComposerDraft(workspaceId, sessionId);
@@ -149,7 +165,7 @@ export function useComposer(
         draftRef.current = fetched;
         setDraft(fetched);
         setDraftConflict(null);
-        if (replaceLocal || localAtStart === localEditRevision.current) {
+        if (replaceLocal || (!localWasDirtyAtStart && localAtStart === localEditRevision.current)) {
           valueRef.current = fetched.text;
           restoredResourcesRef.current = fetched.resources;
           lastSavedSignature.current = draftSignature(draftPayload(fetched));
@@ -193,16 +209,7 @@ export function useComposer(
     const base = draftRef.current;
     if (!base) return null;
     const extras = resolveSendExtras(sendExtrasRef.current);
-    const toolsProvidedByHost = Object.prototype.hasOwnProperty.call(extras, "tools");
-    return {
-      expectedRevision: base.revision,
-      text: value,
-      resources: mergeResources(restoredResources, extras.resources ?? []),
-      tools: toolsProvidedByHost ? (extras.tools ?? []) : base.tools,
-      toolsProvided: toolsProvidedByHost ? true : base.toolsProvided,
-      model: extras.model ?? base.model,
-      reasoningEffort: extras.reasoningEffort ?? base.reasoningEffort,
-    };
+    return composerDraftPayload(base, value, restoredResources, extras);
   }, [restoredResources, value]);
 
   const persistPayload = useCallback(
@@ -586,6 +593,24 @@ function draftPayload(draft: ComposerDraft): SaveComposerDraftRequest {
     toolsProvided: draft.toolsProvided,
     model: draft.model,
     reasoningEffort: draft.reasoningEffort,
+  };
+}
+
+function composerDraftPayload(
+  base: ComposerDraft,
+  text: string,
+  restoredResources: ResourceRef[],
+  extras: ComposerSendExtras,
+): SaveComposerDraftRequest {
+  const toolsProvidedByHost = Object.prototype.hasOwnProperty.call(extras, "tools");
+  return {
+    expectedRevision: base.revision,
+    text,
+    resources: mergeResources(restoredResources, extras.resources ?? []),
+    tools: toolsProvidedByHost ? (extras.tools ?? []) : base.tools,
+    toolsProvided: toolsProvidedByHost ? true : base.toolsProvided,
+    model: extras.model ?? base.model,
+    reasoningEffort: extras.reasoningEffort ?? base.reasoningEffort,
   };
 }
 
