@@ -13,6 +13,7 @@ import {
   autoResumeSessionBranchInTransaction,
   canonicalSessionCommandHash,
   evaluateSessionControl,
+  lockSessionEventWriteRows,
   lockWorkspaceInferenceControl,
   registerInternalUpdateWakeInTransaction,
   reserveSessionCommandReceipt,
@@ -99,12 +100,13 @@ async function lockSession(
   workspaceId: string,
   sessionId: string,
 ): Promise<typeof schema.sessions.$inferSelect> {
-  const [session] = await db
-    .select()
-    .from(schema.sessions)
-    .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
-    .for("update")
-    .limit(1);
+  const locks = await lockSessionEventWriteRows(db, {
+    workspaceId,
+    controlLock: "already_locked",
+    workspaceLock: "already_locked",
+    sessionIds: [sessionId],
+  });
+  const session = locks.sessions[0];
   if (!session) throw new Error(`Session not found: ${sessionId}`);
   return session;
 }
@@ -142,7 +144,7 @@ export async function supersedeSessionCurrentDirectionInTransaction(
       lastSequence: input.lastSequence,
     };
   }
-  const [current] = await db
+  const [preview] = await db
     .select()
     .from(schema.sessionTurns)
     .where(
@@ -152,8 +154,15 @@ export async function supersedeSessionCurrentDirectionInTransaction(
         eq(schema.sessionTurns.id, input.activeTurnId),
       ),
     )
-    .for("update")
     .limit(1);
+  const locks = await lockSessionEventWriteRows(db, {
+    workspaceId: input.workspaceId,
+    controlLock: "already_locked",
+    workspaceLock: "already_locked",
+    turnIds: [input.activeTurnId],
+    attemptIds: preview?.activeAttemptId ? [preview.activeAttemptId] : [],
+  });
+  const current = locks.turns[0];
   if (!current) {
     throw new SessionControlInvariantError(
       `Session ${input.sessionId} points to missing active turn ${input.activeTurnId}`,
@@ -274,7 +283,16 @@ async function loadQueuedTurns(
       asc(schema.sessionTurns.createdAt),
       asc(schema.sessionTurns.id),
     );
-  return lock ? await query.for("update") : await query;
+  const rows = await query;
+  if (!lock || rows.length === 0) return rows;
+  const locks = await lockSessionEventWriteRows(db, {
+    workspaceId,
+    controlLock: "already_locked",
+    workspaceLock: "already_locked",
+    turnIds: rows.map((row) => row.id),
+  });
+  const byId = new Map(locks.turns.map((row) => [row.id, row]));
+  return rows.map((row) => byId.get(row.id)).filter((row): row is QueuedTurnRow => Boolean(row));
 }
 
 async function normalizeQueuePositions(
@@ -320,7 +338,12 @@ function draftIsNonEmpty(draft: ComposerDraftRow): boolean {
 
 export async function getComposerDraftInTransaction(
   db: Database,
-  input: { workspaceId: string; sessionId: string; subjectId: string; lock?: boolean },
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    subjectId: string;
+    lock?: boolean;
+  },
 ): Promise<ComposerDraftRow | null> {
   const query = db
     .select()
@@ -353,8 +376,15 @@ export async function saveComposerDraftInTransaction(
   },
 ): Promise<ComposerDraftRow> {
   await lockWorkspaceInferenceControl(db, input.workspaceId, "share");
+  await lockSessionEventWriteRows(db, {
+    workspaceId: input.workspaceId,
+    controlLock: "already_locked",
+  });
   await lockSession(db, input.workspaceId, input.sessionId);
-  const current = await getComposerDraftInTransaction(db, { ...input, lock: true });
+  const current = await getComposerDraftInTransaction(db, {
+    ...input,
+    lock: true,
+  });
   const currentRevision = current?.revision ?? 0;
   if (currentRevision !== input.expectedRevision) {
     throw new QueueCommandConflictError("DRAFT_CHANGED", "Composer draft changed", {
@@ -403,6 +433,10 @@ export async function moveQueuedTurnInTransaction(
   },
 ): Promise<QueueCommandResult> {
   await lockWorkspaceInferenceControl(db, input.workspaceId, "share");
+  await lockSessionEventWriteRows(db, {
+    workspaceId: input.workspaceId,
+    controlLock: "already_locked",
+  });
   const session = await lockSession(db, input.workspaceId, input.sessionId);
   const requestHash = canonicalSessionCommandHash({
     beforeTurnId: input.beforeTurnId,
@@ -494,7 +528,11 @@ export async function moveQueuedTurnInTransaction(
     eventIds.push(event.id);
     await db
       .update(schema.sessions)
-      .set({ queueVersion, lastSequence: session.lastSequence + 1, updatedAt: new Date() })
+      .set({
+        queueVersion,
+        lastSequence: session.lastSequence + 1,
+        updatedAt: new Date(),
+      })
       .where(eq(schema.sessions.id, input.sessionId));
   }
   const receipt = await updateSessionCommandReceiptResult(db, reserved.receipt.id, {
@@ -525,6 +563,10 @@ export async function deleteSessionQueueItemInTransaction(
   },
 ): Promise<QueueCommandResult> {
   await lockWorkspaceInferenceControl(db, input.workspaceId, "share");
+  await lockSessionEventWriteRows(db, {
+    workspaceId: input.workspaceId,
+    controlLock: "already_locked",
+  });
   const session = await lockSession(db, input.workspaceId, input.sessionId);
   const requestHash = canonicalSessionCommandHash({
     expectedTurnVersion: input.expectedTurnVersion,
@@ -549,18 +591,14 @@ export async function deleteSessionQueueItemInTransaction(
       replay: true,
     };
   }
-  const [turn] = await db
-    .select()
-    .from(schema.sessionTurns)
-    .where(
-      and(
-        eq(schema.sessionTurns.workspaceId, input.workspaceId),
-        eq(schema.sessionTurns.sessionId, input.sessionId),
-        eq(schema.sessionTurns.id, input.turnId),
-      ),
-    )
-    .for("update")
-    .limit(1);
+  const turn = (
+    await lockSessionEventWriteRows(db, {
+      workspaceId: input.workspaceId,
+      controlLock: "already_locked",
+      workspaceLock: "already_locked",
+      turnIds: [input.turnId],
+    })
+  ).turns[0];
   if (!turn || turn.status !== "queued" || !["user", "api"].includes(turn.source)) {
     throw new QueueCommandConflictError("QUEUE_PROMPT_STARTED", "Prompt is no longer waiting", {
       queueVersion: session.queueVersion,
@@ -616,7 +654,11 @@ export async function deleteSessionQueueItemInTransaction(
   if (!event) throw new Error("Queue delete event was not inserted");
   await db
     .update(schema.sessions)
-    .set({ queueVersion, lastSequence: session.lastSequence + 1, updatedAt: now })
+    .set({
+      queueVersion,
+      lastSequence: session.lastSequence + 1,
+      updatedAt: now,
+    })
     .where(eq(schema.sessions.id, input.sessionId));
   const receipt = await updateSessionCommandReceiptResult(db, reserved.receipt.id, {
     queueVersion,
@@ -648,6 +690,10 @@ export async function editQueuedTurnInTransaction(
   },
 ): Promise<EditQueueCommandResult> {
   await lockWorkspaceInferenceControl(db, input.workspaceId, "share");
+  await lockSessionEventWriteRows(db, {
+    workspaceId: input.workspaceId,
+    controlLock: "already_locked",
+  });
   const session = await lockSession(db, input.workspaceId, input.sessionId);
   const requestHash = canonicalSessionCommandHash({
     expectedTurnVersion: input.expectedTurnVersion,
@@ -664,7 +710,10 @@ export async function editQueuedTurnInTransaction(
     operationKey: input.operationKey,
     canonicalRequestHash: requestHash,
   });
-  const existingDraft = await getComposerDraftInTransaction(db, { ...input, lock: true });
+  const existingDraft = await getComposerDraftInTransaction(db, {
+    ...input,
+    lock: true,
+  });
   if (reserved.replay && reserved.receipt.appliedQueueVersion !== null) {
     if (!existingDraft) throw new Error("Replayed queue Edit has no durable draft");
     return {
@@ -689,18 +738,14 @@ export async function editQueuedTurnInTransaction(
       draftRevision,
     });
   }
-  const [turn] = await db
-    .select()
-    .from(schema.sessionTurns)
-    .where(
-      and(
-        eq(schema.sessionTurns.workspaceId, input.workspaceId),
-        eq(schema.sessionTurns.sessionId, input.sessionId),
-        eq(schema.sessionTurns.id, input.turnId),
-      ),
-    )
-    .for("update")
-    .limit(1);
+  const turn = (
+    await lockSessionEventWriteRows(db, {
+      workspaceId: input.workspaceId,
+      controlLock: "already_locked",
+      workspaceLock: "already_locked",
+      turnIds: [input.turnId],
+    })
+  ).turns[0];
   if (!turn || turn.status !== "queued" || !["user", "api"].includes(turn.source)) {
     throw new QueueCommandConflictError("QUEUE_PROMPT_STARTED", "Prompt is no longer waiting", {
       queueVersion: session.queueVersion,
@@ -780,7 +825,11 @@ export async function editQueuedTurnInTransaction(
   if (!event) throw new Error("Queue edit event was not inserted");
   await db
     .update(schema.sessions)
-    .set({ queueVersion, lastSequence: session.lastSequence + 1, updatedAt: now })
+    .set({
+      queueVersion,
+      lastSequence: session.lastSequence + 1,
+      updatedAt: now,
+    })
     .where(eq(schema.sessions.id, input.sessionId));
   const receipt = await updateSessionCommandReceiptResult(db, reserved.receipt.id, {
     queueVersion,
@@ -788,7 +837,14 @@ export async function editQueuedTurnInTransaction(
     draftRevision: nextDraftRevision,
     result: { sourceTurnId: turn.id },
   });
-  return { receipt, queueVersion, items: remaining, draft, eventIds: [event.id], replay: false };
+  return {
+    receipt,
+    queueVersion,
+    items: remaining,
+    draft,
+    eventIds: [event.id],
+    replay: false,
+  };
 }
 
 export async function steerQueuedTurnInTransaction(
@@ -804,7 +860,18 @@ export async function steerQueuedTurnInTransaction(
     operationKey: string;
   },
 ): Promise<SteerQueueCommandResult> {
-  await lockWorkspaceInferenceControl(db, input.workspaceId, "update");
+  const workspaceControl = await lockWorkspaceInferenceControl(db, input.workspaceId, "update");
+  await lockSessionEventWriteRows(db, {
+    workspaceId: input.workspaceId,
+    controlLock: "already_locked",
+    sessionIds:
+      input.actor.type === "agent_attempt"
+        ? [input.actor.sessionId, input.sessionId]
+        : [input.sessionId],
+    turnIds:
+      input.actor.type === "agent_attempt" ? [input.actor.turnId, input.turnId] : [input.turnId],
+    attemptIds: input.actor.type === "agent_attempt" ? [input.actor.attemptId] : [],
+  });
   const requestHash = canonicalSessionCommandHash({
     expectedTurnVersion: input.expectedTurnVersion,
     controlEtag: input.controlEtag ?? null,
@@ -843,7 +910,7 @@ export async function steerQueuedTurnInTransaction(
     });
   }
   const before = await evaluateSessionControl(db, input.workspaceId, input.sessionId, {
-    lock: "share",
+    workspaceControl,
   });
   if (input.controlEtag && input.controlEtag !== before.controlEtag) {
     throw new SessionControlConflictError();
@@ -1021,10 +1088,23 @@ export async function submitHumanPromptInTransaction(
     reasoningEffort?: ReasoningEffort | null;
     reasoningEffortFallback: ReasoningEffort;
     source: "user" | "api";
-    mcpCredentialUpdates?: Array<{ id: string; headersEncrypted: Record<string, string> }>;
+    mcpCredentialUpdates?: Array<{
+      id: string;
+      headersEncrypted: Record<string, string>;
+    }>;
   },
 ): Promise<SubmitHumanPromptResult> {
-  await lockWorkspaceInferenceControl(db, input.workspaceId, "update");
+  const workspaceControl = await lockWorkspaceInferenceControl(db, input.workspaceId, "update");
+  await lockSessionEventWriteRows(db, {
+    workspaceId: input.workspaceId,
+    controlLock: "already_locked",
+    sessionIds:
+      input.actor.type === "agent_attempt"
+        ? [input.actor.sessionId, input.sessionId]
+        : [input.sessionId],
+    turnIds: input.actor.type === "agent_attempt" ? [input.actor.turnId] : [],
+    attemptIds: input.actor.type === "agent_attempt" ? [input.actor.attemptId] : [],
+  });
   const requestHash = canonicalSessionCommandHash({
     delivery: input.delivery,
     controlEtag: input.controlEtag ?? null,
@@ -1074,7 +1154,7 @@ export async function submitHumanPromptInTransaction(
   }
 
   const before = await evaluateSessionControl(db, input.workspaceId, input.sessionId, {
-    lock: "share",
+    workspaceControl,
   });
   if (input.controlEtag && input.controlEtag !== before.controlEtag) {
     throw new SessionControlConflictError();
@@ -1370,7 +1450,11 @@ export async function submitHumanPromptInTransaction(
     action: input.delivery === "steer" ? "session.prompt.steer" : "session.prompt.send",
     targetType: "session_turn",
     targetId: turnId,
-    metadata: { operationId: reserved.receipt.id, replacedTurnId, interruptionCount },
+    metadata: {
+      operationId: reserved.receipt.id,
+      replacedTurnId,
+      interruptionCount,
+    },
   });
   const eventIds = eventRows.map((event) => event.id);
   const receipt = await updateSessionCommandReceiptResult(db, reserved.receipt.id, {
@@ -1412,7 +1496,14 @@ export async function sendAgentMessageInTransaction(
     text: string;
   },
 ): Promise<AgentInternalUpdateCommandResult> {
-  await lockWorkspaceInferenceControl(db, input.workspaceId, "share");
+  const workspaceControl = await lockWorkspaceInferenceControl(db, input.workspaceId, "share");
+  await lockSessionEventWriteRows(db, {
+    workspaceId: input.workspaceId,
+    controlLock: "already_locked",
+    sessionIds: [input.actor.sessionId, input.targetSessionId],
+    turnIds: [input.actor.turnId],
+    attemptIds: [input.actor.attemptId],
+  });
   const requestHash = canonicalSessionCommandHash({ text: input.text });
   const reserved = await reserveSessionCommandReceipt(db, {
     accountId: input.accountId,
@@ -1463,7 +1554,7 @@ export async function sendAgentMessageInTransaction(
     );
   }
   const effective = await evaluateSessionControl(db, input.workspaceId, input.targetSessionId, {
-    lock: "share",
+    workspaceControl,
   });
   const now = new Date();
   const [update] = await db
@@ -1577,6 +1668,13 @@ export async function steerAgentSessionInTransaction(
   },
 ): Promise<AgentInternalUpdateCommandResult> {
   await lockWorkspaceInferenceControl(db, input.workspaceId, "update");
+  await lockSessionEventWriteRows(db, {
+    workspaceId: input.workspaceId,
+    controlLock: "already_locked",
+    sessionIds: [input.actor.sessionId, input.targetSessionId],
+    turnIds: [input.actor.turnId],
+    attemptIds: [input.actor.attemptId],
+  });
   const reserved = await reserveSessionCommandReceipt(db, {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
@@ -1585,7 +1683,9 @@ export async function steerAgentSessionInTransaction(
     targetSessionId: input.targetSessionId,
     targetTurnId: null,
     operationKey: input.operationKey,
-    canonicalRequestHash: canonicalSessionCommandHash({ instruction: input.instruction }),
+    canonicalRequestHash: canonicalSessionCommandHash({
+      instruction: input.instruction,
+    }),
   });
   if (reserved.replay) {
     const updateId = String(reserved.receipt.result.updateId ?? "");
