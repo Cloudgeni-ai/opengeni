@@ -30,6 +30,8 @@ import {
   UpdateSessionGoalRequest,
   UpdateSessionRequest,
   ViewerHeartbeatRequest,
+  WORKSPACE_CONTROL_ACTOR_MAX_BYTES,
+  workspaceControlUtf8Bytes,
   type SandboxBackend,
   type Session,
   type TerminalPtyExitedPayload,
@@ -685,8 +687,14 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/control", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    if (workspaceControlUtf8Bytes(grant.subjectId) > WORKSPACE_CONTROL_ACTOR_MAX_BYTES) {
+      throw new HTTPException(400, { message: "workspace-control actor is too large" });
+    }
     const sessionId = c.req.param("sessionId");
-    const payload = SessionControlRequest.parse(await c.req.json());
+    const parsed = SessionControlRequest.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      throw new HTTPException(400, { message: "invalid session control request" });
+    }
     try {
       return c.json(
         await controlHumanSessionWorkstream(
@@ -697,7 +705,7 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
             sessionId,
             subjectId: grant.subjectId,
           },
-          payload,
+          parsed.data,
         ),
       );
     } catch (error) {

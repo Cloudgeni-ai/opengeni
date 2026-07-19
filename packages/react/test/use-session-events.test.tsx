@@ -159,6 +159,106 @@ describe("useSessionEvents", () => {
     await hook.unmount();
   });
 
+  test("an abort-insensitive old iterator cannot commit after a session switch", async () => {
+    let releaseOld!: () => void;
+    const oldReady = new Promise<void>((resolve) => {
+      releaseOld = resolve;
+    });
+    const oldEvent = event(1);
+    const newEvent: SessionEvent = {
+      ...event(1),
+      id: "evt-new-stream",
+      sessionId: SECOND_SESSION_ID,
+    };
+    const client = fakeClient({
+      streamEvents: (_workspaceId, sessionId) =>
+        (async function* () {
+          if (sessionId === SESSION_ID) {
+            // Deliberately ignore AbortSignal and yield after the old effect's cleanup.
+            await oldReady;
+            yield oldEvent;
+            return;
+          }
+          yield newEvent;
+        })(),
+    });
+    const hook = await renderHook(
+      (props: { sessionId: string }) =>
+        useSessionEvents(props.sessionId, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          replay: "full",
+        }),
+      { sessionId: SESSION_ID },
+    );
+
+    await hook.rerender({ sessionId: SECOND_SESSION_ID });
+    await flush(20);
+    expect(hook.result.current.events.map((item) => item.id)).toEqual(["evt-new-stream"]);
+
+    releaseOld();
+    await flush(20);
+    expect(hook.result.current.events.map((item) => item.id)).toEqual(["evt-new-stream"]);
+    expect(hook.result.current.events.map((item) => item.sessionId)).toEqual([SECOND_SESSION_ID]);
+
+    await hook.unmount();
+  });
+
+  test("an abort-insensitive old backward fetch cannot replace the new session window", async () => {
+    let releaseOlder!: (events: SessionEvent[]) => void;
+    const olderPage = new Promise<SessionEvent[]>((resolve) => {
+      releaseOlder = resolve;
+    });
+    const firstTail = event(101);
+    const secondEvent: SessionEvent = {
+      ...event(1, "session.created", {}),
+      id: "evt-second-session",
+      sessionId: SECOND_SESSION_ID,
+    };
+    const client = fakeClient({
+      listEvents: async (_workspaceId, sessionId, options = {}) => {
+        if (sessionId === SECOND_SESSION_ID) return [secondEvent];
+        if (options.before === Number.MAX_SAFE_INTEGER) return [firstTail];
+        if (options.before === 101) return await olderPage;
+        return [];
+      },
+      streamEvents: () =>
+        (async function* () {
+          // Keep the stream open contract without yielding.
+        })(),
+    });
+    const hook = await renderHook(
+      (props: { sessionId: string }) =>
+        useSessionEvents(props.sessionId, { client, workspaceId: WORKSPACE_ID }),
+      { sessionId: SESSION_ID },
+    );
+    await flush(20);
+    expect(hook.result.current.hasOlder).toBeTrue();
+
+    let oldLoad!: Promise<boolean>;
+    await actRun(() => {
+      oldLoad = hook.result.current.loadOlder();
+    });
+    expect(hook.result.current.loadingOlder).toBeTrue();
+
+    await hook.rerender({ sessionId: SECOND_SESSION_ID });
+    await flush(20);
+    expect(hook.result.current.loadingOlder).toBeFalse();
+    expect(hook.result.current.events.map((item) => item.id)).toEqual(["evt-second-session"]);
+
+    releaseOlder([
+      event(1, "session.created", {}),
+      ...Array.from({ length: 99 }, (_, index) => event(index + 2)),
+    ]);
+    expect(await actRun(async () => await oldLoad)).toBeFalse();
+    await flush(20);
+    expect(hook.result.current.loadingOlder).toBeFalse();
+    expect(hook.result.current.events.map((item) => item.id)).toEqual(["evt-second-session"]);
+    expect(hook.result.current.events.map((item) => item.sessionId)).toEqual([SECOND_SESSION_ID]);
+
+    await hook.unmount();
+  });
+
   test("boundary snap trims a mid-turn window top to the oldest user message in the buffer", async () => {
     const store = [
       event(1, "session.created", {}),
@@ -613,6 +713,12 @@ describe("boundBrowserSessionEventWindow", () => {
     expect(window.bytes).toBeLessThanOrEqual(SESSION_EVENT_BROWSER_SINGLE_EVENT_MAX_BYTES);
     expect(payload.id).toBe("call-circular");
     expect(truncation.reason).toBe("event_not_serializable");
+    expect(truncation.originalBytes).toBeNull();
+    expect(truncation.omittedBytes).toBeNull();
+    expect(truncation.estimatedOriginalTokens).toBeNull();
+    expect(truncation.deliveredBytes).toBe(
+      new TextEncoder().encode(JSON.stringify(retained)).byteLength,
+    );
     expect(truncation.fullEvidence).toEqual({
       available: false,
       reason: "not_retained",

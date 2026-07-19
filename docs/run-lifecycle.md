@@ -244,6 +244,16 @@ during the rolling migration and are defensively normalized at each outbound
 boundary. Generic omitted output is unavailable unless a separate
 access-controlled artifact/file receipt explicitly retained it.
 
+Workspace-control events follow a smaller independent contract because they are
+cursor invalidations, not evidence or conversation history. Human reason input
+is limited to 8 KiB UTF-8 (and cannot contain NUL), authenticated actor ids are
+limited to 1 KiB, and the durable event is at most 16 KiB with explicit original /
+delivered / omitted byte facts for guarded historical or direct-writer values.
+The generic full value was not retained. NATS asserts a 32-KiB message, SSE uses
+the same one-frame 96-KiB connection queue, and REST pages use a separate 1-MiB
+byte envelope plus the last delivered sequence as the resume cursor. Replaying
+one guarded poison row must still advance to every later durable revision.
+
 Sandbox recovery state is persisted separately again, in
 `sandbox_session_envelopes`: the small versioned descriptor (provider handle /
 snapshot reference / manifest) used to reattach, snapshot-restore, or rebuild

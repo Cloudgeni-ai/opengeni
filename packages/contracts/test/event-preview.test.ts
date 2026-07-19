@@ -85,4 +85,39 @@ describe("bounded session event payloads", () => {
     );
     expect(sessionEventPayloadTruncation(bounded)?.surface).toBe("sse_legacy_guard");
   });
+
+  test("reports cyclic source size as unknown instead of measuring a placeholder", () => {
+    const cyclic: Record<string, unknown> = { id: "cyclic-output", text: "visible" };
+    cyclic.self = cyclic;
+
+    const bounded = boundSessionEventPayload(cyclic);
+    const metadata = sessionEventPayloadTruncation(bounded);
+
+    expect(sessionEventJsonBytes(bounded)).toBeLessThanOrEqual(SESSION_EVENT_PAYLOAD_MAX_BYTES);
+    expect(metadata).toMatchObject({
+      reason: "payload_not_serializable",
+      originalBytes: null,
+      omittedBytes: null,
+      estimatedOriginalTokens: null,
+      deliveredBytes: sessionEventJsonBytes(bounded),
+    });
+  });
+
+  test("turns BigInt, function, and symbol values into serializable explicit omissions", () => {
+    const bounded = boundSessionEventPayload({
+      id: "unserializable-values",
+      bigint: 10n,
+      function: () => "not retained",
+      symbol: Symbol("not retained"),
+    });
+    const metadata = sessionEventPayloadTruncation(bounded);
+
+    expect(() => JSON.stringify(bounded)).not.toThrow();
+    expect(JSON.stringify(bounded)).toContain("bigint value omitted");
+    expect(JSON.stringify(bounded)).toContain("function value omitted");
+    expect(JSON.stringify(bounded)).toContain("symbol value omitted");
+    expect(metadata?.reason).toBe("payload_not_serializable");
+    expect(metadata?.originalBytes).toBeNull();
+    expect(metadata?.deliveredBytes).toBe(sessionEventJsonBytes(bounded));
+  });
 });

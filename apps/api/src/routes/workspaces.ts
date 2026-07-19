@@ -7,9 +7,11 @@ import {
   UpdateWorkspaceModelPolicyRequest,
   UpdateWorkspaceRequest,
   UpdateWorkspaceSettingsRequest,
+  WORKSPACE_CONTROL_ACTOR_MAX_BYTES,
   WorkspaceInferenceControlRequest,
   Workspace,
   WorkspaceMember,
+  workspaceControlUtf8Bytes,
   type AccessContext,
   type Permission,
 } from "@opengeni/contracts";
@@ -34,6 +36,7 @@ import {
   updateWorkspaceSettings,
   upsertWorkspaceModelPolicy,
 } from "@opengeni/db";
+import { boundWorkspaceControlHttpPage } from "@opengeni/events";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { hasPermission, requireAccessContext, requireAccessGrant } from "@opengeni/core";
@@ -171,12 +174,18 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/inference-control", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
-    const payload = WorkspaceInferenceControlRequest.parse(await c.req.json());
+    if (workspaceControlUtf8Bytes(grant.subjectId) > WORKSPACE_CONTROL_ACTOR_MAX_BYTES) {
+      throw new HTTPException(400, { message: "workspace-control actor is too large" });
+    }
+    const parsed = WorkspaceInferenceControlRequest.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      throw new HTTPException(400, { message: "invalid workspace inference-control request" });
+    }
     return c.json(
       await controlHumanWorkspace(
         { db: deps.db, bus: deps.bus, workflowClient: deps.workflowClient },
         { accountId: grant.accountId, workspaceId, subjectId: grant.subjectId },
-        payload,
+        parsed.data,
       ),
     );
   });
@@ -185,14 +194,19 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "workspace:read");
     const after = Math.max(0, Number.parseInt(c.req.query("after") ?? "0", 10) || 0);
-    return c.json(
-      await listWorkspaceControlEvents(
-        deps.db,
-        workspaceId,
-        after,
-        boundedLimit(c.req.query("limit")),
-      ),
+    const events = await listWorkspaceControlEvents(
+      deps.db,
+      workspaceId,
+      after,
+      boundedLimit(c.req.query("limit")),
     );
+    const page = boundWorkspaceControlHttpPage(events);
+    c.header("X-OpenGeni-Page-Bytes", String(page.bytes));
+    c.header("X-OpenGeni-Page-Truncated", String(page.truncated));
+    if (page.nextSequence !== null) {
+      c.header("X-OpenGeni-Next-After", String(page.nextSequence));
+    }
+    return c.json(page.events);
   });
 
   app.get("/v1/workspaces/:workspaceId/control-events/stream", async (c) => {

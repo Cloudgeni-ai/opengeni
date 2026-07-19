@@ -89,7 +89,11 @@ export function sanitizeEventString(value: string): string {
  * keys are sanitized too -- they are jsonb-constrained the same as values.
  */
 export function sanitizeEventPayload<T>(payload: T): T {
-  return boundSessionEventPayload(sanitizeEventPayloadDeep(payload));
+  // Bound first. The preview walker caps depth/container fan-out and replaces
+  // inline media before this sanitizer allocates a deep clone. Reversing this
+  // order lets a cyclic, deeply nested, or multi-megabyte tool result exhaust
+  // the stack/heap before the durable 64 KiB event boundary can protect it.
+  return sanitizeEventPayloadDeep(boundSessionEventPayload(payload));
 }
 
 function sanitizeEventPayloadDeep<T>(payload: T): T {
@@ -119,21 +123,36 @@ function sanitizeEventPayloadDeep<T>(payload: T): T {
  * performs only the database-safety repair (NUL removal and UTF-16 repair).
  */
 export function sanitizeModelPayload<T>(payload: T): T {
+  return sanitizeModelPayloadDeep(payload, new WeakSet<object>(), 0);
+}
+
+const MODEL_PAYLOAD_SANITIZE_MAX_DEPTH = 64;
+const MODEL_PAYLOAD_CYCLE_MARKER = "[OpenGeni omitted cyclic model payload]";
+const MODEL_PAYLOAD_DEPTH_MARKER = "[OpenGeni omitted model payload beyond database-safety depth]";
+
+function sanitizeModelPayloadDeep<T>(payload: T, seen: WeakSet<object>, depth: number): T {
   if (typeof payload === "string") {
     return sanitizeEventString(payload) as unknown as T;
   }
-  if (Array.isArray(payload)) {
-    return payload.map((item) => sanitizeModelPayload(item)) as unknown as T;
+  if (!payload || typeof payload !== "object") return payload;
+  if (depth >= MODEL_PAYLOAD_SANITIZE_MAX_DEPTH) {
+    return MODEL_PAYLOAD_DEPTH_MARKER as unknown as T;
   }
-  if (payload && typeof payload === "object") {
+  if (seen.has(payload)) return MODEL_PAYLOAD_CYCLE_MARKER as unknown as T;
+  seen.add(payload);
+  try {
+    if (Array.isArray(payload)) {
+      return payload.map((item) => sanitizeModelPayloadDeep(item, seen, depth + 1)) as unknown as T;
+    }
     return Object.fromEntries(
       Object.entries(payload as Record<string, unknown>).map(([key, value]) => [
         sanitizeEventString(key),
-        sanitizeModelPayload(value),
+        sanitizeModelPayloadDeep(value, seen, depth + 1),
       ]),
     ) as unknown as T;
+  } finally {
+    seen.delete(payload);
   }
-  return payload;
 }
 
 function sanitizeSensitiveEventField(key: string, value: unknown): unknown {

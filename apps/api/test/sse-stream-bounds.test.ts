@@ -223,6 +223,54 @@ test("workspace-control SSE uses the same one-frame stall bound", async () => {
   await expect(response.body!.getReader().read()).rejects.toBeInstanceOf(TypeError);
 });
 
+test("workspace-control replay bounds a poison row and reconnect advances past it", async () => {
+  durableControlEvents = [
+    {
+      ...controlEvent(1),
+      reason: `HEAD-${"🙂".repeat(600_000)}-TAIL`,
+      actor: `actor-${"界".repeat(300_000)}`,
+    },
+    controlEvent(2),
+  ];
+  durableControlReads.length = 0;
+  const bus = {
+    subscribeWorkspaceControl: async () => () => {},
+  } as unknown as EventBus;
+  const response = await sseWorkspaceControlStream(
+    fakeDb as never,
+    bus,
+    WORKSPACE_ID,
+    0,
+    new AbortController().signal,
+    { stallTimeoutMs: 100 },
+  );
+  const reader = response.body!.getReader();
+  const replayed = await readControlEvents(reader, 2);
+
+  expect(replayed.map((candidate) => candidate.sequence)).toEqual([1, 2]);
+  expect(replayed[0]?.truncation).toMatchObject({
+    surface: "sse_legacy_guard",
+    fullEvidence: { available: false, reason: "not_retained" },
+  });
+  expect(replayed[1]?.truncation).toBeUndefined();
+  expect(durableControlReads).toEqual([{ after: 0, limit: 100 }]);
+  await reader.cancel();
+
+  const resumed = await sseWorkspaceControlStream(
+    fakeDb as never,
+    bus,
+    WORKSPACE_ID,
+    1,
+    new AbortController().signal,
+    { stallTimeoutMs: 100 },
+  );
+  const resumedReader = resumed.body!.getReader();
+  const resumedEvents = await readControlEvents(resumedReader, 1);
+  expect(resumedEvents.map((candidate) => candidate.sequence)).toEqual([2]);
+  expect(durableControlReads.at(-1)).toEqual({ after: 1, limit: 100 });
+  await resumedReader.cancel();
+});
+
 async function readSequences(
   reader: ReadableStreamDefaultReader<Uint8Array>,
   count: number,
@@ -240,6 +288,25 @@ async function readSequences(
     if (data) sequences.push((JSON.parse(data) as SessionEvent).sequence);
   }
   return sequences;
+}
+
+async function readControlEvents(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  count: number,
+): Promise<WorkspaceControlEvent[]> {
+  const events: WorkspaceControlEvent[] = [];
+  const decoder = new TextDecoder();
+  while (events.length < count) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    const data = decoder
+      .decode(value)
+      .split("\n")
+      .find((line) => line.startsWith("data: "))
+      ?.slice("data: ".length);
+    if (data) events.push(JSON.parse(data) as WorkspaceControlEvent);
+  }
+  return events;
 }
 
 async function waitFor(predicate: () => boolean, timeoutMs = 1_000): Promise<void> {

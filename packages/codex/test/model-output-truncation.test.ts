@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  MODEL_TOOL_OUTPUT_OVERSIZED_IMAGE_CARD_DATA_URL,
   MODEL_TOOL_OUTPUT_OPAQUE_PAYLOAD_MAX_BYTES,
   boundModelToolOutputItem,
   modelToolOutputSerializationBudgetTokens,
@@ -121,13 +122,32 @@ describe("Codex-parity model tool-output truncation", () => {
     });
   });
 
-  test("never truncates hosted computer screenshot protocol", () => {
+  test("preserves hosted computer screenshot protocol within the hard allowance", () => {
     const item = {
       type: "computer_call_result",
       callId: "computer-1",
       output: { type: "computer_screenshot", data: "a".repeat(266_000) },
     };
     expect(boundModelToolOutputItem(item, 5)).toBe(item);
+  });
+
+  test("bounds an oversized hosted screenshot with a protocol-valid explicit omission card", () => {
+    const item = {
+      type: "computer_call_result",
+      callId: "computer-oversized",
+      output: {
+        type: "computer_screenshot",
+        data: `data:image/png;base64,${"a".repeat(MODEL_TOOL_OUTPUT_OPAQUE_PAYLOAD_MAX_BYTES)}`,
+      },
+    };
+
+    const bounded = boundModelToolOutputItem(item, 5);
+    const data = (bounded.output as { data: string }).data;
+    expect(data).toBe(MODEL_TOOL_OUTPUT_OVERSIZED_IMAGE_CARD_DATA_URL);
+    const png = Buffer.from(data.slice(data.indexOf(",") + 1), "base64");
+    expect([...png.subarray(0, 8)]).toEqual([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    expect(Buffer.byteLength(JSON.stringify(bounded), "utf8")).toBeLessThan(16 * 1024);
+    expect(boundModelToolOutputItem(bounded, 5)).toEqual(bounded);
   });
 
   test("never truncates a text-transport screenshot data URL", () => {
@@ -272,7 +292,7 @@ describe("Codex-parity model tool-output truncation", () => {
     expect(boundModelToolOutputItem(objectItem, 5)).toEqual(objectItem);
   });
 
-  test("omits rather than corrupts an opaque protocol payload above the hard allowance", () => {
+  test("uses a valid omission image rather than corrupting opaque image protocol", () => {
     const dataUrl = `data:image/png;base64,${"a".repeat(MODEL_TOOL_OUTPUT_OPAQUE_PAYLOAD_MAX_BYTES)}`;
     const item = {
       type: "function_call_result",
@@ -282,8 +302,8 @@ describe("Codex-parity model tool-output truncation", () => {
     };
 
     const bounded = boundModelToolOutputItem(item, 5);
-    expect(bounded.output).toContain("omitted image payload");
-    expect(Buffer.byteLength(bounded.output, "utf8")).toBeLessThan(200);
+    expect(bounded.output).toBe(MODEL_TOOL_OUTPUT_OVERSIZED_IMAGE_CARD_DATA_URL);
+    expect(Buffer.byteLength(bounded.output, "utf8")).toBeLessThan(16 * 1024);
     expect(boundModelToolOutputItem(bounded, 5)).toEqual(bounded);
   });
 

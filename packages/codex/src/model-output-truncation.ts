@@ -19,6 +19,10 @@
  * function, so replayed conversation truth is identical to live model input.
  */
 
+import { MODEL_TOOL_OUTPUT_OVERSIZED_IMAGE_CARD_DATA_URL } from "./oversized-image-card";
+
+export { MODEL_TOOL_OUTPUT_OVERSIZED_IMAGE_CARD_DATA_URL } from "./oversized-image-card";
+
 export type ModelHistoryItem = Record<string, unknown>;
 
 export const CODEX_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS = 10_000;
@@ -36,6 +40,7 @@ const TOKEN_TRUNCATION_MARKER = /…\d{1,12} tokens truncated…/u;
 const TOOL_RESULT_TYPES = new Set([
   "function_call_result",
   "function_call_output",
+  "computer_call_result",
   "custom_tool_call_output",
   "shell_call_output",
   "apply_patch_call_output",
@@ -401,17 +406,27 @@ function boundOpaqueProtocolString(
   state: ModelOutputBoundState,
   kind: OpaqueProtocolKind,
 ): string {
+  // A prior pass can only have produced this exact static value. Treat it as a
+  // consumed image allowance so applying the boundary again is byte-idempotent
+  // even when more image fields follow it in the same structured result.
+  if (kind === "image" && value === MODEL_TOOL_OUTPUT_OVERSIZED_IMAGE_CARD_DATA_URL) {
+    state.remainingOpaqueBytes = 0;
+    return value;
+  }
   const bytes = Buffer.byteLength(value, "utf8");
   if (bytes <= state.remainingOpaqueBytes) {
     state.remainingOpaqueBytes -= bytes;
     return value;
   }
   state.remainingOpaqueBytes = 0;
+  if (kind === "image") return MODEL_TOOL_OUTPUT_OVERSIZED_IMAGE_CARD_DATA_URL;
   return `[OpenGeni omitted ${kind} payload: ${bytes} bytes exceeded the bounded model-input allowance]`;
 }
 
 function nonTextProtocolKind(value: unknown): OpaqueProtocolKind | null {
-  if (value === "image" || value === "input_image") return "image";
+  if (value === "image" || value === "input_image" || value === "computer_screenshot") {
+    return "image";
+  }
   if (value === "file" || value === "input_file") return "file";
   if (value === "encrypted_content") return "encrypted";
   return null;

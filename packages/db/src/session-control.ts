@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { boundWorkspaceControlEvent, workspaceControlUtf8Bytes } from "@opengeni/contracts";
 import { and, eq, sql } from "drizzle-orm";
 import type { Database } from "./index";
 import * as schema from "./schema";
@@ -1748,9 +1749,38 @@ async function insertWorkspaceControlEventInTransaction(
     actor: string;
   },
 ): Promise<string> {
+  const projected = boundWorkspaceControlEvent(
+    {
+      id: crypto.randomUUID(),
+      workspaceId: input.workspaceId,
+      sequence: input.revision,
+      revision: input.revision,
+      type: "workspace.control.changed",
+      scope: input.scope,
+      rootSessionId: input.rootSessionId,
+      action: input.action,
+      automatic: input.automatic,
+      reason: input.reason,
+      actor: input.actor,
+      occurredAt: new Date(0).toISOString(),
+    },
+    { surface: "durable_control" },
+  );
+  const field = (name: "reason" | "actor") =>
+    projected.truncation?.fields.find((candidate) => candidate.field === name);
   const [event] = await db
     .insert(schema.workspaceControlEvents)
-    .values(input)
+    .values({
+      ...input,
+      reason: projected.reason,
+      reasonOriginalBytes:
+        input.reason === null
+          ? null
+          : (field("reason")?.originalBytes ?? workspaceControlUtf8Bytes(projected.reason!)),
+      actor: projected.actor,
+      actorOriginalBytes:
+        field("actor")?.originalBytes ?? workspaceControlUtf8Bytes(projected.actor),
+    })
     .returning({ id: schema.workspaceControlEvents.id });
   if (!event) {
     throw new SessionControlInvariantError("Workspace control event was not inserted");

@@ -146,7 +146,6 @@ export function useSessionEvents(
     // pausing via `enabled: false` keeps the timeline visible.
     if (streamKeyRef.current !== streamKey) {
       streamKeyRef.current = streamKey;
-      generationRef.current += 1;
       setStateStreamKey(streamKey);
       eventWindowRef.current = EMPTY_EVENT_WINDOW;
       setEventWindow(EMPTY_EVENT_WINDOW);
@@ -163,11 +162,21 @@ export function useSessionEvents(
       loadingOlderRef.current = false;
       initialWindowLoadedRef.current = false;
     }
+    // AbortController is advisory: custom SDK clients and async iterators may
+    // ignore it and resolve/yield after cleanup. Fence every effect instance so
+    // only the newest dependency generation can mutate refs or React state.
+    const generation = generationRef.current + 1;
+    generationRef.current = generation;
+    if (loadingOlderRef.current) {
+      loadingOlderRef.current = false;
+      setLoadingOlder(false);
+    }
     if (!sessionId || !enabled) {
       setConnectionState("idle");
       return;
     }
     const controller = new AbortController();
+    const isCurrent = () => generationRef.current === generation && !controller.signal.aborted;
     streamAbortRef.current = controller;
     // Batch yielded events into one React update per flush window so a long
     // replay (thousands of events) does not render per event.
@@ -175,6 +184,10 @@ export function useSessionEvents(
     let flushTimer: ReturnType<typeof setTimeout> | null = null;
     const flush = () => {
       flushTimer = null;
+      if (!isCurrent()) {
+        pending = [];
+        return;
+      }
       if (pending.length === 0) {
         return;
       }
@@ -208,6 +221,7 @@ export function useSessionEvents(
       }
     };
     const scheduleFlush = () => {
+      if (!isCurrent()) return;
       flushTimer ??= setTimeout(flush, 16);
     };
 
@@ -225,7 +239,7 @@ export function useSessionEvents(
             maxFetches: INITIAL_FETCH_CAP,
             signal: controller.signal,
           });
-          if (controller.signal.aborted) {
+          if (!isCurrent()) {
             return;
           }
           observeSessionStatus(window.events, sessionStatusRef, setSessionStatusProjection);
@@ -248,21 +262,22 @@ export function useSessionEvents(
           signal: controller.signal,
           beforeLive: async () => await reconcileSession(sessionId),
           onStateChange: (state) => {
-            if (!controller.signal.aborted) {
+            if (isCurrent()) {
               setConnectionState(state);
             }
           },
         });
         for await (const event of stream) {
+          if (!isCurrent()) break;
           pending.push(event);
           scheduleFlush();
         }
-        if (!controller.signal.aborted) {
+        if (isCurrent()) {
           flush();
           setConnectionState("ended");
         }
       } catch (cause) {
-        if (!controller.signal.aborted) {
+        if (isCurrent()) {
           flush();
           setError(cause instanceof Error ? cause : new Error(String(cause)));
           setConnectionState("error");
@@ -272,6 +287,9 @@ export function useSessionEvents(
 
     return () => {
       controller.abort();
+      if (generationRef.current === generation) {
+        generationRef.current = generation + 1;
+      }
       if (streamAbortRef.current === controller) {
         streamAbortRef.current = null;
       }
@@ -427,7 +445,9 @@ function boundBrowserLegacyEvent(event: SessionEvent): SessionEvent {
   // second durable representation. Reconstructing the SDK wire shape prevents
   // legacy/malformed extra properties from bypassing the browser byte cap.
   const serialized = browserSerialize(event);
-  const originalBytes = encoder.encode(serialized.value).byteLength;
+  const originalBytes = serialized.serializable
+    ? encoder.encode(serialized.value).byteLength
+    : null;
   const typeIsSafe =
     browserUtf8Bytes(event.type) <= BROWSER_EVENT_TYPE_MAX_BYTES &&
     !event.type.includes("\n") &&
@@ -443,6 +463,7 @@ function boundBrowserLegacyEvent(event: SessionEvent): SessionEvent {
 
   if (
     serialized.serializable &&
+    originalBytes !== null &&
     originalBytes <= SESSION_EVENT_BROWSER_SINGLE_EVENT_MAX_BYTES &&
     typeIsSafe &&
     clientEventId === event.clientEventId &&
@@ -462,9 +483,12 @@ function boundBrowserLegacyEvent(event: SessionEvent): SessionEvent {
       ? browserEnvelopeFieldProjection("duplicateReason", event.duplicateReason, duplicateReason)
       : null,
   ].filter((field) => field !== null);
-  const payloadBytes = browserJsonBytes(event.payload);
+  const payloadSerialization = browserSerialize(event.payload);
+  const payloadBytes = payloadSerialization.serializable
+    ? encoder.encode(payloadSerialization.value).byteLength
+    : null;
   const preview = truncateBrowserUtf8Middle(
-    browserSerialize(event.payload).value,
+    payloadSerialization.value,
     BROWSER_EVENT_PAYLOAD_PREVIEW_MAX_BYTES,
   );
   const truncation = {
@@ -474,7 +498,7 @@ function boundBrowserLegacyEvent(event: SessionEvent): SessionEvent {
     originalBytes,
     deliveredBytes: 0,
     omittedBytes: originalBytes,
-    estimatedOriginalTokens: Math.ceil(originalBytes / 4),
+    estimatedOriginalTokens: originalBytes === null ? null : Math.ceil(originalBytes / 4),
     estimatedDeliveredTokens: 0,
     fullEvidence: { available: false as const, reason: "not_retained" as const },
     details: [
@@ -623,17 +647,31 @@ function truncateBrowserUtf8Middle(value: string, maxBytes: number): string {
 function settleBrowserEventTruncation(
   event: SessionEvent,
   truncation: {
-    originalBytes: number;
+    originalBytes: number | null;
     deliveredBytes: number;
-    omittedBytes: number;
+    omittedBytes: number | null;
     estimatedDeliveredTokens: number;
   },
 ): void {
-  for (let attempt = 0; attempt < 6; attempt += 1) {
-    truncation.deliveredBytes = browserJsonBytes(event);
-    truncation.omittedBytes = Math.max(0, truncation.originalBytes - truncation.deliveredBytes);
-    truncation.estimatedDeliveredTokens = Math.ceil(truncation.deliveredBytes / 4);
+  for (let attempt = 0; attempt < 16; attempt += 1) {
+    const deliveredBytes = browserJsonBytes(event);
+    const omittedBytes =
+      truncation.originalBytes === null
+        ? null
+        : Math.max(0, truncation.originalBytes - deliveredBytes);
+    const estimatedDeliveredTokens = Math.ceil(deliveredBytes / 4);
+    if (
+      truncation.deliveredBytes === deliveredBytes &&
+      truncation.omittedBytes === omittedBytes &&
+      truncation.estimatedDeliveredTokens === estimatedDeliveredTokens
+    ) {
+      return;
+    }
+    truncation.deliveredBytes = deliveredBytes;
+    truncation.omittedBytes = omittedBytes;
+    truncation.estimatedDeliveredTokens = estimatedDeliveredTokens;
   }
+  throw new RangeError("Browser event byte accounting did not converge");
 }
 
 function browserUtf8Bytes(value: string): number {

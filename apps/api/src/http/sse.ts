@@ -2,7 +2,7 @@ import type { SessionEvent, WorkspaceControlEvent } from "@opengeni/contracts";
 import { listSessionEvents, listWorkspaceControlEvents, type Database } from "@opengeni/db";
 import {
   formatSessionEventSse,
-  formatSse,
+  formatWorkspaceControlEventSse,
   SESSION_EVENT_SSE_FRAME_MAX_BYTES,
   type EventBus,
 } from "@opengeni/events";
@@ -433,7 +433,7 @@ export async function sseWorkspaceControlStream(
         for (const missed of missing) {
           if (missed.sequence >= event.sequence) break;
           if (missed.sequence > lastSent) {
-            await writeFrame(formatSse(missed));
+            await writeFrame(formatWorkspaceControlEventSse(missed));
             lastSent = missed.sequence;
           }
         }
@@ -444,7 +444,7 @@ export async function sseWorkspaceControlStream(
         }
       }
     }
-    await writeFrame(formatSse(event));
+    await writeFrame(formatWorkspaceControlEventSse(event));
     lastSent = event.sequence;
   };
   delivery = createLatestWinsDelivery(send, fail);

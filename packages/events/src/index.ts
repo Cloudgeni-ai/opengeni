@@ -1,6 +1,7 @@
 import {
   boundSessionEvent,
   boundSessionEventPayload,
+  boundWorkspaceControlEvent,
   sessionEventJsonBytes,
   sessionEventPayloadTruncation,
   type SessionBusMessage,
@@ -96,6 +97,10 @@ export const SESSION_EVENT_NATS_MESSAGE_MAX_BYTES = 512 * 1024;
 export const SESSION_EVENT_SSE_FRAME_MAX_BYTES = 96 * 1024;
 /** Independent count+byte envelope for one durable HTTP replay response. */
 export const SESSION_EVENT_HTTP_PAGE_MAX_BYTES = 1024 * 1024;
+/** Workspace invalidations are one compact event, never a broker evidence blob. */
+export const WORKSPACE_CONTROL_NATS_MESSAGE_MAX_BYTES = 32 * 1024;
+/** Count+byte envelope for one workspace-control REST replay page. */
+export const WORKSPACE_CONTROL_HTTP_PAGE_MAX_BYTES = 1024 * 1024;
 
 /**
  * Await `nc.flush()` but never longer than `timeoutMs`. With infinite reconnect a
@@ -372,7 +377,8 @@ export async function createNatsEventBus(
       subscribeSession(nc, workspaceId, sessionId, onEvents),
     publishWorkspaceControl: async (workspaceId, event) => {
       try {
-        nc.publish(workspaceControlSubject(workspaceId), codec.encode(event));
+        const encoded = workspaceControlEventNatsPayload(event);
+        nc.publish(workspaceControlSubject(workspaceId), encoded);
       } catch (error) {
         (options.logger?.warn ?? silentLogger.warn)(
           "NATS workspace-control invalidation dropped; clients reconcile from Postgres",
@@ -390,7 +396,11 @@ export async function createNatsEventBus(
       const sub = nc.subscribe(workspaceControlSubject(workspaceId));
       void (async () => {
         for await (const msg of sub) {
-          await onEvent(codec.decode(msg.data) as WorkspaceControlEvent);
+          await onEvent(
+            boundWorkspaceControlEvent(codec.decode(msg.data) as WorkspaceControlEvent, {
+              surface: "nats_legacy_guard",
+            }),
+          );
         }
       })();
       return () => sub.unsubscribe();
@@ -744,6 +754,31 @@ export function formatSse<T extends { sequence: number; type: string }>(event: T
   ].join("\n");
 }
 
+/** Canonical one-event NATS payload with an exact broker byte assertion. */
+export function workspaceControlEventNatsPayload(event: WorkspaceControlEvent): Uint8Array {
+  const bounded = boundWorkspaceControlEvent(event, { surface: "nats_legacy_guard" });
+  const encoded = codec.encode(bounded);
+  if (encoded.byteLength > WORKSPACE_CONTROL_NATS_MESSAGE_MAX_BYTES) {
+    throw new RangeError(
+      `Workspace-control event cannot fit in the NATS envelope (${encoded.byteLength} > ${WORKSPACE_CONTROL_NATS_MESSAGE_MAX_BYTES} bytes)`,
+    );
+  }
+  return encoded;
+}
+
+/** Defensively bounds current and historical workspace invalidations per frame. */
+export function formatWorkspaceControlEventSse(event: WorkspaceControlEvent): string {
+  const bounded = boundWorkspaceControlEvent(event, { surface: "sse_legacy_guard" });
+  const formatted = formatSse(bounded);
+  const bytes = new TextEncoder().encode(formatted).byteLength;
+  if (bytes > SESSION_EVENT_SSE_FRAME_MAX_BYTES) {
+    throw new RangeError(
+      `Bounded workspace-control SSE frame exceeds its envelope (${bytes} > ${SESSION_EVENT_SSE_FRAME_MAX_BYTES} bytes)`,
+    );
+  }
+  return formatted;
+}
+
 /** Defensively bounds historical rows before they become one SSE frame. */
 export function formatSessionEventSse(event: SessionEvent): string {
   const bounded = boundSessionEventForSurface(event, "sse_legacy_guard");
@@ -850,6 +885,41 @@ export function boundSessionEventHttpPage(
         : options.direction === "after"
           ? sessionEventResumeSequence(edge)
           : edge.sequence,
+    bytes,
+  };
+}
+
+/** Return one count+byte-bounded workspace-control page and resume cursor. */
+export function boundWorkspaceControlHttpPage(
+  events: readonly WorkspaceControlEvent[],
+  maxBytes = WORKSPACE_CONTROL_HTTP_PAGE_MAX_BYTES,
+): {
+  events: WorkspaceControlEvent[];
+  truncated: boolean;
+  nextSequence: number | null;
+  bytes: number;
+} {
+  const projected = events.map((event) =>
+    boundWorkspaceControlEvent(event, { surface: "http_projection" }),
+  );
+  const selected: WorkspaceControlEvent[] = [];
+  let bytes = 2; // []
+  for (const event of projected) {
+    const eventBytes = sessionEventJsonBytes(event);
+    const separator = selected.length === 0 ? 0 : 1;
+    if (bytes + separator + eventBytes > maxBytes) break;
+    selected.push(event);
+    bytes += separator + eventBytes;
+  }
+  if (projected.length > 0 && selected.length === 0) {
+    throw new RangeError(
+      `A bounded workspace-control event cannot fit in the HTTP page envelope (${maxBytes} bytes)`,
+    );
+  }
+  return {
+    events: selected,
+    truncated: selected.length < projected.length,
+    nextSequence: selected.at(-1)?.sequence ?? null,
     bytes,
   };
 }

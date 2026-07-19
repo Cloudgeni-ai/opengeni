@@ -48,11 +48,15 @@ export type SessionEventBoundarySurface =
 export type SessionEventPayloadTruncation = {
   truncated: true;
   surface: SessionEventBoundarySurface;
-  reason: "payload_bytes_exceeded" | "inline_media_not_retained" | "database_guard";
-  originalBytes: number;
+  reason:
+    | "payload_bytes_exceeded"
+    | "payload_not_serializable"
+    | "inline_media_not_retained"
+    | "database_guard";
+  originalBytes: number | null;
   deliveredBytes: number;
-  omittedBytes: number;
-  estimatedOriginalTokens: number;
+  omittedBytes: number | null;
+  estimatedOriginalTokens: number | null;
   estimatedDeliveredTokens: number;
   fullEvidence: {
     available: false;
@@ -60,7 +64,7 @@ export type SessionEventPayloadTruncation = {
   };
   details: Array<{
     path: string;
-    kind: "string" | "array" | "object" | "depth" | "media" | "binary";
+    kind: "string" | "array" | "object" | "depth" | "media" | "binary" | "unserializable";
     originalBytes?: number;
     deliveredBytes?: number;
     omittedEntries?: number;
@@ -153,28 +157,42 @@ export function boundSessionEventPayload<T>(
 ): T {
   const maxBytes = Math.max(1024, Math.floor(options.maxBytes ?? SESSION_EVENT_PAYLOAD_MAX_BYTES));
   const surface = options.surface ?? "durable_audit";
-  const originalBytes = sessionEventJsonBytes(payload);
+  const originalSerialization = serializeForBoundary(payload);
+  const originalSerializedBytes = encoder.encode(originalSerialization.value).byteLength;
+  const originalBytes = originalSerialization.serializable ? originalSerializedBytes : null;
 
   let state = previewState(DEFAULT_STRING_BYTES, DEFAULT_ARRAY_ENTRIES, DEFAULT_OBJECT_FIELDS);
   let preview = previewValue(payload, state, "$", 0);
-  if (!state.changed && originalBytes <= maxBytes) return payload;
+  if (!state.changed && originalSerialization.serializable && originalSerializedBytes <= maxBytes) {
+    return payload;
+  }
 
-  let reason: SessionEventPayloadTruncation["reason"] = state.sawMedia
-    ? "inline_media_not_retained"
-    : "payload_bytes_exceeded";
+  let reason: SessionEventPayloadTruncation["reason"] = !originalSerialization.serializable
+    ? "payload_not_serializable"
+    : state.sawMedia
+      ? "inline_media_not_retained"
+      : "payload_bytes_exceeded";
   let bounded = attachTruncation(preview, boundaryMetadata(surface, reason, originalBytes, state));
 
   if (sessionEventJsonBytes(bounded) > Math.min(maxBytes, TARGET_PAYLOAD_BYTES)) {
     state = previewState(RETRY_STRING_BYTES, RETRY_ARRAY_ENTRIES, RETRY_OBJECT_FIELDS);
     preview = previewValue(payload, state, "$", 0);
-    reason = state.sawMedia ? "inline_media_not_retained" : "payload_bytes_exceeded";
+    reason = !originalSerialization.serializable
+      ? "payload_not_serializable"
+      : state.sawMedia
+        ? "inline_media_not_retained"
+        : "payload_bytes_exceeded";
     bounded = attachTruncation(preview, boundaryMetadata(surface, reason, originalBytes, state));
   }
 
   if (sessionEventJsonBytes(bounded) > maxBytes) {
     const identity = identityPreview(payload);
     state.changed = true;
-    recordDetail(state, { path: "$", kind: "object", originalBytes });
+    recordDetail(state, {
+      path: "$",
+      kind: "object",
+      ...(originalBytes === null ? {} : { originalBytes }),
+    });
     bounded = attachTruncation(
       {
         ...identity,
@@ -229,6 +247,11 @@ function previewValue(value: unknown, state: PreviewState, path: string, depth: 
       deliveredBytes: utf8Bytes(delivered),
     });
     return delivered;
+  }
+  if (typeof value === "bigint" || typeof value === "function" || typeof value === "symbol") {
+    state.changed = true;
+    recordDetail(state, { path, kind: "unserializable" });
+    return `[${typeof value} value omitted at audit serialization boundary]`;
   }
   if (value === null || typeof value !== "object") return value;
 
@@ -319,7 +342,7 @@ function attachTruncation(
 function boundaryMetadata(
   surface: SessionEventBoundarySurface,
   reason: SessionEventPayloadTruncation["reason"],
-  originalBytes: number,
+  originalBytes: number | null,
   state: PreviewState,
 ): SessionEventPayloadTruncation {
   return {
@@ -329,7 +352,8 @@ function boundaryMetadata(
     originalBytes,
     deliveredBytes: 0,
     omittedBytes: originalBytes,
-    estimatedOriginalTokens: approximateSessionEventTokens(originalBytes),
+    estimatedOriginalTokens:
+      originalBytes === null ? null : approximateSessionEventTokens(originalBytes),
     estimatedDeliveredTokens: 0,
     fullEvidence: { available: false, reason: "not_retained" },
     details: state.details,
@@ -338,12 +362,7 @@ function boundaryMetadata(
 
 function settleDeliveredSizes(payload: Record<string, unknown>, maxBytes: number): void {
   const truncation = payload.truncation as SessionEventPayloadTruncation;
-  for (let attempt = 0; attempt < 6; attempt += 1) {
-    const deliveredBytes = sessionEventJsonBytes(payload);
-    truncation.deliveredBytes = deliveredBytes;
-    truncation.omittedBytes = Math.max(0, truncation.originalBytes - deliveredBytes);
-    truncation.estimatedDeliveredTokens = approximateSessionEventTokens(deliveredBytes);
-  }
+  convergeDeliveredSizes(payload, truncation);
   // This should only be reachable when a caller supplies an unusually tiny
   // custom maxBytes. Preserve explicit metadata over an accidental overshoot.
   if (sessionEventJsonBytes(payload) > maxBytes) {
@@ -354,10 +373,33 @@ function settleDeliveredSizes(payload: Record<string, unknown>, maxBytes: number
       }
     }
     truncation.details = truncation.details.slice(0, 4);
-    truncation.deliveredBytes = sessionEventJsonBytes(payload);
-    truncation.omittedBytes = Math.max(0, truncation.originalBytes - truncation.deliveredBytes);
-    truncation.estimatedDeliveredTokens = approximateSessionEventTokens(truncation.deliveredBytes);
+    convergeDeliveredSizes(payload, truncation);
   }
+}
+
+function convergeDeliveredSizes(
+  payload: Record<string, unknown>,
+  truncation: SessionEventPayloadTruncation,
+): void {
+  for (let attempt = 0; attempt < 16; attempt += 1) {
+    const deliveredBytes = sessionEventJsonBytes(payload);
+    const omittedBytes =
+      truncation.originalBytes === null
+        ? null
+        : Math.max(0, truncation.originalBytes - deliveredBytes);
+    const estimatedDeliveredTokens = approximateSessionEventTokens(deliveredBytes);
+    if (
+      truncation.deliveredBytes === deliveredBytes &&
+      truncation.omittedBytes === omittedBytes &&
+      truncation.estimatedDeliveredTokens === estimatedDeliveredTokens
+    ) {
+      return;
+    }
+    truncation.deliveredBytes = deliveredBytes;
+    truncation.omittedBytes = omittedBytes;
+    truncation.estimatedDeliveredTokens = estimatedDeliveredTokens;
+  }
+  throw new RangeError("Session event byte accounting did not converge");
 }
 
 function recordDetail(
@@ -446,13 +488,23 @@ function utf8Bytes(value: string): number {
   return encoder.encode(value).byteLength;
 }
 
-function stringifyForBoundary(value: unknown): string {
+function serializeForBoundary(value: unknown): { value: string; serializable: boolean } {
   try {
     const serialized = JSON.stringify(value);
-    return serialized === undefined ? "null" : serialized;
+    return {
+      value: serialized === undefined ? "null" : serialized,
+      serializable: serialized !== undefined,
+    };
   } catch {
-    return JSON.stringify("[unserializable event payload omitted]");
+    return {
+      value: JSON.stringify("[unserializable event payload omitted]"),
+      serializable: false,
+    };
   }
+}
+
+function stringifyForBoundary(value: unknown): string {
+  return serializeForBoundary(value).value;
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {

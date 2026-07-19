@@ -1,4 +1,8 @@
-import type { SessionEvent, WorkspaceControlEvent } from "@opengeni/contracts";
+import {
+  boundWorkspaceControlEvent,
+  type SessionEvent,
+  type WorkspaceControlEvent,
+} from "@opengeni/contracts";
 import type { EventBus, RequestConnection, RequestHandler, RequestReply } from "@opengeni/events";
 
 export class MemoryEventBus implements EventBus {
@@ -44,10 +48,11 @@ export class MemoryEventBus implements EventBus {
   }
 
   async publishWorkspaceControl(workspaceId: string, event: WorkspaceControlEvent): Promise<void> {
-    this.publishedWorkspaceControl.push(event);
+    const bounded = boundWorkspaceControlEvent(event, { surface: "nats_legacy_guard" });
+    this.publishedWorkspaceControl.push(bounded);
     const subscribers = this.workspaceControlSubscribers.get(workspaceId);
     if (subscribers) {
-      await Promise.all([...subscribers].map((subscriber) => subscriber(event)));
+      await Promise.all([...subscribers].map((subscriber) => subscriber(bounded)));
     }
   }
 

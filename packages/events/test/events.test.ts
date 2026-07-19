@@ -3,15 +3,21 @@ import {
   SESSION_EVENT_HTTP_PAGE_MAX_BYTES,
   SESSION_EVENT_NATS_MESSAGE_MAX_BYTES,
   SESSION_EVENT_SSE_FRAME_MAX_BYTES,
+  WORKSPACE_CONTROL_HTTP_PAGE_MAX_BYTES,
+  WORKSPACE_CONTROL_NATS_MESSAGE_MAX_BYTES,
   boundSessionEventHttpPage,
+  boundWorkspaceControlHttpPage,
   formatSessionEventSse,
   formatSse,
+  formatWorkspaceControlEventSse,
   sessionEventBatchesByBytes,
+  workspaceControlEventNatsPayload,
 } from "../src/index";
 import {
   sessionEventJsonBytes,
   sessionEventPayloadTruncation,
   type SessionEvent,
+  type WorkspaceControlEvent,
 } from "@opengeni/contracts";
 
 const WORKSPACE_ID = "11111111-1111-4111-8111-111111111111";
@@ -39,6 +45,23 @@ function encodedBatchBytes(events: SessionEvent[]): number {
       events,
     }),
   ).byteLength;
+}
+
+function controlEvent(sequence: number, reason = "operator pause"): WorkspaceControlEvent {
+  return {
+    id: `33333333-3333-4333-8333-${String(sequence).padStart(12, "0")}`,
+    workspaceId: WORKSPACE_ID,
+    sequence,
+    revision: sequence,
+    type: "workspace.control.changed",
+    scope: "workspace",
+    rootSessionId: null,
+    action: sequence % 2 === 0 ? "resume" : "pause",
+    automatic: false,
+    reason,
+    actor: `actor-${"界".repeat(100_000)}`,
+    occurredAt: new Date(1_770_000_000_000 + sequence).toISOString(),
+  };
 }
 
 describe("SSE formatting", () => {
@@ -208,5 +231,52 @@ describe("session event transport envelopes", () => {
     expect(sessionEventPayloadTruncation(page.events.at(-1)?.payload)?.surface).toBe(
       "http_projection",
     );
+  });
+});
+
+describe("workspace-control transport envelopes", () => {
+  test("bounds one multi-megabyte legacy invalidation for NATS and SSE", () => {
+    const legacy = controlEvent(1, `HEAD-${"🙂".repeat(600_000)}-TAIL`);
+    const encoded = workspaceControlEventNatsPayload(legacy);
+    const natsEvent = JSON.parse(new TextDecoder().decode(encoded)) as WorkspaceControlEvent;
+    const frame = formatWorkspaceControlEventSse(legacy);
+    const sseEvent = JSON.parse(
+      frame
+        .split("\n")
+        .find((line) => line.startsWith("data: "))!
+        .slice("data: ".length),
+    ) as WorkspaceControlEvent;
+
+    expect(encoded.byteLength).toBeLessThanOrEqual(WORKSPACE_CONTROL_NATS_MESSAGE_MAX_BYTES);
+    expect(new TextEncoder().encode(frame).byteLength).toBeLessThanOrEqual(
+      SESSION_EVENT_SSE_FRAME_MAX_BYTES,
+    );
+    expect(natsEvent.truncation).toMatchObject({
+      surface: "nats_legacy_guard",
+      fullEvidence: { available: false, reason: "not_retained" },
+    });
+    expect(sseEvent.truncation).toMatchObject({
+      surface: "sse_legacy_guard",
+      fullEvidence: { available: false, reason: "not_retained" },
+    });
+    expect(natsEvent.sequence).toBe(1);
+    expect(sseEvent.sequence).toBe(1);
+  });
+
+  test("returns a count-plus-byte-bounded prefix with a truthful next cursor", () => {
+    const events = Array.from({ length: 100 }, (_, index) =>
+      controlEvent(index + 1, `reason-${index}-${"x".repeat(20_000)}`),
+    );
+    const page = boundWorkspaceControlHttpPage(events, 40_000);
+
+    expect(page.truncated).toBeTrue();
+    expect(page.events.length).toBeGreaterThan(0);
+    expect(page.events.map((item) => item.sequence)).toEqual(
+      Array.from({ length: page.events.length }, (_, index) => index + 1),
+    );
+    expect(page.nextSequence).toBe(page.events.at(-1)?.sequence ?? null);
+    expect(page.bytes).toBe(sessionEventJsonBytes(page.events));
+    expect(page.bytes).toBeLessThanOrEqual(40_000);
+    expect(page.bytes).toBeLessThanOrEqual(WORKSPACE_CONTROL_HTTP_PAGE_MAX_BYTES);
   });
 });

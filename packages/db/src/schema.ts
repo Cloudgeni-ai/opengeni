@@ -1300,7 +1300,9 @@ export const workspaceControlEvents = pgTable(
     action: text("action").notNull(),
     automatic: boolean("automatic").notNull().default(false),
     reason: text("reason"),
+    reasonOriginalBytes: integer("reason_original_bytes"),
     actor: text("actor").notNull(),
+    actorOriginalBytes: integer("actor_original_bytes").notNull(),
     occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({

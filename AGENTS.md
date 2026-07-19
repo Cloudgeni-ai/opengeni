@@ -79,6 +79,9 @@ For a map of every app, package, and how the parts fit together, start at [`docs
 - Session goals support `GET`, `PATCH(status paused|active)`, and idempotent `DELETE` clear on `/v1/workspaces/:workspaceId/sessions/:id/goal`; clearing removes the goal row and emits `goal.cleared`.
 - Core NATS is the realtime bus between producers and API instances.
 - Postgres is the durable event store and replay source.
+- Workspace-control events are compact invalidations, not evidence blobs: control reasons and
+  actors have canonical UTF-8 ingress/storage bounds, legacy rows carry explicit loss facts, and
+  REST/NATS/SSE projections are independently byte-bounded.
 - Temporal is orchestration only. Token streams do not go through workflow history.
 - OpenAI Agents SDK execution happens inside non-retryable worker activities.
 - Agent activities are side-effectful. Do not add automatic Temporal retries around full agent turns unless each model/tool/sandbox boundary has been made idempotent.

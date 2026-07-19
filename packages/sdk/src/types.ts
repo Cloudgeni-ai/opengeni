@@ -1745,6 +1745,26 @@ export type WorkspaceControlEvent = {
   reason: string | null;
   actor: string;
   occurredAt: string;
+  truncation?: {
+    truncated: true;
+    surface:
+      | "durable_control"
+      | "database_guard"
+      | "http_projection"
+      | "nats_legacy_guard"
+      | "sse_legacy_guard";
+    deliveredBytes: number;
+    fields: Array<{
+      field: "reason" | "actor";
+      originalBytes: number;
+      deliveredBytes: number;
+      omittedBytes: number;
+    }>;
+    fullEvidence: {
+      available: false;
+      reason: "not_retained";
+    };
+  } | null;
 };
 
 export type SessionQueueMutationResponse = {

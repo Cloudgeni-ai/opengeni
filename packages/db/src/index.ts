@@ -76,6 +76,7 @@ import type {
   RigCheck,
 } from "@opengeni/contracts";
 import {
+  boundWorkspaceControlEvent,
   SESSION_EVENT_CLIENT_EVENT_ID_MAX_BYTES,
   SESSION_EVENT_DUPLICATE_REASON_MAX_BYTES,
   SESSION_EVENT_ENVELOPE_MAX_BYTES,
@@ -12230,20 +12231,27 @@ function mapWorkspaceControlEvent(
   row: typeof schema.workspaceControlEvents.$inferSelect,
 ): WorkspaceControlEvent {
   const revision = Number(row.revision);
-  return {
-    id: row.id,
-    workspaceId: row.workspaceId,
-    sequence: revision,
-    revision,
-    type: "workspace.control.changed",
-    scope: row.scope as WorkspaceControlEvent["scope"],
-    rootSessionId: row.rootSessionId,
-    action: row.action as WorkspaceControlEvent["action"],
-    automatic: row.automatic,
-    reason: row.reason,
-    actor: row.actor,
-    occurredAt: row.occurredAt.toISOString(),
-  };
+  return boundWorkspaceControlEvent(
+    {
+      id: row.id,
+      workspaceId: row.workspaceId,
+      sequence: revision,
+      revision,
+      type: "workspace.control.changed",
+      scope: row.scope as WorkspaceControlEvent["scope"],
+      rootSessionId: row.rootSessionId,
+      action: row.action as WorkspaceControlEvent["action"],
+      automatic: row.automatic,
+      reason: row.reason,
+      actor: row.actor,
+      occurredAt: row.occurredAt.toISOString(),
+    },
+    {
+      surface: "durable_control",
+      reasonOriginalBytes: row.reasonOriginalBytes,
+      actorOriginalBytes: row.actorOriginalBytes,
+    },
+  );
 }
 
 export async function listWorkspaceControlEvents(
