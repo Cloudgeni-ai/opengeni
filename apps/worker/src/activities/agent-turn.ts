@@ -31,6 +31,7 @@ import {
   recordCodexAccountConnectors,
   quarantineCodexCredentialForLease,
   setActiveCodexCredential,
+  getSessionMemoryContext,
   resolveWorkspaceMemoryBlock,
   setCodexCredentialExhaustedWithWakeTargets,
   withCodexCapacityMutation,
@@ -2575,7 +2576,15 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         db,
         input.workspaceId,
       );
-      const workspaceMemory = await resolveWorkspaceMemoryBlock(db, input.workspaceId);
+      const sessionMemoryContext = await getSessionMemoryContext(
+        db,
+        input.workspaceId,
+        input.sessionId,
+      );
+      const workspaceMemory = await resolveWorkspaceMemoryBlock(db, input.workspaceId, {
+        ...(sessionMemoryContext ?? { sessionId: input.sessionId }),
+        now: new Date(),
+      });
       const baseRunSettings = {
         // IMAGE PRECEDENCE (M3): rig > pack > deployment. settingsWithRigImage runs
         // OUTERMOST so a rig-pinned image overrides both the pack image and the
