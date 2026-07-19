@@ -1,8 +1,9 @@
-import type { Settings } from "@opengeni/config";
+import type { ModelUsageInput, Settings } from "@opengeni/config";
 import type {
   ConnectionCredentialsPort,
   EntitlementsPort,
   ScheduledTaskTriggerType,
+  SessionEventType,
 } from "@opengeni/contracts";
 import type { Database } from "@opengeni/db";
 import type { DocumentServices } from "@opengeni/documents";
@@ -132,6 +133,18 @@ export type SettleSessionInterruptionsInput = {
   phase?: "logical" | "attempt_quiesced";
 };
 
+export type QuarantineTurnPersistenceAttemptInput = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  attemptId: string;
+  reason: "malformed_heartbeat" | "malformed_activity_result" | "invalid_receipt_reference";
+};
+
+export type QuarantineTurnPersistenceAttemptResult = {
+  action: "quarantined" | "stale";
+};
+
 export type FailSessionAttemptInput = {
   accountId: string;
   workspaceId: string;
@@ -157,10 +170,111 @@ export type RecoverDispatchResult =
   // a zombie that actually settled the turn after the server gave up on its
   // heartbeats. Nothing to redo; the workflow just continues its loop.
   | { action: "stale" }
+  | { action: "quarantined" }
   // The per-turn crash-loop guard tripped; the workflow must fail the
   // session for real. `redispatches` is the count already consumed (== the
   // ceiling), so the failed attempt was worker death number redispatches + 1.
   | { action: "exceeded"; turnId: string; redispatches: number };
+
+export type PendingToolCallPersistenceObligation = {
+  kind: "pending_tool_call";
+  callId: string;
+  callType: string;
+  callItem: Record<string, unknown>;
+};
+
+export type ExactTurnEventPersistenceInput = {
+  type: SessionEventType;
+  payload: unknown;
+  turnId: string;
+  producerId: string;
+  producerSeq: number;
+  occurredAt: string;
+};
+
+export type ModelCallPersistenceObligation = {
+  kind: "model_call";
+  history: {
+    producerCodexCredentialId: string | null;
+    modelToolOutputTruncationTokens: number;
+    items: Array<{ position: number; item: Record<string, unknown> }>;
+  };
+  metering: {
+    model: string;
+    isCodexTurn: boolean;
+    usage: ModelUsageInput;
+    sourceKey: string;
+  } | null;
+  event: ExactTurnEventPersistenceInput | null;
+};
+
+export type PreparedContextCompactionPersistence =
+  | {
+      action: "apply";
+      persistenceKey: string;
+      replacementItems: Array<Record<string, unknown>>;
+      summaryItem: Record<string, unknown>;
+      replacementInputTokens: number;
+      clearRequestedCompaction: boolean;
+      occurredAt: string;
+      eventPayload: Record<string, unknown>;
+      result: {
+        signalTokens: number;
+        thresholdTokens: number;
+        estimatedTokensBefore: number;
+        estimatedTokensAfter: number;
+        replacementFingerprint: string;
+      };
+    }
+  | {
+      action: "skip";
+      persistenceKey: string;
+      reason: "replacement_not_smaller" | "replacement_unchanged";
+      clearRequestedCompaction: boolean;
+      occurredAt: string;
+      eventPayload: Record<string, unknown>;
+    };
+
+export type ContextCompactionPersistenceObligation = {
+  kind: "context_compaction";
+  compaction: PreparedContextCompactionPersistence;
+  metering: ModelCallPersistenceObligation["metering"] | null;
+  event: ExactTurnEventPersistenceInput | null;
+};
+
+export type TurnPersistenceObligation =
+  | PendingToolCallPersistenceObligation
+  | ModelCallPersistenceObligation
+  | ContextCompactionPersistenceObligation;
+
+/**
+ * Bounded Temporal reference to exact persistence work stored in PostgreSQL.
+ * Raw model/tool/compaction content must never enter workflow history.
+ */
+export type TurnPersistenceHandoff = {
+  version: 2;
+  receiptId: string;
+  turnId: string;
+  triggerEventId: string;
+  executionGeneration: number;
+  attemptId: string;
+  obligationKind: TurnPersistenceObligation["kind"];
+  obligationDigest: string;
+};
+
+export type PersistTurnHandoffAndRecoverInput = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  attemptId: string;
+  handoff: TurnPersistenceHandoff;
+  reason: "activity_result" | "heartbeat_timeout";
+};
+
+export type PersistTurnHandoffAndRecoverResult =
+  | { action: "recovering"; turnId: string }
+  | { action: "stale" }
+  | { action: "quarantined" };
 
 export type PeekSessionWorkInput = {
   workspaceId: string;
@@ -211,9 +325,17 @@ export type IndexDocumentInput = {
 type ClaimedRunAgentTurnResult = {
   // "recovering": this attempt ended after durably preserving the same current
   // inference for a new attempt. Recovery is not prompt queue work.
-  status: "idle" | "requires_action" | "failed" | "cancelled" | "recovering";
+  status:
+    | "idle"
+    | "requires_action"
+    | "failed"
+    | "cancelled"
+    | "recovering"
+    | "persistence_pending";
   turnId: string;
   attemptId: string;
+  /** Present only for persistence_pending; consumed by a retryable control activity. */
+  persistenceHandoff?: TurnPersistenceHandoff;
   // Provider backpressure pacing: when set on an idle or recovering result, the
   // session workflow holds the loop this long before admitting the next attempt.
   continueDelayMs?: number;

@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "
 import {
   addSessionSystemUpdate,
   acceptSessionApprovalDecision,
+  admitSessionTurnModelCall,
   applyCreditDebitUpToBalance,
   applyCreditLedgerEntry,
   applyContextCompaction,
@@ -16,6 +17,7 @@ import {
   createDb,
   createSession,
   createSessionGoal,
+  establishSessionTurnPersistenceReceipt,
   evaluateSessionControl,
   evaluateSessionControls,
   evaluateGoalContinuation,
@@ -25,6 +27,8 @@ import {
   getSession,
   getSessionGoal,
   getSessionTurn,
+  getSessionTurnPersistenceReceipt,
+  inspectSessionTurnPersistenceReceipt,
   listOutstandingSessionSystemUpdates,
   listSessionDiscoverySummaries,
   listSessionSystemUpdatesForTurn,
@@ -44,9 +48,12 @@ import {
   recordPendingSessionToolCallResult,
   recordUsageEvent,
   recordSkippedContextCompaction,
+  quarantineSessionTurnPersistenceAttempt,
+  quarantineAmbiguousSessionTurnModelCall,
   setSessionLastInputTokensForTurnAttempt,
   settleSessionIdleWithParentOutbox,
   settleSessionAttemptInterruptions,
+  settleSessionTurnPersistenceReceipt,
   submitHumanPromptInTransaction,
   deleteSessionQueueItemInTransaction,
   withWorkspaceRls,
@@ -970,6 +977,50 @@ describe("clean session control plane", () => {
       },
     );
     expect(resumedTurn?.id).toBe(turn!.id);
+    const receiptId = crypto.randomUUID();
+    const obligationDigest = "a".repeat(64);
+    const obligation = {
+      kind: "pending_tool_call",
+      callId: "approval-call",
+      callType: "function_call",
+      callItem: {
+        type: "function_call",
+        name: "protected_tool",
+        callId: "approval-call",
+        status: "in_progress",
+        arguments: "{}",
+      },
+    };
+    expect(
+      await establishSessionTurnPersistenceReceipt(client.db, {
+        id: receiptId,
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn!.id,
+        attemptId: resumedAttemptId,
+        executionGeneration: resumedTurn!.executionGeneration,
+        triggerEventId: approval!.id,
+        obligationKind: "pending_tool_call",
+        obligationVersion: 1,
+        obligationDigest,
+        obligation,
+      }),
+    ).toMatchObject({ action: "established", receipt: { id: receiptId } });
+    expect(
+      await registerPendingSessionToolCall(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn!.id,
+        executionGeneration: resumedTurn!.executionGeneration,
+        attemptId: resumedAttemptId,
+        persistenceReceiptId: receiptId,
+        callId: obligation.callId,
+        callType: obligation.callType,
+        callItem: obligation.callItem,
+      }),
+    ).toEqual({ accepted: true, registered: false });
     expect(
       await recordPendingSessionToolCallResult(client.db, {
         accountId: grant.accountId,
@@ -978,6 +1029,7 @@ describe("clean session control plane", () => {
         turnId: turn!.id,
         executionGeneration: resumedTurn!.executionGeneration,
         attemptId: resumedAttemptId,
+        persistenceReceiptId: receiptId,
         callId: "approval-call",
         resultItem: {
           type: "function_call_result",
@@ -988,6 +1040,17 @@ describe("clean session control plane", () => {
         },
       }),
     ).toEqual({ accepted: true, recorded: true });
+    expect(
+      await settleSessionTurnPersistenceReceipt(client.db, {
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn!.id,
+        attemptId: resumedAttemptId,
+        executionGeneration: resumedTurn!.executionGeneration,
+        receiptId,
+        obligationDigest,
+      }),
+    ).toEqual({ action: "settled" });
     const recovery = await requestSessionTurnRecovery(client.db, grant.workspaceId!, {
       sessionId: session.id,
       turnId: turn!.id,
@@ -1007,6 +1070,9 @@ describe("clean session control plane", () => {
         .slice(-2)
         .map((row) => row.item.type),
     ).toEqual(["function_call", "function_call_result"]);
+    expect(await getSessionTurn(client.db, grant.workspaceId!, turn!.id)).toMatchObject({
+      metadata: { approvalRecoveryMode: "canonical_history" },
+    });
   });
 
   test("Pause preserves a pending approval, while Steer permanently closes it", async () => {
@@ -1739,6 +1805,631 @@ describe("clean session control plane", () => {
     expect(await isSessionCompactionRequested(client.db, grant.workspaceId!, session.id)).toBe(
       true,
     );
+  });
+
+  test("an exact pending persistence receipt alone crosses Pause and settles idempotently", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "run one external effect");
+    const attemptId = crypto.randomUUID();
+    const turn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId },
+    );
+    if (!turn) throw new Error("receipt test turn was not claimed");
+    const receiptId = crypto.randomUUID();
+    const obligation = {
+      kind: "pending_tool_call",
+      callId: "effect-call",
+      callType: "function_call",
+      callItem: {
+        type: "function_call",
+        callId: "effect-call",
+        name: "external_effect",
+        arguments: "{}",
+      },
+    };
+    const receiptInput = {
+      id: receiptId,
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      turnId: turn.id,
+      attemptId,
+      executionGeneration: turn.executionGeneration,
+      triggerEventId: turn.triggerEventId,
+      obligationKind: "pending_tool_call" as const,
+      obligationVersion: 1 as const,
+      obligationDigest: "a".repeat(64),
+      obligation,
+    };
+
+    const paused = await controlSession(grant, session.id, "pause");
+    expect(paused.interruptionCount).toBe(1);
+    expect(
+      await registerPendingSessionToolCall(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn.id,
+        executionGeneration: turn.executionGeneration,
+        attemptId,
+        callId: "ordinary-call",
+        callType: "function_call",
+        callItem: { type: "function_call", callId: "ordinary-call" },
+      }),
+    ).toEqual({ accepted: false, registered: false });
+
+    const established = await establishSessionTurnPersistenceReceipt(client.db, receiptInput);
+    expect(established).toMatchObject({ action: "established", receipt: { id: receiptId } });
+    expect(await establishSessionTurnPersistenceReceipt(client.db, receiptInput)).toMatchObject({
+      action: "confirmed",
+      receipt: { id: receiptId },
+    });
+    await expect(
+      establishSessionTurnPersistenceReceipt(client.db, {
+        ...receiptInput,
+        id: crypto.randomUUID(),
+      }),
+    ).rejects.toThrow("already owns a different pending persistence receipt");
+
+    expect(
+      await registerPendingSessionToolCall(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn.id,
+        executionGeneration: turn.executionGeneration,
+        attemptId,
+        persistenceReceiptId: receiptId,
+        callId: obligation.callId,
+        callType: obligation.callType,
+        callItem: obligation.callItem,
+      }),
+    ).toEqual({ accepted: true, registered: true });
+
+    const settlement = {
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      turnId: turn.id,
+      attemptId,
+      executionGeneration: turn.executionGeneration,
+      receiptId,
+      obligationDigest: receiptInput.obligationDigest,
+    };
+    expect(await settleSessionTurnPersistenceReceipt(client.db, settlement)).toEqual({
+      action: "settled",
+    });
+    expect(await settleSessionTurnPersistenceReceipt(client.db, settlement)).toEqual({
+      action: "confirmed",
+    });
+    expect(
+      await getSessionTurnPersistenceReceipt(client.db, grant.workspaceId!, {
+        sessionId: session.id,
+        attemptId,
+        receiptId,
+      }),
+    ).toMatchObject({ state: "settled", settledAt: expect.any(Date) });
+
+    expect(
+      await appendSessionHistoryItems(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn.id,
+        expectedExecutionGeneration: turn.executionGeneration,
+        expectedAttemptId: attemptId,
+        persistenceReceiptId: receiptId,
+        items: [{ position: 0, item: { type: "message", role: "assistant", content: "late" } }],
+      }),
+    ).toBe(false);
+
+    const foreign = await fixture();
+    expect(
+      await getSessionTurnPersistenceReceipt(client.db, foreign.grant.workspaceId!, {
+        sessionId: session.id,
+        attemptId,
+        receiptId,
+      }),
+    ).toBeNull();
+  });
+
+  test("worker-death closure atomically yields a receipt established after prior discovery", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "complete one provider boundary before worker death");
+    const attemptId = crypto.randomUUID();
+    const turn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId },
+    );
+    if (!turn) throw new Error("atomic receipt recovery turn was not claimed");
+
+    // This is the obsolete activity-side discovery result. Establishing the
+    // receipt immediately afterward must still prevent generic worker-death
+    // closure from abandoning the completed provider boundary.
+    expect(
+      await getSessionTurnPersistenceReceipt(client.db, grant.workspaceId!, {
+        sessionId: session.id,
+        attemptId,
+      }),
+    ).toBeNull();
+
+    const receiptId = crypto.randomUUID();
+    const admissionId = crypto.randomUUID();
+    const obligationDigest = "c".repeat(64);
+    expect(
+      await admitSessionTurnModelCall(client.db, {
+        id: admissionId,
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn.id,
+        attemptId,
+        executionGeneration: turn.executionGeneration,
+        triggerEventId: turn.triggerEventId,
+        callIndex: 1,
+        callKind: "agent_model",
+        provider: "scripted",
+        providerApi: "responses",
+        model: "scripted-model",
+      }),
+    ).toMatchObject({ action: "established", admission: { id: admissionId } });
+    await establishSessionTurnPersistenceReceipt(client.db, {
+      id: receiptId,
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      turnId: turn.id,
+      attemptId,
+      executionGeneration: turn.executionGeneration,
+      triggerEventId: turn.triggerEventId,
+      modelCallAdmissionId: admissionId,
+      obligationKind: "model_call",
+      obligationVersion: 1,
+      obligationDigest,
+      obligation: {
+        kind: "model_call",
+        history: { items: [] },
+        metering: null,
+        event: null,
+      },
+    });
+
+    const recovered = await recoverSessionDispatch(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      attemptId,
+      timeoutType: "HEARTBEAT",
+      maxRedispatches: 3,
+    });
+    expect(recovered).toMatchObject({
+      action: "persistence_pending",
+      receipt: { id: receiptId, attemptId, state: "pending" },
+      events: [],
+    });
+    expect(await getSessionTurn(client.db, grant.workspaceId!, turn.id)).toMatchObject({
+      status: "running",
+      activeAttemptId: attemptId,
+      executionGeneration: turn.executionGeneration,
+    });
+    expect(
+      await inspectSessionTurnPersistenceReceipt(client.db, grant.workspaceId!, {
+        sessionId: session.id,
+        turnId: turn.id,
+        attemptId,
+        executionGeneration: turn.executionGeneration,
+        receiptId,
+      }),
+    ).toMatchObject({ action: "pending", receipt: { id: receiptId } });
+
+    expect(
+      await settleSessionTurnPersistenceReceipt(client.db, {
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn.id,
+        attemptId,
+        executionGeneration: turn.executionGeneration,
+        receiptId,
+        obligationDigest,
+      }),
+    ).toEqual({ action: "settled" });
+    expect(
+      await inspectSessionTurnPersistenceReceipt(client.db, grant.workspaceId!, {
+        sessionId: session.id,
+        turnId: turn.id,
+        attemptId,
+        executionGeneration: turn.executionGeneration,
+        receiptId,
+      }),
+    ).toMatchObject({ action: "settled", receipt: { id: receiptId } });
+  });
+
+  test("model-call admission is idempotent, provenance-exact, and allows only one unlinked call", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "admit one exact provider call");
+    const attemptId = crypto.randomUUID();
+    const turn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId },
+    );
+    if (!turn) throw new Error("model-call admission turn was not claimed");
+    const admissionInput = {
+      id: crypto.randomUUID(),
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      turnId: turn.id,
+      attemptId,
+      executionGeneration: turn.executionGeneration,
+      triggerEventId: turn.triggerEventId,
+      callIndex: 1,
+      callKind: "agent_model" as const,
+      provider: "scripted",
+      providerApi: "responses" as const,
+      model: "scripted-model",
+    };
+
+    expect(await admitSessionTurnModelCall(client.db, admissionInput)).toMatchObject({
+      action: "established",
+      admission: { id: admissionInput.id, callIndex: 1 },
+    });
+    expect(await admitSessionTurnModelCall(client.db, admissionInput)).toMatchObject({
+      action: "confirmed",
+      admission: { id: admissionInput.id },
+    });
+    await expect(
+      admitSessionTurnModelCall(client.db, {
+        ...admissionInput,
+        id: crypto.randomUUID(),
+        model: "conflicting-model",
+      }),
+    ).rejects.toThrow("has conflicting provenance");
+    await expect(
+      admitSessionTurnModelCall(client.db, {
+        ...admissionInput,
+        id: crypto.randomUUID(),
+        callIndex: 2,
+      }),
+    ).rejects.toThrow();
+  });
+
+  test("model receipts require the exact admission kind and maintain a bidirectional link", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "link completed inference truth");
+    const attemptId = crypto.randomUUID();
+    const turn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId },
+    );
+    if (!turn) throw new Error("model receipt admission turn was not claimed");
+    const receiptId = crypto.randomUUID();
+    const obligation = {
+      kind: "model_call",
+      history: { items: [] },
+      metering: null,
+      event: null,
+    };
+    const receiptInput = {
+      id: receiptId,
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      turnId: turn.id,
+      attemptId,
+      executionGeneration: turn.executionGeneration,
+      triggerEventId: turn.triggerEventId,
+      obligationKind: "model_call" as const,
+      obligationVersion: 1 as const,
+      obligationDigest: "d".repeat(64),
+      obligation,
+    };
+
+    await expect(establishSessionTurnPersistenceReceipt(client.db, receiptInput)).rejects.toThrow(
+      "conflicts with its exact ownership chain",
+    );
+
+    const admissionId = crypto.randomUUID();
+    await admitSessionTurnModelCall(client.db, {
+      id: admissionId,
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      turnId: turn.id,
+      attemptId,
+      executionGeneration: turn.executionGeneration,
+      triggerEventId: turn.triggerEventId,
+      callIndex: 1,
+      callKind: "agent_model",
+      provider: "scripted",
+      providerApi: "responses",
+      model: "scripted-model",
+    });
+    await expect(
+      establishSessionTurnPersistenceReceipt(client.db, {
+        ...receiptInput,
+        modelCallAdmissionId: admissionId,
+        obligationKind: "context_compaction",
+        obligation: { ...obligation, kind: "context_compaction" },
+      }),
+    ).rejects.toThrow("conflicts with its model-call admission");
+
+    expect(
+      await establishSessionTurnPersistenceReceipt(client.db, {
+        ...receiptInput,
+        modelCallAdmissionId: admissionId,
+      }),
+    ).toMatchObject({ action: "established", receipt: { id: receiptId } });
+    const [linkedAdmission] = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      db
+        .select({
+          receiptId: schema.sessionTurnModelCallAdmissions.persistenceReceiptId,
+          receiptEstablishedAt: schema.sessionTurnModelCallAdmissions.receiptEstablishedAt,
+        })
+        .from(schema.sessionTurnModelCallAdmissions)
+        .where(eq(schema.sessionTurnModelCallAdmissions.id, admissionId)),
+    );
+    expect(linkedAdmission).toMatchObject({
+      receiptId,
+      receiptEstablishedAt: expect.any(Date),
+    });
+    expect(
+      await recoverSessionDispatch(client.db, grant.workspaceId!, {
+        sessionId: session.id,
+        attemptId,
+        timeoutType: "HEARTBEAT",
+        maxRedispatches: 3,
+      }),
+    ).toMatchObject({ action: "persistence_pending", receipt: { id: receiptId } });
+
+    await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      db
+        .update(schema.sessionTurnModelCallAdmissions)
+        .set({ persistenceReceiptId: null, receiptEstablishedAt: null })
+        .where(eq(schema.sessionTurnModelCallAdmissions.id, admissionId)),
+    );
+    await expect(
+      establishSessionTurnPersistenceReceipt(client.db, {
+        ...receiptInput,
+        modelCallAdmissionId: admissionId,
+      }),
+    ).rejects.toThrow("already owns a different pending persistence receipt");
+  });
+
+  test("an unlinked admission atomically quarantines worker-death recovery and stale retries", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "never replay an ambiguously completed inference");
+    const attemptId = crypto.randomUUID();
+    const turn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId },
+    );
+    if (!turn) throw new Error("ambiguous model-call turn was not claimed");
+    const admissionId = crypto.randomUUID();
+    await admitSessionTurnModelCall(client.db, {
+      id: admissionId,
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      turnId: turn.id,
+      attemptId,
+      executionGeneration: turn.executionGeneration,
+      triggerEventId: turn.triggerEventId,
+      callIndex: 1,
+      callKind: "agent_model",
+      provider: "scripted",
+      providerApi: "responses",
+      model: "scripted-model",
+    });
+
+    const quarantined = await recoverSessionDispatch(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      attemptId,
+      timeoutType: "HEARTBEAT",
+      maxRedispatches: 3,
+    });
+    expect(quarantined).toMatchObject({ action: "quarantined", turnId: turn.id });
+    expect(quarantined.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "turn.failed",
+          payload: expect.objectContaining({
+            code: "ambiguous_model_call",
+            effectState: "unknown",
+            retryable: false,
+          }),
+        }),
+      ]),
+    );
+    expect(await getSession(client.db, grant.workspaceId!, session.id)).toMatchObject({
+      status: "failed",
+      activeTurnId: null,
+    });
+    expect(
+      await quarantineAmbiguousSessionTurnModelCall(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn.id,
+        attemptId,
+        executionGeneration: turn.executionGeneration,
+        admissionId,
+      }),
+    ).toEqual({ action: "stale", events: [] });
+    expect(
+      await recoverSessionDispatch(client.db, grant.workspaceId!, {
+        sessionId: session.id,
+        attemptId,
+        timeoutType: "HEARTBEAT",
+        maxRedispatches: 3,
+      }),
+    ).toMatchObject({ action: "stale" });
+  });
+
+  test("in-process ambiguous-call quarantine owns only the exact live attempt", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "quarantine this exact failed provider boundary");
+    const attemptId = crypto.randomUUID();
+    const turn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId },
+    );
+    if (!turn) throw new Error("in-process quarantine turn was not claimed");
+    const admissionId = crypto.randomUUID();
+    await admitSessionTurnModelCall(client.db, {
+      id: admissionId,
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      turnId: turn.id,
+      attemptId,
+      executionGeneration: turn.executionGeneration,
+      triggerEventId: turn.triggerEventId,
+      callIndex: 1,
+      callKind: "context_compaction",
+      provider: "scripted",
+      providerApi: "chat",
+      model: "scripted-model",
+    });
+
+    expect(
+      await quarantineAmbiguousSessionTurnModelCall(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn.id,
+        attemptId,
+        executionGeneration: turn.executionGeneration,
+        admissionId,
+      }),
+    ).toMatchObject({ action: "quarantined", turnId: turn.id });
+    expect(
+      await quarantineAmbiguousSessionTurnModelCall(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn.id,
+        attemptId,
+        executionGeneration: turn.executionGeneration,
+        admissionId,
+      }),
+    ).toEqual({ action: "stale", events: [] });
+  });
+
+  test("invalid persistence evidence atomically quarantines and removes the live-attempt wedge", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "perform an uncertain effect");
+    const attemptId = crypto.randomUUID();
+    const turn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId },
+    );
+    if (!turn) throw new Error("quarantine test turn was not claimed");
+    const receiptId = crypto.randomUUID();
+    await establishSessionTurnPersistenceReceipt(client.db, {
+      id: receiptId,
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      turnId: turn.id,
+      attemptId,
+      executionGeneration: turn.executionGeneration,
+      triggerEventId: turn.triggerEventId,
+      obligationKind: "pending_tool_call",
+      obligationVersion: 1,
+      obligationDigest: "b".repeat(64),
+      obligation: {
+        kind: "pending_tool_call",
+        callId: "unknown-effect",
+        callType: "function_call",
+        callItem: { type: "function_call", callId: "unknown-effect" },
+      },
+    });
+
+    const quarantined = await quarantineSessionTurnPersistenceAttempt(
+      client.db,
+      grant.workspaceId!,
+      {
+        sessionId: session.id,
+        attemptId,
+        reason: "malformed_heartbeat",
+      },
+    );
+    expect(quarantined).toMatchObject({ action: "quarantined", turnId: turn.id });
+    expect(quarantined.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "turn.failed",
+          payload: expect.objectContaining({
+            code: "invalid_turn_persistence_handoff",
+            effectState: "unknown",
+            retryable: false,
+          }),
+        }),
+      ]),
+    );
+    expect(
+      await getSessionTurnPersistenceReceipt(client.db, grant.workspaceId!, {
+        sessionId: session.id,
+        attemptId,
+        receiptId,
+      }),
+    ).toMatchObject({
+      state: "quarantined",
+      quarantineReason: "malformed_heartbeat",
+      quarantinedAt: expect.any(Date),
+    });
+    expect(await getSession(client.db, grant.workspaceId!, session.id)).toMatchObject({
+      status: "failed",
+      activeTurnId: null,
+    });
+    expect(await getSessionTurn(client.db, grant.workspaceId!, turn.id)).toMatchObject({
+      status: "failed",
+      activeAttemptId: null,
+    });
+    const [attempt] = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      db
+        .select({
+          state: schema.sessionTurnAttempts.state,
+          outcome: schema.sessionTurnAttempts.outcome,
+        })
+        .from(schema.sessionTurnAttempts)
+        .where(
+          and(
+            eq(schema.sessionTurnAttempts.workspaceId, grant.workspaceId!),
+            eq(schema.sessionTurnAttempts.id, attemptId),
+          ),
+        ),
+    );
+    expect(attempt).toEqual({ state: "closed", outcome: "failed" });
+
+    const revived = await send(grant, session.id, "operator-approved retry as a new turn");
+    const successor = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+    );
+    expect(successor?.id).toBe(revived.turn.id);
+    expect(successor?.activeAttemptId).not.toBe(attemptId);
   });
 
   test("Steer supersedes maintenance compaction and leaves the request for the new prompt", async () => {

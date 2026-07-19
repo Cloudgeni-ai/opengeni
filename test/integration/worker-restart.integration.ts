@@ -3,17 +3,23 @@ import { Client, Connection } from "@temporalio/client";
 import { NativeConnection, Worker } from "@temporalio/worker";
 import type { AccessGrant } from "@opengeni/contracts";
 import {
+  acceptSessionApprovalDecision,
+  admitSessionTurnModelCall,
   applySessionTurnSettlement,
   bootstrapWorkspace,
+  claimSessionWorkForAttempt,
   createDb,
   createSession,
+  establishSessionTurnPersistenceReceipt,
   getSession,
   getSessionHistoryItems,
+  getSessionTurnPersistenceReceipt,
   listSessionEvents,
   listSessionTurns,
   mutateSessionControlInTransaction,
   withWorkspaceRls,
 } from "@opengeni/db";
+import { migrate } from "@opengeni/db/migrate";
 import { createNatsEventBus, type EventBus } from "@opengeni/events";
 import { createProductionAgentRuntime } from "@opengeni/runtime";
 import {
@@ -30,6 +36,7 @@ import { postUserMessageTurn } from "@opengeni/core";
 import type { SessionWorkflowClient } from "../../apps/api/src/app";
 import { createActivityTestHarness } from "../../apps/worker/src/activities";
 import { currentActivityContext } from "../../apps/worker/src/activities/streaming";
+import { prepareTurnPersistenceHandoff } from "../../apps/worker/src/turn-persistence-handoff";
 import {
   CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES,
   TURN_WORKER_MAX_CONCURRENT_TURNS,
@@ -37,20 +44,40 @@ import {
 import { turnTaskQueue } from "../../apps/worker/src/workflows/activities";
 import { submitTestHumanPrompt } from "./helpers/session-control";
 
-// Proves the campaign's robustness contract: a worker rollout restart
-// (graceful SIGTERM shutdown) mid-turn must not produce a failed session.
-// The in-flight turn checkpoints, re-queues, and a second worker resumes it
-// from persisted conversation truth — without re-executing side effects the
-// first attempt already performed.
+// Proves the campaign's robustness contract across real PostgreSQL, Temporal,
+// and NATS: a worker restart can recover pre-effect or fully receipted progress,
+// but it must fail closed rather than replay an admitted provider/tool effect
+// whose complete result is unknown.
+type RequiredServices = Pick<
+  TestServices,
+  "databaseUrl" | "natsUrl" | "temporalHost" | "migrate" | "down"
+>;
+
+async function hangWithoutHeartbeating(): Promise<never> {
+  await new Promise<void>((_resolve, reject) => {
+    const signal = currentActivityContext()?.cancellationSignal;
+    if (!signal || signal.aborted) {
+      reject(new Error("simulated dead turn worker cancelled after timeout"));
+      return;
+    }
+    signal.addEventListener(
+      "abort",
+      () => reject(new Error("simulated dead turn worker cancelled after timeout")),
+      { once: true },
+    );
+  });
+  throw new Error("unreachable simulated dead turn worker completion");
+}
+
 describe("worker restart resilience", () => {
-  let services: TestServices;
+  let services: RequiredServices;
   let dbClient: ReturnType<typeof createDb>;
   let bus: EventBus;
   let connection: Connection;
   let nativeConnection: NativeConnection;
 
   beforeAll(async () => {
-    services = await startTestServices({ temporal: true });
+    services = await requiredServices();
     await services.migrate();
     dbClient = createDb(services.databaseUrl);
     bus = await createNatsEventBus(services.natsUrl);
@@ -68,7 +95,7 @@ describe("worker restart resilience", () => {
     await services?.down();
   }, 60_000);
 
-  test("graceful worker shutdown mid-turn recovers the same turn on a healthy worker", async () => {
+  test("graceful worker shutdown during an admitted model call quarantines without replay", async () => {
     const grant = await testGrant();
     const mcp = startTestMcpServer();
     const taskQueue = `worker-restart-${crypto.randomUUID()}`;
@@ -89,11 +116,12 @@ describe("worker restart resilience", () => {
         delayMs: 50,
         outputText: "never finished",
       },
-      // Model call 3: the resumed attempt's response on the second worker.
+      // Must remain unused: the admitted second call cannot be replayed merely
+      // because shutdown interrupted its stream before receipt establishment.
       {
         id: "restart-call-3",
-        outputText: "resumed and finished",
-        chunks: ["resumed ", "and ", "finished"],
+        outputText: "must not replay",
+        chunks: ["must ", "not ", "replay"],
       },
     ]);
     const settings = testSettings({
@@ -142,85 +170,598 @@ describe("worker restart resilience", () => {
 
     const firstWorker = await restartTestWorker(nativeConnection, taskQueue, activities);
     const firstRun = firstWorker.run();
-    const client = new Client({ connection });
-    const handle = await client.workflow.start("sessionWorkflow", {
-      taskQueue,
-      workflowId,
-      args: [
-        {
-          accountId: grant.accountId,
-          workspaceId: grant.workspaceId,
-          sessionId: session.id,
-        },
-      ],
-    });
-
-    // Wait until the side effect ran, its progress was checkpointed to items,
-    // and the second (slow) model call is in flight — then pull the plug.
-    await waitFor(() => mcp.calls.length === 1);
-    await waitFor(
-      async () =>
-        (await getSessionHistoryItems(dbClient.db, grant.workspaceId, session.id)).length > 0,
-    );
-    await waitFor(() => model.calls === 2);
-    firstWorker.shutdown();
-    await firstRun;
-
-    // Between workers the same logical turn is recoverable, not converted into
-    // queue work and not failed.
-    const recovering = await getSession(dbClient.db, grant.workspaceId, session.id);
-    expect(recovering?.status).toBe("recovering");
-    const turnsAfterShutdown = await listSessionTurns(dbClient.db, grant.workspaceId, session.id);
-    expect(turnsAfterShutdown.map((turn) => turn.status)).toEqual(["recovering"]);
-    expect(turnsAfterShutdown[0]?.id).toBe(accepted.turn.id);
-    const eventsAfterShutdown = await listSessionEvents(
-      dbClient.db,
-      grant.workspaceId,
-      session.id,
-      0,
-      200,
-    );
-    expect(eventsAfterShutdown.some((event) => event.type === "turn.recovery.requested")).toBe(
-      true,
-    );
-    expect(eventsAfterShutdown.some((event) => event.type === "turn.failed")).toBe(false);
-
-    const secondWorker = await restartTestWorker(nativeConnection, taskQueue, activities);
-    const secondRun = secondWorker.run();
+    let firstWorkerStopped = false;
+    let completionWorker: Awaited<ReturnType<typeof restartTestWorker>> | null = null;
+    let completionRun: Promise<void> | null = null;
     try {
+      const client = new Client({ connection });
+      const handle = await client.workflow.start("sessionWorkflow", {
+        taskQueue,
+        workflowId,
+        args: [
+          {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            sessionId: session.id,
+          },
+        ],
+      });
+
+      // Wait until the side effect ran, its progress was checkpointed to items,
+      // and the second (slow) model call is in flight — then pull the plug. The
+      // first workflow bundle load can exceed the generic 30s polling default on
+      // a cold native Temporal worker, so keep this below the enclosing test
+      // bound and emit state that makes a genuine failure actionable.
+      await waitFor(() => mcp.calls.length === 1, {
+        timeoutMs: 120_000,
+        describe: () => `modelCalls=${model.calls} mcpCalls=${mcp.calls.length}`,
+      });
+      await waitFor(
+        async () =>
+          (await getSessionHistoryItems(dbClient.db, grant.workspaceId, session.id)).length > 0,
+      );
+      await waitFor(() => model.calls === 2);
+      firstWorker.shutdown();
+      firstWorkerStopped = true;
+      await firstRun;
+      // A healthy worker is still needed to drain the workflow task after the
+      // old turn activity exits. It must not receive a new inference attempt.
+      completionWorker = await restartTestWorker(nativeConnection, taskQueue, activities);
+      completionRun = completionWorker.run();
       await handle.result();
     } finally {
-      secondWorker.shutdown();
-      await secondRun;
+      if (!firstWorkerStopped) {
+        firstWorker.shutdown();
+        await firstRun.catch(() => undefined);
+      }
+      if (completionWorker && completionRun) {
+        completionWorker.shutdown();
+        await completionRun;
+      }
       mcp.close();
     }
 
-    const resumed = await getSession(dbClient.db, grant.workspaceId, session.id);
-    expect(resumed?.status).toBe("idle");
+    const quarantined = await getSession(dbClient.db, grant.workspaceId, session.id);
+    expect(quarantined).toMatchObject({ status: "failed", activeTurnId: null });
     const turns = await listSessionTurns(dbClient.db, grant.workspaceId, session.id);
-    expect(turns.map((turn) => turn.status)).toEqual(["completed"]);
+    expect(turns).toEqual([
+      expect.objectContaining({ id: accepted.turn.id, status: "failed", activeAttemptId: null }),
+    ]);
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 500);
-    expect(events.some((event) => event.type === "turn.failed")).toBe(false);
-    expect(events.filter((event) => event.type === "turn.recovery.requested")).toHaveLength(1);
-    expect(latestStatus(events)).toBe("idle");
-    // The new attempt receives the same canonical conversation truth, without
-    // a fabricated recovery message.
-    expect(model.calls).toBe(3);
-    const resumeRequest = JSON.stringify(
-      (model.requests.at(-1) as { input?: unknown })?.input ?? "",
+    expect(events.filter((event) => event.type === "turn.recovery.requested")).toHaveLength(0);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "turn.failed",
+        payload: expect.objectContaining({
+          code: "ambiguous_model_call",
+          effectState: "unknown",
+          retryable: false,
+        }),
+      }),
     );
-    expect(resumeRequest).toContain("do the work");
-    expect(resumeRequest).toContain("call-restart-1");
-    // ...and did not blindly replay the already-executed side effect.
+    expect(latestStatus(events)).toBe("failed");
+    // Both external boundaries happened once: the first tool result was fully
+    // durable, while the second provider call remained ambiguous. Neither is
+    // invoked again by a successor attempt.
+    expect(model.calls).toBe(2);
+    expect(model.requests).toHaveLength(2);
     expect(mcp.calls).toEqual([{ tool: "search_documents", args: { query: "current state" } }]);
-    expect(
-      events.some(
-        (event) =>
-          event.type === "agent.message.completed" &&
-          JSON.stringify(event.payload).includes("resumed and finished"),
-      ),
-    ).toBe(true);
   }, 180_000);
+
+  test("worker shutdown after an approved tool begins continues from canonical history without replay", async () => {
+    const grant = await testGrant();
+    let activeActivityCancellation: Promise<void> | null = null;
+    let resolveCancellationObserved!: () => void;
+    const cancellationObserved = new Promise<void>((resolve) => {
+      resolveCancellationObserved = resolve;
+    });
+    let resolveCancelledActivityFinalized!: () => void;
+    const cancelledActivityFinalized = new Promise<void>((resolve) => {
+      resolveCancelledActivityFinalized = resolve;
+    });
+    let releaseCancelledActivityReturn!: () => void;
+    const cancelledActivityReturnGate = new Promise<void>((resolve) => {
+      releaseCancelledActivityReturn = resolve;
+    });
+    let activityHeartbeats = 0;
+    let heartbeatsAtCancellation = 0;
+    let activityHeartbeatError: unknown;
+    const mcp = startTestMcpServer({
+      beforeToolResult: async () => {
+        if (!activeActivityCancellation) {
+          throw new Error("approved-tool restart fixture has no active cancellation signal");
+        }
+        // The external effect is recorded before this hook. Hold its response
+        // until Temporal has actually cancelled the resumed activity, so the
+        // result cannot race ahead of the worker-shutdown boundary.
+        await activeActivityCancellation;
+      },
+    });
+    const taskQueue = `approved-tool-restart-${crypto.randomUUID()}`;
+    const model = new ScriptedModel([
+      {
+        id: "approved-tool-call-1",
+        output: [
+          functionCall(
+            "docs__search_documents",
+            { query: "rolling deploy state" },
+            "call-approved-restart",
+          ),
+        ],
+      },
+      {
+        id: "approved-tool-call-2",
+        outputText: "continued from the explicit unknown outcome",
+        chunks: ["continued from ", "the explicit unknown outcome"],
+      },
+    ]);
+    const settings = testSettings({
+      databaseUrl: services.databaseUrl,
+      natsUrl: services.natsUrl,
+      temporalHost: services.temporalHost,
+      temporalTaskQueue: taskQueue,
+      mcpServers: [
+        {
+          id: "docs",
+          name: "Document Search",
+          url: mcp.url,
+          allowedTools: ["search_documents"],
+          cacheToolsList: false,
+          requireApproval: true,
+        },
+      ],
+    });
+    const baseActivities = createActivityTestHarness({
+      settings,
+      db: dbClient.db,
+      bus,
+      runtime: createProductionAgentRuntime({ model }),
+    });
+    const activities = {
+      ...baseActivities,
+      runAgentTurn: async (input: Parameters<typeof baseActivities.runAgentTurn>[0]) => {
+        const context = currentActivityContext();
+        if (!context) {
+          throw new Error("approved-tool restart fixture has no Temporal activity context");
+        }
+        const signal = context.cancellationSignal;
+        let resolveActiveActivityCancellation!: () => void;
+        activeActivityCancellation = new Promise<void>((resolve) => {
+          resolveActiveActivityCancellation = resolve;
+        });
+        const noteCancellation = () => {
+          heartbeatsAtCancellation = activityHeartbeats;
+          resolveActiveActivityCancellation();
+          resolveCancellationObserved();
+        };
+        if (signal.aborted) {
+          noteCancellation();
+        } else {
+          signal.addEventListener("abort", noteCancellation, { once: true });
+        }
+        const heartbeat = () => {
+          try {
+            context.heartbeat({
+              phase: "approved-tool-rolling-overlap-fixture",
+              count: activityHeartbeats + 1,
+            });
+            activityHeartbeats += 1;
+          } catch (error) {
+            activityHeartbeatError ??= error;
+          }
+        };
+        heartbeat();
+        const heartbeatTimer = setInterval(heartbeat, 25);
+        try {
+          return await baseActivities.runAgentTurn(input);
+        } finally {
+          // Hold the cancelled activity only after the production finalizer has
+          // completed and published its quiescence receipt. This leaves the old
+          // Temporal activity physically alive and heartbeating while a new
+          // worker polls both queues, proving Temporal does not dispatch the
+          // successor merely because cancellation and DB quiescence are known.
+          if (signal.aborted && mcp.calls.length === 1) {
+            resolveCancelledActivityFinalized();
+            await cancelledActivityReturnGate;
+          }
+          clearInterval(heartbeatTimer);
+          signal.removeEventListener("abort", noteCancellation);
+        }
+      },
+    };
+    const session = await createSession(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "inspect the rolling deploy state",
+      resources: [],
+      tools: [{ kind: "mcp", id: "docs" }],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    const workflowId = `session-${session.id}`;
+    await submitTestHumanPrompt(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      subjectId: grant.subjectId,
+      text: "inspect the rolling deploy state",
+      resources: [],
+      tools: [{ kind: "mcp", id: "docs" }],
+      delivery: "send",
+      reasoningEffortFallback: settings.openaiReasoningEffort,
+    });
+
+    const firstWorker = await restartTestWorker(nativeConnection, taskQueue, activities);
+    const firstRun = firstWorker.run();
+    let firstRunSettled = false;
+    void firstRun.then(
+      () => {
+        firstRunSettled = true;
+      },
+      () => {
+        firstRunSettled = true;
+      },
+    );
+    let firstWorkerShutdownRequested = false;
+    let completionWorker: Awaited<ReturnType<typeof restartTestWorker>> | null = null;
+    let completionRun: Promise<void> | null = null;
+    try {
+      const client = new Client({ connection });
+      const handle = await client.workflow.start("sessionWorkflow", {
+        taskQueue,
+        workflowId,
+        args: [
+          {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            sessionId: session.id,
+          },
+        ],
+      });
+      await waitFor(
+        async () =>
+          (await getSession(dbClient.db, grant.workspaceId, session.id))?.status ===
+          "requires_action",
+        { timeoutMs: 120_000 },
+      );
+      const approvalEvent = (
+        await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 200)
+      ).find((event) => event.type === "session.requiresAction");
+      const approvalId = (
+        approvalEvent?.payload as {
+          approvals?: Array<{ rawItem?: { id?: unknown } }>;
+        }
+      )?.approvals?.[0]?.rawItem?.id;
+      expect(approvalId).toBe("call-approved-restart");
+      const approval = await acceptSessionApprovalDecision(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        payload: { approvalId, decision: "approve" },
+      });
+      if (approval.action !== "accepted") {
+        throw new Error(`approval was not accepted: session is ${approval.sessionStatus}`);
+      }
+      await handle.signal("approvalDecision", approval.event.id);
+
+      await waitFor(() => mcp.calls.length === 1, {
+        timeoutMs: 120_000,
+        describe: () => `modelCalls=${model.calls} mcpCalls=${mcp.calls.length}`,
+      });
+      firstWorker.shutdown();
+      firstWorkerShutdownRequested = true;
+      await cancellationObserved;
+      await cancelledActivityFinalized;
+
+      completionWorker = await restartTestWorker(nativeConnection, taskQueue, activities);
+      completionRun = completionWorker.run();
+      await waitFor(() => activityHeartbeats >= heartbeatsAtCancellation + 3, {
+        timeoutMs: 5_000,
+        intervalMs: 10,
+        describe: () =>
+          `heartbeats=${activityHeartbeats} cancellationBaseline=${heartbeatsAtCancellation}`,
+      });
+
+      expect(activityHeartbeatError).toBeUndefined();
+      expect(firstRunSettled).toBe(false);
+      expect(mcp.calls).toEqual([
+        { tool: "search_documents", args: { query: "rolling deploy state" } },
+      ]);
+      expect(model.calls).toBe(1);
+      expect(model.requests).toHaveLength(1);
+      const overlapTurns = await listSessionTurns(dbClient.db, grant.workspaceId, session.id);
+      expect(overlapTurns).toHaveLength(1);
+      expect(overlapTurns[0]?.executionGeneration).toBe(2);
+      const overlapAttempts = await withWorkspaceRls(dbClient.db, grant.workspaceId, async (db) =>
+        (await db.query.sessionTurnAttempts.findMany()).filter(
+          (attempt) => attempt.turnId === overlapTurns[0]!.id,
+        ),
+      );
+      expect(overlapAttempts).toHaveLength(2);
+      // Worker shutdown cancellation is not itself a durable session-control
+      // interruption, so it cannot mint a PostgreSQL quiescence receipt. The
+      // still-open Temporal activity promise is the admission gate until its
+      // physical return lets the workflow settle recovery.
+      expect(overlapAttempts.filter((attempt) => attempt.quiescedAt !== null)).toHaveLength(0);
+
+      releaseCancelledActivityReturn();
+      await firstRun;
+      await handle.result();
+    } finally {
+      releaseCancelledActivityReturn();
+      if (!firstWorkerShutdownRequested) {
+        firstWorker.shutdown();
+      }
+      await firstRun.catch(() => undefined);
+      if (completionWorker && completionRun) {
+        completionWorker.shutdown();
+        await completionRun;
+      }
+      mcp.close();
+    }
+
+    expect(mcp.calls).toEqual([
+      { tool: "search_documents", args: { query: "rolling deploy state" } },
+    ]);
+    expect(model.calls).toBe(2);
+    expect(model.requests).toHaveLength(2);
+    const turns = await listSessionTurns(dbClient.db, grant.workspaceId, session.id);
+    expect(turns).toHaveLength(1);
+    expect(turns[0]).toMatchObject({ status: "completed", executionGeneration: 3 });
+    const attempts = await withWorkspaceRls(dbClient.db, grant.workspaceId, async (db) =>
+      (await db.query.sessionTurnAttempts.findMany()).filter(
+        (attempt) => attempt.turnId === turns[0]!.id,
+      ),
+    );
+    expect(attempts).toHaveLength(3);
+    expect(attempts.every((attempt) => attempt.state === "closed")).toBe(true);
+
+    const history = await getSessionHistoryItems(dbClient.db, grant.workspaceId, session.id);
+    expect(history.map((row) => row.item)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "function_call",
+          callId: "call-approved-restart",
+        }),
+        expect.objectContaining({
+          type: "function_call_result",
+          callId: "call-approved-restart",
+          status: "incomplete",
+          output: expect.objectContaining({
+            text: expect.stringContaining("side-effect outcome is unknown"),
+          }),
+        }),
+      ]),
+    );
+    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 500);
+    const unknownOutputIndex = events.findIndex(
+      (event) =>
+        event.type === "agent.toolCall.output" &&
+        (event.payload as { id?: unknown; recovery?: { outcome?: unknown } }).id ===
+          "call-approved-restart" &&
+        (event.payload as { recovery?: { outcome?: unknown } }).recovery?.outcome === "unknown",
+    );
+    const recoveryIndex = events.findIndex((event) => event.type === "turn.recovery.requested");
+    expect(unknownOutputIndex).toBeGreaterThan(-1);
+    expect(recoveryIndex).toBeGreaterThan(unknownOutputIndex);
+    expect(events.filter((event) => event.type === "turn.recovery.requested")).toHaveLength(1);
+    expect(events.filter((event) => event.type === "turn.failed")).toHaveLength(0);
+    expect(latestStatus(events)).toBe("idle");
+  }, 240_000);
+
+  test("worker death after a PostgreSQL model receipt but before heartbeat never replays inference", async () => {
+    const grant = await testGrant();
+    const taskQueue = `receipt-before-heartbeat-${crypto.randomUUID()}`;
+    const settings = testSettings({
+      databaseUrl: services.databaseUrl,
+      natsUrl: services.natsUrl,
+      temporalHost: services.temporalHost,
+      temporalTaskQueue: taskQueue,
+    });
+    const baseActivities = createActivityTestHarness({
+      settings,
+      db: dbClient.db,
+      bus,
+      runtime: createProductionAgentRuntime({ model: new ScriptedModel("must not be called") }),
+    });
+    let providerInferenceEffects = 0;
+    let turnDispatches = 0;
+    let committedReceiptId: string | null = null;
+    let receiptAttemptId: string | null = null;
+    const activities = {
+      ...baseActivities,
+      runAgentTurn: async (input: Parameters<typeof baseActivities.runAgentTurn>[0]) => {
+        const context = currentActivityContext();
+        if (!context) throw new Error("receipt fault fixture has no Temporal activity context");
+        const claim = await claimSessionWorkForAttempt(dbClient.db, input.workspaceId, {
+          sessionId: input.sessionId,
+          workflowId: input.workflowId,
+          workflowRunId: input.workflowRunId,
+          attemptId: input.attemptId,
+          dispatchId: context.info.activityId,
+          trigger: input.trigger,
+        });
+        if (claim.action === "unclaimed") {
+          return { status: "unclaimed" as const, reason: claim.reason };
+        }
+        turnDispatches += 1;
+        const turn = claim.turn;
+        if (turnDispatches === 1) {
+          providerInferenceEffects += 1;
+          const sourceKey = `provider-response-${input.attemptId}`;
+          const prepared = prepareTurnPersistenceHandoff({
+            turnId: turn.id,
+            triggerEventId: turn.triggerEventId,
+            executionGeneration: turn.executionGeneration,
+            attemptId: input.attemptId,
+            obligation: {
+              kind: "model_call",
+              history: {
+                producerCodexCredentialId: null,
+                modelToolOutputTruncationTokens: 4_096,
+                items: [
+                  {
+                    // The initial user prompt already owns canonical position 0.
+                    position: 1,
+                    item: {
+                      type: "message",
+                      role: "assistant",
+                      content: "provider completed exactly once",
+                    },
+                  },
+                ],
+              },
+              metering: {
+                model: "scripted-model",
+                isCodexTurn: false,
+                usage: { inputTokens: 10, outputTokens: 3, totalTokens: 13 },
+                sourceKey,
+              },
+              event: {
+                type: "agent.model.usage",
+                payload: {
+                  turnId: turn.id,
+                  model: "scripted-model",
+                  sourceKey,
+                  inputTokens: 10,
+                  outputTokens: 3,
+                },
+                turnId: turn.id,
+                producerId: `turn-attempt:${input.attemptId}`,
+                producerSeq: 1,
+                occurredAt: new Date().toISOString(),
+              },
+            },
+          });
+          const modelCallAdmissionId = crypto.randomUUID();
+          const admitted = await admitSessionTurnModelCall(dbClient.db, {
+            id: modelCallAdmissionId,
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: turn.id,
+            attemptId: input.attemptId,
+            executionGeneration: turn.executionGeneration,
+            triggerEventId: turn.triggerEventId,
+            callIndex: 1,
+            callKind: "agent_model",
+            provider: "scripted",
+            providerApi: "responses",
+            model: "scripted-model",
+          });
+          expect(admitted.action).toBe("established");
+          const established = await establishSessionTurnPersistenceReceipt(dbClient.db, {
+            id: prepared.handoff.receiptId,
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: prepared.handoff.turnId,
+            attemptId: prepared.handoff.attemptId,
+            executionGeneration: prepared.handoff.executionGeneration,
+            triggerEventId: prepared.handoff.triggerEventId,
+            modelCallAdmissionId,
+            obligationKind: prepared.handoff.obligationKind,
+            obligationVersion: 1,
+            obligationDigest: prepared.handoff.obligationDigest,
+            obligation: prepared.obligation,
+          });
+          expect(established.action).toBe("established");
+          committedReceiptId = prepared.handoff.receiptId;
+          receiptAttemptId = input.attemptId;
+          // No heartbeat and no activity result follows this committed row.
+          // Temporal's real heartbeat timeout supplies the worker-death edge.
+          return await hangWithoutHeartbeating();
+        }
+
+        const settled = await applySessionTurnSettlement(dbClient.db, input.workspaceId, {
+          sessionId: input.sessionId,
+          turnId: turn.id,
+          triggerEventId: turn.triggerEventId,
+          attemptId: input.attemptId,
+          turnStatus: "completed",
+          sessionStatus: "idle",
+          activeTurnId: null,
+          events: [{ type: "turn.completed", payload: { recoveredReceipt: true } }],
+        });
+        expect(settled.action).toBe("settled");
+        return {
+          status: "idle" as const,
+          turnId: turn.id,
+          attemptId: input.attemptId,
+        };
+      },
+    };
+    const session = await createSession(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "complete one provider call",
+      resources: [],
+      tools: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    await submitTestHumanPrompt(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      subjectId: grant.subjectId,
+      text: "complete one provider call",
+      resources: [],
+      tools: [],
+      delivery: "send",
+      reasoningEffortFallback: settings.openaiReasoningEffort,
+    });
+
+    const worker = await restartTestWorker(nativeConnection, taskQueue, activities);
+    const run = worker.run();
+    const client = new Client({ connection });
+    try {
+      const handle = await client.workflow.start("sessionWorkflow", {
+        taskQueue,
+        workflowId: `session-${session.id}`,
+        args: [
+          {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            sessionId: session.id,
+          },
+        ],
+      });
+      await handle.result();
+    } finally {
+      worker.shutdown();
+      await run;
+    }
+
+    expect(providerInferenceEffects).toBe(1);
+    expect(turnDispatches).toBe(2);
+    expect(committedReceiptId).not.toBeNull();
+    const turns = await listSessionTurns(dbClient.db, grant.workspaceId, session.id);
+    expect(turns).toHaveLength(1);
+    expect(turns[0]).toMatchObject({ status: "completed", executionGeneration: 2 });
+    const attempts = await withWorkspaceRls(dbClient.db, grant.workspaceId, async (db) =>
+      (await db.query.sessionTurnAttempts.findMany()).filter(
+        (attempt) => attempt.turnId === turns[0]!.id,
+      ),
+    );
+    expect(attempts).toHaveLength(2);
+    expect(attempts.every((attempt) => attempt.state === "closed")).toBe(true);
+    expect(
+      await getSessionTurnPersistenceReceipt(dbClient.db, grant.workspaceId, {
+        sessionId: session.id,
+        attemptId: receiptAttemptId!,
+        receiptId: committedReceiptId!,
+      }),
+    ).toMatchObject({ state: "settled" });
+    const history = await getSessionHistoryItems(dbClient.db, grant.workspaceId, session.id);
+    expect(JSON.stringify(history)).toContain("provider completed exactly once");
+    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 500);
+    expect(events.filter((event) => event.type === "agent.model.usage")).toHaveLength(1);
+    expect(events.filter((event) => event.type === "turn.recovery.requested")).toHaveLength(1);
+    expect(events.filter((event) => event.type === "turn.failed")).toHaveLength(0);
+  }, 240_000);
 
   test("graceful worker shutdown before model progress recovers the same turn untouched", async () => {
     const grant = await testGrant();
@@ -370,7 +911,7 @@ describe("worker restart resilience", () => {
     ).toBe(true);
   }, 180_000);
 
-  test("a late activity settlement after Pause is stale and cannot override recovery truth", async () => {
+  test("a late activity settlement after Pause cannot override admitted-call quarantine", async () => {
     const grant = await testGrant();
     const taskQueue = `pause-zombie-race-${crypto.randomUUID()}`;
     const settings = testSettings({
@@ -394,53 +935,11 @@ describe("worker restart resilience", () => {
       runtime: createProductionAgentRuntime({ model }),
     });
     let dispatchedAttemptId: string | null = null;
-    let interruptSettled!: () => void;
-    const interruptSettlement = new Promise<void>((resolve) => {
-      interruptSettled = resolve;
-    });
-    let lateSettlement: Awaited<ReturnType<typeof applySessionTurnSettlement>> | null = null;
     const activities = {
       ...baseActivities,
-      settleSessionInterruptions: async (
-        input: Parameters<typeof baseActivities.settleSessionInterruptions>[0],
-      ) => {
-        const result = await baseActivities.settleSessionInterruptions(input);
-        interruptSettled();
-        return result;
-      },
       runAgentTurn: async (input: Parameters<typeof baseActivities.runAgentTurn>[0]) => {
         dispatchedAttemptId = input.attemptId;
-        let result: Awaited<ReturnType<typeof baseActivities.runAgentTurn>> | null = null;
-        let activityError: unknown;
-        try {
-          result = await baseActivities.runAgentTurn(input);
-          if (result.status === "unclaimed") return result;
-        } catch (error) {
-          activityError = error;
-        }
-        // Deterministically model the production zombie boundary: the real
-        // activity has observed cancellation, then this wrapper publishes a
-        // terminal settlement from that fenced attempt after Pause committed.
-        await interruptSettlement;
-        const [turn] = await listSessionTurns(dbClient.db, input.workspaceId, input.sessionId);
-        if (!turn) throw new Error(`zombie fixture turn disappeared for ${input.sessionId}`);
-        lateSettlement = await applySessionTurnSettlement(dbClient.db, input.workspaceId, {
-          sessionId: input.sessionId,
-          turnId: turn.id,
-          triggerEventId: turn.triggerEventId,
-          attemptId: input.attemptId,
-          turnStatus: "completed",
-          sessionStatus: "idle",
-          activeTurnId: null,
-          events: [
-            {
-              type: "turn.completed",
-              payload: { output: "late zombie output" },
-            },
-          ],
-        });
-        if (activityError) throw activityError;
-        return result!;
+        return await baseActivities.runAgentTurn(input);
       },
     };
     const session = await createSession(dbClient.db, {
@@ -486,7 +985,8 @@ describe("worker restart resilience", () => {
         return (
           dispatchedAttemptId !== null &&
           turn?.status === "running" &&
-          turn.activeAttemptId === dispatchedAttemptId
+          turn.activeAttemptId === dispatchedAttemptId &&
+          model.calls === 1
         );
       });
       const pause = await withWorkspaceRls(dbClient.db, grant.workspaceId, (db) =>
@@ -510,19 +1010,54 @@ describe("worker restart resilience", () => {
       await workerRun;
     }
 
+    // The provider call was durably admitted before Pause, so cancellation cannot
+    // prove whether the provider completed an externally visible response. The
+    // workflow must fail closed instead of replaying inference. Model the old
+    // worker's terminal write after that durable quarantine; the attempt fence
+    // must reject this exact zombie write without changing committed truth.
+    const [pausedTurn] = await listSessionTurns(dbClient.db, grant.workspaceId, session.id);
+    if (!pausedTurn || !dispatchedAttemptId) {
+      throw new Error(`pause fixture lost its turn attempt for ${session.id}`);
+    }
+    const lateSettlement = await applySessionTurnSettlement(dbClient.db, grant.workspaceId, {
+      sessionId: session.id,
+      turnId: pausedTurn.id,
+      triggerEventId: pausedTurn.triggerEventId,
+      attemptId: dispatchedAttemptId,
+      turnStatus: "completed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [
+        {
+          type: "turn.completed",
+          payload: { output: "late zombie output" },
+        },
+      ],
+    });
     expect(lateSettlement).toMatchObject({
       action: "stale",
-      turnStatus: "recovering",
+      turnStatus: "failed",
+      activeTurnId: null,
       events: [],
     });
     const turns = await listSessionTurns(dbClient.db, grant.workspaceId, session.id);
-    expect(turns.map((turn) => turn.status)).toEqual(["recovering"]);
+    expect(turns.map((turn) => turn.status)).toEqual(["failed"]);
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100);
-    expect(events.filter((event) => event.type === "turn.recovery.requested")).toHaveLength(1);
+    expect(events.filter((event) => event.type === "turn.recovery.requested")).toHaveLength(0);
     expect(events.filter((event) => event.type === "turn.completed")).toHaveLength(0);
-    expect(events.filter((event) => event.type === "turn.failed")).toHaveLength(0);
+    expect(events.filter((event) => event.type === "turn.failed")).toEqual([
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          code: "ambiguous_model_call",
+          effectState: "unknown",
+          retryable: false,
+        }),
+      }),
+    ]);
+    expect(model.calls).toBe(1);
     expect(await getSession(dbClient.db, grant.workspaceId, session.id)).toMatchObject({
-      status: "recovering",
+      status: "failed",
+      activeTurnId: null,
       effectiveControl: { state: "paused" },
     });
   }, 180_000);
@@ -712,6 +1247,31 @@ describe("worker restart resilience", () => {
     return grant;
   }
 });
+
+async function requiredServices(): Promise<RequiredServices> {
+  const databaseUrl = process.env.OPENGENI_TEST_DATABASE_URL;
+  const natsUrl = process.env.OPENGENI_TEST_NATS_URL;
+  const temporalHost = process.env.OPENGENI_TEST_TEMPORAL_HOST;
+  const configured = [databaseUrl, natsUrl, temporalHost].filter(Boolean).length;
+  if (configured !== 0 && configured !== 3) {
+    throw new Error(
+      "native integration requires OPENGENI_TEST_DATABASE_URL, OPENGENI_TEST_NATS_URL, and OPENGENI_TEST_TEMPORAL_HOST together",
+    );
+  }
+  if (databaseUrl && natsUrl && temporalHost) {
+    const migrationUrl = process.env.OPENGENI_TEST_DATABASE_ADMIN_URL ?? databaseUrl;
+    return {
+      databaseUrl,
+      natsUrl,
+      temporalHost,
+      migrate: async () => {
+        await migrate(migrationUrl);
+      },
+      down: async () => undefined,
+    };
+  }
+  return await startTestServices({ temporal: true });
+}
 
 async function restartTestWorker(
   nativeConnection: NativeConnection,

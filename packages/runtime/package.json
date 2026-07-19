@@ -23,6 +23,10 @@
     "./sandbox": {
       "types": "./src/sandbox/index.ts",
       "default": "./src/sandbox/index.ts"
+    },
+    "./usage-telemetry": {
+      "types": "./src/usage-telemetry.ts",
+      "default": "./src/usage-telemetry.ts"
     }
   },
   "publishConfig": {

@@ -29,6 +29,7 @@ describe("session-state interrupt settlement", () => {
           wakeSessionWorkflow: null,
         }) as any,
       {
+        getSessionTurnPersistenceReceipt: mock(async () => null),
         markSessionAttemptQuiesced: mock(async (_db, input) => {
           quiescenceReceipts.push(input);
           return [];

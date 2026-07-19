@@ -548,6 +548,52 @@ describe("provider-proof compaction transcript", () => {
     ]);
   });
 
+  test("reports the validated summary and usage together at provider completion", async () => {
+    const completions: unknown[] = [];
+    const order: string[] = [];
+    const fakeClient = {
+      chat: {
+        completions: {
+          create: async () => {
+            order.push("provider");
+            return {
+              id: "chatcmpl_summary",
+              usage: { prompt_tokens: 21, completion_tokens: 4, total_tokens: 25 },
+              choices: [{ message: { content: "exact completed summary" } }],
+            };
+          },
+        },
+      },
+    };
+
+    expect(
+      await summarizeForCompaction(testSettings(), buildCompactionPromptInput([user("ship it")]), {
+        client: fakeClient as any,
+        api: "chat",
+        model: "scripted-model",
+        onCallStart: async () => {
+          order.push("admission");
+          return "admission-exact";
+        },
+        onCompleted: async (completion) => {
+          order.push("completed");
+          completions.push(completion);
+        },
+      }),
+    ).toBe("exact completed summary");
+    expect(order).toEqual(["admission", "provider", "completed"]);
+    expect(completions).toEqual([
+      {
+        callAdmissionId: "admission-exact",
+        summary: "exact completed summary",
+        usage: {
+          responseId: "chatcmpl_summary",
+          usage: { inputTokens: 21, outputTokens: 4, totalTokens: 25 },
+        },
+      },
+    ]);
+  });
+
   test("rejects a semantically empty provider response with content-free diagnostics", async () => {
     const fakeClient = {
       responses: {

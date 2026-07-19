@@ -31,9 +31,12 @@ import {
   deserializeSandboxSessionStateEnvelope,
   ensureReadableStreamFrom,
   materializeSandboxFileDownloads,
+  modelResponseCompletionFromSdkEvent,
+  modelWithCallAdmission,
   repositoryCloneCommand,
   repositoryUsesSandboxClone,
   mcpToolErrorOutput,
+  installFunctionToolCallReceipts,
   modelCallUsageTelemetry,
   modelResponseUsageFromSdkEvent,
   normalizeSdkEvent,
@@ -159,6 +162,57 @@ describe("runtime event normalization", () => {
       },
     });
     expect(normalizeSdkEvent(event)).toEqual([]);
+  });
+
+  test("recognizes provider completion without manufacturing usage", () => {
+    const event = {
+      type: "raw_model_stream_event",
+      data: {
+        type: "response_done",
+        response: { id: "resp-without-usage", output: [] },
+      },
+    } as any;
+
+    expect(modelResponseCompletionFromSdkEvent(event)).toEqual({
+      responseId: "resp-without-usage",
+      usage: null,
+    });
+    expect(modelResponseUsageFromSdkEvent(event)).toBeNull();
+  });
+
+  test("awaits a fresh admission before each model invocation without changing identity", async () => {
+    const order: string[] = [];
+    class FakeModel {
+      async getResponse() {
+        order.push("response");
+        return { output: [] };
+      }
+
+      async *getStreamedResponse() {
+        order.push("stream");
+        yield { type: "response_done" };
+      }
+    }
+
+    const raw = new FakeModel();
+    let admission = 0;
+    const admitted = modelWithCallAdmission(raw as any, async () => {
+      order.push(`admit-${++admission}`);
+    });
+
+    expect(admitted.constructor).toBe(raw.constructor);
+    expect(admitted).toBeInstanceOf(FakeModel);
+    await admitted.getResponse({} as any);
+    for await (const _event of admitted.getStreamedResponse({} as any)) {
+      // Consuming the stream is what crosses the provider boundary.
+    }
+    expect(order).toEqual(["admit-1", "response", "admit-2", "stream"]);
+
+    const blocked = modelWithCallAdmission(raw as any, async () => {
+      throw new Error("admission unavailable");
+    });
+    await expect(blocked.getResponse({} as any)).rejects.toThrow("admission unavailable");
+    expect(order).toEqual(["admit-1", "response", "admit-2", "stream"]);
   });
 
   test("extracts raw Responses usage without manufacturing a durable event", () => {
@@ -3669,6 +3723,142 @@ function fakeMcpServer(name: string): MCPServer {
     async invalidateToolsCache() {},
   };
 }
+
+describe("function tool call receipts", () => {
+  function functionTool(invoke: (...args: any[]) => unknown) {
+    return {
+      type: "function",
+      name: "mutate_external_state",
+      description: "test",
+      parameters: { type: "object", properties: {} },
+      strict: true,
+      invoke,
+    } as any;
+  }
+
+  function agentWithTool(tool: any): any {
+    return {
+      async getAllTools() {
+        return [tool];
+      },
+      clone() {
+        return agentWithTool(tool);
+      },
+    };
+  }
+
+  test("awaits the durable receipt before starting the external effect", async () => {
+    const order: string[] = [];
+    const agent = agentWithTool(
+      functionTool(async () => {
+        order.push("effect");
+        return "ok";
+      }),
+    );
+    installFunctionToolCallReceipts(agent, async (receipt) => {
+      order.push("receipt:start");
+      await Bun.sleep(0);
+      expect(receipt).toEqual({
+        callId: "call-1",
+        callType: "function_call",
+        callItem: {
+          type: "function_call",
+          callId: "call-1",
+          name: "mutate_external_state",
+          arguments: '{"value":1}',
+        },
+      });
+      order.push("receipt:committed");
+    });
+
+    const [tool] = await agent.getAllTools({});
+    await tool.invoke(
+      {},
+      { value: 1 },
+      {
+        toolCall: {
+          type: "function_call",
+          callId: "call-1",
+          name: "mutate_external_state",
+          arguments: '{"value":1}',
+        },
+      },
+    );
+
+    expect(order).toEqual(["receipt:start", "receipt:committed", "effect"]);
+  });
+
+  test("blocks the effect when receipt persistence fails", async () => {
+    let effects = 0;
+    const agent = agentWithTool(
+      functionTool(() => {
+        effects += 1;
+      }),
+    );
+    installFunctionToolCallReceipts(agent, async () => {
+      throw new Error("postgres unavailable");
+    });
+
+    const [tool] = await agent.getAllTools({});
+    await expect(
+      tool.invoke(
+        {},
+        {},
+        {
+          toolCall: { type: "function_call", callId: "call-2", name: tool.name, arguments: "{}" },
+        },
+      ),
+    ).rejects.toThrow("postgres unavailable");
+    expect(effects).toBe(0);
+  });
+
+  test("blocks the effect when the provider supplies only an item id", async () => {
+    let receipts = 0;
+    let effects = 0;
+    const agent = agentWithTool(
+      functionTool(() => {
+        effects += 1;
+      }),
+    );
+    installFunctionToolCallReceipts(agent, async () => {
+      receipts += 1;
+    });
+
+    const [tool] = await agent.getAllTools({});
+    await expect(
+      tool.invoke(
+        {},
+        {},
+        { toolCall: { type: "function_call", id: "fc-provider-item", name: tool.name } },
+      ),
+    ).rejects.toThrow("stable provider call id");
+    expect({ receipts, effects }).toEqual({ receipts: 0, effects: 0 });
+  });
+
+  test("survives clone-of-clone without double-registering", async () => {
+    let receipts = 0;
+    let effects = 0;
+    const agent = agentWithTool(
+      functionTool(() => {
+        effects += 1;
+      }),
+    );
+    installFunctionToolCallReceipts(agent, async () => {
+      receipts += 1;
+    });
+
+    const clone = agent.clone({}).clone({});
+    const [tool] = await clone.getAllTools({});
+    await tool.invoke(
+      {},
+      {},
+      {
+        toolCall: { type: "function_call", callId: "call-3", name: tool.name, arguments: "{}" },
+      },
+    );
+    expect({ receipts, effects }).toEqual({ receipts: 1, effects: 1 });
+  });
+});
 
 describe("pack skills in the sandbox skill index", () => {
   const infraSkill = {

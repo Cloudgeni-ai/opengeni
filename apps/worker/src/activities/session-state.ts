@@ -8,11 +8,29 @@ import {
   getSessionTurnForAttempt,
   markSessionAttemptQuiesced,
   requireSession,
+  appendSessionHistoryItems,
+  registerPendingSessionToolCall,
+  requestSessionTurnRecovery,
+  getSessionTurnPersistenceReceipt,
+  inspectSessionTurnPersistenceReceipt,
+  settleSessionTurnPersistenceReceipt,
+  quarantineSessionTurnPersistenceAttempt,
   settleSessionIdleWithParentOutbox,
 } from "@opengeni/db";
-import { publishDurableSessionEvents } from "@opengeni/events";
+import {
+  appendOrConfirmAndPublishTurnEventsFenced,
+  publishDurableSessionEvents,
+} from "@opengeni/events";
 import { deliverFailedChildTurnToParent, notifyParentOfChildIdle } from "./parent-wake";
 import { recordTurnsQueuedGauge } from "../observability-metrics";
+import { recordModelUsageAndDebitCredits } from "./model-usage";
+import { persistPreparedContextCompaction } from "./context-compaction-persistence";
+import { TurnAttemptFencedError } from "./turn-attempt-fenced";
+import {
+  parseTurnPersistenceHandoff,
+  parseTurnPersistenceObligation,
+  turnPersistenceObligationDigest,
+} from "../turn-persistence-handoff";
 import type {
   ActivityServices,
   PeekSessionWorkInput,
@@ -21,6 +39,12 @@ import type {
   MarkSessionIdleInput,
   RecoverDispatchInput,
   RecoverDispatchResult,
+  PersistTurnHandoffAndRecoverInput,
+  PersistTurnHandoffAndRecoverResult,
+  QuarantineTurnPersistenceAttemptInput,
+  QuarantineTurnPersistenceAttemptResult,
+  TurnPersistenceHandoff,
+  TurnPersistenceObligation,
 } from "./types";
 
 export type SessionStateActivityOverrides = Partial<{
@@ -32,6 +56,16 @@ export type SessionStateActivityOverrides = Partial<{
   getSessionEvent: typeof getSessionEvent;
   getSessionTurnForAttempt: typeof getSessionTurnForAttempt;
   requireSession: typeof requireSession;
+  appendSessionHistoryItems: typeof appendSessionHistoryItems;
+  registerPendingSessionToolCall: typeof registerPendingSessionToolCall;
+  requestSessionTurnRecovery: typeof requestSessionTurnRecovery;
+  getSessionTurnPersistenceReceipt: typeof getSessionTurnPersistenceReceipt;
+  inspectSessionTurnPersistenceReceipt: typeof inspectSessionTurnPersistenceReceipt;
+  settleSessionTurnPersistenceReceipt: typeof settleSessionTurnPersistenceReceipt;
+  quarantineSessionTurnPersistenceAttempt: typeof quarantineSessionTurnPersistenceAttempt;
+  appendOrConfirmAndPublishTurnEventsFenced: typeof appendOrConfirmAndPublishTurnEventsFenced;
+  recordModelUsageAndDebitCredits: typeof recordModelUsageAndDebitCredits;
+  persistPreparedContextCompaction: typeof persistPreparedContextCompaction;
   settleSessionIdleWithParentOutbox: typeof settleSessionIdleWithParentOutbox;
   markSessionAttemptQuiesced: typeof markSessionAttemptQuiesced;
   publishDurableSessionEvents: typeof publishDurableSessionEvents;
@@ -45,6 +79,13 @@ export type SessionStateActivityOverrides = Partial<{
 // and the session fails for real on the next death. A plain constant by
 // design — this is a pathology bound, not a run-length limit.
 export const WORKER_DEATH_MAX_REDISPATCHES = 3;
+
+class PendingTurnPersistenceReceiptError extends Error {
+  constructor() {
+    super("Turn persistence receipt remains pending; retrying persistence-only activity");
+    this.name = "PendingTurnPersistenceReceiptError";
+  }
+}
 
 export function createSessionStateActivities(
   services: () => Promise<ActivityServices>,
@@ -60,6 +101,27 @@ export function createSessionStateActivities(
   const getSessionEventFn = overrides.getSessionEvent ?? getSessionEvent;
   const getSessionTurnForAttemptFn = overrides.getSessionTurnForAttempt ?? getSessionTurnForAttempt;
   const requireSessionFn = overrides.requireSession ?? requireSession;
+  const appendSessionHistoryItemsFn =
+    overrides.appendSessionHistoryItems ?? appendSessionHistoryItems;
+  const registerPendingSessionToolCallFn =
+    overrides.registerPendingSessionToolCall ?? registerPendingSessionToolCall;
+  const requestSessionTurnRecoveryFn =
+    overrides.requestSessionTurnRecovery ?? requestSessionTurnRecovery;
+  const getSessionTurnPersistenceReceiptFn =
+    overrides.getSessionTurnPersistenceReceipt ?? getSessionTurnPersistenceReceipt;
+  const inspectSessionTurnPersistenceReceiptFn =
+    overrides.inspectSessionTurnPersistenceReceipt ?? inspectSessionTurnPersistenceReceipt;
+  const settleSessionTurnPersistenceReceiptFn =
+    overrides.settleSessionTurnPersistenceReceipt ?? settleSessionTurnPersistenceReceipt;
+  const quarantineSessionTurnPersistenceAttemptFn =
+    overrides.quarantineSessionTurnPersistenceAttempt ?? quarantineSessionTurnPersistenceAttempt;
+  const appendOrConfirmAndPublishTurnEventsFencedFn =
+    overrides.appendOrConfirmAndPublishTurnEventsFenced ??
+    appendOrConfirmAndPublishTurnEventsFenced;
+  const recordModelUsageAndDebitCreditsFn =
+    overrides.recordModelUsageAndDebitCredits ?? recordModelUsageAndDebitCredits;
+  const persistPreparedContextCompactionFn =
+    overrides.persistPreparedContextCompaction ?? persistPreparedContextCompaction;
   const settleSessionIdleWithParentOutboxFn =
     overrides.settleSessionIdleWithParentOutbox ?? settleSessionIdleWithParentOutbox;
   const markSessionAttemptQuiescedFn =
@@ -117,9 +179,334 @@ export function createSessionStateActivities(
     );
   }
 
+  async function quarantineTurnPersistenceAttempt(
+    input: QuarantineTurnPersistenceAttemptInput,
+  ): Promise<QuarantineTurnPersistenceAttemptResult> {
+    const { db, bus, settings, observability, wakeSessionWorkflow } = await services();
+    const quarantined = await quarantineSessionTurnPersistenceAttemptFn(db, input.workspaceId, {
+      sessionId: input.sessionId,
+      attemptId: input.attemptId,
+      reason: input.reason,
+    });
+    if (quarantined.action === "stale") return { action: "stale" };
+    await publishDurableSessionEventsFn(
+      bus,
+      input.workspaceId,
+      input.sessionId,
+      quarantined.events,
+    );
+    await deliverFailedChildTurnToParentFn(
+      { db, bus, settings, observability, wakeSessionWorkflow },
+      input.workspaceId,
+      input.sessionId,
+      quarantined.turnId,
+    );
+    return { action: "quarantined" };
+  }
+
+  function handoffFromReceipt(receipt: {
+    id: string;
+    turnId: string;
+    triggerEventId: string;
+    executionGeneration: number;
+    attemptId: string;
+    obligationKind: string;
+    obligationDigest: string;
+  }): TurnPersistenceHandoff | null {
+    return parseTurnPersistenceHandoff({
+      version: 2,
+      receiptId: receipt.id,
+      turnId: receipt.turnId,
+      triggerEventId: receipt.triggerEventId,
+      executionGeneration: receipt.executionGeneration,
+      attemptId: receipt.attemptId,
+      obligationKind: receipt.obligationKind,
+      obligationDigest: receipt.obligationDigest,
+    });
+  }
+
+  function obligationForReceipt(
+    receipt: Awaited<ReturnType<typeof getSessionTurnPersistenceReceipt>>,
+    input: Pick<
+      PersistTurnHandoffAndRecoverInput,
+      "accountId" | "workspaceId" | "sessionId" | "attemptId"
+    >,
+    handoff: TurnPersistenceHandoff,
+  ): TurnPersistenceObligation | null {
+    const obligation = receipt
+      ? parseTurnPersistenceObligation(receipt.obligation, handoff.turnId)
+      : null;
+    if (
+      !receipt ||
+      receipt.accountId !== input.accountId ||
+      receipt.workspaceId !== input.workspaceId ||
+      receipt.sessionId !== input.sessionId ||
+      receipt.turnId !== handoff.turnId ||
+      receipt.triggerEventId !== handoff.triggerEventId ||
+      receipt.executionGeneration !== handoff.executionGeneration ||
+      receipt.attemptId !== handoff.attemptId ||
+      receipt.attemptId !== input.attemptId ||
+      receipt.id !== handoff.receiptId ||
+      receipt.obligationKind !== handoff.obligationKind ||
+      receipt.obligationVersion !== 1 ||
+      receipt.obligationDigest !== handoff.obligationDigest ||
+      !obligation ||
+      turnPersistenceObligationDigest(obligation) !== handoff.obligationDigest
+    ) {
+      return null;
+    }
+    return obligation;
+  }
+
+  async function reconcileReceiptFenceRejection(
+    db: ActivityServices["db"],
+    input: Pick<
+      PersistTurnHandoffAndRecoverInput,
+      "accountId" | "workspaceId" | "sessionId" | "attemptId"
+    >,
+    handoff: TurnPersistenceHandoff,
+  ): Promise<"settled" | "stale" | "quarantined"> {
+    const inspected = await inspectSessionTurnPersistenceReceiptFn(db, input.workspaceId, {
+      sessionId: input.sessionId,
+      turnId: handoff.turnId,
+      attemptId: input.attemptId,
+      executionGeneration: handoff.executionGeneration,
+      receiptId: handoff.receiptId,
+    });
+    if (inspected.action === "stale") return "stale";
+    if (
+      inspected.action === "missing" ||
+      !obligationForReceipt(inspected.receipt, input, handoff)
+    ) {
+      const quarantined = await quarantineTurnPersistenceAttempt({
+        ...input,
+        reason: "invalid_receipt_reference",
+      });
+      return quarantined.action;
+    }
+    if (inspected.action === "quarantined") return "quarantined";
+    if (inspected.action === "pending") {
+      // Control activities have unbounded Temporal retries with bounded
+      // backoff. A still-live pending receipt is persistence work that must be
+      // retried, never stale success that lets the workflow abandon the turn.
+      throw new PendingTurnPersistenceReceiptError();
+    }
+    return "settled";
+  }
+
+  async function persistReceipt(
+    input: Pick<
+      PersistTurnHandoffAndRecoverInput,
+      "accountId" | "workspaceId" | "sessionId" | "attemptId"
+    > & { handoff: TurnPersistenceHandoff; recoverReason?: string },
+  ): Promise<PersistTurnHandoffAndRecoverResult | { action: "persisted" }> {
+    const { db, bus, settings, observability } = await services();
+    const handoff = parseTurnPersistenceHandoff(input.handoff);
+    if (!handoff || handoff.attemptId !== input.attemptId || handoff.turnId.length === 0) {
+      await quarantineTurnPersistenceAttempt({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        attemptId: input.attemptId,
+        reason: "invalid_receipt_reference",
+      });
+      return { action: "quarantined" };
+    }
+    const receipt = await getSessionTurnPersistenceReceiptFn(db, input.workspaceId, {
+      sessionId: input.sessionId,
+      attemptId: input.attemptId,
+      receiptId: handoff.receiptId,
+    });
+    const obligation = obligationForReceipt(receipt, input, handoff);
+    if (!receipt || !obligation) {
+      await quarantineTurnPersistenceAttempt({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        attemptId: input.attemptId,
+        reason: "invalid_receipt_reference",
+      });
+      return { action: "quarantined" };
+    }
+    if (receipt.state === "quarantined") return { action: "quarantined" };
+    persistence: if (receipt.state === "pending") {
+      const receiptId = handoff.receiptId;
+      if (obligation.kind === "pending_tool_call") {
+        const registered = await registerPendingSessionToolCallFn(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: handoff.turnId,
+          executionGeneration: handoff.executionGeneration,
+          attemptId: input.attemptId,
+          persistenceReceiptId: receiptId,
+          callId: obligation.callId,
+          callType: obligation.callType,
+          callItem: obligation.callItem,
+        });
+        if (!registered.accepted) {
+          const disposition = await reconcileReceiptFenceRejection(db, input, handoff);
+          if (disposition === "settled") break persistence;
+          return { action: disposition };
+        }
+      } else if (obligation.kind === "model_call") {
+        const historyAccepted = await appendSessionHistoryItemsFn(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: handoff.turnId,
+          expectedExecutionGeneration: handoff.executionGeneration,
+          expectedAttemptId: input.attemptId,
+          persistenceReceiptId: receiptId,
+          producerCodexCredentialId: obligation.history.producerCodexCredentialId,
+          modelToolOutputTruncationTokens: obligation.history.modelToolOutputTruncationTokens,
+          items: obligation.history.items,
+        });
+        if (!historyAccepted) {
+          const disposition = await reconcileReceiptFenceRejection(db, input, handoff);
+          if (disposition === "settled") break persistence;
+          return { action: disposition };
+        }
+        if (obligation.metering && obligation.event) {
+          await recordModelUsageAndDebitCreditsFn(settings, db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: handoff.turnId,
+            ...obligation.metering,
+            observability,
+          });
+          const eventResult = await appendOrConfirmAndPublishTurnEventsFencedFn(
+            db,
+            bus,
+            input.workspaceId,
+            input.sessionId,
+            handoff.turnId,
+            handoff.executionGeneration,
+            input.attemptId,
+            [
+              {
+                ...obligation.event,
+                occurredAt: new Date(obligation.event.occurredAt),
+              },
+            ],
+            undefined,
+            receiptId,
+          );
+          if (!eventResult.accepted) {
+            const disposition = await reconcileReceiptFenceRejection(db, input, handoff);
+            if (disposition === "settled") break persistence;
+            return { action: disposition };
+          }
+        }
+      } else {
+        if (obligation.metering) {
+          await recordModelUsageAndDebitCreditsFn(settings, db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: handoff.turnId,
+            ...obligation.metering,
+            observability,
+          });
+        }
+        if (obligation.event) {
+          const eventResult = await appendOrConfirmAndPublishTurnEventsFencedFn(
+            db,
+            bus,
+            input.workspaceId,
+            input.sessionId,
+            handoff.turnId,
+            handoff.executionGeneration,
+            input.attemptId,
+            [
+              {
+                ...obligation.event,
+                occurredAt: new Date(obligation.event.occurredAt),
+              },
+            ],
+            undefined,
+            receiptId,
+          );
+          if (!eventResult.accepted) {
+            const disposition = await reconcileReceiptFenceRejection(db, input, handoff);
+            if (disposition === "settled") break persistence;
+            return { action: disposition };
+          }
+        }
+        try {
+          const compaction = await persistPreparedContextCompactionFn(
+            db,
+            {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              turnId: handoff.turnId,
+              executionGeneration: handoff.executionGeneration,
+              attemptId: input.attemptId,
+              persistenceReceiptId: receiptId,
+            },
+            obligation.compaction,
+          );
+          await publishDurableSessionEventsFn(
+            bus,
+            input.workspaceId,
+            input.sessionId,
+            compaction.events,
+          );
+        } catch (error) {
+          if (error instanceof TurnAttemptFencedError) {
+            const disposition = await reconcileReceiptFenceRejection(db, input, handoff);
+            if (disposition === "settled") break persistence;
+            return { action: disposition };
+          }
+          throw error;
+        }
+      }
+      const settled = await settleSessionTurnPersistenceReceiptFn(db, {
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId: handoff.turnId,
+        attemptId: input.attemptId,
+        executionGeneration: handoff.executionGeneration,
+        receiptId,
+        obligationDigest: handoff.obligationDigest,
+      });
+      if (settled.action === "fenced") {
+        const disposition = await reconcileReceiptFenceRejection(db, input, handoff);
+        if (disposition !== "settled") return { action: disposition };
+      }
+    }
+    if (!input.recoverReason) return { action: "persisted" };
+    const recovery = await requestSessionTurnRecoveryFn(db, input.workspaceId, {
+      sessionId: input.sessionId,
+      turnId: handoff.turnId,
+      triggerEventId: handoff.triggerEventId,
+      attemptId: input.attemptId,
+      reason: input.recoverReason,
+    });
+    if (recovery.action === "stale") return { action: "stale" };
+    await publishDurableSessionEventsFn(bus, input.workspaceId, input.sessionId, recovery.events);
+    return { action: "recovering", turnId: handoff.turnId };
+  }
+
+  async function pendingReceiptHandoff(input: {
+    workspaceId: string;
+    sessionId: string;
+    attemptId: string;
+  }): Promise<TurnPersistenceHandoff | null | "invalid"> {
+    const { db } = await services();
+    const receipt = await getSessionTurnPersistenceReceiptFn(db, input.workspaceId, {
+      sessionId: input.sessionId,
+      attemptId: input.attemptId,
+    });
+    if (!receipt) return null;
+    return handoffFromReceipt(receipt) ?? "invalid";
+  }
+
   async function settleSessionInterruptions(
     input: SettleSessionInterruptionsInput,
-  ): Promise<{ action: "paused" | "continue" | "stale" }> {
+  ): Promise<{ action: "paused" | "continue" | "stale" | "failed" }> {
     const { db, bus, observability } = await services();
     if (input.phase === "attempt_quiesced") {
       const events = await markSessionAttemptQuiescedFn(db, {
@@ -130,6 +517,19 @@ export function createSessionStateActivities(
       });
       await publishDurableSessionEventsFn(bus, input.workspaceId, input.sessionId, events);
       return { action: "stale" };
+    }
+    const pending = await pendingReceiptHandoff(input);
+    if (pending === "invalid") {
+      await quarantineTurnPersistenceAttempt({
+        ...input,
+        reason: "invalid_receipt_reference",
+      });
+      return { action: "failed" };
+    }
+    if (pending) {
+      const persisted = await persistReceipt({ ...input, handoff: pending });
+      if (persisted.action === "quarantined") return { action: "failed" };
+      if (persisted.action === "stale") return { action: "stale" };
     }
     const applied = await settleSessionAttemptInterruptionsFn(
       db,
@@ -159,11 +559,44 @@ export function createSessionStateActivities(
       timeoutType: input.timeoutType,
       maxRedispatches: WORKER_DEATH_MAX_REDISPATCHES,
     });
+    if (result.action === "persistence_pending") {
+      const pending = handoffFromReceipt(result.receipt);
+      if (!pending) {
+        await quarantineTurnPersistenceAttempt({
+          ...input,
+          reason: "invalid_receipt_reference",
+        });
+        return { action: "quarantined" };
+      }
+      const persisted = await persistReceipt({
+        ...input,
+        handoff: pending,
+        recoverReason: `persistence_${pending.obligationKind}_heartbeat_timeout`,
+      });
+      if (persisted.action === "recovering") {
+        return {
+          action: "recovering",
+          turnId: persisted.turnId,
+          redispatches: 0,
+        };
+      }
+      if (persisted.action === "quarantined") return { action: "quarantined" };
+      return { action: "stale" };
+    }
     if (result.action === "stale" || result.action === "unclaimed") {
       return { action: result.action };
     }
     await publishDurableSessionEventsFn(bus, input.workspaceId, input.sessionId, result.events);
     await refreshQueuedTurnsGauge(db, observability, countQueuedTurnsFn, recordTurnsQueuedGaugeFn);
+    if (result.action === "quarantined") {
+      await deliverFailedChildTurnToParentFn(
+        { db, bus, settings, observability, wakeSessionWorkflow },
+        input.workspaceId,
+        input.sessionId,
+        result.turnId,
+      );
+      return { action: "quarantined" };
+    }
     if (result.action === "exceeded") {
       await deliverFailedChildTurnToParentFn(
         { db, bus, settings, observability, wakeSessionWorkflow },
@@ -182,6 +615,37 @@ export function createSessionStateActivities(
       turnId: result.turnId,
       redispatches: result.redispatches,
     };
+  }
+
+  /**
+   * Retry only the exact receipt that failed at the turn worker's persistence
+   * boundary, then checkpoint the same logical turn for a higher-generation
+   * attempt. Tool receipts converge on (turn, callId), model receipts on their
+   * exact producer/source identity, and compaction receipts on their persistence
+   * key and replacement fingerprint. Activity retry, completion-response loss,
+   * and old/new worker overlap therefore cannot duplicate an external effect.
+   * No model or tool code is reachable from this activity.
+   */
+  async function persistTurnHandoffAndRecover(
+    input: PersistTurnHandoffAndRecoverInput,
+  ): Promise<PersistTurnHandoffAndRecoverResult> {
+    const handoff = parseTurnPersistenceHandoff(input.handoff);
+    if (!handoff) {
+      await quarantineTurnPersistenceAttempt({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        attemptId: input.attemptId,
+        reason: "invalid_receipt_reference",
+      });
+      return { action: "quarantined" };
+    }
+    const result = await persistReceipt({
+      ...input,
+      handoff,
+      recoverReason: `persistence_${handoff.obligationKind}_${input.reason}`,
+    });
+    return result.action === "persisted" ? { action: "stale" } : result;
   }
 
   async function peekSessionWork(input: PeekSessionWorkInput) {
@@ -220,8 +684,10 @@ export function createSessionStateActivities(
 
   return {
     failSessionAttempt,
+    quarantineTurnPersistenceAttempt,
     settleSessionInterruptions,
     recoverDispatch,
+    persistTurnHandoffAndRecover,
     peekSessionWork,
     markSessionIdle,
   };

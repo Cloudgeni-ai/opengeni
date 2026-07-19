@@ -6,6 +6,7 @@ import {
   createSession,
   getActiveSessionHistoryItems,
   getSession,
+  hasSessionContextCompactionOutcomeForTurn,
   getSessionTurn,
   initializeSessionStartAtomically,
   isSessionCompactionRequested,
@@ -28,6 +29,8 @@ import {
 } from "@opengeni/testing";
 import { createActivityTestHarness } from "../src/activities";
 import { isContextWindowExceeded, maybeCompactContext } from "../src/activities/context-compaction";
+import { persistPreparedContextCompaction } from "../src/activities/context-compaction-persistence";
+import type { PreparedContextCompactionPersistence } from "../src/activities/types";
 
 async function claimCompactionForAttempt(
   db: Parameters<typeof claimSessionWorkForAttempt>[0],
@@ -384,7 +387,7 @@ describe("standalone context compaction execution", () => {
     );
   });
 
-  test("a transient standalone summary failure keeps the request on the same recovering turn", async () => {
+  test("a transient standalone summary failure quarantines the admitted provider call without replay", async () => {
     const suffix = crypto.randomUUID();
     const access = await bootstrapWorkspace(client.db, {
       accountExternalSource: "test",
@@ -493,7 +496,7 @@ describe("standalone context compaction execution", () => {
       trigger: { kind: "next" },
     });
 
-    expect(result).toMatchObject({ status: "recovering", attemptId });
+    expect(result).toMatchObject({ status: "failed", attemptId });
     if (result.status === "unclaimed") throw new Error("Compaction was not claimed");
     expect(await isSessionCompactionRequested(client.db, grant.workspaceId!, session.id)).toBe(
       true,
@@ -505,21 +508,32 @@ describe("standalone context compaction execution", () => {
     ).toEqual(originalItems);
     expect(await getSessionTurn(client.db, grant.workspaceId!, result.turnId)).toMatchObject({
       source: "compaction",
-      status: "recovering",
+      status: "failed",
+      activeAttemptId: null,
     });
     expect(await getSession(client.db, grant.workspaceId!, session.id)).toMatchObject({
-      status: "recovering",
-      activeTurnId: result.turnId,
+      status: "failed",
+      activeTurnId: null,
     });
     const events = await listSessionEvents(client.db, grant.workspaceId!, session.id, {
       after: 0,
       limit: 100,
     });
     expect(events.map((event) => event.type)).not.toContain("session.context.compaction.skipped");
-    expect(events).toContainEqual(expect.objectContaining({ type: "turn.recovery.requested" }));
+    expect(events.map((event) => event.type)).not.toContain("turn.recovery.requested");
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "turn.failed",
+        payload: expect.objectContaining({
+          code: "ambiguous_model_call",
+          effectState: "unknown",
+          retryable: false,
+        }),
+      }),
+    );
   });
 
-  test("a transient /compact inside a queued user turn preserves the request for same-turn recovery", async () => {
+  test("a transient /compact quarantines the admitted provider call without replay", async () => {
     const suffix = crypto.randomUUID();
     const access = await bootstrapWorkspace(client.db, {
       accountExternalSource: "test",
@@ -631,25 +645,36 @@ describe("standalone context compaction execution", () => {
       trigger: { kind: "next" },
     });
 
-    expect(result).toMatchObject({ status: "recovering", attemptId });
+    expect(result).toMatchObject({ status: "failed", attemptId });
     if (result.status === "unclaimed") throw new Error("User turn was not claimed");
     expect(await isSessionCompactionRequested(client.db, grant.workspaceId!, session.id)).toBe(
       true,
     );
     expect(await getSessionTurn(client.db, grant.workspaceId!, result.turnId)).toMatchObject({
       source: "user",
-      status: "recovering",
+      status: "failed",
+      activeAttemptId: null,
     });
     expect(await getSession(client.db, grant.workspaceId!, session.id)).toMatchObject({
-      status: "recovering",
-      activeTurnId: result.turnId,
+      status: "failed",
+      activeTurnId: null,
     });
     const events = await listSessionEvents(client.db, grant.workspaceId!, session.id, {
       after: 0,
       limit: 100,
     });
     expect(events.map((event) => event.type)).not.toContain("session.context.compaction.skipped");
-    expect(events).toContainEqual(expect.objectContaining({ type: "turn.recovery.requested" }));
+    expect(events.map((event) => event.type)).not.toContain("turn.recovery.requested");
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "turn.failed",
+        payload: expect.objectContaining({
+          code: "ambiguous_model_call",
+          effectState: "unknown",
+          retryable: false,
+        }),
+      }),
+    );
   });
 
   test("consumes an operator request without replacing history when its summary is not smaller", async () => {
@@ -1066,6 +1091,122 @@ describe("standalone context compaction execution", () => {
         (row) => row.item,
       ),
     ).toEqual([originalItem]);
+  });
+
+  test("concurrent prepared-result replay confirms one exact compaction without rewriting history", async () => {
+    const suffix = crypto.randomUUID();
+    const access = await bootstrapWorkspace(client.db, {
+      accountExternalSource: "test",
+      accountExternalId: `account-${suffix}`,
+      accountName: "Compaction receipt test",
+      workspaceExternalSource: "test",
+      workspaceExternalId: `workspace-${suffix}`,
+      workspaceName: "Compaction receipt test",
+      subjectId: `subject-${suffix}`,
+    });
+    const grant = access.workspaceGrants[0]!;
+    const session = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      initialMessage: "initial",
+      resources: [],
+      metadata: {},
+      model: "scripted-compactor",
+      sandboxBackend: "none",
+    });
+    await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
+      await db.insert(schema.sessionHistoryItems).values({
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        position: 0,
+        item: { type: "message", role: "user", content: "retain this request" },
+      });
+    });
+    await requestSessionCompaction(client.db, grant.workspaceId!, session.id);
+    const attemptId = crypto.randomUUID();
+    const turn = await claimCompactionForAttempt(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      attemptId,
+    );
+    const scope = {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      turnId: turn!.id,
+      executionGeneration: turn!.executionGeneration,
+      attemptId,
+    };
+    const prepared: PreparedContextCompactionPersistence = {
+      action: "apply",
+      persistenceKey: `compaction-${suffix}`,
+      replacementItems: [{ type: "message", role: "user", content: "retain this request" }],
+      summaryItem: {
+        type: "message",
+        role: "user",
+        content: `${SUMMARY_PREFIX}\nexact prepared checkpoint`,
+        opengeni_context_summary: true,
+      },
+      replacementInputTokens: 12,
+      clearRequestedCompaction: true,
+      occurredAt: "2026-07-18T22:22:37.000Z",
+      eventPayload: {
+        persistenceKey: `compaction-${suffix}`,
+        trigger: "operator",
+        estimatedTokensBefore: 1_000,
+        estimatedTokensAfter: 12,
+        replacementFingerprint: `fingerprint-${suffix}`,
+      },
+      result: {
+        signalTokens: 1_000,
+        thresholdTokens: 900,
+        estimatedTokensBefore: 1_000,
+        estimatedTokensAfter: 12,
+        replacementFingerprint: `fingerprint-${suffix}`,
+      },
+    };
+
+    const [first, overlap] = await Promise.all([
+      persistPreparedContextCompaction(client.db, scope, prepared),
+      persistPreparedContextCompaction(client.db, scope, prepared),
+    ]);
+    expect(first).toMatchObject({ compacted: true });
+    expect(overlap).toMatchObject({
+      compacted: true,
+      summaryPosition: first.compacted ? first.summaryPosition : -1,
+    });
+    expect(
+      (await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id)).map(
+        (row) => row.item,
+      ),
+    ).toEqual(
+      prepared.action === "apply" ? [...prepared.replacementItems, prepared.summaryItem] : [],
+    );
+    const events = await listSessionEvents(client.db, grant.workspaceId!, session.id, 0, 100);
+    expect(
+      events.filter(
+        (event) =>
+          event.type === "session.context.compacted" &&
+          (event.payload as Record<string, unknown>).persistenceKey === prepared.persistenceKey,
+      ),
+    ).toHaveLength(1);
+    expect(
+      await hasSessionContextCompactionOutcomeForTurn(
+        client.db,
+        grant.workspaceId!,
+        session.id,
+        turn!.id,
+      ),
+    ).toBe(true);
+
+    await expect(
+      persistPreparedContextCompaction(client.db, scope, {
+        ...prepared,
+        eventPayload: { ...prepared.eventPayload, replacementFingerprint: "collision" },
+      }),
+    ).rejects.toThrow("persistence key collision");
   });
 
   test("recognizes a provider overflow through the content-free compaction wrapper", () => {

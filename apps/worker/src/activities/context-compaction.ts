@@ -1,5 +1,4 @@
 import {
-  applyContextCompaction,
   getActiveSessionHistoryItems,
   recordSkippedContextCompaction,
   type Database,
@@ -17,27 +16,14 @@ import {
   type CompactionItem,
 } from "@opengeni/runtime";
 import { contextInputBudgetTokens, type Settings } from "@opengeni/config";
-import type { SessionEvent } from "@opengeni/contracts";
+import type { PreparedContextCompactionPersistence } from "./types";
+import {
+  persistPreparedContextCompaction,
+  type PersistedContextCompactionResult,
+} from "./context-compaction-persistence";
 import { TurnAttemptFencedError } from "./turn-attempt-fenced";
 
-export type MaybeCompactResult =
-  | {
-      compacted: false;
-      reason: string;
-      events: SessionEvent[];
-      requestConsumed: boolean;
-    }
-  | {
-      compacted: true;
-      supersededFrom: number;
-      summaryPosition: number;
-      signalTokens: number;
-      thresholdTokens: number;
-      estimatedTokensBefore: number;
-      estimatedTokensAfter: number;
-      replacementFingerprint: string;
-      events: SessionEvent[];
-    };
+export type MaybeCompactResult = PersistedContextCompactionResult;
 
 /**
  * Durable portable context compaction, following Codex CLI's local path.
@@ -82,6 +68,8 @@ export async function maybeCompactContext(
     force?: boolean;
     clearRequestedCompaction?: boolean;
     trigger?: "auto" | "operator" | "proactive" | "overflow";
+    persistenceKey?: () => string;
+    onPrepared?: (prepared: PreparedContextCompactionPersistence) => Promise<MaybeCompactResult>;
   } = {},
 ): Promise<MaybeCompactResult> {
   const active = await getActiveSessionHistoryItems(db, scope.workspaceId, scope.sessionId);
@@ -146,101 +134,76 @@ export async function maybeCompactContext(
     };
   }
   if (previousReplacementFingerprint === replacementFingerprint) {
-    let requestConsumed = false;
-    if (options.clearRequestedCompaction) {
-      const skipped = await recordSkippedContextCompaction(db, {
-        ...scope,
-        expectedExecutionGeneration: scope.executionGeneration,
-        expectedAttemptId: scope.attemptId,
-        reason: "replacement_unchanged",
-      });
-      if (!skipped.recorded) {
-        throw new TurnAttemptFencedError(
-          "turn attempt was fenced while consuming an unchanged context compaction request",
-        );
-      }
-      requestConsumed = true;
-      return {
-        compacted: false,
-        reason: "replacement_unchanged",
-        events: skipped.events,
-        requestConsumed,
-      };
-    }
-    return {
-      compacted: false,
+    const persistenceKey = options.persistenceKey?.() ?? crypto.randomUUID();
+    const prepared: PreparedContextCompactionPersistence = {
+      action: "skip",
+      persistenceKey,
       reason: "replacement_unchanged",
-      events: [],
-      requestConsumed,
+      clearRequestedCompaction: options.clearRequestedCompaction === true,
+      occurredAt: new Date().toISOString(),
+      eventPayload: {
+        persistenceKey,
+        trigger: options.trigger ?? "auto",
+        reason: "replacement_unchanged",
+        replacementFingerprint,
+      },
     };
+    return await (options.onPrepared
+      ? options.onPrepared(prepared)
+      : persistPreparedContextCompaction(db, scope, prepared));
   }
   if (estimatedTokensAfter >= estimatedTokensBefore) {
-    let requestConsumed = false;
-    if (options.clearRequestedCompaction) {
-      const skipped = await recordSkippedContextCompaction(db, {
-        ...scope,
-        expectedExecutionGeneration: scope.executionGeneration,
-        expectedAttemptId: scope.attemptId,
-        reason: "replacement_not_smaller",
-      });
-      if (!skipped.recorded) {
-        throw new TurnAttemptFencedError(
-          "turn attempt was fenced while consuming a non-shrinking context compaction request",
-        );
-      }
-      requestConsumed = true;
-      return {
-        compacted: false,
-        reason: "replacement_not_smaller",
-        events: skipped.events,
-        requestConsumed,
-      };
-    }
-    return {
-      compacted: false,
+    const persistenceKey = options.persistenceKey?.() ?? crypto.randomUUID();
+    const prepared: PreparedContextCompactionPersistence = {
+      action: "skip",
+      persistenceKey,
       reason: "replacement_not_smaller",
-      events: [],
-      requestConsumed,
+      clearRequestedCompaction: options.clearRequestedCompaction === true,
+      occurredAt: new Date().toISOString(),
+      eventPayload: {
+        persistenceKey,
+        trigger: options.trigger ?? "auto",
+        reason: "replacement_not_smaller",
+        replacementFingerprint,
+        estimatedTokensBefore,
+        estimatedTokensAfter,
+      },
     };
+    return await (options.onPrepared
+      ? options.onPrepared(prepared)
+      : persistPreparedContextCompaction(db, scope, prepared));
   }
-  const applied = await applyContextCompaction(db, {
-    accountId: scope.accountId,
-    workspaceId: scope.workspaceId,
-    sessionId: scope.sessionId,
-    turnId: scope.turnId,
-    expectedExecutionGeneration: scope.executionGeneration,
-    expectedAttemptId: scope.attemptId,
+  const persistenceKey = options.persistenceKey?.() ?? crypto.randomUUID();
+  const prepared: PreparedContextCompactionPersistence = {
+    action: "apply",
+    persistenceKey,
     replacementItems: replacementHistory.slice(0, -1),
     summaryItem: summaryItem as Record<string, unknown>,
     replacementInputTokens: estimatedTokensAfter,
-    ...(options.clearRequestedCompaction ? { clearRequestedCompaction: true } : {}),
+    clearRequestedCompaction: options.clearRequestedCompaction === true,
+    occurredAt: new Date().toISOString(),
     eventPayload: {
+      persistenceKey,
       trigger: options.trigger ?? "auto",
       estimatedTokensBefore,
       estimatedTokensAfter,
+      replacementFingerprint,
       compactionInputEstimatedTokens: summarized.preparation.estimatedInputTokens,
       compactionInputToolOutputsRewritten: summarized.preparation.rewrittenToolOutputs,
       compactionInputHistoryItemsDropped: summarized.preparation.droppedHistoryItems,
       compactionInputProviderCalls: summarized.providerCalls,
     },
-  });
-  if (!applied.applied) {
-    throw new TurnAttemptFencedError(
-      `turn attempt was fenced during context compaction: ${applied.reason}`,
-    );
-  }
-
-  return {
-    compacted: true,
-    supersededFrom: applied.supersededFrom,
-    summaryPosition: applied.summaryPosition,
-    signalTokens: decision.signalTokens,
-    thresholdTokens: decision.thresholdTokens,
-    estimatedTokensBefore,
-    estimatedTokensAfter,
-    replacementFingerprint,
-    events: applied.events,
+    result: {
+      signalTokens: decision.signalTokens,
+      thresholdTokens: decision.thresholdTokens,
+      estimatedTokensBefore,
+      estimatedTokensAfter,
+      replacementFingerprint,
+    },
   };
+  return await (options.onPrepared
+    ? options.onPrepared(prepared)
+    : persistPreparedContextCompaction(db, scope, prepared));
 }
 
 async function summarizeWithCodexOverflowTrimming(

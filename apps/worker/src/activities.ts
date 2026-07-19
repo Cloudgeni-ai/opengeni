@@ -34,6 +34,11 @@ export type {
   ReconcileCodexCapacityWaitResult,
   RecoverDispatchInput,
   RecoverDispatchResult,
+  PersistTurnHandoffAndRecoverInput,
+  PersistTurnHandoffAndRecoverResult,
+  QuarantineTurnPersistenceAttemptInput,
+  QuarantineTurnPersistenceAttemptResult,
+  TurnPersistenceHandoff,
   RunAgentTurnInput,
   RunAgentTurnResult,
 } from "./activities/types";
@@ -138,13 +143,18 @@ export function createControlActivities(dependencies: ActivityDependencies = {})
 }
 
 export function createTurnActivities(dependencies: ActivityDependencies = {}) {
-  return { runAgentTurn: createRunAgentTurnActivity(createActivityServices(dependencies)) };
+  return {
+    runAgentTurn: createRunAgentTurnActivity(createActivityServices(dependencies)),
+  };
 }
 
 /** Direct activity harness for tests; production workers always choose one role. */
 export function createActivityTestHarness(dependencies: ActivityDependencies = {}) {
   const services = createActivityServices(dependencies);
-  return { runAgentTurn: createRunAgentTurnActivity(services), ...controlActivities(services) };
+  return {
+    runAgentTurn: createRunAgentTurnActivity(services),
+    ...controlActivities(services),
+  };
 }
 
 const defaultControlActivities = createControlActivities();
@@ -153,8 +163,11 @@ const defaultTurnActivities = createTurnActivities();
 export const runAgentTurn = defaultTurnActivities.runAgentTurn;
 export const indexDocument = defaultControlActivities.indexDocument;
 export const failSessionAttempt = defaultControlActivities.failSessionAttempt;
+export const quarantineTurnPersistenceAttempt =
+  defaultControlActivities.quarantineTurnPersistenceAttempt;
 export const settleSessionInterruptions = defaultControlActivities.settleSessionInterruptions;
 export const recoverDispatch = defaultControlActivities.recoverDispatch;
+export const persistTurnHandoffAndRecover = defaultControlActivities.persistTurnHandoffAndRecover;
 export const peekSessionWork = defaultControlActivities.peekSessionWork;
 export const markSessionIdle = defaultControlActivities.markSessionIdle;
 export const dispatchScheduledTaskRun = defaultControlActivities.dispatchScheduledTaskRun;

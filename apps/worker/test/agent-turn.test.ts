@@ -2,6 +2,7 @@ import { describe, expect, mock, test } from "bun:test";
 import { CancelledFailure } from "@temporalio/activity";
 import { ModelItem } from "@openai/agents-core/types";
 import type { Settings } from "@opengeni/config";
+import { createObservability } from "@opengeni/observability";
 import {
   interruptedToolCallResult,
   SandboxImageConflictError,
@@ -16,9 +17,11 @@ import { testSettings } from "@opengeni/testing";
 import {
   acceptsPromptCacheKeyForTurn,
   agentRunFailurePayload,
+  boundedTurnFailureTelemetry,
   assertPhysicalToolQuiescenceForCancellation,
   classifyContextWindowOverflowError,
   classifyMcpTransportTimeoutError,
+  claimModelResponseCompletion,
   codexCredentialLeaseDeadlineExpired,
   computerToolModeForTurn,
   createTurnSandboxProvisioner,
@@ -37,6 +40,8 @@ import {
   resolveActiveSandboxBackend,
   shouldRecoverCompactionProviderFailure,
   shouldStartOnTurnRecording,
+  turnActivitySpanError,
+  turnFinalizationSpanError,
   shouldRunTurnEndWorkspacePersistence,
   turnOperationCancellationFailure,
   waitForTurnOperation,
@@ -491,6 +496,47 @@ describe("model usage source key (re-dispatch charge stability)", () => {
         positionalKey: "aggregate",
       }),
     ).toBe("aggregate");
+  });
+});
+
+describe("model response completion admission correlation", () => {
+  test("links distinct admitted calls even when the provider repeats a response id", () => {
+    const pendingAdmissionIds = ["admission-1", "admission-2"];
+    const unlinkedAdmissionIds = new Set(pendingAdmissionIds);
+
+    const first = claimModelResponseCompletion({
+      pendingAdmissionIds,
+      unlinkedAdmissionIds,
+      completedCallCount: 0,
+      responseId: "repeated-provider-response-id",
+      dispatchId: "attempt-1",
+    });
+    unlinkedAdmissionIds.delete(first.modelCallAdmissionId);
+    const second = claimModelResponseCompletion({
+      pendingAdmissionIds,
+      unlinkedAdmissionIds,
+      completedCallCount: first.completedCallCount,
+      responseId: "repeated-provider-response-id",
+      dispatchId: "attempt-1",
+    });
+
+    expect(first.modelCallAdmissionId).toBe("admission-1");
+    expect(second.modelCallAdmissionId).toBe("admission-2");
+    expect(second.completedCallCount).toBe(2);
+    expect(first.responseSourceKey).toBe(second.responseSourceKey);
+    expect(pendingAdmissionIds).toEqual([]);
+  });
+
+  test("fails closed when a completion has no exact unlinked admission", () => {
+    expect(() =>
+      claimModelResponseCompletion({
+        pendingAdmissionIds: [],
+        unlinkedAdmissionIds: new Set(),
+        completedCallCount: 0,
+        responseId: "unexpected-response",
+        dispatchId: "attempt-1",
+      }),
+    ).toThrow("provider response completed without a matching exact model-call admission");
   });
 });
 
@@ -1114,6 +1160,145 @@ describe("worker shutdown preemption", () => {
     expect(isWorkerShutdownCancellation(new CancelledFailure("TIMED_OUT"))).toBe(false);
     expect(isWorkerShutdownCancellation(new Error("WORKER_SHUTDOWN"))).toBe(false);
     expect(isWorkerShutdownCancellation(undefined)).toBe(false);
+  });
+
+  test("keeps only bounded nested driver identity in failure telemetry", () => {
+    const driver: Record<string, unknown> = { name: "PostgresError", code: "57P01" };
+    const wrapped: Record<string, unknown> = {
+      name: "DrizzleQueryError",
+      message: "query and parameters must not become attributes",
+      cause: driver,
+    };
+    driver.cause = wrapped;
+
+    expect(boundedTurnFailureTelemetry(wrapped)).toEqual({
+      "opengeni.error_driver_code": "57P01",
+      "opengeni.error_cause_type": "PostgresError",
+    });
+    expect(
+      boundedTurnFailureTelemetry({
+        cause: {
+          name: "x".repeat(1_000),
+          code: "unsafe code with spaces and arbitrary provider text",
+        },
+      }),
+    ).toEqual({});
+  });
+
+  test("serialized persistence-boundary spans exclude SQL, parameters, provider text, and tool arguments", async () => {
+    const exported: unknown[] = [];
+    const observability = createObservability(
+      {
+        serviceName: "opengeni",
+        environment: "test",
+        observabilityStructuredLogs: true,
+        observabilityMetricsEnabled: false,
+        observabilityOtlpEndpoint: "http://collector:4318",
+        observabilityOtlpHeaders: "",
+      },
+      {
+        component: "worker",
+        now: () => 1,
+        exporter: async (_url, body) => {
+          exported.push(body);
+        },
+      },
+    );
+    const rawPersistenceError = Object.assign(
+      new Error(
+        'Failed query: insert into session_history_items values ($1); params: ["provider-output-secret", "tool-arguments-secret"]',
+      ),
+      {
+        name: "DrizzleQueryError",
+        cause: Object.assign(new Error("provider-text-secret"), {
+          name: "PostgresError",
+          code: "57P01",
+        }),
+      },
+    );
+    const span = observability.startSpan("worker.run_agent_segment");
+    span.end({
+      attributes: {
+        "opengeni.failure_provenance": "persistence_boundary",
+        ...boundedTurnFailureTelemetry(rawPersistenceError),
+      },
+      error: turnActivitySpanError(rawPersistenceError, "persistence_boundary"),
+    });
+    await Bun.sleep(0);
+
+    expect(exported).toHaveLength(1);
+    const serialized = JSON.stringify(exported[0]);
+    expect(serialized).toContain("Turn persistence boundary failed");
+    expect(serialized).toContain("TurnPersistenceBoundaryError");
+    expect(serialized).toContain("PostgresError");
+    expect(serialized).toContain("57P01");
+    for (const secret of [
+      "insert into session_history_items",
+      "params:",
+      "provider-output-secret",
+      "provider-text-secret",
+      "tool-arguments-secret",
+    ]) {
+      expect(serialized).not.toContain(secret);
+    }
+  });
+
+  test("serialized finalization spans exclude SQL, parameters, provider text, and tool arguments", async () => {
+    const exported: unknown[] = [];
+    const observability = createObservability(
+      {
+        serviceName: "opengeni",
+        environment: "test",
+        observabilityStructuredLogs: true,
+        observabilityMetricsEnabled: false,
+        observabilityOtlpEndpoint: "http://collector:4318",
+        observabilityOtlpHeaders: "",
+      },
+      {
+        component: "worker",
+        now: () => 1,
+        exporter: async (_url, body) => {
+          exported.push(body);
+        },
+      },
+    );
+    const rawFinalizationError = Object.assign(
+      new Error(
+        'Failed query: update session_turn_attempts set state=$1; params: ["provider-output-secret", "tool-arguments-secret"]',
+      ),
+      {
+        name: "DrizzleQueryError",
+        cause: Object.assign(new Error("provider-text-secret"), {
+          name: "PostgresError",
+          code: "57P01",
+        }),
+      },
+    );
+    const span = observability.startSpan("worker.run_agent_segment");
+    span.end({
+      attributes: {
+        "opengeni.failure_provenance": "finalization",
+        ...boundedTurnFailureTelemetry(rawFinalizationError),
+      },
+      error: turnFinalizationSpanError(rawFinalizationError),
+    });
+    await Bun.sleep(0);
+
+    expect(exported).toHaveLength(1);
+    const serialized = JSON.stringify(exported[0]);
+    expect(serialized).toContain("Turn finalization failed");
+    expect(serialized).toContain("TurnFinalizationError");
+    expect(serialized).toContain("PostgresError");
+    expect(serialized).toContain("57P01");
+    for (const secret of [
+      "update session_turn_attempts",
+      "params:",
+      "provider-output-secret",
+      "provider-text-secret",
+      "tool-arguments-secret",
+    ]) {
+      expect(serialized).not.toContain(secret);
+    }
   });
 
   test("skips slow workspace housekeeping for every physical cancellation boundary", () => {

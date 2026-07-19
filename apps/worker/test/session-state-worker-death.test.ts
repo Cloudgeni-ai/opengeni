@@ -7,6 +7,7 @@ const recoveryCalls: unknown[] = [];
 const parentWakeCalls: unknown[] = [];
 let recoveryResult:
   | { action: "unclaimed"; events: [] }
+  | { action: "persistence_pending"; receipt: any; events: [] }
   | { action: "recovering"; turnId: string; redispatches: number; events: any[] }
   | { action: "exceeded"; turnId: string; redispatches: number; events: any[] }
   | { action: "stale"; events: []; turnStatus: string | null; activeTurnId: string | null };
@@ -25,6 +26,7 @@ function makeActivities() {
         wakeSessionWorkflow: null,
       }) as any,
     {
+      getSessionTurnPersistenceReceipt: mock(async () => null),
       recoverSessionDispatch: mock(async (...args: unknown[]) => {
         recoveryCalls.push(args[2]);
         return recoveryResult as any;

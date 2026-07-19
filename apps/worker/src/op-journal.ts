@@ -21,6 +21,7 @@
 
 import type { Context } from "@temporalio/activity";
 import type { OpStreamJournal } from "@opengeni/runtime";
+import type { TurnPersistenceHandoff } from "./activities/types";
 
 /** The activity's shared heartbeat-details object: every heartbeat call site
  *  spreads THIS one object (plus its own phase), so fields like the op-ack
@@ -28,6 +29,8 @@ import type { OpStreamJournal } from "@opengeni/runtime";
 export interface TurnHeartbeatDetails extends Record<string, unknown> {
   /** Settled-op roster: durable op id → its exit seq (the final-ack frontier). */
   opAcks: Record<string, string>;
+  /** Exact bounded operation a control worker must persist before turn recovery. */
+  persistenceHandoff?: TurnPersistenceHandoff;
 }
 
 export function makeTurnOpJournal(
