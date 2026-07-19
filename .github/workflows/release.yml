@@ -109,7 +109,28 @@ jobs:
       - name: Publish closure guard
         run: bun scripts/publish-closure-guard.ts
 
+      - name: Detect versionable changesets
+        id: release_plan
+        shell: bash
+        run: |
+          set -euo pipefail
+          plan="$RUNNER_TEMP/changeset-status.json"
+          bunx changeset status --output "$plan"
+          changeset_count="$(jq -er '.changesets | length' "$plan")"
+          release_count="$(jq -er '.releases | length' "$plan")"
+          if [ "$changeset_count" -gt 0 ] && [ "$release_count" -eq 0 ]; then
+            echo "::error::pending changesets target only ignored/private packages and cannot produce a Version PR"
+            exit 1
+          fi
+          if [ "$release_count" -gt 0 ]; then
+            echo "has_releases=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_releases=false" >> "$GITHUB_OUTPUT"
+            echo "No publishable package changesets; a Version PR is not required."
+          fi
+
       - name: Create or update Version PR
+        if: ${{ steps.release_plan.outputs.has_releases == 'true' }}
         uses: changesets/action@a45c4d594aa4e2c509dc14a9f2b3b67ba3780d0d # v1
         with:
           version: bun run changeset:version

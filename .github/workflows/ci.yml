@@ -13,6 +13,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
@@ -29,6 +31,21 @@ jobs:
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
+
+      - name: Validate changeset release plan
+        shell: bash
+        run: |
+          set -euo pipefail
+          plan="$RUNNER_TEMP/changeset-status.json"
+          git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
+          git update-ref refs/heads/main refs/remotes/origin/main
+          bunx changeset status --output "$plan"
+          changeset_count="$(jq -er '.changesets | length' "$plan")"
+          release_count="$(jq -er '.releases | length' "$plan")"
+          if [ "$changeset_count" -gt 0 ] && [ "$release_count" -eq 0 ]; then
+            echo "::error::pending changesets target only ignored/private packages and cannot produce a Version PR"
+            exit 1
+          fi
 
       - name: Generated font manifest freshness
         run: bun run check:generated-fonts
