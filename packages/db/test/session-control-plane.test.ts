@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import {
+  SESSION_EVENT_RAW_DELTA_TYPES,
   SESSION_EVENT_PAYLOAD_MAX_BYTES,
   sessionEventJsonBytes,
   sessionEventPayloadTruncation,
@@ -12,9 +13,12 @@ import {
   applyContextCompaction,
   applySessionTurnSettlement,
   abandonRecordingForTurnAttempt,
+  appendSessionEventToSandboxGroup,
   appendSessionEvents,
+  appendSessionEventsAndUpdateSession,
   appendSessionHistoryItems,
   appendSessionEventsForTurnAttempt,
+  appendSessionEventsWithLockedSessionUpdate,
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
   clearDurablePendingSessionToolCalls,
@@ -300,6 +304,331 @@ describe("clean session control plane", () => {
     expect(pageTwo.hasMore).toBe(false);
     expect(new Set([...pageOne.sessions, ...pageTwo.sessions].map((entry) => entry.id))).toEqual(
       new Set([first.id, second.id, third.id]),
+    );
+  });
+
+  test("session discovery preserves exact keysets and hands concurrent changes to the next scan", async () => {
+    const { grant, session: first } = await fixture();
+    const sessions = [first];
+    for (let index = 1; index < 5; index += 1) {
+      sessions.push(
+        await createSession(client.db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          initialMessage: `equal-timestamp-${index}`,
+          resources: [],
+          metadata: {},
+          model: "scripted-model",
+          sandboxBackend: "none",
+        }),
+      );
+    }
+    const exactEqualTimestamp = "2020-01-02T03:04:05.123456Z";
+    await shared.admin`
+      update sessions
+      set created_at = ${exactEqualTimestamp}::text::timestamptz,
+          updated_at = ${exactEqualTimestamp}::text::timestamptz
+      where workspace_id = ${grant.workspaceId!}`;
+
+    const expectedEqualOrder = sessions
+      .map((session) => session.id)
+      .sort()
+      .reverse();
+    const createdIds: string[] = [];
+    let createdCursor: Parameters<typeof listSessionDiscoverySummaries>[2]["cursor"];
+    do {
+      const page = await listSessionDiscoverySummaries(client.db, grant.workspaceId!, {
+        limit: 2,
+        orderBy: "createdAt",
+        ...(createdCursor ? { cursor: createdCursor } : {}),
+      });
+      expect(page.orderBy).toBe("createdAt");
+      expect(page.sessions.map((session) => session.sortAt)).toEqual(
+        page.sessions.map(() => exactEqualTimestamp),
+      );
+      for (const session of page.sessions) {
+        expect(createdIds).not.toContain(session.id);
+        createdIds.push(session.id);
+      }
+      createdCursor = page.nextCursor ?? undefined;
+      if (createdCursor) {
+        expect(createdCursor.sortAt).toBe(exactEqualTimestamp);
+        expect(createdCursor.snapshotAt).toBe(page.snapshotAt);
+      }
+    } while (createdCursor);
+    expect(createdIds).toEqual(expectedEqualOrder);
+
+    const firstUpdatedPage = await listSessionDiscoverySummaries(client.db, grant.workspaceId!, {
+      limit: 2,
+      orderBy: "updatedAt",
+    });
+    expect(firstUpdatedPage.sessions.map((session) => session.id)).toEqual(
+      expectedEqualOrder.slice(0, 2),
+    );
+    expect(firstUpdatedPage.nextCursor?.sortAt).toBe(exactEqualTimestamp);
+    const movedId = expectedEqualOrder.at(-1)!;
+    const newcomer = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      initialMessage: "inserted-after-snapshot",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    await shared.admin`
+      update sessions
+      set updated_at = ${firstUpdatedPage.snapshotAt}::text::timestamptz + interval '1 microsecond'
+      where workspace_id = ${grant.workspaceId!} and id = ${movedId}`;
+    await shared.admin`
+      update sessions
+      set updated_at = ${firstUpdatedPage.snapshotAt}::text::timestamptz + interval '2 microseconds'
+      where workspace_id = ${grant.workspaceId!} and id = ${newcomer.id}`;
+
+    const oldTraversalIds = firstUpdatedPage.sessions.map((session) => session.id);
+    let oldCursor = firstUpdatedPage.nextCursor ?? undefined;
+    while (oldCursor) {
+      const page = await listSessionDiscoverySummaries(client.db, grant.workspaceId!, {
+        limit: 2,
+        orderBy: "updatedAt",
+        cursor: oldCursor,
+      });
+      expect(page.snapshotAt).toBe(firstUpdatedPage.snapshotAt);
+      for (const session of page.sessions) {
+        expect(oldTraversalIds).not.toContain(session.id);
+        oldTraversalIds.push(session.id);
+      }
+      oldCursor = page.nextCursor ?? undefined;
+    }
+    expect(new Set(oldTraversalIds)).toEqual(
+      new Set(expectedEqualOrder.filter((id) => id !== movedId)),
+    );
+    expect(oldTraversalIds).not.toContain(newcomer.id);
+
+    const changedIds: string[] = [];
+    let changedCursor: Parameters<typeof listSessionDiscoverySummaries>[2]["cursor"];
+    do {
+      const page = await listSessionDiscoverySummaries(client.db, grant.workspaceId!, {
+        limit: 1,
+        orderBy: "updatedAt",
+        updatedAfter: firstUpdatedPage.updatedThrough,
+        ...(changedCursor ? { cursor: changedCursor } : {}),
+      });
+      expect(page.updatedAfter).toBe(firstUpdatedPage.updatedThrough);
+      for (const session of page.sessions) {
+        expect(changedIds).not.toContain(session.id);
+        changedIds.push(session.id);
+      }
+      changedCursor = page.nextCursor ?? undefined;
+    } while (changedCursor);
+    expect(changedIds).toEqual([newcomer.id, movedId]);
+    expect(new Set([...oldTraversalIds, ...changedIds])).toEqual(
+      new Set([...expectedEqualOrder, newcomer.id]),
+    );
+    await expect(
+      listSessionDiscoverySummaries(client.db, grant.workspaceId!, {
+        limit: 1,
+        orderBy: "createdAt",
+        updatedAfter: firstUpdatedPage.updatedThrough,
+      }),
+    ).rejects.toThrow("updatedAfter requires orderBy=updatedAt");
+  });
+
+  test("session monitoring traversal uses both composite keyset indexes", async () => {
+    const { grant } = await fixture();
+    await shared.admin`
+      insert into sessions (
+        account_id, workspace_id, initial_message, resources, tools, metadata,
+        model, sandbox_backend, sandbox_group_id, created_at, updated_at
+      )
+      select ${grant.accountId}, ${grant.workspaceId!}, 'plan-' || n::text,
+        '[]'::jsonb, '[]'::jsonb, '{}'::jsonb, 'scripted-model', 'none',
+        gen_random_uuid(),
+        statement_timestamp() - make_interval(secs => n),
+        statement_timestamp() - make_interval(secs => 5001 - n)
+      from generate_series(1, 5000) as generated(n)`;
+    await shared.admin`analyze sessions`;
+    const [cursor] = await shared.admin<Array<{ id: string; createdAt: Date; updatedAt: Date }>>`
+      select id, created_at as "createdAt", updated_at as "updatedAt"
+      from sessions where workspace_id = ${grant.workspaceId!}
+      order by created_at desc, id desc offset 2500 limit 1`;
+    expect(cursor).toBeDefined();
+    const plans = await shared.admin.begin(async (transaction) => {
+      await transaction`set local enable_seqscan = off`;
+      await transaction`set local enable_bitmapscan = off`;
+      const created = await transaction`
+        explain (format json, costs off)
+        select id from sessions
+        where workspace_id = ${grant.workspaceId!}
+          and created_at <= statement_timestamp()
+          and (
+            created_at < ${cursor!.createdAt}
+            or (created_at = ${cursor!.createdAt} and id < ${cursor!.id})
+          )
+        order by created_at desc, id desc limit 20`;
+      const updated = await transaction`
+        explain (format json, costs off)
+        select id from sessions
+        where workspace_id = ${grant.workspaceId!}
+          and updated_at > '2000-01-01T00:00:00Z'::timestamptz
+          and updated_at <= statement_timestamp()
+          and (
+            updated_at < ${cursor!.updatedAt}
+            or (updated_at = ${cursor!.updatedAt} and id < ${cursor!.id})
+          )
+        order by updated_at desc, id desc limit 20`;
+      return { created, updated };
+    });
+    expect(JSON.stringify(plans.created)).toContain("sessions_workspace_created_id_idx");
+    expect(JSON.stringify(plans.updated)).toContain("sessions_workspace_updated_id_idx");
+  });
+
+  test("raw delta writers advance sequence without advancing monitoring activity", async () => {
+    const baseline = "2020-01-02T03:04:05.123000Z";
+    const rawDeltas = () =>
+      SESSION_EVENT_RAW_DELTA_TYPES.map((type, index) => ({
+        type,
+        payload: { text: `fragment-${index}` },
+      }));
+    const setBaseline = async (workspaceId: string, sessionId: string) => {
+      await shared.admin`
+        update sessions set updated_at = ${baseline}::timestamptz
+        where workspace_id = ${workspaceId} and id = ${sessionId}`;
+    };
+    const activity = async (workspaceId: string, sessionId: string) => {
+      const [row] = await shared.admin<Array<{ lastSequence: number; updatedAt: string }>>`
+        select last_sequence as "lastSequence",
+          to_char(updated_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "updatedAt"
+        from sessions where workspace_id = ${workspaceId} and id = ${sessionId}`;
+      return row!;
+    };
+
+    const generic = await fixture();
+    await setBaseline(generic.grant.workspaceId!, generic.session.id);
+    const genericBefore = await activity(generic.grant.workspaceId!, generic.session.id);
+    await appendSessionEvents(
+      client.db,
+      generic.grant.workspaceId!,
+      generic.session.id,
+      rawDeltas(),
+    );
+    expect(await activity(generic.grant.workspaceId!, generic.session.id)).toEqual({
+      lastSequence: genericBefore.lastSequence + SESSION_EVENT_RAW_DELTA_TYPES.length,
+      updatedAt: baseline,
+    });
+    await appendSessionEvents(client.db, generic.grant.workspaceId!, generic.session.id, [
+      { type: "agent.message.completed", payload: { text: "semantic" } },
+    ]);
+    expect((await activity(generic.grant.workspaceId!, generic.session.id)).updatedAt).not.toBe(
+      baseline,
+    );
+
+    const attempt = await fixture();
+    await send(attempt.grant, attempt.session.id, "attempt activity");
+    const attemptId = crypto.randomUUID();
+    const turn = await claimTestSessionWork(
+      client.db,
+      attempt.grant.workspaceId!,
+      attempt.session.id,
+      `session-${attempt.session.id}`,
+      { attemptId },
+    );
+    expect(turn).not.toBeNull();
+    await setBaseline(attempt.grant.workspaceId!, attempt.session.id);
+    const attemptBefore = await activity(attempt.grant.workspaceId!, attempt.session.id);
+    expect(
+      (
+        await appendSessionEventsForTurnAttempt(
+          client.db,
+          attempt.grant.workspaceId!,
+          attempt.session.id,
+          turn!.id,
+          turn!.executionGeneration,
+          attemptId,
+          rawDeltas(),
+        )
+      ).accepted,
+    ).toBeTrue();
+    expect(await activity(attempt.grant.workspaceId!, attempt.session.id)).toEqual({
+      lastSequence: attemptBefore.lastSequence + SESSION_EVENT_RAW_DELTA_TYPES.length,
+      updatedAt: baseline,
+    });
+    await appendSessionEventsForTurnAttempt(
+      client.db,
+      attempt.grant.workspaceId!,
+      attempt.session.id,
+      turn!.id,
+      turn!.executionGeneration,
+      attemptId,
+      [{ type: "agent.message.completed", payload: { text: "semantic" } }],
+    );
+    expect((await activity(attempt.grant.workspaceId!, attempt.session.id)).updatedAt).not.toBe(
+      baseline,
+    );
+
+    const grouped = await fixture();
+    await setBaseline(grouped.grant.workspaceId!, grouped.session.id);
+    const groupedBefore = await activity(grouped.grant.workspaceId!, grouped.session.id);
+    await appendSessionEventToSandboxGroup(
+      client.db,
+      grouped.grant.workspaceId!,
+      grouped.session.sandboxGroupId,
+      rawDeltas()[0]!,
+    );
+    expect(await activity(grouped.grant.workspaceId!, grouped.session.id)).toEqual({
+      lastSequence: groupedBefore.lastSequence + 1,
+      updatedAt: baseline,
+    });
+
+    const updated = await fixture();
+    await setBaseline(updated.grant.workspaceId!, updated.session.id);
+    const updatedBefore = await activity(updated.grant.workspaceId!, updated.session.id);
+    await appendSessionEventsAndUpdateSession(
+      client.db,
+      updated.grant.workspaceId!,
+      updated.session.id,
+      [rawDeltas()[0]!],
+      {},
+    );
+    expect(await activity(updated.grant.workspaceId!, updated.session.id)).toEqual({
+      lastSequence: updatedBefore.lastSequence + 1,
+      updatedAt: baseline,
+    });
+    await appendSessionEventsAndUpdateSession(
+      client.db,
+      updated.grant.workspaceId!,
+      updated.session.id,
+      [rawDeltas()[0]!],
+      { metadata: { activity: "explicit mutation" } },
+    );
+    expect((await activity(updated.grant.workspaceId!, updated.session.id)).updatedAt).not.toBe(
+      baseline,
+    );
+
+    const locked = await fixture();
+    await setBaseline(locked.grant.workspaceId!, locked.session.id);
+    const lockedBefore = await activity(locked.grant.workspaceId!, locked.session.id);
+    await appendSessionEventsWithLockedSessionUpdate(
+      client.db,
+      locked.grant.workspaceId!,
+      locked.session.id,
+      () => ({ events: [rawDeltas()[0]!] }),
+    );
+    expect(await activity(locked.grant.workspaceId!, locked.session.id)).toEqual({
+      lastSequence: lockedBefore.lastSequence + 1,
+      updatedAt: baseline,
+    });
+    await appendSessionEventsWithLockedSessionUpdate(
+      client.db,
+      locked.grant.workspaceId!,
+      locked.session.id,
+      () => ({
+        events: [rawDeltas()[0]!],
+        update: { metadata: { activity: "explicit locked mutation" } },
+      }),
+    );
+    expect((await activity(locked.grant.workspaceId!, locked.session.id)).updatedAt).not.toBe(
+      baseline,
     );
   });
 

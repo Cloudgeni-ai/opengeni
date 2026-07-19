@@ -483,6 +483,23 @@ The current map:
 
 - **Event store.** Every `session_events.payload` passes through `sanitizeEventPayload` (NUL + lone-surrogate repair, secret redaction, and the canonical audit bound) before insert; otherwise jsonb rejection or unconstrained output could kill or grow a turn. The SQL fallback is defense in depth, not the normal semantic preview path.
 - **Event monitoring indexes.** Tail and typed lookups execute inside the RLS transaction using `(workspace_id, session_id, type, sequence)` and a partial `(workspace_id, session_id, sequence)` index that excludes the four raw delta firehoses. A caller can therefore ask for current terminal/checkpoint/tool-receipt truth without scanning or serializing the session's durable history.
+- **Compact session discovery.** `sessions_list` selects only its monitoring
+  summary fields and traverses deterministic descending `(created_at, id)` or
+  `(updated_at, id)` keysets through matching workspace-prefixed indexes.
+  Opaque cursors bind the order, exact PostgreSQL-microsecond keyset, first-page
+  timestamp ceiling, and incremental `updatedAfter` scope. Updated-order pages
+  expose that ceiling as `updatedThrough` for the next scan; it is a timestamp
+  watermark, not a global commit sequence. Raw message/reasoning/command/PTY
+  deltas advance `last_sequence` without moving `updated_at`, while semantic
+  events and explicit session mutations advance monitoring activity.
+- **Model-facing entity details are independently bounded.** `session_get`
+  uses an exact-ID, field/count/byte-aware projection, and `rig_get` selects
+  summary-only historical versions/changes while retaining one bounded active
+  definition. Each complete pretty-printed MCP response has an exact 64 KiB
+  cap with explicit projection facts. The access-controlled REST detail routes
+  retain their existing exact contracts; MCP monitoring never fetches large
+  historical rig scripts, checks, change payloads, or verification logs merely
+  to discard them after serialization.
 - **Three memory stores + envelope.** See §3.5: `session_history_items` (model truth), `agent_run_states` (approval resume), `session_events` (audit), and `sandbox_session_envelopes` (sandbox recovery). Workspace knowledge memory (`knowledge_memories`, human-reviewed) is separate again — see §3.5.
 - **pgvector documents.** `document_bases`/`documents`/`document_chunks` with `embedding vector(3072)`. No ANN index (vector search is a sequential scan; keyword search uses a GIN FTS index); embedding model is stored per chunk and filtered on at search time. Documents carry source metadata + `aclTags` (retrieval filters, not authz); `knowledge_memories` stores reviewed workspace memory with its own FTS index.
 - **Object storage.** `s3-compatible` (MinIO local), `aws-s3`, `azure-blob`, `gcs` for file bytes + recordings. Presigned URLs are **host-bound** (host is part of the S3 signature) — the public endpoint and the in-Docker `minio:9000` endpoint are not interchangeable; use `putObject` for server-side writes on split topologies. Direct upload completion validates provider HEAD metadata before making the file ready, while a completed-request retry re-enters the row lock and idempotently repairs a missing `file.uploaded` usage event. Unfinalized PUTs are retained through URL expiry plus cleanup grace, then reclaimed by the worker schedule described in §7.2.

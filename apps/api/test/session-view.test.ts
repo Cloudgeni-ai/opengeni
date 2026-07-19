@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import type { SessionEvent } from "@opengeni/contracts";
+import type { Rig, Session, SessionEvent } from "@opengeni/contracts";
 import {
+  boundRigDetailMcp,
+  boundSessionDetailMcp,
   boundSessionEventMcpPage,
   capPayloadValue,
   capSessionDetail,
@@ -69,7 +71,9 @@ describe("boundSessionEventMcpPage", () => {
   test("keeps the newest suffix for a capped backward page without fake events", () => {
     const page = boundSessionEventMcpPage({
       events: Array.from({ length: 100 }, (_, index) =>
-        event(1_000 + index, { output: `HEAD-${"界🙂".repeat(20_000)}-${index}-TAIL` }),
+        event(1_000 + index, {
+          output: `HEAD-${"界🙂".repeat(20_000)}-${index}-TAIL`,
+        }),
       ),
       mode: "forensic",
       payloadMode: "full",
@@ -132,7 +136,11 @@ describe("boundSessionEventMcpPage", () => {
 
 describe("capSessionDetail", () => {
   test("preserves small values and clamps unbounded metadata/message fields", () => {
-    const small = { metadata: { k: "v" }, initialMessage: "hi", status: "running" };
+    const small = {
+      metadata: { k: "v" },
+      initialMessage: "hi",
+      status: "running",
+    };
     expect(capSessionDetail(small)).toBe(small);
 
     const large = {
@@ -143,5 +151,169 @@ describe("capSessionDetail", () => {
     expect(capped).not.toBe(large);
     expect(JSON.stringify(capped).length).toBeLessThan(JSON.stringify(large).length);
     expect(capped.initialMessage).toContain("model monitoring projection");
+  });
+});
+
+function sessionFixture(overrides: Partial<Session> = {}): Session {
+  return {
+    id: SESSION,
+    workspaceId: WORKSPACE,
+    accountId: "00000000-0000-4000-8000-000000000003",
+    status: "running",
+    initialMessage: "initial",
+    title: "worker",
+    titleSource: "agent",
+    instructions: null,
+    resources: [],
+    tools: [],
+    metadata: {},
+    model: "gpt-5-codex",
+    sandboxBackend: "none",
+    sandboxOs: "linux",
+    sandboxGroupId: SESSION,
+    activeSandboxId: null,
+    activeEpoch: 0,
+    variableSetId: null,
+    environmentId: null,
+    rigId: null,
+    rigVersionId: null,
+    firstPartyMcpPermissions: null,
+    mcpServers: [],
+    parentSessionId: null,
+    createIdempotencyKey: null,
+    temporalWorkflowId: `session-${SESSION}`,
+    activeTurnId: null,
+    lastInputTokens: null,
+    queueVersion: 0,
+    queueHeadPosition: 0,
+    queueTailPosition: 0,
+    effectiveControl: {
+      state: "active",
+      blockers: [],
+      resumeOptions: [],
+    } as never,
+    lastSequence: 7,
+    codexPinnedCredentialId: null,
+    codexLastCredentialId: null,
+    pinned: false,
+    pinnedAt: null,
+    pinVersion: 0,
+    createdAt: "2026-07-19T00:00:00.000Z",
+    updatedAt: "2026-07-19T00:01:00.000Z",
+    ...overrides,
+  };
+}
+
+describe("boundSessionDetailMcp", () => {
+  test("bounds every aggregate and reports exact final bytes", () => {
+    const huge = "界🙂".repeat(50_000);
+    const session = sessionFixture({
+      title: huge,
+      initialMessage: huge,
+      instructions: huge,
+      metadata: Object.fromEntries(
+        Array.from({ length: 500 }, (_, index) => [`metadata-${index}-${huge}`, huge]),
+      ),
+      resources: Array.from({ length: 200 }, (_, index) => ({
+        kind: "repository",
+        uri: `https://example.com/${index}`,
+        ref: huge,
+      })) as never,
+      tools: Array.from({ length: 200 }, (_, index) => ({
+        kind: "mcp",
+        id: `tool-${index}`,
+        description: huge,
+      })) as never,
+      mcpServers: Array.from({ length: 100 }, (_, index) => ({
+        id: `server-${index}`,
+        name: huge,
+        url: `https://mcp-${index}.example.com`,
+        headerNames: [huge],
+        credentialVersion: 1,
+      })),
+      firstPartyMcpPermissions: Array.from({ length: 200 }, () => "sessions:read") as never,
+    });
+    const result = boundSessionDetailMcp(session, {
+      state: "paused",
+      blockers: Array.from({ length: 200 }, () => ({ reason: huge })),
+    });
+    expect(result.projection.bytes).toBe(
+      Buffer.byteLength(JSON.stringify(result, null, 2), "utf8"),
+    );
+    expect(result.projection.bytes).toBeLessThanOrEqual(result.projection.maxBytes);
+    expect(result.projection.truncated).toBeTrue();
+    expect(result.projection.fields.resources.originalCount).toBe(200);
+    expect(result.projection.fields.resources.deliveredCount).toBe(24);
+    expect(result.projection.fields.tools.originalCount).toBe(200);
+    expect(result.projection.fields.tools.deliveredCount).toBe(24);
+    expect(result.initialMessage).toContain("model monitoring projection");
+    expect(JSON.stringify(result)).not.toContain(huge);
+  });
+});
+
+describe("boundRigDetailMcp", () => {
+  test("keeps one bounded active definition and summary-only history", () => {
+    const huge = "setup-界🙂".repeat(40_000);
+    const rig: Rig = {
+      id: "00000000-0000-4000-8000-000000000010",
+      accountId: "00000000-0000-4000-8000-000000000003",
+      workspaceId: WORKSPACE,
+      name: huge,
+      description: huge,
+      createdBy: "session:test",
+      activeVersion: {
+        id: "00000000-0000-4000-8000-000000000011",
+        rigId: "00000000-0000-4000-8000-000000000010",
+        version: 99,
+        image: huge,
+        setupScript: huge,
+        checks: Array.from({ length: 100 }, (_, index) => ({
+          name: `check-${index}`,
+          command: huge,
+        })),
+        credentialHooks: Array.from({ length: 100 }, () => huge),
+        defaultVariableSetIds: Array.from(
+          { length: 100 },
+          (_, index) => `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+        ),
+        changelog: huge,
+        createdBy: "session:test",
+        active: true,
+        createdAt: "2026-07-19T00:00:00.000Z",
+      },
+      activeVersionHealth: { checkHealth: "passing", lastVerifiedAt: null },
+      versionCount: 500,
+      createdAt: "2026-07-19T00:00:00.000Z",
+      updatedAt: "2026-07-19T00:01:00.000Z",
+    };
+    const result = boundRigDetailMcp(
+      rig,
+      {
+        versions: Array.from({ length: 100 }, (_, index) => ({
+          id: `version-${index}`,
+          changelog: huge,
+          setupScriptBytes: 5_000_000,
+        })),
+        total: 500,
+        hasMore: true,
+      },
+      {
+        changes: Array.from({ length: 100 }, (_, index) => ({
+          id: `change-${index}`,
+          commandPreview: huge,
+          verificationBytes: 8_000_000,
+        })),
+        total: 400,
+        hasMore: true,
+      },
+    );
+    expect(result.projection.bytes).toBe(
+      Buffer.byteLength(JSON.stringify(result, null, 2), "utf8"),
+    );
+    expect(result.projection.bytes).toBeLessThanOrEqual(result.projection.maxBytes);
+    expect(result.versionsTruncated).toBeTrue();
+    expect(result.changesTruncated).toBeTrue();
+    expect(result.rig.activeVersion?.setupScript).toContain("model monitoring projection");
+    expect(JSON.stringify(result)).not.toContain(huge);
   });
 });

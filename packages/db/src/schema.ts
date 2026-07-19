@@ -662,6 +662,19 @@ export const sessions = pgTable(
       table.workspaceId,
       table.createdAt,
     ),
+    // Model-facing monitoring pages use exact (timestamp,id) keysets. Keep the
+    // older prefix index during rolling deploys; these composites serve both
+    // deterministic traversal and updatedAfter change scans.
+    workspaceCreatedId: index("sessions_workspace_created_id_idx").on(
+      table.workspaceId,
+      table.createdAt.desc(),
+      table.id.desc(),
+    ),
+    workspaceUpdatedId: index("sessions_workspace_updated_id_idx").on(
+      table.workspaceId,
+      table.updatedAt.desc(),
+      table.id.desc(),
+    ),
     variableSet: index("sessions_variable_set_idx").on(table.workspaceId, table.variableSetId),
     parent: index("sessions_parent_idx").on(table.workspaceId, table.parentSessionId),
     // Routing index: resolve session_id -> sandbox_group_id at every lease entry

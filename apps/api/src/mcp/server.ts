@@ -32,7 +32,11 @@ import {
   listScheduledTasks,
   listSessionEventPage,
   listSessionDiscoverySummaries,
+  type SessionDiscoveryCursor,
+  type SessionDiscoveryOrderBy,
   listRigs,
+  listRigChangeMonitoringSummaries,
+  listRigVersionMonitoringSummaries,
   listSocialConnections,
   listSocialPosts,
   listVariableSets,
@@ -67,8 +71,6 @@ import { hasPermission } from "@opengeni/core";
 import { recordWorkspaceUsage, requireLimit } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
-  listRigChangesForApi,
-  listRigVersionsForApi,
   promoteVerifiedDefinitionEditChangeForApi,
   proposeRigChangeForApi,
   requireRigChangeForApi,
@@ -111,7 +113,8 @@ import {
 } from "@opengeni/core";
 import {
   boundSessionEventMcpPage,
-  capSessionDetail,
+  boundSessionDetailMcp,
+  boundRigDetailMcp,
   SESSION_EVENT_MCP_MAX_BYTES,
 } from "./session-view";
 import type { ToolspaceMcpSurface } from "./toolspace";
@@ -159,7 +162,11 @@ export function buildOpenGeniMcpServer(
       },
       async ({ title }) => {
         const result = await updateSessionTitle(deps, grant.workspaceId, sessionId, title, "agent");
-        return json({ ok: true, updated: result.updated, title: result.title ?? title });
+        return json({
+          ok: true,
+          updated: result.updated,
+          title: result.title ?? title,
+        });
       },
     );
   }
@@ -224,7 +231,9 @@ export function buildOpenGeniMcpServer(
         if (file.status !== "ready") {
           throw new Error(`file is ${file.status}`);
         }
-        const signed = await deps.objectStorage.createGetUrl({ key: file.objectKey });
+        const signed = await deps.objectStorage.createGetUrl({
+          key: file.objectKey,
+        });
         return json({
           file: {
             id: file.id,
@@ -260,7 +269,9 @@ export function buildOpenGeniMcpServer(
             deps.db,
             grant.workspaceId,
           );
-          const repositories = await listGitHubAppRepositories(deps.settings, { installationIds });
+          const repositories = await listGitHubAppRepositories(deps.settings, {
+            installationIds,
+          });
           const visible = typeof limit === "number" ? repositories.slice(0, limit) : repositories;
           return json({
             repositories: visible.map((repository) =>
@@ -390,7 +401,9 @@ export function buildOpenGeniMcpServer(
         inputSchema: { limit: z4.number().int().positive().optional() },
       },
       async ({ limit }) =>
-        json({ tasks: await listScheduledTasks(deps.db, grant.workspaceId, limit ?? 100) }),
+        json({
+          tasks: await listScheduledTasks(deps.db, grant.workspaceId, limit ?? 100),
+        }),
     );
 
     server.registerTool(
@@ -439,7 +452,11 @@ export function buildOpenGeniMcpServer(
           payload,
           toolsProvided: scheduledTaskToolsProvided(args),
         });
-        await syncCreatedScheduledTask({ db: deps.db, workflowClient: deps.workflowClient, task });
+        await syncCreatedScheduledTask({
+          db: deps.db,
+          workflowClient: deps.workflowClient,
+          task,
+        });
         return json(task);
       },
     );
@@ -536,7 +553,10 @@ export function buildOpenGeniMcpServer(
       {
         description:
           "Trigger a scheduled task immediately. Pass a stable triggerId to make a retried trigger idempotent (one charge, one run).",
-        inputSchema: { id: z4.string().uuid(), triggerId: z4.string().min(1).max(128).optional() },
+        inputSchema: {
+          id: z4.string().uuid(),
+          triggerId: z4.string().min(1).max(128).optional(),
+        },
       },
       async ({ id, triggerId }) => {
         const task = await requireScheduledTask(deps.db, grant.workspaceId, id);
@@ -594,7 +614,10 @@ export function buildOpenGeniMcpServer(
       "scheduled_task_runs_list",
       {
         description: "List runs for a scheduled task.",
-        inputSchema: { taskId: z4.string().uuid(), limit: z4.number().int().positive().optional() },
+        inputSchema: {
+          taskId: z4.string().uuid(),
+          limit: z4.number().int().positive().optional(),
+        },
       },
       async ({ taskId, limit }) =>
         json({
@@ -836,7 +859,9 @@ function registerGoalTools(
   );
 }
 
-type JsonResult = (value: unknown) => { content: Array<{ type: "text"; text: string }> };
+type JsonResult = (value: unknown) => {
+  content: Array<{ type: "text"; text: string }>;
+};
 
 const MemoryKindSchema = z4.enum(["preference", "semantic", "procedural", "decision", "episodic"]);
 
@@ -979,7 +1004,11 @@ function registerFleetTools(
   sessionId: string,
   json: JsonResult,
 ): void {
-  const services: FleetServices = { db: deps.db, settings: deps.settings, bus: deps.bus };
+  const services: FleetServices = {
+    db: deps.db,
+    settings: deps.settings,
+    bus: deps.bus,
+  };
 
   // Resolve the session's group sandbox (the default/home fleet member) at
   // call-time via the shared helper (same context the user-authenticated swap
@@ -1036,7 +1065,11 @@ function registerFleetTools(
             workdir: z4.string().optional(),
           }),
           z4.object({ kind: z4.literal("read"), path: z4.string().min(1) }),
-          z4.object({ kind: z4.literal("write"), path: z4.string().min(1), content: z4.string() }),
+          z4.object({
+            kind: z4.literal("write"),
+            path: z4.string().min(1),
+            content: z4.string(),
+          }),
         ]),
       },
     },
@@ -1056,7 +1089,10 @@ function registerFleetTools(
     },
     async ({ kind, name }) =>
       json(
-        await provisionSandbox(services, await fleetContext(), { kind, ...(name ? { name } : {}) }),
+        await provisionSandbox(services, await fleetContext(), {
+          kind,
+          ...(name ? { name } : {}),
+        }),
       ),
   );
 }
@@ -1110,24 +1146,31 @@ function registerRigTools(
     server.registerTool(
       "rig_get",
       {
-        description: "Get a rig, its versions, and recent changes.",
+        description:
+          "Get one rig's bounded active definition plus compact historical version/change summaries. Historical setup scripts, checks, payloads, and verification logs are represented by counts/byte facts rather than copied into model context; use the access-controlled REST detail endpoints for exact retained definitions.",
         inputSchema: {
           rigId: z4.string().uuid(),
+          versionLimit: z4.number().int().positive().optional(),
           changeLimit: z4.number().int().positive().optional(),
         },
       },
-      async ({ rigId, changeLimit }) => {
+      async ({ rigId, versionLimit, changeLimit }) => {
         const rig = await requireRigForApi(deps.db, grant.workspaceId, rigId);
-        return json({
-          rig,
-          versions: await listRigVersionsForApi({ db: deps.db }, grant.workspaceId, rig.id),
-          changes: await listRigChangesForApi(
-            { db: deps.db },
+        const [versions, changes] = await Promise.all([
+          listRigVersionMonitoringSummaries(
+            deps.db,
             grant.workspaceId,
             rig.id,
-            boundedMcpLimit(changeLimit),
+            boundedRigHistoryLimit(versionLimit),
           ),
-        });
+          listRigChangeMonitoringSummaries(
+            deps.db,
+            grant.workspaceId,
+            rig.id,
+            boundedRigHistoryLimit(changeLimit),
+          ),
+        ]);
+        return json(boundRigDetailMcp(rig, versions, changes));
       },
     );
 
@@ -1268,18 +1311,38 @@ function registerWorkspaceOrchestrationTools(
       "sessions_list",
       {
         description:
-          "List compact high-level session status in this workspace, newest first. Use session_get for one session's detailed resources/tools/settings. The list never returns full session objects or history.",
+          "List compact high-level session status in this workspace. Defaults to creation order; use orderBy=updatedAt with updatedAfter/updatedThrough for indexed incremental monitoring. Cursors are opaque snapshot-bound keysets. Use session_get for exact known targets and detailed resources/tools/settings. The list never returns full session objects or history.",
         inputSchema: {
           limit: z4.number().int().positive().max(100).optional(),
           cursor: z4.string().max(512).optional(),
           includeLastMessage: z4.boolean().optional(),
+          orderBy: z4.enum(["createdAt", "updatedAt"]).optional(),
+          updatedAfter: z4.string().max(64).optional(),
         },
       },
-      async ({ limit, cursor, includeLastMessage }) => {
+      async ({ limit, cursor, includeLastMessage, orderBy: requestedOrderBy, updatedAfter }) => {
+        const decodedCursor = cursor ? decodeSessionDiscoveryCursor(cursor) : undefined;
+        const orderBy: SessionDiscoveryOrderBy =
+          requestedOrderBy ?? decodedCursor?.orderBy ?? "createdAt";
+        if (decodedCursor && decodedCursor.orderBy !== orderBy) {
+          throw new Error("sessions_list cursor order does not match orderBy");
+        }
+        const normalizedUpdatedAfter =
+          updatedAfter !== undefined
+            ? normalizeSessionDiscoveryTimestamp(updatedAfter, "updatedAfter")
+            : (decodedCursor?.updatedAfter ?? undefined);
+        if (normalizedUpdatedAfter !== undefined && orderBy !== "updatedAt") {
+          throw new Error("sessions_list updatedAfter requires orderBy=updatedAt");
+        }
+        if (decodedCursor && decodedCursor.updatedAfter !== (normalizedUpdatedAfter ?? null)) {
+          throw new Error("sessions_list cursor does not match updatedAfter");
+        }
         const page = await listSessionDiscoverySummaries(deps.db, grant.workspaceId, {
           limit: boundedSessionDiscoveryLimit(limit),
-          ...(cursor ? { cursor: decodeSessionDiscoveryCursor(cursor) } : {}),
+          ...(decodedCursor ? { cursor: decodedCursor } : {}),
           includeLastMessage: includeLastMessage === true,
+          orderBy,
+          ...(normalizedUpdatedAfter ? { updatedAfter: normalizedUpdatedAfter } : {}),
         });
         return json(capSessionDiscoveryPage(page, includeLastMessage === true));
       },
@@ -1298,10 +1361,7 @@ function registerWorkspaceOrchestrationTools(
           throw new Error("session not found");
         }
         const queue = await getSessionQueueSnapshot(deps.db, grant.workspaceId, sessionId);
-        return json({
-          ...capSessionDetail(session),
-          effectiveControl: queue?.effectiveControl ?? null,
-        });
+        return json(boundSessionDetailMcp(session, queue?.effectiveControl ?? null));
       },
     );
 
@@ -1667,7 +1727,11 @@ function registerWorkspaceOrchestrationTools(
           title,
           "agent",
         );
-        return json({ ok: true, updated: result.updated, title: result.title ?? title });
+        return json({
+          ok: true,
+          updated: result.updated,
+          title: result.title ?? title,
+        });
       },
     );
   }
@@ -1772,7 +1836,11 @@ function registerVariableSetTools(
       variableSetId: variableSet.id,
       variableName: parsedName.data,
     });
-    const responseVariableSet = { id: variableSet.id, name: variableSet.name, created };
+    const responseVariableSet = {
+      id: variableSet.id,
+      name: variableSet.name,
+      created,
+    };
     return json({
       variableSet: responseVariableSet,
       environment: responseVariableSet,
@@ -1842,7 +1910,12 @@ function registerGitHubConnectTool(
       const missing = githubAppMissingSettings(settings);
       const slug = settings.githubAppSlug?.trim() || null;
       if (missing.length > 0 || !slug) {
-        return json({ configured: false, appSlug: slug, installUrl: null, missing });
+        return json({
+          configured: false,
+          appSlug: slug,
+          installUrl: null,
+          missing,
+        });
       }
       const base = (
         settings.publicBaseUrl ??
@@ -1952,7 +2025,10 @@ function repositoryWithScheduledTaskResource(
       ref: repository.defaultBranch,
       mountPath: repositoryMountPath(uri),
       ...(repository.private
-        ? { githubInstallationId: repository.installationId, githubRepositoryId: repository.id }
+        ? {
+            githubInstallationId: repository.installationId,
+            githubRepositoryId: repository.id,
+          }
         : {}),
     },
   };
@@ -1976,6 +2052,11 @@ function boundedMcpLimit(limit: number | undefined): number {
   return Math.min(500, Math.max(1, Math.floor(limit)));
 }
 
+function boundedRigHistoryLimit(limit: number | undefined): number {
+  if (!limit || !Number.isFinite(limit)) return 20;
+  return Math.min(100, Math.max(1, Math.floor(limit)));
+}
+
 function boundedSessionEventMcpLimit(limit: number | undefined): number {
   if (!limit || !Number.isFinite(limit)) return 40;
   return Math.min(250, Math.max(1, Math.floor(limit)));
@@ -1991,33 +2072,89 @@ function boundedSessionDiscoveryLimit(limit: number | undefined): number {
   return Math.min(SESSION_DISCOVERY_MAX_LIMIT, Math.max(1, Math.floor(limit)));
 }
 
-function encodeSessionDiscoveryCursor(cursor: { createdAt: Date | string; id: string }): string {
+export function encodeSessionDiscoveryCursor(cursor: SessionDiscoveryCursor): string {
   return Buffer.from(
     JSON.stringify({
-      createdAt:
-        cursor.createdAt instanceof Date ? cursor.createdAt.toISOString() : cursor.createdAt,
+      v: 1,
+      orderBy: cursor.orderBy,
+      sortAt: cursor.sortAt,
       id: cursor.id,
+      snapshotAt: cursor.snapshotAt,
+      updatedAfter: cursor.updatedAfter,
     }),
     "utf8",
   ).toString("base64url");
 }
 
-function decodeSessionDiscoveryCursor(value: string): { createdAt: Date; id: string } {
+const SESSION_DISCOVERY_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$/;
+const SESSION_DISCOVERY_UUID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function normalizeSessionDiscoveryTimestamp(value: string, label: string): string {
+  if (!SESSION_DISCOVERY_TIMESTAMP.test(value) || Number.isNaN(new Date(value).getTime())) {
+    throw new Error(`sessions_list ${label} must be an ISO UTC date-time`);
+  }
+  // Preserve up to six fractional digits. Converting through JS Date would
+  // discard PostgreSQL microseconds and can skip equal-millisecond rows.
+  return value;
+}
+
+export function decodeSessionDiscoveryCursor(value: string): SessionDiscoveryCursor {
   try {
     const parsed = JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as {
+      v?: unknown;
+      orderBy?: unknown;
+      sortAt?: unknown;
       createdAt?: unknown;
       id?: unknown;
+      snapshotAt?: unknown;
+      updatedAfter?: unknown;
     };
-    const createdAt = typeof parsed.createdAt === "string" ? new Date(parsed.createdAt) : null;
     if (
-      !createdAt ||
-      Number.isNaN(createdAt.getTime()) ||
+      parsed.v === undefined &&
+      typeof parsed.createdAt === "string" &&
+      typeof parsed.id === "string" &&
+      SESSION_DISCOVERY_UUID.test(parsed.id)
+    ) {
+      const createdAt = normalizeSessionDiscoveryTimestamp(
+        parsed.createdAt,
+        "legacy cursor createdAt",
+      );
+      return {
+        orderBy: "createdAt",
+        sortAt: createdAt,
+        id: parsed.id,
+        snapshotAt: createdAt,
+        updatedAfter: null,
+      };
+    }
+    if (
+      parsed.v !== 1 ||
+      (parsed.orderBy !== "createdAt" && parsed.orderBy !== "updatedAt") ||
+      typeof parsed.sortAt !== "string" ||
+      typeof parsed.snapshotAt !== "string" ||
+      (parsed.updatedAfter !== null && typeof parsed.updatedAfter !== "string") ||
       typeof parsed.id !== "string" ||
-      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(parsed.id)
+      !SESSION_DISCOVERY_UUID.test(parsed.id)
     ) {
       throw new Error("invalid cursor fields");
     }
-    return { createdAt, id: parsed.id };
+    const sortAt = normalizeSessionDiscoveryTimestamp(parsed.sortAt, "cursor sortAt");
+    const snapshotAt = normalizeSessionDiscoveryTimestamp(parsed.snapshotAt, "cursor snapshotAt");
+    const normalizedUpdatedAfter =
+      parsed.updatedAfter === null
+        ? null
+        : normalizeSessionDiscoveryTimestamp(parsed.updatedAfter, "cursor updatedAfter");
+    if (normalizedUpdatedAfter !== null && parsed.orderBy !== "updatedAt") {
+      throw new Error("incremental cursor requires updatedAt order");
+    }
+    return {
+      orderBy: parsed.orderBy,
+      sortAt,
+      id: parsed.id,
+      snapshotAt,
+      updatedAfter: normalizedUpdatedAfter,
+    };
   } catch {
     throw new Error("sessions_list cursor is invalid");
   }
@@ -2124,36 +2261,62 @@ export function capSessionDiscoveryPage(
   });
 
   let kept = projected;
-  let responseTruncated = false;
-  while (
-    kept.length > 1 &&
-    Buffer.byteLength(JSON.stringify({ sessions: kept }), "utf8") >
-      SESSION_DISCOVERY_PAGE_MAX_BYTES - 2_048
-  ) {
-    kept = kept.slice(0, -1);
-    responseTruncated = true;
-  }
-  const lastKept = kept.at(-1);
-  const droppedForByteCap = kept.length < projected.length;
-  const nextCursor = droppedForByteCap
-    ? lastKept
-      ? encodeSessionDiscoveryCursor({ createdAt: lastKept.createdAt, id: lastKept.id })
-      : null
-    : page.nextCursor
-      ? encodeSessionDiscoveryCursor(page.nextCursor)
-      : null;
-  return {
-    sessions: kept,
-    total: page.total,
-    hasMore: page.hasMore || droppedForByteCap,
-    nextCursor,
-    responseTruncated,
-    ...(responseTruncated
-      ? {
-          truncationReason: `response exceeded ${SESSION_DISCOVERY_PAGE_MAX_BYTES} bytes; continue with nextCursor`,
-        }
-      : {}),
+  const build = () => {
+    const lastKept = kept.at(-1);
+    const droppedForByteCap = kept.length < projected.length;
+    const sourceLast = lastKept
+      ? page.sessions.find((session) => session.id === lastKept.id)
+      : undefined;
+    const nextCursor = droppedForByteCap
+      ? sourceLast
+        ? encodeSessionDiscoveryCursor({
+            orderBy: page.orderBy,
+            sortAt: sourceLast.sortAt,
+            id: sourceLast.id,
+            snapshotAt: page.snapshotAt,
+            updatedAfter: page.updatedAfter,
+          })
+        : null
+      : page.nextCursor
+        ? encodeSessionDiscoveryCursor(page.nextCursor)
+        : null;
+    const result = {
+      sessions: kept,
+      total: page.total,
+      hasMore: page.hasMore || droppedForByteCap,
+      nextCursor,
+      orderBy: page.orderBy,
+      snapshotAt: page.snapshotAt,
+      updatedAfter: page.updatedAfter,
+      updatedThrough: page.updatedThrough,
+      responseTruncated: droppedForByteCap,
+      ...(droppedForByteCap
+        ? {
+            truncationReason: `response exceeded ${SESSION_DISCOVERY_PAGE_MAX_BYTES} bytes; continue with nextCursor`,
+          }
+        : {}),
+      bytes: 0,
+      maxBytes: SESSION_DISCOVERY_PAGE_MAX_BYTES,
+    };
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const measured = Buffer.byteLength(JSON.stringify(result, null, 2), "utf8");
+      if (result.bytes === measured) break;
+      result.bytes = measured;
+    }
+    return result;
   };
+
+  let result = build();
+  while (result.bytes > SESSION_DISCOVERY_PAGE_MAX_BYTES && kept.length > 1) {
+    kept = kept.slice(0, -1);
+    result = build();
+  }
+  if (result.bytes > SESSION_DISCOVERY_PAGE_MAX_BYTES) {
+    throw new RangeError(
+      `sessions_list metadata exceeds its ${SESSION_DISCOVERY_PAGE_MAX_BYTES}-byte envelope`,
+    );
+  }
+  return result;
 }
 
 function parseMcpDate(raw: string, label: string): Date {

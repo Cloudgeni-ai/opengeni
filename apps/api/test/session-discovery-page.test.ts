@@ -1,11 +1,83 @@
 import { describe, expect, test } from "bun:test";
-import { capSessionDiscoveryPage } from "../src/mcp/server";
+import {
+  capSessionDiscoveryPage,
+  decodeSessionDiscoveryCursor,
+  encodeSessionDiscoveryCursor,
+} from "../src/mcp/server";
 
 function uuid(index: number): string {
   return `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`;
 }
 
 describe("sessions_list compact discovery projection", () => {
+  test("stays deterministic and within the exact envelope at 1, 20, and 100 rows", () => {
+    let previousBytes = 0;
+    for (const count of [1, 20, 100]) {
+      const sessions = Array.from({ length: count }, (_, index) => ({
+        id: uuid(index + 1),
+        title: `session-${index + 1}`,
+        parentSessionId: null,
+        status: "idle",
+        effectiveControl: {
+          state: "active",
+          primaryBlocker: null,
+          additionalBlockerCount: 0,
+        },
+        goal: { status: "active", text: `goal-${index + 1}` },
+        queuedPromptCount: 0,
+        treeStats: {
+          directChildren: 0,
+          totalDescendants: 0,
+          runningDescendants: 0,
+          queuedDescendants: 0,
+          attentionDescendants: 0,
+          pausedDescendants: 0,
+          failedDescendants: 0,
+          truncated: false,
+        },
+        latestMessage: {
+          type: "agent.message",
+          preview: `message-${index + 1}`,
+        },
+        createdAt: new Date(Date.UTC(2026, 6, 18, 0, 0, index)).toISOString(),
+        updatedAt: new Date(Date.UTC(2026, 6, 18, 1, 0, index)).toISOString(),
+        sortAt: new Date(Date.UTC(2026, 6, 18, 0, 0, index))
+          .toISOString()
+          .replace(".000Z", ".123456Z"),
+      }));
+      const page = {
+        sessions,
+        total: count,
+        hasMore: false,
+        nextCursor: null,
+        orderBy: "createdAt",
+        snapshotAt: "2026-07-18T02:00:00.654321Z",
+        updatedThrough: "2026-07-18T02:00:00.654321Z",
+        updatedAfter: null,
+      } as const;
+
+      const first = capSessionDiscoveryPage(page as any, true);
+      const second = capSessionDiscoveryPage(page as any, true);
+      expect(second).toEqual(first);
+      expect(first.bytes).toBe(Buffer.byteLength(JSON.stringify(first, null, 2), "utf8"));
+      expect(first.bytes).toBeLessThanOrEqual(first.maxBytes);
+      expect(first.bytes).toBeGreaterThan(previousBytes);
+      expect(first.sessions).toHaveLength(count);
+      expect(first.responseTruncated).toBeFalse();
+      expect(first.hasMore).toBeFalse();
+      expect(first.nextCursor).toBeNull();
+      expect(
+        first.sessions.every(
+          (session) =>
+            !session.titleTruncated &&
+            !session.goal?.summaryTruncated &&
+            !session.latestMessage?.previewTruncated,
+        ),
+      ).toBeTrue();
+      previousBytes = first.bytes;
+    }
+  });
+
   test("caps every unbounded field and the complete serialized page", () => {
     const huge = "x".repeat(50_000);
     const sessions = Array.from({ length: 100 }, (_, index) => ({
@@ -40,6 +112,9 @@ describe("sessions_list compact discovery projection", () => {
       latestMessage: { type: "agent.message.completed", preview: huge },
       createdAt: new Date(Date.UTC(2026, 6, 18, 0, 0, index)).toISOString(),
       updatedAt: new Date(Date.UTC(2026, 6, 18, 0, 0, index)).toISOString(),
+      sortAt: new Date(Date.UTC(2026, 6, 18, 0, 0, index))
+        .toISOString()
+        .replace(".000Z", ".123456Z"),
     }));
     const result = capSessionDiscoveryPage(
       {
@@ -47,11 +122,16 @@ describe("sessions_list compact discovery projection", () => {
         total: sessions.length,
         hasMore: false,
         nextCursor: null,
+        orderBy: "createdAt",
+        snapshotAt: "2026-07-18T01:00:00.654321Z",
+        updatedThrough: "2026-07-18T01:00:00.654321Z",
+        updatedAfter: null,
       } as any,
       true,
     );
-    const serialized = JSON.stringify(result);
-    expect(Buffer.byteLength(serialized, "utf8")).toBeLessThanOrEqual(128_000);
+    const serialized = JSON.stringify(result, null, 2);
+    expect(Buffer.byteLength(serialized, "utf8")).toBe(result.bytes);
+    expect(result.bytes).toBeLessThanOrEqual(result.maxBytes);
     expect(result.responseTruncated).toBe(true);
     expect(result.hasMore).toBe(true);
     expect(result.nextCursor).toBeTruthy();
@@ -98,14 +178,51 @@ describe("sessions_list compact discovery projection", () => {
             latestMessage: { type: "user.message", preview: "secret tail" },
             createdAt: "2026-07-18T00:00:00.000Z",
             updatedAt: "2026-07-18T00:00:00.000Z",
+            sortAt: "2026-07-18T00:00:00.000001Z",
           },
         ],
         total: 1,
         hasMore: false,
         nextCursor: null,
+        orderBy: "createdAt",
+        snapshotAt: "2026-07-18T01:00:00.000001Z",
+        updatedThrough: "2026-07-18T01:00:00.000001Z",
+        updatedAfter: null,
       } as any,
       false,
     );
     expect(result.sessions[0]).not.toHaveProperty("latestMessage");
+  });
+
+  test("round-trips versioned cursors, upgrades legacy cursors, and rejects tampering", () => {
+    const cursor = {
+      orderBy: "updatedAt" as const,
+      sortAt: "2026-07-19T14:58:57.123456Z",
+      id: uuid(9),
+      snapshotAt: "2026-07-19T15:00:00.654321Z",
+      updatedAfter: "2026-07-19T14:00:00.000001Z",
+    };
+    const encoded = encodeSessionDiscoveryCursor(cursor);
+    expect(encoded).not.toContain("2026");
+    expect(decodeSessionDiscoveryCursor(encoded)).toEqual(cursor);
+
+    const legacy = Buffer.from(
+      JSON.stringify({ createdAt: cursor.sortAt, id: cursor.id }),
+      "utf8",
+    ).toString("base64url");
+    expect(decodeSessionDiscoveryCursor(legacy)).toEqual({
+      orderBy: "createdAt",
+      sortAt: cursor.sortAt,
+      id: cursor.id,
+      snapshotAt: cursor.sortAt,
+      updatedAfter: null,
+    });
+    const incompatible = Buffer.from(
+      JSON.stringify({ v: 1, ...cursor, orderBy: "createdAt" }),
+      "utf8",
+    ).toString("base64url");
+    expect(() => decodeSessionDiscoveryCursor(incompatible)).toThrow(
+      "sessions_list cursor is invalid",
+    );
   });
 });

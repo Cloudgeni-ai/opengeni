@@ -80,6 +80,7 @@ import type {
 } from "@opengeni/contracts";
 import {
   boundWorkspaceControlEvent,
+  SESSION_EVENT_RAW_DELTA_TYPES,
   SESSION_EVENT_CLIENT_EVENT_ID_MAX_BYTES,
   SESSION_EVENT_DUPLICATE_REASON_MAX_BYTES,
   SESSION_EVENT_ENVELOPE_MAX_BYTES,
@@ -6648,6 +6649,81 @@ export async function listRigVersions(
   });
 }
 
+export type RigVersionMonitoringSummary = {
+  id: string;
+  rigId: string;
+  version: number;
+  active: boolean;
+  image: string | null;
+  imageOriginalChars: number | null;
+  setupScriptBytes: number;
+  checkCount: number;
+  credentialHookCount: number;
+  defaultVariableSetCount: number;
+  changelog: string | null;
+  changelogOriginalChars: number | null;
+  createdBy: string | null;
+  createdAt: string;
+};
+
+/** Compact-by-query historical rig versions for the model-facing MCP surface. */
+export async function listRigVersionMonitoringSummaries(
+  db: Database,
+  workspaceId: string,
+  rigId: string,
+  limit = 20,
+): Promise<{ versions: RigVersionMonitoringSummary[]; hasMore: boolean; total: number }> {
+  const boundedLimit = Math.max(1, Math.min(100, Math.floor(limit)));
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select({
+        id: schema.rigVersions.id,
+        rigId: schema.rigVersions.rigId,
+        version: schema.rigVersions.version,
+        active: schema.rigVersions.active,
+        image: sql<string | null>`left(${schema.rigVersions.image}, 512)`,
+        imageOriginalChars: sql<number | null>`char_length(${schema.rigVersions.image})::int`,
+        setupScriptBytes: sql<number>`octet_length(coalesce(${schema.rigVersions.setupScript}, ''))::int`,
+        checkCount: sql<number>`jsonb_array_length(${schema.rigVersions.checks})::int`,
+        credentialHookCount: sql<number>`jsonb_array_length(${schema.rigVersions.credentialHooks})::int`,
+        defaultVariableSetCount: sql<number>`jsonb_array_length(${schema.rigVersions.defaultVariableSetIds})::int`,
+        changelog: sql<string | null>`left(${schema.rigVersions.changelog}, 600)`,
+        changelogOriginalChars: sql<
+          number | null
+        >`char_length(${schema.rigVersions.changelog})::int`,
+        createdBy: sql<string | null>`left(${schema.rigVersions.createdBy}, 200)`,
+        createdAt: schema.rigVersions.createdAt,
+      })
+      .from(schema.rigVersions)
+      .where(
+        and(eq(schema.rigVersions.workspaceId, workspaceId), eq(schema.rigVersions.rigId, rigId)),
+      )
+      .orderBy(desc(schema.rigVersions.version), desc(schema.rigVersions.id))
+      .limit(boundedLimit + 1);
+    const [{ total } = { total: 0 }] = await scopedDb
+      .select({ total: sql<number>`count(*)::int` })
+      .from(schema.rigVersions)
+      .where(
+        and(eq(schema.rigVersions.workspaceId, workspaceId), eq(schema.rigVersions.rigId, rigId)),
+      );
+    return {
+      versions: rows.slice(0, boundedLimit).map((row) => ({
+        ...row,
+        setupScriptBytes: Number(row.setupScriptBytes),
+        checkCount: Number(row.checkCount),
+        credentialHookCount: Number(row.credentialHookCount),
+        defaultVariableSetCount: Number(row.defaultVariableSetCount),
+        imageOriginalChars: row.imageOriginalChars === null ? null : Number(row.imageOriginalChars),
+        changelogOriginalChars:
+          row.changelogOriginalChars === null ? null : Number(row.changelogOriginalChars),
+        createdAt: row.createdAt.toISOString(),
+      })),
+      hasMore: rows.length > boundedLimit,
+      total: Number(total),
+    };
+  });
+}
+
 export async function getRigVersion(
   db: Database,
   workspaceId: string,
@@ -6822,6 +6898,96 @@ export async function listRigChanges(
       .orderBy(desc(schema.rigChanges.createdAt))
       .limit(limit);
     return rows.map(mapRigChange);
+  });
+}
+
+export type RigChangeMonitoringSummary = {
+  id: string;
+  rigId: string;
+  baseVersionId: string | null;
+  kind: RigChangeKind;
+  status: RigChangeStatus;
+  proposedBy: string | null;
+  resultVersionId: string | null;
+  commandPreview: string | null;
+  commandOriginalChars: number | null;
+  payloadBytes: number;
+  verificationBytes: number;
+  verificationLogBytes: number;
+  verificationStartedAt: string | null;
+  verificationFinishedAt: string | null;
+  verificationPassed: boolean | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+/** Compact-by-query recent rig changes for the model-facing MCP surface. */
+export async function listRigChangeMonitoringSummaries(
+  db: Database,
+  workspaceId: string,
+  rigId: string,
+  limit = 20,
+): Promise<{ changes: RigChangeMonitoringSummary[]; hasMore: boolean; total: number }> {
+  const boundedLimit = Math.max(1, Math.min(100, Math.floor(limit)));
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select({
+        id: schema.rigChanges.id,
+        rigId: schema.rigChanges.rigId,
+        baseVersionId: schema.rigChanges.baseVersionId,
+        kind: schema.rigChanges.kind,
+        status: schema.rigChanges.status,
+        proposedBy: sql<string | null>`left(${schema.rigChanges.proposedBy}, 200)`,
+        resultVersionId: schema.rigChanges.resultVersionId,
+        commandPreview: sql<string | null>`left(${schema.rigChanges.payload}->>'command', 600)`,
+        commandOriginalChars: sql<
+          number | null
+        >`char_length(${schema.rigChanges.payload}->>'command')::int`,
+        payloadBytes: sql<number>`octet_length(${schema.rigChanges.payload}::text)::int`,
+        verificationBytes: sql<number>`octet_length(coalesce(${schema.rigChanges.verification}::text, 'null'))::int`,
+        verificationLogBytes: sql<number>`octet_length(coalesce(${schema.rigChanges.verification}->>'log', ''))::int`,
+        verificationStartedAt: sql<
+          string | null
+        >`left(${schema.rigChanges.verification}->>'startedAt', 64)`,
+        verificationFinishedAt: sql<
+          string | null
+        >`left(${schema.rigChanges.verification}->>'finishedAt', 64)`,
+        verificationPassed: sql<boolean | null>`case
+          when ${schema.rigChanges.verification}->>'passed' = 'true' then true
+          when ${schema.rigChanges.verification}->>'passed' = 'false' then false
+          else null
+        end`,
+        createdAt: schema.rigChanges.createdAt,
+        updatedAt: schema.rigChanges.updatedAt,
+      })
+      .from(schema.rigChanges)
+      .where(
+        and(eq(schema.rigChanges.workspaceId, workspaceId), eq(schema.rigChanges.rigId, rigId)),
+      )
+      .orderBy(desc(schema.rigChanges.createdAt), desc(schema.rigChanges.id))
+      .limit(boundedLimit + 1);
+    const [{ total } = { total: 0 }] = await scopedDb
+      .select({ total: sql<number>`count(*)::int` })
+      .from(schema.rigChanges)
+      .where(
+        and(eq(schema.rigChanges.workspaceId, workspaceId), eq(schema.rigChanges.rigId, rigId)),
+      );
+    return {
+      changes: rows.slice(0, boundedLimit).map((row) => ({
+        ...row,
+        kind: row.kind as RigChangeKind,
+        status: row.status as RigChangeStatus,
+        commandOriginalChars:
+          row.commandOriginalChars === null ? null : Number(row.commandOriginalChars),
+        payloadBytes: Number(row.payloadBytes),
+        verificationBytes: Number(row.verificationBytes),
+        verificationLogBytes: Number(row.verificationLogBytes),
+        createdAt: row.createdAt.toISOString(),
+        updatedAt: row.updatedAt.toISOString(),
+      })),
+      hasMore: rows.length > boundedLimit,
+      total: Number(total),
+    };
   });
 }
 
@@ -11649,7 +11815,17 @@ export async function listSessions(
   });
 }
 
-export type SessionDiscoveryCursor = { createdAt: Date; id: string };
+export type SessionDiscoveryOrderBy = "createdAt" | "updatedAt";
+export type SessionDiscoveryCursor = {
+  orderBy: SessionDiscoveryOrderBy;
+  /** Exact PostgreSQL timestamp text (including microseconds), not a JS Date. */
+  sortAt: string;
+  id: string;
+  /** First-page ceiling: rows that move past it belong to the next incremental scan. */
+  snapshotAt: string;
+  /** The incremental filter is cursor-bound so continuation cannot silently change scope. */
+  updatedAfter: string | null;
+};
 export const SESSION_DISCOVERY_GOAL_MAX_CHARS = 600;
 export const SESSION_DISCOVERY_MESSAGE_MAX_CHARS = 600;
 export type SessionDiscoverySummary = {
@@ -11669,6 +11845,8 @@ export type SessionDiscoverySummary = {
   } | null;
   createdAt: string;
   updatedAt: string;
+  /** Internal exact keyset timestamp; omitted from the MCP row projection. */
+  sortAt: string;
 };
 
 /**
@@ -11683,24 +11861,61 @@ export async function listSessionDiscoverySummaries(
     limit: number;
     cursor?: SessionDiscoveryCursor;
     includeLastMessage?: boolean;
+    orderBy?: SessionDiscoveryOrderBy;
+    updatedAfter?: string;
   },
 ): Promise<{
   sessions: SessionDiscoverySummary[];
   hasMore: boolean;
   nextCursor: SessionDiscoveryCursor | null;
   total: number;
+  orderBy: SessionDiscoveryOrderBy;
+  snapshotAt: string;
+  updatedThrough: string;
+  updatedAfter: string | null;
 }> {
   const limit = Math.max(1, Math.min(100, Math.floor(options.limit)));
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const orderBy = options.orderBy ?? options.cursor?.orderBy ?? "createdAt";
+    const updatedAfter = options.updatedAfter ?? options.cursor?.updatedAfter ?? null;
+    if (options.cursor?.orderBy !== undefined && options.cursor.orderBy !== orderBy) {
+      throw new Error("sessions_list cursor order does not match the request");
+    }
+    if (options.cursor && options.cursor.updatedAfter !== updatedAfter) {
+      throw new Error("sessions_list cursor incremental filter does not match the request");
+    }
+    if (updatedAfter !== null && orderBy !== "updatedAt") {
+      throw new Error("sessions_list updatedAfter requires orderBy=updatedAt");
+    }
+    const sortColumn =
+      orderBy === "updatedAt" ? schema.sessions.updatedAt : schema.sessions.createdAt;
+    const snapshotAt =
+      options.cursor?.snapshotAt ??
+      (
+        await rawRows<{ value: string }>(
+          scopedDb,
+          sql`select to_char(statement_timestamp() at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as value`,
+        )
+      )[0]!.value;
     const cursorPredicate = options.cursor
       ? or(
-          lt(schema.sessions.createdAt, options.cursor.createdAt),
+          // Cast through text deliberately. postgres.js otherwise infers a
+          // timestamptz parameter and serializes this exact cursor string via
+          // JS Date, which discards PostgreSQL's sub-millisecond precision.
+          sql`${sortColumn} < ${options.cursor.sortAt}::text::timestamptz`,
           and(
-            eq(schema.sessions.createdAt, options.cursor.createdAt),
+            sql`${sortColumn} = ${options.cursor.sortAt}::text::timestamptz`,
             lt(schema.sessions.id, options.cursor.id),
           ),
         )
       : undefined;
+    const snapshotFilters: SQL[] = [
+      eq(schema.sessions.workspaceId, workspaceId),
+      sql`${sortColumn} <= ${snapshotAt}::text::timestamptz`,
+    ];
+    if (updatedAfter !== null) {
+      snapshotFilters.push(sql`${schema.sessions.updatedAt} > ${updatedAfter}::text::timestamptz`);
+    }
     const rows = await scopedDb
       .select({
         id: schema.sessions.id,
@@ -11712,10 +11927,14 @@ export async function listSessionDiscoverySummaries(
         status: schema.sessions.status,
         createdAt: schema.sessions.createdAt,
         updatedAt: schema.sessions.updatedAt,
+        sortAt:
+          orderBy === "updatedAt"
+            ? sql<string>`to_char(${schema.sessions.updatedAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`
+            : sql<string>`to_char(${schema.sessions.createdAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`,
       })
       .from(schema.sessions)
-      .where(and(eq(schema.sessions.workspaceId, workspaceId), cursorPredicate))
-      .orderBy(desc(schema.sessions.createdAt), desc(schema.sessions.id))
+      .where(and(...snapshotFilters, cursorPredicate))
+      .orderBy(desc(sortColumn), desc(schema.sessions.id))
       .limit(limit + 1);
     const hasMore = rows.length > limit;
     const page = rows.slice(0, limit);
@@ -11723,13 +11942,17 @@ export async function listSessionDiscoverySummaries(
     const [{ total } = { total: 0 }] = await scopedDb
       .select({ total: sql<number>`count(*)::int` })
       .from(schema.sessions)
-      .where(eq(schema.sessions.workspaceId, workspaceId));
+      .where(and(...snapshotFilters));
     if (ids.length === 0) {
       return {
         sessions: [],
         hasMore: false,
         nextCursor: null,
         total: Number(total),
+        orderBy,
+        snapshotAt,
+        updatedThrough: snapshotAt,
+        updatedAfter,
       };
     }
 
@@ -11838,14 +12061,28 @@ export async function listSessionDiscoverySummaries(
           : null,
         createdAt: row.createdAt.toISOString(),
         updatedAt: row.updatedAt.toISOString(),
+        sortAt: row.sortAt,
       };
     });
     const last = page.at(-1);
     return {
       sessions,
       hasMore,
-      nextCursor: hasMore && last ? { createdAt: last.createdAt, id: last.id } : null,
+      nextCursor:
+        hasMore && last
+          ? {
+              orderBy,
+              sortAt: last.sortAt,
+              id: last.id,
+              snapshotAt,
+              updatedAfter,
+            }
+          : null,
       total: Number(total),
+      orderBy,
+      snapshotAt,
+      updatedThrough: snapshotAt,
+      updatedAfter,
     };
   });
 }
@@ -24088,6 +24325,26 @@ function mapSessionSystemUpdate(
   };
 }
 
+const SESSION_EVENT_RAW_DELTA_TYPE_SET: ReadonlySet<string> = new Set(
+  SESSION_EVENT_RAW_DELTA_TYPES,
+);
+
+/** Raw streaming fragments advance the durable sequence, not monitoring activity. */
+function sessionEventTypesAdvanceActivity(inputs: ReadonlyArray<{ type: string }>): boolean {
+  return inputs.some((input) => !SESSION_EVENT_RAW_DELTA_TYPE_SET.has(input.type));
+}
+
+function sessionMutationAdvancesActivity(update: {
+  resources?: ResourceRef[];
+  tools?: ToolRef[];
+  model?: string;
+  metadata?: Record<string, unknown>;
+  status?: SessionStatus;
+  activeTurnId?: string | null;
+}): boolean {
+  return Object.values(update).some((value) => value !== undefined);
+}
+
 export async function appendSessionEvents(
   db: Database,
   workspaceId: string,
@@ -24142,7 +24399,10 @@ export async function appendSessionEvents(
       const inserted = await tx.insert(schema.sessionEvents).values(values).returning();
       await tx
         .update(schema.sessions)
-        .set({ lastSequence: sequence, updatedAt: new Date() })
+        .set({
+          lastSequence: sequence,
+          ...(sessionEventTypesAdvanceActivity(values) ? { updatedAt: new Date() } : {}),
+        })
         .where(
           and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)),
         );
@@ -24468,7 +24728,10 @@ export async function appendSessionEventsForTurnAttempt(
         const inserted = await tx.insert(schema.sessionEvents).values(values).returning();
         await tx
           .update(schema.sessions)
-          .set({ lastSequence: sequence, updatedAt: now })
+          .set({
+            lastSequence: sequence,
+            ...(sessionEventTypesAdvanceActivity(values) ? { updatedAt: now } : {}),
+          })
           .where(
             and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)),
           );
@@ -24535,7 +24798,7 @@ export async function appendSessionEventToSandboxGroup(
           .update(schema.sessions)
           .set({
             lastSequence: sql`${schema.sessions.lastSequence} + 1`,
-            updatedAt: new Date(),
+            ...(sessionEventTypesAdvanceActivity([input]) ? { updatedAt: new Date() } : {}),
           })
           .where(
             and(
@@ -24607,6 +24870,8 @@ export async function appendSessionEventsAndUpdateSession(
           occurredAt: input.occurredAt ?? now,
         }));
         const inserted = await tx.insert(schema.sessionEvents).values(values).returning();
+        const advancesActivity =
+          sessionMutationAdvancesActivity(update) || sessionEventTypesAdvanceActivity(values);
         await tx
           .update(schema.sessions)
           .set({
@@ -24617,7 +24882,7 @@ export async function appendSessionEventsAndUpdateSession(
             ...(update.metadata !== undefined ? { metadata: update.metadata } : {}),
             ...(update.status !== undefined ? { status: update.status } : {}),
             ...(update.activeTurnId !== undefined ? { activeTurnId: update.activeTurnId } : {}),
-            updatedAt: now,
+            ...(advancesActivity ? { updatedAt: now } : {}),
           })
           .where(
             and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)),
@@ -24729,6 +24994,8 @@ export async function appendSessionEventsWithLockedSessionUpdate(
         }));
         const inserted = await tx.insert(schema.sessionEvents).values(values).returning();
         const update = built.update ?? {};
+        const advancesActivity =
+          sessionMutationAdvancesActivity(update) || sessionEventTypesAdvanceActivity(values);
         await tx
           .update(schema.sessions)
           .set({
@@ -24739,7 +25006,7 @@ export async function appendSessionEventsWithLockedSessionUpdate(
             ...(update.metadata !== undefined ? { metadata: update.metadata } : {}),
             ...(update.status !== undefined ? { status: update.status } : {}),
             ...(update.activeTurnId !== undefined ? { activeTurnId: update.activeTurnId } : {}),
-            updatedAt: now,
+            ...(advancesActivity ? { updatedAt: now } : {}),
           })
           .where(
             and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)),

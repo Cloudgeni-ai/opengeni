@@ -278,6 +278,27 @@ bounded and cannot recover source bytes that the audit boundary omitted. The
 MCP result is separately capped to 64 KiB of exact pretty-printed JSON and never
 advances a cursor over an event it did not return.
 
+Session discovery is a separate compact monitoring projection, not a list of
+full session rows. `sessions_list` defaults to deterministic descending
+`(created_at, id)` order and can instead use descending `(updated_at, id)`
+order. Both paths use opaque, versioned, snapshot-bound keyset cursors and their
+matching workspace/timestamp/id indexes. An updated-order first page returns
+`updatedThrough`; a later incremental scan passes that value as
+`updatedAfter`, so a row that moves beyond the old snapshot is deliberately
+handed to the next scan rather than duplicated in the old traversal. These are
+timestamp watermarks, not a global commit sequence. Known targets should be
+read with exact-ID `session_get`, whose model-facing projection independently
+bounds every aggregate and the complete pretty-printed response to 64 KiB;
+the REST session detail contract remains unchanged.
+
+`sessions.updated_at` is canonical monitoring activity, not stream volume. A
+batch containing only raw message, reasoning, sandbox-command-output, or PTY
+deltas advances `last_sequence` but does not advance `updated_at`. A semantic
+event or explicit session mutation advances both as applicable. This keeps
+updated-order discovery useful even while a productive session emits a large
+raw token or terminal stream; `session_events` remains the exact sequenced
+audit path for those retained previews.
+
 Those durable stores are still not the realtime or browser representation.
 NATS chunks bounded encoded messages; each session/workspace-control SSE body
 queues at most one complete frame of at most 96 KiB, retains one latest-wins
