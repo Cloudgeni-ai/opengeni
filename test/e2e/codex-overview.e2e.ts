@@ -164,6 +164,47 @@ function json(body: unknown, status = 200): Response {
   });
 }
 
+async function completePriorNoCreditAttempt(
+  creditId: string,
+  browserSessionHash: string,
+): Promise<{ attemptId: string; upstreamIdempotencyKey: string }> {
+  const attemptId = crypto.randomUUID();
+  const claimHolderId = crypto.randomUUID();
+  const priorAttempt = await claimCodexResetRedemption(client.db, {
+    id: attemptId,
+    accountId: defaultAccountId,
+    workspaceId,
+    credentialId: detailedCredentialId,
+    subjectId: `user:${OWNER_USER_ID}`,
+    browserSessionHash,
+    creditId,
+    confirmationExpiresAt: new Date(Date.now() + 5 * 60_000),
+    claimHolderId,
+  });
+  if (priorAttempt.kind !== "claimed") throw new Error("expected prior non-consuming claim");
+  const priorFence = await fenceCodexResetRedemptionSend(client.db, {
+    accountId: defaultAccountId,
+    workspaceId,
+    attemptId,
+    claimHolderId,
+    credentialId: detailedCredentialId,
+    subjectId: `user:${OWNER_USER_ID}`,
+    browserSessionHash,
+  });
+  if (priorFence.kind !== "ready") throw new Error("expected prior non-consuming send fence");
+  const priorCompletion = await completeCodexResetRedemption(client.db, {
+    accountId: defaultAccountId,
+    workspaceId,
+    attemptId,
+    claimHolderId,
+    outcome: "noCredit",
+  });
+  if (priorCompletion.result?.outcome !== "noCredit") {
+    throw new Error("expected prior non-consuming completion");
+  }
+  return { attemptId, upstreamIdempotencyKey: priorAttempt.attempt.upstreamIdempotencyKey };
+}
+
 async function expectNoWcagAxeViolations(page: Page, include: string): Promise<void> {
   const report = await new AxeBuilder({ page })
     .include(include)
@@ -335,42 +376,15 @@ beforeAll(async () => {
   }
   await ensureCodexRotationSettings(client.db, accountId, workspaceId);
   await setInitialActiveCodexCredential(client.db, workspaceId, detailedCredentialId);
-  const priorAttemptId = crypto.randomUUID();
-  priorNonConsumingAttemptId = priorAttemptId;
-  const priorClaimHolderId = crypto.randomUUID();
-  const priorAttempt = await claimCodexResetRedemption(client.db, {
-    id: priorAttemptId,
-    accountId,
-    workspaceId,
-    credentialId: detailedCredentialId,
-    subjectId: `user:${OWNER_USER_ID}`,
-    browserSessionHash: "prior-browser-session",
-    creditId: "detailed-credit",
-    confirmationExpiresAt: new Date(Date.now() + 5 * 60_000),
-    claimHolderId: priorClaimHolderId,
-  });
-  if (priorAttempt.kind !== "claimed") throw new Error("expected prior non-consuming claim");
-  priorNonConsumingUpstreamKey = priorAttempt.attempt.upstreamIdempotencyKey;
-  const priorFence = await fenceCodexResetRedemptionSend(client.db, {
-    accountId,
-    workspaceId,
-    attemptId: priorAttemptId,
-    claimHolderId: priorClaimHolderId,
-    credentialId: detailedCredentialId,
-    subjectId: `user:${OWNER_USER_ID}`,
-    browserSessionHash: "prior-browser-session",
-  });
-  if (priorFence.kind !== "ready") throw new Error("expected prior non-consuming send fence");
-  const priorCompletion = await completeCodexResetRedemption(client.db, {
-    accountId,
-    workspaceId,
-    attemptId: priorAttemptId,
-    claimHolderId: priorClaimHolderId,
-    outcome: "noCredit",
-  });
-  if (priorCompletion.result?.outcome !== "noCredit") {
-    throw new Error("expected prior non-consuming completion");
-  }
+  const priorAttempt = await completePriorNoCreditAttempt(
+    "detailed-credit",
+    "prior-browser-session",
+  );
+  priorNonConsumingAttemptId = priorAttempt.attemptId;
+  priorNonConsumingUpstreamKey = priorAttempt.upstreamIdempotencyKey;
+  // Provider detail intentionally retains redeemed rows. Their earlier
+  // non-consuming outcome is history only and must not invent availability.
+  await completePriorNoCreditAttempt("historical-credit", "prior-historical-session");
   await mkdir(EVIDENCE_DIR, { recursive: true });
 }, 180_000);
 
@@ -417,6 +431,14 @@ describe("OPE-24 real browser/API/Postgres reset overview", () => {
     await accountCard("Detailed account")
       .getByText(/Earlier attempt: The provider found no reset credit to use\..+available again\./)
       .waitFor();
+    await accountCard("Detailed account")
+      .getByText("Earlier attempt: The provider found no reset credit to use.", { exact: true })
+      .waitFor();
+    expect(
+      await accountCard("Detailed account")
+        .getByText(/available again\./)
+        .count(),
+    ).toBe(1);
     await accountCard("Count-only account")
       .getByText(/individual details are unavailable\. View only\./)
       .waitFor();

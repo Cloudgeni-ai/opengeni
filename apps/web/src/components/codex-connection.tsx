@@ -452,8 +452,10 @@ function ResetCreditInventory({
                   ) : null}
                   {priorNonConsumingOutcome ? (
                     <div className="mt-1 break-words text-2xs text-fg-muted" aria-live="polite">
-                      Earlier attempt: {priorNonConsumingOutcome} The provider currently lists this
-                      reset as available again.
+                      Earlier attempt: {priorNonConsumingOutcome}
+                      {credit.actionable
+                        ? " The provider currently lists this reset as available again."
+                        : ""}
                     </div>
                   ) : null}
                 </div>
