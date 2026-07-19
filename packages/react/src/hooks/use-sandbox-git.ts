@@ -23,8 +23,9 @@ export type UseSandboxGitOptions = ClientOverride & {
   /** Lease liveness ("warm" | "draining" | "cold"). When NOT warm, the diff is
    *  served from the capture (cold/offline) instead of a live `gitDiff` RPC. */
   liveness?: string | undefined;
-  /** The latest turn-end capture (from `useWorkspaceCapture`). Supplies the cold
-   *  diff for this repo. A warm box always wins (live `gitDiff` unchanged). */
+  /** The latest turn-end capture (from `useWorkspaceCapture`). Seeds the diff
+   *  immediately; a warm box reconciles live and leaves this durable review
+   *  surface in place if the live request is temporarily unavailable. */
   capture?: WorkspaceCaptureManifest | null | undefined;
 };
 
@@ -194,6 +195,7 @@ export function useSandboxGit(
   const [behind, setBehind] = useState(0);
   const [repoRoots, setRepoRoots] = useState<string[]>([]);
   const [source, setSource] = useState<"live" | "capture" | null>(null);
+  const sourceRef = useRef<"live" | "capture" | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<Error | null>(null);
   const [stateIdentity, setStateIdentity] = useState(identityKey);
@@ -233,6 +235,7 @@ export function useSandboxGit(
       setBehind(repositories.reduce((sum, { status }) => sum + status.behind, 0));
       if (repositories.length === 0) {
         setDiff([]);
+        sourceRef.current = "live";
         setSource("live");
         return;
       }
@@ -261,6 +264,7 @@ export function useSandboxGit(
           ),
         ),
       );
+      sourceRef.current = "live";
       setSource("live");
     } catch (cause) {
       if (refreshGenerationRef.current !== generation) return;
@@ -285,6 +289,7 @@ export function useSandboxGit(
         setBehind(0);
         setRepoRoots([]);
         setDiff((prev) => (prev.length === 0 ? prev : []));
+        sourceRef.current = "capture";
         setSource("capture");
         return;
       }
@@ -301,6 +306,7 @@ export function useSandboxGit(
           ),
         ),
       );
+      sourceRef.current = "capture";
       setSource("capture");
       setError(null);
     },
@@ -331,6 +337,7 @@ export function useSandboxGit(
       setAhead(0);
       setBehind(0);
       setRepoRoots([]);
+      sourceRef.current = null;
       setSource(null);
       setLoading(false);
       setError(null);
@@ -338,11 +345,11 @@ export function useSandboxGit(
     if (!enabled) {
       return;
     }
-    if (isLive) {
-      void refresh();
-    } else if (captureRevision !== null && captureRef.current) {
-      seedFromCapture(captureRef.current);
-    } else {
+    const currentCapture = captureRevision !== null ? captureRef.current : null;
+    if (currentCapture && (identityChanged || !isLive || sourceRef.current !== "live")) {
+      seedFromCapture(currentCapture);
+    }
+    if (isLive || !currentCapture) {
       void refresh();
     }
     return () => {

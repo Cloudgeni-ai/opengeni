@@ -1,5 +1,11 @@
 # @opengeni/db
 
+## 0.7.5
+
+### Patch Changes
+
+- 28290a0: Make context compaction and pending tool-call recovery converge without reactivating superseded history or repeating failed internal turns.
+
 ## 0.7.4
 
 ### Patch Changes

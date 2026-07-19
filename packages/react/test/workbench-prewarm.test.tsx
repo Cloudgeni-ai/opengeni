@@ -735,6 +735,38 @@ describe("SandboxWorkspace capture-driven default renders with no content switch
     await rendered.unmount();
   });
 
+  test("warm provider failure keeps captured Changes visible with an accessible retry state", async () => {
+    const { client } = coldClient({
+      getStreamCapabilities: async () => fakeCapabilities(),
+      getWorkspaceCapture: async () => captureAvailable(fakeManifest(1)),
+      gitStatus: async () => {
+        throw new Error("OpenGeni API 503: Workspace files are temporarily unavailable");
+      },
+      fsList: async () => {
+        throw new Error("OpenGeni API 503: Workspace files are temporarily unavailable");
+      },
+    });
+    const rendered = await renderComponent(
+      withProvider(
+        client,
+        <SandboxWorkspace
+          sessionId={SESSION_ID}
+          events={[]}
+          primary={<div>chat</div>}
+          autoSaveId="og.test.prewarm.degraded-capture"
+        />,
+      ),
+    );
+    await flush();
+
+    expect(selectedTabText(rendered.container)).toContain("Changes");
+    const degraded = rendered.container.querySelector("[data-opengeni-changes-degraded]");
+    expect(degraded?.getAttribute("role")).toBe("status");
+    expect(degraded?.textContent).toContain("Showing the latest captured revision");
+    expect(rendered.container.textContent).toContain("app.py");
+    await rendered.unmount();
+  });
+
   test("a tab selection from the previous session does not override the new session default", async () => {
     const { client } = coldClient({
       getWorkspaceCapture: async () => captureAvailable(fakeManifest(2)),

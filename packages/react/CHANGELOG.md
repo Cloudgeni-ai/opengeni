@@ -1,5 +1,12 @@
 # @opengeni/react
 
+## 0.16.1
+
+### Patch Changes
+
+- 4e9c48c: Preserve the exact autosaved composer text when sending or steering so trailing whitespace cannot trip the draft consistency fence.
+- 9a7dec2: Keep captured workspace files and diffs usable when the live sandbox provider is temporarily unavailable, surface a truthful retryable degraded state, and distinguish provider failures from invalid workspace paths.
+
 ## 0.16.0
 
 ### Minor Changes
