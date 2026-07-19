@@ -113,6 +113,14 @@ import type {
   ScheduledTask,
   ScheduledTaskRun,
   Session,
+  SessionArchiveApplyRequest,
+  SessionArchiveApplyResponse,
+  SessionArchiveChecksum,
+  SessionArchivePlanRequest,
+  SessionArchivePlanResponse,
+  SessionArchiveReceipt,
+  SessionArchiveReceiptEvidence,
+  SessionArchiveView,
   SessionListResponse,
   UpdateSessionPinRequest,
   SessionEvent,
@@ -256,11 +264,13 @@ import {
 function sessionListQuery(options: {
   limit?: number;
   parentSessionId?: string | null;
+  archiveView?: SessionArchiveView;
 }): Record<string, string> {
-  const { limit, parentSessionId } = options;
+  const { limit, parentSessionId, archiveView } = options;
   return {
     ...(limit === undefined ? {} : { limit: String(limit) }),
     ...(parentSessionId === undefined ? {} : { parentSessionId: parentSessionId ?? "null" }),
+    ...(archiveView === undefined ? {} : { archiveView }),
   };
 }
 
@@ -420,10 +430,18 @@ export class OpenGeniClient {
     );
   }
 
-  async getSession(workspaceId: string, sessionId: string): Promise<Session> {
+  async getSession(
+    workspaceId: string,
+    sessionId: string,
+    options: { archiveView?: SessionArchiveView } = {},
+  ): Promise<Session> {
     return await this.requestJson<Session>(
       "GET",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}`,
+      undefined,
+      {
+        ...(options.archiveView ? { archiveView: options.archiveView } : {}),
+      },
     );
   }
 
@@ -476,6 +494,7 @@ export class OpenGeniClient {
       limit?: number;
       parentSessionId?: string | null;
       search?: string;
+      archiveView?: SessionArchiveView;
     } = {},
   ): Promise<Session[]> {
     // Search was added with the pin-aware page endpoint. An older API silently
@@ -504,6 +523,7 @@ export class OpenGeniClient {
       parentSessionId?: string | null;
       cursor?: string;
       search?: string;
+      archiveView?: SessionArchiveView;
       /** Return only the complete personal pinned projection. */
       pinsOnly?: boolean;
     } = {},
@@ -570,10 +590,71 @@ export class OpenGeniClient {
     );
   }
 
-  async getSessionLineage(workspaceId: string, sessionId: string): Promise<SessionLineageResponse> {
+  async getSessionLineage(
+    workspaceId: string,
+    sessionId: string,
+    options: { archiveView?: SessionArchiveView } = {},
+  ): Promise<SessionLineageResponse> {
     return await this.requestJson<SessionLineageResponse>(
       "GET",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/lineage`,
+      undefined,
+      {
+        ...(options.archiveView ? { archiveView: options.archiveView } : {}),
+      },
+    );
+  }
+
+  /** Read-only recursive closure/blocker plan; creates no receipt or source mutation. */
+  async planSessionArchive(
+    workspaceId: string,
+    request: SessionArchivePlanRequest,
+  ): Promise<SessionArchivePlanResponse> {
+    return await this.requestJson<SessionArchivePlanResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/session-archives/plan`,
+      request,
+    );
+  }
+
+  /** Apply exactly one manifest root under checksum and idempotency fences. */
+  async applySessionArchive(
+    workspaceId: string,
+    request: SessionArchiveApplyRequest,
+  ): Promise<SessionArchiveApplyResponse> {
+    return await this.requestJson<SessionArchiveApplyResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/session-archives/apply`,
+      request,
+    );
+  }
+
+  async getSessionArchiveReceipt(
+    workspaceId: string,
+    receiptId: string,
+  ): Promise<SessionArchiveReceiptEvidence> {
+    return await this.requestJson<SessionArchiveReceiptEvidence>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/session-archives/receipts/${receiptId}`,
+    );
+  }
+
+  /** Compact replay lookup used by a resumable bulk operator. */
+  async listSessionArchiveReceipts(
+    workspaceId: string,
+    options: {
+      manifestChecksum?: SessionArchiveChecksum;
+      rootChecksum?: SessionArchiveChecksum;
+    } = {},
+  ): Promise<SessionArchiveReceipt[]> {
+    return await this.requestJson<SessionArchiveReceipt[]>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/session-archives/receipts`,
+      undefined,
+      {
+        ...(options.manifestChecksum ? { manifestChecksum: options.manifestChecksum } : {}),
+        ...(options.rootChecksum ? { rootChecksum: options.rootChecksum } : {}),
+      },
     );
   }
 

@@ -12,6 +12,7 @@ import {
   OPENGENI_CORRELATION_HEADER,
   type ComposerDraft,
   type SaveComposerDraftRequest,
+  type SessionArchiveManifest,
 } from "../src/types";
 import { collect, makeEvent, SESSION_ID, sseBlock, WORKSPACE_ID } from "./helpers";
 
@@ -207,6 +208,121 @@ describe("OpenGeniClient", () => {
     expect(requests[1]!.url).toBe(
       `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/events?after=2&before=9&limit=10&compact=1`,
     );
+  });
+
+  test("archive-aware session reads bind the explicit archive view to each request", async () => {
+    const { client, requests } = makeClient((request) =>
+      request.url.includes("view=page")
+        ? jsonResponse({ pinned: [], sessions: [], nextCursor: null })
+        : request.url.endsWith("/lineage?archiveView=all")
+          ? jsonResponse({ ancestors: [], children: [] })
+          : request.url.includes("/sessions?")
+            ? jsonResponse([])
+            : jsonResponse({ id: SESSION_ID }),
+    );
+
+    await client.getSession(WORKSPACE_ID, SESSION_ID, { archiveView: "archived" });
+    await client.listSessions(WORKSPACE_ID, { archiveView: "all", search: "  sealed tree  " });
+    await client.listSessionPage(WORKSPACE_ID, { archiveView: "archived", cursor: "next" });
+    await client.getSessionLineage(WORKSPACE_ID, SESSION_ID, { archiveView: "all" });
+
+    expect(requests.map((request) => request.url)).toEqual([
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}?archiveView=archived`,
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions?view=page&archiveView=all&search=sealed+tree`,
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions?view=page&archiveView=archived&cursor=next`,
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/lineage?archiveView=all`,
+    ]);
+  });
+
+  test("session archive plan/apply/receipt methods use the fenced bulk protocol", async () => {
+    const receiptId = "00000000-0000-4000-8000-000000000062";
+    const manifestChecksum = `sha256:${"a".repeat(64)}`;
+    const rootChecksum = `sha256:${"b".repeat(64)}`;
+    const manifest: SessionArchiveManifest = {
+      format: "opengeni.session-archive-manifest",
+      version: 1,
+      workspaceId: WORKSPACE_ID,
+      action: "archive",
+      totalMemberCount: 1,
+      roots: [
+        {
+          rootSessionId: SESSION_ID,
+          targetSealId: null,
+          memberCount: 1,
+          members: [
+            {
+              sessionId: SESSION_ID,
+              parentSessionId: null,
+              depth: 0,
+              expectedArchiveRevision: "0",
+              expectedArchived: false,
+            },
+          ],
+        },
+      ],
+    };
+    const { client, requests } = makeClient((request) => {
+      if (request.url.endsWith("/plan")) {
+        return jsonResponse({ manifest, manifestChecksum, canApply: true, roots: [] });
+      }
+      if (request.url.endsWith("/apply")) {
+        return jsonResponse({ receipt: { id: receiptId }, replay: false, rootArchive: {} });
+      }
+      if (request.url.endsWith(`/receipts/${receiptId}`)) {
+        return jsonResponse({ receipt: { id: receiptId }, members: [] });
+      }
+      if (request.url.includes("/receipts?")) {
+        return jsonResponse([]);
+      }
+      throw new Error(`unexpected request: ${request.url}`);
+    });
+
+    await client.planSessionArchive(WORKSPACE_ID, {
+      action: "archive",
+      roots: [{ rootSessionId: SESSION_ID }],
+    });
+    await client.applySessionArchive(WORKSPACE_ID, {
+      manifest,
+      manifestChecksum,
+      rootChecksum,
+      idempotencyKey: "bulk-061/root-001",
+    });
+    await client.getSessionArchiveReceipt(WORKSPACE_ID, receiptId);
+    await client.listSessionArchiveReceipts(WORKSPACE_ID, {
+      manifestChecksum,
+      rootChecksum,
+    });
+
+    expect(requests.map(({ method, url }) => ({ method, url }))).toEqual([
+      {
+        method: "POST",
+        url: `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/session-archives/plan`,
+      },
+      {
+        method: "POST",
+        url: `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/session-archives/apply`,
+      },
+      {
+        method: "GET",
+        url: `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/session-archives/receipts/${receiptId}`,
+      },
+      {
+        method: "GET",
+        url: `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/session-archives/receipts?manifestChecksum=${encodeURIComponent(manifestChecksum)}&rootChecksum=${encodeURIComponent(rootChecksum)}`,
+      },
+    ]);
+    expect(JSON.parse(requests[0]!.body!)).toEqual({
+      action: "archive",
+      roots: [{ rootSessionId: SESSION_ID }],
+    });
+    expect(JSON.parse(requests[1]!.body!)).toEqual({
+      manifest,
+      manifestChecksum,
+      rootChecksum,
+      idempotencyKey: "bulk-061/root-001",
+    });
+    expect(requests[2]!.body).toBeNull();
+    expect(requests[3]!.body).toBeNull();
   });
 
   test("updates an existing session MCP approval policy through the dedicated route", async () => {

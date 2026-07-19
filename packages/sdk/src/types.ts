@@ -219,6 +219,158 @@ export type SessionStatus =
   | "failed"
   | "cancelled";
 
+export type SessionArchiveAction = "archive" | "unarchive";
+export type SessionArchiveView = "live" | "archived" | "all";
+/** Runtime contracts require `sha256:` followed by exactly 64 lower-case hex characters. */
+export type SessionArchiveChecksum = string;
+export type SessionArchiveOperationCategory =
+  | "create_child"
+  | "queue_mutation"
+  | "send_message"
+  | "steer"
+  | "control"
+  | "turn_claim"
+  | "attempt_update"
+  | "event_append"
+  | "goal_mutation"
+  | "workflow_wake"
+  | "child_callback"
+  | "schedule_fire"
+  | "job_mutation"
+  | "sandbox_route"
+  | "sandbox_lease"
+  | "sandbox_pty"
+  | "sandbox_viewer"
+  | "file_mutation"
+  | "metadata_mutation";
+export type SessionArchiveDenial = {
+  code: "session_archived" | "archived_ancestry";
+  targetSessionId: string;
+  archivedAncestorSessionId: string;
+  archiveRootSessionId: string;
+  archiveSealId: string;
+  archiveRevision: string;
+  operation: SessionArchiveOperationCategory;
+  retryable: false;
+};
+export type SessionArchiveBlockerCode =
+  | "session_lifecycle_live"
+  | "turn_unsettled"
+  | "attempt_unsettled"
+  | "queue_pending"
+  | "composer_draft_pending"
+  | "system_update_pending"
+  | "child_callback_pending"
+  | "workflow_wake_pending"
+  | "goal_active"
+  | "goal_wake_pending"
+  | "durable_wait_active"
+  | "background_job_active"
+  | "schedule_reuse_active"
+  | "schedule_fire_pending"
+  | "sandbox_operation_active"
+  | "sandbox_viewer_active"
+  | "sandbox_pty_active"
+  | "sandbox_lease_exclusive"
+  | "sandbox_recovery_active"
+  | "sandbox_route_switch_active"
+  | "invariant_unproven";
+export type SessionArchiveBlocker = {
+  code: SessionArchiveBlockerCode;
+  sessionId: string;
+  resourceId: string | null;
+  state: string | null;
+  details: Record<string, unknown>;
+};
+export type SessionArchiveProjection = {
+  archived: boolean;
+  archiveRevision: string;
+  activeSealCount: number;
+  archivedAt: string | null;
+  nearestFence: {
+    sessionId: string;
+    rootSessionId: string;
+    sealId: string;
+    archiveRevision: string;
+  } | null;
+};
+export type SessionArchiveManifestMember = {
+  sessionId: string;
+  parentSessionId: string | null;
+  depth: number;
+  expectedArchiveRevision: string;
+  expectedArchived: boolean;
+};
+export type SessionArchiveManifestRoot = {
+  rootSessionId: string;
+  targetSealId: string | null;
+  memberCount: number;
+  members: SessionArchiveManifestMember[];
+};
+export type SessionArchiveManifest = {
+  format: "opengeni.session-archive-manifest";
+  version: 1;
+  workspaceId: string;
+  action: SessionArchiveAction;
+  totalMemberCount: number;
+  roots: SessionArchiveManifestRoot[];
+};
+export type SessionArchivePlanRequest = {
+  action: SessionArchiveAction;
+  roots: Array<{ rootSessionId: string; targetSealId?: string | null }>;
+};
+export type SessionArchivePlanRoot = {
+  rootSessionId: string;
+  targetSealId: string | null;
+  rootChecksum: SessionArchiveChecksum;
+  memberCount: number;
+  canApply: boolean;
+  blockers: SessionArchiveBlocker[];
+};
+export type SessionArchivePlanResponse = {
+  manifest: SessionArchiveManifest;
+  manifestChecksum: SessionArchiveChecksum;
+  canApply: boolean;
+  roots: SessionArchivePlanRoot[];
+};
+export type SessionArchiveApplyRequest = {
+  manifest: SessionArchiveManifest;
+  manifestChecksum: SessionArchiveChecksum;
+  rootChecksum: SessionArchiveChecksum;
+  idempotencyKey: string;
+};
+export type SessionArchiveReceipt = {
+  id: string;
+  workspaceId: string;
+  action: SessionArchiveAction;
+  operationKey: string;
+  manifestChecksum: SessionArchiveChecksum;
+  rootChecksum: SessionArchiveChecksum;
+  rootSessionId: string;
+  sealId: string;
+  memberCount: number;
+  coverageChecksum: SessionArchiveChecksum;
+  committedAt: string;
+};
+export type SessionArchiveReceiptMember = {
+  sessionId: string;
+  parentSessionId: string | null;
+  depth: number;
+  beforeArchiveRevision: string;
+  afterArchiveRevision: string;
+  beforeArchived: boolean;
+  afterArchived: boolean;
+};
+export type SessionArchiveApplyResponse = {
+  receipt: SessionArchiveReceipt;
+  replay: boolean;
+  rootArchive: SessionArchiveProjection;
+};
+export type SessionArchiveReceiptEvidence = {
+  receipt: SessionArchiveReceipt;
+  members: SessionArchiveReceiptMember[];
+};
+
 // Mirror of `@opengeni/contracts` SandboxBackend (11 values; every member is
 // additive at the end). 3-way enum parity is pinned by
 // `test/contract-parity.test.ts`.
@@ -815,6 +967,8 @@ export type Session = {
   workspaceId: string;
   accountId: string;
   status: SessionStatus;
+  /** Absent only when reading from a pre-OPE-61 server during rolling upgrade. */
+  archive?: SessionArchiveProjection | undefined;
   initialMessage: string;
   title: string | null;
   titleSource: "user" | "agent" | null;

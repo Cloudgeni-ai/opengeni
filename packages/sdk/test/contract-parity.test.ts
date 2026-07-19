@@ -79,6 +79,19 @@ import {
   WorkspaceMember as ContractWorkspaceMember,
 } from "@opengeni/contracts";
 import { SandboxBackend as DeploymentSandboxBackend } from "@opengeni/deployment";
+import {
+  SessionArchiveAction as ContractSessionArchiveAction,
+  SessionArchiveApplyRequest as ContractSessionArchiveApplyRequest,
+  SessionArchiveApplyResponse as ContractSessionArchiveApplyResponse,
+  SessionArchiveBlocker as ContractSessionArchiveBlocker,
+  SessionArchiveDenial as ContractSessionArchiveDenial,
+  SessionArchiveOperationCategory as ContractSessionArchiveOperationCategory,
+  SessionArchivePlanRequest as ContractSessionArchivePlanRequest,
+  SessionArchivePlanResponse as ContractSessionArchivePlanResponse,
+  SessionArchiveProjection as ContractSessionArchiveProjection,
+  SessionArchiveReceiptEvidence as ContractSessionArchiveReceiptEvidence,
+  SessionArchiveView as ContractSessionArchiveView,
+} from "@opengeni/contracts/session-archive";
 import type { z } from "zod";
 import {
   DEFAULT_FILE_RESOURCE_MOUNT_ROOT,
@@ -136,6 +149,17 @@ import type {
   UpdateRigRequest,
   ProposeRigChangeRequest,
   Session,
+  SessionArchiveAction,
+  SessionArchiveApplyRequest,
+  SessionArchiveApplyResponse,
+  SessionArchiveBlocker,
+  SessionArchiveDenial,
+  SessionArchiveOperationCategory,
+  SessionArchivePlanRequest,
+  SessionArchivePlanResponse,
+  SessionArchiveProjection,
+  SessionArchiveReceiptEvidence,
+  SessionArchiveView,
   SessionCapabilities,
   SessionEvent,
   SessionHumanInputRequest,
@@ -186,6 +210,54 @@ describe("SDK / contracts parity", () => {
     expect(statuses).toEqual(ContractSessionStatus.options);
     expect(backends).toEqual(ContractSandboxBackend.options);
     expect(efforts).toEqual(ContractReasoningEffort.options);
+  });
+
+  test("session archival literals and wire shapes match the canonical subpath", () => {
+    const actions: readonly SessionArchiveAction[] = ContractSessionArchiveAction.options;
+    const views: readonly SessionArchiveView[] = ContractSessionArchiveView.options;
+    const operations: readonly SessionArchiveOperationCategory[] =
+      ContractSessionArchiveOperationCategory.options;
+    expect(actions).toEqual(["archive", "unarchive"]);
+    expect(views).toEqual(["live", "archived", "all"]);
+    expect(operations).toEqual(ContractSessionArchiveOperationCategory.options);
+
+    const acceptProjection = (
+      value: z.infer<typeof ContractSessionArchiveProjection>,
+    ): SessionArchiveProjection => value;
+    const acceptBlocker = (
+      value: z.infer<typeof ContractSessionArchiveBlocker>,
+    ): SessionArchiveBlocker => value;
+    const acceptDenial = (
+      value: z.infer<typeof ContractSessionArchiveDenial>,
+    ): SessionArchiveDenial => value;
+    const acceptPlanResponse = (
+      value: z.infer<typeof ContractSessionArchivePlanResponse>,
+    ): SessionArchivePlanResponse => value;
+    const acceptApplyResponse = (
+      value: z.infer<typeof ContractSessionArchiveApplyResponse>,
+    ): SessionArchiveApplyResponse => value;
+    const acceptReceiptEvidence = (
+      value: z.infer<typeof ContractSessionArchiveReceiptEvidence>,
+    ): SessionArchiveReceiptEvidence => value;
+    const acceptPlanRequest = (
+      value: SessionArchivePlanRequest,
+    ): z.input<typeof ContractSessionArchivePlanRequest> => value;
+    const acceptApplyRequest = (
+      value: SessionArchiveApplyRequest,
+    ): z.input<typeof ContractSessionArchiveApplyRequest> => value;
+
+    expect(
+      [
+        acceptProjection,
+        acceptBlocker,
+        acceptDenial,
+        acceptPlanResponse,
+        acceptApplyResponse,
+        acceptReceiptEvidence,
+        acceptPlanRequest,
+        acceptApplyRequest,
+      ].every((fn) => typeof fn === "function"),
+    ).toBe(true);
   });
 
   test("first-party MCP tool-name union matches the contracts enum", () => {
