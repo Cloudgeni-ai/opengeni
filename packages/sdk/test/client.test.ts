@@ -120,6 +120,37 @@ describe("OpenGeniClient", () => {
     expect(JSON.parse(request.body!)).toEqual({ initialMessage: "hello", sandboxBackend: "none" });
   });
 
+  test("createSession preserves idempotency, variable-set aliases, and tools presence", async () => {
+    const { client, requests } = makeClient(() =>
+      jsonResponse({ id: SESSION_ID, workspaceId: WORKSPACE_ID, status: "queued" }, 202),
+    );
+    await client.createSession(WORKSPACE_ID, {
+      initialMessage: "canonical variable set",
+      idempotencyKey: "create-session-canonical",
+      variableSetId: "variables-canonical",
+    });
+    await client.createSession(WORKSPACE_ID, {
+      initialMessage: "deprecated environment alias",
+      idempotencyKey: "create-session-alias",
+      environmentId: "variables-alias",
+      tools: [],
+    });
+
+    expect(JSON.parse(requests[0]!.body!)).toEqual({
+      initialMessage: "canonical variable set",
+      idempotencyKey: "create-session-canonical",
+      variableSetId: "variables-canonical",
+    });
+    expect(JSON.parse(requests[1]!.body!)).toEqual({
+      initialMessage: "deprecated environment alias",
+      idempotencyKey: "create-session-alias",
+      environmentId: "variables-alias",
+      tools: [],
+    });
+    expect("tools" in JSON.parse(requests[0]!.body!)).toBe(false);
+    expect("tools" in JSON.parse(requests[1]!.body!)).toBe(true);
+  });
+
   test("getSession and listEvents hit the expected paths and query params", async () => {
     const { client, requests } = makeClient((request) =>
       request.url.includes("/events")
