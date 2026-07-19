@@ -19,6 +19,7 @@
 
 import { describe, expect, test } from "bun:test";
 import {
+  RoutingBackendRecoveryRequiredError,
   RoutingSandboxSession,
   RoutingUnsupportedError,
   makeActiveBackendResolver,
@@ -104,6 +105,36 @@ function mutablePointer(initial: ActivePointer = { activeSandboxId: null, active
 }
 
 describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () => {
+  test("provider disappearance fences an ambiguous mutation and never replays it", async () => {
+    let writes = 0;
+    let lossCallbacks = 0;
+    const missing = Object.assign(new Error("provider sandbox missing"), { status: 404 });
+    const backend: RoutableBackendSession = {
+      async writeFile() {
+        writes += 1;
+        throw missing;
+      },
+    };
+    const proxy = new RoutingSandboxSession({
+      defaultResolved: { session: backend, sandboxId: null, kind: "modal" },
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => ({ session: backend, sandboxId: null, kind: "modal" }),
+      onDefaultBackendError: async ({ error, op }) => {
+        expect(error).toBe(missing);
+        expect(op).toBe("writeFile");
+        lossCallbacks += 1;
+        return { leaseEpoch: 8, recovery: "pending" };
+      },
+    });
+
+    const error = await proxy.writeFile({ path: "maybe-written" }).catch((caught) => caught);
+    expect(error).toBeInstanceOf(RoutingBackendRecoveryRequiredError);
+    expect((error as RoutingBackendRecoveryRequiredError).leaseEpoch).toBe(8);
+    expect((error as RoutingBackendRecoveryRequiredError).retryable).toBe(true);
+    expect(writes).toBe(1);
+    expect(lossCallbacks).toBe(1);
+  });
+
   test("(1) active-epoch fence: a swap mid-turn routes the NEXT op to the new backend", async () => {
     const modal = new FakeBackend("modal");
     const selfhosted = new FakeBackend("selfhosted");
@@ -331,6 +362,46 @@ describe("makeActiveBackendResolver — heterogeneous default/modal/selfhosted d
     expect(r.sandboxId).toBeNull();
     expect(r.kind).toBe("modal");
     expect(r.session).toBe(defaultBackend);
+  });
+
+  test("null pointer after a home repair uses the current durable backend, not the stale default handle", async () => {
+    const original = new FakeBackend("group-before-repair");
+    const replacement = new FakeBackend("group-after-repair");
+    const resolvedPointers: ActivePointer[] = [];
+    const resolve = makeActiveBackendResolver({
+      workspaceId: WS,
+      defaultBackend: original,
+      defaultKind: "modal",
+      resolveDefaultBackend: async (pointer) => {
+        resolvedPointers.push(pointer);
+        return {
+          session: pointer.activeEpoch === 0 ? original : replacement,
+          sandboxId: null,
+          kind: "modal",
+        };
+      },
+      getSandbox: async () => null,
+      controlRpcFactory: () => new MockAgentResponder(),
+      relay: RELAY,
+    });
+    const ptr = mutablePointer();
+    const proxy = new RoutingSandboxSession({
+      defaultResolved: { session: original, sandboxId: null, kind: "modal" },
+      readPointer: ptr.read,
+      resolveActiveBackend: resolve,
+    });
+
+    await proxy.exec({ cmd: "before" });
+    ptr.swap(null); // same home target, but a repair advanced the route epoch
+    const result = (await proxy.exec({ cmd: "after" })) as { stdout: string };
+
+    expect(result.stdout).toBe("group-after-repair");
+    expect(original.calls).toEqual(["before"]);
+    expect(replacement.calls).toEqual(["after"]);
+    expect(resolvedPointers).toEqual([
+      { activeSandboxId: null, activeEpoch: 0 },
+      { activeSandboxId: null, activeEpoch: 1 },
+    ]);
   });
 
   test("selfhosted target -> a SelfhostedSession bound to the enrollment agentId, fenced under active_epoch", async () => {

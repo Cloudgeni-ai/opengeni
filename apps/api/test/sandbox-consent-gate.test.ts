@@ -2,11 +2,11 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import postgres from "postgres";
 import { Hono } from "hono";
 import {
-  testSettings,
   acquireSharedTestDatabase,
+  MemoryEventBus,
+  testSettings,
   type SharedTestDatabase,
 } from "@opengeni/testing";
-import { MemoryEventBus } from "@opengeni/testing";
 import {
   acquireLease,
   commitWarmingToWarm,
@@ -20,10 +20,13 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
-import { createSessionForRequest } from "@opengeni/core";
-import { attachViewer } from "../src/sandbox/viewer";
+import {
+  createSessionForRequest,
+  type ApiRouteDeps,
+  type SessionWorkflowClient,
+} from "@opengeni/core";
+import { attachViewer, type ViewerServices } from "../src/sandbox/viewer";
 import { registerSessionRoutes } from "../src/routes/sessions";
-import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
 
 // P3.2 — the un-redacted/shared CONSENT GATE + viewer REVOCATION (Phase 3 close).
 // Design-of-record 08-implementation-plan.md P3.2 + modules/07-channel-b.md §6 +
@@ -58,20 +61,17 @@ let app: Hono;
 
 // productAccessMode:"managed" + delegationSecret so a signed delegated token's
 // permissions are the grant (the access path builds the grant from the token
-// payload — no DB grant lookup, full control over the permission set). backend
-// "modal" is desktop-capable so the negotiation read surfaces a real desktop
-// cell (shared/acknowledged); sandboxDesktopEnabled + a stream-token secret keep
-// it un-degraded. No real provider is touched: warm boxes are PRE-SEEDED so the
-// viewer attach takes the ATTACHED path (no establish).
+// payload — no DB grant lookup, full control over the permission set). The
+// consent gate uses a deterministic fake Modal session. Its warm lease carries
+// a real resumable identity and can pass the attached-path readiness probe
+// without touching a cloud provider.
 const BACKEND = "modal" as const;
 const settings = testSettings({
   productAccessMode: "managed",
   delegationSecret: DELEGATION_SECRET,
   sandboxBackend: BACKEND,
   sandboxDesktopEnabled: true,
-  // This suite proves desktop consent and holder semantics. Its warm lease is
-  // deliberately provider-free, so an unrelated terminal capability probe must
-  // not retire that fake descriptor and turn the attach into a Modal cold-create.
+  // This suite proves desktop consent and holder semantics, not stream minting.
   sandboxTerminalEnabled: false,
   streamTokenSecret: "p32-stream-token-secret",
   sandboxOwnershipEnabled: true,
@@ -79,6 +79,43 @@ const settings = testSettings({
   sandboxViewerHolderTtlMs: 5_000,
   sandboxIdleGraceMs: 500,
 });
+
+/** Deterministic provider establishment scoped to this route harness. It
+ * verifies that API-direct operations resume the exact leased Modal identity
+ * under resume-only authority, then exposes the command surface required by
+ * the real readiness/display-stack paths. */
+const establishSandboxSession: NonNullable<ViewerServices["establishSandboxSession"]> = async (
+  _settings,
+  envelope,
+  options,
+) => {
+  expect(options.recovery).toBe("resume-only");
+  expect(options.backendOverride).toBe(BACKEND);
+  expect(envelope?.backendId).toBe(BACKEND);
+  const sessionState = envelope?.sessionState as
+    | { providerState?: { sandboxId?: unknown }; workspaceReady?: unknown }
+    | undefined;
+  const sandboxId = sessionState?.providerState?.sandboxId;
+  expect(typeof sandboxId).toBe("string");
+  expect(sessionState?.workspaceReady).toBe(true);
+  return {
+    client: {},
+    session: {
+      state: { sandboxId },
+      async exec() {
+        return { stdout: "", exitCode: 0 };
+      },
+    },
+    sessionState,
+    instanceId: sandboxId as string,
+    backendId: BACKEND,
+    origin: "resumed",
+  };
+};
+
+function viewerServices(): ViewerServices {
+  return { db, settings, establishSandboxSession };
+}
 
 async function freshWorkspace(): Promise<{
   accountId: string;
@@ -106,7 +143,7 @@ function stubWorkflowClient(): SessionWorkflowClient {
   } as unknown as SessionWorkflowClient;
 }
 
-function deps(): ApiRouteDeps {
+function deps(): ApiRouteDeps & Pick<ViewerServices, "establishSandboxSession"> {
   return {
     settings,
     db,
@@ -117,9 +154,10 @@ function deps(): ApiRouteDeps {
     documentIndexer: { indexDocument: async () => {} },
     getDocumentServices: () => ({}) as never,
     resumeBoxById: async () => {
-      throw new Error("resumeBoxById should not be called in these tests (backend=none)");
+      throw new Error("legacy resumeBoxById injection should not be called in these tests");
     },
-  } as unknown as ApiRouteDeps;
+    establishSandboxSession,
+  } as unknown as ApiRouteDeps & Pick<ViewerServices, "establishSandboxSession">;
 }
 
 // A signed delegated token: the workspace grant IS the token's permission set.
@@ -145,8 +183,9 @@ function url(workspaceId: string, sessionId: string, suffix: string): string {
 }
 
 // Seed a WARM lease row for a session's group (cold->warming CAS then commit
-// warm), dropping the seed turn holder so the box is warm with NO holder — the
-// viewer attaches via the ATTACHED path (no provider establish needed).
+// warm), dropping the seed turn holder so the box is warm with NO holder. The
+// attached viewer must resume this exact disposable fake instance and verify
+// readiness; a provider-free synthetic warm row would correctly fail closed.
 async function seedWarmBox(
   accountId: string,
   workspaceId: string,
@@ -160,19 +199,27 @@ async function seedWarmBox(
     kind: "turn",
     holderId: "seed-turn",
     subjectId: sessionId,
-    backend: "none",
+    backend: BACKEND,
     leaseTtlMs: 5_000,
   });
   expect(acquired.role).toBe("spawner");
+  const sandboxId = `sb-consent-${sessionId}`;
+  const resumeState = {
+    backendId: BACKEND,
+    sessionState: {
+      providerState: { sandboxId },
+      workspaceReady: true,
+    },
+  };
   const committed = await commitWarmingToWarm(db, {
     accountId,
     workspaceId,
     sandboxGroupId,
     expectedEpoch: acquired.lease.leaseEpoch,
-    instanceId: "inst-warm",
+    instanceId: sandboxId,
     dataPlaneUrl: null,
-    resumeBackendId: "none",
-    resumeState: { backendId: "none" },
+    resumeBackendId: BACKEND,
+    resumeState,
     leaseTtlMs: 5_000,
   });
   expect(committed.committed).toBe(true);
@@ -474,20 +521,18 @@ describe("P3.2 viewer revocation (OD-6 v1) — holder-drop drains iff last holde
     const { accountId, workspaceId, sessionId, sandboxGroupId } = await soloSession();
 
     // One viewer attaches (refcount 1).
-    const attached = await attachViewer(
-      { db, settings },
-      {
-        accountId,
-        workspaceId,
-        session: {
-          id: sessionId,
-          sandboxGroupId,
-          sandboxBackend: BACKEND,
-          sandboxOs: "linux",
-        } as never,
-        viewerId: "v-only",
-      },
-    );
+    const attached = await attachViewer(viewerServices(), {
+      accountId,
+      workspaceId,
+      session: {
+        id: sessionId,
+        sandboxGroupId,
+        sandboxBackend: BACKEND,
+        sandboxOs: "linux",
+        resources: [],
+      } as never,
+      viewerId: "v-only",
+    });
     expect(attached.liveness).toBe("warm");
     const before = await readLease(db, workspaceId, sandboxGroupId);
     expect(before?.viewerHolders).toBe(1);
@@ -575,20 +620,18 @@ describe("P3.2 viewer revocation (OD-6 v1) — holder-drop drains iff last holde
   test("revoke via the route (stream:view) drops the holder", async () => {
     if (!available) return;
     const { accountId, workspaceId, sessionId, sandboxGroupId } = await soloSession();
-    await attachViewer(
-      { db, settings },
-      {
-        accountId,
-        workspaceId,
-        session: {
-          id: sessionId,
-          sandboxGroupId,
-          sandboxBackend: BACKEND,
-          sandboxOs: "linux",
-        } as never,
-        viewerId: "route-viewer",
-      },
-    );
+    await attachViewer(viewerServices(), {
+      accountId,
+      workspaceId,
+      session: {
+        id: sessionId,
+        sandboxGroupId,
+        sandboxBackend: BACKEND,
+        sandboxOs: "linux",
+        resources: [],
+      } as never,
+      viewerId: "route-viewer",
+    });
     const auth = await bearer({
       accountId,
       workspaceId,

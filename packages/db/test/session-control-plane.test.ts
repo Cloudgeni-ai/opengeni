@@ -567,7 +567,7 @@ describe("clean session control plane", () => {
           output: { type: "text", text: "B completed" },
         },
       }),
-    ).toEqual({ accepted: true, recorded: true });
+    ).toEqual({ accepted: true, recorded: true, allResultsRecorded: false });
 
     const recovery = await requestSessionTurnRecovery(client.db, grant.workspaceId!, {
       sessionId: session.id,
@@ -643,7 +643,7 @@ describe("clean session control plane", () => {
         callId: "new-complete",
         resultItem,
       }),
-    ).toEqual({ accepted: true, recorded: true });
+    ).toEqual({ accepted: true, recorded: true, allResultsRecorded: false });
     expect(
       await appendSessionHistoryItems(client.db, {
         accountId: grant.accountId,
@@ -987,7 +987,7 @@ describe("clean session control plane", () => {
           output: { type: "text", text: "approved result" },
         },
       }),
-    ).toEqual({ accepted: true, recorded: true });
+    ).toEqual({ accepted: true, recorded: true, allResultsRecorded: true });
     const recovery = await requestSessionTurnRecovery(client.db, grant.workspaceId!, {
       sessionId: session.id,
       turnId: turn!.id,

@@ -1518,6 +1518,37 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // THIS handle so a mid-turn sandbox_swap can never re-route those execs onto a
     // connected machine (the user's real computer).
     let setupBoxSession: unknown = null;
+    // A same-target API repair can replace the home provider while this turn is
+    // alive. Keep setup/snapshot persistence on the rebound raw session while
+    // preserving the SDK-owned routing proxy for eager turns. Lazy turns hold the
+    // proxy separately, so their worker-side handle may replace its raw session.
+    const onHomeSandboxRebound = (rebound: {
+      established: EstablishedSandboxSession;
+      leaseEpoch: number;
+    }): void => {
+      const current = resolvedSandbox;
+      const previousSession = current?.established.session;
+      const preserveRoutingProxy = current !== null && previousSession !== setupBoxSession;
+      setupBoxSession = rebound.established.session;
+      if (!current) return;
+      current.leaseEpoch = rebound.leaseEpoch;
+      current.established = preserveRoutingProxy
+        ? {
+            ...current.established,
+            client: rebound.established.client,
+            // Keep the stable SDK-facing proxy; only its resolver changes the
+            // underlying backend. The worker's setupBoxSession above is raw.
+            session: previousSession,
+            sessionState: rebound.established.sessionState,
+            instanceId: rebound.established.instanceId,
+            backendId: rebound.established.backendId,
+            ...(rebound.established.origin ? { origin: rebound.established.origin } : {}),
+            ...(rebound.established.restoredArchive
+              ? { restoredArchive: rebound.established.restoredArchive }
+              : {}),
+          }
+        : rebound.established;
+    };
     // The globally unique durable turn-attempt holder id + the group id,
     // captured so the lease heartbeat can refresh the lease TTL epoch-fenced
     // (a superseded owner self-evicts) and finally can release.
@@ -3437,6 +3468,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 settings,
                 bus,
                 onOp: machineOpObserver.observer,
+                onHomeSandboxRebound,
               },
               {
                 workspaceId: input.workspaceId,
@@ -3526,24 +3558,35 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // the flag off the established group box is injected unchanged (today's
           // path). The lease still owns the group box lifecycle — the proxy is a
           // routing veneer, not an owner.
-          if (routingEnabled(settings)) {
-            resolvedSandbox = {
-              ...resolvedSandbox,
-              established: wrapTurnBoxWithRouting(
-                { db, settings, bus },
-                // Thread the SAME declared environment the group box was created with
-                // (resumeBoxForTurn, above) so a selfhosted swap target's manifest
-                // carries it too — the SDK's per-turn manifest-env delta stays empty
-                // (no "cannot change manifest environment variables" throw).
-                {
-                  workspaceId: input.workspaceId,
-                  sessionId: input.sessionId,
-                  environment: sandboxEnvironment,
+          resolvedSandbox = {
+            ...resolvedSandbox,
+            established: wrapTurnBoxWithRouting(
+              {
+                db,
+                settings,
+                bus,
+                onHomeSandboxLost: publishSandboxLost,
+                onHomeSandboxRebound,
+              },
+              // Thread the SAME declared environment the group box was created with
+              // (resumeBoxForTurn, above) so a selfhosted swap target's manifest
+              // carries it too — the SDK's per-turn manifest-env delta stays empty
+              // (no "cannot change manifest environment variables" throw).
+              {
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                environment: sandboxEnvironment,
+                homeLease: {
+                  accountId: input.accountId,
+                  sandboxGroupId: session.sandboxGroupId,
+                  leaseEpoch: resolvedSandbox.leaseEpoch,
+                  instanceId: resolvedSandbox.established.instanceId,
+                  backend: groupBoxBackend,
                 },
-                resolvedSandbox.established,
-              ),
-            };
-          }
+              },
+              resolvedSandbox.established,
+            ),
+          };
         }
         if (resolvedSandbox) {
           startLeaseHeartbeat(resolvedSandbox, activeSandboxBackend ?? groupBoxBackend);
@@ -3905,6 +3948,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             settings,
             bus,
             onOp: machineOpObserver.observer,
+            onHomeSandboxLost: publishSandboxLost,
+            onHomeSandboxRebound,
           },
           {
             workspaceId: input.workspaceId,
@@ -3916,6 +3961,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             backendId: sdkBackendIdForSandboxBackend(groupBoxBackend),
             agentDefaultManifest,
             provisioner: turnSandboxProvisioner,
+            homeLeaseIdentity: {
+              accountId: input.accountId,
+              sandboxGroupId: session.sandboxGroupId,
+              backend: groupBoxBackend,
+            },
           },
         );
       }

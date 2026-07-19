@@ -19,13 +19,14 @@ import {
   SwapActiveSandboxRequest,
   SwapActiveSandboxResponse,
 } from "@opengeni/contracts";
-import { getEnrollment, readMachineMetricsSeries } from "@opengeni/db";
+import { getEnrollment, readMachineMetricsSeries, requireSession } from "@opengeni/db";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { requireAccessGrant } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { buildFleetContextForSession, swapActiveSandbox } from "@opengeni/core";
 import { listMachines, metricRowToSample } from "../sandbox/machines";
+import { ensureSessionGroupReady as ensureViewerSessionGroupReady } from "../sandbox/viewer";
 
 // The supported series windows → milliseconds. An unknown/absent window defaults
 // to 1h (the dossier default). Bounded so a caller cannot request an unbounded
@@ -102,7 +103,26 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
       workspaceId,
       sessionId,
     });
-    const result = await swapActiveSandbox({ db, settings, bus }, ctx, body.target);
+    const result = await swapActiveSandbox(
+      {
+        db,
+        settings,
+        bus,
+        ensureSessionGroupReady: async (fleetCtx) => {
+          const session = await requireSession(db, fleetCtx.workspaceId, fleetCtx.sessionId);
+          return await ensureViewerSessionGroupReady(
+            { db, settings, bus },
+            {
+              accountId: fleetCtx.accountId,
+              workspaceId: fleetCtx.workspaceId,
+              session,
+            },
+          );
+        },
+      },
+      ctx,
+      body.target,
+    );
     return c.json(SwapActiveSandboxResponse.parse(result));
   });
 }

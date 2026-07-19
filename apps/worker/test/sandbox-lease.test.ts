@@ -88,7 +88,9 @@ const REAPER_SETTINGS = testSettings({
 
 // A lean ActivityServices the reaper actually reads from (db/settings/observability).
 function reaperServices(settings: Settings = REAPER_SETTINGS): () => Promise<ActivityServices> {
-  const observability = createObservability(settings, { component: "worker-test" });
+  const observability = createObservability(settings, {
+    component: "worker-test",
+  });
   return async () => ({
     settings,
     db,
@@ -223,6 +225,25 @@ async function insertHolder(
     insert into sandbox_lease_holders (account_id, lease_id, workspace_id, kind, holder_id, last_heartbeat_at)
     values (${ids.accountId}, ${leaseId}, ${ids.workspaceId}, ${kind}, ${holderId},
             now() - (${String(heartbeatAgoMs)} || ' milliseconds')::interval)`;
+}
+
+function archiveDescriptor(archive: string, capturedAtMs: number) {
+  const bytes = Buffer.from(archive, "base64");
+  const archiveSha256 = new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
+  return {
+    version: 1 as const,
+    revision: `wa1:${capturedAtMs}:${archiveSha256}`,
+    archiveSha256,
+    archiveBytes: bytes.length,
+    capturedAt: new Date(capturedAtMs).toISOString(),
+    workspace: {
+      algorithm: "sha256" as const,
+      sha256: archiveSha256,
+      entryCount: 1,
+      fileCount: 1,
+      totalFileBytes: bytes.length,
+    },
+  };
 }
 
 async function readRow(workspaceId: string, groupId: string) {
@@ -380,7 +401,10 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       resumeBackendId: "modal",
       resumeState: {
         backendId: "modal",
-        sessionState: { providerState: { sandboxId: "sb-old" }, workspaceReady: true },
+        sessionState: {
+          providerState: { sandboxId: "sb-old" },
+          workspaceReady: true,
+        },
       },
     });
     // First persist: folds the archive, no prior snapshot to GC.
@@ -395,8 +419,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       workspaceArchive: archive1,
     });
     expect(r1.wrote).toBe(true);
-    expect(r1.priorArchive).toBeNull();
-    expect(r1.priorArchivePrev).toBeNull();
+    expect(r1.priorArchiveForGc).toBeNull();
     // The archive is folded at resume_state.sessionState.workspaceArchive AND the
     // existing providerState sibling is preserved (resume-by-id still works).
     const [row1] =
@@ -418,8 +441,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       workspaceArchive: archive2,
     });
     expect(r2.wrote).toBe(true);
-    expect(r2.priorArchive).toBe(archive1);
-    expect(r2.priorArchivePrev).toBeNull();
+    expect(r2.priorArchiveForGc).toBeNull();
 
     // Epoch fence: a stale-epoch persist writes ZERO rows (wrote:false) so the
     // reaper leaves the (re-armed/superseded) box RUNNING — never terminates it.
@@ -449,7 +471,10 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       resumeBackendId: "modal",
       resumeState: {
         backendId: "modal",
-        sessionState: { providerState: { sandboxId: "sb-warm" }, workspaceReady: true },
+        sessionState: {
+          providerState: { sandboxId: "sb-warm" },
+          workspaceReady: true,
+        },
       },
     });
     const attempt = await freshWarmSnapshotAttempt(ids);
@@ -592,6 +617,153 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     expect(r5.wrote).toBe(false);
   }, 60_000);
 
+  test("(1b-retention) the last verified fallback survives warm + drain rotations until a newer revision is verified", async () => {
+    if (!available) return;
+    const ids = await freshWorkspace();
+    const attempt = await freshWarmSnapshotAttempt(ids);
+    const t0 = 1_910_000_000_000;
+    const archive1 = Buffer.from(
+      'MODAL_SANDBOX_FS_SNAPSHOT_V1\n{"snapshot_id":"verified-fallback"}',
+    ).toString("base64");
+    const archive2 = Buffer.from(
+      'MODAL_SANDBOX_FS_SNAPSHOT_V1\n{"snapshot_id":"warm-next"}',
+    ).toString("base64");
+    const archive3 = Buffer.from(
+      'MODAL_SANDBOX_FS_SNAPSHOT_V1\n{"snapshot_id":"warm-latest"}',
+    ).toString("base64");
+    const archive4 = Buffer.from(
+      'MODAL_SANDBOX_FS_SNAPSHOT_V1\n{"snapshot_id":"drain-latest"}',
+    ).toString("base64");
+    const archive5 = Buffer.from(
+      'MODAL_SANDBOX_FS_SNAPSHOT_V1\n{"snapshot_id":"post-verify"}',
+    ).toString("base64");
+    const descriptor1 = archiveDescriptor(archive1, t0);
+    const descriptor2 = archiveDescriptor(archive2, t0 + 1_000);
+    const descriptor3 = archiveDescriptor(archive3, t0 + 2_000);
+    const descriptor4 = archiveDescriptor(archive4, t0 + 3_000);
+    const descriptor5 = archiveDescriptor(archive5, t0 + 4_000);
+
+    // Model a live box that was restored and tree-verified from revision 1.
+    // The current archive is therefore the only known-good fallback when newer
+    // captures begin rotating through the current slot.
+    await insertLease(ids, {
+      liveness: "warm",
+      refcount: 1,
+      turnHolders: 1,
+      leaseEpoch: 11,
+      expiresInMs: 600_000,
+      instanceId: "box-verified-fallback",
+      backend: "modal",
+      resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: {
+          providerState: { sandboxId: "box-verified-fallback" },
+          workspaceArchive: archive1,
+          workspaceArchiveMeta: descriptor1,
+          workspaceArchiveAt: descriptor1.capturedAt,
+        },
+        opengeniRecovery: {
+          workspace: {
+            status: "ready",
+            verifiedRevision: descriptor1.revision,
+            verifiedAt: descriptor1.capturedAt,
+          },
+        },
+      },
+    });
+
+    const warm2 = await persistWarmSnapshot(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      ...attempt,
+      sandboxGroupId: ids.groupId,
+      expectedEpoch: 11,
+      workspaceArchive: archive2,
+      workspaceArchiveMeta: descriptor2,
+      minIntervalMs: 0,
+      capturedAtMs: t0 + 1_000,
+    });
+    expect(warm2.priorArchiveForGc).toBeNull();
+
+    const warm3 = await persistWarmSnapshot(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      ...attempt,
+      sandboxGroupId: ids.groupId,
+      expectedEpoch: 11,
+      workspaceArchive: archive3,
+      workspaceArchiveMeta: descriptor3,
+      minIntervalMs: 0,
+      capturedAtMs: t0 + 2_000,
+    });
+    expect(warm3.priorArchiveForGc).toBe(archive2);
+    const [afterWarm] =
+      await admin`select resume_state from sandbox_leases where sandbox_group_id = ${ids.groupId}`;
+    expect((afterWarm!.resume_state as any).sessionState).toMatchObject({
+      workspaceArchive: archive3,
+      workspaceArchiveMeta: descriptor3,
+      workspaceArchivePrev: archive1,
+      workspaceArchivePrevMeta: descriptor1,
+    });
+
+    // The drain seam uses the same rotation policy. It may GC the superseded
+    // unverified current revision, but the independently verified fallback must
+    // remain reachable in the previous slot.
+    await admin`update sandbox_leases
+      set liveness = 'draining', refcount = 0, turn_holders = 0
+      where sandbox_group_id = ${ids.groupId}`;
+    const drain4 = await persistDrainSnapshot(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sandboxGroupId: ids.groupId,
+      expectedEpoch: 11,
+      workspaceArchive: archive4,
+      workspaceArchiveMeta: descriptor4,
+    });
+    expect(drain4.priorArchiveForGc).toBe(archive3);
+    const [afterDrain] =
+      await admin`select resume_state from sandbox_leases where sandbox_group_id = ${ids.groupId}`;
+    expect((afterDrain!.resume_state as any).sessionState).toMatchObject({
+      workspaceArchive: archive4,
+      workspaceArchiveMeta: descriptor4,
+      workspaceArchivePrev: archive1,
+      workspaceArchivePrevMeta: descriptor1,
+    });
+
+    // Only independent verification of the newer durable revision releases the
+    // old fallback for GC. The next rotation keeps revision 4 and returns exactly
+    // revision 1 — never the newly verified archive — as its sole GC candidate.
+    await admin`update sandbox_leases set resume_state = jsonb_set(
+      jsonb_set(
+        resume_state,
+        '{opengeniRecovery,workspace,verifiedRevision}',
+        to_jsonb(${descriptor4.revision}::text),
+        true
+      ),
+      '{opengeniRecovery,workspace,verifiedAt}',
+      to_jsonb(${descriptor4.capturedAt}::text),
+      true
+    ) where sandbox_group_id = ${ids.groupId}`;
+    const drain5 = await persistDrainSnapshot(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sandboxGroupId: ids.groupId,
+      expectedEpoch: 11,
+      workspaceArchive: archive5,
+      workspaceArchiveMeta: descriptor5,
+    });
+    expect(drain5.priorArchiveForGc).toBe(archive1);
+    const [afterNewVerification] =
+      await admin`select resume_state from sandbox_leases where sandbox_group_id = ${ids.groupId}`;
+    expect((afterNewVerification!.resume_state as any).sessionState).toMatchObject({
+      workspaceArchive: archive5,
+      workspaceArchiveMeta: descriptor5,
+      workspaceArchivePrev: archive4,
+      workspaceArchivePrevMeta: descriptor4,
+    });
+  }, 60_000);
+
   test("(1b-warm-control) a committed attempt interruption fences a late warm snapshot", async () => {
     if (!available) return;
     const ids = await freshWorkspace();
@@ -649,7 +821,10 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
 
     const resumeState = {
       backendId: "modal",
-      sessionState: { providerState: { sandboxId: "sb-created" }, workspaceReady: true },
+      sessionState: {
+        providerState: { sandboxId: "sb-created" },
+        workspaceReady: true,
+      },
     };
     const recorded = await recordWarmingSandboxCreated(db, {
       accountId: ids.accountId,
@@ -667,7 +842,12 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     expect(recorded.lease?.resumeBackendId).toBe("modal");
 
     const [row] = await admin<
-      { liveness: string; instance_id: string | null; resume_state: any; lease_epoch: number }[]
+      {
+        liveness: string;
+        instance_id: string | null;
+        resume_state: any;
+        lease_epoch: number;
+      }[]
     >`
       select liveness, instance_id, resume_state, lease_epoch
       from sandbox_leases
@@ -1192,11 +1372,10 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     expect(created).toBe(1); // still exactly one Schedule.
   });
 
-  // ── FINDING 1: re-arm during no-archive snapshot window must NOT delete a live box.
-  // When a backend produces no archive (persistWorkspace returns nothing), the
-  // terminate seam previously skipped the persist CAS entirely and called delete()
-  // unconditionally. If a re-arm landed in the snapshot window the box was killed
-  // while live. The fix: call persistArchive(null) as a CAS-check-only gate.
+  // ── FINDING 1: even a test/legacy no-archive termination seam must remain
+  // epoch/refcount fenced. Production cloud teardown now refuses to delete a
+  // resumable box without a verified capture; this lower-level test preserves
+  // the independent invariant that a concurrent re-arm aborts any such seam.
   test("(F1) no-archive path: lease re-armed during snapshot window aborts terminate (no delete)", async () => {
     if (!available) return;
 

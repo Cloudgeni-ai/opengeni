@@ -329,7 +329,9 @@ describe("migration 0053 (Codex credential leases)", () => {
 
       // Immediate rollback is configuration-only: a current/old worker with
       // leasing disabled again uses the active pointer and never needs to drop
-      // the additive row/table. Re-running the real migration chain is a no-op.
+      // the additive row/table. Stop the simulated old app writer before
+      // running the current migration chain: migration 0065 is an intentional
+      // maintenance cutover and must reject every live opengeni_app session.
       await admin`
         update codex_rotation_settings
         set rotation_enabled = false, lease_rotation_enabled = false
@@ -352,6 +354,8 @@ describe("migration 0053 (Codex credential leases)", () => {
       // Rotation OFF is untouched by OPE-36: the selector returns the workspace
       // active pointer, exactly as before.
       expect(featureOffAgain.credentialId).toBe(oldWorkerAfterCutover!.active_credential_id);
+      await app.close();
+      app = null;
       await migrate(databaseUrl);
       const [afterIdempotentMigrate] = await admin<
         { count: number; lease_rotation_enabled: boolean }[]

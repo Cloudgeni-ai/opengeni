@@ -16,6 +16,7 @@
 // end to end without a live provider.
 
 import { afterAll, describe, expect, mock, test } from "bun:test";
+import { createHash } from "node:crypto";
 
 // Mock the modal SDK BEFORE importing the runtime (so the modal provider's
 // `new ModalSandboxClient(...)` constructs our fake).
@@ -24,6 +25,10 @@ const createArgs: Array<{ manifest?: unknown; snapshot?: unknown }> = [];
 // Controls for hydrateWorkspace-throw + delete tracking.
 let hydrateWorkspaceFailuresRemaining = 0;
 const deleteCalls: unknown[] = [];
+const EXPECTED_WORKSPACE_SHA = "a".repeat(64);
+let observedWorkspaceSha = EXPECTED_WORKSPACE_SHA;
+let replaceInstanceOnHydrate = false;
+const restoreEvents: string[] = [];
 
 class FakeModalSandboxClient {
   backendId = "modal";
@@ -41,8 +46,14 @@ class FakeModalSandboxClient {
         "assertCoreSnapshotUnsupported: ModalSandboxClient.create({ snapshot }) is unsupported",
       );
     }
-    return {
+    const session = {
       state: { sandboxId: "sb-fresh" },
+      async exec() {
+        restoreEvents.push("fingerprint-exec");
+        return {
+          stdout: `OPENGENI_WORKSPACE_FINGERPRINT_V1 ${observedWorkspaceSha} 7 4 1234\n`,
+        };
+      },
       async hydrateWorkspace(data: Uint8Array) {
         if (hydrateWorkspaceFailuresRemaining > 0) {
           hydrateWorkspaceFailuresRemaining -= 1;
@@ -51,8 +62,13 @@ class FakeModalSandboxClient {
           );
         }
         hydrateCalls.push(data);
+        restoreEvents.push("hydrate");
+        if (replaceInstanceOnHydrate) {
+          session.state.sandboxId = "sb-restored";
+        }
       },
     };
+    return session;
   }
   async delete(state: unknown) {
     deleteCalls.push(state);
@@ -95,6 +111,22 @@ function envelopeWithArchive(archiveB64: string | undefined) {
   };
   if (archiveB64 !== undefined) {
     sessionState.workspaceArchive = archiveB64;
+    const bytes = Buffer.from(archiveB64, "base64");
+    const archiveSha256 = createHash("sha256").update(bytes).digest("hex");
+    sessionState.workspaceArchiveMeta = {
+      version: 1,
+      revision: `wa1:1700000000000:${archiveSha256}`,
+      archiveSha256,
+      archiveBytes: bytes.length,
+      capturedAt: "2023-11-14T22:13:20.000Z",
+      workspace: {
+        algorithm: "sha256",
+        sha256: EXPECTED_WORKSPACE_SHA,
+        entryCount: 7,
+        fileCount: 4,
+        totalFileBytes: 1234,
+      },
+    };
   }
   return { backendId: "modal", sessionState };
 }
@@ -174,6 +206,46 @@ describe("cold-restore archive+hydrate (sandbox-file-persistence)", () => {
     expect(hydrateCalls).toHaveLength(1);
     expect(new TextDecoder().decode(hydrateCalls[0]!)).toBe(SNAPSHOT_REF);
     expect(established.instanceId).toBe("sb-fresh");
+    expect(established.origin).toBe("restored");
+    expect(established.restoredArchive?.archiveSha256).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  test("attributes a hydrate replacement before restore verification runs on it", async () => {
+    hydrateCalls.length = 0;
+    createArgs.length = 0;
+    restoreEvents.length = 0;
+    replaceInstanceOnHydrate = true;
+    try {
+      const createdIds: string[] = [];
+      const established = await establishSandboxSessionFromEnvelope(
+        modalSettings(),
+        envelopeWithArchive(SNAPSHOT_B64),
+        {
+          sessionId: "sess-hydrate-replacement-order",
+          recovery: "create-or-restore",
+          environment: {},
+          onSandboxCreated: async (created) => {
+            createdIds.push(created.instanceId);
+            restoreEvents.push(`attributed:${created.instanceId}`);
+          },
+          onWorkspaceRestoreVerifying: async () => {
+            restoreEvents.push("restore-verifying");
+          },
+        },
+      );
+
+      expect(createdIds).toEqual(["sb-fresh", "sb-restored"]);
+      expect(restoreEvents).toEqual([
+        "attributed:sb-fresh",
+        "hydrate",
+        "attributed:sb-restored",
+        "restore-verifying",
+        "fingerprint-exec",
+      ]);
+      expect(established.instanceId).toBe("sb-restored");
+    } finally {
+      replaceInstanceOnHydrate = false;
+    }
   });
 
   test("cold-restore with NO archive creates a fresh box and does NOT hydrate", async () => {
@@ -192,56 +264,69 @@ describe("cold-restore archive+hydrate (sandbox-file-persistence)", () => {
     expect(established.instanceId).toBe("sb-fresh");
   });
 
-  test("cold-restore falls back to workspaceArchivePrev when current hydrate throws", async () => {
+  test("cold-restore never silently selects workspaceArchivePrev when the selected revision fails", async () => {
     hydrateCalls.length = 0;
     createArgs.length = 0;
     deleteCalls.length = 0;
     hydrateWorkspaceFailuresRemaining = 1;
 
     try {
-      const established = await establishSandboxSessionFromEnvelope(
-        modalSettings(),
-        envelopeWithArchivePair(SNAPSHOT_B64, SNAPSHOT_PREV_B64),
-        { sessionId: "sess-hydrate-prev", recovery: "create-or-restore", environment: {} },
-      );
-
+      await expect(
+        establishSandboxSessionFromEnvelope(
+          modalSettings(),
+          envelopeWithArchivePair(SNAPSHOT_B64, SNAPSHOT_PREV_B64),
+          { sessionId: "sess-hydrate-prev", recovery: "create-or-restore", environment: {} },
+        ),
+      ).rejects.toMatchObject({ code: "archive_hydration_failed" });
       expect(createArgs).toHaveLength(1);
-      expect(deleteCalls.length).toBe(0);
-      expect(hydrateCalls).toHaveLength(1);
-      expect(new TextDecoder().decode(hydrateCalls[0]!)).toBe(SNAPSHOT_PREV_REF);
-      expect(established.instanceId).toBe("sb-fresh");
+      expect(deleteCalls.length).toBe(1);
+      expect(hydrateCalls).toHaveLength(0);
     } finally {
       hydrateWorkspaceFailuresRemaining = 0;
     }
   });
 
-  test("cold-restore with unusable archive falls through to a clean box", async () => {
+  test("cold-restore with unusable archive fails closed and never exposes a clean box", async () => {
     hydrateCalls.length = 0;
     createArgs.length = 0;
     deleteCalls.length = 0;
     hydrateWorkspaceFailuresRemaining = 1;
 
     try {
-      const established = await establishSandboxSessionFromEnvelope(
-        modalSettings(),
-        envelopeWithArchive(SNAPSHOT_B64),
-        {
-          sessionId: "sess-hydrate-fail-open",
+      await expect(
+        establishSandboxSessionFromEnvelope(modalSettings(), envelopeWithArchive(SNAPSHOT_B64), {
+          sessionId: "sess-hydrate-fail-closed",
           recovery: "create-or-restore",
           environment: {},
-        },
-      );
-
-      expect(established.instanceId).toBe("sb-fresh");
+        }),
+      ).rejects.toMatchObject({ code: "archive_hydration_failed" });
       expect(deleteCalls.length).toBe(1);
       expect(deleteCalls[0]).toMatchObject({ sandboxId: "sb-fresh" });
-      expect(createArgs).toHaveLength(2);
+      expect(createArgs).toHaveLength(1);
       expect(hydrateCalls).toHaveLength(0);
-      // Nothing was actually hydrated → must NOT report as restored-from-archive
-      // (else sandbox.box.created would claim hydrated:"archive" on an empty box).
-      expect(established.origin).toBe("created");
     } finally {
       hydrateWorkspaceFailuresRemaining = 0;
+    }
+  });
+
+  test("cold-restore blocks a plausible partial workspace whose tree fingerprint differs", async () => {
+    hydrateCalls.length = 0;
+    createArgs.length = 0;
+    deleteCalls.length = 0;
+    observedWorkspaceSha = "b".repeat(64);
+    try {
+      await expect(
+        establishSandboxSessionFromEnvelope(modalSettings(), envelopeWithArchive(SNAPSHOT_B64), {
+          sessionId: "sess-partial-restore",
+          recovery: "create-or-restore",
+          environment: {},
+        }),
+      ).rejects.toMatchObject({ code: "workspace_fingerprint_mismatch" });
+      expect(deleteCalls).toHaveLength(1);
+      expect(createArgs).toHaveLength(1);
+      expect(hydrateCalls).toHaveLength(1);
+    } finally {
+      observedWorkspaceSha = EXPECTED_WORKSPACE_SHA;
     }
   });
 });

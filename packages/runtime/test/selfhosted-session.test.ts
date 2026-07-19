@@ -493,9 +493,15 @@ describe("isProviderSandboxNotFoundError — selfhosted ALWAYS false (no rival c
     }
   });
 
-  test("Modal's discriminator is unaffected (404 still true for modal)", () => {
+  test("Modal requires typed or exact terminal evidence before declaring NotFound", () => {
     expect(isProviderSandboxNotFoundError("modal", { status: 404 })).toBe(true);
-    expect(isProviderSandboxNotFoundError("modal", new Error("sandbox not found"))).toBe(true);
+    expect(
+      isProviderSandboxNotFoundError(
+        "modal",
+        new Error("Modal sandbox sb-selfhosted-test not found (has been terminated)"),
+      ),
+    ).toBe(true);
+    expect(isProviderSandboxNotFoundError("modal", new Error("sandbox not found"))).toBe(false);
   });
 });
 

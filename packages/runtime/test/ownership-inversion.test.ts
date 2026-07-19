@@ -28,6 +28,7 @@ import {
   runAgentStream,
   createSandboxClientForBackend,
   establishSandboxSessionFromEnvelope,
+  isProviderSandboxGoneDuringRoutedOperation,
   isProviderSandboxNotFoundError,
 } from "../src/index";
 
@@ -239,19 +240,44 @@ describe("P1.2 isProviderSandboxNotFoundError (per-backend NotFound discriminato
     expect(isProviderSandboxNotFoundError("e2b", { statusCode: 404 })).toBe(true);
   });
 
-  test("box-gone phrasing -> NotFound", () => {
+  test("generic numeric gRPC status 5 is not provider NotFound evidence", () => {
+    expect(isProviderSandboxNotFoundError("modal", { code: 5 })).toBe(false);
+    expect(isProviderSandboxNotFoundError("modal", { status: 5 })).toBe(false);
+    expect(isProviderSandboxNotFoundError("modal", { statusCode: 5 })).toBe(false);
+  });
+
+  test("only typed codes and Modal's exact terminal grammar are NotFound", () => {
+    expect(
+      isProviderSandboxNotFoundError(
+        "modal",
+        new Error("Modal sandbox sb-123 not found (has been terminated)"),
+      ),
+    ).toBe(true);
     expect(isProviderSandboxNotFoundError("modal", new Error("Sandbox sb-123 not found"))).toBe(
-      true,
+      false,
     );
     expect(
       isProviderSandboxNotFoundError("e2b", new Error("the sandbox is no longer running")),
-    ).toBe(true);
-    expect(isProviderSandboxNotFoundError("runloop", new Error("devbox has been terminated"))).toBe(
-      true,
-    );
+    ).toBe(false);
     expect(
       isProviderSandboxNotFoundError("daytona", { code: "SANDBOX_NOT_FOUND", message: "gone" }),
     ).toBe(true);
+  });
+
+  test("transient typed evidence dominates nested NotFound prose", () => {
+    expect(
+      isProviderSandboxNotFoundError("modal", {
+        code: "UNAVAILABLE",
+        status: 14,
+        cause: { code: "NOT_FOUND", message: "Modal sandbox sb-old not found" },
+      }),
+    ).toBe(false);
+    expect(
+      isProviderSandboxNotFoundError("modal", {
+        code: "ENOTFOUND",
+        message: "Name resolution failed: sandbox not found",
+      }),
+    ).toBe(false);
   });
 
   test("a resume-conflict / still-running / generic error is NOT NotFound (never recreate -> never double-spawn)", () => {
@@ -268,6 +294,56 @@ describe("P1.2 isProviderSandboxNotFoundError (per-backend NotFound discriminato
     expect(isProviderSandboxNotFoundError("modal", { status: 500 })).toBe(false);
     expect(isProviderSandboxNotFoundError("modal", null)).toBe(false);
     expect(isProviderSandboxNotFoundError("modal", undefined)).toBe(false);
+  });
+});
+
+describe("OPE-60 routed-operation sandbox disappearance discriminator", () => {
+  test("generic 404 and NOT_FOUND subresource errors do not retire the provider sandbox", () => {
+    expect(isProviderSandboxGoneDuringRoutedOperation("modal", { status: 404 })).toBe(false);
+    expect(
+      isProviderSandboxGoneDuringRoutedOperation("modal", {
+        code: "NOT_FOUND",
+        status: 404,
+        message: "/workspace/missing.txt not found",
+      }),
+    ).toBe(false);
+    expect(
+      isProviderSandboxGoneDuringRoutedOperation("modal", {
+        code: "RESOURCE_NOT_FOUND",
+        message: "exposed port not found",
+      }),
+    ).toBe(false);
+  });
+
+  test("sandbox-scoped typed evidence and Modal terminal grammar retire the exact sandbox", () => {
+    expect(
+      isProviderSandboxGoneDuringRoutedOperation("daytona", {
+        code: "SANDBOX_NOT_FOUND",
+        message: "sandbox is gone",
+      }),
+    ).toBe(true);
+    expect(
+      isProviderSandboxGoneDuringRoutedOperation(
+        "modal",
+        new Error("Modal sandbox sb-123 not found (has been terminated)"),
+      ),
+    ).toBe(true);
+    expect(
+      isProviderSandboxGoneDuringRoutedOperation(
+        "modal",
+        new Error("Modal sandbox sb-123 is no longer running."),
+      ),
+    ).toBe(true);
+  });
+
+  test("transient transport evidence dominates nested sandbox disappearance", () => {
+    expect(
+      isProviderSandboxGoneDuringRoutedOperation("modal", {
+        code: "UNAVAILABLE",
+        status: 14,
+        cause: { code: "SANDBOX_NOT_FOUND" },
+      }),
+    ).toBe(false);
   });
 });
 

@@ -23,10 +23,11 @@ import { join } from "node:path";
 import { createRequire } from "node:module";
 import {
   buildStreamUrl,
+  SandboxResumeStateUnavailableError,
   verifyStreamToken,
   type EstablishedSandboxSession,
 } from "@opengeni/runtime/sandbox";
-import { mintDesktopStream } from "../src/sandbox/viewer";
+import { mintDesktopStream, mintTerminalStream } from "../src/sandbox/viewer";
 
 // P4.2 — the pixel DATA PLANE against a REAL lease (pgvector throwaway DB). Drives
 // mintDesktopStream + the rotation primitive directly:
@@ -60,6 +61,7 @@ const settings = testSettings({
   sandboxBackend: "modal",
   sandboxOwnershipEnabled: true,
   sandboxDesktopEnabled: true,
+  sandboxTerminalEnabled: true,
   delegationSecret: "p42-test-secret",
   streamTokenSecret: undefined,
   sandboxLeaseTtlMs: 5_000,
@@ -72,10 +74,18 @@ function fakeEstablish(epoch: number): () => Promise<EstablishedSandboxSession> 
   return async () => {
     const session = {
       // The display-stack ensure step runs through exec; a no-op success.
-      exec: async () => ({ output: "OPENGENI_DESKTOP_UP port=6080", exitCode: 0 }),
+      exec: async () => ({
+        output: "OPENGENI_DESKTOP_UP port=6080\nOPENGENI_TERMINAL_UP port=7681",
+        exitCode: 0,
+      }),
       resolveExposedPort: async (port: number) => {
-        expect(port).toBe(6080);
-        return { host: `box-epoch-${epoch}.modal.host`, port: 443, tls: true, query: "" };
+        expect([6080, 7681]).toContain(port);
+        return {
+          host: `box-epoch-${epoch}${port === 7681 ? "-terminal" : ""}.modal.host`,
+          port: 443,
+          tls: true,
+          query: "",
+        };
       },
       close: async () => {},
     };
@@ -89,7 +99,10 @@ function fakeEstablish(epoch: number): () => Promise<EstablishedSandboxSession> 
   };
 }
 
-async function freshWorkspace(): Promise<{ accountId: string; workspaceId: string }> {
+async function freshWorkspace(): Promise<{
+  accountId: string;
+  workspaceId: string;
+}> {
   const [a] = await admin<
     { id: string }[]
   >`insert into managed_accounts (name) values ('acct') returning id`;
@@ -105,7 +118,10 @@ async function freshWorkspace(): Promise<{ accountId: string; workspaceId: strin
 async function seedWarmModalBox(
   accountId: string,
   workspaceId: string,
-): Promise<{ session: Awaited<ReturnType<typeof getSession>>; lease: LeaseSnapshot }> {
+): Promise<{
+  session: Awaited<ReturnType<typeof getSession>>;
+  lease: LeaseSnapshot;
+}> {
   const created = await createSession(db, {
     accountId,
     workspaceId,
@@ -148,6 +164,18 @@ async function seedWarmModalBox(
   const session = await getSession(db, workspaceId, created.id);
   const lease = await readLease(db, workspaceId, sandboxGroupId);
   return { session, lease: lease! };
+}
+
+async function addKeeperHolder(lease: LeaseSnapshot, accountId: string, workspaceId: string) {
+  await admin`
+    insert into sandbox_lease_holders (
+      account_id, workspace_id, lease_id, kind, holder_id, last_heartbeat_at
+    ) values (
+      ${accountId}, ${workspaceId}, ${lease.id}, 'viewer', 'keeper-viewer', now()
+    )`;
+  await admin`update sandbox_leases
+    set refcount = 1, viewer_holders = 1
+    where id = ${lease.id}`;
 }
 
 beforeAll(async () => {
@@ -394,12 +422,149 @@ describe("P4.2 desktop pixel data plane (real lease + RLS + fence)", () => {
         establish: fakeEstablish(lease.leaseEpoch),
       },
     );
-    // The stale mint returns a cell (for its own dead epoch), but the LIVE row is
-    // never overwritten — the fence held.
-    expect(staleMint).not.toBeNull();
+    // The stale mint must not disclose a cell for its dead epoch, and the LIVE
+    // row is never overwritten — the fence held.
+    expect(staleMint).toBeNull();
     const afterStale = await readLease(db, workspaceId, session!.sandboxGroupId);
     expect(afterStale?.dataPlaneUrl).toBe(liveUrl); // the live URL survived
     expect(afterStale?.leaseEpoch).toBe(newEpoch);
+  }, 60_000);
+
+  test("CACHED DESKTOP URL + authoritative provider NOT_FOUND retires the exact instance and discloses no capability", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const { session } = await seedWarmModalBox(accountId, workspaceId);
+    const cachedUrl = "wss://stale-box.modal.host/";
+    await admin`update sandbox_leases set data_plane_url = ${cachedUrl}
+      where workspace_id = ${workspaceId} and sandbox_group_id = ${session!.sandboxGroupId}`;
+    const live = (await readLease(db, workspaceId, session!.sandboxGroupId))!;
+    const mint = await mintDesktopStream(
+      { db, settings },
+      {
+        accountId,
+        workspaceId,
+        session: session!,
+        viewerId: crypto.randomUUID(),
+        lease: live,
+        establish: async () => {
+          throw new Error(`Modal sandbox ${live.instanceId} is no longer running.`);
+        },
+      },
+    );
+    expect(mint).toBeNull();
+    const after = await readLease(db, workspaceId, session!.sandboxGroupId);
+    expect(after).toMatchObject({
+      liveness: "cold",
+      instanceId: null,
+      leaseEpoch: live.leaseEpoch + 1,
+      dataPlaneUrl: null,
+    });
+  }, 60_000);
+
+  test("CACHED TERMINAL URL + authoritative provider NOT_FOUND retires the exact instance and discloses no capability", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const { session } = await seedWarmModalBox(accountId, workspaceId);
+    const cachedUrl = "wss://stale-terminal.modal.host/";
+    await admin`update sandbox_leases set terminal_data_plane_url = ${cachedUrl}
+      where workspace_id = ${workspaceId} and sandbox_group_id = ${session!.sandboxGroupId}`;
+    const live = (await readLease(db, workspaceId, session!.sandboxGroupId))!;
+    const mint = await mintTerminalStream(
+      { db, settings },
+      {
+        accountId,
+        workspaceId,
+        session: session!,
+        viewerId: crypto.randomUUID(),
+        lease: live,
+        establish: async () => {
+          throw new Error(`Modal sandbox ${live.instanceId} is no longer running.`);
+        },
+      },
+    );
+    expect(mint).toBeNull();
+    const after = await readLease(db, workspaceId, session!.sandboxGroupId);
+    expect(after).toMatchObject({
+      liveness: "cold",
+      instanceId: null,
+      leaseEpoch: live.leaseEpoch + 1,
+      terminalDataPlaneUrl: null,
+    });
+  }, 60_000);
+
+  test("transient and missing local resume state preserve desktop liveness, identity, epoch, and keeper holder", async () => {
+    if (!available) return;
+    for (const [label, establish] of [
+      [
+        "transient",
+        async () => {
+          throw new Error("provider temporarily unavailable");
+        },
+      ],
+      [
+        "missing-resume-state",
+        async () => {
+          throw new SandboxResumeStateUnavailableError("modal");
+        },
+      ],
+    ] as const) {
+      const { accountId, workspaceId } = await freshWorkspace();
+      const { session, lease } = await seedWarmModalBox(accountId, workspaceId);
+      await addKeeperHolder(lease, accountId, workspaceId);
+      if (label === "missing-resume-state") {
+        await admin`update sandbox_leases set resume_state = null where id = ${lease.id}`;
+      }
+      const before = (await readLease(db, workspaceId, session!.sandboxGroupId))!;
+      const mint = await mintDesktopStream(
+        { db, settings },
+        {
+          accountId,
+          workspaceId,
+          session: session!,
+          viewerId: crypto.randomUUID(),
+          lease: before,
+          establish,
+        },
+      );
+      expect(mint, label).toBeNull();
+      const after = await readLease(db, workspaceId, session!.sandboxGroupId);
+      expect(after).toMatchObject({
+        liveness: "warm",
+        instanceId: before.instanceId,
+        leaseEpoch: before.leaseEpoch,
+        refcount: 1,
+        viewerHolders: 1,
+      });
+      const [holder] = await admin<{ holder_id: string }[]>`
+        select holder_id from sandbox_lease_holders where lease_id = ${lease.id}`;
+      expect(holder?.holder_id).toBe("keeper-viewer");
+    }
+  }, 60_000);
+
+  test("STALE TERMINAL EPOCH — a failed publication never discloses the terminal URL", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const { session, lease } = await seedWarmModalBox(accountId, workspaceId);
+    const newEpoch = lease.leaseEpoch + 1;
+    const liveUrl = "wss://live-terminal.modal.host/";
+    await admin`update sandbox_leases
+      set lease_epoch = ${newEpoch}, terminal_data_plane_url = ${liveUrl}
+      where workspace_id = ${workspaceId} and sandbox_group_id = ${session!.sandboxGroupId}`;
+    const staleMint = await mintTerminalStream(
+      { db, settings },
+      {
+        accountId,
+        workspaceId,
+        session: session!,
+        viewerId: crypto.randomUUID(),
+        lease,
+        establish: fakeEstablish(lease.leaseEpoch),
+      },
+    );
+    expect(staleMint).toBeNull();
+    const after = await readLease(db, workspaceId, session!.sandboxGroupId);
+    expect(after?.terminalDataPlaneUrl).toBe(liveUrl);
+    expect(after?.leaseEpoch).toBe(newEpoch);
   }, 60_000);
 
   test("UNACKED — the route gate (P3.2) blocks the un-redacted desktop before a mint is even attempted", async () => {
@@ -489,7 +654,9 @@ describe.if(LIVE)("P4.2 GATED live-Modal — RFB pixels through the real Modal t
       const BOX_TIMEOUT_MS = 12 * 60 * 1000;
 
       const modal = new ModalClient({ logLevel: "info" });
-      const app = await modal.apps.fromName(APP_NAME, { createIfMissing: true });
+      const app = await modal.apps.fromName(APP_NAME, {
+        createIfMissing: true,
+      });
 
       const aptRetry = (pkgs: string) =>
         `export DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC; set -eux; for attempt in 1 2 3; do ` +
