@@ -5,7 +5,7 @@ import * as schema from "./schema";
 
 export const SESSION_ANCESTRY_LIMIT = 10_000;
 
-export type WorkspaceControlLockMode = "share" | "update";
+export type WorkspaceControlLockMode = "none" | "share" | "update";
 export type EffectiveControlState = "active" | "paused";
 export type SessionCommandActor =
   | { type: "human" | "operator"; subjectId: string }
@@ -154,9 +154,12 @@ export async function assertAgentCommandAuthorityInTransaction(
     workspaceId: string;
     actor: Extract<SessionCommandActor, { type: "agent_attempt" }>;
     targetSessionId: string;
-    action: "pause" | "resume" | "steer" | "message";
+    action: "pause" | "resume" | "steer" | "message" | "goal";
   },
 ): Promise<void> {
+  if (input.action === "goal" && input.targetSessionId !== input.actor.sessionId) {
+    throw new SessionControlInvariantError("An agent goal command must target its own session");
+  }
   const lockedSessions = await db
     .select({ id: schema.sessions.id })
     .from(schema.sessions)
@@ -307,6 +310,7 @@ function controlEtag(value: unknown): string {
 }
 
 function lockClause(mode: WorkspaceControlLockMode) {
+  if (mode === "none") return sql.empty();
   return mode === "update" ? sql.raw("for update") : sql.raw("for share");
 }
 
@@ -903,26 +907,32 @@ async function findCommandReceipt(
     targetSessionId: string | null;
     targetTurnId: string | null;
     operationKey: string;
+    identityScope: "actor" | "goal_operation";
   },
 ): Promise<SessionCommandReceiptRow | null> {
   const actorSubjectId = input.actor.type === "agent_attempt" ? null : input.actor.subjectId;
   const actorAttemptId = input.actor.type === "agent_attempt" ? input.actor.attemptId : null;
-  const rows = await db
-    .select()
-    .from(schema.sessionCommandReceipts)
-    .where(
-      and(
-        eq(schema.sessionCommandReceipts.workspaceId, input.workspaceId),
-        eq(schema.sessionCommandReceipts.actorType, input.actor.type),
-        sql`${schema.sessionCommandReceipts.actorSubjectId} is not distinct from ${actorSubjectId}`,
-        sql`${schema.sessionCommandReceipts.actorAttemptId} is not distinct from ${actorAttemptId}::uuid`,
-        eq(schema.sessionCommandReceipts.action, input.action),
-        sql`${schema.sessionCommandReceipts.targetSessionId} is not distinct from ${input.targetSessionId}::uuid`,
-        sql`${schema.sessionCommandReceipts.targetTurnId} is not distinct from ${input.targetTurnId}::uuid`,
-        eq(schema.sessionCommandReceipts.operationKey, input.operationKey),
-      ),
-    )
-    .for("update");
+  const identity =
+    input.identityScope === "goal_operation"
+      ? and(
+          eq(schema.sessionCommandReceipts.workspaceId, input.workspaceId),
+          eq(schema.sessionCommandReceipts.actorType, "agent_attempt"),
+          eq(schema.sessionCommandReceipts.action, input.action),
+          eq(schema.sessionCommandReceipts.targetSessionId, input.targetSessionId!),
+          sql`${schema.sessionCommandReceipts.targetTurnId} is null`,
+          eq(schema.sessionCommandReceipts.operationKey, input.operationKey),
+        )
+      : and(
+          eq(schema.sessionCommandReceipts.workspaceId, input.workspaceId),
+          eq(schema.sessionCommandReceipts.actorType, input.actor.type),
+          sql`${schema.sessionCommandReceipts.actorSubjectId} is not distinct from ${actorSubjectId}`,
+          sql`${schema.sessionCommandReceipts.actorAttemptId} is not distinct from ${actorAttemptId}::uuid`,
+          eq(schema.sessionCommandReceipts.action, input.action),
+          sql`${schema.sessionCommandReceipts.targetSessionId} is not distinct from ${input.targetSessionId}::uuid`,
+          sql`${schema.sessionCommandReceipts.targetTurnId} is not distinct from ${input.targetTurnId}::uuid`,
+          eq(schema.sessionCommandReceipts.operationKey, input.operationKey),
+        );
+  const rows = await db.select().from(schema.sessionCommandReceipts).where(identity).for("update");
   return rows[0] ?? null;
 }
 
@@ -937,9 +947,22 @@ export async function reserveSessionCommandReceipt(
     targetTurnId: string | null;
     operationKey: string;
     canonicalRequestHash: string;
+    identityScope?: "actor" | "goal_operation";
   },
 ): Promise<{ receipt: SessionCommandReceiptRow; replay: boolean }> {
   if (!input.operationKey.trim()) throw new Error("operationKey must not be empty");
+  const identityScope = input.identityScope ?? "actor";
+  if (
+    identityScope === "goal_operation" &&
+    (input.actor.type !== "agent_attempt" ||
+      input.action !== "goal.update" ||
+      input.targetSessionId === null ||
+      input.targetTurnId !== null)
+  ) {
+    throw new SessionControlInvariantError(
+      "Target-scoped receipt identity is reserved for agent goal.update commands",
+    );
+  }
   const actorSubjectId = input.actor.type === "agent_attempt" ? null : input.actor.subjectId;
   const actorAttemptId = input.actor.type === "agent_attempt" ? input.actor.attemptId : null;
   const [inserted] = await db
@@ -967,6 +990,7 @@ export async function reserveSessionCommandReceipt(
       targetSessionId: input.targetSessionId,
       targetTurnId: input.targetTurnId,
       operationKey: input.operationKey,
+      identityScope,
     }));
   if (!receipt) throw new SessionControlInvariantError("Command receipt conflict was not readable");
   if (receipt.canonicalRequestHash !== input.canonicalRequestHash) {

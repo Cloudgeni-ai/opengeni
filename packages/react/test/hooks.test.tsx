@@ -616,6 +616,45 @@ describe("useGoal", () => {
     await hook.unmount();
   });
 
+  test("turn, session, control, and system-update events refresh continuation truth", async () => {
+    let reads = 0;
+    const client = fakeClient({
+      getGoal: async () => {
+        reads += 1;
+        return fakeGoal({
+          continuation: {
+            state: "scheduled",
+            reason: "wake_pending",
+            wakeRevision: reads,
+            observedRevision: reads,
+            nextAttemptAt: null,
+            lastError: null,
+          },
+        });
+      },
+    });
+    const hook = await renderHook(
+      (events: SessionEvent[]) =>
+        useGoal(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events }),
+      [] as SessionEvent[],
+    );
+    await flush();
+    expect(reads).toBe(0);
+
+    await hook.rerender([
+      makeEvent(1, "agent.message.delta"),
+      makeEvent(2, "turn.started"),
+      makeEvent(3, "session.status.changed"),
+      makeEvent(4, "session.control.paused"),
+      makeEvent(5, "system.update.pending"),
+    ]);
+    await flush(250);
+
+    expect(reads).toBe(1);
+    expect(hook.result.current.goal?.continuation?.state).toBe("scheduled");
+    await hook.unmount();
+  });
+
   test("shared-feed goal refreshes are discarded after the session changes", async () => {
     const initialSessionId: string = SESSION_ID;
     const otherSessionId = "33333333-3333-4333-8333-333333333333";

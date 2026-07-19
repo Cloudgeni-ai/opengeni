@@ -1256,6 +1256,9 @@ export const sessionCommandReceipts = pgTable(
       table.targetSessionId,
       table.createdAt,
     ),
+    goalUpdateOperation: uniqueIndex("session_command_receipts_goal_update_operation_uq")
+      .on(table.workspaceId, table.action, table.targetSessionId, table.operationKey)
+      .where(sql`${table.action} = 'goal.update'`),
     actorValid: check(
       "session_command_receipts_actor_check",
       sql`(
@@ -1566,6 +1569,10 @@ export const sessionWorkflowWakeOutbox = pgTable(
       "session_workflow_wake_outbox_revision_check",
       sql`${table.wakeRevision} > 0 and ${table.deliveredRevision} >= 0 and ${table.deliveredRevision} <= ${table.wakeRevision}`,
     ),
+    revisionSafe: check(
+      "session_workflow_wake_outbox_revision_safe_check",
+      sql`${table.wakeRevision} <= 9007199254740991 and ${table.deliveredRevision} <= 9007199254740991`,
+    ),
     workspaceAccount: foreignKey({
       name: "session_workflow_wake_outbox_workspace_account_fk",
       columns: [table.workspaceId, table.accountId],
@@ -1612,6 +1619,18 @@ export const sessionGoals = pgTable(
     maxAutoContinuations: integer("max_auto_continuations"), // per-goal override; a configured settings cap (if any) remains the hard ceiling
     lastContinuationTurnId: uuid("last_continuation_turn_id"),
     versionAtLastContinuation: integer("version_at_last_continuation"),
+    // OPE-59: Postgres owns the continuation obligation. Terminal settlement
+    // advances wakeRevision in the same transaction that makes the session
+    // idle; materialization advances observedRevision only alongside the one
+    // typed update, timeline events, usage row, and workflow-wake outbox row.
+    // Temporal signals and workflow history are replaceable nudges over these
+    // monotonic revisions.
+    continuationWakeRevision: bigint("continuation_wake_revision", { mode: "number" })
+      .notNull()
+      .default(0),
+    continuationObservedRevision: bigint("continuation_observed_revision", { mode: "number" })
+      .notNull()
+      .default(0),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -1626,6 +1645,10 @@ export const sessionGoals = pgTable(
       table.sessionId,
     ),
     status: index("session_goals_workspace_status_idx").on(table.workspaceId, table.status),
+    continuationRevisionValid: check(
+      "session_goals_continuation_revision_check",
+      sql`${table.continuationWakeRevision} >= 0 and ${table.continuationObservedRevision} >= 0 and ${table.continuationObservedRevision} <= ${table.continuationWakeRevision} and ${table.continuationWakeRevision} <= 9007199254740991 and ${table.continuationObservedRevision} <= 9007199254740991`,
+    ),
   }),
 );
 

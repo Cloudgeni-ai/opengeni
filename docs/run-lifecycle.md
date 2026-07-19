@@ -184,7 +184,11 @@ workflow (signalWithStart), and the next turn runs from the stored items.
 Only `cancelled` — an explicit user act — is terminal.
 
 Every transaction that creates or re-enables workflow work also increments the
-session's durable wake revision. Single-target producers signal directly;
+session's durable wake revision. An active goal has a second, goal-owned
+monotonic wake/observed pair: terminal settlement advances it in the same
+transaction as the workflow wake, and continuation materialization observes it
+only alongside the typed update, event pair, usage fact, session transition,
+and successor workflow wake. Single-target producers signal directly;
 recursive controls trigger the bounded dispatcher once without loading the
 affected tree into API memory. Successful delivery acknowledges the exact
 revision, and the dispatcher retries only due unacknowledged rows.
@@ -196,13 +200,30 @@ return when a signal arrived during that chain, closing the completion race.
 
 ## Goals — what makes long runs continue
 
-Agents stop prematurely. A **goal** flips the default so that finishing a turn
-with nothing queued records one typed goal-continuation internal update and the
-agent must explicitly `goal_complete` or `goal_pause` to stop. The update joins
-the next bounded internal batch and never appears as a human queue row. This is
-the mechanism behind every multi-day autonomous run. Full detail in
-`docs/goals.md`; the one-line model: queued human input always wins over an
-internal continuation, and goals are bounded by progress/budget guards, not
+Agents stop prematurely. A **goal** flips the default so terminal settlement of
+the last turn arms one durable Postgres continuation obligation and the agent
+must explicitly `goal_complete` or `goal_pause` to stop. A locked transaction
+materializes one revision as one typed goal-continuation update, its audit
+events and usage fact, and the next workflow wake. The stable
+`goal-continuation:<goalId>:wake:<revision>` identity makes a lost commit
+response/retry a no-op rather than another logical continuation. The update
+joins the next bounded internal batch and never appears as a human queue row.
+
+Queued human input and Steer always win; approval, same-turn recovery,
+provider-capacity wait, recursive Pause, and cancellation block synthesis.
+Temporal activity failure records a delayed outbox wake and may close the
+workflow; `signalWithStart` later reconstructs delivery from Postgres without a
+human message or model polling. A dead worker may re-dispatch the same logical
+goal turn under a new fenced attempt, but cannot materialize or bill another
+continuation. The goal API projects scheduled/running/blocked/invariant-broken
+from one repeatable snapshot so UI state never guesses from `active` or `idle`.
+Agent `goal_update` is itself a revisioned command: its stable operation key is
+target-scoped across replacement attempts, while the receipt retains the
+original attempt for audit. Receipt/result, goal version, session-sequenced
+event, and mutation commit atomically. A lost response can therefore be
+reconciled from a recovered attempt without double-applying the update, and an
+old replay returns its stored result rather than overwriting newer goal truth.
+Full detail in `docs/goals.md`; goals are bounded by progress/budget guards, not
 counts.
 
 ## Memory — three stores, three jobs
