@@ -11,6 +11,15 @@ afterEach(async () => {
 });
 
 describe("release schema contract", () => {
+  test("classifies the OPE-24 owning-human cutover as maintenance-only", async () => {
+    const contract = await buildSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0065_codex_subscription_overview.sql",
+      ),
+    ).toMatchObject({ deploymentMode: "maintenance" });
+  });
+
   test("is deterministic across creation order and classifies only executable SQL migrations", async () => {
     const first = await fixture([
       ["0002_second.sql", "-- deployment-mode: rolling\nselect 2;"],

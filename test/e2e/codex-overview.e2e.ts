@@ -4,9 +4,12 @@ import AxeBuilder from "@axe-core/playwright";
 import { chromium, type Browser, type Page } from "playwright";
 import type { AccessContext } from "@opengeni/contracts";
 import {
+  claimCodexResetRedemption,
+  completeCodexResetRedemption,
   createDb,
   encryptEnvironmentValue,
   ensureCodexRotationSettings,
+  fenceCodexResetRedemptionSend,
   recordCodexAccountUsage,
   setInitialActiveCodexCredential,
   upsertCodexSubscriptionCredential,
@@ -37,8 +40,11 @@ let client: DbClient;
 let browser: Browser;
 let edge: ReturnType<typeof Bun.serve>;
 let publicPort: number;
+let defaultAccountId: string;
 let workspaceId: string;
 let detailedCredentialId: string;
+let priorNonConsumingAttemptId: string;
+let priorNonConsumingUpstreamKey: string;
 let available = true;
 
 const provider = {
@@ -282,6 +288,7 @@ beforeAll(async () => {
   const context = (await access.json()) as AccessContext;
   workspaceId = context.defaultWorkspaceId!;
   const accountId = context.defaultAccountId!;
+  defaultAccountId = accountId;
   const key = Buffer.from(settings.environmentsEncryptionKey!, "base64");
   for (const [externalId, label] of [
     ["detailed", "Detailed account"],
@@ -328,6 +335,42 @@ beforeAll(async () => {
   }
   await ensureCodexRotationSettings(client.db, accountId, workspaceId);
   await setInitialActiveCodexCredential(client.db, workspaceId, detailedCredentialId);
+  const priorAttemptId = crypto.randomUUID();
+  priorNonConsumingAttemptId = priorAttemptId;
+  const priorClaimHolderId = crypto.randomUUID();
+  const priorAttempt = await claimCodexResetRedemption(client.db, {
+    id: priorAttemptId,
+    accountId,
+    workspaceId,
+    credentialId: detailedCredentialId,
+    subjectId: `user:${OWNER_USER_ID}`,
+    browserSessionHash: "prior-browser-session",
+    creditId: "detailed-credit",
+    confirmationExpiresAt: new Date(Date.now() + 5 * 60_000),
+    claimHolderId: priorClaimHolderId,
+  });
+  if (priorAttempt.kind !== "claimed") throw new Error("expected prior non-consuming claim");
+  priorNonConsumingUpstreamKey = priorAttempt.attempt.upstreamIdempotencyKey;
+  const priorFence = await fenceCodexResetRedemptionSend(client.db, {
+    accountId,
+    workspaceId,
+    attemptId: priorAttemptId,
+    claimHolderId: priorClaimHolderId,
+    credentialId: detailedCredentialId,
+    subjectId: `user:${OWNER_USER_ID}`,
+    browserSessionHash: "prior-browser-session",
+  });
+  if (priorFence.kind !== "ready") throw new Error("expected prior non-consuming send fence");
+  const priorCompletion = await completeCodexResetRedemption(client.db, {
+    accountId,
+    workspaceId,
+    attemptId: priorAttemptId,
+    claimHolderId: priorClaimHolderId,
+    outcome: "noCredit",
+  });
+  if (priorCompletion.result?.outcome !== "noCredit") {
+    throw new Error("expected prior non-consuming completion");
+  }
   await mkdir(EVIDENCE_DIR, { recursive: true });
 }, 180_000);
 
@@ -370,6 +413,9 @@ describe("OPE-24 real browser/API/Postgres reset overview", () => {
     await accountCard("Detailed account")
       .getByText(/resets .+ \(in \d+[mhd]\)/)
       .first()
+      .waitFor();
+    await accountCard("Detailed account")
+      .getByText(/Earlier attempt: The provider found no reset credit to use\..+available again\./)
       .waitFor();
     await accountCard("Count-only account")
       .getByText(/individual details are unavailable\. View only\./)
@@ -485,6 +531,15 @@ describe("OPE-24 real browser/API/Postgres reset overview", () => {
     });
     expect(provider.consumeBodies).toHaveLength(0);
 
+    // Simulate a lost completed noCredit HTTP response from the earlier browser:
+    // the server has durable non-consuming history, while sessionStorage still
+    // carries its obsolete logical UUID. A new click must discard it and create
+    // a fresh provider idempotency key.
+    await page.evaluate(({ key, value }) => sessionStorage.setItem(key, value), {
+      key: `opengeni.codexResetAttempt:${workspaceId}:${defaultAccountId}:${encodeURIComponent("detailed-credit")}`,
+      value: priorNonConsumingAttemptId,
+    });
+
     await page.getByRole("button", { name: "Redeem Full reset" }).click();
     const dialog = page.getByRole("dialog");
     await dialog.waitFor();
@@ -504,6 +559,7 @@ describe("OPE-24 real browser/API/Postgres reset overview", () => {
       .first()
       .waitFor({ timeout: 10_000 });
     expect(provider.consumeBodies).toHaveLength(1);
+    expect(provider.consumeBodies[0]?.redeem_request_id).not.toBe(priorNonConsumingUpstreamKey);
     const callsBeforeFreshCacheReload = provider.overviewCalls;
     await context.close();
 

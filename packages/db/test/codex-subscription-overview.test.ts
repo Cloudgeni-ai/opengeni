@@ -649,6 +649,67 @@ describe("OPE-24 Codex overview and irreversible reset state", () => {
       claimHolderId: crypto.randomUUID(),
     });
     expect(wrongSession.kind).toBe("conflict");
+
+    // Losing all browser state before provider_started must not tombstone the
+    // provider credit forever. A fresh logical UUID may replace only the
+    // released processing row; no provider key has been used yet.
+    const releasedReplacementId = crypto.randomUUID();
+    const releasedReplacement = await claimCodexResetRedemption(dbB, {
+      id: releasedReplacementId,
+      ...wsA,
+      credentialId,
+      subjectId: "user:owner",
+      browserSessionHash: "session-c",
+      creditId: "credit-a",
+      confirmationExpiresAt: new Date(Date.now() + 5 * 60_000),
+      claimHolderId: crypto.randomUUID(),
+    });
+    expect(releasedReplacement.kind).toBe("claimed");
+    expect(await getCodexResetRedemptionAttempt(dbA, wsA.workspaceId, id)).toBeNull();
+
+    // An ungraceful process death leaves the holder/lease behind. Replacement
+    // remains blocked while that lease is live, then is atomic under the same
+    // per-credit lock after DB-time expiry.
+    const crashedId = crypto.randomUUID();
+    const crashed = await claimCodexResetRedemption(dbA, {
+      id: crashedId,
+      ...wsA,
+      credentialId,
+      subjectId: "user:owner",
+      browserSessionHash: "session-crashed",
+      creditId: "credit-crashed",
+      confirmationExpiresAt: new Date(Date.now() + 5 * 60_000),
+      claimHolderId: crypto.randomUUID(),
+    });
+    expect(crashed.kind).toBe("claimed");
+    const liveReplacement = await claimCodexResetRedemption(dbB, {
+      id: crypto.randomUUID(),
+      ...wsA,
+      credentialId,
+      subjectId: "user:owner",
+      browserSessionHash: "session-new",
+      creditId: "credit-crashed",
+      confirmationExpiresAt: new Date(Date.now() + 5 * 60_000),
+      claimHolderId: crypto.randomUUID(),
+    });
+    expect(liveReplacement.kind).toBe("conflict");
+    await admin`
+      update codex_reset_redemption_attempts
+      set claim_expires_at = now() - interval '1 second'
+      where workspace_id = ${wsA.workspaceId} and id = ${crashedId}`;
+    const expiredReplacementId = crypto.randomUUID();
+    const expiredReplacement = await claimCodexResetRedemption(dbB, {
+      id: expiredReplacementId,
+      ...wsA,
+      credentialId,
+      subjectId: "user:owner",
+      browserSessionHash: "session-new",
+      creditId: "credit-crashed",
+      confirmationExpiresAt: new Date(Date.now() + 5 * 60_000),
+      claimHolderId: crypto.randomUUID(),
+    });
+    expect(expiredReplacement.kind).toBe("claimed");
+    expect(await getCodexResetRedemptionAttempt(dbA, wsA.workspaceId, crashedId)).toBeNull();
   });
 
   test("final send fence rechecks DB-time expiry, identity, health, and extends both fresh and resumed sends", async () => {

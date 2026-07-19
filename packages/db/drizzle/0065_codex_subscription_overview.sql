@@ -1,6 +1,11 @@
--- deployment-mode: rolling
+-- deployment-mode: maintenance
 -- OPE-24: trustworthy Codex subscription overview, allocator OCC/audit, and
 -- owning-human reset-credit redemption.
+--
+-- Old API binaries do not write connected_by_subject_id and do not fence
+-- disconnect/reconnect against unresolved provider attempts. Drain every old
+-- API replica before applying this migration, then start only this revision;
+-- mixed-version writers would invalidate the owning-human redemption boundary.
 --
 -- OPE-21 exclusively owns allocator_enabled in migration 0053. This migration
 -- only adds the independent OCC/audit fields, provider summary cache, connecting

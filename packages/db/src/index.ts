@@ -10038,22 +10038,43 @@ export async function claimCodexResetRedemption(
           return { kind: "forbidden" } as const;
         }
 
-        const [creditAttempt] = await tx
-          .select({ id: schema.codexResetRedemptionAttempts.id })
-          .from(schema.codexResetRedemptionAttempts)
-          .where(
-            and(
-              eq(schema.codexResetRedemptionAttempts.workspaceId, input.workspaceId),
-              eq(schema.codexResetRedemptionAttempts.credentialId, input.credentialId),
-              eq(schema.codexResetRedemptionAttempts.creditId, input.creditId),
-              or(
-                ne(schema.codexResetRedemptionAttempts.status, "completed"),
-                inArray(schema.codexResetRedemptionAttempts.outcome, ["reset", "alreadyRedeemed"]),
+        const [creditAttempt] = await tx.execute<{
+          id: string;
+          status: CodexResetRedemptionStatus;
+          claim_live: boolean | null;
+        }>(sql`
+          select id, status, claim_expires_at > now() as claim_live
+          from codex_reset_redemption_attempts
+          where workspace_id = ${input.workspaceId}
+            and credential_id = ${input.credentialId}
+            and credit_id = ${input.creditId}
+            and (status <> 'completed' or outcome in ('reset', 'alreadyRedeemed'))
+          limit 1
+          for update
+        `);
+        if (creditAttempt) {
+          // A different browser UUID may replace only definite pre-provider
+          // work whose claim is released/expired. The per-credit advisory lock
+          // serializes replacement with a late original claimant, and the
+          // DB-time predicate prevents an application-clock race. Once
+          // provider_started (or successfully completed), preserve the one
+          // upstream idempotency key and fail closed.
+          if (creditAttempt.status !== "processing" || creditAttempt.claim_live) {
+            return { kind: "conflict" } as const;
+          }
+          const removed = await tx
+            .delete(schema.codexResetRedemptionAttempts)
+            .where(
+              and(
+                eq(schema.codexResetRedemptionAttempts.workspaceId, input.workspaceId),
+                eq(schema.codexResetRedemptionAttempts.id, creditAttempt.id),
+                eq(schema.codexResetRedemptionAttempts.status, "processing"),
+                sql`(${schema.codexResetRedemptionAttempts.claimExpiresAt} is null or ${schema.codexResetRedemptionAttempts.claimExpiresAt} <= now())`,
               ),
-            ),
-          )
-          .limit(1);
-        if (creditAttempt) return { kind: "conflict" } as const;
+            )
+            .returning({ id: schema.codexResetRedemptionAttempts.id });
+          if (removed.length !== 1) return { kind: "conflict" } as const;
+        }
 
         const [created] = await tx
           .insert(schema.codexResetRedemptionAttempts)

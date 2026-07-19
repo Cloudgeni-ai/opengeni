@@ -419,8 +419,14 @@ function ResetCreditInventory({
             const resumable = Boolean(
               overview.canResumeRedemption && recovery && recovery.status !== "completed",
             );
-            const completedOutcome =
-              recovery?.status === "completed" && recovery.outcome
+            const completedSuccessfulOutcome =
+              recovery?.status === "completed" &&
+              (recovery.outcome === "reset" || recovery.outcome === "alreadyRedeemed")
+                ? redemptionOutcomeCopy(recovery.outcome)
+                : null;
+            const priorNonConsumingOutcome =
+              recovery?.status === "completed" &&
+              (recovery.outcome === "nothingToReset" || recovery.outcome === "noCredit")
                 ? redemptionOutcomeCopy(recovery.outcome)
                 : null;
             const expiry =
@@ -444,13 +450,19 @@ function ResetCreditInventory({
                       {credit.description}
                     </div>
                   ) : null}
+                  {priorNonConsumingOutcome ? (
+                    <div className="mt-1 break-words text-2xs text-fg-muted" aria-live="polite">
+                      Earlier attempt: {priorNonConsumingOutcome} The provider currently lists this
+                      reset as available again.
+                    </div>
+                  ) : null}
                 </div>
-                {completedOutcome ? (
+                {completedSuccessfulOutcome ? (
                   <div
                     className="max-w-56 text-right text-2xs text-status-success"
                     aria-live="polite"
                   >
-                    {completedOutcome}
+                    {completedSuccessfulOutcome}
                   </div>
                 ) : credit.actionable || resumable ? (
                   <Button
@@ -460,7 +472,9 @@ function ResetCreditInventory({
                     className="min-h-11 shrink-0"
                     disabled={busy}
                     aria-label={`${resumable ? "Resume redemption of" : "Redeem"} ${credit.title ?? "usage limit reset"}`}
-                    onClick={() => onRedeem(credit, recovery)}
+                    onClick={() =>
+                      onRedeem(credit, resumable || priorNonConsumingOutcome ? recovery : undefined)
+                    }
                   >
                     {resumable ? "Resume uncertain attempt" : "Redeem"}
                   </Button>
@@ -782,15 +796,29 @@ export function CodexSubscriptionsCard({
       setPreparingReset(credit.id);
       let createdLocalAttempt = false;
       try {
-        const stored = storedRedemptionAttempt(workspaceId, accountId, credit.id);
-        const attempt: StoredRedemptionAttempt = recovery ??
+        const startsFreshAfterNonConsumingCompletion = Boolean(
+          recovery?.status === "completed" &&
+          (recovery.outcome === "nothingToReset" || recovery.outcome === "noCredit"),
+        );
+        // A lost HTTP response may leave the old completed UUID in
+        // sessionStorage. nothingToReset/noCredit did not consume the provider
+        // credit, so a newly provider-authorized click must mint a fresh
+        // logical/upstream key rather than replay that completed attempt.
+        if (startsFreshAfterNonConsumingCompletion) {
+          removeStoredRedemptionAttempt(workspaceId, accountId, credit.id);
+        }
+        const resumableRecovery = startsFreshAfterNonConsumingCompletion ? undefined : recovery;
+        const stored = startsFreshAfterNonConsumingCompletion
+          ? null
+          : storedRedemptionAttempt(workspaceId, accountId, credit.id);
+        const attempt: StoredRedemptionAttempt = resumableRecovery ??
           stored ?? {
             attemptId: crypto.randomUUID(),
             creditId: credit.id,
             title: credit.title,
             expiresAt: credit.expiresAt,
           };
-        createdLocalAttempt = recovery == null && stored == null;
+        createdLocalAttempt = resumableRecovery == null && stored == null;
         // Session storage is only a convenience checkpoint. Durable server
         // discovery restores provider_started/completed attempts if storage is
         // unavailable or the owning human opens a new browser session.
@@ -799,7 +827,7 @@ export function CodexSubscriptionsCard({
           attemptId: attempt.attemptId,
           creditId: credit.id,
         });
-        if (recovery && !preparation.resumable) {
+        if (resumableRecovery && !preparation.resumable) {
           removeStoredRedemptionAttempt(workspaceId, accountId, credit.id);
           toast.error("This reset was not sent to the provider and is no longer actionable.");
           await refreshUsage();

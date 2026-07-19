@@ -148,12 +148,22 @@ persisted and audited once. The redeem response returns that durable outcome
 with `overview: null` and never waits for provider usage/detail readback; the
 browser refreshes the independently bounded overview afterward. A completed
 outcome remains server-discoverable after tab/session loss or later credential
-health changes and never triggers a second consume.
+health changes. `reset`/`alreadyRedeemed` permanently suppress another consume
+for that provider credit. `nothingToReset`/`noCredit` remain visible as history
+but do not suppress a later newly confirmed attempt when the provider again
+reports exact actionable detail; that later action receives a fresh logical and
+upstream idempotency key.
 Only `reset`/`alreadyRedeemed` clear provider-exhaustion cooldown, and no outcome
 changes allocator eligibility. The one-credit fence remains permanent only for
 those successful outcomes; `nothingToReset`/`noCredit` permit a later, newly
 confirmed logical attempt. Provider bodies, bearer tokens, opaque credit ids and
 upstream keys never enter logs/events/audit metadata.
+
+Migration `0065_codex_subscription_overview.sql` is a maintenance cutover, not a
+rolling API change. Every old API replica must be drained before applying it,
+because old binaries neither record the connecting human nor protect unresolved
+provider attempts from disconnect/ownership-changing reconnect. Start only the
+new revision after the migration; mixed old/new API writers are forbidden.
 
 The unique same-turn lease is idempotent. A one-minute heartbeat renews its
 five-minute TTL throughout long tool/model runs; normal completion releases it
