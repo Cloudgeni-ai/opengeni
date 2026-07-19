@@ -5788,7 +5788,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       ) {
         const recoveryResult = providerRecoveryResult();
         await flushRuntimeBatcher();
-        await reconcileConversationTruth({ requireDurable: true });
+        // Compaction executes before an agent stream exists. Its request and
+        // replacement history are fenced by the compaction transaction itself,
+        // so preserve the pre-OPE-13 no-op reconciliation at this boundary.
+        // Generic provider/MCP failures below still require an exact stream
+        // checkpoint before any automatic continuation is allowed.
+        await reconcileConversationTruth();
         const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
           sessionId: input.sessionId,
           turnId,
