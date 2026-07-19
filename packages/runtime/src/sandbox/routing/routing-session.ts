@@ -236,9 +236,10 @@ export class SandboxMutationRetryExhaustedError extends Error {
     public readonly backend: string,
     public readonly activeEpoch: number,
     public readonly invocations: number,
+    public readonly proof: "never_sent" | "fenced",
   ) {
     super(
-      `The active sandbox rejected mutating operation "${op}" before acceptance ${invocations} time(s) on ${backend} at epoch ${activeEpoch}; the bounded retry budget was exhausted.`,
+      `The active sandbox rejected mutating operation "${op}" before acceptance ${invocations} time(s) on ${backend} at epoch ${activeEpoch} (${proof}); the bounded retry budget was exhausted.`,
     );
   }
 }
@@ -530,6 +531,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     let lastError: unknown;
     let lastBackendKind = "unknown";
     let lastActiveEpoch = 0;
+    let lastProof: "never_sent" | "fenced" = "fenced";
     while (attempt <= this.maxFenceRetries) {
       const backend = await this.resolve();
       const activeEpoch = this.cachedEpoch ?? 0;
@@ -588,6 +590,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
         // the next resolve re-reads the NEW pointer and the op lands on the new
         // active sandbox (the fenced-retry role). Bounded by maxFenceRetries.
         lastError = error;
+        lastProof = fenced ? "fenced" : "never_sent";
         this.cachedEpoch = undefined;
         this.cachedSandboxId = undefined;
         this.cached = undefined;
@@ -606,7 +609,13 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     // Exhausted retries against a relentless swap-storm: surface the fence so the
     // caller (turn) backs off — never loop forever.
     if (isMutatingRoutingOperation(op) && lastError) {
-      throw new SandboxMutationRetryExhaustedError(op, lastBackendKind, lastActiveEpoch, attempt);
+      throw new SandboxMutationRetryExhaustedError(
+        op,
+        lastBackendKind,
+        lastActiveEpoch,
+        attempt,
+        lastProof,
+      );
     }
     throw lastError ?? new Error(`routing op "${op}" exhausted fence retries`);
   }
@@ -632,6 +641,15 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   private renderSelfhostedFaultOrThrow(error: unknown): string {
     if (isSelfhostedControlError(error) && !error.fenced) {
       return renderSelfhostedFault(error);
+    }
+    if (error instanceof SandboxMutationRetryExhaustedError && error.proof === "never_sent") {
+      return [
+        "[sandbox transport] the command could not reach the active sandbox",
+        `What happened: the sandbox rejected the command before acceptance ${error.invocations} time(s); the bounded retry budget was exhausted.`,
+        `Which layer: the ${error.backend} sandbox transport / admission boundary at active epoch ${error.activeEpoch}.`,
+        "What was preserved: nothing ran during these invocations; no command effect needs reconciliation.",
+        "What to try: restore the sandbox connection, then submit a new command; this command call will not retry again.",
+      ].join("\n");
     }
     throw error;
   }

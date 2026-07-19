@@ -474,6 +474,7 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
     const error = await proxy.exec({ cmd: "safe-to-retry" }).catch((caught) => caught);
     expect(error).toBeInstanceOf(SandboxMutationRetryExhaustedError);
     expect((error as SandboxMutationRetryExhaustedError).invocations).toBe(3);
+    expect((error as SandboxMutationRetryExhaustedError).proof).toBe("never_sent");
     expect(String(error)).not.toContain("raw transport payload");
     expect(calls).toBe(3);
   });

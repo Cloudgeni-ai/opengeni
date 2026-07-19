@@ -16,6 +16,7 @@ import {
   NatsControlRpc,
   RoutingSandboxSession,
   RoutingUnsupportedError,
+  SandboxMutationRetryExhaustedError,
   SelfhostedControlError,
   SelfhostedSession,
   SELFHOSTED_NEVER_SENT_MAX_RETRIES,
@@ -373,7 +374,7 @@ describe("G2 — RoutingSandboxSession.execCommand renders a terminal fault as i
     expect(out).not.toContain("Please try again");
   });
 
-  test("a fence error is re-thrown (routing retries it), NOT rendered", async () => {
+  test("a fence exhaustion is re-thrown as a safe routing error, NOT rendered", async () => {
     const backend: RoutableBackendSession = {
       execCommand: async () => {
         throw mapped(ErrorCode.ERROR_CODE_FENCED);
@@ -384,8 +385,8 @@ describe("G2 — RoutingSandboxSession.execCommand renders a terminal fault as i
       await proxyOverBackend(backend).execCommand({ cmd: "ls" });
     } catch (e) {
       threw = true;
-      expect(e).toBeInstanceOf(SelfhostedControlError);
-      expect((e as SelfhostedControlError).fenced).toBe(true);
+      expect(e).toBeInstanceOf(SandboxMutationRetryExhaustedError);
+      expect((e as SandboxMutationRetryExhaustedError).proof).toBe("fenced");
     }
     expect(threw).toBe(true);
   });
