@@ -111,6 +111,7 @@ The worker replicas share one Temporal control task queue. Any compatible worker
 7. Run a live verifier longer than two minutes and observe at least the +120s, +150s, and +180s reaper sweeps. The exact active owner row must protect only its registered provider instance; on every exit, exact deactivation and provider termination run independently. Expiry is the process-death backstop, not ordinary cleanup.
 
 Provider tags remain best-effort diagnostics throughout. Missing or copied tags never establish ownership; the database projection is authoritative.
+The runtime app role has tenant-scoped `SELECT` on the owner registry but no direct table mutation privilege. Register/rebind and exact deactivation run only through pinned `SECURITY DEFINER` functions that verify the transaction's account/workspace scope; role provisioning reapplies this protected-table exception after every ordinary schema-wide DML grant.
 
 ### Partial rollout, rollback, and downgrade
 

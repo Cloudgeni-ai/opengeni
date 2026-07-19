@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import postgres from "postgres";
 import { migrate } from "@opengeni/db/migrate";
+import { provisionRoles } from "@opengeni/db/provision-roles";
 
 const execFileAsync = promisify(execFile);
 
@@ -227,9 +228,10 @@ async function templateReady(): Promise<boolean> {
 
 /**
  * Build the once-per-container template database: CREATE it, run the full
- * migration chain, apply the opengeni_app GRANTs, then flip datistemplate=true
- * as the ready sentinel. Every test file's database is later cloned from it via
- * `CREATE DATABASE ... TEMPLATE`, which skips the migration replay entirely.
+ * migration chain, apply the canonical provisionRoles() contract, then flip
+ * datistemplate=true as the ready sentinel. Every test file's database is later
+ * cloned from it via `CREATE DATABASE ... TEMPLATE`, which skips the migration
+ * replay entirely.
  * Called only inside the container lock, so exactly one process builds it; the
  * `datistemplate` guard makes it idempotent and self-healing after a crash
  * mid-build (a leftover non-template DB of the same name is dropped + rebuilt).
@@ -253,20 +255,17 @@ async function ensureTemplateBuilt(): Promise<void> {
   // 0000_initial inside migrate()).
   await migrate(templateUrl);
 
-  // Grant the non-superuser login role the same way each per-file database used
-  // to be granted (the migrations' grants are IF EXISTS-guarded and skipped in a
-  // fresh database); clones inherit these object grants from the template.
-  const grantsSql = postgres(templateUrl, { max: 1 });
-  try {
-    await grantsSql.unsafe(`
-      GRANT USAGE ON SCHEMA public TO opengeni_app;
-      GRANT USAGE ON SCHEMA opengeni_private TO opengeni_app;
-      GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO opengeni_app;
-      GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA opengeni_private TO opengeni_app;
-    `);
-  } finally {
-    await grantsSql.end().catch(() => undefined);
-  }
+  // Exercise the same repeatable role-provisioning path used by deployments.
+  // This intentionally runs after all migrations: ordinary tables receive the
+  // broad app DML contract while protected lifecycle registries must retain
+  // their narrower migration-defined ACL. Clones inherit those exact grants.
+  await provisionRoles(templateUrl, {
+    targetSchema: "public",
+    rlsStrategy: "force",
+    appRole: "opengeni_app",
+    appPassword: APP_PASSWORD,
+    temporalPassword: "",
+  });
 
   // Flip the ready sentinel. This must run with NO open connections to the
   // template; the migrate + grant pools above are already closed. Marking it a
@@ -436,8 +435,8 @@ function uniqueDbName(label: string): string {
  * calling test file. Returns `null` if docker is unavailable so the caller can
  * skip (the same graceful degradation the per-file harness had).
  *
- * The returned database has: the full migration chain applied, the
- * `opengeni_app` role GRANTed on its public/opengeni_private schemas, and a
+ * The returned database has: the full migration chain applied, the canonical
+ * `provisionRoles()` grants on its public/opengeni_private schemas, and a
  * superuser `admin` handle scoped to it. Call `release()` in afterAll.
  */
 export async function acquireSharedTestDatabase(

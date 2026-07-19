@@ -4,7 +4,9 @@ import postgres from "postgres";
 import {
   createApiKey,
   createDb,
+  deactivateSandboxEphemeralOwner,
   listApiKeys,
+  registerSandboxEphemeralOwner,
   rlsStrategyFor,
   withWorkspaceRls,
   type Database,
@@ -39,13 +41,25 @@ const CONTAINER = `ogverify-pg-rls-dedicated-${PORT}`;
 const PASSWORD = "x";
 const APP_PASSWORD = "apppw";
 const SCHEMA = "tenantx";
-const ADMIN_URL = `postgres://postgres:${PASSWORD}@127.0.0.1:${PORT}/postgres`;
-const APP_URL = `postgres://opengeni_app:${APP_PASSWORD}@127.0.0.1:${PORT}/postgres`;
+const directAdminUrl = process.env.OPENGENI_TEST_DEDICATED_ADMIN_DATABASE_URL;
+const directAppUrl = process.env.OPENGENI_TEST_DEDICATED_APP_DATABASE_URL;
+if (Boolean(directAdminUrl) !== Boolean(directAppUrl)) {
+  throw new Error(
+    "OPENGENI_TEST_DEDICATED_ADMIN_DATABASE_URL and OPENGENI_TEST_DEDICATED_APP_DATABASE_URL must be set together",
+  );
+}
+const usesDocker = !directAdminUrl;
+const ADMIN_URL = directAdminUrl ?? `postgres://postgres:${PASSWORD}@127.0.0.1:${PORT}/postgres`;
+const APP_URL =
+  directAppUrl ?? `postgres://opengeni_app:${APP_PASSWORD}@127.0.0.1:${PORT}/postgres`;
 const SEARCH_PATH = `${SCHEMA},opengeni_private,public`;
 const IMAGE = "pgvector/pgvector:pg17";
 
 function docker(args: string[]): string {
-  return execFileSync("docker", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  return execFileSync("docker", args, {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
 }
 
 function removeContainer(): void {
@@ -84,7 +98,10 @@ let db: Database;
 // Seed a fresh (account, workspace) as the superuser (bypasses RLS) directly in
 // the dedicated schema. We MUST schema-qualify because the admin connection's
 // search_path is the server default (public).
-async function freshWorkspace(): Promise<{ accountId: string; workspaceId: string }> {
+async function freshWorkspace(): Promise<{
+  accountId: string;
+  workspaceId: string;
+}> {
   const [a] = await admin<{ id: string }[]>`
     insert into ${admin(SCHEMA)}.managed_accounts (name) values ('acct') returning id`;
   const [w] = await admin<{ id: string }[]>`
@@ -93,24 +110,26 @@ async function freshWorkspace(): Promise<{ accountId: string; workspaceId: strin
 }
 
 beforeAll(async () => {
-  try {
-    removeContainer();
-    docker([
-      "run",
-      "--rm",
-      "-d",
-      "-e",
-      `POSTGRES_PASSWORD=${PASSWORD}`,
-      "-p",
-      `${PORT}:5432`,
-      "--name",
-      CONTAINER,
-      IMAGE,
-    ]);
-  } catch (err) {
-    available = false;
-    console.warn(`[rls-dedicated] docker unavailable, skipping: ${String(err)}`);
-    return;
+  if (usesDocker) {
+    try {
+      removeContainer();
+      docker([
+        "run",
+        "--rm",
+        "-d",
+        "-e",
+        `POSTGRES_PASSWORD=${PASSWORD}`,
+        "-p",
+        `${PORT}:5432`,
+        "--name",
+        CONTAINER,
+        IMAGE,
+      ]);
+    } catch (err) {
+      available = false;
+      console.warn(`[rls-dedicated] docker unavailable, skipping: ${String(err)}`);
+      return;
+    }
   }
   await waitForReady();
 
@@ -126,6 +145,7 @@ beforeAll(async () => {
     rlsStrategy: "force",
     appRole: "opengeni_app",
     appPassword: APP_PASSWORD,
+    temporalPassword: "",
   });
 
   admin = postgres(ADMIN_URL, { max: 4 });
@@ -147,7 +167,7 @@ afterAll(async () => {
   } catch {
     /* noop */
   }
-  removeContainer();
+  if (usesDocker) removeContainer();
 });
 
 describe("Step I Fork-6 — RLS isolation under a DEDICATED schema + NON-OWNER role", () => {
@@ -179,6 +199,111 @@ describe("Step I Fork-6 — RLS isolation under a DEDICATED schema + NON-OWNER r
   test("(E) the createDb handle is bound to the force strategy", async () => {
     if (!available) return;
     expect(rlsStrategyFor(db)).toBe("force");
+  });
+
+  test("(F) protected owner lifecycle ACL survives repeated dedicated-schema provisioning", async () => {
+    if (!available) return;
+
+    // provisionRoles() first grants ordinary table DML, then must reapply the
+    // protected-registry exception. A later/retried call cannot reopen direct
+    // mutation authority.
+    await provisionRoles(ADMIN_URL, {
+      targetSchema: SCHEMA,
+      rlsStrategy: "force",
+      appRole: "opengeni_app",
+      appPassword: APP_PASSWORD,
+      temporalPassword: "",
+    });
+    const [acl] = await admin<
+      {
+        can_select: boolean;
+        can_insert: boolean;
+        can_update: boolean;
+        can_delete: boolean;
+        can_truncate: boolean;
+      }[]
+    >`
+      select
+        has_table_privilege(
+          'opengeni_app',
+          to_regclass(${`${SCHEMA}.sandbox_ephemeral_owners`}),
+          'SELECT'
+        ) as can_select,
+        has_table_privilege(
+          'opengeni_app',
+          to_regclass(${`${SCHEMA}.sandbox_ephemeral_owners`}),
+          'INSERT'
+        ) as can_insert,
+        has_table_privilege(
+          'opengeni_app',
+          to_regclass(${`${SCHEMA}.sandbox_ephemeral_owners`}),
+          'UPDATE'
+        ) as can_update,
+        has_table_privilege(
+          'opengeni_app',
+          to_regclass(${`${SCHEMA}.sandbox_ephemeral_owners`}),
+          'DELETE'
+        ) as can_delete,
+        has_table_privilege(
+          'opengeni_app',
+          to_regclass(${`${SCHEMA}.sandbox_ephemeral_owners`}),
+          'TRUNCATE'
+        ) as can_truncate`;
+    expect(acl).toEqual({
+      can_select: true,
+      can_insert: false,
+      can_update: false,
+      can_delete: false,
+      can_truncate: false,
+    });
+
+    const functions = await admin<
+      Array<{
+        proname: string;
+        prosecdef: boolean;
+        proconfig: string[] | null;
+        prosrc: string;
+      }>
+    >`
+      select P.proname, P.prosecdef, P.proconfig, P.prosrc
+      from pg_proc P
+      join pg_namespace N on N.oid = P.pronamespace
+      where N.nspname = 'opengeni_private'
+        and P.proname in (
+          'register_sandbox_ephemeral_owner',
+          'deactivate_sandbox_ephemeral_owner',
+          'list_live_modal_sandbox_instances'
+        )
+      order by P.proname`;
+    expect(functions).toHaveLength(3);
+    for (const fn of functions) {
+      expect(fn.prosecdef).toBe(true);
+      expect(fn.proconfig).toContain("search_path=pg_catalog");
+      expect(fn.prosrc).toContain(`${SCHEMA}.sandbox_ephemeral_owners`);
+    }
+
+    const workspace = await freshWorkspace();
+    const executionId = crypto.randomUUID();
+    const instanceId = `modal-dedicated-owner-${executionId}`;
+    await expect(
+      registerSandboxEphemeralOwner(db, {
+        executionId,
+        ...workspace,
+        kind: "rig_verification",
+        backend: "modal",
+        instanceId,
+        expiresAt: new Date(Date.now() + 10 * 60_000),
+      }),
+    ).resolves.toMatchObject({ executionId, instanceId, active: true });
+    await expect(
+      deactivateSandboxEphemeralOwner(db, {
+        executionId,
+        ...workspace,
+        kind: "rig_verification",
+        backend: "modal",
+        instanceId,
+      }),
+    ).resolves.toBe(true);
   });
 
   test("(B) rows written under A's RLS context land in the DEDICATED schema, not public", async () => {

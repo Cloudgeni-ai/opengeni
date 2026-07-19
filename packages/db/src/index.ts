@@ -16023,24 +16023,17 @@ export async function registerSandboxEphemeralOwner(
         expires_at: Date | string;
         deactivated_at: Date | string | null;
       }>(sql`
-        insert into sandbox_ephemeral_owners (
-          execution_id, account_id, workspace_id, kind, backend, instance_id,
-          active, expires_at, deactivated_at, created_at, updated_at
-        ) values (
-          ${input.executionId}, ${input.accountId}, ${input.workspaceId}, ${input.kind},
-          ${input.backend}, ${input.instanceId}, true, ${input.expiresAt.toISOString()}, null, now(), now()
-        )
-        on conflict (execution_id) do update set
-          instance_id = excluded.instance_id,
-          expires_at = excluded.expires_at,
-          updated_at = now()
-        where sandbox_ephemeral_owners.account_id = excluded.account_id
-          and sandbox_ephemeral_owners.workspace_id = excluded.workspace_id
-          and sandbox_ephemeral_owners.kind = excluded.kind
-          and sandbox_ephemeral_owners.backend = excluded.backend
-          and sandbox_ephemeral_owners.active = true
-        returning execution_id, account_id, workspace_id, kind, backend,
+        select execution_id, account_id, workspace_id, kind, backend,
           instance_id, active, expires_at, deactivated_at
+        from opengeni_private.register_sandbox_ephemeral_owner(
+          ${input.executionId},
+          ${input.accountId},
+          ${input.workspaceId},
+          ${input.kind},
+          ${input.backend},
+          ${input.instanceId},
+          ${input.expiresAt.toISOString()}
+        )
       `);
       const row = rows[0];
       if (!row) {
@@ -16069,29 +16062,27 @@ export async function deactivateSandboxEphemeralOwner(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
-      const rows = await scopedDb.execute<{ execution_id: string }>(sql`
-        update sandbox_ephemeral_owners set
-          active = false,
-          deactivated_at = now(),
-          expires_at = least(expires_at, now()),
-          updated_at = now()
-        where execution_id = ${input.executionId}
-          and workspace_id = ${input.workspaceId}
-          and kind = ${input.kind}
-          and backend = ${input.backend}
-          and instance_id = ${input.instanceId}
-          and active = true
-        returning execution_id
+      const rows = await scopedDb.execute<{ deactivated: boolean }>(sql`
+        select opengeni_private.deactivate_sandbox_ephemeral_owner(
+          ${input.executionId},
+          ${input.accountId},
+          ${input.workspaceId},
+          ${input.kind},
+          ${input.backend},
+          ${input.instanceId}
+        ) as deactivated
       `);
-      return rows.length > 0;
+      return rows[0]?.deactivated === true;
     },
   );
 }
 
 // Cross-workspace provider ownership read for the Modal orphan sweep. The
-// SECURITY DEFINER function is the sole sanctioned RLS bypass and unions the
-// existing OPE-48/OPE-60 lease projection with only active, unexpired verifier
-// instances.
+// pinned SECURITY DEFINER function is the sole sanctioned cross-workspace RLS
+// bypass and unions the existing OPE-48/OPE-60 lease projection with only
+// active, unexpired verifier instances. Register/rebind and deactivation use
+// separate tenant-fenced definer functions so the app role has no direct table
+// mutation authority.
 export async function listLiveModalSandboxInstanceAttributions(
   db: Database,
 ): Promise<LiveModalSandboxInstanceAttribution[]> {

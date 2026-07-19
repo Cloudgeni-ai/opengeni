@@ -21,7 +21,10 @@ let appDatabaseUrl = "";
 let ownsAdmin = false;
 let sequence = 0;
 
-async function freshWorkspace(): Promise<{ accountId: string; workspaceId: string }> {
+async function freshWorkspace(): Promise<{
+  accountId: string;
+  workspaceId: string;
+}> {
   sequence += 1;
   const [account] = await admin<{ id: string }[]>`
     insert into managed_accounts (name)
@@ -77,15 +80,32 @@ describe("sandbox ephemeral ownership (real PostgreSQL + FORCE RLS)", () => {
   test("migration installs FORCE RLS, least-privilege grants, and a pinned definer path", async () => {
     if (!available) return;
     const [table] = await admin<
-      { relrowsecurity: boolean; relforcerowsecurity: boolean; required_privileges: string[] }[]
+      {
+        relrowsecurity: boolean;
+        relforcerowsecurity: boolean;
+        granted_privileges: string[];
+        denied_privileges: string[];
+      }[]
     >`
       select C.relrowsecurity,
              C.relforcerowsecurity,
              array_remove(array[
                case when has_table_privilege('opengeni_app', C.oid, 'SELECT') then 'SELECT' end,
                case when has_table_privilege('opengeni_app', C.oid, 'INSERT') then 'INSERT' end,
-               case when has_table_privilege('opengeni_app', C.oid, 'UPDATE') then 'UPDATE' end
-             ], null) as required_privileges
+               case when has_table_privilege('opengeni_app', C.oid, 'UPDATE') then 'UPDATE' end,
+               case when has_table_privilege('opengeni_app', C.oid, 'DELETE') then 'DELETE' end,
+               case when has_table_privilege('opengeni_app', C.oid, 'TRUNCATE') then 'TRUNCATE' end,
+               case when has_table_privilege('opengeni_app', C.oid, 'REFERENCES') then 'REFERENCES' end,
+               case when has_table_privilege('opengeni_app', C.oid, 'TRIGGER') then 'TRIGGER' end
+             ], null) as granted_privileges,
+             array_remove(array[
+               case when not has_table_privilege('opengeni_app', C.oid, 'INSERT') then 'INSERT' end,
+               case when not has_table_privilege('opengeni_app', C.oid, 'UPDATE') then 'UPDATE' end,
+               case when not has_table_privilege('opengeni_app', C.oid, 'DELETE') then 'DELETE' end,
+               case when not has_table_privilege('opengeni_app', C.oid, 'TRUNCATE') then 'TRUNCATE' end,
+               case when not has_table_privilege('opengeni_app', C.oid, 'REFERENCES') then 'REFERENCES' end,
+               case when not has_table_privilege('opengeni_app', C.oid, 'TRIGGER') then 'TRIGGER' end
+             ], null) as denied_privileges
       from pg_class C
       join pg_namespace N on N.oid = C.relnamespace
       where C.relname = 'sandbox_ephemeral_owners'
@@ -93,24 +113,20 @@ describe("sandbox ephemeral ownership (real PostgreSQL + FORCE RLS)", () => {
     expect(table).toEqual({
       relrowsecurity: true,
       relforcerowsecurity: true,
-      required_privileges: ["SELECT", "INSERT", "UPDATE"],
+      granted_privileges: ["SELECT"],
+      denied_privileges: ["INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"],
     });
 
-    // The shared PostgreSQL harness intentionally grants DELETE on every public
-    // table after migrations. Assert the migration's narrower application-role
-    // contract from its source rather than conflating it with harness-wide ACLs.
-    const migration = await Bun.file(
-      new URL("../drizzle/0068_rig_verification_ephemeral_ownership.sql", import.meta.url),
-    ).text();
-    expect(migration).toContain(
-      "GRANT SELECT, INSERT, UPDATE ON TABLE %I.sandbox_ephemeral_owners TO opengeni_app",
-    );
-    expect(migration).not.toMatch(/GRANT[^;]*DELETE[^;]*sandbox_ephemeral_owners/i);
-
-    const [fn] = await admin<
-      { prosecdef: boolean; proconfig: string[] | null; executable: boolean }[]
+    const functions = await admin<
+      {
+        proname: string;
+        prosecdef: boolean;
+        proconfig: string[] | null;
+        executable: boolean;
+      }[]
     >`
-      select P.prosecdef,
+      select P.proname,
+             P.prosecdef,
              P.proconfig,
              has_function_privilege(
                'opengeni_app',
@@ -120,10 +136,22 @@ describe("sandbox ephemeral ownership (real PostgreSQL + FORCE RLS)", () => {
       from pg_proc P
       join pg_namespace N on N.oid = P.pronamespace
       where N.nspname = 'opengeni_private'
-        and P.proname = 'list_live_modal_sandbox_instances'`;
-    expect(fn?.prosecdef).toBe(true);
-    expect(fn?.proconfig).toContain("search_path=pg_catalog");
-    expect(fn?.executable).toBe(true);
+        and P.proname in (
+          'register_sandbox_ephemeral_owner',
+          'deactivate_sandbox_ephemeral_owner',
+          'list_live_modal_sandbox_instances'
+        )
+      order by P.proname`;
+    expect(functions.map((fn) => fn.proname)).toEqual([
+      "deactivate_sandbox_ephemeral_owner",
+      "list_live_modal_sandbox_instances",
+      "register_sandbox_ephemeral_owner",
+    ]);
+    for (const fn of functions) {
+      expect(fn.prosecdef).toBe(true);
+      expect(fn.proconfig).toContain("search_path=pg_catalog");
+      expect(fn.executable).toBe(true);
+    }
 
     const [tenantConstraint] = await admin<{ definition: string }[]>`
       select pg_get_constraintdef(C.oid) as definition
@@ -136,6 +164,85 @@ describe("sandbox ephemeral ownership (real PostgreSQL + FORCE RLS)", () => {
     expect(tenantConstraint?.definition).toContain(
       "FOREIGN KEY (workspace_id, account_id) REFERENCES workspaces(id, account_id) ON DELETE CASCADE",
     );
+  });
+
+  test("the app role can read and use fenced lifecycle APIs but cannot mutate the table directly", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const executionId = crypto.randomUUID();
+    const instanceId = `modal-acl-${executionId}`;
+    await registerSandboxEphemeralOwner(db, {
+      executionId,
+      ...workspace,
+      kind: "rig_verification",
+      backend: "modal",
+      instanceId,
+      expiresAt: new Date(Date.now() + 10 * 60_000),
+    });
+
+    const app = postgres(appDatabaseUrl, { max: 1 });
+    const inScope = async <T>(operation: (tx: postgres.TransactionSql) => Promise<T>) =>
+      await app.begin(async (tx) => {
+        await tx`select set_config('opengeni.account_id', ${workspace.accountId}, true)`;
+        await tx`select set_config('opengeni.workspace_id', ${workspace.workspaceId}, true)`;
+        return await operation(tx);
+      });
+    try {
+      const visible = await inScope(async (tx) => {
+        const [row] = await tx<{ count: number }[]>`
+          select count(*)::int as count
+          from sandbox_ephemeral_owners
+          where execution_id = ${executionId}`;
+        return row!.count;
+      });
+      expect(visible).toBe(1);
+
+      await expect(
+        inScope(async (tx) => {
+          await tx`
+            insert into sandbox_ephemeral_owners (
+              execution_id, account_id, workspace_id, kind, backend, instance_id, expires_at
+            ) values (
+              ${crypto.randomUUID()}, ${workspace.accountId}, ${workspace.workspaceId},
+              'rig_verification', 'modal', ${`modal-direct-insert-${crypto.randomUUID()}`},
+              now() + interval '10 minutes'
+            )`;
+        }),
+      ).rejects.toMatchObject({ code: "42501" });
+      await expect(
+        inScope(async (tx) => {
+          await tx`
+            update sandbox_ephemeral_owners
+            set active = false
+            where execution_id = ${executionId}`;
+        }),
+      ).rejects.toMatchObject({ code: "42501" });
+      await expect(
+        inScope(async (tx) => {
+          await tx`delete from sandbox_ephemeral_owners where execution_id = ${executionId}`;
+        }),
+      ).rejects.toMatchObject({ code: "42501" });
+      await expect(
+        inScope(async (tx) => {
+          await tx`truncate table sandbox_ephemeral_owners`;
+        }),
+      ).rejects.toMatchObject({ code: "42501" });
+    } finally {
+      await app.end();
+    }
+
+    const [stillActive] = await admin<{ active: boolean }[]>`
+      select active from sandbox_ephemeral_owners where execution_id = ${executionId}`;
+    expect(stillActive).toEqual({ active: true });
+    await expect(
+      deactivateSandboxEphemeralOwner(db, {
+        executionId,
+        ...workspace,
+        kind: "rig_verification",
+        backend: "modal",
+        instanceId,
+      }),
+    ).resolves.toBe(true);
   });
 
   test("PostgreSQL rejects an account paired with another tenant's workspace", async () => {
@@ -376,7 +483,10 @@ describe("sandbox ephemeral ownership (real PostgreSQL + FORCE RLS)", () => {
       backend: "modal",
       expiresAt: new Date(Date.now() + 10 * 60_000),
     };
-    await registerSandboxEphemeralOwner(db, { ...base, instanceId: firstInstanceId });
+    await registerSandboxEphemeralOwner(db, {
+      ...base,
+      instanceId: firstInstanceId,
+    });
     const rebound = await registerSandboxEphemeralOwner(db, {
       ...base,
       instanceId: secondInstanceId,

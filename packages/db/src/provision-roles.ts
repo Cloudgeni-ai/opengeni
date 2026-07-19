@@ -151,10 +151,13 @@ async function grantTemporalRoleInDatabase(
 }
 
 /**
- * Grant the app role table DML in the OpenGeni data schema + EXECUTE on the
- * `opengeni_private` helper functions. Schema-parameterized (Step I): standalone
- * passes `public`; embedded passes the dedicated schema. The grants are guarded
- * on schema existence so provisioning before migrate is a safe no-op.
+ * Grant the app role ordinary table DML in the OpenGeni data schema + EXECUTE
+ * on the `opengeni_private` helper functions. Schema-parameterized (Step I):
+ * standalone passes `public`; embedded passes the dedicated schema. Protected
+ * lifecycle registries are narrowed again after the generic grant so repeated
+ * provisioning cannot restore direct mutation authority. The grants are
+ * guarded on schema/table existence so provisioning before migrate is a safe
+ * no-op.
  */
 async function grantAppRoleIfSchemaExists(
   sql: postgres.Sql,
@@ -167,6 +170,34 @@ BEGIN
   IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = ${literal(schema)}) THEN
     EXECUTE format('GRANT USAGE ON SCHEMA %I TO %I', ${literal(schema)}, ${literal(role)});
     EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA %I TO %I', ${literal(schema)}, ${literal(role)});
+
+    -- sandbox_ephemeral_owners is mutated only through tenant-fenced SECURITY
+    -- DEFINER lifecycle functions. Reapply this exception after every generic
+    -- grant so provisioning remains idempotent and cannot reopen direct
+    -- INSERT/UPDATE/DELETE/TRUNCATE or other table-level bypasses.
+    IF EXISTS (
+      SELECT 1
+      FROM pg_class C
+      JOIN pg_namespace N ON N.oid = C.relnamespace
+      WHERE N.nspname = ${literal(schema)}
+        AND C.relname = 'sandbox_ephemeral_owners'
+        AND C.relkind IN ('r', 'p')
+    ) THEN
+      EXECUTE format(
+        'REVOKE ALL PRIVILEGES ON TABLE %I.sandbox_ephemeral_owners FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'REVOKE ALL PRIVILEGES ON TABLE %I.sandbox_ephemeral_owners FROM %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+      EXECUTE format(
+        'GRANT SELECT ON TABLE %I.sandbox_ephemeral_owners TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
   END IF;
   IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'opengeni_private') THEN
     EXECUTE format('GRANT USAGE ON SCHEMA opengeni_private TO %I', ${literal(role)});
