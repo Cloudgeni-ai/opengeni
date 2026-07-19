@@ -244,7 +244,9 @@ describe("DurableActionsView", () => {
         { questionId: "checks", value: ["ci", "review"] },
       ],
     });
-    expect((resolutions[0]?.[3] as { clientEventId: string }).clientEventId).toBeTruthy();
+    expect(
+      (resolutions[0]?.[3] as { clientEventId?: string } | undefined)?.clientEventId,
+    ).toBeTruthy();
   });
 
   test("cancels an ask-user wait with a fresh idempotency key", async () => {
@@ -270,7 +272,9 @@ describe("DurableActionsView", () => {
       outcome: "cancelled",
       reason: "Cancelled by the user",
     });
-    expect((resolutions[0]?.[3] as { clientEventId: string }).clientEventId).toBeTruthy();
+    expect(
+      (resolutions[0]?.[3] as { clientEventId?: string } | undefined)?.clientEventId,
+    ).toBeTruthy();
   });
 
   test("renders reminders, timeouts, timers, and event outcomes without model-poll controls", async () => {
