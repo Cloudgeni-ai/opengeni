@@ -3,8 +3,8 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-// P0.4 guard: apps/api accesses sandbox construction/resume symbols ONLY via the
-// agent-loop-free leaf `@opengeni/runtime/sandbox` — NEVER the bare
+// P0.4 guard: apps/api accesses runtime symbols ONLY via explicitly approved
+// agent-loop-free leaves — NEVER the bare
 // `@opengeni/runtime` barrel (which re-exports the @openai/agents agent loop:
 // Agent/run/Runner/RunState). Importing the barrel would pull the agent-loop
 // graph into the API process and break the API-direct control-plane invariant.
@@ -15,8 +15,8 @@ const here = dirname(fileURLToPath(import.meta.url));
 const apiSrc = resolve(here, "..", "src");
 
 // Forbidden module specifiers in apps/api source: the runtime barrel + the raw
-// @openai agent-loop roots. The /sandbox subpath is the ONLY allowed runtime
-// import.
+// @openai agent-loop roots. Every runtime subpath must be explicitly allowlisted
+// here as an agent-loop-free leaf.
 const FORBIDDEN_SPECIFIERS = new Set([
   "@opengeni/runtime",
   "@openai/agents",
@@ -24,7 +24,10 @@ const FORBIDDEN_SPECIFIERS = new Set([
   "@openai/agents-core",
 ]);
 
-const ALLOWED_RUNTIME_SUBPATH = "@opengeni/runtime/sandbox";
+const ALLOWED_RUNTIME_SUBPATHS = new Set([
+  "@opengeni/runtime/mcp-network",
+  "@opengeni/runtime/sandbox",
+]);
 
 function importSpecifiersOf(source: string): string[] {
   const specifiers: string[] = [];
@@ -54,7 +57,7 @@ function listSourceFiles(dir: string): string[] {
 }
 
 describe("apps/api — sandbox access only via @opengeni/runtime/sandbox (P0.4 guard)", () => {
-  test("no apps/api source imports the bare runtime barrel or any agent-loop root", () => {
+  test("no apps/api source imports the runtime barrel, an unapproved subpath, or any agent-loop root", () => {
     const files = listSourceFiles(apiSrc);
     expect(files.length).toBeGreaterThan(0);
 
@@ -67,12 +70,12 @@ describe("apps/api — sandbox access only via @opengeni/runtime/sandbox (P0.4 g
         if (FORBIDDEN_SPECIFIERS.has(spec)) {
           offenders.push({ file: file.slice(apiSrc.length + 1), specifier: spec });
         }
-        if (spec === ALLOWED_RUNTIME_SUBPATH) {
+        if (spec === "@opengeni/runtime/sandbox") {
           sawAllowedRuntimeImport = true;
         }
-        // Defensive: any @opengeni/runtime/* subpath other than /sandbox is also
-        // a violation (only the leaf is allowed). None exist today, but pin it.
-        if (spec.startsWith("@opengeni/runtime/") && spec !== ALLOWED_RUNTIME_SUBPATH) {
+        // Defensive: every @opengeni/runtime/* subpath must be proven
+        // agent-loop-free and named in the narrow allowlist above.
+        if (spec.startsWith("@opengeni/runtime/") && !ALLOWED_RUNTIME_SUBPATHS.has(spec)) {
           offenders.push({ file: file.slice(apiSrc.length + 1), specifier: spec });
         }
       }
