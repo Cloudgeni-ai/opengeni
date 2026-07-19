@@ -303,10 +303,12 @@ describe("owned-path beforeAgentStart hooks — the provided-session blind spot"
     // Stub live box: records execs; its manifest mirrors the agent's default manifest
     // so applyManifestToProvidedSession sees no delta to apply.
     const execCalls: Array<{ cmd: string }> = [];
+    const setupOrder: string[] = [];
     const providedSession = {
       state: { manifest: buildManifest(settings, [repoResource], environment) },
       exec: async (args: { cmd: string }) => {
         execCalls.push(args);
+        if (args.cmd.includes("clone_repository")) setupOrder.push("repository-clone");
         return { exitCode: 0, stdout: "", stderr: "" };
       },
       // The SDK's filesystem/shell/skills capabilities require these at prepare
@@ -329,6 +331,10 @@ describe("owned-path beforeAgentStart hooks — the provided-session blind spot"
         client: stubClient as never,
         session: providedSession as never,
       },
+      onGitCredentialSessionReady: async (session) => {
+        expect(session).toBe(providedSession);
+        setupOrder.push("git-credential-bind");
+      },
     });
     for await (const _ of result.toStream()) {
       void _;
@@ -342,6 +348,7 @@ describe("owned-path beforeAgentStart hooks — the provided-session blind spot"
     expect(cloneExecs[0]!.cmd).toContain("OPENGENI_GIT_TOKEN_SEED");
     expect(cloneExecs[0]!.cmd).toContain("seed-token-e2e");
     expect(cloneExecs[0]!.cmd).toContain("repos/example/repo");
+    expect(setupOrder).toEqual(["git-credential-bind", "repository-clone"]);
   });
 
   test("connected machine (effective backend selfhosted): NO platform setup exec touches the user's box", async () => {

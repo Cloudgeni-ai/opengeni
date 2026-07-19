@@ -611,6 +611,55 @@ describe("P4.4 SandboxChannelAService — Git (real local box)", () => {
     expect(JSON.stringify(result)).not.toContain("user:");
   });
 
+  test("repository identity discovery rejects the whole snapshot when one root has no origin", async () => {
+    const { session } = await makeBox();
+    const svc = new SandboxChannelAService({ session });
+    const seeded = await svc.terminalExec({
+      command: [
+        "mkdir -p repos/acme/valid repos/acme/missing",
+        "git -C repos/acme/valid init -q",
+        "git -C repos/acme/valid remote add origin 'https://github.com/Acme/Valid.git'",
+        "git -C repos/acme/missing init -q",
+      ].join(" && "),
+      cwd: "",
+      timeoutMs: 20_000,
+      emitStream: false,
+    });
+    expect(seeded.exitCode).toBe(0);
+    expect(await svc.detectGitRepositoryIdentities()).toEqual({
+      repositories: [],
+      complete: false,
+      degradedReason: "identity_incomplete",
+    });
+  });
+
+  test("repository identity discovery rejects unsupported origins without reflecting secrets", async () => {
+    const { session } = await makeBox();
+    const svc = new SandboxChannelAService({ session });
+    const secret = "never-leave-the-box";
+    const seeded = await svc.terminalExec({
+      command: [
+        "mkdir -p repos/acme/unsupported repos/acme/malformed",
+        "git -C repos/acme/unsupported init -q",
+        `git -C repos/acme/unsupported remote add origin 'https://user:${secret}@example.com/Acme/Private.git'`,
+        "git -C repos/acme/malformed init -q",
+        "git -C repos/acme/malformed remote add origin 'not-a-supported-origin'",
+      ].join(" && "),
+      cwd: "",
+      timeoutMs: 20_000,
+      emitStream: false,
+    });
+    expect(seeded.exitCode).toBe(0);
+    const result = await svc.detectGitRepositoryIdentities();
+    expect(result).toEqual({
+      repositories: [],
+      complete: false,
+      degradedReason: "identity_incomplete",
+    });
+    expect(JSON.stringify(result)).not.toContain(secret);
+    expect(JSON.stringify(result)).not.toContain("example.com");
+  });
+
   test("repository identity discovery refuses an incomplete root snapshot", async () => {
     let calls = 0;
     const svc = new SandboxChannelAService({
@@ -636,6 +685,37 @@ describe("P4.4 SandboxChannelAService — Git (real local box)", () => {
       degradedReason: "result_limit_exceeded",
     });
     expect(calls).toBe(1);
+  });
+
+  test("repository identity discovery refuses sanitizer output without its completion trailer", async () => {
+    let calls = 0;
+    const svc = new SandboxChannelAService({
+      session: {
+        exec: async () => {
+          calls += 1;
+          return calls === 1
+            ? {
+                stdout: ["./repos/a/one/.git", "__OPENGENI_REPOSITORY_DISCOVERY_STATUS__:0"].join(
+                  "\n",
+                ),
+                stderr: "",
+                exitCode: 0,
+              }
+            : {
+                stdout: "github\tgithub.com/a/one\n",
+                stderr: "",
+                exitCode: 0,
+              };
+        },
+      },
+    });
+
+    expect(await svc.detectGitRepositoryIdentities()).toEqual({
+      repositories: [],
+      complete: false,
+      degradedReason: "identity_incomplete",
+    });
+    expect(calls).toBe(2);
   });
 
   test("git log returns the commit chain", async () => {

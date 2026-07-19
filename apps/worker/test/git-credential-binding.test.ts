@@ -3,6 +3,8 @@ import type { GitHubRepository } from "@opengeni/contracts";
 import type { Database, SandboxGitCredentialBinding } from "@opengeni/db";
 import type { GitCredentialTokenWriterSession } from "@opengeni/runtime";
 import {
+  assertMintedGitCredentialBindingCoverage,
+  GitCredentialLifecycleError,
   matchObservedGitHubRepositories,
   assertCredentialRepositoryRefSecretFree,
   repositoryIdentityForCredentialRef,
@@ -10,7 +12,10 @@ import {
   validateRebindGitCredentialsResult,
   validateReboundCredentialRefs,
 } from "../src/activities/git-credential-binding";
-import { mintRunGitCredentialsFromRepositoryRefs } from "../src/activities/environment";
+import {
+  mintRunGitCredentials,
+  mintRunGitCredentialsFromRepositoryRefs,
+} from "../src/activities/environment";
 import { testSettings } from "@opengeni/testing";
 
 const observed = [{ provider: "github" as const, canonical: "github.com/Acme/Private" }];
@@ -197,6 +202,77 @@ describe("resource-less Git credential binding", () => {
     ).toThrow("did not exactly cover");
   });
 
+  test("rejects explicit GitHub metadata for a non-GitHub host before broker mint", async () => {
+    const secret = "must-not-be-reflected";
+    let mintCalls = 0;
+    let message = "";
+    try {
+      await mintRunGitCredentials(
+        testSettings(),
+        [
+          {
+            kind: "repository",
+            provider: "github",
+            uri: `https://example.com/Acme/${secret}.git`,
+            ref: "main",
+            githubInstallationId: 42,
+            githubRepositoryId: 7,
+          },
+        ],
+        {
+          scope,
+          gitCredentials: async (request) => {
+            mintCalls += 1;
+            return { token: "must-not-mint", workspaceId: request.workspaceId };
+          },
+        },
+      );
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    expect(message).toContain("unsupported Git host");
+    expect(message).not.toContain(secret);
+    expect(mintCalls).toBe(0);
+  });
+
+  test("rejects insecure or nonstandard explicit GitHub endpoints before broker mint", async () => {
+    const secret = "must-not-be-reflected";
+    let mintCalls = 0;
+    for (const uri of [
+      `http://github.com/Acme/${secret}.git`,
+      `https://github.com:8443/Acme/${secret}.git`,
+    ]) {
+      let message = "";
+      try {
+        await mintRunGitCredentials(
+          testSettings(),
+          [
+            {
+              kind: "repository",
+              provider: "github",
+              uri,
+              ref: "main",
+              githubInstallationId: 42,
+              githubRepositoryId: 7,
+            },
+          ],
+          {
+            scope,
+            gitCredentials: async (request) => {
+              mintCalls += 1;
+              return { token: "must-not-mint", workspaceId: request.workspaceId };
+            },
+          },
+        );
+      } catch (error) {
+        message = error instanceof Error ? error.message : String(error);
+      }
+      expect(message).toContain("unsupported transport");
+      expect(message).not.toContain(secret);
+    }
+    expect(mintCalls).toBe(0);
+  });
+
   test("an incomplete worker discovery never reuses, rebinds, or persists authorization", async () => {
     let rebinds = 0;
     let upserts = 0;
@@ -279,9 +355,98 @@ describe("resource-less Git credential binding", () => {
     });
   });
 
+  test("a managed checkout with no explicit resource auto-discovers and persists its host binding", async () => {
+    const upserts: Array<{ source: string; repositoryRefs: unknown[] }> = [];
+    const result = await resolveGitCredentialBindingForSession({
+      db: {} as Database,
+      settings: testSettings(),
+      scope,
+      session: {} as GitCredentialTokenWriterSession,
+      resources: [],
+      connectionCredentials: {
+        rebindGitCredentials: async (request) => ({
+          status: "bound",
+          workspaceId: request.workspaceId,
+          repositoryRefs: storedBinding().repositoryRefs,
+        }),
+      },
+      operations: {
+        listBindings: async () => [],
+        detectRepositories: async () => ({
+          repositories: observed,
+          complete: true,
+          degradedReason: null,
+        }),
+        upsertBinding: async (_db, input) => {
+          upserts.push({
+            source: input.source,
+            repositoryRefs: [...input.repositoryRefs],
+          });
+          return storedBinding({ source: input.source, repositoryRefs: [...input.repositoryRefs] });
+        },
+      },
+    });
+    expect(result.status).toBe("bound");
+    expect(upserts).toEqual([
+      {
+        source: "observed_checkout",
+        repositoryRefs: storedBinding().repositoryRefs,
+      },
+    ]);
+  });
+
+  test("lifecycle errors expose only a fixed typed code", () => {
+    const secret = "provider-secret-must-not-escape";
+    const error = new GitCredentialLifecycleError("token_install_failed");
+    expect(error).toMatchObject({
+      name: "GitCredentialLifecycleError",
+      code: "token_install_failed",
+    });
+    expect(error.message).toBe("Git credential lifecycle failed (token_install_failed)");
+    expect(JSON.stringify(error)).not.toContain(secret);
+  });
+
+  test("a partial multi-provider token bundle fails closed without reflecting token values", () => {
+    const secret = "partial-provider-token-must-not-escape";
+    const binding = {
+      status: "bound" as const,
+      repositoryRefs: [
+        ...storedBinding().repositoryRefs,
+        {
+          provider: "gitlab" as const,
+          uri: "https://gitlab.example.com/Acme/Private.git",
+          ref: "main",
+          repositoryId: 8,
+          connectionId: "gitlab-connection",
+        },
+      ],
+      bindings: [storedBinding()],
+      expectedGenerations: { github: 1, gitlab: 1 },
+    };
+    let message = "";
+    try {
+      assertMintedGitCredentialBindingCoverage(binding, {
+        gitTokens: { github: secret },
+        expiresAt: {},
+      });
+    } catch (error) {
+      expect(error).toMatchObject({
+        name: "GitCredentialLifecycleError",
+        code: "token_mint_failed",
+      });
+      message = error instanceof Error ? error.message : String(error);
+    }
+    expect(message).toBe("Git credential lifecycle failed (token_mint_failed)");
+    expect(message).not.toContain(secret);
+  });
+
   test("durable reuse requires exact observed coverage and deactivates omitted providers", async () => {
     let rebinds = 0;
-    const marked: Array<{ providers: string[]; reasonCode: string }> = [];
+    const marked: Array<{
+      providers: string[];
+      reasonCode: string;
+      expectedGenerations: unknown;
+    }> = [];
     const azure = storedBinding({
       id: "00000000-0000-4000-8000-000000000005",
       provider: "azure_devops",
@@ -309,7 +474,11 @@ describe("resource-less Git credential binding", () => {
       operations: {
         listBindings: async () => [storedBinding(), azure],
         markBindingsStatus: async (_db, input) => {
-          marked.push({ providers: [...input.providers], reasonCode: input.reasonCode });
+          marked.push({
+            providers: [...input.providers],
+            reasonCode: input.reasonCode,
+            expectedGenerations: input.expectedGenerations,
+          });
           return [];
         },
         detectRepositories: async () => ({
@@ -325,7 +494,11 @@ describe("resource-less Git credential binding", () => {
     ).toEqual(["github"]);
     expect(rebinds).toBe(0);
     expect(marked).toEqual([
-      { providers: ["azure_devops"], reasonCode: "repository_not_observed" },
+      {
+        providers: ["azure_devops"],
+        reasonCode: "repository_not_observed",
+        expectedGenerations: { azure_devops: 1 },
+      },
     ]);
   });
 

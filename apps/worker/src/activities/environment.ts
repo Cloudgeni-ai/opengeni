@@ -19,6 +19,7 @@ import {
   type VariableSetForRun as WorkspaceEnvironmentForRun,
 } from "@opengeni/db";
 import { createGitHubAppInstallationTokenWithExpiry, githubAppBotIdentity } from "@opengeni/github";
+import { assertExplicitCredentialRepositoryRef } from "./git-credential-identity";
 
 // Re-exported from the shared @opengeni/db leaf (moved there so the API-direct
 // attach paths can load the SAME decrypted workspace environment the turn
@@ -423,11 +424,12 @@ function gitCredentialSelections(resources: ResourceRef[]): GitCredentialSelecti
 export function gitCredentialRepositoryRefs(
   resources: readonly ResourceRef[],
 ): GitCredentialRepositoryRef[] {
-  return resources.flatMap((resource) => {
+  const refs = resources.flatMap((resource) => {
     if (resource.kind !== "repository") return [];
     const provider = repositoryCredentialProvider(resource);
     return provider ? [gitCredentialRepositoryRefForResource(resource, provider)] : [];
   });
+  return refs.map(assertExplicitCredentialRepositoryRef);
 }
 
 function gitCredentialSelectionsFromRepositoryRefs(

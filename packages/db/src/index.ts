@@ -13567,6 +13567,8 @@ export async function markSandboxGitCredentialBindingsStatus(
     providers: readonly GitCredentialProvider[];
     status: Exclude<SandboxGitCredentialBindingStatus, "active">;
     reasonCode: string;
+    /** Optional exact active-generation fence for controller-owned deactivation. */
+    expectedGenerations?: Readonly<Partial<Record<GitCredentialProvider, number>>>;
     /** Optional one-shot sandbox invalidation while all provider rows are locked. */
     mutateSandbox?: () => Promise<void>;
   },
@@ -13591,6 +13593,19 @@ export async function markSandboxGitCredentialBindingsStatus(
         .orderBy(asc(schema.sandboxGitCredentialBindings.provider))
         .for("update");
       if (current.length === 0) return [];
+      if (
+        input.expectedGenerations &&
+        ((Object.keys(input.expectedGenerations) as GitCredentialProvider[]).sort().join("\0") !==
+          providers.join("\0") ||
+          current.length !== providers.length ||
+          current.some(
+            (binding) =>
+              binding.status !== "active" ||
+              binding.generation !== input.expectedGenerations?.[binding.provider],
+          ))
+      ) {
+        return [];
+      }
       await input.mutateSandbox?.();
       const rows: SandboxGitCredentialBinding[] = [];
       for (const binding of current) {

@@ -3014,10 +3014,10 @@ export type RunAgentStreamOptions = {
   onRuntimeEvent?: (event: NormalizedRuntimeEvent) => Promise<void> | void;
   contextCompactionSignal?: () => ProviderContextTokenSignal | null | undefined;
   contextCompactionRequested?: () => boolean | Promise<boolean>;
-  // Host-managed git credential renewal registration. Called only after the
-  // initial token-file seed completed on a real provisioned box. The worker
-  // owns the multi-day timer and uses this pinned, un-proxied session to
-  // atomically replace token files; runtime never mints credentials itself.
+  // Host-managed git credential binding + renewal registration. Called on the
+  // real provisioned box after rig/credential/toolspace setup and before any
+  // repository clone. The worker resolves authorization, installs the initial
+  // token files, and owns the multi-day timer; runtime never mints credentials.
   onGitCredentialSessionReady?: (session: GitCredentialTokenWriterSession) => Promise<void> | void;
   // OWNERSHIP INVERSION (P1.2): an externally-owned, already-live sandbox
   // session resolved by the per-turn resume-by-id path. When present,
@@ -3341,8 +3341,10 @@ export async function runAgentStream(
           ? { fileDownloadsMaterialized: true }
           : {}),
         ...(overrides.onRuntimeEvent ? { onRuntimeEvent: overrides.onRuntimeEvent } : {}),
+        ...(overrides.onGitCredentialSessionReady
+          ? { onGitCredentialSessionReady: overrides.onGitCredentialSessionReady }
+          : {}),
       });
-      await overrides.onGitCredentialSessionReady?.(setupSession);
     }
     const runAs = sandboxRunAs(settings);
     const fileDownloads = sandboxFileDownloadsForAgent(agent);
@@ -3368,8 +3370,8 @@ export async function runAgentStream(
         rigCredentialHooksForAgent(agent),
       ),
       ...sandboxToolspaceTokenHooksForAgent(agent),
-      ...sandboxRepositoryCloneHooksForAgent(agent),
       ...gitCredentialSessionRegistrationHooks(overrides.onGitCredentialSessionReady),
+      ...sandboxRepositoryCloneHooksForAgent(agent),
     ];
     const ownedHookContext: SandboxLifecycleHookContext = {
       environment,
@@ -3455,8 +3457,8 @@ export async function runAgentStream(
             rigCredentialHooksForAgent(agent),
           ),
           ...sandboxToolspaceTokenHooksForAgent(agent),
-          ...sandboxRepositoryCloneHooksForAgent(agent),
           ...gitCredentialSessionRegistrationHooks(overrides.onGitCredentialSessionReady),
+          ...sandboxRepositoryCloneHooksForAgent(agent),
         ],
         {
           environment,
@@ -3877,9 +3879,10 @@ export async function pinProvidedSessionManifestEnvironment(
  * refresh, az login is idempotent). The connected-machine (selfhosted) branch
  * keeps platform setup OFF the user's real box and seeds ONLY the toolspace token.
  *
- * `gitTokenSeedsOverride` lets the lazy provisioner pass its own freshly-minted
- * run-scoped provider tokens (minted at establish time, not turn start);
- * unset ⇒ read the seeds off the agent exactly as the eager path does.
+ * `gitTokenSeedsOverride` remains available to direct callers that already own
+ * a complete token bundle. The worker's lazy path instead uses
+ * `onGitCredentialSessionReady`, so authorization and minting happen only after
+ * the real session exists and before the repository-clone hook.
  */
 export async function runOwnedSandboxSetup(
   agent: Agent<any, any>,
@@ -3891,6 +3894,7 @@ export async function runOwnedSandboxSetup(
     preparedInput?: PreparedAgentInput;
     fileDownloadsMaterialized?: boolean;
     onRuntimeEvent?: SandboxLifecycleHookContext["onRuntimeEvent"];
+    onGitCredentialSessionReady?: RunAgentStreamOptions["onGitCredentialSessionReady"];
     gitTokenSeedsOverride?: GitTokenSeeds;
     gitTokenSeedOverride?: string;
   },
@@ -3929,6 +3933,7 @@ export async function runOwnedSandboxSetup(
       rigCredentialHooksForAgent(agent),
     ),
     ...sandboxToolspaceTokenHooksForAgent(agent),
+    ...gitCredentialSessionRegistrationHooks(opts.onGitCredentialSessionReady),
     ...sandboxRepositoryCloneHooksForAgent(agent),
   ];
   const ownedHookContext: SandboxLifecycleHookContext = {
@@ -5261,6 +5266,69 @@ function gitCredentialHelperCommandLines(
   ];
 }
 
+function selectedGitCredentialProviders(seeds: GitTokenSeeds): GitCredentialProvider[] {
+  return GIT_CREDENTIAL_PROVIDERS.filter((provider) => Boolean(seeds[provider]));
+}
+
+/** Shared final/temp removal used by invalidation and failure-clean mutation traps. */
+function gitProviderTokenRemovalCommandLines(
+  providers: readonly GitCredentialProvider[],
+  includePidTemps: boolean,
+): string[] {
+  return [...new Set(providers)]
+    .filter((provider) => GIT_CREDENTIAL_PROVIDERS.includes(provider))
+    .flatMap((provider) => {
+      const paths =
+        provider === "github"
+          ? [
+              "${OPENGENI_GIT_TOKEN_FILE:-$HOME/.opengeni/git-token}",
+              "${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}/github-token",
+            ]
+          : [`\${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}/${provider}-token`];
+      return paths.flatMap((path) => [
+        `rm -f -- "${path}"`,
+        ...(includePidTemps ? [`rm -f -- "${path}.tmp.$$"`] : []),
+      ]);
+    });
+}
+
+/**
+ * A shell mutation is complete only after every selected token and helper write
+ * succeeds. EXIT/signal cleanup removes all selected final token files and PID
+ * temps, so a partial install/refresh can never leave a plausibly usable token.
+ */
+function gitCredentialFailureCleanupGuardCommandLines(
+  providers: readonly GitCredentialProvider[],
+  includeHelperTemps: boolean,
+): string[] {
+  return [
+    "git_credential_mutation_complete=0",
+    "cleanup_failed_git_credential_mutation() {",
+    "  mutation_status=$?",
+    "  trap - EXIT HUP INT TERM",
+    '  if [ "$git_credential_mutation_complete" -ne 1 ]; then',
+    "    set +e",
+    ...gitProviderTokenRemovalCommandLines(providers, true).map((line) => `    ${line}`),
+    ...(includeHelperTemps
+      ? [
+          '    git_askpass_cleanup="${GIT_ASKPASS:-$HOME/.opengeni/askpass}"',
+          '    wrapper_dir_cleanup="${OPENGENI_GIT_CLI_WRAPPER_DIR:-$HOME/.opengeni/bin}"',
+          '    rm -f -- "$git_askpass_cleanup.tmp.$$"',
+          '    for cleanup_tool in gh glab az; do rm -f -- "$wrapper_dir_cleanup/$cleanup_tool.tmp.$$"; done',
+        ]
+      : []),
+    "  fi",
+    '  exit "$mutation_status"',
+    "}",
+    "trap cleanup_failed_git_credential_mutation EXIT",
+    "trap 'exit 143' HUP INT TERM",
+  ];
+}
+
+function gitCredentialFailureCleanupSuccessCommandLines(): string[] {
+  return ["git_credential_mutation_complete=1", "trap - EXIT HUP INT TERM"];
+}
+
 /** Install stable git/CLI helpers and optionally seed provider token files. */
 export function gitCredentialHelperInstallCommand(
   repositoryRefs: readonly GitCredentialRepositoryRef[],
@@ -5271,7 +5339,9 @@ export function gitCredentialHelperInstallCommand(
     seedPrefix,
     "set -eu",
     'export HOME="${HOME:-/workspace}"',
+    ...gitCredentialFailureCleanupGuardCommandLines(selectedGitCredentialProviders(seeds), true),
     ...gitCredentialHelperCommandLines(repositoryRefs),
+    ...gitCredentialFailureCleanupSuccessCommandLines(),
   ]
     .filter(Boolean)
     .join("\n");
@@ -5304,7 +5374,9 @@ export function gitProviderTokenRefreshCommand(seeds: GitTokenSeeds): string {
     seedPrefix,
     "set -eu",
     'export HOME="${HOME:-/workspace}"',
+    ...gitCredentialFailureCleanupGuardCommandLines(selectedGitCredentialProviders(seeds), false),
     ...gitCredentialTokenWriterCommandLines(),
+    ...gitCredentialFailureCleanupSuccessCommandLines(),
   ].join("\n");
 }
 
@@ -5327,18 +5399,15 @@ export function gitProviderTokenInvalidationCommand(
     GIT_CREDENTIAL_PROVIDERS.includes(provider),
   );
   if (selected.length === 0) return "";
-  const removals = selected.flatMap((provider) => {
-    if (provider === "github") {
-      return [
-        'rm -f -- "${OPENGENI_GIT_TOKEN_FILE:-$HOME/.opengeni/git-token}"',
-        'rm -f -- "${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}/github-token"',
-      ];
-    }
-    return [
-      `rm -f -- "\${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}/${provider}-token"`,
-    ];
-  });
-  return ["set -eu", 'export HOME="${HOME:-/workspace}"', ...removals].join("\n");
+  return [
+    "set -eu",
+    'export HOME="${HOME:-/workspace}"',
+    "git_credential_invalidation_status=0",
+    ...gitProviderTokenRemovalCommandLines(selected, true).map(
+      (line) => `${line} || git_credential_invalidation_status=1`,
+    ),
+    'exit "$git_credential_invalidation_status"',
+  ].join("\n");
 }
 
 /** Atomically unlink only OpenGeni-owned provider token files. */

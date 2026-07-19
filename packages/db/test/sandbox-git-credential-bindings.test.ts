@@ -261,6 +261,111 @@ describe("sandbox Git credential binding generations", () => {
     expect(revoked.every((binding) => binding.status === "rebind_required")).toBe(true);
   });
 
+  test("a stale controller cannot deactivate or mutate a rebound generation", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const original = await upsertSandboxGitCredentialBinding(db, {
+      ...scope,
+      provider: "github",
+      source: "observed_checkout",
+      repositoryRefs: [githubRef(1)],
+    });
+    const rebound = await upsertSandboxGitCredentialBinding(db, {
+      ...scope,
+      provider: "github",
+      source: "observed_checkout",
+      repositoryRefs: [githubRef(2)],
+    });
+    let invalidations = 0;
+    const stale = await markSandboxGitCredentialBindingsStatus(db, {
+      ...scope,
+      providers: ["github"],
+      status: "unavailable",
+      reasonCode: "token_install_failed",
+      expectedGenerations: { github: original.generation },
+      mutateSandbox: async () => {
+        invalidations += 1;
+      },
+    });
+    expect(stale).toEqual([]);
+    expect(invalidations).toBe(0);
+    expect(await listSandboxGitCredentialBindings(db, scope.workspaceId, scope.sessionId)).toEqual([
+      rebound,
+    ]);
+  });
+
+  test("one stale provider fences an entire multi-provider controller invalidation", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const github = await upsertSandboxGitCredentialBinding(db, {
+      ...scope,
+      provider: "github",
+      source: "observed_checkout",
+      repositoryRefs: [githubRef(1)],
+    });
+    const gitlab = await upsertSandboxGitCredentialBinding(db, {
+      ...scope,
+      provider: "gitlab",
+      source: "observed_checkout",
+      repositoryRefs: [gitlabRef(1)],
+    });
+    const reboundGitlab = await upsertSandboxGitCredentialBinding(db, {
+      ...scope,
+      provider: "gitlab",
+      source: "observed_checkout",
+      repositoryRefs: [gitlabRef(2)],
+    });
+    let invalidations = 0;
+    expect(
+      await markSandboxGitCredentialBindingsStatus(db, {
+        ...scope,
+        providers: ["github", "gitlab"],
+        status: "unavailable",
+        reasonCode: "token_install_failed",
+        expectedGenerations: {
+          github: github.generation,
+          gitlab: gitlab.generation,
+        },
+        mutateSandbox: async () => {
+          invalidations += 1;
+        },
+      }),
+    ).toEqual([]);
+    expect(invalidations).toBe(0);
+    expect(await listSandboxGitCredentialBindings(db, scope.workspaceId, scope.sessionId)).toEqual([
+      github,
+      reboundGitlab,
+    ]);
+  });
+
+  test("the generation fence rejects expected-provider keys outside the locked set", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const github = await upsertSandboxGitCredentialBinding(db, {
+      ...scope,
+      provider: "github",
+      source: "observed_checkout",
+      repositoryRefs: [githubRef(1)],
+    });
+    let invalidations = 0;
+    expect(
+      await markSandboxGitCredentialBindingsStatus(db, {
+        ...scope,
+        providers: ["github"],
+        status: "unavailable",
+        reasonCode: "token_install_failed",
+        expectedGenerations: { github: github.generation, gitlab: 1 },
+        mutateSandbox: async () => {
+          invalidations += 1;
+        },
+      }),
+    ).toEqual([]);
+    expect(invalidations).toBe(0);
+    expect(await listSandboxGitCredentialBindings(db, scope.workspaceId, scope.sessionId)).toEqual([
+      github,
+    ]);
+  });
+
   test("FORCE RLS hides another workspace's binding", async () => {
     if (!available) return;
     const a = await fixture();

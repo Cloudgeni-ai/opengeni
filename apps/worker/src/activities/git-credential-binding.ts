@@ -33,8 +33,36 @@ import {
   type MintedRunGitCredentials,
 } from "./environment";
 import type { ResourceRef } from "@opengeni/contracts";
+import {
+  assertExplicitCredentialRepositoryRef,
+  repositoryIdentityForCredentialRef,
+} from "./git-credential-identity";
+
+export {
+  assertCredentialRepositoryRefSecretFree,
+  repositoryIdentityForCredentialRef,
+} from "./git-credential-identity";
 
 type FailureStatus = "not_found" | "ambiguous" | "unavailable" | "revoked";
+
+export type GitCredentialLifecycleErrorCode =
+  | "authorization_unproven"
+  | "binding_resolution_failed"
+  | "binding_fence_rejected"
+  | "token_mint_failed"
+  | "token_install_failed"
+  | "token_refresh_failed"
+  | "token_invalidation_failed"
+  | "token_cleanup_failed";
+
+/** Fixed, secret-safe controller failure surfaced across worker/runtime seams. */
+export class GitCredentialLifecycleError extends Error {
+  override readonly name = "GitCredentialLifecycleError";
+
+  constructor(readonly code: GitCredentialLifecycleErrorCode) {
+    super(`Git credential lifecycle failed (${code})`);
+  }
+}
 
 export type ResolvedGitCredentialBinding = {
   status: "bound";
@@ -79,116 +107,6 @@ export type ResolveGitCredentialBindingOptions = {
     ) => Promise<Awaited<ReturnType<SandboxChannelAService["detectGitRepositoryIdentities"]>>>;
   };
 };
-
-/**
- * Normalize one already-token-free ref to the same identity Channel A emits.
- * Credential-bearing URLs are rejected rather than sanitized here: only the
- * in-box discovery command may see raw remotes, while catalog/host refs must be
- * safe before they cross the worker/DB boundary.
- */
-export function repositoryIdentityForCredentialRef(
-  value: GitCredentialRepositoryRef,
-): ObservedGitRepositoryIdentity {
-  const ref = assertCredentialRepositoryRefSecretFree(value);
-  if (!ref.provider) throw new Error("rebound repository ref omitted provider");
-  let host = "";
-  let path = "";
-  const scp = /^([^/:@]+)@([^/:]+):(.+)$/.exec(ref.uri);
-  if (scp) {
-    if (scp[1] !== "git") throw new Error("rebound repository ref contains unsupported userinfo");
-    host = scp[2]!;
-    path = scp[3]!;
-  } else {
-    let url: URL;
-    try {
-      url = new URL(ref.uri);
-    } catch {
-      throw new Error("rebound repository ref is not a supported absolute Git URL");
-    }
-    if (url.password || url.search || url.hash) {
-      throw new Error("rebound repository ref contains credential-bearing URL components");
-    }
-    if (url.username && !(url.protocol === "ssh:" && url.username === "git")) {
-      throw new Error("rebound repository ref contains credential-bearing URL components");
-    }
-    if (!["https:", "http:", "ssh:"].includes(url.protocol)) {
-      throw new Error("rebound repository ref uses an unsupported URL protocol");
-    }
-    host = url.hostname;
-    path = url.pathname;
-  }
-  host = host.toLowerCase();
-  path = path.replace(/^\/+/, "").replace(/\.git$/i, "");
-  if (!host || !path || !/^[A-Za-z0-9._~%+@/-]+$/.test(path) || path.includes("..")) {
-    throw new Error("rebound repository ref has an invalid repository identity");
-  }
-  let provider: GitCredentialProvider;
-  let canonical: string;
-  if (host === "github.com") {
-    provider = "github";
-    canonical = `github.com/${path}`;
-  } else if (host.includes("gitlab")) {
-    provider = "gitlab";
-    canonical = `${host}/${path}`;
-  } else if (host === "ssh.dev.azure.com") {
-    const match = /^v3\/([^/]+)\/([^/]+)\/(.+)$/.exec(path);
-    if (!match) throw new Error("rebound Azure DevOps SSH ref has an invalid identity");
-    provider = "azure_devops";
-    canonical = `dev.azure.com/${match[1]}/${match[2]}/_git/${match[3]}`;
-  } else if (host === "dev.azure.com") {
-    if (!/^[^/]+\/[^/]+\/_git\/.+$/.test(path)) {
-      throw new Error("rebound Azure DevOps ref has an invalid identity");
-    }
-    provider = "azure_devops";
-    canonical = `dev.azure.com/${path}`;
-  } else if (host.endsWith(".visualstudio.com")) {
-    const org = host.slice(0, -".visualstudio.com".length);
-    const match = /^([^/]+)\/_git\/(.+)$/.exec(path);
-    if (!match) throw new Error("rebound Azure DevOps ref has an invalid identity");
-    provider = "azure_devops";
-    canonical = `dev.azure.com/${org}/${match[1]}/_git/${match[2]}`;
-  } else {
-    throw new Error("rebound repository ref uses an unsupported Git host");
-  }
-  if (provider !== ref.provider) throw new Error("rebound repository provider does not match URI");
-  return { provider, canonical };
-}
-
-/** Validate catalog/explicit refs without constraining custom provider hosts. */
-export function assertCredentialRepositoryRefSecretFree(
-  value: GitCredentialRepositoryRef,
-): GitCredentialRepositoryRef {
-  const ref = GitCredentialRepositoryRefContract.parse(value);
-  const scp = /^([^/:@]+)@([^/:]+):(.+)$/.exec(ref.uri);
-  if (scp) {
-    if (scp[1] !== "git" || !scp[2] || !scp[3] || /[\s?#]/.test(scp[2]) || /[\s?#]/.test(scp[3])) {
-      throw new Error("repository credential ref contains unsupported SCP-style components");
-    }
-    return ref;
-  }
-  let url: URL;
-  try {
-    url = new URL(ref.uri);
-  } catch {
-    throw new Error("repository credential ref is not a supported absolute Git URL");
-  }
-  if (
-    !["https:", "http:", "ssh:"].includes(url.protocol) ||
-    !url.hostname ||
-    !url.pathname.replace(/^\/+/, "")
-  ) {
-    throw new Error("repository credential ref is not a supported absolute Git URL");
-  }
-  if (
-    url.password ||
-    url.search ||
-    url.hash ||
-    (url.username && !(url.protocol === "ssh:" && url.username === "git"))
-  ) {
-    throw new Error("repository credential ref contains credential-bearing URL components");
-  }
-  return ref;
-}
 
 function withLegacyInvalidationProviders(
   resolution: UnresolvedGitCredentialBinding,
@@ -344,9 +262,21 @@ async function deactivateBindings(
   status: Exclude<SandboxGitCredentialBindingStatus, "active">,
   reasonCode: string,
 ): Promise<void> {
-  const existing = new Set(bindings.map((binding) => binding.provider));
-  const selected = [...new Set(providers)].filter((provider) => existing.has(provider)).sort();
+  // Only the active rows in the exact snapshot this resolver inspected may be
+  // deactivated. A concurrent resolver/rebinder that advances one generation
+  // owns the replacement and must not have its token removed by this stale
+  // controller.
+  const active = new Map(
+    bindings
+      .filter((binding) => binding.status === "active")
+      .map((binding) => [binding.provider, binding] as const),
+  );
+  const selected = [...new Set(providers)].filter((provider) => active.has(provider)).sort();
   if (selected.length === 0) return;
+  const expectedGenerations: Partial<Record<GitCredentialProvider, number>> = {};
+  for (const provider of selected) {
+    expectedGenerations[provider] = active.get(provider)!.generation;
+  }
   const markBindingsStatus =
     options.operations?.markBindingsStatus ?? markSandboxGitCredentialBindingsStatus;
   await markBindingsStatus(options.db, {
@@ -354,6 +284,7 @@ async function deactivateBindings(
     providers: selected,
     status,
     reasonCode,
+    expectedGenerations,
     mutateSandbox: async () => {
       await invalidateGitProviderTokenFiles(options.session, selected, {
         ...(options.runAs ? { runAs: options.runAs } : {}),
@@ -428,7 +359,7 @@ export async function resolveGitCredentialBindingForSession(
   if (explicitRefs.length > 0) {
     // Resource attachments were already authorized by the API. Persist only the
     // provider/catalog shape used by the existing mint path.
-    for (const ref of explicitRefs) assertCredentialRepositoryRefSecretFree(ref);
+    for (const ref of explicitRefs) assertExplicitCredentialRepositoryRef(ref);
     const resolution = await persistRefs(options, explicitRefs, "explicit_resource");
     const currentProviders = new Set(resolution.bindings.map((binding) => binding.provider));
     await deactivateBindings(
@@ -564,6 +495,22 @@ export async function mintResolvedGitCredentialBinding(
   });
 }
 
+/** Require one non-empty token for every provider authorized by the binding. */
+export function assertMintedGitCredentialBindingCoverage(
+  binding: ResolvedGitCredentialBinding,
+  minted: MintedRunGitCredentials | undefined,
+): MintedRunGitCredentials {
+  if (!minted) {
+    throw new GitCredentialLifecycleError("token_mint_failed");
+  }
+  for (const provider of Object.keys(binding.expectedGenerations) as GitCredentialProvider[]) {
+    if (!minted.gitTokens[provider]) {
+      throw new GitCredentialLifecycleError("token_mint_failed");
+    }
+  }
+  return minted;
+}
+
 export async function installResolvedGitCredentialBinding(
   db: Database,
   scope: ConnectionScope & { sessionId: string },
@@ -572,20 +519,25 @@ export async function installResolvedGitCredentialBinding(
   minted: MintedRunGitCredentials,
   options: { runAs?: string } = {},
 ): Promise<void> {
-  const result = await withActiveSandboxGitCredentialBindings(
-    db,
-    { ...scope, expectedGenerations: binding.expectedGenerations },
-    async () => {
-      await installGitCredentialHelpersAndTokens(
-        session,
-        binding.repositoryRefs,
-        minted.gitTokens,
-        options,
-      );
-    },
-  );
+  let result: Awaited<ReturnType<typeof withActiveSandboxGitCredentialBindings>>;
+  try {
+    result = await withActiveSandboxGitCredentialBindings(
+      db,
+      { ...scope, expectedGenerations: binding.expectedGenerations },
+      async () => {
+        await installGitCredentialHelpersAndTokens(
+          session,
+          binding.repositoryRefs,
+          minted.gitTokens,
+          options,
+        );
+      },
+    );
+  } catch {
+    throw new GitCredentialLifecycleError("token_install_failed");
+  }
   if (!result.applied) {
-    throw new Error(`Git credential binding became ${result.reason} before token installation`);
+    throw new GitCredentialLifecycleError("binding_fence_rejected");
   }
 }
 
@@ -597,15 +549,20 @@ export async function refreshResolvedGitCredentialBinding(
   minted: MintedRunGitCredentials,
   options: { runAs?: string } = {},
 ): Promise<void> {
-  const result = await withActiveSandboxGitCredentialBindings(
-    db,
-    { ...scope, expectedGenerations: binding.expectedGenerations },
-    async () => {
-      await refreshGitProviderTokenFiles(session, minted.gitTokens, options);
-    },
-  );
+  let result: Awaited<ReturnType<typeof withActiveSandboxGitCredentialBindings>>;
+  try {
+    result = await withActiveSandboxGitCredentialBindings(
+      db,
+      { ...scope, expectedGenerations: binding.expectedGenerations },
+      async () => {
+        await refreshGitProviderTokenFiles(session, minted.gitTokens, options);
+      },
+    );
+  } catch {
+    throw new GitCredentialLifecycleError("token_refresh_failed");
+  }
   if (!result.applied) {
-    throw new Error(`Git credential binding became ${result.reason} before token refresh`);
+    throw new GitCredentialLifecycleError("binding_fence_rejected");
   }
 }
 
@@ -617,17 +574,22 @@ export async function expireResolvedGitCredentialBinding(
   providers: readonly GitCredentialProvider[],
   options: { runAs?: string } = {},
 ): Promise<void> {
-  const result = await withActiveSandboxGitCredentialBindings(
-    db,
-    { ...scope, expectedGenerations: binding.expectedGenerations },
-    async () => {
-      await invalidateGitProviderTokenFiles(session, providers, options);
-    },
-  );
+  let result: Awaited<ReturnType<typeof withActiveSandboxGitCredentialBindings>>;
+  try {
+    result = await withActiveSandboxGitCredentialBindings(
+      db,
+      { ...scope, expectedGenerations: binding.expectedGenerations },
+      async () => {
+        await invalidateGitProviderTokenFiles(session, providers, options);
+      },
+    );
+  } catch {
+    throw new GitCredentialLifecycleError("token_invalidation_failed");
+  }
   // A stale/revoked binding must never authorize a file mutation. Its revoker
   // owns invalidation under the replacement generation/status lock.
   if (!result.applied && result.reason === "missing") {
-    throw new Error("Git credential binding disappeared before token expiry invalidation");
+    throw new GitCredentialLifecycleError("binding_fence_rejected");
   }
 }
 
@@ -643,15 +605,24 @@ export async function invalidateResolvedGitCredentialBinding(
   },
 ): Promise<void> {
   const providers = Object.keys(binding.expectedGenerations).sort() as GitCredentialProvider[];
-  await markSandboxGitCredentialBindingsStatus(db, {
-    ...scope,
-    providers,
-    status: input.status,
-    reasonCode: input.reasonCode,
-    mutateSandbox: async () => {
-      await invalidateGitProviderTokenFiles(session, providers, {
-        ...(input.runAs ? { runAs: input.runAs } : {}),
-      });
-    },
-  });
+  let rows: Awaited<ReturnType<typeof markSandboxGitCredentialBindingsStatus>>;
+  try {
+    rows = await markSandboxGitCredentialBindingsStatus(db, {
+      ...scope,
+      providers,
+      status: input.status,
+      reasonCode: input.reasonCode,
+      expectedGenerations: binding.expectedGenerations,
+      mutateSandbox: async () => {
+        await invalidateGitProviderTokenFiles(session, providers, {
+          ...(input.runAs ? { runAs: input.runAs } : {}),
+        });
+      },
+    });
+  } catch {
+    throw new GitCredentialLifecycleError("token_invalidation_failed");
+  }
+  if (rows.length !== providers.length) {
+    throw new GitCredentialLifecycleError("binding_fence_rejected");
+  }
 }

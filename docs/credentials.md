@@ -38,11 +38,22 @@ Rules that hold across the table:
   `GIT_ASKPASS` reads those files for git, and the `gh`, `glab`, and `az`
   wrappers read them at invocation time before setting child-process-only token
   env vars. Renewal atomically replaces the same files, so multi-day turns see
-  current credentials without model action or manifest mutation. A token file
-  is never authorization: resource-less/rematerialized managed boxes bind only
-  an in-box-sanitized repository identity to an exact workspace-authorized
-  catalog/host ref, and every final token-file write checks the binding's active
-  generation under a row lock. Revocation, an unprovable refresh, or exact token
+  current credentials without model action or manifest mutation. Setup on a
+  managed box is ordered as rig setup → deployment/rig credential hooks →
+  Toolspace token → Git binding/mint/install → repository clone. The Git step
+  receives the established real session, so lazy materialization resumes the
+  box before discovery or mint and credentials are installed before clone. A
+  token file is never authorization: explicit GitHub metadata must identify a
+  standard HTTPS or SSH `github.com` endpoint, while a
+  resource-less/rematerialized box requires every
+  discovered repository root to produce one sanitized supported origin and
+  binds the complete set to exact workspace-authorized catalog/host refs. Every
+  install, refresh, expiry unlink, and controller deactivation checks the full
+  active binding-generation set under row locks; one concurrent rebind fences
+  the whole stale mutation. Multi-provider token bundles must be complete.
+  Failed install/refresh scripts remove every selected final and PID-temporary
+  token file, and lifecycle failures surface fixed typed codes rather than raw
+  provider/sandbox errors. Revocation, an unprovable refresh, or exact token
   expiry unlinks the provider file. Missing token files are clean passthroughs.
 - **The perimeter is not identity.** The deployment access key gates who can
   talk to a deployment at all; workspace identity and permissions always come

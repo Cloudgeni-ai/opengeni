@@ -6,5 +6,6 @@
 ---
 
 Recover authorized Git credentials for resource-less and rematerialized managed sandboxes from
-secret-free repository identities, fence every token-file mutation against durable binding
-generations, and keep Connected Machines on their own Git authorization path.
+complete secret-free repository identities, install them on the established box before clone,
+fail partial token mutation cleanly, and fence every controller action against the full durable
+binding-generation set while keeping Connected Machines on their own Git authorization path.

@@ -157,7 +157,6 @@ import { maybeCompactContext } from "./context-compaction";
 import { TurnAttemptFencedError } from "./turn-attempt-fenced";
 import {
   loadWorkspaceEnvironmentForRunWithCredentials,
-  mintRunGitCredentials,
   sandboxEnvironmentForRun,
   type MintedRunGitCredentials,
 } from "./environment";
@@ -166,7 +165,9 @@ import {
   type GitCredentialRenewalController,
 } from "./git-credential-renewal";
 import {
+  assertMintedGitCredentialBindingCoverage,
   expireResolvedGitCredentialBinding,
+  GitCredentialLifecycleError,
   installResolvedGitCredentialBinding,
   invalidateResolvedGitCredentialBinding,
   mintResolvedGitCredentialBinding,
@@ -3137,31 +3138,38 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         if (gitCredentialRenewalClosed) return;
 
         const bindingScope = { ...connectionScope, sessionId: input.sessionId };
-        const resolution = await resolveGitCredentialBindingForSession({
-          db,
-          settings: runSettings,
-          scope: bindingScope,
-          session: tokenSession,
-          resources: turnResources,
-          ...(connectionCredentials ? { connectionCredentials } : {}),
-          ...(runAs ? { runAs } : {}),
-        });
+        let resolution: Awaited<ReturnType<typeof resolveGitCredentialBindingForSession>>;
+        try {
+          resolution = await resolveGitCredentialBindingForSession({
+            db,
+            settings: runSettings,
+            scope: bindingScope,
+            session: tokenSession,
+            resources: turnResources,
+            ...(connectionCredentials ? { connectionCredentials } : {}),
+            ...(runAs ? { runAs } : {}),
+          });
+        } catch {
+          throw new GitCredentialLifecycleError("binding_resolution_failed");
+        }
         if (resolution.status !== "bound") {
           // No checkout means there is nothing to authorize and no token file to
           // manage. Any observed/indeterminate checkout fails closed instead of
           // leaving a stale platform token that later surfaces as an unexplained
           // provider 401.
           if ((resolution.legacyInvalidationProviders?.length ?? 0) > 0) {
-            await invalidateGitProviderTokenFiles(
-              tokenSession,
-              resolution.legacyInvalidationProviders!,
-              runAs ? { runAs } : {},
-            );
+            try {
+              await invalidateGitProviderTokenFiles(
+                tokenSession,
+                resolution.legacyInvalidationProviders!,
+                runAs ? { runAs } : {},
+              );
+            } catch {
+              throw new GitCredentialLifecycleError("token_cleanup_failed");
+            }
           }
           if (resolution.reasonCode === "no_repository_observed") return;
-          throw new Error(
-            `Git credential authorization could not be proven (${resolution.reasonCode})`,
-          );
+          throw new GitCredentialLifecycleError("authorization_unproven");
         }
         const binding: ResolvedGitCredentialBinding = resolution;
         const invalidateBinding = async (reasonCode: string): Promise<void> => {
@@ -3173,23 +3181,33 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         };
         const mintBinding = async (
           terminalOnFailure: boolean,
+          prepared?: MintedRunGitCredentials,
         ): Promise<MintedRunGitCredentials> => {
           try {
-            const minted = await mintResolvedGitCredentialBinding(
-              runSettings,
-              connectionScope,
+            const minted = assertMintedGitCredentialBindingCoverage(
               binding,
-              connectionCredentials?.gitCredentials,
+              prepared ??
+                (await mintResolvedGitCredentialBinding(
+                  runSettings,
+                  connectionScope,
+                  binding,
+                  connectionCredentials?.gitCredentials,
+                )),
             );
-            if (!minted || Object.keys(minted.gitTokens).length === 0) {
-              throw new Error("Git credential provider returned no token bundle");
-            }
             return minted;
-          } catch (error) {
+          } catch {
+            let cleanupFailed = false;
             if (terminalOnFailure) {
               // Initial setup cannot proceed without a currently proven token.
               // Mark the binding unavailable so the next turn rediscovers it.
-              await invalidateBinding("token_mint_failed").catch(() => undefined);
+              await invalidateBinding("token_mint_failed").catch((error) => {
+                if (
+                  !(error instanceof GitCredentialLifecycleError) ||
+                  error.code !== "binding_fence_rejected"
+                ) {
+                  cleanupFailed = true;
+                }
+              });
             } else {
               // A running turn may recover from a transient broker outage. Keep
               // the authorization binding active for retries, but immediately
@@ -3202,21 +3220,50 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 binding,
                 Object.keys(binding.expectedGenerations) as GitCredentialProvider[],
                 { ...(runAs ? { runAs } : {}) },
-              ).catch(() => undefined);
+              ).catch((error) => {
+                if (
+                  !(error instanceof GitCredentialLifecycleError) ||
+                  error.code !== "binding_fence_rejected"
+                ) {
+                  cleanupFailed = true;
+                }
+              });
             }
-            throw error;
+            throw new GitCredentialLifecycleError(
+              cleanupFailed ? "token_cleanup_failed" : "token_mint_failed",
+            );
           }
         };
 
-        const prepared = initial ?? (await mintBinding(true));
-        await installResolvedGitCredentialBinding(
-          db,
-          bindingScope,
-          tokenSession,
-          binding,
-          prepared,
-          { ...(runAs ? { runAs } : {}) },
-        );
+        const prepared = await mintBinding(true, initial);
+        try {
+          await installResolvedGitCredentialBinding(
+            db,
+            bindingScope,
+            tokenSession,
+            binding,
+            prepared,
+            { ...(runAs ? { runAs } : {}) },
+          );
+        } catch (error) {
+          if (
+            error instanceof GitCredentialLifecycleError &&
+            error.code === "binding_fence_rejected"
+          ) {
+            throw error;
+          }
+          try {
+            await invalidateBinding("token_install_failed");
+          } catch (cleanupError) {
+            if (
+              !(cleanupError instanceof GitCredentialLifecycleError) ||
+              cleanupError.code !== "binding_fence_rejected"
+            ) {
+              throw new GitCredentialLifecycleError("token_cleanup_failed");
+            }
+          }
+          throw new GitCredentialLifecycleError("token_install_failed");
+        }
         if (gitCredentialRenewalClosed) return;
 
         const providers = Object.keys(binding.expectedGenerations) as GitCredentialProvider[];
@@ -3684,13 +3731,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         turnSandboxProvisioner = createTurnSandboxProvisioner<ResumedTurnSandbox>(
           async () => {
             throwIfWorkerShuttingDown();
-            const lazyGitCredentials = !platformManagesGitCredentialsForTurn(activeSandboxBackend)
-              ? undefined
-              : await mintRunGitCredentials(runSettings, turnResources, {
-                  scope: connectionScope,
-                  gitCredentials: connectionCredentials?.gitCredentials,
-                });
-            const lazyGitTokens = lazyGitCredentials?.gitTokens;
             const provisioned = await resumeBoxForTurn(
               {
                 db,
@@ -3728,12 +3768,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 onRuntimeEvent: async (event) => {
                   await publish?.([{ type: event.type, payload: event.payload }], true);
                 },
-                ...(lazyGitTokens ? { gitTokenSeedsOverride: lazyGitTokens } : {}),
+                ...(platformManagesGitCredentialsForTurn(activeSandboxBackend)
+                  ? {
+                      onGitCredentialSessionReady: async (tokenSession) => {
+                        await attachGitCredentialRenewal(tokenSession, undefined);
+                      },
+                    }
+                  : {}),
               },
-            );
-            await attachGitCredentialRenewal(
-              provisioned.established.session as GitCredentialTokenWriterSession,
-              lazyGitCredentials,
             );
             // Return the REAL established box (NOT a copy whose session is the routing
             // proxy). resolveActiveBackend dispatches ops to `provisioned.established.session`;

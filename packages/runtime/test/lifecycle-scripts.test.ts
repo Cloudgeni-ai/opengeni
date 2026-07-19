@@ -201,6 +201,94 @@ describe("lifecycle scripts — real sh execution semantics", () => {
     }
   });
 
+  test("helper install failure removes selected token files and every PID temp without leaking", () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-git-install-failure-"));
+    try {
+      const home = join(root, "home");
+      mkdirSync(home, { recursive: true });
+      const blocked = join(home, "blocked-wrapper-parent");
+      writeFileSync(blocked, "not-a-directory");
+      const secret = "install-secret-must-not-leak";
+      const run = runScript(
+        gitCredentialHelperInstallCommand(
+          [
+            {
+              provider: "github",
+              uri: "https://github.com/acme/private.git",
+              ref: "main",
+              repositoryId: 456,
+              installationId: 123,
+            },
+          ],
+          { github: secret },
+        ),
+        { HOME: home, OPENGENI_GIT_CLI_WRAPPER_DIR: join(blocked, "children") },
+      );
+      expect(run.status).not.toBe(0);
+      expect(run.output).not.toContain(secret);
+      expect(existsSync(join(home, ".opengeni", "git-token"))).toBe(false);
+      expect(existsSync(join(home, ".opengeni", "git-credentials", "github-token"))).toBe(false);
+      expect(
+        readdirSync(home, { recursive: true })
+          .map(String)
+          .filter((path) => path.includes(".tmp.")),
+      ).toEqual([]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("refresh failure removes a partially replaced token and its temp without leaking", () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-git-refresh-failure-"));
+    try {
+      const home = join(root, "home");
+      mkdirSync(join(home, ".opengeni"), { recursive: true });
+      const blocked = join(home, "blocked-credential-dir");
+      writeFileSync(blocked, "not-a-directory");
+      const secret = "refresh-secret-must-not-leak";
+      const run = runScript(gitProviderTokenRefreshCommand({ github: secret }), {
+        HOME: home,
+        OPENGENI_GIT_CREDENTIALS_DIR: blocked,
+      });
+      expect(run.status).not.toBe(0);
+      expect(run.output).not.toContain(secret);
+      expect(existsSync(join(home, ".opengeni", "git-token"))).toBe(false);
+      expect(
+        readdirSync(home, { recursive: true })
+          .map(String)
+          .filter((path) => path.includes(".tmp.")),
+      ).toEqual([]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("invalidation attempts every selected provider after one unlink fails", () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-git-invalidation-failure-"));
+    try {
+      const home = join(root, "home");
+      const credentialsDir = join(home, ".opengeni", "git-credentials");
+      const blockedGitHubFile = join(home, "blocked-github-token");
+      mkdirSync(credentialsDir, { recursive: true });
+      mkdirSync(blockedGitHubFile);
+      writeFileSync(join(credentialsDir, "github-token"), "github-secret");
+      writeFileSync(join(credentialsDir, "gitlab-token"), "gitlab-secret");
+      const run = runScript(gitProviderTokenInvalidationCommand(["github", "gitlab"]), {
+        HOME: home,
+        OPENGENI_GIT_TOKEN_FILE: blockedGitHubFile,
+        OPENGENI_GIT_CREDENTIALS_DIR: credentialsDir,
+      });
+      expect(run.status).not.toBe(0);
+      expect(run.output).not.toContain("github-secret");
+      expect(run.output).not.toContain("gitlab-secret");
+      expect(existsSync(blockedGitHubFile)).toBe(true);
+      expect(existsSync(join(credentialsDir, "github-token"))).toBe(false);
+      expect(existsSync(join(credentialsDir, "gitlab-token"))).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test("resource-less helper bootstrap installs Git fallback and invalidation unlinks only selected providers", () => {
     const root = mkdtempSync(join(tmpdir(), "opengeni-git-bootstrap-"));
     try {
