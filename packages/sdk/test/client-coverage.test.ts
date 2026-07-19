@@ -287,9 +287,7 @@ describe("OpenGeniClient access + workspaces", () => {
     const result = await client.getWorkspaceModelCatalog(WORKSPACE_ID);
     expect(requests).toHaveLength(1);
     expect(requests[0]!.method).toBe("GET");
-    expect(new URL(requests[0]!.url).pathname).toBe(
-      `/v1/workspaces/${WORKSPACE_ID}/model-catalog`,
-    );
+    expect(new URL(requests[0]!.url).pathname).toBe(`/v1/workspaces/${WORKSPACE_ID}/model-catalog`);
     expect(result.models[0]?.availability.selectable).toBe(true);
   });
 });

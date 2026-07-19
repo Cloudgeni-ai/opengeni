@@ -673,8 +673,7 @@ export async function postUserMessageTurn(input: {
           tools: input.tools,
           model: requestedModel,
           reasoningEffort: requestedReasoningEffort,
-          reasoningEffortFallback:
-            input.reasoningEffortFallback ?? settings.openaiReasoningEffort,
+          reasoningEffortFallback: input.reasoningEffortFallback ?? settings.openaiReasoningEffort,
           turnExecutionPolicy: input.turnExecutionPolicy,
           source: input.origin === "operator" ? "api" : "user",
           mcpCredentialUpdates: input.mcpCredentialUpdates ?? [],
@@ -837,12 +836,7 @@ export async function createSessionForRequest(
   // stamps the deployment default onto the session — so the policy must vet
   // that effective value, not just explicit ones (a restricted workspace's
   // default-model session would otherwise be born blocked).
-  await assertWorkspaceModelPolicyAllows(
-    db,
-    settings,
-    workspaceId,
-    model,
-  );
+  await assertWorkspaceModelPolicyAllows(db, settings, workspaceId, model);
   const reasoningEffort = payload.reasoningEffort ?? settings.openaiReasoningEffort;
   const turnExecutionPolicy = resolveTurnExecutionPolicyV1(settings, {
     modelId: model,

@@ -569,11 +569,7 @@ export function resolveTurnModel(
   return {
     provider: resolved.provider,
     client,
-    model: buildModelInstance(
-      resolved.provider,
-      client,
-      resolved.model.upstreamModelId,
-    ),
+    model: buildModelInstance(resolved.provider, client, resolved.model.upstreamModelId),
     configured: resolved.model,
   };
 }

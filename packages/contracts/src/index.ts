@@ -5088,8 +5088,7 @@ export const ModelBillingAttributionV1 = z.object({
 });
 export type ModelBillingAttributionV1 = z.infer<typeof ModelBillingAttributionV1>;
 
-export const TURN_EXECUTION_POLICY_METADATA_KEY =
-  "turnExecutionPolicyV1" as const;
+export const TURN_EXECUTION_POLICY_METADATA_KEY = "turnExecutionPolicyV1" as const;
 
 export const TurnExecutionModelSourceV1 = z.enum([
   "explicit",
@@ -5097,9 +5096,7 @@ export const TurnExecutionModelSourceV1 = z.enum([
   "deployment",
   "continuation",
 ]);
-export type TurnExecutionModelSourceV1 = z.infer<
-  typeof TurnExecutionModelSourceV1
->;
+export type TurnExecutionModelSourceV1 = z.infer<typeof TurnExecutionModelSourceV1>;
 
 export const TurnExecutionReasoningSourceV1 = z.enum([
   "explicit",
@@ -5107,9 +5104,7 @@ export const TurnExecutionReasoningSourceV1 = z.enum([
   "deployment",
   "continuation",
 ]);
-export type TurnExecutionReasoningSourceV1 = z.infer<
-  typeof TurnExecutionReasoningSourceV1
->;
+export type TurnExecutionReasoningSourceV1 = z.infer<typeof TurnExecutionReasoningSourceV1>;
 
 /**
  * Secret-safe execution identity frozen onto one accepted logical turn.
@@ -5147,15 +5142,15 @@ export const TurnExecutionPolicyV1 = z
       context.addIssue({
         code: "custom",
         path: ["requestedModelId"],
-        message:
-          "only an explicit model source may retain a requested model id",
+        message: "only an explicit model source may retain a requested model id",
       });
     }
   });
 export type TurnExecutionPolicyV1 = z.infer<typeof TurnExecutionPolicyV1>;
 
 export type TurnExecutionPolicyReadV1 =
-  { kind: "absent" } | { kind: "valid"; policy: TurnExecutionPolicyV1 };
+  | { kind: "absent" }
+  | { kind: "valid"; policy: TurnExecutionPolicyV1 };
 
 /**
  * Read the policy from turn metadata. Only a literally absent key is legacy;
@@ -5163,29 +5158,18 @@ export type TurnExecutionPolicyReadV1 =
  * malformed present value fail closed. Error text reports paths only and never
  * reflects the untrusted value into logs or events.
  */
-export function readTurnExecutionPolicyV1(
-  metadata: unknown,
-): TurnExecutionPolicyReadV1 {
+export function readTurnExecutionPolicyV1(metadata: unknown): TurnExecutionPolicyReadV1 {
   if (metadata === null || metadata === undefined) {
     return { kind: "absent" };
   }
   if (typeof metadata !== "object" || Array.isArray(metadata)) {
-    throw new Error(
-      "Malformed turn execution policy metadata: turn metadata is not an object",
-    );
+    throw new Error("Malformed turn execution policy metadata: turn metadata is not an object");
   }
   const record = metadata as Record<string, unknown>;
-  if (
-    !Object.prototype.hasOwnProperty.call(
-      record,
-      TURN_EXECUTION_POLICY_METADATA_KEY,
-    )
-  ) {
+  if (!Object.prototype.hasOwnProperty.call(record, TURN_EXECUTION_POLICY_METADATA_KEY)) {
     return { kind: "absent" };
   }
-  const parsed = TurnExecutionPolicyV1.safeParse(
-    record[TURN_EXECUTION_POLICY_METADATA_KEY],
-  );
+  const parsed = TurnExecutionPolicyV1.safeParse(record[TURN_EXECUTION_POLICY_METADATA_KEY]);
   if (!parsed.success) {
     const paths = [
       ...new Set(
@@ -5194,9 +5178,7 @@ export function readTurnExecutionPolicyV1(
         ),
       ),
     ].join(", ");
-    throw new Error(
-      `Malformed turn execution policy metadata at ${paths || "policy"}`,
-    );
+    throw new Error(`Malformed turn execution policy metadata at ${paths || "policy"}`);
   }
   return { kind: "valid", policy: parsed.data };
 }
@@ -5291,7 +5273,10 @@ export const ClientModel = z.object({
   billing: ModelBillingAttributionV1.optional(),
   capabilities: ModelCapabilitiesV1.optional(),
   pricing: ModelPricingScheduleV1.optional(),
-  definitionVersion: z.string().regex(/^sha256:[a-f0-9]{64}$/u).optional(),
+  definitionVersion: z
+    .string()
+    .regex(/^sha256:[a-f0-9]{64}$/u)
+    .optional(),
 });
 export type ClientModel = z.infer<typeof ClientModel>;
 

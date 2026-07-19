@@ -285,10 +285,7 @@ export function createApp(deps: AppDependencies): Hono {
         deploymentRevision: deps.settings.deploymentRevision,
         apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
         ...(deps.settings.serverVersion ? { serverVersion: deps.settings.serverVersion } : {}),
-        defaultModel: canonicalizeConfiguredModelId(
-          deps.settings,
-          deps.settings.openaiModel,
-        ),
+        defaultModel: canonicalizeConfiguredModelId(deps.settings, deps.settings.openaiModel),
         allowedModels: configuredAllowedModels(deps.settings),
         // Provider-grouped model list for the picker. configuredModels() carries the
         // union of the built-in allow-list and every registry provider's models, in
