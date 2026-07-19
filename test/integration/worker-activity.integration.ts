@@ -1373,6 +1373,9 @@ describe("worker activities integration", () => {
           kind: "repository",
           uri: "https://github.com/Futhark-AS/aifilesearch.git",
           ref: "main",
+          provider: "github",
+          githubInstallationId: 123,
+          githubRepositoryId: 456,
         },
       ],
       metadata: {},
@@ -1387,6 +1390,12 @@ describe("worker activities integration", () => {
       settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl }),
       db: dbClient.db,
       bus,
+      connectionCredentials: {
+        gitCredentials: async (input) => ({
+          token: "installation-token",
+          workspaceId: input.workspaceId,
+        }),
+      },
       runtime: createProductionAgentRuntime({
         model: new ScriptedModel([{ outputText: "ok", chunks: ["ok"] }]),
         sandboxClient: {
@@ -1413,14 +1422,17 @@ describe("worker activities integration", () => {
     });
 
     expect(result.status).toBe("failed");
-    expect(sandboxExecCalls).toHaveLength(1);
-    expect(String(sandboxExecCalls[0]?.cmd)).toContain(
+    const cloneExecCalls = sandboxExecCalls.filter((call) =>
+      String(call.cmd).includes("clone_repository"),
+    );
+    expect(cloneExecCalls).toHaveLength(1);
+    expect(String(cloneExecCalls[0]?.cmd)).toContain(
       "clone_repository '/workspace/repos/Futhark-AS/aifilesearch'",
     );
-    expect(String(sandboxExecCalls[0]?.cmd)).toContain(
+    expect(String(cloneExecCalls[0]?.cmd)).toContain(
       'git -C "$tmp" fetch --depth 1 --no-tags --filter=blob:none origin "$ref"',
     );
-    expect(String(sandboxExecCalls[0]?.cmd)).toContain("x-access-token");
+    expect(String(cloneExecCalls[0]?.cmd)).toContain("x-access-token");
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
     expect(events.some((event) => event.type === "sandbox.operation.started")).toBe(true);
     expect(events.some((event) => event.type === "sandbox.operation.completed")).toBe(true);

@@ -225,6 +225,11 @@ describe("Temporal workflow integration", () => {
       let started = false;
       const failures: Array<{ changeId: string; attempt: number; reason: string }> = [];
       const worker = await testWorker(nativeConnection, taskQueue, {
+        // testWorker normally hosts both the control and turn queues. This
+        // rig-only workflow never dispatches a turn, but the helper keeps the
+        // turn activity explicit so session-workflow tests fail fast when they
+        // accidentally omit it.
+        runAgentTurn: async () => ({ status: "idle" }),
         verifyRigChange: async () => {
           started = true;
           await new Promise<void>((resolve) => {
