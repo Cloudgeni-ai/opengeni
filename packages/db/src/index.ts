@@ -39,6 +39,9 @@ import type {
   Session,
   SessionListResponse,
   SessionEvent,
+  SessionEventPayloadMode,
+  SessionEventReadDirection,
+  SessionEventSemanticClass,
   SessionEventType,
   SessionGoal,
   SessionGoalCreatedBy,
@@ -81,6 +84,7 @@ import {
   SESSION_EVENT_DUPLICATE_REASON_MAX_BYTES,
   SESSION_EVENT_ENVELOPE_MAX_BYTES,
   SESSION_EVENT_TYPE_MAX_BYTES,
+  resolveSessionEventTypeFilters,
   reasoningEffortForMetadata,
   resolveWorkspaceMemoryEnabled,
   RigChange as RigChangeContract,
@@ -104,6 +108,7 @@ import {
   isNull,
   lt,
   ne,
+  notInArray,
   or,
   sql,
   type SQL,
@@ -11978,6 +11983,13 @@ export type ListSessionEventsOptions = {
   after?: number;
   before?: number;
   limit?: number;
+  direction?: SessionEventReadDirection;
+  includeTypes?: readonly SessionEventType[];
+  excludeTypes?: readonly SessionEventType[];
+  includeClasses?: readonly SessionEventSemanticClass[];
+  excludeClasses?: readonly SessionEventSemanticClass[];
+  defaultExcludeTypes?: readonly SessionEventType[];
+  payloadMode?: SessionEventPayloadMode;
 };
 
 export type ListSessionEventPageOptions = ListSessionEventsOptions & {
@@ -11991,6 +12003,11 @@ export type SessionEventPage = {
   events: SessionEvent[];
   hasMore: boolean;
   bytes: number;
+  direction: SessionEventReadDirection;
+  coveredSequence: { first: number; last: number } | null;
+  nextAfter: number | null;
+  nextBefore: number | null;
+  truncatedBy: "count" | "bytes" | null;
 };
 
 const POSTGRES_INT_MAX = 2_147_483_647;
@@ -12036,6 +12053,15 @@ export async function listSessionEventPage(
   const requestedLimit = Math.max(1, normalizeEventLimit(options.limit, 500));
   const hasBefore = options.before !== undefined && Number.isFinite(options.before);
   const before = hasBefore ? Math.floor(options.before as number) : undefined;
+  const direction = options.direction ?? (hasBefore ? "before" : "after");
+  const payloadMode = options.payloadMode ?? "full";
+  const typeFilters = resolveSessionEventTypeFilters({
+    includeTypes: options.includeTypes,
+    excludeTypes: options.excludeTypes,
+    includeClasses: options.includeClasses,
+    excludeClasses: options.excludeClasses,
+    defaultExcludeTypes: options.defaultExcludeTypes,
+  });
   const maxBytes = Math.max(
     SESSION_EVENT_ENVELOPE_MAX_BYTES + 2,
     normalizeEventLimit(options.maxBytes, SESSION_EVENT_DB_PAGE_MAX_BYTES),
@@ -12048,8 +12074,9 @@ export async function listSessionEventPage(
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const events: SessionEvent[] = [];
     let bytes = 2; // []
-    let cursor = hasBefore ? before : after;
+    let cursor = direction === "before" ? before : after;
     let hasMore = false;
+    let truncatedBy: SessionEventPage["truncatedBy"] = null;
 
     for (;;) {
       const remainingWithLookahead = Math.max(1, requestedLimit - events.length + 1);
@@ -12059,20 +12086,31 @@ export async function listSessionEventPage(
         eq(schema.sessionEvents.sessionId, sessionId),
         gt(schema.sessionEvents.sequence, after),
       ];
-      if (hasBefore) {
+      if (typeFilters.includeTypes.length > 0) {
+        filters.push(inArray(schema.sessionEvents.type, typeFilters.includeTypes));
+      }
+      if (typeFilters.excludeTypes.length > 0) {
+        filters.push(notInArray(schema.sessionEvents.type, typeFilters.excludeTypes));
+      }
+      if (direction === "before") {
         if (cursor !== undefined && cursor <= POSTGRES_INT_MAX) {
           filters.push(lt(schema.sessionEvents.sequence, cursor));
         }
       } else if (cursor !== undefined) {
         filters.push(gt(schema.sessionEvents.sequence, cursor));
       }
+      if (direction === "after" && before !== undefined && before <= POSTGRES_INT_MAX) {
+        filters.push(lt(schema.sessionEvents.sequence, before));
+      }
 
       const rows = await scopedDb
-        .select(sessionEventProjectionSelect())
+        .select(sessionEventProjectionSelect(payloadMode))
         .from(schema.sessionEvents)
         .where(and(...filters))
         .orderBy(
-          hasBefore ? desc(schema.sessionEvents.sequence) : asc(schema.sessionEvents.sequence),
+          direction === "before"
+            ? desc(schema.sessionEvents.sequence)
+            : asc(schema.sessionEvents.sequence),
         )
         .limit(queryLimit);
       if (rows.length === 0) break;
@@ -12080,6 +12118,7 @@ export async function listSessionEventPage(
       for (const row of rows) {
         if (events.length >= requestedLimit) {
           hasMore = true;
+          truncatedBy = "count";
           break;
         }
         const event = mapProjectedEvent(row);
@@ -12092,6 +12131,7 @@ export async function listSessionEventPage(
             );
           }
           hasMore = true;
+          truncatedBy = "bytes";
           break;
         }
         events.push(event);
@@ -12102,12 +12142,23 @@ export async function listSessionEventPage(
       if (rows.length < queryLimit) break;
     }
 
-    if (hasBefore) events.reverse();
-    return { events, hasMore, bytes };
+    if (direction === "before") events.reverse();
+    const first = events[0]?.sequence ?? null;
+    const last = events.at(-1)?.sequence ?? null;
+    return {
+      events,
+      hasMore,
+      bytes,
+      direction,
+      coveredSequence: first === null || last === null ? null : { first, last },
+      nextAfter: direction === "after" ? (last ?? after) : null,
+      nextBefore: direction === "before" ? (first ?? before ?? null) : null,
+      truncatedBy,
+    };
   });
 }
 
-function sessionEventProjectionSelect() {
+function sessionEventProjectionSelect(payloadMode: SessionEventPayloadMode = "full") {
   const typeInvalid = sql`(
     octet_length(${schema.sessionEvents.type}) > ${SESSION_EVENT_TYPE_MAX_BYTES}
     or position(E'\\n' in ${schema.sessionEvents.type}) > 0
@@ -12186,6 +12237,30 @@ function sessionEventProjectionSelect() {
     )
     else opengeni_private.project_session_event_payload(${schema.sessionEvents.payload})
   end`;
+  const projectedPayloadBytes = sql<number>`octet_length((${projectedPayload})::text)`;
+  const selectedPayload =
+    payloadMode === "none"
+      ? sql<unknown>`jsonb_build_object(
+          '_monitoring', jsonb_build_object(
+            'payloadMode', 'none',
+            'payloadOmitted', true,
+            'projectedPayloadBytes', ${projectedPayloadBytes}
+          )
+        )`
+      : payloadMode === "summary"
+        ? sql<unknown>`case
+            when ${projectedPayloadBytes} <= 4096 then ${projectedPayload}
+            else jsonb_build_object(
+              '_monitoring', jsonb_build_object(
+                'payloadMode', 'summary',
+                'payloadTruncated', true,
+                'projectedPayloadBytes', ${projectedPayloadBytes},
+                'fullForensicPayload', 'request payloadMode=full explicitly'
+              ),
+              'preview', left((${projectedPayload})::text, 2048)
+            )
+          end`
+        : projectedPayload;
 
   return {
     id: schema.sessionEvents.id,
@@ -12193,7 +12268,7 @@ function sessionEventProjectionSelect() {
     sessionId: schema.sessionEvents.sessionId,
     sequence: schema.sessionEvents.sequence,
     type: projectedType,
-    payload: projectedPayload,
+    payload: selectedPayload,
     occurredAt: schema.sessionEvents.occurredAt,
     clientEventId: projectedClientEventId,
     turnId: schema.sessionEvents.turnId,
@@ -12238,6 +12313,14 @@ export async function listSessionEvents(
   const limit = normalizeEventLimit(options.limit, 500);
   const hasBefore = options.before !== undefined && Number.isFinite(options.before);
   const before = hasBefore ? Math.floor(options.before as number) : undefined;
+  const direction = options.direction ?? (hasBefore ? "before" : "after");
+  const typeFilters = resolveSessionEventTypeFilters({
+    includeTypes: options.includeTypes,
+    excludeTypes: options.excludeTypes,
+    includeClasses: options.includeClasses,
+    excludeClasses: options.excludeClasses,
+    defaultExcludeTypes: options.defaultExcludeTypes,
+  });
 
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const filters: SQL[] = [
@@ -12245,16 +12328,26 @@ export async function listSessionEvents(
       eq(schema.sessionEvents.sessionId, sessionId),
       gt(schema.sessionEvents.sequence, after),
     ];
+    if (typeFilters.includeTypes.length > 0) {
+      filters.push(inArray(schema.sessionEvents.type, typeFilters.includeTypes));
+    }
+    if (typeFilters.excludeTypes.length > 0) {
+      filters.push(notInArray(schema.sessionEvents.type, typeFilters.excludeTypes));
+    }
     if (before !== undefined && before <= POSTGRES_INT_MAX) {
       filters.push(lt(schema.sessionEvents.sequence, before));
     }
     const rows = await scopedDb
-      .select(sessionEventProjectionSelect())
+      .select(sessionEventProjectionSelect(options.payloadMode ?? "full"))
       .from(schema.sessionEvents)
       .where(and(...filters))
-      .orderBy(hasBefore ? desc(schema.sessionEvents.sequence) : asc(schema.sessionEvents.sequence))
+      .orderBy(
+        direction === "before"
+          ? desc(schema.sessionEvents.sequence)
+          : asc(schema.sessionEvents.sequence),
+      )
       .limit(limit);
-    return (hasBefore ? rows.reverse() : rows).map(mapProjectedEvent);
+    return (direction === "before" ? rows.reverse() : rows).map(mapProjectedEvent);
   });
 }
 

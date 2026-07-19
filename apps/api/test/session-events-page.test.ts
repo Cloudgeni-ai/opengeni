@@ -111,6 +111,105 @@ async function fixture(): Promise<{
 }
 
 describe("session event byte-bounded HTTP pages", () => {
+  test("no-cursor monitoring returns a semantic tail instead of the oldest 40 deltas", async () => {
+    if (!available) return;
+    const { workspaceId, sessionId, authorization } = await fixture();
+    const [session] = await admin<Array<{ accountId: string }>>`
+      select account_id as "accountId" from sessions where id = ${sessionId}`;
+    await admin`
+      insert into session_events (
+        account_id, workspace_id, session_id, sequence, type, payload, turn_generation
+      )
+      select ${session!.accountId}, ${workspaceId}, ${sessionId}, sequence,
+        'agent.message.delta', ${admin.json({ text: "raw-token-fragment" })}, 1
+      from generate_series(1, 40) as sequence`;
+    await admin`
+      insert into session_events (
+        account_id, workspace_id, session_id, sequence, type, payload, turn_generation
+      ) values
+        (${session!.accountId}, ${workspaceId}, ${sessionId}, 41, 'session.context.compacted',
+          ${admin.json({ status: "completed", checkpoint: "current" })}, 1),
+        (${session!.accountId}, ${workspaceId}, ${sessionId}, 42, 'turn.completed',
+          ${admin.json({ status: "completed", result: "authoritative" })}, 2)`;
+
+    const monitoring = await app.request(
+      `http://x/v1/workspaces/${workspaceId}/sessions/${sessionId}/events`,
+      { headers: { authorization } },
+    );
+    expect(monitoring.status).toBe(200);
+    const body = (await monitoring.json()) as Array<{
+      sequence: number;
+      type: string;
+      turnGeneration: number | null;
+    }>;
+    expect(body.map((event) => [event.sequence, event.type])).toEqual([
+      [41, "session.context.compacted"],
+      [42, "turn.completed"],
+    ]);
+    expect(body.some((event) => event.type === "agent.message.delta")).toBeFalse();
+    expect(monitoring.headers.get("X-OpenGeni-Event-Mode")).toBe("monitoring");
+    expect(monitoring.headers.get("X-OpenGeni-Event-Direction")).toBe("before");
+    expect(monitoring.headers.get("X-OpenGeni-Payload-Mode")).toBe("summary");
+    expect(monitoring.headers.get("X-OpenGeni-Covered-First")).toBe("41");
+    expect(monitoring.headers.get("X-OpenGeni-Covered-Last")).toBe("42");
+    expect(monitoring.headers.get("X-OpenGeni-Next-Before")).toBe("41");
+
+    const latestTerminal = await app.request(
+      `http://x/v1/workspaces/${workspaceId}/sessions/${sessionId}/events?latest=terminal`,
+      { headers: { authorization } },
+    );
+    const latestBody = (await latestTerminal.json()) as typeof body;
+    expect(latestBody).toHaveLength(1);
+    expect(latestBody[0]).toMatchObject({
+      sequence: 42,
+      type: "turn.completed",
+      turnGeneration: 2,
+    });
+
+    const forensic = await app.request(
+      `http://x/v1/workspaces/${workspaceId}/sessions/${sessionId}/events?mode=forensic&payloadMode=full&after=0&limit=40`,
+      { headers: { authorization } },
+    );
+    const forensicBody = (await forensic.json()) as typeof body;
+    expect(forensicBody).toHaveLength(40);
+    expect(forensicBody.every((event) => event.type === "agent.message.delta")).toBeTrue();
+    expect(forensic.headers.get("X-OpenGeni-Event-Direction")).toBe("after");
+    expect(forensic.headers.get("X-OpenGeni-Next-After")).toBe("40");
+    expect(forensic.headers.get("X-OpenGeni-Forensic-Exact")).toBe("true");
+  });
+
+  test("type/class filters and payload modes are explicit and validated", async () => {
+    if (!available) return;
+    const { workspaceId, sessionId, authorization } = await fixture();
+    const [session] = await admin<Array<{ accountId: string }>>`
+      select account_id as "accountId" from sessions where id = ${sessionId}`;
+    await admin`
+      insert into session_events (
+        account_id, workspace_id, session_id, sequence, type, payload
+      ) values
+        (${session!.accountId}, ${workspaceId}, ${sessionId}, 1, 'agent.model.usage',
+          ${admin.json({ inputTokens: 10, outputTokens: 2 })}),
+        (${session!.accountId}, ${workspaceId}, ${sessionId}, 2, 'machine.op.failed',
+          ${admin.json({ code: "OFFLINE", detail: "x" })})`;
+
+    const response = await app.request(
+      `http://x/v1/workspaces/${workspaceId}/sessions/${sessionId}/events?includeClasses=failure&payloadMode=none`,
+      { headers: { authorization } },
+    );
+    const body = (await response.json()) as Array<{ type: string; payload: unknown }>;
+    expect(body).toHaveLength(1);
+    expect(body[0]).toMatchObject({
+      type: "machine.op.failed",
+      payload: { _monitoring: { payloadMode: "none", payloadOmitted: true } },
+    });
+
+    const invalid = await app.request(
+      `http://x/v1/workspaces/${workspaceId}/sessions/${sessionId}/events?includeTypes=not.real`,
+      { headers: { authorization } },
+    );
+    expect(invalid.status).toBe(400);
+  });
+
   test("compact pages expose exact bytes and advance through coalescedUntil", async () => {
     if (!available) return;
     const { workspaceId, sessionId, authorization } = await fixture();

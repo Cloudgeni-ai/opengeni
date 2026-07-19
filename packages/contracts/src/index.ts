@@ -3750,6 +3750,157 @@ export const SessionEventType = z.enum([
 ]);
 export type SessionEventType = z.infer<typeof SessionEventType>;
 
+/**
+ * Stable semantic groups for bounded session monitoring. These are a read
+ * projection only: an event keeps its canonical durable `type`, and callers
+ * can always combine a class with explicit type include/exclude filters.
+ */
+export const SessionEventSemanticClass = z.enum([
+  "control",
+  "terminal",
+  "failure",
+  "checkpoint",
+  "tool_receipt",
+  "provider_account",
+]);
+export type SessionEventSemanticClass = z.infer<typeof SessionEventSemanticClass>;
+
+export const SessionEventPayloadMode = z.enum(["none", "summary", "full"]);
+export type SessionEventPayloadMode = z.infer<typeof SessionEventPayloadMode>;
+
+export const SessionEventReadMode = z.enum(["monitoring", "forensic"]);
+export type SessionEventReadMode = z.infer<typeof SessionEventReadMode>;
+
+export const SessionEventReadDirection = z.enum(["after", "before"]);
+export type SessionEventReadDirection = z.infer<typeof SessionEventReadDirection>;
+
+export const SESSION_EVENT_RAW_DELTA_TYPES = [
+  "agent.message.delta",
+  "agent.reasoning.delta",
+  "sandbox.command.output.delta",
+  "terminal.pty.output.delta",
+] as const satisfies readonly SessionEventType[];
+
+export const SESSION_EVENT_SEMANTIC_CLASS_TYPES = {
+  control: [
+    "session.status.changed",
+    "session.requiresAction",
+    "user.pause",
+    "user.approvalDecision",
+    "goal.set",
+    "goal.updated",
+    "goal.completed",
+    "goal.paused",
+    "goal.resumed",
+    "goal.cleared",
+    "goal.continuation",
+    "system.update.pending",
+    "system.update.delivered",
+    "session.control.paused",
+    "session.control.resumed",
+    "session.control.steer_requested",
+    "workspace.inference.paused",
+    "workspace.inference.resumed",
+    "session.queue.changed",
+    "session.queue.prompt.cancelled",
+  ],
+  terminal: [
+    "turn.completed",
+    "turn.failed",
+    "turn.cancelled",
+    "turn.superseded",
+    "goal.completed",
+    "goal.paused",
+    "rig.setup.completed",
+    "rig.setup.skipped",
+    "rig.setup.failed",
+    "sandbox.operation.completed",
+    "sandbox.operation.failed",
+    "recording.available",
+    "recording.failed",
+    "terminal.pty.exited",
+  ],
+  failure: [
+    "session.event.envelope_omitted",
+    "turn.failed",
+    "tool.auth_needed",
+    "rig.setup.failed",
+    "sandbox.operation.failed",
+    "recording.failed",
+    "sandbox.box.lost",
+    "workspace.revision.degraded",
+    "machine.op.failed",
+    "machine.link.lost",
+  ],
+  checkpoint: [
+    "session.context.compaction.requested",
+    "session.context.compacted",
+    "session.context.compaction.skipped",
+    "session.context.cleared",
+    "turn.recovery.requested",
+    "session.queue.history",
+    "sandbox.box.snapshot",
+    "workspace.revision.captured",
+  ],
+  tool_receipt: [
+    "agent.toolCall.created",
+    "agent.toolCall.output",
+    "tool.auth_needed",
+    "artifact.created",
+  ],
+  provider_account: [
+    "agent.model.usage",
+    "codex.account.switched",
+    "codex.credential.selected",
+    "codex.capacity.waiting",
+    "codex.capacity.resumed",
+    "codex.capacity.superseded",
+    "sandbox.box.created",
+    "sandbox.box.lost",
+    "sandbox.box.terminated",
+    "sandbox.box.snapshot",
+    "sandbox.env.drift",
+    "session.route.reconciled",
+    "machine.op.failed",
+    "machine.op.recovered",
+    "machine.link.lost",
+    "machine.link.restored",
+    "machine.runner.restarted",
+  ],
+} as const satisfies Record<SessionEventSemanticClass, readonly SessionEventType[]>;
+
+export type ResolveSessionEventTypeFiltersInput = {
+  includeTypes?: readonly SessionEventType[] | undefined;
+  excludeTypes?: readonly SessionEventType[] | undefined;
+  includeClasses?: readonly SessionEventSemanticClass[] | undefined;
+  excludeClasses?: readonly SessionEventSemanticClass[] | undefined;
+  /** Applied unless the same type was explicitly included by type or class. */
+  defaultExcludeTypes?: readonly SessionEventType[] | undefined;
+};
+
+/** Resolve class/type filter algebra once so every read surface behaves alike. */
+export function resolveSessionEventTypeFilters(input: ResolveSessionEventTypeFiltersInput): {
+  includeTypes: SessionEventType[];
+  excludeTypes: SessionEventType[];
+} {
+  const included = new Set<SessionEventType>(input.includeTypes ?? []);
+  for (const semanticClass of input.includeClasses ?? []) {
+    for (const type of SESSION_EVENT_SEMANTIC_CLASS_TYPES[semanticClass]) included.add(type);
+  }
+
+  const excluded = new Set<SessionEventType>(input.excludeTypes ?? []);
+  for (const semanticClass of input.excludeClasses ?? []) {
+    for (const type of SESSION_EVENT_SEMANTIC_CLASS_TYPES[semanticClass]) excluded.add(type);
+  }
+  for (const type of input.defaultExcludeTypes ?? []) {
+    if (!included.has(type)) excluded.add(type);
+  }
+
+  // An explicit exclusion always wins over a positive selector.
+  for (const type of excluded) included.delete(type);
+  return { includeTypes: [...included], excludeTypes: [...excluded] };
+}
+
 export const ToolAuthNeededPayload = z.object({
   serverId: z.string().min(1),
   toolName: z.string().min(1).nullable().optional(),

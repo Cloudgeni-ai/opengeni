@@ -651,6 +651,48 @@ export type SessionEvent = {
   duplicateReason?: string | null | undefined;
 };
 
+export type SessionEventSemanticClass =
+  | "control"
+  | "terminal"
+  | "failure"
+  | "checkpoint"
+  | "tool_receipt"
+  | "provider_account";
+export type SessionEventPayloadMode = "none" | "summary" | "full";
+export type SessionEventReadMode = "monitoring" | "forensic";
+export type SessionEventReadDirection = "after" | "before";
+
+export type SessionEventListOptions = {
+  after?: number;
+  before?: number;
+  limit?: number;
+  compact?: boolean;
+  mode?: SessionEventReadMode;
+  direction?: SessionEventReadDirection;
+  payloadMode?: SessionEventPayloadMode;
+  includeTypes?: SessionEventType[];
+  excludeTypes?: SessionEventType[];
+  includeClasses?: SessionEventSemanticClass[];
+  excludeClasses?: SessionEventSemanticClass[];
+  latest?: SessionEventSemanticClass;
+};
+
+export type SessionEventPage = {
+  events: SessionEvent[];
+  mode: SessionEventReadMode;
+  payloadMode: SessionEventPayloadMode;
+  direction: SessionEventReadDirection;
+  bytes: number;
+  maxBytes: number;
+  truncated: boolean;
+  hasMore: boolean;
+  truncatedBy: "count" | "bytes" | "http_bytes" | null;
+  coveredSequence: { first: number; last: number } | null;
+  nextAfter: number | null;
+  nextBefore: number | null;
+  forensicExact: boolean;
+};
+
 export type ToolAuthNeededPayload = {
   serverId: string;
   toolName?: string | null | undefined;

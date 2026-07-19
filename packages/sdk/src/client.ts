@@ -89,6 +89,8 @@ import type {
   SessionListResponse,
   UpdateSessionPinRequest,
   SessionEvent,
+  SessionEventListOptions,
+  SessionEventPage,
   SessionGoal,
   SessionLineageResponse,
   SessionMcpCredentialUpdateInput,
@@ -514,19 +516,85 @@ export class OpenGeniClient {
   async listEvents(
     workspaceId: string,
     sessionId: string,
-    options: { after?: number; before?: number; limit?: number; compact?: boolean } = {},
+    options: SessionEventListOptions = {},
   ): Promise<SessionEvent[]> {
-    return await this.requestJson<SessionEvent[]>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/events`,
-      undefined,
-      {
+    return (await this.listEventPage(workspaceId, sessionId, options)).events;
+  }
+
+  /** Bounded durable/monitoring page plus exact projection and cursor facts. */
+  async listEventPage(
+    workspaceId: string,
+    sessionId: string,
+    options: SessionEventListOptions = {},
+  ): Promise<SessionEventPage> {
+    const response = await this.fetchImpl(
+      this.url(`/v1/workspaces/${workspaceId}/sessions/${sessionId}/events`, {
         ...(options.after !== undefined ? { after: String(options.after) } : {}),
         ...(options.before !== undefined ? { before: String(options.before) } : {}),
         ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
         ...(options.compact ? { compact: "1" } : {}),
+        ...(options.mode ? { mode: options.mode } : {}),
+        ...(options.direction ? { direction: options.direction } : {}),
+        ...(options.payloadMode ? { payloadMode: options.payloadMode } : {}),
+        ...(options.includeTypes?.length ? { includeTypes: options.includeTypes.join(",") } : {}),
+        ...(options.excludeTypes?.length ? { excludeTypes: options.excludeTypes.join(",") } : {}),
+        ...(options.includeClasses?.length
+          ? { includeClasses: options.includeClasses.join(",") }
+          : {}),
+        ...(options.excludeClasses?.length
+          ? { excludeClasses: options.excludeClasses.join(",") }
+          : {}),
+        ...(options.latest ? { latest: options.latest } : {}),
+      }),
+      {
+        method: "GET",
+        headers: { ...this.headers(), Accept: "application/json" },
       },
     );
+    assertApiContractResponse(response);
+    if (!response.ok) throw new OpenGeniApiError(response.status, await safeText(response));
+    const events = (await response.json()) as SessionEvent[];
+    const integerHeader = (name: string): number | null => {
+      const raw = response.headers.get(name);
+      if (raw === null) return null;
+      const value = Number(raw);
+      return Number.isSafeInteger(value) && value >= 0 ? value : null;
+    };
+    const mode =
+      response.headers.get("X-OpenGeni-Event-Mode") === "forensic" ? "forensic" : "monitoring";
+    const direction =
+      response.headers.get("X-OpenGeni-Event-Direction") === "after" ? "after" : "before";
+    const payloadHeader = response.headers.get("X-OpenGeni-Payload-Mode");
+    const payloadMode =
+      payloadHeader === "none" || payloadHeader === "full" ? payloadHeader : "summary";
+    const first = integerHeader("X-OpenGeni-Covered-First");
+    const last = integerHeader("X-OpenGeni-Covered-Last");
+    const bytes =
+      integerHeader("X-OpenGeni-Page-Bytes") ??
+      new TextEncoder().encode(JSON.stringify(events)).byteLength;
+    const maxBytes = integerHeader("X-OpenGeni-Page-Max-Bytes") ?? 1024 * 1024;
+    const truncatedByHeader = response.headers.get("X-OpenGeni-Truncated-By");
+    const truncatedBy =
+      truncatedByHeader === "count" ||
+      truncatedByHeader === "bytes" ||
+      truncatedByHeader === "http_bytes"
+        ? truncatedByHeader
+        : null;
+    return {
+      events,
+      mode,
+      payloadMode,
+      direction,
+      bytes,
+      maxBytes,
+      truncated: response.headers.get("X-OpenGeni-Page-Truncated") === "true",
+      hasMore: response.headers.get("X-OpenGeni-Has-More") === "true",
+      truncatedBy,
+      coveredSequence: first === null || last === null ? null : { first, last },
+      nextAfter: integerHeader("X-OpenGeni-Next-After"),
+      nextBefore: integerHeader("X-OpenGeni-Next-Before"),
+      forensicExact: response.headers.get("X-OpenGeni-Forensic-Exact") === "true",
+    };
   }
 
   /** POST a user/control event to the session. Returns the accepted event. */

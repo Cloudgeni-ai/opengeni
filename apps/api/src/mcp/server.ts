@@ -1,5 +1,11 @@
 import {
   CreateScheduledTaskRequest,
+  SESSION_EVENT_RAW_DELTA_TYPES,
+  SessionEventPayloadMode,
+  SessionEventReadDirection,
+  SessionEventReadMode,
+  SessionEventSemanticClass,
+  SessionEventType,
   SessionMcpCredentialUpdateInput,
   VariableSetVariableName,
   type AccessGrant,
@@ -24,7 +30,7 @@ import {
   listGitHubInstallationIdsForWorkspace,
   listScheduledTaskRuns,
   listScheduledTasks,
-  listSessionEvents,
+  listSessionEventPage,
   listSessionDiscoverySummaries,
   listRigs,
   listSocialConnections,
@@ -103,7 +109,11 @@ import {
   type FleetServices,
   type RunOnOp,
 } from "@opengeni/core";
-import { capEventPage, capSessionDetail } from "./session-view";
+import {
+  boundSessionEventMcpPage,
+  capSessionDetail,
+  SESSION_EVENT_MCP_MAX_BYTES,
+} from "./session-view";
 import type { ToolspaceMcpSurface } from "./toolspace";
 
 export type McpServerOptions = {
@@ -1299,28 +1309,76 @@ function registerWorkspaceOrchestrationTools(
       "session_events",
       {
         description:
-          "Read a session's event timeline (oldest first), to monitor another session's progress. Pass `after` = the highest event `sequence` already seen to page forward; the response's `nextAfter` is that cursor. The response is BYTE-CAPPED for a monitoring glance: fat per-event audit previews are clamped, and an over-budget page is reduced to its head + tail with a marker. Re-read the marker's sequence range with a smaller `limit` to inspect retained durable previews. Generic source output omitted at the durable event boundary is unavailable unless a separately retained artifact/file receipt exists. `nextAfter` advances past every real event the page covered.",
+          "Read a compact semantic tail only when session_get status is insufficient. With no cursor, this returns the newest matching events and excludes raw message/reasoning/command/PTY deltas. Use `latest` for the newest typed terminal/checkpoint/receipt without replaying intermediates; use nextBefore to page older or explicit after/nextAfter to page forward. Type/class filters run in the RLS-scoped database query. payloadMode none|summary|full controls retained audit payload projection, but every model result is independently byte-capped with explicit truncation and exact covered sequence bounds. Exact retained forensic payloads require the access-controlled REST/SDK events API with mode=forensic&payloadMode=full; generic source bytes never retained by the audit boundary remain unavailable.",
         inputSchema: {
           sessionId: z4.string().uuid(),
           after: z4.number().int().nonnegative().optional(),
+          before: z4.number().int().positive().optional(),
           limit: z4.number().int().positive().optional(),
+          direction: z4.enum(SessionEventReadDirection.options).optional(),
+          mode: z4.enum(SessionEventReadMode.options).optional(),
+          payloadMode: z4.enum(SessionEventPayloadMode.options).optional(),
+          includeTypes: z4.array(z4.enum(SessionEventType.options)).max(100).optional(),
+          excludeTypes: z4.array(z4.enum(SessionEventType.options)).max(100).optional(),
+          includeClasses: z4
+            .array(z4.enum(SessionEventSemanticClass.options))
+            .max(SessionEventSemanticClass.options.length)
+            .optional(),
+          excludeClasses: z4
+            .array(z4.enum(SessionEventSemanticClass.options))
+            .max(SessionEventSemanticClass.options.length)
+            .optional(),
+          latest: z4.enum(SessionEventSemanticClass.options).optional(),
         },
       },
-      async ({ sessionId, after, limit }) => {
+      async ({
+        sessionId,
+        after,
+        before,
+        limit,
+        direction: requestedDirection,
+        mode: requestedMode,
+        payloadMode: requestedPayloadMode,
+        includeTypes = [],
+        excludeTypes = [],
+        includeClasses = [],
+        excludeClasses = [],
+        latest,
+      }) => {
         await requireSession(deps.db, grant.workspaceId, sessionId);
-        const events = await listSessionEvents(
-          deps.db,
-          grant.workspaceId,
-          sessionId,
-          after ?? 0,
-          boundedMcpLimit(limit),
-        );
-        const capped = capEventPage(events);
-        return json({
-          events: capped.events,
-          nextAfter: capped.nextAfter ?? after ?? 0,
-          ...(capped.truncated ? { truncated: true } : {}),
+        const mode = requestedMode ?? (after !== undefined ? "forensic" : "monitoring");
+        const direction = latest
+          ? "before"
+          : (requestedDirection ??
+            (before !== undefined ? "before" : after !== undefined ? "after" : "before"));
+        const payloadMode = requestedPayloadMode ?? (mode === "monitoring" ? "summary" : "full");
+        const effectiveClasses = [...includeClasses];
+        if (latest && !effectiveClasses.includes(latest)) effectiveClasses.push(latest);
+        const dbPage = await listSessionEventPage(deps.db, grant.workspaceId, sessionId, {
+          after: after ?? 0,
+          ...(before !== undefined ? { before } : {}),
+          direction,
+          limit: latest ? 1 : boundedSessionEventMcpLimit(limit),
+          payloadMode,
+          includeTypes,
+          excludeTypes,
+          includeClasses: effectiveClasses,
+          excludeClasses,
+          ...(mode === "monitoring" ? { defaultExcludeTypes: SESSION_EVENT_RAW_DELTA_TYPES } : {}),
+          maxBytes: SESSION_EVENT_MCP_MAX_BYTES * 4,
         });
+        return json(
+          boundSessionEventMcpPage({
+            events: dbPage.events,
+            mode,
+            payloadMode,
+            direction,
+            sourceHasMore: dbPage.hasMore,
+            sourceTruncatedBy: dbPage.truncatedBy,
+            after: after ?? 0,
+            before: before ?? null,
+          }),
+        );
       },
     );
   }
@@ -1916,6 +1974,11 @@ function boundedMcpLimit(limit: number | undefined): number {
     return 100;
   }
   return Math.min(500, Math.max(1, Math.floor(limit)));
+}
+
+function boundedSessionEventMcpLimit(limit: number | undefined): number {
+  if (!limit || !Number.isFinite(limit)) return 40;
+  return Math.min(250, Math.max(1, Math.floor(limit)));
 }
 
 const SESSION_DISCOVERY_DEFAULT_LIMIT = 20;

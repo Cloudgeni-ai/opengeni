@@ -22,6 +22,12 @@ import {
   PtyResizeRequest,
   PtyWriteRequest,
   SessionControlRequest,
+  SESSION_EVENT_RAW_DELTA_TYPES,
+  SessionEventPayloadMode,
+  SessionEventReadDirection,
+  SessionEventReadMode,
+  SessionEventSemanticClass,
+  SessionEventType,
   SaveComposerDraftRequest,
   SteerSessionQueueItemRequest,
   SteerSessionMessageRequest,
@@ -489,26 +495,107 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     await requireAccessGrant(c, deps, workspaceId, "sessions:read");
     const sessionId = c.req.param("sessionId");
     await assertSessionExists(db, workspaceId, sessionId);
-    const after = eventSequence(c.req.query("after"), 0);
-    const before = optionalEventSequence(c.req.query("before"));
+    const rawAfter = c.req.query("after");
+    const rawBefore = c.req.query("before");
+    const after = eventSequence(rawAfter, 0);
+    const before = optionalEventSequence(rawBefore);
     const compact = compactEvents(c.req.query("compact"));
-    const limit = eventListLimit(c.req.query("limit"), compact ? 5000 : 2000);
+    const explicitReplay = rawAfter !== undefined || rawBefore !== undefined || compact;
+    const mode = eventEnumValue(
+      c.req.query("mode"),
+      SessionEventReadMode,
+      "mode",
+      explicitReplay ? "forensic" : "monitoring",
+    );
+    const latestClass = eventEnumValue(
+      c.req.query("latest"),
+      SessionEventSemanticClass,
+      "latest",
+      undefined,
+    );
+    const direction = latestClass
+      ? "before"
+      : eventEnumValue(
+          c.req.query("direction"),
+          SessionEventReadDirection,
+          "direction",
+          before !== undefined
+            ? "before"
+            : rawAfter !== undefined
+              ? "after"
+              : mode === "monitoring"
+                ? "before"
+                : "after",
+        );
+    const payloadMode = eventEnumValue(
+      c.req.query("payloadMode"),
+      SessionEventPayloadMode,
+      "payloadMode",
+      mode === "monitoring" ? "summary" : "full",
+    );
+    const includeTypes = eventEnumList(
+      c.req.query("includeTypes"),
+      SessionEventType,
+      "includeTypes",
+    );
+    const excludeTypes = eventEnumList(
+      c.req.query("excludeTypes"),
+      SessionEventType,
+      "excludeTypes",
+    );
+    const includeClasses = eventEnumList(
+      c.req.query("includeClasses"),
+      SessionEventSemanticClass,
+      "includeClasses",
+    );
+    if (latestClass && !includeClasses.includes(latestClass)) includeClasses.push(latestClass);
+    const excludeClasses = eventEnumList(
+      c.req.query("excludeClasses"),
+      SessionEventSemanticClass,
+      "excludeClasses",
+    );
+    const limit = latestClass
+      ? 1
+      : eventListLimit(
+          c.req.query("limit"),
+          compact ? 5000 : mode === "monitoring" ? 250 : 2000,
+          mode === "monitoring" ? 40 : 500,
+        );
     const dbPage = await listSessionEventPage(db, workspaceId, sessionId, {
       after,
       ...(before !== undefined ? { before } : {}),
       limit,
+      direction,
+      payloadMode,
+      includeTypes,
+      excludeTypes,
+      includeClasses,
+      excludeClasses,
+      ...(mode === "monitoring" ? { defaultExcludeTypes: SESSION_EVENT_RAW_DELTA_TYPES } : {}),
     });
     const events = dbPage.events;
     const projected = compact ? coalesceSessionEventDeltas(events) : events;
     const page = boundSessionEventHttpPage(projected, {
-      direction: before !== undefined ? "before" : "after",
+      direction,
     });
     const hasMore = dbPage.hasMore || page.truncated;
     c.header("X-OpenGeni-Page-Bytes", String(page.bytes));
+    c.header("X-OpenGeni-Page-Max-Bytes", String(1024 * 1024));
     c.header("X-OpenGeni-Page-Truncated", String(hasMore));
+    c.header("X-OpenGeni-Has-More", String(hasMore));
+    c.header("X-OpenGeni-Event-Mode", mode);
+    c.header("X-OpenGeni-Event-Direction", direction);
+    c.header("X-OpenGeni-Payload-Mode", payloadMode);
+    c.header("X-OpenGeni-Forensic-Exact", String(mode === "forensic" && payloadMode === "full"));
+    const coveredFirst = page.events[0]?.sequence;
+    const coveredLast = page.events.at(-1)?.sequence;
+    if (coveredFirst !== undefined) c.header("X-OpenGeni-Covered-First", String(coveredFirst));
+    if (coveredLast !== undefined) c.header("X-OpenGeni-Covered-Last", String(coveredLast));
+    const truncatedBy = page.truncated ? "http_bytes" : dbPage.truncatedBy;
+    if (truncatedBy) c.header("X-OpenGeni-Truncated-By", truncatedBy);
     if (page.nextSequence !== null) {
       c.header(
-        before !== undefined ? "X-OpenGeni-Next-Before" : "X-OpenGeni-Next-After",
+        direction === "before" ? "X-OpenGeni-Next-Before" : "X-OpenGeni-Next-After",
         String(page.nextSequence),
       );
     }
@@ -1672,12 +1759,60 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
   });
 }
 
-function eventListLimit(raw: string | undefined, max = 2000): number {
-  const limit = Number(raw ?? 500);
+function eventListLimit(raw: string | undefined, max = 2000, fallback = 500): number {
+  const limit = Number(raw ?? fallback);
   if (!Number.isFinite(limit)) {
-    return 500;
+    return fallback;
   }
   return Math.min(max, Math.max(1, Math.floor(limit)));
+}
+
+function eventEnumValue<T extends string>(
+  raw: string | undefined,
+  schema: { safeParse(value: unknown): { success: boolean; data?: T } },
+  name: string,
+  fallback: T,
+): T;
+function eventEnumValue<T extends string>(
+  raw: string | undefined,
+  schema: { safeParse(value: unknown): { success: boolean; data?: T } },
+  name: string,
+  fallback: undefined,
+): T | undefined;
+function eventEnumValue<T extends string>(
+  raw: string | undefined,
+  schema: { safeParse(value: unknown): { success: boolean; data?: T } },
+  name: string,
+  fallback: T | undefined,
+): T | undefined {
+  if (raw === undefined) return fallback;
+  const parsed = schema.safeParse(raw);
+  if (!parsed.success) {
+    throw new HTTPException(400, { message: `${name} is invalid` });
+  }
+  return parsed.data as T;
+}
+
+function eventEnumList<T extends string>(
+  raw: string | undefined,
+  schema: { safeParse(value: unknown): { success: boolean; data?: T } },
+  name: string,
+): T[] {
+  if (raw === undefined || raw.trim() === "") return [];
+  const values = raw
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  if (values.length > 100) {
+    throw new HTTPException(400, { message: `${name} accepts at most 100 values` });
+  }
+  return values.map((value) => {
+    const parsed = schema.safeParse(value);
+    if (!parsed.success) {
+      throw new HTTPException(400, { message: `${name} contains an invalid value` });
+    }
+    return parsed.data as T;
+  });
 }
 
 function sessionListQuery(

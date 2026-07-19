@@ -1766,6 +1766,17 @@ export const sessionEvents = pgTable(
       table.sessionId,
       table.createdAt,
     ),
+    sessionTypeSequence: index("session_events_workspace_session_type_sequence_idx").on(
+      table.workspaceId,
+      table.sessionId,
+      table.type,
+      table.sequence,
+    ),
+    monitoringTail: index("session_events_workspace_session_monitoring_tail_idx")
+      .on(table.workspaceId, table.sessionId, table.sequence)
+      .where(
+        sql`${table.type} not in ('agent.message.delta', 'agent.reasoning.delta', 'sandbox.command.output.delta', 'terminal.pty.output.delta')`,
+      ),
     payloadBytes: check(
       "session_events_payload_bytes_check",
       sql`octet_length(${table.payload}::text) <= 65536`,
