@@ -4195,6 +4195,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         stream = undefined;
         batcher = null;
         let responseUsageCount = 0;
+        // The SDK emits every processed call item for one model response before
+        // it emits any result for that response. Keep that response-local batch
+        // in memory so an orphan from an older response cannot pin later stable
+        // calls. Durable recovery remains call/result based and needs no batch
+        // schema or compatibility state.
+        let currentToolBatchCallIds = new Set<string>();
+        let currentToolBatchCompletedCallIds = new Set<string>();
         // Actual input tokens of the most recent model response this turn; the
         // pre-read trigger for the NEXT turn. Persisted at every turn-end path.
         let lastProviderContextTokensObserved: number | null = null;
@@ -4286,6 +4293,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               streamDone = true;
               break;
             }
+            let stableToolCallIdsToClear: string[] | null = null;
+            let completedCurrentToolBatch = false;
             const responseUsage = modelResponseUsageFromSdkEvent(next.value);
             if (responseUsage) {
               await recordCompletedModelCallBeforeOwnershipFences({
@@ -4356,6 +4365,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   }
                 },
               });
+              currentToolBatchCallIds = new Set<string>();
+              currentToolBatchCompletedCallIds = new Set<string>();
               await reconcileConversationTruth();
               try {
                 await ensureRunAllowed(
@@ -4398,6 +4409,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   "turn attempt ended while recording an in-flight tool call",
                 );
               }
+              currentToolBatchCallIds.add(pendingToolCall.callId);
             }
             const completedToolCall = completedToolCallFromSdkEvent(next.value);
             if (completedToolCall) {
@@ -4421,31 +4433,52 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   "turn attempt ended while recording a tool-call result",
                 );
               }
-              if (recorded.allResultsRecorded) {
-                // Persist the SDK's now-stable complete call/result batch before
-                // clearing its receipts. A crash between these transactions is
-                // harmless: settlement finds both raw results and merely
-                // consumes them without fabricating an interruption.
+              const belongsToCurrentBatch = currentToolBatchCallIds.has(completedToolCall.callId);
+              if (belongsToCurrentBatch) {
+                currentToolBatchCompletedCallIds.add(completedToolCall.callId);
+              }
+              const currentBatchIsStable =
+                belongsToCurrentBatch &&
+                currentToolBatchCallIds.size > 0 &&
+                currentToolBatchCompletedCallIds.size === currentToolBatchCallIds.size;
+              const standaloneStableResult =
+                !belongsToCurrentBatch && currentToolBatchCallIds.size === 0;
+              if (currentBatchIsStable || standaloneStableResult) {
+                // Persist the SDK's now-stable complete call/result batch. Keep
+                // the receipts until the normalized tool-output event below is
+                // durably flushed: recovery then covers every crash boundary
+                // without either losing or duplicating the UI projection.
                 await reconcileConversationTruth({ requireDurable: true });
-                const cleared = await clearDurablePendingSessionToolCalls(db, {
-                  accountId: input.accountId,
-                  workspaceId: input.workspaceId,
-                  sessionId: input.sessionId,
-                  turnId: activeTurnId,
-                  executionGeneration,
-                  attemptId: input.attemptId,
-                });
-                if (!cleared.accepted) {
-                  throw new TurnAttemptFencedError(
-                    "turn attempt ended while finalizing tool-call results",
-                  );
-                }
+                stableToolCallIdsToClear = currentBatchIsStable
+                  ? [...currentToolBatchCallIds]
+                  : [completedToolCall.callId];
+                completedCurrentToolBatch = currentBatchIsStable;
               }
             }
             const normalized = normalizeSdkEvent(next.value);
             for (const event of normalized) {
               streamTiming.onEvent(event.type);
               await batcher.push(event);
+            }
+            if (stableToolCallIdsToClear) {
+              const cleared = await clearDurablePendingSessionToolCalls(db, {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                turnId: activeTurnId,
+                executionGeneration,
+                attemptId: input.attemptId,
+                callIds: stableToolCallIdsToClear,
+              });
+              if (!cleared.accepted) {
+                throw new TurnAttemptFencedError(
+                  "turn attempt ended while finalizing tool-call results",
+                );
+              }
+              if (completedCurrentToolBatch) {
+                currentToolBatchCallIds = new Set<string>();
+                currentToolBatchCompletedCallIds = new Set<string>();
+              }
             }
           }
         } finally {
