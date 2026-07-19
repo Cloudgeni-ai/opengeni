@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { Client, Connection } from "@temporalio/client";
 import { NativeConnection, Worker } from "@temporalio/worker";
+import { eq } from "drizzle-orm";
 import type { AccessGrant } from "@opengeni/contracts";
 import {
   applySessionTurnSettlement,
