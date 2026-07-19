@@ -8,7 +8,11 @@ import {
   SandboxImageConflictError,
   SandboxLeaseSupersededError,
 } from "@opengeni/db";
-import { sanitizeHistoryItemsForModel } from "@opengeni/runtime";
+import {
+  CompactionProviderResponseError,
+  EmptyCompactionSummaryError,
+  sanitizeHistoryItemsForModel,
+} from "@opengeni/runtime";
 import { testSettings } from "@opengeni/testing";
 import {
   acceptsPromptCacheKeyForTurn,
@@ -31,6 +35,7 @@ import {
   PROVIDER_BACKPRESSURE_DELAY_MS,
   providerRecoveryResult,
   resolveActiveSandboxBackend,
+  shouldRecoverCompactionProviderFailure,
   shouldStartOnTurnRecording,
 } from "../src/activities/agent-turn";
 import { sandboxLeaseHolderIdForAttempt } from "../src/sandbox-resume";
@@ -1247,6 +1252,31 @@ describe("transient provider error classifier", () => {
       detail:
         "Active session history is 2048 UTF-8 JSON bytes, exceeding the 1024-byte materialization limit.",
     });
+  });
+
+  test("only transient provider compaction failures use same-turn recovery", () => {
+    expect(
+      shouldRecoverCompactionProviderFailure(
+        new CompactionProviderResponseError({ httpStatus: 503, code: "server_error" }),
+      ),
+    ).toBe(true);
+    expect(
+      shouldRecoverCompactionProviderFailure(
+        new CompactionProviderResponseError({
+          httpStatus: 429,
+          code: "rate_limit_exceeded",
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      shouldRecoverCompactionProviderFailure(
+        new CompactionProviderResponseError({
+          httpStatus: 400,
+          code: "context_length_exceeded",
+        }),
+      ),
+    ).toBe(false);
+    expect(shouldRecoverCompactionProviderFailure(new EmptyCompactionSummaryError())).toBe(false);
   });
 
   test("a 503 recovers the same turn after backpressure pacing, independent of goal state", () => {

@@ -615,6 +615,35 @@ export class EmptyCompactionSummaryError extends Error {
   }
 }
 
+/**
+ * The checkpoint model request ended in a provider/transport failure rather
+ * than a successful response with an empty assistant message. Diagnostics are
+ * deliberately bounded and content-free so this error can be persisted on a
+ * turn without copying provider messages or conversation input into events.
+ */
+export class CompactionProviderResponseError extends Error {
+  readonly diagnostics: Record<string, unknown>;
+  readonly status?: number;
+  readonly code?: string;
+  readonly type?: string;
+  override readonly cause?: unknown;
+
+  constructor(diagnostics: Record<string, unknown> = {}, cause?: unknown) {
+    const compact = JSON.stringify(diagnostics).slice(0, 2_000);
+    super(
+      `Compaction provider request failed; active history was preserved${compact ? ` (${compact})` : ""}`,
+    );
+    this.name = "CompactionProviderResponseError";
+    this.diagnostics = diagnostics;
+    if (typeof diagnostics.httpStatus === "number") this.status = diagnostics.httpStatus;
+    if (typeof diagnostics.code === "string") this.code = diagnostics.code;
+    if (typeof diagnostics.type === "string") this.type = diagnostics.type;
+    if (cause !== undefined) {
+      Object.defineProperty(this, "cause", { value: cause, enumerable: false });
+    }
+  }
+}
+
 export function findCompactionNeededError(
   error: unknown,
   seen = new WeakSet<object>(),
