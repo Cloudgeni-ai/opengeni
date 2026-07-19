@@ -12,6 +12,7 @@ import {
   fakeCapabilities,
   fakeColdCapabilities,
   fakeEvent,
+  fakeFileDiff,
   fakeHeadlessCapabilities,
 } from "./sandbox-fixtures";
 import { useSandboxFiles } from "../src/hooks/use-sandbox-files";
@@ -22,6 +23,7 @@ import { useSessionCapabilities } from "../src/hooks/use-session-capabilities";
 registerDom();
 
 const ctx = { workspaceId: WORKSPACE_ID };
+const SECOND_SESSION_ID = "33333333-3333-4333-8333-333333333333";
 
 describe("useSessionCapabilities", () => {
   test("a warm session negotiates to ready and exposes the doc as UI truth", async () => {
@@ -315,6 +317,108 @@ describe("useSessionCapabilities", () => {
     expect(hook.result.current.capabilities).toBeNull();
     await hook.unmount();
   });
+
+  test("a session switch aborts the obsolete capability request", async () => {
+    let obsoleteSignal: AbortSignal | undefined;
+    const client = fakeClient({
+      getStreamCapabilities: async (_workspaceId, sessionId, options) => {
+        if (sessionId === SESSION_ID) {
+          obsoleteSignal = options?.signal;
+          return await new Promise<ReturnType<typeof fakeCapabilities>>(() => {});
+        }
+        return fakeCapabilities({ leaseEpoch: 22 });
+      },
+    });
+    const hook = await renderHook(
+      (props: { sessionId: string }) => useSessionCapabilities(props.sessionId, { ...ctx, client }),
+      { sessionId: SESSION_ID },
+    );
+    await flush();
+    expect(obsoleteSignal?.aborted).toBe(false);
+
+    await hook.rerender({ sessionId: SECOND_SESSION_ID });
+    await flush();
+
+    expect(obsoleteSignal?.aborted).toBe(true);
+    expect(hook.result.current.state).toBe("ready");
+    expect(hook.result.current.capabilities?.leaseEpoch).toBe(22);
+    await hook.unmount();
+  });
+
+  test("a session switch renders zero frames of the previous capability document", async () => {
+    let resolveSecond: (value: ReturnType<typeof fakeCapabilities>) => void = () => {};
+    const secondCapabilities = new Promise<ReturnType<typeof fakeCapabilities>>((resolve) => {
+      resolveSecond = resolve;
+    });
+    const client = fakeClient({
+      getStreamCapabilities: async (_workspaceId, sessionId) =>
+        sessionId === SESSION_ID ? fakeCapabilities({ leaseEpoch: 11 }) : await secondCapabilities,
+    });
+    const observations: Array<{ sessionId: string; leaseEpoch: number | null }> = [];
+    const hook = await renderHook(
+      (props: { sessionId: string }) => {
+        const result = useSessionCapabilities(props.sessionId, { ...ctx, client });
+        observations.push({
+          sessionId: props.sessionId,
+          leaseEpoch: result.capabilities?.leaseEpoch ?? null,
+        });
+        return result;
+      },
+      { sessionId: SESSION_ID },
+    );
+    await flush();
+    expect(hook.result.current.capabilities?.leaseEpoch).toBe(11);
+    observations.length = 0;
+
+    await hook.rerender({ sessionId: SECOND_SESSION_ID });
+    expect(
+      observations.some(
+        (observation) =>
+          observation.sessionId === SECOND_SESSION_ID && observation.leaseEpoch === 11,
+      ),
+    ).toBe(false);
+    expect(hook.result.current.capabilities).toBeNull();
+
+    await actRun(() => resolveSecond(fakeCapabilities({ leaseEpoch: 22 })));
+    await flush();
+    expect(hook.result.current.capabilities?.leaseEpoch).toBe(22);
+    await hook.unmount();
+  });
+
+  test("a late viewer attach is released against its original session after identity loss", async () => {
+    let resolveAttach: (value: ReturnType<typeof fakeAttachResponse>) => void = () => {};
+    const attachResult = new Promise<ReturnType<typeof fakeAttachResponse>>((resolve) => {
+      resolveAttach = resolve;
+    });
+    const detached: Array<{ sessionId: string; viewerId: string }> = [];
+    const client = fakeClient({
+      getStreamCapabilities: async (_workspaceId, sessionId) =>
+        sessionId === SESSION_ID ? fakeCapabilities() : fakeHeadlessCapabilities(),
+      attachViewer: async () => await attachResult,
+      detachViewer: async (_workspaceId, sessionId, viewerId) => {
+        detached.push({ sessionId, viewerId });
+      },
+    });
+    const hook = await renderHook(
+      (props: { sessionId: string }) =>
+        useSessionCapabilities(props.sessionId, { ...ctx, client, attachDesktop: true }),
+      { sessionId: SESSION_ID },
+    );
+    await flush();
+
+    await hook.rerender({ sessionId: SECOND_SESSION_ID });
+    await actRun(() => resolveAttach(fakeAttachResponse()));
+    await flush();
+
+    expect(detached).toEqual([
+      {
+        sessionId: SESSION_ID,
+        viewerId: "44444444-4444-4444-8444-444444444444",
+      },
+    ]);
+    expect(hook.result.current.viewerId).toBeNull();
+    await hook.unmount();
+  });
 });
 
 describe("useSandboxTerminal", () => {
@@ -439,6 +543,116 @@ describe("useSandboxTerminal", () => {
     await flush();
     expect(hook.result.current.running).toBe(false);
     expect(hook.result.current.write).toBeNull();
+    await hook.unmount();
+  });
+
+  test("a session switch renders zero frames of the old PTY and filters retained old events", async () => {
+    let resolveSecond: (value: {
+      ptyId: string;
+      streamVia: "sse-events";
+      supportsInput: true;
+    }) => void = () => {};
+    const secondOpen = new Promise<{
+      ptyId: string;
+      streamVia: "sse-events";
+      supportsInput: true;
+    }>((resolve) => {
+      resolveSecond = resolve;
+    });
+    const oldEvents = [
+      fakeEvent(1, "terminal.pty.output.delta", {
+        ptyId: "opened-old",
+        stream: "stdout",
+        chunk: "old-session-secret\n",
+        seq: 0,
+      }),
+    ];
+    const client = fakeClient({
+      terminalPtyOpen: async (_workspaceId, sessionId) =>
+        sessionId === SESSION_ID
+          ? { ptyId: "opened-old", streamVia: "sse-events" as const, supportsInput: true }
+          : await secondOpen,
+      terminalPtyClose: async () => {},
+    });
+    const observations: Array<{ sessionId: string; activePtyId: string | null }> = [];
+    const hook = await renderHook(
+      (props: { sessionId: string }) => {
+        const result = useSandboxTerminal(props.sessionId, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          events: oldEvents,
+          interactive: true,
+        });
+        observations.push({ sessionId: props.sessionId, activePtyId: result.activePtyId });
+        return result;
+      },
+      { sessionId: SESSION_ID },
+    );
+    await flush();
+    expect(hook.result.current.activePtyId).toBe("opened-old");
+    expect(hook.result.current.chunks.map((chunk) => chunk.text)).toContain("old-session-secret\n");
+    observations.length = 0;
+
+    await hook.rerender({ sessionId: SECOND_SESSION_ID });
+
+    expect(
+      observations.some(
+        (observation) =>
+          observation.sessionId === SECOND_SESSION_ID && observation.activePtyId === "opened-old",
+      ),
+    ).toBe(false);
+    expect(hook.result.current.activePtyId).toBeNull();
+    expect(hook.result.current.chunks).toEqual([]);
+
+    await actRun(() =>
+      resolveSecond({ ptyId: "opened-new", streamVia: "sse-events", supportsInput: true }),
+    );
+    await flush();
+    expect(hook.result.current.activePtyId).toBe("opened-new");
+    await hook.unmount();
+  });
+
+  test("a late write failure from the old session cannot reopen the new session PTY", async () => {
+    let rejectOldWrite: (cause: Error) => void = () => {};
+    const oldWrite = new Promise<void>((_resolve, reject) => {
+      rejectOldWrite = reject;
+    });
+    const opened: string[] = [];
+    const client = fakeClient({
+      terminalPtyOpen: async (_workspaceId, sessionId) => {
+        opened.push(sessionId);
+        return {
+          ptyId: sessionId === SESSION_ID ? "opened-old" : "opened-new",
+          streamVia: "sse-events" as const,
+          supportsInput: true,
+        };
+      },
+      terminalPtyWrite: async (_workspaceId, sessionId) => {
+        if (sessionId === SESSION_ID) await oldWrite;
+      },
+      terminalPtyClose: async () => {},
+    });
+    const hook = await renderHook(
+      (props: { sessionId: string }) =>
+        useSandboxTerminal(props.sessionId, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          events: [],
+          interactive: true,
+        }),
+      { sessionId: SESSION_ID },
+    );
+    await flush();
+    hook.result.current.write?.("pwd\n");
+    await hook.rerender({ sessionId: SECOND_SESSION_ID });
+    await flush();
+    expect(hook.result.current.activePtyId).toBe("opened-new");
+
+    await actRun(() => rejectOldWrite(new OpenGeniApiError(409, "pty session lost")));
+    await flush();
+
+    expect(hook.result.current.activePtyId).toBe("opened-new");
+    expect(opened).toEqual([SESSION_ID, SECOND_SESSION_ID]);
     await hook.unmount();
   });
 });
@@ -1049,6 +1263,62 @@ describe("useSandboxGit", () => {
     expect(hook.result.current.branch).toBe("feature");
     expect(hook.result.current.ahead).toBe(1);
     expect(hook.result.current.diff[0]?.hunks[0]?.lines[0]?.type).toBe("add");
+    await hook.unmount();
+  });
+
+  test("warm multi-repo mode reads every advertised root and qualifies its diff", async () => {
+    const statusRoots: string[] = [];
+    const diffRoots: string[] = [];
+    const includeUntracked: (boolean | undefined)[] = [];
+    const client = fakeClient({
+      gitStatus: async (_workspaceId, _sessionId, request) => {
+        const root = request?.path ?? "";
+        statusRoots.push(root);
+        return {
+          isRepo: true,
+          head: `${root}-main`,
+          detached: false,
+          upstream: null,
+          ahead: root === "api" ? 1 : 0,
+          behind: root === "web" ? 2 : 0,
+          files: [],
+          revision: 1,
+        };
+      },
+      gitDiff: async (_workspaceId, _sessionId, request) => {
+        const root = request?.path ?? "";
+        diffRoots.push(root);
+        includeUntracked.push(request?.includeUntracked);
+        return {
+          files: [fakeFileDiff({ path: root === "api" ? "src/server.ts" : "src/app.tsx" })],
+          revision: 1,
+        };
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useSandboxGit(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          liveness: "warm",
+          repoPaths: ["api", "web"],
+        }),
+      undefined,
+    );
+    await flush();
+
+    expect(statusRoots).toEqual(["api", "web"]);
+    expect(diffRoots).toEqual(["api", "web"]);
+    expect(includeUntracked).toEqual([true, true]);
+    expect(hook.result.current.repoCount).toBe(2);
+    expect(hook.result.current.repoRoots).toEqual(["api", "web"]);
+    expect(hook.result.current.branch).toBeNull();
+    expect(hook.result.current.ahead).toBe(1);
+    expect(hook.result.current.behind).toBe(2);
+    expect(hook.result.current.diff.map((file) => [file.path, file.repoRoot])).toEqual([
+      ["api/src/server.ts", "api"],
+      ["web/src/app.tsx", "web"],
+    ]);
     await hook.unmount();
   });
 

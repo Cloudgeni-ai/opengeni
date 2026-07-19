@@ -6,6 +6,7 @@ import {
   countQueuedTurns,
   getSessionEvent,
   getSessionTurnForAttempt,
+  markSessionAttemptQuiesced,
   requireSession,
   settleSessionIdleWithParentOutbox,
 } from "@opengeni/db";
@@ -32,6 +33,7 @@ export type SessionStateActivityOverrides = Partial<{
   getSessionTurnForAttempt: typeof getSessionTurnForAttempt;
   requireSession: typeof requireSession;
   settleSessionIdleWithParentOutbox: typeof settleSessionIdleWithParentOutbox;
+  markSessionAttemptQuiesced: typeof markSessionAttemptQuiesced;
   publishDurableSessionEvents: typeof publishDurableSessionEvents;
   deliverFailedChildTurnToParent: typeof deliverFailedChildTurnToParent;
   notifyParentOfChildIdle: typeof notifyParentOfChildIdle;
@@ -60,6 +62,8 @@ export function createSessionStateActivities(
   const requireSessionFn = overrides.requireSession ?? requireSession;
   const settleSessionIdleWithParentOutboxFn =
     overrides.settleSessionIdleWithParentOutbox ?? settleSessionIdleWithParentOutbox;
+  const markSessionAttemptQuiescedFn =
+    overrides.markSessionAttemptQuiesced ?? markSessionAttemptQuiesced;
   const publishDurableSessionEventsFn =
     overrides.publishDurableSessionEvents ?? publishDurableSessionEvents;
   const deliverFailedChildTurnToParentFn =
@@ -117,6 +121,16 @@ export function createSessionStateActivities(
     input: SettleSessionInterruptionsInput,
   ): Promise<{ action: "paused" | "continue" | "stale" }> {
     const { db, bus, observability } = await services();
+    if (input.phase === "attempt_quiesced") {
+      const events = await markSessionAttemptQuiescedFn(db, {
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        attemptId: input.attemptId,
+        temporalWorkflowId: input.workflowId,
+      });
+      await publishDurableSessionEventsFn(bus, input.workspaceId, input.sessionId, events);
+      return { action: "stale" };
+    }
     const applied = await settleSessionAttemptInterruptionsFn(
       db,
       input.workspaceId,

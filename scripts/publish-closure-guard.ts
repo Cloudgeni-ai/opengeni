@@ -162,6 +162,30 @@ if (!reactOpengeniDeps.includes("@opengeni/sdk")) {
   failures.push(`@opengeni/react must keep @opengeni/sdk as a runtime dependency.`);
 }
 
+// CSS subpath imports must resolve in strict external TypeScript consumers as
+// well as bundlers. A bare string export ships runtime CSS but leaves tsgo/tsc
+// unable to type a side-effect import unless every consumer adds its own
+// wildcard declaration.
+const reactExports = (reactPkg as PackageJson & { exports?: Record<string, unknown> }).exports;
+for (const subpath of ["./styles.css", "./tokens.css"]) {
+  const entry = reactExports?.[subpath];
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+    failures.push(`@opengeni/react ${subpath} must provide typed conditional exports.`);
+    continue;
+  }
+  const conditions = entry as { types?: unknown; default?: unknown };
+  for (const condition of ["types", "default"] as const) {
+    const target = conditions[condition];
+    if (typeof target !== "string" || !target.startsWith("./")) {
+      failures.push(`@opengeni/react ${subpath} is missing a local ${condition} export target.`);
+      continue;
+    }
+    if (!existsSync(join(repoRoot, "packages/react", target))) {
+      failures.push(`@opengeni/react ${subpath} ${condition} target does not exist: ${target}.`);
+    }
+  }
+}
+
 // (d) Built dist bundles must not reference any server/embed package.
 //
 // The sdk/react tsup configs externalize all @opengeni/* (see their

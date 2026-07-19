@@ -46,7 +46,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await admin?.end().catch(() => undefined);
   await blank?.release();
-});
+}, 180_000);
 
 describe("0054 session pin migration (real PostgreSQL)", () => {
   test("bounds production lock contention and cleanly retries", async () => {
