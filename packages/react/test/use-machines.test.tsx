@@ -335,4 +335,64 @@ describe("useMachines", () => {
     expect(hook.result.current.attachingSandboxId).toBeNull();
     await hook.unmount();
   });
+
+  test("a late revoke settlement from the old session cannot clear the new session spinner", async () => {
+    let resolveOld: () => void = () => {};
+    let resolveNew: () => void = () => {};
+    const oldRevoke = new Promise<void>((resolve) => {
+      resolveOld = resolve;
+    });
+    const newRevoke = new Promise<void>((resolve) => {
+      resolveNew = resolve;
+    });
+    const machinesClient: MachinesClientLike = {
+      listMachines: async () => response,
+      revokeEnrollment: async (_workspaceId, enrollmentId) => {
+        await (enrollmentId === "old-enrollment" ? oldRevoke : newRevoke);
+        return { revoked: true };
+      },
+    };
+    const hook = await renderHook(
+      (props: { sessionId: string }) =>
+        useMachines({
+          client,
+          workspaceId: WORKSPACE_ID,
+          machinesClient,
+          sessionId: props.sessionId,
+        }),
+      { sessionId: "sess-1" },
+    );
+    await flush();
+    let oldResult!: Promise<boolean>;
+    await actRun(() => {
+      oldResult = hook.result.current.revoke("old-enrollment");
+    });
+    await flush();
+    expect(hook.result.current.revokingEnrollmentId).toBe("old-enrollment");
+
+    await hook.rerender({ sessionId: "sess-2" });
+    expect(hook.result.current.revokingEnrollmentId).toBeNull();
+    let newResult!: Promise<boolean>;
+    await actRun(() => {
+      newResult = hook.result.current.revoke("new-enrollment");
+    });
+    await flush();
+    expect(hook.result.current.revokingEnrollmentId).toBe("new-enrollment");
+
+    await actRun(async () => {
+      resolveOld();
+      await oldResult;
+    });
+    await flush();
+    expect(hook.result.current.revokingEnrollmentId).toBe("new-enrollment");
+    expect(hook.result.current.mutationError).toBeNull();
+
+    await actRun(async () => {
+      resolveNew();
+      await newResult;
+    });
+    await flush();
+    expect(hook.result.current.revokingEnrollmentId).toBeNull();
+    await hook.unmount();
+  });
 });

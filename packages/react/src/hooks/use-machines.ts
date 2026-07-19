@@ -136,7 +136,12 @@ export function useMachines(options: UseMachinesOptions = {}): UseMachinesResult
     sandboxId: string | null;
   }>(() => ({ identity: identityKey, sandboxId: null }));
   const attachingSandboxId = attachState.identity === identityKey ? attachState.sandboxId : null;
-  const [revokingEnrollmentId, setRevokingEnrollmentId] = useState<string | null>(null);
+  const [revokeState, setRevokeState] = useState<{
+    identity: string;
+    enrollmentId: string | null;
+  }>(() => ({ identity: identityKey, enrollmentId: null }));
+  const revokingEnrollmentId =
+    revokeState.identity === identityKey ? revokeState.enrollmentId : null;
 
   const data = loadedData ?? EMPTY;
   // The swap is session-scoped: a host adapter (`attachMachine`) wins; otherwise
@@ -186,18 +191,21 @@ export function useMachines(options: UseMachinesOptions = {}): UseMachinesResult
   const revoke = useCallback(
     async (enrollmentId: string): Promise<boolean> => {
       if (!machinesClient.revokeEnrollment) return false;
-      setRevokingEnrollmentId(enrollmentId);
+      const ownedIdentity = identityKey;
+      setRevokeState({ identity: ownedIdentity, enrollmentId });
       const result = await run(async () => {
         // A 2xx `{ revoked: false }` is the route's retry-safe, already-revoked
         // outcome. Either value means the enrollment is terminal.
         await machinesClient.revokeEnrollment!(workspaceId, enrollmentId);
         return true;
       });
-      setRevokingEnrollmentId(null);
-      if (result) await refresh();
+      if (identityRef.current === ownedIdentity) {
+        setRevokeState({ identity: ownedIdentity, enrollmentId: null });
+        if (result) await refresh();
+      }
       return result === true;
     },
-    [machinesClient, workspaceId, run, refresh],
+    [machinesClient, workspaceId, identityKey, run, refresh],
   );
 
   return {
