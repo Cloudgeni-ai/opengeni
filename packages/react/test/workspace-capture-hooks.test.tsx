@@ -810,7 +810,7 @@ describe("useSandboxFiles — capture source", () => {
     await hook.unmount();
   });
 
-  test("warm uses the LIVE path (capture ignored, existing behavior)", async () => {
+  test("warm reconciles the capture to the live path when the provider succeeds", async () => {
     let fsListCalls = 0;
     const client = fakeClient({
       gitStatus: async () => ({
@@ -838,9 +838,99 @@ describe("useSandboxFiles — capture source", () => {
       undefined,
     );
     await flush();
-    expect(fsListCalls).toBeGreaterThan(0);
+    expect(fsListCalls).toBe(1);
     expect(hook.result.current.source).toBe("live");
     expect(hook.result.current.tree.map((n) => n.name)).toEqual(["live.ts"]);
+    await hook.unmount();
+  });
+
+  test("warm live-list failure preserves the capture and reads captured content server-side", async () => {
+    const content = "captured during provider failure\n";
+    const hash = createHash("sha256").update(content).digest("hex");
+    const capture = fakeManifest({
+      files: [
+        {
+          ...fakeManifest().files[0]!,
+          hash,
+          sizeBytes: Buffer.byteLength(content),
+        },
+      ],
+    });
+    let fsReadCalls = 0;
+    let captureFileCalls = 0;
+    let failLiveList = true;
+    const client = fakeClient({
+      gitStatus: async () => ({
+        isRepo: false,
+        head: null,
+        detached: false,
+        upstream: null,
+        ahead: 0,
+        behind: 0,
+        files: [],
+        revision: 0,
+      }),
+      fsList: async () => {
+        if (failLiveList) {
+          throw new Error("OpenGeni API 503: Workspace files are temporarily unavailable");
+        }
+        return {
+          root: treeDir("", "", [treeFile("app.py", "src/app.py", 13)]),
+          revision: 4,
+          truncated: false,
+        };
+      },
+      fsRead: async (_workspaceId, _sessionId, request) => {
+        fsReadCalls += 1;
+        return {
+          path: request.path,
+          encoding: "utf8",
+          content: "live content\n",
+          sizeBytes: 13,
+          truncated: false,
+          isBinary: false,
+          revision: 4,
+        };
+      },
+      getWorkspaceCaptureFile: async (_workspaceId, _sessionId, path, revision) => {
+        captureFileCalls += 1;
+        return {
+          path,
+          revision: revision!,
+          status: "modified",
+          hash,
+          baseHash: null,
+          sizeBytes: Buffer.byteLength(content),
+          isBinary: false,
+          tooLarge: false,
+          encoding: "utf8",
+          content,
+          contentUrl: null,
+        };
+      },
+    });
+    const hook = await renderHook(
+      () => useSandboxFiles(SESSION_ID, { ...ctx, client, capture, liveness: "warm" }),
+      undefined,
+    );
+    await flush();
+
+    expect(hook.result.current.source).toBe("capture");
+    expect(hook.result.current.tree.map((node) => node.name)).toEqual(["src", "README.md"]);
+    expect(hook.result.current.error?.message).toContain("503");
+    const read = await hook.result.current.readFile("src/app.py");
+    expect(read.content).toBe(content);
+    expect(captureFileCalls).toBe(1);
+    expect(fsReadCalls).toBe(0);
+
+    failLiveList = false;
+    await actRun(() => hook.result.current.refresh());
+    await flush();
+    expect(hook.result.current.source).toBe("live");
+    expect(hook.result.current.error).toBeNull();
+    const liveRead = await hook.result.current.readFile("src/app.py");
+    expect(liveRead.content).toBe("live content\n");
+    expect(fsReadCalls).toBe(1);
     await hook.unmount();
   });
 
@@ -914,6 +1004,7 @@ describe("useSandboxFiles — capture source", () => {
   });
 
   test("FLAGSHIP: cold→warm reconcile keeps node identity — no remount, deltas patched", async () => {
+    let fsListCalls = 0;
     const client = fakeClient({
       gitStatus: async () => ({
         isRepo: false,
@@ -927,15 +1018,18 @@ describe("useSandboxFiles — capture source", () => {
       }),
       // The live list returns the SAME two entries the capture had (unchanged),
       // plus a new file — the delta that must be patched in.
-      fsList: async () => ({
-        root: treeDir("", "", [
-          treeDir("src", "src"),
-          treeFile("README.md", "README.md", 10),
-          treeFile("new.ts", "new.ts", 3),
-        ]),
-        revision: 1,
-        truncated: false,
-      }),
+      fsList: async () => {
+        fsListCalls += 1;
+        return {
+          root: treeDir("", "", [
+            treeDir("src", "src"),
+            treeFile("README.md", "README.md", 10),
+            treeFile("new.ts", "new.ts", 3),
+          ]),
+          revision: 1,
+          truncated: false,
+        };
+      },
     });
     const hook = await renderHook(
       (props: { liveness: string }) =>
@@ -959,6 +1053,7 @@ describe("useSandboxFiles — capture source", () => {
     // Box warms → live reconcile.
     await hook.rerender({ liveness: "warm" });
     await flush();
+    expect(fsListCalls).toBe(1);
 
     const warmTree = hook.result.current.tree;
     // The tree was NEVER emptied and NOW serves live.
@@ -1460,7 +1555,7 @@ describe("useSandboxGit — capture source", () => {
     await hook.unmount();
   });
 
-  test("warm uses the live diff directly (capture ignored)", async () => {
+  test("warm reconciles the capture to the live diff", async () => {
     let gitDiffCalls = 0;
     const client = fakeClient({
       gitStatus: async () => ({
@@ -1487,6 +1582,30 @@ describe("useSandboxGit — capture source", () => {
     expect(gitDiffCalls).toBeGreaterThan(0);
     expect(hook.result.current.source).toBe("live");
     expect(hook.result.current.diff.map((d) => d.path)).toEqual(["live-only.py"]);
+    await hook.unmount();
+  });
+
+  test("warm live-Git failure preserves the captured review diff", async () => {
+    const client = fakeClient({
+      gitStatus: async () => {
+        throw new Error("OpenGeni API 503: Workspace files are temporarily unavailable");
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useSandboxGit(SESSION_ID, {
+          ...ctx,
+          client,
+          capture: fakeManifest(),
+          liveness: "warm",
+        }),
+      undefined,
+    );
+    await flush();
+
+    expect(hook.result.current.source).toBe("capture");
+    expect(hook.result.current.diff.map((file) => file.path)).toEqual(["app.py"]);
+    expect(hook.result.current.error?.message).toContain("503");
     await hook.unmount();
   });
 
