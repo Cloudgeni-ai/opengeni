@@ -321,6 +321,37 @@ describe("turn density profile release-gate helpers", () => {
     expect(cleaned).toBe(true);
   });
 
+  test("keeps work primary when reap and manifest cleanup both fail", async () => {
+    const primaryFailure = new Error("wave deadline elapsed");
+    const cleanupFailure = new Error("manifest cleanup failed");
+    const lifecycle = withDensitySeedChildCleanup(
+      async () => {
+        throw primaryFailure;
+      },
+      () => ({
+        exitCode: null,
+        exited: new Promise<number>(() => undefined),
+        kill: () => undefined,
+      }),
+      async () => {
+        throw cleanupFailure;
+      },
+      5,
+    );
+
+    try {
+      await lifecycle;
+      throw new Error("expected seed lifecycle to fail");
+    } catch (error) {
+      expect(error).toBe(primaryFailure);
+      expect(primaryFailure.cause).toBeInstanceOf(AggregateError);
+      const secondaryFailures = (primaryFailure.cause as AggregateError).errors;
+      expect(secondaryFailures).toHaveLength(2);
+      expect(String(secondaryFailures[0])).toContain("waiting for killed density seed process");
+      expect(secondaryFailures[1]).toBe(cleanupFailure);
+    }
+  });
+
   test("preserves an early activity failure instead of masking it as gate settlement", () => {
     const rejected = new Error("driver decode rejected");
     expect(densityActivityFailureBeforeGate([{ status: "rejected", reason: rejected }])).toBe(

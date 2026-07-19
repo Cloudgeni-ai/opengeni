@@ -995,12 +995,12 @@ export async function withDensitySeedChildCleanup<T>(
   cleanup: () => Promise<void>,
   reapTimeoutMs = DENSITY_SEED_REAP_TIMEOUT_MS,
 ): Promise<T> {
+  let result: T;
   try {
-    return await work();
+    result = await work();
   } catch (error) {
     const child = currentChild();
     if (child && child.exitCode === null) {
-      let reapFailure: unknown;
       try {
         child.kill(9);
         await withTimeout(
@@ -1009,15 +1009,34 @@ export async function withDensitySeedChildCleanup<T>(
           `Timed out after ${reapTimeoutMs}ms waiting for killed density seed process to exit`,
         );
       } catch (reapError) {
-        reapFailure = reapError;
-      }
-      if (reapFailure !== undefined && error instanceof Error && error.cause === undefined) {
-        error.cause = reapFailure;
+        attachDensitySeedSecondaryFailure(error, reapError);
       }
     }
+    try {
+      await cleanup();
+    } catch (cleanupError) {
+      attachDensitySeedSecondaryFailure(error, cleanupError);
+    }
     throw error;
-  } finally {
-    await cleanup();
+  }
+  await cleanup();
+  return result;
+}
+
+function attachDensitySeedSecondaryFailure(primary: unknown, secondary: unknown): void {
+  if (!(primary instanceof Error)) return;
+  try {
+    primary.cause =
+      primary.cause === undefined
+        ? secondary
+        : new AggregateError(
+            primary.cause instanceof AggregateError
+              ? [...primary.cause.errors, secondary]
+              : [primary.cause, secondary],
+            "Density seed lifecycle secondary failures",
+          );
+  } catch {
+    // A frozen or exotic thrown Error must still remain the primary failure.
   }
 }
 
