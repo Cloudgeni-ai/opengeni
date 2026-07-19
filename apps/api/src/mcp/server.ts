@@ -12,11 +12,14 @@ import {
   correctWorkspaceMemory,
   countVariableSets,
   beginRigChangeVerificationAttempt,
+  createBackgroundJobForTurn,
+  createPassiveDurableWaitForTurn,
   createVariableSet,
   deleteScheduledTask,
   encryptVariableSetValue,
   getSession,
   getSessionGoal,
+  getAskUserResolutionForTurn,
   getSessionQueueSnapshot,
   getSessionTurn,
   getVariableSet,
@@ -163,6 +166,9 @@ export function buildOpenGeniMcpServer(
   // stays on the normal first-party MCP surface only.
   if (!toolspaceMode && sessionId !== null && options.workspaceMemoryEnabled === true) {
     registerMemoryTools(server, deps, grant, sessionId, json);
+  }
+  if (!toolspaceMode && sessionId !== null) {
+    registerDurableWaitTools(server, deps, grant, sessionId, json);
   }
 
   // Fleet tools (M7 bring-your-own-compute): list / attach / swap / run_on /
@@ -1242,6 +1248,194 @@ function exactAgentCommandContext(
     callerAttemptId: attemptId,
     callerExecutionGeneration: executionGeneration,
   };
+}
+
+const DurableQuestionOptionSchema = z4.object({
+  value: z4.string().min(1).max(200),
+  label: z4.string().min(1).max(500),
+});
+const DurableQuestionBaseSchema = {
+  id: z4.string().min(1).max(128),
+  prompt: z4.string().min(1).max(2_000),
+  description: z4.string().max(4_000).optional(),
+  required: z4.boolean().default(true),
+};
+const DurableQuestionSchema = z4.discriminatedUnion("type", [
+  z4.object({
+    ...DurableQuestionBaseSchema,
+    type: z4.literal("text"),
+    placeholder: z4.string().max(500).optional(),
+    minLength: z4.number().int().nonnegative().optional(),
+    maxLength: z4.number().int().positive().max(32_768).optional(),
+  }),
+  z4.object({
+    ...DurableQuestionBaseSchema,
+    type: z4.literal("single_select"),
+    options: z4.array(DurableQuestionOptionSchema).min(1).max(100),
+  }),
+  z4.object({
+    ...DurableQuestionBaseSchema,
+    type: z4.literal("multi_select"),
+    options: z4.array(DurableQuestionOptionSchema).min(1).max(100),
+    minSelections: z4.number().int().nonnegative().optional(),
+    maxSelections: z4.number().int().positive().max(100).optional(),
+  }),
+]);
+
+function registerDurableWaitTools(
+  server: McpServer,
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  sessionId: string,
+  json: JsonResult,
+): void {
+  server.registerTool(
+    "ask_user",
+    {
+      description:
+        "Suspend this exact turn for structured human input. The wait is indefinite unless timeoutAt is supplied; reminders notify viewers without running inference. On answer/cancel/timeout, the same SDK RunState resumes exactly once and this call returns the private resolution.",
+      inputSchema: {
+        requestKey: z4.string().min(1).max(200),
+        title: z4.string().min(1).max(500).optional(),
+        description: z4.string().max(4_000).optional(),
+        questions: z4.array(DurableQuestionSchema).min(1).max(20),
+        timeoutAt: z4.string().datetime({ offset: true }).optional(),
+        reminderIntervalSeconds: z4
+          .number()
+          .int()
+          .positive()
+          .max(30 * 24 * 60 * 60)
+          .optional(),
+      },
+    },
+    async ({ requestKey }) => {
+      const caller = exactAgentCommandContext(grant, sessionId);
+      const resolution = await getAskUserResolutionForTurn(deps.db, {
+        workspaceId: grant.workspaceId,
+        sessionId,
+        turnId: caller.callerTurnId,
+        requestKey,
+      });
+      if (!resolution) {
+        throw new Error("ask_user resolution is not available for this signed turn");
+      }
+      return json(resolution);
+    },
+  );
+
+  server.registerTool(
+    "wait_until",
+    {
+      description:
+        "Suspend this existing session until an absolute timestamp. The durable Temporal timer survives browser, worker, and workflow-run loss; this call ends the current model run without polling.",
+      inputSchema: {
+        requestKey: z4.string().min(1).max(200),
+        until: z4.string().datetime({ offset: true }),
+        description: z4.string().max(4_000).optional(),
+      },
+    },
+    async ({ requestKey, until, description }) => {
+      const caller = exactAgentCommandContext(grant, sessionId);
+      const result = await createPassiveDurableWaitForTurn(deps.db, {
+        accountId: caller.accountId,
+        workspaceId: caller.workspaceId,
+        sessionId,
+        turnId: caller.callerTurnId,
+        expectedExecutionGeneration: caller.callerExecutionGeneration,
+        expectedAttemptId: caller.callerAttemptId,
+        requestKey,
+        kind: "until",
+        wakeAt: new Date(until),
+        ...(description ? { description } : {}),
+      });
+      return json({ wait: result.wait, created: result.created, suspended: true });
+    },
+  );
+
+  server.registerTool(
+    "wait_for_event",
+    {
+      description:
+        "Suspend this existing session until one authorized idempotent event matches type and correlationKey (and optional subject), or until timeoutAt. Event source identity is derived from this authenticated call and cannot be supplied in JSON.",
+      inputSchema: {
+        requestKey: z4.string().min(1).max(200),
+        type: z4.string().min(1).max(200),
+        correlationKey: z4.string().min(1).max(500),
+        subject: z4.string().min(1).max(500).optional(),
+        description: z4.string().max(4_000).optional(),
+        timeoutAt: z4.string().datetime({ offset: true }).optional(),
+      },
+    },
+    async ({ requestKey, type, correlationKey, subject, description, timeoutAt }) => {
+      const caller = exactAgentCommandContext(grant, sessionId);
+      const result = await createPassiveDurableWaitForTurn(deps.db, {
+        accountId: caller.accountId,
+        workspaceId: caller.workspaceId,
+        sessionId,
+        turnId: caller.callerTurnId,
+        expectedExecutionGeneration: caller.callerExecutionGeneration,
+        expectedAttemptId: caller.callerAttemptId,
+        requestKey,
+        kind: "event",
+        eventSourceIdentity: grant.subjectId,
+        eventType: type,
+        eventCorrelationKey: correlationKey,
+        ...(subject ? { eventSubject: subject } : {}),
+        ...(description ? { description } : {}),
+        ...(timeoutAt ? { timeoutAt: new Date(timeoutAt) } : {}),
+      });
+      return json({ wait: result.wait, created: result.created, suspended: true });
+    },
+  );
+
+  server.registerTool(
+    "start_background_job",
+    {
+      description:
+        "Start one idempotent asynchronous command in a dedicated durable execution provider, suspend this existing session, and resume it exactly once when the job completes, fails, is cancelled, or is lost. The job survives browser and worker loss; OpenGeni never reruns provider work after a successful start fence.",
+      inputSchema: {
+        requestKey: z4.string().min(1).max(200),
+        command: z4.string().min(1).max(32_768),
+        args: z4.array(z4.string().max(8_192)).max(256).default([]),
+        cwd: z4.string().min(1).max(4_096).optional(),
+        artifactPaths: z4.array(z4.string().min(1).max(4_096)).max(32).default([]),
+        timeoutSeconds: z4
+          .number()
+          .int()
+          .positive()
+          .max(30 * 24 * 60 * 60)
+          .optional(),
+        metadata: z4.record(z4.string(), z4.unknown()).default({}),
+      },
+    },
+    async ({ requestKey, command, args, cwd, artifactPaths, timeoutSeconds, metadata }) => {
+      const caller = exactAgentCommandContext(grant, sessionId);
+      const result = await createBackgroundJobForTurn(deps.db, {
+        accountId: caller.accountId,
+        workspaceId: caller.workspaceId,
+        sessionId,
+        turnId: caller.callerTurnId,
+        expectedExecutionGeneration: caller.callerExecutionGeneration,
+        expectedAttemptId: caller.callerAttemptId,
+        provider: "modal",
+        requestKey,
+        spec: {
+          command,
+          args,
+          artifactPaths,
+          metadata,
+          ...(cwd ? { cwd } : {}),
+          ...(timeoutSeconds ? { timeoutSeconds } : {}),
+        },
+      });
+      return json({
+        job: result.job,
+        wait: result.wait,
+        created: result.created,
+        suspended: true,
+      });
+    },
+  );
 }
 
 function registerWorkspaceOrchestrationTools(

@@ -36,6 +36,7 @@ import {
   UserMessageBody,
 } from "@/components/session/banners";
 import { ComposerAgentsPill } from "@/components/session/composer-agents-pill";
+import { DurableActions } from "@/components/session/durable-actions";
 import { useRail } from "@/components/rail/rail-context";
 import { GoalSurface } from "@/components/session/goal-surface";
 import { SessionInspector } from "@/components/session/inspector";
@@ -745,6 +746,11 @@ function SessionChatPane(props: {
       {/* The one compact control stack above the composer. Each surface hides
           when it has nothing to show, so the stack degrades to
           whichever one is present — or neither. */}
+      <DurableActions
+        workspaceId={props.session.workspaceId}
+        sessionId={props.session.id}
+        events={props.events}
+      />
       {!terminal ? <QueueSurface queue={props.queue} composer={composer} /> : null}
       <GoalSurface session={props.session} goal={props.goal} />
       <ComposerAgentsPill workspaceId={props.session.workspaceId} nodes={props.agentNodes} />

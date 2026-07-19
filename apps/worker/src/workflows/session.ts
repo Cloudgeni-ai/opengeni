@@ -68,6 +68,31 @@ export function continuationHoldMs(
   return Math.max(delay, 0);
 }
 
+export type DurableWaitTimerPlan =
+  | { cause: "deadline" | "reminder"; delayMs: number }
+  | { cause: "signal"; delayMs: null };
+
+/** Pure timer reconstruction used by the workflow and restart-focused tests. */
+export function durableWaitTimerPlan(
+  ref: { kind: string; wakeAt: string | null; nextReminderAt: string | null },
+  nowMs: number,
+): DurableWaitTimerPlan {
+  const candidates: Array<{ cause: "deadline" | "reminder"; at: number }> = [];
+  if (ref.kind === "ask_user" && ref.nextReminderAt) {
+    const at = Date.parse(ref.nextReminderAt);
+    if (Number.isFinite(at)) candidates.push({ cause: "reminder", at });
+  }
+  if ((ref.kind === "ask_user" || ref.kind === "until" || ref.kind === "event") && ref.wakeAt) {
+    const at = Date.parse(ref.wakeAt);
+    if (Number.isFinite(at)) candidates.push({ cause: "deadline", at });
+  }
+  candidates.sort((left, right) => left.at - right.at || left.cause.localeCompare(right.cause));
+  const next = candidates[0];
+  return next
+    ? { cause: next.cause, delayMs: Math.max(0, next.at - nowMs) }
+    : { cause: "signal", delayMs: null };
+}
+
 /**
  * True when an agent-turn activity failure means "the worker hosting the
  * turn died or vanished" rather than "the turn itself failed": the server
@@ -231,6 +256,43 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
     }
   }
 
+  async function waitForDurableWait(
+    ref: activities.DurableWaitPeekRef,
+    baseline: {
+      wakeups: number;
+      approvalWakeups: number;
+      interruptionWakeups: number;
+    },
+  ): Promise<void> {
+    const plan = durableWaitTimerPlan(ref, Date.now());
+    if (plan.delayMs === null) {
+      await condition(
+        () =>
+          interruptionWakeups !== baseline.interruptionWakeups ||
+          approvalWakeups !== baseline.approvalWakeups ||
+          wakeups !== baseline.wakeups,
+      );
+      return;
+    }
+    if (plan.delayMs > 0) {
+      const signalled = await condition(
+        () =>
+          interruptionWakeups !== baseline.interruptionWakeups ||
+          approvalWakeups !== baseline.approvalWakeups ||
+          wakeups !== baseline.wakeups,
+        plan.delayMs,
+      );
+      if (signalled) return;
+    }
+    await activity.reconcileDurableWaitTimer({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      waitId: ref.waitId,
+      cause: plan.cause,
+    });
+  }
+
   while (true) {
     // History-overflow guard. The top of the loop is the only safe
     // continueAsNew boundary: no turn is mid-flight (every path that reaches a
@@ -272,6 +334,14 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
     const closeSignalVersion = signalVersion;
     const closeNonControlSignalVersion = nonControlSignalVersion;
     const workflowId = workflowInfo().workflowId;
+    // Signals can arrive while the durable peek activity is in flight. Capture
+    // the counters before the peek so a control or wake hint accepted in that
+    // window cannot be baselined away by the wait that follows it.
+    const waitSignalBaseline = {
+      wakeups,
+      approvalWakeups,
+      interruptionWakeups,
+    };
     const peek = await activity.peekSessionWork({
       workspaceId: input.workspaceId,
       sessionId: input.sessionId,
@@ -297,15 +367,20 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       continue;
     }
     if (peek.kind === "approval-wait") {
-      const seenApprovalWakeups = approvalWakeups;
-      const seenWakeups = wakeups;
-      const seenInterruptionWakeups = interruptionWakeups;
+      if (peek.ref) {
+        await waitForDurableWait(peek.ref, waitSignalBaseline);
+        continue;
+      }
       await condition(
         () =>
-          interruptionWakeups !== seenInterruptionWakeups ||
-          approvalWakeups !== seenApprovalWakeups ||
-          wakeups !== seenWakeups,
+          interruptionWakeups !== waitSignalBaseline.interruptionWakeups ||
+          approvalWakeups !== waitSignalBaseline.approvalWakeups ||
+          wakeups !== waitSignalBaseline.wakeups,
       );
+      continue;
+    }
+    if (peek.kind === "durable-wait") {
+      await waitForDurableWait(peek.ref, waitSignalBaseline);
       continue;
     }
     if (peek.kind === "idle") {

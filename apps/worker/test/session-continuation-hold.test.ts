@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { continuationHoldMs } from "../src/workflows/session";
+import { continuationHoldMs, durableWaitTimerPlan } from "../src/workflows/session";
 
 // P3 all-capped infinite-loop bugfix (fix #6). session.ts must treat a rotation
 // all-capped idle (`idleUntilReset`) as a MANDATORY hold: a 0/elapsed continueDelayMs
@@ -48,5 +48,63 @@ describe("continuationHoldMs — the all-capped idle is a real wait", () => {
       continuationHoldMs({ status: "failed", continueDelayMs: 99, idleUntilReset: true }, FLOOR),
     ).toBe(0);
     expect(continuationHoldMs({ status: "requires_action" }, FLOOR)).toBe(0);
+  });
+});
+
+describe("durableWaitTimerPlan — restart-safe wait reconstruction", () => {
+  const now = Date.parse("2026-07-11T12:00:00.000Z");
+
+  test("ask_user defaults to an indefinite signal wait", () => {
+    expect(
+      durableWaitTimerPlan({ kind: "ask_user", wakeAt: null, nextReminderAt: null }, now),
+    ).toEqual({ cause: "signal", delayMs: null });
+  });
+
+  test("an ask_user reminder wins before its timeout", () => {
+    expect(
+      durableWaitTimerPlan(
+        {
+          kind: "ask_user",
+          nextReminderAt: "2026-07-11T12:01:00.000Z",
+          wakeAt: "2026-07-11T12:05:00.000Z",
+        },
+        now,
+      ),
+    ).toEqual({ cause: "reminder", delayMs: 60_000 });
+  });
+
+  test("a timeout wins when no earlier reminder remains", () => {
+    expect(
+      durableWaitTimerPlan(
+        {
+          kind: "ask_user",
+          nextReminderAt: null,
+          wakeAt: "2026-07-11T12:05:00.000Z",
+        },
+        now,
+      ),
+    ).toEqual({ cause: "deadline", delayMs: 300_000 });
+  });
+
+  test("restart after a passive deadline reconciles immediately", () => {
+    expect(
+      durableWaitTimerPlan(
+        {
+          kind: "event",
+          nextReminderAt: null,
+          wakeAt: "2026-07-11T11:59:59.000Z",
+        },
+        now,
+      ),
+    ).toEqual({ cause: "deadline", delayMs: 0 });
+  });
+
+  test("event and background-job waits without deadlines remain signal-driven", () => {
+    expect(
+      durableWaitTimerPlan({ kind: "event", nextReminderAt: null, wakeAt: null }, now),
+    ).toEqual({ cause: "signal", delayMs: null });
+    expect(
+      durableWaitTimerPlan({ kind: "background_job", nextReminderAt: null, wakeAt: null }, now),
+    ).toEqual({ cause: "signal", delayMs: null });
   });
 });

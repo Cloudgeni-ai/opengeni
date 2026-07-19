@@ -176,6 +176,7 @@ import {
 import { deliverFailedChildTurnToParent } from "./parent-wake";
 import { createSecretRedactor, identityRedactor } from "./redaction";
 import { applyCodexHistoryStrip, turnInput, type TurnCodexAccount } from "./run-input";
+import { askUserBoundaryFromApprovals } from "./durable-waits";
 import {
   createRuntimeBatcher,
   currentActivityContext,
@@ -4259,6 +4260,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         if (stream.interruptions.length > 0) {
           await reconcileConversationTruth();
           const approvals = runtime.serializeApprovals(stream.interruptions);
+          const askUser = askUserBoundaryFromApprovals(approvals);
           await saveRunStateFenced({
             accountId: input.accountId,
             workspaceId: input.workspaceId,
@@ -4268,6 +4270,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             expectedAttemptId: input.attemptId,
             serializedRunState: stream.state.toString(),
             pendingApprovals: approvals,
+            ...(askUser ? { askUser } : {}),
             // Record the account freezing this state so a resume on a DIFFERENT
             // codex account strips its account-bound reasoning before replay (HOLE C).
             frozenCodexCredentialId: effectiveCodexCredentialId,

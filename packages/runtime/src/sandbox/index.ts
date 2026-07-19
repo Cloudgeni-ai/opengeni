@@ -63,6 +63,8 @@ export {
   type ProviderConstructionContext,
 } from "./providers";
 export {
+  BackgroundJobProviderLostError,
+  createModalBackgroundJobProvider,
   ensureModalRegistryImage,
   modalSandboxAttributionEnvironment,
   modalSandboxAttributionTags,
@@ -70,6 +72,9 @@ export {
   tagModalSandbox,
   terminateModalSandboxById,
   type LiveModalSandboxLeaseAttribution,
+  type BackgroundJobExecutionProvider,
+  type BackgroundJobObservationHooks,
+  type BackgroundJobProviderTerminal,
   type ModalModuleLoader,
   type ModalOrphanSweepResult,
   type ModalSandboxAttribution,

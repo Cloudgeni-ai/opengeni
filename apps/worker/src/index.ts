@@ -18,6 +18,7 @@ import {
   ScheduleAlreadyRunning,
   ScheduleOverlapPolicy,
   Client as TemporalClient,
+  WorkflowExecutionAlreadyStartedError,
 } from "@temporalio/client";
 import { NativeConnection, Worker } from "@temporalio/worker";
 import { ensureModalRegistryImage } from "@opengeni/runtime";
@@ -26,7 +27,11 @@ import {
   createTurnActivities,
   type ActivityDependencies,
 } from "./activities";
-import type { SignalCodexCapacityWorkflow, WakeSessionWorkflowSignal } from "./activities/types";
+import type {
+  SignalCodexCapacityWorkflow,
+  StartBackgroundJobWorkflow,
+  WakeSessionWorkflowSignal,
+} from "./activities/types";
 import { turnTaskQueue } from "./workflows/activities";
 import { dbReadyCheck, natsReadyCheck, startWorkerHttpServer } from "./http";
 import { observabilityEventLogger } from "./observability-metrics";
@@ -145,6 +150,7 @@ export async function createWorkerWorkflowSignaler(
 ): Promise<{
   wakeSessionWorkflow: WakeSessionWorkflowSignal;
   signalCodexCapacityWorkflow: SignalCodexCapacityWorkflow;
+  startBackgroundJobWorkflow: StartBackgroundJobWorkflow;
   check: () => Promise<void>;
   close: () => Promise<void>;
 }> {
@@ -203,6 +209,20 @@ export async function createWorkerWorkflowSignaler(
       // A typed capacity signal cannot acknowledge the generic outbox row:
       // another producer may have advanced it with a Pause/Steer that requires
       // sessionControl. The global dispatcher owns that acknowledgement.
+    },
+    startBackgroundJobWorkflow: async ({ accountId, workspaceId, jobId, workflowId }) => {
+      try {
+        await temporal.workflow.start("backgroundJobWorkflow", {
+          taskQueue: settings.temporalTaskQueue,
+          workflowId,
+          workflowIdReusePolicy: "REJECT_DUPLICATE",
+          args: [{ accountId, workspaceId, jobId }],
+        });
+      } catch (error) {
+        // The dispatch ledger is at-least-once. A stable workflow id makes a
+        // repeated start proof that the prior delivery succeeded.
+        if (!(error instanceof WorkflowExecutionAlreadyStartedError)) throw error;
+      }
     },
     check: async () => {
       await connection.workflowService.getSystemInfo({});
@@ -430,6 +450,7 @@ export async function startWorker() {
         observability,
         wakeSessionWorkflow: signaler.wakeSessionWorkflow,
         signalCodexCapacityWorkflow: signaler.signalCodexCapacityWorkflow,
+        startBackgroundJobWorkflow: signaler.startBackgroundJobWorkflow,
         db: dbClient.db,
         bus,
       },

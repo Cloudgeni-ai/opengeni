@@ -501,10 +501,146 @@ export type SessionTurn = {
   updatedAt: string;
 };
 
+// --- Existing-session durable waits and one-shot background jobs -----------
+
+export type DurableWaitKind = "ask_user" | "until" | "event" | "background_job";
+export type DurableWaitOutcome =
+  | "answered"
+  | "time_reached"
+  | "event_received"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "lost"
+  | "timed_out";
+export type DurableWaitState = "waiting" | "resolved";
+
+export type DurableAnswer = {
+  questionId: string;
+  value: string | string[];
+};
+
+export type ResolveAskUserRequest =
+  | {
+      outcome: "answered";
+      answers: DurableAnswer[];
+      clientEventId: string;
+    }
+  | {
+      outcome: "cancelled";
+      reason?: string | undefined;
+      clientEventId: string;
+    };
+
+export type DurableIngressEvent = {
+  version: 1;
+  eventId: string;
+  type: string;
+  subject?: string | undefined;
+  correlationKey: string;
+  occurredAt: string;
+  payload?: Record<string, unknown> | undefined;
+};
+
+export type DurableWait = {
+  id: string;
+  sessionId: string;
+  originTurnId: string | null;
+  kind: DurableWaitKind;
+  requestKey: string;
+  state: DurableWaitState;
+  outcome: DurableWaitOutcome | null;
+  request: Record<string, unknown>;
+  wakeAt: string | null;
+  nextReminderAt: string | null;
+  reminderSequence: number;
+  backgroundJobId: string | null;
+  createdAt: string;
+  resolvedAt: string | null;
+};
+
+export type ResolveAskUserResponse = {
+  action: "accepted" | "duplicate";
+  wait: DurableWait;
+  event: SessionEvent;
+};
+
+export type DurableEventIngressResponse = {
+  action: "accepted" | "matched" | "replay";
+  ingressEventId: string;
+  matchedWaitId: string | null;
+};
+
+export type BackgroundJobProvider = "modal";
+export type BackgroundJobStatus =
+  | "queued"
+  | "starting"
+  | "running"
+  | "cancelling"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "lost";
+
+export type BackgroundJobSpec = {
+  command: string;
+  args: string[];
+  cwd?: string | undefined;
+  artifactPaths: string[];
+  timeoutSeconds?: number | undefined;
+  metadata: Record<string, unknown>;
+};
+
+export type BackgroundJob = {
+  id: string;
+  accountId: string;
+  workspaceId: string;
+  originSessionId: string;
+  originTurnId: string | null;
+  waitId: string | null;
+  provider: BackgroundJobProvider;
+  spec: BackgroundJobSpec;
+  fireKey: string;
+  status: BackgroundJobStatus;
+  providerRef: string | null;
+  providerInstanceId: string | null;
+  startCount: number;
+  cancelRequestedAt: string | null;
+  exitCode: number | null;
+  error: string | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type BackgroundJobLog = {
+  jobId: string;
+  attemptId: string | null;
+  sequence: number;
+  providerOffset: number;
+  stream: "stdout" | "stderr" | "system";
+  text: string;
+  occurredAt: string;
+};
+
+export type BackgroundJobArtifact = {
+  id: string;
+  jobId: string;
+  path: string;
+  filename: string;
+  contentType: string;
+  sizeBytes: number;
+  sha256: string;
+  storageKey: string;
+  createdAt: string;
+};
+
 export const SESSION_EVENT_TYPES = [
   "session.created",
   "session.status.changed",
   "session.requiresAction",
+  "session.wait.reminder",
   "session.context.compaction.requested",
   "session.context.compacted",
   "session.context.compaction.skipped",
@@ -1150,6 +1286,7 @@ export const KNOWN_PERMISSIONS = [
   "sessions:create",
   "sessions:read",
   "sessions:control",
+  "events:ingest",
   // Sandbox-surfacing (mirror of @opengeni/contracts Permission). stream:view is
   // strictly broader than sessions:read (un-redacted pixels); stream:control is
   // the never-granted-v1 raw-input plane; stream:acknowledge is the secret-leak

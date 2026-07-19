@@ -2131,6 +2131,10 @@ function ensureBuiltInMcpServers(settings: Settings): Settings["mcpServers"] {
       // permission-invariant tool and docs is already uncached, so both stay
       // safe to cache / leave as-is.)
       cacheToolsList: false,
+      // ask_user is a structured approval boundary. The SDK must interrupt
+      // before invoking it; the answer transaction later consumes this exact
+      // approval and the resumed invocation reads the private resolution.
+      requireApproval: ["ask_user"],
     },
     ...(hasFiles
       ? []

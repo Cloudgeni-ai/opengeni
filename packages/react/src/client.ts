@@ -32,6 +32,14 @@ export type SessionClientLike = Pick<
   | "getComposerDraft"
   | "saveComposerDraft"
   | "listTurns"
+  // Existing-session durable waits and one-shot background jobs
+  | "listDurableWaits"
+  | "resolveAskUser"
+  | "listBackgroundJobs"
+  | "listBackgroundJobLogs"
+  | "listBackgroundJobArtifacts"
+  | "createBackgroundJobArtifactDownloadUrl"
+  | "cancelBackgroundJob"
   // Goal
   | "getGoal"
   | "updateGoal"

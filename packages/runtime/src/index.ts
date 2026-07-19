@@ -1554,6 +1554,16 @@ export function buildOpenGeniAgent(
     // spread; the SDK concatenates these with MCP and sandbox capability tools.
     ...(hostedTools.length ? { tools: hostedTools } : {}),
     ...(options.mcpServers?.length ? { mcpServers: options.mcpServers } : {}),
+    // Passive durable waits are turn boundaries, not polling tools. Their MCP
+    // call commits the wait against the signed attempt, then its output becomes
+    // this run's final output so the SDK never performs another model call.
+    toolUseBehavior: {
+      stopAtToolNames: [
+        "opengeni__wait_until",
+        "opengeni__wait_for_event",
+        "opengeni__start_background_job",
+      ] as string[],
+    },
     // Surface FAILED MCP tool calls as `{ isError: true }` tool output (see
     // mcpToolErrorFunction / mcpToolErrorOutput) instead of the SDK's default
     // flat error string, so a thrown MCP failure (protocol error, auth, timeout,

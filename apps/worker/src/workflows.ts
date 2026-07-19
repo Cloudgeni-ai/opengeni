@@ -15,6 +15,7 @@ export {
 export { sandboxReaperWorkflow } from "./workflows/sandbox-reaper";
 export { fileUploadReaperWorkflow } from "./workflows/file-upload-reaper";
 export { sessionWorkflowWakeDispatcherWorkflow } from "./workflows/workflow-wake";
+export { backgroundJobWorkflow, type BackgroundJobWorkflowInput } from "./workflows/background-job";
 export {
   rigVerificationWorkflow,
   type RigVerificationWorkflowInput,

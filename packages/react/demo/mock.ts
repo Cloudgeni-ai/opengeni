@@ -256,6 +256,37 @@ export class MockOpenGeniClient implements SessionClientLike {
     return SCHEDULED_TASKS;
   }
 
+  // The component harness does not currently script durable waits or jobs, but
+  // it implements the full client slice so embedding examples remain honest as
+  // the public SessionClientLike surface grows.
+  async listDurableWaits() {
+    return [];
+  }
+
+  async resolveAskUser(): Promise<never> {
+    throw new Error("the React demo does not script durable ask-user waits");
+  }
+
+  async listBackgroundJobs() {
+    return [];
+  }
+
+  async listBackgroundJobLogs() {
+    return [];
+  }
+
+  async listBackgroundJobArtifacts() {
+    return [];
+  }
+
+  async createBackgroundJobArtifactDownloadUrl(): Promise<never> {
+    throw new Error("the React demo does not script background-job artifacts");
+  }
+
+  async cancelBackgroundJob(): Promise<never> {
+    throw new Error("the React demo does not script background-job cancellation");
+  }
+
   async sendMessage(
     _workspaceId: string,
     sessionId: string,

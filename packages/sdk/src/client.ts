@@ -23,6 +23,9 @@ import type {
   CodexUsageMap,
   BillingSummary,
   BillingUsageResponse,
+  BackgroundJob,
+  BackgroundJobArtifact,
+  BackgroundJobLog,
   CapabilityCatalogItem,
   CapabilityCatalogResponse,
   CapabilityInstallation,
@@ -60,6 +63,10 @@ import type {
   DocumentBase,
   DocumentSearchRequest,
   DocumentSearchResponse,
+  DurableEventIngressResponse,
+  DurableIngressEvent,
+  DurableWait,
+  DurableWaitState,
   EnableCapabilityRequest,
   EnablePackRequest,
   FileAsset,
@@ -83,6 +90,8 @@ import type {
   ReasoningEffort,
   RegisterCapabilityPackRequest,
   ResourceRef,
+  ResolveAskUserRequest,
+  ResolveAskUserResponse,
   ScheduledTask,
   ScheduledTaskRun,
   Session,
@@ -572,6 +581,126 @@ export class OpenGeniClient {
       ...(clientEventId !== undefined ? { clientEventId } : {}),
       payload,
     });
+  }
+
+  // --- Durable waits and one-shot background jobs --------------------------
+
+  async listDurableWaits(
+    workspaceId: string,
+    sessionId: string,
+    options: { state?: DurableWaitState; limit?: number } = {},
+  ): Promise<DurableWait[]> {
+    return await this.requestJson<DurableWait[]>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/durable-waits`,
+      undefined,
+      {
+        ...(options.state !== undefined ? { state: options.state } : {}),
+        ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
+      },
+    );
+  }
+
+  async getDurableWait(
+    workspaceId: string,
+    sessionId: string,
+    waitId: string,
+  ): Promise<DurableWait> {
+    return await this.requestJson<DurableWait>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/durable-waits/${waitId}`,
+    );
+  }
+
+  async resolveAskUser(
+    workspaceId: string,
+    sessionId: string,
+    waitId: string,
+    request: ResolveAskUserRequest,
+  ): Promise<ResolveAskUserResponse> {
+    return await this.requestJson<ResolveAskUserResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/durable-waits/${waitId}/resolve`,
+      request,
+    );
+  }
+
+  async ingestDurableEvent(
+    workspaceId: string,
+    event: DurableIngressEvent,
+  ): Promise<DurableEventIngressResponse> {
+    return await this.requestJson<DurableEventIngressResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/durable-events`,
+      event,
+    );
+  }
+
+  async listBackgroundJobs(
+    workspaceId: string,
+    sessionId: string,
+    options: { limit?: number } = {},
+  ): Promise<BackgroundJob[]> {
+    return await this.requestJson<BackgroundJob[]>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/background-jobs`,
+      undefined,
+      {
+        ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
+      },
+    );
+  }
+
+  async getBackgroundJob(workspaceId: string, jobId: string): Promise<BackgroundJob> {
+    return await this.requestJson<BackgroundJob>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/background-jobs/${jobId}`,
+    );
+  }
+
+  async listBackgroundJobLogs(
+    workspaceId: string,
+    jobId: string,
+    options: { after?: number; limit?: number } = {},
+  ): Promise<BackgroundJobLog[]> {
+    return await this.requestJson<BackgroundJobLog[]>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/background-jobs/${jobId}/logs`,
+      undefined,
+      {
+        ...(options.after !== undefined ? { after: String(options.after) } : {}),
+        ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
+      },
+    );
+  }
+
+  async listBackgroundJobArtifacts(
+    workspaceId: string,
+    jobId: string,
+  ): Promise<BackgroundJobArtifact[]> {
+    return await this.requestJson<BackgroundJobArtifact[]>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/background-jobs/${jobId}/artifacts`,
+    );
+  }
+
+  async createBackgroundJobArtifactDownloadUrl(
+    workspaceId: string,
+    jobId: string,
+    artifactId: string,
+  ): Promise<FileDownloadUrlResponse> {
+    return await this.requestJson<FileDownloadUrlResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/background-jobs/${jobId}/artifacts/${artifactId}/download-url`,
+    );
+  }
+
+  async cancelBackgroundJob(workspaceId: string, jobId: string): Promise<BackgroundJob> {
+    return await this.requestJson<BackgroundJob>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/background-jobs/${jobId}/cancel`,
+      {},
+    );
   }
 
   /**

@@ -10,6 +10,7 @@ type WorkflowControlActivities = Pick<
   | "markSessionIdle"
   | "peekSessionWork"
   | "reconcileCodexCapacityWait"
+  | "reconcileDurableWaitTimer"
   | "recoverDispatch"
   | "settleSessionInterruptions"
 >;

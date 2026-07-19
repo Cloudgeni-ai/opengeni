@@ -1,6 +1,7 @@
 import { ModalImageSelector, ModalSandboxClient } from "@openai/agents-extensions/sandbox/modal";
 import { effectiveModalIdleTimeoutSeconds } from "@opengeni/config";
 import type { Settings } from "@opengeni/config";
+import type { BackgroundJobSpec } from "@opengeni/contracts";
 import { CAPABILITY_DESCRIPTORS } from "../capabilities";
 import { SandboxConfigError } from "../errors";
 import type { ProviderRegistration } from "./types";
@@ -281,6 +282,220 @@ export async function terminateModalSandboxById(
   }
 }
 
+export class BackgroundJobProviderLostError extends Error {
+  constructor(instanceId: string, cause?: unknown) {
+    super(`Modal background job provider instance disappeared: ${instanceId}`, { cause });
+    this.name = "BackgroundJobProviderLostError";
+  }
+}
+
+export type BackgroundJobProviderTerminal = {
+  status: "completed" | "failed" | "cancelled" | "lost";
+  exitCode?: number | null;
+  error?: string | null;
+  artifacts: Array<{
+    path: string;
+    bytes: Uint8Array;
+  }>;
+};
+
+export type BackgroundJobObservationHooks = {
+  onLog: (input: {
+    stream: "stdout" | "stderr";
+    providerOffset: number;
+    text: string;
+  }) => Promise<void>;
+  shouldCancel: () => Promise<boolean>;
+  heartbeat: () => void;
+  sleep: (ms: number) => Promise<void>;
+};
+
+export type BackgroundJobExecutionProvider = {
+  start: (input: {
+    workspaceId: string;
+    jobId: string;
+    spec: BackgroundJobSpec;
+  }) => Promise<{ providerRef: string; providerInstanceId: string }>;
+  observe: (input: {
+    providerInstanceId: string;
+    spec: BackgroundJobSpec;
+    deadlineAt: Date | null;
+    hooks: BackgroundJobObservationHooks;
+  }) => Promise<BackgroundJobProviderTerminal>;
+  terminate: (providerInstanceId: string) => Promise<void>;
+};
+
+function isModalNotFound(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const candidate = error as {
+    name?: unknown;
+    code?: unknown;
+    status?: unknown;
+    message?: unknown;
+  };
+  return (
+    candidate.name === "NotFoundError" ||
+    candidate.code === "NOT_FOUND" ||
+    candidate.code === 5 ||
+    candidate.status === 404 ||
+    (typeof candidate.message === "string" && /not[ -]?found/i.test(candidate.message))
+  );
+}
+
+async function modalImageForBackgroundJob(
+  modal: ModalClientLike,
+  settings: Settings,
+): Promise<unknown> {
+  const cached = cachedModalRegistryImage(settings);
+  if (cached) return cached;
+  const imageRef = settings.modalImageRef ?? "debian:bookworm-slim";
+  if (!settings.modalImageRegistrySecret) {
+    return modal.images.fromRegistry(imageRef);
+  }
+  const secret = await modal.secrets.fromName(
+    settings.modalImageRegistrySecret,
+    settings.modalEnvironment ? { environment: settings.modalEnvironment } : undefined,
+  );
+  return modal.images.fromRegistry(imageRef, secret);
+}
+
+/**
+ * Durable one-shot Modal execution. The job command is the Sandbox main
+ * process, so sandboxId alone is sufficient to reattach after a worker loss.
+ */
+export function createModalBackgroundJobProvider(
+  settings: Settings,
+): BackgroundJobExecutionProvider {
+  return {
+    async start(input) {
+      await ensureModalRegistryImage(settings);
+      const modal = await createModalClient(settings);
+      try {
+        const app = await modal.apps.fromName(settings.modalAppName, {
+          createIfMissing: true,
+          ...(settings.modalEnvironment ? { environment: settings.modalEnvironment } : {}),
+        });
+        const image = await modalImageForBackgroundJob(modal, settings);
+        const timeoutMs = (input.spec.timeoutSeconds ?? settings.modalTimeoutSeconds) * 1_000;
+        const sandbox = await modal.sandboxes.create(
+          app,
+          image as Parameters<ModalClientLike["sandboxes"]["create"]>[1],
+          {
+            command: [input.spec.command, ...input.spec.args],
+            ...(input.spec.cwd ? { workdir: input.spec.cwd } : {}),
+            timeoutMs,
+            idleTimeoutMs: timeoutMs,
+            tags: {
+              opengeni: "true",
+              opengeni_background_job_id: input.jobId,
+              opengeni_workspace_id: input.workspaceId,
+            },
+          },
+        );
+        return {
+          providerRef: `modal:sandbox:${sandbox.sandboxId}`,
+          providerInstanceId: sandbox.sandboxId,
+        };
+      } finally {
+        modal.close();
+      }
+    },
+
+    async observe(input) {
+      const modal = await createModalClient(settings);
+      let sandbox: Awaited<ReturnType<ModalClientLike["sandboxes"]["fromId"]>>;
+      try {
+        try {
+          sandbox = await modal.sandboxes.fromId(input.providerInstanceId);
+        } catch (error) {
+          if (isModalNotFound(error)) {
+            throw new BackgroundJobProviderLostError(input.providerInstanceId, error);
+          }
+          throw error;
+        }
+
+        let streamFailure: unknown = null;
+        const drain = async (stream: "stdout" | "stderr") => {
+          const reader = sandbox[stream].getReader();
+          const encoder = new TextEncoder();
+          let providerOffset = 0;
+          try {
+            for (;;) {
+              const chunk = await reader.read();
+              if (chunk.done) return;
+              const text = chunk.value;
+              await input.hooks.onLog({ stream, providerOffset, text });
+              providerOffset += encoder.encode(text).byteLength;
+            }
+          } finally {
+            reader.releaseLock();
+          }
+        };
+        const drains = [drain("stdout"), drain("stderr")].map((promise) =>
+          promise.catch((error) => {
+            streamFailure = error;
+          }),
+        );
+
+        for (;;) {
+          input.hooks.heartbeat();
+          if (streamFailure) throw streamFailure;
+          if (await input.hooks.shouldCancel()) {
+            await sandbox.terminate().catch(() => undefined);
+            await Promise.all(drains);
+            return { status: "cancelled", artifacts: [] };
+          }
+          if (input.deadlineAt && input.deadlineAt.getTime() <= Date.now()) {
+            await sandbox.terminate().catch(() => undefined);
+            await Promise.all(drains);
+            return {
+              status: "failed",
+              exitCode: null,
+              error: "background job timed out",
+              artifacts: [],
+            };
+          }
+          let exitCode: number | null;
+          try {
+            exitCode = await sandbox.poll();
+          } catch (error) {
+            if (isModalNotFound(error)) {
+              throw new BackgroundJobProviderLostError(input.providerInstanceId, error);
+            }
+            throw error;
+          }
+          if (exitCode !== null) {
+            await Promise.all(drains);
+            if (streamFailure) throw streamFailure;
+            const artifacts: BackgroundJobProviderTerminal["artifacts"] = [];
+            for (const path of input.spec.artifactPaths) {
+              try {
+                artifacts.push({ path, bytes: await sandbox.filesystem.readBytes(path) });
+              } catch (error) {
+                if (isModalNotFound(error)) break;
+                throw error;
+              }
+            }
+            return {
+              status: exitCode === 0 ? "completed" : "failed",
+              exitCode,
+              ...(exitCode === 0 ? {} : { error: `background job exited with code ${exitCode}` }),
+              artifacts,
+            };
+          }
+          await input.hooks.sleep(1_000);
+        }
+      } finally {
+        modal.close();
+      }
+    },
+
+    async terminate(providerInstanceId) {
+      await terminateModalSandboxById(settings, providerInstanceId);
+    },
+  };
+}
+
 type ModalSandboxInfo = {
   id: string;
   createdAt?: number;
@@ -389,6 +604,12 @@ export async function sweepModalOrphanSandboxes(
         const leaseId = tags.opengeni_lease_id;
         const workspaceId = tags.opengeni_workspace_id;
         const sandboxGroupId = tags.opengeni_sandbox_group_id;
+        // Background jobs are owned by their stable Temporal controller and a
+        // Modal hard timeout, not by the interactive session-lease table.
+        if (tags.opengeni_background_job_id) {
+          skipped += 1;
+          continue;
+        }
         const liveByInstance = info.id ? liveByInstanceId.get(info.id) : undefined;
         if (liveByInstance) {
           // Live-instance guard (see above): a live lease resumes this exact box

@@ -3,6 +3,12 @@ import type {
   AccessGrant,
   ApiKey,
   BillingBalance,
+  BackgroundJob,
+  BackgroundJobArtifact,
+  BackgroundJobLog,
+  BackgroundJobProvider,
+  BackgroundJobSpec,
+  BackgroundJobStatus,
   CapabilityCatalogItem,
   CapabilityInstallation,
   CapabilityInstallationStatus,
@@ -12,6 +18,11 @@ import type {
   ConnectionKind,
   ConnectionMetadata,
   ConnectionStatus,
+  DurableAnswer,
+  DurableIngressEvent,
+  DurableWait,
+  DurableWaitKind,
+  DurableWaitOutcome,
   McpServerConnectionRef,
   FileAsset,
   FileStatus,
@@ -36,6 +47,7 @@ import type {
   ScheduledTaskScheduleSpec,
   ScheduledTaskStatus,
   ScheduledTaskTriggerType,
+  ScheduledOccurrence,
   Session,
   SessionListResponse,
   SessionEvent,
@@ -76,10 +88,12 @@ import type {
   RigCheck,
 } from "@opengeni/contracts";
 import {
+  AskUserRequest,
   reasoningEffortForMetadata,
   resolveWorkspaceMemoryEnabled,
   RigChange as RigChangeContract,
   SessionSystemUpdatePayload,
+  stableJson,
 } from "@opengeni/contracts";
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
 import { boundModelToolOutputItem, isCodexBilledModel } from "@opengeni/codex";
@@ -475,6 +489,7 @@ export const allWorkspacePermissions: Permission[] = [
   "sessions:create",
   "sessions:read",
   "sessions:control",
+  "events:ingest",
   "files:upload",
   "files:read",
   "documents:manage",
@@ -5456,6 +5471,2501 @@ export async function listScheduledTaskRuns(
       .limit(limit);
     return rows.map(mapScheduledTaskRun);
   });
+}
+
+export type CreateBackgroundJobForTurnInput = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  turnId: string;
+  expectedExecutionGeneration: number;
+  expectedAttemptId: string;
+  provider: BackgroundJobProvider;
+  spec: BackgroundJobSpec;
+  requestKey: string;
+};
+
+function mapBackgroundJob(row: typeof schema.backgroundJobs.$inferSelect): BackgroundJob {
+  return {
+    id: row.id,
+    accountId: row.accountId,
+    workspaceId: row.workspaceId,
+    originSessionId: row.originSessionId,
+    originTurnId: row.originTurnId ?? null,
+    waitId: row.waitId ?? null,
+    provider: row.provider as BackgroundJobProvider,
+    spec: row.spec as BackgroundJobSpec,
+    fireKey: row.fireKey,
+    status: row.status as BackgroundJobStatus,
+    providerRef: row.providerRef ?? null,
+    providerInstanceId: row.providerInstanceId ?? null,
+    startCount: row.startCount,
+    cancelRequestedAt: row.cancelRequestedAt?.toISOString() ?? null,
+    exitCode: row.exitCode ?? null,
+    error: row.error ?? null,
+    startedAt: row.startedAt?.toISOString() ?? null,
+    finishedAt: row.finishedAt?.toISOString() ?? null,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  };
+}
+
+function mapBackgroundJobLog(
+  row: typeof schema.backgroundJobLogChunks.$inferSelect,
+): BackgroundJobLog {
+  return {
+    jobId: row.jobId,
+    attemptId: row.attemptId ?? null,
+    sequence: row.sequence,
+    providerOffset: row.providerOffset,
+    stream: row.stream as BackgroundJobLog["stream"],
+    text: row.text,
+    occurredAt: row.occurredAt.toISOString(),
+  };
+}
+
+function mapBackgroundJobArtifact(
+  row: typeof schema.backgroundJobArtifacts.$inferSelect,
+): BackgroundJobArtifact {
+  return {
+    id: row.id,
+    jobId: row.jobId,
+    path: row.path,
+    filename: row.filename,
+    contentType: row.contentType,
+    sizeBytes: row.sizeBytes,
+    sha256: row.sha256,
+    storageKey: row.storageKey,
+    createdAt: row.createdAt.toISOString(),
+  };
+}
+
+/**
+ * Register one asynchronous job and its passive wait for the exact signed
+ * running turn. The job, wait, and controller dispatch commit together; a
+ * stale generation/attempt can never start provider work.
+ */
+export async function createBackgroundJobForTurn(
+  db: Database,
+  input: CreateBackgroundJobForTurnInput,
+): Promise<{ job: BackgroundJob; wait: DurableWait; created: boolean }> {
+  if (!input.requestKey.trim()) throw new Error("Background job request key is required");
+  const fireKey = `session:${input.sessionId}:background-job:${input.requestKey}`;
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        const fence = await lockTurnAttemptWriteFenceTx(tx as unknown as Database, {
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+          executionGeneration: input.expectedExecutionGeneration,
+          attemptId: input.expectedAttemptId,
+        });
+        if (!fence.allowed || fence.turn.status !== "running") {
+          throw new Error(
+            `Background jobs require the signed running turn attempt${
+              fence.allowed ? "" : `: ${fence.reason}`
+            }`,
+          );
+        }
+
+        const jobId = crypto.randomUUID();
+        const [inserted] = await tx
+          .insert(schema.backgroundJobs)
+          .values({
+            id: jobId,
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            originSessionId: input.sessionId,
+            originTurnId: input.turnId,
+            provider: input.provider,
+            spec: input.spec,
+            fireKey,
+            status: "queued",
+          })
+          .onConflictDoNothing({
+            target: [schema.backgroundJobs.workspaceId, schema.backgroundJobs.fireKey],
+          })
+          .returning();
+        let job = inserted;
+        if (!job) {
+          const [existing] = await tx
+            .select()
+            .from(schema.backgroundJobs)
+            .where(
+              and(
+                eq(schema.backgroundJobs.workspaceId, input.workspaceId),
+                eq(schema.backgroundJobs.fireKey, fireKey),
+              ),
+            )
+            .limit(1);
+          if (!existing) throw new Error("background job fire-key conflict disappeared");
+          if (
+            existing.originSessionId !== input.sessionId ||
+            existing.originTurnId !== input.turnId ||
+            existing.provider !== input.provider ||
+            stableJson(existing.spec) !== stableJson(input.spec)
+          ) {
+            throw new Error(
+              `Background job request key was reused with different content: ${input.requestKey}`,
+            );
+          }
+          job = existing;
+        }
+
+        const [insertedWait] = await tx
+          .insert(schema.durableWaits)
+          .values({
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            originTurnId: input.turnId,
+            executionGeneration: input.expectedExecutionGeneration,
+            attemptId: input.expectedAttemptId,
+            kind: "background_job",
+            requestKey: input.requestKey,
+            request: {
+              provider: input.provider,
+              spec: input.spec,
+              jobId: job.id,
+            },
+            state: "waiting",
+            backgroundJobId: job.id,
+          })
+          .onConflictDoNothing({
+            target: [
+              schema.durableWaits.workspaceId,
+              schema.durableWaits.sessionId,
+              schema.durableWaits.requestKey,
+            ],
+          })
+          .returning();
+        let wait = insertedWait;
+        if (!wait) {
+          const [existingWait] = await tx
+            .select()
+            .from(schema.durableWaits)
+            .where(
+              and(
+                eq(schema.durableWaits.workspaceId, input.workspaceId),
+                eq(schema.durableWaits.sessionId, input.sessionId),
+                eq(schema.durableWaits.requestKey, input.requestKey),
+              ),
+            )
+            .limit(1);
+          if (!existingWait) throw new Error("background job wait conflict disappeared");
+          if (
+            existingWait.originTurnId !== input.turnId ||
+            existingWait.executionGeneration !== input.expectedExecutionGeneration ||
+            existingWait.attemptId !== input.expectedAttemptId ||
+            existingWait.kind !== "background_job" ||
+            existingWait.backgroundJobId !== job.id
+          ) {
+            throw new Error(`Durable wait request key was reused: ${input.requestKey}`);
+          }
+          wait = existingWait;
+        }
+        const [linked] = await tx
+          .update(schema.backgroundJobs)
+          .set({ waitId: wait.id, updatedAt: new Date() })
+          .where(
+            and(
+              eq(schema.backgroundJobs.workspaceId, input.workspaceId),
+              eq(schema.backgroundJobs.id, job.id),
+              or(isNull(schema.backgroundJobs.waitId), eq(schema.backgroundJobs.waitId, wait.id)),
+            ),
+          )
+          .returning();
+        if (!linked) throw new Error(`Background job wait link conflict: ${job.id}`);
+        await tx
+          .insert(schema.backgroundJobDispatches)
+          .values({
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            jobId: job.id,
+            dispatchKey: `background-job:${job.id}:controller:v1`,
+            workflowId: `background-job-${job.id}`,
+            status: "requested",
+          })
+          .onConflictDoNothing({
+            target: [
+              schema.backgroundJobDispatches.workspaceId,
+              schema.backgroundJobDispatches.jobId,
+              schema.backgroundJobDispatches.dispatchKey,
+            ],
+          });
+        return {
+          job: mapBackgroundJob(linked),
+          wait: mapDurableWait(wait),
+          created: Boolean(inserted),
+        };
+      }),
+  );
+}
+
+export async function getBackgroundJob(
+  db: Database,
+  workspaceId: string,
+  jobId: string,
+): Promise<BackgroundJob | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select()
+      .from(schema.backgroundJobs)
+      .where(
+        and(
+          eq(schema.backgroundJobs.workspaceId, workspaceId),
+          eq(schema.backgroundJobs.id, jobId),
+        ),
+      )
+      .limit(1);
+    return row ? mapBackgroundJob(row) : null;
+  });
+}
+
+export async function listBackgroundJobs(
+  db: Database,
+  workspaceId: string,
+  options: { sessionId?: string; limit?: number } = {},
+): Promise<BackgroundJob[]> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select()
+      .from(schema.backgroundJobs)
+      .where(
+        and(
+          eq(schema.backgroundJobs.workspaceId, workspaceId),
+          ...(options.sessionId
+            ? [eq(schema.backgroundJobs.originSessionId, options.sessionId)]
+            : []),
+        ),
+      )
+      .orderBy(desc(schema.backgroundJobs.createdAt))
+      .limit(options.limit ?? 100);
+    return rows.map(mapBackgroundJob);
+  });
+}
+
+export type BackgroundJobAttemptRecord = {
+  id: string;
+  attemptNumber: number;
+};
+
+/** Allocate an observation attempt while holding the durable job lock. */
+export async function createBackgroundJobAttempt(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    jobId: string;
+    controllerId?: string | null;
+  },
+): Promise<BackgroundJobAttemptRecord> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        const [job] = await tx
+          .select({ accountId: schema.backgroundJobs.accountId })
+          .from(schema.backgroundJobs)
+          .where(
+            and(
+              eq(schema.backgroundJobs.workspaceId, input.workspaceId),
+              eq(schema.backgroundJobs.id, input.jobId),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (!job) throw new Error(`Background job not found: ${input.jobId}`);
+        const [{ attemptNumber } = { attemptNumber: 0 }] = await tx
+          .select({
+            attemptNumber: sql<number>`coalesce(max(${schema.backgroundJobAttempts.attemptNumber}), 0) + 1`,
+          })
+          .from(schema.backgroundJobAttempts)
+          .where(
+            and(
+              eq(schema.backgroundJobAttempts.workspaceId, input.workspaceId),
+              eq(schema.backgroundJobAttempts.jobId, input.jobId),
+            ),
+          );
+        const now = new Date();
+        await tx
+          .update(schema.backgroundJobAttempts)
+          .set({
+            status: "lost",
+            finishedAt: now,
+            error: "observer superseded by a newer controller attempt",
+            updatedAt: now,
+          })
+          .where(
+            and(
+              eq(schema.backgroundJobAttempts.workspaceId, input.workspaceId),
+              eq(schema.backgroundJobAttempts.jobId, input.jobId),
+              eq(schema.backgroundJobAttempts.status, "observing"),
+            ),
+          );
+        const [attempt] = await tx
+          .insert(schema.backgroundJobAttempts)
+          .values({
+            accountId: job.accountId,
+            workspaceId: input.workspaceId,
+            jobId: input.jobId,
+            attemptNumber: Number(attemptNumber),
+            controllerId: input.controllerId ?? null,
+            status: "observing",
+          })
+          .returning({ id: schema.backgroundJobAttempts.id });
+        if (!attempt) throw new Error(`Failed to record background job attempt: ${input.jobId}`);
+        return { id: attempt.id, attemptNumber: Number(attemptNumber) };
+      }),
+  );
+}
+
+export async function finishBackgroundJobAttempt(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    attemptId: string;
+    status: "completed" | "failed" | "cancelled" | "lost";
+    error?: string | null;
+  },
+): Promise<void> {
+  await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      await scopedDb.transaction(
+        async (tx) =>
+          await finishBackgroundJobAttemptInTransaction(tx as unknown as Database, input),
+      );
+    },
+  );
+}
+
+export async function finishBackgroundJobAttemptInTransaction(
+  tx: Database,
+  input: {
+    workspaceId: string;
+    attemptId: string;
+    status: "completed" | "failed" | "cancelled" | "lost";
+    error?: string | null;
+    finishedAt?: Date;
+  },
+): Promise<void> {
+  const finishedAt = input.finishedAt ?? new Date();
+  const [finished] = await tx
+    .update(schema.backgroundJobAttempts)
+    .set({
+      status: input.status,
+      finishedAt,
+      ...(input.error !== undefined ? { error: input.error } : {}),
+      updatedAt: finishedAt,
+    })
+    .where(
+      and(
+        eq(schema.backgroundJobAttempts.workspaceId, input.workspaceId),
+        eq(schema.backgroundJobAttempts.id, input.attemptId),
+        eq(schema.backgroundJobAttempts.status, "observing"),
+      ),
+    )
+    .returning({ id: schema.backgroundJobAttempts.id });
+  if (finished) return;
+  const [existing] = await tx
+    .select({ status: schema.backgroundJobAttempts.status })
+    .from(schema.backgroundJobAttempts)
+    .where(
+      and(
+        eq(schema.backgroundJobAttempts.workspaceId, input.workspaceId),
+        eq(schema.backgroundJobAttempts.id, input.attemptId),
+      ),
+    )
+    .limit(1);
+  if (!existing) throw new Error(`Background job attempt not found: ${input.attemptId}`);
+  if (existing.status !== input.status) {
+    throw new Error(`Background job attempt terminal outcome conflict: ${input.attemptId}`);
+  }
+}
+
+/** Commit a stable Temporal observer dispatch identity before signaling it. */
+export async function ensureBackgroundJobDispatch(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    jobId: string;
+    dispatchKey: string;
+    workflowId: string;
+  },
+): Promise<void> {
+  await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      await scopedDb
+        .insert(schema.backgroundJobDispatches)
+        .values({
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          jobId: input.jobId,
+          dispatchKey: input.dispatchKey,
+          workflowId: input.workflowId,
+          status: "requested",
+        })
+        .onConflictDoNothing({
+          target: [
+            schema.backgroundJobDispatches.workspaceId,
+            schema.backgroundJobDispatches.jobId,
+            schema.backgroundJobDispatches.dispatchKey,
+          ],
+        });
+    },
+  );
+}
+
+export type BackgroundJobDispatch = {
+  id: string;
+  accountId: string;
+  workspaceId: string;
+  jobId: string;
+  dispatchKey: string;
+  workflowId: string;
+  attempts: number;
+};
+
+/** Claim only explicit committed dispatch rows; never infer runnable jobs by scan. */
+export async function claimPendingBackgroundJobDispatches(
+  db: Database,
+  limit = 100,
+): Promise<BackgroundJobDispatch[]> {
+  const rows = await rawRows<{
+    id: string;
+    account_id: string;
+    workspace_id: string;
+    job_id: string;
+    dispatch_key: string;
+    workflow_id: string;
+    attempts: number | string;
+  }>(db, sql`select * from opengeni_private.claim_background_job_dispatches(${limit})`);
+  return rows.map((row) => ({
+    id: row.id,
+    accountId: row.account_id,
+    workspaceId: row.workspace_id,
+    jobId: row.job_id,
+    dispatchKey: row.dispatch_key,
+    workflowId: row.workflow_id,
+    attempts: Number(row.attempts),
+  }));
+}
+
+export async function markBackgroundJobDispatchStarted(
+  db: Database,
+  input: { workspaceId: string; jobId: string; dispatchKey: string },
+): Promise<void> {
+  await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const now = new Date();
+    // `started` is terminal success for this dispatch ledger: the stable
+    // Temporal workflow accepted the start. The background job's lifecycle is
+    // tracked separately and must not be conflated with dispatch completion.
+    await scopedDb
+      .update(schema.backgroundJobDispatches)
+      .set({ status: "started", startedAt: now, updatedAt: now })
+      .where(
+        and(
+          eq(schema.backgroundJobDispatches.workspaceId, input.workspaceId),
+          eq(schema.backgroundJobDispatches.jobId, input.jobId),
+          eq(schema.backgroundJobDispatches.dispatchKey, input.dispatchKey),
+        ),
+      );
+  });
+}
+
+export async function markBackgroundJobDispatchFailed(
+  db: Database,
+  input: Pick<BackgroundJobDispatch, "workspaceId" | "id">,
+  error: string,
+): Promise<void> {
+  await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    await scopedDb
+      .update(schema.backgroundJobDispatches)
+      .set({ error: error.slice(0, 500), updatedAt: new Date() })
+      .where(
+        and(
+          eq(schema.backgroundJobDispatches.workspaceId, input.workspaceId),
+          eq(schema.backgroundJobDispatches.id, input.id),
+          eq(schema.backgroundJobDispatches.status, "requested"),
+        ),
+      );
+  });
+}
+
+export type ClaimBackgroundJobStartResult =
+  | { action: "start"; job: BackgroundJob }
+  | { action: "reattach"; job: BackgroundJob }
+  | { action: "terminal"; job: BackgroundJob };
+
+/** Claim the only provider start; retries may reattach, never create a second provider run. */
+export async function claimBackgroundJobStart(
+  db: Database,
+  workspaceId: string,
+  jobId: string,
+): Promise<ClaimBackgroundJobStartResult> {
+  return await withWorkspaceRls(
+    db,
+    workspaceId,
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        const [row] = await tx
+          .select()
+          .from(schema.backgroundJobs)
+          .where(
+            and(
+              eq(schema.backgroundJobs.workspaceId, workspaceId),
+              eq(schema.backgroundJobs.id, jobId),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (!row) throw new Error(`Background job not found: ${jobId}`);
+        if (row.status === "queued") {
+          const [started] = await tx
+            .update(schema.backgroundJobs)
+            .set({ status: "starting", startCount: row.startCount + 1, updatedAt: new Date() })
+            .where(
+              and(
+                eq(schema.backgroundJobs.workspaceId, workspaceId),
+                eq(schema.backgroundJobs.id, jobId),
+                eq(schema.backgroundJobs.startCount, 0),
+              ),
+            )
+            .returning();
+          if (!started) throw new Error(`Background job start fence lost: ${jobId}`);
+          return { action: "start", job: mapBackgroundJob(started) } as const;
+        }
+        if ((row.status === "running" || row.status === "cancelling") && row.providerInstanceId) {
+          return { action: "reattach", job: mapBackgroundJob(row) } as const;
+        }
+        if (row.status === "starting" && !row.providerInstanceId) {
+          const now = new Date();
+          const [lost] = await tx
+            .update(schema.backgroundJobs)
+            .set({
+              status: "lost",
+              error:
+                "provider start was interrupted before its durable instance reference was recorded",
+              finishedAt: now,
+              updatedAt: now,
+            })
+            .where(eq(schema.backgroundJobs.id, jobId))
+            .returning();
+          return { action: "terminal", job: mapBackgroundJob(lost ?? row) } as const;
+        }
+        if (row.status === "running" && !row.providerInstanceId) {
+          const now = new Date();
+          const [lost] = await tx
+            .update(schema.backgroundJobs)
+            .set({
+              status: "lost",
+              error: "running background job has no durable provider instance reference",
+              finishedAt: now,
+              updatedAt: now,
+            })
+            .where(
+              and(
+                eq(schema.backgroundJobs.workspaceId, workspaceId),
+                eq(schema.backgroundJobs.id, jobId),
+                eq(schema.backgroundJobs.status, "running"),
+              ),
+            )
+            .returning();
+          return { action: "terminal", job: mapBackgroundJob(lost ?? row) } as const;
+        }
+        return { action: "terminal", job: mapBackgroundJob(row) } as const;
+      }),
+  );
+}
+
+export async function attachBackgroundJobProviderInTransaction(
+  tx: Database,
+  input: {
+    workspaceId: string;
+    jobId: string;
+    attemptId: string;
+    providerRef: string;
+    providerInstanceId: string;
+    startedAt: Date;
+  },
+): Promise<BackgroundJob | null> {
+  const [job] = await tx
+    .select({ id: schema.backgroundJobs.id })
+    .from(schema.backgroundJobs)
+    .where(
+      and(
+        eq(schema.backgroundJobs.workspaceId, input.workspaceId),
+        eq(schema.backgroundJobs.id, input.jobId),
+        eq(schema.backgroundJobs.status, "starting"),
+        eq(schema.backgroundJobs.startCount, 1),
+        isNull(schema.backgroundJobs.providerInstanceId),
+      ),
+    )
+    .for("update")
+    .limit(1);
+  if (!job) return null;
+  const [latestAttempt] = await tx
+    .select({ id: schema.backgroundJobAttempts.id })
+    .from(schema.backgroundJobAttempts)
+    .where(
+      and(
+        eq(schema.backgroundJobAttempts.workspaceId, input.workspaceId),
+        eq(schema.backgroundJobAttempts.jobId, input.jobId),
+        eq(schema.backgroundJobAttempts.status, "observing"),
+      ),
+    )
+    .orderBy(desc(schema.backgroundJobAttempts.attemptNumber))
+    .for("update")
+    .limit(1);
+  if (latestAttempt?.id !== input.attemptId) return null;
+  const [row] = await tx
+    .update(schema.backgroundJobs)
+    .set({
+      status: "running",
+      providerRef: input.providerRef,
+      providerInstanceId: input.providerInstanceId,
+      startedAt: input.startedAt,
+      updatedAt: input.startedAt,
+    })
+    .where(
+      and(
+        eq(schema.backgroundJobs.workspaceId, input.workspaceId),
+        eq(schema.backgroundJobs.id, input.jobId),
+        eq(schema.backgroundJobs.status, "starting"),
+        eq(schema.backgroundJobs.startCount, 1),
+        isNull(schema.backgroundJobs.providerInstanceId),
+      ),
+    )
+    .returning();
+  if (row) {
+    await tx
+      .update(schema.backgroundJobAttempts)
+      .set({
+        providerRef: input.providerRef,
+        providerInstanceId: input.providerInstanceId,
+        updatedAt: input.startedAt,
+      })
+      .where(
+        and(
+          eq(schema.backgroundJobAttempts.workspaceId, input.workspaceId),
+          eq(schema.backgroundJobAttempts.id, input.attemptId),
+          eq(schema.backgroundJobAttempts.status, "observing"),
+        ),
+      );
+  }
+  return row ? mapBackgroundJob(row) : null;
+}
+
+export async function attachBackgroundJobProvider(
+  db: Database,
+  input: Parameters<typeof attachBackgroundJobProviderInTransaction>[1],
+): Promise<BackgroundJob | null> {
+  return await withWorkspaceRls(
+    db,
+    input.workspaceId,
+    async (scopedDb) =>
+      await scopedDb.transaction(
+        async (tx) =>
+          await attachBackgroundJobProviderInTransaction(tx as unknown as Database, input),
+      ),
+  );
+}
+
+export async function requestBackgroundJobCancel(
+  db: Database,
+  workspaceId: string,
+  jobId: string,
+): Promise<BackgroundJob> {
+  return await withWorkspaceRls(
+    db,
+    workspaceId,
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        const [row] = await tx
+          .select()
+          .from(schema.backgroundJobs)
+          .where(
+            and(
+              eq(schema.backgroundJobs.workspaceId, workspaceId),
+              eq(schema.backgroundJobs.id, jobId),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (!row) throw new Error(`Background job not found: ${jobId}`);
+        if (["completed", "failed", "cancelled", "lost"].includes(row.status)) {
+          return mapBackgroundJob(row);
+        }
+        const now = new Date();
+        const [updated] = await tx
+          .update(schema.backgroundJobs)
+          .set({
+            status: "cancelling",
+            cancelRequestedAt: row.cancelRequestedAt ?? now,
+            updatedAt: now,
+          })
+          .where(eq(schema.backgroundJobs.id, jobId))
+          .returning();
+        if (!updated) throw new Error(`Background job cancel fence lost: ${jobId}`);
+        return mapBackgroundJob(updated);
+      }),
+  );
+}
+
+export async function getBackgroundJobCancelRequested(
+  db: Database,
+  workspaceId: string,
+  jobId: string,
+): Promise<boolean> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({ requested: isNotNull(schema.backgroundJobs.cancelRequestedAt) })
+      .from(schema.backgroundJobs)
+      .where(
+        and(
+          eq(schema.backgroundJobs.workspaceId, workspaceId),
+          eq(schema.backgroundJobs.id, jobId),
+        ),
+      )
+      .limit(1);
+    return row ? Boolean(row.requested) : false;
+  });
+}
+
+export async function settleBackgroundJobInTransaction(
+  tx: Database,
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    jobId: string;
+    waitId: string;
+    attemptId: string;
+    status: "completed" | "failed" | "cancelled" | "lost";
+    finishedAt: Date;
+    resolutionEventId: string | null;
+    exitCode?: number | null;
+    error?: string | null;
+  },
+): Promise<void> {
+  // The session row is already locked by addSessionSystemUpdateWithSourceMutation.
+  // Preserve the remaining canonical order: wait -> job/attempt.
+  const [wait] = await tx
+    .select()
+    .from(schema.durableWaits)
+    .where(
+      and(
+        eq(schema.durableWaits.workspaceId, input.workspaceId),
+        eq(schema.durableWaits.sessionId, input.sessionId),
+        eq(schema.durableWaits.id, input.waitId),
+        eq(schema.durableWaits.kind, "background_job"),
+      ),
+    )
+    .for("update")
+    .limit(1);
+  const [job] = await tx
+    .select()
+    .from(schema.backgroundJobs)
+    .where(
+      and(
+        eq(schema.backgroundJobs.workspaceId, input.workspaceId),
+        eq(schema.backgroundJobs.originSessionId, input.sessionId),
+        eq(schema.backgroundJobs.id, input.jobId),
+      ),
+    )
+    .for("update")
+    .limit(1);
+  if (!wait || !job || wait.backgroundJobId !== job.id || job.waitId !== wait.id) {
+    throw new Error(`Background job durable wait link changed: ${input.jobId}`);
+  }
+  const [latestAttempt] = await tx
+    .select({
+      id: schema.backgroundJobAttempts.id,
+      status: schema.backgroundJobAttempts.status,
+    })
+    .from(schema.backgroundJobAttempts)
+    .where(
+      and(
+        eq(schema.backgroundJobAttempts.workspaceId, input.workspaceId),
+        eq(schema.backgroundJobAttempts.jobId, input.jobId),
+      ),
+    )
+    .orderBy(desc(schema.backgroundJobAttempts.attemptNumber))
+    .for("update")
+    .limit(1);
+  if (latestAttempt?.id !== input.attemptId) {
+    throw new Error(`Background job observer attempt fence lost: ${input.jobId}`);
+  }
+  const terminalStatuses = ["completed", "failed", "cancelled", "lost"] as const;
+  const jobIsTerminal = terminalStatuses.includes(job.status as (typeof terminalStatuses)[number]);
+  if (
+    latestAttempt.status !== "observing" &&
+    !(jobIsTerminal && latestAttempt.status === input.status)
+  ) {
+    throw new Error(`Background job observer attempt is no longer active: ${input.attemptId}`);
+  }
+  if (jobIsTerminal) {
+    if (job.status !== input.status) {
+      throw new Error(`Background job terminal outcome conflict: ${input.jobId}`);
+    }
+  } else {
+    if (!["starting", "running", "cancelling"].includes(job.status)) {
+      throw new Error(`Background job is not terminal-settleable: ${input.jobId}`);
+    }
+    const [settled] = await tx
+      .update(schema.backgroundJobs)
+      .set({
+        status: input.status,
+        finishedAt: input.finishedAt,
+        ...(input.exitCode !== undefined ? { exitCode: input.exitCode } : {}),
+        ...(input.error !== undefined ? { error: input.error } : {}),
+        updatedAt: input.finishedAt,
+      })
+      .where(
+        and(
+          eq(schema.backgroundJobs.workspaceId, input.workspaceId),
+          eq(schema.backgroundJobs.id, input.jobId),
+          inArray(schema.backgroundJobs.status, ["starting", "running", "cancelling"]),
+        ),
+      )
+      .returning({ id: schema.backgroundJobs.id });
+    if (!settled) throw new Error(`Background job terminal fence lost: ${input.jobId}`);
+  }
+
+  const resolution = {
+    jobId: input.jobId,
+    status: input.status,
+    ...(input.exitCode !== undefined ? { exitCode: input.exitCode } : {}),
+    ...(input.error !== undefined ? { error: input.error } : {}),
+  };
+  if (wait.state === "resolved") {
+    if (
+      wait.outcome !== input.status ||
+      (wait.resolutionEventId !== null && wait.resolutionEventId !== input.resolutionEventId)
+    ) {
+      throw new Error(`Background job wait terminal outcome conflict: ${input.waitId}`);
+    }
+    if (wait.resolutionEventId === null && input.resolutionEventId !== null) {
+      await tx
+        .update(schema.durableWaits)
+        .set({ resolutionEventId: input.resolutionEventId, updatedAt: input.finishedAt })
+        .where(eq(schema.durableWaits.id, wait.id));
+    }
+    return;
+  }
+  const [resolved] = await tx
+    .update(schema.durableWaits)
+    .set({
+      state: "resolved",
+      outcome: input.status,
+      resolution,
+      resolutionEventId: input.resolutionEventId,
+      resolvedAt: input.finishedAt,
+      updatedAt: input.finishedAt,
+    })
+    .where(and(eq(schema.durableWaits.id, wait.id), eq(schema.durableWaits.state, "waiting")))
+    .returning({ id: schema.durableWaits.id });
+  if (!resolved) throw new Error(`Background job wait terminal fence lost: ${input.waitId}`);
+}
+
+export type SettleBackgroundJobResult = {
+  job: BackgroundJob;
+  wait: DurableWait;
+  delivery: AddSessionSystemUpdateResult;
+};
+
+/**
+ * Atomically make a provider terminal result session-visible. The closed
+ * internal-update union remains unchanged: the terminal is one nested
+ * scheduled_occurrence, and its dedupe key is stable across observer restart.
+ */
+export async function settleBackgroundJob(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    jobId: string;
+    status: "completed" | "failed" | "cancelled" | "lost";
+    attemptId: string;
+    finishedAt?: Date;
+    exitCode?: number | null;
+    error?: string | null;
+  },
+): Promise<SettleBackgroundJobResult> {
+  const current = await getBackgroundJob(db, input.workspaceId, input.jobId);
+  if (!current?.waitId) {
+    throw new Error(`Background job durable wait not found: ${input.jobId}`);
+  }
+  const finishedAt = input.finishedAt ?? new Date();
+  const occurrence: ScheduledOccurrence = {
+    type: "background_job_terminal",
+    waitId: current.waitId,
+    jobId: current.id,
+    status: input.status,
+    ...(input.exitCode !== undefined ? { exitCode: input.exitCode } : {}),
+    ...(input.error !== undefined ? { error: input.error } : {}),
+  };
+  const delivery = await addSessionSystemUpdateWithSourceMutation(
+    db,
+    {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: current.originSessionId,
+      kind: "scheduled_occurrence",
+      classification:
+        input.status === "completed"
+          ? "success"
+          : input.status === "cancelled"
+            ? "info"
+            : "failure",
+      sourceId: current.id,
+      dedupeKey: `background-job:${current.id}:terminal`,
+      summary: `Background job ${input.status}`,
+      payload: { type: "scheduled_occurrence", occurrence },
+      lineage: {
+        jobId: current.id,
+        waitId: current.waitId,
+        originTurnId: current.originTurnId,
+      },
+    },
+    async (tx, wakeEventId) => {
+      await settleBackgroundJobInTransaction(tx, {
+        workspaceId: input.workspaceId,
+        sessionId: current.originSessionId,
+        jobId: current.id,
+        waitId: current.waitId!,
+        attemptId: input.attemptId,
+        status: input.status,
+        finishedAt,
+        resolutionEventId: wakeEventId,
+        ...(input.exitCode !== undefined ? { exitCode: input.exitCode } : {}),
+        ...(input.error !== undefined ? { error: input.error } : {}),
+      });
+      await finishBackgroundJobAttemptInTransaction(tx, {
+        workspaceId: input.workspaceId,
+        attemptId: input.attemptId,
+        status: input.status,
+        finishedAt,
+        ...(input.error !== undefined ? { error: input.error } : {}),
+      });
+    },
+  );
+  const [job, wait] = await Promise.all([
+    getBackgroundJob(db, input.workspaceId, input.jobId),
+    getDurableWait(db, input.workspaceId, current.originSessionId, current.waitId),
+  ]);
+  if (!job || !wait) throw new Error(`Settled background job disappeared: ${input.jobId}`);
+  return { job, wait, delivery };
+}
+
+export async function appendBackgroundJobLog(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    jobId: string;
+    attemptId?: string | null;
+    providerOffset: number;
+    stream: BackgroundJobLog["stream"];
+    text: string;
+    occurredAt?: Date;
+  },
+): Promise<BackgroundJobLog> {
+  if (!Number.isSafeInteger(input.providerOffset) || input.providerOffset < 0) {
+    throw new Error("Background job provider offset must be a non-negative safe integer");
+  }
+  const encoded = new TextEncoder().encode(input.text);
+  let storedText = input.text;
+  if (encoded.byteLength > 64 * 1024) {
+    const decoder = new TextDecoder("utf-8", { fatal: true });
+    let end = 64 * 1024;
+    while (end > 0) {
+      try {
+        storedText = decoder.decode(encoded.subarray(0, end));
+        break;
+      } catch {
+        // UTF-8 uses at most four bytes per scalar; this retreats only to the
+        // nearest complete boundary and never changes the provider cursor.
+        end -= 1;
+      }
+    }
+  }
+  const digest = await crypto.subtle.digest("SHA-256", encoded);
+  const contentHash = Array.from(new Uint8Array(digest))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        const [job] = await tx
+          .select({ accountId: schema.backgroundJobs.accountId })
+          .from(schema.backgroundJobs)
+          .where(
+            and(
+              eq(schema.backgroundJobs.workspaceId, input.workspaceId),
+              eq(schema.backgroundJobs.id, input.jobId),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (!job) throw new Error(`Background job not found: ${input.jobId}`);
+        if (input.attemptId) {
+          const [attempt] = await tx
+            .select({ id: schema.backgroundJobAttempts.id })
+            .from(schema.backgroundJobAttempts)
+            .where(
+              and(
+                eq(schema.backgroundJobAttempts.workspaceId, input.workspaceId),
+                eq(schema.backgroundJobAttempts.jobId, input.jobId),
+                eq(schema.backgroundJobAttempts.id, input.attemptId),
+                eq(schema.backgroundJobAttempts.status, "observing"),
+              ),
+            )
+            .limit(1);
+          if (!attempt) {
+            throw new Error(
+              `Background job observer attempt is no longer active: ${input.attemptId}`,
+            );
+          }
+        }
+        const [{ sequence } = { sequence: 0 }] = await tx
+          .select({
+            sequence: sql<number>`coalesce(max(${schema.backgroundJobLogChunks.sequence}), 0) + 1`,
+          })
+          .from(schema.backgroundJobLogChunks)
+          .where(
+            and(
+              eq(schema.backgroundJobLogChunks.workspaceId, input.workspaceId),
+              eq(schema.backgroundJobLogChunks.jobId, input.jobId),
+            ),
+          );
+        const [row] = await tx
+          .insert(schema.backgroundJobLogChunks)
+          .values({
+            accountId: job.accountId,
+            workspaceId: input.workspaceId,
+            jobId: input.jobId,
+            attemptId: input.attemptId ?? null,
+            sequence: Number(sequence),
+            providerOffset: input.providerOffset,
+            providerLength: encoded.byteLength,
+            stream: input.stream,
+            text: storedText,
+            contentHash,
+            occurredAt: input.occurredAt ?? new Date(),
+          })
+          .onConflictDoNothing({
+            target: [
+              schema.backgroundJobLogChunks.workspaceId,
+              schema.backgroundJobLogChunks.jobId,
+              schema.backgroundJobLogChunks.stream,
+              schema.backgroundJobLogChunks.providerOffset,
+            ],
+          })
+          .returning();
+        if (row) return mapBackgroundJobLog(row);
+        const [existing] = await tx
+          .select()
+          .from(schema.backgroundJobLogChunks)
+          .where(
+            and(
+              eq(schema.backgroundJobLogChunks.workspaceId, input.workspaceId),
+              eq(schema.backgroundJobLogChunks.jobId, input.jobId),
+              eq(schema.backgroundJobLogChunks.stream, input.stream),
+              eq(schema.backgroundJobLogChunks.providerOffset, input.providerOffset),
+            ),
+          )
+          .limit(1);
+        if (!existing) throw new Error("Background job log conflict disappeared");
+        if (existing.contentHash !== contentHash) {
+          throw new Error(
+            `Background job log offset was replayed with different content: ${input.stream}:${input.providerOffset}`,
+          );
+        }
+        return mapBackgroundJobLog(existing);
+      }),
+  );
+}
+
+export async function listBackgroundJobLogs(
+  db: Database,
+  workspaceId: string,
+  jobId: string,
+  after = 0,
+  limit = 500,
+): Promise<BackgroundJobLog[]> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select()
+      .from(schema.backgroundJobLogChunks)
+      .where(
+        and(
+          eq(schema.backgroundJobLogChunks.workspaceId, workspaceId),
+          eq(schema.backgroundJobLogChunks.jobId, jobId),
+          gt(schema.backgroundJobLogChunks.sequence, after),
+        ),
+      )
+      .orderBy(asc(schema.backgroundJobLogChunks.sequence))
+      .limit(limit);
+    return rows.map(mapBackgroundJobLog);
+  });
+}
+
+export async function getBackgroundJobLogOffsets(
+  db: Database,
+  workspaceId: string,
+  jobId: string,
+): Promise<Record<BackgroundJobLog["stream"], number>> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select({
+        stream: schema.backgroundJobLogChunks.stream,
+        // Offsets are provider byte positions, not the sum of persisted text.
+        // A retry can replay an already-seen chunk (deduped by its start
+        // offset), and stored text is capped independently of provider bytes.
+        // The full original byte length preserves the exact provider cursor.
+        bytes: sql<number>`coalesce(max(${schema.backgroundJobLogChunks.providerOffset} + ${schema.backgroundJobLogChunks.providerLength}), 0)::bigint`,
+      })
+      .from(schema.backgroundJobLogChunks)
+      .where(
+        and(
+          eq(schema.backgroundJobLogChunks.workspaceId, workspaceId),
+          eq(schema.backgroundJobLogChunks.jobId, jobId),
+        ),
+      )
+      .groupBy(schema.backgroundJobLogChunks.stream);
+    const offsets: Record<BackgroundJobLog["stream"], number> = {
+      stdout: 0,
+      stderr: 0,
+      system: 0,
+    };
+    for (const row of rows) {
+      if (row.stream === "stdout" || row.stream === "stderr" || row.stream === "system") {
+        offsets[row.stream] = Number(row.bytes ?? 0);
+      }
+    }
+    return offsets;
+  });
+}
+
+export async function insertBackgroundJobArtifactInTransaction(
+  tx: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    jobId: string;
+    path: string;
+    filename: string;
+    contentType: string;
+    sizeBytes: number;
+    sha256: string;
+    storageKey: string;
+  },
+): Promise<BackgroundJobArtifact> {
+  const [row] = await tx
+    .insert(schema.backgroundJobArtifacts)
+    .values(input)
+    .onConflictDoNothing({
+      target: [
+        schema.backgroundJobArtifacts.workspaceId,
+        schema.backgroundJobArtifacts.jobId,
+        schema.backgroundJobArtifacts.path,
+      ],
+    })
+    .returning();
+  if (row) return mapBackgroundJobArtifact(row);
+  const [existing] = await tx
+    .select()
+    .from(schema.backgroundJobArtifacts)
+    .where(
+      and(
+        eq(schema.backgroundJobArtifacts.workspaceId, input.workspaceId),
+        eq(schema.backgroundJobArtifacts.jobId, input.jobId),
+        eq(schema.backgroundJobArtifacts.path, input.path),
+      ),
+    )
+    .limit(1);
+  if (!existing) throw new Error(`Background artifact conflict disappeared: ${input.path}`);
+  if (
+    existing.filename !== input.filename ||
+    existing.contentType !== input.contentType ||
+    existing.sizeBytes !== input.sizeBytes ||
+    existing.sha256 !== input.sha256 ||
+    existing.storageKey !== input.storageKey
+  ) {
+    throw new Error(`Background artifact path was replayed with different content: ${input.path}`);
+  }
+  return mapBackgroundJobArtifact(existing);
+}
+
+export async function insertBackgroundJobArtifact(
+  db: Database,
+  input: Parameters<typeof insertBackgroundJobArtifactInTransaction>[1],
+): Promise<BackgroundJobArtifact> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(
+        async (tx) =>
+          await insertBackgroundJobArtifactInTransaction(tx as unknown as Database, input),
+      ),
+  );
+}
+
+export async function listBackgroundJobArtifacts(
+  db: Database,
+  workspaceId: string,
+  jobId: string,
+): Promise<BackgroundJobArtifact[]> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select()
+      .from(schema.backgroundJobArtifacts)
+      .where(
+        and(
+          eq(schema.backgroundJobArtifacts.workspaceId, workspaceId),
+          eq(schema.backgroundJobArtifacts.jobId, jobId),
+        ),
+      )
+      .orderBy(asc(schema.backgroundJobArtifacts.createdAt), asc(schema.backgroundJobArtifacts.id));
+    return rows.map(mapBackgroundJobArtifact);
+  });
+}
+
+export async function getBackgroundJobArtifact(
+  db: Database,
+  workspaceId: string,
+  jobId: string,
+  artifactId: string,
+): Promise<BackgroundJobArtifact | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select()
+      .from(schema.backgroundJobArtifacts)
+      .where(
+        and(
+          eq(schema.backgroundJobArtifacts.workspaceId, workspaceId),
+          eq(schema.backgroundJobArtifacts.jobId, jobId),
+          eq(schema.backgroundJobArtifacts.id, artifactId),
+        ),
+      )
+      .limit(1);
+    return row ? mapBackgroundJobArtifact(row) : null;
+  });
+}
+
+function mapDurableWait(row: typeof schema.durableWaits.$inferSelect): DurableWait {
+  return {
+    id: row.id,
+    sessionId: row.sessionId,
+    originTurnId: row.originTurnId ?? null,
+    kind: row.kind as DurableWaitKind,
+    requestKey: row.requestKey,
+    state: row.state as DurableWait["state"],
+    outcome: (row.outcome as DurableWaitOutcome | null) ?? null,
+    request: row.request,
+    wakeAt: row.wakeAt?.toISOString() ?? null,
+    nextReminderAt: row.nextReminderAt?.toISOString() ?? null,
+    reminderSequence: row.reminderSequence,
+    backgroundJobId: row.backgroundJobId ?? null,
+    createdAt: row.createdAt.toISOString(),
+    resolvedAt: row.resolvedAt?.toISOString() ?? null,
+  };
+}
+
+export async function getDurableWait(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  waitId: string,
+): Promise<DurableWait | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select()
+      .from(schema.durableWaits)
+      .where(
+        and(
+          eq(schema.durableWaits.workspaceId, workspaceId),
+          eq(schema.durableWaits.sessionId, sessionId),
+          eq(schema.durableWaits.id, waitId),
+        ),
+      )
+      .limit(1);
+    return row ? mapDurableWait(row) : null;
+  });
+}
+
+export async function listDurableWaits(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  options: { state?: DurableWait["state"]; limit?: number } = {},
+): Promise<DurableWait[]> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select()
+      .from(schema.durableWaits)
+      .where(
+        and(
+          eq(schema.durableWaits.workspaceId, workspaceId),
+          eq(schema.durableWaits.sessionId, sessionId),
+          ...(options.state ? [eq(schema.durableWaits.state, options.state)] : []),
+        ),
+      )
+      .orderBy(desc(schema.durableWaits.createdAt), desc(schema.durableWaits.id))
+      .limit(options.limit ?? 100);
+    return rows.map(mapDurableWait);
+  });
+}
+
+export type AdvanceAskUserReminderResult =
+  | { action: "reminded"; wait: DurableWait; event: SessionEvent }
+  | { action: "stale"; wait: DurableWait | null };
+
+/**
+ * Advance one due ask_user reminder without making the session runnable.
+ *
+ * Reminders are metadata-only session events for audit/UI/NATS. They never
+ * create a prompt, an internal update, or a workflow-wake outbox revision.
+ * After downtime, one reconciliation emits at most one reminder and advances
+ * directly to the first future interval so restart cannot create a catch-up
+ * storm. The ask_user timeout always wins when it is already due.
+ */
+export async function advanceAskUserReminder(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    waitId: string;
+    now?: Date;
+  },
+): Promise<AdvanceAskUserReminderResult> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        const now = input.now ?? new Date();
+        const [workspace] = await tx
+          .select({ id: schema.workspaces.id })
+          .from(schema.workspaces)
+          .where(eq(schema.workspaces.id, input.workspaceId))
+          .for("update")
+          .limit(1);
+        const [session] = await tx
+          .select()
+          .from(schema.sessions)
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, input.workspaceId),
+              eq(schema.sessions.id, input.sessionId),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (!workspace || !session) return { action: "stale", wait: null } as const;
+
+        // Discover the immutable turn reference without locking the wait out of
+        // order, then take workspace -> session -> turn -> wait.
+        const [waitRef] = await tx
+          .select({ originTurnId: schema.durableWaits.originTurnId })
+          .from(schema.durableWaits)
+          .where(
+            and(
+              eq(schema.durableWaits.workspaceId, input.workspaceId),
+              eq(schema.durableWaits.sessionId, input.sessionId),
+              eq(schema.durableWaits.id, input.waitId),
+              eq(schema.durableWaits.kind, "ask_user"),
+            ),
+          )
+          .limit(1);
+        if (waitRef?.originTurnId) {
+          await tx
+            .select({ id: schema.sessionTurns.id })
+            .from(schema.sessionTurns)
+            .where(
+              and(
+                eq(schema.sessionTurns.workspaceId, input.workspaceId),
+                eq(schema.sessionTurns.sessionId, input.sessionId),
+                eq(schema.sessionTurns.id, waitRef.originTurnId),
+              ),
+            )
+            .for("update")
+            .limit(1);
+        }
+        const [wait] = await tx
+          .select()
+          .from(schema.durableWaits)
+          .where(
+            and(
+              eq(schema.durableWaits.workspaceId, input.workspaceId),
+              eq(schema.durableWaits.sessionId, input.sessionId),
+              eq(schema.durableWaits.id, input.waitId),
+              eq(schema.durableWaits.kind, "ask_user"),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (
+          !wait ||
+          wait.state !== "waiting" ||
+          !wait.nextReminderAt ||
+          !wait.reminderIntervalSeconds ||
+          wait.nextReminderAt > now ||
+          (wait.wakeAt !== null && wait.wakeAt <= now)
+        ) {
+          return { action: "stale", wait: wait ? mapDurableWait(wait) : null } as const;
+        }
+
+        const intervalMs = wait.reminderIntervalSeconds * 1_000;
+        const elapsedIntervals = Math.floor(
+          Math.max(0, now.getTime() - wait.nextReminderAt.getTime()) / intervalMs,
+        );
+        const proposedNext = new Date(
+          wait.nextReminderAt.getTime() + (elapsedIntervals + 1) * intervalMs,
+        );
+        const nextReminderAt =
+          wait.wakeAt === null || proposedNext < wait.wakeAt ? proposedNext : null;
+        const reminderSequence = wait.reminderSequence + 1;
+        const [updated] = await tx
+          .update(schema.durableWaits)
+          .set({
+            reminderSequence,
+            nextReminderAt,
+            updatedAt: now,
+          })
+          .where(and(eq(schema.durableWaits.id, wait.id), eq(schema.durableWaits.state, "waiting")))
+          .returning();
+        if (!updated) return { action: "stale", wait: mapDurableWait(wait) } as const;
+
+        const [event] = await tx
+          .insert(schema.sessionEvents)
+          .values({
+            accountId: session.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            sequence: session.lastSequence + 1,
+            type: "session.wait.reminder",
+            payload: sanitizeEventPayload({
+              waitId: wait.id,
+              requestKey: wait.requestKey,
+              reminderSequence,
+              nextReminderAt: nextReminderAt?.toISOString() ?? null,
+            }),
+            occurredAt: now,
+          })
+          .returning();
+        if (!event) throw new Error(`Failed to append ask_user reminder: ${wait.id}`);
+        await tx
+          .update(schema.sessions)
+          .set({ lastSequence: session.lastSequence + 1, updatedAt: now })
+          .where(eq(schema.sessions.id, session.id));
+        return {
+          action: "reminded",
+          wait: mapDurableWait(updated),
+          event: mapEvent(event),
+        } as const;
+      }),
+  );
+}
+
+export type CreatePassiveDurableWaitForTurnInput = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  turnId: string;
+  expectedExecutionGeneration: number;
+  expectedAttemptId: string;
+  requestKey: string;
+  description?: string | null;
+} & (
+  | { kind: "until"; wakeAt: Date }
+  | {
+      kind: "event";
+      eventSourceIdentity: string;
+      eventType: string;
+      eventCorrelationKey: string;
+      eventSubject?: string | null;
+      timeoutAt?: Date | null;
+    }
+);
+
+/** Register one passive wait for the exact signed running attempt. */
+export async function createPassiveDurableWaitForTurn(
+  db: Database,
+  input: CreatePassiveDurableWaitForTurnInput,
+): Promise<{ wait: DurableWait; created: boolean }> {
+  if (!input.requestKey.trim()) throw new Error("Durable wait request key is required");
+  const wakeAt = input.kind === "until" ? input.wakeAt : (input.timeoutAt ?? null);
+  if (wakeAt && !Number.isFinite(wakeAt.getTime())) {
+    throw new Error("Durable wait deadline is invalid");
+  }
+  if (input.kind === "event" && !input.eventSourceIdentity.trim()) {
+    throw new Error("Durable event source identity is required");
+  }
+  const request: Record<string, unknown> =
+    input.kind === "until"
+      ? {
+          until: input.wakeAt.toISOString(),
+          ...(input.description ? { description: input.description } : {}),
+        }
+      : {
+          type: input.eventType,
+          correlationKey: input.eventCorrelationKey,
+          ...(input.eventSubject ? { subject: input.eventSubject } : {}),
+          ...(input.description ? { description: input.description } : {}),
+          ...(input.timeoutAt ? { timeoutAt: input.timeoutAt.toISOString() } : {}),
+        };
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        const fence = await lockTurnAttemptWriteFenceTx(tx as unknown as Database, {
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+          executionGeneration: input.expectedExecutionGeneration,
+          attemptId: input.expectedAttemptId,
+        });
+        if (!fence.allowed || fence.turn.status !== "running") {
+          throw new Error(
+            `Durable waits require the signed running turn attempt${
+              fence.allowed ? "" : `: ${fence.reason}`
+            }`,
+          );
+        }
+        const values = {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          originTurnId: input.turnId,
+          executionGeneration: input.expectedExecutionGeneration,
+          attemptId: input.expectedAttemptId,
+          kind: input.kind,
+          requestKey: input.requestKey,
+          request,
+          state: "waiting" as const,
+          wakeAt,
+          eventSourceIdentity: input.kind === "event" ? input.eventSourceIdentity : null,
+          eventType: input.kind === "event" ? input.eventType : null,
+          eventSubject: input.kind === "event" ? (input.eventSubject ?? null) : null,
+          eventCorrelationKey: input.kind === "event" ? input.eventCorrelationKey : null,
+        };
+        const [inserted] = await tx
+          .insert(schema.durableWaits)
+          .values(values)
+          .onConflictDoNothing({
+            target: [
+              schema.durableWaits.workspaceId,
+              schema.durableWaits.sessionId,
+              schema.durableWaits.requestKey,
+            ],
+          })
+          .returning();
+        if (inserted) return { wait: mapDurableWait(inserted), created: true };
+        const [existing] = await tx
+          .select()
+          .from(schema.durableWaits)
+          .where(
+            and(
+              eq(schema.durableWaits.workspaceId, input.workspaceId),
+              eq(schema.durableWaits.sessionId, input.sessionId),
+              eq(schema.durableWaits.requestKey, input.requestKey),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (!existing) throw new Error("Durable wait request-key conflict disappeared");
+        const sameShape =
+          existing.originTurnId === input.turnId &&
+          existing.executionGeneration === input.expectedExecutionGeneration &&
+          existing.attemptId === input.expectedAttemptId &&
+          existing.kind === input.kind &&
+          stableJson(existing.request) === stableJson(request) &&
+          (existing.wakeAt?.toISOString() ?? null) === (wakeAt?.toISOString() ?? null) &&
+          (existing.eventSourceIdentity ?? null) ===
+            (input.kind === "event" ? input.eventSourceIdentity : null);
+        if (!sameShape) {
+          throw new Error(`Durable wait request key was reused: ${input.requestKey}`);
+        }
+        return { wait: mapDurableWait(existing), created: false };
+      }),
+  );
+}
+
+export class DurableAnswerValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "DurableAnswerValidationError";
+  }
+}
+
+export function validateDurableAnswers(
+  questions: AskUserRequest["questions"],
+  answers: DurableAnswer[],
+): DurableAnswer[] {
+  const questionsById = new Map(questions.map((question) => [question.id, question]));
+  const answersById = new Map<string, DurableAnswer>();
+  for (const answer of answers) {
+    if (answersById.has(answer.questionId)) {
+      throw new DurableAnswerValidationError(`duplicate answer: ${answer.questionId}`);
+    }
+    if (!questionsById.has(answer.questionId)) {
+      throw new DurableAnswerValidationError(`unknown question: ${answer.questionId}`);
+    }
+    answersById.set(answer.questionId, answer);
+  }
+  for (const question of questions) {
+    const answer = answersById.get(question.id);
+    if (!answer) {
+      if (question.required) {
+        throw new DurableAnswerValidationError(`answer required: ${question.id}`);
+      }
+      continue;
+    }
+    if (question.type === "text") {
+      if (typeof answer.value !== "string") {
+        throw new DurableAnswerValidationError(`text answer required: ${question.id}`);
+      }
+      if (question.required && answer.value.trim().length === 0) {
+        throw new DurableAnswerValidationError(`non-empty answer required: ${question.id}`);
+      }
+      if (question.minLength !== undefined && answer.value.length < question.minLength) {
+        throw new DurableAnswerValidationError(`answer too short: ${question.id}`);
+      }
+      if (question.maxLength !== undefined && answer.value.length > question.maxLength) {
+        throw new DurableAnswerValidationError(`answer too long: ${question.id}`);
+      }
+      continue;
+    }
+    const allowed = new Set(question.options.map((option) => option.value));
+    if (question.type === "single_select") {
+      if (typeof answer.value !== "string" || !allowed.has(answer.value)) {
+        throw new DurableAnswerValidationError(`invalid selection: ${question.id}`);
+      }
+      continue;
+    }
+    if (!Array.isArray(answer.value)) {
+      throw new DurableAnswerValidationError(`selection array required: ${question.id}`);
+    }
+    if (new Set(answer.value).size !== answer.value.length) {
+      throw new DurableAnswerValidationError(`duplicate selection: ${question.id}`);
+    }
+    if (answer.value.some((value) => !allowed.has(value))) {
+      throw new DurableAnswerValidationError(`invalid selection: ${question.id}`);
+    }
+    const minimum = question.minSelections ?? (question.required ? 1 : 0);
+    if (answer.value.length < minimum) {
+      throw new DurableAnswerValidationError(`too few selections: ${question.id}`);
+    }
+    if (question.maxSelections !== undefined && answer.value.length > question.maxSelections) {
+      throw new DurableAnswerValidationError(`too many selections: ${question.id}`);
+    }
+  }
+  return questions.flatMap((question) => {
+    const answer = answersById.get(question.id);
+    return answer ? [answer] : [];
+  });
+}
+
+export type AskUserResolution =
+  | { waitId: string; outcome: "answered"; answers: DurableAnswer[] }
+  | { waitId: string; outcome: "cancelled" | "timed_out"; reason: string | null };
+
+/** Private tool re-execution lookup, restricted to the signed logical turn. */
+export async function getAskUserResolutionForTurn(
+  db: Database,
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    requestKey: string;
+  },
+): Promise<AskUserResolution | null> {
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({
+        id: schema.durableWaits.id,
+        state: schema.durableWaits.state,
+        outcome: schema.durableWaits.outcome,
+        resolution: schema.durableWaits.resolution,
+      })
+      .from(schema.durableWaits)
+      .where(
+        and(
+          eq(schema.durableWaits.workspaceId, input.workspaceId),
+          eq(schema.durableWaits.sessionId, input.sessionId),
+          eq(schema.durableWaits.originTurnId, input.turnId),
+          eq(schema.durableWaits.requestKey, input.requestKey),
+          eq(schema.durableWaits.kind, "ask_user"),
+        ),
+      )
+      .limit(1);
+    if (!row || row.state !== "resolved") return null;
+    if (row.outcome === "answered") {
+      const answers = row.resolution?.answers;
+      return Array.isArray(answers)
+        ? { waitId: row.id, outcome: "answered", answers: answers as DurableAnswer[] }
+        : null;
+    }
+    if (row.outcome === "cancelled" || row.outcome === "timed_out") {
+      return {
+        waitId: row.id,
+        outcome: row.outcome,
+        reason: typeof row.resolution?.reason === "string" ? row.resolution.reason : null,
+      };
+    }
+    return null;
+  });
+}
+
+export type ResolveAskUserWaitInput = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  waitId: string;
+  now?: Date;
+} & (
+  | { outcome: "answered"; answers: DurableAnswer[]; clientEventId: string }
+  | { outcome: "cancelled"; reason?: string | null; clientEventId: string }
+  | { outcome: "timed_out" }
+);
+
+export type ResolveAskUserWaitResult =
+  | {
+      action: "accepted" | "duplicate";
+      wait: DurableWait;
+      event: SessionEvent;
+      events: SessionEvent[];
+      temporalWorkflowId: string;
+      workflowWakeRevision: number | null;
+    }
+  | {
+      action: "conflict";
+      reason:
+        | "wait_not_pending"
+        | "client_event_conflict"
+        | "session_not_requires_action"
+        | "run_state_missing"
+        | "run_state_fence_changed"
+        | "approval_not_pending"
+        | "timeout_not_due";
+    };
+
+/**
+ * Resolve one ask_user boundary and consume its SDK approval exactly once.
+ * Answers stay private in durable_waits.resolution. The public event contains
+ * only the approval id, wait id, and terminal outcome required for RunState
+ * replay. Duplicate retries never mint another workflow-wake revision.
+ */
+export async function resolveAskUserWait(
+  db: Database,
+  input: ResolveAskUserWaitInput,
+): Promise<ResolveAskUserWaitResult> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        const [workspace] = await tx
+          .select({ id: schema.workspaces.id })
+          .from(schema.workspaces)
+          .where(eq(schema.workspaces.id, input.workspaceId))
+          .for("update")
+          .limit(1);
+        const [session] = await tx
+          .select()
+          .from(schema.sessions)
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, input.workspaceId),
+              eq(schema.sessions.id, input.sessionId),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (!workspace || !session) {
+          return { action: "conflict", reason: "wait_not_pending" } as const;
+        }
+
+        // Discover the immutable origin without taking the wait lock out of
+        // order, then lock canonical workspace -> session -> turn -> wait.
+        const [waitRef] = await tx
+          .select({ originTurnId: schema.durableWaits.originTurnId })
+          .from(schema.durableWaits)
+          .where(
+            and(
+              eq(schema.durableWaits.workspaceId, input.workspaceId),
+              eq(schema.durableWaits.sessionId, input.sessionId),
+              eq(schema.durableWaits.id, input.waitId),
+              eq(schema.durableWaits.kind, "ask_user"),
+            ),
+          )
+          .limit(1);
+        const [turn] = waitRef?.originTurnId
+          ? await tx
+              .select()
+              .from(schema.sessionTurns)
+              .where(
+                and(
+                  eq(schema.sessionTurns.workspaceId, input.workspaceId),
+                  eq(schema.sessionTurns.sessionId, input.sessionId),
+                  eq(schema.sessionTurns.id, waitRef.originTurnId),
+                ),
+              )
+              .for("update")
+              .limit(1)
+          : [];
+        const [wait] = await tx
+          .select()
+          .from(schema.durableWaits)
+          .where(
+            and(
+              eq(schema.durableWaits.workspaceId, input.workspaceId),
+              eq(schema.durableWaits.sessionId, input.sessionId),
+              eq(schema.durableWaits.id, input.waitId),
+              eq(schema.durableWaits.kind, "ask_user"),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (!turn || !wait || !wait.approvalId) {
+          return { action: "conflict", reason: "wait_not_pending" } as const;
+        }
+
+        const clientEventId =
+          input.outcome === "timed_out" ? `durable-wait:${wait.id}:timeout` : input.clientEventId;
+        const resolution: Record<string, unknown> =
+          input.outcome === "answered"
+            ? {
+                answers: validateDurableAnswers(
+                  AskUserRequest.parse(wait.request).questions,
+                  input.answers,
+                ),
+              }
+            : {
+                reason: input.outcome === "timed_out" ? "timeout" : (input.reason ?? null),
+              };
+
+        if (wait.state === "resolved") {
+          const [existingEvent] = wait.resolutionEventId
+            ? await tx
+                .select()
+                .from(schema.sessionEvents)
+                .where(
+                  and(
+                    eq(schema.sessionEvents.workspaceId, input.workspaceId),
+                    eq(schema.sessionEvents.sessionId, input.sessionId),
+                    eq(schema.sessionEvents.id, wait.resolutionEventId),
+                  ),
+                )
+                .limit(1)
+            : [];
+          if (
+            existingEvent &&
+            wait.outcome === input.outcome &&
+            wait.answerClientEventId === clientEventId &&
+            stableJson(wait.resolution) === stableJson(resolution)
+          ) {
+            return {
+              action: "duplicate" as const,
+              wait: mapDurableWait(wait),
+              event: mapEvent(existingEvent),
+              events: [] as SessionEvent[],
+              temporalWorkflowId: session.temporalWorkflowId ?? `session-${session.id}`,
+              workflowWakeRevision: null,
+            };
+          }
+          return { action: "conflict", reason: "wait_not_pending" } as const;
+        }
+        if (input.outcome === "timed_out") {
+          const dueAt = input.now ?? new Date();
+          if (!wait.wakeAt || wait.wakeAt > dueAt) {
+            return { action: "conflict", reason: "timeout_not_due" } as const;
+          }
+        }
+        const [clientEvent] = await tx
+          .select({ id: schema.sessionEvents.id })
+          .from(schema.sessionEvents)
+          .where(
+            and(
+              eq(schema.sessionEvents.workspaceId, input.workspaceId),
+              eq(schema.sessionEvents.sessionId, input.sessionId),
+              eq(schema.sessionEvents.clientEventId, clientEventId),
+            ),
+          )
+          .limit(1);
+        if (clientEvent) {
+          return { action: "conflict", reason: "client_event_conflict" } as const;
+        }
+        if (
+          session.status !== "requires_action" ||
+          session.activeTurnId !== turn.id ||
+          turn.status !== "requires_action"
+        ) {
+          return { action: "conflict", reason: "session_not_requires_action" } as const;
+        }
+        const [state] = await tx
+          .select()
+          .from(schema.agentRunStates)
+          .where(
+            and(
+              eq(schema.agentRunStates.workspaceId, input.workspaceId),
+              eq(schema.agentRunStates.sessionId, input.sessionId),
+              eq(schema.agentRunStates.turnId, turn.id),
+            ),
+          )
+          .orderBy(desc(schema.agentRunStates.stateVersion), desc(schema.agentRunStates.createdAt))
+          .for("update")
+          .limit(1);
+        if (!state) return { action: "conflict", reason: "run_state_missing" } as const;
+        const [requiresActionEvent] = await tx
+          .select({
+            turnGeneration: schema.sessionEvents.turnGeneration,
+            turnAttemptId: schema.sessionEvents.turnAttemptId,
+          })
+          .from(schema.sessionEvents)
+          .where(
+            and(
+              eq(schema.sessionEvents.workspaceId, input.workspaceId),
+              eq(schema.sessionEvents.sessionId, input.sessionId),
+              eq(schema.sessionEvents.turnId, turn.id),
+              eq(schema.sessionEvents.type, "session.requiresAction"),
+              eq(schema.sessionEvents.turnAssociation, "current"),
+            ),
+          )
+          .orderBy(desc(schema.sessionEvents.sequence))
+          .limit(1);
+        if (
+          wait.originTurnId !== turn.id ||
+          wait.executionGeneration !== turn.executionGeneration ||
+          wait.attemptId === null ||
+          state.turnId !== turn.id ||
+          state.executionGeneration !== wait.executionGeneration ||
+          state.attemptId !== wait.attemptId ||
+          requiresActionEvent?.turnGeneration !== wait.executionGeneration ||
+          requiresActionEvent.turnAttemptId !== wait.attemptId
+        ) {
+          return { action: "conflict", reason: "run_state_fence_changed" } as const;
+        }
+        const pendingApprovals = Array.isArray(state.pendingApprovals)
+          ? state.pendingApprovals
+          : [];
+        const approvalIndex = pendingApprovals.findIndex((approval) => {
+          if (!approval || typeof approval !== "object" || Array.isArray(approval)) return false;
+          const candidate = approval as Record<string, unknown>;
+          return candidate.id === wait.approvalId || candidate.approvalId === wait.approvalId;
+        });
+        if (approvalIndex < 0) {
+          return { action: "conflict", reason: "approval_not_pending" } as const;
+        }
+
+        const now = input.now ?? new Date();
+        const [event] = await tx
+          .insert(schema.sessionEvents)
+          .values({
+            accountId: session.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            sequence: session.lastSequence + 1,
+            type: "user.approvalDecision",
+            payload: sanitizeEventPayload({
+              approvalId: wait.approvalId,
+              decision: "approve",
+              durableWaitId: wait.id,
+              durableWaitOutcome: input.outcome,
+            }),
+            clientEventId,
+            turnId: turn.id,
+            turnGeneration: wait.executionGeneration,
+            turnAttemptId: wait.attemptId,
+            turnAssociation: "current",
+            occurredAt: now,
+          })
+          .returning();
+        if (!event) throw new Error("Failed to append ask_user approval decision");
+        const [resolved] = await tx
+          .update(schema.durableWaits)
+          .set({
+            state: "resolved",
+            outcome: input.outcome,
+            resolution,
+            answerClientEventId: clientEventId,
+            resolutionEventId: event.id,
+            resolvedAt: now,
+            nextReminderAt: null,
+            updatedAt: now,
+          })
+          .where(and(eq(schema.durableWaits.id, wait.id), eq(schema.durableWaits.state, "waiting")))
+          .returning();
+        if (!resolved) throw new Error("ask_user terminal fence lost while locked");
+        await tx
+          .update(schema.agentRunStates)
+          .set({
+            pendingApprovals: pendingApprovals.filter((_, index) => index !== approvalIndex),
+          })
+          .where(eq(schema.agentRunStates.id, state.id));
+        await tx
+          .update(schema.sessions)
+          .set({ lastSequence: session.lastSequence + 1, updatedAt: now })
+          .where(eq(schema.sessions.id, session.id));
+        const workflowWakeRevision = await enqueueSessionWorkflowWakeInTransaction(
+          tx as unknown as Database,
+          {
+            accountId: session.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: session.id,
+            temporalWorkflowId: session.temporalWorkflowId ?? `session-${session.id}`,
+            reason: "approval_decision",
+          },
+        );
+        return {
+          action: "accepted" as const,
+          wait: mapDurableWait(resolved),
+          event: mapEvent(event),
+          events: [mapEvent(event)],
+          temporalWorkflowId: session.temporalWorkflowId ?? `session-${session.id}`,
+          workflowWakeRevision,
+        };
+      }),
+  );
+}
+
+export type ResolvePassiveDurableWaitInput = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  waitId: string;
+  outcome: "time_reached" | "event_received" | "cancelled" | "timed_out";
+  resolution?: Record<string, unknown>;
+  now?: Date;
+};
+
+export async function resolvePassiveDurableWait(
+  db: Database,
+  input: ResolvePassiveDurableWaitInput,
+): Promise<{ wait: DurableWait; delivery: AddSessionSystemUpdateResult }> {
+  const wait = await getDurableWait(db, input.workspaceId, input.sessionId, input.waitId);
+  if (!wait || (wait.kind !== "until" && wait.kind !== "event")) {
+    throw new Error(`Passive durable wait not found: ${input.waitId}`);
+  }
+  const validOutcome =
+    (wait.kind === "until" && ["time_reached", "cancelled"].includes(input.outcome)) ||
+    (wait.kind === "event" && ["event_received", "cancelled", "timed_out"].includes(input.outcome));
+  if (!validOutcome) {
+    throw new Error(`Invalid ${wait.kind} wait outcome: ${input.outcome}`);
+  }
+  const occurrence: ScheduledOccurrence = {
+    type: "durable_wait",
+    waitId: wait.id,
+    waitKind: wait.kind,
+    outcome: input.outcome,
+    requestKey: wait.requestKey,
+  };
+  const now = input.now ?? new Date();
+  const delivery = await addSessionSystemUpdateWithSourceMutation(
+    db,
+    {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      kind: "scheduled_occurrence",
+      classification:
+        input.outcome === "time_reached" || input.outcome === "event_received" ? "success" : "info",
+      sourceId: wait.id,
+      dedupeKey: `durable-wait:${wait.id}:terminal`,
+      summary: `Durable ${wait.kind} wait ${input.outcome.replaceAll("_", " ")}`,
+      payload: { type: "scheduled_occurrence", occurrence },
+      lineage: { waitId: wait.id, originTurnId: wait.originTurnId },
+    },
+    async (tx, wakeEventId) => {
+      const [locked] = await tx
+        .select()
+        .from(schema.durableWaits)
+        .where(
+          and(
+            eq(schema.durableWaits.workspaceId, input.workspaceId),
+            eq(schema.durableWaits.sessionId, input.sessionId),
+            eq(schema.durableWaits.id, wait.id),
+          ),
+        )
+        .for("update")
+        .limit(1);
+      if (!locked) throw new Error(`Durable wait disappeared: ${wait.id}`);
+      if (locked.state === "resolved") {
+        if (
+          locked.outcome !== input.outcome ||
+          (locked.resolutionEventId !== null && locked.resolutionEventId !== wakeEventId)
+        ) {
+          throw new Error(`Durable wait terminal outcome conflict: ${wait.id}`);
+        }
+        if (locked.resolutionEventId === null && wakeEventId !== null) {
+          await tx
+            .update(schema.durableWaits)
+            .set({ resolutionEventId: wakeEventId, updatedAt: now })
+            .where(eq(schema.durableWaits.id, locked.id));
+        }
+        return;
+      }
+      if (
+        (input.outcome === "time_reached" || input.outcome === "timed_out") &&
+        (!locked.wakeAt || locked.wakeAt > now)
+      ) {
+        throw new Error(`Durable wait deadline is not due: ${wait.id}`);
+      }
+      const [resolved] = await tx
+        .update(schema.durableWaits)
+        .set({
+          state: "resolved",
+          outcome: input.outcome,
+          resolution: input.resolution ?? {},
+          resolutionEventId: wakeEventId,
+          resolvedAt: now,
+          updatedAt: now,
+        })
+        .where(and(eq(schema.durableWaits.id, locked.id), eq(schema.durableWaits.state, "waiting")))
+        .returning({ id: schema.durableWaits.id });
+      if (!resolved) throw new Error(`Durable wait terminal fence lost: ${wait.id}`);
+    },
+  );
+  const resolved = await getDurableWait(db, input.workspaceId, input.sessionId, input.waitId);
+  if (!resolved) throw new Error(`Resolved durable wait disappeared: ${input.waitId}`);
+  return { wait: resolved, delivery };
+}
+
+export class DurableIngressEventConflictError extends Error {
+  constructor(eventId: string) {
+    super(`Durable event id was reused with different content: ${eventId}`);
+    this.name = "DurableIngressEventConflictError";
+  }
+}
+
+class DurableIngressMatchRaceError extends Error {
+  constructor() {
+    super("Durable event match changed concurrently");
+    this.name = "DurableIngressMatchRaceError";
+  }
+}
+
+async function sha256StableJson(value: unknown): Promise<string> {
+  const encoded = new TextEncoder().encode(stableJson(value));
+  const digest = await crypto.subtle.digest("SHA-256", encoded);
+  return Array.from(new Uint8Array(digest))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+export type IngestDurableEventResult = {
+  action: "accepted" | "matched" | "replay";
+  ingressEventId: string;
+  matchedWaitId: string | null;
+  delivery: AddSessionSystemUpdateResult | null;
+};
+
+/**
+ * Accept an idempotent event from an authenticated principal. The caller must
+ * derive authenticatedSourceIdentity from AccessGrant.subjectId (or an equally
+ * trusted internal identity); it is deliberately absent from DurableIngressEvent.
+ */
+export async function ingestDurableEvent(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    authenticatedSourceIdentity: string;
+    event: DurableIngressEvent;
+  },
+): Promise<IngestDurableEventResult> {
+  if (!input.authenticatedSourceIdentity.trim()) {
+    throw new Error("Authenticated durable event source identity is required");
+  }
+  const contentHash = await sha256StableJson(input.event);
+  const occurredAt = new Date(input.event.occurredAt);
+  if (!Number.isFinite(occurredAt.getTime())) throw new Error("Durable event time is invalid");
+
+  while (true) {
+    const inspected = await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+      const [existing] = await scopedDb
+        .select()
+        .from(schema.durableWaitEvents)
+        .where(
+          and(
+            eq(schema.durableWaitEvents.workspaceId, input.workspaceId),
+            eq(schema.durableWaitEvents.sourceIdentity, input.authenticatedSourceIdentity),
+            eq(schema.durableWaitEvents.eventId, input.event.eventId),
+          ),
+        )
+        .limit(1);
+      if (existing) return { existing, wait: null };
+      const [wait] = await scopedDb
+        .select()
+        .from(schema.durableWaits)
+        .where(
+          and(
+            eq(schema.durableWaits.workspaceId, input.workspaceId),
+            eq(schema.durableWaits.kind, "event"),
+            eq(schema.durableWaits.state, "waiting"),
+            eq(schema.durableWaits.eventSourceIdentity, input.authenticatedSourceIdentity),
+            eq(schema.durableWaits.eventType, input.event.type),
+            eq(schema.durableWaits.eventCorrelationKey, input.event.correlationKey),
+            or(
+              isNull(schema.durableWaits.eventSubject),
+              ...(input.event.subject
+                ? [eq(schema.durableWaits.eventSubject, input.event.subject)]
+                : []),
+            ),
+          ),
+        )
+        .orderBy(asc(schema.durableWaits.createdAt), asc(schema.durableWaits.id))
+        .limit(1);
+      return { existing: null, wait: wait ?? null };
+    });
+
+    if (inspected.existing) {
+      if (inspected.existing.contentHash !== contentHash) {
+        throw new DurableIngressEventConflictError(input.event.eventId);
+      }
+      return {
+        action: "replay",
+        ingressEventId: inspected.existing.id,
+        matchedWaitId: inspected.existing.matchedWaitId ?? null,
+        delivery: null,
+      };
+    }
+
+    if (!inspected.wait) {
+      return await withRlsContext(
+        db,
+        { accountId: input.accountId, workspaceId: input.workspaceId },
+        async (scopedDb) =>
+          await scopedDb.transaction(async (tx) => {
+            const [inserted] = await tx
+              .insert(schema.durableWaitEvents)
+              .values({
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                version: input.event.version,
+                sourceIdentity: input.authenticatedSourceIdentity,
+                eventId: input.event.eventId,
+                contentHash,
+                type: input.event.type,
+                subject: input.event.subject ?? null,
+                correlationKey: input.event.correlationKey,
+                occurredAt,
+                payload: input.event.payload,
+                state: "accepted",
+              })
+              .onConflictDoNothing({
+                target: [
+                  schema.durableWaitEvents.workspaceId,
+                  schema.durableWaitEvents.sourceIdentity,
+                  schema.durableWaitEvents.eventId,
+                ],
+              })
+              .returning();
+            if (inserted) {
+              return {
+                action: "accepted" as const,
+                ingressEventId: inserted.id,
+                matchedWaitId: null,
+                delivery: null,
+              };
+            }
+            const [existing] = await tx
+              .select()
+              .from(schema.durableWaitEvents)
+              .where(
+                and(
+                  eq(schema.durableWaitEvents.workspaceId, input.workspaceId),
+                  eq(schema.durableWaitEvents.sourceIdentity, input.authenticatedSourceIdentity),
+                  eq(schema.durableWaitEvents.eventId, input.event.eventId),
+                ),
+              )
+              .for("update")
+              .limit(1);
+            if (!existing) throw new Error("Durable event conflict disappeared");
+            if (existing.contentHash !== contentHash) {
+              throw new DurableIngressEventConflictError(input.event.eventId);
+            }
+            return {
+              action: "replay" as const,
+              ingressEventId: existing.id,
+              matchedWaitId: existing.matchedWaitId ?? null,
+              delivery: null,
+            };
+          }),
+      );
+    }
+
+    const wait = mapDurableWait(inspected.wait);
+    const occurrence: ScheduledOccurrence = {
+      type: "durable_wait",
+      waitId: wait.id,
+      waitKind: "event",
+      outcome: "event_received",
+      requestKey: wait.requestKey,
+    };
+    try {
+      const delivery = await addSessionSystemUpdateWithSourceMutation(
+        db,
+        {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: wait.sessionId,
+          kind: "scheduled_occurrence",
+          classification: "success",
+          sourceId: wait.id,
+          dedupeKey: `durable-wait:${wait.id}:terminal`,
+          summary: "Durable event received",
+          payload: { type: "scheduled_occurrence", occurrence },
+          lineage: { waitId: wait.id, ingressEventId: input.event.eventId },
+        },
+        async (tx, wakeEventId) => {
+          const [insertedEvent] = await tx
+            .insert(schema.durableWaitEvents)
+            .values({
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              version: input.event.version,
+              sourceIdentity: input.authenticatedSourceIdentity,
+              eventId: input.event.eventId,
+              contentHash,
+              type: input.event.type,
+              subject: input.event.subject ?? null,
+              correlationKey: input.event.correlationKey,
+              occurredAt,
+              payload: input.event.payload,
+              state: "matched",
+              matchedWaitId: wait.id,
+            })
+            .onConflictDoNothing({
+              target: [
+                schema.durableWaitEvents.workspaceId,
+                schema.durableWaitEvents.sourceIdentity,
+                schema.durableWaitEvents.eventId,
+              ],
+            })
+            .returning();
+          const [eventRow] = insertedEvent
+            ? [insertedEvent]
+            : await tx
+                .select()
+                .from(schema.durableWaitEvents)
+                .where(
+                  and(
+                    eq(schema.durableWaitEvents.workspaceId, input.workspaceId),
+                    eq(schema.durableWaitEvents.sourceIdentity, input.authenticatedSourceIdentity),
+                    eq(schema.durableWaitEvents.eventId, input.event.eventId),
+                  ),
+                )
+                .for("update")
+                .limit(1);
+          if (!eventRow) throw new Error("Durable ingress event disappeared");
+          if (eventRow.contentHash !== contentHash) {
+            throw new DurableIngressEventConflictError(input.event.eventId);
+          }
+          if (
+            eventRow.state === "matched" &&
+            eventRow.matchedWaitId !== null &&
+            eventRow.matchedWaitId !== wait.id
+          ) {
+            throw new DurableIngressMatchRaceError();
+          }
+          const [lockedWait] = await tx
+            .select()
+            .from(schema.durableWaits)
+            .where(
+              and(
+                eq(schema.durableWaits.workspaceId, input.workspaceId),
+                eq(schema.durableWaits.id, wait.id),
+              ),
+            )
+            .for("update")
+            .limit(1);
+          if (!lockedWait) throw new DurableIngressMatchRaceError();
+          if (lockedWait.state === "resolved") {
+            if (
+              lockedWait.outcome !== "event_received" ||
+              lockedWait.resolution?.ingressEventId !== eventRow.id
+            ) {
+              throw new DurableIngressMatchRaceError();
+            }
+            return;
+          }
+          if (
+            lockedWait.kind !== "event" ||
+            lockedWait.eventSourceIdentity !== input.authenticatedSourceIdentity ||
+            lockedWait.eventType !== input.event.type ||
+            lockedWait.eventCorrelationKey !== input.event.correlationKey ||
+            (lockedWait.eventSubject !== null &&
+              lockedWait.eventSubject !== (input.event.subject ?? null))
+          ) {
+            throw new DurableIngressMatchRaceError();
+          }
+          await tx
+            .update(schema.durableWaitEvents)
+            .set({ state: "matched", matchedWaitId: lockedWait.id })
+            .where(eq(schema.durableWaitEvents.id, eventRow.id));
+          const now = new Date();
+          const [resolved] = await tx
+            .update(schema.durableWaits)
+            .set({
+              state: "resolved",
+              outcome: "event_received",
+              resolution: { ingressEventId: eventRow.id },
+              resolutionEventId: wakeEventId,
+              resolvedAt: now,
+              updatedAt: now,
+            })
+            .where(
+              and(
+                eq(schema.durableWaits.id, lockedWait.id),
+                eq(schema.durableWaits.state, "waiting"),
+              ),
+            )
+            .returning({ id: schema.durableWaits.id });
+          if (!resolved) throw new DurableIngressMatchRaceError();
+        },
+      );
+      const [eventRow] = await withWorkspaceRls(db, input.workspaceId, async (scopedDb) =>
+        scopedDb
+          .select({ id: schema.durableWaitEvents.id })
+          .from(schema.durableWaitEvents)
+          .where(
+            and(
+              eq(schema.durableWaitEvents.workspaceId, input.workspaceId),
+              eq(schema.durableWaitEvents.sourceIdentity, input.authenticatedSourceIdentity),
+              eq(schema.durableWaitEvents.eventId, input.event.eventId),
+            ),
+          )
+          .limit(1),
+      );
+      if (!eventRow) throw new Error("Matched durable event disappeared");
+      return {
+        action: delivery.added ? "matched" : "replay",
+        ingressEventId: eventRow.id,
+        matchedWaitId: wait.id,
+        delivery,
+      };
+    } catch (error) {
+      if (error instanceof DurableIngressMatchRaceError) continue;
+      throw error;
+    }
+  }
 }
 
 export async function createVariableSet(
@@ -11989,6 +14499,8 @@ export async function getLatestRunState(
   turnId: string | null;
   serializedRunState: string;
   pendingApprovals: unknown[];
+  executionGeneration: number | null;
+  attemptId: string | null;
   // The codex account that froze this state (pin > workspace-active), or null
   // when frozen on the non-codex path / before the column existed. The replay
   // path compares it to the resuming turn's codex account to decide whether the
@@ -12013,6 +14525,8 @@ export async function getLatestRunState(
           turnId: row.turnId ?? null,
           serializedRunState: row.serializedRunState,
           pendingApprovals: row.pendingApprovals,
+          executionGeneration: row.executionGeneration ?? null,
+          attemptId: row.attemptId ?? null,
           frozenCodexCredentialId: row.frozenCodexCredentialId ?? null,
         }
       : null;
@@ -17629,6 +20143,8 @@ export async function saveRunState(
     // account can strip the blob's account-bound reasoning. Defaults null so
     // every legacy caller (and the non-codex path) is byte-identical.
     frozenCodexCredentialId?: string | null;
+    /** Structured ask_user boundary committed atomically with the private state. */
+    askUser?: { approvalId: string; request: AskUserRequest };
   },
 ): Promise<boolean> {
   return await withRlsContext(
@@ -17660,11 +20176,80 @@ export async function saveRunState(
           workspaceId: input.workspaceId,
           sessionId: input.sessionId,
           turnId: input.turnId,
+          executionGeneration: input.expectedExecutionGeneration,
+          attemptId: input.expectedAttemptId,
           stateVersion: Number(maxVersion) + 1,
           serializedRunState: input.serializedRunState,
           pendingApprovals: input.pendingApprovals,
           frozenCodexCredentialId: input.frozenCodexCredentialId ?? null,
         });
+        if (input.askUser) {
+          const request = input.askUser.request;
+          const timeoutAt = request.timeoutAt ? new Date(request.timeoutAt) : null;
+          if (timeoutAt && !Number.isFinite(timeoutAt.getTime())) {
+            throw new Error("ask_user timeout is invalid");
+          }
+          const now = new Date();
+          const proposedReminder = request.reminderIntervalSeconds
+            ? new Date(now.getTime() + request.reminderIntervalSeconds * 1_000)
+            : null;
+          const nextReminderAt =
+            proposedReminder && (!timeoutAt || proposedReminder < timeoutAt)
+              ? proposedReminder
+              : null;
+          const [insertedWait] = await tx
+            .insert(schema.durableWaits)
+            .values({
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              originTurnId: input.turnId,
+              executionGeneration: input.expectedExecutionGeneration,
+              attemptId: input.expectedAttemptId,
+              approvalId: input.askUser.approvalId,
+              kind: "ask_user",
+              requestKey: request.requestKey,
+              request,
+              state: "waiting",
+              wakeAt: timeoutAt,
+              nextReminderAt,
+              reminderIntervalSeconds: request.reminderIntervalSeconds ?? null,
+            })
+            .onConflictDoNothing({
+              target: [
+                schema.durableWaits.workspaceId,
+                schema.durableWaits.sessionId,
+                schema.durableWaits.requestKey,
+              ],
+            })
+            .returning();
+          if (!insertedWait) {
+            const [existingWait] = await tx
+              .select()
+              .from(schema.durableWaits)
+              .where(
+                and(
+                  eq(schema.durableWaits.workspaceId, input.workspaceId),
+                  eq(schema.durableWaits.sessionId, input.sessionId),
+                  eq(schema.durableWaits.requestKey, request.requestKey),
+                ),
+              )
+              .for("update")
+              .limit(1);
+            if (!existingWait) throw new Error("ask_user request-key conflict disappeared");
+            const sameWait =
+              existingWait.kind === "ask_user" &&
+              existingWait.originTurnId === input.turnId &&
+              existingWait.executionGeneration === input.expectedExecutionGeneration &&
+              existingWait.attemptId === input.expectedAttemptId &&
+              existingWait.approvalId === input.askUser.approvalId &&
+              stableJson(existingWait.request) === stableJson(request) &&
+              (existingWait.wakeAt?.toISOString() ?? null) === (timeoutAt?.toISOString() ?? null);
+            if (!sameWait) {
+              throw new Error(`ask_user request key was reused: ${request.requestKey}`);
+            }
+          }
+        }
         return true;
       });
     },
@@ -19859,7 +22444,7 @@ export async function settleSessionAttemptInterruptions(
 export type SessionWorkPeek =
   | { kind: "runnable" }
   | { kind: "approval-pending"; triggerEventId: string }
-  | { kind: "approval-wait" }
+  | { kind: "approval-wait"; ref?: DurableWaitPeekRef }
   | {
       kind: "capacity-wait";
       ref: {
@@ -19870,7 +22455,26 @@ export type SessionWorkPeek =
       };
     }
   | { kind: "interruption-pending"; attemptId: string }
+  | { kind: "durable-wait"; ref: DurableWaitPeekRef }
   | { kind: "idle" };
+
+export type DurableWaitPeekRef = {
+  waitId: string;
+  kind: DurableWaitKind;
+  wakeAt: string | null;
+  nextReminderAt: string | null;
+  reminderSequence: number;
+};
+
+function durableWaitPeekRef(row: typeof schema.durableWaits.$inferSelect): DurableWaitPeekRef {
+  return {
+    waitId: row.id,
+    kind: row.kind as DurableWaitKind,
+    wakeAt: row.wakeAt?.toISOString() ?? null,
+    nextReminderAt: row.nextReminderAt?.toISOString() ?? null,
+    reminderSequence: row.reminderSequence,
+  };
+}
 
 /** Read durable session state without reserving a turn-worker slot or mutating it. */
 export async function peekSessionWork(
@@ -19986,8 +22590,23 @@ export async function peekSessionWork(
           )
           .orderBy(desc(schema.sessionEvents.sequence), desc(schema.sessionEvents.id))
           .limit(1);
-        return approval
-          ? { kind: "approval-pending", triggerEventId: approval.id }
+        if (approval) return { kind: "approval-pending", triggerEventId: approval.id };
+        const [askWait] = await scopedDb
+          .select()
+          .from(schema.durableWaits)
+          .where(
+            and(
+              eq(schema.durableWaits.workspaceId, workspaceId),
+              eq(schema.durableWaits.sessionId, sessionId),
+              eq(schema.durableWaits.originTurnId, turn.id),
+              eq(schema.durableWaits.kind, "ask_user"),
+              eq(schema.durableWaits.state, "waiting"),
+            ),
+          )
+          .orderBy(asc(schema.durableWaits.createdAt), asc(schema.durableWaits.id))
+          .limit(1);
+        return askWait
+          ? { kind: "approval-wait", ref: durableWaitPeekRef(askWait) }
           : { kind: "approval-wait" };
       }
       if (turn.status === "running") {
@@ -20022,7 +22641,23 @@ export async function peekSessionWork(
         ),
       )
       .limit(1);
-    return pendingUpdate ? { kind: "runnable" } : { kind: "idle" };
+    if (pendingUpdate) return { kind: "runnable" };
+    const [durableWait] = await scopedDb
+      .select()
+      .from(schema.durableWaits)
+      .where(
+        and(
+          eq(schema.durableWaits.workspaceId, workspaceId),
+          eq(schema.durableWaits.sessionId, sessionId),
+          eq(schema.durableWaits.state, "waiting"),
+          inArray(schema.durableWaits.kind, ["until", "event", "background_job"]),
+        ),
+      )
+      .orderBy(asc(schema.durableWaits.createdAt), asc(schema.durableWaits.id))
+      .limit(1);
+    return durableWait
+      ? { kind: "durable-wait", ref: durableWaitPeekRef(durableWait) }
+      : { kind: "idle" };
   });
 }
 
@@ -22896,6 +25531,28 @@ export async function acceptSessionApprovalDecision(
             action: "conflict",
             sessionStatus: session.status as SessionStatus,
           } as const;
+        }
+        const approvalId = input.payload.approvalId;
+        if (typeof approvalId === "string" && approvalId.length > 0) {
+          const [askOwned] = await tx
+            .select({ id: schema.durableWaits.id })
+            .from(schema.durableWaits)
+            .where(
+              and(
+                eq(schema.durableWaits.workspaceId, input.workspaceId),
+                eq(schema.durableWaits.sessionId, input.sessionId),
+                eq(schema.durableWaits.kind, "ask_user"),
+                eq(schema.durableWaits.state, "waiting"),
+                eq(schema.durableWaits.approvalId, approvalId),
+              ),
+            )
+            .limit(1);
+          if (askOwned) {
+            return {
+              action: "conflict",
+              sessionStatus: session.status as SessionStatus,
+            } as const;
+          }
         }
         const [trigger] = await tx
           .select({ sequence: schema.sessionEvents.sequence })
