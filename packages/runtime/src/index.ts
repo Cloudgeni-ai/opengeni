@@ -1828,7 +1828,7 @@ function functionToolCallReceipt(
     return null;
   }
   const raw = toolCall as Record<string, unknown>;
-  const callId = raw.callId ?? raw.call_id ?? raw.id;
+  const callId = raw.callId ?? raw.call_id;
   if (typeof callId !== "string" || callId.length === 0) {
     return null;
   }

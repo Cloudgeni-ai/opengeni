@@ -1,5 +1,6 @@
 import {
   ActivityFailure,
+  ApplicationFailure,
   CancellationScope,
   condition,
   continueAsNew,
@@ -471,8 +472,9 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       const workerDeath = workerDeathFailure(outcome.error);
       if (workerDeath) {
         if (workerDeath.invalidPersistenceHandoff) {
-          throw new Error(
+          throw ApplicationFailure.nonRetryable(
             "Worker heartbeat carried an invalid persistence handoff; automatic turn replay refused",
+            "InvalidTurnPersistenceHandoff",
           );
         }
         if (workerDeath.persistenceHandoff) {

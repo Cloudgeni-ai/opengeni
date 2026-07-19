@@ -3729,7 +3729,7 @@ describe("function tool call receipts", () => {
     expect(effects).toBe(0);
   });
 
-  test("blocks the effect when the provider omits a stable call id", async () => {
+  test("blocks the effect when the provider supplies only an item id", async () => {
     let receipts = 0;
     let effects = 0;
     const agent = agentWithTool(
@@ -3743,7 +3743,11 @@ describe("function tool call receipts", () => {
 
     const [tool] = await agent.getAllTools({});
     await expect(
-      tool.invoke({}, {}, { toolCall: { type: "function_call", name: tool.name } }),
+      tool.invoke(
+        {},
+        {},
+        { toolCall: { type: "function_call", id: "fc-provider-item", name: tool.name } },
+      ),
     ).rejects.toThrow("stable provider call id");
     expect({ receipts, effects }).toEqual({ receipts: 0, effects: 0 });
   });

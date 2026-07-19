@@ -14,6 +14,7 @@ import {
   mutateSessionControlInTransaction,
   withWorkspaceRls,
 } from "@opengeni/db";
+import { migrate } from "@opengeni/db/migrate";
 import { createNatsEventBus, type EventBus } from "@opengeni/events";
 import { createProductionAgentRuntime } from "@opengeni/runtime";
 import {
@@ -42,15 +43,20 @@ import { submitTestHumanPrompt } from "./helpers/session-control";
 // The in-flight turn checkpoints, re-queues, and a second worker resumes it
 // from persisted conversation truth — without re-executing side effects the
 // first attempt already performed.
+type RequiredServices = Pick<
+  TestServices,
+  "databaseUrl" | "natsUrl" | "temporalHost" | "migrate" | "down"
+>;
+
 describe("worker restart resilience", () => {
-  let services: TestServices;
+  let services: RequiredServices;
   let dbClient: ReturnType<typeof createDb>;
   let bus: EventBus;
   let connection: Connection;
   let nativeConnection: NativeConnection;
 
   beforeAll(async () => {
-    services = await startTestServices({ temporal: true });
+    services = await requiredServices();
     await services.migrate();
     dbClient = createDb(services.databaseUrl);
     bus = await createNatsEventBus(services.natsUrl);
@@ -712,6 +718,31 @@ describe("worker restart resilience", () => {
     return grant;
   }
 });
+
+async function requiredServices(): Promise<RequiredServices> {
+  const databaseUrl = process.env.OPENGENI_TEST_DATABASE_URL;
+  const natsUrl = process.env.OPENGENI_TEST_NATS_URL;
+  const temporalHost = process.env.OPENGENI_TEST_TEMPORAL_HOST;
+  const configured = [databaseUrl, natsUrl, temporalHost].filter(Boolean).length;
+  if (configured !== 0 && configured !== 3) {
+    throw new Error(
+      "native integration requires OPENGENI_TEST_DATABASE_URL, OPENGENI_TEST_NATS_URL, and OPENGENI_TEST_TEMPORAL_HOST together",
+    );
+  }
+  if (databaseUrl && natsUrl && temporalHost) {
+    const migrationUrl = process.env.OPENGENI_TEST_DATABASE_ADMIN_URL ?? databaseUrl;
+    return {
+      databaseUrl,
+      natsUrl,
+      temporalHost,
+      migrate: async () => {
+        await migrate(migrationUrl);
+      },
+      down: async () => undefined,
+    };
+  }
+  return await startTestServices({ temporal: true });
+}
 
 async function restartTestWorker(
   nativeConnection: NativeConnection,

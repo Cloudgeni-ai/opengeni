@@ -123,6 +123,17 @@ describe("turn persistence heartbeat handoff", () => {
     expect(
       turnPersistenceHandoffFromHeartbeat({
         persistenceHandoff: {
+          ...modelHandoff,
+          obligation: {
+            ...modelHandoff.obligation,
+            event: { ...modelHandoff.obligation.event, type: "agent.message.completed" },
+          },
+        },
+      }),
+    ).toBeNull();
+    expect(
+      turnPersistenceHandoffFromHeartbeat({
+        persistenceHandoff: {
           ...handoff,
           obligation: { ...handoff.obligation, callItem: "not-an-object" },
         },

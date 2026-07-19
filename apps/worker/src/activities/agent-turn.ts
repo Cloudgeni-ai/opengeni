@@ -6213,7 +6213,7 @@ function pendingToolCallFromSdkEvent(event: unknown): {
     return null;
   }
   const raw = item.rawItem as Record<string, unknown>;
-  const callId = raw.callId ?? raw.call_id ?? raw.id;
+  const callId = raw.callId ?? raw.call_id;
   const callType = raw.type;
   if (typeof callId !== "string" || callId.length === 0 || typeof callType !== "string") {
     return null;
@@ -6235,7 +6235,7 @@ function completedToolCallFromSdkEvent(event: unknown): {
     item.rawItem && typeof item.rawItem === "object" && !Array.isArray(item.rawItem)
       ? (item.rawItem as Record<string, unknown>)
       : {};
-  const callId = raw.callId ?? raw.call_id ?? item.id;
+  const callId = raw.callId ?? raw.call_id;
   return typeof callId === "string" && callId.length > 0 ? { callId, resultItem: raw } : null;
 }
 

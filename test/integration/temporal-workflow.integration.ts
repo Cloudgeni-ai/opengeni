@@ -445,12 +445,19 @@ describe("Temporal workflow integration", () => {
       const handoff = modelPersistenceHandoff(turn);
       const queuedTurns = [turn];
       const runs: Array<{ attemptId: string }> = [];
+      let completedInferenceEffects = 0;
       const persistenceRetries: unknown[] = [];
       const genericRecoveries: unknown[] = [];
       const failures: unknown[] = [];
       const admission = createTurnAdmission(queuedTurns, async (input) => {
         runs.push(input as (typeof runs)[number]);
-        if (runs.length === 1) return await heartbeatPersistenceThenDie(handoff);
+        if (runs.length === 1) {
+          // This counter stands in for the irreversible provider call. The
+          // replacement activity is dispatched, but the completed inference
+          // obligation is persisted rather than invoking the provider again.
+          completedInferenceEffects += 1;
+          return await heartbeatPersistenceThenDie(handoff);
+        }
         return { status: "idle" };
       });
       const worker = await testWorker(nativeConnection, taskQueue, {
@@ -480,6 +487,7 @@ describe("Temporal workflow integration", () => {
         });
         await handle.result();
         expect(runs).toHaveLength(2);
+        expect(completedInferenceEffects).toBe(1);
         expect(persistenceRetries).toEqual([
           expect.objectContaining({
             attemptId: runs[0]!.attemptId,
