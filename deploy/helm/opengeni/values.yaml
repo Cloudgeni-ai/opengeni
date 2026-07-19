@@ -484,8 +484,11 @@ migrations:
     digest: ""
     pullPolicy: IfNotPresent
   secret:
-    # Optional separate secret for migration/admin-only settings such as
-    # OPENGENI_MIGRATIONS_DATABASE_URL. If empty, the runtime secret is reused.
+    # Separate secret for migration/admin-only settings:
+    # OPENGENI_MIGRATIONS_DATABASE_URL plus the exact opengeni_app username and
+    # password consumed by db:provision-roles. Production must not reuse the
+    # runtime Secret here; API/worker receive only the restricted runtime URL.
+    # Empty reuse is retained only for disposable conformance fixtures.
     existingSecret: ""
   command: ["bun", "run", "db:migrate"]
   backoffLimit: 6

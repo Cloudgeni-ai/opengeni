@@ -1,5 +1,10 @@
 import type { Settings } from "@opengeni/config";
-import { dbSql, type Database } from "@opengeni/db";
+import {
+  assertRuntimeDatabasePosture,
+  dbSql,
+  type Database,
+  type RuntimeDatabasePostureOptions,
+} from "@opengeni/db";
 import type { EventBus } from "@opengeni/events";
 import type { Observability } from "@opengeni/observability";
 
@@ -76,8 +81,15 @@ export async function runReadinessChecks(
   };
 }
 
-export function dbReadyCheck(db: Database): () => Promise<void> {
+export function dbReadyCheck(
+  db: Database,
+  posture?: RuntimeDatabasePostureOptions,
+): () => Promise<void> {
   return async () => {
+    if (posture) {
+      await assertRuntimeDatabasePosture(db, posture);
+      return;
+    }
     await db.execute(dbSql`select 1`);
   };
 }

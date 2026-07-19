@@ -21,7 +21,9 @@ OpenGeni runs agents that can execute tools in configured sandboxes. Review `.en
 
 The base API is workspace-scoped and resolves protected requests through an access grant. `managed` mode uses Better Auth for browser human auth and OpenGeni-owned API keys for product/API access. `configured` mode lets a self-hosted or embedded deployment use delegated bearer tokens or a deployment shared-key boundary. The deployment shared key uses `x-opengeni-access-key`; product API keys use `Authorization: Bearer`.
 
-Before exposing OpenGeni beyond local development, choose the access mode intentionally, run the workspace-isolation/RLS checks, use a non-owner application DB role in production where possible, and put appropriate gateway rate limits and request size limits in front of public routes.
+Before exposing OpenGeni beyond local development, choose the access mode intentionally, run the workspace-isolation/RLS checks, and put appropriate gateway rate limits and request size limits in front of public routes. A standalone `force` deployment must separate its migration/owner URL from ordinary API/worker traffic: runtime connects as exact role `opengeni_app`, with no superuser/`BYPASSRLS`/create-role/create-database/replication/inheritance attributes, memberships, ownership, or schema creation. `bun run db:assert-runtime-posture` proves the exact 64-table active FORCE-RLS and 74-table DML contracts; API/worker startup and readiness fail closed on the same catalog assertion. The `scoped` strategy is only for an embedded host that explicitly owns the isolation boundary.
+
+Never use a credential rollback to restore an owner, superuser, or `BYPASSRLS` identity to ordinary runtime traffic. If a restricted-identity cutover or an older image fails, keep admission in maintenance and fix forward while preserving the restricted runtime Secret.
 
 No model provider credentials are automatically exposed inside agent sandboxes. Only expose host credentials to a managed sandbox through explicit preparation profiles or allowlists, and prefer short-lived credentials.
 

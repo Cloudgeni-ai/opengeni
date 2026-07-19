@@ -131,6 +131,10 @@ const SettingsSchema = z.object({
   // non-owner `opengeni_app` role. "scoped" = the embedded owner-role path (the
   // GUC is still emitted defensively, so the query path is identical).
   rlsStrategy: z.enum(["force", "scoped"]).default("force"),
+  // Exact PostgreSQL login identity required by the standalone FORCE-RLS
+  // startup/readiness assertion. Embedded `scoped` hosts own their role model
+  // and are deliberately not constrained to this name.
+  runtimeDatabaseRole: z.string().min(1).default("opengeni_app"),
   natsUrl: z.string().default("nats://127.0.0.1:4222"),
   temporalHost: z.string().default("127.0.0.1:7233"),
   temporalNamespace: z.string().default("default"),
@@ -975,6 +979,7 @@ export function getSettings(): Settings {
     databaseUrl: optional("OPENGENI_DATABASE_URL"),
     dbSchema: optional("OPENGENI_DB_SCHEMA"),
     rlsStrategy: optional("OPENGENI_RLS_STRATEGY"),
+    runtimeDatabaseRole: optional("OPENGENI_RUNTIME_DATABASE_ROLE"),
     natsUrl: optional("OPENGENI_NATS_URL"),
     temporalHost: optional("OPENGENI_TEMPORAL_HOST"),
     temporalNamespace: optional("OPENGENI_TEMPORAL_NAMESPACE"),

@@ -11,7 +11,13 @@ import type {
   ScheduledTaskOverlapPolicy,
   ScheduledTaskScheduleSpec,
 } from "@opengeni/contracts";
-import { createDb, markSessionWorkflowWakeDelivered, type Database } from "@opengeni/db";
+import {
+  assertRuntimeDatabasePosture,
+  createDb,
+  markSessionWorkflowWakeDelivered,
+  runtimeDatabaseReadyCheck,
+  type Database,
+} from "@opengeni/db";
 import { createNatsEventBus, type ResponderConnection } from "@opengeni/events";
 import { createObservability, logStartupDependencyRetry } from "@opengeni/observability";
 import { SESSION_WORKFLOW_WAKE_DISPATCHER_SCHEDULE_ID } from "@opengeni/core";
@@ -252,11 +258,21 @@ export async function startApi() {
   const retryOptions = startupRetryOptions(settings);
   const onRetry = (event: Parameters<typeof logStartupDependencyRetry>[1]) =>
     logStartupDependencyRetry(observability, event);
+  const databasePosture = {
+    rlsStrategy: settings.rlsStrategy,
+    expectedRole: settings.runtimeDatabaseRole,
+    targetSchema: settings.dbSchema.trim() || "public",
+  } as const;
   // The PRIVILEGED control-plane NATS login (M-AUTH): when the server runs with
   // auth_callout, api/worker authenticate as a static account user permitted to
   // request `agent.*.rpc`. Null in local dev (anonymous connect — the bus default).
   const controlPlaneAuth = resolveNatsControlPlaneAuth(settings);
   try {
+    await retryStartupDependency(
+      "PostgreSQL runtime posture",
+      () => assertRuntimeDatabasePosture(dbClient.db, databasePosture),
+      { ...retryOptions, onRetry },
+    );
     bus = await retryStartupDependency(
       "NATS",
       () =>
@@ -295,6 +311,9 @@ export async function startApi() {
     workflowClient: workflowClient.client,
     documentIndexer: workflowClient.documentIndexer,
     observability,
+    readinessChecks: {
+      db: runtimeDatabaseReadyCheck(dbClient.db, databasePosture),
+    },
   });
   const server = Bun.serve({
     hostname: settings.apiHost,

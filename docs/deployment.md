@@ -41,6 +41,62 @@ kubectl -n opengeni create secret generic opengeni-runtime \
   --dry-run=client -o yaml | kubectl apply -f -
 ```
 
+### Database identities and runtime posture
+
+Standalone deployments using the default `OPENGENI_RLS_STRATEGY=force` require
+two distinct secret paths:
+
+- **migration/provisioning:** `OPENGENI_MIGRATIONS_DATABASE_URL`,
+  `OPENGENI_APP_DATABASE_USER=opengeni_app`, and the corresponding
+  `OPENGENI_APP_DATABASE_PASSWORD`; this identity owns/applies schema and is
+  available only to migration and role-provision Jobs;
+- **ordinary runtime:** `OPENGENI_DATABASE_URL`, structurally targeting the same
+  database but authenticating as `opengeni_app`; this is the only database URL
+  available to API and worker containers.
+
+After every migration and before rolling workloads, run:
+
+```bash
+bun run db:provision-roles
+bun run db:assert-runtime-posture
+```
+
+The provisioner converges `opengeni_app` to `LOGIN NOSUPERUSER NOBYPASSRLS
+NOCREATEROLE NOCREATEDB NOREPLICATION NOINHERIT`, refuses to guess through any
+role membership or ownership, revokes database/schema creation and all table
+privileges, then grants DML only on the 74-table `RUNTIME_DML_TABLES` contract.
+The runtime assertion connects through the runtime URL and checks, using only
+PostgreSQL catalogs in a repeatable-read/read-only transaction:
+
+- exact current/session role, attributes, zero role-graph edges, and
+  `row_security=on`;
+- no database/schema/relation/private-routine ownership and no database/schema
+  CREATE;
+- exactly 64 declared tenant tables with ENABLE + FORCE + active RLS and at
+  least one policy each;
+- required DML and absence of TRUNCATE/REFERENCES/TRIGGER on the 74 runtime
+  tables, with no table privileges outside that allowlist;
+- access to the `opengeni_private` helpers.
+
+API and worker startup run the same assertion before NATS, Temporal, HTTP
+serving, or workflow polling begins. Their readiness endpoints repeat it instead
+of treating `select 1` as database readiness. `OPENGENI_RUNTIME_DATABASE_ROLE`
+defaults to and should remain `opengeni_app` for standalone deployments.
+
+The `scoped` strategy is an explicit embedding contract: OpenGeni checks only
+coherent connectivity/identity because the host owns the role and isolation
+boundary. It must not be used to bypass the standalone `force` posture.
+
+Changing an existing standalone environment from an owner, superuser, or
+`BYPASSRLS` runtime identity to `opengeni_app` is an identity/ownership cutover,
+not an ordinary rolling secret edit. Serialize the first transition through a
+reviewed maintenance plan: stop admission/claiming, preserve the migration-only
+URL, update the runtime Secret to the restricted URL, provision, run the posture
+probe from that exact Secret, then start only the posture-gated runtime. A
+rollback may restore a compatible image digest, but must never restore the old
+broad database URL or role attributes. If an older image cannot run through the
+restricted role, remain in maintenance and fix forward.
+
 For Azure managed Blob storage, the artifact generator can consume the
 sensitive Terraform output `object_storage_azure_connection_string` into the
 private `runtime.env` file. Keep the Terraform output JSON under `.agent/` or
@@ -379,9 +435,10 @@ Use this boundary when building a production cluster:
 | TLS | cert-manager, cloud load balancer certificates, or an existing ingress/TLS stack | `ingress.tls` and SSE-safe ingress annotations |
 | Observability | OpenTelemetry Collector/Operator, Prometheus Operator CRDs, or a managed OTLP/Prometheus backend | `/metrics`, OTLP env, `ServiceMonitor`, `PrometheusRule` |
 
-The secret must provide runtime values such as:
+The runtime secret must provide values such as:
 
 - `OPENGENI_DATABASE_URL`
+- `OPENGENI_RUNTIME_DATABASE_ROLE=opengeni_app` for standalone FORCE-RLS deployments (the default)
 - `OPENGENI_TEMPORAL_HOST`
 - `OPENGENI_NATS_URL` when not using in-cluster NATS
 - `OPENGENI_STARTUP_DEPENDENCY_RETRY_*` when dependencies need longer startup windows
@@ -399,6 +456,10 @@ The secret must provide runtime values such as:
 - sandbox backend credentials when required
 
 Do not commit real secret values.
+
+Keep `OPENGENI_MIGRATIONS_DATABASE_URL` and
+`OPENGENI_APP_DATABASE_PASSWORD` out of the runtime Secret. Put them in a
+separate migration-only Secret referenced by `migrations.secret.existingSecret`.
 
 OpenGeni's storage package intentionally exposes a small provider-neutral boundary instead of calling provider SDKs directly from routes. The current shipped backends are `s3-compatible`, `azure-blob`, `aws-s3`, and `gcs`; sandbox file resources are emitted as native storage mounts when the sandbox backend supports them, or materialized through short-lived signed downloads when a backend cannot mount that provider directly. Additional providers should be added behind the same boundary, or bridged through a library such as `files-sdk` if that becomes the lowest-maintenance adapter layer.
 

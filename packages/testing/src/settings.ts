@@ -8,6 +8,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     databaseUrl: "postgres://opengeni:opengeni@127.0.0.1:5432/opengeni",
     dbSchema: "",
     rlsStrategy: "force",
+    runtimeDatabaseRole: "opengeni_app",
     natsUrl: "nats://127.0.0.1:4222",
     temporalHost: "127.0.0.1:7233",
     temporalNamespace: "default",

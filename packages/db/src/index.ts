@@ -164,6 +164,7 @@ export {
   sanitizeModelPayload,
 } from "./event-payload-sanitizer";
 export * from "./persistence-errors";
+export * from "./runtime-posture";
 export { sanitizeMemoryText } from "./memory-domain";
 // Re-exported so external consumers can `import { migrate } from "@opengeni/db"`.
 // The `@opengeni/db/migrate` subpath stays available too (internal callers + the
@@ -387,13 +388,25 @@ export async function withRlsContext<T>(
     // manufacturing a phantom "no active subscription" from a credential that is
     // in fact active. Convert that silent false into a loud, root-cause-bearing
     // error so the caller can retry rather than permanently mis-decide.
-    const applied = await tx.execute<{ account_id: string | null }>(
-      sql`select current_setting('opengeni.account_id', true) as account_id`,
+    const applied = await tx.execute<{
+      account_id: string | null;
+      workspace_id: string | null;
+    }>(
+      sql`select
+        current_setting('opengeni.account_id', true) as account_id,
+        current_setting('opengeni.workspace_id', true) as workspace_id`,
     );
     const appliedAccountId = applied[0]?.account_id ?? "";
+    const expectedWorkspaceId = context.workspaceId ?? "";
+    const appliedWorkspaceId = applied[0]?.workspace_id ?? "";
     if (appliedAccountId !== context.accountId) {
       throw new Error(
         `RLS context not applied on the active backend: expected account ${context.accountId}, got "${appliedAccountId}"`,
+      );
+    }
+    if (appliedWorkspaceId !== expectedWorkspaceId) {
+      throw new Error(
+        `RLS context not applied on the active backend: expected workspace "${expectedWorkspaceId}", got "${appliedWorkspaceId}"`,
       );
     }
     return await fn(scoped);

@@ -6,7 +6,12 @@ import {
   startupRetryOptions,
   type Settings,
 } from "@opengeni/config";
-import { createDb, markSessionWorkflowWakeDelivered, type Database } from "@opengeni/db";
+import {
+  assertRuntimeDatabasePosture,
+  createDb,
+  markSessionWorkflowWakeDelivered,
+  type Database,
+} from "@opengeni/db";
 import { createNatsEventBus } from "@opengeni/events";
 import {
   createObservability,
@@ -393,6 +398,11 @@ export async function startWorker() {
     ...(searchPath ? { searchPath } : {}),
     rlsStrategy: settings.rlsStrategy,
   });
+  const databasePosture = {
+    rlsStrategy: settings.rlsStrategy,
+    expectedRole: settings.runtimeDatabaseRole,
+    targetSchema: settings.dbSchema.trim() || "public",
+  } as const;
   const controlPlaneAuth = resolveNatsControlPlaneAuth(settings);
   let bus: Awaited<ReturnType<typeof createNatsEventBus>> | undefined;
   let signaler: Awaited<ReturnType<typeof createWorkerWorkflowSignaler>> | undefined;
@@ -406,6 +416,11 @@ export async function startWorker() {
     | undefined;
   let httpServer: ReturnType<typeof startWorkerHttpServer> | undefined;
   try {
+    await retryStartupDependency(
+      "PostgreSQL runtime posture",
+      () => assertRuntimeDatabasePosture(dbClient.db, databasePosture),
+      { ...retryOptions, onRetry },
+    );
     bus = await retryStartupDependency(
       "NATS",
       () =>
@@ -438,7 +453,7 @@ export async function startWorker() {
       settings,
       observability,
       checks: {
-        db: dbReadyCheck(dbClient.db),
+        db: dbReadyCheck(dbClient.db, databasePosture),
         nats: natsReadyCheck(bus),
         temporal: signaler.check,
       },

@@ -1,5 +1,6 @@
 import postgres from "postgres";
 import type { RlsStrategy } from "./index";
+import { RUNTIME_DML_TABLES } from "./runtime-posture";
 
 export type ProvisionResult = {
   appRole: string | null;
@@ -83,7 +84,12 @@ export async function provisionRoles(
           "OPENGENI_APP_DATABASE_PASSWORD (or appPassword) is required for rlsStrategy 'force'",
         );
       }
-      await ensureLoginRole(sql, appRole, appPassword);
+      // Ownership and role-graph edges cannot be safely guessed away. Refuse to
+      // mutate an existing role until an operator has explicitly transferred
+      // objects/removed memberships; role attributes and direct grants, however,
+      // are deterministic and are converged below on every run.
+      await assertAppRoleSafeToNormalize(sql, appRole);
+      await ensureRestrictedAppLoginRole(sql, appRole, appPassword);
       provisionedAppRole = appRole;
     }
 
@@ -124,6 +130,108 @@ END $$;
 `);
 }
 
+async function ensureRestrictedAppLoginRole(
+  sql: postgres.Sql,
+  role: string,
+  password: string,
+): Promise<void> {
+  await sql.unsafe(`
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = ${literal(role)}) THEN
+    EXECUTE format(
+      'CREATE ROLE %I WITH LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB NOREPLICATION NOINHERIT PASSWORD %L',
+      ${literal(role)},
+      ${literal(password)}
+    );
+  ELSE
+    EXECUTE format(
+      'ALTER ROLE %I WITH LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB NOREPLICATION NOINHERIT PASSWORD %L',
+      ${literal(role)},
+      ${literal(password)}
+    );
+  END IF;
+END $$;
+`);
+}
+
+/**
+ * Fail rather than silently revoking role relationships or transferring owned
+ * objects. Those operations have effects outside OpenGeni's runtime grant
+ * contract and require an explicit, audited operator decision.
+ */
+async function assertAppRoleSafeToNormalize(sql: postgres.Sql, role: string): Promise<void> {
+  const exists = await sql<{ exists: boolean }[]>`
+    select exists(select 1 from pg_roles where rolname = ${role}) as exists
+  `;
+  if (!exists[0]?.exists) {
+    return;
+  }
+
+  const memberships = await sql<{ relationship: string }[]>`
+    select ('inherits:' || parent.rolname)::text as relationship
+    from pg_auth_members membership
+    join pg_roles member on member.oid = membership.member
+    join pg_roles parent on parent.oid = membership.roleid
+    where member.rolname = ${role}
+    union all
+    select ('member:' || member.rolname)::text as relationship
+    from pg_auth_members membership
+    join pg_roles member on member.oid = membership.member
+    join pg_roles parent on parent.oid = membership.roleid
+    where parent.rolname = ${role}
+    order by relationship
+  `;
+  if (memberships.length > 0) {
+    throw new Error(
+      `Refusing to normalize app role ${role}: remove role relationships first (${memberships
+        .map((row) => row.relationship)
+        .join(", ")})`,
+    );
+  }
+
+  const ownedObjects = await sql<{ object_name: string }[]>`
+    select ('database:' || d.datname)::text as object_name
+    from pg_database d
+    join pg_roles owner on owner.oid = d.datdba
+    where owner.rolname = ${role}
+    union all
+    select ('schema:' || n.nspname)::text as object_name
+    from pg_namespace n
+    join pg_roles owner on owner.oid = n.nspowner
+    where owner.rolname = ${role}
+      and n.nspname <> 'information_schema'
+      and n.nspname !~ '^pg_'
+    union all
+    select ('relation:' || n.nspname || '.' || c.relname)::text as object_name
+    from pg_class c
+    join pg_namespace n on n.oid = c.relnamespace
+    join pg_roles owner on owner.oid = c.relowner
+    where owner.rolname = ${role}
+      and n.nspname <> 'information_schema'
+      and n.nspname !~ '^pg_'
+    union all
+    select (
+      'routine:' || n.nspname || '.' || p.proname || '(' ||
+      pg_get_function_identity_arguments(p.oid) || ')'
+    )::text as object_name
+    from pg_proc p
+    join pg_namespace n on n.oid = p.pronamespace
+    join pg_roles owner on owner.oid = p.proowner
+    where owner.rolname = ${role}
+      and n.nspname <> 'information_schema'
+      and n.nspname !~ '^pg_'
+    order by object_name
+  `;
+  if (ownedObjects.length > 0) {
+    throw new Error(
+      `Refusing to normalize app role ${role}: transfer owned objects first (${ownedObjects
+        .map((row) => row.object_name)
+        .join(", ")})`,
+    );
+  }
+}
+
 async function ensureDatabase(sql: postgres.Sql, database: string, owner: string): Promise<void> {
   const existing = await sql<{ exists: boolean }[]>`
     select exists(select 1 from pg_database where datname = ${database}) as exists
@@ -161,16 +269,51 @@ async function grantAppRoleIfSchemaExists(
   role: string,
   schema: string,
 ): Promise<void> {
+  const runtimeDmlTables = `ARRAY[${RUNTIME_DML_TABLES.map(literal).join(", ")}]`;
   await sql.unsafe(`
 DO $$
+DECLARE
+  owner_role text := current_user;
+  runtime_table text;
 BEGIN
+  EXECUTE format('REVOKE CREATE ON DATABASE %I FROM %I', current_database(), ${literal(role)});
   IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = ${literal(schema)}) THEN
     EXECUTE format('GRANT USAGE ON SCHEMA %I TO %I', ${literal(schema)}, ${literal(role)});
-    EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA %I TO %I', ${literal(schema)}, ${literal(role)});
+    EXECUTE format('REVOKE CREATE ON SCHEMA %I FROM %I', ${literal(schema)}, ${literal(role)});
+    EXECUTE format('REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA %I FROM %I', ${literal(schema)}, ${literal(role)});
+    FOREACH runtime_table IN ARRAY ${runtimeDmlTables} LOOP
+      IF to_regclass(format('%I.%I', ${literal(schema)}, runtime_table)) IS NOT NULL THEN
+        EXECUTE format(
+          'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE %I.%I TO %I',
+          ${literal(schema)},
+          runtime_table,
+          ${literal(role)}
+        );
+      END IF;
+    END LOOP;
+    EXECUTE format('GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA %I TO %I', ${literal(schema)}, ${literal(role)});
+    EXECUTE format(
+      'ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I REVOKE ALL PRIVILEGES ON TABLES FROM %I',
+      owner_role,
+      ${literal(schema)},
+      ${literal(role)}
+    );
+    EXECUTE format(
+      'ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I GRANT USAGE, SELECT ON SEQUENCES TO %I',
+      owner_role,
+      ${literal(schema)},
+      ${literal(role)}
+    );
   END IF;
   IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'opengeni_private') THEN
     EXECUTE format('GRANT USAGE ON SCHEMA opengeni_private TO %I', ${literal(role)});
+    EXECUTE format('REVOKE CREATE ON SCHEMA opengeni_private FROM %I', ${literal(role)});
     EXECUTE format('GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA opengeni_private TO %I', ${literal(role)});
+    EXECUTE format(
+      'ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA opengeni_private GRANT EXECUTE ON FUNCTIONS TO %I',
+      owner_role,
+      ${literal(role)}
+    );
   END IF;
 END $$;
 `);

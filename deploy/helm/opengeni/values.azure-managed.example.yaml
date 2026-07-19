@@ -77,7 +77,9 @@ networkPolicy:
 postgres:
   enabled: false
   # Keep false when Terraform provisions Azure Database for PostgreSQL and
-  # provide OPENGENI_DATABASE_URL through secret.existingSecret.
+  # provide the restricted opengeni_app OPENGENI_DATABASE_URL through
+  # secret.existingSecret. Put the owner/admin URL and opengeni_app provisioning
+  # credentials only in migrations.secret.existingSecret.
 
 temporal:
   # Production should use Temporal Cloud, an existing endpoint, or the official
