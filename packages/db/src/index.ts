@@ -18071,10 +18071,11 @@ export async function clearSessionGoal(
       await scopedDb.transaction(async (tx) => {
         const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
           workspaceId,
+          controlLock: "share",
           sessionIds: [sessionId],
         });
         const session = locks.sessions[0];
-        if (!session) {
+        if (!locks.control || !locks.workspace || !session) {
           throw new Error(`Session not found: ${sessionId}`);
         }
         const [existing] = await tx
@@ -18215,18 +18216,15 @@ export async function upsertSessionGoalWithEvent(
     async (scopedDb) =>
       await scopedDb.transaction(async (rawTx) => {
         const tx = rawTx as unknown as Database;
-        const [session] = await tx
-          .select()
-          .from(schema.sessions)
-          .where(
-            and(
-              eq(schema.sessions.workspaceId, input.workspaceId),
-              eq(schema.sessions.id, input.sessionId),
-            ),
-          )
-          .for("update")
-          .limit(1);
-        if (!session) throw new Error(`Session not found: ${input.sessionId}`);
+        const locks = await lockSessionEventWriteRows(tx, {
+          workspaceId: input.workspaceId,
+          controlLock: "share",
+          sessionIds: [input.sessionId],
+        });
+        const session = locks.sessions[0];
+        if (!locks.control || !locks.workspace || !session) {
+          throw new Error(`Session not found: ${input.sessionId}`);
+        }
         const result = await upsertSessionGoal(tx, input);
         const now = new Date();
         const [event] = await tx
@@ -18327,13 +18325,15 @@ export async function updateSessionGoalWithEvent(
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
     scopedDb.transaction(async (rawTx) => {
       const tx = rawTx as unknown as Database;
-      const [session] = await tx
-        .select()
-        .from(schema.sessions)
-        .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
-        .for("update")
-        .limit(1);
-      if (!session) throw new Error(`Session not found: ${sessionId}`);
+      const locks = await lockSessionEventWriteRows(tx, {
+        workspaceId,
+        controlLock: "share",
+        sessionIds: [sessionId],
+      });
+      const session = locks.sessions[0];
+      if (!locks.control || !locks.workspace || !session) {
+        throw new Error(`Session not found: ${sessionId}`);
+      }
 
       const reserved = input.command
         ? await reserveSessionCommandReceipt(tx, {
@@ -18652,6 +18652,15 @@ export async function setSessionGoalStatusWithEvent(
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
     scopedDb.transaction(async (rawTx) => {
       const tx = rawTx as unknown as Database;
+      const locks = await lockSessionEventWriteRows(tx, {
+        workspaceId,
+        controlLock: "share",
+        sessionIds: [sessionId],
+      });
+      const session = locks.sessions[0];
+      if (!locks.control || !locks.workspace || !session) {
+        throw new Error(`Session not found: ${sessionId}`);
+      }
       const result = await setSessionGoalStatus(tx, workspaceId, sessionId, {
         status: input.status,
         ...(input.evidence !== undefined ? { evidence: input.evidence } : {}),
@@ -18659,13 +18668,6 @@ export async function setSessionGoalStatusWithEvent(
         ...(input.pausedReason !== undefined ? { pausedReason: input.pausedReason } : {}),
       });
       if (!result.changed) return { ...result, events: [] };
-      const [session] = await tx
-        .select()
-        .from(schema.sessions)
-        .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
-        .for("update")
-        .limit(1);
-      if (!session) throw new Error(`Session not found: ${sessionId}`);
       const payload =
         input.event.type === "goal.completed"
           ? {
@@ -19106,24 +19108,21 @@ export async function materializeGoalContinuation(
     async (scopedDb) =>
       await scopedDb.transaction(async (rawTx) => {
         const tx = rawTx as unknown as Database;
+        const locks = await lockSessionEventWriteRows(tx, {
+          workspaceId: input.workspaceId,
+          controlLock: "share",
+          sessionIds: [input.sessionId],
+        });
+        const session = locks.sessions[0];
+        if (!locks.control || !locks.workspace || !session) {
+          throw new Error(`Session not found: ${input.sessionId}`);
+        }
         const effectiveControl = await evaluateSessionControl(
           tx,
           input.workspaceId,
           input.sessionId,
-          { lock: "share" },
+          { workspaceControl: locks.control },
         );
-        const [session] = await tx
-          .select()
-          .from(schema.sessions)
-          .where(
-            and(
-              eq(schema.sessions.accountId, input.accountId),
-              eq(schema.sessions.workspaceId, input.workspaceId),
-              eq(schema.sessions.id, input.sessionId),
-            ),
-          )
-          .for("update")
-          .limit(1);
         const [goalRead] = await tx
           .select()
           .from(schema.sessionGoals)
@@ -19136,7 +19135,6 @@ export async function materializeGoalContinuation(
           .for("update")
           .limit(1);
         if (
-          !session ||
           !goalRead ||
           goalRead.status !== "active" ||
           session.status === "cancelled" ||

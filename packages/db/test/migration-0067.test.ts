@@ -16,11 +16,11 @@ let blank: BlankTestDatabase | null = null;
 let available = true;
 
 beforeAll(async () => {
-  blank = await acquireBlankTestDatabase("migration-0073");
+  blank = await acquireBlankTestDatabase("migration-0067");
   if (!blank) {
     if (requireRealDatabase) {
       throw new Error(
-        "[migration-0073] OPENGENI_REQUIRE_REAL_DB=1 but the real PostgreSQL harness is unavailable",
+        "[migration-0067] OPENGENI_REQUIRE_REAL_DB=1 but the real PostgreSQL harness is unavailable",
       );
     }
     available = false;
@@ -31,18 +31,18 @@ afterAll(async () => {
   await blank?.release();
 });
 
-describe("migration 0073 (durable goal wake)", () => {
+describe("migration 0067 (durable goal wake)", () => {
   test("arms only idle legacy goals and preserves existing or blocked work", async () => {
     if (!available || !blank) return;
     const admin = postgres(blank.databaseUrl, { max: 1 });
     try {
       const files = (await readdir(migrationsDir)).filter((file) => file.endsWith(".sql")).sort();
-      for (const file of files.filter((candidate) => candidate < "0073_")) {
+      for (const file of files.filter((candidate) => candidate < "0067_")) {
         await applyFile(admin, file);
       }
 
       const [account] = await admin<{ id: string }[]>`
-        insert into managed_accounts (name) values ('migration-0073-account') returning id`;
+        insert into managed_accounts (name) values ('migration-0067-account') returning id`;
       const insertWorkspace = async (name: string, paused = false) => {
         const [workspace] = await admin<{ id: string }[]>`
           insert into workspaces (account_id, name)
@@ -56,8 +56,8 @@ describe("migration 0073 (durable goal wake)", () => {
           )`;
         return workspace!;
       };
-      const workspace = await insertWorkspace("migration-0073-workspace");
-      const pausedWorkspace = await insertWorkspace("migration-0073-paused-workspace", true);
+      const workspace = await insertWorkspace("migration-0067-workspace");
+      const pausedWorkspace = await insertWorkspace("migration-0067-paused-workspace", true);
 
       const insertSession = async (
         text: string,
@@ -342,7 +342,7 @@ describe("migration 0073 (durable goal wake)", () => {
         update workspace_inference_controls set revision = 3
         where workspace_id = ${pausedWorkspace.id}`;
 
-      await applyFile(admin, "0073_durable_goal_wake.sql");
+      await applyFile(admin, "0067_durable_goal_wake.sql");
 
       const goals = await admin<
         Array<{

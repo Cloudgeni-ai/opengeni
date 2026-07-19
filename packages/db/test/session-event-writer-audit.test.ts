@@ -43,7 +43,32 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 1,
     contract: "canonical",
   },
-  "packages/db/src/index.ts#clearSessionGoal": { inserts: 1, contract: "canonical" },
+  "packages/db/src/index.ts#clearSessionGoal": {
+    inserts: 1,
+    contract: "canonical",
+    requiresControlShare: true,
+  },
+  "packages/db/src/index.ts#upsertSessionGoalWithEvent": {
+    inserts: 1,
+    contract: "canonical",
+    requiresControlShare: true,
+  },
+  "packages/db/src/index.ts#updateSessionGoalWithEvent": {
+    inserts: 1,
+    contract: "canonical",
+    requiresControlShare: true,
+  },
+  "packages/db/src/index.ts#setSessionGoalStatusWithEvent": {
+    inserts: 1,
+    contract: "canonical",
+    requiresControlShare: true,
+  },
+  "packages/db/src/index.ts#materializeGoalContinuation": {
+    inserts: 2,
+    contract: "canonical",
+    requiresControlShare: true,
+    requiresControlRevalidation: true,
+  },
   "packages/db/src/index.ts#initializeSessionStartAtomically": {
     inserts: 2,
     contract: "canonical",
