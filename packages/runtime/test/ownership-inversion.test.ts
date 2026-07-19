@@ -239,6 +239,12 @@ describe("P1.2 isProviderSandboxNotFoundError (per-backend NotFound discriminato
     expect(isProviderSandboxNotFoundError("e2b", { statusCode: 404 })).toBe(true);
   });
 
+  test("generic numeric gRPC status 5 is not provider NotFound evidence", () => {
+    expect(isProviderSandboxNotFoundError("modal", { code: 5 })).toBe(false);
+    expect(isProviderSandboxNotFoundError("modal", { status: 5 })).toBe(false);
+    expect(isProviderSandboxNotFoundError("modal", { statusCode: 5 })).toBe(false);
+  });
+
   test("only typed codes and Modal's exact terminal grammar are NotFound", () => {
     expect(
       isProviderSandboxNotFoundError(

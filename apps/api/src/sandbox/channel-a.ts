@@ -42,7 +42,6 @@ import { HTTPException } from "hono/http-exception";
 import {
   establishSandboxSessionFromEnvelope,
   isProviderSandboxNotFoundError,
-  SandboxResumeStateUnavailableError,
   SandboxChannelAService,
   ChannelAConflictError,
   ChannelANotFoundError,
@@ -230,10 +229,7 @@ export async function withChannelA<T>(
           environment,
         });
       } catch (error) {
-        if (
-          !(error instanceof SandboxResumeStateUnavailableError) &&
-          !isProviderSandboxNotFoundError(session.sandboxBackend, error)
-        ) {
+        if (!isProviderSandboxNotFoundError(session.sandboxBackend, error)) {
           throw error;
         }
         const marked = await markWarmLeaseInstanceLost(db, {

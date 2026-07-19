@@ -2,10 +2,11 @@
  * Provider sandbox failure classification.
  *
  * This is deliberately structural and fail-closed. DNS failures often contain
- * the word "not found" (`ENOTFOUND`) while gRPC reports a missing sandbox as
- * status 5 (`NOT_FOUND`) and a transient command-router outage as status 14
- * (`UNAVAILABLE`). Only authoritative, non-transient evidence may retire a
- * provider instance and license lease recovery.
+ * the word "not found" (`ENOTFOUND`) while gRPC status values are also used by
+ * unrelated SDKs and command routers. A bare numeric status (including gRPC's
+ * numeric 5) is therefore not enough to retire a provider instance. Only
+ * authoritative, non-transient evidence may retire a provider instance and
+ * license lease recovery.
  */
 export type ProviderSandboxFailureKind = "not_found" | "transient_transport" | "other";
 
@@ -15,7 +16,6 @@ export type ProviderSandboxFailure = {
   diagnostic: string;
 };
 
-const GRPC_NOT_FOUND = 5;
 const GRPC_TRANSIENT = new Set([1, 2, 4, 13, 14]);
 const TRANSIENT_CODES = new Set([
   "CANCELLED",
@@ -110,10 +110,7 @@ export function classifyProviderSandboxFailure(
   if (signals.numbers.some((status) => GRPC_TRANSIENT.has(status))) {
     return { kind: "transient_transport", diagnostic };
   }
-  if (
-    signals.numbers.some((status) => status === 404 || status === GRPC_NOT_FOUND) ||
-    signals.codes.some((code) => NOT_FOUND_CODES.has(code))
-  ) {
+  if (signals.numbers.some((status) => status === 404) || signals.codes.some((code) => NOT_FOUND_CODES.has(code))) {
     return { kind: "not_found", diagnostic };
   }
 

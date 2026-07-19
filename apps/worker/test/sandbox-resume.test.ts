@@ -46,6 +46,7 @@ import {
 import {
   captureVerifiedWorkspaceArchive,
   establishSandboxSessionFromEnvelope,
+  SandboxResumeStateUnavailableError,
 } from "@opengeni/runtime";
 import {
   resumeBoxForTurn,
@@ -393,6 +394,64 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
     });
     expect(committed.committed).toBe(true);
     expect(committed.lease?.instanceId).toBe("box-replacement");
+  }, 60_000);
+
+  test("attached warm row with an instance but no resume_state fails closed and preserves the keeper", async () => {
+    if (!available) return;
+    const settings = settingsFor(true);
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    const keeperId = sandboxLeaseHolderIdForAttempt("keeper-null-resume");
+    const acquired = await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: keeperId,
+      subjectId: groupId,
+      backend: "local",
+      leaseTtlMs: settings.sandboxLeaseTtlMs,
+    });
+    expect(acquired.role).toBe("spawner");
+    const committed = await commitWarmingToWarm(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: acquired.lease.leaseEpoch,
+      instanceId: "box-null-resume",
+      resumeBackendId: "unix_local",
+      resumeState: null,
+      leaseTtlMs: settings.sandboxLeaseTtlMs,
+    });
+    expect(committed.committed).toBe(true);
+
+    let caught: unknown;
+    try {
+      await resumeBoxForTurn(
+        { db, settings },
+        {
+          accountId,
+          workspaceId,
+          sandboxGroupId: groupId,
+          sessionId: groupId,
+          backend: "local",
+        },
+        "turn",
+        sandboxLeaseHolderIdForAttempt("attached-null-resume"),
+      );
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(SandboxResumeStateUnavailableError);
+    const after = await readRow(workspaceId, groupId);
+    expect(after).toMatchObject({
+      liveness: "warm",
+      refcount: 1,
+      turn_holders: 1,
+      viewer_holders: 0,
+      lease_epoch: committed.lease!.leaseEpoch,
+      instance_id: "box-null-resume",
+    });
+    expect(await holderCount(workspaceId, groupId, keeperId)).toBe(1);
   }, 60_000);
 
   test("(3) epoch fence on the HEARTBEAT path: a re-establish bumps lease_epoch -> the stale holder's heartbeat is rejected (self-evicts)", async () => {

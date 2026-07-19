@@ -45,7 +45,6 @@ import {
   WorkspaceArchiveIntegrityError,
   establishSandboxSessionFromEnvelope,
   isProviderSandboxNotFoundError,
-  SandboxResumeStateUnavailableError,
   serializeEstablishedSandboxEnvelope,
   deletePriorPersistedSnapshot,
   tagModalSandbox,
@@ -879,10 +878,7 @@ export async function resumeBoxForTurn(
         ...(services.sandboxMetrics ? { metrics: services.sandboxMetrics } : {}),
       });
     } catch (error) {
-      if (
-        !(error instanceof SandboxResumeStateUnavailableError) &&
-        !isProviderSandboxNotFoundError(ids.backend, error)
-      ) {
+      if (!isProviderSandboxNotFoundError(ids.backend, error)) {
         throw error;
       }
       const marked = await markWarmLeaseInstanceLost(db, {

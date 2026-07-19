@@ -57,13 +57,10 @@ import {
   ensureTerminalServer,
   establishSandboxSessionFromEnvelope,
   isProviderSandboxNotFoundError,
-  SandboxResumeStateUnavailableError,
   exposeStreamPort,
   desktopCapableBackend,
   NatsControlRpc,
   SelfhostedSandboxClient,
-  mintStreamToken,
-  STREAM_TOKEN_DEFAULT_TTL_SECONDS,
   TERMINAL_STREAM_PORT,
   DisplayStackUnsupportedError,
   TerminalServerUnsupportedError,
@@ -502,8 +499,7 @@ async function retireMissingWarmLease(
 ): Promise<boolean> {
   if (
     input.lease.instanceId === null ||
-    (!(error instanceof SandboxResumeStateUnavailableError) &&
-      !isProviderSandboxNotFoundError(input.session.sandboxBackend, error))
+    !isProviderSandboxNotFoundError(input.session.sandboxBackend, error)
   ) {
     return false;
   }
@@ -616,8 +612,8 @@ export type MintDesktopStreamInput = {
  * Idempotent display-stack + resolveExposedPort are safe to call N times. The
  * resolved URL is recorded on the lease (data_plane_url) under the epoch fence; a
  * stale-epoch write (the box re-established under a newer epoch mid-call) is a
- * no-op and we return the freshly-minted cell anyway (it is for the epoch we
- * resumed under; the next op reconciles).
+ * no-op and the mint returns null rather than disclosing a capability for the
+ * superseded provider epoch.
  */
 export async function mintDesktopStream(
   services: ViewerServices,
@@ -683,33 +679,6 @@ export async function mintDesktopStream(
     return null;
   }
 
-  // FAST PATH (P4.2 perf): when the lease already holds the data-plane URL for
-  // this epoch, the box is warm, exposed, and the display stack is already up.
-  // Re-resuming the box by id (Modal resume-by-id is ~40s) + re-running
-  // ensureDisplayStack + exposeStreamPort on EVERY stream-capabilities poll made
-  // the desktop look like it was "starting" forever. The tunnel URL is stable for
-  // the life of the (epoch-fenced) box, so mint ONLY a fresh scoped token (HMAC,
-  // sub-millisecond) against the cached URL and return — no box touch at all. A
-  // rollover advances the epoch and re-records dataPlaneUrl via the slow path, so
-  // a cached URL here is always the current epoch's live tunnel.
-  if (lease.dataPlaneUrl) {
-    const nowSeconds = Math.floor(Date.now() / 1000);
-    const token = await mintStreamToken(secret, {
-      workspaceId,
-      sessionId: session.id,
-      viewerId,
-      leaseEpoch: lease.leaseEpoch,
-      nowSeconds,
-    });
-    return {
-      url: lease.dataPlaneUrl,
-      token,
-      expiresAt: new Date((nowSeconds + STREAM_TOKEN_DEFAULT_TTL_SECONDS) * 1000).toISOString(),
-      resolution: defaultResolution(settings),
-      leaseEpoch: lease.leaseEpoch,
-    };
-  }
-
   // Resume the LIVE box by id from the authoritative lease descriptor. An
   // attached stream resolver has no creation authority and never substitutes a
   // per-session envelope for missing lease state.
@@ -768,15 +737,18 @@ export async function mintDesktopStream(
     }
 
     // Record the resolved URL on the lease under the epoch fence (rotation +
-    // disclosure). A fence miss (the box re-established under a newer epoch
-    // mid-call) is a no-op; we still return the cell we minted for our epoch.
-    await recordLeaseDataPlaneUrl(db, {
+    // disclosure). A fence miss means this capability belongs to a stale
+    // provider epoch; never return it to the caller.
+    const recorded = await recordLeaseDataPlaneUrl(db, {
       accountId,
       workspaceId,
       sandboxGroupId: session.sandboxGroupId,
       expectedEpoch: lease.leaseEpoch,
       dataPlaneUrl: exposed.url,
     });
+    if (!recorded) {
+      return null;
+    }
 
     const mint: DesktopStreamMint = {
       url: exposed.url,
@@ -830,8 +802,8 @@ export async function mintDesktopStream(
 // server (ensureTerminalServer), resolves the provider's scoped tunnel for port
 // 7681 (a SEPARATE tunnel from the 6080 desktop noVNC → a different URL), mints
 // the scoped per-viewer stream token, and records the resolved URL on the lease's
-// terminal_data_plane_url column under the epoch fence. The fast-path re-mints
-// ONLY a fresh token against the cached terminal URL (no box touch).
+// terminal_data_plane_url column under the epoch fence. Every mint re-establishes
+// provider/readiness state; the cached URL is never used as a blind fast path.
 //
 // It does NOT require the desktop to be on — it gates on the separate
 // sandboxTerminalEnabled toggle. Degradation (no secret, headless backend, ttyd
@@ -927,29 +899,6 @@ export async function mintTerminalStream(
     return null;
   }
 
-  // FAST PATH: the terminal tunnel URL is stable for the life of the (epoch-fenced)
-  // box, so when the lease already caches it, mint ONLY a fresh scoped token (HMAC,
-  // sub-millisecond) against the cached URL — no box resume/exec at all. A rollover
-  // advances the epoch and clears terminalDataPlaneUrl (commitWarmingToWarm), so a
-  // cached URL here is always the current epoch's live ttyd tunnel.
-  if (lease.terminalDataPlaneUrl) {
-    const nowSeconds = Math.floor(Date.now() / 1000);
-    const token = await mintStreamToken(secret, {
-      workspaceId,
-      sessionId: session.id,
-      viewerId,
-      leaseEpoch: lease.leaseEpoch,
-      port: TERMINAL_STREAM_PORT,
-      nowSeconds,
-    });
-    return {
-      url: lease.terminalDataPlaneUrl,
-      token,
-      expiresAt: new Date((nowSeconds + STREAM_TOKEN_DEFAULT_TTL_SECONDS) * 1000).toISOString(),
-      leaseEpoch: lease.leaseEpoch,
-    };
-  }
-
   // Resume the LIVE box by id (lease.resume_state authoritative), ensure ttyd, and
   // resolve the 7681 tunnel + mint the scoped token, IN-PROCESS.
   const envelope = lease.resumeState;
@@ -1008,16 +957,19 @@ export async function mintTerminalStream(
       throw error;
     }
 
-    // Record the resolved terminal URL on the lease under the epoch fence. A fence
-    // miss (box re-established under a newer epoch mid-call) is a no-op; we still
-    // return the cell we minted for our epoch.
-    await recordLeaseTerminalDataPlaneUrl(db, {
+    // Record the resolved terminal URL on the lease under the epoch fence. A
+    // fence miss means this capability belongs to a stale provider epoch; never
+    // return it to the caller.
+    const recorded = await recordLeaseTerminalDataPlaneUrl(db, {
       accountId,
       workspaceId,
       sandboxGroupId: session.sandboxGroupId,
       expectedEpoch: lease.leaseEpoch,
       terminalDataPlaneUrl: exposed.url,
     });
+    if (!recorded) {
+      return null;
+    }
 
     return {
       url: exposed.url,
@@ -1216,7 +1168,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
  *
  * The GET stream-capabilities handshake mints a token scoped to the CALLING
  * PRINCIPAL — grant.subjectId — which for an API-key principal is a NON-UUID like
- * "configured:key". Passing that straight to mintStreamToken threw a ZodError in
+ * "configured:key". Passing that straight to the stream-token payload parser threw a ZodError in
  * StreamTokenPayload.parse, which escaped as an uncaught 500 (caps-500 bug). The
  * browser's managed-session subject IS a UUID and is returned unchanged, so it is
  * unaffected. A non-UUID principal is mapped to a DETERMINISTIC v5-shaped UUID

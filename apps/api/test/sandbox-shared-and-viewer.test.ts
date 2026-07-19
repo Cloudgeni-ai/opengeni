@@ -24,10 +24,12 @@ import type { AccessGrant } from "@opengeni/contracts";
 import { createSessionForRequest } from "@opengeni/core";
 import {
   establishSandboxSessionFromEnvelope,
+  SandboxResumeStateUnavailableError,
   serializeEstablishedSandboxEnvelope,
   type EstablishedSandboxSession,
 } from "@opengeni/runtime";
 import { attachViewer, detachViewer, heartbeatViewer } from "../src/sandbox/viewer";
+import { withChannelA } from "../src/sandbox/channel-a";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
 
 // P1.4 — the shared-sandbox MCP surface (create-session resolution) + the
@@ -609,6 +611,78 @@ async function closeSeedBox(established: EstablishedSandboxSession): Promise<voi
 }
 
 describe("P1.4 API-direct viewer-holder lifecycle (real lease + reaper)", () => {
+  test("attached Channel-A path with instance_id but null resume_state fails closed and preserves the keeper", async () => {
+    if (!available) return;
+    const localSettings = testSettings({
+      sandboxBackend: "local",
+      sandboxOwnershipEnabled: true,
+      sandboxLeaseTtlMs: 5_000,
+      sandboxIdleGraceMs: 500,
+    });
+    const { accountId, workspaceId } = await freshWorkspace();
+    const session = await createSession(db, {
+      accountId,
+      workspaceId,
+      initialMessage: "channel-a null resume",
+      resources: [],
+      metadata: {},
+      model: "m",
+      sandboxBackend: "local",
+    });
+    const acquired = await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: session.sandboxGroupId,
+      kind: "turn",
+      holderId: "channel-a-keeper",
+      subjectId: session.id,
+      backend: "local",
+      leaseTtlMs: localSettings.sandboxLeaseTtlMs,
+    });
+    expect(acquired.role).toBe("spawner");
+    const committed = await commitWarmingToWarm(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: session.sandboxGroupId,
+      expectedEpoch: acquired.lease.leaseEpoch,
+      instanceId: "channel-a-box-null-resume",
+      resumeBackendId: "unix_local",
+      resumeState: null,
+      leaseTtlMs: localSettings.sandboxLeaseTtlMs,
+    });
+    expect(committed.committed).toBe(true);
+
+    let caught: unknown;
+    try {
+      await withChannelA(
+        { db, settings: localSettings, bus: new MemoryEventBus() },
+        {
+          accountId,
+          workspaceId,
+          session: session as never,
+          subjectId: "channel-a-test",
+        },
+        async () => "unreachable",
+      );
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(SandboxResumeStateUnavailableError);
+    const after = await readLease(db, workspaceId, session.sandboxGroupId);
+    expect(after).toMatchObject({
+      liveness: "warm",
+      refcount: 1,
+      turnHolders: 1,
+      viewerHolders: 0,
+      leaseEpoch: committed.lease!.leaseEpoch,
+      instanceId: "channel-a-box-null-resume",
+    });
+    const [keeper] = await admin<{ holder_id: string }[]>`
+      select holder_id from sandbox_lease_holders
+      where lease_id = ${committed.lease!.id}`;
+    expect(keeper?.holder_id).toBe("channel-a-keeper");
+  }, 60_000);
+
   test("a viewer holder keeps a WARM box alive with NO turn running; the reaper does NOT terminate it", async () => {
     if (!available) return;
     const { accountId, workspaceId } = await freshWorkspace();

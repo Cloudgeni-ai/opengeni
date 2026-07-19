@@ -359,6 +359,7 @@ export async function setRlsContext(db: Database, context: RlsContext): Promise<
   await db.execute(
     sql`select set_config('opengeni.workspace_id', ${context.workspaceId ?? ""}, true)`,
   );
+  await db.execute(sql`select set_config('opengeni.sandbox_recovery_protocol_v1', '1', true)`);
 }
 
 export async function withRlsContext<T>(
@@ -15513,7 +15514,9 @@ export async function reapStaleLeaseHolders(
 // reaper Temporal Schedule (P1.3) sees stale rows across ALL workspaces in ONE
 // pass, bypassing per-workspace FORCE RLS. DB-only — returns the drainable rows;
 // the provider stop() is the caller's concern. No RLS GUC is set (the DEFINER fn
-// is the sanctioned cross-workspace read).
+// is the sanctioned cross-workspace read). Each invocation runs in its own
+// transaction and opts into the recovery protocol fence; this also makes the
+// legacy fallback safe after PostgreSQL aborts an undefined-function call.
 export async function reapStaleLeaseHoldersGlobal(
   db: Database,
   input: {
@@ -15530,19 +15533,46 @@ export async function reapStaleLeaseHoldersGlobal(
     instance_id: string | null;
     lease_epoch: number | string;
   }>;
+  const runCurrentReaper = async () =>
+    await db.transaction(async (txRaw) => {
+      const tx = txRaw as unknown as Database;
+      await tx.execute(
+        sql`select set_config('opengeni.sandbox_recovery_protocol_v1', '1', true)`,
+      );
+      return await rawRows<{
+        workspace_id: string;
+        sandbox_group_id: string;
+        instance_id: string | null;
+        lease_epoch: number | string;
+      }>(
+        tx,
+        sql`
+        select workspace_id, sandbox_group_id, instance_id, lease_epoch
+        from opengeni_private.reap_sandbox_leases(${input.viewerHolderTtlMs}, ${input.turnHolderTtlMs ?? 0}, ${input.idleGraceMs})
+      `,
+      );
+    });
+  const runLegacyReaper = async () =>
+    await db.transaction(async (txRaw) => {
+      const tx = txRaw as unknown as Database;
+      await tx.execute(
+        sql`select set_config('opengeni.sandbox_recovery_protocol_v1', '1', true)`,
+      );
+      return await rawRows<{
+        workspace_id: string;
+        sandbox_group_id: string;
+        instance_id: string | null;
+        lease_epoch: number | string;
+      }>(
+        tx,
+        sql`
+        select workspace_id, sandbox_group_id, instance_id, lease_epoch
+        from opengeni_private.reap_sandbox_leases(${input.viewerHolderTtlMs}, ${input.idleGraceMs})
+      `,
+      );
+    });
   try {
-    rows = await rawRows<{
-      workspace_id: string;
-      sandbox_group_id: string;
-      instance_id: string | null;
-      lease_epoch: number | string;
-    }>(
-      db,
-      sql`
-      select workspace_id, sandbox_group_id, instance_id, lease_epoch
-      from opengeni_private.reap_sandbox_leases(${input.viewerHolderTtlMs}, ${input.turnHolderTtlMs ?? 0}, ${input.idleGraceMs})
-    `,
-    );
+    rows = await runCurrentReaper();
   } catch (error) {
     // Deploy normally runs migrations before rollout, but a newly-started worker
     // may briefly hit a DB that only has the legacy 2-arg SECURITY DEFINER
@@ -15557,18 +15587,7 @@ export async function reapStaleLeaseHoldersGlobal(
         "sandbox lease global reaper: 3-arg reap_sandbox_leases missing; falling back to legacy 2-arg sweep",
       );
     }
-    rows = await rawRows<{
-      workspace_id: string;
-      sandbox_group_id: string;
-      instance_id: string | null;
-      lease_epoch: number | string;
-    }>(
-      db,
-      sql`
-      select workspace_id, sandbox_group_id, instance_id, lease_epoch
-      from opengeni_private.reap_sandbox_leases(${input.viewerHolderTtlMs}, ${input.idleGraceMs})
-    `,
-    );
+    rows = await runLegacyReaper();
   }
   return rows.map((r) => ({
     workspaceId: r.workspace_id,
@@ -15865,13 +15884,12 @@ export async function confirmDrainCold(
 // re-arm raced an external action, but it does not itself license deleting a
 // resumable cloud box without a verified capture.
 //
-// Returns `{ wrote, priorArchive }`:
+// Returns `{ wrote, priorArchiveForGc }`:
 //   - wrote:false  -> the CAS missed (re-armed / newer epoch / vanished); the
 //                     caller must NOT terminate (the box is wanted again). No GC.
-//   - priorArchive -> the archive THIS lease carried before (if any), so the
-//                     caller can best-effort delete the superseded provider
-//                     snapshot (keep-latest-per-lease GC). null on the first
-//                     persist for this box or when workspaceArchive is null.
+//   - priorArchiveForGc -> the one archive made unreachable by this rotation,
+//                     so the caller can best-effort delete it. The last
+//                     restore/tree-verified revision is deliberately retained.
 // The fence is the split-brain guard: a stale-epoch reaper writes ZERO rows and
 // is told not to terminate.
 export async function persistDrainSnapshot(
@@ -15891,8 +15909,7 @@ export async function persistDrainSnapshot(
   },
 ): Promise<{
   wrote: boolean;
-  priorArchive: string | null;
-  priorArchivePrev: string | null;
+  priorArchiveForGc: string | null;
   archiveRevision: string | null;
 }> {
   const workspaceArchiveMeta =
@@ -15930,8 +15947,7 @@ export async function persistDrainSnapshot(
       if (guard.length === 0) {
         return {
           wrote: false,
-          priorArchive: null,
-          priorArchivePrev: null,
+          priorArchiveForGc: null,
           archiveRevision: null,
         };
       }
@@ -15942,11 +15958,15 @@ export async function persistDrainSnapshot(
       if (input.workspaceArchive === null) {
         return {
           wrote: true,
-          priorArchive: null,
-          priorArchivePrev: null,
+          priorArchiveForGc: null,
           archiveRevision: null,
         };
       }
+      const rotation = rotateWorkspaceArchives({
+        resumeState: guard[0]!.resume_state,
+        priorCurrentArchive: priorArchive,
+        priorPreviousArchive: priorArchivePrev,
+      });
       await foldWorkspaceArchiveOntoLease(scopedDb, {
         workspaceId: input.workspaceId,
         sandboxGroupId: input.sandboxGroupId,
@@ -15955,12 +15975,12 @@ export async function persistDrainSnapshot(
         workspaceArchiveMeta,
         resumeState: guard[0]!.resume_state,
         livenessGuard: "draining",
-        clearPreviousArchive: true,
+        previousArchive: rotation.previousArchive,
+        previousArchiveMeta: rotation.previousArchiveMeta,
       });
       return {
         wrote: true,
-        priorArchive,
-        priorArchivePrev,
+        priorArchiveForGc: rotation.priorArchiveForGc,
         archiveRevision: workspaceArchiveMeta?.revision ?? null,
       };
     },
@@ -15981,8 +16001,52 @@ export async function persistDrainSnapshot(
  * (||) with the fold — this CREATES sessionState if absent AND preserves its
  * existing siblings (providerState/manifest/exposedPorts). The archive is
  * bound as a jsonb string scalar (to_jsonb(text)). Re-asserting the caller's
- * CAS guard keeps the write atomic with its FOR UPDATE lock.
+ * CAS guard keeps the write atomic with its FOR UPDATE lock. Archive-slot
+ * rotation is computed by rotateWorkspaceArchives before this writer is called,
+ * so the warm and drain seams use exactly the same retention policy.
  */
+export function rotateWorkspaceArchives(input: {
+  resumeState: Record<string, unknown> | null;
+  priorCurrentArchive: string | null;
+  priorPreviousArchive: string | null;
+}): {
+  previousArchive: string | null;
+  previousArchiveMeta: SandboxArchiveRevision | null;
+  priorArchiveForGc: string | null;
+} {
+  const sessionState =
+    input.resumeState?.sessionState && typeof input.resumeState.sessionState === "object"
+      ? (input.resumeState.sessionState as Record<string, unknown>)
+      : {};
+  const previousMeta = parseArchiveRevision(sessionState.workspaceArchivePrevMeta);
+  const recovery =
+    input.resumeState?.opengeniRecovery && typeof input.resumeState.opengeniRecovery === "object"
+      ? (input.resumeState.opengeniRecovery as Record<string, unknown>)
+      : {};
+  const workspace =
+    recovery.workspace && typeof recovery.workspace === "object"
+      ? (recovery.workspace as Record<string, unknown>)
+      : {};
+  const verifiedRevision =
+    typeof workspace.verifiedRevision === "string" ? workspace.verifiedRevision : null;
+  const preserveVerifiedPrevious =
+    input.priorPreviousArchive !== null &&
+    previousMeta !== null &&
+    previousMeta.revision === verifiedRevision;
+
+  return preserveVerifiedPrevious
+    ? {
+        previousArchive: input.priorPreviousArchive,
+        previousArchiveMeta: previousMeta,
+        priorArchiveForGc: input.priorCurrentArchive,
+      }
+    : {
+        previousArchive: input.priorCurrentArchive,
+        previousArchiveMeta: parseArchiveRevision(sessionState.workspaceArchiveMeta),
+        priorArchiveForGc: input.priorPreviousArchive,
+      };
+}
+
 async function foldWorkspaceArchiveOntoLease(
   scopedDb: Database,
   input: {
@@ -15993,9 +16057,8 @@ async function foldWorkspaceArchiveOntoLease(
     workspaceArchiveMeta: SandboxArchiveRevision | null;
     resumeState: Record<string, unknown> | null;
     livenessGuard: "draining" | "warm";
-    priorCurrentArchive?: string | null;
-    priorCurrentArchiveMeta?: unknown;
-    clearPreviousArchive?: boolean;
+    previousArchive: string | null;
+    previousArchiveMeta: SandboxArchiveRevision | null;
     /** The wall-clock (ISO) this archive's capture STARTED. Stamped as
      *  workspaceArchiveAt so warm-snapshot ordering is by capture-initiation, not
      *  land time — a late, older capture is superseded (persistWarmSnapshot's
@@ -16024,16 +16087,15 @@ async function foldWorkspaceArchiveOntoLease(
   } else {
     delete sessionState.workspaceArchiveMeta;
   }
-  if (input.clearPreviousArchive) {
+  if (input.previousArchive !== null) {
+    sessionState.workspaceArchivePrev = input.previousArchive;
+  } else {
     delete sessionState.workspaceArchivePrev;
+  }
+  if (input.previousArchiveMeta !== null) {
+    sessionState.workspaceArchivePrevMeta = input.previousArchiveMeta;
+  } else {
     delete sessionState.workspaceArchivePrevMeta;
-  } else if (input.priorCurrentArchive) {
-    sessionState.workspaceArchivePrev = input.priorCurrentArchive;
-    if (input.priorCurrentArchiveMeta !== undefined && input.priorCurrentArchiveMeta !== null) {
-      sessionState.workspaceArchivePrevMeta = input.priorCurrentArchiveMeta;
-    } else {
-      delete sessionState.workspaceArchivePrevMeta;
-    }
   }
   const folded: Record<string, unknown> = { ...base, sessionState };
   const explicitRecovery =
@@ -16109,14 +16171,12 @@ export async function persistWarmSnapshot(
         prior_archive: string | null;
         prior_archive_prev: string | null;
         prior_archive_at: string | null;
-        prior_archive_meta: unknown;
         resume_state: Record<string, unknown> | null;
       }>(sql`
         select
           resume_state #>> '{sessionState,workspaceArchive}' as prior_archive,
           resume_state #>> '{sessionState,workspaceArchivePrev}' as prior_archive_prev,
           resume_state #>> '{sessionState,workspaceArchiveAt}' as prior_archive_at,
-          resume_state #> '{sessionState,workspaceArchiveMeta}' as prior_archive_meta,
           resume_state
         from sandbox_leases
         where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
@@ -16163,6 +16223,11 @@ export async function persistWarmSnapshot(
           archiveRevision: null,
         };
       }
+      const rotation = rotateWorkspaceArchives({
+        resumeState: guard[0]!.resume_state,
+        priorCurrentArchive: priorArchive,
+        priorPreviousArchive: priorArchivePrev,
+      });
       await foldWorkspaceArchiveOntoLease(scopedDb, {
         workspaceId: input.workspaceId,
         sandboxGroupId: input.sandboxGroupId,
@@ -16171,15 +16236,15 @@ export async function persistWarmSnapshot(
         workspaceArchiveMeta,
         resumeState: guard[0]!.resume_state,
         livenessGuard: "warm",
-        priorCurrentArchive: priorArchive,
-        priorCurrentArchiveMeta: guard[0]!.prior_archive_meta,
+        previousArchive: rotation.previousArchive,
+        previousArchiveMeta: rotation.previousArchiveMeta,
         archiveAtIso: workspaceArchiveMeta?.capturedAt ?? new Date(capturedAtMs).toISOString(),
       });
       return {
         wrote: true,
         throttled: false,
         superseded: false,
-        priorArchiveForGc: priorArchivePrev,
+        priorArchiveForGc: rotation.priorArchiveForGc,
         archiveRevision: workspaceArchiveMeta?.revision ?? null,
       };
     },

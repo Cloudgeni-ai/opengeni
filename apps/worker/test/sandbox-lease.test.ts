@@ -185,6 +185,25 @@ async function insertHolder(
             now() - (${String(heartbeatAgoMs)} || ' milliseconds')::interval)`;
 }
 
+function archiveDescriptor(archive: string, capturedAtMs: number) {
+  const bytes = Buffer.from(archive, "base64");
+  const archiveSha256 = new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
+  return {
+    version: 1 as const,
+    revision: `wa1:${capturedAtMs}:${archiveSha256}`,
+    archiveSha256,
+    archiveBytes: bytes.length,
+    capturedAt: new Date(capturedAtMs).toISOString(),
+    workspace: {
+      algorithm: "sha256" as const,
+      sha256: archiveSha256,
+      entryCount: 1,
+      fileCount: 1,
+      totalFileBytes: bytes.length,
+    },
+  };
+}
+
 async function readRow(workspaceId: string, groupId: string) {
   const [r] = await admin`
     select liveness, refcount, turn_holders, viewer_holders, lease_epoch, instance_id
@@ -356,8 +375,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       workspaceArchive: archive1,
     });
     expect(r1.wrote).toBe(true);
-    expect(r1.priorArchive).toBeNull();
-    expect(r1.priorArchivePrev).toBeNull();
+    expect(r1.priorArchiveForGc).toBeNull();
     // The archive is folded at resume_state.sessionState.workspaceArchive AND the
     // existing providerState sibling is preserved (resume-by-id still works).
     const [row1] =
@@ -379,8 +397,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       workspaceArchive: archive2,
     });
     expect(r2.wrote).toBe(true);
-    expect(r2.priorArchive).toBe(archive1);
-    expect(r2.priorArchivePrev).toBeNull();
+    expect(r2.priorArchiveForGc).toBeNull();
 
     // Epoch fence: a stale-epoch persist writes ZERO rows (wrote:false) so the
     // reaper leaves the (re-armed/superseded) box RUNNING — never terminates it.

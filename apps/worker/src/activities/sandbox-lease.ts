@@ -125,11 +125,11 @@ type CreateSandboxClientForBackendFn = typeof createSandboxClientForBackend;
  * db/accountId/row and delegates to persistDrainSnapshot. Returns:
  *   - wrote:false  -> the CAS missed (re-armed / newer epoch / vanished). The box
  *                     is wanted again; the seam MUST NOT terminate it.
- *   - priorArchive / priorArchivePrev -> superseded archives to GC at drain.
+ *   - priorArchiveForGc -> the one archive made unreachable by rotation.
  *
  * Pass null for archiveBase64 to CAS-check WITHOUT writing (re-arm guard for
  * backends with no persistWorkspace — ensures a re-arm during the snapshot window
- * aborts the terminate before client.delete()). priorArchive values are always
+ * aborts the terminate before client.delete()). The GC candidate is always
  * null in this case.
  */
 export type PersistArchiveFn = (
@@ -137,8 +137,7 @@ export type PersistArchiveFn = (
   archiveMetadata?: WorkspaceArchiveDescriptor,
 ) => Promise<{
   wrote: boolean;
-  priorArchive: string | null;
-  priorArchivePrev: string | null;
+  priorArchiveForGc: string | null;
   archiveRevision?: string | null;
 }>;
 
@@ -840,7 +839,7 @@ export async function terminateProviderBox(
   // null-archive path of persistArchive does exactly this: FOR UPDATE + liveness/
   // refcount/epoch guard, no write. wrote:false → abort the terminate.
   if (verifiedArchive) {
-    const { wrote, priorArchive, priorArchivePrev } = await persistArchive(
+    const { wrote, priorArchiveForGc } = await persistArchive(
       verifiedArchive.base64,
       verifiedArchive.descriptor,
     );
@@ -856,20 +855,12 @@ export async function terminateProviderBox(
     }
     // Keep-latest-per-lease GC: best-effort delete the prior snapshot image now,
     // while the session (and its Modal client) is still live. Never throws.
-    const deleted = await deletePriorPersistedSnapshot(session, priorArchive);
+    const deleted = await deletePriorPersistedSnapshot(session, priorArchiveForGc);
     if (deleted) {
       observability.info("sandbox reaper: GC'd superseded workspace snapshot", {
         sandboxGroupId: lease.sandboxGroupId,
         backend,
         snapshotId: deleted,
-      });
-    }
-    const deletedPrev = await deletePriorPersistedSnapshot(session, priorArchivePrev);
-    if (deletedPrev) {
-      observability.info("sandbox reaper: GC'd superseded previous workspace snapshot", {
-        sandboxGroupId: lease.sandboxGroupId,
-        backend,
-        snapshotId: deletedPrev,
       });
     }
   } else {
