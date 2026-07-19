@@ -8,12 +8,19 @@ type LockContract = "canonical" | "turn_attempt_fence" | "owned_suffix";
 type ExpectedWriter = {
   inserts: number;
   contract: LockContract;
+  requiresControlShare?: boolean;
+  requiresControlRevalidation?: boolean;
 };
 
 const repoRoot = resolve(import.meta.dir, "../../..");
 
 const expectedWriters: Record<string, ExpectedWriter> = {
-  "packages/db/src/index.ts#armCodexCapacityWait": { inserts: 1, contract: "canonical" },
+  "packages/db/src/index.ts#armCodexCapacityWait": {
+    inserts: 1,
+    contract: "canonical",
+    requiresControlShare: true,
+    requiresControlRevalidation: true,
+  },
   "packages/db/src/index.ts#supersedeCodexCapacityWaitInTransaction": {
     inserts: 1,
     contract: "owned_suffix",
@@ -21,6 +28,8 @@ const expectedWriters: Record<string, ExpectedWriter> = {
   "packages/db/src/index.ts#reconcileCodexCapacityWait": {
     inserts: 1,
     contract: "canonical",
+    requiresControlShare: true,
+    requiresControlRevalidation: true,
   },
   "packages/db/src/index.ts#applyContextCompaction": {
     inserts: 1,
@@ -250,6 +259,34 @@ function functionCalls(functionNode: ts.FunctionLikeDeclaration, expectedName: s
   return found;
 }
 
+function functionCallsWithStringProperty(
+  functionNode: ts.FunctionLikeDeclaration,
+  expectedName: string,
+  propertyName: string,
+  propertyValue: string,
+): boolean {
+  let found = false;
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node) && callName(node) === expectedName) {
+      found = node.arguments.some(
+        (argument) =>
+          ts.isObjectLiteralExpression(argument) &&
+          argument.properties.some(
+            (property) =>
+              ts.isPropertyAssignment(property) &&
+              ((ts.isIdentifier(property.name) && property.name.text === propertyName) ||
+                (ts.isStringLiteral(property.name) && property.name.text === propertyName)) &&
+              ts.isStringLiteral(property.initializer) &&
+              property.initializer.text === propertyValue,
+          ),
+      );
+    }
+    if (!found) ts.forEachChild(node, visit);
+  };
+  ts.forEachChild(functionNode, visit);
+  return found;
+}
+
 function callPositions(functionNode: ts.FunctionLikeDeclaration, expectedName: string): number[] {
   const positions: number[] = [];
   const visit = (node: ts.Node): void => {
@@ -373,6 +410,19 @@ describe("session_events writer inventory", () => {
         expect(canonicalLocks.length).toBeGreaterThan(0);
         const firstLock = canonicalLocks[0];
         expect(firstLock).toBeLessThan(insertPositions(writer.functionNode)[0]!);
+        if (expected.requiresControlShare) {
+          expect(
+            functionCallsWithStringProperty(
+              writer.functionNode,
+              "lockSessionEventWriteRows",
+              "controlLock",
+              "share",
+            ),
+          ).toBe(true);
+        }
+        if (expected.requiresControlRevalidation) {
+          expect(functionCalls(writer.functionNode, "evaluateSessionControl")).toBe(true);
+        }
       } else if (expected.contract === "turn_attempt_fence") {
         expect(functionCalls(writer.functionNode, "lockTurnAttemptWriteFenceTx")).toBe(true);
         const firstFence = callPositions(writer.functionNode, "lockTurnAttemptWriteFenceTx")[0];

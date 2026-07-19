@@ -8362,11 +8362,13 @@ function nextCodexCapacityCheckAt(
 
 /**
  * Atomically settle one all-unavailable turn and arm exactly one durable wait.
- * Lock order is allocator rotation row -> session -> goal -> blocked turn ->
- * live lease (when a reactive failure owns one) -> waiter. The failed turn,
- * idle/capacity-paused session, durable events, lease release, and waiter
- * generation commit together; a crash cannot leave only half of the boundary
- * visible.
+ * Lock order is allocator rotation row -> workspace control -> actual workspace
+ * -> session -> exact turn -> exact attempt -> goal -> live lease (when a
+ * reactive failure owns one) -> waiter. The control share lock and effective
+ * control recheck prevent a capacity boundary from closing an attempt after a
+ * committed Pause. The failed turn, idle/capacity-paused session, durable
+ * events, lease release, and waiter generation commit together; a crash cannot
+ * leave only half of the boundary visible.
  */
 export async function armCodexCapacityWait(
   db: Database,
@@ -8403,6 +8405,7 @@ export async function armCodexCapacityWait(
         }
         const locks = await lockSessionEventWriteRows(tx, {
           workspaceId: input.workspaceId,
+          controlLock: "share",
           sessionIds: [input.sessionId],
           turnIds: [input.turnId],
           attemptIds: [input.attemptId],
@@ -8410,6 +8413,11 @@ export async function armCodexCapacityWait(
         const session = locks.sessions[0];
         const turn = locks.turns[0];
         const attempt = locks.attempts[0];
+        const effectiveControl = session
+          ? await evaluateSessionControl(tx, input.workspaceId, input.sessionId, {
+              workspaceControl: locks.control ?? undefined,
+            })
+          : null;
         const [goal] = await tx
           .select()
           .from(schema.sessionGoals)
@@ -8481,6 +8489,8 @@ export async function armCodexCapacityWait(
             currentRedispatches === (input.expectedRedispatches ?? currentRedispatches));
         if (
           !goal ||
+          effectiveControl?.state !== "active" ||
+          effectiveControl.settlement !== null ||
           session.activeTurnId !== input.turnId ||
           session.status !== "running" ||
           goal.status !== "active" ||
@@ -8901,7 +8911,10 @@ export async function reconcileCodexCapacityWait<
         if (!rotation || rotation.accountId !== input.accountId) {
           return { action: "stale", waiter: null, events: [] } as const;
         }
-        await lockSessionEventWriteRows(tx, { workspaceId: input.workspaceId });
+        const prefix = await lockSessionEventWriteRows(tx, {
+          workspaceId: input.workspaceId,
+          controlLock: "share",
+        });
         const [waiterRead] = await tx
           .select()
           .from(schema.codexCapacityWaiters)
@@ -8922,12 +8935,18 @@ export async function reconcileCodexCapacityWait<
         }
         const locks = await lockSessionEventWriteRows(tx, {
           workspaceId: input.workspaceId,
+          controlLock: "already_locked",
           workspaceLock: "already_locked",
           sessionIds: [input.sessionId],
           turnIds: [waiterRead.blockedTurnId],
         });
         const session = locks.sessions[0];
         const blockedTurn = locks.turns[0];
+        const effectiveControl = session
+          ? await evaluateSessionControl(tx, input.workspaceId, input.sessionId, {
+              workspaceControl: prefix.control ?? undefined,
+            })
+          : null;
         const [goal] = await tx
           .select()
           .from(schema.sessionGoals)
@@ -8992,7 +9011,9 @@ export async function reconcileCodexCapacityWait<
           .limit(1);
         const currentPolicyHash = codexCapacityPolicyHashFromTurnMetadata(blockedTurn.metadata);
         let supersedeReason: string | null = null;
-        if (goal.status !== "active" || goal.version !== waiter.goalVersion) {
+        if (effectiveControl?.state !== "active" || effectiveControl.settlement !== null) {
+          supersedeReason = "control_changed";
+        } else if (goal.status !== "active" || goal.version !== waiter.goalVersion) {
           supersedeReason = "goal_changed";
         } else if (currentPolicyHash !== waiter.policyHash) {
           supersedeReason = "credential_policy_changed";

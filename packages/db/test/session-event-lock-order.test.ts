@@ -15,13 +15,16 @@ import {
   appendSessionEventsAndUpdateSession,
   appendSessionEventsForTurnAttempt,
   appendSessionEventsWithLockedSessionUpdate,
+  armCodexCapacityWait,
   applySessionTurnSettlement,
   canonicalSessionCommandHash,
   createDb,
+  ensureCodexRotationSettings,
   getOrCreateSessionSystemUpdateOutbox,
   markSessionAttemptQuiesced,
   mutateSessionControlInTransaction,
   QueueCommandConflictError,
+  reconcileCodexCapacityWait,
   recoverSessionDispatch,
   sendAgentMessageInTransaction,
   SessionCommandIdempotencyError,
@@ -197,8 +200,8 @@ async function seedSandboxGroupMember(
   return sessionId;
 }
 
-async function seedGoal(fixture: RunningFixture): Promise<void> {
-  await admin`
+async function seedGoal(fixture: RunningFixture): Promise<string> {
+  const [goal] = await admin<{ id: string }[]>`
     insert into session_goals (
       account_id, workspace_id, session_id, status, text,
       success_criteria, version, max_auto_continuations
@@ -206,7 +209,9 @@ async function seedGoal(fixture: RunningFixture): Promise<void> {
       ${fixture.accountId}, ${fixture.workspaceId}, ${fixture.sessionId}, 'active',
       'Initial OPE-63 goal', 'Persist every event exactly once', 1, 20
     )
+    returning id
   `;
+  return goal!.id;
 }
 
 async function seedRecording(fixture: RunningFixture): Promise<string> {
@@ -272,6 +277,63 @@ async function activityWriter(
     1,
     fixture.attemptId,
     [{ type, payload }],
+  );
+}
+
+async function pauseSession(fixture: RunningFixture): Promise<unknown> {
+  return await withWorkspaceRls(
+    db,
+    fixture.workspaceId,
+    async (scopedDb) =>
+      await scopedDb.transaction(
+        async (tx) =>
+          await mutateSessionControlInTransaction(tx as unknown as Database, {
+            accountId: fixture.accountId,
+            workspaceId: fixture.workspaceId,
+            sessionId: fixture.sessionId,
+            actor: { type: "human", subjectId: "ope63-capacity-pause-race" },
+            operationKey: crypto.randomUUID(),
+            action: "pause",
+            reason: "OPE-63 capacity control barrier",
+          }),
+      ),
+  );
+}
+
+async function armCapacityWait(fixture: RunningFixture, goalId: string) {
+  await ensureCodexRotationSettings(db, fixture.accountId, fixture.workspaceId);
+  return await armCodexCapacityWait(db, {
+    accountId: fixture.accountId,
+    workspaceId: fixture.workspaceId,
+    sessionId: fixture.sessionId,
+    turnId: fixture.turnId,
+    attemptId: fixture.attemptId,
+    workflowId: `session-${fixture.sessionId}`,
+    goalId,
+    goalVersion: 1,
+    earliestResetAt: null,
+    resetKind: "bounded_refresh",
+    failurePayload: {
+      error: "all connected Codex subscriptions are unavailable",
+      code: "codex_usage_limit_reached",
+    },
+  });
+}
+
+async function reconcileAvailableCapacity(
+  fixture: RunningFixture,
+  waiter: { id: string; generation: number },
+) {
+  return await reconcileCodexCapacityWait(
+    db,
+    {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      sessionId: fixture.sessionId,
+      waiterId: waiter.id,
+      generation: waiter.generation,
+    },
+    () => ({ kind: "available", credentialId: crypto.randomUUID() }),
   );
 }
 
@@ -504,7 +566,7 @@ async function raceInOrder(
   firstEventType: string,
   firstWriter: () => Promise<unknown>,
   secondWriter: () => Promise<unknown>,
-): Promise<void> {
+): Promise<[unknown, unknown]> {
   const lockId = nextBarrierId++;
   await barrier`select pg_advisory_lock(${BARRIER_CLASS}, ${lockId})`;
   await admin`
@@ -522,7 +584,10 @@ async function raceInOrder(
     await waitForTwoAppLockWaiters();
     await barrier`select pg_advisory_unlock(${BARRIER_CLASS}, ${lockId})`;
     released = true;
-    await within(Promise.all([first, second]), "both event writers to commit");
+    return (await within(Promise.all([first, second]), "both event writers to commit")) as [
+      unknown,
+      unknown,
+    ];
   } finally {
     await admin`delete from ope63_event_barriers where event_type = ${firstEventType}`.catch(
       () => undefined,
@@ -927,6 +992,114 @@ describe("OPE-63 canonical session-event lock order", () => {
       expect(new Set(goalRows.map((row) => row.type))).toEqual(
         new Set(["goal.updated", "agent.model.usage"]),
       );
+    }
+  }, 120_000);
+
+  test("serializes capacity-wait arming with Pause in both arrival orders", async () => {
+    for (const first of ["arm", "pause"] as const) {
+      const fixture = await seedRunningSession();
+      const goalId = await seedGoal(fixture);
+      const arm = async () => await armCapacityWait(fixture, goalId);
+      const pause = async () => await pauseSession(fixture);
+
+      const [firstResult, secondResult] = await raceInOrder(
+        first === "arm" ? "codex.capacity.waiting" : "session.control.paused",
+        first === "arm" ? arm : pause,
+        first === "arm" ? pause : arm,
+      );
+      const armResult = (first === "arm" ? firstResult : secondResult) as Awaited<
+        ReturnType<typeof armCapacityWait>
+      >;
+      const pauseResult = (first === "pause" ? firstResult : secondResult) as Awaited<
+        ReturnType<typeof pauseSession>
+      >;
+
+      if (first === "pause") {
+        expect(armResult.action).toBe("stale");
+        expect(await assertCommittedSequence(fixture, 1)).toMatchObject([
+          { sequence: 1, type: "session.control.paused" },
+        ]);
+        continue;
+      }
+
+      expect(armResult.action).toBe("waiting");
+      if (armResult.action !== "waiting") throw new Error("capacity wait did not arm");
+      const reconciled = await reconcileAvailableCapacity(fixture, armResult.waiter);
+      expect(reconciled.action).toBe("superseded");
+      expect((pauseResult as { interruptionCount?: number }).interruptionCount).toBe(0);
+      expect(await assertCommittedSequence(fixture, 5)).toMatchObject([
+        { sequence: 1, type: "turn.failed" },
+        { sequence: 2, type: "codex.capacity.waiting" },
+        { sequence: 3, type: "session.status.changed" },
+        { sequence: 4, type: "session.control.paused" },
+        { sequence: 5, type: "codex.capacity.superseded" },
+      ]);
+    }
+  }, 120_000);
+
+  test("serializes capacity reconciliation with Pause in both arrival orders", async () => {
+    for (const first of ["reconcile", "pause"] as const) {
+      const fixture = await seedRunningSession();
+      const goalId = await seedGoal(fixture);
+      const armed = await armCapacityWait(fixture, goalId);
+      if (armed.action !== "waiting") throw new Error("capacity wait did not arm");
+      const reconcile = async () => await reconcileAvailableCapacity(fixture, armed.waiter);
+      const pause = async () => await pauseSession(fixture);
+
+      const [firstResult, secondResult] = await raceInOrder(
+        first === "reconcile" ? "codex.capacity.resumed" : "session.control.paused",
+        first === "reconcile" ? reconcile : pause,
+        first === "reconcile" ? pause : reconcile,
+      );
+      const reconcileResult = (first === "reconcile" ? firstResult : secondResult) as Awaited<
+        ReturnType<typeof reconcileAvailableCapacity>
+      >;
+      const pauseResult = (first === "pause" ? firstResult : secondResult) as Awaited<
+        ReturnType<typeof pauseSession>
+      >;
+
+      if (first === "pause") {
+        expect(reconcileResult.action).toBe("superseded");
+        expect(await assertCommittedSequence(fixture, 5)).toMatchObject([
+          { sequence: 1, type: "turn.failed" },
+          { sequence: 2, type: "codex.capacity.waiting" },
+          { sequence: 3, type: "session.status.changed" },
+          { sequence: 4, type: "session.control.paused" },
+          { sequence: 5, type: "codex.capacity.superseded" },
+        ]);
+      } else {
+        expect(reconcileResult.action).toBe("resumed");
+        expect(await assertCommittedSequence(fixture, 6)).toMatchObject([
+          { sequence: 1, type: "turn.failed" },
+          { sequence: 2, type: "codex.capacity.waiting" },
+          { sequence: 3, type: "session.status.changed" },
+          { sequence: 4, type: "system.update.pending" },
+          { sequence: 5, type: "codex.capacity.resumed" },
+          { sequence: 6, type: "session.control.paused" },
+        ]);
+      }
+
+      const [state] = await admin<
+        {
+          status: string;
+          active_turn_id: string | null;
+          pending_updates: number;
+        }[]
+      >`
+        select session.status, session.active_turn_id,
+               (select count(*)::int from session_system_updates update_row
+                where update_row.workspace_id = session.workspace_id
+                  and update_row.session_id = session.id
+                  and update_row.state = 'pending') as pending_updates
+        from sessions session
+        where session.workspace_id = ${fixture.workspaceId}
+          and session.id = ${fixture.sessionId}
+      `;
+      expect(state).toEqual({
+        status: first === "reconcile" ? "queued" : "idle",
+        active_turn_id: null,
+        pending_updates: first === "reconcile" ? 1 : 0,
+      });
     }
   }, 120_000);
 
