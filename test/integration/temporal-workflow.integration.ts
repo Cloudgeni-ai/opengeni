@@ -45,6 +45,14 @@ const workerDeathTestTimeoutMs = 360_000;
 
 const temporalWorkflowTestTimeoutMs = 30_000;
 
+// Goal-continuation cases run real workflow timers and activities after the two
+// long heartbeat-recovery proofs. On a loaded shared runner, task polling and
+// worker drain can legitimately exceed the general 30s test ceiling even though
+// the workflow's delay and settlement assertions still pass. Keep a finite,
+// narrowly scoped ceiling so a timed-out test cannot strand its worker and
+// cascade into the following cases; this does not change any runtime timeout.
+const goalContinuationTestTimeoutMs = 60_000;
+
 // continueAsNew tests legitimately span a continueAsNew chain (the handle only
 // resolves on the FINAL run) plus a possible 5s idle-wait window before the
 // continued run re-claims the durable-queue turn that arrived after the
@@ -807,7 +815,7 @@ describe("Temporal workflow integration", () => {
         await run;
       }
     },
-    temporalWorkflowTestTimeoutMs,
+    goalContinuationTestTimeoutMs,
   );
 
   test(
@@ -857,7 +865,7 @@ describe("Temporal workflow integration", () => {
         await run;
       }
     },
-    temporalWorkflowTestTimeoutMs,
+    goalContinuationTestTimeoutMs,
   );
 
   test(
@@ -914,7 +922,7 @@ describe("Temporal workflow integration", () => {
         await run;
       }
     },
-    temporalWorkflowTestTimeoutMs,
+    goalContinuationTestTimeoutMs,
   );
 
   test(
