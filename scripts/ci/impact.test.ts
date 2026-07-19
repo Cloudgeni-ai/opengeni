@@ -383,7 +383,9 @@ describe("fail-closed change impact", () => {
 
   test("current-main release, generated-source, consumer, and capture gates remain required", () => {
     const ci = readFileSync(".github/workflows/ci.yml", "utf8");
+    const release = readFileSync(".github/workflows/release.yml", "utf8");
     const guards = readFileSync("scripts/ci/run-guards-plan.ts", "utf8");
+    const closureGuard = readFileSync("scripts/publish-closure-guard.ts", "utf8");
     const packageJson = JSON.parse(readFileSync("package.json", "utf8")) as {
       scripts?: Record<string, string>;
     };
@@ -402,6 +404,16 @@ describe("fail-closed change impact", () => {
     expect(ci.indexOf("Restore or build content-addressed package outputs")).toBeLessThan(
       ci.indexOf("Clean published consumer"),
     );
+    expect(ci).toContain("args+=(--require-client-dist)");
+    expect(
+      release.match(/bun scripts\/publish-closure-guard\.ts --require-client-dist/g),
+    ).toHaveLength(2);
+    expect(packageJson.scripts?.["closure-guard"]).toBe(
+      "bun run build:packages && bun scripts/publish-closure-guard.ts --require-client-dist",
+    );
+    expect(closureGuard).not.toContain('spawnSync("bun", ["run", "build"]');
+    expect(closureGuard).toContain("if (requireClientDist)");
+    expect(closureGuard).toContain("Build the selected package outputs exactly once");
     expect(full.e2eTests).toContain("test/e2e/sandbox.e2e.ts");
     expect(readFileSync("test/e2e/sandbox.e2e.ts", "utf8")).toContain(
       "captures a real turn-end multi-repository workspace through the public API",

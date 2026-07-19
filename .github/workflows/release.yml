@@ -107,7 +107,7 @@ jobs:
         run: cd packages/sdk && bun test test/contract-parity.test.ts
 
       - name: Publish closure guard
-        run: bun scripts/publish-closure-guard.ts
+        run: bun scripts/publish-closure-guard.ts --require-client-dist
 
       - name: Detect versionable changesets
         id: release_plan
@@ -272,7 +272,7 @@ jobs:
         run: cd packages/sdk && bun test test/contract-parity.test.ts
 
       - name: Publish closure guard
-        run: bun scripts/publish-closure-guard.ts
+        run: bun scripts/publish-closure-guard.ts --require-client-dist
 
       - name: Plan exact package publication
         id: package-plan
