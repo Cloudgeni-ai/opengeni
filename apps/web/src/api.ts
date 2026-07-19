@@ -182,13 +182,14 @@ export type CodexResetRedemptionPreparation = {
   confirmationToken: string;
   expiresAt: string;
   resumable: boolean;
+  recoveryStatus: "provider_started" | "completed" | null;
 };
 
 export type CodexResetRedemptionResult = {
   status: "completed";
   attemptId: string;
   outcome: "reset" | "nothingToReset" | "noCredit" | "alreadyRedeemed";
-  overview: unknown;
+  overview: null;
 };
 
 /**

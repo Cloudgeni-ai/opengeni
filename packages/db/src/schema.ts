@@ -356,6 +356,11 @@ export const codexResetRedemptionAttempts = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
+    workspaceAccount: foreignKey({
+      name: "codex_reset_redemption_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
     upstreamKey: uniqueIndex("codex_reset_redemption_upstream_key_idx").on(
       table.upstreamIdempotencyKey,
     ),
@@ -369,7 +374,29 @@ export const codexResetRedemptionAttempts = pgTable(
       table.credentialId,
       table.createdAt,
     ),
-    claimExpiry: index("codex_reset_redemption_claim_expiry_idx").on(table.claimExpiresAt),
+    claimExpiry: index("codex_reset_redemption_claim_expiry_idx")
+      .on(table.claimExpiresAt)
+      .where(sql`${table.status} <> 'completed'`),
+    statusValid: check(
+      "codex_reset_redemption_status_check",
+      sql`${table.status} in ('processing', 'provider_started', 'completed')`,
+    ),
+    outcomeValid: check(
+      "codex_reset_redemption_outcome_check",
+      sql`${table.outcome} is null or ${table.outcome} in ('reset', 'nothingToReset', 'noCredit', 'alreadyRedeemed')`,
+    ),
+    completionConsistent: check(
+      "codex_reset_redemption_completed_check",
+      sql`(${table.status} = 'completed') = (${table.outcome} is not null and ${table.completedAt} is not null)`,
+    ),
+    retryCountValid: check(
+      "codex_reset_redemption_retry_count_check",
+      sql`${table.retryCount} >= 0`,
+    ),
+    humanSubjectValid: check(
+      "codex_reset_redemption_human_subject_check",
+      sql`${table.subjectId} like 'user:_%'`,
+    ),
   }),
 );
 

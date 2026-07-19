@@ -53,6 +53,30 @@ import {
 // connected credential. Concurrent calls for the SAME credential still coalesce,
 // so the one-time refresh token is never double-spent.
 const inflight = new Map<string, Promise<CodexTokenSnapshot>>();
+const CODEX_TOKEN_REFRESH_TIMEOUT_MS = 6_000;
+
+async function withCodexTokenDeadline<T>(operation: Promise<T>): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const guarded = operation.then(
+    (value) => value,
+    (error) => {
+      throw error;
+    },
+  );
+  try {
+    return await Promise.race([
+      guarded,
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error("Codex token refresh timed out")),
+          CODEX_TOKEN_REFRESH_TIMEOUT_MS,
+        );
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
 
 // Dependencies are injectable so the lifecycle logic (single-flight, staleness,
 // needs_relogin transition) is unit-testable without a database. Production uses
@@ -100,7 +124,10 @@ export function buildCodexTokenResolver(
     cred: CodexCredentialForRun,
   ): Promise<CodexTokenSnapshot> => {
     try {
-      const next = await deps.refresh(cred.tokens.refreshToken);
+      // Bound even injected/custom refresh implementations that ignore abort
+      // signals. The provider client has its own AbortController timeout; this
+      // outer fence ensures the DB advisory transaction cannot be held forever.
+      const next = await withCodexTokenDeadline(deps.refresh(cred.tokens.refreshToken));
       const tokens = {
         access_token: next.accessToken ?? cred.tokens.accessToken,
         refresh_token: next.refreshToken ?? cred.tokens.refreshToken,
@@ -275,19 +302,33 @@ export async function fetchCodexUsageForAccount(
     return errorUsagePayload();
   }
 
-  if (normalized.fiveHour || normalized.weekly || normalized.rateLimitResetCredits) {
+  const parsedQuota =
+    normalized.status !== "error" && (normalized.fiveHour != null || normalized.weekly != null);
+  if (parsedQuota || normalized.rateLimitResetCredits) {
+    const checkedAt = new Date();
+    // Quota windows and reset-summary freshness are independent. A malformed
+    // usage body can still carry a syntactically valid count; that count may be
+    // cached without erasing or falsely refreshing the last valid quota truth.
     // Cache-write is best-effort: a disconnect under us (false) or a transient
-    // write error must NOT sink the freshly-read usage we are about to return.
+    // write error must NOT sink the freshly-read result we are about to return.
     await recordCodexAccountUsage(db, workspaceId, credentialId, {
-      primaryUsedPercent: normalized.fiveHour?.percent ?? null,
-      primaryResetAt: normalized.fiveHour?.resetAt ? new Date(normalized.fiveHour.resetAt) : null,
-      secondaryUsedPercent: normalized.weekly?.percent ?? null,
-      secondaryResetAt: normalized.weekly?.resetAt ? new Date(normalized.weekly.resetAt) : null,
-      checkedAt: new Date(),
+      ...(parsedQuota
+        ? {
+            primaryUsedPercent: normalized.fiveHour?.percent ?? null,
+            primaryResetAt: normalized.fiveHour?.resetAt
+              ? new Date(normalized.fiveHour.resetAt)
+              : null,
+            secondaryUsedPercent: normalized.weekly?.percent ?? null,
+            secondaryResetAt: normalized.weekly?.resetAt
+              ? new Date(normalized.weekly.resetAt)
+              : null,
+            checkedAt,
+          }
+        : {}),
       ...(normalized.rateLimitResetCredits
         ? {
             resetCreditAvailableCount: normalized.rateLimitResetCredits.availableCount,
-            resetCreditsCheckedAt: new Date(),
+            resetCreditsCheckedAt: checkedAt,
           }
         : {}),
     }).catch(() => undefined);

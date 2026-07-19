@@ -7074,6 +7074,10 @@ export type CodexCredentialForRun = {
  * accessor — auto-activates a brand-new first account and ensures the
  * rotation-settings row exists.
  */
+export type UpsertCodexSubscriptionCredentialResult =
+  | { kind: "upserted"; id: string; isNew: boolean }
+  | { kind: "unresolved_redemption"; id: string; isNew: false };
+
 export async function upsertCodexSubscriptionCredential(
   db: Database,
   input: {
@@ -7091,11 +7095,51 @@ export async function upsertCodexSubscriptionCredential(
     /** Direct managed-cookie human who most recently connected this row. */
     connectedBySubjectId?: string | null;
   },
-): Promise<{ id: string; isNew: boolean }> {
+): Promise<UpsertCodexSubscriptionCredentialResult> {
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
+      // Serialize both the initial partial-index insert and ownership-changing
+      // reconnects for this exact provider account. The row lock is shared with
+      // the final redemption-send fence: either reconnect wins before any send,
+      // or it observes durable provider_started truth and cannot replace its
+      // owning human while the upstream outcome is unresolved.
+      await scopedDb.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${`codex-credential-upsert:${input.workspaceId}:${input.chatgptAccountId ?? "null"}`}, 0))`,
+      );
+      const [existing] = input.chatgptAccountId
+        ? await scopedDb
+            .select({
+              id: schema.codexSubscriptionCredentials.id,
+              connectedBySubjectId: schema.codexSubscriptionCredentials.connectedBySubjectId,
+            })
+            .from(schema.codexSubscriptionCredentials)
+            .where(
+              and(
+                eq(schema.codexSubscriptionCredentials.workspaceId, input.workspaceId),
+                eq(schema.codexSubscriptionCredentials.chatgptAccountId, input.chatgptAccountId),
+              ),
+            )
+            .for("update")
+            .limit(1)
+        : [];
+      if (existing && existing.connectedBySubjectId !== (input.connectedBySubjectId ?? null)) {
+        const [unresolved] = await scopedDb
+          .select({ id: schema.codexResetRedemptionAttempts.id })
+          .from(schema.codexResetRedemptionAttempts)
+          .where(
+            and(
+              eq(schema.codexResetRedemptionAttempts.workspaceId, input.workspaceId),
+              eq(schema.codexResetRedemptionAttempts.credentialId, existing.id),
+              eq(schema.codexResetRedemptionAttempts.status, "provider_started"),
+            ),
+          )
+          .limit(1);
+        if (unresolved) {
+          return { kind: "unresolved_redemption", id: existing.id, isNew: false };
+        }
+      }
       const now = new Date();
       const [row] = await scopedDb
         .insert(schema.codexSubscriptionCredentials)
@@ -7165,7 +7209,7 @@ export async function upsertCodexSubscriptionCredential(
       // keeps the original (older) value, so the two diverge. This distinguishes
       // insert from update without a second read.
       const isNew = row.createdAt.getTime() === row.updatedAt.getTime();
-      return { id: row.id, isNew };
+      return { kind: "upserted", id: row.id, isNew };
     },
   );
 }
@@ -9641,6 +9685,8 @@ export type CodexResetRedemptionAttempt = {
   completedAt: Date | null;
   lastFailureKind: string | null;
   retryCount: number;
+  createdAt: Date;
+  updatedAt: Date;
 };
 
 function mapCodexResetRedemptionAttempt(
@@ -9664,6 +9710,8 @@ function mapCodexResetRedemptionAttempt(
     completedAt: codexMetadataDate(row.completedAt),
     lastFailureKind: row.lastFailureKind,
     retryCount: row.retryCount,
+    createdAt: codexMetadataDate(row.createdAt)!,
+    updatedAt: codexMetadataDate(row.updatedAt)!,
   };
 }
 
@@ -9686,6 +9734,170 @@ export async function getCodexResetRedemptionAttempt(
       .limit(1);
     return row ? mapCodexResetRedemptionAttempt(row) : null;
   });
+}
+
+export type CodexResetRedemptionRecovery = {
+  attemptId: string;
+  credentialId: string;
+  creditId: string;
+  status: "provider_started" | "completed";
+  outcome: CodexResetRedemptionOutcome | null;
+  providerStartedAt: Date | null;
+  completedAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
+/**
+ * Cookie-owner discovery source for durable ambiguous/completed attempts.
+ * Browser storage is never required to recover these non-secret identifiers.
+ */
+export async function listCodexResetRedemptionRecoveries(
+  db: Database,
+  input: { accountId: string; workspaceId: string; subjectId: string },
+): Promise<CodexResetRedemptionRecovery[]> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await scopedDb
+        .select({
+          attemptId: schema.codexResetRedemptionAttempts.id,
+          credentialId: schema.codexResetRedemptionAttempts.credentialId,
+          creditId: schema.codexResetRedemptionAttempts.creditId,
+          status: schema.codexResetRedemptionAttempts.status,
+          outcome: schema.codexResetRedemptionAttempts.outcome,
+          providerStartedAt: schema.codexResetRedemptionAttempts.providerStartedAt,
+          completedAt: schema.codexResetRedemptionAttempts.completedAt,
+          createdAt: schema.codexResetRedemptionAttempts.createdAt,
+          updatedAt: schema.codexResetRedemptionAttempts.updatedAt,
+        })
+        .from(schema.codexResetRedemptionAttempts)
+        .innerJoin(
+          schema.codexSubscriptionCredentials,
+          and(
+            eq(
+              schema.codexSubscriptionCredentials.id,
+              schema.codexResetRedemptionAttempts.credentialId,
+            ),
+            eq(
+              schema.codexSubscriptionCredentials.workspaceId,
+              schema.codexResetRedemptionAttempts.workspaceId,
+            ),
+          ),
+        )
+        .where(
+          and(
+            eq(schema.codexResetRedemptionAttempts.workspaceId, input.workspaceId),
+            eq(schema.codexResetRedemptionAttempts.subjectId, input.subjectId),
+            eq(schema.codexSubscriptionCredentials.connectedBySubjectId, input.subjectId),
+            inArray(schema.codexResetRedemptionAttempts.status, ["provider_started", "completed"]),
+          ),
+        )
+        .orderBy(desc(schema.codexResetRedemptionAttempts.createdAt));
+      return rows.map((row) => ({
+        attemptId: row.attemptId,
+        credentialId: row.credentialId,
+        creditId: row.creditId,
+        status: row.status as "provider_started" | "completed",
+        outcome: row.outcome as CodexResetRedemptionOutcome | null,
+        providerStartedAt: codexMetadataDate(row.providerStartedAt),
+        completedAt: codexMetadataDate(row.completedAt),
+        createdAt: codexMetadataDate(row.createdAt)!,
+        updatedAt: codexMetadataDate(row.updatedAt)!,
+      }));
+    },
+  );
+}
+
+export type AdoptCodexResetRedemptionResult =
+  | { kind: "current" | "adopted"; attempt: CodexResetRedemptionAttempt }
+  | { kind: "in_progress" }
+  | { kind: "not_found" }
+  | { kind: "forbidden" }
+  | { kind: "conflict" };
+
+/** Adopt a released durable ambiguity/completion into the owner's current browser session. */
+export async function adoptCodexResetRedemptionAttempt(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    attemptId: string;
+    credentialId: string;
+    creditId: string;
+    subjectId: string;
+    browserSessionHash: string;
+  },
+): Promise<AdoptCodexResetRedemptionResult> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        const [credential] = await tx
+          .select({
+            connectedBySubjectId: schema.codexSubscriptionCredentials.connectedBySubjectId,
+          })
+          .from(schema.codexSubscriptionCredentials)
+          .where(
+            and(
+              eq(schema.codexSubscriptionCredentials.id, input.credentialId),
+              eq(schema.codexSubscriptionCredentials.workspaceId, input.workspaceId),
+            ),
+          )
+          .for("share")
+          .limit(1);
+        if (!credential) return { kind: "not_found" } as const;
+        if (credential.connectedBySubjectId !== input.subjectId) {
+          return { kind: "forbidden" } as const;
+        }
+        const [attempt] = await tx
+          .select()
+          .from(schema.codexResetRedemptionAttempts)
+          .where(
+            and(
+              eq(schema.codexResetRedemptionAttempts.workspaceId, input.workspaceId),
+              eq(schema.codexResetRedemptionAttempts.id, input.attemptId),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (!attempt) return { kind: "not_found" } as const;
+        if (
+          attempt.accountId !== input.accountId ||
+          attempt.credentialId !== input.credentialId ||
+          attempt.creditId !== input.creditId ||
+          attempt.subjectId !== input.subjectId
+        ) {
+          return { kind: "conflict" } as const;
+        }
+        if (attempt.browserSessionHash === input.browserSessionHash) {
+          return { kind: "current", attempt: mapCodexResetRedemptionAttempt(attempt) } as const;
+        }
+        if (attempt.status !== "provider_started" && attempt.status !== "completed") {
+          return { kind: "conflict" } as const;
+        }
+        const claim = await tx.execute<{ claim_live: boolean }>(sql`
+          select claim_expires_at > now() as claim_live
+          from codex_reset_redemption_attempts
+          where workspace_id = ${input.workspaceId} and id = ${input.attemptId}
+        `);
+        if (claim[0]?.claim_live) return { kind: "in_progress" } as const;
+        const [adopted] = await tx
+          .update(schema.codexResetRedemptionAttempts)
+          .set({
+            browserSessionHash: input.browserSessionHash,
+            claimHolderId: null,
+            claimExpiresAt: null,
+            updatedAt: sql`now()`,
+          })
+          .where(eq(schema.codexResetRedemptionAttempts.id, input.attemptId))
+          .returning();
+        if (!adopted) throw new Error("Codex redemption adoption returned no row");
+        return { kind: "adopted", attempt: mapCodexResetRedemptionAttempt(adopted) } as const;
+      }),
+  );
 }
 
 export type ClaimCodexResetRedemptionResult =
@@ -9868,8 +10080,148 @@ export async function claimCodexResetRedemption(
   );
 }
 
-/** Atomically cross the ambiguity boundary immediately before the provider POST. */
-export async function markCodexResetRedemptionProviderStarted(
+export type CodexResetRedemptionSendNotReadyReason =
+  | "not_found"
+  | "identity_mismatch"
+  | "claim_expired"
+  | "confirmation_expired"
+  | "credential_unavailable"
+  | "already_completed";
+
+export type FenceCodexResetRedemptionSendResult =
+  | { kind: "ready"; attempt: CodexResetRedemptionAttempt }
+  | {
+      kind: "not_ready";
+      reason: CodexResetRedemptionSendNotReadyReason;
+    };
+
+/**
+ * Final DB-time irreversible-send fence, called only after preflight and token
+ * resolution and immediately before every provider POST (including ambiguity
+ * retries). The credential SHARE lock serializes against disconnect and
+ * ownership-changing reconnect. The claim is extended beyond the bounded
+ * consume operation in the same transaction that persists provider_started.
+ */
+export async function fenceCodexResetRedemptionSend(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    attemptId: string;
+    claimHolderId: string;
+    credentialId: string;
+    subjectId: string;
+    browserSessionHash: string;
+    sendLeaseMs?: number;
+  },
+): Promise<FenceCodexResetRedemptionSendResult> {
+  const sendLeaseMs = input.sendLeaseMs ?? 30_000;
+  if (!Number.isFinite(sendLeaseMs) || sendLeaseMs <= 10_000) {
+    throw new Error("Codex redemption send lease must exceed the bounded provider call");
+  }
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        const [credential] = await tx
+          .select({
+            connectedBySubjectId: schema.codexSubscriptionCredentials.connectedBySubjectId,
+            status: schema.codexSubscriptionCredentials.status,
+          })
+          .from(schema.codexSubscriptionCredentials)
+          .where(
+            and(
+              eq(schema.codexSubscriptionCredentials.accountId, input.accountId),
+              eq(schema.codexSubscriptionCredentials.workspaceId, input.workspaceId),
+              eq(schema.codexSubscriptionCredentials.id, input.credentialId),
+            ),
+          )
+          .for("share")
+          .limit(1);
+        const [attempt] = await tx
+          .select()
+          .from(schema.codexResetRedemptionAttempts)
+          .where(
+            and(
+              eq(schema.codexResetRedemptionAttempts.accountId, input.accountId),
+              eq(schema.codexResetRedemptionAttempts.workspaceId, input.workspaceId),
+              eq(schema.codexResetRedemptionAttempts.id, input.attemptId),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (!attempt) return { kind: "not_ready", reason: "not_found" } as const;
+        if (
+          attempt.credentialId !== input.credentialId ||
+          attempt.subjectId !== input.subjectId ||
+          attempt.browserSessionHash !== input.browserSessionHash ||
+          attempt.claimHolderId !== input.claimHolderId
+        ) {
+          return { kind: "not_ready", reason: "identity_mismatch" } as const;
+        }
+        if (attempt.status === "completed") {
+          return { kind: "not_ready", reason: "already_completed" } as const;
+        }
+        const [liveness] = await tx.execute<{
+          claim_live: boolean;
+          confirmation_live: boolean;
+        }>(sql`
+          select claim_expires_at > now() as claim_live,
+                 confirmation_expires_at > now() as confirmation_live
+          from codex_reset_redemption_attempts
+          where workspace_id = ${input.workspaceId} and id = ${input.attemptId}
+        `);
+        let reason: CodexResetRedemptionSendNotReadyReason;
+        if (!liveness?.claim_live) reason = "claim_expired";
+        else if (!liveness.confirmation_live) reason = "confirmation_expired";
+        else if (
+          !credential ||
+          credential.status !== "active" ||
+          credential.connectedBySubjectId !== input.subjectId
+        ) {
+          reason = "credential_unavailable";
+        } else {
+          const [ready] = await tx
+            .update(schema.codexResetRedemptionAttempts)
+            .set({
+              status: "provider_started",
+              providerStartedAt: sql`coalesce(${schema.codexResetRedemptionAttempts.providerStartedAt}, now())`,
+              claimExpiresAt: sql`now() + (${sendLeaseMs} * interval '1 millisecond')`,
+              lastFailureKind: null,
+              updatedAt: sql`now()`,
+            })
+            .where(eq(schema.codexResetRedemptionAttempts.id, input.attemptId))
+            .returning();
+          if (!ready) throw new Error("Codex redemption send fence returned no row");
+          return { kind: "ready", attempt: mapCodexResetRedemptionAttempt(ready) } as const;
+        }
+
+        // Before provider_started it is safe to remove the false logical
+        // attempt. Once provider work may have begun, preserve the upstream key
+        // and merely release this request's stale claim for owner recovery.
+        if (attempt.status === "processing") {
+          await tx
+            .delete(schema.codexResetRedemptionAttempts)
+            .where(eq(schema.codexResetRedemptionAttempts.id, input.attemptId));
+        } else {
+          await tx
+            .update(schema.codexResetRedemptionAttempts)
+            .set({
+              claimHolderId: null,
+              claimExpiresAt: null,
+              lastFailureKind: `send_fence_${reason}`,
+              updatedAt: sql`now()`,
+            })
+            .where(eq(schema.codexResetRedemptionAttempts.id, input.attemptId));
+        }
+        return { kind: "not_ready", reason } as const;
+      }),
+  );
+}
+
+/** Delete only definite pre-provider work still owned by this request. */
+export async function abandonCodexResetRedemptionBeforeProvider(
   db: Database,
   input: {
     accountId: string;
@@ -9882,24 +10234,18 @@ export async function markCodexResetRedemptionProviderStarted(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
-      const rows = await scopedDb
-        .update(schema.codexResetRedemptionAttempts)
-        .set({
-          status: "provider_started",
-          providerStartedAt: new Date(),
-          updatedAt: new Date(),
-        })
+      const deleted = await scopedDb
+        .delete(schema.codexResetRedemptionAttempts)
         .where(
           and(
             eq(schema.codexResetRedemptionAttempts.workspaceId, input.workspaceId),
             eq(schema.codexResetRedemptionAttempts.id, input.attemptId),
             eq(schema.codexResetRedemptionAttempts.status, "processing"),
             eq(schema.codexResetRedemptionAttempts.claimHolderId, input.claimHolderId),
-            sql`${schema.codexResetRedemptionAttempts.claimExpiresAt} > now()`,
           ),
         )
         .returning({ id: schema.codexResetRedemptionAttempts.id });
-      return rows.length === 1;
+      return deleted.length === 1;
     },
   );
 }
@@ -10040,11 +10386,12 @@ export async function completeCodexResetRedemption(
 
 /** The P2 usage-cache snapshot written by the refreshing usage wrapper. */
 export type CodexAccountUsageSnapshot = {
-  primaryUsedPercent: number | null;
-  primaryResetAt: Date | null;
-  secondaryUsedPercent: number | null;
-  secondaryResetAt: Date | null;
-  checkedAt: Date;
+  primaryUsedPercent?: number | null;
+  primaryResetAt?: Date | null;
+  secondaryUsedPercent?: number | null;
+  secondaryResetAt?: Date | null;
+  /** Present only when the quota body parsed successfully. */
+  checkedAt?: Date;
   resetCreditAvailableCount?: number | null;
   resetCreditsCheckedAt?: Date | null;
 };
@@ -10081,11 +10428,15 @@ export async function recordCodexAccountUsageWithWakeTargets(
       const updated = await tx
         .update(schema.codexSubscriptionCredentials)
         .set({
-          primaryUsedPercent: snapshot.primaryUsedPercent,
-          primaryResetAt: snapshot.primaryResetAt,
-          secondaryUsedPercent: snapshot.secondaryUsedPercent,
-          secondaryResetAt: snapshot.secondaryResetAt,
-          usageCheckedAt: snapshot.checkedAt,
+          ...(snapshot.checkedAt !== undefined
+            ? {
+                primaryUsedPercent: snapshot.primaryUsedPercent ?? null,
+                primaryResetAt: snapshot.primaryResetAt ?? null,
+                secondaryUsedPercent: snapshot.secondaryUsedPercent ?? null,
+                secondaryResetAt: snapshot.secondaryResetAt ?? null,
+                usageCheckedAt: snapshot.checkedAt,
+              }
+            : {}),
           ...(snapshot.resetCreditAvailableCount !== undefined
             ? {
                 resetCreditAvailableCount: snapshot.resetCreditAvailableCount,
@@ -10648,13 +10999,58 @@ export async function disconnectCodexAccount(
   db: Database,
   workspaceId: string,
   credentialId: string,
-): Promise<{ removed: boolean; newActiveCredentialId: string | null }> {
+): Promise<{
+  removed: boolean;
+  newActiveCredentialId: string | null;
+  blockedByUnresolvedRedemption: boolean;
+}> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     await scopedDb.execute(sql`
       select id from codex_rotation_settings
       where workspace_id = ${workspaceId}
       for update
     `);
+    const [credential] = await scopedDb
+      .select({ id: schema.codexSubscriptionCredentials.id })
+      .from(schema.codexSubscriptionCredentials)
+      .where(
+        and(
+          eq(schema.codexSubscriptionCredentials.id, credentialId),
+          eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    const [settingsBefore] = await scopedDb
+      .select({ activeCredentialId: schema.codexRotationSettings.activeCredentialId })
+      .from(schema.codexRotationSettings)
+      .where(eq(schema.codexRotationSettings.workspaceId, workspaceId))
+      .limit(1);
+    if (!credential) {
+      return {
+        removed: false,
+        newActiveCredentialId: settingsBefore?.activeCredentialId ?? null,
+        blockedByUnresolvedRedemption: false,
+      };
+    }
+    const [unresolved] = await scopedDb
+      .select({ id: schema.codexResetRedemptionAttempts.id })
+      .from(schema.codexResetRedemptionAttempts)
+      .where(
+        and(
+          eq(schema.codexResetRedemptionAttempts.workspaceId, workspaceId),
+          eq(schema.codexResetRedemptionAttempts.credentialId, credentialId),
+          eq(schema.codexResetRedemptionAttempts.status, "provider_started"),
+        ),
+      )
+      .limit(1);
+    if (unresolved) {
+      return {
+        removed: false,
+        newActiveCredentialId: settingsBefore?.activeCredentialId ?? null,
+        blockedByUnresolvedRedemption: true,
+      };
+    }
     const removedRows = await scopedDb
       .delete(schema.codexSubscriptionCredentials)
       .where(
@@ -10671,7 +11067,11 @@ export async function disconnectCodexAccount(
       .where(eq(schema.codexRotationSettings.workspaceId, workspaceId))
       .limit(1);
     if (removedRows.length === 0) {
-      return { removed: false, newActiveCredentialId: settingsRow?.activeCredentialId ?? null };
+      return {
+        removed: false,
+        newActiveCredentialId: settingsRow?.activeCredentialId ?? null,
+        blockedByUnresolvedRedemption: false,
+      };
     }
     let newActive = settingsRow?.activeCredentialId ?? null;
     if (newActive === null) {
@@ -10689,21 +11089,47 @@ export async function disconnectCodexAccount(
           .where(eq(schema.codexRotationSettings.workspaceId, workspaceId));
       }
     }
-    return { removed: true, newActiveCredentialId: newActive };
+    return {
+      removed: true,
+      newActiveCredentialId: newActive,
+      blockedByUnresolvedRedemption: false,
+    };
   });
 }
 
-/** Legacy "disconnect all" (old workspace-wide behavior). Returns rows removed. */
+/** Legacy "disconnect all"; atomically rejects when any provider work is unresolved. */
 export async function disconnectAllCodexAccounts(
   db: Database,
   workspaceId: string,
-): Promise<number> {
+): Promise<{ removed: number; blockedCredentialIds: string[] }> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const credentials = await scopedDb
+      .select({ id: schema.codexSubscriptionCredentials.id })
+      .from(schema.codexSubscriptionCredentials)
+      .where(eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId))
+      .orderBy(asc(schema.codexSubscriptionCredentials.id))
+      .for("update");
+    if (credentials.length === 0) return { removed: 0, blockedCredentialIds: [] };
+    const blocked = await scopedDb
+      .selectDistinct({ credentialId: schema.codexResetRedemptionAttempts.credentialId })
+      .from(schema.codexResetRedemptionAttempts)
+      .where(
+        and(
+          eq(schema.codexResetRedemptionAttempts.workspaceId, workspaceId),
+          eq(schema.codexResetRedemptionAttempts.status, "provider_started"),
+        ),
+      );
+    if (blocked.length > 0) {
+      return {
+        removed: 0,
+        blockedCredentialIds: blocked.map((row) => row.credentialId).sort(),
+      };
+    }
     const rows = await scopedDb
       .delete(schema.codexSubscriptionCredentials)
       .where(eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId))
       .returning({ id: schema.codexSubscriptionCredentials.id });
-    return rows.length;
+    return { removed: rows.length, blockedCredentialIds: [] };
   });
 }
 

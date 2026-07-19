@@ -4,6 +4,9 @@
 
 import { CODEX_CLIENT_ID, CODEX_ID_TOKEN_AUTH_CLAIM, CODEX_TOKEN_URL } from "./constants";
 import type { CodexFetch } from "./device-code";
+import { runBoundedCodexOperation } from "./bounded-operation";
+
+const CODEX_REFRESH_TIMEOUT_MS = 5_000;
 
 /** Permanent — the workspace must reconnect (status => needs_relogin). */
 export class CodexReloginRequired extends Error {
@@ -32,17 +35,25 @@ export type CodexRefreshTokens = {
 export async function refreshCodexToken(
   refreshToken: string,
   fetchImpl: CodexFetch = fetch,
+  timeoutMs = CODEX_REFRESH_TIMEOUT_MS,
 ): Promise<CodexRefreshTokens> {
-  const res = await fetchImpl(CODEX_TOKEN_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      client_id: CODEX_CLIENT_ID,
-      grant_type: "refresh_token",
-      refresh_token: refreshToken,
-    }),
-  });
-  const text = await res.text();
+  const fetched = await runBoundedCodexOperation(async (signal) => {
+    const res = await fetchImpl(CODEX_TOKEN_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        client_id: CODEX_CLIENT_ID,
+        grant_type: "refresh_token",
+        refresh_token: refreshToken,
+      }),
+      signal,
+    });
+    return { res, text: await res.text() };
+  }, timeoutMs);
+  if (!fetched.ok) {
+    throw new CodexRefreshTransient(`Codex token refresh ${fetched.reason}`);
+  }
+  const { res, text } = fetched.value;
   if (!res.ok) {
     const code = extractRefreshErrorCode(text);
     const msg = code ? PERMANENT_REFRESH_FAILURES[code] : undefined;

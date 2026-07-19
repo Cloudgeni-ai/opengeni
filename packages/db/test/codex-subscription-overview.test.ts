@@ -11,10 +11,10 @@ import {
   createDb,
   encryptEnvironmentValue,
   ensureCodexRotationSettings,
+  fenceCodexResetRedemptionSend,
   getCodexResetRedemptionAttempt,
   listCodexAccountStatuses,
   loadCodexCredentialForRun,
-  markCodexResetRedemptionProviderStarted,
   recordCodexAccountUsage,
   recordCodexTokenRefresh,
   releaseCodexResetRedemptionClaim,
@@ -409,12 +409,15 @@ describe("OPE-24 Codex overview and irreversible reset state", () => {
     const holder = claimed!.attempt.claimHolderId!;
     expect(claimed!.attempt.status).toBe("processing");
     expect(
-      await markCodexResetRedemptionProviderStarted(dbA, {
+      await fenceCodexResetRedemptionSend(dbA, {
         ...ws,
         attemptId: id,
         claimHolderId: holder,
+        credentialId,
+        subjectId: common.subjectId,
+        browserSessionHash: common.browserSessionHash,
       }),
-    ).toBe(true);
+    ).toMatchObject({ kind: "ready" });
     await releaseCodexResetRedemptionClaim(dbA, {
       ...ws,
       attemptId: id,
@@ -491,12 +494,15 @@ describe("OPE-24 Codex overview and irreversible reset state", () => {
       expect(claim.kind).toBe("claimed");
       if (claim.kind !== "claimed") throw new Error(`expected ${outcome} claim`);
       expect(
-        await markCodexResetRedemptionProviderStarted(dbA, {
+        await fenceCodexResetRedemptionSend(dbA, {
           ...ws,
           attemptId: id,
           claimHolderId: claim.attempt.claimHolderId!,
+          credentialId,
+          subjectId: "user:owner",
+          browserSessionHash: `session-${outcome}`,
         }),
-      ).toBe(true);
+      ).toMatchObject({ kind: "ready" });
       const completed = (
         await completeCodexResetRedemption(dbA, {
           ...ws,

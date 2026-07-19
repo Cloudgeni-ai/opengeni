@@ -101,6 +101,7 @@ export type {
   CodexConnectPoll,
   CodexOverviewResponse,
   CodexResetCredit,
+  CodexResetRedemptionRecovery,
   CodexRotationSettings,
   CodexUsage,
   CodexUsageMap,

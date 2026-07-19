@@ -9,6 +9,7 @@ import {
   type CodexRateLimitResetConsumeResponse,
   type CodexRateLimitResetCreditsDetails,
 } from "./reset-credits";
+import { runBoundedCodexOperation } from "./bounded-operation";
 
 export type CodexAuthHeaders = {
   accessToken: string;
@@ -17,6 +18,7 @@ export type CodexAuthHeaders = {
   clientVersion: string;
 };
 
+const CODEX_READ_TIMEOUT_MS = 5_000;
 const RESET_CREDIT_DETAILS_TIMEOUT_MS = 5_000;
 const RESET_CREDIT_CONSUME_TIMEOUT_MS = 10_000;
 
@@ -25,32 +27,6 @@ export type ResetCreditFetchFailureReason =
   | "invalid_response"
   | "network_error"
   | "timeout";
-
-async function resetCreditFetch(
-  fetchImpl: CodexFetch,
-  input: string,
-  init: RequestInit,
-  timeoutMs: number,
-): Promise<
-  { ok: true; response: Response } | { ok: false; status: 0; reason: "network_error" | "timeout" }
-> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return {
-      ok: true,
-      response: await fetchImpl(input, { ...init, signal: controller.signal }),
-    };
-  } catch {
-    return {
-      ok: false,
-      status: 0,
-      reason: controller.signal.aborted ? "timeout" : "network_error",
-    };
-  } finally {
-    clearTimeout(timeout);
-  }
-}
 
 function subscriptionHeaders(a: CodexAuthHeaders): Record<string, string> {
   return {
@@ -67,36 +43,45 @@ function subscriptionHeaders(a: CodexAuthHeaders): Record<string, string> {
 export async function fetchCodexModels(
   a: CodexAuthHeaders,
   fetchImpl: CodexFetch = fetch,
+  timeoutMs = CODEX_READ_TIMEOUT_MS,
 ): Promise<{ ok: boolean; status: number; slugs: string[] }> {
-  const res = await fetchImpl(
-    `${CODEX_RESPONSES_BASE}/models?client_version=${encodeURIComponent(a.clientVersion)}`,
-    {
-      method: "GET",
-      headers: subscriptionHeaders(a),
-    },
-  );
-  if (!res.ok) {
-    return { ok: false, status: res.status, slugs: [] };
-  }
-  const body = (await res.json()) as { models?: Array<{ slug?: string }> };
-  const slugs = (body.models ?? [])
-    .map((m) => m.slug)
-    .filter((s): s is string => typeof s === "string");
-  return { ok: true, status: res.status, slugs };
+  const fetched = await runBoundedCodexOperation(async (signal) => {
+    const res = await fetchImpl(
+      `${CODEX_RESPONSES_BASE}/models?client_version=${encodeURIComponent(a.clientVersion)}`,
+      { method: "GET", headers: subscriptionHeaders(a), signal },
+    );
+    if (!res.ok) {
+      await res.arrayBuffer().catch(() => undefined);
+      return { ok: false, status: res.status, slugs: [] as string[] };
+    }
+    const body = (await res.json()) as { models?: Array<{ slug?: string }> };
+    const slugs = (body.models ?? [])
+      .map((model) => model.slug)
+      .filter((slug): slug is string => typeof slug === "string");
+    return { ok: true, status: res.status, slugs };
+  }, timeoutMs);
+  return fetched.ok ? fetched.value : { ok: false, status: 0, slugs: [] };
 }
 
 /** GET /wham/usage — authoritative limits. NB the WHAM base is /backend-api, NOT /codex (spec §1.8a). */
 export async function fetchCodexUsage(
   a: CodexAuthHeaders,
   fetchImpl: CodexFetch = fetch,
+  timeoutMs = CODEX_READ_TIMEOUT_MS,
 ): Promise<{ status: number; payload: unknown }> {
-  const res = await fetchImpl(`${CODEX_WHAM_BASE}/wham/usage`, {
-    method: "GET",
-    headers: subscriptionHeaders(a),
-  });
-  // A 404 may carry a usage-limit body; the route layer normalizes it to a limits state (spec §1.8c).
-  const payload = res.ok || res.status === 404 ? await res.json().catch(() => null) : null;
-  return { status: res.status, payload };
+  const fetched = await runBoundedCodexOperation(async (signal) => {
+    const res = await fetchImpl(`${CODEX_WHAM_BASE}/wham/usage`, {
+      method: "GET",
+      headers: subscriptionHeaders(a),
+      signal,
+    });
+    // A 404 may carry a usage-limit body; the route layer normalizes it to a limits state (spec §1.8c).
+    const payload = res.ok || res.status === 404 ? await res.json().catch(() => null) : null;
+    if (!res.ok && res.status !== 404) await res.arrayBuffer().catch(() => undefined);
+    return { status: res.status, payload };
+  }, timeoutMs);
+  if (!fetched.ok) throw new Error(`Codex usage request ${fetched.reason}`);
+  return fetched.value;
 }
 
 /**
@@ -114,24 +99,24 @@ export async function fetchCodexRateLimitResetCredits(
   | { ok: true; status: number; details: CodexRateLimitResetCreditsDetails }
   | { ok: false; status: number; reason: ResetCreditFetchFailureReason }
 > {
-  const fetched = await resetCreditFetch(
-    fetchImpl,
-    `${CODEX_WHAM_BASE}/wham/rate-limit-reset-credits`,
-    { method: "GET", headers: subscriptionHeaders(a) },
-    timeoutMs,
-  );
-  if (!fetched.ok) return fetched;
-  const res = fetched.response;
-  if (!res.ok) {
-    // Drain the body without retaining/logging it. Provider error bodies may
-    // contain account-specific details and are not part of this contract.
-    await res.arrayBuffer().catch(() => undefined);
-    return { ok: false, status: res.status, reason: "http_error" };
-  }
-  const details = parseCodexRateLimitResetCreditsDetails(await res.json().catch(() => null));
-  return details
-    ? { ok: true, status: res.status, details }
-    : { ok: false, status: res.status, reason: "invalid_response" };
+  const fetched = await runBoundedCodexOperation(async (signal) => {
+    const res = await fetchImpl(`${CODEX_WHAM_BASE}/wham/rate-limit-reset-credits`, {
+      method: "GET",
+      headers: subscriptionHeaders(a),
+      signal,
+    });
+    if (!res.ok) {
+      // Drain the body without retaining/logging it. Provider error bodies may
+      // contain account-specific details and are not part of this contract.
+      await res.arrayBuffer().catch(() => undefined);
+      return { ok: false as const, status: res.status, reason: "http_error" as const };
+    }
+    const details = parseCodexRateLimitResetCreditsDetails(await res.json().catch(() => null));
+    return details
+      ? { ok: true as const, status: res.status, details }
+      : { ok: false as const, status: res.status, reason: "invalid_response" as const };
+  }, timeoutMs);
+  return fetched.ok ? fetched.value : { ok: false, status: 0, reason: fetched.reason };
 }
 
 /**
@@ -157,10 +142,8 @@ export async function consumeCodexRateLimitResetCredit(
   if (input.idempotencyKey.length === 0 || input.creditId === "") {
     return { ok: false, status: 0, reason: "invalid_request" };
   }
-  const fetched = await resetCreditFetch(
-    fetchImpl,
-    `${CODEX_WHAM_BASE}/wham/rate-limit-reset-credits/consume`,
-    {
+  const fetched = await runBoundedCodexOperation(async (signal) => {
+    const res = await fetchImpl(`${CODEX_WHAM_BASE}/wham/rate-limit-reset-credits/consume`, {
       method: "POST",
       headers: {
         ...subscriptionHeaders(a),
@@ -170,17 +153,16 @@ export async function consumeCodexRateLimitResetCredit(
         redeem_request_id: input.idempotencyKey,
         ...(input.creditId ? { credit_id: input.creditId } : {}),
       }),
-    },
-    timeoutMs,
-  );
-  if (!fetched.ok) return fetched;
-  const res = fetched.response;
-  if (!res.ok) {
-    await res.arrayBuffer().catch(() => undefined);
-    return { ok: false, status: res.status, reason: "http_error" };
-  }
-  const result = parseCodexRateLimitResetConsumeResponse(await res.json().catch(() => null));
-  return result
-    ? { ok: true, status: res.status, result }
-    : { ok: false, status: res.status, reason: "invalid_response" };
+      signal,
+    });
+    if (!res.ok) {
+      await res.arrayBuffer().catch(() => undefined);
+      return { ok: false as const, status: res.status, reason: "http_error" as const };
+    }
+    const result = parseCodexRateLimitResetConsumeResponse(await res.json().catch(() => null));
+    return result
+      ? { ok: true as const, status: res.status, result }
+      : { ok: false as const, status: res.status, reason: "invalid_response" as const };
+  }, timeoutMs);
+  return fetched.ok ? fetched.value : { ok: false, status: 0, reason: fetched.reason };
 }

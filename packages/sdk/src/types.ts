@@ -1316,6 +1316,18 @@ export type CodexResetCredit = {
   actionable: boolean;
 };
 
+/** Owning-human recovery metadata. It contains no token, browser-session hash, or provider key. */
+export type CodexResetRedemptionRecovery = {
+  attemptId: string;
+  creditId: string;
+  status: "provider_started" | "completed";
+  outcome: "reset" | "nothingToReset" | "noCredit" | "alreadyRedeemed" | null;
+  providerStartedAt: string | null;
+  completedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type CodexAccountOverview = {
   accountId: string;
   usage: {
@@ -1338,6 +1350,8 @@ export type CodexAccountOverview = {
   canRedeem: boolean;
   /** Owning managed-cookie human may replay durable completion without a healthy provider token. */
   canResumeRedemption: boolean;
+  /** Durable owner-scoped ambiguity/completion discovery; never redemption authority for agents. */
+  redemptions: CodexResetRedemptionRecovery[];
 };
 
 /** Independently settled live overview keyed by workspace credential id. */

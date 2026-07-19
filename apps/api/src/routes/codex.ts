@@ -30,6 +30,8 @@ import {
   type CodexRateLimitResetCreditsDetails,
 } from "@opengeni/codex";
 import {
+  abandonCodexResetRedemptionBeforeProvider,
+  adoptCodexResetRedemptionAttempt,
   buildCodexTokenResolver,
   claimCodexResetRedemption,
   completeCodexResetRedemption,
@@ -39,12 +41,13 @@ import {
   ensureCodexRotationSettings,
   fetchCodexUsageForAccount,
   fetchCodexRateLimitResetCreditsForAccount,
+  fenceCodexResetRedemptionSend,
   getCodexResetRedemptionAttempt,
   getCodexCredentialStatus,
   getCodexRotationSettings,
   listPendingCodexCapacityWakeTargets,
   listCodexAccountStatuses,
-  markCodexResetRedemptionProviderStarted,
+  listCodexResetRedemptionRecoveries,
   releaseCodexResetRedemptionClaim,
   updateCodexAllocatorEligibility,
   loadCodexCredentialForRun,
@@ -186,9 +189,12 @@ function requireSameOriginBrowserMutation(c: Context, deps: ApiRouteDeps): void 
       message: "JSON browser request required",
     });
   }
-  const expectedOrigin = deps.settings.publicBaseUrl
-    ? new URL(deps.settings.publicBaseUrl).origin
-    : new URL(c.req.url).origin;
+  if (!deps.settings.publicBaseUrl) {
+    throw new HTTPException(503, {
+      message: "managed browser origin is not configured",
+    });
+  }
+  const expectedOrigin = new URL(deps.settings.publicBaseUrl).origin;
   if (c.req.header("origin") !== expectedOrigin) {
     throw new HTTPException(403, {
       message: "same-origin browser request required",
@@ -341,6 +347,7 @@ async function fetchCodexAccountOverview(
   row: CodexAccountStatus,
   canRedeem: boolean,
   canResumeRedemption: boolean,
+  redemptions: Awaited<ReturnType<typeof listCodexResetRedemptionRecoveries>> = [],
   providerCall: CodexProviderCall = async (operation) => await operation(),
 ) {
   const fetchImpl = (deps.codexFetch ?? fetch) as CodexFetch;
@@ -440,6 +447,16 @@ async function fetchCodexAccountOverview(
     },
     canRedeem,
     canResumeRedemption,
+    redemptions: redemptions.map((redemption) => ({
+      attemptId: redemption.attemptId,
+      creditId: redemption.creditId,
+      status: redemption.status,
+      outcome: redemption.outcome,
+      providerStartedAt: redemption.providerStartedAt?.toISOString() ?? null,
+      completedAt: redemption.completedAt?.toISOString() ?? null,
+      createdAt: redemption.createdAt.toISOString(),
+      updatedAt: redemption.updatedAt.toISOString(),
+    })),
   };
 }
 
@@ -607,10 +624,16 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
           connectedBySubjectId:
             connectingHuman?.subjectId === grant.subjectId ? connectingHuman.subjectId : null,
         });
-        return { result: upserted, changed: true };
+        return { result: upserted, changed: upserted.kind === "upserted" };
       },
     );
     const upserted = mutation.result;
+    if (upserted.kind === "unresolved_redemption") {
+      throw new HTTPException(409, {
+        message:
+          "this subscription has an unresolved reset redemption; recover it before changing ownership",
+      });
+    }
     // Ensure the per-workspace rotation-settings row exists, then auto-activate
     // the FIRST account only. Additional new accounts do NOT auto-activate — a
     // manual switch is required (no auto-rotation in P1). A re-connect of the
@@ -853,6 +876,12 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       },
     );
     const result = mutation.result;
+    if (result.blockedByUnresolvedRedemption) {
+      throw new HTTPException(409, {
+        message:
+          "this subscription has an unresolved reset redemption; recover it before disconnecting",
+      });
+    }
     await signalCodexCapacityTargets(deps, mutation.wakeTargets);
     return c.json({ disconnected: result.removed, newActiveId: result.newActiveCredentialId });
   });
@@ -866,13 +895,19 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       db,
       { workspaceId, reason: "codex_credentials_disconnected" },
       async (tx) => {
-        const removed = await disconnectAllCodexAccounts(tx, workspaceId);
-        return { result: removed, changed: removed > 0 };
+        const result = await disconnectAllCodexAccounts(tx, workspaceId);
+        return { result, changed: result.removed > 0 };
       },
     );
-    const removed = mutation.result;
+    const result = mutation.result;
+    if (result.blockedCredentialIds.length > 0) {
+      throw new HTTPException(409, {
+        message:
+          "one or more subscriptions have unresolved reset redemptions; recover them before disconnecting",
+      });
+    }
     await signalCodexCapacityTargets(deps, mutation.wakeTargets);
-    return c.json({ disconnected: removed > 0 });
+    return c.json({ disconnected: result.removed > 0 });
   });
 
   // Back-compat: remaining usage / limits for the ACTIVE account only. Repointed
@@ -962,6 +997,16 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
     const human = await managedCookieHuman(c, deps);
     const accounts = await listCodexAccountStatuses(db, workspaceId);
+    const ownerRecoveries =
+      human &&
+      human.subjectId === grant.subjectId &&
+      hasPermission(grant.permissions, "workspace:admin")
+        ? await listCodexResetRedemptionRecoveries(db, {
+            accountId: grant.accountId,
+            workspaceId,
+            subjectId: human.subjectId,
+          })
+        : [];
     const overview: Record<string, Awaited<ReturnType<typeof fetchCodexAccountOverview>>> = {};
     const queue = [...accounts];
     // Usage + detailed inventory are two independent calls per account. Limit
@@ -985,6 +1030,9 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
           account,
           canRedeem,
           canResumeRedemption,
+          canResumeRedemption
+            ? ownerRecoveries.filter((recovery) => recovery.credentialId === account.id)
+            : [],
           providerCall,
         );
       }
@@ -1008,7 +1056,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
     async (c) => {
       const workspaceId = c.req.param("workspaceId");
       const credentialId = c.req.param("accountId");
-      const { human } = await requireRedemptionHuman(c, deps, workspaceId);
+      const { human, accountId } = await requireRedemptionHuman(c, deps, workspaceId);
       c.header("cache-control", "no-store");
       const parsed = redemptionPrepareBody.safeParse(await c.req.json().catch(() => null));
       if (!parsed.success) {
@@ -1019,7 +1067,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       const accounts = await listCodexAccountStatuses(db, workspaceId);
       const account = accounts.find((candidate) => candidate.id === credentialId);
       if (!account) throw new HTTPException(404, { message: "codex account not found" });
-      const existing = await getCodexResetRedemptionAttempt(db, workspaceId, parsed.data.attemptId);
+      let existing = await getCodexResetRedemptionAttempt(db, workspaceId, parsed.data.attemptId);
       if (account.connectedBySubjectId !== human.subjectId) {
         throw new HTTPException(403, {
           message: "only the human who connected this subscription may redeem its reset credits",
@@ -1029,12 +1077,39 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
         existing &&
         (existing.credentialId !== credentialId ||
           existing.creditId !== parsed.data.creditId ||
-          existing.subjectId !== human.subjectId ||
-          existing.browserSessionHash !== human.browserSessionHash)
+          existing.subjectId !== human.subjectId)
       ) {
         throw new HTTPException(409, {
           message: "logical redemption attempt identity mismatch",
         });
+      }
+      if (existing) {
+        const adoption = await adoptCodexResetRedemptionAttempt(db, {
+          accountId,
+          workspaceId,
+          attemptId: existing.id,
+          credentialId,
+          creditId: existing.creditId,
+          subjectId: human.subjectId,
+          browserSessionHash: human.browserSessionHash,
+        });
+        if (adoption.kind === "in_progress") {
+          throw new HTTPException(409, {
+            message: "this redemption is still in progress in another browser request",
+          });
+        }
+        if (adoption.kind === "not_found") {
+          throw new HTTPException(409, { message: "redemption recovery state changed" });
+        }
+        if (adoption.kind === "forbidden") {
+          throw new HTTPException(403, { message: "redemption owner is unavailable" });
+        }
+        if (adoption.kind === "conflict") {
+          throw new HTTPException(409, {
+            message: "logical redemption attempt identity mismatch",
+          });
+        }
+        existing = adoption.attempt;
       }
       // Starting or retrying provider work requires a healthy credential. A
       // completed attempt is different: its provider outcome is durable truth,
@@ -1068,6 +1143,10 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
         // committed. Keep that exact logical id replayable without another
         // provider consume call, just like an ambiguous provider_started attempt.
         resumable: existing?.status === "provider_started" || existing?.status === "completed",
+        recoveryStatus:
+          existing?.status === "provider_started" || existing?.status === "completed"
+            ? existing.status
+            : null,
       });
     },
   );
@@ -1137,28 +1216,18 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
         return c.json({ status: "in_progress", attemptId: parsed.data.attemptId }, 409);
       }
 
-      const finishResponse = async (outcome: string) => {
-        const account = (await listCodexAccountStatuses(db, workspaceId)).find(
-          (candidate) => candidate.id === credentialId,
-        );
-        const overview = account
-          ? await fetchCodexAccountOverview(
-              deps,
-              workspaceId,
-              account,
-              account.status === "active",
-              true,
-            )
-          : null;
-        return c.json({
+      const finishResponse = (outcome: string) =>
+        c.json({
           status: "completed",
           attemptId: parsed.data.attemptId,
           outcome,
-          overview,
+          // Durable provider truth must never wait for best-effort provider
+          // readback. The browser refreshes overview independently after this
+          // response; a hung account cannot suppress a completed outcome.
+          overview: null,
         });
-      };
       if (claimed.kind === "completed") {
-        return await finishResponse(claimed.attempt.outcome!);
+        return finishResponse(claimed.attempt.outcome!);
       }
 
       const attempt = claimed.attempt;
@@ -1172,12 +1241,11 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
           fetchImpl,
         );
         if (!details.ok) {
-          await releaseCodexResetRedemptionClaim(db, {
+          await abandonCodexResetRedemptionBeforeProvider(db, {
             accountId,
             workspaceId,
             attemptId: attempt.id,
             claimHolderId,
-            failureKind: `preflight_${details.reason}`,
           });
           return c.json(
             {
@@ -1189,12 +1257,11 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
           );
         }
         if (!freshActionableCredit(details.details, attempt.creditId)) {
-          await releaseCodexResetRedemptionClaim(db, {
+          await abandonCodexResetRedemptionBeforeProvider(db, {
             accountId,
             workspaceId,
             attemptId: attempt.id,
             claimHolderId,
-            failureKind: "preflight_not_actionable",
           });
           return c.json(
             {
@@ -1211,13 +1278,22 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       try {
         token = await buildCodexTokenResolver(db, settings, workspaceId, credentialId).getToken();
       } catch {
-        await releaseCodexResetRedemptionClaim(db, {
-          accountId,
-          workspaceId,
-          attemptId: attempt.id,
-          claimHolderId,
-          failureKind: "provider_auth_unavailable",
-        });
+        if (attempt.status === "processing") {
+          await abandonCodexResetRedemptionBeforeProvider(db, {
+            accountId,
+            workspaceId,
+            attemptId: attempt.id,
+            claimHolderId,
+          });
+        } else {
+          await releaseCodexResetRedemptionClaim(db, {
+            accountId,
+            workspaceId,
+            attemptId: attempt.id,
+            claimHolderId,
+            failureKind: "provider_auth_unavailable",
+          });
+        }
         return c.json(
           {
             status: "provider_unavailable",
@@ -1227,18 +1303,32 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
           503,
         );
       }
-      if (attempt.status === "processing") {
-        const started = await markCodexResetRedemptionProviderStarted(db, {
-          accountId,
-          workspaceId,
-          attemptId: attempt.id,
-          claimHolderId,
-        });
-        if (!started) {
-          return c.json({ status: "in_progress", attemptId: attempt.id }, 409);
+      const fenced = await fenceCodexResetRedemptionSend(db, {
+        accountId,
+        workspaceId,
+        attemptId: attempt.id,
+        claimHolderId,
+        credentialId,
+        subjectId: human.subjectId,
+        browserSessionHash: human.browserSessionHash,
+      });
+      if (fenced.kind !== "ready") {
+        if (fenced.reason === "confirmation_expired") {
+          return c.json(
+            { status: "confirmation_expired", attemptId: attempt.id, retryable: true },
+            403,
+          );
         }
+        if (fenced.reason === "credential_unavailable") {
+          return c.json(
+            { status: "provider_unavailable", attemptId: attempt.id, retryable: true },
+            503,
+          );
+        }
+        return c.json({ status: "in_progress", attemptId: attempt.id }, 409);
       }
 
+      const sendAttempt = fenced.attempt;
       const consumed = await consumeCodexRateLimitResetCredit(
         {
           accessToken: token.accessToken,
@@ -1247,8 +1337,8 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
           clientVersion: CODEX_CLIENT_VERSION,
         },
         {
-          idempotencyKey: attempt.upstreamIdempotencyKey,
-          creditId: attempt.creditId,
+          idempotencyKey: sendAttempt.upstreamIdempotencyKey,
+          creditId: sendAttempt.creditId,
         },
         fetchImpl,
       );
@@ -1273,8 +1363,10 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       if (!completed) {
         return c.json({ status: "in_progress", attemptId: attempt.id }, 409);
       }
-      await signalCodexCapacityTargets(deps, completion.wakeTargets);
-      return await finishResponse(completed.outcome!);
+      // The outbox is durable; signaling is best-effort and must not hold the
+      // owning human's already-completed provider outcome hostage.
+      void signalCodexCapacityTargets(deps, completion.wakeTargets);
+      return finishResponse(completed.outcome!);
     },
   );
 }

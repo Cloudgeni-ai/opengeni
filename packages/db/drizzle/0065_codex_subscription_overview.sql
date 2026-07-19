@@ -83,10 +83,10 @@ CREATE TABLE IF NOT EXISTS "codex_reset_redemption_attempts" (
     FOREIGN KEY ("workspace_id", "account_id")
     REFERENCES "workspaces"("id", "account_id")
     ON DELETE CASCADE,
-  CONSTRAINT "codex_reset_redemption_workspace_credential_fk"
-    FOREIGN KEY ("workspace_id", "credential_id")
-    REFERENCES "codex_subscription_credentials"("workspace_id", "id")
-    ON DELETE CASCADE,
+  -- Deliberately no credential FK: a disconnect must never cascade-delete the
+  -- only durable upstream redeem_request_id after provider work may have begun.
+  -- Accessors validate and lock the workspace credential before every send;
+  -- completed history may outlive a later safe credential disconnect.
   CONSTRAINT "codex_reset_redemption_status_check"
     CHECK (status IN ('processing', 'provider_started', 'completed')),
   CONSTRAINT "codex_reset_redemption_outcome_check"
