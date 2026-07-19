@@ -144,8 +144,22 @@ export type SessionWorkflowInput = {
   maxCapacityChecksPerRun?: number;
 };
 
-export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void> {
-  const turnActivity = turnActivityForTaskQueue(workflowInfo().taskQueue);
+export type SessionWorkflowOptions = {
+  heartbeatTimeout?: string;
+};
+
+export function createSessionWorkflow(options: SessionWorkflowOptions = {}) {
+  return async function sessionWorkflow(input: SessionWorkflowInput): Promise<void> {
+    return runSessionWorkflow(input, turnActivityForTaskQueue(workflowInfo().taskQueue, options));
+  };
+}
+
+export const sessionWorkflow = createSessionWorkflow();
+
+async function runSessionWorkflow(
+  input: SessionWorkflowInput,
+  turnActivity: ReturnType<typeof turnActivityForTaskQueue>,
+): Promise<void> {
   let approvalWakeups = 0;
   let interruptionWakeups = 0;
   let wakeups = 0;

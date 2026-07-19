@@ -9,16 +9,23 @@ import {
 } from "../../apps/worker/src/concurrency";
 import { turnTaskQueue } from "../../apps/worker/src/workflows/activities";
 
+const acceleratedTemporalWorkflowPath = new URL(
+  "./temporal-workflow.test-workflows.ts",
+  import.meta.url,
+).pathname;
+const acceleratedSessionWorkflowName = "sessionWorkflowWithAcceleratedHeartbeat";
+
 // An ungraceful worker death cannot be faked by throwing a TimeoutFailure
 // from the activity (the worker coerces thrown activity errors into
 // ApplicationFailure via ensureApplicationFailure), so the worker-death tests
 // produce the REAL failure shape: the mock turn activity hangs without ever
 // heartbeating and the Temporal server closes it with a heartbeat timeout
-// (the session workflow's proxy sets heartbeatTimeout to 2 minutes), delivering an
-// ActivityFailure whose cause is a TimeoutFailure with timeoutType HEARTBEAT
-// — exactly what a SIGKILLed worker produces. The hang rejects on the late
-// worker cancellation so ignored local completion cannot mutate fake durable
-// state, while still allowing the test worker to drain at the end.
+// (the test-only workflow uses a one-second heartbeat timeout), delivering an
+// ActivityFailure whose cause is a TimeoutFailure with timeoutType HEARTBEAT —
+// exactly what a SIGKILLed worker produces. The production workflow remains
+// configured with its two-minute heartbeat timeout. The hang rejects on the
+// late worker cancellation so ignored local completion cannot mutate fake
+// durable state, while still allowing the test worker to drain at the end.
 async function hangWithoutHeartbeating(): Promise<{ status: string }> {
   await new Promise<void>((_resolve, reject) => {
     const signal = currentActivityContext()?.cancellationSignal;
@@ -35,13 +42,10 @@ async function hangWithoutHeartbeating(): Promise<{ status: string }> {
   throw new Error("unreachable simulated dead worker completion");
 }
 
-// The end-to-end ownership chain has two independently bounded phases: the
-// server may spend the full two-minute heartbeat window detecting the dead turn
-// worker, then the control-plane recovery activity has its own two-minute
-// start-to-close contract. Leave scheduling and worker-drain slack after both
-// phases so a loaded CI host cannot cancel a valid recovery at the boundary.
-// This finite test ceiling does not change either runtime timeout.
-const workerDeathTestTimeoutMs = 360_000;
+// The test-only workflow's one-second heartbeat window still needs scheduling
+// and worker-drain slack on a loaded CI host. This finite test ceiling does not
+// change the production timeout or the Temporal failure semantics under test.
+const workerDeathTestTimeoutMs = 60_000;
 
 const temporalWorkflowTestTimeoutMs = 30_000;
 
@@ -298,25 +302,30 @@ describe("Temporal workflow integration", () => {
         if (runs.length === 1) return await hangWithoutHeartbeating();
         return { status: "idle" };
       });
-      const worker = await testWorker(nativeConnection, taskQueue, {
-        ...admission.activities,
-        markSessionIdle: async () => undefined,
-        recoverDispatch: async (input: { attemptId: string; timeoutType: string }) => {
-          recoveries.push(input);
-          admission.recover();
-          return { action: "recovering", turnId: turn.id, redispatches: 1 };
+      const worker = await testWorker(
+        nativeConnection,
+        taskQueue,
+        {
+          ...admission.activities,
+          markSessionIdle: async () => undefined,
+          recoverDispatch: async (input: { attemptId: string; timeoutType: string }) => {
+            recoveries.push(input);
+            admission.recover();
+            return { action: "recovering", turnId: turn.id, redispatches: 1 };
+          },
+          failSessionAttempt: async (input: unknown) => {
+            failures.push(input);
+          },
+          settleSessionInterruptions: async () => ({
+            action: "continue" as const,
+          }),
         },
-        failSessionAttempt: async (input: unknown) => {
-          failures.push(input);
-        },
-        settleSessionInterruptions: async () => ({
-          action: "continue" as const,
-        }),
-      });
+        { workflowsPath: acceleratedTemporalWorkflowPath },
+      );
       const run = worker.run();
       try {
         const client = new Client({ connection });
-        const handle = await client.workflow.start("sessionWorkflow", {
+        const handle = await client.workflow.start(acceleratedSessionWorkflowName, {
           taskQueue,
           workflowId: `wf-${crypto.randomUUID()}`,
           args: [
@@ -366,24 +375,29 @@ describe("Temporal workflow integration", () => {
         runs.push(input);
         return await hangWithoutHeartbeating();
       });
-      const worker = await testWorker(nativeConnection, taskQueue, {
-        ...admission.activities,
-        markSessionIdle: async () => undefined,
-        recoverDispatch: async (input: { attemptId: string; timeoutType: string }) => {
-          recoveries.push(input);
-          return { action: "exceeded", turnId: turn.id, redispatches: 3 };
+      const worker = await testWorker(
+        nativeConnection,
+        taskQueue,
+        {
+          ...admission.activities,
+          markSessionIdle: async () => undefined,
+          recoverDispatch: async (input: { attemptId: string; timeoutType: string }) => {
+            recoveries.push(input);
+            return { action: "exceeded", turnId: turn.id, redispatches: 3 };
+          },
+          failSessionAttempt: async (input: { error?: string }) => {
+            failures.push(input);
+          },
+          settleSessionInterruptions: async () => ({
+            action: "continue" as const,
+          }),
         },
-        failSessionAttempt: async (input: { error?: string }) => {
-          failures.push(input);
-        },
-        settleSessionInterruptions: async () => ({
-          action: "continue" as const,
-        }),
-      });
+        { workflowsPath: acceleratedTemporalWorkflowPath },
+      );
       const run = worker.run();
       try {
         const client = new Client({ connection });
-        const handle = await client.workflow.start("sessionWorkflow", {
+        const handle = await client.workflow.start(acceleratedSessionWorkflowName, {
           taskQueue,
           workflowId: `wf-${crypto.randomUUID()}`,
           args: [
@@ -1790,6 +1804,7 @@ async function testWorker(
   nativeConnection: NativeConnection,
   taskQueue: string,
   activities: Record<string, (...args: any[]) => Promise<unknown>>,
+  options: { workflowsPath?: string } = {},
 ): Promise<{ run: () => Promise<void>; shutdown: () => void }> {
   const defaults = {
     enqueueGoalRetryWake: async () => undefined,
@@ -1805,7 +1820,9 @@ async function testWorker(
       connection: nativeConnection,
       namespace: "default",
       taskQueue,
-      workflowsPath: new URL("../../apps/worker/src/workflows.ts", import.meta.url).pathname,
+      workflowsPath:
+        options.workflowsPath ??
+        new URL("../../apps/worker/src/workflows.ts", import.meta.url).pathname,
       activities: controlActivities,
       maxConcurrentActivityTaskExecutions: CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES,
     }),
