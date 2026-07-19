@@ -723,7 +723,6 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       // Unpin from a different device/API context while the manager—not the
       // descendant—is the active route. Focus reconciliation refreshes the
       // complete pins-only page, then point-reads the absent cached pin revision.
-      await setSessionPinThroughApi(page, apiBaseUrl, workspaceId, pinnedDescendant, false);
       const pinsOnlyRefresh = page.waitForResponse((response) => {
         const url = new URL(response.url());
         return (
@@ -739,6 +738,11 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
           url.pathname === `/v1/workspaces/${workspaceId}/sessions/${descendant.id}`
         );
       });
+      // Install both observers before the remote mutation. The ordinary 15s
+      // pin poll may otherwise reconcile between the mutation response and the
+      // explicit focus refresh, making a truthful point read invisible to the
+      // acceptance harness.
+      await setSessionPinThroughApi(page, apiBaseUrl, workspaceId, pinnedDescendant, false);
       await page.evaluate(() => window.dispatchEvent(new Event("focus")));
       await Promise.all([pinsOnlyRefresh, descendantPointRead]);
       const topLevelPinnedDescendant = page.locator(
