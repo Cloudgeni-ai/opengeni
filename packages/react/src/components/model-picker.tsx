@@ -12,6 +12,8 @@ export type ModelPickerProps = {
   onChange: (modelId: string) => void;
   disabled?: boolean | undefined;
   className?: string | undefined;
+  /** Visible-to-assistive-technology label. Defaults to "Model". */
+  label?: string | undefined;
 };
 
 /**
@@ -25,7 +27,14 @@ export type ModelPickerProps = {
  * the send path. Renders nothing when no models are exposed, so a single-model
  * deployment shows no chrome.
  */
-export function ModelPicker({ models, value, onChange, disabled, className }: ModelPickerProps) {
+export function ModelPicker({
+  models,
+  value,
+  onChange,
+  disabled,
+  className,
+  label = "Model",
+}: ModelPickerProps) {
   const selectId = useId();
   // Group by provider, preserving first-seen order for both the providers and
   // the models within each — the server already orders the list (default model
@@ -50,14 +59,14 @@ export function ModelPicker({ models, value, onChange, disabled, className }: Mo
   return (
     <span className={cn("relative inline-flex items-center", className)}>
       <label htmlFor={selectId} className="sr-only">
-        Model
+        {label}
       </label>
       <select
         id={selectId}
         value={value ?? ""}
         onChange={(event) => onChange(event.target.value)}
         disabled={disabled === true}
-        aria-label="Model"
+        aria-label={label}
         className={cn(
           // Sized like the other footer controls; the chevron overlay needs the
           // right padding so the value never collides with it.
