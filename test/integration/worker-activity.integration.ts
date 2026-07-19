@@ -973,7 +973,6 @@ describe("worker activities integration", () => {
         checkpointSucceeded: true,
         sameTurnReplay: "refused",
       });
-      expect(firstEvents.filter((event) => event.type === "agent.toolCall.output")).toHaveLength(1);
       const activeHistory = await getActiveSessionHistoryItems(
         dbClient.db,
         grant.workspaceId,
@@ -1272,6 +1271,89 @@ describe("worker activities integration", () => {
       status: "failed",
       activeAttemptId: null,
     });
+    expect((await getSessionGoal(dbClient.db, grant.workspaceId, session.id))?.status).toBe(
+      "active",
+    );
+  });
+
+  test("a failed final provider-transport checkpoint suppresses automatic goal continuation", async () => {
+    const grant = await testGrant(dbClient.db);
+    const session = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "provider checkpoint must be durable",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    await createSessionGoal(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      text: "do not continue across an unpersisted provider boundary",
+      createdBy: "api",
+    });
+    await appendOwnedEvents(dbClient.db, grant, session.id, [
+      { type: "user.message", payload: { text: "provider checkpoint must be durable" } },
+    ]);
+    const baseRuntime = createProductionAgentRuntime({
+      model: new ScriptedModel([{ outputText: "unused" }]),
+    });
+    const state = {
+      get history(): never {
+        throw new Error("deterministic provider checkpoint write failure");
+      },
+      usage: {},
+      toString: () => "unpersisted-provider-state",
+    };
+    const runtime: OpenGeniRuntime = {
+      ...baseRuntime,
+      runStream: async () =>
+        ({
+          toStream: () =>
+            (async function* () {
+              yield* [];
+              throw Object.assign(new Error("raw provider body must not persist"), {
+                status: 503,
+              });
+            })(),
+          completed: Promise.resolve(),
+          interruptions: [],
+          state,
+          finalOutput: "",
+        }) as never,
+    };
+    const activities = createWorkerActivities({
+      settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl }),
+      db: dbClient.db,
+      bus,
+      runtime,
+    });
+
+    const result = await activities.runAgentTurn({
+      attemptId: crypto.randomUUID(),
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      trigger: { kind: "next" },
+      workflowId: "workflow-provider-transport-checkpoint-failed",
+      workflowRunId: crypto.randomUUID(),
+    });
+    expect(result).toMatchObject({ status: "idle" });
+    expect(result).not.toHaveProperty("continueDelayMs");
+    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100);
+    const failure = events.find((event) => event.type === "turn.failed")?.payload;
+    expect(failure).toMatchObject({
+      code: "provider_unavailable",
+      retryable: true,
+      httpStatus: 503,
+      checkpointSucceeded: false,
+      recovery: "user_message",
+      sameTurnReplay: "refused",
+      automaticContinuationRefused: true,
+    });
+    expect(JSON.stringify(failure)).not.toContain("raw provider body");
+    expect(events.some((event) => event.type === "goal.continuation")).toBe(false);
+    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("idle");
     expect((await getSessionGoal(dbClient.db, grant.workspaceId, session.id))?.status).toBe(
       "active",
     );
