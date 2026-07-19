@@ -145,6 +145,26 @@ const expectedOwnedSuffixCallers: Record<string, string[]> = {
   ],
 };
 
+const expectedOutboxWriters: Record<
+  string,
+  { inserts: number; contract: "child_lifecycle" | "owned_child_lifecycle" | "canonical_pair" }
+> = {
+  "packages/db/src/index.ts#settleSessionIdleWithParentOutbox": {
+    inserts: 1,
+    contract: "child_lifecycle",
+  },
+  "packages/db/src/index.ts#enqueueFailedChildOutboxForTurnTx": {
+    inserts: 1,
+    contract: "owned_child_lifecycle",
+  },
+  "packages/db/src/index.ts#getOrCreateSessionSystemUpdateOutbox": {
+    inserts: 1,
+    contract: "canonical_pair",
+  },
+};
+
+const expectedFailedChildOutboxCallers = ["applySessionTurnSettlement", "recoverSessionDispatch"];
+
 function productionTypeScriptFiles(): string[] {
   const files: string[] = [];
   const visit = (directory: string): void => {
@@ -204,6 +224,18 @@ function insertsSessionEvents(node: ts.CallExpression): boolean {
   );
 }
 
+function insertsSessionSystemUpdateOutbox(node: ts.CallExpression): boolean {
+  if (!ts.isPropertyAccessExpression(node.expression) || node.expression.name.text !== "insert") {
+    return false;
+  }
+  const table = node.arguments[0];
+  return Boolean(
+    table &&
+    ((ts.isPropertyAccessExpression(table) && table.name.text === "sessionSystemUpdateOutbox") ||
+      (ts.isIdentifier(table) && table.text === "sessionSystemUpdateOutbox")),
+  );
+}
+
 function functionCalls(functionNode: ts.FunctionLikeDeclaration, expectedName: string): boolean {
   let found = false;
   const visit = (node: ts.Node): void => {
@@ -252,10 +284,22 @@ describe("session_events writer inventory", () => {
     const ownedSuffixCallers = new Map<string, Set<string>>(
       Object.keys(expectedOwnedSuffixCallers).map((name) => [name, new Set()]),
     );
+    const outboxWriters = new Map<
+      string,
+      { count: number; sourceFile: ts.SourceFile; functionNode: ts.FunctionLikeDeclaration }
+    >();
+    const failedChildOutboxCallers = new Set<string>();
 
     for (const path of productionTypeScriptFiles()) {
       const source = readFileSync(path, "utf8");
-      if (!source.includes("sessionEvents") && !source.includes("session_events")) continue;
+      if (
+        !source.includes("sessionEvents") &&
+        !source.includes("session_events") &&
+        !source.includes("sessionSystemUpdateOutbox") &&
+        !source.includes("session_system_update_outbox")
+      ) {
+        continue;
+      }
       const file = relative(repoRoot, path).replaceAll("\\", "/");
       const sourceFile = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true);
       const visit = (node: ts.Node): void => {
@@ -276,9 +320,23 @@ describe("session_events writer inventory", () => {
               functionNode: enclosing.node,
             });
           }
+          if (insertsSessionSystemUpdateOutbox(node)) {
+            if (!enclosing)
+              throw new Error(`Unnamed session-system-update outbox writer in ${file}`);
+            const key = `${file}#${enclosing.name}`;
+            const existing = outboxWriters.get(key);
+            outboxWriters.set(key, {
+              count: (existing?.count ?? 0) + 1,
+              sourceFile,
+              functionNode: enclosing.node,
+            });
+          }
           const called = callName(node);
           if (called && ownedSuffixCallers.has(called) && enclosing) {
             ownedSuffixCallers.get(called)!.add(enclosing.name);
+          }
+          if (called === "enqueueFailedChildOutboxForTurnTx" && enclosing) {
+            failedChildOutboxCallers.add(enclosing.name);
           }
         }
         if (ts.isTaggedTemplateExpression(node)) {
@@ -304,8 +362,12 @@ describe("session_events writer inventory", () => {
     for (const [key, expected] of Object.entries(expectedWriters)) {
       const writer = writers.get(key)!;
       if (expected.contract === "canonical") {
-        expect(functionCalls(writer.functionNode, "lockSessionEventWriteRows")).toBe(true);
-        const firstLock = callPositions(writer.functionNode, "lockSessionEventWriteRows")[0];
+        const canonicalLocks = [
+          ...callPositions(writer.functionNode, "lockSessionEventWriteRows"),
+          ...callPositions(writer.functionNode, "lockChildLifecycleOutboxWriteRowsTx"),
+        ].sort((left, right) => left - right);
+        expect(canonicalLocks.length).toBeGreaterThan(0);
+        const firstLock = canonicalLocks[0];
         expect(firstLock).toBeLessThan(insertPositions(writer.functionNode)[0]!);
       } else if (expected.contract === "turn_attempt_fence") {
         expect(functionCalls(writer.functionNode, "lockTurnAttemptWriteFenceTx")).toBe(true);
@@ -332,13 +394,52 @@ describe("session_events writer inventory", () => {
         const definitions = functionDefinitions.get(caller) ?? [];
         expect(definitions).toHaveLength(1);
         const callerNode = definitions[0]!.functionNode;
-        expect(functionCalls(callerNode, "lockSessionEventWriteRows")).toBe(true);
-        const firstLock = callPositions(callerNode, "lockSessionEventWriteRows")[0];
+        const canonicalLocks = [
+          ...callPositions(callerNode, "lockSessionEventWriteRows"),
+          ...callPositions(callerNode, "lockChildLifecycleOutboxWriteRowsTx"),
+        ].sort((left, right) => left - right);
+        expect(canonicalLocks.length).toBeGreaterThan(0);
+        const firstLock = canonicalLocks[0];
         const delegatedCalls = [...ownedSuffixCallers.keys()].flatMap((ownedWriter) =>
           callPositions(callerNode, ownedWriter),
         );
         expect(firstLock).toBeLessThan(Math.min(...delegatedCalls));
       }
+    }
+
+    expect(
+      Object.fromEntries([...outboxWriters].map(([key, value]) => [key, value.count])),
+    ).toEqual(
+      Object.fromEntries(
+        Object.entries(expectedOutboxWriters).map(([key, value]) => [key, value.inserts]),
+      ),
+    );
+    expect([...failedChildOutboxCallers].sort()).toEqual(
+      [...expectedFailedChildOutboxCallers].sort(),
+    );
+    for (const [key, expected] of Object.entries(expectedOutboxWriters)) {
+      const writer = outboxWriters.get(key)!;
+      if (expected.contract === "child_lifecycle") {
+        expect(functionCalls(writer.functionNode, "lockChildLifecycleOutboxWriteRowsTx")).toBe(
+          true,
+        );
+        expect(functionCalls(writer.functionNode, "retryWorkspacePersistence")).toBe(true);
+      } else if (expected.contract === "canonical_pair") {
+        expect(functionCalls(writer.functionNode, "lockSessionEventWriteRows")).toBe(true);
+        expect(functionCalls(writer.functionNode, "retryRlsPersistence")).toBe(true);
+        const firstLock = callPositions(writer.functionNode, "lockSessionEventWriteRows")[0];
+        expect(firstLock).toBeLessThan(callPositions(writer.functionNode, "insert")[0]!);
+      }
+    }
+    for (const caller of expectedFailedChildOutboxCallers) {
+      const definitions = functionDefinitions.get(caller) ?? [];
+      expect(definitions).toHaveLength(1);
+      const callerNode = definitions[0]!.functionNode;
+      expect(functionCalls(callerNode, "lockChildLifecycleOutboxWriteRowsTx")).toBe(true);
+      expect(functionCalls(callerNode, "retryWorkspacePersistence")).toBe(true);
+      const firstLock = callPositions(callerNode, "lockChildLifecycleOutboxWriteRowsTx")[0];
+      const enqueue = callPositions(callerNode, "enqueueFailedChildOutboxForTurnTx")[0];
+      expect(firstLock).toBeLessThan(enqueue!);
     }
   });
 });

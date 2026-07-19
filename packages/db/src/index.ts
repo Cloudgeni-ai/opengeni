@@ -108,7 +108,10 @@ import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { decryptEnvironmentValue } from "./environment-crypto";
 import { sanitizeEventPayload, sanitizeModelPayload } from "./event-payload-sanitizer";
-import { runIdempotentPersistenceTransaction } from "./persistence-errors";
+import {
+  runIdempotentPersistenceTransaction,
+  type IdempotentPersistenceTransactionOptions,
+} from "./persistence-errors";
 import {
   closePendingSessionToolCallsInTransaction,
   historyCallId,
@@ -124,6 +127,7 @@ import {
   registerInternalUpdateWakeInTransaction,
   registerSessionTurnAttemptClaim,
   serializeEffectiveSessionControl,
+  SessionControlInvariantError,
   type SessionTurnAttemptOutcome,
   type WorkspaceControlRow,
 } from "./session-control";
@@ -417,6 +421,28 @@ export async function withWorkspaceRls<T>(
   fn: (db: Database) => Promise<T>,
 ): Promise<T> {
   return await withRlsContext(db, await rlsContextForWorkspace(db, workspaceId), fn);
+}
+
+async function retryWorkspacePersistence<T>(
+  db: Database,
+  workspaceId: string,
+  options: IdempotentPersistenceTransactionOptions,
+  fn: (db: Database) => Promise<T>,
+): Promise<T> {
+  return await runIdempotentPersistenceTransaction(options, async () => {
+    return await withWorkspaceRls(db, workspaceId, fn);
+  });
+}
+
+async function retryRlsPersistence<T>(
+  db: Database,
+  context: RlsContext,
+  options: IdempotentPersistenceTransactionOptions,
+  fn: (db: Database) => Promise<T>,
+): Promise<T> {
+  return await runIdempotentPersistenceTransaction(options, async () => {
+    return await withRlsContext(db, context, fn);
+  });
 }
 
 /**
@@ -20128,6 +20154,84 @@ export async function peekSessionWork(
 }
 
 /**
+ * Child lifecycle transactions discover immutable parentage only after taking
+ * the control/workspace prefix. They must then lock child and parent together,
+ * UUID ordered, before exact turn/attempt rows or an outbox FK insert. This is
+ * a staged use of the one canonical event-write helper, not a second lock order.
+ */
+async function lockChildLifecycleOutboxWriteRowsTx(
+  tx: Database,
+  workspaceId: string,
+  input: { sessionId: string; turnId?: string; attemptId?: string },
+) {
+  const prefix = await lockSessionEventWriteRows(tx, {
+    workspaceId,
+    controlLock: "share",
+    sessionIds: [],
+  });
+  const [preview] = await tx
+    .select({ id: schema.sessions.id, parentSessionId: schema.sessions.parentSessionId })
+    .from(schema.sessions)
+    .where(
+      and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, input.sessionId)),
+    )
+    .limit(1);
+  if (!preview) throw new Error(`Session not found: ${input.sessionId}`);
+
+  const sessionLocks = await lockSessionEventWriteRows(tx, {
+    workspaceId,
+    controlLock: "already_locked",
+    workspaceLock: "already_locked",
+    sessionIds: [input.sessionId, ...(preview.parentSessionId ? [preview.parentSessionId] : [])],
+  });
+  const session = sessionLocks.sessions.find((row) => row.id === input.sessionId);
+  if (!session) throw new Error(`Session not found: ${input.sessionId}`);
+  if (session.parentSessionId !== preview.parentSessionId) {
+    throw new SessionControlInvariantError(
+      `Session ${input.sessionId} parent changed while establishing lifecycle locks`,
+    );
+  }
+  if (
+    session.parentSessionId &&
+    !sessionLocks.sessions.some((row) => row.id === session.parentSessionId)
+  ) {
+    throw new SessionControlInvariantError(
+      `Parent session ${session.parentSessionId} was not locked with child ${input.sessionId}`,
+    );
+  }
+
+  let turnId = input.turnId ?? null;
+  if (!turnId && input.attemptId) {
+    const [attemptPreview] = await tx
+      .select({ turnId: schema.sessionTurnAttempts.turnId })
+      .from(schema.sessionTurnAttempts)
+      .where(
+        and(
+          eq(schema.sessionTurnAttempts.workspaceId, workspaceId),
+          eq(schema.sessionTurnAttempts.id, input.attemptId),
+        ),
+      )
+      .limit(1);
+    turnId = attemptPreview?.turnId ?? null;
+  }
+  const exactLocks = await lockSessionEventWriteRows(tx, {
+    workspaceId,
+    controlLock: "already_locked",
+    workspaceLock: "already_locked",
+    turnIds: turnId ? [turnId] : [],
+    attemptIds: turnId && input.attemptId ? [input.attemptId] : [],
+  });
+  return {
+    control: prefix.control,
+    workspace: prefix.workspace,
+    sessions: sessionLocks.sessions,
+    turns: exactLocks.turns,
+    attempts: exactLocks.attempts,
+    session,
+  };
+}
+
+/**
  * Commit the workflow's terminal-for-now idle decision and its parent delivery
  * source in one transaction. A crash after commit leaves a pending outbox row for
  * the global reconciler; a normal caller immediately enriches/delivers the same
@@ -20146,15 +20250,19 @@ export async function settleSessionIdleWithParentOutbox(
     }
   | { action: "stale"; episodeKey: null; events: [] }
 > {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+  const persistence = {
+    stage: "session_lifecycle_outbox.settle_idle",
+    eventTypes: ["child_terminal_result", "session.status.changed"],
+    maxAttempts: 3,
+  };
+  return await retryWorkspacePersistence(db, workspaceId, persistence, async (scopedDb) => {
     return await scopedDb.transaction(async (tx) => {
-      const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
+      const locks = await lockChildLifecycleOutboxWriteRowsTx(
+        tx as unknown as Database,
         workspaceId,
-        controlLock: "share",
-        sessionIds: [sessionId],
-      });
-      const session = locks.sessions[0];
-      if (!session) throw new Error(`Session not found: ${sessionId}`);
+        { sessionId },
+      );
+      const session = locks.session;
       const effectiveControl = await evaluateSessionControl(
         tx as unknown as Database,
         workspaceId,
@@ -20534,18 +20642,40 @@ export async function applySessionTurnSettlement(
   input: ApplySessionTurnSettlementInput,
 ): Promise<ApplySessionTurnSettlementResult> {
   const fromStatuses = input.fromStatuses ?? ["running", "requires_action"];
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+  const eventTypes = [
+    ...input.events.map((event) => event.type),
+    ...(input.recording?.action === "available"
+      ? ["recording.available"]
+      : input.recording?.action === "failed"
+        ? ["recording.failed"]
+        : []),
+    ...(input.compactionRequestFailure ? ["session.context.compaction.skipped"] : []),
+    ...(input.turnStatus === "failed" ? ["child_terminal_result"] : []),
+  ];
+  const persistence = {
+    stage: "session_lifecycle_outbox.settle_turn",
+    eventTypes,
+    maxAttempts: 3,
+  };
+  return await retryWorkspacePersistence(db, workspaceId, persistence, async (scopedDb) => {
     return await scopedDb.transaction(async (tx) => {
-      const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
-        workspaceId,
-        controlLock: "share",
-        sessionIds: [input.sessionId],
-        turnIds: [input.turnId],
-        attemptIds: [input.attemptId],
-      });
-      const session = locks.sessions[0];
-      const turn = locks.turns[0];
-      const attempt = locks.attempts[0];
+      const locks =
+        input.turnStatus === "failed"
+          ? await lockChildLifecycleOutboxWriteRowsTx(tx as unknown as Database, workspaceId, {
+              sessionId: input.sessionId,
+              turnId: input.turnId,
+              attemptId: input.attemptId,
+            })
+          : await lockSessionEventWriteRows(tx as unknown as Database, {
+              workspaceId,
+              controlLock: "share",
+              sessionIds: [input.sessionId],
+              turnIds: [input.turnId],
+              attemptIds: [input.attemptId],
+            });
+      const session = locks.sessions.find((row) => row.id === input.sessionId);
+      const turn = locks.turns.find((row) => row.id === input.turnId);
+      const attempt = locks.attempts.find((row) => row.id === input.attemptId);
       if (!session) {
         throw new Error(`Session not found: ${input.sessionId}`);
       }
@@ -21556,34 +21686,32 @@ export async function recoverSessionDispatch(
   workspaceId: string,
   input: RecoverSessionDispatchInput,
 ): Promise<RecoverSessionDispatchResult> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+  const persistence = {
+    stage: "session_lifecycle_outbox.recover_dispatch",
+    eventTypes: [
+      "child_terminal_result",
+      "session.status.changed",
+      "turn.failed",
+      "turn.recovery.requested",
+    ],
+    maxAttempts: 3,
+  };
+  return await retryWorkspacePersistence(db, workspaceId, persistence, async (scopedDb) => {
     return await scopedDb.transaction(async (tx) => {
-      const prefix = await lockSessionEventWriteRows(tx as unknown as Database, {
+      const locks = await lockChildLifecycleOutboxWriteRowsTx(
+        tx as unknown as Database,
         workspaceId,
-        controlLock: "share",
-        sessionIds: [input.sessionId],
-      });
-      const session = prefix.sessions[0];
-      if (!session) {
-        throw new Error(`Session not found: ${input.sessionId}`);
-      }
+        { sessionId: input.sessionId, attemptId: input.attemptId },
+      );
+      const session = locks.session;
       const effectiveControl = await evaluateSessionControl(
         tx as unknown as Database,
         workspaceId,
         input.sessionId,
-        { workspaceControl: prefix.control ?? undefined },
+        { workspaceControl: locks.control ?? undefined },
       );
-      const [attemptPreview] = await tx
-        .select()
-        .from(schema.sessionTurnAttempts)
-        .where(
-          and(
-            eq(schema.sessionTurnAttempts.workspaceId, workspaceId),
-            eq(schema.sessionTurnAttempts.id, input.attemptId),
-          ),
-        )
-        .limit(1);
-      if (!attemptPreview) {
+      const attempt = locks.attempts.find((row) => row.id === input.attemptId);
+      if (!attempt) {
         return input.timeoutType === "SCHEDULE_TO_START"
           ? { action: "unclaimed", events: [] }
           : {
@@ -21593,19 +21721,11 @@ export async function recoverSessionDispatch(
               activeTurnId: session.activeTurnId,
             };
       }
-      const exact = await lockSessionEventWriteRows(tx as unknown as Database, {
-        workspaceId,
-        workspaceLock: "already_locked",
-        turnIds: [attemptPreview.turnId],
-        attemptIds: [input.attemptId],
-      });
-      const turn = exact.turns[0];
-      const attempt = exact.attempts[0];
+      const turn = locks.turns.find((row) => row.id === attempt.turnId);
       const turnStatus = (turn?.status as SessionTurnStatus | undefined) ?? null;
       const parsedMetadata = readTurnDispatchMetadata(turn?.metadata);
       if (
-        !prefix.workspace ||
-        !attempt ||
+        !locks.workspace ||
         !turn ||
         turn.accountId !== session.accountId ||
         turn.sessionId !== input.sessionId ||
@@ -22370,59 +22490,71 @@ export async function getOrCreateSessionSystemUpdateOutbox(
   db: Database,
   input: Omit<SessionSystemUpdateOutboxDelivery, "id" | "status">,
 ): Promise<SessionSystemUpdateOutboxDelivery> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      const [row] = await scopedDb
-        .insert(schema.sessionSystemUpdateOutbox)
-        .values({
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          sourceSessionId: input.sourceSessionId,
-          targetSessionId: input.targetSessionId,
-          dedupeKey: input.dedupeKey,
+  const persistence = {
+    stage: "session_lifecycle_outbox.get_or_create",
+    eventTypes: ["child_terminal_result"],
+    maxAttempts: 3,
+  };
+  const context = { accountId: input.accountId, workspaceId: input.workspaceId };
+  return await retryRlsPersistence(db, context, persistence, async (scopedDb) => {
+    const locks = await lockSessionEventWriteRows(scopedDb, {
+      workspaceId: input.workspaceId,
+      sessionIds: [input.sourceSessionId, input.targetSessionId],
+    });
+    const expectedSessionIds = new Set([input.sourceSessionId, input.targetSessionId]);
+    if (locks.sessions.length !== expectedSessionIds.size) {
+      throw new SessionControlInvariantError(
+        "System-update outbox source and target sessions must exist in the same workspace",
+      );
+    }
+    const [row] = await scopedDb
+      .insert(schema.sessionSystemUpdateOutbox)
+      .values({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sourceSessionId: input.sourceSessionId,
+        targetSessionId: input.targetSessionId,
+        dedupeKey: input.dedupeKey,
+        kind: input.kind,
+        classification: input.classification,
+        sourceId: input.sourceId,
+        summary: input.summary,
+        payload: input.payload,
+        lineage: input.lineage,
+      })
+      .onConflictDoUpdate({
+        target: [
+          schema.sessionSystemUpdateOutbox.workspaceId,
+          schema.sessionSystemUpdateOutbox.dedupeKey,
+        ],
+        set: {
           kind: input.kind,
           classification: input.classification,
           sourceId: input.sourceId,
           summary: input.summary,
           payload: input.payload,
           lineage: input.lineage,
-        })
-        .onConflictDoUpdate({
-          target: [
-            schema.sessionSystemUpdateOutbox.workspaceId,
-            schema.sessionSystemUpdateOutbox.dedupeKey,
-          ],
-          set: {
-            kind: input.kind,
-            classification: input.classification,
-            sourceId: input.sourceId,
-            summary: input.summary,
-            payload: input.payload,
-            lineage: input.lineage,
-            updatedAt: new Date(),
-          },
-        })
-        .returning();
-      if (!row) throw new Error("Failed to persist system-update outbox row");
-      return {
-        id: row.id,
-        status: row.status as "pending" | "delivered",
-        accountId: row.accountId,
-        workspaceId: row.workspaceId,
-        sourceSessionId: row.sourceSessionId,
-        targetSessionId: row.targetSessionId,
-        dedupeKey: row.dedupeKey,
-        kind: "child_terminal_result",
-        classification: row.classification as SystemUpdateClassification,
-        sourceId: row.sourceId,
-        summary: row.summary,
-        payload: parseChildTerminalResultPayload(row.payload),
-        lineage: row.lineage,
-      };
-    },
-  );
+          updatedAt: new Date(),
+        },
+      })
+      .returning();
+    if (!row) throw new Error("Failed to persist system-update outbox row");
+    return {
+      id: row.id,
+      status: row.status as "pending" | "delivered",
+      accountId: row.accountId,
+      workspaceId: row.workspaceId,
+      sourceSessionId: row.sourceSessionId,
+      targetSessionId: row.targetSessionId,
+      dedupeKey: row.dedupeKey,
+      kind: "child_terminal_result",
+      classification: row.classification as SystemUpdateClassification,
+      sourceId: row.sourceId,
+      summary: row.summary,
+      payload: parseChildTerminalResultPayload(row.payload),
+      lineage: row.lineage,
+    };
+  });
 }
 
 export async function markSessionSystemUpdateOutboxFailed(

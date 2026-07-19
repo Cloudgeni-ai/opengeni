@@ -10,7 +10,11 @@ import {
   appendSessionEventsWithLockedSessionUpdate,
   applySessionTurnSettlement,
   createDb,
+  getOrCreateSessionSystemUpdateOutbox,
+  recoverSessionDispatch,
   sendAgentMessageInTransaction,
+  SessionEventPersistenceError,
+  settleSessionIdleWithParentOutbox,
   updateSessionGoal,
   updateSessionTitle,
   withWorkspaceRls,
@@ -46,6 +50,7 @@ let barrier: postgres.Sql;
 let appClient: DbClient;
 let db: Database;
 let nextBarrierId = 1;
+let nextSessionPairId = 1;
 
 async function freshWorkspace(): Promise<WorkspaceFixture> {
   const [account] = await admin<{ id: string }[]>`
@@ -65,21 +70,34 @@ async function freshWorkspace(): Promise<WorkspaceFixture> {
   return { accountId: account!.id, workspaceId: workspace!.id };
 }
 
-async function seedRunningSession(workspace?: WorkspaceFixture): Promise<RunningFixture> {
+async function seedRunningSession(
+  workspace?: WorkspaceFixture,
+  options: { sessionId?: string; parentSessionId?: string | null } = {},
+): Promise<RunningFixture> {
   const owner = workspace ?? (await freshWorkspace());
-  const sessionId = crypto.randomUUID();
+  const sessionId = options.sessionId ?? crypto.randomUUID();
   const sandboxGroupId = sessionId;
   const turnId = crypto.randomUUID();
   const attemptId = crypto.randomUUID();
   const triggerEventId = crypto.randomUUID();
   const workflowId = `session-${sessionId}`;
+  const metadata = {
+    dispatchGeneration: 1,
+    dispatchAttempt: {
+      id: `activity-${attemptId}`,
+      generation: 1,
+      triggerEventId,
+    },
+  };
   await admin`
     insert into sessions (
       id, account_id, workspace_id, initial_message, model,
-      sandbox_backend, sandbox_group_id, status, temporal_workflow_id
+      sandbox_backend, sandbox_group_id, status, temporal_workflow_id,
+      parent_session_id
     ) values (
       ${sessionId}, ${owner.accountId}, ${owner.workspaceId}, 'OPE-63 race',
-      'codex/gpt-5.6-sol', 'modal', ${sandboxGroupId}, 'running', ${workflowId}
+      'codex/gpt-5.6-sol', 'modal', ${sandboxGroupId}, 'running', ${workflowId},
+      ${options.parentSessionId ?? null}
     )
   `;
   await admin.begin(async (tx) => {
@@ -92,7 +110,7 @@ async function seedRunningSession(workspace?: WorkspaceFixture): Promise<Running
       ) values (
         ${turnId}, ${owner.accountId}, ${owner.workspaceId}, ${sessionId}, ${triggerEventId},
         ${workflowId}, 'running', 1, 'OPE-63 race', 'codex/gpt-5.6-sol',
-        'xhigh', 'modal', '[]'::jsonb, '[]'::jsonb, '{}'::jsonb,
+        'xhigh', 'modal', '[]'::jsonb, '[]'::jsonb, ${JSON.stringify(metadata)}::jsonb,
         1, ${attemptId}
       )
     `;
@@ -116,6 +134,37 @@ async function seedRunningSession(workspace?: WorkspaceFixture): Promise<Running
     attemptId,
     triggerEventId,
   };
+}
+
+async function seedIdleChild(
+  workspace: WorkspaceFixture,
+  sessionId: string,
+  parentSessionId: string,
+): Promise<Pick<RunningFixture, "accountId" | "workspaceId" | "sessionId">> {
+  await admin`
+    insert into sessions (
+      id, account_id, workspace_id, initial_message, model,
+      sandbox_backend, sandbox_group_id, status, temporal_workflow_id,
+      parent_session_id
+    ) values (
+      ${sessionId}, ${workspace.accountId}, ${workspace.workspaceId}, 'OPE-63 idle child',
+      'codex/gpt-5.6-sol', 'modal', ${sessionId}, 'running', ${`session-${sessionId}`},
+      ${parentSessionId}
+    )
+  `;
+  return { ...workspace, sessionId };
+}
+
+function orderedParentChildIds(order: "parent-first" | "child-first"): {
+  parentSessionId: string;
+  childSessionId: string;
+} {
+  const suffix = (nextSessionPairId++).toString(16).padStart(12, "0");
+  const low = `00000000-0000-4000-8000-${suffix}`;
+  const high = `ffffffff-ffff-4fff-bfff-${suffix}`;
+  return order === "parent-first"
+    ? { parentSessionId: low, childSessionId: high }
+    : { parentSessionId: high, childSessionId: low };
 }
 
 async function seedSandboxGroupMember(
@@ -183,7 +232,7 @@ async function activityWriter(
 
 async function sendAgentMessage(
   actor: RunningFixture,
-  target: RunningFixture,
+  target: Pick<RunningFixture, "sessionId">,
   operationKey: string,
 ): Promise<unknown> {
   return await withWorkspaceRls(
@@ -304,6 +353,47 @@ async function raceInOrder(
       await barrier`select pg_advisory_unlock(${BARRIER_CLASS}, ${lockId})`.catch(() => undefined);
     }
     await Promise.allSettled([first, second].filter((value): value is Promise<unknown> => !!value));
+  }
+}
+
+async function raceLifecycleOutboxAgainstAgentCommand(input: {
+  dedupeKey: string;
+  lifecycleWriter: () => Promise<unknown>;
+  parent: RunningFixture;
+  child: Pick<RunningFixture, "sessionId">;
+}): Promise<[unknown, unknown]> {
+  const barrierKey = `outbox:${input.dedupeKey}`;
+  const lockId = nextBarrierId++;
+  await barrier`select pg_advisory_lock(${BARRIER_CLASS}, ${lockId})`;
+  await admin`
+    insert into ope63_event_barriers (event_type, lock_class, lock_id)
+    values (${barrierKey}, ${BARRIER_CLASS}, ${lockId})
+  `;
+  let released = false;
+  let lifecycle: Promise<unknown> | null = null;
+  let command: Promise<unknown> | null = null;
+  try {
+    lifecycle = input.lifecycleWriter();
+    await waitForAdvisoryWaiter();
+    await admin`delete from ope63_event_barriers where event_type = ${barrierKey}`;
+    command = sendAgentMessage(input.parent, input.child, crypto.randomUUID());
+    await waitForTwoAppLockWaiters();
+    await barrier`select pg_advisory_unlock(${BARRIER_CLASS}, ${lockId})`;
+    released = true;
+    return await within(
+      Promise.all([lifecycle, command]),
+      "the lifecycle outbox and parent-to-child command to commit",
+    );
+  } finally {
+    await admin`delete from ope63_event_barriers where event_type = ${barrierKey}`.catch(
+      () => undefined,
+    );
+    if (!released) {
+      await barrier`select pg_advisory_unlock(${BARRIER_CLASS}, ${lockId})`.catch(() => undefined);
+    }
+    await Promise.allSettled(
+      [lifecycle, command].filter((value): value is Promise<unknown> => Boolean(value)),
+    );
   }
 }
 
@@ -430,6 +520,7 @@ beforeAll(async () => {
     declare
       configured record;
       fault_state text;
+      always_fault_state text;
       fault_attempt bigint;
     begin
       select lock_class, lock_id
@@ -448,6 +539,15 @@ beforeAll(async () => {
             errcode = fault_state,
             message = 'OPE-63 injected persistence fault';
         end if;
+      end if;
+
+      always_fault_state := new.payload ->> 'ope63AlwaysFaultSqlState';
+      if always_fault_state in ('40P01', '40001') then
+        raise exception using
+          errcode = always_fault_state,
+          message = 'OPE-63 injected persistence fault with private-token',
+          detail = 'Failed query: insert into session_events values ($1) private-token',
+          table = 'session_events';
       end if;
 
       if new.payload ->> 'ope63RollbackCandidate' = 'true' then
@@ -487,6 +587,30 @@ beforeAll(async () => {
     create trigger zz_ope63_command_receipt_test_trigger
     after insert on session_command_receipts
     for each row execute function ope63_command_receipt_test_trigger();
+
+    create function ope63_system_update_outbox_test_trigger()
+    returns trigger
+    language plpgsql
+    security definer
+    set search_path = pg_catalog, public
+    as $function$
+    declare
+      configured record;
+    begin
+      select lock_class, lock_id
+      into configured
+      from public.ope63_event_barriers
+      where event_type = 'outbox:' || new.dedupe_key;
+      if found then
+        perform pg_catalog.pg_advisory_xact_lock(configured.lock_class, configured.lock_id);
+      end if;
+      return new;
+    end
+    $function$;
+
+    create trigger ope63_system_update_outbox_test_trigger
+    before insert on session_system_update_outbox
+    for each row execute function ope63_system_update_outbox_test_trigger();
   `);
 }, 180_000);
 
@@ -789,6 +913,235 @@ describe("OPE-63 canonical session-event lock order", () => {
     expect(await assertCommittedSequence(secondTarget, 1)).toMatchObject([
       { sequence: 1, type: "system.update.pending" },
     ]);
+  }, 60_000);
+
+  test("locks both child lifecycle outbox sessions before parent-to-child Agent commands", async () => {
+    for (const order of ["parent-first", "child-first"] as const) {
+      for (const path of [
+        "idle",
+        "failed-settlement",
+        "exhausted-recovery",
+        "get-or-create",
+      ] as const) {
+        const workspace = await freshWorkspace();
+        const ids = orderedParentChildIds(order);
+        const parent = await seedRunningSession(workspace, { sessionId: ids.parentSessionId });
+        let child: Pick<RunningFixture, "accountId" | "workspaceId" | "sessionId">;
+        let runningChild: RunningFixture | null = null;
+        if (path === "idle" || path === "get-or-create") {
+          child = await seedIdleChild(workspace, ids.childSessionId, ids.parentSessionId);
+        } else {
+          runningChild = await seedRunningSession(workspace, {
+            sessionId: ids.childSessionId,
+            parentSessionId: ids.parentSessionId,
+          });
+          child = runningChild;
+        }
+        const dedupeKey =
+          path === "idle" || path === "get-or-create"
+            ? `child-completion:${child.sessionId}:0`
+            : `child-completion:${child.sessionId}:turn:${runningChild!.turnId}`;
+
+        const lifecycleWriter = async (): Promise<unknown> => {
+          switch (path) {
+            case "idle":
+              return await settleSessionIdleWithParentOutbox(
+                db,
+                workspace.workspaceId,
+                child.sessionId,
+              );
+            case "failed-settlement":
+              return await applySessionTurnSettlement(db, workspace.workspaceId, {
+                sessionId: runningChild!.sessionId,
+                turnId: runningChild!.turnId,
+                triggerEventId: runningChild!.triggerEventId,
+                attemptId: runningChild!.attemptId,
+                turnStatus: "failed",
+                sessionStatus: "failed",
+                activeTurnId: null,
+                events: [
+                  { type: "turn.failed", payload: { code: "ope63_test_failure" } },
+                  { type: "session.status.changed", payload: { status: "failed" } },
+                ],
+              });
+            case "exhausted-recovery":
+              return await recoverSessionDispatch(db, workspace.workspaceId, {
+                sessionId: runningChild!.sessionId,
+                attemptId: runningChild!.attemptId,
+                timeoutType: "HEARTBEAT",
+                maxRedispatches: 0,
+              });
+            case "get-or-create":
+              return await getOrCreateSessionSystemUpdateOutbox(db, {
+                accountId: workspace.accountId,
+                workspaceId: workspace.workspaceId,
+                sourceSessionId: child.sessionId,
+                targetSessionId: parent.sessionId,
+                dedupeKey,
+                kind: "child_terminal_result",
+                classification: "success",
+                sourceId: child.sessionId,
+                summary: "OPE-63 fallback outbox race",
+                payload: {
+                  type: "child_terminal_result",
+                  childSessionId: child.sessionId,
+                  status: "idle",
+                },
+                lineage: {
+                  childSessionId: child.sessionId,
+                  parentSessionId: parent.sessionId,
+                },
+              });
+          }
+        };
+
+        const [lifecycle, command] = await raceLifecycleOutboxAgainstAgentCommand({
+          dedupeKey,
+          lifecycleWriter,
+          parent,
+          child,
+        });
+        expect(command).toMatchObject({ replay: false });
+        if (path === "idle") expect(lifecycle).toMatchObject({ action: "settled" });
+        if (path === "failed-settlement") {
+          expect(lifecycle).toMatchObject({ action: "settled" });
+        }
+        if (path === "exhausted-recovery") {
+          expect(lifecycle).toMatchObject({ action: "exceeded" });
+        }
+        if (path === "get-or-create") {
+          expect(lifecycle).toMatchObject({ dedupeKey, status: "pending" });
+        }
+
+        const outbox = await admin<
+          Array<{
+            source_session_id: string;
+            target_session_id: string;
+            status: string;
+          }>
+        >`
+          select source_session_id, target_session_id, status
+          from session_system_update_outbox
+          where workspace_id = ${workspace.workspaceId}
+            and dedupe_key = ${dedupeKey}
+        `;
+        expect([...outbox]).toEqual([
+          {
+            source_session_id: child.sessionId,
+            target_session_id: parent.sessionId,
+            status: "pending",
+          },
+        ]);
+        const [updates] = await admin<{ count: number }[]>`
+          select count(*)::int as count
+          from session_system_updates
+          where workspace_id = ${workspace.workspaceId}
+            and session_id = ${child.sessionId}
+            and kind = 'agent_message'
+        `;
+        expect(updates?.count).toBe(1);
+        const expectedEventCount =
+          path === "idle"
+            ? 2
+            : path === "failed-settlement" || path === "exhausted-recovery"
+              ? 3
+              : 1;
+        const rows = await assertCommittedSequence(child, expectedEventCount);
+        expect(rows.filter((row) => row.type === "system.update.pending")).toHaveLength(1);
+      }
+    }
+  }, 180_000);
+
+  test("retries failed-child settlement persistence without replaying external effects", async () => {
+    for (const sqlState of ["40P01", "40001"] as const) {
+      const workspace = await freshWorkspace();
+      const parent = await seedRunningSession(workspace);
+      const child = await seedRunningSession(workspace, { parentSessionId: parent.sessionId });
+      await admin`select setval('ope63_fault_attempt_seq', 1, false)`;
+      let providerCalls = 0;
+      let toolEffects = 0;
+      let externalEffects = 0;
+      providerCalls += 1;
+      toolEffects += 1;
+      externalEffects += 1;
+      const sourceKey = `lifecycle-exactly-once-${sqlState}-${crypto.randomUUID()}`;
+
+      const settled = await applySessionTurnSettlement(db, workspace.workspaceId, {
+        sessionId: child.sessionId,
+        turnId: child.turnId,
+        triggerEventId: child.triggerEventId,
+        attemptId: child.attemptId,
+        turnStatus: "failed",
+        sessionStatus: "failed",
+        activeTurnId: null,
+        events: [
+          {
+            type: "agent.model.usage",
+            payload: { sourceKey, ope63FaultSqlState: sqlState, totalTokens: 42 },
+          },
+          { type: "turn.failed", payload: { code: "ope63_test_failure" } },
+        ],
+      });
+      expect(settled).toMatchObject({ action: "settled" });
+      expect(providerCalls).toBe(1);
+      expect(toolEffects).toBe(1);
+      expect(externalEffects).toBe(1);
+      const [attempts] = await admin<{ last_value: string }[]>`
+        select last_value::text from ope63_fault_attempt_seq
+      `;
+      expect(Number(attempts?.last_value)).toBe(2);
+      const rows = await assertCommittedSequence(child, 2);
+      expect(rows.filter((row) => row.type === "agent.model.usage")).toEqual([
+        expect.objectContaining({ payload: expect.objectContaining({ sourceKey }) }),
+      ]);
+      const [outbox] = await admin<{ count: number }[]>`
+        select count(*)::int as count
+        from session_system_update_outbox
+        where workspace_id = ${workspace.workspaceId}
+          and dedupe_key = ${`child-completion:${child.sessionId}:turn:${child.turnId}`}
+      `;
+      expect(outbox?.count).toBe(1);
+    }
+  }, 60_000);
+
+  test("sanitizes exhausted lifecycle persistence failures", async () => {
+    const workspace = await freshWorkspace();
+    const parent = await seedRunningSession(workspace);
+    const child = await seedRunningSession(workspace, { parentSessionId: parent.sessionId });
+    const error = await applySessionTurnSettlement(db, workspace.workspaceId, {
+      sessionId: child.sessionId,
+      turnId: child.turnId,
+      triggerEventId: child.triggerEventId,
+      attemptId: child.attemptId,
+      turnStatus: "failed",
+      sessionStatus: "failed",
+      activeTurnId: null,
+      events: [
+        {
+          type: "turn.failed",
+          payload: { ope63AlwaysFaultSqlState: "40P01", private: "private-token" },
+        },
+      ],
+    }).catch((caught) => caught);
+    expect(error).toBeInstanceOf(SessionEventPersistenceError);
+    expect((error as SessionEventPersistenceError).details).toMatchObject({
+      code: "db_deadlock",
+      sqlState: "40P01",
+      stage: "session_lifecycle_outbox.settle_turn",
+      eventTypes: ["child_terminal_result", "turn.failed"],
+      attempts: 3,
+      retryOutcome: "exhausted",
+      database: { table: "session_events" },
+    });
+    const observable = JSON.stringify({
+      message: (error as Error).message,
+      stack: (error as Error).stack,
+      details: (error as SessionEventPersistenceError).details,
+      cause: (error as Error & { cause?: unknown }).cause,
+    });
+    expect(observable).not.toContain("private-token");
+    expect(observable).not.toContain("insert into");
+    expect(await assertCommittedSequence(child, 0)).toEqual([]);
   }, 60_000);
 
   test("retries only idempotent persistence for real 40P01 and 40001 faults", async () => {
