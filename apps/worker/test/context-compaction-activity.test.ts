@@ -17,7 +17,9 @@ import {
   listSessionSystemUpdatesForTurn,
   peekSessionWork,
   requestSessionCompaction,
+  submitHumanPromptInTransaction,
   withWorkspaceRls,
+  withWorkspaceSubjectRls,
 } from "@opengeni/db";
 import * as schema from "@opengeni/db/schema";
 import type { EventBus } from "@opengeni/events";
@@ -661,7 +663,7 @@ describe("standalone context compaction execution", () => {
     expect(events).toContainEqual(expect.objectContaining({ type: "turn.recovery.requested" }));
   });
 
-  test("same-turn empty-summary recovery settles once and waits for new durable input", async () => {
+  test("same-turn empty-summary recovery settles once and waits for actionable durable input", async () => {
     const suffix = crypto.randomUUID();
     const access = await bootstrapWorkspace(client.db, {
       accountExternalSource: "test",
@@ -901,6 +903,43 @@ describe("standalone context compaction execution", () => {
       },
     });
     if (!newUpdate.added) throw new Error("new update was not inserted");
+    const heldClaim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: `dispatch-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    expect(heldClaim).toEqual({ action: "unclaimed", reason: "no-work" });
+    expect(
+      (
+        await listOutstandingSessionSystemUpdates(client.db, grant.workspaceId!, session.id)
+      ).map((update) => update.id),
+    ).toEqual(expect.arrayContaining([ordinary.update.id, newUpdate.update.id]));
+
+    await withWorkspaceSubjectRls(
+      client.db,
+      grant.workspaceId!,
+      grant.subjectId,
+      async (db) =>
+        await db.transaction(async (tx) =>
+          await submitHumanPromptInTransaction(tx as typeof db, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId!,
+            sessionId: session.id,
+            subjectId: grant.subjectId,
+            actor: { type: "human", subjectId: grant.subjectId },
+            operationKey: crypto.randomUUID(),
+            delivery: "send",
+            text: "Retry after the compaction failure with new human input",
+            resources: [],
+            tools: [],
+            reasoningEffortFallback: "low",
+            source: "user",
+          }),
+        ),
+    );
     const retryClaim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
       sessionId: session.id,
       workflowId: `session-${session.id}`,
@@ -911,9 +950,9 @@ describe("standalone context compaction execution", () => {
     });
     expect(retryClaim).toMatchObject({
       action: "claimed",
-      turn: { source: "system", metadata: { internalUpdateCount: 2 } },
+      turn: { source: "user" },
     });
-    if (retryClaim.action !== "claimed") throw new Error("new update did not wake the session");
+    if (retryClaim.action !== "claimed") throw new Error("human input did not wake the session");
     expect(
       (
         await listSessionSystemUpdatesForTurn(

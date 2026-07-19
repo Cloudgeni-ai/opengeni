@@ -4760,8 +4760,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             // terminal. End this workflow run as well: returning plain idle
             // would immediately synthesize another goal continuation against
             // the unchanged active history and repeat the same failed
-            // compaction. A new human prompt, Steer, or genuinely new internal
-            // update remains a durable explicit wake and may retry.
+            // compaction. A new human/API prompt, Steer, or explicitly requested
+            // Compact remains a durable explicit wake and may retry; ordinary
+            // machine updates stay pending for that actionable wake.
             return claimedResult({ status: "idle", deferredUntilWake: true });
           }
           // Codex parity: compaction remains inside the same logical turn and

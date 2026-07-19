@@ -164,10 +164,11 @@ failure during same-turn recovery, the exact turn is settled once, ordinary
 internal updates are deferred, and any delivered goal-continuation receipt is
 terminalized. A worker crash therefore cannot clear the request without the
 matching terminal truth, and an idle maintenance execution cannot immediately
-recreate itself forever. With no newer durable work wake, the workflow ends
-instead of retrying against unchanged history. A later human prompt, Steer, or
-genuinely new internal update can wake normal claim ordering and make one new
-attempt. The active history stays unchanged throughout.
+recreate itself forever. With no newer actionable work wake, the workflow ends
+instead of retrying against unchanged history. Ordinary machine updates remain
+pending; a later human/API prompt, Steer, or explicitly requested Compact can
+create newer truth and make one new attempt. The active history stays unchanged
+throughout.
 
 Codex-subscription responses are streaming on the wire even for this
 non-streaming summarizer. Terminal `response.failed`, `response.error`, `error`,

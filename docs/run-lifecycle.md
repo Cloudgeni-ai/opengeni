@@ -96,9 +96,10 @@ otherwise failed compaction identifies compaction summarization or the provider
 failure, never installs a mechanical summary, and preserves active history. A
 failed same-turn recovery atomically settles the exact turn, defers ordinary
 internal updates, terminalizes a delivered goal-continuation receipt, and ends
-that workflow run. Without a newer durable work wake, the workflow cannot
-synthesize another goal continuation from unchanged history; a later prompt,
-Steer, or genuinely new internal update may make one new attempt.
+that workflow run. Without a newer actionable work wake, the workflow cannot
+synthesize another goal continuation from unchanged history. Ordinary machine
+updates remain pending; a later human/API prompt, Steer, or explicitly requested
+Compact may create newer truth and make one new attempt.
 
 Resolved model context metadata is authoritative on every model-facing path.
 For the Codex subscription catalog this means a 272,000-token raw window, a
