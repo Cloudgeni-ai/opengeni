@@ -962,7 +962,8 @@ describe("Temporal workflow integration", () => {
     "workflow-wake dispatcher delegates one bounded canonical outbox sweep",
     async () => {
       const taskQueue = `workflow-test-${crypto.randomUUID()}`;
-      let dispatches = 0;
+      let wakeDispatches = 0;
+      let backgroundDispatches = 0;
       const expected = {
         claimed: 4,
         delivered: 4,
@@ -972,8 +973,12 @@ describe("Temporal workflow integration", () => {
       const worker = await testWorker(nativeConnection, taskQueue, {
         runAgentTurn: async () => ({ status: "idle" }),
         dispatchSessionWorkflowWakes: async () => {
-          dispatches += 1;
+          wakeDispatches += 1;
           return expected;
+        },
+        dispatchBackgroundJobControllers: async () => {
+          backgroundDispatches += 1;
+          return 3;
         },
       });
       const run = worker.run();
@@ -985,7 +990,8 @@ describe("Temporal workflow integration", () => {
           args: [],
         });
         expect(await handle.result()).toEqual(expected);
-        expect(dispatches).toBe(1);
+        expect(wakeDispatches).toBe(1);
+        expect(backgroundDispatches).toBe(1);
       } finally {
         worker.shutdown();
         await run;
