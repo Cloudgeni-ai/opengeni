@@ -23,6 +23,7 @@ describe("session-state interrupt settlement", () => {
           wakeSessionWorkflow: null,
         }) as any,
       {
+        getSessionTurnPersistenceReceipt: mock(async () => null),
         settleSessionAttemptInterruptions: mock(
           async (_db, workspaceId: string, sessionId: string, attemptId: string) => {
             controlApplications.push({ workspaceId, sessionId, attemptId });

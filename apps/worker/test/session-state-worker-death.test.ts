@@ -25,6 +25,7 @@ function makeActivities() {
         wakeSessionWorkflow: null,
       }) as any,
     {
+      getSessionTurnPersistenceReceipt: mock(async () => null),
       recoverSessionDispatch: mock(async (...args: unknown[]) => {
         recoveryCalls.push(args[2]);
         return recoveryResult as any;
