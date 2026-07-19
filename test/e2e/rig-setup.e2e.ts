@@ -126,7 +126,13 @@ describe("real Docker rig-setup e2e", () => {
   }
 
   test("first turn runs the setup (started+completed), second warm turn SKIPS via the marker", async () => {
-    const rigId = await seedRig("proof-rig", "echo ok > /tmp/opengeni-rig-proof && touch /tmp/x");
+    const rigId = await seedRig(
+      "proof-rig",
+      [
+        "if [ -e /tmp/opengeni-rig-proof ]; then echo setup-reran >&2; exit 19; fi",
+        "printf '%s\n' ok > /tmp/opengeni-rig-proof",
+      ].join("\n"),
+    );
     const sessionId = await createRigSession(rigId, "hello");
     const firstEvents = await waitForTerminal(sessionId);
 
@@ -230,6 +236,10 @@ function stackEnv(services: TestServices, localApiPort: number): Record<string, 
     OPENGENI_DOCKER_IMAGE: "opengeni-sandbox:local",
     OPENGENI_DOCKER_NETWORK: services.dockerNetwork,
     OPENGENI_SANDBOX_PREPARATION_PROFILES: "none",
+    // The marker is per box. Ownership keeps this session's Docker box live
+    // across turns so the second turn exercises the warm-marker path rather
+    // than correctly running setup in a newly-created legacy box.
+    OPENGENI_SANDBOX_OWNERSHIP_ENABLED: "true",
     // Pin the rig setup budget tiny so the sleep-5 rig hits the timeout branch;
     // the echo/touch rigs finish well within it.
     OPENGENI_RIG_SETUP_TIMEOUT_MS: "2000",
