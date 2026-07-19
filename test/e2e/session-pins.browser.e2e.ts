@@ -445,7 +445,16 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       expect(await composer.inputValue()).toBe("Unsent local draft that must not be overwritten");
       await queue.getByRole("button", { name: "Keep current draft" }).click();
       expect(await queuedRows.count()).toBe(2);
+      const clearedDraftSaved = desktopPage.waitForResponse(
+        (response) =>
+          response.request().method() === "PUT" &&
+          response.url() ===
+            `${apiBaseUrl}/v1/workspaces/${workspaceId}/sessions/${manager.id}/composer-draft` &&
+          response.ok(),
+      );
       await composer.fill("");
+      await clearedDraftSaved;
+      await desktopPage.getByText("Saving draft…", { exact: true }).waitFor({ state: "hidden" });
       await queue.getByRole("button", { name: "More actions for queued prompt 2" }).click();
       await desktopPage.getByRole("menuitem", { name: "Edit in composer" }).click();
       await waitFor(
