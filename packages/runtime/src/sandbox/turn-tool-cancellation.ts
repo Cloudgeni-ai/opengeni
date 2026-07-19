@@ -1,7 +1,11 @@
 import type { Computer, Editor, Tool } from "@openai/agents";
 
 import { runWithToolCallCorrelation, sanitizeOpIdToken } from "./op-correlation";
-import { parseExecBannerExitCode, parseExecBannerSessionId } from "./channel-a";
+import {
+  isExecSessionLostBanner,
+  parseExecBannerExitCode,
+  parseExecBannerSessionId,
+} from "./channel-a";
 
 const TURN_EXEC_YIELD_MS = 250;
 const TURN_WRITE_YIELD_MS = 250;
@@ -586,7 +590,13 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
               : input;
             const output = await tool.invoke(runContext, cappedInput, details);
             if (sessionId !== null && typeof output === "string") {
-              if (parseExecBannerSessionId(output) === sessionId) {
+              if (isExecSessionLostBanner(output, sessionId)) {
+                // Modal reports a vanished exec session as a non-throwing
+                // string. The matching provider banner is positive evidence
+                // that this exact tracked PTY no longer exists; a different id
+                // or an ambiguous error must leave the registration fenced.
+                this.shellSessions.delete(sessionId);
+              } else if (parseExecBannerSessionId(output) === sessionId) {
                 if (!this.shellSessions.has(sessionId)) {
                   this.shellSessions.set(sessionId, {
                     sessionId,
@@ -841,6 +851,10 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
         undefined,
       );
       if (typeof output !== "string") return false;
+      // Marker files can already be gone when a process exited outside the
+      // model-facing write path. Modal's exact matching lost-session banner is
+      // then the only positive provider proof that this tracked PTY is absent.
+      if (isExecSessionLostBanner(output, state.sessionId)) return true;
       if (parseExecBannerSessionId(output) === state.sessionId) return false;
       if (parseExecBannerExitCode(output) !== null) return true;
     } catch {

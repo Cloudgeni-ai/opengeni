@@ -176,6 +176,80 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     await quiescence;
   });
 
+  test("matching lost-session banners unregister ordinary and cancellation-finalizer PTYs", async () => {
+    const ordinaryController = createTurnToolCancellationController();
+    let ordinaryWrites = 0;
+    const ordinaryExec = functionTool("exec_command", async () => running(17));
+    const ordinaryWrite = functionTool("write_stdin", async () => {
+      ordinaryWrites += 1;
+      return "write_stdin failed: session not found: 17";
+    });
+    const ordinaryTools = ordinaryController.wrapTools([ordinaryExec, ordinaryWrite]) as Array<
+      Extract<Tool<unknown>, { type: "function" }>
+    >;
+    await ordinaryTools[0]!.invoke(runContext, JSON.stringify({ cmd: "sleep 60" }));
+    await ordinaryTools[1]!.invoke(runContext, JSON.stringify({ session_id: 17, chars: "" }));
+    ordinaryController.cancel(new Error("steered"));
+    await ordinaryController.waitForQuiescence();
+    expect(ordinaryWrites).toBe(1);
+
+    const finalizerAbort = new AbortController();
+    const finalizerController = createTurnToolCancellationController(finalizerAbort.signal);
+    let finalizerWrites = 0;
+    const finalizerExec = functionTool("exec_command", async (_context, rawInput) => {
+      const cmd = String((JSON.parse(rawInput) as { cmd?: unknown }).cmd);
+      if (cmd.includes("command cat '/tmp/opengeni-turn-shell/")) return exited(0);
+      return running(18);
+    });
+    const finalizerWrite = functionTool("write_stdin", async () => {
+      finalizerWrites += 1;
+      return "write_stdin failed: session not found: 18";
+    });
+    const [wrappedFinalizerExec] = finalizerController.wrapTools([
+      finalizerExec,
+      finalizerWrite,
+    ]) as Array<Extract<Tool<unknown>, { type: "function" }>>;
+    await wrappedFinalizerExec!.invoke(runContext, JSON.stringify({ cmd: "sleep 60" }));
+    finalizerAbort.abort(new Error("steered"));
+    await finalizerController.waitForQuiescence();
+    expect(finalizerWrites).toBe(1);
+  });
+
+  test("mismatched and ambiguous write failures cannot falsely open the PTY fence", async () => {
+    const abort = new AbortController();
+    const controller = createTurnToolCancellationController(abort.signal);
+    let response: "mismatched" | "ambiguous" | "matching" = "mismatched";
+    let writes = 0;
+    const exec = functionTool("exec_command", async (_context, rawInput) => {
+      const cmd = String((JSON.parse(rawInput) as { cmd?: unknown }).cmd);
+      if (cmd.includes("command cat '/tmp/opengeni-turn-shell/")) return exited(0);
+      return running(19);
+    });
+    const write = functionTool("write_stdin", async () => {
+      writes += 1;
+      if (response === "mismatched") return "write_stdin failed: session not found: 91";
+      if (response === "ambiguous") throw new Error("provider temporarily unavailable");
+      return "write_stdin failed: session not found: 19";
+    });
+    const [wrappedExec, wrappedWrite] = controller.wrapTools([exec, write]) as Array<
+      Extract<Tool<unknown>, { type: "function" }>
+    >;
+    await wrappedExec!.invoke(runContext, JSON.stringify({ cmd: "sleep 60" }));
+    expect(
+      await wrappedWrite!.invoke(runContext, JSON.stringify({ session_id: 19, chars: "" })),
+    ).toBe("write_stdin failed: session not found: 91");
+    abort.abort(new Error("steered"));
+    const quiescence = controller.waitForQuiescence();
+    await Bun.sleep(125);
+    expect(await pendingAfterMicrotasks(quiescence)).toBe(true);
+    response = "ambiguous";
+    await Bun.sleep(125);
+    expect(await pendingAfterMicrotasks(quiescence)).toBe(true);
+    response = "matching";
+    await quiescence;
+    expect(writes).toBeGreaterThanOrEqual(3);
+  });
+
   test("cancels a connected-machine op by its durable tool-call id before waiting for output", async () => {
     const abort = new AbortController();
     const controller = createTurnToolCancellationController(abort.signal);
