@@ -378,6 +378,7 @@ describe("Temporal workflow integration", () => {
               turnId: turn.id,
               reason,
               checkpointSucceeded: true,
+              queuedHumanWork: false,
             };
           },
           failSessionAttempt: async (input: unknown) => {
@@ -450,6 +451,7 @@ describe("Temporal workflow integration", () => {
               turnId: turn.id,
               reason,
               checkpointSucceeded: false,
+              queuedHumanWork: false,
             };
           },
           failSessionAttempt: async (input: unknown) => {
@@ -491,6 +493,87 @@ describe("Temporal workflow integration", () => {
       workerDeathTestTimeoutMs,
     );
   }
+
+  test(
+    "a real heartbeat timeout admits baselined human work after incomplete no-replay settlement",
+    async () => {
+      const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+      const scope = workflowScope();
+      const failedTurn = queuedTurn("event-1");
+      const baselinedPrompt = queuedTurn("event-older-than-recovery");
+      // Both turns exist before the workflow starts. No signal newer than the
+      // current workflow baseline can rescue the second prompt after recovery.
+      const queuedTurns = [failedTurn, baselinedPrompt];
+      const runs: Array<{ attemptId: string; turnId: string }> = [];
+      const recoveries: Array<{ attemptId: string; timeoutType: string }> = [];
+      const timeline: string[] = [];
+      const failures: unknown[] = [];
+      const admission = createTurnAdmission(queuedTurns, async (input, turn) => {
+        runs.push({ attemptId: input.attemptId, turnId: turn.id });
+        timeline.push(`run:${turn.id}`);
+        if (turn.id === failedTurn.id) return await hangWithoutHeartbeating();
+        return { status: "idle" };
+      });
+      const worker = await testWorker(nativeConnection, taskQueue, {
+        ...admission.activities,
+        markSessionIdle: async () => undefined,
+        maybeContinueGoal: async () => {
+          timeline.push("goal");
+          return { action: "none" as const };
+        },
+        recoverDispatch: async (input: { attemptId: string; timeoutType: string }) => {
+          recoveries.push(input);
+          timeline.push("recover");
+          admission.settleNoReplay();
+          return {
+            action: "settled_no_replay",
+            turnId: failedTurn.id,
+            reason: "transport_acceptance_unknown" as const,
+            checkpointSucceeded: false,
+            queuedHumanWork: true,
+          };
+        },
+        failSessionAttempt: async (input: unknown) => {
+          failures.push(input);
+        },
+        settleSessionInterruptions: async () => ({
+          action: "continue" as const,
+        }),
+      });
+      const run = worker.run();
+      try {
+        const client = new Client({ connection });
+        const handle = await client.workflow.start("sessionWorkflow", {
+          taskQueue,
+          workflowId: `wf-${crypto.randomUUID()}`,
+          args: [
+            {
+              ...scope,
+              sessionId: crypto.randomUUID(),
+              initialEventId: "event-1",
+            },
+          ],
+        });
+        await handle.result();
+        expect(runs.map((entry) => entry.turnId)).toEqual([failedTurn.id, baselinedPrompt.id]);
+        expect(runs.filter((entry) => entry.turnId === failedTurn.id)).toHaveLength(1);
+        expect(recoveries).toEqual([
+          expect.objectContaining({
+            attemptId: runs[0]!.attemptId,
+            timeoutType: "HEARTBEAT",
+          }),
+        ]);
+        const queuedRunIndex = timeline.indexOf(`run:${baselinedPrompt.id}`);
+        expect(queuedRunIndex).toBeGreaterThan(timeline.indexOf("recover"));
+        expect(timeline.slice(0, queuedRunIndex)).not.toContain("goal");
+        expect(failures).toHaveLength(0);
+      } finally {
+        worker.shutdown();
+        await run;
+      }
+    },
+    workerDeathTestTimeoutMs,
+  );
 
   test(
     "stops after atomic worker-death settlement exceeds the re-dispatch ceiling",

@@ -23510,6 +23510,7 @@ export type RecoverSessionDispatchResult =
       turnId: string;
       reason: SessionTurnNoReplayCheckpointReason;
       checkpointSucceeded: boolean;
+      queuedHumanWork: boolean;
       events: SessionEvent[];
     }
   | {
@@ -23646,11 +23647,24 @@ export async function recoverSessionDispatch(
             checkpoint.checkpoint.executionGeneration === settledTurn.executionGeneration &&
             checkpoint.checkpoint.disposition === "failed_idle"
           ) {
+            const [waitingPrompt] = await tx
+              .select({ id: schema.sessionTurns.id })
+              .from(schema.sessionTurns)
+              .where(
+                and(
+                  eq(schema.sessionTurns.workspaceId, workspaceId),
+                  eq(schema.sessionTurns.sessionId, input.sessionId),
+                  eq(schema.sessionTurns.status, "queued"),
+                  inArray(schema.sessionTurns.source, ["user", "api"]),
+                ),
+              )
+              .limit(1);
             return {
               action: "settled_no_replay" as const,
               turnId: settledTurn.id,
               reason: checkpoint.checkpoint.reason,
               checkpointSucceeded: checkpoint.checkpoint.conversationCheckpoint === "complete",
+              queuedHumanWork: waitingPrompt !== undefined,
               events: [] as SessionEvent[],
             };
           }
@@ -23748,6 +23762,7 @@ export async function recoverSessionDispatch(
           )
           .limit(1);
         const effectiveSessionStatus = waitingPrompt ? "queued" : "idle";
+        const queuedHumanWork = waitingPrompt !== undefined;
         const acceptedInvalidContent = checkpoint.reason === "provider_invalid_content";
         const checkpointSucceeded = checkpoint.conversationCheckpoint === "complete";
         const inserted = await tx
@@ -23858,6 +23873,7 @@ export async function recoverSessionDispatch(
           turnId: turn.id,
           reason: checkpoint.reason,
           checkpointSucceeded,
+          queuedHumanWork,
           events: [...closedTools.events, ...inserted.map(mapEvent)],
         };
       }

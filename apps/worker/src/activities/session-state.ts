@@ -186,6 +186,7 @@ export function createSessionStateActivities(
         turnId: result.turnId,
         reason: result.reason,
         checkpointSucceeded: result.checkpointSucceeded,
+        queuedHumanWork: result.queuedHumanWork,
       };
     }
     return {

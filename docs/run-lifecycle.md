@@ -51,9 +51,12 @@ than replaying it. If the worker dies after either durable boundary but before
 ordinary settlement, heartbeat recovery consumes the fence into the same
 failed/idle truth; it never increments the worker-death redispatch counter or
 reclaims the logical turn. A `complete` checkpoint may let an active goal start
-a **new** follow-up turn after pacing; `incomplete` reports checkpoint failure
-and suppresses automatic continuation. Without a goal, a later user message
-may continue.
+a **new** follow-up turn after pacing. An `incomplete` checkpoint reports
+failure and suppresses goal/internal continuation, but the locked settlement
+also reports whether an independent human/API turn is already queued; when it
+is, the workflow continues to its canonical FIFO peek/claim even if that turn's
+signal predates the current workflow baseline. A later prompt races through its
+normal transactional queue-revision wake path.
 For an MCP timeout after a successful tool output, the durable call/result
 lineage remains exactly once — neither the completed tool call nor the full
 turn is blindly replayed. Budget/credit exhaustion likewise leaves the session
@@ -236,7 +239,9 @@ attempt. When the exact attempt already stored an accepted/acceptance-unknown
 fails the turn and idles the session instead; no replacement attempt exists.
 This is true for both the pre-history `incomplete` marker and its atomic
 final-history `complete` upgrade. Recovery reports checkpoint success only for
-`complete`; `incomplete` also refuses automatic goal continuation. The exact
+`complete`; `incomplete` refuses automatic goal/internal continuation but
+returns the canonical locked fact for any separately queued human/API work so
+the workflow cannot close while that work is eligible and unowned. The exact
 closed attempt keeps this result idempotently recognizable when either the
 ordinary terminal settlement or recovery settlement commits but its activity
 response is lost.

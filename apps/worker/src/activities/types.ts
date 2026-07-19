@@ -162,9 +162,12 @@ export type RecoverDispatchResult =
       turnId: string;
       reason: "provider_invalid_content" | "transport_acceptance_unknown";
       // False means only the exact no-replay boundary committed before worker
-      // death; final conversation history remained incomplete, so the workflow
-      // must close without synthesizing an active-goal continuation.
+      // death; final conversation history remained incomplete. Only canonical
+      // queued human/API work may keep this workflow open in that state.
       checkpointSucceeded: boolean;
+      // Derived by the locked failed-idle settlement from queued user/API turns
+      // only. Goal, internal-update, deferred, and capacity work never set it.
+      queuedHumanWork: boolean;
     }
   // The turn is no longer running/requires_action: the timed-out attempt was
   // a zombie that actually settled the turn after the server gave up on its

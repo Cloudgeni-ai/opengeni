@@ -530,9 +530,15 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
           // timed-out attempt actually settled the turn (a zombie finished
           // after the server gave up on its heartbeats); nothing to redo.
           // If worker death exposed an incomplete final conversation checkpoint,
-          // stop this workflow run before the idle branch can synthesize a goal
-          // continuation. A later external wake is independently admitted.
-          return !(recovery.action === "settled_no_replay" && !recovery.checkpointSucceeded);
+          // stop before the idle branch can synthesize goal/internal work unless
+          // the locked settlement proved an independent human/API turn is
+          // already queued. That canonical work must reach the next peek/claim
+          // even when its signal predates this workflow's current baseline.
+          return !(
+            recovery.action === "settled_no_replay" &&
+            !recovery.checkpointSucceeded &&
+            !recovery.queuedHumanWork
+          );
         }
         // The worker-death activity atomically committed failed turn/session
         // truth when the bounded redispatch ceiling was exceeded.
