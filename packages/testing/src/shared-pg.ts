@@ -438,7 +438,7 @@ function uniqueDbName(label: string): string {
     .slice(0, 24)}_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
 }
 
-function databaseUrl(
+function databaseUrlForDatabase(
   baseUrl: string,
   dbName: string,
   credentials?: { username: string; password: string },
@@ -453,7 +453,7 @@ function databaseUrl(
 }
 
 async function ensureExternalCluster(adminBaseUrl: string): Promise<void> {
-  const rootUrl = databaseUrl(adminBaseUrl, "postgres");
+  const rootUrl = databaseUrlForDatabase(adminBaseUrl, "postgres");
   await waitForReady(rootUrl);
   const root = postgres(rootUrl, { max: 1 });
   try {
@@ -471,7 +471,7 @@ async function ensureExternalCluster(adminBaseUrl: string): Promise<void> {
 }
 
 async function createExternalDatabase(adminBaseUrl: string, dbName: string): Promise<void> {
-  const root = postgres(databaseUrl(adminBaseUrl, "postgres"), { max: 1 });
+  const root = postgres(databaseUrlForDatabase(adminBaseUrl, "postgres"), { max: 1 });
   try {
     await root.unsafe(`CREATE DATABASE "${dbName}"`);
   } finally {
@@ -480,7 +480,7 @@ async function createExternalDatabase(adminBaseUrl: string, dbName: string): Pro
 }
 
 async function dropExternalDatabase(adminBaseUrl: string, dbName: string): Promise<void> {
-  const root = postgres(databaseUrl(adminBaseUrl, "postgres"), { max: 1 });
+  const root = postgres(databaseUrlForDatabase(adminBaseUrl, "postgres"), { max: 1 });
   try {
     await root.unsafe(`DROP DATABASE IF EXISTS "${dbName}" WITH (FORCE)`).catch(() => undefined);
   } finally {
@@ -508,8 +508,8 @@ async function acquireExternalSharedTestDatabase(
 ): Promise<SharedTestDatabase> {
   await ensureExternalCluster(adminBaseUrl);
   const dbName = uniqueDbName(label);
-  const adminUrl = databaseUrl(adminBaseUrl, dbName);
-  const appUrl = databaseUrl(adminBaseUrl, dbName, {
+  const adminUrl = databaseUrlForDatabase(adminBaseUrl, dbName);
+  const appUrl = databaseUrlForDatabase(adminBaseUrl, dbName, {
     username: "opengeni_app",
     password: APP_PASSWORD,
   });
@@ -544,7 +544,7 @@ async function acquireExternalBlankTestDatabase(
 ): Promise<BlankTestDatabase> {
   await ensureExternalCluster(adminBaseUrl);
   const dbName = uniqueDbName(label);
-  const databaseUrlForTest = databaseUrl(adminBaseUrl, dbName);
+  const databaseUrlForTest = databaseUrlForDatabase(adminBaseUrl, dbName);
   await createExternalDatabase(adminBaseUrl, dbName);
   let released = false;
   return {

@@ -42,9 +42,9 @@ describe("migration 0076 (atomic session initialization receipt)", () => {
       await admin.unsafe(
         "create table if not exists schema_migrations (name text primary key, applied_at timestamptz not null default now())",
       );
-      for (const file of files.filter((file) => file < "0076_")) {
-        await admin.unsafe(await readFile(join(migrationsDir, file), "utf8"));
-        await admin`insert into schema_migrations (name) values (${file}) on conflict do nothing`;
+      for (const migrationFile of files.filter((file) => file < "0076_")) {
+        await admin.unsafe(await readFile(join(migrationsDir, migrationFile), "utf8"));
+        await admin`insert into schema_migrations (name) values (${migrationFile}) on conflict do nothing`;
       }
 
       const [account] = await admin<{ id: string }[]>`

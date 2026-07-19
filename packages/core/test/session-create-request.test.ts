@@ -66,12 +66,12 @@ class RecordingWorkflowClient implements SessionWorkflowClient {
 
 function deps(
   db: Database,
-  settings: Settings,
+  appSettings: Settings,
   workflowClient = new RecordingWorkflowClient(),
   bus = new MemoryEventBus(),
 ): ApiRouteDeps {
   return {
-    settings,
+    settings: appSettings,
     db,
     bus,
     workflowClient,

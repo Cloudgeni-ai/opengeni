@@ -8,7 +8,6 @@ import {
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
   createDb,
-  initializeSessionStartAtomically,
   listSessionEvents,
   listSessionTurns,
   peekSessionWork,
