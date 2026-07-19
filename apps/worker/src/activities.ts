@@ -34,6 +34,9 @@ export type {
   ReconcileCodexCapacityWaitResult,
   RecoverDispatchInput,
   RecoverDispatchResult,
+  PersistTurnHandoffAndRecoverInput,
+  PersistTurnHandoffAndRecoverResult,
+  TurnPersistenceHandoff,
   RunAgentTurnInput,
   RunAgentTurnResult,
 } from "./activities/types";
@@ -155,6 +158,7 @@ export const indexDocument = defaultControlActivities.indexDocument;
 export const failSessionAttempt = defaultControlActivities.failSessionAttempt;
 export const settleSessionInterruptions = defaultControlActivities.settleSessionInterruptions;
 export const recoverDispatch = defaultControlActivities.recoverDispatch;
+export const persistTurnHandoffAndRecover = defaultControlActivities.persistTurnHandoffAndRecover;
 export const peekSessionWork = defaultControlActivities.peekSessionWork;
 export const markSessionIdle = defaultControlActivities.markSessionIdle;
 export const dispatchScheduledTaskRun = defaultControlActivities.dispatchScheduledTaskRun;

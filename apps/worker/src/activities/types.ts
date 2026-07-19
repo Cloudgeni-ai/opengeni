@@ -1,8 +1,9 @@
-import type { Settings } from "@opengeni/config";
+import type { ModelUsageInput, Settings } from "@opengeni/config";
 import type {
   ConnectionCredentialsPort,
   EntitlementsPort,
   ScheduledTaskTriggerType,
+  SessionEventType,
 } from "@opengeni/contracts";
 import type { Database } from "@opengeni/db";
 import type { DocumentServices } from "@opengeni/documents";
@@ -155,6 +156,101 @@ export type RecoverDispatchResult =
   // ceiling), so the failed attempt was worker death number redispatches + 1.
   | { action: "exceeded"; turnId: string; redispatches: number };
 
+export type PendingToolCallPersistenceObligation = {
+  kind: "pending_tool_call";
+  callId: string;
+  callType: string;
+  callItem: Record<string, unknown>;
+};
+
+export type ExactTurnEventPersistenceInput = {
+  type: SessionEventType;
+  payload: unknown;
+  turnId: string;
+  producerId: string;
+  producerSeq: number;
+  occurredAt: string;
+};
+
+export type ModelCallPersistenceObligation = {
+  kind: "model_call";
+  history: {
+    producerCodexCredentialId: string | null;
+    modelToolOutputTruncationTokens: number;
+    items: Array<{ position: number; item: Record<string, unknown> }>;
+  };
+  metering: {
+    model: string;
+    isCodexTurn: boolean;
+    usage: ModelUsageInput;
+    sourceKey: string;
+  };
+  event: ExactTurnEventPersistenceInput;
+};
+
+export type PreparedContextCompactionPersistence =
+  | {
+      action: "apply";
+      persistenceKey: string;
+      replacementItems: Array<Record<string, unknown>>;
+      summaryItem: Record<string, unknown>;
+      replacementInputTokens: number;
+      clearRequestedCompaction: boolean;
+      occurredAt: string;
+      eventPayload: Record<string, unknown>;
+      result: {
+        signalTokens: number;
+        thresholdTokens: number;
+        estimatedTokensBefore: number;
+        estimatedTokensAfter: number;
+        replacementFingerprint: string;
+      };
+    }
+  | {
+      action: "skip";
+      persistenceKey: string;
+      reason: "replacement_not_smaller" | "replacement_unchanged";
+      clearRequestedCompaction: boolean;
+      occurredAt: string;
+      eventPayload: Record<string, unknown>;
+    };
+
+export type ContextCompactionPersistenceObligation = {
+  kind: "context_compaction";
+  compaction: PreparedContextCompactionPersistence;
+  metering: ModelCallPersistenceObligation["metering"] | null;
+  event: ExactTurnEventPersistenceInput | null;
+};
+
+/**
+ * Exact persistence work a turn worker had accepted but could not prove
+ * durable. This is intentionally operation-scoped: the control worker may
+ * retry the database write, but never provider inference or tool execution.
+ */
+export type TurnPersistenceHandoff = {
+  version: 1;
+  turnId: string;
+  triggerEventId: string;
+  executionGeneration: number;
+  obligation:
+    | PendingToolCallPersistenceObligation
+    | ModelCallPersistenceObligation
+    | ContextCompactionPersistenceObligation;
+};
+
+export type PersistTurnHandoffAndRecoverInput = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  attemptId: string;
+  handoff: TurnPersistenceHandoff;
+  reason: "activity_result" | "heartbeat_timeout";
+};
+
+export type PersistTurnHandoffAndRecoverResult =
+  | { action: "recovering"; turnId: string }
+  | { action: "stale" };
+
 export type PeekSessionWorkInput = {
   workspaceId: string;
   sessionId: string;
@@ -204,9 +300,17 @@ export type IndexDocumentInput = {
 type ClaimedRunAgentTurnResult = {
   // "recovering": this attempt ended after durably preserving the same current
   // inference for a new attempt. Recovery is not prompt queue work.
-  status: "idle" | "requires_action" | "failed" | "cancelled" | "recovering";
+  status:
+    | "idle"
+    | "requires_action"
+    | "failed"
+    | "cancelled"
+    | "recovering"
+    | "persistence_pending";
   turnId: string;
   attemptId: string;
+  /** Present only for persistence_pending; consumed by a retryable control activity. */
+  persistenceHandoff?: TurnPersistenceHandoff;
   // Provider backpressure pacing: when set on an idle or recovering result, the
   // session workflow holds the loop this long before admitting the next attempt.
   continueDelayMs?: number;

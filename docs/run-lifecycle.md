@@ -107,6 +107,40 @@ compaction transition, tool receipt, and terminal settlement must match that
 attempt. A typed schedule-to-start timeout is the only no-attempt recovery case
 because its activity never ran.
 
+Completed provider and tool effects have a narrower durability boundary than
+the full activity. Function tools expose the provider-stable call id at the SDK
+`invoke` seam; the worker must register that exact call receipt under the turn
+fence **before** the underlying function can start. A missing call id or failed
+registration blocks the effect. A completed ordinary model response prepares
+the exact new conversation rows, idempotent accounting source key, and reserved
+`agent.model.usage` producer event. A completed compaction response additionally
+prepares the exact apply/skip transition, replacement fingerprint, and
+persistence key. The activity heartbeats that versioned obligation before its
+first lease renewal or Postgres mutation.
+
+If the worker cannot prove final persistence, it returns internal status
+`persistence_pending`; if the process dies, the same obligation remains in the
+last Temporal heartbeat. The workflow validates every identity and timestamp,
+then invokes only `persistTurnHandoffAndRecover`, a retryable control activity
+whose dependency closure contains database/event persistence but no provider,
+runtime, tool, or sandbox execution. Its fixed orders are:
+
+- tool: pending-call receipt → same-turn recovery;
+- model: conversation rows → usage/credit ledger → exact usage event → recovery;
+- compaction: usage/credit ledger → exact usage event → exact prepared
+  apply/skip → recovery.
+
+Every phase is idempotent under the original attempt fence. Exact producer rows
+confirm an ambiguous event commit; compaction confirms the same persistence key
+and replacement fingerprint; accounting uses the same source key. Only after
+all Postgres obligations are confirmed does the transactionally fenced recovery
+advance the logical turn for a higher-generation attempt. Activity-response
+loss, Temporal control-activity retry, and old/new worker overlap therefore
+repeat persistence only—not inference, tool invocation, or an external effect.
+A present but malformed heartbeat obligation fails closed and cannot fall back
+to generic worker-death redispatch. PostgreSQL is the authority; NATS fanout is
+retried/best-effort delivery and never changes whether recovery is safe.
+
 Claim, interruption, and event-writing settlement share one lock order:
 workspace, then session, then exact turn, then exact attempt. Event inserts also touch the workspace through
 their foreign keys, so acquiring it later would reintroduce a claim/preemption
@@ -151,9 +185,11 @@ kill (SIGKILL, OOM, node loss, a rollout whose grace period expired) never
 runs the graceful checkpoint; it surfaces to the session workflow as a
 heartbeat-timeout `ActivityFailure` carrying the exact dead activity id. The
 workflow does not fail the session independently for that shape: conversation
-truth was still dual-written after every model response during the turn, so
-the fenced `recoverTurnAfterWorkerDeath` activity atomically closes the lost
-attempt, marks the same
+truth was still persisted after every completed model response during the turn.
+When the heartbeat carries a pending exact persistence obligation, the workflow
+settles that receipt through `persistTurnHandoffAndRecover` before any
+redispatch. Otherwise the fenced `recoverTurnAfterWorkerDeath` activity
+atomically closes the lost attempt, marks the same
 logical turn `recovering` and the loop dispatches its next attempt. This is not
 prompt-queue work and not an automatic Temporal retry of side-effectful work:
 the resumed attempt sees everything durably checkpointed, including explicit

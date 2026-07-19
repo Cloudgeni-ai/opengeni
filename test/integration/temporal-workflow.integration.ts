@@ -35,6 +35,15 @@ async function hangWithoutHeartbeating(): Promise<{ status: string }> {
   throw new Error("unreachable simulated dead worker completion");
 }
 
+async function heartbeatPersistenceThenDie(
+  persistenceHandoff: unknown,
+): Promise<{ status: string }> {
+  const context = currentActivityContext();
+  if (!context) throw new Error("simulated worker-death activity has no Temporal context");
+  context.heartbeat({ persistenceHandoff });
+  return await hangWithoutHeartbeating();
+}
+
 // Generous bound for the server to detect a missed-heartbeat activity
 // (2-minute heartbeat window + server detection slack) plus the rest of the
 // test. This timeout does not change runtime behavior; it only prevents a slow
@@ -271,6 +280,95 @@ describe("Temporal workflow integration", () => {
   );
 
   test(
+    "persists a returned handoff before continue-as-new re-dispatches the same turn",
+    async () => {
+      const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+      const scope = workflowScope();
+      const sessionId = crypto.randomUUID();
+      const workflowId = `wf-${crypto.randomUUID()}`;
+      const turn = queuedTurn("event-1");
+      const queuedTurns = [turn];
+      const runs: Array<{ attemptId: string }> = [];
+      const handoffs: unknown[] = [];
+      const failures: unknown[] = [];
+      const admission = createTurnAdmission(queuedTurns, async (input) => {
+        runs.push(input as (typeof runs)[number]);
+        return runs.length === 1
+          ? {
+              status: "persistence_pending",
+              persistenceHandoff: {
+                version: 1,
+                turnId: turn.id,
+                triggerEventId: turn.triggerEventId,
+                executionGeneration: 1,
+                obligation: {
+                  kind: "pending_tool_call",
+                  callId: "call-1",
+                  callType: "function_call",
+                  callItem: {
+                    type: "function_call",
+                    callId: "call-1",
+                    name: "external_effect",
+                    arguments: "{}",
+                  },
+                },
+              },
+            }
+          : { status: "idle" };
+      });
+      const worker = await testWorker(nativeConnection, taskQueue, {
+        ...admission.activities,
+        persistTurnHandoffAndRecover: async (input: unknown) => {
+          handoffs.push(input);
+          admission.recover();
+          return { action: "recovering", turnId: turn.id };
+        },
+        markSessionIdle: async () => undefined,
+        failSessionAttempt: async (input: unknown) => {
+          failures.push(input);
+        },
+        settleSessionInterruptions: async () => ({ action: "continue" as const }),
+      });
+      const run = worker.run();
+      try {
+        const client = new Client({ connection });
+        const handle = await client.workflow.start("sessionWorkflow", {
+          taskQueue,
+          workflowId,
+          args: [{ ...scope, sessionId, initialEventId: "event-1", maxTurnsPerRun: 1 }],
+        });
+        await handle.result();
+        expect(runs).toHaveLength(2);
+        expect(handoffs).toEqual([
+          expect.objectContaining({
+            attemptId: runs[0]!.attemptId,
+            reason: "activity_result",
+            handoff: expect.objectContaining({ turnId: turn.id }),
+          }),
+        ]);
+        expect(failures).toHaveLength(0);
+
+        const firstRun = client.workflow.getHandle(workflowId, handle.firstExecutionRunId);
+        const history = await firstRun.fetchHistory();
+        const continuedEvent = (history.events ?? []).find(
+          (event) => event.workflowExecutionContinuedAsNewEventAttributes != null,
+        );
+        expect(continuedEvent).toBeDefined();
+        expect(decodeContinuedInput(continuedEvent)).toEqual({
+          accountId: scope.accountId,
+          workspaceId: scope.workspaceId,
+          sessionId,
+          maxTurnsPerRun: 1,
+        });
+      } finally {
+        worker.shutdown();
+        await run;
+      }
+    },
+    continueAsNewTestTimeoutMs,
+  );
+
+  test(
     "re-dispatches a turn whose worker died (heartbeat timeout) instead of failing the session",
     async () => {
       const taskQueue = `workflow-test-${crypto.randomUUID()}`;
@@ -329,6 +427,120 @@ describe("Temporal workflow integration", () => {
             timeoutType: "HEARTBEAT",
           }),
         ]);
+        expect(failures).toHaveLength(0);
+      } finally {
+        worker.shutdown();
+        await run;
+      }
+    },
+    workerDeathTestTimeoutMs,
+  );
+
+  test(
+    "persists a completed-model heartbeat after worker death without replaying inference",
+    async () => {
+      const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+      const scope = workflowScope();
+      const turn = queuedTurn("event-1");
+      const handoff = modelPersistenceHandoff(turn);
+      const queuedTurns = [turn];
+      const runs: Array<{ attemptId: string }> = [];
+      const persistenceRetries: unknown[] = [];
+      const genericRecoveries: unknown[] = [];
+      const failures: unknown[] = [];
+      const admission = createTurnAdmission(queuedTurns, async (input) => {
+        runs.push(input as (typeof runs)[number]);
+        if (runs.length === 1) return await heartbeatPersistenceThenDie(handoff);
+        return { status: "idle" };
+      });
+      const worker = await testWorker(nativeConnection, taskQueue, {
+        ...admission.activities,
+        markSessionIdle: async () => undefined,
+        persistTurnHandoffAndRecover: async (input: unknown) => {
+          persistenceRetries.push(input);
+          admission.recover();
+          return { action: "recovering", turnId: turn.id };
+        },
+        recoverDispatch: async (input: unknown) => {
+          genericRecoveries.push(input);
+          return { action: "recovering", turnId: turn.id, redispatches: 1 };
+        },
+        failSessionAttempt: async (input: unknown) => {
+          failures.push(input);
+        },
+        settleSessionInterruptions: async () => ({ action: "continue" as const }),
+      });
+      const run = worker.run();
+      try {
+        const client = new Client({ connection });
+        const handle = await client.workflow.start("sessionWorkflow", {
+          taskQueue,
+          workflowId: `wf-${crypto.randomUUID()}`,
+          args: [{ ...scope, sessionId: crypto.randomUUID(), initialEventId: "event-1" }],
+        });
+        await handle.result();
+        expect(runs).toHaveLength(2);
+        expect(persistenceRetries).toEqual([
+          expect.objectContaining({
+            attemptId: runs[0]!.attemptId,
+            reason: "heartbeat_timeout",
+            handoff,
+          }),
+        ]);
+        expect(genericRecoveries).toHaveLength(0);
+        expect(failures).toHaveLength(0);
+      } finally {
+        worker.shutdown();
+        await run;
+      }
+    },
+    workerDeathTestTimeoutMs,
+  );
+
+  test(
+    "fails closed on a malformed persistence heartbeat instead of replaying the turn",
+    async () => {
+      const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+      const scope = workflowScope();
+      const queuedTurns = [queuedTurn("event-1")];
+      const runs: unknown[] = [];
+      const persistenceRetries: unknown[] = [];
+      const genericRecoveries: unknown[] = [];
+      const failures: unknown[] = [];
+      const admission = createTurnAdmission(queuedTurns, async (input) => {
+        runs.push(input);
+        return await heartbeatPersistenceThenDie({ version: 1, obligation: "corrupt" });
+      });
+      const worker = await testWorker(nativeConnection, taskQueue, {
+        ...admission.activities,
+        markSessionIdle: async () => undefined,
+        persistTurnHandoffAndRecover: async (input: unknown) => {
+          persistenceRetries.push(input);
+          return { action: "stale" as const };
+        },
+        recoverDispatch: async (input: unknown) => {
+          genericRecoveries.push(input);
+          return { action: "stale" as const };
+        },
+        failSessionAttempt: async (input: unknown) => {
+          failures.push(input);
+        },
+        settleSessionInterruptions: async () => ({ action: "continue" as const }),
+      });
+      const run = worker.run();
+      try {
+        const client = new Client({ connection });
+        const handle = await client.workflow.start("sessionWorkflow", {
+          taskQueue,
+          workflowId: `wf-${crypto.randomUUID()}`,
+          args: [{ ...scope, sessionId: crypto.randomUUID(), initialEventId: "event-1" }],
+        });
+        await expect(handle.result()).rejects.toThrow(
+          "Worker heartbeat carried an invalid persistence handoff",
+        );
+        expect(runs).toHaveLength(1);
+        expect(persistenceRetries).toHaveLength(0);
+        expect(genericRecoveries).toHaveLength(0);
         expect(failures).toHaveLength(0);
       } finally {
         worker.shutdown();
@@ -1674,6 +1886,8 @@ function createTurnAdmission(
           currentState = "approval";
         } else if (result.status === "recovering") {
           currentState = "recovering";
+        } else if (result.status === "persistence_pending") {
+          currentState = "running";
         } else if (result.capacityWait) {
           current = null;
           currentAttemptId = null;
@@ -1698,6 +1912,49 @@ function queuedTurn(triggerEventId: string): WorkflowTestTurn {
   return {
     id: crypto.randomUUID(),
     triggerEventId,
+  };
+}
+
+function modelPersistenceHandoff(turn: WorkflowTestTurn) {
+  const sourceKey = `response-${turn.id}`;
+  return {
+    version: 1 as const,
+    turnId: turn.id,
+    triggerEventId: turn.triggerEventId,
+    executionGeneration: 1,
+    obligation: {
+      kind: "model_call" as const,
+      history: {
+        producerCodexCredentialId: null,
+        modelToolOutputTruncationTokens: 4_096,
+        items: [
+          {
+            position: 4,
+            item: { type: "message", role: "assistant", content: "completed once" },
+          },
+        ],
+      },
+      metering: {
+        model: "gpt-5.6-sol",
+        isCodexTurn: false,
+        usage: { inputTokens: 10, outputTokens: 2, totalTokens: 12 },
+        sourceKey,
+      },
+      event: {
+        type: "agent.model.usage" as const,
+        payload: {
+          turnId: turn.id,
+          model: "gpt-5.6-sol",
+          sourceKey,
+          inputTokens: 10,
+          outputTokens: 2,
+        },
+        turnId: turn.id,
+        producerId: "workflow:turn:activity",
+        producerSeq: 17,
+        occurredAt: "2026-07-18T22:22:36.000Z",
+      },
+    },
   };
 }
 

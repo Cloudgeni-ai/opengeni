@@ -105,6 +105,7 @@ import {
 } from "drizzle-orm";
 import type { PgDatabase, PgTransactionConfig } from "drizzle-orm/pg-core";
 import { drizzle } from "drizzle-orm/postgres-js";
+import { isDeepStrictEqual } from "node:util";
 import postgres from "postgres";
 import { decryptEnvironmentValue } from "./environment-crypto";
 import { sanitizeEventPayload, sanitizeModelPayload } from "./event-payload-sanitizer";
@@ -11889,6 +11890,55 @@ export async function getSessionEvent(
   });
 }
 
+/**
+ * Internal durable-producer lookup used to confirm an event append whose
+ * transaction outcome is ambiguous (for example, the connection dropped after
+ * PostgreSQL committed). This is deliberately read-only: canonical sequence
+ * allocation and attempt fencing remain owned by the append transaction.
+ */
+export type ProducedSessionEvent = SessionEvent & {
+  producerId: string;
+  producerSeq: number;
+};
+
+export async function listSessionEventsByProducer(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  producerId: string,
+  producerSeqs: number[],
+): Promise<ProducedSessionEvent[]> {
+  const sequences = [
+    ...new Set(producerSeqs.filter((sequence) => Number.isSafeInteger(sequence) && sequence >= 0)),
+  ];
+  if (!producerId || sequences.length === 0) return [];
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select()
+      .from(schema.sessionEvents)
+      .where(
+        and(
+          eq(schema.sessionEvents.workspaceId, workspaceId),
+          eq(schema.sessionEvents.sessionId, sessionId),
+          eq(schema.sessionEvents.producerId, producerId),
+          inArray(schema.sessionEvents.producerSeq, sequences),
+        ),
+      )
+      .orderBy(asc(schema.sessionEvents.producerSeq));
+    return rows.flatMap((row) =>
+      row.producerId !== null && row.producerSeq !== null
+        ? [
+            {
+              ...mapEvent(row),
+              producerId: row.producerId,
+              producerSeq: row.producerSeq,
+            },
+          ]
+        : [],
+    );
+  });
+}
+
 function mapWorkspaceControlEvent(
   row: typeof schema.workspaceControlEvents.$inferSelect,
 ): WorkspaceControlEvent {
@@ -12614,6 +12664,47 @@ export type ApplyContextCompactionResult =
   | { applied: false; reason: TurnAttemptFenceRejectReason };
 
 /**
+ * Read-only recovery hint: a prior attempt of this same logical turn already
+ * durably settled a provider-produced compaction result. A higher-generation
+ * attempt uses it to avoid sampling that summarizer again; the event is never
+ * fed to the model and does not grant write authority.
+ */
+export async function hasSessionContextCompactionOutcomeForTurn(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  turnId: string,
+): Promise<boolean> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({ id: schema.sessionEvents.id })
+      .from(schema.sessionEvents)
+      .where(
+        and(
+          eq(schema.sessionEvents.workspaceId, workspaceId),
+          eq(schema.sessionEvents.sessionId, sessionId),
+          eq(schema.sessionEvents.turnId, turnId),
+          inArray(schema.sessionEvents.type, [
+            "session.context.compacted",
+            "session.context.compaction.skipped",
+          ]),
+        ),
+      )
+      .limit(1);
+    return Boolean(row);
+  });
+}
+
+function compactionPersistencePayloadMatches(
+  actual: unknown,
+  expected: Record<string, unknown>,
+): boolean {
+  if (!actual || typeof actual !== "object" || Array.isArray(actual)) return false;
+  const record = actual as Record<string, unknown>;
+  return Object.entries(expected).every(([key, value]) => isDeepStrictEqual(record[key], value));
+}
+
+/**
  * Atomically install the Codex-style replacement history for one exact turn
  * attempt. The old active rows remain as inactive audit evidence; the retained
  * user messages and summary receive fresh whole-number positions after every
@@ -12633,6 +12724,8 @@ export async function applyContextCompaction(
     summaryItem: Record<string, unknown>;
     replacementInputTokens: number;
     clearRequestedCompaction?: boolean;
+    persistenceKey?: string;
+    occurredAt?: Date;
     eventPayload?: Record<string, unknown>;
   },
 ): Promise<ApplyContextCompactionResult> {
@@ -12650,6 +12743,43 @@ export async function applyContextCompaction(
         });
         if (!fence.allowed) {
           return { applied: false as const, reason: fence.reason };
+        }
+        if (input.persistenceKey) {
+          const [existing] = await tx
+            .select()
+            .from(schema.sessionEvents)
+            .where(
+              and(
+                eq(schema.sessionEvents.workspaceId, input.workspaceId),
+                eq(schema.sessionEvents.sessionId, input.sessionId),
+                eq(schema.sessionEvents.turnId, input.turnId),
+                eq(schema.sessionEvents.turnGeneration, input.expectedExecutionGeneration),
+                eq(schema.sessionEvents.turnAttemptId, input.expectedAttemptId),
+                eq(schema.sessionEvents.type, "session.context.compacted"),
+                sql`${schema.sessionEvents.payload}->>'persistenceKey' = ${input.persistenceKey}`,
+              ),
+            )
+            .limit(1);
+          if (existing) {
+            const expectedPayload = input.eventPayload ?? { persistenceKey: input.persistenceKey };
+            if (!compactionPersistencePayloadMatches(existing.payload, expectedPayload)) {
+              throw new Error(
+                `context compaction persistence key collision: ${input.persistenceKey}`,
+              );
+            }
+            const payload = existing.payload as Record<string, unknown>;
+            const supersededFrom = Number(payload.supersededFrom);
+            const summaryPosition = Number(payload.summaryPosition);
+            if (!Number.isSafeInteger(supersededFrom) || !Number.isSafeInteger(summaryPosition)) {
+              throw new Error(`context compaction receipt is malformed: ${input.persistenceKey}`);
+            }
+            return {
+              applied: true as const,
+              supersededFrom,
+              summaryPosition,
+              events: [mapEvent(existing)],
+            };
+          }
         }
         const [{ maxPosition } = { maxPosition: -1 }] = await tx
           .select({
@@ -12711,9 +12841,11 @@ export async function applyContextCompaction(
                 type: "session.context.compacted",
                 payload: sanitizeEventPayload({
                   ...input.eventPayload,
+                  ...(input.persistenceKey ? { persistenceKey: input.persistenceKey } : {}),
+                  supersededFrom,
                   summaryPosition,
                 }),
-                occurredAt: new Date(),
+                occurredAt: input.occurredAt ?? new Date(),
               })
               .returning()
           : [];
@@ -12764,6 +12896,10 @@ export async function recordSkippedContextCompaction(
       | "replacement_not_smaller"
       | "replacement_unchanged"
       | "summarization_failed";
+    clearRequestedCompaction?: boolean;
+    persistenceKey?: string;
+    occurredAt?: Date;
+    eventPayload?: Record<string, unknown>;
   },
 ): Promise<
   | { recorded: true; events: SessionEvent[] }
@@ -12782,7 +12918,37 @@ export async function recordSkippedContextCompaction(
           attemptId: input.expectedAttemptId,
         });
         if (!fence.allowed) return { recorded: false as const, reason: fence.reason };
-        if (!fence.session.compactRequested) {
+        if (input.persistenceKey) {
+          const [existing] = await tx
+            .select()
+            .from(schema.sessionEvents)
+            .where(
+              and(
+                eq(schema.sessionEvents.workspaceId, input.workspaceId),
+                eq(schema.sessionEvents.sessionId, input.sessionId),
+                eq(schema.sessionEvents.turnId, input.turnId),
+                eq(schema.sessionEvents.turnGeneration, input.expectedExecutionGeneration),
+                eq(schema.sessionEvents.turnAttemptId, input.expectedAttemptId),
+                eq(schema.sessionEvents.type, "session.context.compaction.skipped"),
+                sql`${schema.sessionEvents.payload}->>'persistenceKey' = ${input.persistenceKey}`,
+              ),
+            )
+            .limit(1);
+          if (existing) {
+            const expectedPayload = input.eventPayload ?? {
+              persistenceKey: input.persistenceKey,
+              reason: input.reason,
+            };
+            if (!compactionPersistencePayloadMatches(existing.payload, expectedPayload)) {
+              throw new Error(
+                `context compaction persistence key collision: ${input.persistenceKey}`,
+              );
+            }
+            return { recorded: true as const, events: [mapEvent(existing)] };
+          }
+        }
+        const clearRequestedCompaction = input.clearRequestedCompaction ?? true;
+        if (clearRequestedCompaction && !fence.session.compactRequested) {
           return { recorded: false as const, reason: "request_not_pending" as const };
         }
         const inserted = await tx
@@ -12797,14 +12963,18 @@ export async function recordSkippedContextCompaction(
             turnAssociation: "current",
             sequence: fence.session.lastSequence + 1,
             type: "session.context.compaction.skipped",
-            payload: sanitizeEventPayload({ reason: input.reason }),
-            occurredAt: new Date(),
+            payload: sanitizeEventPayload({
+              ...input.eventPayload,
+              ...(input.persistenceKey ? { persistenceKey: input.persistenceKey } : {}),
+              reason: input.reason,
+            }),
+            occurredAt: input.occurredAt ?? new Date(),
           })
           .returning();
         await tx
           .update(schema.sessions)
           .set({
-            compactRequested: false,
+            ...(clearRequestedCompaction ? { compactRequested: false } : {}),
             lastSequence: fence.session.lastSequence + 1,
             updatedAt: new Date(),
           })
@@ -12812,7 +12982,7 @@ export async function recordSkippedContextCompaction(
             and(
               eq(schema.sessions.workspaceId, input.workspaceId),
               eq(schema.sessions.id, input.sessionId),
-              eq(schema.sessions.compactRequested, true),
+              ...(clearRequestedCompaction ? [eq(schema.sessions.compactRequested, true)] : []),
             ),
           );
         return { recorded: true as const, events: inserted.map(mapEvent) };

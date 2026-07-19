@@ -19,7 +19,9 @@ The implementation lives in:
   prefix, rebuild rules, and the typed compaction signal.
 - `packages/runtime/src/index.ts`: the tool-less summarizer and per-call signal.
 - `apps/worker/src/activities/context-compaction.ts`: summarizer retry and the
-  fenced durable replacement.
+  preparation of the exact apply/skip receipt.
+- `apps/worker/src/activities/context-compaction-persistence.ts`: DB-only
+  application or confirmation of that prepared receipt.
 - `apps/worker/src/activities/agent-turn.ts`: pre-call and same-turn recovery.
 - `packages/db/src/index.ts`: the atomic history replacement and token signal.
 
@@ -183,3 +185,27 @@ one transaction without changing history. A failed, paused, recovered, or
 superseded attempt cannot lose the request or publish a current compaction
 result; only an authoritatively recorded terminal summarization failure consumes
 the request as described above.
+
+## Persistence-boundary recovery
+
+Once the summarizer has returned a validated non-empty response and its usage,
+the worker prepares one exact apply or skip receipt. The receipt fixes the
+replacement rows (when applying), result fields, accounting source, reserved
+usage event, compaction event payload, persistence key, occurrence time, and
+replacement fingerprint. The worker heartbeats that complete obligation before
+the first lease confirmation or persistence mutation.
+
+The strict persistence order is ownership/lease confirmation, model usage
+metering, exact usage-event append or confirmation, and then application or
+confirmation of the prepared compaction result. A retry after process death or
+an ambiguous database response runs only this DB persistence path. The
+persistence key and replacement fingerprint must match the already-recorded
+result; a higher execution generation that discovers the settled receipt uses
+that result and never invokes the summarizer again.
+
+PostgreSQL rows are the authority for usage, events, history replacement, and
+the compaction receipt. NATS publication is secondary fanout: a failed or
+duplicate publication cannot make a compaction uncommitted and can never
+authorize resampling. The workflow may recover the same logical turn only after
+every obligation in the heartbeat receipt is durably applied or exactly
+confirmed.

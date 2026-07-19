@@ -2,10 +2,13 @@ import type { SessionBusMessage, SessionEvent, WorkspaceControlEvent } from "@op
 import {
   appendSessionEvents,
   appendSessionEventsForTurnAttempt,
+  listSessionEventsByProducer,
   sessionSubject,
   type AppendEventInput,
   type Database,
+  type ProducedSessionEvent,
 } from "@opengeni/db";
+import { isDeepStrictEqual } from "node:util";
 import {
   connect,
   JSONCodec,
@@ -595,6 +598,161 @@ export async function appendAndPublishTurnEventsFenced(
     );
   }
   return result;
+}
+
+export type ExactTurnEventInput = AppendEventInput & {
+  turnId: string;
+  producerId: string;
+  producerSeq: number;
+  occurredAt: Date;
+};
+
+type ExactTurnEventPersistenceDependencies = {
+  append: typeof appendSessionEventsForTurnAttempt;
+  find: typeof listSessionEventsByProducer;
+};
+
+function exactTurnEventAssociation(
+  event: ProducedSessionEvent,
+  input: ExactTurnEventInput,
+  executionGeneration: number,
+  attemptId: string,
+): "accepted" | "rejected" | null {
+  if (
+    event.turnId !== input.turnId ||
+    event.turnGeneration !== executionGeneration ||
+    event.turnAttemptId !== attemptId ||
+    event.producerId !== input.producerId ||
+    event.producerSeq !== input.producerSeq ||
+    event.occurredAt !== input.occurredAt.toISOString()
+  ) {
+    return null;
+  }
+  if (
+    event.type === input.type &&
+    (event.turnAssociation === "current" || event.turnAssociation === "duplicate") &&
+    isDeepStrictEqual(event.payload, input.payload ?? {})
+  ) {
+    return "accepted";
+  }
+  const rejection =
+    event.type === "turn.event.rejected_late" &&
+    event.turnAssociation === "late_rejected" &&
+    event.payload !== null &&
+    typeof event.payload === "object"
+      ? (event.payload as Record<string, unknown>)
+      : null;
+  if (
+    rejection?.rejectedType === input.type &&
+    isDeepStrictEqual(rejection.rejectedPayload, input.payload ?? {})
+  ) {
+    return "rejected";
+  }
+  return null;
+}
+
+/**
+ * Confirm whether every exact producer input is already durable. `null` means
+ * no producer row exists yet; a partial/mismatched roster is a producer
+ * collision and must never be mistaken for successful response-loss recovery.
+ */
+export function confirmExactTurnEventPersistence(
+  persisted: ProducedSessionEvent[],
+  inputs: ExactTurnEventInput[],
+  executionGeneration: number,
+  attemptId: string,
+): { events: SessionEvent[]; accepted: boolean } | null {
+  if (persisted.length === 0) return null;
+  const bySequence = new Map(persisted.map((event) => [event.producerSeq, event]));
+  if (bySequence.size !== inputs.length) {
+    throw new Error("Exact turn event producer roster was only partially committed");
+  }
+  const associations = inputs.map((input) => {
+    const event = bySequence.get(input.producerSeq);
+    return event ? exactTurnEventAssociation(event, input, executionGeneration, attemptId) : null;
+  });
+  if (associations.some((association) => association === null)) {
+    throw new Error("Exact turn event producer identity was reused for different durable data");
+  }
+  const accepted = associations.every((association) => association === "accepted");
+  if (!accepted && !associations.every((association) => association === "rejected")) {
+    throw new Error("Exact turn event producer roster mixed accepted and rejected rows");
+  }
+  return {
+    events: inputs.map((input) => bySequence.get(input.producerSeq)!),
+    accepted,
+  };
+}
+
+/**
+ * Append one exact attempt-owned event batch, or confirm the same producer rows
+ * after an ambiguous completion. The canonical DB writer still owns locks,
+ * fencing, and sequence allocation; this adapter can only re-run that
+ * persistence operation and can never reach model/tool/provider code.
+ */
+export async function appendOrConfirmAndPublishTurnEventsFenced(
+  db: Database,
+  bus: EventBus,
+  workspaceId: string,
+  sessionId: string,
+  turnId: string,
+  executionGeneration: number,
+  attemptId: string,
+  events: ExactTurnEventInput[],
+  dependencies: ExactTurnEventPersistenceDependencies = {
+    append: appendSessionEventsForTurnAttempt,
+    find: listSessionEventsByProducer,
+  },
+): Promise<{ events: SessionEvent[]; accepted: boolean }> {
+  if (events.length === 0) return { events: [], accepted: true };
+  const producerIds = new Set(events.map((event) => event.producerId));
+  if (producerIds.size !== 1 || !producerIds.has(events[0]!.producerId)) {
+    throw new Error("Exact turn event persistence requires one producer per batch");
+  }
+  const producerId = events[0]!.producerId;
+  const producerSeqs = events.map((event) => event.producerSeq);
+  const findPersisted = async () =>
+    await dependencies.find(db, workspaceId, sessionId, producerId, producerSeqs);
+  const alreadyCommitted = confirmExactTurnEventPersistence(
+    await findPersisted(),
+    events,
+    executionGeneration,
+    attemptId,
+  );
+  if (alreadyCommitted) {
+    await publishDurableSessionEvents(bus, workspaceId, sessionId, alreadyCommitted.events);
+    return alreadyCommitted;
+  }
+  try {
+    const appended = await dependencies.append(
+      db,
+      workspaceId,
+      sessionId,
+      turnId,
+      executionGeneration,
+      attemptId,
+      events,
+    );
+    await publishDurableSessionEvents(bus, workspaceId, sessionId, appended.events);
+    return appended;
+  } catch (appendError) {
+    try {
+      const committedAfterError = confirmExactTurnEventPersistence(
+        await findPersisted(),
+        events,
+        executionGeneration,
+        attemptId,
+      );
+      if (committedAfterError) {
+        await publishDurableSessionEvents(bus, workspaceId, sessionId, committedAfterError.events);
+        return committedAfterError;
+      }
+    } catch {
+      // Preserve the canonical writer's original failure when confirmation
+      // cannot prove that the exact producer batch committed.
+    }
+    throw appendError;
+  }
 }
 
 function subscribeSession(

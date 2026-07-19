@@ -7,11 +7,21 @@ import {
   getSessionEvent,
   getSessionTurnForAttempt,
   requireSession,
+  appendSessionHistoryItems,
+  registerPendingSessionToolCall,
+  requestSessionTurnRecovery,
   settleSessionIdleWithParentOutbox,
 } from "@opengeni/db";
-import { publishDurableSessionEvents } from "@opengeni/events";
+import {
+  appendOrConfirmAndPublishTurnEventsFenced,
+  publishDurableSessionEvents,
+} from "@opengeni/events";
 import { deliverFailedChildTurnToParent, notifyParentOfChildIdle } from "./parent-wake";
 import { recordTurnsQueuedGauge } from "../observability-metrics";
+import { recordModelUsageAndDebitCredits } from "./model-usage";
+import { persistPreparedContextCompaction } from "./context-compaction-persistence";
+import { TurnAttemptFencedError } from "./turn-attempt-fenced";
+import { parseTurnPersistenceHandoff } from "../turn-persistence-handoff";
 import type {
   ActivityServices,
   PeekSessionWorkInput,
@@ -20,6 +30,8 @@ import type {
   MarkSessionIdleInput,
   RecoverDispatchInput,
   RecoverDispatchResult,
+  PersistTurnHandoffAndRecoverInput,
+  PersistTurnHandoffAndRecoverResult,
 } from "./types";
 
 export type SessionStateActivityOverrides = Partial<{
@@ -31,6 +43,12 @@ export type SessionStateActivityOverrides = Partial<{
   getSessionEvent: typeof getSessionEvent;
   getSessionTurnForAttempt: typeof getSessionTurnForAttempt;
   requireSession: typeof requireSession;
+  appendSessionHistoryItems: typeof appendSessionHistoryItems;
+  registerPendingSessionToolCall: typeof registerPendingSessionToolCall;
+  requestSessionTurnRecovery: typeof requestSessionTurnRecovery;
+  appendOrConfirmAndPublishTurnEventsFenced: typeof appendOrConfirmAndPublishTurnEventsFenced;
+  recordModelUsageAndDebitCredits: typeof recordModelUsageAndDebitCredits;
+  persistPreparedContextCompaction: typeof persistPreparedContextCompaction;
   settleSessionIdleWithParentOutbox: typeof settleSessionIdleWithParentOutbox;
   publishDurableSessionEvents: typeof publishDurableSessionEvents;
   deliverFailedChildTurnToParent: typeof deliverFailedChildTurnToParent;
@@ -58,6 +76,19 @@ export function createSessionStateActivities(
   const getSessionEventFn = overrides.getSessionEvent ?? getSessionEvent;
   const getSessionTurnForAttemptFn = overrides.getSessionTurnForAttempt ?? getSessionTurnForAttempt;
   const requireSessionFn = overrides.requireSession ?? requireSession;
+  const appendSessionHistoryItemsFn =
+    overrides.appendSessionHistoryItems ?? appendSessionHistoryItems;
+  const registerPendingSessionToolCallFn =
+    overrides.registerPendingSessionToolCall ?? registerPendingSessionToolCall;
+  const requestSessionTurnRecoveryFn =
+    overrides.requestSessionTurnRecovery ?? requestSessionTurnRecovery;
+  const appendOrConfirmAndPublishTurnEventsFencedFn =
+    overrides.appendOrConfirmAndPublishTurnEventsFenced ??
+    appendOrConfirmAndPublishTurnEventsFenced;
+  const recordModelUsageAndDebitCreditsFn =
+    overrides.recordModelUsageAndDebitCredits ?? recordModelUsageAndDebitCredits;
+  const persistPreparedContextCompactionFn =
+    overrides.persistPreparedContextCompaction ?? persistPreparedContextCompaction;
   const settleSessionIdleWithParentOutboxFn =
     overrides.settleSessionIdleWithParentOutbox ?? settleSessionIdleWithParentOutbox;
   const publishDurableSessionEventsFn =
@@ -170,6 +201,143 @@ export function createSessionStateActivities(
     };
   }
 
+  /**
+   * Retry only the exact receipt that failed at the turn worker's persistence
+   * boundary, then checkpoint the same logical turn for a higher-generation
+   * attempt. Tool receipts converge on (turn, callId), model receipts on their
+   * exact producer/source identity, and compaction receipts on their persistence
+   * key and replacement fingerprint. Activity retry, completion-response loss,
+   * and old/new worker overlap therefore cannot duplicate an external effect.
+   * No model or tool code is reachable from this activity.
+   */
+  async function persistTurnHandoffAndRecover(
+    input: PersistTurnHandoffAndRecoverInput,
+  ): Promise<PersistTurnHandoffAndRecoverResult> {
+    const { db, bus, settings, observability } = await services();
+    const handoff = parseTurnPersistenceHandoff(input.handoff);
+    if (!handoff) {
+      throw new Error("Invalid turn persistence handoff; persistence retry refused");
+    }
+    const obligation = handoff.obligation;
+    if (obligation.kind === "pending_tool_call") {
+      const registered = await registerPendingSessionToolCallFn(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId: handoff.turnId,
+        executionGeneration: handoff.executionGeneration,
+        attemptId: input.attemptId,
+        callId: obligation.callId,
+        callType: obligation.callType,
+        callItem: obligation.callItem,
+      });
+      if (!registered.accepted) {
+        return { action: "stale" };
+      }
+    } else if (obligation.kind === "model_call") {
+      const historyAccepted = await appendSessionHistoryItemsFn(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId: handoff.turnId,
+        expectedExecutionGeneration: handoff.executionGeneration,
+        expectedAttemptId: input.attemptId,
+        producerCodexCredentialId: obligation.history.producerCodexCredentialId,
+        modelToolOutputTruncationTokens: obligation.history.modelToolOutputTruncationTokens,
+        items: obligation.history.items,
+      });
+      if (!historyAccepted) return { action: "stale" };
+      await recordModelUsageAndDebitCreditsFn(settings, db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId: handoff.turnId,
+        ...obligation.metering,
+        observability,
+      });
+      const eventResult = await appendOrConfirmAndPublishTurnEventsFencedFn(
+        db,
+        bus,
+        input.workspaceId,
+        input.sessionId,
+        handoff.turnId,
+        handoff.executionGeneration,
+        input.attemptId,
+        [
+          {
+            ...obligation.event,
+            occurredAt: new Date(obligation.event.occurredAt),
+          },
+        ],
+      );
+      if (!eventResult.accepted) return { action: "stale" };
+    } else {
+      if (obligation.metering) {
+        await recordModelUsageAndDebitCreditsFn(settings, db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: handoff.turnId,
+          ...obligation.metering,
+          observability,
+        });
+      }
+      if (obligation.event) {
+        const eventResult = await appendOrConfirmAndPublishTurnEventsFencedFn(
+          db,
+          bus,
+          input.workspaceId,
+          input.sessionId,
+          handoff.turnId,
+          handoff.executionGeneration,
+          input.attemptId,
+          [
+            {
+              ...obligation.event,
+              occurredAt: new Date(obligation.event.occurredAt),
+            },
+          ],
+        );
+        if (!eventResult.accepted) return { action: "stale" };
+      }
+      try {
+        const compaction = await persistPreparedContextCompactionFn(
+          db,
+          {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: handoff.turnId,
+            executionGeneration: handoff.executionGeneration,
+            attemptId: input.attemptId,
+          },
+          obligation.compaction,
+        );
+        await publishDurableSessionEventsFn(
+          bus,
+          input.workspaceId,
+          input.sessionId,
+          compaction.events,
+        );
+      } catch (error) {
+        if (error instanceof TurnAttemptFencedError) return { action: "stale" };
+        throw error;
+      }
+    }
+    const recovery = await requestSessionTurnRecoveryFn(db, input.workspaceId, {
+      sessionId: input.sessionId,
+      turnId: handoff.turnId,
+      triggerEventId: handoff.triggerEventId,
+      attemptId: input.attemptId,
+      reason: `persistence_${obligation.kind}_${input.reason}`,
+    });
+    if (recovery.action === "stale") {
+      return { action: "stale" };
+    }
+    await publishDurableSessionEventsFn(bus, input.workspaceId, input.sessionId, recovery.events);
+    return { action: "recovering", turnId: handoff.turnId };
+  }
+
   async function peekSessionWork(input: PeekSessionWorkInput) {
     const { db, observability } = await services();
     const peek = await peekSessionWorkFn(db, input.workspaceId, input.sessionId);
@@ -208,6 +376,7 @@ export function createSessionStateActivities(
     failSessionAttempt,
     settleSessionInterruptions,
     recoverDispatch,
+    persistTurnHandoffAndRecover,
     peekSessionWork,
     markSessionIdle,
   };

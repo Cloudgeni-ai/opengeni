@@ -34,6 +34,7 @@ import {
   repositoryCloneCommand,
   repositoryUsesSandboxClone,
   mcpToolErrorOutput,
+  installFunctionToolCallReceipts,
   modelCallUsageTelemetry,
   modelResponseUsageFromSdkEvent,
   normalizeSdkEvent,
@@ -3639,6 +3640,138 @@ function fakeMcpServer(name: string): MCPServer {
     async invalidateToolsCache() {},
   };
 }
+
+describe("function tool call receipts", () => {
+  function functionTool(invoke: (...args: any[]) => unknown) {
+    return {
+      type: "function",
+      name: "mutate_external_state",
+      description: "test",
+      parameters: { type: "object", properties: {} },
+      strict: true,
+      invoke,
+    } as any;
+  }
+
+  function agentWithTool(tool: any): any {
+    return {
+      async getAllTools() {
+        return [tool];
+      },
+      clone() {
+        return agentWithTool(tool);
+      },
+    };
+  }
+
+  test("awaits the durable receipt before starting the external effect", async () => {
+    const order: string[] = [];
+    const agent = agentWithTool(
+      functionTool(async () => {
+        order.push("effect");
+        return "ok";
+      }),
+    );
+    installFunctionToolCallReceipts(agent, async (receipt) => {
+      order.push("receipt:start");
+      await Bun.sleep(0);
+      expect(receipt).toEqual({
+        callId: "call-1",
+        callType: "function_call",
+        callItem: {
+          type: "function_call",
+          callId: "call-1",
+          name: "mutate_external_state",
+          arguments: '{"value":1}',
+        },
+      });
+      order.push("receipt:committed");
+    });
+
+    const [tool] = await agent.getAllTools({});
+    await tool.invoke(
+      {},
+      { value: 1 },
+      {
+        toolCall: {
+          type: "function_call",
+          callId: "call-1",
+          name: "mutate_external_state",
+          arguments: '{"value":1}',
+        },
+      },
+    );
+
+    expect(order).toEqual(["receipt:start", "receipt:committed", "effect"]);
+  });
+
+  test("blocks the effect when receipt persistence fails", async () => {
+    let effects = 0;
+    const agent = agentWithTool(
+      functionTool(() => {
+        effects += 1;
+      }),
+    );
+    installFunctionToolCallReceipts(agent, async () => {
+      throw new Error("postgres unavailable");
+    });
+
+    const [tool] = await agent.getAllTools({});
+    await expect(
+      tool.invoke(
+        {},
+        {},
+        {
+          toolCall: { type: "function_call", callId: "call-2", name: tool.name, arguments: "{}" },
+        },
+      ),
+    ).rejects.toThrow("postgres unavailable");
+    expect(effects).toBe(0);
+  });
+
+  test("blocks the effect when the provider omits a stable call id", async () => {
+    let receipts = 0;
+    let effects = 0;
+    const agent = agentWithTool(
+      functionTool(() => {
+        effects += 1;
+      }),
+    );
+    installFunctionToolCallReceipts(agent, async () => {
+      receipts += 1;
+    });
+
+    const [tool] = await agent.getAllTools({});
+    await expect(
+      tool.invoke({}, {}, { toolCall: { type: "function_call", name: tool.name } }),
+    ).rejects.toThrow("stable provider call id");
+    expect({ receipts, effects }).toEqual({ receipts: 0, effects: 0 });
+  });
+
+  test("survives clone-of-clone without double-registering", async () => {
+    let receipts = 0;
+    let effects = 0;
+    const agent = agentWithTool(
+      functionTool(() => {
+        effects += 1;
+      }),
+    );
+    installFunctionToolCallReceipts(agent, async () => {
+      receipts += 1;
+    });
+
+    const clone = agent.clone({}).clone({});
+    const [tool] = await clone.getAllTools({});
+    await tool.invoke(
+      {},
+      {},
+      {
+        toolCall: { type: "function_call", callId: "call-3", name: tool.name, arguments: "{}" },
+      },
+    );
+    expect({ receipts, effects }).toEqual({ receipts: 1, effects: 1 });
+  });
+});
 
 describe("pack skills in the sandbox skill index", () => {
   const infraSkill = {

@@ -810,6 +810,10 @@ export async function summarizeForCompaction(
     promptCacheKey?: string;
     systemInstructions?: string;
     onUsage?: (usage: ModelResponseUsage) => void | Promise<void>;
+    onCompleted?: (result: {
+      summary: string;
+      usage: ModelResponseUsage | null;
+    }) => void | Promise<void>;
   } = {},
 ): Promise<string> {
   const client = options.client ?? buildOpenAIClientFromSettings(settings);
@@ -839,6 +843,7 @@ export async function summarizeForCompaction(
     if (!summary) {
       throw new EmptyCompactionSummaryError(compactionResponseDiagnostics(completion, summary));
     }
+    await options.onCompleted?.({ summary, usage });
     return summary;
   }
   // Use the same SDK Responses adapter as the real agent call. It converts the
@@ -879,6 +884,7 @@ export async function summarizeForCompaction(
   if (!summary) {
     throw new EmptyCompactionSummaryError(compactionResponseDiagnostics(response, summary));
   }
+  await options.onCompleted?.({ summary, usage });
   return summary;
 }
 
@@ -1115,6 +1121,14 @@ export type BuildAgentOptions = {
    * shell/filesystem turns never pay that cost.
    */
   onComputerUseReady?: (session: SandboxSessionLike) => Promise<void>;
+  /**
+   * Persist the SDK's exact function-call receipt before the function tool is
+   * allowed to start. The callback is awaited from the tool's `invoke` path,
+   * where `details.toolCall` already carries the provider-stable call id. A
+   * rejected callback therefore blocks the external effect rather than trying
+   * to reconstruct it from a later stream event after execution may have begun.
+   */
+  onFunctionToolCall?: (call: FunctionToolCallReceipt) => Promise<void>;
   // The LIVE, by-reference connector-namespace Set from prepareAgentTools
   // (codexConnectorNamespaces): fills during each turn's codex_apps tools/list,
   // read per model call by the codex tool_search description so the model sees
@@ -1570,6 +1584,12 @@ export function buildOpenGeniAgent(
     }
     maybeInstallCodexToolSearch(agent, settings, options);
     applyMcpApprovalPolicy(agent, settings);
+    if (options.onFunctionToolCall) {
+      installFunctionToolCallReceipts(
+        agent as unknown as FunctionReceiptCapableAgent,
+        options.onFunctionToolCall,
+      );
+    }
     return agent;
   }
 
@@ -1639,6 +1659,12 @@ export function buildOpenGeniAgent(
   }
   maybeInstallCodexToolSearch(agent, settings, options);
   applyMcpApprovalPolicy(agent, settings);
+  if (options.onFunctionToolCall) {
+    installFunctionToolCallReceipts(
+      agent as unknown as FunctionReceiptCapableAgent,
+      options.onFunctionToolCall,
+    );
+  }
   return agent;
 }
 
@@ -1770,6 +1796,105 @@ function applyMcpApprovalPolicy(agent: Agent<any, any>, settings: Settings): voi
     return;
   }
   installMcpApprovalPolicy(agent as unknown as ApprovalCapableAgent, policies);
+}
+
+export type FunctionToolCallReceipt = {
+  callId: string;
+  callType: string;
+  callItem: Record<string, unknown>;
+};
+
+type FunctionReceiptCapableAgent = {
+  getAllTools: (runContext: unknown) => Promise<Tool<any>[]>;
+  clone?: (config: unknown) => FunctionReceiptCapableAgent;
+};
+
+const FUNCTION_RECEIPT_WRAPPED = Symbol("opengeni.functionReceiptWrapped");
+
+type FunctionReceiptWrappedTool = Tool<any> & {
+  [FUNCTION_RECEIPT_WRAPPED]?: true;
+};
+
+function functionToolCallReceipt(
+  toolName: string,
+  input: unknown,
+  details: unknown,
+): FunctionToolCallReceipt | null {
+  const toolCall =
+    details && typeof details === "object"
+      ? (details as { toolCall?: unknown }).toolCall
+      : undefined;
+  if (!toolCall || typeof toolCall !== "object" || Array.isArray(toolCall)) {
+    return null;
+  }
+  const raw = toolCall as Record<string, unknown>;
+  const callId = raw.callId ?? raw.call_id ?? raw.id;
+  if (typeof callId !== "string" || callId.length === 0) {
+    return null;
+  }
+  const callType = typeof raw.type === "string" && raw.type.length > 0 ? raw.type : "function_call";
+  return {
+    callId,
+    callType,
+    callItem: {
+      ...raw,
+      type: callType,
+      callId,
+      name: typeof raw.name === "string" && raw.name.length > 0 ? raw.name : toolName,
+      ...(raw.arguments === undefined ? { arguments: input } : {}),
+    },
+  };
+}
+
+function withFunctionToolCallReceipts(
+  tools: Tool<any>[],
+  persist: (call: FunctionToolCallReceipt) => Promise<void>,
+): Tool<any>[] {
+  return tools.map((tool) => {
+    const wrapped = tool as FunctionReceiptWrappedTool;
+    if (tool.type !== "function" || wrapped[FUNCTION_RECEIPT_WRAPPED]) {
+      return tool;
+    }
+    const invoke = tool.invoke;
+    return {
+      ...tool,
+      [FUNCTION_RECEIPT_WRAPPED]: true,
+      invoke: async (runContext, input, details) => {
+        const receipt = functionToolCallReceipt(tool.name, input, details);
+        if (!receipt) {
+          throw new Error(
+            `Function tool ${tool.name} omitted its stable provider call id; execution refused`,
+          );
+        }
+        await persist(receipt);
+        return await invoke(runContext, input, details);
+      },
+    };
+  });
+}
+
+/**
+ * Install the durable-before-effect function-tool receipt boundary on an
+ * agent. SandboxAgent resolves tools on a fresh clone for each model step, so
+ * the transform recursively re-installs itself on every clone. The symbol on
+ * each wrapped tool keeps clone implementations that copy instance overrides
+ * from invoking the callback twice.
+ */
+export function installFunctionToolCallReceipts(
+  agent: FunctionReceiptCapableAgent,
+  persist: (call: FunctionToolCallReceipt) => Promise<void>,
+): void {
+  const originalGetAllTools = agent.getAllTools.bind(agent);
+  agent.getAllTools = async (runContext: unknown) =>
+    withFunctionToolCallReceipts(await originalGetAllTools(runContext), persist);
+  const originalClone = agent.clone?.bind(agent);
+  if (originalClone) {
+    agent.clone = (config: unknown) => {
+      const cloned = originalClone(config);
+      installFunctionToolCallReceipts(cloned, persist);
+      return cloned;
+    };
+  }
 }
 
 /**

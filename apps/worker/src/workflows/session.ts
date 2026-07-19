@@ -17,6 +17,10 @@ import {
   turnActivityForTaskQueue,
   workflowFailureMessage,
 } from "./activities";
+import {
+  parseTurnPersistenceHandoff,
+  turnPersistenceHandoffHeartbeatState,
+} from "../turn-persistence-handoff";
 
 /**
  * Deterministic backstop for continueAsNew. A session workflow is long-lived
@@ -82,9 +86,11 @@ export function continuationHoldMs(
  * SCHEDULE_TO_CLOSE timeouts are deliberately excluded: with the 30-day
  * startToClose they mean the turn truly overran, which stays a real failure.
  */
-function workerDeathFailure(
-  error: unknown,
-): { timeoutType: "HEARTBEAT" | "SCHEDULE_TO_START" } | null {
+function workerDeathFailure(error: unknown): {
+  timeoutType: "HEARTBEAT" | "SCHEDULE_TO_START";
+  persistenceHandoff: activities.TurnPersistenceHandoff | null;
+  invalidPersistenceHandoff: boolean;
+} | null {
   if (!(error instanceof ActivityFailure)) {
     return null;
   }
@@ -95,7 +101,23 @@ function workerDeathFailure(
   ) {
     return null;
   }
-  return { timeoutType: cause.timeoutType };
+  const heartbeatHandoff =
+    cause.timeoutType === "HEARTBEAT"
+      ? turnPersistenceHandoffHeartbeatState(cause.lastHeartbeatDetails)
+      : ({ state: "absent" } as const);
+  return {
+    timeoutType: cause.timeoutType,
+    persistenceHandoff: heartbeatHandoff.state === "valid" ? heartbeatHandoff.handoff : null,
+    invalidPersistenceHandoff: heartbeatHandoff.state === "invalid",
+  };
+}
+
+/** Validate the durable operation carried by Temporal heartbeat details. */
+export function turnPersistenceHandoffFromHeartbeat(
+  details: unknown,
+): activities.TurnPersistenceHandoff | null {
+  const state = turnPersistenceHandoffHeartbeatState(details);
+  return state.state === "valid" ? state.handoff : null;
 }
 
 export const userMessage = defineSignal<[string]>("userMessage");
@@ -448,6 +470,22 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       // bounded by a per-turn redispatch counter persisted on the turn row.
       const workerDeath = workerDeathFailure(outcome.error);
       if (workerDeath) {
+        if (workerDeath.invalidPersistenceHandoff) {
+          throw new Error(
+            "Worker heartbeat carried an invalid persistence handoff; automatic turn replay refused",
+          );
+        }
+        if (workerDeath.persistenceHandoff) {
+          await activity.persistTurnHandoffAndRecover({
+            accountId,
+            workspaceId,
+            sessionId,
+            attemptId,
+            handoff: workerDeath.persistenceHandoff,
+            reason: "heartbeat_timeout",
+          });
+          return true;
+        }
         const recovery = await activity.recoverDispatch({
           accountId,
           workspaceId,
@@ -477,6 +515,22 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
     }
 
     if (outcome.result.status === "unclaimed") {
+      return true;
+    }
+
+    if (outcome.result.status === "persistence_pending") {
+      const handoff = parseTurnPersistenceHandoff(outcome.result.persistenceHandoff);
+      if (!handoff || handoff.turnId !== outcome.result.turnId) {
+        throw new Error("persistence_pending turn result carried an invalid handoff");
+      }
+      await activity.persistTurnHandoffAndRecover({
+        accountId,
+        workspaceId,
+        sessionId,
+        attemptId,
+        handoff,
+        reason: "activity_result",
+      });
       return true;
     }
 

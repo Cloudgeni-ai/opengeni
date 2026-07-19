@@ -2,7 +2,6 @@ import {
   applySessionTurnSettlement,
   requestSessionTurnRecovery,
   claimSessionWorkForAttempt,
-  applyCreditDebitUpToBalance,
   getBillingBalance,
   getRigName,
   getRigVersion,
@@ -41,6 +40,7 @@ import {
   recordPendingSessionToolCallResult,
   clearDurablePendingSessionToolCalls,
   appendSessionHistoryItems,
+  hasSessionContextCompactionOutcomeForTurn,
   isSessionCompactionRequested,
   countSessionHistoryItems,
   getActiveSessionHistoryItems,
@@ -67,7 +67,12 @@ import {
   type CodexCredentialLeaseSelectionContext,
   type SessionTurnRecordingSettlement,
 } from "@opengeni/db";
-import { appendAndPublishTurnEventsFenced, publishDurableSessionEvents } from "@opengeni/events";
+import {
+  appendAndPublishTurnEventsFenced,
+  appendOrConfirmAndPublishTurnEventsFenced,
+  publishDurableSessionEvents,
+  type ExactTurnEventInput,
+} from "@opengeni/events";
 import {
   sandboxStateEntryFromRunState,
   maxTurnsExceededRunState,
@@ -105,12 +110,9 @@ import {
 } from "@opengeni/runtime";
 import {
   builtinProviderId,
-  calculateModelUsageCostMicros,
-  configuredModelPricing,
   configuredStaticUsageLimits,
   sandboxWarmRateMicrosPerSecond,
   settingsWithResolvedModelContext,
-  type ModelUsageInput,
   type ModelProviderApi,
   type RegistryProviderKind,
   type Settings,
@@ -121,6 +123,8 @@ import {
   settingsWithEnabledCapabilityMcpServers,
   settingsWithSessionMcpServersForRun,
 } from "./capabilities";
+import { recordModelUsageAndDebitCredits } from "./model-usage";
+export { recordModelUsageAndDebitCredits } from "./model-usage";
 import {
   authoritativeCodexCapacityResetAt,
   chooseRotationActive,
@@ -153,8 +157,10 @@ import {
   type CodexUsageHeaderSnapshot,
 } from "@opengeni/codex";
 import { mergeResourceRefs, mergeToolRefs } from "./common";
-import { maybeCompactContext } from "./context-compaction";
+import { maybeCompactContext, type MaybeCompactResult } from "./context-compaction";
+import { persistPreparedContextCompaction } from "./context-compaction-persistence";
 import { TurnAttemptFencedError } from "./turn-attempt-fenced";
+import { persistCompletedModelCallReceipt } from "./turn-persistence-sequencing";
 import {
   loadWorkspaceEnvironmentForRunWithCredentials,
   mintRunGitCredentials,
@@ -182,7 +188,15 @@ import {
   nextStreamEvent,
   startActivityHeartbeat,
 } from "./streaming";
-import type { ActivityServices, RunAgentTurnInput, RunAgentTurnResult } from "./types";
+import type {
+  ActivityServices,
+  ContextCompactionPersistenceObligation,
+  ModelCallPersistenceObligation,
+  PreparedContextCompactionPersistence,
+  RunAgentTurnInput,
+  RunAgentTurnResult,
+  TurnPersistenceHandoff,
+} from "./types";
 import {
   resumeBoxForTurn,
   acquireSelfhostedLeaseForTurn,
@@ -534,44 +548,25 @@ export async function emitModelCallUsage(input: {
   accountChangedFromPrevCall?: boolean;
   emittedSourceKeys?: Set<string>;
 }): Promise<void> {
-  const usage =
-    input.usage && typeof input.usage === "object" && "usage" in input.usage
-      ? (input.usage as { usage?: unknown }).usage
-      : null;
-  if (!usage || typeof usage !== "object") {
-    return;
-  }
+  const event = modelCallUsageEvent(input);
+  if (!event) return;
   if (input.emittedSourceKeys?.has(input.sourceKey)) return;
-  const telemetry = modelCallUsageTelemetry(usage as Parameters<typeof modelCallUsageTelemetry>[0]);
-  const appended = await input.publish?.(
-    [
-      {
-        type: "agent.model.usage",
-        payload: {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          turnId: input.turnId,
-          provider: input.provider,
-          providerApi: input.providerApi,
-          model: input.model,
-          sourceKey: input.sourceKey,
-          ...telemetry,
-        },
-      },
-    ],
-    true,
-  );
+  const appended = await input.publish?.([event], true);
   input.emittedSourceKeys?.add(input.sourceKey);
   const authoritative = appended?.events.some(
-    (event) =>
-      event.type === "agent.model.usage" &&
-      event.turnAssociation === "current" &&
-      event.payload !== null &&
-      typeof event.payload === "object" &&
-      (event.payload as Record<string, unknown>).sourceKey === input.sourceKey,
+    (persisted) =>
+      persisted.type === "agent.model.usage" &&
+      persisted.turnAssociation === "current" &&
+      persisted.payload !== null &&
+      typeof persisted.payload === "object" &&
+      (persisted.payload as Record<string, unknown>).sourceKey === input.sourceKey,
   );
   if (!authoritative) return;
+  const telemetry = modelCallUsageTelemetry(
+    (input.usage && typeof input.usage === "object" && "usage" in input.usage
+      ? (input.usage as { usage?: unknown }).usage
+      : null) as Parameters<typeof modelCallUsageTelemetry>[0],
+  );
   try {
     input.observability.info("model call usage", {
       accountId: input.accountId,
@@ -596,6 +591,41 @@ export async function emitModelCallUsage(input: {
   } catch {
     // Durable event + billing already committed; logging is best-effort only.
   }
+}
+
+export function modelCallUsageEvent(input: {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  turnId: string;
+  provider: string;
+  providerApi: ModelProviderApi;
+  model: string;
+  sourceKey: string;
+  usage: ModelResponseUsage | { usage?: unknown | null } | null;
+}): Omit<AppendEventInput, "producerId" | "producerSeq" | "turnId"> | null {
+  const usage =
+    input.usage && typeof input.usage === "object" && "usage" in input.usage
+      ? (input.usage as { usage?: unknown }).usage
+      : null;
+  if (!usage || typeof usage !== "object") {
+    return null;
+  }
+  const telemetry = modelCallUsageTelemetry(usage as Parameters<typeof modelCallUsageTelemetry>[0]);
+  return {
+    type: "agent.model.usage",
+    payload: {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      provider: input.provider,
+      providerApi: input.providerApi,
+      model: input.model,
+      sourceKey: input.sourceKey,
+      ...telemetry,
+    },
+  };
 }
 
 export function historyRowsToAppend(
@@ -1135,6 +1165,20 @@ export function codexCredentialLeaseDeadlineExpired(
   );
 }
 
+class TurnPersistenceBoundaryError extends Error {
+  constructor(
+    readonly handoff: TurnPersistenceHandoff,
+    readonly persistenceCause: unknown,
+  ) {
+    super(
+      persistenceCause instanceof Error
+        ? persistenceCause.message
+        : "turn persistence boundary failed",
+    );
+    this.name = "TurnPersistenceBoundaryError";
+  }
+}
+
 export function createRunAgentTurnActivity(services: () => Promise<ActivityServices>) {
   return async function runAgentTurn(input: RunAgentTurnInput): Promise<RunAgentTurnResult> {
     const {
@@ -1618,8 +1662,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // Dual-write of conversation truth (issue #35): completed items are
     // reconciled into session_history_items after every model response and at
     // every turn-end path (idempotent on position), and the sandbox recovery
-    // envelope is upserted alongside. Best-effort by design: persistence
-    // problems must never fail the run.
+    // envelope is upserted alongside. Ordinary checkpoints remain best-effort,
+    // but a completed provider response uses the strict prepared-row path below:
+    // those exact rows become part of its Temporal persistence handoff before
+    // metering/final-event settlement, so a DB fault cannot license inference
+    // replay.
     //
     // Orphaned-tool-output guard: `stream.state.history` is NOT a plain
     // append-only array — it is a computed getter
@@ -1642,6 +1689,74 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // inserts a fractional summary position, so total rows no longer equal
     // max(position)+1 and the slice index can no longer double as the position.
     let nextHistoryPosition = 0;
+    type PreparedConversationHistory = {
+      rows: Array<{ position: number; item: Record<string, unknown> }>;
+      nextWatermark: number;
+      nextPosition: number;
+      advanceWatermark: boolean;
+    };
+    const prepareConversationHistory = (
+      options: { skipInputOnlyRows?: boolean } = {},
+    ): PreparedConversationHistory => {
+      if (!stream) {
+        return {
+          rows: [],
+          nextWatermark: persistedHistoryCount,
+          nextPosition: nextHistoryPosition,
+          advanceWatermark: false,
+        };
+      }
+      const rawHistory = (stream.state as { history?: unknown[] }).history;
+      if (!Array.isArray(rawHistory)) {
+        return {
+          rows: [],
+          nextWatermark: persistedHistoryCount,
+          nextPosition: nextHistoryPosition,
+          advanceWatermark: false,
+        };
+      }
+      const { rows, nextWatermark, nextPosition } = historyRowsToAppend(
+        rawHistory as Array<Record<string, unknown>>,
+        persistedHistoryCount,
+        nextHistoryPosition,
+        modelRunSettings.modelToolOutputTruncationTokens,
+      );
+      const hasModelOrToolProgress = rows.some((row) => isModelOrToolProgressHistoryItem(row.item));
+      const shouldAppendRows =
+        rows.length > 0 && (!options.skipInputOnlyRows || hasModelOrToolProgress);
+      return {
+        rows: shouldAppendRows ? rows : [],
+        nextWatermark,
+        nextPosition,
+        advanceWatermark: shouldAppendRows || !options.skipInputOnlyRows,
+      };
+    };
+    const persistPreparedConversationHistory = async (
+      prepared: PreparedConversationHistory,
+    ): Promise<void> => {
+      if (prepared.rows.length > 0) {
+        const appended = await appendSessionHistoryItems(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: turnId!,
+          expectedExecutionGeneration: executionGeneration,
+          expectedAttemptId: input.attemptId,
+          producerCodexCredentialId: effectiveCodexCredentialId,
+          modelToolOutputTruncationTokens: modelRunSettings.modelToolOutputTruncationTokens,
+          items: prepared.rows,
+        });
+        if (!appended) {
+          throw new TurnAttemptFencedError(
+            "turn execution generation was fenced while saving conversation history",
+          );
+        }
+      }
+      if (prepared.advanceWatermark) {
+        persistedHistoryCount = prepared.nextWatermark;
+        nextHistoryPosition = prepared.nextPosition;
+      }
+    };
     const reconcileConversationTruth = async (
       options: { skipInputOnlyRows?: boolean; requireDurable?: boolean } = {},
     ) => {
@@ -1649,46 +1764,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         return;
       }
       try {
-        const rawHistory = (stream.state as { history?: unknown[] }).history;
-        if (Array.isArray(rawHistory)) {
-          const { rows, nextWatermark, nextPosition } = historyRowsToAppend(
-            rawHistory as Array<Record<string, unknown>>,
-            persistedHistoryCount,
-            nextHistoryPosition,
-            modelRunSettings.modelToolOutputTruncationTokens,
-          );
-          const hasModelOrToolProgress = rows.some((row) =>
-            isModelOrToolProgressHistoryItem(row.item),
-          );
-          const shouldAppendRows =
-            rows.length > 0 && (!options.skipInputOnlyRows || hasModelOrToolProgress);
-          if (shouldAppendRows) {
-            const appended = await appendSessionHistoryItems(db, {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-              turnId,
-              expectedExecutionGeneration: executionGeneration,
-              expectedAttemptId: input.attemptId,
-              // Tag each row with the codex account that produced it (null on the
-              // non-codex path). Resolved at line ~504 before any reconcile pass
-              // runs, so this is the turn's effective account. The read path uses
-              // it to strip cross-account reasoning.encrypted_content next turn.
-              producerCodexCredentialId: effectiveCodexCredentialId,
-              modelToolOutputTruncationTokens: modelRunSettings.modelToolOutputTruncationTokens,
-              items: rows,
-            });
-            if (!appended) {
-              throw new TurnAttemptFencedError(
-                "turn execution generation was fenced while saving conversation history",
-              );
-            }
-          }
-          if (shouldAppendRows || !options.skipInputOnlyRows) {
-            persistedHistoryCount = nextWatermark;
-            nextHistoryPosition = nextPosition;
-          }
-        }
+        await persistPreparedConversationHistory(prepareConversationHistory(options));
         const envelope = sandboxStateEntryFromRunState(stream.state);
         if (envelope) {
           await upsertSandboxSessionEnvelope(db, {
@@ -1848,17 +1924,22 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       codexLeaseHolderId = dispatchId;
       const modelUsageDispatchId = activityContext?.info.activityId ?? dispatchId;
       const emittedModelUsageSourceKeys = new Set<string>();
-      publish = async (
+      const reserveTurnEvents = (
         events: Array<Omit<AppendEventInput, "producerId" | "producerSeq" | "turnId">>,
-        immediate = false,
-      ) => {
-        const inputs = events.map((event) => ({
+      ): ExactTurnEventInput[] =>
+        events.map((event) => ({
           ...event,
           payload: redact(event.payload),
           turnId: turnId!,
           producerId,
           producerSeq: ++producerSeq,
+          occurredAt: event.occurredAt ?? new Date(),
         }));
+      publish = async (
+        events: Array<Omit<AppendEventInput, "producerId" | "producerSeq" | "turnId">>,
+        immediate = false,
+      ) => {
+        const inputs = reserveTurnEvents(events);
         const appended = await appendAndPublishTurnEventsFenced(
           db,
           bus,
@@ -1881,6 +1962,140 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           await Bun.sleep(0);
         }
         return appended;
+      };
+      const persistCompletedModelCall = async (usageInput: {
+        turnId: string;
+        provider: string;
+        providerApi: ModelProviderApi;
+        model: string;
+        sourceKey: string;
+        usage: ModelResponseUsage | { usage?: unknown | null } | null;
+        servingAccountHash?: string;
+        accountChangedFromPrevCall?: boolean;
+        checkpointHistory?: boolean;
+      }): Promise<void> => {
+        if (emittedModelUsageSourceKeys.has(usageInput.sourceKey)) return;
+        const event = modelCallUsageEvent({
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          ...usageInput,
+        });
+        const meteringUsage =
+          usageInput.usage && typeof usageInput.usage === "object" && "usage" in usageInput.usage
+            ? (usageInput.usage as { usage?: unknown }).usage
+            : null;
+        if (!event || !meteringUsage || typeof meteringUsage !== "object") return;
+        const exactEvent = reserveTurnEvents([event])[0]!;
+        const preparedHistory =
+          usageInput.checkpointHistory === false
+            ? {
+                rows: [],
+                nextWatermark: persistedHistoryCount,
+                nextPosition: nextHistoryPosition,
+                advanceWatermark: false,
+              }
+            : prepareConversationHistory();
+        const obligation: ModelCallPersistenceObligation = {
+          kind: "model_call",
+          history: {
+            producerCodexCredentialId: effectiveCodexCredentialId,
+            modelToolOutputTruncationTokens: modelRunSettings.modelToolOutputTruncationTokens,
+            items: preparedHistory.rows,
+          },
+          metering: {
+            model: usageInput.model,
+            isCodexTurn,
+            usage: meteringUsage as ModelCallPersistenceObligation["metering"]["usage"],
+            sourceKey: usageInput.sourceKey,
+          },
+          event: {
+            type: exactEvent.type,
+            payload: exactEvent.payload ?? {},
+            turnId: exactEvent.turnId,
+            producerId: exactEvent.producerId,
+            producerSeq: exactEvent.producerSeq,
+            occurredAt: exactEvent.occurredAt.toISOString(),
+          },
+        };
+        const handoff: TurnPersistenceHandoff = {
+          version: 1,
+          turnId: turnId!,
+          triggerEventId: triggerEventId!,
+          executionGeneration,
+          obligation,
+        };
+        let appended: { events: SessionEvent[]; accepted: boolean };
+        try {
+          appended = await persistCompletedModelCallReceipt({
+            establishHandoff: () => {
+              heartbeatDetails.persistenceHandoff = handoff;
+              activityContext?.heartbeat({
+                ...heartbeatDetails,
+                phase: "persistence_pending",
+                at: new Date().toISOString(),
+              });
+            },
+            confirmOwnership: async () => {
+              await renewCodexLease("model_usage");
+              if (codexLeaseLost) {
+                throw new Error("Codex credential lease expired during the active turn");
+              }
+            },
+            persistHistory: async () => {
+              await persistPreparedConversationHistory(preparedHistory);
+            },
+            persistMetering: async () => {
+              await recordModelUsageAndDebitCredits(settings, db, {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                turnId: usageInput.turnId,
+                ...obligation.metering,
+                observability,
+              });
+            },
+            persistEvent: async () =>
+              await appendOrConfirmAndPublishTurnEventsFenced(
+                db,
+                bus,
+                input.workspaceId,
+                input.sessionId,
+                turnId!,
+                executionGeneration,
+                input.attemptId,
+                [exactEvent],
+              ),
+          });
+          if (!appended.accepted) {
+            throw new TurnAttemptFencedError(
+              "turn attempt ended while settling completed model usage",
+            );
+          }
+        } catch (persistenceError) {
+          if (persistenceError instanceof TurnAttemptFencedError) {
+            delete heartbeatDetails.persistenceHandoff;
+            throw persistenceError;
+          }
+          throw new TurnPersistenceBoundaryError(handoff, persistenceError);
+        }
+        delete heartbeatDetails.persistenceHandoff;
+        activityContext?.heartbeat({
+          ...heartbeatDetails,
+          phase: "model_call_persisted",
+          producerSeq,
+          at: new Date().toISOString(),
+        });
+        await emitModelCallUsage({
+          observability,
+          publish: async () => appended,
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          ...usageInput,
+          emittedSourceKeys: emittedModelUsageSourceKeys,
+        });
+        await Bun.sleep(0);
       };
       settle = async (inputSettlement) => {
         const attemptClosing = ["completed", "failed", "cancelled", "requires_action"].includes(
@@ -2694,37 +2909,32 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         ? input.sessionId
         : undefined;
       let compactionUsageCount = 0;
-      const recordCompactionUsage = async (usage: ModelResponseUsage) => {
-        await recordCompletedModelCallBeforeOwnershipFences({
-          renewLease: () => renewCodexLease("model_usage"),
-          leaseLost: () => codexLeaseLost,
-          leaseLostMessage: "Codex credential lease expired during context compaction",
-          recordUsage: async () => {
-            compactionUsageCount += 1;
-            const sourceKey = modelUsageSourceKey({
-              responseId: usage.responseId,
-              dispatchId: modelUsageDispatchId,
-              positionalKey: `compaction-${compactionUsageCount}`,
-            });
-            const responseAccountCtx = modelCallAccountContext({
-              servingCredentialId: effectiveCodexCredentialId,
-              priorSessionCredentialId: priorSessionCodexCredentialId,
-              isFirstCallOfTurn: compactionUsageCount === 1,
-            });
-            await recordModelUsageAndDebitCredits(settings, db, {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-              turnId: turn.id,
-              model: resolvedModel?.configured.id ?? turn.model,
-              isCodexTurn,
-              usage: usage.usage,
-              sourceKey,
-              observability,
-            });
-            await emitModelCallUsage({
-              observability,
-              publish,
+      let completedCompactionModelCall: {
+        summary: string;
+        sourceKey: string;
+        usage: ModelResponseUsage | null;
+        metering: ContextCompactionPersistenceObligation["metering"];
+        event: ContextCompactionPersistenceObligation["event"];
+        servingAccountHash?: string;
+        accountChangedFromPrevCall?: boolean;
+      } | null = null;
+      const recordCompactionCompletion = async (result: {
+        summary: string;
+        usage: ModelResponseUsage | null;
+      }) => {
+        compactionUsageCount += 1;
+        const sourceKey = modelUsageSourceKey({
+          responseId: result.usage?.responseId ?? null,
+          dispatchId: modelUsageDispatchId,
+          positionalKey: `compaction-${compactionUsageCount}`,
+        });
+        const responseAccountCtx = modelCallAccountContext({
+          servingCredentialId: effectiveCodexCredentialId,
+          priorSessionCredentialId: priorSessionCodexCredentialId,
+          isFirstCallOfTurn: compactionUsageCount === 1,
+        });
+        const usageEvent = result.usage
+          ? modelCallUsageEvent({
               accountId: input.accountId,
               workspaceId: input.workspaceId,
               sessionId: input.sessionId,
@@ -2733,13 +2943,35 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               providerApi: resolvedModel?.provider.api ?? "responses",
               model: resolvedModel?.configured.id ?? turn.model,
               sourceKey,
-              usage,
-              servingAccountHash: responseAccountCtx.servingAccountHash,
-              accountChangedFromPrevCall: responseAccountCtx.accountChangedFromPrevCall,
-              emittedSourceKeys: emittedModelUsageSourceKeys,
-            });
-          },
-        });
+              usage: result.usage,
+            })
+          : null;
+        const exactEvent = usageEvent ? reserveTurnEvents([usageEvent])[0]! : null;
+        completedCompactionModelCall = {
+          summary: result.summary,
+          sourceKey,
+          usage: result.usage,
+          metering: result.usage
+            ? {
+                model: resolvedModel?.configured.id ?? turn.model,
+                isCodexTurn,
+                usage: result.usage.usage,
+                sourceKey,
+              }
+            : null,
+          event: exactEvent
+            ? {
+                type: exactEvent.type,
+                payload: exactEvent.payload ?? {},
+                turnId: exactEvent.turnId,
+                producerId: exactEvent.producerId,
+                producerSeq: exactEvent.producerSeq,
+                occurredAt: exactEvent.occurredAt.toISOString(),
+              }
+            : null,
+          servingAccountHash: responseAccountCtx.servingAccountHash,
+          accountChangedFromPrevCall: responseAccountCtx.accountChangedFromPrevCall,
+        };
       };
       const compactionSummarizerFor = (systemInstructions?: string) =>
         resolvedModel
@@ -2750,7 +2982,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   api: resolvedModel.provider.api,
                   model: resolvedModel.configured.id,
                   maxOutputTokens: SUMMARY_BUFFER_TOKENS,
-                  onUsage: recordCompactionUsage,
+                  onCompleted: recordCompactionCompletion,
                   ...(systemInstructions ? { systemInstructions } : {}),
                   ...(promptCacheKey ? { promptCacheKey } : {}),
                 }),
@@ -2758,11 +2990,127 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           : (s: Settings, m: Array<Record<string, unknown>>) =>
               summarizeForCompaction(s, m, {
                 maxOutputTokens: SUMMARY_BUFFER_TOKENS,
-                onUsage: recordCompactionUsage,
+                onCompleted: recordCompactionCompletion,
                 ...(systemInstructions ? { systemInstructions } : {}),
                 ...(promptCacheKey ? { promptCacheKey } : {}),
               });
 
+      const persistCompletedCompaction = async (
+        prepared: PreparedContextCompactionPersistence,
+      ): Promise<MaybeCompactResult> => {
+        const completed = completedCompactionModelCall;
+        if (!completed) {
+          throw new Error("context compaction completed without a provider result receipt");
+        }
+        const obligation: ContextCompactionPersistenceObligation = {
+          kind: "context_compaction",
+          compaction: prepared,
+          metering: completed.metering,
+          event: completed.event,
+        };
+        const handoff: TurnPersistenceHandoff = {
+          version: 1,
+          turnId: turn.id,
+          triggerEventId: triggerEventId!,
+          executionGeneration,
+          obligation,
+        };
+        heartbeatDetails.persistenceHandoff = handoff;
+        activityContext?.heartbeat({
+          ...heartbeatDetails,
+          phase: "persistence_pending",
+          at: new Date().toISOString(),
+        });
+        let appendedUsage: { events: SessionEvent[]; accepted: boolean } | null = null;
+        let persistedOutcome: MaybeCompactResult | null = null;
+        try {
+          await recordCompletedModelCallBeforeOwnershipFences({
+            renewLease: () => renewCodexLease("model_usage"),
+            leaseLost: () => codexLeaseLost,
+            leaseLostMessage: "Codex credential lease expired during context compaction",
+            recordUsage: async () => {
+              if (obligation.metering) {
+                await recordModelUsageAndDebitCredits(settings, db, {
+                  accountId: input.accountId,
+                  workspaceId: input.workspaceId,
+                  sessionId: input.sessionId,
+                  turnId: turn.id,
+                  ...obligation.metering,
+                  observability,
+                });
+              }
+              if (obligation.event) {
+                appendedUsage = await appendOrConfirmAndPublishTurnEventsFenced(
+                  db,
+                  bus,
+                  input.workspaceId,
+                  input.sessionId,
+                  turn.id,
+                  executionGeneration,
+                  input.attemptId,
+                  [{ ...obligation.event, occurredAt: new Date(obligation.event.occurredAt) }],
+                );
+                if (!appendedUsage.accepted) {
+                  throw new TurnAttemptFencedError(
+                    "turn attempt ended while settling completed compaction usage",
+                  );
+                }
+              }
+              persistedOutcome = await persistPreparedContextCompaction(
+                db,
+                {
+                  accountId: input.accountId,
+                  workspaceId: input.workspaceId,
+                  sessionId: input.sessionId,
+                  turnId: turn.id,
+                  executionGeneration,
+                  attemptId: input.attemptId,
+                },
+                prepared,
+              );
+            },
+          });
+          completedCompactionModelCall = null;
+          delete heartbeatDetails.persistenceHandoff;
+          activityContext?.heartbeat({
+            ...heartbeatDetails,
+            phase: "compaction_persisted",
+            at: new Date().toISOString(),
+          });
+          if (appendedUsage && completed.usage) {
+            await emitModelCallUsage({
+              observability,
+              publish: async () => appendedUsage!,
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              turnId: turn.id,
+              provider: resolvedModel?.provider.id ?? settings.openaiProvider,
+              providerApi: resolvedModel?.provider.api ?? "responses",
+              model: resolvedModel?.configured.id ?? turn.model,
+              sourceKey: completed.sourceKey,
+              usage: completed.usage,
+              ...(completed.servingAccountHash
+                ? { servingAccountHash: completed.servingAccountHash }
+                : {}),
+              ...(completed.accountChangedFromPrevCall !== undefined
+                ? { accountChangedFromPrevCall: completed.accountChangedFromPrevCall }
+                : {}),
+              emittedSourceKeys: emittedModelUsageSourceKeys,
+            });
+          }
+          if (!persistedOutcome) {
+            throw new Error("completed compaction persistence returned no outcome");
+          }
+          return persistedOutcome;
+        } catch (persistenceError) {
+          if (persistenceError instanceof TurnAttemptFencedError) {
+            delete heartbeatDetails.persistenceHandoff;
+            throw persistenceError;
+          }
+          throw new TurnPersistenceBoundaryError(handoff, persistenceError);
+        }
+      };
       if (turn.source === "compaction") {
         const persistentSessionSettings = {
           titleIsSet: Boolean(session.title?.trim()),
@@ -2806,9 +3154,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 force: true,
                 clearRequestedCompaction: true,
                 trigger: "operator",
+                onPrepared: persistCompletedCompaction,
               },
             );
           } catch (error) {
+            if (error instanceof TurnPersistenceBoundaryError) throw error;
             // Codex retries retryable checkpoint-provider failures rather than
             // treating them as a semantic compaction result. Keep the operator
             // request pending and let the ordinary same-turn provider/capacity
@@ -3420,6 +3770,48 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         ...(activeSandboxBackend ? { activeSandboxBackend } : {}),
         fileResourceDownloads,
         mcpServers: preparedTools.mcpServers,
+        onFunctionToolCall: async (pendingToolCall) => {
+          const handoff: TurnPersistenceHandoff = {
+            version: 1,
+            turnId: turnId!,
+            triggerEventId: triggerEventId!,
+            executionGeneration,
+            obligation: { kind: "pending_tool_call", ...pendingToolCall },
+          };
+          heartbeatDetails.persistenceHandoff = handoff;
+          activityContext?.heartbeat({
+            ...heartbeatDetails,
+            phase: "persistence_pending",
+            at: new Date().toISOString(),
+          });
+          try {
+            const registered = await registerPendingSessionToolCall(db, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              turnId: turnId!,
+              executionGeneration,
+              attemptId: input.attemptId,
+              ...pendingToolCall,
+            });
+            if (!registered.accepted) {
+              throw new TurnAttemptFencedError(
+                "turn attempt ended before a function tool could be durably registered",
+              );
+            }
+          } catch (persistenceError) {
+            if (persistenceError instanceof TurnAttemptFencedError) {
+              throw persistenceError;
+            }
+            throw new TurnPersistenceBoundaryError(handoff, persistenceError);
+          }
+          delete heartbeatDetails.persistenceHandoff;
+          activityContext?.heartbeat({
+            ...heartbeatDetails,
+            phase: "tool_call_registered",
+            at: new Date().toISOString(),
+          });
+        },
         // LIVE by-reference connector namespaces (fills during this turn's
         // codex_apps tools/list): the codex tool_search description reads it per
         // model call so the model sees the account's real connected sources.
@@ -3665,7 +4057,18 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // Run before every fresh inference. Approval resumes replay their frozen
       // RunState verbatim and recovering attempts already compacted, if needed,
       // before the first attempt's model boundary.
-      if (triggerType === "user.message" || triggerType === "system.update.delivered") {
+      const recoveredCompactionAlreadySettled =
+        turn.executionGeneration > 1 &&
+        (await hasSessionContextCompactionOutcomeForTurn(
+          db,
+          input.workspaceId,
+          input.sessionId,
+          turn.id,
+        ));
+      if (
+        !recoveredCompactionAlreadySettled &&
+        (triggerType === "user.message" || triggerType === "system.update.delivered")
+      ) {
         let forced = false;
         try {
           // Operator /compact (the slash command) sets a durable request flag;
@@ -3695,12 +4098,15 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   force: true,
                   clearRequestedCompaction: true,
                   trigger: "operator",
+                  onPrepared: persistCompletedCompaction,
                 }
-              : { trigger: "auto" },
+              : { trigger: "auto", onPrepared: persistCompletedCompaction },
           );
-          if (outcome.compacted) {
-            const compactionTrigger = forced ? "operator" : undefined;
-            recordContextCompaction(observability, compactionTrigger ?? "auto");
+          if (outcome.events.length > 0) {
+            if (outcome.compacted) {
+              const compactionTrigger = forced ? "operator" : undefined;
+              recordContextCompaction(observability, compactionTrigger ?? "auto");
+            }
             await publishDurableSessionEvents(
               bus,
               input.workspaceId,
@@ -3709,6 +4115,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             );
           }
         } catch (compactError) {
+          if (compactError instanceof TurnPersistenceBoundaryError) throw compactError;
           if (shouldRecoverCompactionProviderFailure(compactError)) throw compactError;
           if (!isCompactionSummaryFailure(compactError)) throw compactError;
           const errorMessage = compactionFailureReasonFromError(compactError);
@@ -3892,6 +4299,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             force: true,
             ...(triggerLabel === "operator" ? { clearRequestedCompaction: true } : {}),
             trigger: triggerLabel,
+            onPrepared: persistCompletedCompaction,
           },
         );
         if (outcome.events.length > 0) {
@@ -4004,73 +4412,44 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             }
             const responseUsage = modelResponseUsageFromSdkEvent(next.value);
             if (responseUsage) {
-              await recordCompletedModelCallBeforeOwnershipFences({
-                renewLease: () => renewCodexLease("model_usage"),
-                leaseLost: () => codexLeaseLost,
-                leaseLostMessage: "Codex credential lease expired during the active turn",
-                recordUsage: async () => {
-                  responseUsageCount += 1;
-                  const responseSourceKey = modelUsageSourceKey({
-                    responseId: responseUsage.responseId,
-                    dispatchId: modelUsageDispatchId,
-                    positionalKey: `response-${responseUsageCount}`,
-                  });
-                  // Within a turn the serving credential is fixed, so a switch can only
-                  // surface on the turn's FIRST model call (vs the session's prior).
-                  const responseAccountCtx = modelCallAccountContext({
-                    servingCredentialId: effectiveCodexCredentialId,
-                    priorSessionCredentialId: priorSessionCodexCredentialId,
-                    isFirstCallOfTurn: responseUsageCount === 1,
-                  });
-                  await recordModelUsageAndDebitCredits(settings, db, {
-                    accountId: input.accountId,
-                    workspaceId: input.workspaceId,
-                    sessionId: input.sessionId,
-                    turnId: activeTurnId,
-                    model: turn.model,
-                    isCodexTurn,
-                    usage: responseUsage.usage,
-                    sourceKey: responseSourceKey,
-                    observability,
-                  });
-                  await emitModelCallUsage({
-                    observability,
-                    publish,
-                    accountId: input.accountId,
-                    workspaceId: input.workspaceId,
-                    sessionId: input.sessionId,
-                    turnId: activeTurnId,
-                    provider: resolvedModel?.provider.id ?? settings.openaiProvider,
-                    providerApi: resolvedModel?.provider.api ?? "responses",
-                    model: turn.model,
-                    sourceKey: responseSourceKey,
-                    usage: responseUsage,
-                    servingAccountHash: responseAccountCtx.servingAccountHash,
-                    accountChangedFromPrevCall: responseAccountCtx.accountChangedFromPrevCall,
-                    emittedSourceKeys: emittedModelUsageSourceKeys,
-                  });
-                  const observed = responseUsage.usage?.inputTokens;
-                  if (typeof observed === "number" && observed > 0) {
-                    recordModelInputTokens(observability, streamProvider, observed);
-                  }
-                  const observedTotal = providerContextTokens(responseUsage.usage);
-                  if (observedTotal !== null) {
-                    lastProviderContextTokensObserved = observedTotal;
-                    providerContextRevision += 1;
-                  }
-                  // Prompt-cache efficiency for this response — same usage frame as the
-                  // input-token accounting above, so the two are always consistent.
-                  recordModelCacheTokens(observability, streamProvider, {
-                    cachedTokens: modelCallUsageTelemetry(responseUsage.usage).cachedTokens,
-                    promptTokens: responseUsage.usage?.inputTokens,
-                  });
-                },
-                recordAttemptSignals: async () => {
-                  const observed = responseUsage.usage?.inputTokens;
-                  if (typeof observed === "number" && observed > 0) {
-                    await setLastInputTokensFenced(observed);
-                  }
-                },
+              responseUsageCount += 1;
+              const responseSourceKey = modelUsageSourceKey({
+                responseId: responseUsage.responseId,
+                dispatchId: modelUsageDispatchId,
+                positionalKey: `response-${responseUsageCount}`,
+              });
+              // Within a turn the serving credential is fixed, so a switch can only
+              // surface on the turn's FIRST model call (vs the session's prior).
+              const responseAccountCtx = modelCallAccountContext({
+                servingCredentialId: effectiveCodexCredentialId,
+                priorSessionCredentialId: priorSessionCodexCredentialId,
+                isFirstCallOfTurn: responseUsageCount === 1,
+              });
+              await persistCompletedModelCall({
+                turnId: activeTurnId,
+                provider: resolvedModel?.provider.id ?? settings.openaiProvider,
+                providerApi: resolvedModel?.provider.api ?? "responses",
+                model: turn.model,
+                sourceKey: responseSourceKey,
+                usage: responseUsage,
+                servingAccountHash: responseAccountCtx.servingAccountHash,
+                accountChangedFromPrevCall: responseAccountCtx.accountChangedFromPrevCall,
+              });
+              const observed = responseUsage.usage?.inputTokens;
+              if (typeof observed === "number" && observed > 0) {
+                recordModelInputTokens(observability, streamProvider, observed);
+                await setLastInputTokensFenced(observed);
+              }
+              const observedTotal = providerContextTokens(responseUsage.usage);
+              if (observedTotal !== null) {
+                lastProviderContextTokensObserved = observedTotal;
+                providerContextRevision += 1;
+              }
+              // Prompt-cache efficiency for this response — same usage frame as the
+              // input-token accounting above, so the two are always consistent.
+              recordModelCacheTokens(observability, streamProvider, {
+                cachedTokens: modelCallUsageTelemetry(responseUsage.usage).cachedTokens,
+                promptTokens: responseUsage.usage?.inputTokens,
               });
               await reconcileConversationTruth();
               try {
@@ -4216,45 +4595,19 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               | number
               | undefined,
           });
-          await recordCompletedModelCallBeforeOwnershipFences({
-            renewLease: () => renewCodexLease("model_usage"),
-            leaseLost: () => codexLeaseLost,
-            leaseLostMessage: "Codex credential lease expired during the active turn",
-            recordUsage: async () => {
-              await recordModelUsageAndDebitCredits(settings, db, {
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                sessionId: input.sessionId,
-                turnId: activeTurnId,
-                model: turn.model,
-                isCodexTurn,
-                usage: aggregateUsage,
-                sourceKey: aggregateSourceKey,
-                observability,
-              });
-              await emitModelCallUsage({
-                observability,
-                publish,
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                sessionId: input.sessionId,
-                turnId: activeTurnId,
-                provider: resolvedModel?.provider.id ?? settings.openaiProvider,
-                providerApi: resolvedModel?.provider.api ?? "responses",
-                model: turn.model,
-                sourceKey: aggregateSourceKey,
-                usage: { usage: aggregateUsage },
-                servingAccountHash: aggregateAccountCtx.servingAccountHash,
-                accountChangedFromPrevCall: aggregateAccountCtx.accountChangedFromPrevCall,
-                emittedSourceKeys: emittedModelUsageSourceKeys,
-              });
-            },
-            recordAttemptSignals: async () => {
-              if (typeof aggregateInput === "number" && aggregateInput > 0) {
-                await setLastInputTokensFenced(aggregateInput);
-              }
-            },
+          await persistCompletedModelCall({
+            turnId: activeTurnId,
+            provider: resolvedModel?.provider.id ?? settings.openaiProvider,
+            providerApi: resolvedModel?.provider.api ?? "responses",
+            model: turn.model,
+            sourceKey: aggregateSourceKey,
+            usage: { usage: aggregateUsage },
+            servingAccountHash: aggregateAccountCtx.servingAccountHash,
+            accountChangedFromPrevCall: aggregateAccountCtx.accountChangedFromPrevCall,
           });
+          if (typeof aggregateInput === "number" && aggregateInput > 0) {
+            await setLastInputTokensFenced(aggregateInput);
+          }
         }
         if (stream.interruptions.length > 0) {
           await reconcileConversationTruth();
@@ -4393,6 +4746,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               }
             }
           } catch (compactError) {
+            if (compactError instanceof TurnPersistenceBoundaryError) {
+              throw compactError;
+            }
             // Transient checkpoint-provider failures recover this same accepted
             // turn through the normal provider/capacity path. They are not an
             // empty summary and must not create a new goal continuation.
@@ -4468,6 +4824,15 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // back to the workflow-claimed turn when the local lookup had not
       // finished yet.
       const recoveryTurnId = turnId;
+      if (error instanceof TurnPersistenceBoundaryError && recoveryTurnId) {
+        activityStatus = "persistence_pending";
+        activityError = error.persistenceCause;
+        turnMetricOutcome = "recovering";
+        return claimedResult({
+          status: "persistence_pending",
+          persistenceHandoff: error.handoff,
+        });
+      }
       // P1.2: a lease supersession during resume (a newer epoch re-established
       // the box concurrently) is NOT a session failure. Recover the same turn
       // so its next attempt reattaches under the current epoch.
@@ -5970,114 +6335,6 @@ export async function ensureRunAllowed(
       }
     }
   }
-}
-
-// Exported for unit testing the codex-billed bypass; not part of the activity surface.
-export async function recordModelUsageAndDebitCredits(
-  settings: Settings,
-  db: ActivityServices["db"],
-  input: {
-    accountId: string;
-    workspaceId: string;
-    sessionId: string;
-    turnId: string;
-    model: string;
-    isCodexTurn: boolean;
-    usage?: ModelUsageInput | null;
-    sourceKey: string;
-    observability?: ActivityServices["observability"];
-  },
-): Promise<void> {
-  if (!input.usage) {
-    return;
-  }
-  const inputTokens = positiveInt(input.usage.inputTokens);
-  const outputTokens = positiveInt(input.usage.outputTokens);
-  const totalTokens = positiveInt(input.usage.totalTokens) || inputTokens + outputTokens;
-  // A codex-subscription turn is paid by the user's ChatGPT/Codex plan, so it
-  // consumes ZERO OpenGeni credits and must never feed an OpenGeni cap. A
-  // codex/<slug> model has no entry in configuredModelPricing, so the normal path
-  // below would throw "Missing model pricing". We:
-  //   - do NOT emit the cap-feeding `model.tokens` event (ensureRunAllowed and
-  //     the API tokens:consume cap sum `model.tokens` with NO cost dimension, so
-  //     any row would count against maxMonthlyTokensPerWorkspace);
-  //   - record a `model.cost = 0` audit marker (harmless to the monthly cost cap);
-  //   - never look up pricing and never debit credits.
-  if (input.isCodexTurn) {
-    await recordUsageEvent(db, {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      eventType: "model.cost",
-      quantity: 0,
-      unit: "usd_micros",
-      sourceResourceType: "model_response",
-      sourceResourceId: `${input.turnId}:${input.sourceKey}`,
-      idempotencyKey: `usage:model.cost:${input.turnId}:${input.sourceKey}`,
-    });
-    return;
-  }
-  if (totalTokens > 0) {
-    await recordUsageEvent(db, {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      eventType: "model.tokens",
-      quantity: totalTokens,
-      unit: "tokens",
-      sourceResourceType: "model_response",
-      sourceResourceId: `${input.turnId}:${input.sourceKey}`,
-      idempotencyKey: `usage:model.tokens:${input.turnId}:${input.sourceKey}`,
-    });
-  }
-  const shouldDebit = settings.billingMode === "stripe" || settings.usageLimitsMode === "managed";
-  if (!shouldDebit || totalTokens === 0) {
-    return;
-  }
-  if (!configuredModelPricing(settings)[input.model]) {
-    throw new Error(`Missing model pricing for ${input.model}`);
-  }
-  const costMicros = calculateModelUsageCostMicros(settings, input.model, input.usage);
-  await recordUsageEvent(db, {
-    accountId: input.accountId,
-    workspaceId: input.workspaceId,
-    eventType: "model.cost",
-    quantity: costMicros,
-    unit: "usd_micros",
-    sourceResourceType: "model_response",
-    sourceResourceId: `${input.turnId}:${input.sourceKey}`,
-    idempotencyKey: `usage:model.cost:${input.turnId}:${input.sourceKey}`,
-  });
-  if (costMicros > 0) {
-    const result = await applyCreditDebitUpToBalance(db, {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      type: "model_usage_debit",
-      requestedAmountMicros: costMicros,
-      sourceType: "model_response",
-      sourceId: `${input.turnId}:${input.sourceKey}`,
-      idempotencyKey: `credit:model_usage_debit:${input.turnId}:${input.sourceKey}`,
-      metadata: {
-        model: input.model,
-        sessionId: input.sessionId,
-        turnId: input.turnId,
-        sourceKey: input.sourceKey,
-        inputTokens,
-        outputTokens,
-        totalTokens,
-        // Additive: the prompt-cache slice of this call's input tokens, so the
-        // per-call debit record carries cache efficiency alongside the token
-        // counts. 0 when the provider did not report cached tokens.
-        cachedTokens: positiveInt(
-          modelCallUsageTelemetry(input.usage as Parameters<typeof modelCallUsageTelemetry>[0])
-            .cachedTokens,
-        ),
-      },
-    });
-    recordCreditMicros(input.observability, "usage", result.debitedMicros);
-  }
-}
-
-function positiveInt(value: unknown): number {
-  return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
 }
 
 function startOfUtcMonth(): Date {
