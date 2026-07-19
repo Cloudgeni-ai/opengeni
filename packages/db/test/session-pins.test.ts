@@ -12,6 +12,8 @@ import {
   removeWorkspaceMember,
   reapExpiredSessionListSnapshots,
   SessionListAccessError,
+  SessionListCursorError,
+  SessionListCursorExpiredError,
   SessionPinAccessError,
   SessionPinVersionConflictError,
   setSessionPin,
@@ -560,6 +562,45 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     expect(secondPage.sessions.map((row) => row.id)).toEqual([middle.id]);
     expect(secondPage.sessions.map((row) => row.id)).not.toContain(newest.id);
     expect(secondPage.nextCursor).toBeTruthy();
+  }, 60_000);
+
+  test("distinguishes invalid cursor semantics from missing or expired snapshots", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const subjectId = "user:cursor-errors";
+    await grantMember(workspace, subjectId);
+    await session({ ...workspace, message: "cursor first" });
+    await session({ ...workspace, message: "cursor second" });
+    const firstPage = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId,
+      limit: 1,
+    });
+    const cursor = decodeSessionListCursor(firstPage.nextCursor!);
+    expect(cursor).not.toBeNull();
+
+    await expect(
+      listSessionsForSubject(db, workspace.workspaceId, {
+        subjectId,
+        limit: 1,
+        cursor: { ...cursor!, search: "different-filter" },
+      }),
+    ).rejects.toBeInstanceOf(SessionListCursorError);
+    await expect(
+      listSessionsForSubject(db, workspace.workspaceId, {
+        subjectId,
+        limit: 1,
+        cursor: { ...cursor!, offset: Number.MAX_SAFE_INTEGER },
+      }),
+    ).rejects.toBeInstanceOf(SessionListCursorError);
+
+    await admin`delete from session_list_snapshots where id = ${cursor!.snapshotId}`;
+    await expect(
+      listSessionsForSubject(db, workspace.workspaceId, {
+        subjectId,
+        limit: 1,
+        cursor: cursor!,
+      }),
+    ).rejects.toBeInstanceOf(SessionListCursorExpiredError);
   }, 60_000);
 
   test("treats percent, underscore, and backslash as literal search text", async () => {

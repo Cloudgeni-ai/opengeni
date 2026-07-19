@@ -10732,9 +10732,16 @@ export class SessionPinVersionConflictError extends Error {
 }
 
 export class SessionListCursorError extends Error {
-  constructor(message = "session list cursor is invalid or expired") {
+  constructor(message = "session list cursor is invalid") {
     super(message);
     this.name = "SessionListCursorError";
+  }
+}
+
+export class SessionListCursorExpiredError extends Error {
+  constructor(message = "session list cursor snapshot is missing or expired") {
+    super(message);
+    this.name = "SessionListCursorExpiredError";
   }
 }
 
@@ -11078,7 +11085,7 @@ export async function listSessionsForSubject(
             )
             .limit(1);
           if (!snapshot || snapshot.expiresAt.getTime() <= now.getTime()) {
-            throw new SessionListCursorError();
+            throw new SessionListCursorExpiredError();
           }
           if (
             snapshot.parentSessionFilter !== parentFilter ||
@@ -11125,7 +11132,7 @@ export async function listSessionsForSubject(
               .where(eq(schema.workspaces.id, workspaceId))
               .limit(1);
             if (!workspace) {
-              throw new SessionListCursorError();
+              throw new Error("session list workspace disappeared while creating a snapshot");
             }
             const [snapshot] = await tx
               .insert(schema.sessionListSnapshots)
@@ -11140,7 +11147,7 @@ export async function listSessionsForSubject(
               })
               .returning();
             if (!snapshot) {
-              throw new SessionListCursorError();
+              throw new Error("session list snapshot was not created");
             }
             nextCursor = encodeSessionListCursor({
               snapshotId: snapshot.id,

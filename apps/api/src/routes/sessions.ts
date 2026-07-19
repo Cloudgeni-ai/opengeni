@@ -63,6 +63,7 @@ import {
   SessionPinAccessError,
   SessionListAccessError,
   SessionListCursorError,
+  SessionListCursorExpiredError,
   decodeSessionListCursor,
   revokeViewer,
   setSessionGoalStatus,
@@ -145,12 +146,15 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       if (error instanceof SessionListAccessError) {
         throw new HTTPException(403, { message: error.message });
       }
-      if (error instanceof SessionListCursorError) {
+      if (error instanceof SessionListCursorExpiredError) {
         // The caller's short-lived snapshot is no longer usable. Keep this
         // distinct from auth, network, and validation failures so clients can
         // rebase a retained continuation exactly once instead of retrying the
         // expired cursor forever.
         throw new HTTPException(410, { message: error.message });
+      }
+      if (error instanceof SessionListCursorError) {
+        throw new HTTPException(400, { message: error.message });
       }
       throw error;
     }

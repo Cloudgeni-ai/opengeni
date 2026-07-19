@@ -865,15 +865,8 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       expect(await composer.inputValue()).toBe("Unsent local draft that must not be overwritten");
       await queue.getByRole("button", { name: "Keep current draft" }).click();
       expect(await queuedRows.count()).toBe(2);
-      const emptyDraftSaved = desktopPage.waitForResponse(
-        (response) =>
-          response.request().method() === "PUT" &&
-          response.url().endsWith(`/sessions/${manager.id}/composer-draft`) &&
-          response.ok(),
-        { timeout: 10_000 },
-      );
       await composer.fill("");
-      await emptyDraftSaved;
+      await waitForComposerDraftText(desktopPage, apiBaseUrl, workspaceId, manager.id, "");
       await queue.getByRole("button", { name: "More actions for queued prompt 2" }).click();
       await desktopPage.getByRole("menuitem", { name: "Edit in composer" }).click();
       await waitFor(
@@ -1524,6 +1517,41 @@ async function setSessionPinThroughApi(
       return (await response.json()) as BrowserSession;
     },
     { apiBaseUrl, workspaceId, session, pinned },
+  );
+}
+
+async function waitForComposerDraftText(
+  page: Page,
+  apiBaseUrl: string,
+  workspaceId: string,
+  sessionId: string,
+  expectedText: string,
+): Promise<void> {
+  // Let the 500 ms client debounce settle first. Clearing an unsaved local
+  // draft is an idempotent no-op and correctly emits no PUT; if an earlier
+  // autosave did start, poll until its serialized follow-up is authoritative.
+  await page.waitForTimeout(600);
+  await waitFor(
+    async () => {
+      if (await page.getByText("Saving draft…", { exact: true }).isVisible()) return false;
+      return await page.evaluate(
+        async ({
+          apiBaseUrl: browserApiBaseUrl,
+          workspaceId: targetWorkspaceId,
+          sessionId: targetSessionId,
+          expectedText: targetText,
+        }) => {
+          const response = await fetch(
+            `${browserApiBaseUrl}/v1/workspaces/${targetWorkspaceId}/sessions/${targetSessionId}/composer-draft`,
+          );
+          if (!response.ok) return false;
+          const draft = (await response.json()) as { text?: unknown };
+          return draft.text === targetText;
+        },
+        { apiBaseUrl, workspaceId, sessionId, expectedText },
+      );
+    },
+    { timeoutMs: 10_000 },
   );
 }
 

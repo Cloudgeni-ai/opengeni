@@ -15,6 +15,7 @@ import {
   dbSql,
   decryptEnvironmentValue,
   decodeSessionListCursor,
+  encodeSessionListCursor,
   enableCapabilityInstallation,
   encryptEnvironmentValue,
   getActiveSessionHistoryItems,
@@ -309,6 +310,21 @@ describe("API component integration", () => {
     ).toBe(400);
     const decodedCursor = decodeSessionListCursor(firstPage.nextCursor!);
     expect(decodedCursor).not.toBeNull();
+    for (const invalidCursor of [
+      encodeSessionListCursor({ ...decodedCursor!, search: "different-filter" }),
+      encodeSessionListCursor({ ...decodedCursor!, offset: Number.MAX_SAFE_INTEGER }),
+    ]) {
+      expect(
+        (
+          await app.request(
+            workspacePath(
+              workspaceId,
+              `/sessions?view=page&limit=1&cursor=${encodeURIComponent(invalidCursor)}`,
+            ),
+          )
+        ).status,
+      ).toBe(400);
+    }
     await dbClient.db.execute(dbSql`
       update session_list_snapshots
       set expires_at = now() - interval '1 second'

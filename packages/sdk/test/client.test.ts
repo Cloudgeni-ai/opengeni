@@ -288,12 +288,20 @@ describe("OpenGeniClient", () => {
     const unavailable = makeClient(
       () => new Response("temporarily unavailable", { status: 500 }),
     ).client;
+    const invalid = makeClient(() => new Response("cursor invalid", { status: 400 })).client;
 
     const expiredError = await expired
       .listSessionPage(WORKSPACE_ID, { cursor: "expired" })
       .catch((error: unknown) => error);
     expect(expiredError).toBeInstanceOf(OpenGeniSessionListCursorError);
     expect(expiredError).toMatchObject({ status: 410, body: "snapshot expired" });
+
+    const invalidError = await invalid
+      .listSessionPage(WORKSPACE_ID, { cursor: "tampered" })
+      .catch((error: unknown) => error);
+    expect(invalidError).toBeInstanceOf(OpenGeniApiError);
+    expect(invalidError).not.toBeInstanceOf(OpenGeniSessionListCursorError);
+    expect(invalidError).toMatchObject({ status: 400, body: "cursor invalid" });
 
     const unavailableError = await unavailable
       .listSessionPage(WORKSPACE_ID, { cursor: "still-valid" })
