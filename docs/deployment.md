@@ -529,9 +529,16 @@ install script and the per-deploy agent binary at auth-exempt paths
 (`/install.sh`, `/install.ps1`, `/uninstall.sh`, and `/agent/*`), so
 `curl -fsSL https://<host>/install.sh | sh` installs the exact agent build that
 matches the running control plane (the per-SHA binary baked into the API image),
-with no dependency on an external CDN. A public release archive is the fallback
-for other OS/arch assets and the self-update channel. Route these paths (and an
-optional `get.<domain>` host) to the `api` service in the ingress.
+with no dependency on an external CDN. Hosted instructions default to
+`https://app.opengeni.ai`; self-hosted deployments set `OPENGENI_PUBLIC_BASE_URL`.
+
+Pinned `/agent/v<version>/<asset>` URLs always redirect to the immutable
+`agent-v<version>` release asset and never serve an arbitrary deployment's baked
+binary. `/agent/stable/manifest.json[.minisig]` redirects to the real signed,
+moving `agent-latest` release manifest; that manifest in turn names only immutable
+versioned artifact and signature URLs. `beta` has no route until a signed beta
+manifest is actually published. Route these paths (and an optional `get.<domain>`
+host) to the `api` service in the ingress.
 
 ### Enrolling a machine
 
@@ -547,6 +554,20 @@ are supported:
   (`/v1/workspaces/:workspaceId/enrollments/token`) that the agent redeems
   headlessly (`/v1/enrollments/token/exchange`) with no human approval — suited
   to fleet or headless provisioning.
+- **Self-revoke**: an enrolled agent can call
+  `POST /v1/enrollments/self/revoke` with its `oge_` enrollment bearer. It can
+  revoke only the matching enrollment in its own workspace; a lost successful
+  response may be retried idempotently only within the same credential generation.
+  Re-enrollment atomically increments that generation, so an old bearer cannot
+  authenticate or revoke the new enrollment credentials. Revocation denies new
+  NATS authorization/reconnect immediately; it does not synchronously disconnect
+  an already-live socket. Callout-minted user JWTs are capped at five minutes (and
+  never outlive the bearer), bounding residual live access after DB revocation.
+
+With a deployment shared-key edge, only `POST /v1/enrollments/device/start`,
+`POST /v1/enrollments/device/poll`, `POST /v1/enrollments/token/exchange`, and
+`POST /v1/enrollments/self/revoke` are public bootstrap routes. Approval, lookup,
+mint, list, and administrator revoke remain deployment-key and user-grant gated.
 
 Client SDKs surface the machine dashboard and enrollment flow through the
 `@opengeni/react/machines` subpath, and target a session at a specific machine

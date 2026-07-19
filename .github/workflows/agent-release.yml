@@ -128,14 +128,13 @@ jobs:
         run: |
           set -euo pipefail
           rustup target add x86_64-apple-darwin aarch64-apple-darwin
-          # `--features macos-desktop` ships the real macOS display backend
-          # (ScreenCaptureKit capture + CGEvent input + the TCC consent flow). It
-          # forwards to opengeni-agent-platform/macos-desktop and is macOS-ONLY —
-          # the Linux/Windows legs above build default features so their binaries
-          # stay byte-identical. The feature-on path compiles only on this macOS
-          # runner (the objc2 Apple FFI has no Linux/Windows target).
-          cargo build --release --target x86_64-apple-darwin -p opengeni-agent --features macos-desktop
-          cargo build --release --target aarch64-apple-darwin -p opengeni-agent --features macos-desktop
+          # Stable releases intentionally use default features. `macos-desktop`
+          # remains experimental and disabled: native compilation is compatibility
+          # evidence, not proof of ScreenCaptureKit/CGEvent behavior, a logged-in
+          # Aqua session, or human TCC grants. Until a consenting live Mac verifies
+          # the signed-bundle flow, stable macOS agents report display_unavailable.
+          cargo build --release --target x86_64-apple-darwin -p opengeni-agent
+          cargo build --release --target aarch64-apple-darwin -p opengeni-agent
           lipo -create \
             "target/x86_64-apple-darwin/release/opengeni-agent" \
             "target/aarch64-apple-darwin/release/opengeni-agent" \
@@ -379,6 +378,9 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v6
 
+      - name: Set up Bun for manifest generation
+        uses: oven-sh/setup-bun@v2
+
       - name: Download all artifacts
         uses: actions/download-artifact@v8.0.1
         with:
@@ -405,6 +407,16 @@ jobs:
           set -euo pipefail
           if [ -n "${MINISIGN_KEY:-}" ]; then echo "has_minisign=true" >> "$GITHUB_OUTPUT"; else echo "has_minisign=false" >> "$GITHUB_OUTPUT"; fi
 
+      # The agent's installer and updater both fail closed without detached
+      # signatures. Do not create an immutable or moving release that would be
+      # impossible to verify; a missing secret is a release blocker, not a warning.
+      - name: Require signed release artifacts
+        if: steps.creds.outputs.has_minisign != 'true'
+        shell: bash
+        run: |
+          echo "::error::OPENGENI_AGENT_MINISIGN_KEY is required to publish an agent release" >&2
+          exit 1
+
       - name: Sign SHA256SUMS (if the key is present)
         if: steps.creds.outputs.has_minisign == 'true'
         env:
@@ -417,6 +429,31 @@ jobs:
           rsign sign -W -s /tmp/minisign.key -x dist/SHA256SUMS.minisig dist/SHA256SUMS
           rm -f /tmp/minisign.key
 
+      # Derive release truth from the actual downloaded binaries, their hashes,
+      # and their detached signatures. The generator rejects partial/tampered
+      # bundles and emits immutable `agent-v<version>` URLs; it has no key input.
+      - name: Generate deterministic stable update manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          signed_at_ms="$(git show -s --format=%ct "$GITHUB_SHA")000"
+          bun scripts/generate-agent-update-manifest.ts \
+            --dir dist \
+            --version "${{ needs.guard.outputs.version }}" \
+            --signed-at-ms "$signed_at_ms" \
+            --release-download-base "https://github.com/Cloudgeni-ai/opengeni/releases/download"
+
+      - name: Sign stable update manifest
+        env:
+          MINISIGN_KEY: ${{ secrets.OPENGENI_AGENT_MINISIGN_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo install --locked rsign2 || true
+          printf '%s' "$MINISIGN_KEY" > /tmp/minisign.key
+          rsign sign -W -s /tmp/minisign.key -x dist/manifest.json.minisig dist/manifest.json
+          rm -f /tmp/minisign.key
+
       - name: Create the GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -426,8 +463,8 @@ jobs:
             opengeni-agent v${{ needs.guard.outputs.version }} — cross-platform signed release.
 
             Install (read the script first — it is short, POSIX, contains no secrets):
-              Linux/macOS: `curl -fsSL https://get.opengeni.ai/install.sh | sh`
-              Windows:     `irm https://get.opengeni.ai/install.ps1 | iex`
+              Linux/macOS: `curl -fsSL https://app.opengeni.ai/install.sh | sh`
+              Windows:     `irm https://app.opengeni.ai/install.ps1 | iex`
 
             Every binary is minisign-signed (verify against the pinned key) + sha256'd.
             macOS/Windows OS-native code-signing is a creds-drop-in (see release notes
@@ -473,16 +510,8 @@ jobs:
             --prerelease=false \
             --notes "Moving pointer to the newest opengeni-agent build (currently v${{ needs.guard.outputs.version }}).
 
-          Maintained automatically so that \`https://get.opengeni.ai/agent/latest/<asset>\` always resolves to the most recent signed agent binaries. For a pinned version, use the corresponding \`agent-v<ver>\` release instead."
+          Maintained automatically so that \`https://app.opengeni.ai/agent/latest/<asset>\` always resolves to the most recent signed agent binaries. For a pinned version, use the corresponding \`agent-v<ver>\` release instead."
 
-      # Publish the signed channel manifest (the CONTROL surface OpenGeni flips to
-      # promote a build). Promotion (5→25→50→100) + kill-switch are a re-run of this
-      # step with new params — NO rebuild (dossier §23.2/§23.3).
-      - name: Publish the signed channel manifest
-        if: steps.creds.outputs.has_minisign == 'true' && vars.AGENT_MANIFEST_PUBLISH == 'true'
-        env:
-          MINISIGN_KEY: ${{ secrets.OPENGENI_AGENT_MINISIGN_KEY }}
-        shell: bash
-        run: |
-          echo "manifest publish is wired via scripts/publish-agent-manifest.ts (TS side, M11d);"
-          echo "this step is gated on AGENT_MANIFEST_PUBLISH so the binary release stands alone."
+      # `dist/manifest.json[.minisig]` is included in the agent-latest asset
+      # upload above. `/agent/stable/manifest.json` therefore discovers a real
+      # signed moving release file while each referenced binary remains immutable.

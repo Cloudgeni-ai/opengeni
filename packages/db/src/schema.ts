@@ -2239,6 +2239,10 @@ export const enrollments = pgTable(
     desktopUnavailableReason: text("desktop_unavailable_reason"),
     allowScreenControl: boolean("allow_screen_control").notNull().default(false),
     status: text("status", { enum: enrollmentStatusValues }).notNull().default("active"),
+    // Credential-family fence. Existing rows/migration-era bearers are generation
+    // 1; every successful re-enrollment increments this atomically before a new
+    // bearer is signed. Auth and self-revoke require an exact row/claim match.
+    credentialGeneration: integer("credential_generation").notNull().default(1),
     os: text("os", { enum: enrollmentOsValues }).notNull().default("linux"),
     arch: text("arch").notNull().default("x86_64"),
     // Heartbeat liveness cursor. Null until the first connect.

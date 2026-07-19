@@ -6,8 +6,11 @@
 //! consumes a signed channel manifest (codegen'd [`UpdateManifest`] so the TS
 //! publisher and this Rust consumer never drift), verifies each artifact two
 //! independent ways (minisign + sha256) plus a version-monotonicity gate, performs
-//! an ATOMIC same-filesystem self-replace (incl. the Windows rename-self-aside),
-//! and ROLLS BACK to the prior binary on any failed boot health-gate.
+//! an ATOMIC same-filesystem self-replace on Linux/Windows (incl. the Windows
+//! rename-self-aside), and exposes a retained prior binary plus explicit rollback
+//! primitive for a caller that actually executes a post-restart health gate.
+//! macOS running-executable apply is intentionally rejected before any write: the
+//! complete signed `.app` must be reinstalled as one unit.
 //!
 //! # Flow
 //!
@@ -18,9 +21,11 @@
 //! 3. **fetch + verify the artifact** — download the target artifact + its
 //!    `.minisig`, verify the minisign signature against the pinned key AND the
 //!    sha256 from the (signed) manifest — a TAMPERED artifact is rejected here;
-//! 4. **apply** — atomic swap with a retained backup ([`apply`]);
-//! 5. **health-gate + rollback** — the caller runs the boot health gate; a failure
-//!    triggers [`apply::rollback`].
+//! 4. **apply** — Linux/Windows atomic swap with a retained backup ([`apply`]);
+//!    macOS returns a complete-bundle-reinstall requirement before mutation;
+//! 5. **health-gate + rollback** — a caller that truly runs a post-restart health
+//!    gate may trigger [`apply::rollback`]. The CLI update command does not claim
+//!    that it runs such a gate automatically.
 //!
 //! # Testing
 //!
@@ -192,7 +197,30 @@ impl UpdateConfig {
         }
     }
 
-    fn manifest_url(&self) -> String {
+    /// Validates that stable is always available and beta is only requested from
+    /// an explicit custom publication origin.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UpdateError::Channel`] when the channel spelling is unsupported
+    /// or `beta` is requested from the hosted public origin, which publishes only
+    /// stable.
+    pub fn validate_channel(&self) -> UpdateResult<()> {
+        match self.channel.as_str() {
+            "stable" => Ok(()),
+            "beta" if self.base_url != "https://app.opengeni.ai" => Ok(()),
+            "beta" => Err(UpdateError::Channel(
+                "beta is only supported by an explicit custom publication origin; use --base-url <origin> --channel beta".to_string(),
+            )),
+            other => Err(UpdateError::Channel(format!(
+                "{other}; supported channel is stable (beta requires an explicit custom publication origin)"
+            ))),
+        }
+    }
+
+    /// Returns the signed channel manifest URL.
+    #[must_use]
+    pub fn manifest_url(&self) -> String {
         format!(
             "{}/agent/{}/manifest.json",
             self.base_url.trim_end_matches('/'),
@@ -247,7 +275,8 @@ impl PendingUpdate {
     ///
     /// # Errors
     ///
-    /// [`UpdateError::Io`] if the swap fails.
+    /// [`UpdateError::BundleReinstallRequired`] on macOS before mutation, or
+    /// [`UpdateError::Io`] if a supported-platform swap fails.
     pub fn apply_running(&self) -> UpdateResult<PathBuf> {
         replace_running_exe(&self.bytes)
     }
@@ -266,6 +295,7 @@ impl PendingUpdate {
 /// artifact yields [`UpdateError::Signature`]; a wrong checksum
 /// [`UpdateError::Checksum`]; a downgrade [`UpdateError::VersionGate`].
 pub fn check_update(source: &dyn Source, config: &UpdateConfig) -> UpdateResult<CheckOutcome> {
+    config.validate_channel()?;
     // 1. Discover: fetch the manifest + its detached signature, verify the
     //    manifest's OWN signature against the pinned key, then parse.
     let manifest_url = config.manifest_url();
@@ -277,6 +307,12 @@ pub fn check_update(source: &dyn Source, config: &UpdateConfig) -> UpdateResult<
         &config.pubkey,
     )?;
     let manifest = parse_manifest(&manifest_bytes)?;
+    if manifest.channel != config.channel {
+        return Err(UpdateError::Channel(format!(
+            "requested {}, but signed manifest declares {}",
+            config.channel, manifest.channel
+        )));
+    }
     info!(
         channel = %manifest.channel,
         version = %manifest.version,
@@ -402,7 +438,7 @@ mod tests {
         let src = DirSource::new("/root");
         // http(s): scheme+authority stripped, the rest is relative to root.
         assert_eq!(
-            src.resolve("https://get.opengeni.ai/agent/a"),
+            src.resolve("https://app.opengeni.ai/agent/a"),
             PathBuf::from("/root/agent/a")
         );
         // file://: the path is absolute (it already embeds the root) — used verbatim.
@@ -439,5 +475,22 @@ mod tests {
         assert_eq!(back.version, "1.0.1");
         assert_eq!(back.artifacts[0].target, "x86_64-unknown-linux-musl");
         assert_eq!(back.rollout_percent, 50);
+    }
+
+    #[test]
+    fn manifest_url_and_channel_policy_are_explicit() {
+        let stable = UpdateConfig::new("https://app.opengeni.ai/", "stable", "a", "1.0.0");
+        assert_eq!(
+            stable.manifest_url(),
+            "https://app.opengeni.ai/agent/stable/manifest.json"
+        );
+        assert!(stable.validate_channel().is_ok());
+        let hosted_beta = UpdateConfig::new("https://app.opengeni.ai", "beta", "a", "1.0.0");
+        assert!(matches!(
+            hosted_beta.validate_channel(),
+            Err(UpdateError::Channel(_))
+        ));
+        let mirror_beta = UpdateConfig::new("https://mirror.example", "beta", "a", "1.0.0");
+        assert!(mirror_beta.validate_channel().is_ok());
     }
 }

@@ -3,7 +3,7 @@
   OpenGeni self-hosted agent installer — Windows (PowerShell 5.1+ / 7+).
 
 .DESCRIPTION
-  irm https://get.opengeni.ai/install.ps1 | iex
+  irm https://app.opengeni.ai/install.ps1 | iex
 
   READ THIS BEFORE PIPING IT TO iex. This script downloads the opengeni-agent.exe
   for your arch, VERIFIES it two independent ways (a minisign signature against a
@@ -13,20 +13,21 @@
   contains NO secrets. The pinned public key travels WITH this audited script, so
   a compromised CDN cannot serve a binary that verifies.
 
-  Run model (dossier §23.0): the default is a FOREGROUND `opengeni-agent run`. An
-  always-on Windows Service is an explicit opt-in (`opengeni-agent service
-  install`), never installed by this script. This script is rename-running-exe
+  Run model (dossier §23.0): the supported Windows model is FOREGROUND
+  `opengeni-agent run`. Windows service subcommands are intentionally unsupported:
+  this binary does not host the SCM dispatcher, so it refuses service actions
+  without registering or changing a service. This script is rename-running-exe
   aware: a re-install over a running agent renames the live .exe aside before
   placing the new one (the same trick self-update uses).
 
 .PARAMETER -* (environment overrides, all optional)
-  OPENGENI_INSTALL_BASE_URL  Release asset base URL (default https://get.opengeni.ai).
+  OPENGENI_INSTALL_BASE_URL  Release asset base URL (default https://app.opengeni.ai).
                              Point at a local mock (http://localhost/...) to test offline.
   OPENGENI_AGENT_VERSION     Pin a version (default "latest").
   OPENGENI_INSTALL_DIR       Install dir (default %LOCALAPPDATA%\OpenGeni\bin).
   OPENGENI_ENROLL_TOKEN      Non-interactive enroll token (CI/automation).
-  OPENGENI_NO_RUN            "1" => do not start a foreground run; just print the command.
   OPENGENI_API_URL           Control-plane API base URL for enrollment.
+  OPENGENI_WORKSPACE_ID      Workspace UUID for an interactive device-flow enrollment.
 
   Immutable-per-version + GitHub-Releases fallback: assets resolve to
   $BASE/agent/v<ver>/<asset>. If the edge is down, the same assets are mirrored at
@@ -53,7 +54,7 @@ function Get-EnvOr($name, $default) {
 # installer pulls the matching baked agent from the same host it was fetched from.
 # Keep the line's shape stable (rewritten by exact match). OPENGENI_INSTALL_BASE_URL
 # still wins.
-$OpengeniInstallDefaultBaseUrl = 'https://get.opengeni.ai'
+$OpengeniInstallDefaultBaseUrl = 'https://app.opengeni.ai'
 $BaseUrl = Get-EnvOr 'OPENGENI_INSTALL_BASE_URL' $OpengeniInstallDefaultBaseUrl
 $Version = Get-EnvOr 'OPENGENI_AGENT_VERSION' 'latest'
 
@@ -170,6 +171,14 @@ function Add-UserPath($dir) {
   }
 }
 
+# Quote a value for a command the installer prints for a human to paste into
+# PowerShell. This is intentionally separate from the API-provided provisioning
+# command: values received through the current process environment need escaping
+# again when they become source text in the next interactive shell.
+function Quote-PowerShell($value) {
+  return "'" + $value.Replace("'", "''") + "'"
+}
+
 function Main {
   $asset = Get-Asset
   $tmp = New-Item -ItemType Directory -Path (Join-Path $env:TEMP ("og-install-" + [guid]::NewGuid())) -Force
@@ -219,7 +228,12 @@ function Complete-Install($bin) {
   $enrollToken = [Environment]::GetEnvironmentVariable('OPENGENI_ENROLL_TOKEN')
   if (-not [string]::IsNullOrEmpty($enrollToken)) {
     Log "non-interactive enroll (OPENGENI_ENROLL_TOKEN set)"
-    & $bin enroll --token $enrollToken --non-interactive
+    $apiUrl = [Environment]::GetEnvironmentVariable('OPENGENI_API_URL')
+    if (-not [string]::IsNullOrEmpty($apiUrl)) {
+      & $bin --api-url $apiUrl enroll --token $enrollToken --non-interactive
+    } else {
+      & $bin enroll --token $enrollToken --non-interactive
+    }
     Log "enrolled. Start the agent (foreground) with:  $bin run"
     return
   }
@@ -227,19 +241,27 @@ function Complete-Install($bin) {
   Write-Host "opengeni-agent installed at: $bin"
   Write-Host ""
   Write-Host "Next steps (the agent runs in the FOREGROUND — it does NOT install a service):"
-  Write-Host "  1. Enroll this machine:   $bin enroll"
+  # The public provisioning command sets these only for the `irm | iex` process.
+  # Preserve them in the printed human command; a bare later `enroll` would lose
+  # the workspace/API binding and must not silently fall back to another host.
+  $enrollPrefix = @()
+  if (-not [string]::IsNullOrEmpty($env:OPENGENI_WORKSPACE_ID)) {
+    $enrollPrefix += "`$env:OPENGENI_WORKSPACE_ID = $(Quote-PowerShell $env:OPENGENI_WORKSPACE_ID)"
+  }
+  if (-not [string]::IsNullOrEmpty($env:OPENGENI_API_URL)) {
+    $enrollPrefix += "`$env:OPENGENI_API_URL = $(Quote-PowerShell $env:OPENGENI_API_URL)"
+  }
+  $enrollPrefix += "& $(Quote-PowerShell $bin) enroll"
+  Write-Host "  1. Enroll this machine:   $($enrollPrefix -join '; ')"
   Write-Host "  2. Run it (online while this runs, offline when you stop it):"
   Write-Host "       $bin run"
   Write-Host ""
-  Write-Host "Want an always-on machine instead? That is opt-in:  $bin service install"
-  Write-Host "Uninstall any time:  $bin uninstall"
-
-  $noRun = [Environment]::GetEnvironmentVariable('OPENGENI_NO_RUN')
-  if ($noRun -ne '1' -and [Environment]::UserInteractive) {
-    Write-Host ""
-    Log "starting a foreground run (Ctrl-C to stop; set OPENGENI_NO_RUN=1 to skip)"
-    & $bin run
-  }
+  Write-Host "Windows Service hosting is not supported in this build; keep $bin run in the foreground."
+  Write-Host "Clean up service/enrollment state:  $bin uninstall [--purge]  (the running .exe is retained; remove it after exit)"
+  # Never start `run` from the installer. In particular `irm … | iex` can run in
+  # an interactive host while the downloaded script has no durable stdin, which
+  # would turn a successful install into an opaque hang. The human explicitly
+  # performs enrollment and starts the supported foreground run.
 }
 
 Main

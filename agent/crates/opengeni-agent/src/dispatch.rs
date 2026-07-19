@@ -48,6 +48,9 @@ pub struct DispatchContext {
     /// [`Op::DesktopInput`] arm refuses synthetic input with
     /// [`ErrorCode::ConsentRequired`] when this is `false`, BEFORE touching the OS.
     pub consented_screen_control: bool,
+    /// Whether persisted enrollment state affirmatively grants whole-machine
+    /// access. Missing/corrupt historical state is never treated as consent.
+    pub consented_whole_machine: bool,
     /// The connection's NEGOTIATED max reply payload in bytes (the NATS
     /// `server_info().max_payload`, deployment-agnostic — never a hardcoded 1 MiB).
     /// A reply larger than this cannot be published, so an op that produces a large
@@ -145,6 +148,17 @@ async fn dispatch_future<P: Platform>(
     let Some(op) = request.op else {
         return protocol_error(request_id, "ControlRequest carried no op");
     };
+
+    // Host exec/filesystem/git/terminal/desktop operations are never served from
+    // an old, corrupt, or explicitly unconsented enrollment. Lifecycle traffic is
+    // deliberately still available so the machine can remain diagnosable and a
+    // human can re-enroll; screen-control remains its own stricter gate below.
+    if !ctx.consented_whole_machine && is_host_operation(&op) {
+        return consent_required_error(
+            request_id,
+            "whole-machine access is not affirmed by persisted enrollment; re-enroll with human consent",
+        );
+    }
 
     match op {
         // --- lifecycle ops answered by the agent itself ----------------------
@@ -247,6 +261,28 @@ async fn dispatch_future<P: Platform>(
     }
 }
 
+fn is_host_operation(op: &Op) -> bool {
+    matches!(
+        op,
+        Op::Exec(_)
+            | Op::FsRead(_)
+            | Op::FsWrite(_)
+            | Op::FsList(_)
+            | Op::FsMkdir(_)
+            | Op::FsMove(_)
+            | Op::FsStat(_)
+            | Op::FsRemove(_)
+            | Op::Git(_)
+            | Op::PtyOpen(_)
+            | Op::PtyWrite(_)
+            | Op::PtyResize(_)
+            | Op::PtyClose(_)
+            | Op::DesktopEnsure(_)
+            | Op::DesktopInput(_)
+            | Op::DesktopScreenshot(_)
+    )
+}
+
 /// Handles [`Op::DesktopInput`] — the computer-use INJECT op the agent runs
 /// against its own desktop.
 ///
@@ -290,8 +326,8 @@ async fn desktop_input<P: Platform>(
 
 /// Handles [`Op::DesktopScreenshot`] — a one-shot desktop capture.
 ///
-/// NO consent gate: a screenshot is a VIEW op — it needs a DISPLAY, not
-/// screen-control consent (the view/control decoupling). A headless host surfaces
+/// Whole-machine consent is checked before this helper; screen-control consent is
+/// intentionally not required for a VIEW op. A headless host surfaces
 /// `Unsupported` from the backend, mapped like any other error.
 async fn desktop_screenshot<P: Platform>(
     request_id: String,
@@ -635,15 +671,19 @@ mod tests {
     }
 
     fn ctx() -> DispatchContext {
-        ctx_with_consent(false)
+        ctx_with_consent(true, false)
     }
 
-    fn ctx_with_consent(consented_screen_control: bool) -> DispatchContext {
+    fn ctx_with_consent(
+        consented_whole_machine: bool,
+        consented_screen_control: bool,
+    ) -> DispatchContext {
         DispatchContext {
             agent_id: "a1".to_string(),
             epoch: 5,
             started: std::time::Instant::now(),
             consented_screen_control,
+            consented_whole_machine,
             // Tests exercise the dispatch logic, not the wire budget; 0 = unbounded
             // (frames pass through untouched, matching pre-backstop behavior).
             max_reply_bytes: 0,
@@ -855,7 +895,7 @@ mod tests {
                 event: Some(v1::desktop_input_request::Event::Pointer(pointer)),
             }),
         );
-        let resp = dispatch(req, &platform, &ctx_with_consent(true)).await;
+        let resp = dispatch(req, &platform, &ctx_with_consent(true, true)).await;
         assert!(resp.error.is_none(), "a consented input has no error");
         assert!(matches!(resp.result, Some(RespResult::DesktopInput(_))));
         let seen = platform.desktop.injected.lock().unwrap();
@@ -871,7 +911,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn desktop_screenshot_returns_the_captured_frame_without_consent() {
+    async fn desktop_screenshot_returns_the_captured_frame_without_screen_control_consent() {
         let platform = Arc::new(FakePlatform::default());
         // No consent needed: a screenshot is a VIEW op; ctx() is UNCONSENTED.
         let req = request(5, Op::DesktopScreenshot(v1::DesktopScreenshotRequest {}));
@@ -890,5 +930,36 @@ mod tests {
             }
             other => panic!("expected DesktopScreenshot, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn host_operations_require_affirmed_whole_machine_consent() {
+        let platform = Arc::new(FakePlatform::default());
+        for op in [
+            Op::Exec(v1::ExecRequest {
+                command: vec!["true".to_string()],
+                ..Default::default()
+            }),
+            Op::FsRead(v1::FsReadRequest {
+                path: "x".to_string(),
+                ..Default::default()
+            }),
+            Op::Git(v1::GitRequest::default()),
+            Op::DesktopScreenshot(v1::DesktopScreenshotRequest {}),
+        ] {
+            let response =
+                dispatch(request(5, op), &platform, &ctx_with_consent(false, false)).await;
+            assert_eq!(
+                response.error.expect("consent error").code,
+                ErrorCode::ConsentRequired as i32
+            );
+        }
+        let ping = dispatch(
+            request(5, Op::Ping(v1::PingRequest { nonce: 1 })),
+            &platform,
+            &ctx_with_consent(false, false),
+        )
+        .await;
+        assert!(ping.error.is_none(), "lifecycle ping remains available");
     }
 }

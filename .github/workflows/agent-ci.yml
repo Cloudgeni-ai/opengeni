@@ -1,10 +1,10 @@
 name: Agent CI
 
 # PR gate for the Rust agent workspace (agent/**), purely additive to the bun CI.
-# The FULL OS matrix here IS the cross-platform proof: a macOS/Windows compile or
-# test break is caught per-PR, not at tag time — and since these legs cannot run on
-# the Linux dev box, the green run on hosted macos-26 + windows-latest runners is
-# the only evidence the agent builds + tests on those OSes (dossier §23.3 / §24.1).
+# The full OS matrix is cross-platform compile/unit compatibility evidence: a
+# macOS/Windows break is caught per PR rather than at tag time. It is NOT live-OS
+# acceptance evidence for SCM hosting, a logged-in Aqua display, or interactive TCC
+# grants; those require separately recorded native human verification.
 #
 # The Cloudgeni-ai org is on the Team plan, so hosted ubuntu/macos-26/windows-latest
 # runners are available; the path-filter keeps docs-only PRs off the (10×-billed)
@@ -60,9 +60,9 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
 
   # test + build across the OS matrix. macos-26 (Apple Silicon) + windows-latest
-  # each prove the platform compiles AND its unit tests pass — the cross-platform
-  # guarantee for the per-OS code (platform/service/update) that cannot run on the
-  # Linux dev box. This matches the documented proof set above. (The deprecated
+  # each prove the platform compiles AND its unit tests pass — compatibility gates
+  # for per-OS code (platform/service/update) that cannot run on the Linux dev box,
+  # never live service/display acceptance. This matches the proof boundary above. (The deprecated
   # Intel macos-13 image is intentionally omitted: it is not in the Team-plan
   # hosted-runner set, never schedules, and macOS is covered by macos-26 here +
   # the macos-26 install-smoke leg below.)
@@ -168,6 +168,14 @@ jobs:
         # Runs on Linux + macOS runners alike: sources install.sh as a library and
         # drives the darwin bundle-signing/atomic-swap helpers with mocked tools.
         run: sh install/test/macos-bundle-sim.sh
+
+      - name: POSIX uninstall + OS lifecycle contracts
+        if: runner.os != 'Windows'
+        shell: bash
+        working-directory: agent
+        run: |
+          sh install/test/uninstall-contract.sh
+          sh install/test/os-lifecycle-contract.sh
 
       - name: Smoke the install script (Windows)
         if: runner.os == 'Windows'

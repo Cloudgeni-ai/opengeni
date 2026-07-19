@@ -17,9 +17,11 @@
 //!     ai.opengeni.agent.plist`, `RunAtLoad`+`KeepAlive`). LaunchAgent NOT
 //!     LaunchDaemon deliberately: desktop/computer-use needs the user's GUI Aqua
 //!     session + TCC. Structured + compiling; the plist generation is pure + tested.
-//!   * **Windows** — a true Windows Service (`OpengeniAgent`) via the SCM, with
-//!     restart-on-failure recovery + Automatic-(Delayed) start. Structured +
-//!     compiling; the registration command is generated + tested.
+//!   * **Windows** — foreground `opengeni-agent run` remains supported, but service
+//!     lifecycle commands are intentionally unsupported. The binary does not enter
+//!     the SCM dispatcher, so registering `opengeni-agent run` would create a
+//!     service that never reaches `SERVICE_RUNNING`. The command surface fails
+//!     before any `sc.exe` mutation.
 //!
 //! The coarse outer restart loop (the service manager) sits ABOVE the in-process
 //! full-jitter backoff (the fine loop) — two independent layers of resiliency.
@@ -63,6 +65,9 @@ pub struct ServiceSpec {
     pub args: Vec<String>,
     /// The install scope (Linux only; ignored elsewhere).
     pub scope: ServiceScope,
+    /// LaunchAgent stdout/stderr destination directory. Required by the macOS
+    /// renderer so logs are user-owned and never depend on shell `~` expansion.
+    pub log_dir: Option<PathBuf>,
 }
 
 impl ServiceSpec {
@@ -74,6 +79,7 @@ impl ServiceSpec {
             binary_path: binary_path.into(),
             args: vec!["run".to_string()],
             scope: ServiceScope::User,
+            log_dir: None,
         }
     }
 
@@ -99,14 +105,12 @@ impl ServiceSpec {
     }
 }
 
-/// The canonical service identifiers (shared across OSes for consistency).
+/// The canonical service identifiers for supported OS service managers.
 pub mod ids {
     /// The systemd unit name (Linux).
     pub const SYSTEMD_UNIT: &str = "opengeni-agent.service";
     /// The launchd label (macOS) + the plist file stem.
     pub const LAUNCHD_LABEL: &str = "ai.opengeni.agent";
-    /// The Windows Service name (Windows).
-    pub const WINDOWS_SERVICE: &str = "OpengeniAgent";
 }
 
 /// Renders the systemd unit-file body for `spec`. PURE (no IO) so it is fully
@@ -122,7 +126,7 @@ pub fn render_systemd_unit(spec: &ServiceSpec) -> String {
     format!(
         "[Unit]\n\
          Description=OpenGeni self-hosted agent\n\
-         Documentation=https://get.opengeni.ai\n\
+         Documentation=https://app.opengeni.ai\n\
          After=network-online.target\n\
          Wants=network-online.target\n\
          # Don't hammer on a crash-loop; the in-process backoff is the fine loop.\n\
@@ -155,6 +159,13 @@ pub fn render_systemd_unit(spec: &ServiceSpec) -> String {
 }
 
 /// Renders the macOS LaunchAgent plist body for `spec`. PURE + tested.
+///
+/// # Panics
+///
+/// Panics when `spec.log_dir` is absent. Only the macOS service constructor may
+/// call this renderer, and it always supplies the explicit user-owned log path;
+/// treating an omitted path as a programming error prevents a plist with an
+/// implicit or shell-expanded logging destination.
 #[must_use]
 pub fn render_launchd_plist(spec: &ServiceSpec) -> String {
     let mut args = vec![spec.binary_path.to_string_lossy().into_owned()];
@@ -164,6 +175,12 @@ pub fn render_launchd_plist(spec: &ServiceSpec) -> String {
         .map(|a| format!("    <string>{}</string>", xml_escape(a)))
         .collect::<Vec<_>>()
         .join("\n");
+    let log_dir = spec
+        .log_dir
+        .as_ref()
+        .expect("LaunchAgent rendering requires an explicit log directory");
+    let stdout = log_dir.join("agent.stdout.log");
+    let stderr = log_dir.join("agent.stderr.log");
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
          <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
@@ -181,34 +198,16 @@ pub fn render_launchd_plist(spec: &ServiceSpec) -> String {
          \x20 <true/>\n\
          \x20 <key>ThrottleInterval</key>\n\
          \x20 <integer>5</integer>\n\
+         \x20 <key>StandardOutPath</key>\n\
+         \x20 <string>{stdout}</string>\n\
+         \x20 <key>StandardErrorPath</key>\n\
+         \x20 <string>{stderr}</string>\n\
          </dict>\n\
          </plist>\n",
         label = ids::LAUNCHD_LABEL,
         program_args = program_args,
-    )
-}
-
-/// Renders the `sc.exe create` command line registering the Windows Service. The
-/// recovery action (`sc failure … restart`) is a separate command, returned by
-/// [`windows_recovery_command`]. PURE + tested.
-#[must_use]
-pub fn windows_create_command(spec: &ServiceSpec) -> String {
-    let bin = spec.binary_path.to_string_lossy();
-    let args = spec.args.join(" ");
-    // binPath embeds the binary + its run args; Automatic-Delayed start; the
-    // service hosts itself via the windows-service crate's service_dispatcher.
-    format!(
-        "sc.exe create {name} binPath= \"\\\"{bin}\\\" {args}\" start= delayed-auto DisplayName= \"OpenGeni Agent\"",
-        name = ids::WINDOWS_SERVICE,
-    )
-}
-
-/// The `sc.exe failure` recovery command (restart on failure with a 5s delay).
-#[must_use]
-pub fn windows_recovery_command() -> String {
-    format!(
-        "sc.exe failure {name} reset= 0 actions= restart/5000/restart/5000/restart/5000",
-        name = ids::WINDOWS_SERVICE,
+        stdout = xml_escape(&stdout.to_string_lossy()),
+        stderr = xml_escape(&stderr.to_string_lossy()),
     )
 }
 
@@ -226,6 +225,103 @@ pub fn systemd_unit_path(scope: ServiceScope, home: &std::path::Path) -> PathBuf
 pub fn launchd_plist_path(home: &std::path::Path) -> PathBuf {
     home.join("Library/LaunchAgents")
         .join(format!("{}.plist", ids::LAUNCHD_LABEL))
+}
+
+/// The user-owned directory containing LaunchAgent stdout/stderr files.
+#[must_use]
+pub fn launchd_log_dir(home: &std::path::Path) -> PathBuf {
+    home.join("Library/Logs/OpenGeni Agent")
+}
+
+/// Exact modern launchctl argv for bootstrapping a user Aqua-domain LaunchAgent.
+#[must_use]
+pub fn launchctl_bootstrap_args(uid: &str, plist: &std::path::Path) -> Vec<String> {
+    vec![
+        "bootstrap".to_string(),
+        format!("gui/{uid}"),
+        plist.to_string_lossy().into_owned(),
+    ]
+}
+
+/// Exact modern launchctl argv for idempotently unloading a user LaunchAgent.
+#[must_use]
+pub fn launchctl_bootout_args(uid: &str, plist: &std::path::Path) -> Vec<String> {
+    vec![
+        "bootout".to_string(),
+        format!("gui/{uid}"),
+        plist.to_string_lossy().into_owned(),
+    ]
+}
+
+/// Exact modern launchctl argv for restarting a loaded LaunchAgent.
+#[must_use]
+pub fn launchctl_kickstart_args(uid: &str) -> Vec<String> {
+    vec![
+        "kickstart".to_string(),
+        "-k".to_string(),
+        format!("gui/{uid}/{}", ids::LAUNCHD_LABEL),
+    ]
+}
+
+/// Exact modern launchctl argv for stopping a loaded LaunchAgent cleanly.
+#[must_use]
+pub fn launchctl_kill_args(uid: &str) -> Vec<String> {
+    vec![
+        "kill".to_string(),
+        "SIGTERM".to_string(),
+        format!("gui/{uid}/{}", ids::LAUNCHD_LABEL),
+    ]
+}
+
+/// Exact modern launchctl argv for inspecting a user LaunchAgent.
+#[must_use]
+pub fn launchctl_print_args(uid: &str) -> Vec<String> {
+    vec![
+        "print".to_string(),
+        format!("gui/{uid}/{}", ids::LAUNCHD_LABEL),
+    ]
+}
+
+/// Exact `tail` argv for compact LaunchAgent logs.
+#[must_use]
+pub fn launchd_tail_args(log_dir: &std::path::Path, lines: u16, follow: bool) -> Vec<String> {
+    let mut args = vec!["-n".to_string(), lines.to_string()];
+    if follow {
+        args.push("-f".to_string());
+    }
+    args.push(
+        log_dir
+            .join("agent.stdout.log")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    args.push(
+        log_dir
+            .join("agent.stderr.log")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    args
+}
+
+/// Exact journalctl argv for a systemd user or system unit.
+#[must_use]
+pub fn journalctl_args(scope: ServiceScope, lines: u16, follow: bool) -> Vec<String> {
+    let mut args = Vec::new();
+    if scope == ServiceScope::User {
+        args.push("--user".to_string());
+    }
+    args.extend([
+        "-u".to_string(),
+        ids::SYSTEMD_UNIT.to_string(),
+        "-n".to_string(),
+        lines.to_string(),
+        "--no-pager".to_string(),
+    ]);
+    if follow {
+        args.push("-f".to_string());
+    }
+    args
 }
 
 /// Builds an `ExecStart=`-style line: the absolute binary path followed by its
@@ -251,6 +347,18 @@ pub fn unsupported_backend() -> PlatformError {
     )
 }
 
+/// The explicit Windows lifecycle boundary. The foreground agent is a normal
+/// console process; it does not call `StartServiceCtrlDispatcher`, register a
+/// service control handler, or report SCM state transitions. Refuse every service
+/// action rather than leave a broken SCM registration behind.
+#[must_use]
+pub fn windows_service_unsupported() -> PlatformError {
+    PlatformError::Unsupported(
+        "Windows service lifecycle is not supported by this build: opengeni-agent does not host the SCM dispatcher, so no service was registered or changed. Use foreground `opengeni-agent run`."
+            .to_string(),
+    )
+}
+
 /// Convenience: the rendered service definition for the host backend, or an
 /// [`PlatformError::Unsupported`] on an unsupported target. Used by `service
 /// install --print`.
@@ -259,14 +367,14 @@ pub fn unsupported_backend() -> PlatformError {
 ///
 /// [`PlatformError::Unsupported`] when the host has no supported service manager.
 pub fn render_for_host(spec: &ServiceSpec) -> PlatformResult<String> {
-    match ServiceSpec::backend() {
+    render_for_backend(ServiceSpec::backend(), spec)
+}
+
+fn render_for_backend(backend: ServiceBackend, spec: &ServiceSpec) -> PlatformResult<String> {
+    match backend {
         ServiceBackend::Systemd => Ok(render_systemd_unit(spec)),
         ServiceBackend::Launchd => Ok(render_launchd_plist(spec)),
-        ServiceBackend::WindowsScm => Ok(format!(
-            "{}\n{}",
-            windows_create_command(spec),
-            windows_recovery_command()
-        )),
+        ServiceBackend::WindowsScm => Err(windows_service_unsupported()),
         ServiceBackend::Unsupported => Err(unsupported_backend()),
     }
 }
@@ -280,6 +388,7 @@ mod tests {
             binary_path: PathBuf::from("/home/u/.local/bin/opengeni-agent"),
             args: vec!["run".to_string()],
             scope: ServiceScope::User,
+            log_dir: Some(PathBuf::from("/Users/u/Library/Logs/OpenGeni Agent")),
         }
     }
 
@@ -363,6 +472,9 @@ mod tests {
         assert!(plist.contains("<key>KeepAlive</key>"));
         assert!(plist.contains("<string>/home/u/.local/bin/opengeni-agent</string>"));
         assert!(plist.contains("<string>run</string>"));
+        assert!(plist.contains("<key>StandardOutPath</key>"));
+        assert!(plist.contains("agent.stdout.log"));
+        assert!(plist.contains("agent.stderr.log"));
     }
 
     #[test]
@@ -375,14 +487,84 @@ mod tests {
     }
 
     #[test]
-    fn windows_commands_register_and_set_recovery() {
-        let create = windows_create_command(&spec());
-        assert!(create.contains("sc.exe create OpengeniAgent"));
-        assert!(create.contains("start= delayed-auto"));
-        assert!(create.contains("opengeni-agent"));
-        let recovery = windows_recovery_command();
-        assert!(recovery.contains("sc.exe failure OpengeniAgent"));
-        assert!(recovery.contains("restart/5000"));
+    fn launchd_commands_are_modern_aqua_user_argv() {
+        let plist = PathBuf::from("/Users/u/Library/LaunchAgents/ai.opengeni.agent.plist");
+        assert_eq!(
+            launchctl_bootstrap_args("501", &plist),
+            [
+                "bootstrap",
+                "gui/501",
+                "/Users/u/Library/LaunchAgents/ai.opengeni.agent.plist"
+            ]
+        );
+        assert_eq!(
+            launchctl_bootout_args("501", &plist),
+            [
+                "bootout",
+                "gui/501",
+                "/Users/u/Library/LaunchAgents/ai.opengeni.agent.plist"
+            ]
+        );
+        assert_eq!(
+            launchctl_kickstart_args("501"),
+            ["kickstart", "-k", "gui/501/ai.opengeni.agent"]
+        );
+        assert_eq!(
+            launchctl_kill_args("501"),
+            ["kill", "SIGTERM", "gui/501/ai.opengeni.agent"]
+        );
+        assert_eq!(
+            launchctl_print_args("501"),
+            ["print", "gui/501/ai.opengeni.agent"]
+        );
+    }
+
+    #[test]
+    fn log_command_builders_are_bounded_and_pure() {
+        assert_eq!(
+            journalctl_args(ServiceScope::User, 25, true),
+            [
+                "--user",
+                "-u",
+                "opengeni-agent.service",
+                "-n",
+                "25",
+                "--no-pager",
+                "-f"
+            ]
+        );
+        assert_eq!(
+            journalctl_args(ServiceScope::System, 25, false),
+            ["-u", "opengeni-agent.service", "-n", "25", "--no-pager"]
+        );
+        let log_dir = std::path::Path::new("/Users/u/Library/Logs/OpenGeni Agent");
+        assert_eq!(
+            launchd_tail_args(log_dir, 25, true),
+            [
+                "-n".to_string(),
+                "25".to_string(),
+                "-f".to_string(),
+                log_dir
+                    .join("agent.stdout.log")
+                    .to_string_lossy()
+                    .into_owned(),
+                log_dir
+                    .join("agent.stderr.log")
+                    .to_string_lossy()
+                    .into_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn windows_service_contract_fails_closed_without_scm_commands() {
+        let error = windows_service_unsupported().to_string();
+        assert_eq!(
+            error,
+            "unsupported operation: Windows service lifecycle is not supported by this build: opengeni-agent does not host the SCM dispatcher, so no service was registered or changed. Use foreground `opengeni-agent run`."
+        );
+        assert!(!error.contains("sc.exe create"));
+        assert!(render_for_backend(ServiceBackend::WindowsScm, &spec()).is_err());
     }
 
     #[test]
@@ -399,8 +581,8 @@ mod tests {
         // On the build host this returns the host's definition without error.
         let out = render_for_host(&spec());
         match ServiceSpec::backend() {
-            ServiceBackend::Unsupported => assert!(out.is_err()),
-            _ => assert!(out.is_ok()),
+            ServiceBackend::Unsupported | ServiceBackend::WindowsScm => assert!(out.is_err()),
+            ServiceBackend::Systemd | ServiceBackend::Launchd => assert!(out.is_ok()),
         }
     }
 }

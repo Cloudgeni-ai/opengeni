@@ -4,7 +4,7 @@
 # OpenGeni self-hosted agent installer — Linux + macOS, STRICT POSIX sh.
 # =============================================================================
 #
-#   curl -fsSL https://get.opengeni.ai/install.sh | sh
+#   curl -fsSL https://app.opengeni.ai/install.sh | sh
 #
 # READ THIS BEFORE PIPING IT TO A SHELL. This script downloads the
 # `opengeni-agent` binary for your OS/arch, VERIFIES it two independent ways
@@ -21,7 +21,7 @@
 #
 # Environment overrides (all optional):
 #   OPENGENI_INSTALL_BASE_URL  Release asset base URL. Default:
-#                              https://get.opengeni.ai. Point this at a local
+#                              https://app.opengeni.ai. Point this at a local
 #                              mock release dir (file:// or http://localhost)
 #                              to test the verify flow offline.
 #   OPENGENI_AGENT_VERSION     Pin a version (e.g. 1.2.3). Default: "latest",
@@ -44,7 +44,7 @@
 #                              --api-url below) and the interactive `enroll`/`run`
 #                              (the agent reads $OPENGENI_API_URL via clap). Set it
 #                              to target a specific deployment instead of the
-#                              api.opengeni.ai default.
+#                              hosted public origin default.
 #   OPENGENI_WORKSPACE_ID      The workspace (UUID) an INTERACTIVE device-flow
 #                              enroll binds to (the user who approves must hold a
 #                              grant in it). Honored by the agent's `enroll`/`run`
@@ -66,17 +66,19 @@
 # bundle at "$HOME/Applications/OpenGeni Agent.app" (a STABLE CFBundleIdentifier,
 # ai.opengeni.agent) and ~/.local/bin/opengeni-agent is a SYMLINK into that bundle
 # — one code-signing identity for both the CLI and the background app. macOS TCC
-# (Screen Recording / Accessibility) grants attach to that identity + bundle id, so
-# the agent's screen/computer-use features work from either entry point. The two
-# system permission prompts fire at `opengeni-agent enroll`, not on first use.
+# (Screen Recording / Accessibility) grants attach to that identity + bundle id.
+# Stable releases currently disable the experimental native desktop feature and
+# report `display_unavailable`; they do not claim working capture/input or a TCC
+# prompt flow. The bundle shape preserves the required identity boundary for a
+# future release only after it is verified on a live, consenting Mac.
 #
-# Immutable-per-version + GH-Releases fallback. The edge serves the latest
-# release at $BASE/install.sh and immutable copies at $BASE/v/<ver>/install.sh.
-# Assets resolve to $BASE/agent/<ver>/<asset> (immutable per version). If the
-# edge is down, the SAME assets are mirrored on the GitHub Release:
+# Installer + asset routes. The installer exists only at $BASE/install.sh; there is
+# no $BASE/v/<ver>/install.sh route. Latest assets resolve to
+# $BASE/agent/latest/<asset>, and a pinned OPENGENI_AGENT_VERSION=<ver> resolves to
+# $BASE/agent/v<ver>/<asset>. The same pinned assets are archived on GitHub at:
 #   https://github.com/Cloudgeni-ai/opengeni/releases/download/agent-v<ver>/<asset>
-# point OPENGENI_INSTALL_BASE_URL there (with OPENGENI_AGENT_VERSION pinned) to
-# install straight from GitHub Releases — the verify is identical.
+# The installer base override expects the /agent/latest or /agent/v<ver> route
+# layout; do not point it directly at a GitHub release-download directory.
 #
 # Exit codes (so a CI harness can assert on the failure mode):
 #   0  success           3  download failed
@@ -103,7 +105,7 @@ OPENGENI_MINISIGN_PUBKEY='RWSaqgF1EVFuci7hXvDJO7cBh2xf2k0XKhCpvl23aWKG+nMAGfZ6D2
 # standalone install. The OPENGENI_INSTALL_BASE_URL env override always wins.
 # Keep this line's shape stable: apps/api/src/routes/install.ts rewrites it by
 # exact match (DEFAULT_BASE_REWRITES).
-OPENGENI_INSTALL_DEFAULT_BASE_URL="https://get.opengeni.ai"
+OPENGENI_INSTALL_DEFAULT_BASE_URL="https://app.opengeni.ai"
 BASE_URL="${OPENGENI_INSTALL_BASE_URL:-$OPENGENI_INSTALL_DEFAULT_BASE_URL}"
 VERSION="${OPENGENI_AGENT_VERSION:-latest}"
 
@@ -669,7 +671,7 @@ finish() {
   if [ -n "${OPENGENI_ENROLL_TOKEN:-}" ]; then
     log "non-interactive enroll (OPENGENI_ENROLL_TOKEN set)"
     # Forward OPENGENI_API_URL explicitly so the exchange targets THIS deployment
-    # (not the api.opengeni.ai default) even when the agent's env-inherit path is
+    # (not a retired separate API host) even when the agent's env-inherit path is
     # ever bypassed. The agent also reads $OPENGENI_API_URL via clap, so the env
     # alone would suffice — this is belt-and-suspenders. The workspace is encoded
     # in the token, so no --workspace-id is needed on this path.

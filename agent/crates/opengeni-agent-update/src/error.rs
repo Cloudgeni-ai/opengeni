@@ -10,6 +10,9 @@ use thiserror::Error;
 /// An error from any stage of the self-update flow.
 #[derive(Debug, Error)]
 pub enum UpdateError {
+    /// The requested update channel is not published by this origin.
+    #[error("unsupported update channel: {0}")]
+    Channel(String),
     /// The signed channel manifest could not be fetched or parsed.
     #[error("manifest error: {0}")]
     Manifest(String),
@@ -71,6 +74,17 @@ pub enum UpdateError {
         value: String,
         /// The parse error.
         source: semver::Error,
+    },
+
+    /// macOS updates must replace the complete signed app bundle. Mutating only
+    /// `.app/Contents/MacOS/opengeni-agent` would invalidate the bundle signature
+    /// and its TCC identity, so the running-executable path fails before any write.
+    #[error(
+        "macOS in-place update is disabled for {path}: no files were changed; reinstall the complete signed OpenGeni Agent.app bundle"
+    )]
+    BundleReinstallRequired {
+        /// The running executable path that was intentionally left untouched.
+        path: String,
     },
 
     /// The post-update health gate failed; the prior binary was rolled back.

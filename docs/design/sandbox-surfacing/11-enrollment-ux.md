@@ -34,7 +34,7 @@ Non-secret. Keeps the human device-approve step.
   - Interactive (workspaceId): `` curl -fsSL ${origin}/install.sh | OPENGENI_API_URL=${origin} OPENGENI_WORKSPACE_ID=${ws} sh ``
   - Headless (enrollToken, see A2): `` curl -fsSL ${origin}/install.sh | OPENGENI_API_URL=${origin} OPENGENI_ENROLL_TOKEN=${tok} sh ``
   - `origin` is `originOf(baseUrl)` exactly as today. Always include `OPENGENI_API_URL=${origin}`
-    so the agent targets *this* deployment, not the `api.opengeni.ai` default (latent bug).
+    so the agent targets *this* deployment rather than any unrelated hosted origin.
   - Keep `deviceVerificationUri` returning `${origin}/device` (page resolves workspace from the code, see B — no workspace in the URL needed).
 - `src/routes/machines.tsx`: drop `void workspaceId` (line 30); call
   `installOneLiner(origin, { workspaceId })` at line 35. The default rendered command is the

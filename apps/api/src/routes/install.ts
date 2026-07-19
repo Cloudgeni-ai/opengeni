@@ -60,8 +60,8 @@ async function loadAsset(file: string): Promise<string> {
 }
 
 // "The agent ships inside the control-plane" (cont.): the committed install
-// scripts default their release-asset base URL to the public archive
-// (get.opengeni.ai) so a from-source / standalone copy still works. But a
+// scripts default their release-asset base URL to the hosted public origin
+// (app.opengeni.ai) so a from-source / standalone copy still works. But a
 // DEPLOYED control plane must serve a script that pulls the agent from ITSELF —
 // the per-SHA binary baked into THIS image, via the /agent/* routes below — so
 // `curl https://<this-host>/install.sh | sh` installs the exact agent that
@@ -73,11 +73,11 @@ async function loadAsset(file: string): Promise<string> {
 // changes. The marker lines are kept shape-stable in agent/install/install.{sh,ps1}.
 const DEFAULT_BASE_REWRITES: Record<string, (base: string) => { from: string; to: string }> = {
   "install.sh": (base) => ({
-    from: 'OPENGENI_INSTALL_DEFAULT_BASE_URL="https://get.opengeni.ai"',
+    from: 'OPENGENI_INSTALL_DEFAULT_BASE_URL="https://app.opengeni.ai"',
     to: `OPENGENI_INSTALL_DEFAULT_BASE_URL="${base}"`,
   }),
   "install.ps1": (base) => ({
-    from: "$OpengeniInstallDefaultBaseUrl = 'https://get.opengeni.ai'",
+    from: "$OpengeniInstallDefaultBaseUrl = 'https://app.opengeni.ai'",
     to: `$OpengeniInstallDefaultBaseUrl = '${base}'`,
   }),
 };
@@ -201,6 +201,27 @@ export function registerInstallRoutes(app: Hono, deps: ApiRouteDeps): void {
     return serveAsset(asset, `${releasesBase}/download/agent-latest/${asset}`);
   });
 
+  // Stable self-update discovery is a signed moving release asset, not a baked
+  // control-plane binary. The updater requests both paths below; beta deliberately
+  // has no route until an actually published beta release exists, so it fails
+  // honestly rather than advertising a dead channel.
+  app.get(
+    "/agent/stable/manifest.json",
+    () =>
+      new Response(null, {
+        status: 302,
+        headers: { location: `${releasesBase}/download/agent-latest/manifest.json` },
+      }),
+  );
+  app.get(
+    "/agent/stable/manifest.json.minisig",
+    () =>
+      new Response(null, {
+        status: 302,
+        headers: { location: `${releasesBase}/download/agent-latest/manifest.json.minisig` },
+      }),
+  );
+
   // The version segment is the literal `v<ver>` (e.g. `v1.2.3`) — Hono cannot bind
   // a param glued to a literal prefix, so the whole segment is the param and the
   // `v` prefix is validated/stripped here. The release tag is `agent-v<ver>`.
@@ -212,7 +233,13 @@ export function registerInstallRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!VERSION_SEG.test(versionSeg) || !ASSET_NAME.test(asset)) {
       throw new HTTPException(400, { message: "invalid version or asset name" });
     }
-    return serveAsset(asset, `${releasesBase}/download/agent-${versionSeg}/${asset}`);
+    // A version-pinned request is an immutable release lookup. Never satisfy it
+    // from this deployment's baked current binary: doing so would silently return
+    // a different version than the URL claims. It must redirect to agent-v<ver>.
+    return new Response(null, {
+      status: 302,
+      headers: { location: `${releasesBase}/download/agent-${versionSeg}/${asset}` },
+    });
   });
 }
 
@@ -221,5 +248,10 @@ export function registerInstallRoutes(app: Hono, deps: ApiRouteDeps): void {
 export const installExactPaths: ReadonlySet<string> = new Set(Object.keys(TEXT_ASSETS));
 
 export function isInstallRedirectPath(path: string): boolean {
-  return path.startsWith("/agent/latest/") || path.startsWith("/agent/v");
+  return (
+    path.startsWith("/agent/latest/") ||
+    path.startsWith("/agent/v") ||
+    path === "/agent/stable/manifest.json" ||
+    path === "/agent/stable/manifest.json.minisig"
+  );
 }
