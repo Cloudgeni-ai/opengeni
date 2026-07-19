@@ -60,6 +60,7 @@ import type {
   SessionMcpApprovalPolicy,
   SessionMcpServerMetadata,
   SessionStatus,
+  SessionToolPolicy,
   SessionTurn,
   SessionQueueSnapshot,
   SessionSystemUpdate,
@@ -102,6 +103,7 @@ import {
   SESSION_EVENT_ENVELOPE_MAX_BYTES,
   SESSION_EVENT_TYPE_MAX_BYTES,
   resolveSessionEventTypeFilters,
+  capabilityCatalogItemIsTrustedForExposure,
   reasoningEffortForMetadata,
   resolveWorkspaceMemoryEnabled,
   RigChange as RigChangeContract,
@@ -2954,6 +2956,7 @@ export type EnqueueSessionTurnInput = {
   turnInstructions?: string | null;
   resources: ResourceRef[];
   tools: ToolRef[];
+  toolsProvided?: boolean;
   model: string;
   reasoningEffort: ReasoningEffort;
   sandboxBackend: SandboxBackend;
@@ -3949,7 +3952,16 @@ export async function listCapabilityCatalogItems(
         ),
       )
       .orderBy(asc(schema.capabilityCatalogItems.kind), asc(schema.capabilityCatalogItems.name));
-    return rows.map(mapCapabilityCatalogItem);
+    return rows
+      .filter((row) =>
+        capabilityCatalogItemIsTrustedForExposure({
+          source: row.source as CapabilitySource,
+          stale: row.stale,
+          authKind: row.authKind as CapabilityCatalogItem["authKind"],
+          metadata: row.metadata,
+        }),
+      )
+      .map(mapCapabilityCatalogItem);
   });
 }
 
@@ -3973,7 +3985,18 @@ export async function getCapabilityCatalogItem(
       )
       .orderBy(asc(sql`(${schema.capabilityCatalogItems.workspaceId} is null)`))
       .limit(1);
-    return row ? mapCapabilityCatalogItem(row) : null;
+    if (
+      !row ||
+      !capabilityCatalogItemIsTrustedForExposure({
+        source: row.source as CapabilitySource,
+        stale: row.stale,
+        authKind: row.authKind as CapabilityCatalogItem["authKind"],
+        metadata: row.metadata,
+      })
+    ) {
+      return null;
+    }
+    return mapCapabilityCatalogItem(row);
   });
 }
 
@@ -4152,7 +4175,16 @@ export async function listEnabledMcpCapabilityServers(
   }
 
   return [...preferredByInstallation.values()].flatMap(({ item, installation }) => {
-    if (!item.endpointUrl || !mcpConnectivityOk(installation.metadata)) {
+    if (
+      !capabilityCatalogItemIsTrustedForExposure({
+        source: item.source as CapabilitySource,
+        stale: item.stale,
+        authKind: item.authKind as CapabilityCatalogItem["authKind"],
+        metadata: item.metadata,
+      }) ||
+      !item.endpointUrl ||
+      !mcpConnectivityOk(installation.metadata)
+    ) {
       return [];
     }
     const headersEncrypted = encryptedHeadersConfig(installation.config.headersEncrypted);
@@ -11703,6 +11735,7 @@ export async function createSession(
     initialTurnInstructions?: string | null;
     resources: ResourceRef[];
     tools?: ToolRef[];
+    toolPolicy?: SessionToolPolicy | null;
     metadata: Record<string, unknown>;
     /**
      * Frozen creator authority. Legacy/test-only callers may omit this and get
@@ -11753,6 +11786,7 @@ export async function createSession(
             initialTurnInstructions: input.initialTurnInstructions ?? null,
             resources: input.resources,
             tools: input.tools ?? [],
+            toolPolicy: input.toolPolicy ?? null,
             metadata: input.metadata,
             ...creatorColumns(frozenCreator),
             model: input.model,
@@ -11807,6 +11841,7 @@ export async function createSessionWithIdempotencyKey(
     initialTurnInstructions?: string | null;
     resources: ResourceRef[];
     tools?: ToolRef[];
+    toolPolicy?: SessionToolPolicy | null;
     metadata: Record<string, unknown>;
     createdBy?: TurnInitiator;
     createdByContext?: TurnInitiatorContext;
@@ -11850,6 +11885,7 @@ export async function createSessionWithIdempotencyKey(
             initialTurnInstructions: input.initialTurnInstructions ?? null,
             resources: input.resources,
             tools: input.tools ?? [],
+            toolPolicy: input.toolPolicy ?? null,
             metadata: input.metadata,
             ...creatorColumns(frozenCreator),
             model: input.model,
@@ -14128,6 +14164,39 @@ export async function listSessionEvents(
 export type ToolspaceCallReservation =
   | { reserved: true; count: number; turn: SessionTurnForExecution }
   | { reserved: false; reason: TurnAttemptFenceRejectReason | "budget_exhausted" };
+
+export type ToolspaceTurnAttemptClaims = {
+  sessionId: string;
+  turnId: string;
+  attemptId: string;
+  executionGeneration: number;
+};
+
+/**
+ * Admit one exact Toolspace bearer before any session credential is decrypted or
+ * any upstream schema is enumerated. This intentionally reuses the canonical
+ * activity write fence so Pause/Steer, attempt replacement, generation changes,
+ * and terminal settlement revoke a copied token at the same linearization point
+ * as other attempt-owned writes.
+ */
+export async function admitToolspaceTurnAttempt(
+  db: Database,
+  workspaceId: string,
+  claims: ToolspaceTurnAttemptClaims,
+): Promise<boolean> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    return await scopedDb.transaction(async (tx) => {
+      const fence = await lockTurnAttemptWriteFenceTx(tx, {
+        workspaceId,
+        sessionId: claims.sessionId,
+        turnId: claims.turnId,
+        attemptId: claims.attemptId,
+        executionGeneration: claims.executionGeneration,
+      });
+      return fence.allowed && fence.turn.status === "running";
+    });
+  });
+}
 
 /**
  * Atomically reserve one toolspace call against a turn's per-turn budget.
@@ -21782,6 +21851,7 @@ export async function initializeSessionStartAtomically(
               turnInstructions: session.initialTurnInstructions ?? null,
               resources: session.resources,
               tools: session.tools,
+              toolsProvided: session.toolPolicy?.mode === "explicit",
               model: session.model,
               reasoningEffort: reasoningEffortForMetadata(
                 session.metadata,
@@ -21929,6 +21999,7 @@ export async function enqueueSessionTurn(
             turnInstructions: input.turnInstructions ?? null,
             resources: input.resources,
             tools: input.tools,
+            toolsProvided: input.toolsProvided ?? false,
             model: input.model,
             reasoningEffort: input.reasoningEffort,
             sandboxBackend: input.sandboxBackend,
@@ -27750,6 +27821,10 @@ function mapSession(
     instructions: row.instructions ?? null,
     resources: row.resources as ResourceRef[],
     tools: row.tools as ToolRef[],
+    toolPolicy: (row.toolPolicy as SessionToolPolicy | null) ?? {
+      mode: "legacy",
+      inheritedFromSessionId: null,
+    },
     metadata: row.metadata,
     createdBy: initiatorFromStorage(
       row.createdByKind,
@@ -27850,6 +27925,7 @@ function mapSessionTurn(row: typeof schema.sessionTurns.$inferSelect): SessionTu
     prompt: row.prompt,
     resources: row.resources as ResourceRef[],
     tools: row.tools as ToolRef[],
+    toolsProvided: row.toolsProvided,
     model: row.model,
     reasoningEffort: row.reasoningEffort as ReasoningEffort,
     sandboxBackend: row.sandboxBackend as SandboxBackend,

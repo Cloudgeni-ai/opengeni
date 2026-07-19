@@ -249,6 +249,7 @@ export type {
   SessionCapabilities,
   SessionListResponse,
   SessionLineageResponse,
+  SessionEffectiveToolPolicy,
   SessionQueueMutationResponse,
   SessionQueueSnapshot,
   SessionControlResponse,
@@ -272,6 +273,7 @@ export type {
   SessionMcpApprovalPolicy,
   SessionMcpServerInput,
   SessionMcpServerMetadata,
+  SessionToolPolicy,
   // Per-surface capability cell aliases (views of SessionCapabilities).
   FileSystemCapability,
   TerminalCapability,

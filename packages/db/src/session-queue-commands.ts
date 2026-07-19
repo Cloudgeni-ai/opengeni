@@ -3,6 +3,7 @@ import {
   mergeToolRefs,
   type ReasoningEffort,
   type ResourceRef,
+  type SessionToolPolicy,
   type ToolRef,
 } from "@opengeni/contracts";
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
@@ -1135,6 +1136,7 @@ export async function submitHumanPromptInTransaction(
     turnInstructions?: string | null;
     resources: ResourceRef[];
     tools: ToolRef[];
+    toolsProvided?: boolean;
     model?: string | null;
     reasoningEffort?: ReasoningEffort | null;
     reasoningEffortFallback: ReasoningEffort;
@@ -1164,6 +1166,7 @@ export async function submitHumanPromptInTransaction(
     turnInstructions: input.turnInstructions ?? null,
     resources: input.resources,
     tools: input.tools,
+    toolsProvided: input.toolsProvided === true,
     model: input.model ?? null,
     reasoningEffort: input.reasoningEffort ?? null,
     source: input.source,
@@ -1398,7 +1401,11 @@ export async function submitHumanPromptInTransaction(
       payload: sanitizeEventPayload({
         text: input.text,
         ...(input.resources.length ? { resources: input.resources } : {}),
-        ...(input.tools.length ? { tools: input.tools } : {}),
+        ...(input.toolsProvided === true
+          ? { tools: input.tools }
+          : input.tools.length
+            ? { tools: input.tools }
+            : {}),
         ...(input.model ? { model: input.model } : {}),
         ...(input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : {}),
         delivery: input.delivery,
@@ -1427,6 +1434,7 @@ export async function submitHumanPromptInTransaction(
           : (input.turnInstructions ?? null),
       resources: input.resources,
       tools: input.tools,
+      toolsProvided: input.toolsProvided === true,
       model: input.model ?? session.model,
       reasoningEffort: input.reasoningEffort ?? input.reasoningEffortFallback,
       sandboxBackend: session.sandboxBackend,
@@ -1567,7 +1575,9 @@ export async function submitHumanPromptInTransaction(
     .update(schema.sessions)
     .set({
       resources: mergeResourceRefs(session.resources as ResourceRef[], input.resources),
-      tools: mergeToolRefs(session.tools as ToolRef[], input.tools),
+      tools: sessionToolPolicyIsFixed(session.toolPolicy)
+        ? session.tools
+        : mergeToolRefs(session.tools as ToolRef[], input.tools),
       activeTurnId: input.delivery === "steer" ? liveCurrentTurnId : session.activeTurnId,
       status: nextStatus,
       queueVersion,
@@ -1630,6 +1640,12 @@ export async function submitHumanPromptInTransaction(
     workspaceControlEventId: resumed.workspaceControlEventId,
     replay: false,
   };
+}
+
+function sessionToolPolicyIsFixed(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const mode = (value as Partial<SessionToolPolicy>).mode;
+  return mode === "workspace_default" || mode === "explicit" || mode === "inherited";
 }
 
 export async function sendAgentMessageInTransaction(

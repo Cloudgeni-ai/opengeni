@@ -44,12 +44,17 @@ export function startTestMcpServer(
     // before this hook runs, so a test can pause or replace its owner while the
     // remote side effect is observably in flight.
     beforeToolCall?: (call: TestMcpToolCall) => void | Promise<void>;
+    /** Inflate one advertised definition to exercise runtime list-size limits. */
+    toolDescriptionBytes?: number;
+    /** Inflate one successful call result to exercise runtime result-size limits. */
+    toolResultBytes?: number;
   } = {},
 ): TestMcpServer {
   const calls: TestMcpToolCall[] = [];
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
+    ...(options.toolDescriptionBytes || options.toolResultBytes ? { idleTimeout: 60 } : {}),
     async fetch(request) {
       const url = new URL(request.url);
       if (url.pathname !== "/mcp") {
@@ -131,7 +136,13 @@ export function startTestMcpServer(
       const scopedTools = options.toolsForAuthorization
         ? options.toolsForAuthorization(request.headers.get("authorization"))
         : undefined;
-      const mcp = buildServer(calls, scopedTools, options.beforeToolCall);
+      const mcp = buildServer(
+        calls,
+        scopedTools,
+        options.beforeToolCall,
+        options.toolDescriptionBytes,
+        options.toolResultBytes,
+      );
       await mcp.connect(transport);
       return await transport.handleRequest(request);
     },
@@ -181,6 +192,8 @@ function buildServer(
   calls: TestMcpToolCall[],
   scopedTools?: string[],
   beforeToolCall?: (call: TestMcpToolCall) => void | Promise<void>,
+  toolDescriptionBytes?: number,
+  toolResultBytes?: number,
 ): McpServer {
   const server = new McpServer({
     name: "test-document-search",
@@ -189,7 +202,9 @@ function buildServer(
   server.registerTool(
     "search_documents",
     {
-      description: "Search indexed documents.",
+      description: toolDescriptionBytes
+        ? "d".repeat(toolDescriptionBytes)
+        : "Search indexed documents.",
       inputSchema: {
         query: z.string(),
       },
@@ -199,7 +214,12 @@ function buildServer(
       calls.push(call);
       await beforeToolCall?.(call);
       return {
-        content: [{ type: "text", text: `found document for ${query}` }],
+        content: [
+          {
+            type: "text",
+            text: toolResultBytes ? "r".repeat(toolResultBytes) : `found document for ${query}`,
+          },
+        ],
       };
     },
   );
