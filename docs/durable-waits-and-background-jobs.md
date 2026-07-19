@@ -176,12 +176,18 @@ one only once:
   or the provider reports that the instance disappeared, the terminal outcome
   is `lost`; OpenGeni never silently reruns it.
 
-The current execution provider is Modal. It launches the command as the main
-process of a dedicated tagged Modal sandbox, persists the sandbox ID before
-observation, streams stdout/stderr using exact provider-byte offsets, polls
-cancel/timeout, and reads declared artifacts only after process exit. The data
-model and worker interface are provider-neutral, but no non-Modal provider is
-currently supported.
+The current execution provider is Modal. It launches a durable supervisor as
+the main process of a dedicated tagged Modal sandbox and persists the sandbox
+ID before observation. The supervisor starts the user command exactly once in
+a separate process group when supported, writes append-only stdout/stderr and
+an atomic terminal-result manifest inside the sandbox, and remains alive after
+the command exits. Replacement controllers reattach by sandbox ID and replay
+deterministic log chunks from provider byte offsets without restarting the user
+command. They collect declared artifacts while the supervisor is still live,
+settle the database and object-store work, and only then terminate the provider.
+An in-sandbox watchdog enforces the command timeout even while no controller is
+attached. The data model and worker interface are provider-neutral, but no
+non-Modal provider is currently supported.
 
 Log chunks are idempotent by stream/provider offset and content hash. Observer
 supersession is fenced by the latest background-job attempt. Declared artifacts
