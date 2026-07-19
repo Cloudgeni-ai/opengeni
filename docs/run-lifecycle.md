@@ -110,15 +110,25 @@ compaction transition, tool receipt, and terminal settlement must match that
 attempt. A typed schedule-to-start timeout is the only no-attempt recovery case
 because its activity never ran.
 
-Completed provider and tool effects have a narrower durability boundary than
-the full activity. Function tools expose the provider-stable call id at the SDK
-`invoke` seam; the worker must register that exact call receipt under the turn
+Provider and tool effects have a narrower durability boundary than the full
+activity. Immediately before every ordinary model or compaction provider call,
+the worker awaits an exact `session_turn_model_call_admissions` insert under the
+turn-attempt fence. The admission records the positive call index, kind,
+provider/API/model, trigger, and execution generation; at most one admission
+may remain unlinked on an attempt. Only after that commit may provider inference
+start. Function tools expose the provider-stable call id at the SDK `invoke`
+seam; the worker must likewise register that exact call receipt under the turn
 fence **before** the underlying function can start. A missing call id or failed
-registration blocks the effect. A completed ordinary model response prepares
-the exact new conversation rows, idempotent accounting source key, and reserved
-`agent.model.usage` producer event. A completed compaction response additionally
-prepares the exact apply/skip transition, replacement fingerprint, and
-persistence key.
+registration blocks the effect.
+
+A completed ordinary model response prepares the exact new conversation rows
+and, only when the provider supplied usage, the idempotent accounting source key
+and reserved `agent.model.usage` producer event. A completed compaction response
+additionally prepares the exact apply/skip transition, replacement fingerprint,
+and persistence key. Provider completion then atomically inserts the full
+prepared obligation in `session_turn_persistence_receipts` and links admission
+and receipt in both directions. The admission therefore cannot be mistaken for
+proof that a provider call did not complete.
 
 The full prepared obligation is committed first to
 `session_turn_persistence_receipts` as JSONB with its canonical SHA-256 digest,
@@ -140,10 +150,18 @@ only `persistTurnHandoffAndRecover`, a retryable control activity whose
 dependency closure contains database/event persistence but no provider,
 runtime, tool, or sandbox execution. Its fixed orders are:
 
-- tool: pending-call receipt → same-turn recovery;
-- model: conversation rows → usage/credit ledger → exact usage event → recovery;
-- compaction: usage/credit ledger → exact usage event → exact prepared
-  apply/skip → recovery.
+- tool: pending-call receipt → receipt settlement → same-turn recovery;
+- model: conversation rows → optional usage/credit ledger and exact usage event
+  → receipt settlement → same-turn recovery;
+- compaction: optional usage/credit ledger and exact usage event → exact
+  prepared apply/skip → receipt settlement → same-turn recovery.
+
+Provider completion without usage is still a completed effect: history (and a
+compaction transition when applicable) persists and the receipt settles, but
+the worker manufactures neither billing nor an `agent.model.usage` event. The
+full contract is **durable admission → provider invocation → complete obligation
+→ atomic admission/receipt link → persistence-only phases → receipt
+settlement**.
 
 Every phase is idempotent under the original attempt fence. Exact producer rows
 confirm an ambiguous event commit; compaction confirms the same persistence key
@@ -210,19 +228,29 @@ does return, the worker immediately records the provider instance id on the
 warming lease before readiness/display/setup work; any later setup failure
 terminates that just-created sandbox before the lease can be retried.
 
-**Worker restarts are survivable.** A graceful worker shutdown (a deploy or
-rollout restart delivers SIGTERM; Temporal cancels in-flight activities with
-reason `WORKER_SHUTDOWN`) checkpoints conversation truth and the sandbox
-envelope, closes the exact attempt as recoverable, and leaves the same logical
-turn in `recovering`. It never creates a human queue row or synthetic user
-message. Any in-flight side-effecting tool call is durably closed with an
-explicit `interrupted / outcome unknown` result before the next attempt can
-run; a late result is retained only as rejected evidence. The workflow then
-creates a fresh attempt for that same turn on a healthy worker and reconstructs
-model input from durable model history and tool-call lineage. At most the
-single in-flight model step is lost, the same bound as a crash. This is an
-explicit checkpoint/resume, not an automatic Temporal retry. A newer control
-revision, terminal state, or successor attempt wins instead of being
+**Worker restarts are survivable without guessing at provider effects.** A
+graceful worker shutdown (a deploy or rollout restart delivers SIGTERM;
+Temporal cancels in-flight activities with reason `WORKER_SHUTDOWN`)
+checkpoints conversation truth and the sandbox envelope. What happens next is
+determined from PostgreSQL, not from the cancellation reason:
+
+- with no provider admission or pending receipt, the worker closes the exact
+  attempt as recoverable and leaves the same logical turn in `recovering`;
+- with a linked pending receipt, the control lane completes persistence only,
+  settles the receipt, and then recovers the same turn;
+- with an admitted but unlinked model/compaction call, provider effect state is
+  unknown, so one transaction fails the exact attempt/turn/session with
+  `ambiguous_model_call`, `effectState="unknown"`, and `retryable=false`.
+
+The third case never redispatches provider inference merely because SIGTERM
+arrived before receipt establishment. None of these paths creates a human queue
+row or synthetic user message. An in-flight side-effecting tool call is durably
+closed with an explicit `interrupted / outcome unknown` result before a safe
+next attempt can run; a late result is retained only as rejected evidence. A
+recoverable path creates a fresh attempt for the same turn on a healthy worker
+and reconstructs model input from durable model history and tool-call lineage.
+This is explicit checkpoint/resume, not an automatic Temporal retry. A newer
+control revision, terminal state, or successor attempt wins instead of being
 overwritten.
 
 **Ungraceful worker death is also survivable — bounded, never blind.** A hard
@@ -234,16 +262,19 @@ truth was still persisted after every completed model response during the turn.
 When the heartbeat carries a pending exact persistence reference, the workflow
 settles that PostgreSQL receipt through `persistTurnHandoffAndRecover` before
 any redispatch. When no heartbeat reference exists, `recoverSessionDispatch`
-locks the exact attempt and checks for a pending receipt in the same transaction
-that would otherwise close it, covering both the receipt-commit-to-heartbeat gap
-and establishment racing worker-death recovery. If establishment commits first,
-the transaction returns the receipt; if closure commits first, later
-establishment is fenced. Only after atomically proving no pending receipt exists
-does `recoverDispatch` close the lost attempt, mark the same logical turn
-`recovering`, and let the loop dispatch its next attempt. This is not
+locks the exact attempt and checks both its pending receipt and model-call
+admission in the same transaction that would otherwise close it. This covers
+receipt-commit-to-heartbeat, admission-to-provider, provider-to-receipt, and
+establishment-vs-worker-death races. A linked receipt returns for persistence-
+only recovery. No receipt and no admission permits `recoverDispatch` to close
+the lost attempt, mark the same logical turn `recovering`, and let the loop
+dispatch its next attempt. An unlinked admission instead atomically quarantines
+the attempt with `ambiguous_model_call`; it is evidence that provider execution
+may have escaped, never evidence that redispatch is safe. This is not
 prompt-queue work and not an automatic Temporal retry of side-effectful work:
-the resumed attempt sees everything durably checkpointed, including explicit
-`interrupted / outcome unknown` tool results when an effect cannot be proven.
+a safely resumed attempt sees everything durably checkpointed, including
+explicit `interrupted / outcome unknown` tool results when an effect cannot be
+proven.
 The dying activity never writes a competing cancellation or authoritative late
 result.
 A per-turn redispatch counter persisted on the turn row (ceiling 3) breaks
@@ -287,9 +318,11 @@ wrong one is the classic mistake.
 1. **`session_history_items` — conversation truth (the model-facing store).**
    Ordered, verbatim SDK `AgentInputItem` JSON, unredacted, RLS-scoped. This is
    what a new turn's input is built from. It is dual-written as the agent
-   streams (reconciled after every model response and at every turn-end path)
-   so a crash loses at most the single in-flight model call. Ordinary inference
-   has no second conversation-memory read path.
+   streams (reconciled after every model response and at every turn-end path).
+   A completed response with a linked receipt converges through persistence
+   only after a crash; an admitted response without a linked receipt is
+   quarantined as unknown and is never replayed. Ordinary inference has no
+   second conversation-memory read path.
 2. **`agent_run_states` — approval resume only.** The serialized SDK `RunState`
    blob is an opaque, SDK-version-gated process checkpoint. Its one legitimate
    job is resuming a turn that paused mid-flight for a human approval
