@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import {
   canonicalizeSessionArchiveManifest,
+  SessionArchiveApplyRequest,
+  SessionArchiveDenial,
+  SessionArchivePlanRequest,
+  SessionArchiveProjection,
   stringifySessionArchiveManifest,
 } from "../../contracts/src/session-archive";
 import {
@@ -127,5 +131,58 @@ describe("session archive manifest", () => {
     expect(() => canonicalizeSessionArchiveManifest(badSeal)).toThrow(
       `archive root ${rootB} must not name a target seal`,
     );
+  });
+
+  test("pins typed plan/apply, projection, and fail-closed denial wire shapes", () => {
+    expect(
+      SessionArchivePlanRequest.parse({
+        action: "archive",
+        roots: [{ rootSessionId: rootA }],
+      }),
+    ).toEqual({ action: "archive", roots: [{ rootSessionId: rootA, targetSealId: null }] });
+    expect(() =>
+      SessionArchivePlanRequest.parse({
+        action: "unarchive",
+        roots: [{ rootSessionId: rootA }],
+      }),
+    ).toThrow("must name their target seal");
+
+    const checksum = sessionArchiveManifestChecksum(manifest());
+    expect(() =>
+      SessionArchiveApplyRequest.parse({
+        manifest: manifest(),
+        manifestChecksum: checksum,
+        rootChecksum: sessionArchiveRootChecksum(manifest(), rootA),
+        idempotencyKey: "bulk:root-a",
+      }),
+    ).toThrow("exactly one atomic root");
+
+    expect(
+      SessionArchiveProjection.parse({
+        archived: false,
+        archiveRevision: "0",
+        activeSealCount: 0,
+        archivedAt: null,
+        nearestFence: null,
+      }),
+    ).toEqual({
+      archived: false,
+      archiveRevision: "0",
+      activeSealCount: 0,
+      archivedAt: null,
+      nearestFence: null,
+    });
+    expect(
+      SessionArchiveDenial.parse({
+        code: "archived_ancestry",
+        targetSessionId: childA,
+        archivedAncestorSessionId: rootA,
+        archiveRootSessionId: rootA,
+        archiveSealId: "00000000-0000-4000-8000-000000000099",
+        archiveRevision: "13",
+        operation: "create_child",
+        retryable: false,
+      }).retryable,
+    ).toBe(false);
   });
 });

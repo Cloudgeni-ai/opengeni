@@ -17,6 +17,103 @@ export type SessionArchiveAction = z.infer<typeof SessionArchiveAction>;
 export const SessionArchiveView = z.enum(["live", "archived", "all"]);
 export type SessionArchiveView = z.infer<typeof SessionArchiveView>;
 
+export const SessionArchiveChecksum = z
+  .string()
+  .regex(/^sha256:[0-9a-f]{64}$/, "checksum must be sha256:<64 lower-case hex>");
+export type SessionArchiveChecksum = z.infer<typeof SessionArchiveChecksum>;
+
+export const SessionArchiveOperationCategory = z.enum([
+  "create_child",
+  "queue_mutation",
+  "send_message",
+  "steer",
+  "control",
+  "turn_claim",
+  "attempt_update",
+  "event_append",
+  "goal_mutation",
+  "workflow_wake",
+  "child_callback",
+  "schedule_fire",
+  "job_mutation",
+  "sandbox_route",
+  "sandbox_lease",
+  "sandbox_pty",
+  "sandbox_viewer",
+  "file_mutation",
+  "metadata_mutation",
+]);
+export type SessionArchiveOperationCategory = z.infer<typeof SessionArchiveOperationCategory>;
+
+export const SessionArchiveDenial = z
+  .object({
+    code: z.enum(["session_archived", "archived_ancestry"]),
+    targetSessionId: z.string().uuid(),
+    archivedAncestorSessionId: z.string().uuid(),
+    archiveRootSessionId: z.string().uuid(),
+    archiveSealId: z.string().uuid(),
+    archiveRevision: DecimalRevision,
+    operation: SessionArchiveOperationCategory,
+    retryable: z.literal(false),
+  })
+  .strict();
+export type SessionArchiveDenial = z.infer<typeof SessionArchiveDenial>;
+
+export const SessionArchiveBlockerCode = z.enum([
+  "session_lifecycle_live",
+  "turn_unsettled",
+  "attempt_unsettled",
+  "queue_pending",
+  "composer_draft_pending",
+  "system_update_pending",
+  "child_callback_pending",
+  "workflow_wake_pending",
+  "goal_active",
+  "goal_wake_pending",
+  "durable_wait_active",
+  "background_job_active",
+  "schedule_reuse_active",
+  "schedule_fire_pending",
+  "sandbox_operation_active",
+  "sandbox_viewer_active",
+  "sandbox_pty_active",
+  "sandbox_lease_exclusive",
+  "sandbox_recovery_active",
+  "sandbox_route_switch_active",
+  "invariant_unproven",
+]);
+export type SessionArchiveBlockerCode = z.infer<typeof SessionArchiveBlockerCode>;
+
+export const SessionArchiveBlocker = z
+  .object({
+    code: SessionArchiveBlockerCode,
+    sessionId: z.string().uuid(),
+    resourceId: z.string().nullable().default(null),
+    state: z.string().nullable().default(null),
+    details: z.record(z.string(), z.unknown()).default({}),
+  })
+  .strict();
+export type SessionArchiveBlocker = z.infer<typeof SessionArchiveBlocker>;
+
+export const SessionArchiveProjection = z
+  .object({
+    archived: z.boolean(),
+    archiveRevision: DecimalRevision,
+    activeSealCount: z.number().int().nonnegative(),
+    archivedAt: z.string().nullable(),
+    nearestFence: z
+      .object({
+        sessionId: z.string().uuid(),
+        rootSessionId: z.string().uuid(),
+        sealId: z.string().uuid(),
+        archiveRevision: DecimalRevision,
+      })
+      .strict()
+      .nullable(),
+  })
+  .strict();
+export type SessionArchiveProjection = z.infer<typeof SessionArchiveProjection>;
+
 export const SessionArchiveManifestMember = z
   .object({
     sessionId: z.string().uuid(),
@@ -51,6 +148,125 @@ export const SessionArchiveManifest = z
 export type SessionArchiveManifest = z.infer<typeof SessionArchiveManifest>;
 
 export type CanonicalSessionArchiveManifest = SessionArchiveManifest;
+
+export const SessionArchivePlanRequest = z
+  .object({
+    action: SessionArchiveAction,
+    roots: z
+      .array(
+        z
+          .object({
+            rootSessionId: z.string().uuid(),
+            targetSealId: z.string().uuid().nullable().default(null),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(SESSION_ARCHIVE_MANIFEST_MAX_ROOTS),
+  })
+  .strict()
+  .superRefine((request, context) => {
+    for (const [index, root] of request.roots.entries()) {
+      if (request.action === "archive" && root.targetSealId !== null) {
+        context.addIssue({
+          code: "custom",
+          message: "archive plan roots must not name a target seal",
+          path: ["roots", index, "targetSealId"],
+        });
+      }
+      if (request.action === "unarchive" && root.targetSealId === null) {
+        context.addIssue({
+          code: "custom",
+          message: "unarchive plan roots must name their target seal",
+          path: ["roots", index, "targetSealId"],
+        });
+      }
+    }
+  });
+export type SessionArchivePlanRequest = z.infer<typeof SessionArchivePlanRequest>;
+
+export const SessionArchivePlanRoot = z
+  .object({
+    rootSessionId: z.string().uuid(),
+    targetSealId: z.string().uuid().nullable(),
+    rootChecksum: SessionArchiveChecksum,
+    memberCount: z.number().int().positive(),
+    canApply: z.boolean(),
+    blockers: z.array(SessionArchiveBlocker),
+  })
+  .strict();
+export type SessionArchivePlanRoot = z.infer<typeof SessionArchivePlanRoot>;
+
+export const SessionArchivePlanResponse = z
+  .object({
+    manifest: SessionArchiveManifest,
+    manifestChecksum: SessionArchiveChecksum,
+    canApply: z.boolean(),
+    roots: z.array(SessionArchivePlanRoot).min(1),
+  })
+  .strict();
+export type SessionArchivePlanResponse = z.infer<typeof SessionArchivePlanResponse>;
+
+export const SessionArchiveApplyRequest = z
+  .object({
+    manifest: SessionArchiveManifest,
+    manifestChecksum: SessionArchiveChecksum,
+    rootChecksum: SessionArchiveChecksum,
+    idempotencyKey: z.string().min(1).max(200),
+  })
+  .strict()
+  .refine((request) => request.manifest.roots.length === 1, {
+    message: "one apply request must contain exactly one atomic root",
+    path: ["manifest", "roots"],
+  });
+export type SessionArchiveApplyRequest = z.infer<typeof SessionArchiveApplyRequest>;
+
+export const SessionArchiveReceipt = z
+  .object({
+    id: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    action: SessionArchiveAction,
+    operationKey: z.string().min(1),
+    manifestChecksum: SessionArchiveChecksum,
+    rootChecksum: SessionArchiveChecksum,
+    rootSessionId: z.string().uuid(),
+    sealId: z.string().uuid(),
+    memberCount: z.number().int().positive(),
+    coverageChecksum: SessionArchiveChecksum,
+    committedAt: z.string(),
+  })
+  .strict();
+export type SessionArchiveReceipt = z.infer<typeof SessionArchiveReceipt>;
+
+export const SessionArchiveReceiptMember = z
+  .object({
+    sessionId: z.string().uuid(),
+    parentSessionId: z.string().uuid().nullable(),
+    depth: z.number().int().nonnegative(),
+    beforeArchiveRevision: DecimalRevision,
+    afterArchiveRevision: DecimalRevision,
+    beforeArchived: z.boolean(),
+    afterArchived: z.boolean(),
+  })
+  .strict();
+export type SessionArchiveReceiptMember = z.infer<typeof SessionArchiveReceiptMember>;
+
+export const SessionArchiveApplyResponse = z
+  .object({
+    receipt: SessionArchiveReceipt,
+    replay: z.boolean(),
+    rootArchive: SessionArchiveProjection,
+  })
+  .strict();
+export type SessionArchiveApplyResponse = z.infer<typeof SessionArchiveApplyResponse>;
+
+export const SessionArchiveReceiptEvidence = z
+  .object({
+    receipt: SessionArchiveReceipt,
+    members: z.array(SessionArchiveReceiptMember),
+  })
+  .strict();
+export type SessionArchiveReceiptEvidence = z.infer<typeof SessionArchiveReceiptEvidence>;
 
 function canonicalUuid(value: string): string {
   return value.toLowerCase();
