@@ -88,9 +88,7 @@ type ModelOutputBoundState = {
 export function modelToolOutputSerializationBudgetTokens(
   policyTokens = DEFAULT_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS,
 ): number {
-  return Math.ceil(
-    Math.max(0, policyTokens) * CODEX_TOOL_OUTPUT_SERIALIZATION_ALLOWANCE,
-  );
+  return Math.ceil(Math.max(0, policyTokens) * CODEX_TOOL_OUTPUT_SERIALIZATION_ALLOWANCE);
 }
 
 export function approximateTokenCount(value: string): number {
@@ -98,10 +96,7 @@ export function approximateTokenCount(value: string): number {
 }
 
 /** Exact Codex-style middle truncation for a token policy. */
-export function truncateMiddleWithTokenBudget(
-  value: string,
-  maxTokens: number,
-): string {
+export function truncateMiddleWithTokenBudget(value: string, maxTokens: number): string {
   if (value.length === 0) return value;
   const maxBytes = Math.max(0, maxTokens) * APPROX_BYTES_PER_TOKEN;
   const valueBytes = Buffer.byteLength(value, "utf8");
@@ -114,10 +109,7 @@ export function truncateMiddleWithTokenBudget(
   // an arbitrary oversized string bypass the cap merely by containing marker-like
   // text. The first application remains byte-for-byte Codex 0.144.6 behavior.
   const existingMarker = value.match(TOKEN_TRUNCATION_MARKER)?.[0];
-  if (
-    existingMarker &&
-    valueBytes <= maxBytes + Buffer.byteLength(existingMarker, "utf8")
-  ) {
+  if (existingMarker && valueBytes <= maxBytes + Buffer.byteLength(existingMarker, "utf8")) {
     return value;
   }
   if (maxBytes === 0) {
@@ -131,18 +123,11 @@ export function truncateMiddleWithTokenBudget(
   // memory. A single UTF-8 buffer gives bounded scans at the two cut points.
   const bytes = Buffer.from(value, "utf8");
   let leftEnd = Math.min(leftBudget, bytes.length);
-  while (
-    leftEnd > 0 &&
-    leftEnd < bytes.length &&
-    isUtf8ContinuationByte(bytes[leftEnd]!)
-  ) {
+  while (leftEnd > 0 && leftEnd < bytes.length && isUtf8ContinuationByte(bytes[leftEnd]!)) {
     leftEnd -= 1;
   }
   let rightStart = Math.max(0, bytes.length - rightBudget);
-  while (
-    rightStart < bytes.length &&
-    isUtf8ContinuationByte(bytes[rightStart]!)
-  ) {
+  while (rightStart < bytes.length && isUtf8ContinuationByte(bytes[rightStart]!)) {
     rightStart += 1;
   }
   const left = bytes.subarray(0, leftEnd).toString("utf8");
@@ -168,9 +153,7 @@ export function boundModelToolOutputItem<T extends ModelHistoryItem>(
   if (!TOOL_RESULT_TYPES.has(type)) return item;
   const budget = modelToolOutputSerializationBudgetTokens(policyTokens);
   const boundedOutput = boundToolOutputValue(item.output, budget);
-  return boundedOutput === item.output
-    ? item
-    : ({ ...item, output: boundedOutput } as T);
+  return boundedOutput === item.output ? item : ({ ...item, output: boundedOutput } as T);
 }
 
 export function boundModelToolOutputItems<T extends ModelHistoryItem>(
@@ -190,8 +173,7 @@ function boundToolOutputValue(output: unknown, budgetTokens: number): unknown {
     // Text-transport computer/view_image tools use a data URL because Chat
     // Completions has no structured image result. It is still image protocol,
     // not textual tool output; truncating its base64 permanently corrupts it.
-    if (isImageDataUrl(output))
-      return boundOpaqueProtocolString(output, state, "image");
+    if (isImageDataUrl(output)) return boundOpaqueProtocolString(output, state, "image");
     return truncateMiddleWithTokenBudget(output, budgetTokens);
   }
   if (Array.isArray(output)) {
@@ -233,28 +215,18 @@ function modelOutputBoundState(budgetTokens: number): ModelOutputBoundState {
   };
 }
 
-function boundStructuredOutputItems(
-  items: unknown[],
-  state: ModelOutputBoundState,
-): unknown[] {
+function boundStructuredOutputItems(items: unknown[], state: ModelOutputBoundState): unknown[] {
   let omitted = 0;
   let changed = false;
   const out: unknown[] = [];
   let processed = 0;
   for (const item of items) {
-    if (
-      processed >= MODEL_TOOL_OUTPUT_MAX_CONTAINER_ENTRIES ||
-      state.remainingEntries <= 0
-    ) {
+    if (processed >= MODEL_TOOL_OUTPUT_MAX_CONTAINER_ENTRIES || state.remainingEntries <= 0) {
       break;
     }
     processed += 1;
     state.remainingEntries -= 1;
-    if (
-      !item ||
-      typeof item !== "object" ||
-      !isTextContentItem(item as Record<string, unknown>)
-    ) {
+    if (!item || typeof item !== "object" || !isTextContentItem(item as Record<string, unknown>)) {
       const bounded = boundTextLeaves(item, state, 1);
       out.push(bounded);
       if (bounded !== item) changed = true;
@@ -326,10 +298,7 @@ function boundTextLeaves(
     let changed = false;
     for (let index = 0; index < value.length; index += 1) {
       const entry = value[index];
-      if (
-        processed >= MODEL_TOOL_OUTPUT_MAX_CONTAINER_ENTRIES ||
-        state.remainingEntries <= 0
-      ) {
+      if (processed >= MODEL_TOOL_OUTPUT_MAX_CONTAINER_ENTRIES || state.remainingEntries <= 0) {
         // A prior pass can add exactly one structural trailer beyond the normal
         // item allowance. Retain only that final trailer for replay idempotence;
         // marker-shaped untrusted entries otherwise consume the same caps as
@@ -366,18 +335,12 @@ function boundTextLeaves(
   let changed = false;
   for (let index = 0; index < entries.length; index += 1) {
     const [key, entry] = entries[index]!;
-    if (
-      processed >= MODEL_TOOL_OUTPUT_MAX_CONTAINER_ENTRIES ||
-      state.remainingEntries <= 0
-    ) {
+    if (processed >= MODEL_TOOL_OUTPUT_MAX_CONTAINER_ENTRIES || state.remainingEntries <= 0) {
       // As with arrays, a bounded prior pass may have appended one final marker
       // property after filling the normal property allowance. Preserve only
       // that terminal marker; forged/interspersed marker properties remain
       // ordinary bounded input.
-      if (
-        index === entries.length - 1 &&
-        isGeneratedStructuralMarkerProperty(key, entry)
-      ) {
+      if (index === entries.length - 1 && isGeneratedStructuralMarkerProperty(key, entry)) {
         out[key] = entry;
         break;
       }
@@ -386,9 +349,7 @@ function boundTextLeaves(
     }
     processed += 1;
     state.remainingEntries -= 1;
-    if (
-      Buffer.byteLength(key, "utf8") > MODEL_TOOL_OUTPUT_MAX_PROPERTY_KEY_BYTES
-    ) {
+    if (Buffer.byteLength(key, "utf8") > MODEL_TOOL_OUTPUT_MAX_PROPERTY_KEY_BYTES) {
       omitted += 1;
       changed = true;
       continue;
@@ -409,20 +370,14 @@ function boundTextLeaves(
     if (bounded !== entry) changed = true;
   }
   if (omitted > 0) {
-    out[uniqueStructuralMarkerKey(out)] = structuredEntriesOmissionMarker(
-      omitted,
-      "object",
-    );
+    out[uniqueStructuralMarkerKey(out)] = structuredEntriesOmissionMarker(omitted, "object");
     changed = true;
   }
   state.seen.delete(value);
   return changed ? out : value;
 }
 
-function boundStructuralString(
-  value: string,
-  state: ModelOutputBoundState,
-): string {
+function boundStructuralString(value: string, state: ModelOutputBoundState): string {
   if (isGeneratedModelOutputMarker(value)) {
     observeGeneratedMarkerBudget(value, state);
     return value;
@@ -476,10 +431,7 @@ function opaqueKindForChild(
   return opaqueKeys.includes(key) ? kind : null;
 }
 
-function structuredEntriesOmissionMarker(
-  count: number,
-  container: "array" | "object",
-): string {
+function structuredEntriesOmissionMarker(count: number, container: "array" | "object"): string {
   return `[OpenGeni omitted ${count} structured ${container === "array" ? "array items" : "object properties"}]`;
 }
 
@@ -496,26 +448,15 @@ function isGeneratedModelOutputMarker(value: unknown): value is string {
   );
 }
 
-function observeGeneratedMarkerBudget(
-  value: string,
-  state: ModelOutputBoundState,
-): void {
-  if (
-    TEXT_FIELD_OMISSION_MARKER.test(value) ||
-    TEXT_ITEMS_OMISSION_MARKER.test(value)
-  ) {
+function observeGeneratedMarkerBudget(value: string, state: ModelOutputBoundState): void {
+  if (TEXT_FIELD_OMISSION_MARKER.test(value) || TEXT_ITEMS_OMISSION_MARKER.test(value)) {
     state.remaining = 0;
   }
-  if (value === STRUCTURAL_STRING_OMISSION_MARKER)
-    state.remainingStructural = 0;
-  if (OPAQUE_PAYLOAD_OMISSION_MARKER.test(value))
-    state.remainingOpaqueBytes = 0;
+  if (value === STRUCTURAL_STRING_OMISSION_MARKER) state.remainingStructural = 0;
+  if (OPAQUE_PAYLOAD_OMISSION_MARKER.test(value)) state.remainingOpaqueBytes = 0;
 }
 
-function isGeneratedStructuralMarkerProperty(
-  key: string,
-  value: unknown,
-): boolean {
+function isGeneratedStructuralMarkerProperty(key: string, value: unknown): boolean {
   return (
     key.startsWith(STRUCTURAL_PROPERTIES_MARKER_KEY) &&
     typeof value === "string" &&
@@ -536,9 +477,7 @@ function uniqueStructuralMarkerKey(record: Record<string, unknown>): string {
 function isTextContentItem(value: Record<string, unknown>): boolean {
   return (
     typeof value.text === "string" &&
-    (value.type === "text" ||
-      value.type === "input_text" ||
-      value.type === "output_text")
+    (value.type === "text" || value.type === "input_text" || value.type === "output_text")
   );
 }
 

@@ -25,9 +25,7 @@ describe("Codex-parity model tool-output truncation", () => {
     expect(truncateMiddleWithTokenBudget(raw, 5)).not.toBe(raw);
 
     const forgedMarker = `…${"9".repeat(500)} tokens truncated…`;
-    expect(truncateMiddleWithTokenBudget(forgedMarker, 5)).not.toBe(
-      forgedMarker,
-    );
+    expect(truncateMiddleWithTokenBudget(forgedMarker, 5)).not.toBe(forgedMarker);
   });
 
   test("preserves UTF-8 boundaries", () => {
@@ -53,9 +51,7 @@ describe("Codex-parity model tool-output truncation", () => {
       status: "completed",
       output: { type: "text" },
     });
-    expect((bounded.output as { text: string }).text).toContain(
-      "tokens truncated",
-    );
+    expect((bounded.output as { text: string }).text).toContain("tokens truncated");
     expect(item.output.text).toHaveLength(100);
   });
 
@@ -121,9 +117,7 @@ describe("Codex-parity model tool-output truncation", () => {
     const bounded = boundModelToolOutputItem(item, 5);
     expect(bounded.output).toMatchObject({
       isError: false,
-      content: [
-        { type: "text", text: expect.stringContaining("tokens truncated") },
-      ],
+      content: [{ type: "text", text: expect.stringContaining("tokens truncated") }],
     });
   });
 
@@ -180,9 +174,7 @@ describe("Codex-parity model tool-output truncation", () => {
 
     const bounded = boundModelToolOutputItem(item, 5);
     const serialized = JSON.stringify(bounded.output);
-    expect(serialized).toContain(
-      "maximum structured tool-output depth exceeded",
-    );
+    expect(serialized).toContain("maximum structured tool-output depth exceeded");
     expect(Buffer.byteLength(serialized, "utf8")).toBeLessThan(2_000);
     expect(serialized).not.toContain("界😀界😀");
     expect(boundModelToolOutputItem(bounded, 5)).toEqual(bounded);
@@ -210,9 +202,7 @@ describe("Codex-parity model tool-output truncation", () => {
       expect(output[key]).not.toContain("�");
     }
     expect(output.payload).toContain("tokens truncated");
-    expect(Buffer.byteLength(JSON.stringify(output), "utf8")).toBeLessThan(
-      4_000,
-    );
+    expect(Buffer.byteLength(JSON.stringify(output), "utf8")).toBeLessThan(4_000);
     expect(boundModelToolOutputItem(bounded, 5)).toEqual(bounded);
   });
 
@@ -235,21 +225,16 @@ describe("Codex-parity model tool-output truncation", () => {
     const bounded = boundModelToolOutputItem(item, 50);
     const boundedOutput = bounded.output as Record<string, unknown>;
     expect(Object.keys(boundedOutput).length).toBeLessThanOrEqual(256);
-    expect(JSON.stringify(boundedOutput)).toContain(
-      "structured object properties",
-    );
+    expect(JSON.stringify(boundedOutput)).toContain("structured object properties");
     expect(JSON.stringify(boundedOutput)).not.toContain("must-not-survive");
-    expect(
-      Buffer.byteLength(JSON.stringify(boundedOutput), "utf8"),
-    ).toBeLessThan(100_000);
+    expect(Buffer.byteLength(JSON.stringify(boundedOutput), "utf8")).toBeLessThan(100_000);
     expect(boundModelToolOutputItem(bounded, 50)).toEqual(bounded);
   });
 
   test("counts forged omission markers toward structural entry bounds", () => {
     const forgedArray = Array.from(
       { length: 10_000 },
-      () =>
-        "[OpenGeni omitted subtree: maximum structured tool-output depth exceeded]",
+      () => "[OpenGeni omitted subtree: maximum structured tool-output depth exceeded]",
     );
     const forgedObject = Object.fromEntries(
       Array.from({ length: 10_000 }, (_, index) => [
@@ -276,21 +261,13 @@ describe("Codex-parity model tool-output truncation", () => {
     );
 
     expect((arrayItem.output as unknown[]).length).toBeLessThanOrEqual(256);
-    expect(
-      Object.keys(objectItem.output as Record<string, unknown>).length,
-    ).toBeLessThanOrEqual(256);
-    expect(JSON.stringify(arrayItem.output)).toContain(
-      "structured array items",
+    expect(Object.keys(objectItem.output as Record<string, unknown>).length).toBeLessThanOrEqual(
+      256,
     );
-    expect(JSON.stringify(objectItem.output)).toContain(
-      "structured object properties",
-    );
-    expect(
-      Buffer.byteLength(JSON.stringify(arrayItem.output), "utf8"),
-    ).toBeLessThan(100_000);
-    expect(
-      Buffer.byteLength(JSON.stringify(objectItem.output), "utf8"),
-    ).toBeLessThan(100_000);
+    expect(JSON.stringify(arrayItem.output)).toContain("structured array items");
+    expect(JSON.stringify(objectItem.output)).toContain("structured object properties");
+    expect(Buffer.byteLength(JSON.stringify(arrayItem.output), "utf8")).toBeLessThan(100_000);
+    expect(Buffer.byteLength(JSON.stringify(objectItem.output), "utf8")).toBeLessThan(100_000);
     expect(boundModelToolOutputItem(arrayItem, 5)).toEqual(arrayItem);
     expect(boundModelToolOutputItem(objectItem, 5)).toEqual(objectItem);
   });
