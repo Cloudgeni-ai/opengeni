@@ -2788,6 +2788,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 turnId: turn.id,
                 executionGeneration,
                 attemptId: input.attemptId,
+                currentCodexCredentialId: effectiveCodexCredentialId,
               },
               session.lastInputTokens,
               compactionSummarizerFor(compactionInstructions),
@@ -3639,6 +3640,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               turnId: turnId!,
               executionGeneration,
               attemptId: input.attemptId,
+              currentCodexCredentialId: effectiveCodexCredentialId,
             },
             session.lastInputTokens,
             // Provider-aware summarizer: when the turn's model resolved to a
@@ -3812,6 +3814,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               turnId: activeTurnId,
               executionGeneration,
               attemptId: input.attemptId,
+              currentCodexCredentialId: effectiveCodexCredentialId,
             },
             // Never reuse the persisted prior-turn signal for recovery. Proactive
             // guards provide their exact current signal; provider overflows do not,

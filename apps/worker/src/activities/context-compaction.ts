@@ -18,6 +18,7 @@ import {
 } from "@opengeni/runtime";
 import type { Settings } from "@opengeni/config";
 import type { SessionEvent } from "@opengeni/contracts";
+import { applyCodexHistoryStrip } from "./run-input";
 import { TurnAttemptFencedError } from "./turn-attempt-fenced";
 
 export type MaybeCompactResult =
@@ -69,6 +70,7 @@ export async function maybeCompactContext(
     turnId: string;
     executionGeneration: number;
     attemptId: string;
+    currentCodexCredentialId: string | null;
   },
   lastInputTokens: number | null,
   // Injectable for tests; defaults to the real provider-aware model call.
@@ -110,7 +112,17 @@ export async function maybeCompactContext(
     return { compacted: false, reason: "no_history", events: [], requestConsumed };
   }
 
-  const items = sanitizeHistoryItemsForModel(active.map((row) => row.item) as CompactionItem[]);
+  // Compaction is a model-input path. Apply the exact same account-provenance
+  // fence as ordinary history replay before token accounting, summarization,
+  // and replacement construction. In particular, foreign account-bound
+  // reasoning (and account-specific tool-search items) must be dropped whole;
+  // mapping active rows directly to row.item would disclose them to whichever
+  // provider/account performs this summary.
+  const items = sanitizeHistoryItemsForModel(
+    applyCodexHistoryStrip(active, {
+      currentCodexCredentialId: scope.currentCodexCredentialId,
+    }) as CompactionItem[],
+  );
   const decision = decideCompaction({
     items,
     lastInputTokens,

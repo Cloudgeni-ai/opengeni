@@ -367,6 +367,127 @@ describe("standalone context compaction execution", () => {
     ).toHaveLength(1);
   });
 
+  test("applies the ordinary account-provenance fence before portable compaction", async () => {
+    const suffix = crypto.randomUUID();
+    const access = await bootstrapWorkspace(client.db, {
+      accountExternalSource: "test",
+      accountExternalId: `account-${suffix}`,
+      accountName: "Compaction provenance test",
+      workspaceExternalSource: "test",
+      workspaceExternalId: `workspace-${suffix}`,
+      workspaceName: "Compaction provenance test",
+      subjectId: `subject-${suffix}`,
+    });
+    const grant = access.workspaceGrants[0]!;
+    const session = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      initialMessage: "initial",
+      resources: [],
+      metadata: {},
+      model: "scripted-compactor",
+      sandboxBackend: "none",
+    });
+    const foreignCredentialId = crypto.randomUUID();
+    const currentCredentialId = crypto.randomUUID();
+    const foreignReasoning = {
+      type: "reasoning",
+      id: "rs_foreign_compaction_secret",
+      summary: [{ type: "summary_text", text: "foreign private reasoning" }],
+      providerData: { encrypted_content: "foreign-account-encrypted-blob" },
+    };
+    const sameAccountReasoning = {
+      type: "reasoning",
+      id: "rs_current_compaction",
+      summary: [{ type: "summary_text", text: "current account reasoning" }],
+      providerData: { encrypted_content: "current-account-encrypted-blob" },
+    };
+    const foreignMessage = {
+      type: "message",
+      role: "user",
+      content: "preserve portable conversation content",
+    };
+    await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
+      await db.insert(schema.sessionHistoryItems).values([
+        {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: session.id,
+          position: 0,
+          producerCodexCredentialId: foreignCredentialId,
+          item: foreignReasoning,
+        },
+        {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: session.id,
+          position: 1,
+          producerCodexCredentialId: foreignCredentialId,
+          item: foreignMessage,
+        },
+        {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: session.id,
+          position: 2,
+          producerCodexCredentialId: currentCredentialId,
+          item: sameAccountReasoning,
+        },
+        {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: session.id,
+          position: 3,
+          producerCodexCredentialId: currentCredentialId,
+          item: {
+            type: "message",
+            role: "assistant",
+            status: "completed",
+            content: [{ type: "output_text", text: "working notes ".repeat(2_000) }],
+          },
+        },
+      ]);
+    });
+    await requestSessionCompaction(client.db, grant.workspaceId!, session.id);
+    const attemptId = crypto.randomUUID();
+    const turn = await claimCompactionForAttempt(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      attemptId,
+    );
+
+    let summarizerInput: Array<Record<string, unknown>> = [];
+    const outcome = await maybeCompactContext(
+      client.db,
+      testSettings({ contextWindowTokens: 250_000 }),
+      {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn!.id,
+        executionGeneration: turn!.executionGeneration,
+        attemptId,
+        currentCodexCredentialId: currentCredentialId,
+      },
+      null,
+      async (_settings, input) => {
+        summarizerInput = input;
+        return "Portable plaintext checkpoint.";
+      },
+      { force: true, clearRequestedCompaction: true, trigger: "operator" },
+    );
+
+    expect(outcome.compacted).toBe(true);
+    expect(JSON.stringify(summarizerInput)).not.toContain("rs_foreign_compaction_secret");
+    expect(JSON.stringify(summarizerInput)).not.toContain("foreign-account-encrypted-blob");
+    expect(summarizerInput).toContainEqual(foreignMessage);
+    expect(summarizerInput).toContainEqual(sameAccountReasoning);
+    expect(summarizerInput.find((item) => item.id === "rs_current_compaction")).toEqual(
+      sameAccountReasoning,
+    );
+  });
+
   test("consumes an operator request without replacing history when its summary is not smaller", async () => {
     const suffix = crypto.randomUUID();
     const access = await bootstrapWorkspace(client.db, {
@@ -427,6 +548,7 @@ describe("standalone context compaction execution", () => {
         turnId: turn!.id,
         executionGeneration: turn!.executionGeneration,
         attemptId,
+        currentCodexCredentialId: null,
       },
       null,
       async () => "larger replacement ".repeat(1_000),
@@ -512,6 +634,7 @@ describe("standalone context compaction execution", () => {
         turnId: turn!.id,
         executionGeneration: turn!.executionGeneration,
         attemptId,
+        currentCodexCredentialId: null,
       },
       // This belongs to an earlier, tiny request. The forced overflow path must
       // derive its shrink proof from the active transcript instead of treating
@@ -606,6 +729,7 @@ describe("standalone context compaction execution", () => {
           turnId: turn!.id,
           executionGeneration: turn!.executionGeneration,
           attemptId,
+          currentCodexCredentialId: null,
         },
         null,
         async () => "   ",
@@ -681,6 +805,7 @@ describe("standalone context compaction execution", () => {
         turnId: turn!.id,
         executionGeneration: turn!.executionGeneration,
         attemptId,
+        currentCodexCredentialId: null,
       },
       null,
       async () => "same checkpoint",
@@ -760,6 +885,7 @@ describe("standalone context compaction execution", () => {
           turnId: turn!.id,
           executionGeneration: turn!.executionGeneration,
           attemptId,
+          currentCodexCredentialId: null,
         },
         null,
         async (_settings, input) => {
