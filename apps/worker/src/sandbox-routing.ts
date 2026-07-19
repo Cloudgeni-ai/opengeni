@@ -24,7 +24,7 @@ import {
 import type { EventBus } from "@opengeni/events";
 import {
   buildSelfhostedBackendSession,
-  isProviderSandboxNotFoundError,
+  isProviderSandboxGoneDuringRoutedOperation,
   makeActiveBackendResolver,
   NatsControlRpc,
   NatsOpStreamTransport,
@@ -256,7 +256,7 @@ export function wrapTurnBoxWithRouting(
       ? {
           onDefaultBackendError: async ({ error }: { error: unknown }) => {
             const home = ids.homeLease!;
-            if (!isProviderSandboxNotFoundError(home.backend, error)) return null;
+            if (!isProviderSandboxGoneDuringRoutedOperation(home.backend, error)) return null;
             const marked = await markWarmLeaseInstanceLost(db, {
               accountId: home.accountId,
               workspaceId: ids.workspaceId,
@@ -365,7 +365,7 @@ export function wrapLazyTurnBoxWithRouting(
       ? {
           onDefaultBackendError: async ({ error }: { error: unknown }) => {
             const home = args.homeLeaseIdentity!;
-            if (!isProviderSandboxNotFoundError(home.backend, error)) return null;
+            if (!isProviderSandboxGoneDuringRoutedOperation(home.backend, error)) return null;
             const provisioned = await args.provisioner.get();
             if (provisioned.leaseEpoch === undefined) return null;
             const marked = await markWarmLeaseInstanceLost(db, {

@@ -224,6 +224,96 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
     expect((await proxy.exec({ cmd: "uname" })).stdout).toBe("group-box-marker");
   }, 60_000);
 
+  test("operation-level 404/NOT_FOUND preserves the warm provider identity and epoch", async () => {
+    if (!available) return;
+    const [a] = await admin<
+      { id: string }[]
+    >`insert into managed_accounts (name) values ('acct-subresource-miss') returning id`;
+    const [w] = await admin<
+      { id: string }[]
+    >`insert into workspaces (account_id, name) values (${a!.id}, 'ws-subresource-miss') returning id`;
+    await admin`insert into workspace_inference_controls (workspace_id, account_id) values (${w!.id}, ${a!.id})`;
+    const accountId = a!.id;
+    const workspaceId = w!.id;
+    const session = await createSession(db, {
+      accountId,
+      workspaceId,
+      initialMessage: "hi",
+      resources: [],
+      metadata: {},
+      model: "gpt-test",
+      sandboxBackend: "modal",
+    });
+    const acquired = await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: session.sandboxGroupId,
+      kind: "turn",
+      holderId: "subresource-miss-turn",
+      subjectId: session.id,
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
+    const committed = await commitWarmingToWarm(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: session.sandboxGroupId,
+      expectedEpoch: acquired.lease.leaseEpoch,
+      instanceId: "box-still-live",
+      resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: { providerState: { sandboxId: "box-still-live" } },
+      },
+      leaseTtlMs: 45_000,
+    });
+    expect(committed.committed).toBe(true);
+    const warmEpoch = committed.lease!.leaseEpoch;
+    const subresourceMissing = Object.assign(new Error("/workspace/missing.txt not found"), {
+      code: "NOT_FOUND",
+      status: 404,
+    });
+    const groupBox: EstablishedSandboxSession = {
+      client: {},
+      session: {
+        state: { instanceId: "box-still-live" },
+        async writeFile() {
+          throw subresourceMissing;
+        },
+      },
+      sessionState: {},
+      instanceId: "box-still-live",
+      backendId: "modal",
+    };
+    const established = wrapTurnBoxWithRouting(
+      { db, settings, bus: new MemoryEventBus() as never },
+      {
+        workspaceId,
+        sessionId: session.id,
+        homeLease: {
+          accountId,
+          sandboxGroupId: session.sandboxGroupId,
+          leaseEpoch: warmEpoch,
+          instanceId: "box-still-live",
+          backend: "modal",
+        },
+      },
+      groupBox,
+    );
+
+    const error = await (established.session as { writeFile: (args: unknown) => Promise<unknown> })
+      .writeFile({ path: "/workspace/missing.txt", content: "x" })
+      .catch((caught) => caught);
+    expect(error).toBe(subresourceMissing);
+    const lease = await readLease(db, workspaceId, session.sandboxGroupId);
+    expect(lease).toMatchObject({
+      liveness: "warm",
+      instanceId: "box-still-live",
+      leaseEpoch: warmEpoch,
+      recovery: { provider: { status: "exists", instanceId: "box-still-live" } },
+    });
+  }, 60_000);
+
   test("concurrent provider loss fences one lease epoch and never replays an ambiguous mutation", async () => {
     if (!available) return;
     const [a] = await admin<
@@ -296,7 +386,7 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
 
     const operationCalls = Array.from({ length: 24 }, () => 0);
     const missing = Object.assign(new Error("provider sandbox missing"), {
-      code: "NOT_FOUND",
+      code: "SANDBOX_NOT_FOUND",
       status: 404,
     });
     const groupBox: EstablishedSandboxSession = {

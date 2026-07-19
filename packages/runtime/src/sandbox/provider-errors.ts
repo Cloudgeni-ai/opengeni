@@ -93,6 +93,21 @@ function safeDiagnostic(signals: ErrorSignals): string {
     .join(" ");
 }
 
+function hasTransientSignal(signals: ErrorSignals): boolean {
+  return (
+    signals.codes.some((code) => TRANSIENT_CODES.has(code)) ||
+    signals.numbers.some((status) => GRPC_TRANSIENT.has(status))
+  );
+}
+
+function hasModalTerminalSandboxMessage(signals: ErrorSignals): boolean {
+  return signals.messages.some(
+    (message) =>
+      /^Modal sandbox [A-Za-z0-9_-]+ is no longer running\.$/.test(message) ||
+      /^Modal sandbox [A-Za-z0-9_-]+ not found \(has been terminated\)$/.test(message),
+  );
+}
+
 /** Typed transport evidence always dominates nested/string NotFound text. */
 export function classifyProviderSandboxFailure(
   backendId: string,
@@ -104,10 +119,7 @@ export function classifyProviderSandboxFailure(
   const signals = collectSignals(error);
   const diagnostic = safeDiagnostic(signals) || "unclassified_provider_failure";
 
-  if (signals.codes.some((code) => TRANSIENT_CODES.has(code))) {
-    return { kind: "transient_transport", diagnostic };
-  }
-  if (signals.numbers.some((status) => GRPC_TRANSIENT.has(status))) {
+  if (hasTransientSignal(signals)) {
     return { kind: "transient_transport", diagnostic };
   }
   if (
@@ -119,14 +131,7 @@ export function classifyProviderSandboxFailure(
 
   // Modal's SDK emits these exact terminal grammars after resolving one exact
   // sandbox id. Generic "not found" prose is intentionally not authoritative.
-  if (
-    backendId === "modal" &&
-    signals.messages.some(
-      (message) =>
-        /^Modal sandbox [A-Za-z0-9_-]+ is no longer running\.$/.test(message) ||
-        /^Modal sandbox [A-Za-z0-9_-]+ not found \(has been terminated\)$/.test(message),
-    )
-  ) {
+  if (backendId === "modal" && hasModalTerminalSandboxMessage(signals)) {
     return {
       kind: "not_found",
       diagnostic:
@@ -141,6 +146,28 @@ export function classifyProviderSandboxFailure(
 
 export function isProviderSandboxNotFoundError(backendId: string, error: unknown): boolean {
   return classifyProviderSandboxFailure(backendId, error).kind === "not_found";
+}
+
+/**
+ * Whether a failure from an operation routed through an already-established
+ * sandbox proves that exact provider sandbox disappeared.
+ *
+ * Routed operations can legitimately return HTTP 404 / `NOT_FOUND` for paths,
+ * files, ports, processes, and other subresources. Those generic signals are
+ * sufficient for provider create/resume APIs, but they must never retire the
+ * live sandbox identity after an arbitrary operation. Only an explicit
+ * sandbox-scoped provider code or Modal's exact terminal sandbox grammar is
+ * authoritative on this path. Transient transport evidence still dominates.
+ */
+export function isProviderSandboxGoneDuringRoutedOperation(
+  backendId: string,
+  error: unknown,
+): boolean {
+  if (backendId === "selfhosted" || !error) return false;
+  const signals = collectSignals(error);
+  if (hasTransientSignal(signals)) return false;
+  if (signals.codes.includes("SANDBOX_NOT_FOUND")) return true;
+  return backendId === "modal" && hasModalTerminalSandboxMessage(signals);
 }
 
 export function isProviderSandboxTransientError(backendId: string, error: unknown): boolean {

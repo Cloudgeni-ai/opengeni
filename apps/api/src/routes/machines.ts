@@ -110,7 +110,7 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
         bus,
         ensureSessionGroupReady: async (fleetCtx) => {
           const session = await requireSession(db, fleetCtx.workspaceId, fleetCtx.sessionId);
-          await ensureViewerSessionGroupReady(
+          return await ensureViewerSessionGroupReady(
             { db, settings, bus },
             {
               accountId: fleetCtx.accountId,

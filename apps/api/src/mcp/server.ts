@@ -976,7 +976,7 @@ function registerFleetTools(
     bus: deps.bus,
     ensureSessionGroupReady: async (ctx) => {
       const session = await requireSession(deps.db, ctx.workspaceId, ctx.sessionId);
-      await ensureViewerSessionGroupReady(
+      return await ensureViewerSessionGroupReady(
         { db: deps.db, settings: deps.settings, bus: deps.bus },
         { accountId: ctx.accountId, workspaceId: ctx.workspaceId, session },
       );

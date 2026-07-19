@@ -289,11 +289,23 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
     const { ctx, services } = await seedFleet();
     const before = (await readActiveSandbox(db, ctx.workspaceId, ctx.sessionId))!;
     let readinessChecks = 0;
+    let releases = 0;
+    let pointerObservedAtRelease: Awaited<ReturnType<typeof readActiveSandbox>> = null;
     const repaired = await swapActiveSandbox(
       {
         ...services,
         ensureSessionGroupReady: async () => {
           readinessChecks += 1;
+          return {
+            release: async () => {
+              pointerObservedAtRelease = await readActiveSandbox(
+                db,
+                ctx.workspaceId,
+                ctx.sessionId,
+              );
+              releases += 1;
+            },
+          };
         },
       },
       ctx,
@@ -303,6 +315,8 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
     expect(repaired.activeSandboxId).toBeNull();
     expect(repaired.activeEpoch).toBe(before.activeEpoch + 1);
     expect(readinessChecks).toBe(1);
+    expect(releases).toBe(1);
+    expect(pointerObservedAtRelease?.activeEpoch).toBe(repaired.activeEpoch);
 
     const rejectedBefore = (await readActiveSandbox(db, ctx.workspaceId, ctx.sessionId))!;
     const rejected = await swapActiveSandbox(
@@ -318,6 +332,23 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
     expect(rejected.swapped).toBe(false);
     expect(rejected.code).toBe("recovery_in_progress");
     expect(rejected.activeEpoch).toBe(rejectedBefore.activeEpoch);
+
+    let failedRelease = 0;
+    const failed = await swapActiveSandbox(
+      {
+        ...services,
+        ensureSessionGroupReady: async () => ({
+          release: async () => {
+            failedRelease += 1;
+          },
+        }),
+      },
+      { ...ctx, accountId: crypto.randomUUID() },
+      "session",
+    );
+    expect(failed.swapped).toBe(false);
+    expect(failed.code).toBe("concurrent_swap");
+    expect(failedRelease).toBe(1);
   }, 60_000);
 
   test("heterogeneous swap (>=2 flips): Modal->machine->Modal->machine, single-active each time", async () => {

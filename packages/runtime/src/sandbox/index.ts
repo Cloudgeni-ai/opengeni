@@ -71,6 +71,7 @@ export {
 } from "./providers";
 export {
   classifyProviderSandboxFailure,
+  isProviderSandboxGoneDuringRoutedOperation,
   isProviderSandboxNotFoundError,
   isProviderSandboxTransientError,
   type ProviderSandboxFailure,

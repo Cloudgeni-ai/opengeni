@@ -368,37 +368,52 @@ export async function attachViewer(
   }
 }
 
+export type SessionGroupReadinessHold = {
+  lease: LeaseSnapshot;
+  /** Idempotently release the viewer holder after route publication settles. */
+  release: () => Promise<void>;
+};
+
 /** Readiness callback for fleet attach/swap. It acquires one disposable viewer
- * holder through the same provider-verifying path as the UI and releases it
- * immediately. A first 409 may have fenced a missing warm provider; one bounded
- * retry lets the normal cold->warming election rematerialize it. */
+ * holder through the same provider-verifying path as the UI and RETURNS that
+ * holder to the swap owner. The holder must remain live until route publication
+ * settles, otherwise the reaper can drain the just-verified target between the
+ * readiness probe and the route CAS. A first 409 may have fenced a missing warm
+ * provider; one bounded retry lets the normal cold->warming election rematerialize
+ * it. */
 export async function ensureSessionGroupReady(
   services: ViewerServices,
   input: { accountId: string; workspaceId: string; session: Session },
-): Promise<LeaseSnapshot> {
+): Promise<SessionGroupReadinessHold> {
   let lastError: unknown;
   for (let attempt = 0; attempt < 2; attempt += 1) {
+    let release: (() => Promise<void>) | undefined;
     try {
       const attached = await attachViewer(services, input);
-      await detachViewer(services, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        sandboxGroupId: attached.sandboxGroupId,
-        viewerId: attached.viewerId,
-      });
+      let releasePromise: Promise<void> | undefined;
+      release = () =>
+        (releasePromise ??= detachViewer(services, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sandboxGroupId: attached.sandboxGroupId,
+          viewerId: attached.viewerId,
+        }).then(() => undefined));
       const lease = await readLease(services.db, input.workspaceId, attached.sandboxGroupId);
       if (
         lease?.liveness === "warm" &&
         lease.recovery.provider.status === "exists" &&
         lease.recovery.workspace.status === "ready"
       ) {
-        return lease;
+        return { lease, release };
       }
       lastError = new Error("sandbox did not reach verified workspace readiness");
     } catch (error) {
       lastError = error;
-      if (!(error instanceof HTTPException) || error.status !== 409) break;
+      if (release) await release().catch(() => undefined);
+      if (!release && (!(error instanceof HTTPException) || error.status !== 409)) break;
+      continue;
     }
+    if (release) await release().catch(() => undefined);
   }
   throw lastError ?? new Error("sandbox readiness could not be established");
 }

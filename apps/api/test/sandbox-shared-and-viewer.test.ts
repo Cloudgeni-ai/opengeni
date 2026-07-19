@@ -28,7 +28,12 @@ import {
   serializeEstablishedSandboxEnvelope,
   type EstablishedSandboxSession,
 } from "@opengeni/runtime";
-import { attachViewer, detachViewer, heartbeatViewer } from "../src/sandbox/viewer";
+import {
+  attachViewer,
+  detachViewer,
+  ensureSessionGroupReady,
+  heartbeatViewer,
+} from "../src/sandbox/viewer";
 import { withChannelA } from "../src/sandbox/channel-a";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
 
@@ -734,6 +739,31 @@ describe("P1.4 API-direct viewer-holder lifecycle (real lease + reaper)", () => 
     const lease1 = await readLease(db, workspaceId, sandboxGroupId);
     expect(lease1?.liveness).toBe("warm");
     expect(lease1?.viewerHolders).toBe(1);
+  }, 60_000);
+
+  test("fleet readiness returns a live viewer hold until its route owner releases it", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const { sandboxGroupId, sessionId } = await seedWarmBox(accountId, workspaceId);
+    const session = await getSession(db, workspaceId, sessionId);
+    const hold = await ensureSessionGroupReady(
+      { db, settings },
+      { accountId, workspaceId, session: session! },
+    );
+
+    expect(hold.lease.liveness).toBe("warm");
+    const held = await readLease(db, workspaceId, sandboxGroupId);
+    expect(held).toMatchObject({
+      liveness: "warm",
+      viewerHolders: 1,
+      refcount: 1,
+      recovery: { provider: { status: "exists" }, workspace: { status: "ready" } },
+    });
+
+    await hold.release();
+    await hold.release();
+    const released = await readLease(db, workspaceId, sandboxGroupId);
+    expect(released).toMatchObject({ liveness: "draining", viewerHolders: 0, refcount: 0 });
   }, 60_000);
 
   test("releasing the viewer → the reaper drains the box (liveness = turn OR viewer)", async () => {

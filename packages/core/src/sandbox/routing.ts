@@ -21,7 +21,7 @@ import {
 } from "@opengeni/db";
 import { appendAndPublishEvents, type EventBus } from "@opengeni/events";
 import {
-  isProviderSandboxNotFoundError,
+  isProviderSandboxGoneDuringRoutedOperation,
   makeActiveBackendResolver,
   NatsControlRpc,
   RoutingSandboxSession,
@@ -146,7 +146,7 @@ export function wrapChannelABoxWithRouting(
     },
     resolveActiveBackend: resolver,
     onDefaultBackendError: async ({ error }) => {
-      if (!isProviderSandboxNotFoundError(ids.homeLease.backend, error)) return null;
+      if (!isProviderSandboxGoneDuringRoutedOperation(ids.homeLease.backend, error)) return null;
       const marked = await markWarmLeaseInstanceLost(db, {
         accountId: ids.accountId,
         workspaceId: ids.workspaceId,

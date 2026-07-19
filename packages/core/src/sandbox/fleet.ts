@@ -44,7 +44,12 @@ export type FleetServices = {
   /** API-direct readiness owner for the session's home group. Production wires
    * this to the same viewer/provider verification + rematerialization path; core
    * tests may omit it when exercising pointer mechanics only. */
-  ensureSessionGroupReady?: (ctx: FleetContext) => Promise<void>;
+  ensureSessionGroupReady?: (ctx: FleetContext) => Promise<FleetReadinessHold>;
+};
+
+export type FleetReadinessHold = {
+  /** Release target liveness only after route publication settles. */
+  release: () => Promise<void>;
 };
 
 export type FleetContext = {
@@ -413,9 +418,10 @@ export async function swapActiveSandbox(
     };
   }
 
+  let readinessHold: FleetReadinessHold | undefined;
   if (resolved.targetSandboxId === null && services.ensureSessionGroupReady) {
     try {
-      await services.ensureSessionGroupReady(ctx);
+      readinessHold = await services.ensureSessionGroupReady(ctx);
     } catch (error) {
       const lease = await readLease(services.db, ctx.workspaceId, ctx.sessionGroupId);
       const restore = lease?.recovery.restore.status;
@@ -442,44 +448,51 @@ export async function swapActiveSandbox(
     }
   }
 
-  // Read the current epoch, then CAS on it (the fence). One retry on a lost race
-  // (a concurrent swap bumped the epoch between read and write).
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+  try {
+    // Read the current epoch, then CAS on it (the fence). One retry on a lost race
+    // (a concurrent swap bumped the epoch between read and write).
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const pointer = (await readActiveSandbox(services.db, ctx.workspaceId, ctx.sessionId)) ?? {
+        activeSandboxId: null,
+        activeEpoch: 0,
+      };
+      // Even a same-target attach advances active_epoch. It is a repair/fence
+      // request, not a no-op acknowledgment: any cached stale route is invalidated
+      // only after target readiness has been proved above.
+      const result = await setActiveSandbox(services.db, {
+        accountId: ctx.accountId,
+        workspaceId: ctx.workspaceId,
+        sessionId: ctx.sessionId,
+        targetSandboxId: resolved.targetSandboxId,
+        expectedEpoch: pointer.activeEpoch,
+        ...(workingDir !== undefined ? { workingDir } : {}),
+      });
+      if (result.swapped && result.pointer) {
+        return {
+          swapped: true,
+          activeSandboxId: result.pointer.activeSandboxId,
+          activeEpoch: result.pointer.activeEpoch,
+        };
+      }
+      // CAS lost (a concurrent swap won) — re-read + retry once.
+    }
     const pointer = (await readActiveSandbox(services.db, ctx.workspaceId, ctx.sessionId)) ?? {
       activeSandboxId: null,
       activeEpoch: 0,
     };
-    // Even a same-target attach advances active_epoch. It is a repair/fence
-    // request, not a no-op acknowledgment: any cached stale route is invalidated
-    // only after target readiness has been proved above.
-    const result = await setActiveSandbox(services.db, {
-      accountId: ctx.accountId,
-      workspaceId: ctx.workspaceId,
-      sessionId: ctx.sessionId,
-      targetSandboxId: resolved.targetSandboxId,
-      expectedEpoch: pointer.activeEpoch,
-      ...(workingDir !== undefined ? { workingDir } : {}),
-    });
-    if (result.swapped && result.pointer) {
-      return {
-        swapped: true,
-        activeSandboxId: result.pointer.activeSandboxId,
-        activeEpoch: result.pointer.activeEpoch,
-      };
-    }
-    // CAS lost (a concurrent swap won) — re-read + retry once.
+    return {
+      swapped: false,
+      activeSandboxId: pointer.activeSandboxId,
+      activeEpoch: pointer.activeEpoch,
+      reason: "a concurrent swap won the epoch fence; re-read and retry",
+      code: "concurrent_swap",
+    };
+  } finally {
+    // Do not let a cleanup failure turn an already-committed route CAS into a
+    // false failure. Viewer holders are TTL-bounded and will be reaped if this
+    // best-effort explicit release cannot complete.
+    await readinessHold?.release().catch(() => undefined);
   }
-  const pointer = (await readActiveSandbox(services.db, ctx.workspaceId, ctx.sessionId)) ?? {
-    activeSandboxId: null,
-    activeEpoch: 0,
-  };
-  return {
-    swapped: false,
-    activeSandboxId: pointer.activeSandboxId,
-    activeEpoch: pointer.activeEpoch,
-    reason: "a concurrent swap won the epoch fence; re-read and retry",
-    code: "concurrent_swap",
-  };
 }
 
 export type RunOnOp =

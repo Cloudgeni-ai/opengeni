@@ -28,6 +28,7 @@ import {
   runAgentStream,
   createSandboxClientForBackend,
   establishSandboxSessionFromEnvelope,
+  isProviderSandboxGoneDuringRoutedOperation,
   isProviderSandboxNotFoundError,
 } from "../src/index";
 
@@ -293,6 +294,56 @@ describe("P1.2 isProviderSandboxNotFoundError (per-backend NotFound discriminato
     expect(isProviderSandboxNotFoundError("modal", { status: 500 })).toBe(false);
     expect(isProviderSandboxNotFoundError("modal", null)).toBe(false);
     expect(isProviderSandboxNotFoundError("modal", undefined)).toBe(false);
+  });
+});
+
+describe("OPE-60 routed-operation sandbox disappearance discriminator", () => {
+  test("generic 404 and NOT_FOUND subresource errors do not retire the provider sandbox", () => {
+    expect(isProviderSandboxGoneDuringRoutedOperation("modal", { status: 404 })).toBe(false);
+    expect(
+      isProviderSandboxGoneDuringRoutedOperation("modal", {
+        code: "NOT_FOUND",
+        status: 404,
+        message: "/workspace/missing.txt not found",
+      }),
+    ).toBe(false);
+    expect(
+      isProviderSandboxGoneDuringRoutedOperation("modal", {
+        code: "RESOURCE_NOT_FOUND",
+        message: "exposed port not found",
+      }),
+    ).toBe(false);
+  });
+
+  test("sandbox-scoped typed evidence and Modal terminal grammar retire the exact sandbox", () => {
+    expect(
+      isProviderSandboxGoneDuringRoutedOperation("daytona", {
+        code: "SANDBOX_NOT_FOUND",
+        message: "sandbox is gone",
+      }),
+    ).toBe(true);
+    expect(
+      isProviderSandboxGoneDuringRoutedOperation(
+        "modal",
+        new Error("Modal sandbox sb-123 not found (has been terminated)"),
+      ),
+    ).toBe(true);
+    expect(
+      isProviderSandboxGoneDuringRoutedOperation(
+        "modal",
+        new Error("Modal sandbox sb-123 is no longer running."),
+      ),
+    ).toBe(true);
+  });
+
+  test("transient transport evidence dominates nested sandbox disappearance", () => {
+    expect(
+      isProviderSandboxGoneDuringRoutedOperation("modal", {
+        code: "UNAVAILABLE",
+        status: 14,
+        cause: { code: "SANDBOX_NOT_FOUND" },
+      }),
+    ).toBe(false);
   });
 });
 
