@@ -2,6 +2,7 @@ import { ModalImageSelector, ModalSandboxClient } from "@openai/agents-extension
 import { effectiveModalIdleTimeoutSeconds } from "@opengeni/config";
 import type { Settings } from "@opengeni/config";
 import type { BackgroundJobSpec } from "@opengeni/contracts";
+import { posix as posixPath } from "node:path";
 import { CAPABILITY_DESCRIPTORS } from "../capabilities";
 import { SandboxConfigError } from "../errors";
 import type { ProviderRegistration } from "./types";
@@ -242,8 +243,11 @@ function modalClientOptions(
   };
 }
 
-async function createModalClient(settings: Settings): Promise<ModalClientLike> {
-  const modal = await import("modal");
+async function createModalClient(
+  settings: Settings,
+  loadModal: ModalModuleLoader = defaultModalLoader,
+): Promise<ModalClientLike> {
+  const modal = await loadModal();
   return new modal.ModalClient(modalClientOptions(settings));
 }
 
@@ -284,7 +288,9 @@ export async function terminateModalSandboxById(
 
 export class BackgroundJobProviderLostError extends Error {
   constructor(instanceId: string, cause?: unknown) {
-    super(`Modal background job provider instance disappeared: ${instanceId}`, { cause });
+    super(`Modal background job provider instance disappeared: ${instanceId}`, {
+      cause,
+    });
     this.name = "BackgroundJobProviderLostError";
   }
 }
@@ -338,8 +344,151 @@ function isModalNotFound(error: unknown): boolean {
     candidate.code === "NOT_FOUND" ||
     candidate.code === 5 ||
     candidate.status === 404 ||
-    (typeof candidate.message === "string" && /not[ -]?found/i.test(candidate.message))
+    (typeof candidate.message === "string" &&
+      (/not[ -]?found/i.test(candidate.message) ||
+        /sandbox .*already completed|sandbox is unavailable|already shut down/i.test(
+          candidate.message,
+        )))
   );
+}
+
+function isModalFilesystemNotFound(error: unknown): boolean {
+  return (
+    !!error &&
+    typeof error === "object" &&
+    (error as { name?: unknown }).name === "SandboxFilesystemNotFoundError"
+  );
+}
+
+const MODAL_BACKGROUND_JOB_STATE_DIR = "/tmp/.opengeni-background-job";
+const MODAL_BACKGROUND_JOB_COLLECTION_GRACE_SECONDS = 10 * 60;
+// Keep chunks comfortably below appendBackgroundJobLog's 64 KiB stored-text
+// ceiling even when invalid UTF-8 bytes expand to replacement characters.
+const MODAL_BACKGROUND_JOB_LOG_CHUNK_BYTES = 16 * 1024;
+
+/**
+ * The user command cannot be the Sandbox main process: Modal's public
+ * filesystem APIs need a live task ID and cannot recover artifacts after that
+ * process exits. This supervisor keeps the task alive, writes an atomic result
+ * manifest, and leaves cleanup to the controller after artifact persistence and
+ * terminal settlement. Its files are append-only so a replacement observer can
+ * replay the same provider offsets without rerunning the command.
+ */
+const MODAL_BACKGROUND_JOB_SUPERVISOR = String.raw`
+set -eu
+state_dir=$1
+timeout_seconds=$2
+shift 2
+
+mkdir -p "$state_dir"
+rm -f "$state_dir/result" "$state_dir/result.tmp" "$state_dir/timed-out" "$state_dir/timed-out.tmp"
+: > "$state_dir/stdout"
+: > "$state_dir/stderr"
+
+separate_group=0
+if command -v setsid >/dev/null 2>&1; then
+  setsid "$@" > "$state_dir/stdout" 2> "$state_dir/stderr" &
+  child=$!
+  separate_group=1
+else
+  "$@" > "$state_dir/stdout" 2> "$state_dir/stderr" &
+  child=$!
+fi
+
+signal_child() {
+  signal=$1
+  if [ "$separate_group" -eq 1 ]; then
+    kill "-$signal" "-$child" 2>/dev/null || true
+  else
+    kill "-$signal" "$child" 2>/dev/null || true
+  fi
+}
+
+watchdog=""
+if [ "$timeout_seconds" -gt 0 ]; then
+  (
+    sleep "$timeout_seconds"
+    if kill -0 "$child" 2>/dev/null; then
+      printf '1\n' > "$state_dir/timed-out.tmp"
+      mv "$state_dir/timed-out.tmp" "$state_dir/timed-out"
+      signal_child TERM
+      sleep 5
+      signal_child KILL
+    fi
+  ) &
+  watchdog=$!
+fi
+
+set +e
+wait "$child"
+exit_code=$?
+set -e
+if [ -n "$watchdog" ]; then
+  kill "$watchdog" 2>/dev/null || true
+  wait "$watchdog" 2>/dev/null || true
+fi
+# Match direct-Sandbox semantics: descendants cannot outlive their main command.
+if [ "$separate_group" -eq 1 ]; then
+  signal_child TERM
+fi
+
+timed_out=0
+if [ -f "$state_dir/timed-out" ]; then
+  timed_out=1
+fi
+printf '%s %s\n' "$exit_code" "$timed_out" > "$state_dir/result.tmp"
+mv "$state_dir/result.tmp" "$state_dir/result"
+
+# The observer needs a live task ID to read logs and artifacts. Modal's hard
+# timeout is the final safety fuse if every observer disappears permanently.
+while :; do sleep 60; done
+`;
+
+export type ModalBackgroundJobProviderDependencies = {
+  loadModal?: ModalModuleLoader;
+};
+
+function modalBackgroundJobArtifactPath(spec: BackgroundJobSpec, path: string): string {
+  if (posixPath.isAbsolute(path)) return path;
+  return posixPath.resolve(spec.cwd ?? "/", path);
+}
+
+function stableModalLogSegments(
+  bytes: Uint8Array,
+  terminal: boolean,
+): Array<{ rawLength: number; text: string }> {
+  const segments: Array<{ rawLength: number; text: string }> = [];
+  let offset = 0;
+  while (offset < bytes.byteLength) {
+    const remaining = bytes.byteLength - offset;
+    let length = Math.min(remaining, MODAL_BACKGROUND_JOB_LOG_CHUNK_BYTES);
+    if (remaining < MODAL_BACKGROUND_JOB_LOG_CHUNK_BYTES) {
+      const newline = bytes.subarray(offset).indexOf(0x0a);
+      if (newline >= 0) {
+        length = newline + 1;
+      } else if (!terminal) {
+        break;
+      }
+    }
+    const chunk = bytes.subarray(offset, offset + length);
+    segments.push({ rawLength: length, text: new TextDecoder().decode(chunk) });
+    offset += length;
+  }
+  return segments;
+}
+
+function parseModalBackgroundJobResult(bytes: Uint8Array): {
+  exitCode: number;
+  timedOut: boolean;
+} {
+  const value = new TextDecoder().decode(bytes);
+  const match = /^(\d{1,3}) ([01])\n?$/.exec(value);
+  if (!match) throw new Error("Modal background job supervisor returned an invalid result");
+  const exitCode = Number(match[1]);
+  if (!Number.isInteger(exitCode) || exitCode < 0 || exitCode > 255) {
+    throw new Error("Modal background job supervisor returned an invalid exit code");
+  }
+  return { exitCode, timedOut: match[2] === "1" };
 }
 
 async function modalImageForBackgroundJob(
@@ -359,32 +508,42 @@ async function modalImageForBackgroundJob(
   return modal.images.fromRegistry(imageRef, secret);
 }
 
-/**
- * Durable one-shot Modal execution. The job command is the Sandbox main
- * process, so sandboxId alone is sufficient to reattach after a worker loss.
- */
+/** Durable one-shot Modal execution with a reattachable supervisor task. */
 export function createModalBackgroundJobProvider(
   settings: Settings,
+  dependencies: ModalBackgroundJobProviderDependencies = {},
 ): BackgroundJobExecutionProvider {
+  const loadModal = dependencies.loadModal ?? defaultModalLoader;
   return {
     async start(input) {
-      await ensureModalRegistryImage(settings);
-      const modal = await createModalClient(settings);
+      await ensureModalRegistryImage(settings, loadModal);
+      const modal = await createModalClient(settings, loadModal);
       try {
         const app = await modal.apps.fromName(settings.modalAppName, {
           createIfMissing: true,
           ...(settings.modalEnvironment ? { environment: settings.modalEnvironment } : {}),
         });
         const image = await modalImageForBackgroundJob(modal, settings);
-        const timeoutMs = (input.spec.timeoutSeconds ?? settings.modalTimeoutSeconds) * 1_000;
+        const commandTimeoutSeconds = input.spec.timeoutSeconds ?? settings.modalTimeoutSeconds;
+        const sandboxTimeoutMs =
+          (commandTimeoutSeconds + MODAL_BACKGROUND_JOB_COLLECTION_GRACE_SECONDS) * 1_000;
         const sandbox = await modal.sandboxes.create(
           app,
           image as Parameters<ModalClientLike["sandboxes"]["create"]>[1],
           {
-            command: [input.spec.command, ...input.spec.args],
+            command: [
+              "/bin/sh",
+              "-c",
+              MODAL_BACKGROUND_JOB_SUPERVISOR,
+              "opengeni-background-job-supervisor",
+              MODAL_BACKGROUND_JOB_STATE_DIR,
+              String(commandTimeoutSeconds),
+              input.spec.command,
+              ...input.spec.args,
+            ],
             ...(input.spec.cwd ? { workdir: input.spec.cwd } : {}),
-            timeoutMs,
-            idleTimeoutMs: timeoutMs,
+            timeoutMs: sandboxTimeoutMs,
+            idleTimeoutMs: sandboxTimeoutMs,
             tags: {
               opengeni: "true",
               opengeni_background_job_id: input.jobId,
@@ -402,7 +561,7 @@ export function createModalBackgroundJobProvider(
     },
 
     async observe(input) {
-      const modal = await createModalClient(settings);
+      const modal = await createModalClient(settings, loadModal);
       let sandbox: Awaited<ReturnType<ModalClientLike["sandboxes"]["fromId"]>>;
       try {
         try {
@@ -414,40 +573,110 @@ export function createModalBackgroundJobProvider(
           throw error;
         }
 
-        let streamFailure: unknown = null;
-        const drain = async (stream: "stdout" | "stderr") => {
-          const reader = sandbox[stream].getReader();
-          const encoder = new TextEncoder();
-          let providerOffset = 0;
+        const rawOffsets: Record<"stdout" | "stderr", number> = {
+          stdout: 0,
+          stderr: 0,
+        };
+        const providerOffsets: Record<"stdout" | "stderr", number> = {
+          stdout: 0,
+          stderr: 0,
+        };
+        const encoder = new TextEncoder();
+        const readOptionalFile = async (path: string): Promise<Uint8Array | null> => {
           try {
-            for (;;) {
-              const chunk = await reader.read();
-              if (chunk.done) return;
-              const text = chunk.value;
-              await input.hooks.onLog({ stream, providerOffset, text });
-              providerOffset += encoder.encode(text).byteLength;
+            return await sandbox.filesystem.readBytes(path);
+          } catch (error) {
+            if (isModalFilesystemNotFound(error)) return null;
+            if (isModalNotFound(error)) {
+              throw new BackgroundJobProviderLostError(input.providerInstanceId, error);
             }
-          } finally {
-            reader.releaseLock();
+            throw error;
           }
         };
-        const drains = [drain("stdout"), drain("stderr")].map((promise) =>
-          promise.catch((error) => {
-            streamFailure = error;
-          }),
-        );
+        const readLogDelta = async (
+          stream: "stdout" | "stderr",
+          rawOffset: number,
+        ): Promise<Uint8Array> => {
+          try {
+            const process = await sandbox.exec(
+              [
+                "/bin/sh",
+                "-c",
+                'if [ -f "$1" ]; then tail -c "+$2" "$1"; fi',
+                "opengeni-background-job-log-reader",
+                `${MODAL_BACKGROUND_JOB_STATE_DIR}/${stream}`,
+                String(rawOffset + 1),
+              ],
+              { mode: "binary" },
+            );
+            const [exitCode, stdout, stderr] = await Promise.all([
+              process.wait(),
+              process.stdout.readBytes(),
+              process.stderr.readBytes(),
+            ]);
+            if (exitCode !== 0) {
+              throw new Error(
+                `Modal background job log read failed (${stream}, code ${exitCode}): ${new TextDecoder().decode(stderr)}`,
+              );
+            }
+            return stdout;
+          } catch (error) {
+            if (isModalNotFound(error)) {
+              throw new BackgroundJobProviderLostError(input.providerInstanceId, error);
+            }
+            throw error;
+          }
+        };
+        const flushLog = async (stream: "stdout" | "stderr", terminal: boolean) => {
+          const delta = await readLogDelta(stream, rawOffsets[stream]);
+          for (const segment of stableModalLogSegments(delta, terminal)) {
+            await input.hooks.onLog({
+              stream,
+              providerOffset: providerOffsets[stream],
+              text: segment.text,
+            });
+            rawOffsets[stream] += segment.rawLength;
+            providerOffsets[stream] += encoder.encode(segment.text).byteLength;
+          }
+        };
 
         for (;;) {
           input.hooks.heartbeat();
-          if (streamFailure) throw streamFailure;
+          const resultBytes = await readOptionalFile(`${MODAL_BACKGROUND_JOB_STATE_DIR}/result`);
+          const terminal = resultBytes ? parseModalBackgroundJobResult(resultBytes) : null;
+          await Promise.all([flushLog("stdout", !!terminal), flushLog("stderr", !!terminal)]);
+          if (terminal) {
+            const artifacts: BackgroundJobProviderTerminal["artifacts"] = [];
+            for (const path of input.spec.artifactPaths) {
+              const artifactPath = modalBackgroundJobArtifactPath(input.spec, path);
+              const bytes = await readOptionalFile(artifactPath);
+              if (bytes) artifacts.push({ path, bytes });
+            }
+            if (terminal.timedOut) {
+              return {
+                status: "failed",
+                exitCode: null,
+                error: "background job timed out",
+                artifacts,
+              };
+            }
+            return {
+              status: terminal.exitCode === 0 ? "completed" : "failed",
+              exitCode: terminal.exitCode,
+              ...(terminal.exitCode === 0
+                ? {}
+                : {
+                    error: `background job exited with code ${terminal.exitCode}`,
+                  }),
+              artifacts,
+            };
+          }
           if (await input.hooks.shouldCancel()) {
             await sandbox.terminate().catch(() => undefined);
-            await Promise.all(drains);
             return { status: "cancelled", artifacts: [] };
           }
           if (input.deadlineAt && input.deadlineAt.getTime() <= Date.now()) {
             await sandbox.terminate().catch(() => undefined);
-            await Promise.all(drains);
             return {
               status: "failed",
               exitCode: null,
@@ -455,33 +684,22 @@ export function createModalBackgroundJobProvider(
               artifacts: [],
             };
           }
-          let exitCode: number | null;
+          let supervisorExitCode: number | null;
           try {
-            exitCode = await sandbox.poll();
+            supervisorExitCode = await sandbox.poll();
           } catch (error) {
             if (isModalNotFound(error)) {
               throw new BackgroundJobProviderLostError(input.providerInstanceId, error);
             }
             throw error;
           }
-          if (exitCode !== null) {
-            await Promise.all(drains);
-            if (streamFailure) throw streamFailure;
-            const artifacts: BackgroundJobProviderTerminal["artifacts"] = [];
-            for (const path of input.spec.artifactPaths) {
-              try {
-                artifacts.push({ path, bytes: await sandbox.filesystem.readBytes(path) });
-              } catch (error) {
-                if (isModalNotFound(error)) break;
-                throw error;
-              }
-            }
-            return {
-              status: exitCode === 0 ? "completed" : "failed",
-              exitCode,
-              ...(exitCode === 0 ? {} : { error: `background job exited with code ${exitCode}` }),
-              artifacts,
-            };
+          if (supervisorExitCode !== null) {
+            throw new BackgroundJobProviderLostError(
+              input.providerInstanceId,
+              new Error(
+                `Modal background job supervisor exited before terminal collection (code ${supervisorExitCode})`,
+              ),
+            );
           }
           await input.hooks.sleep(1_000);
         }
@@ -491,7 +709,16 @@ export function createModalBackgroundJobProvider(
     },
 
     async terminate(providerInstanceId) {
-      await terminateModalSandboxById(settings, providerInstanceId);
+      if (!providerInstanceId) return;
+      const modal = await createModalClient(settings, loadModal);
+      try {
+        const sandbox = await modal.sandboxes.fromId(providerInstanceId);
+        await sandbox.terminate();
+      } catch (error) {
+        if (!isModalNotFound(error)) throw error;
+      } finally {
+        modal.close();
+      }
     },
   };
 }
