@@ -1,7 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { Client, Connection } from "@temporalio/client";
 import { NativeConnection, Worker } from "@temporalio/worker";
-import { eq } from "drizzle-orm";
 import type { AccessGrant } from "@opengeni/contracts";
 import {
   applySessionTurnSettlement,
@@ -18,7 +17,6 @@ import {
   mutateSessionControlInTransaction,
   withWorkspaceRls,
 } from "@opengeni/db";
-import * as schema from "../../packages/db/src/schema";
 import { migrate } from "@opengeni/db/migrate";
 import { createNatsEventBus, type EventBus } from "@opengeni/events";
 import { createProductionAgentRuntime } from "@opengeni/runtime";
@@ -422,11 +420,10 @@ describe("worker restart resilience", () => {
     const turns = await listSessionTurns(dbClient.db, grant.workspaceId, session.id);
     expect(turns).toHaveLength(1);
     expect(turns[0]).toMatchObject({ status: "completed", executionGeneration: 2 });
-    const attempts = await withWorkspaceRls(dbClient.db, grant.workspaceId, (db) =>
-      db
-        .select({ id: schema.sessionTurnAttempts.id, state: schema.sessionTurnAttempts.state })
-        .from(schema.sessionTurnAttempts)
-        .where(eq(schema.sessionTurnAttempts.turnId, turns[0]!.id)),
+    const attempts = await withWorkspaceRls(dbClient.db, grant.workspaceId, async (db) =>
+      (await db.query.sessionTurnAttempts.findMany()).filter(
+        (attempt) => attempt.turnId === turns[0]!.id,
+      ),
     );
     expect(attempts).toHaveLength(2);
     expect(attempts.every((attempt) => attempt.state === "closed")).toBe(true);
