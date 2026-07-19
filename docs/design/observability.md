@@ -55,7 +55,8 @@ work. The domain metric set (all `opengeni_` prefixed, bounded label values only
   `opengeni_turn_capacity_monitor_last_success_age_seconds`, and
   `opengeni_turn_capacity_monitor_fresh` — failed or hung Temporal reads make
   old queue samples explicitly stale rather than silently preserving apparent
-  runnable pressure
+  runnable pressure; an absent/malformed `DescribeTaskQueue.stats` object is a
+  failed read, never a fresh zero backlog
 - `opengeni_turn_slots_capacity`, `opengeni_turn_slots_reserved`,
   `opengeni_turn_slots_used`, `opengeni_turn_slots_available`, and
   `opengeni_turn_slot_saturation_ratio` — the memory-aware Temporal slot plane
@@ -68,6 +69,11 @@ paused prompt stays queued in Postgres but never schedules `runAgentTurn`.
 PromQL alerts and the bundled dashboard select one exact namespace,
 environment, Helm release, and turn-worker component. Cross-fleet aggregation
 must be an explicit operator query, never the default capacity or paging path.
+The stale-monitor alert includes a release-scoped `absent()` arm, while the
+dashboard exposes minimum monitor freshness and maximum last-success age.
+Kubernetes memory and HPA series are joined through exact
+`app.kubernetes.io/instance` and worker component labels, not pod/HPA name
+prefixes that can mix similarly named releases.
 
 **Model calls** (`{provider, outcome}`; model names are bounded, provider ids more so):
 - `opengeni_model_calls_total`, `opengeni_model_call_duration_seconds`

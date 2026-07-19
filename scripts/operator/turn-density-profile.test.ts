@@ -3,11 +3,19 @@ import { createHash } from "node:crypto";
 import {
   buildProfileResult,
   cleanupDensityWorkspace,
+  DEFAULT_ACTIVE_HISTORY_BYTES,
+  DEFAULT_COMPACTION_TAIL_BYTES,
   DEFAULT_DENSITIES,
+  DEFAULT_HISTORY_ROW_PAYLOAD_BYTES,
+  DEFAULT_INACTIVE_HISTORY_BYTES,
+  DEFAULT_DENSITY_WAVES,
   expectedCompactionCallsForDensity,
   FORCED_COMPACTION_RULE,
+  historyRowShape,
+  historyRows,
   SYNTHETIC_SCENARIOS,
   parseDensitySweep,
+  PRODUCTION_ACTIVE_HISTORY_LIMITS,
   profileConfigFromEnv,
   quantile,
   scenarioForTurn,
@@ -76,6 +84,66 @@ describe("turn density profile release-gate helpers", () => {
       selectionRule: "turnIndex % 6 === 0",
       expectedCallsPerWave: "ceil(density / 6)",
     });
+  });
+
+  test("uses a bounded high-cardinality active/inactive history row shape", () => {
+    const shape = historyRowShape(
+      DEFAULT_ACTIVE_HISTORY_BYTES,
+      DEFAULT_INACTIVE_HISTORY_BYTES,
+      DEFAULT_HISTORY_ROW_PAYLOAD_BYTES,
+      DEFAULT_COMPACTION_TAIL_BYTES,
+    );
+    expect(shape).toEqual({
+      shape: "high-cardinality-tiny-object",
+      rowPayloadTargetBytes: 4_096,
+      activeRowCount: 256,
+      inactiveRowCount: 2_048,
+      totalRowCount: 2_304,
+      compactionTailRowCount: 49,
+      persistentActiveInactiveMix: true,
+      maxActiveRows: 4_096,
+      maxRowsPerTurn: 131_072,
+    });
+    expect(PRODUCTION_ACTIVE_HISTORY_LIMITS).toEqual({
+      jsonBytes: 32 * 1024 * 1024,
+      rows: 4_096,
+      jsonNodes: 200_000,
+      jsonProperties: 100_000,
+    });
+
+    const input = {
+      accountId: "account",
+      workspaceId: "workspace",
+      sessionId: "session",
+      sessionIndex: 0,
+    };
+    const active = historyRows(
+      input,
+      DEFAULT_ACTIVE_HISTORY_BYTES,
+      true,
+      0,
+      DEFAULT_HISTORY_ROW_PAYLOAD_BYTES,
+      DEFAULT_COMPACTION_TAIL_BYTES,
+    );
+    const inactive = historyRows(
+      input,
+      DEFAULT_INACTIVE_HISTORY_BYTES,
+      false,
+      active.length,
+      DEFAULT_HISTORY_ROW_PAYLOAD_BYTES,
+      0,
+    );
+    expect(active).toHaveLength(shape.activeRowCount);
+    expect(inactive).toHaveLength(shape.inactiveRowCount);
+    expect(active.every((row) => row.active)).toBe(true);
+    expect(inactive.every((row) => !row.active)).toBe(true);
+    expect(active[0]?.position).toBe(0);
+    expect(inactive[0]?.position).toBe(active.length);
+    expect(active[0]?.item.content[0]?.text).toHaveLength(3_896);
+    expect(new Set(active.map((row) => row.item.content[0]?.text)).size).toBe(active.length);
+    expect(() => historyRowShape(4_096 * 512 + 1, 0, 512, 200_000)).toThrow(
+      "active history row count must be at most 4096",
+    );
   });
 
   test("rejects unbounded profile controls and inconsistent thresholds", () => {
@@ -154,7 +222,7 @@ describe("turn density profile release-gate helpers", () => {
   test("verifies schema-v3 raw samples, statistics, thresholds, cleanup, and exact SHA", () => {
     const text = profileArtifactText();
     const sha256 = createHash("sha256").update(text).digest("hex");
-    expect(verifyDensityProfileArtifactText(text, sha256)).toEqual({
+    expect(verifyDensityProfileArtifactText(text, sha256, { allowNoncanonical: true })).toEqual({
       sha256,
       schemaVersion: 3,
       densities: [2],
@@ -166,42 +234,114 @@ describe("turn density profile release-gate helpers", () => {
       targetMet: true,
       hardLimitMet: true,
     });
-    expect(() => verifyDensityProfileArtifactText(text, "0".repeat(64))).toThrow(
-      "SHA-256 mismatch",
-    );
+    expect(() =>
+      verifyDensityProfileArtifactText(text, "0".repeat(64), { allowNoncanonical: true }),
+    ).toThrow("SHA-256 mismatch");
   });
 
   test("rejects altered derived statistics, raw samples, and cleanup claims", () => {
     const artifact = JSON.parse(profileArtifactText());
     artifact.densities[0].waves[0].incrementalRssMiBPerTurn.worst = 99;
-    expect(() => verifyDensityProfileArtifactText(`${JSON.stringify(artifact)}\n`)).toThrow(
-      "incrementalRssMiBPerTurn does not match",
-    );
+    expect(() =>
+      verifyDensityProfileArtifactText(`${JSON.stringify(artifact)}\n`, undefined, {
+        allowNoncanonical: true,
+      }),
+    ).toThrow("incrementalRssMiBPerTurn does not match");
     const rawAltered = JSON.parse(profileArtifactText());
     rawAltered.densities[0].waves[0].rawSamples.memory.plateau[0].rss += 1;
-    expect(() => verifyDensityProfileArtifactText(`${JSON.stringify(rawAltered)}\n`)).toThrow(
-      "raw-sample recomputation",
-    );
+    expect(() =>
+      verifyDensityProfileArtifactText(`${JSON.stringify(rawAltered)}\n`, undefined, {
+        allowNoncanonical: true,
+      }),
+    ).toThrow("raw-sample recomputation");
     const cleanupAltered = JSON.parse(profileArtifactText());
     cleanupAltered.cleanup.workspacesDeleted = 0;
-    expect(() => verifyDensityProfileArtifactText(`${JSON.stringify(cleanupAltered)}\n`)).toThrow(
-      "artifact.cleanup does not match",
-    );
+    expect(() =>
+      verifyDensityProfileArtifactText(`${JSON.stringify(cleanupAltered)}\n`, undefined, {
+        allowNoncanonical: true,
+      }),
+    ).toThrow("artifact.cleanup does not match");
     const compactionCallsAltered = JSON.parse(profileArtifactText());
     compactionCallsAltered.densities[0].waves[0].compactionCalls = 0;
     expect(() =>
-      verifyDensityProfileArtifactText(`${JSON.stringify(compactionCallsAltered)}\n`),
+      verifyDensityProfileArtifactText(`${JSON.stringify(compactionCallsAltered)}\n`, undefined, {
+        allowNoncanonical: true,
+      }),
     ).toThrow("compactionCalls must equal 1");
     const compactionShrinksAltered = JSON.parse(profileArtifactText());
     compactionShrinksAltered.densities[0].waves[0].verifiedCompactionHistoryShrinks = 0;
     expect(() =>
-      verifyDensityProfileArtifactText(`${JSON.stringify(compactionShrinksAltered)}\n`),
+      verifyDensityProfileArtifactText(`${JSON.stringify(compactionShrinksAltered)}\n`, undefined, {
+        allowNoncanonical: true,
+      }),
     ).toThrow("verifiedCompactionHistoryShrinks must equal 1");
     const compactionRuleAltered = JSON.parse(profileArtifactText());
     compactionRuleAltered.workload.syntheticMix.forcedCompaction.selectionRule = "all turns";
     expect(() =>
-      verifyDensityProfileArtifactText(`${JSON.stringify(compactionRuleAltered)}\n`),
+      verifyDensityProfileArtifactText(`${JSON.stringify(compactionRuleAltered)}\n`, undefined, {
+        allowNoncanonical: true,
+      }),
     ).toThrow("forcedCompaction does not match");
+
+    const historyShapeAltered = JSON.parse(profileArtifactText());
+    historyShapeAltered.workload.history.shape.activeRowCount += 1;
+    expect(() =>
+      verifyDensityProfileArtifactText(`${JSON.stringify(historyShapeAltered)}\n`, undefined, {
+        allowNoncanonical: true,
+      }),
+    ).toThrow("artifact.workload.history.shape does not match");
+
+    const productionLimitAltered = JSON.parse(profileArtifactText());
+    productionLimitAltered.workload.history.productionActiveMaterializationLimits.rows = 8_192;
+    expect(() =>
+      verifyDensityProfileArtifactText(`${JSON.stringify(productionLimitAltered)}\n`, undefined, {
+        allowNoncanonical: true,
+      }),
+    ).toThrow("productionActiveMaterializationLimits does not match");
+  });
+
+  test("strict verification requires the canonical sweep and current revision", () => {
+    const text = canonicalProfileArtifactText();
+    expect(() => verifyDensityProfileArtifactText(text)).toThrow(
+      "requires the exact current production revision",
+    );
+    expect(
+      verifyDensityProfileArtifactText(text, undefined, {
+        expectedProductionRevision: "current-revision",
+      }).densities,
+    ).toEqual([...DEFAULT_DENSITIES]);
+
+    const revisionAltered = JSON.parse(text);
+    revisionAltered.productionRevision = "old-revision";
+    expect(() =>
+      verifyDensityProfileArtifactText(`${JSON.stringify(revisionAltered)}\n`, undefined, {
+        expectedProductionRevision: "current-revision",
+      }),
+    ).toThrow("productionRevision mismatch");
+
+    const subsetAltered = JSON.parse(text);
+    subsetAltered.workload.densities = [1, 2];
+    expect(() =>
+      verifyDensityProfileArtifactText(`${JSON.stringify(subsetAltered)}\n`, undefined, {
+        expectedProductionRevision: "current-revision",
+      }),
+    ).toThrow("artifact.workload does not match");
+
+    const thresholdsAltered = JSON.parse(text);
+    thresholdsAltered.thresholds.targetMiBPerTurn = 51;
+    expect(() =>
+      verifyDensityProfileArtifactText(`${JSON.stringify(thresholdsAltered)}\n`, undefined, {
+        expectedProductionRevision: "current-revision",
+      }),
+    ).toThrow("artifact.thresholds.controls does not match");
+
+    const isolationAltered = JSON.parse(text);
+    isolationAltered.workload.syntheticMix.azureInferenceCalled = true;
+    expect(() =>
+      verifyDensityProfileArtifactText(`${JSON.stringify(isolationAltered)}\n`, undefined, {
+        expectedProductionRevision: "current-revision",
+      }),
+    ).toThrow("providerIsolation does not match");
   });
 });
 
@@ -266,6 +406,81 @@ function profileArtifactText(): string {
     cleanup: { workspacesCreated: 1, workspacesDeleted: 1, sessionsCreated: 2 },
   });
   return `${JSON.stringify(artifact, null, 2)}\n`;
+}
+
+function canonicalProfileArtifactText(): string {
+  const config = profileConfigFromEnv({});
+  const densityMeasurements: DensityMeasurement[] = DEFAULT_DENSITIES.map((density) => ({
+    density,
+    waves: Array.from({ length: DEFAULT_DENSITY_WAVES }, (_, wave) =>
+      canonicalWaveMeasurement(density, wave, config),
+    ),
+  }));
+  const sessionsCreated = DEFAULT_DENSITIES.reduce(
+    (total, density) => total + density * DEFAULT_DENSITY_WAVES,
+    0,
+  );
+  const artifact = buildProfileResult({
+    config,
+    runId: "density-profile-canonical-test",
+    productionRevision: "current-revision",
+    densityMeasurements,
+    cleanup: { workspacesCreated: 1, workspacesDeleted: 1, sessionsCreated },
+  });
+  return `${JSON.stringify(artifact, null, 2)}\n`;
+}
+
+function canonicalWaveMeasurement(
+  density: number,
+  wave: number,
+  config: ReturnType<typeof profileConfigFromEnv>,
+): DensityMeasurement["waves"][number] {
+  const plateauSampleCount = Math.max(
+    2,
+    Math.ceil((config.plateauSeconds * 1_000) / config.plateauSampleIntervalMs) + 1,
+  );
+  const baseline = Array.from({ length: config.baselineSamples }, () => memorySample(100, 40, 5));
+  const plateau = Array.from({ length: plateauSampleCount }, () => memorySample(110, 45, 7));
+  const settled = Array.from({ length: config.settledSamples }, () => memorySample(102, 43, 5));
+  const incrementalValues = plateau.map(() => 10 / density);
+  const retainedValues = [2 / density];
+  const plateauToSettledValues = plateau.map(() => 8);
+  return {
+    wave,
+    compactionCalls: expectedCompactionCallsForDensity(density),
+    verifiedCompactionHistoryShrinks: expectedCompactionCallsForDensity(density),
+    baseline: memorySummary(baseline),
+    plateau: memorySummary(plateau),
+    settled: memorySummary(settled),
+    incrementalValues,
+    retainedValues,
+    plateauToSettledValues,
+    rawMemory: { baseline, plateau, settled },
+  };
+}
+
+function memorySummary(samples: DensityMemorySample[]): {
+  sampleCount: number;
+  rssMiBMedian: number;
+  rssMiBP95: number;
+  rssMiBP99: number;
+  rssMiBMax: number;
+  heapUsedMiBMedian: number;
+  externalMiBMedian: number;
+} {
+  const mib = 1024 * 1024;
+  const rss = summarizeNumbers(samples.map((sample) => sample.rss / mib));
+  const heap = summarizeNumbers(samples.map((sample) => sample.heapUsed / mib));
+  const external = summarizeNumbers(samples.map((sample) => sample.external / mib));
+  return {
+    sampleCount: samples.length,
+    rssMiBMedian: rss.p50,
+    rssMiBP95: rss.p95,
+    rssMiBP99: rss.p99,
+    rssMiBMax: rss.worst,
+    heapUsedMiBMedian: heap.p50,
+    externalMiBMedian: external.p50,
+  };
 }
 
 function memorySample(

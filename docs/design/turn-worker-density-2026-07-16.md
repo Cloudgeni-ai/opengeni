@@ -13,13 +13,18 @@ Owner: OPE-52
   release ceiling is 100 MiB per active turn, including exceptionally long
   model histories. Fleet pod requests and limits must retain process/runtime
   headroom in addition to this incremental amount.
-- The complete active model-facing transcript has a 32 MiB UTF-8 JSON
-  materialization envelope. PostgreSQL measures `item::text` bytes before
-  returning any JSONB row and the worker rejects an oversized transcript with
-  non-retryable `active_history_too_large`; it never silently trims durable
+- The complete active model-facing transcript has a four-dimensional
+  materialization envelope: 32 MiB UTF-8 JSON, 4,096 rows, 200,000 decoded JSON
+  nodes, and 100,000 object properties. PostgreSQL measures every dimension
+  before returning any JSONB row and the worker rejects an oversized transcript
+  with non-retryable `active_history_too_large`; it never silently trims durable
   conversation truth or relies on compressed JSONB storage size. Normal
-  token-driven compaction should keep valid sessions far below this final
-  safety boundary.
+  token-driven compaction should keep valid sessions far below this final safety
+  boundary.
+- Approval-only SDK RunState is separately limited to 32 MiB, 200,000 nodes,
+  and 100,000 properties; pending approvals are limited to 256 KiB and 256
+  items. Ordinary turns read only RunState ownership metadata, so conversation
+  history and the approval blob are not double-held.
 - Production density evidence must use the exact production image and database
   shape. The reproducible local profile uses `ScriptedModel` and must not call
   an Azure or other external model endpoint.
@@ -48,9 +53,10 @@ inputs are configurable:
 | --- | ---: | --- |
 | `OPENGENI_DENSITY_SWEEP` | `1,2,4,8,12,16,24,32` | Exact candidate densities to run |
 | `OPENGENI_DENSITY_WAVES` | `3` | Repeated waves at every selected density |
-| `OPENGENI_DENSITY_ACTIVE_HISTORY_BYTES` | `750000` | Bounded active long-history bytes per turn |
+| `OPENGENI_DENSITY_ACTIVE_HISTORY_BYTES` | `1048576` | Bounded active long-history bytes per turn |
 | `OPENGENI_DENSITY_INACTIVE_HISTORY_BYTES` | `8388608` | Bounded inactive durable-history bytes per turn |
 | `OPENGENI_DENSITY_COMPACTION_TAIL_BYTES` | `200000` | Recent-user tail in the compaction-shaped active history |
+| `OPENGENI_DENSITY_HISTORY_ROW_PAYLOAD_BYTES` | `4096` | Target UTF-8 text payload for each bounded history row; accepted range is 512–16384 |
 | `OPENGENI_DENSITY_PLATEAU_SECONDS` | `15` | Time held at the model gate |
 | `OPENGENI_DENSITY_PLATEAU_SAMPLE_INTERVAL_MS` | `500` | RSS sample interval during the plateau |
 | `OPENGENI_DENSITY_TARGET_MIB_PER_TURN` | `50` | Advisory target threshold |
@@ -59,13 +65,19 @@ inputs are configurable:
 
 The history seed is deterministic and bounded. It writes inactive rows followed
 by active rows, marks a compaction-checkpoint-shaped active item, and makes the
-newest configured tail recent user input. The default active/inactive sizes are
-the same shape as the original gate; the profile rejects more than 32 MiB for
-either per-turn history class. The production active-history reader separately
-measures the aggregate server-rendered UTF-8 JSON size under one repeatable-read
-snapshot before keyset paging, so TOAST-compressible payloads and concurrent
-appends cannot bypass the envelope. Sampling and synthetic allocation knobs are
-also
+newest configured tail recent user input. The default 1 MiB active history is
+materialized as 256 approximately 4 KiB rows, while the default 8 MiB inactive
+history contributes 2,048 rows. The artifact records the row-payload target,
+active/inactive/total row counts, compaction-tail row count, persistent
+active/inactive mix, the 4,096-row production active limit, and the 131,072-row
+overall harness ceiling. Smaller rows exercise high-cardinality history without
+making the input unbounded; the profile rejects more than 32 MiB for either
+per-turn history class, rejects more than 4,096 active rows, and rejects a total
+row shape above the harness ceiling. Every artifact records the exact production
+32 MiB/4,096-row/200,000-node/100,000-property envelope. The production reader
+measures all four dimensions under one repeatable-read snapshot before keyset
+paging, so TOAST-compressible payloads, many tiny objects, and concurrent appends
+cannot bypass the envelope. Sampling and synthetic allocation knobs are also
 bounded by the script so a profile cannot accidentally become an unbounded
 memory test: at most 10 waves, a 300-second plateau, 100 baseline or settled
 samples, 1,024 synthetic tool/fan-out/drain items, 2 MiB of synthetic working
@@ -89,7 +101,7 @@ wave must make `ceil(density / 6)` compaction calls. After activity settlement,
 the harness also requires every selected request to be consumed and each
 selected session to have fewer active history rows than it had before the
 turn. This gives density 1 a real compaction boundary and larger densities a
-stable mix of compacting and ordinary turns even when the default 750,000-byte
+stable mix of compacting and ordinary turns even when the default 1 MiB active
 history would remain below the automatic token threshold.
 
 The tool and sandbox entries are deliberately **in-process shapes**, not real
@@ -109,16 +121,26 @@ Schema-v3 artifacts are independently checked from their exact file bytes:
 
 ```bash
 bun run verify:turn-density -- artifacts/turn-density.json \
+  --production-revision <current-deployment-revision> \
   --sha256 <expected-sha256>
 ```
 
+Strict verification requires the exact current deployment revision supplied by
+`--production-revision`, the complete canonical density sweep
+`1,2,4,8,12,16,24,32`, three waves, the default bounded history/row shape and
+sampling controls, the 50/100 MiB thresholds, and the scripted-model/no-provider
+isolation fields. A bounded smoke or pathological artifact may opt into
+`--allow-noncanonical`; that mode permits configured subsets and controls but
+still verifies the schema, deterministic history shape, scripted model,
+no-Azure/no-external/no-real-sandbox claims, raw samples, and cleanup contract.
 The verifier hashes the exact UTF-8 file, then recomputes every memory summary,
-per-turn value, percentile, retained/leak statistic, per-density and aggregate
-threshold, raw sample count, truthful synthetic-buffer allocation, and expected
-workspace/session cleanup total. It also derives `ceil(density / 6)` rather
-than trusting stored compaction counts and requires the matching verified
-active-history-shrink count in every wave. Stored summaries are never accepted
-as proof of their own raw samples.
+per-turn value, p50/p95/p99/worst percentile, retained/leak statistic,
+per-density and aggregate threshold, raw sample count, truthful
+synthetic-buffer allocation, and expected workspace/session cleanup total. It
+also derives `ceil(density / 6)` rather than trusting stored compaction counts
+and requires the matching verified active-history-shrink count in every wave.
+Stored summaries and declared history row counts are never accepted as proof of
+their own raw samples or shape.
 
 For each plateau RSS sample, incremental RSS per active turn is:
 
@@ -205,8 +227,9 @@ single-density smoke independently measured 48.0 MiB worst, exit 0, one
 compaction, and artifact SHA-256
 `4906ec9af496856393291302ba3878aa5e040745b940288bcd7f927078a276b4`.
 
-The pathological result depends on allocation fixes. Active history is read in
-ordered keyset pages of 16 while retaining exactly one logical transcript, and
+The pathological result depends on allocation fixes. Active history is
+preflighted for bytes, rows, nodes, and properties, then read in ordered keyset
+pages of 16 while retaining exactly one logical transcript, and
 the sanitized item count produced by that same runtime input is reused for
 reconciliation instead of loading the full active history a second time. JSON
 token estimation counts exact serialized UTF-16 or UTF-8 length without
@@ -214,7 +237,8 @@ allocating a second giant string for persisted plain JSON/JSONB. Objects with
 non-persisted JavaScript semantics (proxies, accessors, custom `toJSON`, boxed
 values, sparse or decorated arrays, and custom/cross-realm prototypes) are
 rejected from the plain-JSON fast path; direct non-persisted callers use the
-materializing fallback rather than receiving a false universal-parity claim.
+actual `JSON.stringify` materializing fallback rather than an undercounting
+object-tag approximation. Values with no valid JSON form fail closed.
 
 The process maximum is intentionally reported but is not the per-turn gate: it
 includes Bun, loaded application modules, database/runtime clients, native

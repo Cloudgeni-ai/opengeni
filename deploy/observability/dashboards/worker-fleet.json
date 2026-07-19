@@ -373,7 +373,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max by (pod) (container_memory_working_set_bytes{namespace=\"$namespace\",container=\"worker\",pod=~\"$release.*\"}) / max by (pod) (kube_pod_container_resource_limits{namespace=\"$namespace\",resource=\"memory\",container=\"worker\",pod=~\"$release.*\"})",
+          "expr": "(\n  max by (namespace, pod) (container_memory_working_set_bytes{namespace=\"$namespace\",container=\"worker\"})\n  * on (namespace, pod) group_left()\n  max by (namespace, pod) (kube_pod_labels{namespace=\"$namespace\",label_app_kubernetes_io_instance=\"$release\",label_app_kubernetes_io_component=~\"worker-control|worker-turns\"})\n)\n/\n(\n  max by (namespace, pod) (kube_pod_container_resource_limits{namespace=\"$namespace\",resource=\"memory\",container=\"worker\"})\n  * on (namespace, pod) group_left()\n  max by (namespace, pod) (kube_pod_labels{namespace=\"$namespace\",label_app_kubernetes_io_instance=\"$release\",label_app_kubernetes_io_component=~\"worker-control|worker-turns\"})\n)",
           "legendFormat": "{{pod}}",
           "datasource": {
             "type": "prometheus",
@@ -490,7 +490,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "kube_horizontalpodautoscaler_status_current_replicas{namespace=\"$namespace\",horizontalpodautoscaler=~\"$release.*worker.*\"}",
+          "expr": "kube_horizontalpodautoscaler_status_current_replicas{namespace=\"$namespace\"}\n* on (namespace, horizontalpodautoscaler) group_left()\nmax by (namespace, horizontalpodautoscaler) (kube_horizontalpodautoscaler_labels{namespace=\"$namespace\",label_app_kubernetes_io_instance=\"$release\",label_app_kubernetes_io_component=~\"worker-control|worker-turns\"})",
           "legendFormat": "current {{horizontalpodautoscaler}}",
           "datasource": {
             "type": "prometheus",
@@ -501,7 +501,7 @@
         },
         {
           "refId": "B",
-          "expr": "kube_horizontalpodautoscaler_spec_max_replicas{namespace=\"$namespace\",horizontalpodautoscaler=~\"$release.*worker.*\"}",
+          "expr": "kube_horizontalpodautoscaler_spec_max_replicas{namespace=\"$namespace\"}\n* on (namespace, horizontalpodautoscaler) group_left()\nmax by (namespace, horizontalpodautoscaler) (kube_horizontalpodautoscaler_labels{namespace=\"$namespace\",label_app_kubernetes_io_instance=\"$release\",label_app_kubernetes_io_component=~\"worker-control|worker-turns\"})",
           "legendFormat": "max {{horizontalpodautoscaler}}",
           "datasource": {
             "type": "prometheus",
@@ -635,6 +635,145 @@
       }
     },
     {
+      "type": "stat",
+      "title": "Turn capacity monitor freshness (all workers)",
+      "description": "Minimum worker-turn capacity-monitor freshness. Zero means at least one exported monitor is stale; no data is also unsafe and is covered by the fleet alert.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "color": "red",
+                  "index": 0,
+                  "text": "Stale"
+                },
+                "1": {
+                  "color": "green",
+                  "index": 1,
+                  "text": "Fresh"
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "min(opengeni_turn_capacity_monitor_fresh{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"})",
+          "legendFormat": "minimum freshness",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "id": 17,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 35
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Turn capacity monitor last-success age (max)",
+      "description": "Worst reported age since a worker-turn process last read Temporal eligible-runnable queue statistics successfully.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 30
+              },
+              {
+                "color": "red",
+                "value": 120
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(opengeni_turn_capacity_monitor_last_success_age_seconds{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"})",
+          "legendFormat": "oldest last success",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "id": 18,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 35
+      }
+    },
+    {
       "type": "row",
       "title": "Context pressure — is compaction keeping up?",
       "collapsed": false,
@@ -644,7 +783,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 35
+        "y": 43
       }
     },
     {
@@ -696,7 +835,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 36
+        "y": 44
       }
     },
     {
@@ -759,7 +898,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 36
+        "y": 44
       }
     },
     {
@@ -811,7 +950,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 44
+        "y": 52
       }
     }
   ]

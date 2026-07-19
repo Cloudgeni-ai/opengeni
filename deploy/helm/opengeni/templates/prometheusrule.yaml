@@ -181,6 +181,8 @@ spec:
             description: Scale the turn fleet or inspect an admission-memory contraction. The slot denominator already honors the hard per-turn memory budget.
         - alert: OpenGeniTurnCapacityMonitorStale
           expr: |
+            absent(opengeni_turn_capacity_monitor_fresh{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-turn"}) == 1
+            or
             max(opengeni_turn_capacity_monitor_fresh{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-turn"}) < 1
             or
             time() - max(opengeni_turn_capacity_monitor_last_success_timestamp_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-turn"}) > 45

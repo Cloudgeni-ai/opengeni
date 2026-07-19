@@ -367,15 +367,38 @@ export function recordTurnTaskQueueStats(
 export function normalizeTurnTaskQueueStats(
   stats: TemporalTurnTaskQueueStats | undefined,
 ): TurnTaskQueueStats {
+  if (!stats) {
+    throw new Error("Temporal DescribeTaskQueue response omitted required stats");
+  }
+  const eligibleBacklog = requiredTemporalNumber(
+    stats.approximateBacklogCount,
+    "approximateBacklogCount",
+    { integer: true },
+  );
+  let oldestBacklogAgeSeconds = 0;
+  if (stats.approximateBacklogAge) {
+    const seconds = optionalTemporalNumber(
+      stats.approximateBacklogAge.seconds,
+      "approximateBacklogAge.seconds",
+      { integer: true },
+    );
+    const nanos = optionalTemporalNumber(
+      stats.approximateBacklogAge.nanos,
+      "approximateBacklogAge.nanos",
+      { integer: true },
+    );
+    if (nanos >= 1_000_000_000) {
+      throw new Error("Temporal approximateBacklogAge.nanos must be less than one second");
+    }
+    oldestBacklogAgeSeconds = seconds + nanos / 1_000_000_000;
+  } else if (eligibleBacklog > 0) {
+    throw new Error("Temporal stats omitted approximateBacklogAge for a nonzero backlog");
+  }
   return {
-    eligibleBacklog: temporalNumber(stats?.approximateBacklogCount),
-    oldestBacklogAgeSeconds: Math.max(
-      0,
-      temporalNumber(stats?.approximateBacklogAge?.seconds) +
-        temporalNumber(stats?.approximateBacklogAge?.nanos) / 1_000_000_000,
-    ),
-    tasksAddRate: temporalNumber(stats?.tasksAddRate),
-    tasksDispatchRate: temporalNumber(stats?.tasksDispatchRate),
+    eligibleBacklog,
+    oldestBacklogAgeSeconds,
+    tasksAddRate: optionalTemporalNumber(stats.tasksAddRate, "tasksAddRate"),
+    tasksDispatchRate: optionalTemporalNumber(stats.tasksDispatchRate, "tasksDispatchRate"),
   };
 }
 
@@ -773,10 +796,31 @@ function nonnegativeFinite(value: number): number {
   return Number.isFinite(value) && value > 0 ? value : 0;
 }
 
-function temporalNumber(value: unknown): number {
-  if (value === null || value === undefined) return 0;
+function requiredTemporalNumber(
+  value: unknown,
+  field: string,
+  options: { integer?: boolean } = {},
+): number {
+  if (value === null || value === undefined) {
+    throw new Error(`Temporal stats omitted required ${field}`);
+  }
   const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : 0;
+  if (
+    !Number.isFinite(parsed) ||
+    parsed < 0 ||
+    (options.integer && !Number.isSafeInteger(parsed))
+  ) {
+    throw new Error(`Temporal stats returned invalid ${field}: ${String(value)}`);
+  }
+  return parsed;
+}
+
+function optionalTemporalNumber(
+  value: unknown,
+  field: string,
+  options: { integer?: boolean } = {},
+): number {
+  return value === null || value === undefined ? 0 : requiredTemporalNumber(value, field, options);
 }
 
 /**

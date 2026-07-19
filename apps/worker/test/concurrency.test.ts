@@ -138,6 +138,21 @@ describe("worker concurrency contract", () => {
     ).toThrow("cannot safely admit one turn");
   });
 
+  test("fails the post-worker startup check when native initialization consumes the last permit", () => {
+    const memory = mutableMemory(300 * MIB, 1_000 * MIB);
+    const supplier = new MemoryAwareTurnSlotSupplier({
+      hardBytesPerTurn: 100 * MIB,
+      nativeHeadroomBytes: 500 * MIB,
+      memorySnapshot: memory.read,
+    });
+    memory.currentBytes = 450 * MIB;
+    expect(() => supplier.assertCanAdmitOne()).toThrow(
+      "cannot safely admit one turn after worker initialization",
+    );
+    memory.currentBytes = 400 * MIB;
+    expect(() => supplier.assertCanAdmitOne()).not.toThrow();
+  });
+
   test("a blocked reservation exits with AbortError rather than leaking a poll", async () => {
     const memory = mutableMemory(300 * MIB, 901 * MIB);
     const supplier = new MemoryAwareTurnSlotSupplier({

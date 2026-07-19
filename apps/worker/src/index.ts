@@ -107,37 +107,43 @@ export async function createOpenGeniWorker(options: WorkerOptions): Promise<{
       observability,
     });
   const turnTuner = options.role === "turn" ? createTurnWorkerTuner({ observability }) : null;
-  const worker = await Worker.create({
-    connection,
-    namespace: settings.temporalNamespace,
-    taskQueue:
-      options.role === "control"
-        ? settings.temporalTaskQueue
-        : turnTaskQueue(settings.temporalTaskQueue),
-    ...(options.role === "control"
-      ? {
-          workflowsPath:
-            options.workflowsPath ?? new URL("../src/workflows.ts", import.meta.url).pathname,
-          maxConcurrentWorkflowTaskExecutions: CONTROL_WORKER_MAX_CONCURRENT_WORKFLOW_TASKS,
-        }
-      : {}),
-    activities,
-    ...(turnTuner
-      ? { tuner: turnTuner.tuner }
-      : { maxConcurrentActivityTaskExecutions: CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES }),
-    // GRACEFUL DEPLOY SHUTDOWN (with the SIGTERM handler in startWorker):
-    // after shutdown() stops polling, in-flight activities get this long to
-    // finish naturally; the rest are then CANCELLED with WORKER_SHUTDOWN —
-    // which triggers agent-turn's same-turn recovery checkpoint instead of a
-    // heartbeat-timeout worker_death. Short on purpose: a long grace here
-    // only delays the checkpoint window long turns actually need.
-    shutdownGraceTime: "5s",
-    // Hard ceiling INSIDE the pod's terminationGracePeriodSeconds (120s): a
-    // wedged checkpoint force-stops here, on our terms, rather than riding
-    // into the kubelet's SIGKILL mid-DB-write.
-    shutdownForceTime: "100s",
-  });
-  return { worker, connection };
+  try {
+    const worker = await Worker.create({
+      connection,
+      namespace: settings.temporalNamespace,
+      taskQueue:
+        options.role === "control"
+          ? settings.temporalTaskQueue
+          : turnTaskQueue(settings.temporalTaskQueue),
+      ...(options.role === "control"
+        ? {
+            workflowsPath:
+              options.workflowsPath ?? new URL("../src/workflows.ts", import.meta.url).pathname,
+            maxConcurrentWorkflowTaskExecutions: CONTROL_WORKER_MAX_CONCURRENT_WORKFLOW_TASKS,
+          }
+        : {}),
+      activities,
+      ...(turnTuner
+        ? { tuner: turnTuner.tuner }
+        : { maxConcurrentActivityTaskExecutions: CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES }),
+      // GRACEFUL DEPLOY SHUTDOWN (with the SIGTERM handler in startWorker):
+      // after shutdown() stops polling, in-flight activities get this long to
+      // finish naturally; the rest are then CANCELLED with WORKER_SHUTDOWN —
+      // which triggers agent-turn's same-turn recovery checkpoint instead of a
+      // heartbeat-timeout worker_death. Short on purpose: a long grace here
+      // only delays the checkpoint window long turns actually need.
+      shutdownGraceTime: "5s",
+      // Hard ceiling INSIDE the pod's terminationGracePeriodSeconds (120s): a
+      // wedged checkpoint force-stops here, on our terms, rather than riding
+      // into the kubelet's SIGKILL mid-DB-write.
+      shutdownForceTime: "100s",
+    });
+    turnTuner?.admission.assertCanAdmitOne();
+    return { worker, connection };
+  } catch (error) {
+    await connection.close().catch(() => undefined);
+    throw error;
+  }
 }
 
 // A signalWithStart capability so a worker activity can wake a PARENT

@@ -17,7 +17,7 @@ describe("turn capacity metrics", () => {
           nanos: 500_000_000,
         },
         tasksAddRate: "4.5",
-        tasksDispatchRate: Number.NaN,
+        tasksDispatchRate: undefined,
       }),
     ).toEqual({
       eligibleBacklog: 17,
@@ -25,12 +25,25 @@ describe("turn capacity metrics", () => {
       tasksAddRate: 4.5,
       tasksDispatchRate: 0,
     });
-    expect(normalizeTurnTaskQueueStats(undefined)).toEqual({
+    expect(normalizeTurnTaskQueueStats({ approximateBacklogCount: 0 })).toEqual({
       eligibleBacklog: 0,
       oldestBacklogAgeSeconds: 0,
       tasksAddRate: 0,
       tasksDispatchRate: 0,
     });
+    expect(() => normalizeTurnTaskQueueStats(undefined)).toThrow("omitted required stats");
+    expect(() => normalizeTurnTaskQueueStats({ approximateBacklogCount: Number.NaN })).toThrow(
+      "invalid approximateBacklogCount",
+    );
+    expect(() => normalizeTurnTaskQueueStats({ approximateBacklogCount: 1 })).toThrow(
+      "omitted approximateBacklogAge",
+    );
+    expect(() =>
+      normalizeTurnTaskQueueStats({
+        approximateBacklogCount: 0,
+        tasksDispatchRate: -1,
+      }),
+    ).toThrow("invalid tasksDispatchRate");
   });
 
   test("records Temporal eligible backlog and normalizes invalid values", async () => {

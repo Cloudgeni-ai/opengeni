@@ -111,7 +111,7 @@ export function estimateItemTokens(item: CompactionItem): number {
   try {
     characters = jsonSerializedLength(item);
   } catch {
-    characters = String(item).length;
+    characters = materializedJsonLength(item);
   }
   return Math.ceil(characters / 4);
 }
@@ -120,8 +120,9 @@ export function estimateItemTokens(item: CompactionItem): number {
  * Count the UTF-16 code units JSON.stringify emits for a persisted plain
  * JSON/JSONB value without materializing the serialized payload. This exact
  * path deliberately rejects custom prototypes, proxies, accessors, wrappers,
- * symbols, sparse arrays, and toJSON hooks; direct non-persisted callers retain
- * the historical String fallback in their estimator.
+ * symbols, sparse arrays, and toJSON hooks. Direct non-persisted callers use
+ * JSON.stringify itself for unusual values so their estimate remains truthful;
+ * values with no JSON representation fail closed.
  */
 export function jsonSerializedLength(value: unknown): number {
   const length = jsonValueLength(value, new Set<object>());
@@ -156,24 +157,28 @@ function jsonValueLength(value: unknown, ancestors: Set<object>): number | undef
       throw new TypeError("BigInt is not JSON serializable");
     case "object": {
       if (value === null) return 4;
-      const shape = plainJsonContainer(value);
+      const kind = plainJsonContainerKind(value);
       if (ancestors.has(value)) {
         throw new TypeError("Converting circular structure to JSON");
       }
       ancestors.add(value);
       try {
-        if (shape.kind === "array") {
+        if (kind === "array") {
+          const arrayValue = value as unknown[];
           let length = 2;
-          for (let index = 0; index < shape.values.length; index += 1) {
+          for (let index = 0; index < arrayValue.length; index += 1) {
             if (index > 0) length += 1;
-            length += jsonValueLength(shape.values[index], ancestors) ?? 4;
+            length += jsonValueLength(plainJsonArrayValue(arrayValue, index), ancestors) ?? 4;
           }
+          assertNoNamedEnumerableArrayProperties(arrayValue);
           return length;
         }
 
         let length = 2;
         let emitted = 0;
-        for (const [property, child] of shape.entries) {
+        for (const property in value) {
+          if (!Object.hasOwn(value, property)) continue;
+          const child = plainJsonObjectValue(value, property);
           const childLength = jsonValueLength(child, ancestors);
           if (childLength === undefined) continue;
           if (emitted > 0) length += 1;
@@ -231,24 +236,29 @@ function jsonValueUtf8ByteLength(value: unknown, ancestors: Set<object>): number
       throw new TypeError("BigInt is not JSON serializable");
     case "object": {
       if (value === null) return 4;
-      const shape = plainJsonContainer(value);
+      const kind = plainJsonContainerKind(value);
       if (ancestors.has(value)) {
         throw new TypeError("Converting circular structure to JSON");
       }
       ancestors.add(value);
       try {
-        if (shape.kind === "array") {
+        if (kind === "array") {
+          const arrayValue = value as unknown[];
           let length = 2;
-          for (let index = 0; index < shape.values.length; index += 1) {
+          for (let index = 0; index < arrayValue.length; index += 1) {
             if (index > 0) length += 1;
-            length += jsonValueUtf8ByteLength(shape.values[index], ancestors) ?? 4;
+            length +=
+              jsonValueUtf8ByteLength(plainJsonArrayValue(arrayValue, index), ancestors) ?? 4;
           }
+          assertNoNamedEnumerableArrayProperties(arrayValue);
           return length;
         }
 
         let length = 2;
         let emitted = 0;
-        for (const [property, child] of shape.entries) {
+        for (const property in value) {
+          if (!Object.hasOwn(value, property)) continue;
+          const child = plainJsonObjectValue(value, property);
           const childLength = jsonValueUtf8ByteLength(child, ancestors);
           if (childLength === undefined) continue;
           if (emitted > 0) length += 1;
@@ -263,19 +273,14 @@ function jsonValueUtf8ByteLength(value: unknown, ancestors: Set<object>): number
   }
 }
 
-type PlainJsonContainer =
-  | { kind: "array"; values: unknown[] }
-  | { kind: "object"; entries: Array<[string, unknown]> };
-
-function plainJsonContainer(value: object): PlainJsonContainer {
+function plainJsonContainerKind(value: object): "array" | "object" {
   if (isProxy(value)) {
     throw new TypeError("plain JSON estimator does not accept proxies");
   }
   if (Object.getOwnPropertySymbols(value).length > 0) {
     throw new TypeError("plain JSON estimator does not accept symbol properties");
   }
-  const descriptors = Object.getOwnPropertyDescriptors(value);
-  const toJsonDescriptor = descriptors.toJSON;
+  const toJsonDescriptor = Object.getOwnPropertyDescriptor(value, "toJSON");
   if (
     toJsonDescriptor &&
     (!("value" in toJsonDescriptor) || typeof toJsonDescriptor.value === "function")
@@ -286,36 +291,37 @@ function plainJsonContainer(value: object): PlainJsonContainer {
     if (Object.getPrototypeOf(value) !== Array.prototype) {
       throw new TypeError("plain JSON estimator does not accept cross-realm or subclassed arrays");
     }
-    const values: unknown[] = [];
-    for (let index = 0; index < value.length; index += 1) {
-      const descriptor = descriptors[String(index)];
-      if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) {
-        throw new TypeError("plain JSON estimator requires dense data-property arrays");
-      }
-      values.push(descriptor.value);
-    }
-    for (const [property, descriptor] of Object.entries(descriptors)) {
-      if (property === "length" || isCanonicalArrayIndex(property, value.length)) continue;
-      if (descriptor.enumerable) {
-        throw new TypeError("plain JSON estimator does not accept named array properties");
-      }
-    }
-    return { kind: "array", values };
+    return "array";
   }
 
   const prototype = Object.getPrototypeOf(value);
   if (prototype !== Object.prototype && prototype !== null) {
     throw new TypeError("plain JSON estimator accepts only plain objects");
   }
-  const entries: Array<[string, unknown]> = [];
-  for (const property of Object.keys(value)) {
-    const descriptor = descriptors[property];
-    if (!descriptor || !("value" in descriptor)) {
-      throw new TypeError("plain JSON estimator does not accept accessors");
-    }
-    entries.push([property, descriptor.value]);
+  return "object";
+}
+
+function plainJsonArrayValue(value: unknown[], index: number): unknown {
+  const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+  if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) {
+    throw new TypeError("plain JSON estimator requires dense data-property arrays");
   }
-  return { kind: "object", entries };
+  return descriptor.value;
+}
+
+function assertNoNamedEnumerableArrayProperties(value: unknown[]): void {
+  for (const property in value) {
+    if (!Object.hasOwn(value, property) || isCanonicalArrayIndex(property, value.length)) continue;
+    throw new TypeError("plain JSON estimator does not accept named array properties");
+  }
+}
+
+function plainJsonObjectValue(value: object, property: string): unknown {
+  const descriptor = Object.getOwnPropertyDescriptor(value, property);
+  if (!descriptor || !("value" in descriptor)) {
+    throw new TypeError("plain JSON estimator does not accept accessors");
+  }
+  return descriptor.value;
 }
 
 function isCanonicalArrayIndex(property: string, length: number): boolean {
@@ -396,24 +402,28 @@ export function estimateTokens(items: readonly CompactionItem[]): number {
 
 export function estimateSerializedValueTokens(value: unknown): number {
   let bytes: number;
-  try {
-    if (typeof value === "string") {
-      bytes = utf8ByteLength(value);
-    } else {
-      try {
-        bytes = jsonSerializedUtf8ByteLength(value);
-      } catch (error) {
-        if (error instanceof TypeError && error.message === "value has no JSON representation") {
-          bytes = 0;
-        } else {
-          throw error;
-        }
-      }
+  if (typeof value === "string") {
+    bytes = utf8ByteLength(value);
+  } else {
+    try {
+      bytes = jsonSerializedUtf8ByteLength(value);
+    } catch {
+      bytes = utf8ByteLength(materializedJson(value));
     }
-  } catch {
-    bytes = utf8ByteLength(String(value));
   }
   return Math.ceil(bytes / 4);
+}
+
+function materializedJsonLength(value: unknown): number {
+  return materializedJson(value).length;
+}
+
+function materializedJson(value: unknown): string {
+  const serialized = JSON.stringify(value);
+  if (serialized === undefined) {
+    throw new TypeError("value has no JSON representation");
+  }
+  return serialized;
 }
 
 export type CompleteModelInputFootprint = {

@@ -177,6 +177,27 @@ export class MemoryAwareTurnSlotSupplier implements CustomSlotSupplier<ActivityS
     };
   }
 
+  /**
+   * Recheck the one-turn startup invariant after Temporal/native construction.
+   * Worker.create can retain memory after the constructor's baseline sample;
+   * a pod that can no longer reserve one permit must fail before readiness.
+   */
+  assertCanAdmitOne(): void {
+    const memory = this.memorySnapshot();
+    if (this.permits.size !== 0) {
+      throw new Error("Turn worker startup admission check ran after slot reservation");
+    }
+    if (this.availableSlots(memory) < 1) {
+      throw new Error(
+        "Turn worker memory limit cannot safely admit one turn after worker initialization: " +
+          `baseline=${this.baselineBytes} current=${memory.currentBytes} ` +
+          `hardTurn=${this.hardBytesPerTurn} nativeHeadroom=${this.nativeHeadroomBytes} ` +
+          `limit=${String(memory.limitBytes)}`,
+      );
+    }
+    this.refreshMetrics(memory);
+  }
+
   private reserveIfSafe(): TurnSlotPermit | null {
     const memory = this.memorySnapshot();
     if (this.permits.size >= this.maximumTurns || !this.memoryAllowsAnother(memory)) {

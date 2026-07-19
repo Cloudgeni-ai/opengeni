@@ -12,7 +12,7 @@ import {
   requireFile,
   getSessionEvent,
   getSessionGoal,
-  getLatestRunState,
+  getLatestRunStateResumeMetadata,
   isCodexBilledTurn,
   workspaceCodexSubscriptionActive,
   acquireCodexCredentialLease,
@@ -57,6 +57,7 @@ import {
   SandboxLeaseSupersededError,
   SandboxImageConflictError,
   ActiveSessionHistoryLimitExceededError,
+  ApprovalRunStateLimitExceededError,
   buildConnectionTokenResolver,
   getEnrollment,
   abandonRecordingForTurnAttempt,
@@ -1775,7 +1776,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       }
       triggerType = trigger.type;
       executionGeneration = turn.executionGeneration;
-      const latestTurnState = await getLatestRunState(db, input.workspaceId, input.sessionId);
+      const latestTurnState = await getLatestRunStateResumeMetadata(
+        db,
+        input.workspaceId,
+        input.sessionId,
+      );
       const continuationCodexCredentialId =
         latestTurnState?.turnId === turnId ? latestTurnState.frozenCodexCredentialId : null;
       redispatchesAtDispatch = Number(
@@ -5594,6 +5599,15 @@ export function agentRunFailurePayload(error: unknown): {
     return {
       error:
         "The session's active conversation history exceeds the worker's safe materialization envelope. Compact or clear the session context before retrying.",
+      code: error.code,
+      retryable: false,
+      detail: error.message,
+    };
+  }
+  if (error instanceof ApprovalRunStateLimitExceededError) {
+    return {
+      error:
+        "The saved approval state exceeds the worker's safe materialization envelope. Clear the pending approval context before retrying.",
       code: error.code,
       retryable: false,
       detail: error.message,

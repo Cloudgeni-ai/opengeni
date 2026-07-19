@@ -142,12 +142,12 @@ describe("non-materializing plain JSON length", () => {
     cyclic.self = cyclic;
     expect(() => jsonSerializedLength(cyclic)).toThrow();
     expect(() => jsonSerializedUtf8ByteLength(cyclic)).toThrow();
-    expect(estimateSerializedValueTokens(undefined)).toBe(0);
-    expect(estimateSerializedValueTokens(1n)).toBe(1);
-    expect(estimateSerializedValueTokens(cyclic)).toBe(4);
+    expect(() => estimateSerializedValueTokens(undefined)).toThrow();
+    expect(() => estimateSerializedValueTokens(1n)).toThrow();
+    expect(() => estimateSerializedValueTokens(cyclic)).toThrow();
   });
 
-  test("rejects non-persisted object semantics instead of claiming universal stringify parity", () => {
+  test("uses real JSON.stringify semantics for unusual non-persisted values", () => {
     const getter = Object.defineProperty({}, "value", {
       enumerable: true,
       get: () => 1,
@@ -165,10 +165,9 @@ describe("non-materializing plain JSON length", () => {
       value: () => [3],
       enumerable: false,
     });
-    const values = [
+    const serializableValues = [
       new Date("2026-07-18T00:00:00.000Z"),
       new Number(7),
-      boxedBigInt,
       { toJSON: () => ({ value: 1 }) },
       hiddenToJson,
       arrayToJson,
@@ -176,11 +175,34 @@ describe("non-materializing plain JSON length", () => {
       proxy,
       crossRealm,
     ];
-    for (const value of values) {
+    for (const value of serializableValues) {
       expect(() => jsonSerializedLength(value)).toThrow();
       expect(() => jsonSerializedUtf8ByteLength(value)).toThrow();
-      expect(estimateSerializedValueTokens(value)).toBeGreaterThanOrEqual(0);
+      expect(estimateSerializedValueTokens(value)).toBe(
+        Math.ceil(Buffer.byteLength(JSON.stringify(value)!, "utf8") / 4),
+      );
     }
+    expect(() => estimateSerializedValueTokens(boxedBigInt)).toThrow();
+  });
+
+  test("does not copy a wide persisted object while counting its exact JSON form", () => {
+    const wide: Record<string, unknown> = {};
+    for (let index = 0; index < 50_000; index += 1) {
+      wide[`property_${index}`] = index;
+    }
+    const serialized = JSON.stringify(wide);
+    expect(jsonSerializedLength(wide)).toBe(serialized.length);
+    expect(jsonSerializedUtf8ByteLength(wide)).toBe(Buffer.byteLength(serialized, "utf8"));
+  });
+
+  test("counts a large custom toJSON result instead of its object tag", () => {
+    const value = {
+      toJSON: () => ({ text: "🦄".repeat(256 * 1024) }),
+    };
+    const serialized = JSON.stringify(value);
+    expect(estimateSerializedValueTokens(value)).toBe(
+      Math.ceil(Buffer.byteLength(serialized, "utf8") / 4),
+    );
   });
 });
 

@@ -650,8 +650,20 @@ Backlog gauges are authoritative only while
 `opengeni_turn_capacity_monitor_fresh == 1` and the last successful Temporal
 read is less than 45 seconds old. The bundled alerts enforce both conditions
 with exact namespace, Helm release, environment, and turn-worker component
-selectors. A stale sample remains visible for diagnosis but cannot page as
-fresh runnable pressure.
+selectors, including an explicit `absent()` branch when the scoped freshness
+series disappears entirely. A missing or malformed Temporal stats object is a
+read failure, not a fresh zero backlog. A stale prior sample remains visible for
+diagnosis but cannot page as fresh runnable pressure. The bundled worker-fleet
+dashboard shows both minimum freshness and maximum last-success age, and joins
+Kubernetes pod/HPA metrics through exact Helm instance/component labels rather
+than release-name prefixes.
+
+Turn admission reserves 100 MiB per active turn plus 512 MiB native headroom
+and is rechecked after Temporal native worker construction. Active conversation
+history is withheld before driver decoding above 32 MiB, 4,096 rows, 200,000
+JSON nodes, or 100,000 object properties. Approval-only RunState has its own
+32 MiB/200,000-node/100,000-property envelope, while pending approvals are
+limited to 256 KiB and 256 items; ordinary turns load only RunState metadata.
 
 The turn-worker Deployment and PodDisruptionBudget both cap voluntary
 unavailability at one pod. With the 16-turn hard density this bounds a rollout

@@ -1226,7 +1226,7 @@ describe("worker activities integration", () => {
       turnId: turn.id,
       expectedExecutionGeneration: turn.executionGeneration,
       expectedAttemptId: initialAttemptId,
-      serializedRunState: "saved-state",
+      serializedRunState: '{"schemaVersion":"test","history":[]}',
       pendingApprovals: [{ id: "approval-1" }],
     });
     expect(

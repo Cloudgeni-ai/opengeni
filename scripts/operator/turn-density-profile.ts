@@ -14,6 +14,9 @@ import {
   isSessionCompactionRequested,
   requestSessionCompaction,
   ACTIVE_SESSION_HISTORY_MAX_JSON_BYTES,
+  ACTIVE_SESSION_HISTORY_MAX_JSON_NODES,
+  ACTIVE_SESSION_HISTORY_MAX_JSON_PROPERTIES,
+  ACTIVE_SESSION_HISTORY_MAX_ROWS,
   withWorkspaceRls,
 } from "@opengeni/db";
 import * as schema from "@opengeni/db/schema";
@@ -23,6 +26,10 @@ import { createTurnActivities } from "../../apps/worker/src/activities";
 
 const MIB = 1024 * 1024;
 const MAX_HISTORY_BYTES_PER_TURN = ACTIVE_SESSION_HISTORY_MAX_JSON_BYTES;
+const MAX_HISTORY_ROW_PAYLOAD_BYTES = 16 * 1024;
+const MIN_HISTORY_ROW_PAYLOAD_BYTES = 512;
+const MAX_HISTORY_ROWS_PER_TURN = 131_072;
+const HISTORY_ROW_OVERHEAD_BYTES = 200;
 const MAX_SYNTHETIC_WORK_BYTES_PER_TURN = 2 * MIB;
 const MAX_WAVES = 10;
 const MAX_PLATEAU_SECONDS = 300;
@@ -33,6 +40,17 @@ const MAX_SYNTHETIC_ITEMS = 1_024;
 const MAX_SYNTHETIC_WAIT_MS = 60_000;
 
 export const DEFAULT_DENSITIES = [1, 2, 4, 8, 12, 16, 24, 32] as const;
+export const DEFAULT_HISTORY_ROW_PAYLOAD_BYTES = 4 * 1024;
+export const DEFAULT_ACTIVE_HISTORY_BYTES = 1 * MIB;
+export const DEFAULT_INACTIVE_HISTORY_BYTES = 8 * MIB;
+export const DEFAULT_COMPACTION_TAIL_BYTES = 200_000;
+export const DEFAULT_DENSITY_WAVES = 3;
+export const PRODUCTION_ACTIVE_HISTORY_LIMITS = {
+  jsonBytes: ACTIVE_SESSION_HISTORY_MAX_JSON_BYTES,
+  rows: ACTIVE_SESSION_HISTORY_MAX_ROWS,
+  jsonNodes: ACTIVE_SESSION_HISTORY_MAX_JSON_NODES,
+  jsonProperties: ACTIVE_SESSION_HISTORY_MAX_JSON_PROPERTIES,
+} as const;
 export const SYNTHETIC_SCENARIOS = [
   "streaming",
   "tool-burst",
@@ -57,6 +75,7 @@ export type DensityProfileConfig = {
   activeHistoryBytes: number;
   inactiveHistoryBytes: number;
   compactionTailBytes: number;
+  historyRowPayloadBytes: number;
   plateauSeconds: number;
   plateauSampleIntervalMs: number;
   baselineSamples: number;
@@ -94,6 +113,18 @@ export type MemorySummary = {
 };
 
 export type DensityMemorySample = ReturnType<typeof process.memoryUsage>;
+
+export type DensityHistoryShape = {
+  shape: "high-cardinality-tiny-object";
+  rowPayloadTargetBytes: number;
+  activeRowCount: number;
+  inactiveRowCount: number;
+  totalRowCount: number;
+  compactionTailRowCount: number;
+  persistentActiveInactiveMix: boolean;
+  maxActiveRows: number;
+  maxRowsPerTurn: number;
+};
 
 export type WaveMeasurement = {
   wave: number;
@@ -167,6 +198,77 @@ export function expectedCompactionCallsForDensity(density: number): number {
 }
 
 /**
+ * Return the deterministic row shape used for bounded long-history inputs.
+ * The target is the text payload per row; JSONB envelope bytes are deliberately
+ * kept separate so the shape remains stable across database encoders.
+ */
+export function historyRowShape(
+  activeBytes: number,
+  inactiveBytes: number,
+  rowPayloadTargetBytes: number,
+  compactionTailBytes: number,
+): DensityHistoryShape {
+  if (
+    !Number.isSafeInteger(activeBytes) ||
+    activeBytes <= 0 ||
+    activeBytes > MAX_HISTORY_BYTES_PER_TURN
+  ) {
+    throw new Error(`active history bytes must be between 1 and ${MAX_HISTORY_BYTES_PER_TURN}`);
+  }
+  if (
+    !Number.isSafeInteger(inactiveBytes) ||
+    inactiveBytes < 0 ||
+    inactiveBytes > MAX_HISTORY_BYTES_PER_TURN
+  ) {
+    throw new Error(`inactive history bytes must be between 0 and ${MAX_HISTORY_BYTES_PER_TURN}`);
+  }
+  if (
+    !Number.isSafeInteger(rowPayloadTargetBytes) ||
+    rowPayloadTargetBytes < MIN_HISTORY_ROW_PAYLOAD_BYTES ||
+    rowPayloadTargetBytes > MAX_HISTORY_ROW_PAYLOAD_BYTES
+  ) {
+    throw new Error(
+      `history row payload bytes must be between ${MIN_HISTORY_ROW_PAYLOAD_BYTES} and ${MAX_HISTORY_ROW_PAYLOAD_BYTES}`,
+    );
+  }
+  if (
+    !Number.isSafeInteger(compactionTailBytes) ||
+    compactionTailBytes <= 0 ||
+    compactionTailBytes > activeBytes
+  ) {
+    throw new Error("compaction tail bytes must be positive and no larger than active history");
+  }
+  const activeRowCount = historyRowCount(activeBytes, rowPayloadTargetBytes);
+  const inactiveRowCount = historyRowCount(inactiveBytes, rowPayloadTargetBytes);
+  const totalRowCount = activeRowCount + inactiveRowCount;
+  if (activeRowCount > ACTIVE_SESSION_HISTORY_MAX_ROWS) {
+    throw new Error(
+      `active history row count must be at most ${ACTIVE_SESSION_HISTORY_MAX_ROWS}; got ${activeRowCount}`,
+    );
+  }
+  if (totalRowCount > MAX_HISTORY_ROWS_PER_TURN) {
+    throw new Error(
+      `history row count must be at most ${MAX_HISTORY_ROWS_PER_TURN} per turn; got ${totalRowCount}`,
+    );
+  }
+  return {
+    shape: "high-cardinality-tiny-object",
+    rowPayloadTargetBytes,
+    activeRowCount,
+    inactiveRowCount,
+    totalRowCount,
+    compactionTailRowCount: historyRowCount(compactionTailBytes, rowPayloadTargetBytes),
+    persistentActiveInactiveMix: inactiveRowCount > 0,
+    maxActiveRows: ACTIVE_SESSION_HISTORY_MAX_ROWS,
+    maxRowsPerTurn: MAX_HISTORY_ROWS_PER_TURN,
+  };
+}
+
+function historyRowCount(totalBytes: number, rowPayloadTargetBytes: number): number {
+  return totalBytes === 0 ? 0 : Math.ceil(totalBytes / rowPayloadTargetBytes);
+}
+
+/**
  * Linear-interpolation quantile. Keeping this exported makes the release-gate
  * math independently testable without importing the DB-backed runner.
  */
@@ -203,20 +305,33 @@ export function profileConfigFromEnv(
   const activeHistoryBytes = boundedPositiveInteger(
     env,
     "OPENGENI_DENSITY_ACTIVE_HISTORY_BYTES",
-    750_000,
+    DEFAULT_ACTIVE_HISTORY_BYTES,
     MAX_HISTORY_BYTES_PER_TURN,
   );
   const inactiveHistoryBytes = boundedNonnegativeInteger(
     env,
     "OPENGENI_DENSITY_INACTIVE_HISTORY_BYTES",
-    8 * MIB,
+    DEFAULT_INACTIVE_HISTORY_BYTES,
     MAX_HISTORY_BYTES_PER_TURN,
   );
   const compactionTailBytes = boundedPositiveInteger(
     env,
     "OPENGENI_DENSITY_COMPACTION_TAIL_BYTES",
-    Math.min(200_000, activeHistoryBytes),
+    Math.min(DEFAULT_COMPACTION_TAIL_BYTES, activeHistoryBytes),
     activeHistoryBytes,
+  );
+  const historyRowPayloadBytes = boundedIntegerRange(
+    env,
+    "OPENGENI_DENSITY_HISTORY_ROW_PAYLOAD_BYTES",
+    DEFAULT_HISTORY_ROW_PAYLOAD_BYTES,
+    MIN_HISTORY_ROW_PAYLOAD_BYTES,
+    MAX_HISTORY_ROW_PAYLOAD_BYTES,
+  );
+  historyRowShape(
+    activeHistoryBytes,
+    inactiveHistoryBytes,
+    historyRowPayloadBytes,
+    compactionTailBytes,
   );
 
   const targetMiBPerTurn = positiveNumberFromEnv(env, "OPENGENI_DENSITY_TARGET_MIB_PER_TURN", 50);
@@ -233,10 +348,11 @@ export function profileConfigFromEnv(
 
   return {
     densities: parseDensitySweep(env.OPENGENI_DENSITY_SWEEP),
-    waves: boundedPositiveInteger(env, "OPENGENI_DENSITY_WAVES", 3, MAX_WAVES),
+    waves: boundedPositiveInteger(env, "OPENGENI_DENSITY_WAVES", DEFAULT_DENSITY_WAVES, MAX_WAVES),
     activeHistoryBytes,
     inactiveHistoryBytes,
     compactionTailBytes,
+    historyRowPayloadBytes,
     plateauSeconds: boundedPositiveInteger(
       env,
       "OPENGENI_DENSITY_PLATEAU_SECONDS",
@@ -456,6 +572,7 @@ export async function runWave(input: {
           activeBytes: config.activeHistoryBytes,
           inactiveBytes: config.inactiveHistoryBytes,
           compactionTailBytes: config.compactionTailBytes,
+          rowPayloadTargetBytes: config.historyRowPayloadBytes,
         }),
         "history seeding",
       );
@@ -642,9 +759,36 @@ async function seedHistory(input: {
   activeBytes: number;
   inactiveBytes: number;
   compactionTailBytes: number;
+  rowPayloadTargetBytes: number;
 }): Promise<void> {
-  const activeRows = historyRows(input, input.activeBytes, true, 0, input.compactionTailBytes);
-  const inactiveRows = historyRows(input, input.inactiveBytes, false, activeRows.length, 0);
+  const shape = historyRowShape(
+    input.activeBytes,
+    input.inactiveBytes,
+    input.rowPayloadTargetBytes,
+    input.compactionTailBytes,
+  );
+  const activeRows = historyRows(
+    input,
+    input.activeBytes,
+    true,
+    0,
+    input.rowPayloadTargetBytes,
+    input.compactionTailBytes,
+  );
+  const inactiveRows = historyRows(
+    input,
+    input.inactiveBytes,
+    false,
+    activeRows.length,
+    input.rowPayloadTargetBytes,
+    0,
+  );
+  if (
+    activeRows.length !== shape.activeRowCount ||
+    inactiveRows.length !== shape.inactiveRowCount
+  ) {
+    throw new Error("Deterministic density history row shape drifted while seeding");
+  }
   for (const rows of chunks([...inactiveRows, ...activeRows], 25)) {
     await withWorkspaceRls(input.db, input.workspaceId, async (db) => {
       await db.insert(schema.sessionHistoryItems).values(rows);
@@ -652,7 +796,7 @@ async function seedHistory(input: {
   }
 }
 
-function historyRows(
+export function historyRows(
   input: {
     accountId: string;
     workspaceId: string;
@@ -662,13 +806,13 @@ function historyRows(
   totalBytes: number,
   active: boolean,
   positionOffset: number,
+  rowPayloadTargetBytes: number,
   compactionTailBytes: number,
 ) {
   if (totalBytes === 0) return [];
-  const chunkBytes = 32_000;
-  const itemCount = Math.max(1, Math.ceil(totalBytes / chunkBytes));
-  const payloadBytes = Math.max(1, Math.floor(totalBytes / itemCount) - 200);
-  const tailCount = active ? Math.max(1, Math.ceil(compactionTailBytes / chunkBytes)) : 0;
+  const itemCount = historyRowCount(totalBytes, rowPayloadTargetBytes);
+  const payloadBytes = Math.max(1, Math.floor(totalBytes / itemCount) - HISTORY_ROW_OVERHEAD_BYTES);
+  const tailCount = active ? historyRowCount(compactionTailBytes, rowPayloadTargetBytes) : 0;
   return Array.from({ length: itemCount }, (_, itemIndex) => {
     const isCompactionTail = active && itemIndex >= itemCount - tailCount;
     const isCheckpoint = active && itemIndex === 0;
@@ -982,6 +1126,13 @@ export function buildProfileResult(input: {
         inactiveBytesPerTurn: config.inactiveHistoryBytes,
         compactionTailBytesPerTurn: config.compactionTailBytes,
         maxHistoryBytesPerTurn: MAX_HISTORY_BYTES_PER_TURN,
+        productionActiveMaterializationLimits: PRODUCTION_ACTIVE_HISTORY_LIMITS,
+        shape: historyRowShape(
+          config.activeHistoryBytes,
+          config.inactiveHistoryBytes,
+          config.historyRowPayloadBytes,
+          config.compactionTailBytes,
+        ),
       },
       plateauSeconds: config.plateauSeconds,
       plateauSampleIntervalMs: config.plateauSampleIntervalMs,
@@ -1031,6 +1182,51 @@ function thresholdResult(worst: number, target: number, hardLimit: number) {
     hardLimitMiBPerTurn: hardLimit,
     targetMet: worst <= target,
     hardLimitMet: worst <= hardLimit,
+  };
+}
+
+function canonicalWorkload() {
+  return {
+    densities: [...DEFAULT_DENSITIES],
+    waves: DEFAULT_DENSITY_WAVES,
+    history: {
+      activeBytesPerTurn: DEFAULT_ACTIVE_HISTORY_BYTES,
+      inactiveBytesPerTurn: DEFAULT_INACTIVE_HISTORY_BYTES,
+      compactionTailBytesPerTurn: DEFAULT_COMPACTION_TAIL_BYTES,
+      maxHistoryBytesPerTurn: MAX_HISTORY_BYTES_PER_TURN,
+      productionActiveMaterializationLimits: PRODUCTION_ACTIVE_HISTORY_LIMITS,
+      shape: historyRowShape(
+        DEFAULT_ACTIVE_HISTORY_BYTES,
+        DEFAULT_INACTIVE_HISTORY_BYTES,
+        DEFAULT_HISTORY_ROW_PAYLOAD_BYTES,
+        DEFAULT_COMPACTION_TAIL_BYTES,
+      ),
+    },
+    plateauSeconds: 15,
+    plateauSampleIntervalMs: 500,
+    sampling: {
+      baselineSamples: 5,
+      settledSamples: 5,
+      settleDelayMs: 1_000,
+      timeoutMs: 120_000,
+    },
+    syntheticMix: {
+      scenarios: SYNTHETIC_SCENARIOS,
+      configuredWorkBytesPerTurn: 256 * 1024,
+      allocatedWorkBytesByScenario: syntheticAllocatedWorkBytesByScenario(256 * 1024),
+      toolBurst: 6,
+      fanOut: 4,
+      waitMs: 10,
+      drainSteps: 4,
+      modelProvider: "ScriptedModel",
+      compactionSummarizer: "injected deterministic density gate",
+      forcedCompaction: FORCED_COMPACTION_RULE,
+      activeHistoryShrinkVerified: true,
+      externalModelProviderCalled: false,
+      azureInferenceCalled: false,
+      realSandboxProviderCalled: false,
+      note: "Tool and sandbox envelopes are bounded in-process shapes, not provider evidence.",
+    },
   };
 }
 
@@ -1124,10 +1320,18 @@ export type DensityProfileVerification = {
   hardLimitMet: boolean;
 };
 
+export type DensityProfileVerificationOptions = {
+  /** The exact current deployment revision expected by the operator. */
+  expectedProductionRevision?: string;
+  /** Permit bounded smoke/pathological controls instead of the release profile. */
+  allowNoncanonical?: boolean;
+};
+
 /** Recompute a schema-v3 artifact from its exact UTF-8 file contents. */
 export function verifyDensityProfileArtifactText(
   text: string,
   expectedSha256?: string,
+  options: DensityProfileVerificationOptions = {},
 ): DensityProfileVerification {
   const sha256 = createHash("sha256").update(text, "utf8").digest("hex");
   if (expectedSha256 !== undefined) {
@@ -1150,6 +1354,28 @@ export function verifyDensityProfileArtifactText(
   if (artifactInteger(root.schemaVersion, "artifact.schemaVersion") !== 3) {
     throw new Error("Density artifact schemaVersion must be 3");
   }
+  const allowNoncanonical = options.allowNoncanonical === true;
+  const productionRevision = artifactString(root.productionRevision, "artifact.productionRevision");
+  if (productionRevision.length === 0) {
+    throw new Error("artifact.productionRevision must be a non-empty string");
+  }
+  const expectedProductionRevision = options.expectedProductionRevision?.trim();
+  if (expectedProductionRevision !== undefined && expectedProductionRevision.length === 0) {
+    throw new Error("Expected current production revision must be non-empty");
+  }
+  if (
+    expectedProductionRevision !== undefined &&
+    productionRevision !== expectedProductionRevision
+  ) {
+    throw new Error(
+      `Density artifact productionRevision mismatch: expected ${expectedProductionRevision}, got ${productionRevision}`,
+    );
+  }
+  if (!allowNoncanonical && expectedProductionRevision === undefined) {
+    throw new Error(
+      "Strict density verification requires the exact current production revision; pass --production-revision or opt into --allow-noncanonical",
+    );
+  }
 
   const workload = artifactRecord(root.workload, "artifact.workload");
   const configuredDensities = artifactNumberArray(
@@ -1166,24 +1392,48 @@ export function verifyDensityProfileArtifactText(
   ) {
     throw new Error("Density artifact workload contains unsupported or duplicate densities");
   }
-  const wavesPerDensity = artifactInteger(workload.waves, "artifact.workload.waves");
-  if (wavesPerDensity < 1) throw new Error("Density artifact workload.waves must be positive");
-  const plateauSeconds = artifactNumber(
+  const wavesPerDensity = boundedArtifactInteger(
+    workload.waves,
+    "artifact.workload.waves",
+    1,
+    MAX_WAVES,
+  );
+  const plateauSeconds = boundedArtifactInteger(
     workload.plateauSeconds,
     "artifact.workload.plateauSeconds",
+    1,
+    MAX_PLATEAU_SECONDS,
   );
-  const plateauSampleIntervalMs = artifactNumber(
+  const plateauSampleIntervalMs = boundedArtifactInteger(
     workload.plateauSampleIntervalMs,
     "artifact.workload.plateauSampleIntervalMs",
+    100,
+    60_000,
   );
   const sampling = artifactRecord(workload.sampling, "artifact.workload.sampling");
-  const baselineSampleCount = artifactInteger(
+  const baselineSampleCount = boundedArtifactInteger(
     sampling.baselineSamples,
     "artifact.workload.sampling.baselineSamples",
+    1,
+    MAX_SAMPLE_COUNT,
   );
-  const settledSampleCount = artifactInteger(
+  const settledSampleCount = boundedArtifactInteger(
     sampling.settledSamples,
     "artifact.workload.sampling.settledSamples",
+    1,
+    MAX_SAMPLE_COUNT,
+  );
+  boundedArtifactInteger(
+    sampling.settleDelayMs,
+    "artifact.workload.sampling.settleDelayMs",
+    1,
+    MAX_SETTLE_DELAY_MS,
+  );
+  boundedArtifactInteger(
+    sampling.timeoutMs,
+    "artifact.workload.sampling.timeoutMs",
+    1,
+    MAX_TIMEOUT_MS,
   );
   const plateauSampleCount = Math.max(
     2,
@@ -1193,15 +1443,85 @@ export function verifyDensityProfileArtifactText(
     throw new Error("Density artifact declares invalid sampling controls");
   }
 
+  const history = artifactRecord(workload.history, "artifact.workload.history");
+  const activeHistoryBytes = artifactInteger(
+    history.activeBytesPerTurn,
+    "artifact.workload.history.activeBytesPerTurn",
+  );
+  const inactiveHistoryBytes = artifactInteger(
+    history.inactiveBytesPerTurn,
+    "artifact.workload.history.inactiveBytesPerTurn",
+  );
+  const compactionTailBytes = artifactInteger(
+    history.compactionTailBytesPerTurn,
+    "artifact.workload.history.compactionTailBytesPerTurn",
+  );
+  if (
+    artifactInteger(
+      history.maxHistoryBytesPerTurn,
+      "artifact.workload.history.maxHistoryBytesPerTurn",
+    ) !== MAX_HISTORY_BYTES_PER_TURN
+  ) {
+    throw new Error(
+      `artifact.workload.history.maxHistoryBytesPerTurn must equal ${MAX_HISTORY_BYTES_PER_TURN}`,
+    );
+  }
+  assertArtifactEqual(
+    history.productionActiveMaterializationLimits,
+    PRODUCTION_ACTIVE_HISTORY_LIMITS,
+    "artifact.workload.history.productionActiveMaterializationLimits",
+  );
+  const historyShape = artifactRecord(history.shape, "artifact.workload.history.shape");
+  const rowPayloadTargetBytes = artifactInteger(
+    historyShape.rowPayloadTargetBytes,
+    "artifact.workload.history.shape.rowPayloadTargetBytes",
+  );
+  assertArtifactEqual(
+    historyShape,
+    historyRowShape(
+      activeHistoryBytes,
+      inactiveHistoryBytes,
+      rowPayloadTargetBytes,
+      compactionTailBytes,
+    ),
+    "artifact.workload.history.shape",
+  );
+
   const syntheticMix = artifactRecord(workload.syntheticMix, "artifact.workload.syntheticMix");
   assertArtifactEqual(
     syntheticMix.scenarios,
     SYNTHETIC_SCENARIOS,
     "artifact.workload.syntheticMix.scenarios",
   );
-  const configuredWorkBytes = artifactInteger(
+  const configuredWorkBytes = boundedArtifactInteger(
     syntheticMix.configuredWorkBytesPerTurn,
     "artifact.workload.syntheticMix.configuredWorkBytesPerTurn",
+    1,
+    MAX_SYNTHETIC_WORK_BYTES_PER_TURN,
+  );
+  boundedArtifactInteger(
+    syntheticMix.toolBurst,
+    "artifact.workload.syntheticMix.toolBurst",
+    1,
+    MAX_SYNTHETIC_ITEMS,
+  );
+  boundedArtifactInteger(
+    syntheticMix.fanOut,
+    "artifact.workload.syntheticMix.fanOut",
+    1,
+    MAX_SYNTHETIC_ITEMS,
+  );
+  boundedArtifactInteger(
+    syntheticMix.waitMs,
+    "artifact.workload.syntheticMix.waitMs",
+    0,
+    MAX_SYNTHETIC_WAIT_MS,
+  );
+  boundedArtifactInteger(
+    syntheticMix.drainSteps,
+    "artifact.workload.syntheticMix.drainSteps",
+    1,
+    MAX_SYNTHETIC_ITEMS,
   );
   assertArtifactEqual(
     syntheticMix.allocatedWorkBytesByScenario,
@@ -1216,6 +1536,25 @@ export function verifyDensityProfileArtifactText(
   if (syntheticMix.activeHistoryShrinkVerified !== true) {
     throw new Error("Density artifact must verify active-history shrink after forced compaction");
   }
+  assertArtifactEqual(
+    {
+      modelProvider: syntheticMix.modelProvider,
+      compactionSummarizer: syntheticMix.compactionSummarizer,
+      externalModelProviderCalled: syntheticMix.externalModelProviderCalled,
+      azureInferenceCalled: syntheticMix.azureInferenceCalled,
+      realSandboxProviderCalled: syntheticMix.realSandboxProviderCalled,
+      note: syntheticMix.note,
+    },
+    {
+      modelProvider: "ScriptedModel",
+      compactionSummarizer: "injected deterministic density gate",
+      externalModelProviderCalled: false,
+      azureInferenceCalled: false,
+      realSandboxProviderCalled: false,
+      note: "Tool and sandbox envelopes are bounded in-process shapes, not provider evidence.",
+    },
+    "artifact.workload.syntheticMix.providerIsolation",
+  );
 
   const rootThresholds = artifactRecord(root.thresholds, "artifact.thresholds");
   const targetMiBPerTurn = artifactNumber(
@@ -1228,6 +1567,14 @@ export function verifyDensityProfileArtifactText(
   );
   if (targetMiBPerTurn <= 0 || hardLimitMiBPerTurn < targetMiBPerTurn) {
     throw new Error("Density artifact declares invalid memory thresholds");
+  }
+  if (!allowNoncanonical) {
+    assertArtifactEqual(workload, canonicalWorkload(), "artifact.workload");
+    assertArtifactEqual(
+      { targetMiBPerTurn, hardLimitMiBPerTurn },
+      { targetMiBPerTurn: 50, hardLimitMiBPerTurn: 100 },
+      "artifact.thresholds.controls",
+    );
   }
 
   const densityRows = artifactArray(root.densities, "artifact.densities");
@@ -1439,9 +1786,27 @@ function artifactNumber(value: unknown, path: string): number {
   return value;
 }
 
+function artifactString(value: unknown, path: string): string {
+  if (typeof value !== "string") throw new Error(`${path} must be a string`);
+  return value;
+}
+
 function artifactInteger(value: unknown, path: string): number {
   const number = artifactNumber(value, path);
   if (!Number.isSafeInteger(number)) throw new Error(`${path} must be a safe integer`);
+  return number;
+}
+
+function boundedArtifactInteger(
+  value: unknown,
+  path: string,
+  minimum: number,
+  maximum: number,
+): number {
+  const number = artifactInteger(value, path);
+  if (number < minimum || number > maximum) {
+    throw new Error(`${path} must be between ${minimum} and ${maximum}`);
+  }
   return number;
 }
 
