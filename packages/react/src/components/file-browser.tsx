@@ -6,6 +6,7 @@ import {
   FolderPlusIcon,
   PencilIcon,
   RefreshCwIcon,
+  TriangleAlertIcon,
   Trash2Icon,
 } from "lucide-react";
 import {
@@ -294,7 +295,11 @@ export function FileBrowser({
   const cursorIndex = cursor ? (rowIndexByPath.get(cursor) ?? -1) : -1;
   const activeDescendantId = cursorIndex >= 0 ? `${treeId}-item-${cursorIndex}` : undefined;
 
-  const supportsMutation = editable;
+  // A capture is immutable review data even if a stale capability document still
+  // says the machine is writable. Mutations become available only after a live
+  // reconciliation has actually succeeded.
+  const supportsMutation =
+    editable && result.source === "live" && result.error === null && !result.loading;
 
   const performDelete = useCallback(
     async (node: FileTreeNode) => {
@@ -584,8 +589,11 @@ export function FileBrowser({
   }, [menu]);
 
   const showErrorEmpty = result.error && result.tree.length === 0 && !draftCreate;
+  const showDegradedTree = result.error && result.tree.length > 0;
   const showEmpty = !result.loading && result.tree.length === 0 && !draftCreate;
-  const showToolbar = supportsMutation || Boolean(result.error) || result.loading;
+  // Retry lives next to the state it explains (the degraded/empty notice), so do
+  // not render a second toolbar retry for the same failure.
+  const showToolbar = supportsMutation || result.loading;
   const usesVirtualTree = !showErrorEmpty && !showEmpty;
 
   // Render a SINGLE node row (no recursion — children are separate flat items the
@@ -828,6 +836,34 @@ export function FileBrowser({
           </ToolbarButton>
         </div>
       )}
+
+      {showDegradedTree ? (
+        <div
+          role="status"
+          aria-live="polite"
+          data-opengeni-files-degraded
+          className="flex shrink-0 items-center gap-2 border-b border-og-status-running/30 bg-og-status-running/10 px-2 py-1.5 text-og-xs text-og-fg-muted"
+        >
+          <TriangleAlertIcon className="size-3.5 shrink-0 text-og-status-running" aria-hidden />
+          <span className="min-w-0 flex-1">
+            {result.source === "capture"
+              ? "Live files are temporarily unavailable. Showing the latest captured revision."
+              : "Live refresh failed. Showing the last loaded files."}
+          </span>
+          <button
+            type="button"
+            onClick={() => void result.refresh()}
+            disabled={result.loading}
+            className="inline-flex min-h-7 shrink-0 items-center gap-1 rounded-og-sm border border-og-border bg-og-surface-1 px-2 font-medium text-og-fg transition-colors hover:border-og-border-strong focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-og-accent disabled:cursor-not-allowed disabled:opacity-50 pointer-coarse:min-h-11"
+          >
+            <RefreshCwIcon
+              className={cn("size-3", result.loading && "animate-spin motion-reduce:animate-none")}
+              aria-hidden
+            />
+            Retry
+          </button>
+        </div>
+      ) : null}
 
       {/* The tree itself. The root is a drop target so a node can be moved to "". */}
       {/* biome-ignore lint/a11y/noNoninteractiveTabindex: the tree owns keyboard nav */}
