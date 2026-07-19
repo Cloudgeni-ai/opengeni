@@ -18,7 +18,7 @@ import { fakeClient, fakeGoal, fakeTurn, SESSION_ID, WORKSPACE_ID } from "./fake
 import { OpenGeniApiError } from "@opengeni/sdk";
 import { useAvailableModels } from "../src/hooks/use-available-models";
 import { useBillingUsage } from "../src/hooks/use-billing-usage";
-import { useComposer } from "../src/hooks/use-composer";
+import { FILE_ONLY_MESSAGE_TEXT, useComposer } from "../src/hooks/use-composer";
 import { useEnvironments } from "../src/hooks/use-environments";
 import { useGoal } from "../src/hooks/use-goal";
 import { usePacks } from "../src/hooks/use-packs";
@@ -849,6 +849,117 @@ describe("useComposer durable draft and control binding", () => {
       expectedDraftRevision: 5,
       controlEtag: "control-3",
     });
+    await hook.unmount();
+  });
+
+  for (const delivery of ["send", "steer"] as const) {
+    test(`${delivery} preserves the exact autosaved draft text`, async () => {
+      const submitted: string[] = [];
+      const initial: ComposerDraft = {
+        revision: 4,
+        text: "",
+        resources: [],
+        tools: [],
+        model: "model-x",
+        reasoningEffort: "medium",
+        sourceTurnId: null,
+        sourceTurnVersion: null,
+        updatedAt: new Date().toISOString(),
+      };
+      const client = fakeClient({
+        getComposerDraft: async () => initial,
+        saveComposerDraft: async (_ws, _session, request) => ({
+          ...initial,
+          text: request.text,
+          resources: request.resources,
+          tools: request.tools,
+          model: request.model,
+          reasoningEffort: request.reasoningEffort,
+          revision: request.expectedRevision + 1,
+        }),
+        sendMessage: async (_ws, _session, input) => {
+          submitted.push((input as { text: string }).text);
+          return makeEvent(1, "user.message");
+        },
+        steerMessage: async (_ws, _session, input) => {
+          submitted.push((input as { text: string }).text);
+          return { accepted: makeEvent(1, "user.message"), turn: fakeTurn() };
+        },
+      });
+      const hook = await renderHook(
+        () =>
+          useComposer(SESSION_ID, {
+            client,
+            workspaceId: WORKSPACE_ID,
+            sendExtras: { model: "model-x", reasoningEffort: "medium" },
+          }),
+        undefined,
+      );
+      await flush();
+      const exactText = "  first line\nsecond line\n\n";
+      await flushing(async () => hook.result.current.setValue(exactText));
+      await flush(600);
+      await flushing(async () => expect(await hook.result.current[delivery]()).toBe(true));
+      expect(submitted).toEqual([exactText]);
+      await hook.unmount();
+    });
+  }
+
+  test("a whitespace-only file message saves and submits the same placeholder", async () => {
+    const savedTexts: string[] = [];
+    const submittedTexts: string[] = [];
+    const resource = {
+      kind: "file" as const,
+      fileId: "33333333-3333-4333-8333-333333333333",
+    };
+    const initial: ComposerDraft = {
+      revision: 1,
+      text: "",
+      resources: [],
+      tools: [],
+      model: "model-x",
+      reasoningEffort: "medium",
+      sourceTurnId: null,
+      sourceTurnVersion: null,
+      updatedAt: new Date().toISOString(),
+    };
+    const client = fakeClient({
+      getComposerDraft: async () => initial,
+      saveComposerDraft: async (_ws, _session, request) => {
+        savedTexts.push(request.text);
+        return {
+          ...initial,
+          text: request.text,
+          resources: request.resources,
+          tools: request.tools,
+          model: request.model,
+          reasoningEffort: request.reasoningEffort,
+          revision: request.expectedRevision + 1,
+        };
+      },
+      sendMessage: async (_ws, _session, input) => {
+        submittedTexts.push((input as { text: string }).text);
+        return makeEvent(1, "user.message");
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          sendExtras: {
+            model: "model-x",
+            reasoningEffort: "medium",
+            resources: [resource],
+          },
+        }),
+      undefined,
+    );
+    await flush();
+    await flushing(async () => hook.result.current.setValue(" \n"));
+    await flushing(async () => expect(await hook.result.current.send()).toBe(true));
+    expect(savedTexts.at(-1)).toBe(FILE_ONLY_MESSAGE_TEXT);
+    expect(submittedTexts).toEqual([FILE_ONLY_MESSAGE_TEXT]);
     await hook.unmount();
   });
 
