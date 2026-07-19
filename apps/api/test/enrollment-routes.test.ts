@@ -192,7 +192,7 @@ afterAll(async () => {
     /* noop */
   }
   await shared?.release();
-});
+}, 180_000);
 
 describe("M5 device-flow happy path: start -> approve -> poll -> EnrollmentCredentials", () => {
   test("the full flow lands an enrollment + sandbox and returns a signed bearer", async () => {

@@ -8,6 +8,12 @@ const controlApplications: Array<{
   sessionId: string;
   attemptId: string;
 }> = [];
+const quiescenceReceipts: Array<{
+  workspaceId: string;
+  sessionId: string;
+  attemptId: string;
+  temporalWorkflowId: string;
+}> = [];
 
 describe("session-state interrupt settlement", () => {
   test("publishes the already-atomic durable pause recovery batch", async () => {
@@ -23,6 +29,10 @@ describe("session-state interrupt settlement", () => {
           wakeSessionWorkflow: null,
         }) as any,
       {
+        markSessionAttemptQuiesced: mock(async (_db, input) => {
+          quiescenceReceipts.push(input);
+          return [];
+        }),
         settleSessionAttemptInterruptions: mock(
           async (_db, workspaceId: string, sessionId: string, attemptId: string) => {
             controlApplications.push({ workspaceId, sessionId, attemptId });
@@ -93,5 +103,51 @@ describe("session-state interrupt settlement", () => {
       turnId: "turn-1",
       payload: { reason: "user_pause" },
     });
+  });
+
+  test("records the exact quiescence boundary without replaying logical settlement", async () => {
+    quiescenceReceipts.length = 0;
+    controlApplications.length = 0;
+    const activities = createSessionStateActivities(
+      async () =>
+        ({
+          db: fakeDb,
+          bus: { publish: async () => undefined },
+          settings: {},
+          observability: {},
+          wakeSessionWorkflow: null,
+        }) as any,
+      {
+        markSessionAttemptQuiesced: mock(async (_db, input) => {
+          quiescenceReceipts.push(input);
+          return [];
+        }),
+        settleSessionAttemptInterruptions: mock(async () => {
+          throw new Error("logical settlement must not be repeated");
+        }),
+        countQueuedTurns: mock(async () => 0),
+        recordTurnsQueuedGauge: mock(() => undefined),
+      },
+    );
+
+    expect(
+      await activities.settleSessionInterruptions({
+        accountId: "account-1",
+        workspaceId: "workspace-1",
+        sessionId: "session-1",
+        attemptId: "attempt-1",
+        workflowId: "workflow-1",
+        phase: "attempt_quiesced",
+      }),
+    ).toEqual({ action: "stale" });
+    expect(quiescenceReceipts).toEqual([
+      {
+        workspaceId: "workspace-1",
+        sessionId: "session-1",
+        attemptId: "attempt-1",
+        temporalWorkflowId: "workflow-1",
+      },
+    ]);
+    expect(controlApplications).toHaveLength(0);
   });
 });

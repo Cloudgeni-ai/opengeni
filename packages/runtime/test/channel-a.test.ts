@@ -7,7 +7,7 @@
 // parsers are also unit-tested in isolation (no box) for the porcelain/numstat/
 // unified-diff shapes the Pierre diff consumes.
 
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { testSettings } from "@opengeni/testing";
 import {
   SandboxChannelAService,
@@ -18,13 +18,19 @@ import {
   parseUnifiedPatch,
   stripExecBanner,
   parseExecBannerSessionId,
-  isWorkspaceEscapeError,
+  parseExecBannerExitCode,
   isExecSessionLostBanner,
   type ChannelASession,
 } from "../src/sandbox";
 import { createSandboxClientForBackend } from "../src/index";
 
 const NUL = String.fromCharCode(0);
+
+// These cases execute real filesystem, Git, and shell processes against a local
+// sandbox. Their product-level commands retain tighter operation deadlines, while
+// the file-scoped test ceiling leaves enough room for cleanup under a loaded CI
+// host instead of canceling a live process at Bun's five-second unit default.
+setDefaultTimeout(30_000);
 
 type LiveLocalSession = ChannelASession & {
   closed: boolean;
@@ -168,6 +174,203 @@ describe("P4.4 SandboxChannelAService — FileSystem (real local box)", () => {
     expect(Array.isArray(srcNode?.children)).toBe(true);
   });
 
+  test("fsListPruned emits residue directories but skips their descendants in one tree query", async () => {
+    const { session } = await makeBox();
+    const svc = new SandboxChannelAService({ session });
+    const made = await svc.terminalExec({
+      command: [
+        "mkdir -p node_modules/pkg src/node_modules/nested src/deep",
+        "printf residue > node_modules/pkg/index.js",
+        "printf nested > src/node_modules/nested/index.js",
+        "printf authored > src/deep/keep.ts",
+      ].join(" && "),
+      cwd: "",
+      timeoutMs: 20_000,
+      emitStream: false,
+    });
+    expect(made.exitCode).toBe(0);
+
+    const list = await svc.fsListPruned(
+      { path: "", depth: 20, maxEntries: 1_000, includeHidden: true },
+      ["node_modules"],
+    );
+    const paths: string[] = [];
+    const walk = (node: typeof list.root): void => {
+      paths.push(node.path);
+      node.children?.forEach(walk);
+    };
+    walk(list.root);
+
+    expect(paths).toContain("node_modules");
+    expect(paths).toContain("src/node_modules");
+    expect(paths).toContain("src/deep/keep.ts");
+    expect(paths).not.toContain("node_modules/pkg");
+    expect(paths).not.toContain("src/node_modules/nested");
+  });
+
+  test("fsListPruned portable macOS/BSD branch preserves depth, hidden, and prune semantics", async () => {
+    const { session } = await makeBox();
+    const made = await new SandboxChannelAService({ session }).terminalExec({
+      command: [
+        "mkdir -p src/deep node_modules/pkg .hidden",
+        "printf visible > src/keep.ts",
+        "printf deep > src/deep/too-deep.ts",
+        "printf residue > node_modules/pkg/index.js",
+        "printf secret > .hidden/secret.txt",
+      ].join(" && "),
+      cwd: "",
+      timeoutMs: 20_000,
+      emitStream: false,
+    });
+    expect(made.exitCode).toBe(0);
+
+    const originalExec = session.exec?.bind(session);
+    if (!originalExec) throw new Error("local test session has no exec surface");
+    let portableBranchObserved = false;
+    session.exec = async (args) => {
+      const capabilityProbe =
+        "if find --version >/dev/null 2>&1 && head -z -n 0 </dev/null >/dev/null 2>&1; then";
+      if (args.cmd.includes(capabilityProbe)) {
+        portableBranchObserved = true;
+        args = { ...args, cmd: args.cmd.replace(capabilityProbe, "if false; then") };
+      }
+      return await originalExec(args);
+    };
+
+    const list = await new SandboxChannelAService({ session }).fsListPruned(
+      { path: "", depth: 2, maxEntries: 1_000, includeHidden: false },
+      ["node_modules"],
+    );
+    const paths: string[] = [];
+    const walk = (node: typeof list.root): void => {
+      paths.push(node.path);
+      node.children?.forEach(walk);
+    };
+    walk(list.root);
+
+    expect(portableBranchObserved).toBe(true);
+    expect(paths).toContain("src/keep.ts");
+    expect(paths).toContain("src/deep");
+    expect(paths).toContain("node_modules");
+    expect(paths).not.toContain("src/deep/too-deep.ts");
+    expect(paths).not.toContain("node_modules/pkg");
+    expect(paths).not.toContain(".hidden");
+  });
+
+  test("fsListPruned indexes a production-sized tree in one provider exec", async () => {
+    const { session } = await makeBox();
+    const svc = new SandboxChannelAService({ session });
+    const made = await svc.terminalExec({
+      command:
+        'mkdir -p src; for d in $(seq 1 150); do mkdir -p "src/d$d"; for f in $(seq 1 29); do : > "src/d$d/f$f.ts"; done; done',
+      cwd: "",
+      timeoutMs: 20_000,
+      emitStream: false,
+    });
+    expect(made.exitCode).toBe(0);
+
+    const originalExec = session.exec?.bind(session);
+    if (!originalExec) throw new Error("local test session has no exec surface");
+    let providerExecs = 0;
+    session.exec = async (args) => {
+      providerExecs += 1;
+      return await originalExec(args);
+    };
+
+    const startedAt = performance.now();
+    const list = await svc.fsListPruned(
+      { path: "", depth: 20, maxEntries: 10_000, includeHidden: true },
+      ["node_modules"],
+    );
+    const durationMs = performance.now() - startedAt;
+    let entryCount = 0;
+    const walk = (node: typeof list.root): void => {
+      for (const child of node.children ?? []) {
+        entryCount += 1;
+        walk(child);
+      }
+    };
+    walk(list.root);
+
+    expect(providerExecs).toBe(1);
+    expect(entryCount).toBe(4_501);
+    expect(list.truncated).toBe(false);
+    // A generous local-host guard catches accidental per-directory traversal
+    // without coupling CI to Modal network latency (the deployed gate owns that).
+    expect(durationMs).toBeLessThan(5_000);
+  });
+
+  test("fsListPruned rejects non-literal prune patterns before executing the box", async () => {
+    let executed = false;
+    const svc = new SandboxChannelAService({
+      session: {
+        exec: async () => {
+          executed = true;
+          return { stdout: "", stderr: "", exitCode: 0 };
+        },
+      },
+    });
+
+    await expect(
+      svc.fsListPruned({ path: "", depth: 1, maxEntries: 10, includeHidden: true }, [
+        "../node_modules",
+        "*",
+      ]),
+    ).rejects.toThrow(/invalid directory prune name/);
+    expect(executed).toBe(false);
+  });
+
+  test("fsListPruned reports transport byte truncation without orphaning child nodes", async () => {
+    const recordDelimiter = String.fromCharCode(0);
+    let command = "";
+    const svc = new SandboxChannelAService({
+      session: {
+        exec: async (args) => {
+          command = args.cmd;
+          return {
+            stdout: [
+              "__OPENGENI_FS_CONFINED_OK__\n",
+              `d\t0\t1.0\t755\t./src${recordDelimiter}`,
+              `f\t1\t1.0\t644\t./src/a.ts${recordDelimiter}`,
+              `__OPENGENI_FS_LIST_TRUNCATED__${recordDelimiter}`,
+            ].join(""),
+            stderr: "",
+            exitCode: 0,
+          };
+        },
+      },
+    });
+
+    const list = await svc.fsListPruned(
+      { path: "", depth: 8, maxEntries: 10, includeHidden: true },
+      ["node_modules"],
+    );
+
+    expect(list.truncated).toBe(true);
+    expect(list.root.children?.[0]?.path).toBe("src");
+    expect(list.root.children?.[0]?.children?.[0]?.path).toBe("src/a.ts");
+    expect(command).toContain("__OPENGENI_FS_LIST_TRUNCATED__");
+  });
+
+  test("fsListPruned fails closed when the provider command is still running", async () => {
+    const svc = new SandboxChannelAService({
+      session: {
+        exec: async () => ({
+          stdout: "__OPENGENI_FS_CONFINED_OK__\n",
+          stderr: "",
+          exitCode: null,
+          sessionId: 17,
+        }),
+      },
+    });
+
+    await expect(
+      svc.fsListPruned({ path: "", depth: 8, maxEntries: 10, includeHidden: true }, [
+        "node_modules",
+      ]),
+    ).rejects.toThrow(/exceeded its 10 second deadline/);
+  });
+
   test("write with overwrite:false on an existing path throws conflict", async () => {
     const { session } = await makeBox();
     const svc = new SandboxChannelAService({ session });
@@ -198,6 +401,113 @@ describe("P4.4 SandboxChannelAService — FileSystem (real local box)", () => {
     await expect(
       svc.fsRead({ path: "/etc/passwd", encoding: "utf8", maxBytes: 16 }),
     ).rejects.toThrow(/absolute/);
+    await expect(
+      svc.fsList({ path: "../escape", depth: 1, maxEntries: 10, includeHidden: true }),
+    ).rejects.toThrow(/traversal/);
+    await expect(svc.gitStatus({ path: "../escape" })).rejects.toThrow(/traversal/);
+  });
+
+  test("reads an internal symlink but rejects an escaping symlink", async () => {
+    const { session } = await makeBox();
+    const svc = new SandboxChannelAService({ session });
+    const outside = `/tmp/opengeni-channel-a-${crypto.randomUUID()}.txt`;
+    const outsideDir = `/tmp/opengeni-channel-a-${crypto.randomUUID()}`;
+    const created = await svc.terminalExec({
+      command: [
+        "printf 'inside content' > internal.txt",
+        "ln -s internal.txt internal-link.txt",
+        `printf 'outside secret' > '${outside}'`,
+        `ln -s '${outside}' external-link.txt`,
+        `mkdir -p '${outsideDir}'`,
+        `ln -s '${outsideDir}' external-dir`,
+      ].join(" && "),
+      cwd: "",
+      timeoutMs: 20_000,
+      emitStream: false,
+    });
+    expect(created.exitCode).toBe(0);
+
+    const internal = await svc.fsRead({
+      path: "internal-link.txt",
+      encoding: "utf8",
+      maxBytes: 1_024,
+    });
+    expect(internal.content).toBe("inside content");
+    await expect(
+      svc.fsRead({ path: "external-link.txt", encoding: "utf8", maxBytes: 1_024 }),
+    ).rejects.toThrow(/outside workspace/);
+
+    const execOnly = new SandboxChannelAService({
+      session: { exec: session.exec!.bind(session) },
+    });
+    expect(
+      (
+        await execOnly.fsRead({
+          path: "internal-link.txt",
+          encoding: "utf8",
+          maxBytes: 1_024,
+        })
+      ).content,
+    ).toBe("inside content");
+    await expect(
+      execOnly.fsRead({ path: "external-link.txt", encoding: "utf8", maxBytes: 1_024 }),
+    ).rejects.toThrow(/outside workspace/);
+    await expect(
+      svc.fsWrite({
+        path: "external-link.txt",
+        encoding: "utf8",
+        content: "overwrite attempt",
+        overwrite: true,
+        createParents: false,
+      }),
+    ).rejects.toThrow(/symbolic link/);
+    await expect(
+      svc.fsWrite({
+        path: "external-dir/new.txt",
+        encoding: "utf8",
+        content: "escape attempt",
+        overwrite: true,
+        createParents: true,
+      }),
+    ).rejects.toThrow(/outside workspace/);
+    await expect(svc.fsMkdir({ path: "external-dir/nested", recursive: true })).rejects.toThrow(
+      /outside workspace/,
+    );
+    await expect(
+      svc.fsMove({
+        path: "internal.txt",
+        newPath: "external-dir/moved.txt",
+        overwrite: true,
+        createParents: true,
+      }),
+    ).rejects.toThrow(/outside workspace/);
+    await expect(
+      svc.fsList({ path: "external-dir", depth: 1, maxEntries: 10, includeHidden: true }),
+    ).rejects.toThrow(/symbolic link/);
+    await expect(svc.gitStatus({ path: "external-dir" })).rejects.toThrow(/symbolic link/);
+
+    const outsideAfter = await svc.terminalExec({
+      command: `printf '%s|' "$(cat '${outside}')"; test ! -e '${outsideDir}/new.txt'; test ! -e '${outsideDir}/moved.txt'`,
+      cwd: "",
+      timeoutMs: 20_000,
+      emitStream: false,
+    });
+    expect(outsideAfter.exitCode).toBe(0);
+    expect(outsideAfter.stdout).toBe("outside secret|");
+
+    const tree = await svc.fsList({ path: "", depth: 1, maxEntries: 100, includeHidden: true });
+    expect(tree.root.children?.find((node) => node.path === "internal-link.txt")?.type).toBe(
+      "symlink",
+    );
+    expect(tree.root.children?.find((node) => node.path === "external-link.txt")?.type).toBe(
+      "symlink",
+    );
+    await svc.terminalExec({
+      command: `rm -f '${outside}'; rmdir '${outsideDir}'`,
+      cwd: "",
+      timeoutMs: 20_000,
+      emitStream: false,
+    });
   });
 
   test("fsWrite emits an fs.changed notification through the emitter", async () => {
@@ -419,11 +729,55 @@ describe("P4.4 SandboxChannelAService — Git (real local box)", () => {
     expect(file!.index).toBe("modified"); // staged
   });
 
+  test("confinement control records cannot collide with legitimate payload output", async () => {
+    const { svc } = await makeRepoWithStagedChange();
+    for (const path of [
+      "__OPENGENI_FS_NOT_FOUND__",
+      "__OPENGENI_FS_ESCAPE__",
+      "__OPENGENI_FS_SYMLINK__",
+      "__OPENGENI_FS_CONFINED_OK__",
+    ]) {
+      await svc.fsWrite({
+        path,
+        encoding: "utf8",
+        content: `${path}\n`,
+        overwrite: true,
+        createParents: true,
+      });
+    }
+
+    const list = await svc.fsList({
+      path: "",
+      depth: 1,
+      maxEntries: 100,
+      includeHidden: true,
+    });
+    expect(list.root.children?.map((node) => node.path)).toEqual(
+      expect.arrayContaining([
+        "__OPENGENI_FS_NOT_FOUND__",
+        "__OPENGENI_FS_ESCAPE__",
+        "__OPENGENI_FS_SYMLINK__",
+        "__OPENGENI_FS_CONFINED_OK__",
+      ]),
+    );
+
+    const status = await svc.gitStatus({ path: "" });
+    expect(status.files.map((file) => file.path)).toEqual(
+      expect.arrayContaining([
+        "__OPENGENI_FS_NOT_FOUND__",
+        "__OPENGENI_FS_ESCAPE__",
+        "__OPENGENI_FS_SYMLINK__",
+        "__OPENGENI_FS_CONFINED_OK__",
+      ]),
+    );
+  });
+
   test("git diff --staged parses into structured hunks (the Pierre feed)", async () => {
     const { svc } = await makeRepoWithStagedChange();
     const diff = await svc.gitDiff({
       path: "",
       staged: true,
+      includeUntracked: false,
       pathspec: [],
       contextLines: 3,
       maxBytesPerFile: 512 * 1024,
@@ -443,6 +797,126 @@ describe("P4.4 SandboxChannelAService — Git (real local box)", () => {
       true,
     );
     expect(hunk.lines.some((l) => l.type === "context")).toBe(true);
+  });
+
+  test("workspace-review diff includes bounded text, binary, and oversized untracked files", async () => {
+    const { svc } = await makeRepoWithStagedChange();
+    await svc.fsWrite({
+      path: "-new file.txt",
+      encoding: "utf8",
+      content: "first\nsecond",
+      overwrite: true,
+      createParents: true,
+    });
+    const outside = `/tmp/opengeni-channel-a-diff-${crypto.randomUUID()}.txt`;
+    const links = await svc.terminalExec({
+      command: [
+        `printf 'must not leak' > '${outside}'`,
+        `ln -s '${outside}' external-link`,
+        "ln -s file.txt internal-link",
+      ].join(" && "),
+      cwd: "",
+      timeoutMs: 20_000,
+      emitStream: false,
+    });
+    expect(links.exitCode).toBe(0);
+    await svc.fsWrite({
+      path: "empty.txt",
+      encoding: "utf8",
+      content: "",
+      overwrite: true,
+      createParents: true,
+    });
+    await svc.fsWrite({
+      path: "asset.bin",
+      encoding: "base64",
+      content: Buffer.from([0, 1, 2, 3]).toString("base64"),
+      overwrite: true,
+      createParents: true,
+    });
+    await svc.fsWrite({
+      path: "large.txt",
+      encoding: "utf8",
+      content: "one\ntwo\nthree\n",
+      overwrite: true,
+      createParents: true,
+    });
+
+    const native = await svc.gitDiff({
+      path: "",
+      staged: false,
+      includeUntracked: false,
+      pathspec: [],
+      contextLines: 3,
+      maxBytesPerFile: 8,
+    });
+    expect(native.files).toEqual([]);
+
+    const review = await svc.gitDiff({
+      path: "",
+      staged: false,
+      includeUntracked: true,
+      pathspec: [],
+      contextLines: 3,
+      maxBytesPerFile: 8,
+    });
+    const text = review.files.find((file) => file.path === "-new file.txt");
+    expect(text?.status).toBe("untracked");
+    expect(text?.additions).toBe(2);
+    expect(text?.truncated).toBe(true);
+    expect(text?.hunks).toEqual([]);
+
+    const empty = review.files.find((file) => file.path === "empty.txt");
+    expect(empty?.status).toBe("untracked");
+    expect(empty?.additions).toBe(0);
+    expect(empty?.truncated).toBe(false);
+    expect(empty?.hunks).toEqual([]);
+
+    const binary = review.files.find((file) => file.path === "asset.bin");
+    expect(binary?.isBinary).toBe(true);
+    expect(binary?.additions).toBe(0);
+    expect(binary?.truncated).toBe(false);
+
+    const large = review.files.find((file) => file.path === "large.txt");
+    expect(large?.additions).toBe(3);
+    expect(large?.truncated).toBe(true);
+
+    const externalLink = review.files.find((file) => file.path === "external-link");
+    expect(externalLink?.truncated).toBe(true);
+    expect(externalLink?.hunks).toEqual([]);
+    expect(JSON.stringify(externalLink)).not.toContain("must not leak");
+    const internalLink = review.files.find((file) => file.path === "internal-link");
+    expect(internalLink?.hunks[0]?.lines.map((line) => line.text)).toEqual(["file.txt"]);
+
+    const fullText = await svc.gitDiff({
+      path: "",
+      staged: false,
+      includeUntracked: true,
+      pathspec: ["-new file.txt"],
+      contextLines: 3,
+      maxBytesPerFile: 1024,
+    });
+    expect(fullText.files).toHaveLength(1);
+    expect(fullText.files[0]?.hunks[0]?.lines.map((line) => line.text)).toEqual([
+      "first",
+      "second",
+    ]);
+    const fullLink = await svc.gitDiff({
+      path: "",
+      staged: false,
+      includeUntracked: true,
+      pathspec: ["external-link"],
+      contextLines: 3,
+      maxBytesPerFile: 1_024,
+    });
+    expect(fullLink.files[0]?.hunks[0]?.lines.map((line) => line.text)).toEqual([outside]);
+    expect(JSON.stringify(fullLink)).not.toContain("must not leak");
+    await svc.terminalExec({
+      command: `rm -f '${outside}'`,
+      cwd: "",
+      timeoutMs: 20_000,
+      emitStream: false,
+    });
   });
 
   test("git status outside a repo returns isRepo:false (not an error)", async () => {
@@ -954,16 +1428,27 @@ describe("P4.4 SandboxChannelAService — terminal cwd frames", () => {
 
   test("dock fs/git operations still use repo-relative workspaceRoot mapping", async () => {
     const paths: string[] = [];
+    const commands: string[] = [];
     const session: ChannelASession = {
       readFile: async ({ path }) => {
         paths.push(path);
         return "file";
       },
       exec: async ({ cmd, workdir }) => {
+        commands.push(cmd);
         paths.push(workdir ?? "");
-        return cmd.startsWith("git status")
-          ? { stdout: "", stderr: "", exitCode: 128 }
-          : { stdout: "", stderr: "", exitCode: 0 };
+        if (cmd.includes("git rev-parse")) {
+          return {
+            stdout: "__OPENGENI_FS_CONFINED_OK__\ntrue\n",
+            stderr: "",
+            exitCode: 0,
+          };
+        }
+        return {
+          stdout: cmd.includes('cd -P -- "$target"') ? "__OPENGENI_FS_CONFINED_OK__\n" : "",
+          stderr: "",
+          exitCode: 0,
+        };
       },
     };
     const svc = new SandboxChannelAService({ session, workspaceRoot: "/workspace" });
@@ -972,7 +1457,8 @@ describe("P4.4 SandboxChannelAService — terminal cwd frames", () => {
     await svc.gitStatus({ path: "repo" });
 
     expect(paths).toContain("/workspace/file.txt");
-    expect(paths).toContain("/workspace/repo");
+    expect(commands.some((command) => command.includes("/workspace/repo"))).toBe(true);
+    expect(commands.some((command) => command.includes('cd -P -- "$target"'))).toBe(true);
   });
 });
 
@@ -1091,17 +1577,16 @@ describe("P4.4 parsers — porcelain/numstat/unified-diff", () => {
     expect(parseExecBannerSessionId("no banner")).toBeNull();
   });
 
-  test("isWorkspaceEscapeError classifies the provider's symlink-escape rejection", () => {
-    // The Modal native-readFile guard on a symlink targeting outside /workspace.
+  test("parseExecBannerExitCode reads only a completed command's banner", () => {
+    const exited =
+      "Chunk ID: abc\nWall time: 0.05 seconds\nProcess exited with code 67\nOutput:\nignored";
+    expect(parseExecBannerExitCode(exited)).toBe(67);
     expect(
-      isWorkspaceEscapeError(
-        new Error("Sandbox path failed remote validation: workspace escape: /tmp/pulse-abc"),
+      parseExecBannerExitCode(
+        "Chunk ID: abc\nProcess running with session ID 7\nOutput:\nProcess exited with code 0",
       ),
-    ).toBe(true);
-    expect(isWorkspaceEscapeError("Remote validation failed: escape detected")).toBe(true);
-    // A genuine not-found is NOT an escape (must fall through to a clean 404).
-    expect(isWorkspaceEscapeError(new Error("ENOENT: no such file or directory"))).toBe(false);
-    expect(isWorkspaceEscapeError(undefined)).toBe(false);
+    ).toBeNull();
+    expect(parseExecBannerExitCode("Output:\nProcess exited with code 0")).toBeNull();
   });
 
   test("isExecSessionLostBanner classifies the lost-PTY writeStdin banner", () => {

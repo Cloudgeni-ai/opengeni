@@ -77,7 +77,7 @@ afterAll(async () => {
     /* noop */
   }
   await shared?.release();
-});
+}, 180_000);
 
 describe("0024 sandboxes / enrollments / metrics DAOs + active-sandbox pointer", () => {
   test("migration adds sessions.active_sandbox_id (nullable) + active_epoch (NOT NULL default 0, integer)", async () => {

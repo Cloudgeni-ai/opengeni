@@ -1,6 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { ScriptedModel, testSettings } from "@opengeni/testing";
-import { buildManifest, buildOpenGeniAgent, runOwnedSandboxSetup } from "../src/index";
+import {
+  buildManifest,
+  buildOpenGeniAgent,
+  installGitCredentialHelpersAndTokens,
+  invalidateGitProviderTokenFiles,
+  refreshGitProviderTokenFiles,
+  runOwnedSandboxSetup,
+} from "../src/index";
 import { RoutingSandboxSession, type RoutableBackendSession } from "../src/sandbox";
 
 const agentsCoreEntry = import.meta.resolve("@openai/agents-core");
@@ -145,6 +152,79 @@ describe("lazy provisioning synthetic manifest", () => {
 
     // The rig-setup hook exec'd its marker-guarded program against the box.
     expect(execCmds.some((cmd) => cmd.includes("/var/opengeni/rig-setup-ver-9.done"))).toBe(true);
+  });
+
+  test("runOwnedSandboxSetup routes lifecycle commands through the attempt cancellation fence", async () => {
+    const settings = testSettings({ sandboxBackend: "modal", webSearchEnabled: false });
+    const environment = { HOME: "/workspace" };
+    const agent = buildOpenGeniAgent(settings, [], {
+      model: new ScriptedModel([]),
+      sandboxEnvironment: environment,
+      rigSetup: {
+        rigId: "rig-1",
+        rigName: "dev-machine",
+        versionId: "ver-cancellable",
+        script: "sleep 60",
+        timeoutMs: 60_000,
+      },
+    });
+    const backend = {
+      state: { manifest: buildManifest(settings, [], environment) },
+      exec: async () => {
+        throw new Error("lifecycle command bypassed the cancellation fence");
+      },
+    };
+    const commands: string[] = [];
+
+    await runOwnedSandboxSetup(agent, backend as never, backend as never, {
+      settings,
+      environment,
+      commandRunner: async (session, args) => {
+        expect(session).toBe(backend);
+        commands.push(args.cmd);
+        return { exitCode: 0, output: "" };
+      },
+    });
+
+    expect(commands).toHaveLength(1);
+    expect(commands[0]).toContain(Buffer.from("sleep 60").toString("base64"));
+  });
+
+  test("credential install, refresh, and invalidation route through the attempt cancellation fence", async () => {
+    const backend = {
+      exec: async () => {
+        throw new Error("credential mutation bypassed the cancellation fence");
+      },
+    };
+    const commands: string[] = [];
+    const commandRunner = async (session: never, args: { cmd: string }) => {
+      expect(session).toBe(backend);
+      commands.push(args.cmd);
+      return { exitCode: 0, output: "" };
+    };
+    const repository = {
+      provider: "github" as const,
+      uri: "https://github.com/acme/private.git",
+      ref: "main",
+      repositoryId: 456,
+      installationId: 123,
+    };
+
+    await installGitCredentialHelpersAndTokens(
+      backend,
+      [repository],
+      { github: "install-token" },
+      {
+        commandRunner,
+      },
+    );
+    await refreshGitProviderTokenFiles(backend, { github: "refresh-token" }, { commandRunner });
+    await invalidateGitProviderTokenFiles(backend, ["github"], { commandRunner });
+
+    expect(commands).toHaveLength(3);
+    expect(commands[0]).toContain("core.askPass");
+    expect(commands[1]).toContain("OPENGENI_GIT_TOKEN_SEED");
+    expect(commands[2]).toContain("git_credential_invalidation_status");
   });
 
   // REGRESSION (caught live on staging 2026-07-08): the SDK's FilesystemCapability

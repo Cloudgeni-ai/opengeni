@@ -318,6 +318,46 @@ describe("resource-less Git credential binding", () => {
     });
   });
 
+  test("resolver deactivation cleanup routes through the attempt cancellation fence", async () => {
+    const tokenSession = {
+      exec: async () => {
+        throw new Error("credential cleanup bypassed the cancellation fence");
+      },
+    } as GitCredentialTokenWriterSession;
+    const commands: string[] = [];
+    const result = await resolveGitCredentialBindingForSession({
+      db: {} as Database,
+      settings: testSettings(),
+      scope,
+      session: tokenSession,
+      resources: [],
+      commandRunner: async (session, args) => {
+        expect(session).toBe(tokenSession);
+        commands.push(args.cmd);
+        return { exitCode: 0, output: "" };
+      },
+      operations: {
+        listBindings: async () => [storedBinding()],
+        markBindingsStatus: async (_db, input) => {
+          await input.mutateSandbox?.();
+          return [];
+        },
+        detectRepositories: async () => ({
+          repositories: [],
+          complete: false,
+          degradedReason: "result_limit_exceeded",
+        }),
+      },
+    });
+
+    expect(result).toMatchObject({
+      status: "unavailable",
+      reasonCode: "discovery_incomplete",
+    });
+    expect(commands).toHaveLength(1);
+    expect(commands[0]).toContain("git_credential_invalidation_status");
+  });
+
   test("invalid host responses fail typed and request cleanup only for an unfenced legacy file", async () => {
     const result = await resolveGitCredentialBindingForSession({
       db: {} as Database,

@@ -38,7 +38,7 @@ RUN set -eux; \
     export DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC; \
     base_packages=" \
         bash ca-certificates coreutils curl gpg git jq openssh-client \
-        fuse3 rclone ripgrep unzip wget python3 python3-pip software-properties-common \
+        fuse3 procps rclone ripgrep unzip wget python3 python3-pip software-properties-common \
         apt-transport-https net-tools netcat-openbsd sudo util-linux xxd file \
     "; \
     for attempt in 1 2 3; do \

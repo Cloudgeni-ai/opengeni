@@ -24,6 +24,7 @@ import {
   installGitCredentialHelpersAndTokens,
   invalidateGitProviderTokenFiles,
   refreshGitProviderTokenFiles,
+  type SandboxLifecycleCommandRunner,
   type GitCredentialTokenWriterSession,
 } from "@opengeni/runtime";
 import {
@@ -91,6 +92,7 @@ export type ResolveGitCredentialBindingOptions = {
   resources: readonly ResourceRef[];
   connectionCredentials?: ConnectionCredentialsPort | null;
   runAs?: string;
+  commandRunner?: SandboxLifecycleCommandRunner;
   listGitHubRepositories?: (
     settings: Settings,
     input: { installationIds?: number[] },
@@ -288,6 +290,7 @@ async function deactivateBindings(
     mutateSandbox: async () => {
       await invalidateGitProviderTokenFiles(options.session, selected, {
         ...(options.runAs ? { runAs: options.runAs } : {}),
+        ...(options.commandRunner ? { commandRunner: options.commandRunner } : {}),
       });
     },
   });
@@ -517,7 +520,7 @@ export async function installResolvedGitCredentialBinding(
   session: GitCredentialTokenWriterSession,
   binding: ResolvedGitCredentialBinding,
   minted: MintedRunGitCredentials,
-  options: { runAs?: string } = {},
+  options: { runAs?: string; commandRunner?: SandboxLifecycleCommandRunner } = {},
 ): Promise<void> {
   let result: Awaited<ReturnType<typeof withActiveSandboxGitCredentialBindings>>;
   try {
@@ -547,7 +550,7 @@ export async function refreshResolvedGitCredentialBinding(
   session: GitCredentialTokenWriterSession,
   binding: ResolvedGitCredentialBinding,
   minted: MintedRunGitCredentials,
-  options: { runAs?: string } = {},
+  options: { runAs?: string; commandRunner?: SandboxLifecycleCommandRunner } = {},
 ): Promise<void> {
   let result: Awaited<ReturnType<typeof withActiveSandboxGitCredentialBindings>>;
   try {
@@ -572,7 +575,7 @@ export async function expireResolvedGitCredentialBinding(
   session: GitCredentialTokenWriterSession,
   binding: ResolvedGitCredentialBinding,
   providers: readonly GitCredentialProvider[],
-  options: { runAs?: string } = {},
+  options: { runAs?: string; commandRunner?: SandboxLifecycleCommandRunner } = {},
 ): Promise<void> {
   let result: Awaited<ReturnType<typeof withActiveSandboxGitCredentialBindings>>;
   try {
@@ -602,6 +605,7 @@ export async function invalidateResolvedGitCredentialBinding(
     status: Exclude<SandboxGitCredentialBindingStatus, "active">;
     reasonCode: string;
     runAs?: string;
+    commandRunner?: SandboxLifecycleCommandRunner;
   },
 ): Promise<void> {
   const providers = Object.keys(binding.expectedGenerations).sort() as GitCredentialProvider[];
@@ -616,6 +620,7 @@ export async function invalidateResolvedGitCredentialBinding(
       mutateSandbox: async () => {
         await invalidateGitProviderTokenFiles(session, providers, {
           ...(input.runAs ? { runAs: input.runAs } : {}),
+          ...(input.commandRunner ? { commandRunner: input.commandRunner } : {}),
         });
       },
     });

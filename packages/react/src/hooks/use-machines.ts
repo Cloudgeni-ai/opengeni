@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { useOpenGeni, type ClientOverride } from "../provider";
 import { useMutationRunner, usePolledValue } from "./internal";
 import type { MachinesResponse, MachineView, MetricSample } from "../types/machines";
@@ -23,7 +23,7 @@ export type MachinesClientLike = {
   /** GET /v1/workspaces/:ws/machines — the dashboard list + active pointer. */
   listMachines: (
     workspaceId: string,
-    options?: { sessionId?: string },
+    options?: { sessionId?: string; signal?: AbortSignal },
   ) => Promise<MachinesResponse>;
   /** GET .../machines/:enrollmentId/metrics/series — the downsampled history. */
   machineMetricsSeries?: (
@@ -106,10 +106,19 @@ export function useMachines(options: UseMachinesOptions = {}): UseMachinesResult
   const machinesClient = (options.machinesClient ??
     (client as unknown as MachinesClientLike)) satisfies MachinesClientLike;
   const sessionId = options.sessionId;
+  const identityKey = `${workspaceId}\u0000${sessionId ?? ""}`;
+  const identityRef = useRef(identityKey);
+  identityRef.current = identityKey;
 
-  const load = useCallback(async () => {
-    return await machinesClient.listMachines(workspaceId, sessionId ? { sessionId } : undefined);
-  }, [machinesClient, workspaceId, sessionId]);
+  const load = useCallback(
+    async (signal?: AbortSignal) => {
+      return await machinesClient.listMachines(workspaceId, {
+        ...(sessionId ? { sessionId } : {}),
+        ...(signal ? { signal } : {}),
+      });
+    },
+    [machinesClient, workspaceId, sessionId],
+  );
 
   const {
     data: loadedData,
@@ -120,9 +129,13 @@ export function useMachines(options: UseMachinesOptions = {}): UseMachinesResult
     pollIntervalMs: options.pollIntervalMs,
     enabled: options.enabled,
   });
-  const { run, mutating, mutationError, clearMutationError } = useMutationRunner();
+  const { run, mutating, mutationError, clearMutationError } = useMutationRunner(identityKey);
   // The sandbox id of the in-flight attach (drives the per-card spinner).
-  const [attachingSandboxId, setAttachingSandboxId] = useState<string | null>(null);
+  const [attachState, setAttachState] = useState<{
+    identity: string;
+    sandboxId: string | null;
+  }>(() => ({ identity: identityKey, sandboxId: null }));
+  const attachingSandboxId = attachState.identity === identityKey ? attachState.sandboxId : null;
   const [revokingEnrollmentId, setRevokingEnrollmentId] = useState<string | null>(null);
 
   const data = loadedData ?? EMPTY;
@@ -143,16 +156,19 @@ export function useMachines(options: UseMachinesOptions = {}): UseMachinesResult
           ? () => machinesClient.swapActiveSandbox!(workspaceId, sessionId, { target: sandboxId })
           : null;
       if (!runSwap) return false;
-      setAttachingSandboxId(sandboxId);
+      const ownedIdentity = identityKey;
+      setAttachState({ identity: ownedIdentity, sandboxId });
       const result = await run(async () => {
         await runSwap();
         return true;
       });
-      setAttachingSandboxId(null);
-      if (result) await refresh();
+      if (identityRef.current === ownedIdentity) {
+        setAttachState({ identity: ownedIdentity, sandboxId: null });
+        if (result) await refresh();
+      }
       return result === true;
     },
-    [machinesClient, workspaceId, sessionId, run, refresh],
+    [machinesClient, workspaceId, sessionId, identityKey, run, refresh],
   );
 
   const fetchSeries = useCallback(

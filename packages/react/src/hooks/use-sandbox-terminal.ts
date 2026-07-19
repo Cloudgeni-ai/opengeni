@@ -82,12 +82,24 @@ export function useSandboxTerminal(
   // is live before the `terminal.pty.started` event round-trips through SSE.
   const ptyFilter = options.ptyId;
   const liveness = options.liveness;
+  const identityKey = `${workspaceId}\u0000${sessionId ?? ""}\u0000${interactive}\u0000${ptyFilter ?? ""}`;
   const [openedPtyId, setOpenedPtyId] = useState<string | null>(null);
   const [openError, setOpenError] = useState<Error | null>(null);
+  const [stateIdentity, setStateIdentity] = useState(identityKey);
   // Bumped to force a fresh PTY open after a write reveals the old PTY was lost
   // (a 409 "pty session lost" — the box rolled over since the open). This makes
   // the interactive terminal self-heal instead of dead-ending on a stale session.
   const [reopenNonce, setReopenNonce] = useState(0);
+  const currentIdentityRef = useRef(identityKey);
+  currentIdentityRef.current = identityKey;
+
+  // Async PTY state belongs to one workspace/session/mode identity. Hide it
+  // synchronously on the switching render, then clear it durably in the effect.
+  useEffect(() => {
+    setStateIdentity(identityKey);
+    setOpenedPtyId(null);
+    setOpenError(null);
+  }, [identityKey]);
 
   // Open ONE interactive PTY against the box, close it on unmount/identity
   // change. The open's banner + subsequent output deltas ride A1, so xterm fills
@@ -99,8 +111,12 @@ export function useSandboxTerminal(
   const openInFlight = useRef(false);
   const boxWarm = liveness === undefined || liveness === "warm" || liveness === "draining";
   useEffect(() => {
-    if (!interactive || !sessionId || ptyFilter || !boxWarm) return;
+    if (!interactive || !sessionId || ptyFilter || !boxWarm) {
+      setOpenError(null);
+      return;
+    }
     let cancelled = false;
+    setOpenError(null);
     openInFlight.current = true;
     let openedId: string | null = null;
     void client
@@ -138,6 +154,9 @@ export function useSandboxTerminal(
     let lastSupportsInput = false;
 
     for (const event of options.events) {
+      // The hook is session-scoped even if a host accidentally retains the old
+      // event array for one render during navigation.
+      if (event.workspaceId !== workspaceId || event.sessionId !== sessionId) continue;
       if (event.type === "terminal.pty.started") {
         const payload = event.payload as { ptyId?: string } | null;
         if (payload?.ptyId) {
@@ -182,19 +201,21 @@ export function useSandboxTerminal(
     const activePty = ptyFilter && open.has(ptyFilter) ? ptyFilter : lastOpened;
     lastSupportsInput = activePty ? (open.get(activePty)?.supportsInput ?? false) : false;
     return { chunks: out, openPty: activePty, supportsInput: lastSupportsInput };
-  }, [options.events, ptyFilter, includeAgentFirehose]);
+  }, [options.events, ptyFilter, includeAgentFirehose, workspaceId, sessionId]);
 
   // The PTY this hook actively drives: the one it opened (interactive) wins so
   // `write` is live the instant the open resolves — even before the
   // `terminal.pty.started` event arrives through SSE. Fall back to whatever the
   // event projection found (a PTY opened elsewhere, or a caller-pinned ptyId).
-  const activePtyId = openedPtyId ?? openPty;
+  const identityMatches = stateIdentity === identityKey;
+  const activePtyId = identityMatches ? (openedPtyId ?? openPty) : null;
   // An interactively-opened PTY accepts stdin by construction (we only open it on
   // a pty-capable backend); a projected PTY uses its advertised supportsInput.
   const canWrite = openedPtyId !== null || supportsInput;
 
   const write = useMemo(() => {
     if (!activePtyId || !canWrite || !sessionId) return null;
+    const writeIdentity = identityKey;
     return (data: string) => {
       void client
         .terminalPtyWrite(workspaceId, sessionId, { ptyId: activePtyId, data })
@@ -205,14 +226,15 @@ export function useSandboxTerminal(
           if (
             cause instanceof OpenGeniApiError &&
             (cause.status === 409 || cause.status === 404) &&
-            activePtyId === openedPtyId
+            activePtyId === openedPtyId &&
+            currentIdentityRef.current === writeIdentity
           ) {
             setOpenedPtyId(null);
             setReopenNonce((n) => n + 1);
           }
         });
     };
-  }, [client, workspaceId, sessionId, activePtyId, canWrite, openedPtyId]);
+  }, [client, workspaceId, sessionId, activePtyId, canWrite, openedPtyId, identityKey]);
 
   const close = useCallback(() => {
     if (!activePtyId || !sessionId) return;
@@ -225,6 +247,6 @@ export function useSandboxTerminal(
     write,
     activePtyId,
     close,
-    error: openError,
+    error: identityMatches ? openError : null,
   };
 }
