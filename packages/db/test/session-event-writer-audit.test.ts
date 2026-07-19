@@ -442,4 +442,52 @@ describe("session_events writer inventory", () => {
       expect(firstLock).toBeLessThan(enqueue!);
     }
   });
+
+  test("generic append and Agent commands keep external effects outside bounded retry", () => {
+    const definitionsFor = (relativePath: string) => {
+      const path = join(repoRoot, relativePath);
+      const sourceFile = ts.createSourceFile(
+        path,
+        readFileSync(path, "utf8"),
+        ts.ScriptTarget.Latest,
+        true,
+      );
+      const definitions = new Map<string, ts.FunctionDeclaration>();
+      const visit = (node: ts.Node): void => {
+        if (ts.isFunctionDeclaration(node) && node.name) {
+          definitions.set(node.name.text, node);
+        }
+        ts.forEachChild(node, visit);
+      };
+      visit(sourceFile);
+      return definitions;
+    };
+
+    const dbDefinitions = definitionsFor("packages/db/src/index.ts");
+    const genericAppend = dbDefinitions.get("appendSessionEvents");
+    expect(genericAppend).toBeDefined();
+    expect(functionCalls(genericAppend!, "retryWorkspacePersistence")).toBe(true);
+    expect(callPositions(genericAppend!, "retryWorkspacePersistence")[0]).toBeLessThan(
+      insertPositions(genericAppend!)[0]!,
+    );
+
+    const commandDefinitions = definitionsFor("packages/core/src/application/session-commands.ts");
+    const retryHelper = commandDefinitions.get("runAgentCommandPersistenceTransaction");
+    expect(retryHelper).toBeDefined();
+    expect(functionCalls(retryHelper!, "runIdempotentPersistenceTransaction")).toBe(true);
+    expect(functionCalls(retryHelper!, "withWorkspaceRls")).toBe(true);
+    expect(functionCalls(retryHelper!, "publishAndWakeAgentCommand")).toBe(false);
+    expect(functionCalls(retryHelper!, "publishWorkspaceControlEvent")).toBe(false);
+
+    for (const commandName of ["sendAgentSessionMessage", "steerAgentSession"] as const) {
+      const command = commandDefinitions.get(commandName);
+      expect(command).toBeDefined();
+      expect(functionCalls(command!, "runAgentCommandPersistenceTransaction")).toBe(true);
+      const persistence = callPositions(command!, "runAgentCommandPersistenceTransaction")[0]!;
+      const publishAndWake = callPositions(command!, "publishAndWakeAgentCommand")[0]!;
+      const publishControl = callPositions(command!, "publishWorkspaceControlEvent")[0]!;
+      expect(persistence).toBeLessThan(publishAndWake);
+      expect(persistence).toBeLessThan(publishControl);
+    }
+  });
 });

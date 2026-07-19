@@ -272,6 +272,7 @@ See §3.5 — the three stores (`session_history_items`, `agent_run_states`, `se
 
 - **Graceful shutdown (SIGTERM):** the activity checkpoints conversation and sandbox truth, marks the same logical turn recoverable, and lets a healthy worker create the next fenced attempt. No prompt or synthetic resume message enters the queue.
 - **Terminal/control race:** graceful recovery, compaction, sandbox supersession, ordinary terminal settlement, approval, lease loss, credential failover, and worker death all use the control-aware canonical event-write locks (control → workspace key-share → session → turn → attempt) and check the same inference gate plus attempt identity. The loser is stale and publishes no authoritative events.
+- **Persistence retry boundary:** generic audit appends and operation-keyed Agent Message/Steer commands retry only their idempotent PostgreSQL transaction on `40P01`/`40001`; inference, tools, NATS publication, and workflow wakes stay outside. Database failures retain sanitized SQLSTATE/stage/correlation truth without query text or parameters.
 - **Ungraceful death (heartbeat timeout):** surfaces as a typed `ActivityFailure` carrying the exact Temporal activity id. `applySessionTurnWorkerDeath` recovers the same turn from durable conversation truth, bounded by the per-turn death ceiling; exceeding it atomically fails the exact turn/session.
 - Neither is an automatic Temporal retry. Deep dive: [`run-lifecycle.md`](run-lifecycle.md).
 

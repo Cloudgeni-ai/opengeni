@@ -1,5 +1,11 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { sendAgentSessionMessage } from "@opengeni/core";
+import { appendAndPublishEvents } from "@opengeni/events";
+import {
+  acquireSharedTestDatabase,
+  MemoryEventBus,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
 import postgres from "postgres";
 import {
   addSessionSystemUpdate,
@@ -259,6 +265,39 @@ async function sendAgentMessage(
   );
 }
 
+async function sendPublishedAgentMessage(
+  actor: RunningFixture,
+  target: Pick<RunningFixture, "sessionId">,
+  operationKey: string,
+  bus: MemoryEventBus,
+  onWake: () => void,
+): Promise<unknown> {
+  return await sendAgentSessionMessage(
+    {
+      db,
+      bus,
+      workflowClient: {
+        wakeSessionWorkflow: async () => {
+          onWake();
+        },
+      },
+    },
+    {
+      accountId: actor.accountId,
+      workspaceId: actor.workspaceId,
+      callerSessionId: actor.sessionId,
+      callerTurnId: actor.turnId,
+      callerAttemptId: actor.attemptId,
+      callerExecutionGeneration: 1,
+    },
+    {
+      targetSessionId: target.sessionId,
+      text: `OPE-63 published pair-lock message ${operationKey}`,
+      idempotencyKey: operationKey,
+    },
+  );
+}
+
 async function waitFor(
   description: string,
   read: () => Promise<number>,
@@ -508,6 +547,13 @@ beforeAll(async () => {
       lock_id integer not null
     )
   `;
+  await admin`
+    create table ope63_command_faults (
+      action text primary key,
+      sql_state text not null,
+      always_fault boolean not null default false
+    )
+  `;
   await admin`create sequence ope63_fault_attempt_seq`;
   await admin`create sequence ope63_rollback_candidate_seq`;
   await admin.unsafe(`
@@ -572,6 +618,8 @@ beforeAll(async () => {
     as $function$
     declare
       configured record;
+      configured_fault record;
+      fault_attempt bigint;
     begin
       select lock_class, lock_id
       into configured
@@ -579,6 +627,21 @@ beforeAll(async () => {
       where event_type = 'receipt:' || new.action;
       if found then
         perform pg_catalog.pg_advisory_xact_lock(configured.lock_class, configured.lock_id);
+      end if;
+
+      select sql_state, always_fault
+      into configured_fault
+      from public.ope63_command_faults
+      where action = new.action;
+      if found and configured_fault.sql_state in ('40P01', '40001') then
+        fault_attempt := nextval('public.ope63_fault_attempt_seq');
+        if configured_fault.always_fault or fault_attempt = 1 then
+          raise exception using
+            errcode = configured_fault.sql_state,
+            message = 'OPE-63 injected command persistence fault with private-token',
+            detail = 'Failed query: insert into session_command_receipts values ($1) private-token',
+            table = 'session_command_receipts';
+        end if;
       end if;
       return new;
     end
@@ -703,6 +766,60 @@ describe("OPE-63 canonical session-event lock order", () => {
       );
     }
   }, 120_000);
+
+  test("root goal append and root-to-lower-UUID child command finish in both arrival orders", async () => {
+    for (const first of ["goal", "command"] as const) {
+      const workspace = await freshWorkspace();
+      const ids = orderedParentChildIds("child-first");
+      expect(ids.childSessionId < ids.parentSessionId).toBe(true);
+      const root = await seedRunningSession(workspace, { sessionId: ids.parentSessionId });
+      const child = await seedIdleChild(workspace, ids.childSessionId, ids.parentSessionId);
+      await seedGoal(root);
+      const bus = new MemoryEventBus();
+      let goalMutations = 0;
+      let wakes = 0;
+      const goalWriter = async () => {
+        goalMutations += 1;
+        const goal = await updateSessionGoal(db, root.workspaceId, root.sessionId, {
+          text: "OPE-63 live root fixture",
+        });
+        return await appendAndPublishEvents(db, bus, root.workspaceId, root.sessionId, [
+          {
+            type: "goal.updated",
+            payload: { goalId: goal.id, text: goal.text, version: goal.version },
+          },
+        ]);
+      };
+      const commandWriter = async () =>
+        await sendPublishedAgentMessage(root, child, crypto.randomUUID(), bus, () => {
+          wakes += 1;
+        });
+
+      await raceInOrder(
+        first === "goal" ? "goal.updated" : "system.update.pending",
+        first === "goal" ? goalWriter : commandWriter,
+        first === "goal" ? commandWriter : goalWriter,
+      );
+
+      expect(goalMutations).toBe(1);
+      expect(wakes).toBe(1);
+      expect(bus.published).toHaveLength(2);
+      expect(await assertCommittedSequence(root, 1)).toMatchObject([
+        { sequence: 1, type: "goal.updated" },
+      ]);
+      expect(await assertCommittedSequence(child, 1)).toMatchObject([
+        { sequence: 1, type: "system.update.pending" },
+      ]);
+      const [updates] = await admin<{ count: number }[]>`
+        select count(*)::int as count
+        from session_system_updates
+        where workspace_id = ${workspace.workspaceId}
+          and session_id = ${child.sessionId}
+          and kind = 'agent_message'
+      `;
+      expect(updates?.count).toBe(1);
+    }
+  }, 60_000);
 
   test("recording settlement and streamed activity retain one monotonic timeline in both orders", async () => {
     for (const first of ["settlement", "activity"] as const) {
@@ -913,6 +1030,100 @@ describe("OPE-63 canonical session-event lock order", () => {
     expect(await assertCommittedSequence(secondTarget, 1)).toMatchObject([
       { sequence: 1, type: "system.update.pending" },
     ]);
+  }, 60_000);
+
+  test("retries only Agent command persistence and publishes or wakes exactly once", async () => {
+    for (const sqlState of ["40P01", "40001"] as const) {
+      const workspace = await freshWorkspace();
+      const ids = orderedParentChildIds("child-first");
+      const actor = await seedRunningSession(workspace, { sessionId: ids.parentSessionId });
+      const target = await seedIdleChild(workspace, ids.childSessionId, ids.parentSessionId);
+      const operationKey = crypto.randomUUID();
+      const bus = new MemoryEventBus();
+      let wakes = 0;
+      await admin`select setval('ope63_fault_attempt_seq', 1, false)`;
+      await admin`
+        insert into ope63_command_faults (action, sql_state)
+        values ('agent.message', ${sqlState})
+      `;
+      let delivered: unknown;
+      try {
+        delivered = await sendPublishedAgentMessage(actor, target, operationKey, bus, () => {
+          wakes += 1;
+        });
+      } finally {
+        await admin`delete from ope63_command_faults where action = 'agent.message'`;
+      }
+
+      expect(delivered).toMatchObject({ replay: false });
+      expect(wakes).toBe(1);
+      expect(bus.published).toHaveLength(1);
+      expect(bus.published[0]).toMatchObject([{ type: "system.update.pending", sequence: 1 }]);
+      const [attempts] = await admin<{ last_value: string }[]>`
+        select last_value::text from ope63_fault_attempt_seq
+      `;
+      expect(Number(attempts?.last_value)).toBe(2);
+      const [persisted] = await admin<Array<{ receipts: number; updates: number; events: number }>>`
+        select
+          (select count(*)::int from session_command_receipts
+           where workspace_id = ${workspace.workspaceId}
+             and action = 'agent.message'
+             and operation_key = ${operationKey}) as receipts,
+          (select count(*)::int from session_system_updates
+           where workspace_id = ${workspace.workspaceId}
+             and session_id = ${target.sessionId}
+             and kind = 'agent_message') as updates,
+          (select count(*)::int from session_events
+           where workspace_id = ${workspace.workspaceId}
+             and session_id = ${target.sessionId}
+             and type = 'system.update.pending') as events
+      `;
+      expect(persisted).toEqual({ receipts: 1, updates: 1, events: 1 });
+      await assertCommittedSequence(target, 1);
+    }
+  }, 60_000);
+
+  test("sanitizes an exhausted Agent command persistence failure before external effects", async () => {
+    const workspace = await freshWorkspace();
+    const ids = orderedParentChildIds("child-first");
+    const actor = await seedRunningSession(workspace, { sessionId: ids.parentSessionId });
+    const target = await seedIdleChild(workspace, ids.childSessionId, ids.parentSessionId);
+    const bus = new MemoryEventBus();
+    let wakes = 0;
+    await admin`select setval('ope63_fault_attempt_seq', 1, false)`;
+    await admin`
+      insert into ope63_command_faults (action, sql_state, always_fault)
+      values ('agent.message', '40P01', true)
+    `;
+    const error = await sendPublishedAgentMessage(actor, target, crypto.randomUUID(), bus, () => {
+      wakes += 1;
+    })
+      .catch((caught) => caught)
+      .finally(async () => {
+        await admin`delete from ope63_command_faults where action = 'agent.message'`;
+      });
+
+    expect(error).toBeInstanceOf(SessionEventPersistenceError);
+    expect((error as SessionEventPersistenceError).details).toMatchObject({
+      code: "db_deadlock",
+      sqlState: "40P01",
+      stage: "session_commands.agent_message",
+      eventTypes: ["system.update.pending"],
+      attempts: 3,
+      retryOutcome: "exhausted",
+      database: { table: "session_command_receipts" },
+    });
+    const observable = JSON.stringify({
+      message: (error as Error).message,
+      stack: (error as Error).stack,
+      details: (error as SessionEventPersistenceError).details,
+      cause: (error as Error & { cause?: unknown }).cause,
+    });
+    expect(observable).not.toContain("private-token");
+    expect(observable).not.toContain("insert into");
+    expect(wakes).toBe(0);
+    expect(bus.published).toHaveLength(0);
+    expect(await assertCommittedSequence(target, 0)).toEqual([]);
   }, 60_000);
 
   test("locks both child lifecycle outbox sessions before parent-to-child Agent commands", async () => {
@@ -1184,5 +1395,79 @@ describe("OPE-63 canonical session-event lock order", () => {
         payload: { sourceKey },
       });
     }
+  }, 60_000);
+
+  test("retries a generic goal append without replaying inference, goal mutation, or publish", async () => {
+    for (const sqlState of ["40P01", "40001"] as const) {
+      const fixture = await seedRunningSession();
+      await seedGoal(fixture);
+      await admin`select setval('ope63_fault_attempt_seq', 1, false)`;
+      const bus = new MemoryEventBus();
+      let inferenceCalls = 0;
+      let goalMutations = 0;
+      inferenceCalls += 1;
+      goalMutations += 1;
+      const goal = await updateSessionGoal(db, fixture.workspaceId, fixture.sessionId, {
+        text: `OPE-63 retried generic append ${sqlState}`,
+      });
+
+      await appendAndPublishEvents(db, bus, fixture.workspaceId, fixture.sessionId, [
+        {
+          type: "goal.updated",
+          payload: {
+            goalId: goal.id,
+            version: goal.version,
+            ope63FaultSqlState: sqlState,
+          },
+        },
+      ]);
+
+      expect(inferenceCalls).toBe(1);
+      expect(goalMutations).toBe(1);
+      expect(bus.published).toHaveLength(1);
+      expect(bus.published[0]).toMatchObject([{ sequence: 1, type: "goal.updated" }]);
+      const [attempts] = await admin<{ last_value: string }[]>`
+        select last_value::text from ope63_fault_attempt_seq
+      `;
+      expect(Number(attempts?.last_value)).toBe(2);
+      const [persistedGoal] = await admin<{ version: number; text: string }[]>`
+        select version, text from session_goals where session_id = ${fixture.sessionId}
+      `;
+      expect(persistedGoal).toEqual({
+        version: 2,
+        text: `OPE-63 retried generic append ${sqlState}`,
+      });
+      await assertCommittedSequence(fixture, 1);
+    }
+  }, 60_000);
+
+  test("sanitizes an exhausted generic append with exact stage and SQLSTATE", async () => {
+    const fixture = await seedRunningSession();
+    const error = await appendSessionEvents(db, fixture.workspaceId, fixture.sessionId, [
+      {
+        type: "goal.updated",
+        payload: { ope63AlwaysFaultSqlState: "40001", private: "private-token" },
+      },
+    ]).catch((caught) => caught);
+
+    expect(error).toBeInstanceOf(SessionEventPersistenceError);
+    expect((error as SessionEventPersistenceError).details).toMatchObject({
+      code: "db_serialization_failure",
+      sqlState: "40001",
+      stage: "session_events.append_generic",
+      eventTypes: ["goal.updated"],
+      attempts: 3,
+      retryOutcome: "exhausted",
+      database: { table: "session_events" },
+    });
+    const observable = JSON.stringify({
+      message: (error as Error).message,
+      stack: (error as Error).stack,
+      details: (error as SessionEventPersistenceError).details,
+      cause: (error as Error & { cause?: unknown }).cause,
+    });
+    expect(observable).not.toContain("private-token");
+    expect(observable).not.toContain("insert into");
+    expect(await assertCommittedSequence(fixture, 0)).toEqual([]);
   }, 60_000);
 });

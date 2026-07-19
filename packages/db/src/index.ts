@@ -22929,56 +22929,58 @@ export async function appendSessionEvents(
   if (inputs.length === 0) {
     return [];
   }
-  return await withWorkspaceRls(
-    db,
-    workspaceId,
-    async (scopedDb) =>
-      await scopedDb.transaction(async (tx) => {
-        const turnIds = inputs
-          .map((input) => input.turnId)
-          .filter((id): id is string => typeof id === "string");
-        const attemptIds = inputs
-          .map((input) => input.turnAttemptId)
-          .filter((id): id is string => typeof id === "string");
-        const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
-          workspaceId,
-          sessionIds: [sessionId],
-          turnIds,
-          attemptIds,
-        });
-        const row = locks.sessions[0];
-        if (!row) {
-          throw new Error(`Session not found: ${sessionId}`);
-        }
-        let sequence = row.lastSequence;
-        const values = inputs.map((input) => ({
-          accountId: row.accountId,
-          workspaceId: row.workspaceId,
-          sessionId,
-          sequence: ++sequence,
-          type: input.type,
-          payload: sanitizeEventPayload(input.payload ?? {}),
-          clientEventId: input.clientEventId ?? null,
-          turnId: input.turnId ?? null,
-          turnGeneration: input.turnGeneration ?? null,
-          turnAttemptId: input.turnAttemptId ?? null,
-          turnAssociation: input.turnAssociation ?? (input.turnId ? "current" : null),
-          duplicateOfEventId: input.duplicateOfEventId ?? null,
-          duplicateReason: input.duplicateReason ?? null,
-          producerId: input.producerId ?? null,
-          producerSeq: input.producerSeq ?? null,
-          occurredAt: input.occurredAt ?? new Date(),
-        }));
-        const inserted = await tx.insert(schema.sessionEvents).values(values).returning();
-        await tx
-          .update(schema.sessions)
-          .set({ lastSequence: sequence, updatedAt: new Date() })
-          .where(
-            and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)),
-          );
-        return inserted.map(mapEvent);
-      }),
-  );
+  const persistence = {
+    stage: "session_events.append_generic",
+    eventTypes: inputs.map((input) => input.type),
+    maxAttempts: 3,
+  };
+  return await retryWorkspacePersistence(db, workspaceId, persistence, async (scopedDb) => {
+    return await scopedDb.transaction(async (tx) => {
+      const turnIds = inputs
+        .map((input) => input.turnId)
+        .filter((id): id is string => typeof id === "string");
+      const attemptIds = inputs
+        .map((input) => input.turnAttemptId)
+        .filter((id): id is string => typeof id === "string");
+      const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
+        workspaceId,
+        sessionIds: [sessionId],
+        turnIds,
+        attemptIds,
+      });
+      const row = locks.sessions[0];
+      if (!row) {
+        throw new Error(`Session not found: ${sessionId}`);
+      }
+      let sequence = row.lastSequence;
+      const values = inputs.map((input) => ({
+        accountId: row.accountId,
+        workspaceId: row.workspaceId,
+        sessionId,
+        sequence: ++sequence,
+        type: input.type,
+        payload: sanitizeEventPayload(input.payload ?? {}),
+        clientEventId: input.clientEventId ?? null,
+        turnId: input.turnId ?? null,
+        turnGeneration: input.turnGeneration ?? null,
+        turnAttemptId: input.turnAttemptId ?? null,
+        turnAssociation: input.turnAssociation ?? (input.turnId ? "current" : null),
+        duplicateOfEventId: input.duplicateOfEventId ?? null,
+        duplicateReason: input.duplicateReason ?? null,
+        producerId: input.producerId ?? null,
+        producerSeq: input.producerSeq ?? null,
+        occurredAt: input.occurredAt ?? new Date(),
+      }));
+      const inserted = await tx.insert(schema.sessionEvents).values(values).returning();
+      await tx
+        .update(schema.sessions)
+        .set({ lastSequence: sequence, updatedAt: new Date() })
+        .where(
+          and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)),
+        );
+      return inserted.map(mapEvent);
+    });
+  });
 }
 
 export type AcceptSessionApprovalDecisionResult =

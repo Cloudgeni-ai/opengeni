@@ -118,6 +118,12 @@ deadlock; key-share rather than update keeps unrelated sessions in one workspace
 concurrent. Start, requires-action, ordinary terminal, recoverable interruption,
 supersession, and worker-death events commit
 with turn status, session status/pointer, and `lastSequence` in one transaction.
+Generic appends and operation-keyed Agent Message/Steer commands retry PostgreSQL
+`40P01`/`40001` only around their bounded, idempotent persistence transaction.
+Provider inference, tools, live event publication, and workflow wakes remain after
+that boundary and are never replayed. An exhausted or non-retryable database
+failure surfaces as sanitized typed truth with SQLSTATE, stage, one correlation
+ID, and allowlisted catalog identifiers—never raw SQL text or bound parameters.
 
 After a reviewed release reaches staging, run the dry-by-default OPE-63 canary
 with `bun run canary:session-event-ordering`. Execution requires
