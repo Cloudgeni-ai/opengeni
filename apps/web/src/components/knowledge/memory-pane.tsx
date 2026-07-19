@@ -675,6 +675,8 @@ function MemoryCard(props: {
   return (
     <div
       ref={props.innerRef}
+      data-memory-id={memory.id}
+      data-highlighted={props.highlighted ? "true" : undefined}
       className={cn(
         "scroll-mt-4 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)]/35 p-3 transition-shadow duration-300",
         faded && "opacity-70",

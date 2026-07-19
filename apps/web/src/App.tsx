@@ -193,6 +193,11 @@ const workspaceSchedulesRoute = createRoute({
 const workspaceDocumentsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "documents",
+  // Memory used to live inside Documents, so existing timeline links and
+  // bookmarks can still carry `?memory=<id>`. Preserve that public URL as a
+  // compatibility redirect to the first-class Memory surface.
+  validateSearch: (search: Record<string, unknown>): { memory?: string } =>
+    typeof search.memory === "string" ? { memory: search.memory } : {},
   component: Documents,
 });
 const workspaceMemoryRoute = createRoute({
@@ -356,6 +361,17 @@ function Schedules() {
 
 function Documents() {
   const { workspaceId } = workspaceDocumentsRoute.useParams();
+  const { memory } = workspaceDocumentsRoute.useSearch();
+  if (memory) {
+    return (
+      <Navigate
+        to="/workspaces/$workspaceId/memory"
+        params={{ workspaceId }}
+        search={{ memory }}
+        replace
+      />
+    );
+  }
   return <LazyDocumentsRoute workspaceId={workspaceId} />;
 }
 

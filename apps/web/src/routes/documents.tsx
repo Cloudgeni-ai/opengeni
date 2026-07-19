@@ -321,9 +321,17 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
         />
 
         <div className="mt-5 grid min-h-0 min-w-0 flex-1 gap-4 lg:grid-cols-[15rem_minmax(0,1fr)] xl:grid-cols-[15rem_minmax(0,1fr)_20rem]">
-          <aside className="min-w-0 border-b border-border pb-4 lg:border-b-0 lg:border-r lg:pr-4">
+          <aside
+            aria-labelledby="document-bases-heading"
+            className="min-w-0 border-b border-border pb-4 lg:border-b-0 lg:border-r lg:pr-4"
+          >
             <div className="mb-2 flex items-center justify-between gap-2">
-              <div className="text-xs font-medium uppercase text-fg-subtle">Bases</div>
+              <h2
+                id="document-bases-heading"
+                className="text-xs font-medium uppercase text-fg-subtle"
+              >
+                Bases
+              </h2>
               <div className="text-2xs text-fg-subtle">{bases.length}</div>
             </div>
             <div className="grid auto-cols-[minmax(10rem,80%)] grid-flow-col gap-1 overflow-x-auto overscroll-x-contain pb-1 lg:block lg:space-y-1 lg:overflow-visible lg:pb-0">
@@ -613,11 +621,17 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
             )}
           </div>
 
-          <aside className="min-w-0 border-t border-border pt-4 lg:col-span-2 xl:col-span-1 xl:border-l xl:border-t-0 xl:pl-4 xl:pt-0">
-            <div className="flex items-center gap-2 text-sm font-medium">
+          <aside
+            aria-labelledby="document-search-heading"
+            className="min-w-0 border-t border-border pt-4 lg:col-span-2 xl:col-span-1 xl:border-l xl:border-t-0 xl:pl-4 xl:pt-0"
+          >
+            <h2
+              id="document-search-heading"
+              className="flex items-center gap-2 text-sm font-medium"
+            >
               <FileSearchIcon className="size-4 text-brand" />
               Search
-            </div>
+            </h2>
             <div className="mt-3 grid gap-2">
               <Input
                 aria-label="Search indexed documents"
@@ -659,13 +673,15 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
                   ))}
                 </Select>
               </div>
-              <Input
-                value={searchAclTags}
-                onChange={(event) => setSearchAclTags(event.target.value)}
-                placeholder="ACL tags"
-                className="h-8 text-xs pointer-coarse:min-h-10"
-                disabled={!selectedBaseId}
-              />
+              <FormField label="ACL tags">
+                <Input
+                  value={searchAclTags}
+                  onChange={(event) => setSearchAclTags(event.target.value)}
+                  placeholder="team, confidential"
+                  className="h-8 text-xs pointer-coarse:min-h-10"
+                  disabled={!selectedBaseId}
+                />
+              </FormField>
               <Button
                 type="button"
                 size="sm"

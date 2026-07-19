@@ -285,6 +285,21 @@ describe("OPE-15 responsive knowledge surfaces (real API + PostgreSQL)", () => {
     workspaceId: string,
     fixtures: SeededFixtures,
   ): Promise<void> {
+    // Memory was previously embedded in Documents. Existing copied links and
+    // bookmarks must migrate to the first-class surface without losing focus.
+    await page.goto(
+      `${webBaseUrl}/workspaces/${workspaceId}/documents?memory=${fixtures.proposedMemoryId}`,
+    );
+    await page.waitForURL(
+      `${webBaseUrl}/workspaces/${workspaceId}/memory?memory=${fixtures.proposedMemoryId}`,
+    );
+    await page.getByRole("heading", { level: 1, name: "Memory", exact: true }).waitFor();
+    const focusedMemory = page.locator(
+      `[data-memory-id="${fixtures.proposedMemoryId}"][data-highlighted="true"]`,
+    );
+    await focusedMemory.waitFor();
+    expect(await focusedMemory.textContent()).toContain(proposedMemoryText);
+
     await page.goto(surfaceUrl(webBaseUrl, workspaceId, "variable-sets", fixtures));
     await page.getByText(longVariableSetName, { exact: true }).waitFor();
     const manage = page.getByRole("button", {
@@ -506,6 +521,11 @@ async function openSurface(
   } else if (surface === "documents") {
     await page.getByText(longBaseName, { exact: true }).waitFor();
     await page.getByText("No documents yet", { exact: true }).waitFor();
+    const bases = page.getByRole("complementary", { name: "Bases", exact: true });
+    const search = page.getByRole("complementary", { name: "Search", exact: true });
+    await bases.waitFor();
+    await search.waitFor();
+    await search.getByRole("textbox", { name: "ACL tags", exact: true }).waitFor();
     expect(await page.getByRole("heading", { name: "Working set" }).count()).toBe(0);
   } else {
     await page.getByText(proposedMemoryText, { exact: true }).waitFor();
@@ -568,7 +588,7 @@ async function expectNoAxeViolations(
 ): Promise<void> {
   const results = await new AxeBuilder({ page })
     .include(include)
-    .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22a", "wcag22aa"])
+    .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22a", "wcag22aa", "best-practice"])
     .analyze();
   expect(
     results.violations.map((violation) => ({
