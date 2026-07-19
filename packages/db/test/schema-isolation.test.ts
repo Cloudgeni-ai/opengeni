@@ -1,6 +1,12 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import postgres from "postgres";
+import {
+  acquireLease,
+  createDb,
+  listLiveModalSandboxInstanceAttributions,
+  registerSandboxEphemeralOwner,
+} from "../src/index";
 import { migrate, runMigrations } from "../src/migrate";
 
 // Step I (§7.7 + §7.8 runtime half) — schema-isolation re-confirmation (SPIKE-1
@@ -180,6 +186,9 @@ describe("Step I — embedded dedicated-schema isolation (SPIKE-1 F1, productize
         INSERT INTO opengeni.managed_accounts (name) VALUES ('grant acct') RETURNING id`;
       const [workspace] = await sql<{ id: string }[]>`
         INSERT INTO opengeni.workspaces (account_id, name) VALUES (${account!.id}, 'grant ws') RETURNING id`;
+      await sql`
+        INSERT INTO opengeni.workspace_inference_controls (workspace_id, account_id)
+        VALUES (${workspace!.id}, ${account!.id})`;
       const [session] = await sql<{ id: string }[]>`
         WITH ids AS (SELECT gen_random_uuid() AS id)
         INSERT INTO opengeni.sessions (
@@ -214,6 +223,58 @@ describe("Step I — embedded dedicated-schema isolation (SPIKE-1 F1, productize
         expect(defaultGrantInserted).toHaveLength(1);
       } finally {
         await app.end();
+      }
+
+      // The unified provider projection is SECURITY DEFINER with a pinned
+      // pg_catalog path. Prove migration-time schema capture keeps both the
+      // pre-existing lease rows and exact verifier owners resolvable outside
+      // public; a nested call to the legacy unqualified lease helper does not.
+      const embedded = createDb(APP_URL, {
+        searchPath: "opengeni,opengeni_private,public",
+      });
+      try {
+        const sandboxGroupId = crypto.randomUUID();
+        const acquired = await acquireLease(embedded.db, {
+          accountId: account!.id,
+          workspaceId: workspace!.id,
+          sandboxGroupId,
+          kind: "turn",
+          holderId: crypto.randomUUID(),
+          backend: "modal",
+          leaseTtlMs: 60_000,
+        });
+        const executionId = crypto.randomUUID();
+        await registerSandboxEphemeralOwner(embedded.db, {
+          executionId,
+          accountId: account!.id,
+          workspaceId: workspace!.id,
+          kind: "rig_verification",
+          backend: "modal",
+          instanceId: "modal-embedded-verifier",
+          expiresAt: new Date(Date.now() + 10 * 60_000),
+        });
+
+        const attributions = await listLiveModalSandboxInstanceAttributions(embedded.db);
+        expect(attributions).toContainEqual({
+          ownerKind: "lease",
+          ownerId: acquired.lease.id,
+          workspaceId: workspace!.id,
+          instanceId: null,
+          sandboxGroupId,
+          liveness: "warming",
+          expiresAt: null,
+        });
+        expect(attributions).toContainEqual({
+          ownerKind: "rig_verification",
+          ownerId: executionId,
+          workspaceId: workspace!.id,
+          instanceId: "modal-embedded-verifier",
+          sandboxGroupId: null,
+          liveness: null,
+          expiresAt: expect.any(Date),
+        });
+      } finally {
+        await embedded.close();
       }
     } finally {
       await sql.end();

@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { testSettings } from "@opengeni/testing";
 import { sweepModalOrphanSandboxes } from "../src/sandbox";
-import type { LiveModalSandboxLeaseAttribution } from "@opengeni/db";
+import type {
+  LiveModalSandboxEphemeralOwnerAttribution,
+  LiveModalSandboxLeaseAttribution,
+} from "../src/sandbox";
 
 // The orphan sweep's LIVE-INSTANCE GUARD: a box that any live lease's envelope
 // points at is NEVER terminated, whatever its tags say. Tags are best-effort
@@ -61,6 +64,15 @@ function attributionTags(input: { leaseId: string; workspaceId: string; sandboxG
     { tagName: "opengeni_lease_id", tagValue: input.leaseId },
     { tagName: "opengeni_workspace_id", tagValue: input.workspaceId },
     { tagName: "opengeni_sandbox_group_id", tagValue: input.sandboxGroupId },
+  ];
+}
+
+function verifierTags(input: { ownerId: string; workspaceId: string }) {
+  return [
+    { tagName: "opengeni", tagValue: "true" },
+    { tagName: "opengeni_owner_kind", tagValue: "rig_verification" },
+    { tagName: "opengeni_owner_id", tagValue: input.ownerId },
+    { tagName: "opengeni_workspace_id", tagValue: input.workspaceId },
   ];
 }
 
@@ -186,5 +198,149 @@ describe("sweepModalOrphanSandboxes live-instance guard", () => {
     expect(terminated).toEqual([]);
     expect(result.terminated).toEqual([]);
     expect(result.skipped).toBe(1);
+  });
+});
+
+describe("sweepModalOrphanSandboxes rig-verification ownership", () => {
+  const createdAtMs = Date.parse("2026-07-19T12:00:00.000Z");
+  const ownerId = "11111111-1111-4111-8111-111111111111";
+  const workspaceId = "22222222-2222-4222-8222-222222222222";
+  const liveOwner: LiveModalSandboxEphemeralOwnerAttribution = {
+    ownerKind: "rig_verification",
+    ownerId,
+    workspaceId,
+    instanceId: "sb-verifier",
+    expiresAt: new Date(createdAtMs + 20 * 60_000),
+  };
+
+  test("an active exact verifier survives 120s, 150s, and 180s reaper sweeps", async () => {
+    for (const elapsedMs of [120_000, 150_000, 180_000]) {
+      const { client, terminated } = fakeModalClient([
+        {
+          id: "sb-verifier",
+          createdAt: createdAtMs / 1000,
+          tags: verifierTags({ ownerId, workspaceId }),
+        },
+      ]);
+      const result = await sweepModalOrphanSandboxes(testSettings(MODAL_SETTINGS), [liveOwner], {
+        client: client as never,
+        now: new Date(createdAtMs + elapsedMs),
+      });
+
+      expect(terminated).toEqual([]);
+      expect(result.terminated).toEqual([]);
+      expect(result.skipped).toBe(1);
+    }
+  });
+
+  test("only the exact registered instance is protected; copied owner tags are stale", async () => {
+    const tags = verifierTags({ ownerId, workspaceId });
+    const { client, terminated, retagged } = fakeModalClient([
+      { id: "sb-verifier", createdAt: createdAtMs / 1000, tags },
+      { id: "sb-wrong-instance", createdAt: createdAtMs / 1000, tags },
+    ]);
+    const result = await sweepModalOrphanSandboxes(testSettings(MODAL_SETTINGS), [liveOwner], {
+      client: client as never,
+      now: new Date(createdAtMs + 150_000),
+    });
+
+    expect(terminated).toEqual(["sb-wrong-instance"]);
+    expect(result.terminated).toEqual([
+      {
+        sandboxId: "sb-wrong-instance",
+        reason: "stale_attribution",
+        tags: {
+          opengeni: "true",
+          opengeni_owner_kind: "rig_verification",
+          opengeni_owner_id: ownerId,
+          opengeni_workspace_id: workspaceId,
+        },
+      },
+    ]);
+    expect(retagged).toEqual([]);
+  });
+
+  test("missing provider tags are healed best-effort but never authoritative", async () => {
+    const { client, terminated, retagged } = fakeModalClient([
+      { id: "sb-verifier", createdAt: createdAtMs / 1000, tags: [] },
+    ]);
+    const result = await sweepModalOrphanSandboxes(testSettings(MODAL_SETTINGS), [liveOwner], {
+      client: client as never,
+      now: new Date(createdAtMs + 180_000),
+    });
+
+    expect(terminated).toEqual([]);
+    expect(result.skipped).toBe(1);
+    expect(retagged).toEqual([
+      {
+        id: "sb-verifier",
+        tags: {
+          opengeni: "true",
+          opengeni_owner_kind: "rig_verification",
+          opengeni_owner_id: ownerId,
+          opengeni_workspace_id: workspaceId,
+        },
+      },
+    ]);
+  });
+
+  test("tag healing failure cannot weaken exact-instance protection", async () => {
+    const { client, terminated } = fakeModalClient([
+      { id: "sb-verifier", createdAt: createdAtMs / 1000, tags: [] },
+    ]);
+    (client.sandboxes as { fromId: unknown }).fromId = async () => ({
+      terminate: async () => terminated.push("sb-verifier"),
+      setTags: async () => {
+        throw new Error("tag write refused");
+      },
+    });
+    const result = await sweepModalOrphanSandboxes(testSettings(MODAL_SETTINGS), [liveOwner], {
+      client: client as never,
+      now: new Date(createdAtMs + 180_000),
+    });
+
+    expect(terminated).toEqual([]);
+    expect(result.terminated).toEqual([]);
+    expect(result.skipped).toBe(1);
+  });
+
+  test("process-death expiry removes protection at the structured sweep clock", async () => {
+    const tags = verifierTags({ ownerId, workspaceId });
+    const beforeExpiry = fakeModalClient([
+      { id: "sb-verifier", createdAt: createdAtMs / 1000, tags },
+    ]);
+    const stillLive = await sweepModalOrphanSandboxes(testSettings(MODAL_SETTINGS), [liveOwner], {
+      client: beforeExpiry.client as never,
+      now: new Date(liveOwner.expiresAt.getTime() - 1),
+    });
+    expect(beforeExpiry.terminated).toEqual([]);
+    expect(stillLive.skipped).toBe(1);
+
+    const afterExpiry = fakeModalClient([
+      { id: "sb-verifier", createdAt: createdAtMs / 1000, tags },
+    ]);
+    const expired = await sweepModalOrphanSandboxes(testSettings(MODAL_SETTINGS), [liveOwner], {
+      client: afterExpiry.client as never,
+      now: new Date(liveOwner.expiresAt.getTime()),
+    });
+    expect(afterExpiry.terminated).toEqual(["sb-verifier"]);
+    expect(expired.terminated[0]?.reason).toBe("stale_attribution");
+  });
+
+  test("omitted ownership permits immediate cleanup of stale verifier attribution", async () => {
+    const { client, terminated } = fakeModalClient([
+      {
+        id: "sb-verifier",
+        createdAt: createdAtMs / 1000,
+        tags: verifierTags({ ownerId, workspaceId }),
+      },
+    ]);
+    const result = await sweepModalOrphanSandboxes(testSettings(MODAL_SETTINGS), [], {
+      client: client as never,
+      now: new Date(createdAtMs + 30_000),
+    });
+
+    expect(terminated).toEqual(["sb-verifier"]);
+    expect(result.terminated[0]?.reason).toBe("stale_attribution");
   });
 });

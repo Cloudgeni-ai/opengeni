@@ -39,7 +39,7 @@ import {
   forceDrainOverLimitViewerOnlyBoxes,
   getBillingBalance,
   listCreditBalancesByAccount,
-  listLiveModalSandboxLeaseAttributions,
+  listLiveModalSandboxInstanceAttributions,
   listMeterableWarmLeases,
   persistDrainSnapshot,
   readLease,
@@ -475,17 +475,36 @@ async function sweepModalOrphansForConfiguredBackend(
   if (settings.sandboxBackend !== "modal" && !settings.modalTokenId && !settings.modalTokenSecret) {
     return 0;
   }
-  let liveLeases: Awaited<ReturnType<typeof listLiveModalSandboxLeaseAttributions>>;
+  let liveAttributions: Awaited<ReturnType<typeof listLiveModalSandboxInstanceAttributions>>;
   try {
-    liveLeases = await listLiveModalSandboxLeaseAttributions(db);
+    liveAttributions = await listLiveModalSandboxInstanceAttributions(db);
   } catch (error) {
-    observability.warn("sandbox reaper: live Modal lease attribution read failed", {
+    observability.warn("sandbox reaper: live Modal instance attribution read failed", {
       error: error instanceof Error ? error.message : String(error),
     });
     return 0;
   }
 
-  const result = await sweepModalOrphanSandboxes(settings, liveLeases);
+  const result = await sweepModalOrphanSandboxes(
+    settings,
+    liveAttributions.map((attribution) =>
+      attribution.ownerKind === "lease"
+        ? {
+            leaseId: attribution.ownerId,
+            workspaceId: attribution.workspaceId,
+            sandboxGroupId: attribution.sandboxGroupId,
+            instanceId: attribution.instanceId,
+            liveness: attribution.liveness,
+          }
+        : {
+            ownerKind: attribution.ownerKind,
+            ownerId: attribution.ownerId,
+            workspaceId: attribution.workspaceId,
+            instanceId: attribution.instanceId,
+            expiresAt: attribution.expiresAt,
+          },
+    ),
+  );
   for (const terminated of result.terminated) {
     observability.warn("sandbox reaper: terminated Modal orphan sandbox", {
       sandboxId: terminated.sandboxId,

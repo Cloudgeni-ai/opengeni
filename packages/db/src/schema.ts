@@ -2037,6 +2037,50 @@ export const sandboxLeaseHolders = pgTable(
   }),
 );
 
+// Standalone provider boxes that intentionally live outside the session/group
+// lease state machine still need durable, bounded ownership while they perform
+// useful work. Keep this registry separate from sandbox_leases: a rig verifier
+// is neither a turn nor a viewer and must never manufacture a lease-shaped
+// identity that no live lease owns.
+export const sandboxEphemeralOwnerKindValues = ["rig_verification"] as const;
+
+export const sandboxEphemeralOwners = pgTable(
+  "sandbox_ephemeral_owners",
+  {
+    // Caller-generated, globally unique verification execution identity. It is
+    // deliberately not defaulted so an activity must carry one identity across
+    // create callbacks, cleanup, and any provider replacement callback.
+    executionId: uuid("execution_id").primaryKey(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    kind: text("kind", { enum: sandboxEphemeralOwnerKindValues }).notNull(),
+    backend: text("backend").notNull(),
+    instanceId: text("instance_id").notNull(),
+    active: boolean("active").notNull().default(true),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    deactivatedAt: timestamp("deactivated_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    // Two active executions may never claim the same exact provider instance.
+    activeInstance: uniqueIndex("sandbox_ephemeral_owners_active_instance_idx")
+      .on(table.backend, table.instanceId)
+      .where(sql`${table.active} = true`),
+    activeExpiry: index("sandbox_ephemeral_owners_active_expiry_idx")
+      .on(table.backend, table.expiresAt)
+      .where(sql`${table.active} = true`),
+    workspaceCreated: index("sandbox_ephemeral_owners_workspace_created_idx").on(
+      table.workspaceId,
+      table.createdAt,
+    ),
+  }),
+);
+
 // The recording lifecycle states (P4.3). Exported so the activity + the query
 // layer share one source of truth for the §3.1 state machine.
 export const sessionRecordingStateValues = [

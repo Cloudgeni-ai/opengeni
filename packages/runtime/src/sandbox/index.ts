@@ -94,13 +94,18 @@ export {
   ensureModalRegistryImage,
   modalSandboxAttributionEnvironment,
   modalSandboxAttributionTags,
+  modalSandboxEphemeralOwnerTags,
   sweepModalOrphanSandboxes,
   tagModalSandbox,
+  tagModalSandboxEphemeralOwner,
   terminateModalSandboxById,
+  type LiveModalSandboxEphemeralOwnerAttribution,
+  type LiveModalSandboxInstanceAttribution,
   type LiveModalSandboxLeaseAttribution,
   type ModalModuleLoader,
   type ModalOrphanSweepResult,
   type ModalSandboxAttribution,
+  type ModalSandboxEphemeralOwnerAttribution,
 } from "./providers/modal";
 export {
   selectBackend,

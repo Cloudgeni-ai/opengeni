@@ -13937,6 +13937,44 @@ export interface LiveModalSandboxLeaseAttribution {
   liveness: SandboxLeaseLiveness;
 }
 
+export type SandboxEphemeralOwnerKind = "rig_verification";
+
+export interface SandboxEphemeralOwner {
+  executionId: string;
+  accountId: string;
+  workspaceId: string;
+  kind: SandboxEphemeralOwnerKind;
+  backend: string;
+  instanceId: string;
+  active: boolean;
+  expiresAt: Date;
+  deactivatedAt: Date | null;
+}
+
+// The provider orphan sweep consumes this ONE exact-instance projection. Lease
+// ownership remains lease-shaped; verifier ownership remains independently
+// typed and bounded. Neither can protect a different provider instance merely
+// because its diagnostic tags happen to match.
+export type LiveModalSandboxInstanceAttribution =
+  | {
+      ownerKind: "lease";
+      ownerId: string;
+      workspaceId: string;
+      instanceId: string | null;
+      sandboxGroupId: string;
+      liveness: SandboxLeaseLiveness;
+      expiresAt: null;
+    }
+  | {
+      ownerKind: "rig_verification";
+      ownerId: string;
+      workspaceId: string;
+      instanceId: string;
+      sandboxGroupId: null;
+      liveness: null;
+      expiresAt: Date;
+    };
+
 export interface AcquireLeaseInput {
   accountId: string;
   workspaceId: string;
@@ -15926,6 +15964,181 @@ export async function listLiveModalSandboxLeaseAttributions(
     instanceId: r.instance_id,
     liveness: r.liveness,
   }));
+}
+
+function mapSandboxEphemeralOwner(row: {
+  execution_id: string;
+  account_id: string;
+  workspace_id: string;
+  kind: SandboxEphemeralOwnerKind;
+  backend: string;
+  instance_id: string;
+  active: boolean;
+  expires_at: Date | string;
+  deactivated_at: Date | string | null;
+}): SandboxEphemeralOwner {
+  return {
+    executionId: row.execution_id,
+    accountId: row.account_id,
+    workspaceId: row.workspace_id,
+    kind: row.kind,
+    backend: row.backend,
+    instanceId: row.instance_id,
+    active: row.active,
+    expiresAt: new Date(row.expires_at),
+    deactivatedAt: row.deactivated_at ? new Date(row.deactivated_at) : null,
+  };
+}
+
+/**
+ * Persist the exact standalone provider instance before setup begins. A repeated
+ * create callback for the same execution may replace the instance identity
+ * (archive hydration can do this), but a deactivated execution is never
+ * resurrected and two active executions can never claim one instance.
+ */
+export async function registerSandboxEphemeralOwner(
+  db: Database,
+  input: {
+    executionId: string;
+    accountId: string;
+    workspaceId: string;
+    kind: SandboxEphemeralOwnerKind;
+    backend: string;
+    instanceId: string;
+    expiresAt: Date;
+  },
+): Promise<SandboxEphemeralOwner> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await scopedDb.execute<{
+        execution_id: string;
+        account_id: string;
+        workspace_id: string;
+        kind: SandboxEphemeralOwnerKind;
+        backend: string;
+        instance_id: string;
+        active: boolean;
+        expires_at: Date | string;
+        deactivated_at: Date | string | null;
+      }>(sql`
+        insert into sandbox_ephemeral_owners (
+          execution_id, account_id, workspace_id, kind, backend, instance_id,
+          active, expires_at, deactivated_at, created_at, updated_at
+        ) values (
+          ${input.executionId}, ${input.accountId}, ${input.workspaceId}, ${input.kind},
+          ${input.backend}, ${input.instanceId}, true, ${input.expiresAt.toISOString()}, null, now(), now()
+        )
+        on conflict (execution_id) do update set
+          instance_id = excluded.instance_id,
+          expires_at = excluded.expires_at,
+          updated_at = now()
+        where sandbox_ephemeral_owners.account_id = excluded.account_id
+          and sandbox_ephemeral_owners.workspace_id = excluded.workspace_id
+          and sandbox_ephemeral_owners.kind = excluded.kind
+          and sandbox_ephemeral_owners.backend = excluded.backend
+          and sandbox_ephemeral_owners.active = true
+        returning execution_id, account_id, workspace_id, kind, backend,
+          instance_id, active, expires_at, deactivated_at
+      `);
+      const row = rows[0];
+      if (!row) {
+        throw new Error(
+          `Sandbox ephemeral owner ${input.executionId} is inactive or belongs to a different identity`,
+        );
+      }
+      return mapSandboxEphemeralOwner(row);
+    },
+  );
+}
+
+/** Deactivate only the execution's currently registered exact instance. */
+export async function deactivateSandboxEphemeralOwner(
+  db: Database,
+  input: {
+    executionId: string;
+    accountId: string;
+    workspaceId: string;
+    kind: SandboxEphemeralOwnerKind;
+    backend: string;
+    instanceId: string;
+  },
+): Promise<boolean> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await scopedDb.execute<{ execution_id: string }>(sql`
+        update sandbox_ephemeral_owners set
+          active = false,
+          deactivated_at = now(),
+          expires_at = least(expires_at, now()),
+          updated_at = now()
+        where execution_id = ${input.executionId}
+          and workspace_id = ${input.workspaceId}
+          and kind = ${input.kind}
+          and backend = ${input.backend}
+          and instance_id = ${input.instanceId}
+          and active = true
+        returning execution_id
+      `);
+      return rows.length > 0;
+    },
+  );
+}
+
+// Cross-workspace provider ownership read for the Modal orphan sweep. The
+// SECURITY DEFINER function is the sole sanctioned RLS bypass and unions the
+// existing OPE-48/OPE-60 lease projection with only active, unexpired verifier
+// instances.
+export async function listLiveModalSandboxInstanceAttributions(
+  db: Database,
+): Promise<LiveModalSandboxInstanceAttribution[]> {
+  const rows = await rawRows<{
+    owner_kind: "lease" | SandboxEphemeralOwnerKind;
+    owner_id: string;
+    workspace_id: string;
+    instance_id: string | null;
+    sandbox_group_id: string | null;
+    liveness: SandboxLeaseLiveness | null;
+    expires_at: Date | string | null;
+  }>(
+    db,
+    sql`
+      select owner_kind, owner_id, workspace_id, instance_id,
+        sandbox_group_id, liveness, expires_at
+      from opengeni_private.list_live_modal_sandbox_instances()
+    `,
+  );
+  return rows.map((row) => {
+    if (row.owner_kind === "lease") {
+      if (!row.sandbox_group_id || !row.liveness) {
+        throw new Error(`Live Modal lease ${row.owner_id} is missing lease attribution`);
+      }
+      return {
+        ownerKind: "lease",
+        ownerId: row.owner_id,
+        workspaceId: row.workspace_id,
+        instanceId: row.instance_id,
+        sandboxGroupId: row.sandbox_group_id,
+        liveness: row.liveness,
+        expiresAt: null,
+      };
+    }
+    if (!row.instance_id || !row.expires_at) {
+      throw new Error(`Live Modal verifier ${row.owner_id} is missing exact attribution`);
+    }
+    return {
+      ownerKind: "rig_verification",
+      ownerId: row.owner_id,
+      workspaceId: row.workspace_id,
+      instanceId: row.instance_id,
+      sandboxGroupId: null,
+      liveness: null,
+      expiresAt: new Date(row.expires_at),
+    };
+  });
 }
 
 // §4.7 — explicit re-arm seam (D1). acquireLease already re-arms a draining

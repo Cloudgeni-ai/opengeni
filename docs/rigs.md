@@ -7,7 +7,7 @@ A workspace owns named **rigs**: versioned sandbox machine definitions (a base i
 1. **Versions are append-only and content-immutable.** `rig_versions` rows are never updated in place; only the `active` flag flips. Exactly one version per rig can be active at a time (a partial unique index on `(rig_id) WHERE active`).
 2. **A session's rig binding is frozen at creation.** `sessions.rig_id`/`sessions.rig_version_id` are set once, from the explicit `rigId` on create or the workspace's default rig, and never move — even if the rig is promoted to a new active version mid-session. A shared box (`sandbox: 'shared'` or an explicit group) must carry the same frozen `rig_version_id` as the rest of its group; a mismatch 422s at create.
 3. **Two change kinds, two trust levels.** `setup_append` is additive (one already-verified-in-a-live-box shell command) and **auto-merges into a new active version on a green clean-replay run** — no `rigs:manage` needed. `definition_edit` is a full next-version edit (image/script/checks/credential hooks/default variable sets) that still runs the same clean-replay verification but always lands `proposed`; promoting it to a new active version requires `rigs:manage`.
-4. **Verification runs in a throwaway, secret-free sandbox.** Rig CI establishes its own sandbox session (id `rig-verification-<changeId>` / `rig-version-verification-<versionId>`), runs the rig-setup hook and (for `setup_append`) the proposed command, then every declared check, and always terminates the box in a `finally` — nothing from a rig verification run persists.
+4. **Verification runs in a throwaway, secret-free sandbox with bounded ownership.** Rig CI establishes its own sandbox session (id `rig-verification-<changeId>` / `rig-version-verification-<versionId>`). Its provider-create callback retains the cleanup handle, persists the exact instance under a globally unique `rig_verification` execution owner with a 20-minute expiry, and only then applies diagnostic provider tags best-effort and permits setup. This is a separate owner type, never a fabricated turn/viewer lease. The run executes the rig-setup hook, the proposed command for `setup_append`, and every declared check; its `finally` independently deactivates ownership and terminates the provider. Nothing persists, and expiry is the process-death cleanup backstop.
 5. **Workspace isolation.** `rigs`, `rig_versions`, and `rig_changes` are all FORCE-RLS workspace-scoped tables, same as every other workspace table.
 6. **Rig setup never touches selfhosted.** The rig-setup hook is part of the same owned-hooks block as the repository-clone and credential hooks, which is skipped entirely when the turn's effective sandbox backend is `selfhosted` (a [Connected Machine](connected-machines.md) is the user's own computer; the platform never runs setup against it). A machine-targeted turn therefore always behaves as if rig-less for setup purposes, even when the session carries a rig binding.
 
@@ -77,10 +77,11 @@ A session's rig binding resolves at create as: the explicit `rigId` on the creat
 Every proposed change is verified the same way, in a throwaway sandbox with no attached secrets:
 
 1. Establish a fresh sandbox session (`rig-verification-<changeId>` or `rig-version-verification-<versionId>`), applying the candidate version's image via the same `rig > pack > deployment` precedence as a live turn.
-2. If the candidate version has a non-empty `setupScript`, run the rig-setup hook against it.
-3. For a `setup_append` change, run the proposed command; a nonzero exit rejects the change immediately without running the declared checks.
-4. Run every declared check (`RigCheck.command`), recording `exitCode`/`output` per check.
-5. Classify the outcome and always tear the sandbox down in a `finally`, whether verification passed, failed, or the whole run threw:
+2. As soon as the provider returns the exact instance, persist its active `rig_verification` execution owner **before** best-effort tags, readiness, setup, or checks. The Modal orphan sweep protects only that matching active, unexpired instance; stale/wrong tags do not protect a box.
+3. If the candidate version has a non-empty `setupScript`, run the rig-setup hook against it.
+4. For a `setup_append` change, run the proposed command; a nonzero exit rejects the change immediately without running the declared checks.
+5. Run every declared check (`RigCheck.command`), recording `exitCode`/`output` per check.
+6. Classify the outcome and, whether verification passed, failed, timed out, was cancelled, or threw during setup, run durable-owner deactivation and provider termination as independent cleanup operations in a `finally`:
 
 | Kind | Checks passed? | Infra error? | Outcome |
 |---|---|---|---|

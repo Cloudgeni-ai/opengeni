@@ -26,6 +26,21 @@ export type LiveModalSandboxLeaseAttribution = ModalSandboxAttribution & {
   liveness?: string;
 };
 
+export type ModalSandboxEphemeralOwnerAttribution = {
+  ownerKind: "rig_verification";
+  ownerId: string;
+  workspaceId: string;
+};
+
+export type LiveModalSandboxEphemeralOwnerAttribution = ModalSandboxEphemeralOwnerAttribution & {
+  instanceId: string;
+  expiresAt: Date;
+};
+
+export type LiveModalSandboxInstanceAttribution =
+  | LiveModalSandboxLeaseAttribution
+  | LiveModalSandboxEphemeralOwnerAttribution;
+
 export type ModalOrphanSweepTermination = {
   sandboxId: string;
   reason: "stale_attribution" | "unattributed";
@@ -56,6 +71,17 @@ export function modalSandboxAttributionTags(
     opengeni_lease_id: input.leaseId,
     opengeni_workspace_id: input.workspaceId,
     opengeni_sandbox_group_id: input.sandboxGroupId,
+  };
+}
+
+export function modalSandboxEphemeralOwnerTags(
+  input: ModalSandboxEphemeralOwnerAttribution,
+): Record<string, string> {
+  return {
+    opengeni: "true",
+    opengeni_owner_kind: input.ownerKind,
+    opengeni_owner_id: input.ownerId,
+    opengeni_workspace_id: input.workspaceId,
   };
 }
 
@@ -264,6 +290,24 @@ export async function tagModalSandbox(
   }
 }
 
+export async function tagModalSandboxEphemeralOwner(
+  settings: Settings,
+  sandboxId: string,
+  attribution: ModalSandboxEphemeralOwnerAttribution,
+): Promise<boolean> {
+  if (!sandboxId) {
+    return false;
+  }
+  const modal = await createModalClient(settings);
+  try {
+    const sandbox = await modal.sandboxes.fromId(sandboxId);
+    await sandbox.setTags(modalSandboxEphemeralOwnerTags(attribution));
+    return true;
+  } finally {
+    modal.close();
+  }
+}
+
 export async function terminateModalSandboxById(
   settings: Settings,
   sandboxId: string,
@@ -331,7 +375,7 @@ function attributionKey(
 
 export async function sweepModalOrphanSandboxes(
   settings: Settings,
-  liveLeases: LiveModalSandboxLeaseAttribution[],
+  liveAttributions: LiveModalSandboxInstanceAttribution[],
   options: {
     now?: Date;
     maxTerminations?: number;
@@ -342,6 +386,17 @@ export async function sweepModalOrphanSandboxes(
   const nowMs = options.now?.getTime() ?? Date.now();
   const maxTerminations = options.maxTerminations ?? MODAL_ORPHAN_SWEEP_LIMIT;
   const unattributedGraceMs = options.unattributedGraceMs ?? MODAL_UNATTRIBUTED_ORPHAN_GRACE_MS;
+  // The DB projection already excludes expired verifier rows. Re-check against
+  // this sweep's structured clock so a row that expires between the DB read and
+  // provider enumeration cannot protect an abandoned box for one extra pass.
+  const liveExactAttributions = liveAttributions.filter(
+    (attribution) =>
+      "leaseId" in attribution ||
+      (Number.isFinite(attribution.expiresAt.getTime()) && attribution.expiresAt.getTime() > nowMs),
+  );
+  const liveLeases = liveExactAttributions.filter(
+    (attribution): attribution is LiveModalSandboxLeaseAttribution => "leaseId" in attribution,
+  );
   const liveByAttribution = new Map(liveLeases.map((lease) => [attributionKey(lease), lease]));
   // LIVE-INSTANCE GUARD: a box that any live lease's envelope points at is NEVER
   // an orphan, whatever its tags say. Tags are best-effort attribution (setTags
@@ -351,9 +406,9 @@ export async function sweepModalOrphanSandboxes(
   // e644e8a8, 2026-07-06) — the box's unpushed work was unrecoverable because
   // nothing outside the reaper drain persists /workspace.
   const liveByInstanceId = new Map(
-    liveLeases
-      .filter((lease) => lease.instanceId)
-      .map((lease) => [lease.instanceId as string, lease]),
+    liveExactAttributions
+      .filter((attribution) => attribution.instanceId)
+      .map((attribution) => [attribution.instanceId as string, attribution]),
   );
   const ownedClient = options.client ? null : await createModalClient(settings);
   const modal = (options.client ?? ownedClient)! as ModalCpListClient;
@@ -389,27 +444,34 @@ export async function sweepModalOrphanSandboxes(
         const leaseId = tags.opengeni_lease_id;
         const workspaceId = tags.opengeni_workspace_id;
         const sandboxGroupId = tags.opengeni_sandbox_group_id;
+        const ownerKind = tags.opengeni_owner_kind;
+        const ownerId = tags.opengeni_owner_id;
         const liveByInstance = info.id ? liveByInstanceId.get(info.id) : undefined;
         if (liveByInstance) {
-          // Live-instance guard (see above): a live lease resumes this exact box
-          // by id — hard-skip it, and HEAL its attribution tags when they are
-          // missing/stale so it stops looking sweep-eligible. Best-effort: a
-          // failed re-tag must never fail the sweep (the guard, not the tags,
-          // is what protects the box now).
-          if (
-            leaseId !== liveByInstance.leaseId ||
-            workspaceId !== liveByInstance.workspaceId ||
-            sandboxGroupId !== liveByInstance.sandboxGroupId
-          ) {
-            try {
-              const sandbox = await modal.sandboxes.fromId(info.id);
-              await sandbox.setTags(
-                modalSandboxAttributionTags({
+          // Live-instance guard (see above): a live lease or bounded verifier
+          // owns this exact box by id — hard-skip it, and HEAL its attribution
+          // tags when they are missing/stale so it stops looking sweep-eligible.
+          // Best-effort: a failed re-tag must never fail the sweep (the registry,
+          // not the tags, is what protects the box now).
+          const expectedTags =
+            "leaseId" in liveByInstance
+              ? modalSandboxAttributionTags({
                   leaseId: liveByInstance.leaseId,
                   workspaceId: liveByInstance.workspaceId,
                   sandboxGroupId: liveByInstance.sandboxGroupId,
-                }),
-              );
+                })
+              : modalSandboxEphemeralOwnerTags({
+                  ownerKind: liveByInstance.ownerKind,
+                  ownerId: liveByInstance.ownerId,
+                  workspaceId: liveByInstance.workspaceId,
+                });
+          const tagsMatch = Object.entries(expectedTags).every(
+            ([tagName, tagValue]) => tags[tagName] === tagValue,
+          );
+          if (!tagsMatch) {
+            try {
+              const sandbox = await modal.sandboxes.fromId(info.id);
+              await sandbox.setTags(expectedTags);
             } catch {
               // Tag healing is opportunistic; the instance guard already
               // protects this box on every future sweep pass.
@@ -426,6 +488,11 @@ export async function sweepModalOrphanSandboxes(
           if (!live || (live.instanceId && live.instanceId !== info.id)) {
             reason = "stale_attribution";
           }
+        } else if (ownerKind === "rig_verification" && ownerId && workspaceId) {
+          // Diagnostic verifier tags never establish ownership. If no active,
+          // unexpired registry row points at this exact box, the attribution is
+          // stale immediately (including a wrong-instance copy of a live id).
+          reason = "stale_attribution";
         } else {
           const createdAtMs = sandboxCreatedAtMs(info);
           if (createdAtMs !== null && nowMs - createdAtMs >= unattributedGraceMs) {
