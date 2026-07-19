@@ -2,10 +2,12 @@
 
 ## Status
 
-Implementation and focused verification are complete on
-`codex/compaction-ledger-recovery`; production release and the final affected-
-session continuation remain pending. Affected production session:
-`aed24825-71d0-465e-8f9b-37f4d51b8eac`.
+Closed in production. OpenGeni PR #482 merged as
+`28290a023e09b59a9288da7a1bf845e43fc8f691`; private-ops production deploy
+`29681125238` installed its exact digest-pinned API, worker, and web artifacts.
+The affected production session
+`aed24825-71d0-465e-8f9b-37f4d51b8eac` compacted successfully and resumed its
+existing goal work on the Codex subscription provider.
 
 Exact upstream baseline: `@openai/codex` 0.144.6, tag `rust-v0.144.6`, commit
 `5d1fbf26c43abc65a203928b2e31561cb039e06d`. Durable Fable review session:
@@ -94,5 +96,41 @@ Exact upstream baseline: `@openai/codex` 0.144.6, tag `rust-v0.144.6`, commit
   atomic history preservation, and internal-update hold with explicit Compact
   escape.
 
-Production deployment and authenticated canary evidence must be appended here
-before this incident is considered closed.
+## Production proof
+
+- Public implementation: OpenGeni PR #482, source
+  `28290a023e09b59a9288da7a1bf845e43fc8f691`; public CI run `29679007617`
+  passed.
+- Immutable artifact build: private-ops run `29679460990`, tag
+  `production-main-28290a023e09b59a9288da7a1bf845e43fc8f691-20260719082400`.
+  Production deploy `29681125238` passed provenance, digest, schema-contract,
+  maintenance-drain, migration, rollout, public-health, and evidence gates.
+- The production workloads independently reported API `2/2`, turn workers
+  `10/10`, control workers `4/4`, and web `1/1` on the exact new digests;
+  `/healthz` reported deployment revision
+  `28290a023e09b59a9288da7a1bf845e43fc8f691`. The unrelated relay remained on
+  its prior digest.
+- Before the canary, the affected session was idle at event `260074`, with 577
+  active history rows (`1,005,277` bytes), a `132,354`-token durable signal,
+  and no live attempt. Its 91 internal updates were deferred and did not create
+  another retry after deployment.
+- Explicit Compact created one maintenance turn, not a queue row. Event
+  `260080` installed a replacement after one provider call, rewrote 155 tool
+  outputs only in the temporary summarizer input, dropped zero history units,
+  and reduced active history to 113 rows (`66,903` bytes) with an `18,371`-
+  token signal. No Azure model tokens were used.
+- The existing goal then resumed as turn
+  `96010b95-98c0-4621-a29f-e8fa5f86abbf` on `codex/gpt-5.6-sol`. Repeated
+  model/tool batches left the pre-existing historical receipt baseline flat,
+  proving new response-local receipt clearing instead of renewed accumulation.
+- The resumed turn naturally crossed the automatic boundary. Event `260587`
+  compacted proactively inside that same logical turn after one provider call,
+  reduced the durable signal to `18,497`, and continued sampling in the same
+  attempt. There was no queued prompt, replacement turn, post-deploy
+  `context_compaction_failed`, history reactivation, or compaction loop.
+- A later, unrelated receipt-registration database error failed that goal turn
+  before its proposed tool executed. An exact rollback-only replay of the same
+  row and call item succeeded, confirming an intermittent write/diagnostics
+  defect rather than a compaction or schema failure. The subsequent system turn
+  continued normally; the cross-session issue is tracked separately as
+  Linear OPE-74.
