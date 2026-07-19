@@ -22,13 +22,18 @@ OPE-75 has a deterministic real-service pre-fix control on draft PR #490, branch
 test/integration/steer-cancellation-deadlock.fixture.test.ts
 ```
 
-The fixture passes as a reproduction against real PostgreSQL 17, NATS, and
-Temporal. It first reproduces the blocked materialization state while the exact
-activity remains `CANCEL_REQUESTED` and heartbeating, then terminalizes that
-activity by exact ID and proves a second current defect: Temporal terminalization
-is mistaken for physical quiescence and a replacement runs while the zombie is
-still executing. The control passes by asserting those broken pre-fix states; it
-does not claim cancellation settlement is implemented.
+The fixture passes as a reproduction against real PostgreSQL 17, NATS 2.14.3,
+and Temporal 1.28.0. It first reproduces the blocked materialization state while
+the exact activity remains `CANCEL_REQUESTED` and heartbeating, then terminalizes
+that activity by exact ID and proves a second current defect: Temporal
+terminalization is mistaken for physical quiescence and a replacement runs while
+the zombie is still executing. A second control stops heartbeats without
+releasing the local activity body, waits for the production two-minute heartbeat
+timeout, and proves the workflow fails while the delivered wake is exhausted and
+the fenced queued replacement remains unadmitted. The exact-head run completed in
+192.91 seconds with 2 tests passing, 0 failures, and 61 expectations. Both
+controls pass by asserting broken pre-fix states; they do not claim cancellation
+settlement is implemented.
 
 Implementation is intentionally blocked from the overlapping runtime and
 database files until the OPE-63 and OPE-73 final reviewed heads land and root
