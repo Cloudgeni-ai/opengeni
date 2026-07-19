@@ -608,7 +608,7 @@ describe("worker restart resilience", () => {
     ).toBe(true);
   }, 180_000);
 
-  test("a late activity settlement after Pause is stale and cannot override recovery truth", async () => {
+  test("a late activity settlement after Pause cannot override admitted-call quarantine", async () => {
     const grant = await testGrant();
     const taskQueue = `pause-zombie-race-${crypto.randomUUID()}`;
     const settings = testSettings({
@@ -682,7 +682,8 @@ describe("worker restart resilience", () => {
         return (
           dispatchedAttemptId !== null &&
           turn?.status === "running" &&
-          turn.activeAttemptId === dispatchedAttemptId
+          turn.activeAttemptId === dispatchedAttemptId &&
+          model.calls === 1
         );
       });
       const pause = await withWorkspaceRls(dbClient.db, grant.workspaceId, (db) =>
@@ -706,10 +707,11 @@ describe("worker restart resilience", () => {
       await workerRun;
     }
 
-    // The workflow now waits for activity cancellation before it settles Pause.
-    // Model the old worker's terminal write after that durable settlement rather
-    // than blocking cancellation on the settlement activity (which deadlocks the
-    // ordering under test). The attempt fence must reject this exact zombie write.
+    // The provider call was durably admitted before Pause, so cancellation cannot
+    // prove whether the provider completed an externally visible response. The
+    // workflow must fail closed instead of replaying inference. Model the old
+    // worker's terminal write after that durable quarantine; the attempt fence
+    // must reject this exact zombie write without changing committed truth.
     const [pausedTurn] = await listSessionTurns(dbClient.db, grant.workspaceId, session.id);
     if (!pausedTurn || !dispatchedAttemptId) {
       throw new Error(`pause fixture lost its turn attempt for ${session.id}`);
@@ -731,17 +733,28 @@ describe("worker restart resilience", () => {
     });
     expect(lateSettlement).toMatchObject({
       action: "stale",
-      turnStatus: "recovering",
+      turnStatus: "failed",
+      activeTurnId: null,
       events: [],
     });
     const turns = await listSessionTurns(dbClient.db, grant.workspaceId, session.id);
-    expect(turns.map((turn) => turn.status)).toEqual(["recovering"]);
+    expect(turns.map((turn) => turn.status)).toEqual(["failed"]);
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100);
-    expect(events.filter((event) => event.type === "turn.recovery.requested")).toHaveLength(1);
+    expect(events.filter((event) => event.type === "turn.recovery.requested")).toHaveLength(0);
     expect(events.filter((event) => event.type === "turn.completed")).toHaveLength(0);
-    expect(events.filter((event) => event.type === "turn.failed")).toHaveLength(0);
+    expect(events.filter((event) => event.type === "turn.failed")).toEqual([
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          code: "ambiguous_model_call",
+          effectState: "unknown",
+          retryable: false,
+        }),
+      }),
+    ]);
+    expect(model.calls).toBe(1);
     expect(await getSession(dbClient.db, grant.workspaceId, session.id)).toMatchObject({
-      status: "recovering",
+      status: "failed",
+      activeTurnId: null,
       effectiveControl: { state: "paused" },
     });
   }, 180_000);
