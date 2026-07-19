@@ -110,7 +110,7 @@ describe("conversation-truth reconcile (orphaned tool output guard)", () => {
     expect(unsafe).not.toEqual([user, callA, callB, resultB, resultA]);
 
     // The live worker's durable receipt gate deliberately skips the partial B
-    // snapshot (`allResultsRecorded === false`) and reconciles only after both
+    // snapshot (the response batch is not settled) and reconciles only after both
     // raw results exist, when the SDK history is stable again.
     const persisted = persistAcrossReconciles([[user], [user, callA, callB, resultB, resultA]]);
     expect(persisted).toEqual([user, callA, callB, resultB, resultA]);

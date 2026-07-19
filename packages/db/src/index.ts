@@ -12380,7 +12380,7 @@ export async function recordPendingSessionToolCallResult(
   input: Omit<PendingSessionToolCallInput, "callType" | "callItem"> & {
     resultItem: Record<string, unknown>;
   },
-): Promise<{ accepted: boolean; recorded: boolean; allResultsRecorded: boolean }> {
+): Promise<{ accepted: boolean; recorded: boolean }> {
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -12394,7 +12394,7 @@ export async function recordPendingSessionToolCallResult(
           attemptId: input.attemptId,
         });
         if (!fence.allowed) {
-          return { accepted: false, recorded: false, allResultsRecorded: false };
+          return { accepted: false, recorded: false };
         }
         const [pending] = await tx
           .select()
@@ -12408,7 +12408,7 @@ export async function recordPendingSessionToolCallResult(
             ),
           )
           .limit(1);
-        if (!pending) return { accepted: true, recorded: false, allResultsRecorded: false };
+        if (!pending) return { accepted: true, recorded: false };
         const resultType = TOOL_RESULT_TYPE_BY_CALL_TYPE[pending.callType];
         if (
           !resultType ||
@@ -12430,21 +12430,9 @@ export async function recordPendingSessionToolCallResult(
             ),
           )
           .returning({ id: schema.sessionPendingToolCalls.id });
-        const [{ unresolved } = { unresolved: 0 }] = await tx
-          .select({ unresolved: sql<number>`count(*)::int` })
-          .from(schema.sessionPendingToolCalls)
-          .where(
-            and(
-              eq(schema.sessionPendingToolCalls.workspaceId, input.workspaceId),
-              eq(schema.sessionPendingToolCalls.sessionId, input.sessionId),
-              eq(schema.sessionPendingToolCalls.turnId, input.turnId),
-              sql`${schema.sessionPendingToolCalls.resultItem} is null`,
-            ),
-          );
         return {
           accepted: true,
           recorded: recorded.length === 1,
-          allResultsRecorded: Number(unresolved) === 0,
         };
       }),
   );
@@ -12457,7 +12445,9 @@ export async function recordPendingSessionToolCallResult(
  */
 export async function clearDurablePendingSessionToolCalls(
   db: Database,
-  input: Omit<PendingSessionToolCallInput, "callId" | "callType" | "callItem">,
+  input: Omit<PendingSessionToolCallInput, "callId" | "callType" | "callItem"> & {
+    callIds: string[];
+  },
 ): Promise<{ accepted: boolean; cleared: number }> {
   return await withRlsContext(
     db,
@@ -12472,6 +12462,7 @@ export async function clearDurablePendingSessionToolCalls(
           attemptId: input.attemptId,
         });
         if (!fence.allowed) return { accepted: false, cleared: 0 };
+        if (input.callIds.length === 0) return { accepted: true, cleared: 0 };
         const pending = await tx
           .select()
           .from(schema.sessionPendingToolCalls)
@@ -12480,30 +12471,40 @@ export async function clearDurablePendingSessionToolCalls(
               eq(schema.sessionPendingToolCalls.workspaceId, input.workspaceId),
               eq(schema.sessionPendingToolCalls.sessionId, input.sessionId),
               eq(schema.sessionPendingToolCalls.turnId, input.turnId),
+              inArray(schema.sessionPendingToolCalls.callId, input.callIds),
               sql`${schema.sessionPendingToolCalls.resultItem} is not null`,
             ),
           )
           .for("update");
         if (pending.length === 0) return { accepted: true, cleared: 0 };
         const history = await tx
-          .select({ item: schema.sessionHistoryItems.item })
+          .select({
+            position: schema.sessionHistoryItems.position,
+            item: schema.sessionHistoryItems.item,
+          })
           .from(schema.sessionHistoryItems)
           .where(
             and(
               eq(schema.sessionHistoryItems.workspaceId, input.workspaceId),
               eq(schema.sessionHistoryItems.sessionId, input.sessionId),
               eq(schema.sessionHistoryItems.turnId, input.turnId),
-              eq(schema.sessionHistoryItems.active, true),
             ),
           );
         const durableIds = pending
           .filter((call) => {
             const resultType = TOOL_RESULT_TYPE_BY_CALL_TYPE[call.callType];
+            if (!resultType) return false;
+            const durableCall = history.find(
+              ({ item }) =>
+                historyItemType(item) === call.callType && historyCallId(item) === call.callId,
+            );
             return Boolean(
-              resultType &&
+              durableCall &&
               history.some(
-                ({ item }) =>
-                  historyItemType(item) === resultType && historyCallId(item) === call.callId,
+                ({ item, position }) =>
+                  position > durableCall.position &&
+                  historyItemType(item) === resultType &&
+                  historyCallId(item) === call.callId,
               ),
             );
           })
@@ -18348,6 +18349,52 @@ export type GoalContinuationDecision =
     }
   | { decision: "continue"; goal: SessionGoal; autoContinuation: number; cap: number | null };
 
+async function turnHasFailureCodeTx(
+  tx: Database,
+  workspaceId: string,
+  sessionId: string,
+  turnId: string,
+  code: string,
+): Promise<boolean> {
+  const [failure] = await tx
+    .select({ id: schema.sessionEvents.id })
+    .from(schema.sessionEvents)
+    .where(
+      and(
+        eq(schema.sessionEvents.workspaceId, workspaceId),
+        eq(schema.sessionEvents.sessionId, sessionId),
+        eq(schema.sessionEvents.turnId, turnId),
+        eq(schema.sessionEvents.type, "turn.failed"),
+        sql`${schema.sessionEvents.payload} ->> 'code' = ${code}`,
+      ),
+    )
+    .limit(1);
+  return Boolean(failure);
+}
+
+async function latestFinishedTurnHasFailureCodeTx(
+  tx: Database,
+  workspaceId: string,
+  sessionId: string,
+  code: string,
+): Promise<boolean> {
+  const [latestFinished] = await tx
+    .select({ id: schema.sessionTurns.id })
+    .from(schema.sessionTurns)
+    .where(
+      and(
+        eq(schema.sessionTurns.workspaceId, workspaceId),
+        eq(schema.sessionTurns.sessionId, sessionId),
+        sql`${schema.sessionTurns.finishedAt} is not null`,
+      ),
+    )
+    .orderBy(desc(schema.sessionTurns.position), desc(schema.sessionTurns.createdAt))
+    .limit(1);
+  return latestFinished
+    ? await turnHasFailureCodeTx(tx, workspaceId, sessionId, latestFinished.id, code)
+    : false;
+}
+
 /**
  * Core continuation decision, taken in one transaction with the goal row
  * locked. Queued work always wins; any non-terminal turn (queued, running, or
@@ -18443,29 +18490,21 @@ export async function evaluateGoalContinuation(
           )
           .orderBy(desc(schema.sessionTurns.position), desc(schema.sessionTurns.createdAt))
           .limit(1);
-        const [contextCompactionFailure] = latestFinished
-          ? await tx
-              .select({
-                id: schema.sessionEvents.id,
-              })
-              .from(schema.sessionEvents)
-              .where(
-                and(
-                  eq(schema.sessionEvents.workspaceId, input.workspaceId),
-                  eq(schema.sessionEvents.sessionId, input.sessionId),
-                  eq(schema.sessionEvents.turnId, latestFinished.id),
-                  eq(schema.sessionEvents.type, "turn.failed"),
-                  sql`${schema.sessionEvents.payload} ->> 'code' = 'context_compaction_failed'`,
-                ),
-              )
-              .limit(1)
-          : [];
+        const contextCompactionFailure = latestFinished
+          ? await turnHasFailureCodeTx(
+              tx as unknown as Database,
+              input.workspaceId,
+              input.sessionId,
+              latestFinished.id,
+              "context_compaction_failed",
+            )
+          : false;
         // A provider could not produce a durable checkpoint for the latest
         // inference. Re-running the unchanged active history autonomously only
         // repeats the same failure. Keep the active goal intact but inert until
-        // a human prompt, a new internal update, or an explicit /compact attempt
-        // creates newer finished-turn truth. Queued human work already won in
-        // the branch above; this never creates queue work or consumes counters.
+        // a human/API prompt, agent Steer instruction, or explicit Compact
+        // attempt creates newer truth. Ordinary internal updates stay pending;
+        // this never creates queue work or consumes counters.
         if (contextCompactionFailure) {
           return { decision: "none" } as const;
         }
@@ -19630,6 +19669,21 @@ export async function claimSessionWorkForAttempt(
             return { action: "claimed", turn: mapSessionTurn(compactionTurn) };
           }
 
+          if (
+            !pendingAgentSteer &&
+            (await latestFinishedTurnHasFailureCodeTx(
+              tx as unknown as Database,
+              workspaceId,
+              sessionId,
+              "context_compaction_failed",
+            ))
+          ) {
+            // Ordinary machine updates must not turn one failed compaction into
+            // an autonomous retry loop. They remain pending and will attach to
+            // the next human/API, Steer, or explicitly requested Compact run.
+            return { action: "unclaimed", reason: "no-work" };
+          }
+
           const pendingUpdates = await tx
             .select({ id: schema.sessionSystemUpdates.id })
             .from(schema.sessionSystemUpdates)
@@ -20482,7 +20536,30 @@ export async function peekSessionWork(
         ),
       )
       .limit(1);
-    return pendingUpdate ? { kind: "runnable" } : { kind: "idle" };
+    if (!pendingUpdate) return { kind: "idle" };
+    if (
+      !(await latestFinishedTurnHasFailureCodeTx(
+        scopedDb,
+        workspaceId,
+        sessionId,
+        "context_compaction_failed",
+      ))
+    ) {
+      return { kind: "runnable" };
+    }
+    const [pendingAgentSteer] = await scopedDb
+      .select({ id: schema.sessionSystemUpdates.id })
+      .from(schema.sessionSystemUpdates)
+      .where(
+        and(
+          eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
+          eq(schema.sessionSystemUpdates.sessionId, sessionId),
+          eq(schema.sessionSystemUpdates.state, "pending"),
+          eq(schema.sessionSystemUpdates.kind, "agent_steer_instruction"),
+        ),
+      )
+      .limit(1);
+    return pendingAgentSteer ? { kind: "runnable" } : { kind: "idle" };
   });
 }
 

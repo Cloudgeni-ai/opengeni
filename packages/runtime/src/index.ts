@@ -229,6 +229,7 @@ export {
   findCompactionNeededError,
   isCompactionSummary,
   latestCompactionReplacementFingerprint,
+  prepareCompactionPromptInput,
   isUserMessage,
   estimateTokens,
   estimateItemTokens,
@@ -247,7 +248,11 @@ export {
   isEphemeralInternalContext,
   USER_MESSAGE_TRUNCATION_MARKER,
 } from "./context-compaction";
-export type { CompactionDecision, CompactionItem } from "./context-compaction";
+export type {
+  CompactionDecision,
+  CompactionItem,
+  PreparedCompactionPromptInput,
+} from "./context-compaction";
 export { modelCallUsageTelemetry } from "./usage-telemetry";
 export type { ModelCallUsageTelemetry } from "./usage-telemetry";
 

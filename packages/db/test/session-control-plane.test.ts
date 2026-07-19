@@ -12,6 +12,7 @@ import {
   appendSessionEventsForTurnAttempt,
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
+  clearDurablePendingSessionToolCalls,
   createDb,
   createSession,
   createSessionGoal,
@@ -566,7 +567,7 @@ describe("clean session control plane", () => {
           output: { type: "text", text: "B completed" },
         },
       }),
-    ).toEqual({ accepted: true, recorded: true, allResultsRecorded: false });
+    ).toEqual({ accepted: true, recorded: true });
 
     const recovery = await requestSessionTurnRecovery(client.db, grant.workspaceId!, {
       sessionId: session.id,
@@ -595,6 +596,316 @@ describe("clean session control plane", () => {
       output: { text: "B completed" },
     });
     expect(history[4]?.item).toMatchObject({ status: "incomplete" });
+  });
+
+  test("a completed response batch clears even when an older call remains unresolved", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "run two model responses");
+    const attemptId = crypto.randomUUID();
+    const turn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId },
+    );
+    for (const callId of ["old-unresolved", "new-complete"]) {
+      await registerPendingSessionToolCall(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn!.id,
+        executionGeneration: turn!.executionGeneration,
+        attemptId,
+        callId,
+        callType: "function_call",
+        callItem: {
+          type: "function_call",
+          name: callId,
+          callId,
+          arguments: "{}",
+        },
+      });
+    }
+    const resultItem = {
+      type: "function_call_result",
+      callId: "new-complete",
+      output: { type: "text", text: "done" },
+    };
+    expect(
+      await recordPendingSessionToolCallResult(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn!.id,
+        executionGeneration: turn!.executionGeneration,
+        attemptId,
+        callId: "new-complete",
+        resultItem,
+      }),
+    ).toEqual({ accepted: true, recorded: true });
+    expect(
+      await appendSessionHistoryItems(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn!.id,
+        expectedExecutionGeneration: turn!.executionGeneration,
+        expectedAttemptId: attemptId,
+        items: [
+          {
+            position: 100,
+            item: {
+              type: "function_call",
+              name: "new-complete",
+              callId: "new-complete",
+              arguments: "{}",
+            },
+          },
+          { position: 101, item: resultItem },
+        ],
+      }),
+    ).toBe(true);
+    expect(
+      await clearDurablePendingSessionToolCalls(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn!.id,
+        executionGeneration: turn!.executionGeneration,
+        attemptId,
+        callIds: ["new-complete"],
+      }),
+    ).toEqual({ accepted: true, cleared: 1 });
+    expect(
+      await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+        db
+          .select({ callId: schema.sessionPendingToolCalls.callId })
+          .from(schema.sessionPendingToolCalls)
+          .where(eq(schema.sessionPendingToolCalls.turnId, turn!.id)),
+      ),
+    ).toEqual([{ callId: "old-unresolved" }]);
+  });
+
+  test("recovery consumes compacted completed pairs without reactivating or re-emitting them", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "run and compact");
+    const attemptId = crypto.randomUUID();
+    const turn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId },
+    );
+    const callItem = {
+      type: "function_call",
+      name: "large_tool",
+      callId: "compacted-call",
+      arguments: "{}",
+    };
+    const resultItem = {
+      type: "function_call_result",
+      callId: "compacted-call",
+      output: { type: "text", text: "durable result" },
+    };
+    await registerPendingSessionToolCall(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      turnId: turn!.id,
+      executionGeneration: turn!.executionGeneration,
+      attemptId,
+      callId: "compacted-call",
+      callType: "function_call",
+      callItem,
+    });
+    await recordPendingSessionToolCallResult(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      turnId: turn!.id,
+      executionGeneration: turn!.executionGeneration,
+      attemptId,
+      callId: "compacted-call",
+      resultItem,
+    });
+    expect(
+      await appendSessionHistoryItems(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn!.id,
+        expectedExecutionGeneration: turn!.executionGeneration,
+        expectedAttemptId: attemptId,
+        items: [
+          { position: 100, item: callItem },
+          { position: 101, item: resultItem },
+        ],
+      }),
+    ).toBe(true);
+    const compacted = await applyContextCompaction(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      turnId: turn!.id,
+      expectedExecutionGeneration: turn!.executionGeneration,
+      expectedAttemptId: attemptId,
+      replacementItems: [{ type: "message", role: "user", content: "retained request" }],
+      summaryItem: { type: "message", role: "user", content: "durable checkpoint" },
+      replacementInputTokens: 10,
+    });
+    expect(compacted).toMatchObject({ applied: true });
+
+    const recovery = await requestSessionTurnRecovery(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      turnId: turn!.id,
+      triggerEventId: turn!.triggerEventId,
+      attemptId,
+      reason: "worker_shutdown",
+    });
+    expect(recovery.action).toBe("recovering");
+    expect(recovery.events.some((event) => event.type === "agent.toolCall.output")).toBe(false);
+    expect(
+      (await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id)).map(
+        (row) => row.item,
+      ),
+    ).toEqual([
+      { type: "message", role: "user", content: "retained request" },
+      { type: "message", role: "user", content: "durable checkpoint" },
+    ]);
+    expect(
+      await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+        db
+          .select()
+          .from(schema.sessionPendingToolCalls)
+          .where(eq(schema.sessionPendingToolCalls.turnId, turn!.id)),
+      ),
+    ).toHaveLength(0);
+  });
+
+  test("recovery projects an active completed pair without duplicating model history", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "persist before event publish");
+    const attemptId = crypto.randomUUID();
+    const turn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId },
+    );
+    const callItem = {
+      type: "function_call",
+      name: "completed_tool",
+      callId: "active-completed-call",
+      arguments: "{}",
+    };
+    const resultItem = {
+      type: "function_call_result",
+      callId: "active-completed-call",
+      output: { type: "text", text: "completed before crash" },
+    };
+    const alreadyProjectedCallItem = {
+      type: "function_call",
+      name: "already_projected_tool",
+      callId: "active-already-projected-call",
+      arguments: "{}",
+    };
+    const alreadyProjectedResultItem = {
+      type: "function_call_result",
+      callId: "active-already-projected-call",
+      output: { type: "text", text: "event committed before crash" },
+    };
+    await registerPendingSessionToolCall(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      turnId: turn!.id,
+      executionGeneration: turn!.executionGeneration,
+      attemptId,
+      callId: "active-completed-call",
+      callType: "function_call",
+      callItem,
+    });
+    await recordPendingSessionToolCallResult(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      turnId: turn!.id,
+      executionGeneration: turn!.executionGeneration,
+      attemptId,
+      callId: "active-completed-call",
+      resultItem,
+    });
+    await registerPendingSessionToolCall(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      turnId: turn!.id,
+      executionGeneration: turn!.executionGeneration,
+      attemptId,
+      callId: "active-already-projected-call",
+      callType: "function_call",
+      callItem: alreadyProjectedCallItem,
+    });
+    await recordPendingSessionToolCallResult(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      turnId: turn!.id,
+      executionGeneration: turn!.executionGeneration,
+      attemptId,
+      callId: "active-already-projected-call",
+      resultItem: alreadyProjectedResultItem,
+    });
+    await appendSessionHistoryItems(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      turnId: turn!.id,
+      expectedExecutionGeneration: turn!.executionGeneration,
+      expectedAttemptId: attemptId,
+      items: [
+        { position: 100, item: callItem },
+        { position: 101, item: resultItem },
+        { position: 102, item: alreadyProjectedCallItem },
+        { position: 103, item: alreadyProjectedResultItem },
+      ],
+    });
+    await appendSessionEvents(client.db, grant.workspaceId!, session.id, [
+      {
+        type: "agent.toolCall.output",
+        turnId: turn!.id,
+        payload: {
+          id: "active-already-projected-call",
+          output: { type: "text", text: "event committed before crash" },
+        },
+      },
+    ]);
+
+    const recovery = await requestSessionTurnRecovery(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      turnId: turn!.id,
+      triggerEventId: turn!.triggerEventId,
+      attemptId,
+      reason: "worker_shutdown",
+    });
+    expect(
+      recovery.events
+        .filter((event) => event.type === "agent.toolCall.output")
+        .map((event) => (event.payload as { id?: unknown }).id),
+    ).toEqual(["active-completed-call"]);
+    expect(
+      (await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id))
+        .map((row) => row.item)
+        .filter(
+          (item) =>
+            item.callId === "active-completed-call" ||
+            item.callId === "active-already-projected-call",
+        )
+        .map((item) => item.type),
+    ).toEqual(["function_call", "function_call_result", "function_call", "function_call_result"]);
   });
 
   test("a pending approval tool receipt follows the logical turn into its next attempt", async () => {
@@ -676,7 +987,7 @@ describe("clean session control plane", () => {
           output: { type: "text", text: "approved result" },
         },
       }),
-    ).toEqual({ accepted: true, recorded: true, allResultsRecorded: true });
+    ).toEqual({ accepted: true, recorded: true });
     const recovery = await requestSessionTurnRecovery(client.db, grant.workspaceId!, {
       sessionId: session.id,
       turnId: turn!.id,
@@ -1063,6 +1374,103 @@ describe("clean session control plane", () => {
         )
       ).map((entry) => entry.id),
     ).toEqual(expect.arrayContaining([first.update.id, second.update.id]));
+  });
+
+  test("a compaction failure holds ordinary internal updates without blocking explicit Compact", async () => {
+    const { grant, session } = await fixture();
+    const first = await addSessionSystemUpdate(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      kind: "child_terminal_result",
+      classification: "failure",
+      sourceId: crypto.randomUUID(),
+      dedupeKey: `child-${crypto.randomUUID()}`,
+      summary: "First child result",
+      payload: {
+        type: "child_terminal_result",
+        childSessionId: crypto.randomUUID(),
+        status: "failed",
+      },
+    });
+    if (!first.added) throw new Error("first system update was not inserted");
+    const failedAttemptId = crypto.randomUUID();
+    const failedTurn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId: failedAttemptId },
+    );
+    await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      turnId: failedTurn!.id,
+      triggerEventId: failedTurn!.triggerEventId,
+      attemptId: failedAttemptId,
+      turnStatus: "failed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [
+        {
+          type: "turn.failed",
+          payload: { error: "checkpoint failed", code: "context_compaction_failed" },
+        },
+      ],
+    });
+
+    const held = await addSessionSystemUpdate(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      kind: "child_terminal_result",
+      classification: "success",
+      sourceId: crypto.randomUUID(),
+      dedupeKey: `child-${crypto.randomUUID()}`,
+      summary: "Second child result",
+      payload: {
+        type: "child_terminal_result",
+        childSessionId: crypto.randomUUID(),
+        status: "idle",
+      },
+    });
+    if (!held.added) throw new Error("held system update was not inserted");
+    expect(await peekSessionWork(client.db, grant.workspaceId!, session.id)).toEqual({
+      kind: "idle",
+    });
+    expect(
+      await claimTestSessionWork(
+        client.db,
+        grant.workspaceId!,
+        session.id,
+        `session-${session.id}`,
+      ),
+    ).toBeNull();
+    expect(
+      (await listOutstandingSessionSystemUpdates(client.db, grant.workspaceId!, session.id)).map(
+        (update) => update.id,
+      ),
+    ).toContain(held.update.id);
+
+    await requestSessionCompaction(client.db, grant.workspaceId!, session.id);
+    expect(await peekSessionWork(client.db, grant.workspaceId!, session.id)).toEqual({
+      kind: "runnable",
+    });
+    const compactionTurn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+    );
+    expect(compactionTurn).toMatchObject({
+      source: "compaction",
+      status: "running",
+      metadata: { executionKind: "context_compaction" },
+    });
+    expect(
+      (await listOutstandingSessionSystemUpdates(client.db, grant.workspaceId!, session.id)).map(
+        (update) => update.id,
+      ),
+    ).toContain(held.update.id);
   });
 
   test("a failed goal-continuation notice is terminal instead of replayable", async () => {

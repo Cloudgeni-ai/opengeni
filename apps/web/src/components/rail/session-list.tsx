@@ -54,6 +54,7 @@ import {
   SESSION_GROUP_ORDER,
   buildRailForest,
   groupSessionsForRail,
+  mergeSessionForRail,
   nodeIsActive,
   recencyGroupFor,
   relativeTimeLabel,
@@ -177,9 +178,13 @@ export function SessionList() {
       ...lineageSessions,
       ...pinned,
     ]) {
-      source.set(session.id, session);
+      const current = source.get(session.id);
+      source.set(session.id, current ? mergeSessionForRail(current, session) : session);
     }
-    for (const [id, override] of pinOverrides) source.set(id, override.session);
+    for (const [id, override] of pinOverrides) {
+      const current = source.get(id);
+      source.set(id, current ? mergeSessionForRail(current, override.session) : override.session);
+    }
     return [...source.values()];
   }, [
     activeLineage.lineage?.ancestors,

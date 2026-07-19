@@ -85,8 +85,16 @@ describe("startProcess", () => {
     expect(Number.isSafeInteger(childPid)).toBe(true);
     expect(processIsAlive(childPid)).toBe(true);
 
+    // A rejection must retain the supervisor's exact failure instead of being
+    // collapsed into a boolean, otherwise a saturated hosted run is
+    // impossible to diagnose.
     const concurrentStops = await Promise.allSettled([started.stop(), started.stop()]);
-    expect(concurrentStops.every((result) => result.status === "fulfilled")).toBe(true);
+    const stopFailures = concurrentStops.flatMap((result) =>
+      result.status === "rejected" ? [result.reason] : [],
+    );
+    if (stopFailures.length > 0) {
+      throw new AggregateError(stopFailures, "concurrent process teardown failed");
+    }
     await started.stop();
     await waitFor(() => !processIsAlive(childPid), { timeoutMs: 5_000 });
     expect(processIsAlive(childPid)).toBe(false);
