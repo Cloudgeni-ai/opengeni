@@ -3,6 +3,7 @@ import {
   canonicalizeConfiguredModelId,
   configuredAllowedModels,
   policyProviderIdForModel,
+  resolveTurnExecutionPolicyV1,
   type Settings,
 } from "@opengeni/config";
 import {
@@ -29,6 +30,7 @@ import {
   type ToolRef,
   type TurnInitiator,
   type TurnInitiatorContext,
+  type TurnExecutionPolicyV1,
 } from "@opengeni/contracts";
 import {
   createSession,
@@ -450,6 +452,7 @@ export async function createAndStartSession(input: {
   clientEventId?: string;
   model: string;
   reasoningEffort: Settings["openaiReasoningEffort"];
+  turnExecutionPolicy: TurnExecutionPolicyV1;
   sandboxBackend: Settings["sandboxBackend"];
   metadata: Record<string, unknown>;
   createdBy?: TurnInitiator;
@@ -608,6 +611,7 @@ async function finishStartSession(
     clientEventId?: string;
     model: string;
     reasoningEffort: Settings["openaiReasoningEffort"];
+    turnExecutionPolicy: TurnExecutionPolicyV1;
     sandboxBackend: Settings["sandboxBackend"];
     variableSet?: { id: string; name: string } | null;
     goal?: GoalSpec | null;
@@ -658,6 +662,7 @@ async function finishStartSession(
     sessionId: session.id,
     ...(input.clientEventId ? { clientEventId: input.clientEventId } : {}),
     reasoningEffortFallback: input.reasoningEffort,
+    turnExecutionPolicy: input.turnExecutionPolicy,
     createdEventPayload: {
       ...(input.variableSet
         ? { variableSetId: input.variableSet.id, variableSetName: input.variableSet.name }
@@ -840,6 +845,7 @@ export async function postUserMessageTurn(input: {
   controlEtag?: string | null;
   expectedDraftRevision?: number | null;
   reasoningEffortFallback?: Settings["openaiReasoningEffort"];
+  turnExecutionPolicy: TurnExecutionPolicyV1;
 }): Promise<{ accepted: SessionEvent; turn: SessionTurn }> {
   const { db, bus, workflowClient, settings, accountId, workspaceId, sessionId } = input;
   const requestedModel = canonicalConfiguredModel(settings, input.model ?? null) ?? null;
@@ -875,6 +881,7 @@ export async function postUserMessageTurn(input: {
           reasoningEffort: requestedReasoningEffort,
           reasoningEffortFallback:
             input.reasoningEffortFallback ?? settings.openaiReasoningEffort,
+          turnExecutionPolicy: input.turnExecutionPolicy,
           source: input.origin === "operator" ? "api" : "user",
           mcpCredentialUpdates: input.mcpCredentialUpdates ?? [],
         }),
@@ -1076,6 +1083,13 @@ export async function createSessionForRequest(
     model,
   );
   const reasoningEffort = payload.reasoningEffort ?? settings.openaiReasoningEffort;
+  const turnExecutionPolicy = resolveTurnExecutionPolicyV1(settings, {
+    modelId: model,
+    requestedModelId: payload.model ?? null,
+    modelSource: payload.model === undefined ? "deployment" : "explicit",
+    reasoningEffort,
+    reasoningSource: payload.reasoningEffort === undefined ? "deployment" : "explicit",
+  });
   // Parent linkage was resolved above, before context validation. A child with
   // no explicit permission override inherits the creating session's effective
   // grant instead of silently expanding to standalone worker defaults.
@@ -1355,6 +1369,7 @@ export async function createSessionForRequest(
       ...(payload.clientEventId ? { clientEventId: payload.clientEventId } : {}),
       model,
       reasoningEffort,
+      turnExecutionPolicy,
       // A shared spawn inherits the box's backend; a caller-supplied
       // sandboxBackend on a shared spawn is ignored (it is the same box). A
       // machine-targeted top-level create labels the home "selfhosted"
@@ -1466,6 +1481,23 @@ export async function acceptSessionUserMessage(
   // pure read with no side effects.
   const existingSession = await requireSession(db, workspaceId, sessionId);
   const requestedModel = canonicalConfiguredModel(settings, input.model ?? null) ?? null;
+  const effectiveModel =
+    canonicalConfiguredModel(settings, requestedModel ?? existingSession.model) ?? null;
+  if (effectiveModel === null) {
+    throw new Error("effective follow-up model unexpectedly resolved to null");
+  }
+  const sessionReasoningEffort = reasoningEffortForSession(
+    existingSession.metadata,
+    settings.openaiReasoningEffort,
+  );
+  const effectiveReasoningEffort = input.reasoningEffort ?? sessionReasoningEffort;
+  const turnExecutionPolicy = resolveTurnExecutionPolicyV1(settings, {
+    modelId: effectiveModel,
+    requestedModelId: input.model ?? null,
+    modelSource: input.model == null ? "session" : "explicit",
+    reasoningEffort: effectiveReasoningEffort,
+    reasoningSource: input.reasoningEffort == null ? "session" : "explicit",
+  });
   const runtimeSettings = settingsWithSessionMcpServerMetadata(
     capabilityRuntimeSettings,
     existingSession.mcpServers,
@@ -1480,8 +1512,7 @@ export async function acceptSessionUserMessage(
     workspaceId,
     action: "agent_run:create",
     quantity: 1,
-    model:
-      canonicalConfiguredModel(settings, requestedModel ?? existingSession.model) ?? null,
+    model: effectiveModel,
   });
   if (requestedResources.some((resource) => resource.kind === "file") && !objectStorage) {
     throw new HTTPException(503, { message: "object storage is not configured" });
@@ -1510,12 +1541,10 @@ export async function acceptSessionUserMessage(
     turnInstructions: input.turnInstructions ?? null,
     resources: requestedResources,
     tools: requestedTools,
-    model: requestedModel,
+    model: input.model ?? null,
     reasoningEffort: input.reasoningEffort ?? null,
-    reasoningEffortFallback: reasoningEffortForSession(
-      existingSession.metadata,
-      settings.openaiReasoningEffort,
-    ),
+    reasoningEffortFallback: sessionReasoningEffort,
+    turnExecutionPolicy,
     mcpCredentialUpdates,
     delivery: input.delivery ?? "send",
     origin: delegatedServiceInitiator ? "operator" : (input.origin ?? "human"),

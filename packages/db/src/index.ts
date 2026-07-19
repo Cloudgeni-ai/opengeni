@@ -70,6 +70,7 @@ import type {
   SessionTurnStatus,
   TurnInitiator,
   TurnInitiatorContext,
+  TurnExecutionPolicyV1,
   SocialConnection,
   SocialConnectionStatus,
   SocialPost,
@@ -102,6 +103,7 @@ import {
   SESSION_EVENT_ENVELOPE_MAX_BYTES,
   SESSION_EVENT_TYPE_MAX_BYTES,
   resolveSessionEventTypeFilters,
+  metadataWithTurnExecutionPolicyV1,
   reasoningEffortForMetadata,
   resolveWorkspaceMemoryEnabled,
   RigChange as RigChangeContract,
@@ -21528,6 +21530,8 @@ export type InitializeSessionStartInput = {
   sessionId: string;
   clientEventId?: string;
   reasoningEffortFallback: ReasoningEffort;
+  /** Trusted create-session policy. Omitted only by legacy low-level callers. */
+  turnExecutionPolicy?: TurnExecutionPolicyV1;
   createdEventPayload: Record<string, unknown>;
   goal?: {
     text: string;
@@ -21741,7 +21745,12 @@ export async function initializeSessionStartAtomically(
               ),
               sandboxBackend: session.sandboxBackend,
               sandboxOs: session.sandboxOs,
-              metadata: {},
+              metadata: input.turnExecutionPolicy
+                ? metadataWithTurnExecutionPolicyV1(
+                    {},
+                    input.turnExecutionPolicy,
+                  )
+                : {},
               lineage: {},
               ...initiatorColumns(creator),
             })
