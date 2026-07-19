@@ -311,7 +311,9 @@ Required constraints:
 - `admit_replacement` requires both `effectDisposition=safe` and
   `physicalDisposition=quiesced` from an authoritative exact operation/activity
   result;
-- `requires_action` requires `effect_unknown` or `quarantined`;
+- `requires_action` requires at least one unresolved gate:
+  `physicalDisposition=not_confirmed`, `effectDisposition` is `effect_unknown`
+  or `quarantined`, or `temporalDisposition=terminalization_unknown`;
 - Temporal `terminalized` never implies physical `quiesced`.
 
 Do not overload `session_turn_attempts.quiesced_at` with a grace timeout or a
