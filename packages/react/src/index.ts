@@ -131,6 +131,16 @@ export type {
   UseSessionLineageOptions,
   UseSessionLineageResult,
 } from "./hooks/use-session-lineage";
+export { useSessionArchive } from "./hooks/use-session-archive";
+export type {
+  UseSessionArchiveOptions,
+  UseSessionArchiveResult,
+} from "./hooks/use-session-archive";
+export { SessionArchiveBanner, SessionArchiveDialog } from "./components/session-archive";
+export type {
+  SessionArchiveBannerProps,
+  SessionArchiveDialogProps,
+} from "./components/session-archive";
 export { useVariableSets, useEnvironments } from "./hooks/use-environments";
 export type {
   UseVariableSetsOptions,
