@@ -72,7 +72,7 @@ export function coalesceSessionEventDeltas(events: SessionEvent[]): SessionEvent
     ) {
       const textBytes = encoder.encode(text).byteLength;
       if (
-        run.textBytes === 0 ||
+        (run.textBytes === 0 && textBytes <= SESSION_EVENT_COALESCED_TEXT_TARGET_BYTES) ||
         run.textBytes + textBytes <= SESSION_EVENT_COALESCED_TEXT_TARGET_BYTES
       ) {
         run.text += text;

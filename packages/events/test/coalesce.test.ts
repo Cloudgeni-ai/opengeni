@@ -4,7 +4,10 @@ import {
   sessionEventJsonBytes,
   type SessionEvent,
 } from "@opengeni/contracts";
-import { coalesceSessionEventDeltas } from "../src/index";
+import {
+  SESSION_EVENT_COALESCED_TEXT_TARGET_BYTES,
+  coalesceSessionEventDeltas,
+} from "../src/index";
 
 const WORKSPACE_ID = "11111111-1111-4111-8111-111111111111";
 const SESSION_ID = "22222222-2222-4222-8222-222222222222";
@@ -189,5 +192,23 @@ describe("coalesceSessionEventDeltas", () => {
         .map((projected) => Number((projected.payload as any).coalescedUntil))
         .sort((left, right) => left - right),
     );
+  });
+
+  test("does not absorb an oversized delta into an empty prefix run", () => {
+    const result = coalesceSessionEventDeltas([
+      event(1, "agent.message.delta", { text: "" }),
+      event(2, "agent.message.delta", {
+        text: "x".repeat(SESSION_EVENT_COALESCED_TEXT_TARGET_BYTES * 4),
+      }),
+      event(3, "agent.message.delta", { text: "tail" }),
+    ]);
+
+    expect(result).toHaveLength(3);
+    expect(result.map((projected) => (projected.payload as any).coalescedUntil)).toEqual([1, 2, 3]);
+    for (const projected of result) {
+      expect(sessionEventJsonBytes(projected.payload)).toBeLessThanOrEqual(
+        SESSION_EVENT_PAYLOAD_MAX_BYTES,
+      );
+    }
   });
 });
