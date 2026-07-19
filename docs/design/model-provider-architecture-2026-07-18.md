@@ -6,15 +6,15 @@
 
 # ADR: Explicit model, provider, credential, billing, and turn policy
 
-- **Status:** Proposed; implementation is blocked until an independent architecture review approves this exact revision
+- **Status:** Accepted at exact revision `b402536b6e90b85575f2273cfb12a0f3be96070f`; implementation in progress
 - **Date:** 2026-07-18
 - **Baseline:** `a906a06881036b7d005ab33940f5ec6c91938482`
 - **Issue:** Linear OPE-12
 - **Owner:** OPE-12 Model Provider Architecture
 - **Review:** Independent Sol/xhigh reviews of `7a86fb08909045e79207193a8f97d88afaa021f5`
-  and `0efab9bff651f33907f7b29e127989cce835cbfa` requested changes; this
-  revision addresses those findings and still requires exact-head approval
-  before implementation
+  and `0efab9bff651f33907f7b29e127989cce835cbfa` requested changes. The exact
+  resulting revision `b402536b6e90b85575f2273cfb12a0f3be96070f` received independent
+  approval before implementation began.
 
 ## Context
 
