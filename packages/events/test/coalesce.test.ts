@@ -2,7 +2,6 @@ import { describe, expect, test } from "bun:test";
 import {
   SESSION_EVENT_PAYLOAD_MAX_BYTES,
   sessionEventJsonBytes,
-  sessionEventPayloadTruncation,
   type SessionEvent,
 } from "@opengeni/contracts";
 import { coalesceSessionEventDeltas } from "../src/index";

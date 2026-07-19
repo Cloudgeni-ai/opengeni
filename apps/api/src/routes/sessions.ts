@@ -51,7 +51,6 @@ import {
   getStreamAcknowledgment,
   insertPtySession,
   listSessionEventPage,
-  listSessionEvents,
   listSessionIdsInGroup,
   listSessionsForSubject,
   listSessionTurns,

@@ -85,7 +85,8 @@ export function createByteBoundedSseStream(
           `SSE frame cannot fit in the configured queue (${chunk.byteLength} > ${maxQueuedBytes} bytes)`,
         );
       }
-      while (!stopped) {
+      for (;;) {
+        if (stopped) return false;
         const desired = controller.desiredSize;
         if (desired === null) return false;
         if (desired >= chunk.byteLength) {
@@ -96,7 +97,6 @@ export function createByteBoundedSseStream(
           capacityWake = resolve;
         });
       }
-      return false;
     },
     close: () => stop(() => controller.close()),
     fail: (error) => stop(() => controller.error(error)),
@@ -129,7 +129,8 @@ export function createLatestWinsDelivery<T extends { sequence: number }>(
   const start = () => {
     if (stopped || running || !newest) return;
     const run = async () => {
-      while (!stopped && newest) {
+      for (;;) {
+        if (stopped || !newest) return;
         const target = newest;
         newest = null;
         await send(target);
@@ -160,7 +161,11 @@ export function createLatestWinsDelivery<T extends { sequence: number }>(
       newest = null;
     },
     whenIdle: async () => {
-      while (running) await running;
+      for (;;) {
+        const pending = running;
+        if (!pending) return;
+        await pending;
+      }
     },
     pendingSequence: () => newest?.sequence ?? null,
   };
