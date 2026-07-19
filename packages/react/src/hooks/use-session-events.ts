@@ -1,5 +1,4 @@
 import type { SessionEvent, SessionStatus, StreamConnectionState } from "@opengeni/sdk";
-import { boundSessionEvent, type SessionEvent as ContractSessionEvent } from "@opengeni/contracts";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useOpenGeni, type ClientOverride } from "../provider";
 import {
@@ -54,6 +53,30 @@ const OLDER_FETCH_CAP = 2;
 const BOUNDARY_PAGE_CAP = 4;
 const EMPTY_EVENTS: SessionEvent[] = [];
 const encoder = new TextEncoder();
+const decoder = new TextDecoder();
+
+const BROWSER_EVENT_TYPE_MAX_BYTES = 256;
+const BROWSER_EVENT_ID_MAX_BYTES = 256;
+const BROWSER_EVENT_CLIENT_ID_MAX_BYTES = 4 * 1024;
+const BROWSER_EVENT_DUPLICATE_REASON_MAX_BYTES = 4 * 1024;
+const BROWSER_EVENT_PAYLOAD_PREVIEW_MAX_BYTES = 48 * 1024;
+const BROWSER_EVENT_PAYLOAD_IDENTITY_FIELDS = [
+  "id",
+  "callId",
+  "call_id",
+  "name",
+  "toolName",
+  "status",
+  "code",
+  "isError",
+  "stream",
+  "commandId",
+  "sequence",
+  "coalescedUntil",
+  "coalescedCount",
+  "firstSequence",
+  "lastSequence",
+] as const;
 
 export const SESSION_EVENT_BROWSER_MAX_BYTES = 8 * 1024 * 1024;
 export const SESSION_EVENT_BROWSER_MAX_COUNT = 10_000;
@@ -367,19 +390,227 @@ export function boundBrowserSessionEventWindow(
 }
 
 function boundBrowserLegacyEvent(event: SessionEvent): SessionEvent {
-  return boundSessionEvent(event as unknown as ContractSessionEvent, {
-    surface: "browser_legacy_guard",
-    maxBytes: SESSION_EVENT_BROWSER_SINGLE_EVENT_MAX_BYTES,
-  }) as unknown as SessionEvent;
+  // The server-side canonical projection lives in @opengeni/contracts. The
+  // publishable React package may depend only on the zero-runtime-dependency
+  // SDK, so this is intentionally a last-resort client guard rather than a
+  // second durable representation. Reconstructing the SDK wire shape prevents
+  // legacy/malformed extra properties from bypassing the browser byte cap.
+  const serialized = browserSerialize(event);
+  const originalBytes = encoder.encode(serialized.value).byteLength;
+  const typeIsSafe =
+    browserUtf8Bytes(event.type) <= BROWSER_EVENT_TYPE_MAX_BYTES &&
+    !event.type.includes("\n") &&
+    !event.type.includes("\r");
+  const clientEventId = boundBrowserOptionalText(
+    event.clientEventId,
+    BROWSER_EVENT_CLIENT_ID_MAX_BYTES,
+  );
+  const duplicateReason = boundBrowserOptionalText(
+    event.duplicateReason,
+    BROWSER_EVENT_DUPLICATE_REASON_MAX_BYTES,
+  );
+
+  if (
+    serialized.serializable &&
+    originalBytes <= SESSION_EVENT_BROWSER_SINGLE_EVENT_MAX_BYTES &&
+    typeIsSafe &&
+    clientEventId === event.clientEventId &&
+    duplicateReason === event.duplicateReason
+  ) {
+    return event;
+  }
+
+  const envelopeProjection = [
+    !typeIsSafe
+      ? browserEnvelopeFieldProjection("type", event.type, "session.event.envelope_omitted")
+      : null,
+    clientEventId !== event.clientEventId
+      ? browserEnvelopeFieldProjection("clientEventId", event.clientEventId, clientEventId)
+      : null,
+    duplicateReason !== event.duplicateReason
+      ? browserEnvelopeFieldProjection("duplicateReason", event.duplicateReason, duplicateReason)
+      : null,
+  ].filter((field) => field !== null);
+  const payloadBytes = browserJsonBytes(event.payload);
+  const preview = truncateBrowserUtf8Middle(
+    browserSerialize(event.payload).value,
+    BROWSER_EVENT_PAYLOAD_PREVIEW_MAX_BYTES,
+  );
+  const truncation = {
+    truncated: true as const,
+    surface: "browser_legacy_guard" as const,
+    reason: serialized.serializable ? "event_envelope_bytes_exceeded" : "event_not_serializable",
+    originalBytes,
+    deliveredBytes: 0,
+    omittedBytes: originalBytes,
+    estimatedOriginalTokens: Math.ceil(originalBytes / 4),
+    estimatedDeliveredTokens: 0,
+    fullEvidence: { available: false as const, reason: "not_retained" as const },
+    details: [
+      {
+        path: "$.payload",
+        kind: "payload_preview",
+        originalBytes: payloadBytes,
+        deliveredBytes: browserUtf8Bytes(preview),
+      },
+    ],
+  };
+  const payload: Record<string, unknown> = {
+    ...browserPayloadIdentity(event.payload),
+    preview,
+    ...(envelopeProjection.length > 0
+      ? {
+          originalType: boundBrowserText(event.type, BROWSER_EVENT_TYPE_MAX_BYTES),
+          envelopeProjection: {
+            truncated: true,
+            surface: "browser_legacy_guard",
+            fields: envelopeProjection,
+          },
+        }
+      : {}),
+    truncation,
+  };
+  const bounded: SessionEvent = {
+    id: boundBrowserText(event.id, BROWSER_EVENT_ID_MAX_BYTES),
+    workspaceId: boundBrowserText(event.workspaceId, BROWSER_EVENT_ID_MAX_BYTES),
+    sessionId: boundBrowserText(event.sessionId, BROWSER_EVENT_ID_MAX_BYTES),
+    sequence: event.sequence,
+    type: typeIsSafe ? event.type : "session.event.envelope_omitted",
+    payload,
+    occurredAt: boundBrowserText(event.occurredAt, BROWSER_EVENT_ID_MAX_BYTES),
+    clientEventId,
+    turnId: boundBrowserOptionalText(event.turnId, BROWSER_EVENT_ID_MAX_BYTES),
+    turnGeneration: event.turnGeneration,
+    turnAttemptId: boundBrowserOptionalText(event.turnAttemptId, BROWSER_EVENT_ID_MAX_BYTES),
+    turnAssociation: event.turnAssociation,
+    duplicateOfEventId: boundBrowserOptionalText(
+      event.duplicateOfEventId,
+      BROWSER_EVENT_ID_MAX_BYTES,
+    ),
+    duplicateReason,
+  };
+
+  settleBrowserEventTruncation(bounded, truncation);
+  if (browserJsonBytes(bounded) > SESSION_EVENT_BROWSER_SINGLE_EVENT_MAX_BYTES) {
+    payload.preview = truncateBrowserUtf8Middle(String(payload.preview), 4 * 1024);
+    truncation.details = truncation.details.slice(0, 1);
+    settleBrowserEventTruncation(bounded, truncation);
+  }
+  if (browserJsonBytes(bounded) > SESSION_EVENT_BROWSER_SINGLE_EVENT_MAX_BYTES) {
+    bounded.clientEventId = null;
+    bounded.duplicateReason = null;
+    payload.preview = "[legacy event omitted at the browser byte boundary]";
+    settleBrowserEventTruncation(bounded, truncation);
+  }
+  return bounded;
 }
 
 function browserJsonBytes(value: unknown): number {
+  return encoder.encode(browserSerialize(value).value).byteLength;
+}
+
+function browserSerialize(value: unknown): { value: string; serializable: boolean } {
   try {
     const serialized = JSON.stringify(value);
-    return encoder.encode(serialized === undefined ? "null" : serialized).byteLength;
+    return { value: serialized === undefined ? "null" : serialized, serializable: true };
   } catch {
-    return encoder.encode('"[unserializable event payload omitted]"').byteLength;
+    return {
+      value: '"[unserializable event payload omitted at browser boundary]"',
+      serializable: false,
+    };
   }
+}
+
+function browserPayloadIdentity(payload: unknown): Record<string, unknown> {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return {};
+  const record = payload as Record<string, unknown>;
+  const identity: Record<string, unknown> = {};
+  for (const field of BROWSER_EVENT_PAYLOAD_IDENTITY_FIELDS) {
+    const value = record[field];
+    if (typeof value === "string") {
+      identity[field] = boundBrowserText(value, BROWSER_EVENT_ID_MAX_BYTES);
+    } else if (typeof value === "number" || typeof value === "boolean" || value === null) {
+      identity[field] = value;
+    }
+  }
+  return identity;
+}
+
+function browserEnvelopeFieldProjection(
+  field: string,
+  original: string | null | undefined,
+  delivered: string | null | undefined,
+): { field: string; originalBytes: number; deliveredBytes: number } {
+  return {
+    field,
+    originalBytes: typeof original === "string" ? browserUtf8Bytes(original) : 0,
+    deliveredBytes: typeof delivered === "string" ? browserUtf8Bytes(delivered) : 0,
+  };
+}
+
+function boundBrowserOptionalText<T extends string | null | undefined>(
+  value: T,
+  maxBytes: number,
+): T {
+  return (typeof value === "string" ? boundBrowserText(value, maxBytes) : value) as T;
+}
+
+function boundBrowserText(value: string, maxBytes: number): string {
+  const bytes = encoder.encode(value);
+  if (bytes.byteLength <= maxBytes) return value;
+  const marker = "…[truncated]";
+  const prefixBudget = Math.max(0, maxBytes - browserUtf8Bytes(marker));
+  let prefixEnd = Math.min(prefixBudget, bytes.byteLength);
+  while (
+    prefixEnd > 0 &&
+    prefixEnd < bytes.byteLength &&
+    isBrowserUtf8Continuation(bytes[prefixEnd]!)
+  ) {
+    prefixEnd -= 1;
+  }
+  return `${decoder.decode(bytes.subarray(0, prefixEnd))}${marker}`;
+}
+
+function truncateBrowserUtf8Middle(value: string, maxBytes: number): string {
+  const bytes = encoder.encode(value);
+  if (bytes.byteLength <= maxBytes) return value;
+  const marker = `…[${bytes.byteLength - maxBytes} bytes omitted]…`;
+  const contentBudget = Math.max(0, maxBytes - browserUtf8Bytes(marker));
+  const leftBudget = Math.floor(contentBudget / 2);
+  const rightBudget = contentBudget - leftBudget;
+  let leftEnd = Math.min(leftBudget, bytes.byteLength);
+  while (leftEnd > 0 && leftEnd < bytes.byteLength && isBrowserUtf8Continuation(bytes[leftEnd]!)) {
+    leftEnd -= 1;
+  }
+  let rightStart = Math.max(0, bytes.byteLength - rightBudget);
+  while (rightStart < bytes.byteLength && isBrowserUtf8Continuation(bytes[rightStart]!)) {
+    rightStart += 1;
+  }
+  return `${decoder.decode(bytes.subarray(0, leftEnd))}${marker}${decoder.decode(bytes.subarray(rightStart))}`;
+}
+
+function settleBrowserEventTruncation(
+  event: SessionEvent,
+  truncation: {
+    originalBytes: number;
+    deliveredBytes: number;
+    omittedBytes: number;
+    estimatedDeliveredTokens: number;
+  },
+): void {
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    truncation.deliveredBytes = browserJsonBytes(event);
+    truncation.omittedBytes = Math.max(0, truncation.originalBytes - truncation.deliveredBytes);
+    truncation.estimatedDeliveredTokens = Math.ceil(truncation.deliveredBytes / 4);
+  }
+}
+
+function browserUtf8Bytes(value: string): number {
+  return encoder.encode(value).byteLength;
+}
+
+function isBrowserUtf8Continuation(value: number): boolean {
+  return (value & 0xc0) === 0x80;
 }
 
 function observeSessionStatus(

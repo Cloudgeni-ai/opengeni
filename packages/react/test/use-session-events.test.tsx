@@ -520,6 +520,41 @@ describe("boundBrowserSessionEventWindow", () => {
     expect(String(retained.duplicateReason)).toEndWith("…[truncated]");
   });
 
+  test("replaces an unserializable legacy payload with explicit bounded non-retention", () => {
+    const circular: Record<string, unknown> = { id: "call-circular" };
+    circular.self = circular;
+    const legacy = event(8, "agent.toolCall.output", circular);
+
+    const window = boundBrowserSessionEventWindow([legacy]);
+    const retained = window.events[0]!;
+    const payload = retained.payload as Record<string, unknown>;
+    const truncation = payload.truncation as Record<string, unknown>;
+
+    expect(window.bytes).toBeLessThanOrEqual(SESSION_EVENT_BROWSER_SINGLE_EVENT_MAX_BYTES);
+    expect(payload.id).toBe("call-circular");
+    expect(truncation.reason).toBe("event_not_serializable");
+    expect(truncation.fullEvidence).toEqual({
+      available: false,
+      reason: "not_retained",
+    });
+  });
+
+  test("preserves compact cursor progress when a legacy compact event is oversized", () => {
+    const legacy = event(9, "agent.message.delta", {
+      coalescedUntil: 40_000,
+      coalescedCount: 39_992,
+      text: `HEAD-${"界".repeat(2 * 1024 * 1024)}-TAIL`,
+    });
+
+    const window = boundBrowserSessionEventWindow([legacy]);
+    const retained = window.events[0]!;
+    const payload = retained.payload as Record<string, unknown>;
+
+    expect(payload.coalescedUntil).toBe(40_000);
+    expect(payload.coalescedCount).toBe(39_992);
+    expect(window.bytes).toBeLessThanOrEqual(SESSION_EVENT_BROWSER_SINGLE_EVENT_MAX_BYTES);
+  });
+
   test("retains the newest exact byte-bounded suffix independently of the count cap", () => {
     const events = Array.from({ length: 3_000 }, (_, index) =>
       event(index + 1, "agent.message.completed", { text: "x".repeat(4_000) }),
