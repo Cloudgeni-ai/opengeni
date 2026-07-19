@@ -94,6 +94,15 @@ jobs:
           OPENGENI_REQUIRE_REAL_DB: "1"
         run: bun run test:unit
 
+      - name: OPE-51 atomic session creation integration
+        env:
+          # This gate must exercise both the real FORCE-RLS PostgreSQL harness
+          # and the production Temporal workflow/durable-wake delivery path.
+          OPENGENI_REQUIRE_REAL_DB: "1"
+        run: >-
+          bun test --max-concurrency=1 --timeout 300000
+          ./test/integration/session-create-temporal.integration.ts
+
       - name: React warning-free test gate
         run: bun run test:react:clean
 
