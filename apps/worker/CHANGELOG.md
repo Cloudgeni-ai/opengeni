@@ -1,5 +1,18 @@
 # @opengeni/worker-bundle
 
+## 0.7.7
+
+### Patch Changes
+
+- 28290a0: Make context compaction and pending tool-call recovery converge without reactivating superseded history or repeating failed internal turns.
+- Updated dependencies [28290a0]
+- Updated dependencies [9a7dec2]
+  - @opengeni/db@0.7.5
+  - @opengeni/runtime@0.8.1
+  - @opengeni/core@0.4.12
+  - @opengeni/documents@0.2.14
+  - @opengeni/events@0.3.5
+
 ## 0.7.6
 
 ### Patch Changes

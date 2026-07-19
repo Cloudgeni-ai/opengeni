@@ -1,5 +1,12 @@
 # @opengeni/runtime
 
+## 0.8.1
+
+### Patch Changes
+
+- 28290a0: Make context compaction and pending tool-call recovery converge without reactivating superseded history or repeating failed internal turns.
+- 9a7dec2: Keep captured workspace files and diffs usable when the live sandbox provider is temporarily unavailable, surface a truthful retryable degraded state, and distinguish provider failures from invalid workspace paths.
+
 ## 0.8.0
 
 ### Minor Changes
