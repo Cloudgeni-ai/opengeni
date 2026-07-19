@@ -216,9 +216,7 @@ describe("parseModelProvidersJson", () => {
   ])("rejects a base URL containing %s", (_case, baseUrl, message) => {
     expect(() =>
       parseModelProvidersJson(
-        JSON.stringify([
-          { id: "acme", baseUrl, apiKey: "mock", models: [{ id: "acme/model" }] },
-        ]),
+        JSON.stringify([{ id: "acme", baseUrl, apiKey: "mock", models: [{ id: "acme/model" }] }]),
       ),
     ).toThrow(message);
   });
@@ -665,10 +663,7 @@ describe("configuredModels", () => {
           id: "acme",
           baseUrl: "https://api.acme.test/v1",
           apiKey: "mock",
-          models: [
-            { id: "acme/one", aliases: ["acme/two"] },
-            { id: "acme/two" },
-          ],
+          models: [{ id: "acme/one", aliases: ["acme/two"] }, { id: "acme/two" }],
         },
       ],
       [
@@ -976,6 +971,7 @@ describe("turn execution policy V1", () => {
     expect(policy).toMatchObject({
       productModelId: "codex/gpt-5.6-sol",
       providerId: "codex-subscription",
+      upstreamModelId: "gpt-5.6-sol",
       credentialSource: { kind: "connected_subscription", provider: "codex" },
       billing: { upstreamPayer: "connected_subscription", metering: "external" },
     });

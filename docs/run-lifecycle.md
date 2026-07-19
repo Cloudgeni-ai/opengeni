@@ -27,6 +27,23 @@ their policy ran. Spawned-child terminal results enter the parent's bounded
 typed internal-update batch without injecting a synthetic `user.message` or a
 human queue row.
 
+Immediately after claim, the exact owning attempt installs or reads the
+logical turn's accepted execution policy before credit admission, credential
+allocation, compaction, or provider work. That secret-safe policy freezes the
+public product model id, provider id, upstream deployment id, credential-source
+class, billing attribution, wire API, and definition version. The public id is
+not necessarily the provider request id: `codex/gpt-5.6-sol`, for example,
+routes upstream as `gpt-5.6-sol`. Billing and Codex allocator eligibility are
+derived from the explicit accepted attribution, never from a model prefix or a
+mutable active-credential snapshot; malformed present metadata fails closed.
+
+Approval, capacity wait, worker recovery, and Pause/Resume create newer
+attempts for the **same logical turn**, so they must replay the original policy
+rather than resolve or overwrite it. A new user/API turn or a newly materialized
+goal, system, child-result, or scheduled turn is a new logical turn and resolves
+a fresh policy. Thus a per-turn model/provider switch persists through recovery
+without accidentally becoming a permanent session default.
+
 **Runs have no length limits, by design.** What the SDK calls "turns" are model
 calls; `OPENGENI_AGENT_MAX_MODEL_CALLS_PER_TURN` exists but defaults to
 effectively unbounded. There is no continuation cap and the agent activity's

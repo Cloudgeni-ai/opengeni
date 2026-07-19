@@ -168,6 +168,7 @@ export function withCodexProvider(settings: Settings): Settings {
     baseUrl: CODEX_PROVIDER_BASE_URL,
     models: CODEX_FALLBACK_MODEL_SLUGS.map((slug) => ({
       id: `${CODEX_MODEL_ID_PREFIX}${slug}`,
+      upstreamModelId: slug,
       label: slug,
       reasoningEffort: true,
       // These three values are the live Codex CLI catalog policy, kept distinct

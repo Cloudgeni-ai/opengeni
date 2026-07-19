@@ -969,7 +969,8 @@ const RegistryModelSchema = z
       ctx.addIssue({
         code: "custom",
         path: ["hostedWebSearch"],
-        message: "legacy hostedWebSearch must agree with capabilities.hostedTools.webSearch.runnable",
+        message:
+          "legacy hostedWebSearch must agree with capabilities.hostedTools.webSearch.runnable",
       });
     }
   });
@@ -1918,6 +1919,7 @@ export function withCodexCatalogProvider(settings: Settings): Settings {
     baseUrl: CODEX_PROVIDER_BASE_URL,
     models: CODEX_FALLBACK_MODEL_SLUGS.map((slug) => ({
       id: `${CODEX_MODEL_ID_PREFIX}${slug}`,
+      upstreamModelId: slug,
       label: slug,
       reasoningEffort: true,
       contextWindowTokens: CODEX_MODEL_CONTEXT_WINDOW_TOKENS,
@@ -2055,9 +2057,7 @@ export function configuredModels(settings: Settings): ConfiguredModel[] {
     parsedRegistry.flatMap((provider) => provider.models.map((model) => model.id)),
   );
   const registryAliases = new Set(
-    parsedRegistry.flatMap((provider) =>
-      provider.models.flatMap((model) => model.aliases ?? []),
-    ),
+    parsedRegistry.flatMap((provider) => provider.models.flatMap((model) => model.aliases ?? [])),
   );
   const isRegistryNamespaced = (id: string): boolean =>
     id.startsWith(CODEX_MODEL_ID_PREFIX) ||
@@ -2203,12 +2203,8 @@ export type ResolveTurnExecutionPolicyV1Input = {
   reasoningSource: TurnExecutionReasoningSourceV1;
 };
 
-function settingsForTurnExecutionPolicy(
-  settings: Settings,
-  modelId: string,
-): Settings {
-  return settings.codexSubscriptionEnabled &&
-    modelId.startsWith(CODEX_MODEL_ID_PREFIX)
+function settingsForTurnExecutionPolicy(settings: Settings, modelId: string): Settings {
+  return settings.codexSubscriptionEnabled && modelId.startsWith(CODEX_MODEL_ID_PREFIX)
     ? withCodexCatalogProvider(settings)
     : settings;
 }
@@ -2222,28 +2218,17 @@ export function resolveTurnExecutionPolicyV1(
   settings: Settings,
   input: ResolveTurnExecutionPolicyV1Input,
 ): TurnExecutionPolicyV1 {
-  const catalogSettings = settingsForTurnExecutionPolicy(
-    settings,
-    input.modelId,
-  );
-  const productModelId = canonicalizeConfiguredModelId(
-    catalogSettings,
-    input.modelId,
-  );
+  const catalogSettings = settingsForTurnExecutionPolicy(settings, input.modelId);
+  const productModelId = canonicalizeConfiguredModelId(catalogSettings, input.modelId);
   const resolved = resolveModelProvider(catalogSettings, productModelId);
   if (!resolved) {
-    throw new Error(
-      "Turn execution policy model is not present in the configured catalog",
-    );
+    throw new Error("Turn execution policy model is not present in the configured catalog");
   }
   if (
     input.requestedModelId !== null &&
-    canonicalizeConfiguredModelId(catalogSettings, input.requestedModelId) !==
-      productModelId
+    canonicalizeConfiguredModelId(catalogSettings, input.requestedModelId) !== productModelId
   ) {
-    throw new Error(
-      "Turn execution policy requested model does not canonicalize to its product",
-    );
+    throw new Error("Turn execution policy requested model does not canonicalize to its product");
   }
   return TurnExecutionPolicyV1.parse({
     schemaVersion: 1,
@@ -2279,30 +2264,20 @@ export function assertTurnExecutionPolicyMatchesConfigV1(
   model: ConfiguredModel;
 } {
   const parsed = TurnExecutionPolicyV1.parse(policy);
-  const catalogSettings = settingsForTurnExecutionPolicy(
-    settings,
-    parsed.productModelId,
-  );
-  const canonicalExpectedModel = canonicalizeConfiguredModelId(
-    catalogSettings,
-    expected.modelId,
-  );
+  const catalogSettings = settingsForTurnExecutionPolicy(settings, parsed.productModelId);
+  const canonicalExpectedModel = canonicalizeConfiguredModelId(catalogSettings, expected.modelId);
   if (
     parsed.productModelId !== canonicalExpectedModel ||
     parsed.reasoningEffort !== expected.reasoningEffort
   ) {
-    throw new Error(
-      "Turn execution policy does not match the accepted turn model/reasoning",
-    );
+    throw new Error("Turn execution policy does not match the accepted turn model/reasoning");
   }
   if (
     parsed.requestedModelId !== null &&
     canonicalizeConfiguredModelId(catalogSettings, parsed.requestedModelId) !==
       parsed.productModelId
   ) {
-    throw new Error(
-      "Turn execution policy requested model does not match its product model",
-    );
+    throw new Error("Turn execution policy requested model does not match its product model");
   }
   const resolved = resolveModelProvider(catalogSettings, parsed.productModelId);
   if (!resolved) {
@@ -2313,13 +2288,10 @@ export function assertTurnExecutionPolicyMatchesConfigV1(
     parsed.upstreamModelId !== resolved.model.upstreamModelId ||
     parsed.wireApi !== resolved.model.api ||
     parsed.definitionVersion !== resolved.model.definitionVersion ||
-    canonicalJson(parsed.credentialSource) !==
-      canonicalJson(resolved.model.credentialSource) ||
+    canonicalJson(parsed.credentialSource) !== canonicalJson(resolved.model.credentialSource) ||
     canonicalJson(parsed.billing) !== canonicalJson(resolved.model.billing);
   if (mismatched) {
-    throw new Error(
-      "Turn execution policy does not match the current provider definition",
-    );
+    throw new Error("Turn execution policy does not match the current provider definition");
   }
   return { policy: parsed, provider: resolved.provider, model: resolved.model };
 }
@@ -2928,10 +2900,9 @@ export function parseModelProvidersJson(raw: string): RegistryProvider[] {
       return normalizeRegistryProvider(result.data);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      throw new Error(
-        `OPENGENI_MODEL_PROVIDERS_JSON provider[${index}] is invalid: ${message}`,
-        { cause: error },
-      );
+      throw new Error(`OPENGENI_MODEL_PROVIDERS_JSON provider[${index}] is invalid: ${message}`, {
+        cause: error,
+      });
     }
   });
 }

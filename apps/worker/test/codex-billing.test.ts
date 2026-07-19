@@ -75,7 +75,7 @@ describe("worker recordModelUsageAndDebitCredits — codex usage recording", () 
         sessionId: "sess-1",
         turnId: "turn-1",
         model: "codex/gpt-5.6-sol", // has NO OpenGeni pricing
-        isCodexTurn: true,
+        externallyBilled: true,
         usage: { inputTokens: 1000, outputTokens: 500, totalTokens: 1500 },
         sourceKey: "response-1",
       });
@@ -109,7 +109,7 @@ describe("worker recordModelUsageAndDebitCredits — codex usage recording", () 
         sessionId: "sess-1",
         turnId: "turn-2",
         model: "scripted-model",
-        isCodexTurn: false,
+        externallyBilled: false,
         usage: { inputTokens: 1000, outputTokens: 500, totalTokens: 1500 },
         sourceKey: "response-1",
       });
