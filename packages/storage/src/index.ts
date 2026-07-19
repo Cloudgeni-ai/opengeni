@@ -48,6 +48,8 @@ export type ObjectStorage = {
     expiresInSeconds?: number;
   }) => Promise<{ url: string; expiresAt: Date }>;
   headFile: (file: FileAsset) => Promise<ObjectHead>;
+  /** Read object metadata by raw storage key. Returns null on 404/missing. */
+  headObject: (key: string) => Promise<ObjectHead | null>;
   getFileBytes: (file: FileAsset) => Promise<Uint8Array>;
   /** Fetch an object by raw storage key (not a tracked FileAsset). Returns null on 404/missing. */
   getObjectBytes: (key: string) => Promise<{ bytes: Uint8Array; contentType?: string } | null>;
@@ -174,6 +176,24 @@ function createS3CompatibleObjectStorage(settings: Settings): ObjectStorage | nu
         metadata: head.Metadata,
       });
     },
+    async headObject(key) {
+      try {
+        const head = await client.send(
+          new HeadObjectCommand({
+            Bucket: settings.objectStorageBucket,
+            Key: key,
+          }),
+        );
+        return objectHead({
+          contentLength: head.ContentLength,
+          contentType: head.ContentType,
+          metadata: head.Metadata,
+        });
+      } catch (error) {
+        if (isS3NotFound(error)) return null;
+        throw error;
+      }
+    },
     async getFileBytes(file) {
       const result = await client.send(
         new GetObjectCommand({
@@ -296,6 +316,19 @@ function createGcsObjectStorage(settings: Settings): ObjectStorage {
         metadata: stringMetadata(metadata.metadata),
       });
     },
+    async headObject(key) {
+      try {
+        const [metadata] = await bucket.file(key).getMetadata();
+        return objectHead({
+          contentLength: parseContentLength(metadata.size),
+          contentType: metadata.contentType,
+          metadata: stringMetadata(metadata.metadata),
+        });
+      } catch (error) {
+        if (isGcsNotFound(error)) return null;
+        throw error;
+      }
+    },
     async getFileBytes(file) {
       const [bytes] = await bucket.file(file.objectKey).download();
       return bytes;
@@ -388,6 +421,14 @@ function createAzureBlobObjectStorage(settings: Settings): ObjectStorage | null 
       return azureHeadToObjectHead(
         await containerClient.getBlobClient(file.objectKey).getProperties(),
       );
+    },
+    async headObject(key) {
+      try {
+        return azureHeadToObjectHead(await containerClient.getBlobClient(key).getProperties());
+      } catch (error) {
+        if (isAzureNotFound(error)) return null;
+        throw error;
+      }
     },
     async getFileBytes(file) {
       return await azureDownloadToBytes(

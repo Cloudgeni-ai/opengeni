@@ -175,6 +175,29 @@ describe("P4.4 SandboxChannelAService — FileSystem (real local box)", () => {
     ).rejects.toBeInstanceOf(ChannelANotFoundError);
   });
 
+  test("native fsRead rejects a directory instead of returning empty file content", async () => {
+    const { session } = await makeBox();
+    const svc = new SandboxChannelAService({ session });
+    await svc.fsMkdir({ path: "not-a-file", recursive: true });
+
+    await expect(
+      svc.fsRead({ path: "not-a-file", encoding: "base64", maxBytes: 1024 }),
+    ).rejects.toThrow("file not found");
+  });
+
+  test("exec-fallback fsRead rejects a directory instead of masking base64 failure", async () => {
+    const { session } = await makeBox();
+    const nativeSvc = new SandboxChannelAService({ session });
+    await nativeSvc.fsMkdir({ path: "not-a-file", recursive: true });
+    if (!session.exec) throw new Error("local test session does not expose exec");
+    const exec = session.exec.bind(session);
+    const fallbackSvc = new SandboxChannelAService({ session: { exec } });
+
+    await expect(
+      fallbackSvc.fsRead({ path: "not-a-file", encoding: "base64", maxBytes: 1024 }),
+    ).rejects.toThrow("file not found");
+  });
+
   test("fsList returns a coherent tree of a known directory", async () => {
     const { session } = await makeBox();
     const svc = new SandboxChannelAService({ session });
@@ -903,6 +926,25 @@ describe("P4.4 SandboxChannelAService — Git (real local box)", () => {
         "__OPENGENI_FS_CONFINED_OK__",
       ]),
     );
+  });
+
+  test("git status enumerates files inside a nested untracked directory", async () => {
+    const { session } = await makeBox();
+    const svc = new SandboxChannelAService({ session });
+    await svc.terminalExec({
+      command:
+        "git init -q && mkdir -p newdir/deep && printf one > newdir/a.txt && printf two > newdir/deep/b.txt",
+      cwd: "",
+      timeoutMs: 20_000,
+      emitStream: false,
+    });
+
+    const status = await svc.gitStatus({ path: "" });
+    expect(status.files.map((file) => file.path).sort()).toEqual([
+      "newdir/a.txt",
+      "newdir/deep/b.txt",
+    ]);
+    expect(status.files.every((file) => file.worktree === "untracked")).toBe(true);
   });
 
   test("git diff --staged parses into structured hunks (the Pierre feed)", async () => {

@@ -32,6 +32,7 @@ export const CAPTURE_SIGNED_URL_TTL_SECONDS = 300;
 // inject an in-memory map without standing up S3/minio.
 export type CaptureStoragePort = {
   getObjectBytes: (key: string) => Promise<{ bytes: Uint8Array } | null>;
+  headObject: (key: string) => Promise<unknown | null>;
   createGetUrl: (args: {
     key: string;
     expiresInSeconds?: number;
@@ -242,6 +243,16 @@ export async function serveWorkspaceCaptureFile(
       ? Buffer.from(blob.bytes).toString("base64")
       : new TextDecoder().decode(blob.bytes);
     return GetWorkspaceCaptureFileResponse.parse({ ...base, encoding, content, contentUrl: null });
+  }
+  if (!(await storage.headObject(file.contentRef))) {
+    // Signing does not prove existence: provider signers accept arbitrary keys.
+    // Preserve the same graceful live-file fallback as the inline read path.
+    return GetWorkspaceCaptureFileResponse.parse({
+      ...base,
+      encoding: null,
+      content: null,
+      contentUrl: null,
+    });
   }
   const signed = await storage.createGetUrl({
     key: file.contentRef,

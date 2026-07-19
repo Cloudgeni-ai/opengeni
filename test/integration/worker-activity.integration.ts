@@ -2992,6 +2992,7 @@ function fakeObjectStorage(body: string): ObjectStorage {
       ContentLength: new TextEncoder().encode(body).byteLength,
       ContentType: "text/plain",
     }),
+    headObject: async () => null,
     getFileBytes: async () => new TextEncoder().encode(body),
   };
 }

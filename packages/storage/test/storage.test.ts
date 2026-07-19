@@ -114,6 +114,16 @@ describe("getObjectBytes (S3-compatible)", () => {
             { status: 404, headers: { "content-type": "application/xml" } },
           );
         }
+        if (request.method === "HEAD") {
+          return new Response(null, {
+            status: 200,
+            headers: {
+              "content-length": String(Buffer.byteLength(object.body)),
+              "content-type": object.contentType,
+              "x-amz-meta-sha256": "stored-checksum",
+            },
+          });
+        }
         return new Response(object.body, {
           status: 200,
           headers: { "content-type": object.contentType },
@@ -164,6 +174,52 @@ describe("getObjectBytes (S3-compatible)", () => {
       );
       const result = await storage!.getObjectBytes("catalog-assets/logos/missing.com/zzz.png");
       expect(result).toBeNull();
+    } finally {
+      fake.close();
+    }
+  });
+
+  test("heads an existing raw-key object without downloading it", async () => {
+    const fake = startFakeS3({
+      "workspace-captures/ws/sess/blobs/abc": { body: "capture", contentType: "text/plain" },
+    });
+    try {
+      const storage = withEnv(
+        {
+          OPENGENI_OBJECT_STORAGE_BACKEND: "s3-compatible",
+          OPENGENI_OBJECT_STORAGE_ENDPOINT: fake.url,
+          OPENGENI_OBJECT_STORAGE_BUCKET: "test-bucket",
+          OPENGENI_OBJECT_STORAGE_FORCE_PATH_STYLE: "true",
+          OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID: "test",
+          OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY: "test",
+        },
+        () => createObjectStorage(getSettings()),
+      );
+      expect(await storage!.headObject("workspace-captures/ws/sess/blobs/abc")).toEqual({
+        ContentLength: 7,
+        ContentType: "text/plain",
+        Metadata: { sha256: "stored-checksum" },
+      });
+    } finally {
+      fake.close();
+    }
+  });
+
+  test("returns null when a raw-key HEAD is missing", async () => {
+    const fake = startFakeS3({});
+    try {
+      const storage = withEnv(
+        {
+          OPENGENI_OBJECT_STORAGE_BACKEND: "s3-compatible",
+          OPENGENI_OBJECT_STORAGE_ENDPOINT: fake.url,
+          OPENGENI_OBJECT_STORAGE_BUCKET: "test-bucket",
+          OPENGENI_OBJECT_STORAGE_FORCE_PATH_STYLE: "true",
+          OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID: "test",
+          OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY: "test",
+        },
+        () => createObjectStorage(getSettings()),
+      );
+      expect(await storage!.headObject("workspace-captures/ws/sess/blobs/missing")).toBeNull();
     } finally {
       fake.close();
     }

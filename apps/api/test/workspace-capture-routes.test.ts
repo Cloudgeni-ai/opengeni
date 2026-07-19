@@ -189,6 +189,9 @@ function fakeStorage(
       const bytes = objects[key];
       return bytes ? { bytes } : null;
     },
+    async headObject(key) {
+      return objects[key] ? {} : null;
+    },
     async createGetUrl({ key }) {
       signed.push(key);
       return {
@@ -247,7 +250,24 @@ describe("serveWorkspaceCapture (manifest response)", () => {
     });
   });
 
-  test("failed row without a known discovery reason does not invent one", async () => {
+  test("persistent capture churn returns explicit degraded metadata", async () => {
+    const res = await serveWorkspaceCapture(
+      makeRow({
+        state: "failed",
+        manifestKey: null,
+        treeIndexKey: null,
+        stats: { degradedReason: "workspace_changed_during_capture" },
+      }),
+      fakeStorage({}),
+    );
+    expect(res).toMatchObject({
+      available: false,
+      degradedReason: "workspace_changed_during_capture",
+      revision: 3,
+    });
+  });
+
+  test("failed row without a known degraded reason does not invent one", async () => {
     const res = await serveWorkspaceCapture(
       makeRow({ state: "failed", manifestKey: null, treeIndexKey: null, stats: {} }),
       fakeStorage({}),
@@ -452,5 +472,19 @@ describe("serveWorkspaceCaptureFile (single after-image)", () => {
     const res = await serveWorkspaceCaptureFile(makeRow(), "src/app.ts", storage);
     expect(res.content).toBeNull();
     expect(res.contentUrl).toBeNull();
+  });
+
+  test("large after-image blob missing → marker without signing an unusable URL", async () => {
+    const storage = storageWith([
+      fileEntry({
+        path: "big.txt",
+        contentRef: BIG_REF,
+        sizeBytes: CAPTURE_INLINE_FILE_MAX_BYTES + 1,
+      }),
+    ]); // no BIG_REF blob
+    const res = await serveWorkspaceCaptureFile(makeRow(), "big.txt", storage);
+    expect(res.content).toBeNull();
+    expect(res.contentUrl).toBeNull();
+    expect(storage.signed).toEqual([]);
   });
 });

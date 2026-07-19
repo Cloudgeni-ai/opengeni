@@ -787,7 +787,10 @@ export class SandboxChannelAService {
       };
     }
     const { stdout } = await this.runInConfinedDirectory(repo, {
-      cmd: "git status --porcelain=v2 --branch -z",
+      // Git's default untracked mode collapses a new nested tree to `? path/`.
+      // The file-oriented Channel-A contract must enumerate the actual files,
+      // while retaining current-main's same-command workspace confinement.
+      cmd: "git status --porcelain=v2 --branch -z --untracked-files=all",
     });
     return { ...parsePorcelainV2(stdout), revision: this.revision };
   }

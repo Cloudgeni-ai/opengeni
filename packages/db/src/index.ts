@@ -11796,10 +11796,17 @@ export async function listSessionEvents(
     typeof afterOrOptions === "number"
       ? { after: afterOrOptions, limit: legacyLimit }
       : afterOrOptions;
-  const after = normalizeEventSequence(options.after, 0);
+  // session_events.sequence is int4. Clamp direct DB callers too so a route or
+  // embed host cannot bind an oversized JavaScript number and trigger a
+  // PostgreSQL integer-overflow error.
+  const after = Math.min(POSTGRES_INT_MAX, Math.max(0, normalizeEventSequence(options.after, 0)));
   const limit = normalizeEventLimit(options.limit, 500);
   const hasBefore = options.before !== undefined && Number.isFinite(options.before);
-  const before = hasBefore ? Math.floor(options.before as number) : undefined;
+  // Keep direct DB callers from binding an extreme negative JavaScript number
+  // to PostgreSQL int4. Positive values above int4 intentionally mean "no
+  // upper bound" so a caller can request the newest page without excluding the
+  // valid maximum sequence.
+  const before = hasBefore ? Math.max(0, Math.floor(options.before as number)) : undefined;
 
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const filters: SQL[] = [
@@ -15604,11 +15611,11 @@ export async function insertWorkspaceCapture(
 /**
  * Persist an epoch-fenced degraded capture marker.
  *
- * Repository discovery is part of the capture's authority boundary: if the
- * platform cannot prove discovery completed, it must not publish an
- * authoritative-looking `available` capture with zero repositories. The
- * marker deliberately has no manifest/blob keys, so readers fall back to the
- * live box while still receiving an explicit degraded reason.
+ * Repository discovery and byte stabilization are part of the capture's
+ * authority boundary: if the platform cannot prove either completed, it must
+ * not leave an older `available` capture looking current. The marker
+ * deliberately has no manifest/blob keys, so readers fall back to the live box
+ * while still receiving an explicit degraded reason.
  */
 export async function insertFailedWorkspaceCapture(
   db: Database,

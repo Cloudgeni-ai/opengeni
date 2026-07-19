@@ -4148,6 +4148,23 @@ describe("API component integration", () => {
       5, 6, 7,
     ]);
 
+    for (const oversizedAfter of [String(Number.MAX_SAFE_INTEGER), "1e100"]) {
+      const beyond = await app.request(
+        workspacePath(
+          workspaceId,
+          `/sessions/${session.id}/events?after=${oversizedAfter}&limit=10`,
+        ),
+      );
+      expect(beyond.status).toBe(200);
+      expect((await beyond.json()) as SessionEvent[]).toEqual([]);
+    }
+
+    const extremeNegativeBefore = await app.request(
+      workspacePath(workspaceId, `/sessions/${session.id}/events?before=-1e100&limit=10`),
+    );
+    expect(extremeNegativeBefore.status).toBe(200);
+    expect((await extremeNegativeBefore.json()) as SessionEvent[]).toEqual([]);
+
     const clampedMax = await app.request(
       workspacePath(workspaceId, `/sessions/${session.id}/events?limit=1000000000`),
     );
