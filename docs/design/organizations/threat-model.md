@@ -5,7 +5,7 @@
 
 # Organizations and identity threat model
 
-Status: **proposed; independent review required before schema changes**
+Status: **revised proposal after blocked review; independent approval required**
 
 Companion decision: [`tenancy-identity-adr.md`](tenancy-identity-adr.md)
 
@@ -70,6 +70,9 @@ Assume:
 - a database row contains mismatched organization/workspace ids due to a programming
   error; and
 - support/operator mistakes occur during transfer, deletion, export, or recovery.
+- recovery factors or approvers are compromised and attempt an identity merge;
+- a lost native device remains offline or receives a push for the wrong tenant; and
+- an incompatible old binary races canonical membership revocation.
 
 Database superuser, host root, and malicious code executing with the environment's
 master encryption keys are outside tenant-isolation guarantees, but their access must
@@ -97,6 +100,13 @@ remain operationally restricted and auditable.
    persistent channels and user-bound delegated tokens are revision-fenced.
 10. **Old binaries cannot weaken isolation.** Additive migration and compatibility
     fields preserve the existing workspace/RLS boundary.
+11. **Every data plane is an authority boundary.** Object keys, topics, indexes, caches,
+    telemetry, jobs, callbacks, and private state are server-scoped and independently
+    negative-tested; tags alone never authorize.
+12. **Audit is append-only and scoped.** Ordinary app code cannot rewrite, erase, or
+    expose actor/operator-global history through a null tenant predicate.
+13. **Federation is absent until reviewed.** Domain/group claims grant nothing and no
+    enterprise support is advertised by this revision.
 
 ## 6. Threats and required controls
 
@@ -114,6 +124,9 @@ and becomes linked to a victim's human identity.
   security notification, and audit.
 - A merge preview enumerates affected organizations/roles without exposing secrets.
 - There is no “helpful” sign-in-time email merge fallback.
+- A binding already owned by another human can enter only the distinct, revision-fenced
+  merge protocol in ADR section 15. Duplicate personal organizations, authority,
+  recovery, billing, and private-owner conflicts must be resolved before apply.
 
 ### T2. Ambient cookie or callback overwrites another active account
 
@@ -360,6 +373,161 @@ uses a table-owner connection, or treats host ACL tags as authorization.
 - Host policy may attenuate but not bypass composite-key/RLS invariants.
 - Conformance suite covers managed and injected identity adapters.
 
+### T17. Merge or recovery converts compromise into durable authority
+
+**Attack:** A compromised account links a victim login, a recovery approver replays an
+old ceremony, two personal organizations collapse silently, or a crashed merge worker
+partially moves grants/private assets and later repeats them.
+
+**Controls:**
+
+- Link, merge, and recovery use the separate state machines in ADR section 15.
+- Every transition checks operation generation, both starting human revisions, proof
+  expiry, approver eligibility, and a unique idempotency key under lock.
+- Existing-human merge requires fresh proof from both sources, or the stricter recovery
+  quorum plus 72-hour cooling; ordinary proven merge still cools for 24 hours.
+- All pre-existing verified paths are notified at proposal, conflict decision, apply,
+  dispute, reverse, and finalize. A dispute fences every stale callback/worker.
+- Duplicate personal organizations require explicit keep/convert/delete decisions;
+  billing/personal entitlements enter hold and never sum automatically.
+- Apply is one transaction with an effect ledger and reversible alias. Sessions/tokens
+  are revoked; audit identities and source contributions are not rewritten.
+- A compromised/suspended/newly-added approver, target identity, or absorbed identity
+  cannot satisfy recovery quorum.
+
+**Tests:** Traverse every transition/event pair, including duplicate/reordered callback,
+expired proof, revision change, lost approver, dispute at the deadline, crash at every
+effect, deterministic retry, reversal, and finalization. Generate every conflict-table
+combination and prove no implicit owner, role, billing, recovery, private-data, or
+personal-organization outcome.
+
+### T18. A non-database plane crosses tenants
+
+**Attack:** A caller forges an object prefix, subscribes to a NATS wildcard, manipulates
+search ACL tags, collides a cache key, follows a webhook redirect, claims another
+tenant's job, or learns tenant data from raw logs/metrics.
+
+**Controls:**
+
+- ADR section 16 is the required authority registry for database, object, NATS, search,
+  cache, observability, jobs, callbacks, webhooks, provider connections, and private
+  state.
+- Every identifier and capability is derived from a verified durable owner tuple. A
+  callback/payload/query never supplies its own trusted tenant scope.
+- Object capabilities fix operation, key prefix, size/type, checksum, expiry, and exact
+  tenant pair; server-side copy validates both source and destination.
+- Broker JWTs enumerate publish/subscribe subjects; no client wildcard can widen them.
+- Search authorization is checked before query and after result. ACL/index tags alone
+  are not authorization.
+- Cache keys include plane, owner tuple, and revision; a cached value repeats the owner
+  tuple and is rejected on mismatch.
+- Jobs authorize at enqueue and claim; webhook retries preserve the original durable
+  destination/owner and do not follow an unapproved redirect.
+- Shared logs/traces/metrics contain no content/secrets and tenant dashboards query a
+  capability-checked projection, not arbitrary raw labels.
+
+### T19. Mutable or mis-scoped audit destroys evidence
+
+**Attack:** Ordinary app code updates/deletes an audit row, a tenant queries events with
+`organization_id IS NULL`, a privileged rewrite changes both events and database chain
+head, or deletion silently erases identity-security evidence.
+
+**Controls:**
+
+- The app can execute only the dedicated append function; it has no table/sequence/
+  partition mutation ownership. Append-deny trigger and deployment grant assertions are
+  defense in depth.
+- Scope is explicit (`actor`, `organization`, `workspace`, `operator`, or public
+  integrity checkpoint). Null tenant is never a visibility wildcard.
+- Per-scope locked sequence/hash chains and externally signed retention-locked heads
+  detect rewrite, truncation, removal, and reordering beyond the normal DB role boundary.
+- Security mutation and audit append commit together. Rollback leaves neither effect.
+- A versioned retention schedule is mandatory. Crypto-erasure/pseudonymization preserves
+  chain evidence; statutory hard erasure records a signed range certificate instead of
+  pretending the chain is continuous.
+- Operator read/compliance erasure uses distinct short-lived roles and is itself
+  appended/audited.
+
+### T20. Mixed versions restore a revoked grant
+
+**Attack:** An old API writes legacy `subject_id` after canonical revocation, an old
+worker claims a v2 job, or a rollback reads a permissive stale legacy projection.
+
+**Controls:**
+
+- Migration section 7 defines exactly one authority for each phase.
+- Canonical cutover waits for zero incompatible protocol leases and grants the versioned
+  non-login database capability only to compatible deployments.
+- For canonical tenants, legacy direct DML and legacy-role reads are database-denied.
+  Request flags or settable GUCs cannot claim compatibility.
+- Canonical grant/revoke writes canonical row, legacy projection, revision, outbox, and
+  audit atomically under the governance-row lock.
+- Any projection/revision disagreement fails closed and quarantines. No asynchronous
+  reconciliation can turn disagreement into a grant.
+- Pre-v2 rollback after cutover is intentionally unavailable; only a compatible forward
+  recovery can serve the tenant.
+
+### T21. Native/device storage or callback crosses accounts
+
+**Attack:** Credentials land in shared preferences/WebView storage, OS backup clones a
+slot to another device, a custom-scheme callback is hijacked, refresh replay survives,
+lost-device caches remain readable, or push leaks another tenant's content.
+
+**Controls:**
+
+- ADR section 19 applies the same server-side session set/slot/revision semantics to
+  browser and native clients.
+- Native installations use proof-of-possession keys and OS secure storage. PKCE plus
+  verified app/universal links, loopback, or device flow binds callback ownership.
+- Rotating refresh-token family replay revokes the slot. Restored credentials without
+  the installation key are rejected.
+- Encrypted cache namespace includes installation, slot, human, exact tenant pair, and
+  revisions. High-sensitivity content is offline-disabled; all other content expires
+  within 24 hours without online revision check and resists clock rollback.
+- Lost-device action revokes installation/slots/token families/push registrations and
+  wrapping record. Remote wipe is explicitly best effort.
+- Push contains only an opaque id, is scoped at registration and enqueue, and requires a
+  fresh authorized fetch before rendering.
+
+### T22. Same-human aliases leak private state between slots
+
+**Attack:** Two linked login accounts reuse a slot cache or decrypted connection because
+they resolve to the same human; or a legacy `user:<id>` draft is assigned to the wrong
+human during merge/backfill.
+
+**Controls:**
+
+- ADR section 17 declares a canonical owner for drafts, pins, connections, keys,
+  uploads, preferences, slot caches, and auth tokens.
+- Durable human-owned state may be freshly fetched across same-human login accounts;
+  slot-local caches, auth tokens, upload handles, decrypted connections, and in-flight
+  responses are never reused.
+- Human-owned rows that touch resources also carry the exact tenant pair. Upload attach
+  rechecks pair and revision.
+- Legacy subject augmentation requires one unambiguous login-to-human binding and keeps
+  source provenance/stable ids. Ambiguity is quarantine, never email-based assignment.
+- Merge uses a reversible owner effect ledger; duplicate ids are retained under stable
+  disambiguated ids rather than dropped or overwritten.
+
+### T23. Federation claims or first caller seize governance
+
+**Attack:** A domain/group/administrator claim grants an organization role despite no
+federation lifecycle, or the first remote request to an unauthenticated self-hosted
+instance becomes owner.
+
+**Controls:**
+
+- Federation is explicitly deferred by ADR section 20. Domain, group, role, and email
+  claims grant nothing; unsupported federation endpoints/configuration fail closed.
+- Generic issuer/subject authentication creates only a login account. Membership and
+  recovery require explicit audited governance operations.
+- Bootstrap uses an operator-delivered 256-bit single-use secret plus configured-human
+  or loopback/OS proof, never first-request wins.
+- An unauthenticated listener outside allowed loopback/private operator policy refuses
+  startup. Unknown and non-human subjects cannot own or recover.
+- Bootstrap is one locked idempotent transaction with stable installation ids and an
+  offline factor; collaboration enablement preserves all normal tenant/RLS semantics.
+
 ## 7. Session and credential invalidation matrix
 
 | Change | Browser slot | Auth session | Org/workspace grant cache | Persistent stream | User delegated token | Org API key | Running workload |
@@ -371,12 +539,42 @@ uses a table-owner connection, or treats host ACL tags as authorization.
 | Password reset/compromise | all affected-account slots revoked | all affected-account sessions revoked | affected actor cleared | affected closed | affected rejected | personal keys revoked by policy | organization workload unchanged |
 | Delete organization finalizes | affected route access removed | identity login may remain | organization invalidated | closed | rejected | org keys revoked | must already be stopped/transferred |
 
+Native/device invalidation uses the same rows plus these host effects:
+
+| Change | Installation/slot | Secure-store token family | Offline cache | Push registration |
+| --- | --- | --- | --- | --- |
+| Switch slot | installation retained; new epoch | families isolated | old namespace sealed; no reuse | old slot registration inactive |
+| Sign out account on device | affected slot revoked | affected family revoked | affected namespace key deleted | affected registration deleted |
+| Sign out device | all device slots revoked | all device families revoked | all local wrapping keys deleted | all device registrations deleted |
+| Account compromise | affected-account slots on all devices revoked | replay family denied globally | unreadable after key/revision/24 h bound | affected registrations deleted |
+| Device lost | whole installation revoked | installation proof and families denied | remote wipe best effort; secure store/expiry are guarantees | all installation registrations deleted |
+
+### 7.1 Data-plane adversarial matrix
+
+For every row below seed equal-shaped tenant A/B resources and actor A/B resources.
+
+| Plane | Mandatory denied operations |
+| --- | --- |
+| DB workspace/org/actor | missing context; wrong pair; actor-global enumerate; tenant-null visibility; all CRUD |
+| Object/upload/export | forged prefix; signed PUT/GET reuse; cross-tenant copy; callback key substitution; expired capability |
+| NATS/stream | wildcard publish/subscribe; forged JWT scope; stale revision delivery; cross-tenant replay |
+| Search/index | forged ACL/tag; wrong namespace; stale indexed grant; result from deleted/revoked tenant |
+| Cache/idempotency | owner-key collision; stale revision; same key across tenants; actor A retrieving actor B value |
+| Logs/traces/metrics/analytics | raw secret/content; unauthorized tenant dashboard; join through reused label; erased identity reidentification |
+| Jobs/workflows/outbox | payload scope substitution; stale user claim; old worker claim; retry changing owner; cross-tenant batch without operator role |
+| Callback/webhook/integration | replay; wrong signature/state; redirect scope change; secret read; destination owner mutation during retry |
+| Provider/private state | login id used as provider/tenant id; same-human slot cache reuse; ambiguous legacy owner; cross-owner credential selection |
+
+Passing DB RLS tests does not waive any row in this matrix.
+
 ## 8. Audit-event minimum set
 
 At minimum record successful and failed high-risk attempts for:
 
 - login account add/link/unlink, slot switch, per-account/all-account sign-out;
 - identity merge/recovery and step-up challenge result;
+- identity merge evidence/conflict/cooling/dispute/reverse/finalize and recovery approver
+  eligibility decisions;
 - organization create/convert/rename/status/delete/cancel-delete;
 - invite create/resend/cancel/expire/accept/reject;
 - membership add/remove/leave, role/capability change, ownership transfer;
@@ -384,6 +582,10 @@ At minimum record successful and failed high-risk attempts for:
 - personal/service credential create/revoke;
 - export request/claim/complete/download/expire; and
 - authorization invalidation delivery failure/retry.
+- audit retention/legal-hold/crypto-erasure/hard-erasure certificate and integrity-head
+  sign/export/verification failure;
+- native installation/slot/token-family/push registration create/revoke/replay; and
+- bootstrap claim/refusal/recovery/collaboration enablement.
 
 Routine read events and every harmless switch need not flood the main audit log if a
 separate security-session history provides equivalent evidence. Sensitive mutations do.
@@ -400,6 +602,10 @@ separate security-session history provides equivalent evidence. Sensitive mutati
 - Legacy `accountId`/new `organizationId` equality and mismatch rejection.
 - Cookie/slot selection, per-account sign-out, CSRF/origin, callback state, open-redirect
   rejection, and stale identity-epoch response discard.
+- Every link/merge/recovery transition, proof/quorum/cooling/revision rule, conflict
+  resolution, crash retry, dispute, reversal, and source-contribution preservation.
+- Issuer/subject/email/slug normalization fixtures and tombstone generation/reuse.
+- Bootstrap first-claim race/restart/recovery and federation claim rejection.
 
 ### 9.2 Real PostgreSQL tests
 
@@ -414,6 +620,11 @@ equal-shaped rows. Run as the real non-owner app role with FORCE RLS:
 - concurrent owner demote/remove/leave/transfer preserves human governance;
 - revocation and invitation consumption serialize correctly; and
 - forward migration/backfill is idempotent on legacy, partial, duplicate, and empty data.
+- the app role cannot update/delete/truncate audit history, actor/operator scope cannot
+  leak, hash segments verify, and mutation rollback leaves no orphan audit event;
+- legacy/new grant and revoke races obey phase authority; old roles cannot read or write
+  canonical tenants and disagreement denies; and
+- actor-global RLS/capabilities prevent one human from enumerating another.
 
 ### 9.3 API/SDK/embedded tests
 
@@ -424,6 +635,9 @@ equal-shaped rows. Run as the real non-owner app role with FORCE RLS:
 - User membership removal does not accidentally revoke independent organization keys or
   leave personal keys active.
 - A delegated token with stale revision fails even before expiry.
+- Every data-plane row in section 7.1 has an integration/conformance negative test.
+- Native secure-store unavailable/backup restore/callback hijack/refresh replay/offline
+  expiry/device loss/push token reuse fail closed.
 
 ### 9.4 Browser tests
 

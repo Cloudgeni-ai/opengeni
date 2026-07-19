@@ -5,7 +5,7 @@
 
 # Organizations and identity design packet
 
-Status: **proposed; implementation blocked pending independent architecture and security review**
+Status: **revised after BLOCK/REQUEST CHANGES; implementation remains blocked pending fresh independent approval**
 
 Issue: OPE-10
 
@@ -48,6 +48,25 @@ Review must explicitly cover:
 
 An approval applies only to the reviewed commit and tree. Any semantic change to these
 documents requires a fresh review.
+
+The first exact-head review of commit `7b8aa79ea09dbfc92ee8cb0f9db5c87ce590bfab`
+returned BLOCK/REQUEST CHANGES. This revision addresses that review but is not
+self-approved. The Main Orchestrator must commission a fresh independent review of the
+new immutable head.
+
+## Blocked-review finding resolution index
+
+| Finding | Normative resolution |
+| --- | --- |
+| S1.1 link/merge/recovery and personal-org conflicts | ADR §15 defines separate link, merge, and recovery state machines, proof/quorum, locks/revisions, cooling/dispute/reversal, deterministic conflict outcomes, effect ledger, and failure recovery; threat model T17 and UX §14 define adversarial tests and ceremony states. |
+| S1.2 complete tenant/data-plane and actor-global isolation | ADR §§16–17 define canonical owners and enforcement for DB, object, NATS, search, cache, telemetry, jobs, callbacks/webhooks, provider connections, operators, and private state; threat model T18/T22 and §7.1 require two-tenant/two-actor negative tests. |
+| S1.3 immutable audit authority | ADR §18 defines separate append-only privileges, explicit scopes, hash chains/external signed heads, integrity export, retention/legal hold, and lawful erasure; threat model T19 and migration §3.8 define enforcement and tests. |
+| S1.4 mixed-version reauthorization | Migration §§7, 9, and 13–15 define phase authority, incompatible-binary drain, unforgeable versioned DB capability, synchronous canonical/legacy mutation, fail-closed disagreement, forward-only recovery, and old/new race proofs; threat model T20 covers attack behavior. |
+| S2.5 enterprise federation | ADR §20 explicitly defers all domain/SCIM/SAML-organization/SSO lifecycle claims and fails closed; threat model T23 tests claim rejection. |
+| S2.6 native/device sessions | ADR §19 defines common server session slots, secure-store/device binding, callback ownership, rotation/replay, loss/revocation, offline expiry, and push scoping; threat model T21 and UX §15 define tests and interactions. |
+| S2.7 canonical private ownership | ADR §17 chooses typed human/login/slot/organization/workspace owners for drafts, pins, connections, keys, uploads, preferences, and caches and defines legacy subject migration; threat model T22 and UX §4 define same-human switch fencing. |
+| S2.8 normalization and large-tenant migration | Migration §§12–15 define bytewise issuer/subject rules, verified-email and slug rules, tombstones, migration-number reservation, online DDL transaction limits, batch/lock/WAL/lag/CPU abort gates, and clean/upgrade/crash/scale tests. |
+| S2.9 bootstrap and simplified mode | ADR §21 defines secure idempotent first-human/recovery bootstrap and collaboration transition; threat model T23 and UX §16 prohibit first-request ownership and define the simplified capability without weaker tenancy. |
 
 ## Ownership boundary
 

@@ -5,7 +5,7 @@
 
 # Organizations and identity migration and compatibility plan
 
-Status: **proposal; no DDL may land before ADR/threat-model approval**
+Status: **revised proposal after blocked review; no DDL may land before approval**
 
 Companions: [`tenancy-identity-adr.md`](tenancy-identity-adr.md),
 [`threat-model.md`](threat-model.md)
@@ -16,9 +16,11 @@ Companions: [`tenancy-identity-adr.md`](tenancy-identity-adr.md),
 2. Existing workspace ids and resource tenant pairs never change.
 3. `managed_accounts.id` remains the physical organization id.
 4. `account_id`/`accountId` remains a compatibility alias for organization id.
-5. Existing writers remain valid after schema expansion.
-6. New writers preserve legacy authorization rows until all supported old binaries and
-   clients age out; keeping the alias indefinitely is acceptable.
+5. Existing writers remain valid during schema expansion and shadowing only. They are
+   drained and database-fenced before canonical governance becomes authoritative.
+6. New writers synchronously preserve the legacy authorization projection until all
+   supported old clients age out; keeping the wire/physical alias indefinitely is
+   acceptable, but an old binary never remains an authority after cutover.
 7. Backfill is idempotent, bounded, resumable, observable, and never guesses identity
    from unverified email.
 8. No feature read switches until shadow-read parity, constraints, and real FORCE-RLS
@@ -64,8 +66,10 @@ instead of requiring Better Auth tables.
 adapter/auth-user reference, verified-claim summaries, status, security revision, and
 timestamps.
 
-Required uniqueness is `(issuer, provider_subject)`. There is no unique email constraint
-used for linking. A login account belongs to exactly one human identity.
+Required uniqueness is the bytewise pair `(canonical_issuer, provider_subject)`. Section
+12 defines canonicalization, collation, limits, and index rollout. There is no unique
+email constraint used for linking. A login account belongs to exactly one human
+identity.
 
 ### 3.3 Organization metadata and membership
 
@@ -96,9 +100,10 @@ key proves both belong to the same organization. The existing composite workspac
 continues to prove the workspace relationship.
 
 New managed-human writes populate both canonical identity references and legacy
-`subject_id = user:<adapterUserId>` in one transaction. Old writers that populate only
-`subject_id` remain readable through the legacy resolver and are queued/reconciled for
-identity augmentation.
+`subject_id = user:<adapterUserId>` in one transaction. Before canonical enablement, an
+old legacy-only write remains readable and is synchronously marked for reconciliation.
+After canonical enablement, that mutation is rejected by the database fence; it is
+never asynchronously granted later.
 
 ### 3.5 Invitations
 
@@ -132,9 +137,11 @@ owns detailed ledger changes and must review the final interface.
 
 ### 3.8 Audit and revisions
 
-Extend the existing audit shape additively with actor human/login/slot or principal
-identity, authorization revision, request/idempotency id, outcome, and assurance
-summary. Existing audit writers remain valid with null new fields.
+Introduce the separately owned append-only audit authority from ADR section 18 and
+augment events with actor human/login/slot or principal identity, authorization
+revision, request/idempotency id, scope, outcome, assurance summary, chain sequence, and
+integrity fields. Legacy audit calls are adapted to the append function during the dark
+phase; direct mutable app-role access is removed before any governance endpoint enables.
 
 Add monotonic security/authorization revisions to the smallest appropriate governance,
 membership, and login rows. A durable outbox carries invalidation after the committing
@@ -204,9 +211,11 @@ For each legacy billing customer, ledger, usage, and entitlement scope:
 5. Validate constraints online and prove no mismatch/quarantine remains in enabled
    tenants.
 6. Enable shadow reads and compare canonical versus legacy access contexts.
-7. Enable canonical reads for an allow-listed cohort with automatic fail-closed fallback
-   to legacy only when semantics are provably equivalent.
-8. Enable multi-account/invitation UI after auth and revocation tests pass.
+7. Drain incompatible binaries, install the versioned database capability/fences, and
+   prove there is no old writer or reader lease before any tenant changes authority.
+8. Enable canonical reads for an allow-listed cohort. Canonical/legacy disagreement is
+   denial plus quarantine, never a fallback grant.
+9. Enable multi-account/invitation UI after auth and revocation tests pass.
 
 No `NOT NULL`, column drop, table rename, legacy-write removal, or policy relaxation is
 part of the initial feature rollout.
@@ -237,21 +246,42 @@ A future major may remove deprecated wire aliases only after telemetry and suppo
 policy show no supported clients depend on them. Physical `account_id` columns may stay
 forever; a database rename is not required for public correctness.
 
-## 7. Mixed-version behavior
+## 7. Mixed-version writer and reader authority
 
-| Component state | Required behavior |
-| --- | --- |
-| Old binary + expanded schema | Ignores new nullable tables/columns; existing workspace authorization unchanged |
-| New binary + backfill incomplete | Dual-writes; legacy authorization remains authoritative; v2 feature disabled for incomplete tenant |
-| New web + old API | Detects missing feature; one ambient login and legacy org grouping continue |
-| Old web/SDK + new API | Legacy fields/routes remain; no new mandatory response field breaks parsing |
-| New API + old worker | Workload tokens keep legacy organization/workspace ids; no identity-v2-only claim required until all workers support it |
-| Old API rollback after v2 writes | Legacy workspace membership/grants written alongside v2 remain usable; invitations/new governance UI pause, no broader access granted |
+Authority is explicit per rollout phase:
 
-An old binary does not understand new organization-level roles. Therefore every v2
-operation that grants workspace access also maintains the legacy workspace grant. New
-owner/recovery/invitation mutations must be feature-disabled during a rollback until a
-compatible API returns; they must not be approximated by old routes.
+| Phase | Legacy-only reader/writer | V2 reader/writer | Access decision and rollback |
+| --- | --- | --- | --- |
+| `legacy` | Authoritative under existing workspace rules | May shadow and dual-write but cannot grant through canonical state | Roll back freely; v2 governance absent |
+| `expanded_dark` | Still authoritative; legacy-only mutations are recorded for synchronous reconciliation | Writes canonical + legacy projection in one transaction; reads legacy and compares shadow | Roll back freely while no tenant leaves this phase |
+| `reconciled` | Reads/writes allowed only while the deployment has no canonical-enabled tenant; all discrepancies block enablement | Same as dark; complete backfill and shadow parity required | Drain begins; no new feature exposure |
+| `canonical` | Denied by versioned database capability/RLS and mutation fences for that tenant | Sole authority; human access requires active canonical org/workspace grants and an equal legacy projection | Roll back only to a v2-compatible binary; otherwise affected traffic remains fail-closed/unavailable |
+| `canonical_degraded` | Denied | Reads/mutations with any canonical/legacy/revision disagreement deny and quarantine; security revocation still removes both projections atomically | Repair forward with compatible binary; never re-enable legacy authority |
+
+The database capability is unforgeable by request input or a settable GUC. The final
+implementation uses a versioned non-login database role/capability, provisioned only to
+v2-compatible API/worker deployments and consumed by RLS/policy functions. Its exact
+role and provisioning require the runtime DB-role owner's review. An ordinary legacy
+app role cannot `SET ROLE` into it. A deployment registry also records live binary
+protocol leases; tenant cutover locks the registry and refuses while an incompatible
+API, worker, migration worker, or background claimant is live.
+
+For a canonical tenant, direct legacy workspace-membership DML is rejected. Compatible
+code calls one locked domain/database operation that writes canonical membership,
+legacy `subject_id` projection, authorization revision, invalidation outbox, and audit
+append in one transaction. Revocation marks canonical standing inactive and removes or
+invalidates the legacy projection before commit. The tenant governance row is locked
+before membership rows, so an old/new writer race has one serial order: a legacy write
+before cutover is reconciled before enablement; after cutover it fails and cannot
+reauthorize a revoked human.
+
+New web against old API remains in legacy single-account mode. Old web/SDK against new
+API continues to receive additive legacy fields, but its server is still v2 authority.
+New API with an incompatible old worker cannot enable identity-dependent jobs; workers
+must hold the same protocol capability before claiming those rows. Once any tenant is
+canonical, rollback to a pre-v2 API/worker is not a supported availability rollback:
+the versioned database fence keeps it from serving that tenant. Recovery is forward to
+the last v2-compatible binary.
 
 ## 8. Rollout sequence and abort gates
 
@@ -274,10 +304,15 @@ compatible API returns; they must not be approximated by old routes.
 - Run bounded backfill and shadow projection.
 - Abort/disable v2 for any tenant with unresolved duplicate, missing subject, membership
   mismatch, balance mismatch, or RLS-policy failure.
+- Keep canonical governance impossible to enable while any incompatible binary lease
+  exists; exercise old/new mutation races continuously.
 
 ### Gate 3: read enablement
 
-- Enable canonical identity/org reads for an internal cohort.
+- Drain incompatible binaries, rotate/provision the v2 database capability, and prove
+  the legacy app role cannot read or mutate a canonical tenant.
+- Atomically switch an internal tenant governance row from `reconciled` to `canonical`
+  only after parity and zero-quarantine checks under the same lock.
 - Verify revocation deadlines, old-client behavior, and no cross-tenant query/metric.
 - Gradually widen; feature flag rollback changes reads/UI only, never schema.
 
@@ -295,9 +330,13 @@ compatible API returns; they must not be approximated by old routes.
 ## 9. Binary rollback and operational recovery
 
 - Rolling back API/web/worker leaves expanded schema and canonical rows intact.
-- Existing workspace membership rows continue to authorize exactly as before.
-- Disable new mutation endpoints before rollback so unsupported governance state is not
-  changed by two semantics.
+- Before any canonical tenant exists, legacy workspace authorization continues exactly
+  as before and a binary rollback is available.
+- After canonical enablement, only a v2-protocol-compatible rollback may serve that
+  tenant. A pre-v2 binary remains fenced for reads and writes even if accidentally
+  deployed; availability is sacrificed rather than reopening access.
+- Disable new mutation endpoints and drain claims before a compatible rollback so one
+  authority remains active.
 - Do not reverse migrations, delete backfilled rows, or rename columns during incident
   response.
 - Re-run reconciliation after returning to a compatible binary.
@@ -355,3 +394,144 @@ The implementation candidate must freeze and report:
 No successful migration, staging check, merge, or release makes the issue Done. The
 identical accepted revision must be deployed and verified live in production under the
 release owner's control.
+
+## 12. Exact normalization, uniqueness, and tombstones
+
+Normalization has a version stored beside every normalized value. Changing a rule is a
+new migration and shadow comparison, never an in-place reinterpretation.
+
+### 12.1 Issuer and provider subject
+
+For URL issuers, require an absolute URI with no userinfo, query, or fragment.
+Canonicalization lowercases the ASCII scheme and IDNA A-label host, removes only the
+scheme's default port, and preserves path, percent encoding, and trailing slash exactly. OIDC
+issuer equality remains exact after those authority-component rules; paths are
+case-sensitive and no percent decode or Unicode normalization occurs. Non-URL issuers
+must use a registered ASCII `urn:opengeni:issuer:<adapter>:<opaque>` namespace; unknown
+formats are rejected.
+
+Provider subject is an opaque, case-sensitive bytewise UTF-8 string from the configured
+issuer, 1–1024 bytes, with no trimming, case folding, email parsing, or Unicode
+normalization. The database uses deterministic `C`/bytewise collation for canonical
+issuer and subject. The unique key is `(canonical_issuer, provider_subject)`; a digest
+may accelerate lookup but cannot replace collision-checked original bytes. Raw issuer
+is retained for display/diagnostics, never equality.
+
+### 12.2 Verified invitation email
+
+Email is only a target claim. Trim surrounding ASCII whitespace, split at the final
+`@`, reject empty/control/invalid UTF-8 components, convert the domain to lowercase
+IDNA A-label form, and preserve the local part byte-for-byte and case-sensitive by
+default. Do not remove dots, strip plus tags, map aliases, or apply consumer-provider
+rules. A deployment may register an issuer-specific local-part canonicalizer only with
+an immutable version and exact verified issuer; invitation creation and acceptance must
+use the same version. Store claim type, canonical value, canonicalizer version, and
+verifying issuer. Equality alone never links humans.
+
+At most one active invitation with identical organization, target claim/version, and
+proposed authority is allowed. A resend rotates its secret on that row. Different
+authority remains a visible inviter conflict, not last-write-wins.
+
+### 12.3 Organization and workspace slugs
+
+Route slugs are restricted to lowercase ASCII: start/end alphanumeric, internal
+alphanumeric or single hyphen, 1–63 bytes. Input is trimmed and ASCII-lowercased; any
+other Unicode, consecutive hyphen, or lossy transliteration is rejected. Organization
+slug is unique deployment-wide. Workspace slug is unique within organization. Unique
+indexes use bytewise collation and partial predicates over live/reserved states.
+
+Soft deletion creates a tombstone retaining normalized slug, former owner scope,
+deletion/finalization times, and deep-link/invitation invalidation generation. Slugs are
+never automatically reused. An authorized operator may reclaim only after the
+deployment's declared retention (never less than 90 days), zero live links/invites/
+callbacks, explicit takeover warning, step-up, and audit. Reclaim increments generation
+so stale signed state cannot resolve to the new tenant.
+
+## 13. Migration identity and online DDL transaction rules
+
+This design intentionally names no migration number. Immediately before implementation,
+the sole schema owner must fetch current `main` and every accepted adjacent candidate,
+reserve the next identity through the repository's migration ownership process, and
+record the exact prefix/checksum in Linear and the PR. A placeholder or locally guessed
+number may not be committed.
+
+Online expansion is split by PostgreSQL transaction semantics:
+
+1. One short rolling migration creates nullable columns/tables, functions, triggers,
+   RLS policies, and unvalidated FKs with `lock_timeout = '1s'`, ordinary DDL
+   `statement_timeout = '5s'`, and no table rewrite/default requiring a heap scan.
+2. A nontransactional reviewed migration creates each large unique/supporting index via
+   `CREATE INDEX CONCURRENTLY`, one at a time, with `lock_timeout = '1s'` and
+   `statement_timeout = '30min'`. An invalid index after crash is detected, dropped
+   concurrently, and retried; it is never treated as complete.
+3. A short migration attaches constraints to proven indexes or adds them `NOT VALID`.
+   Constraint validation runs separately with a 30-minute statement timeout and aborts
+   on operational gates below.
+4. `NOT NULL`, legacy column removal, table rename, heap-rewriting default, and broad
+   policy replacement are excluded from the initial rollout.
+
+Each DDL unit records start/end catalog inventory and exact checksum. Failure leaves
+expanded compatible schema; recovery repairs forward. No transaction contains both
+concurrent index creation and ordinary DDL.
+
+## 14. Bounded backfill and large-tenant operating envelope
+
+Backfill orders by immutable primary key and processes at most 500 rows per transaction.
+Each transaction targets 250 ms, has `lock_timeout = '1s'`, `statement_timeout = '5s'`,
+and `idle_in_transaction_session_timeout = '5s'`. It locks only selected rows with
+`FOR UPDATE SKIP LOCKED`, writes canonical row + legacy projection + checkpoint in the
+same transaction, and commits before fetching the next batch. A deterministic source
+key and effect ledger make replay after crash idempotent.
+
+The controller pauses new batches when any default gate persists:
+
+- primary or replica database CPU is above 80% for five minutes;
+- replay/replication lag exceeds 10 seconds;
+- migration-attributable WAL exceeds 1 GiB in five minutes or free WAL/disk capacity
+  falls below 20%;
+- application p95 database latency rises more than 20% over the recorded 30-minute
+  baseline for five minutes;
+- a batch waits on a lock for one second, exceeds five seconds, or reports a deadlock;
+  or
+- error/quarantine rate exceeds 0.1% or any authorization mismatch appears.
+
+Resume requires ten healthy minutes and an operator/controller checkpoint. Any
+cross-tenant result, duplicate canonical key, unexplained count/balance mismatch,
+governance-invariant violation, audit-chain failure, or legacy grant without canonical
+source is an abort for that tenant, not a skipped row. Provider-specific monitors may
+use stricter values; weakening these defaults requires a new recorded migration review.
+
+Backfill never runs one transaction per tenant when the tenant is unbounded. For a hot
+tenant it interleaves small ranges, preserves stable ordering, and exposes progress by
+source table/range without raw tenant labels in shared telemetry. A second full scan and
+a separately started reconciliation pass must both reach a zero-change, zero-quarantine
+fixpoint before the tenant can become `reconciled`.
+
+## 15. Required clean, upgrade, crash, race, and scale proofs
+
+In addition to section 10, the implementation must prove:
+
+- canonicalization fixtures for URL authority case/default ports, significant issuer
+  path/trailing slash, opaque subject case/Unicode bytes, IDNA domains, case-sensitive
+  email local parts, provider-specific versioning, and ASCII slug rejection;
+- clean install and production-shaped upgrade produce the same constraints/indexes/
+  policies/grants despite different row histories;
+- crash before/after every DDL unit, concurrent-index phase, batch write, checkpoint,
+  identity merge effect, audit append, and tenant authority flip converges forward;
+- a legacy writer racing canonical grant/revoke before cutover is reconciled, while the
+  same write after cutover is database-denied and cannot restore access;
+- old reader, old worker, or stale job claimant lacks the v2 database capability and
+  receives no canonical-tenant data;
+- canonical-only row, legacy-only row, mismatched revisions, and mismatched owner pair
+  all fail closed and quarantine;
+- generated large tenants exercise at least the greater of production p99 or 1,000,000
+  owner/resource rows, and at least the greater of twice the largest production
+  membership fan-out or 100,000 memberships in one organization, while a
+  throttle-injection test trips each CPU, lag, WAL, disk, latency, lock, and error gate;
+  and
+- rollback before cutover preserves legacy availability, whereas attempted pre-v2
+  rollback after cutover is visibly unavailable rather than permissive.
+
+Results include batch duration, locks, WAL, lag, CPU, latency, rows/sec, retries,
+quarantines, and fixpoint counts. Synthetic scale below either stated floor is not
+acceptance evidence.

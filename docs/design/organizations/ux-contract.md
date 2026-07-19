@@ -5,7 +5,7 @@
 
 # Account → organization → workspace UX contract
 
-Status: **proposal; implementation follows approved ADR/threat model**
+Status: **revised proposal after blocked review; implementation remains gated**
 
 Scope: web console behavior plus requirements for embedded hosts and CLI parity.
 
@@ -20,10 +20,12 @@ Scope: web console behavior plus requirements for embedded hosts and CLI parity.
 - Never discard a draft, unresolved upload, or in-flight mutation during a switch.
 - Meet keyboard, screen-reader, mobile, touch, reduced-motion, light/dark, localization,
   self-hosting, and white-label requirements.
+- Provide secure native/device and single-user modes without weakening the shared
+  server-side identity or tenant model.
 
 ## 2. Information hierarchy
 
-The compact rail header shows three levels:
+In collaborative/managed mode, the compact rail header shows three levels:
 
 1. **Account** — avatar plus the selected login-account display name/email and issuer
    when needed to disambiguate.
@@ -36,7 +38,10 @@ the accessible name includes all three selected labels. On mobile, the same cont
 a bottom sheet/full-height drawer, not nested hover menus.
 
 Never present raw UUID fragments as the normal organization name. A diagnostic details
-view may show copyable ids to authorized users.
+view may show copyable ids to authorized users. The narrowly gated single-user
+simplification in section 16 may collapse the visible header to the workspace label;
+account and organization remain named in accessible settings and in every destructive
+or security ceremony.
 
 ## 3. Combined switcher
 
@@ -137,6 +142,11 @@ Once blockers resolve:
 Late old-epoch responses are ignored, even if successful. A failed destination load
 offers retry and safe return/default choices without rendering old data under the new
 labels.
+
+Even when the new login slot resolves to the same human, steps 1–7 still run. Human-owned
+drafts/pins may reappear only after a fresh server fetch; the prior slot's memory cache,
+decrypted connection, upload handle, auth material, and in-flight result are never
+reused.
 
 ## 5. Deep-link recovery
 
@@ -308,6 +318,9 @@ The implementation is not candidate-ready without real-browser evidence for:
 | Navigation blockers | local draft, saving draft, draft conflict, uploading, failed upload, in-flight mutation |
 | Network | normal, slow, offline/retry, late old-epoch response |
 | Accessibility | keyboard-only, screen-reader announcements, 200% zoom, reduced motion |
+| Native/device | add/switch slot, per-account/device/all-device logout, offline expiry, lost device, callback failure, push isolation |
+| Identity security | link, merge conflicts, recovery cooling/dispute, duplicate personal organizations, reversal |
+| Local mode | first-owner bootstrap, simplified one-of-each shell, collaboration enablement |
 
 Evidence must include the defect/baseline and verified result, be scrubbed of identities,
 emails, tokens, tenant ids, file content, and billing details, and be attached to the
@@ -325,3 +338,116 @@ durable issue history.
 - Keyboard, screen-reader, mobile, and both themes pass with useful evidence.
 - No brand, hosted billing provider, Better Auth, or Codex-specific assumption is baked
   into the reusable contract.
+
+## 14. Login linking, identity merge, and recovery UX
+
+The UI never labels identity merge as merely “link account.” Account management exposes
+three distinct actions with distinct consequences:
+
+- **Add sign-in method** for an unowned login binding;
+- **Merge two existing identities** when both bindings already own identities; and
+- **Recover access** when a usable path is unavailable or compromised.
+
+Linking shows target human/account summary, issuer, callback origin, ten-minute proof
+expiry, and a cancel action. A provider callback that discovers another owner stops at
+`Merge required`; it does not continue with an email-based confirmation.
+
+The merge wizard renders the server's revision-bound conflict manifest. It requires an
+explicit decision for:
+
+- which personal organization remains personal and whether each other one is converted
+  to team, exported/deleted first, or the merge is cancelled;
+- the exact union of organization/workspace roles and any separation-of-duty block;
+- pending invitation duplicates;
+- recovery-quorum changes;
+- personal billing/entitlement hold and billing-owner decision; and
+- counts and owner categories for drafts, pins, uploads, connections, and keys without
+  exposing their secret content.
+
+No preselected destructive answer is allowed. The review screen names both identities,
+the canonical survivor, affected organizations, sessions that will be signed out, the
+24-hour or recovery 72-hour cooling deadline, notification destinations in masked form,
+30-day dispute/reversal deadline, and the fact that audit identities are not rewritten.
+Final confirmation requires step-up. Progress states map one-to-one to the ADR state
+machine: evidence pending, conflict blocked, cooling off, disputed/aborted, ready,
+applying, reversible, reversed, and finalized. Refresh/retry reads the durable operation;
+it never starts another merge.
+
+Every notified identity receives a safe **Dispute this change** path during cooling and
+the reversible window. Dispute signs out sensitive sessions, fences the operation, and
+shows recovery/support instructions without revealing the other identity's private
+data. A failed notice is visible to authorized initiators and blocks readiness when
+policy requires reachability.
+
+Recovery UI lists only the narrowly requested effects (for example revoke compromised
+login, attach a newly proved method, rotate offline factor). It never bundles ownership
+transfer, workspace-content access, organization membership, or identity merge. It
+shows eligible/received approvals, cooling deadline, notices, dispute state, and an
+incident/reason field. Approver labels never imply that recovery admins can read content.
+
+## 15. Native/device session UX
+
+Native clients present the same independently revocable account slots as web, but name
+the installation/device in security settings. **Signed-in devices** shows last verified
+time, approximate platform label, contained accounts, and status without exposing token,
+push, hardware key, or full network identifiers.
+
+Actions are separate and explicit:
+
+- **Sign out this account on this device**;
+- **Sign out all accounts on this device**;
+- **Sign out this account on all devices**; and
+- **Mark device lost**, which revokes the installation, every slot/token family, and
+  push registration and explains that remote wipe is best effort.
+
+Adding an account opens an OS-verified app/universal link, loopback, or device-code flow.
+An unverified custom-scheme callback produces a safe failure and cannot select an
+account. The app displays the expected issuer/host before leaving and validates the
+server operation after return.
+
+Offline presentation is metadata-minimal. High-sensitivity content says **Online access
+required**. Other encrypted cached content displays its last verified time and a fixed
+expiry no later than 24 hours; clock rollback cannot extend it. At expiry, revocation,
+secure-store failure, installation mismatch, or backup restore to another device, the
+app seals/removes the cache and requests reauthentication without flashing old content.
+
+Push notifications contain generic copy such as “OpenGeni has an update” unless the app
+has fetched and authorized the opaque notification id while unlocked. Account/tenant
+labels and content do not appear in OS push payloads. Opening push runs account/tenant
+resolution and the normal switch preflight; it never silently changes actor.
+
+Native accessibility, dirty-work, epoch, cache, and deep-link requirements are identical
+to web. Device evidence includes offline, lost, replayed refresh, wrong callback, reused
+push token, secure-store unavailable, and two-account/two-tenant cases.
+
+## 16. Local/self-hosted bootstrap and simplified single-user UX
+
+Before bootstrap completes, the shell shows a local/operator claim screen only on an
+allowed listener. It asks for the one-time operator-delivered bootstrap secret and the
+configured/OS-bound human proof; it never offers “continue as first user.” It explains
+that one personal organization/workspace and an offline recovery factor will be created.
+Concurrent claim, reused secret, unknown/non-human subject, or remote-listener refusal
+uses a generic safe error and operator instructions. Restart by the same proved human
+returns the exact existing setup rather than duplicating it.
+
+`single_user_simplified` mode may activate only from the server capability when
+collaboration is disabled and exactly one active human, login slot, personal
+organization, and workspace exist. In that mode:
+
+- the primary rail trigger may show only workspace name/status;
+- redundant account/organization switch rows, People, and Invitations are hidden;
+- accessible Settings still names account, organization, workspace, recovery status,
+  ids in diagnostics, export, and danger-zone scope; and
+- sign-out, recovery, export, delete, credential, and billing confirmations always name
+  their complete owner/scope.
+
+The UI must not infer simplified mode from list length alone. It renders normal
+collaborative controls immediately when the signed server capability disappears.
+**Enable collaboration** is a step-up security flow that verifies the offline recovery
+path, explains roles/invitations/content boundaries, disables simplified mode, and only
+then enables invitations/additional humans. Workspace/organization ids, URLs, drafts,
+keys, and resources remain unchanged; there is no “upgrade migration” that loosens RLS.
+
+Acceptance evidence covers first-claim race/restart, offline recovery enrollment,
+simplified desktop/mobile/keyboard/screen-reader shell, destructive scope labels, and
+the collaboration transition with the same tenant ids and no stale simplified cache.
