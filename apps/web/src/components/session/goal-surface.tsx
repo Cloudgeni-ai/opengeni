@@ -261,11 +261,7 @@ export function GoalSurface({ goal }: { session: Session; goal: UseGoalResult })
             )}
           >
             <Icon className={cn("size-3.5 shrink-0", meta.tint)} />
-            <span
-              className={cn("shrink-0 font-medium", state === "pursuing" ? "text-fg" : meta.tint)}
-            >
-              {meta.label}
-            </span>
+            <span className="shrink-0 font-medium text-fg">{meta.label}</span>
             <span aria-hidden className="shrink-0 text-fg-subtle">
               ·
             </span>
