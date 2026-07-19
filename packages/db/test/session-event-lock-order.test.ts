@@ -1054,9 +1054,6 @@ describe("OPE-63 canonical session-event lock order", () => {
       const reconcileResult = (first === "reconcile" ? firstResult : secondResult) as Awaited<
         ReturnType<typeof reconcileAvailableCapacity>
       >;
-      const pauseResult = (first === "pause" ? firstResult : secondResult) as Awaited<
-        ReturnType<typeof pauseSession>
-      >;
 
       if (first === "pause") {
         expect(reconcileResult.action).toBe("superseded");
