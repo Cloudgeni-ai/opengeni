@@ -1630,6 +1630,36 @@ export type SessionGoalStatus = "active" | "paused" | "completed";
 
 export type SessionGoalCreatedBy = "api" | "agent" | "scheduled_task";
 
+export type SessionGoalContinuationState =
+  | "inactive"
+  | "scheduled"
+  | "running"
+  | "blocked"
+  | "invariant_broken";
+
+export type SessionGoalContinuationReason =
+  | "goal_inactive"
+  | "wake_pending"
+  | "continuation_pending"
+  | "human_work_pending"
+  | "goal_turn_running"
+  | "human_turn_running"
+  | "workstream_paused"
+  | "approval_required"
+  | "provider_backpressure"
+  | "session_cancelled"
+  | "system_work_pending"
+  | "missing_obligation";
+
+export type SessionGoalContinuation = {
+  state: SessionGoalContinuationState;
+  reason: SessionGoalContinuationReason;
+  wakeRevision: number;
+  observedRevision: number;
+  nextAttemptAt: string | null;
+  lastError: string | null;
+};
+
 export type SessionGoal = {
   id: string;
   accountId: string;
@@ -1647,6 +1677,8 @@ export type SessionGoal = {
   noProgressStreak: number;
   maxAutoContinuations: number | null;
   metadata: Record<string, unknown>;
+  /** Optional for source compatibility; the API always supplies this projection. */
+  continuation?: SessionGoalContinuation | undefined;
   createdAt: string;
   updatedAt: string;
 };

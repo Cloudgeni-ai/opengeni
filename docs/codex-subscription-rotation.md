@@ -115,16 +115,19 @@ provider reset timestamp has elapsed becomes eligible immediately; an all-capped
 pool performs one bounded live usage refresh before idling. Unknown reset data
 always yields a positive bounded delay, never a zero-delay loop.
 
-If no healthy candidate exists for an active goal, `armCodexCapacityWait`
-atomically marks the blocked turn failed once, releases its credential lease,
-idles the session with reason `codex_capacity`, writes the audit events, and
-creates or advances one `codex_capacity_waiters` row. The common lock order is
-workspace rotation row → session → goal → blocked turn → live credential lease
+If no healthy candidate exists for the currently admitted Codex turn,
+`armCodexCapacityWait` atomically closes its exact attempt with outcome
+`waiting_capacity`, releases its credential lease, preserves the same
+nonterminal blocked turn plus the session's active-turn pointer, writes the
+audit events, and creates or advances one `codex_capacity_waiters` row. This
+applies to goal-bearing and goalless prompts. The common lock order is workspace
+rotation row → session → optional goal → blocked turn → live credential lease
 (when reactive) → waiter. A reactive arm must still own the exact
-holder/generation and worker-redispatch fence. The row records goal/control
-generation, accepted `policyHash`, the earliest authoritative reset (when known),
-bounded-refresh state, and `wakeRevision`/`observedWakeRevision`; it stores no
-credential material or provider body.
+holder/generation and worker-redispatch fence. The row records the blocked turn
+generation, an optional active-goal id/version fence, accepted `policyHash`, the
+earliest authoritative reset (when known), bounded-refresh state, and
+`wakeRevision`/`observedWakeRevision`; it stores no credential material or
+provider body.
 
 `reconcileCodexCapacityWait` runs the normal metadata-only allocator decision
 under the same rotation-row transaction. It accepts the same opaque
@@ -133,13 +136,13 @@ pool policy can return per-pool diagnostics without union ranking or duplicating
 the waiter. Unavailable decisions return `earliestResetAt`, `resetKind`
 (`authoritative` or `bounded_refresh`), and optional secret-safe diagnostics;
 unknown resets exponentially back off from one to fifteen minutes without
-running a model. Availability commits one system
-`goal.continuation` event and one queued turn, preserving model, reasoning,
-resources, tools, and sandbox policy from the blocked turn. It does not create a
-`user.message` or replay the failed turn row. The new turn resets execution-local
-worker-death and credential-failover counters rather than inheriting budgets
-consumed by the blocked turn. A second timer/signal observes the waiter as
-resumed/stale and enqueues nothing.
+running a model. Availability atomically marks the waiter resumed and moves the
+exact blocked turn and session from `waiting_capacity` to `recovering`, keeping
+the same turn id and active pointer. The workflow's ordinary admission path
+then creates a new attempt for that turn. It creates no `user.message`, system
+update, usage event, goal continuation, or queued turn, and it does not perform
+a competing terminal settlement/requeue. A second timer/signal observes the
+waiter as resumed/stale and performs no work.
 
 `withCodexCapacityMutation` is the same-transaction mutation/outbox seam for any
 eligibility or future pool membership/default write: it locks the workspace
@@ -151,11 +154,14 @@ is authoritative. The workflow snapshots its wake counters before dispatching a
 turn, so a signal delivered after waiter commit but before the activity result
 returns causes immediate reconciliation instead of being baselined away. It
 reconstructs pending timers on worker/Temporal restart and `continueAsNew`.
-`reconcileCodexCapacityWait` atomically rechecks human queue, effective Pause,
-goal, policy, blocked-turn identity, and duplicate-work fences before recording
-the typed capacity-resume update; ordinary attempt claim repeats admission before
-provider/model/tool/billing work starts. Reset/boost entitlement redemption is
-never automatic.
+`reconcileCodexCapacityWait` atomically rechecks effective Pause, optional goal,
+policy, active pointer, blocked-turn generation, and duplicate-work fences
+before the same-turn `recovering` transition; ordinary queued prompts remain
+behind that current turn, and ordinary attempt claim repeats admission before
+provider/model/tool/billing work starts. Pause returns without mutating the
+waiter so Resume can reconstruct it. Steer, cancellation, or another semantic
+fence change supersedes the waiter/blocked turn rather than letting a stale wake
+run. Reset/boost entitlement redemption is never automatic.
 
 Only a **definitive credential/account refusal** can move the same durable turn to
 another credential:

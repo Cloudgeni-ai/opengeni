@@ -81,6 +81,7 @@ import {
   reasoningEffortForMetadata,
   resolveWorkspaceMemoryEnabled,
   RigChange as RigChangeContract,
+  SessionGoal as SessionGoalContract,
   SessionSystemUpdatePayload,
 } from "@opengeni/contracts";
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
@@ -117,13 +118,19 @@ import {
   TOOL_RESULT_TYPE_BY_CALL_TYPE,
 } from "./session-tool-call-settlement";
 import {
+  assertAgentCommandAuthorityInTransaction,
+  canonicalSessionCommandHash,
   closeSessionTurnAttemptInTransaction,
   evaluateSessionControl,
   evaluateSessionControls,
   lockWorkspaceInferenceControl,
   registerInternalUpdateWakeInTransaction,
   registerSessionTurnAttemptClaim,
+  reserveSessionCommandReceipt,
   serializeEffectiveSessionControl,
+  SessionControlInvariantError,
+  updateSessionCommandReceiptResult,
+  type SessionCommandActor,
   type SessionTurnAttemptOutcome,
 } from "./session-control";
 import * as schema from "./schema";
@@ -8163,12 +8170,13 @@ export type CodexCapacityWait = {
   accountId: string;
   workspaceId: string;
   sessionId: string;
-  goalId: string;
+  goalId: string | null;
   blockedTurnId: string;
+  blockedTurnGeneration: number;
   workflowId: string;
   generation: number;
   status: CodexCapacityWaitStatus;
-  goalVersion: number;
+  goalVersion: number | null;
   policyHash: string | null;
   earliestResetAt: Date | null;
   nextCheckAt: Date;
@@ -8199,7 +8207,11 @@ export type CodexCapacityMutationResult<T> = {
 };
 
 export type CodexCapacityAvailabilityDecision =
-  | { kind: "available"; credentialId: string; diagnostic?: Record<string, unknown> }
+  | {
+      kind: "available";
+      credentialId: string;
+      diagnostic?: Record<string, unknown>;
+    }
   | {
       kind: "unavailable";
       earliestResetAt: Date | null;
@@ -8220,18 +8232,26 @@ export type CodexCapacitySelectionContext<
 
 export type ArmCodexCapacityWaitResult =
   | { action: "waiting"; waiter: CodexCapacityWait; events: SessionEvent[] }
-  | { action: "stale"; waiter: CodexCapacityWait | null; events: SessionEvent[] };
+  | {
+      action: "stale";
+      waiter: CodexCapacityWait | null;
+      events: SessionEvent[];
+    };
 
 export type ReconcileCodexCapacityWaitResult =
   | { action: "waiting"; waiter: CodexCapacityWait; events: SessionEvent[] }
   | {
       action: "resumed";
       waiter: CodexCapacityWait;
-      update: SessionSystemUpdate;
       events: SessionEvent[];
     }
+  | { action: "paused"; waiter: CodexCapacityWait; events: SessionEvent[] }
   | { action: "superseded"; waiter: CodexCapacityWait; events: SessionEvent[] }
-  | { action: "stale"; waiter: CodexCapacityWait | null; events: SessionEvent[] };
+  | {
+      action: "stale";
+      waiter: CodexCapacityWait | null;
+      events: SessionEvent[];
+    };
 
 export const CODEX_CAPACITY_REFRESH_MIN_MS = 60_000;
 export const CODEX_CAPACITY_REFRESH_MAX_MS = 15 * 60_000;
@@ -8256,6 +8276,7 @@ function mapCodexCapacityWaiter(
     sessionId: row.sessionId,
     goalId: row.goalId,
     blockedTurnId: row.blockedTurnId,
+    blockedTurnGeneration: row.blockedTurnGeneration,
     workflowId: row.workflowId,
     generation: row.generation,
     status: row.status as CodexCapacityWaitStatus,
@@ -8333,12 +8354,12 @@ function nextCodexCapacityCheckAt(
 }
 
 /**
- * Atomically settle one all-unavailable turn and arm exactly one durable wait.
- * Lock order is allocator rotation row -> session -> goal -> blocked turn ->
- * live lease (when a reactive failure owns one) -> waiter. The failed turn,
- * idle/capacity-paused session, durable events, lease release, and waiter
- * generation commit together; a crash cannot leave only half of the boundary
- * visible.
+ * Atomically close one all-unavailable attempt and arm exactly one durable wait
+ * for the same logical turn. Lock order is workspace control -> allocator
+ * rotation row -> session -> optional goal -> blocked turn -> live lease (when
+ * a reactive failure owns one) -> waiter. The waiting turn/session pointer,
+ * durable events, exact lease release, and waiter generation commit together;
+ * a crash cannot leave only half of the boundary visible.
  */
 export async function armCodexCapacityWait(
   db: Database,
@@ -8349,8 +8370,8 @@ export async function armCodexCapacityWait(
     turnId: string;
     attemptId: string;
     workflowId: string;
-    goalId: string;
-    goalVersion: number;
+    goalId?: string | null;
+    goalVersion?: number | null;
     policyHash?: string | null;
     earliestResetAt: Date | null;
     resetKind: CodexCapacityResetKind;
@@ -8363,12 +8384,27 @@ export async function armCodexCapacityWait(
   },
 ): Promise<ArmCodexCapacityWaitResult> {
   const now = input.now ?? new Date();
+  const goalId = input.goalId ?? null;
+  const goalVersion = input.goalVersion ?? null;
+  if (
+    (goalId === null) !== (goalVersion === null) ||
+    (goalVersion !== null && (!Number.isSafeInteger(goalVersion) || goalVersion < 1))
+  ) {
+    throw new Error("Codex capacity goal fence must be absent or contain a positive version");
+  }
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
       await scopedDb.transaction(async (rawTx) => {
         const tx = rawTx as unknown as Database;
+        await lockWorkspaceInferenceControl(tx, input.workspaceId, "share");
+        const effectiveControl = await evaluateSessionControl(
+          tx,
+          input.workspaceId,
+          input.sessionId,
+          { lock: "share" },
+        );
         const rotation = await lockExistingCodexRotationSettingsForCapacity(tx, input.workspaceId);
         if (!rotation || rotation.accountId !== input.accountId) {
           return { action: "stale", waiter: null, events: [] } as const;
@@ -8385,18 +8421,20 @@ export async function armCodexCapacityWait(
           )
           .for("update")
           .limit(1);
-        const [goal] = await tx
-          .select()
-          .from(schema.sessionGoals)
-          .where(
-            and(
-              eq(schema.sessionGoals.workspaceId, input.workspaceId),
-              eq(schema.sessionGoals.id, input.goalId),
-              eq(schema.sessionGoals.sessionId, input.sessionId),
-            ),
-          )
-          .for("update")
-          .limit(1);
+        const [goal] = goalId
+          ? await tx
+              .select()
+              .from(schema.sessionGoals)
+              .where(
+                and(
+                  eq(schema.sessionGoals.workspaceId, input.workspaceId),
+                  eq(schema.sessionGoals.id, goalId),
+                  eq(schema.sessionGoals.sessionId, input.sessionId),
+                ),
+              )
+              .for("update")
+              .limit(1)
+          : [];
         const [turn] = await tx
           .select()
           .from(schema.sessionTurns)
@@ -8435,7 +8473,10 @@ export async function armCodexCapacityWait(
         if (
           existing?.status === "waiting" &&
           existing.blockedTurnId === input.turnId &&
-          turn?.status === "failed"
+          existing.blockedTurnGeneration === turn?.executionGeneration &&
+          turn?.status === "waiting_capacity" &&
+          session?.status === "waiting_capacity" &&
+          session.activeTurnId === input.turnId
         ) {
           return {
             action: "waiting",
@@ -8454,12 +8495,12 @@ export async function armCodexCapacityWait(
             currentRedispatches === (input.expectedRedispatches ?? currentRedispatches));
         if (
           !session ||
-          !goal ||
           !turn ||
+          effectiveControl.state !== "active" ||
           session.activeTurnId !== input.turnId ||
           session.status !== "running" ||
-          goal.status !== "active" ||
-          goal.version !== input.goalVersion ||
+          (goalId !== null &&
+            (!goal || goal.status !== "active" || goal.version !== goalVersion)) ||
           turn.status !== "running" ||
           turn.activeAttemptId !== input.attemptId ||
           !leaseFenceValid ||
@@ -8479,7 +8520,7 @@ export async function armCodexCapacityWait(
           sessionId: input.sessionId,
           turnId: input.turnId,
           executionGeneration: turn.executionGeneration,
-          outcome: "failed",
+          outcome: "waiting_capacity",
           closedAt: now,
         });
 
@@ -8495,12 +8536,13 @@ export async function armCodexCapacityWait(
           accountId: input.accountId,
           workspaceId: input.workspaceId,
           sessionId: input.sessionId,
-          goalId: input.goalId,
+          goalId,
           blockedTurnId: input.turnId,
+          blockedTurnGeneration: turn.executionGeneration,
           workflowId: input.workflowId,
           generation,
           status: "waiting",
-          goalVersion: input.goalVersion,
+          goalVersion,
           policyHash,
           earliestResetAt: input.earliestResetAt,
           nextCheckAt,
@@ -8545,32 +8587,17 @@ export async function armCodexCapacityWait(
               workspaceId: input.workspaceId,
               sessionId: input.sessionId,
               sequence: ++sequence,
-              type: "turn.failed",
+              type: "codex.capacity.waiting",
               payload: sanitizeEventPayload({
                 ...input.failurePayload,
                 recovery: "codex_capacity",
-                retryable: false,
+                retryable: true,
                 rotated: true,
-                capacityWaiterId: waiterRow.id,
-                capacityWaitGeneration: waiterRow.generation,
-              }),
-              turnId: input.turnId,
-              turnGeneration: turn.executionGeneration,
-              turnAttemptId: input.attemptId,
-              turnAssociation: "current",
-              occurredAt: now,
-            },
-            {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-              sequence: ++sequence,
-              type: "codex.capacity.waiting",
-              payload: sanitizeEventPayload({
                 waiterId: waiterRow.id,
                 generation: waiterRow.generation,
-                goalId: input.goalId,
-                goalVersion: input.goalVersion,
+                goalId,
+                goalVersion,
+                blockedTurnGeneration: turn.executionGeneration,
                 policyHash,
                 resetKind: input.resetKind,
                 earliestResetAt: input.earliestResetAt?.toISOString() ?? null,
@@ -8588,7 +8615,7 @@ export async function armCodexCapacityWait(
               sessionId: input.sessionId,
               sequence: ++sequence,
               type: "session.status.changed",
-              payload: { status: "idle", reason: "codex_capacity" },
+              payload: { status: "waiting_capacity", reason: "codex_capacity" },
               turnId: input.turnId,
               turnGeneration: turn.executionGeneration,
               turnAttemptId: input.attemptId,
@@ -8597,13 +8624,14 @@ export async function armCodexCapacityWait(
             },
           ])
           .returning();
-        await tx
+        const [waitingTurn] = await tx
           .update(schema.sessionTurns)
           .set({
-            status: "failed",
+            status: "waiting_capacity",
             activeAttemptId: null,
+            metadata: metadataWithoutTurnDispatchAttempt(turn.metadata),
             version: turn.version + 1,
-            finishedAt: now,
+            finishedAt: null,
             updatedAt: now,
           })
           .where(
@@ -8611,13 +8639,18 @@ export async function armCodexCapacityWait(
               eq(schema.sessionTurns.workspaceId, input.workspaceId),
               eq(schema.sessionTurns.id, input.turnId),
               eq(schema.sessionTurns.status, "running"),
+              eq(schema.sessionTurns.activeAttemptId, input.attemptId),
             ),
-          );
-        await tx
+          )
+          .returning({ id: schema.sessionTurns.id });
+        if (!waitingTurn) {
+          throw new Error("Codex capacity blocked turn changed during atomic arm");
+        }
+        const [waitingSession] = await tx
           .update(schema.sessions)
           .set({
-            status: "idle",
-            activeTurnId: null,
+            status: "waiting_capacity",
+            activeTurnId: input.turnId,
             lastSequence: sequence,
             updatedAt: now,
           })
@@ -8625,15 +8658,24 @@ export async function armCodexCapacityWait(
             and(
               eq(schema.sessions.workspaceId, input.workspaceId),
               eq(schema.sessions.id, input.sessionId),
+              eq(schema.sessions.status, "running"),
               eq(schema.sessions.activeTurnId, input.turnId),
             ),
-          );
-        await tx.execute(sql`
-          delete from codex_credential_leases
-          where account_id = ${input.accountId}
-            and workspace_id = ${input.workspaceId}
-            and turn_id = ${input.turnId}
-        `);
+          )
+          .returning({ id: schema.sessions.id });
+        if (!waitingSession) {
+          throw new Error("Codex capacity session changed during atomic arm");
+        }
+        if (input.leaseFence) {
+          await tx.execute(sql`
+            delete from codex_credential_leases
+            where account_id = ${input.accountId}
+              and workspace_id = ${input.workspaceId}
+              and turn_id = ${input.turnId}
+              and holder_id = ${input.leaseFence.holderId}
+              and generation = ${input.leaseFence.generation}
+          `);
+        }
         return {
           action: "waiting",
           waiter: mapCodexCapacityWaiter(waiterRow),
@@ -8781,6 +8823,7 @@ async function supersedeCodexCapacityWaitInTransaction(
   tx: Database,
   input: {
     session: typeof schema.sessions.$inferSelect;
+    blockedTurn: typeof schema.sessionTurns.$inferSelect;
     waiter: typeof schema.codexCapacityWaiters.$inferSelect;
     reason: string;
     now: Date;
@@ -8804,9 +8847,52 @@ async function supersedeCodexCapacityWaitInTransaction(
   if (!updated) {
     return { waiter: mapCodexCapacityWaiter(input.waiter), events: [] };
   }
-  const inserted = await tx
-    .insert(schema.sessionEvents)
-    .values({
+  const turnWasCurrent = input.session.activeTurnId === input.blockedTurn.id;
+  const turnStillWaiting = input.blockedTurn.status === "waiting_capacity";
+  const terminalTurnStatus = input.session.status === "cancelled" ? "cancelled" : "superseded";
+  if (turnStillWaiting) {
+    const [supersededTurn] = await tx
+      .update(schema.sessionTurns)
+      .set({
+        status: terminalTurnStatus,
+        activeAttemptId: null,
+        cancelledBy: "codex_capacity_reconcile",
+        cancelReason: input.reason,
+        version: input.blockedTurn.version + 1,
+        finishedAt: input.now,
+        updatedAt: input.now,
+      })
+      .where(
+        and(
+          eq(schema.sessionTurns.workspaceId, input.session.workspaceId),
+          eq(schema.sessionTurns.id, input.blockedTurn.id),
+          eq(schema.sessionTurns.status, "waiting_capacity"),
+          isNull(schema.sessionTurns.activeAttemptId),
+          eq(schema.sessionTurns.executionGeneration, input.waiter.blockedTurnGeneration),
+        ),
+      )
+      .returning({ id: schema.sessionTurns.id });
+    if (!supersededTurn) {
+      throw new Error("Codex capacity blocked turn changed during atomic supersession");
+    }
+  }
+  const [queued] = turnWasCurrent
+    ? await tx
+        .select({ id: schema.sessionTurns.id })
+        .from(schema.sessionTurns)
+        .where(
+          and(
+            eq(schema.sessionTurns.workspaceId, input.session.workspaceId),
+            eq(schema.sessionTurns.sessionId, input.session.id),
+            eq(schema.sessionTurns.status, "queued"),
+          ),
+        )
+        .limit(1)
+    : [];
+  const nextSessionStatus =
+    input.session.status === "cancelled" ? "cancelled" : queued ? "queued" : "idle";
+  const eventValues: Array<typeof schema.sessionEvents.$inferInsert> = [
+    {
       accountId: input.session.accountId,
       workspaceId: input.session.workspaceId,
       sessionId: input.session.id,
@@ -8818,28 +8904,59 @@ async function supersedeCodexCapacityWaitInTransaction(
         reason: input.reason,
       }),
       turnId: updated.blockedTurnId,
+      turnGeneration: input.blockedTurn.executionGeneration,
+      ...(turnWasCurrent ? { turnAssociation: "current" } : {}),
       occurredAt: input.now,
-    })
-    .returning();
-  await tx
+    },
+  ];
+  if (turnWasCurrent && input.session.status !== nextSessionStatus) {
+    eventValues.push({
+      accountId: input.session.accountId,
+      workspaceId: input.session.workspaceId,
+      sessionId: input.session.id,
+      sequence: input.session.lastSequence + 2,
+      type: "session.status.changed",
+      payload: { status: nextSessionStatus, reason: input.reason },
+      turnId: updated.blockedTurnId,
+      turnGeneration: input.blockedTurn.executionGeneration,
+      turnAssociation: "current",
+      occurredAt: input.now,
+    });
+  }
+  const inserted = await tx.insert(schema.sessionEvents).values(eventValues).returning();
+  const lastSequence = input.session.lastSequence + inserted.length;
+  const [updatedSession] = await tx
     .update(schema.sessions)
-    .set({ lastSequence: input.session.lastSequence + 1, updatedAt: input.now })
+    .set({
+      ...(turnWasCurrent ? { status: nextSessionStatus, activeTurnId: null } : {}),
+      lastSequence,
+      updatedAt: input.now,
+    })
     .where(
       and(
         eq(schema.sessions.workspaceId, input.session.workspaceId),
         eq(schema.sessions.id, input.session.id),
+        ...(turnWasCurrent ? [eq(schema.sessions.activeTurnId, input.blockedTurn.id)] : []),
       ),
-    );
-  return { waiter: mapCodexCapacityWaiter(updated), events: inserted.map(mapEvent) };
+    )
+    .returning({ id: schema.sessions.id });
+  if (!updatedSession) {
+    throw new Error("Codex capacity session changed during atomic supersession");
+  }
+  return {
+    waiter: mapCodexCapacityWaiter(updated),
+    events: inserted.map(mapEvent),
+  };
 }
 
 /**
  * Row-lock and re-evaluate one waiter. Availability is decided by a pure
  * caller supplied policy over the same rotation-row transaction as normal
- * acquisition. If available, one system goal-continuation event and one turn
- * are committed; duplicate timers/signals observe status=resumed and do no
- * work. If any goal/control/policy/turn/queue fence changed, the waiter is
- * superseded without inference.
+ * acquisition. If available, the exact blocked turn becomes `recovering`;
+ * duplicate timers/signals observe status=resumed and do no work. Effective
+ * Pause leaves the waiter untouched, ordinary queued prompts remain behind the
+ * current inference, and only an explicit semantic fence change supersedes the
+ * waiter/blocked turn without inference.
  */
 export async function reconcileCodexCapacityWait<
   TPolicyScope = never,
@@ -8872,6 +8989,13 @@ export async function reconcileCodexCapacityWait<
     async (scopedDb) =>
       await scopedDb.transaction(async (rawTx) => {
         const tx = rawTx as unknown as Database;
+        await lockWorkspaceInferenceControl(tx, input.workspaceId, "share");
+        const effectiveControl = await evaluateSessionControl(
+          tx,
+          input.workspaceId,
+          input.sessionId,
+          { lock: "share" },
+        );
         const rotation = await lockExistingCodexRotationSettingsForCapacity(tx, input.workspaceId);
         if (!rotation || rotation.accountId !== input.accountId) {
           return { action: "stale", waiter: null, events: [] } as const;
@@ -8906,18 +9030,20 @@ export async function reconcileCodexCapacityWait<
           )
           .for("update")
           .limit(1);
-        const [goal] = await tx
-          .select()
-          .from(schema.sessionGoals)
-          .where(
-            and(
-              eq(schema.sessionGoals.workspaceId, input.workspaceId),
-              eq(schema.sessionGoals.id, waiterRead.goalId),
-              eq(schema.sessionGoals.sessionId, input.sessionId),
-            ),
-          )
-          .for("update")
-          .limit(1);
+        const [goal] = waiterRead.goalId
+          ? await tx
+              .select()
+              .from(schema.sessionGoals)
+              .where(
+                and(
+                  eq(schema.sessionGoals.workspaceId, input.workspaceId),
+                  eq(schema.sessionGoals.id, waiterRead.goalId),
+                  eq(schema.sessionGoals.sessionId, input.sessionId),
+                ),
+              )
+              .for("update")
+              .limit(1)
+          : [];
         const [blockedTurn] = await tx
           .select()
           .from(schema.sessionTurns)
@@ -8938,7 +9064,6 @@ export async function reconcileCodexCapacityWait<
           .limit(1);
         if (
           !session ||
-          !goal ||
           !blockedTurn ||
           !waiter ||
           waiter.generation !== input.generation ||
@@ -8950,47 +9075,40 @@ export async function reconcileCodexCapacityWait<
             events: [],
           } as const;
         }
+        if (effectiveControl.state !== "active") {
+          return {
+            action: "paused",
+            waiter: mapCodexCapacityWaiter(waiter),
+            events: [],
+          } as const;
+        }
 
-        const [pending] = await tx
-          .select({ id: schema.sessionTurns.id })
-          .from(schema.sessionTurns)
-          .where(
-            and(
-              eq(schema.sessionTurns.workspaceId, input.workspaceId),
-              eq(schema.sessionTurns.sessionId, input.sessionId),
-              inArray(schema.sessionTurns.status, ["queued", "running", "requires_action"]),
-            ),
-          )
-          .limit(1);
-        const [laterTurn] = await tx
-          .select({ id: schema.sessionTurns.id })
-          .from(schema.sessionTurns)
-          .where(
-            and(
-              eq(schema.sessionTurns.workspaceId, input.workspaceId),
-              eq(schema.sessionTurns.sessionId, input.sessionId),
-              gt(schema.sessionTurns.position, blockedTurn.position),
-            ),
-          )
-          .limit(1);
         const currentPolicyHash = codexCapacityPolicyHashFromTurnMetadata(blockedTurn.metadata);
         let supersedeReason: string | null = null;
-        if (goal.status !== "active" || goal.version !== waiter.goalVersion) {
+        if (session.status === "cancelled") {
+          supersedeReason = "session_cancelled";
+        } else if (
+          waiter.goalId !== null &&
+          (!goal || goal.status !== "active" || goal.version !== waiter.goalVersion)
+        ) {
           supersedeReason = "goal_changed";
         } else if (currentPolicyHash !== waiter.policyHash) {
           supersedeReason = "credential_policy_changed";
-        } else if (session.status !== "idle" || session.activeTurnId !== null) {
-          supersedeReason = "session_not_capacity_idle";
-        } else if (blockedTurn.status !== "failed") {
+        } else if (session.activeTurnId !== blockedTurn.id) {
+          supersedeReason = "active_turn_changed";
+        } else if (session.status !== "waiting_capacity") {
+          supersedeReason = "session_not_waiting_capacity";
+        } else if (
+          blockedTurn.status !== "waiting_capacity" ||
+          blockedTurn.activeAttemptId !== null ||
+          blockedTurn.executionGeneration !== waiter.blockedTurnGeneration
+        ) {
           supersedeReason = "blocked_turn_changed";
-        } else if (pending) {
-          supersedeReason = "pending_work_exists";
-        } else if (laterTurn) {
-          supersedeReason = "newer_turn_exists";
         }
         if (supersedeReason) {
           const superseded = await supersedeCodexCapacityWaitInTransaction(tx, {
             session,
+            blockedTurn,
             waiter,
             reason: supersedeReason,
             now,
@@ -9062,64 +9180,6 @@ export async function reconcileCodexCapacityWait<
           } as const;
         }
 
-        const prompt = [
-          "[CODEX CAPACITY RESUME] Codex subscription capacity is available again.",
-          `Continue the existing active goal from durable conversation history: ${goal.text}`,
-          `Success criteria: ${goal.successCriteria ?? "none specified"}.`,
-          "Do not replay completed tool side effects; verify any ambiguous in-flight effect before repeating it.",
-          "If the goal is complete, call opengeni__goal_complete. If blocked for another reason, call opengeni__goal_pause.",
-        ].join("\n");
-        const [update] = await tx
-          .insert(schema.sessionSystemUpdates)
-          .values({
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            kind: "goal_continuation",
-            classification: "info",
-            sourceId: goal.id,
-            dedupeKey: `codex-capacity-resume:${waiter.id}:${waiter.generation}`,
-            summary: prompt,
-            payload: {
-              type: "goal_continuation",
-              goalId: goal.id,
-              goalVersion: goal.version,
-              prompt,
-              reason: "codex_capacity",
-              capacityWaiterId: waiter.id,
-              capacityWaitGeneration: waiter.generation,
-              policy: {
-                model: blockedTurn.model,
-                reasoningEffort: blockedTurn.reasoningEffort,
-                tools: blockedTurn.tools,
-                sandboxBackend: blockedTurn.sandboxBackend,
-              },
-            },
-            lineage: {
-              goalId: goal.id,
-              blockedTurnId: blockedTurn.id,
-              capacityWaiterId: waiter.id,
-            },
-            state: "pending",
-          })
-          .returning();
-        if (!update) {
-          throw new Error("Codex capacity resume did not create an internal update");
-        }
-        await tx
-          .insert(schema.usageEvents)
-          .values({
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            eventType: "agent_run.created",
-            quantity: 1,
-            unit: "run",
-            sourceResourceType: "session_system_update",
-            sourceResourceId: update.id,
-            idempotencyKey: `agent_run.created:codex-capacity:${input.workspaceId}:${update.id}`,
-            occurredAt: now,
-          })
-          .onConflictDoNothing({ target: schema.usageEvents.idempotencyKey });
         const events = await tx
           .insert(schema.sessionEvents)
           .values([
@@ -9128,14 +9188,20 @@ export async function reconcileCodexCapacityWait<
               workspaceId: input.workspaceId,
               sessionId: input.sessionId,
               sequence: session.lastSequence + 1,
-              type: "system.update.pending",
+              type: "codex.capacity.resumed",
               payload: sanitizeEventPayload({
-                updateId: update.id,
-                kind: update.kind,
-                classification: update.classification,
-                sourceId: update.sourceId,
-                summary: update.summary,
+                waiterId: waiter.id,
+                generation: waiter.generation,
+                wakeRevision: waiter.wakeRevision,
+                goalId: waiter.goalId,
+                goalVersion: waiter.goalVersion,
+                blockedTurnGeneration: waiter.blockedTurnGeneration,
+                policyHash: waiter.policyHash,
+                diagnostic: decision.diagnostic ?? null,
               }),
+              turnId: blockedTurn.id,
+              turnGeneration: blockedTurn.executionGeneration,
+              turnAssociation: "current",
               occurredAt: now,
             },
             {
@@ -9143,18 +9209,11 @@ export async function reconcileCodexCapacityWait<
               workspaceId: input.workspaceId,
               sessionId: input.sessionId,
               sequence: session.lastSequence + 2,
-              type: "codex.capacity.resumed",
-              payload: sanitizeEventPayload({
-                waiterId: waiter.id,
-                generation: waiter.generation,
-                wakeRevision: waiter.wakeRevision,
-                goalId: goal.id,
-                goalVersion: goal.version,
-                policyHash: waiter.policyHash,
-                diagnostic: decision.diagnostic ?? null,
-                updateId: update.id,
-              }),
+              type: "session.status.changed",
+              payload: { status: "recovering", reason: "codex_capacity" },
               turnId: blockedTurn.id,
+              turnGeneration: blockedTurn.executionGeneration,
+              turnAssociation: "current",
               occurredAt: now,
             },
           ])
@@ -9163,7 +9222,7 @@ export async function reconcileCodexCapacityWait<
           .update(schema.codexCapacityWaiters)
           .set({
             status: "resumed",
-            resumedUpdateId: update.id,
+            resumedUpdateId: null,
             observedWakeRevision: waiter.wakeRevision,
             lastWakeReason: "capacity_available",
             updatedAt: now,
@@ -9179,11 +9238,34 @@ export async function reconcileCodexCapacityWait<
         if (!updatedWaiter) {
           throw new Error("Codex capacity waiter changed during atomic resume");
         }
-        await tx
+        const [recoveringTurn] = await tx
+          .update(schema.sessionTurns)
+          .set({
+            status: "recovering",
+            activeAttemptId: null,
+            metadata: metadataWithoutTurnDispatchAttempt(blockedTurn.metadata),
+            version: blockedTurn.version + 1,
+            finishedAt: null,
+            updatedAt: now,
+          })
+          .where(
+            and(
+              eq(schema.sessionTurns.workspaceId, input.workspaceId),
+              eq(schema.sessionTurns.id, blockedTurn.id),
+              eq(schema.sessionTurns.status, "waiting_capacity"),
+              isNull(schema.sessionTurns.activeAttemptId),
+              eq(schema.sessionTurns.executionGeneration, waiter.blockedTurnGeneration),
+            ),
+          )
+          .returning({ id: schema.sessionTurns.id });
+        if (!recoveringTurn) {
+          throw new Error("Codex capacity blocked turn changed during atomic resume");
+        }
+        const [recoveringSession] = await tx
           .update(schema.sessions)
           .set({
-            status: "queued",
-            activeTurnId: null,
+            status: "recovering",
+            activeTurnId: blockedTurn.id,
             lastSequence: session.lastSequence + 2,
             updatedAt: now,
           })
@@ -9191,13 +9273,17 @@ export async function reconcileCodexCapacityWait<
             and(
               eq(schema.sessions.workspaceId, input.workspaceId),
               eq(schema.sessions.id, input.sessionId),
-              isNull(schema.sessions.activeTurnId),
+              eq(schema.sessions.status, "waiting_capacity"),
+              eq(schema.sessions.activeTurnId, blockedTurn.id),
             ),
-          );
+          )
+          .returning({ id: schema.sessions.id });
+        if (!recoveringSession) {
+          throw new Error("Codex capacity session changed during atomic resume");
+        }
         return {
           action: "resumed",
           waiter: mapCodexCapacityWaiter(updatedWaiter),
-          update: mapSessionSystemUpdate(update),
           events: events.map(mapEvent),
         } as const;
       }),
@@ -17731,6 +17817,196 @@ export async function getSessionGoal(
   });
 }
 
+export type SessionGoalContinuationProjection = {
+  state: "inactive" | "scheduled" | "running" | "blocked" | "invariant_broken";
+  reason:
+    | "goal_inactive"
+    | "wake_pending"
+    | "continuation_pending"
+    | "human_work_pending"
+    | "goal_turn_running"
+    | "human_turn_running"
+    | "workstream_paused"
+    | "approval_required"
+    | "provider_backpressure"
+    | "session_cancelled"
+    | "system_work_pending"
+    | "missing_obligation";
+  wakeRevision: number;
+  observedRevision: number;
+  nextAttemptAt: string | null;
+  lastError: string | null;
+};
+
+/**
+ * Read the goal and its autonomy state from one repeatable Postgres snapshot.
+ * The projection never infers liveness from the public session status alone:
+ * goal revisions, typed internal updates/turns, capacity waiters, admission
+ * control, and the workflow-wake delivery ledger each remain distinct truth.
+ */
+export async function getSessionGoalWithContinuation(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<(SessionGoal & { continuation: SessionGoalContinuationProjection }) | null> {
+  const context = await rlsContextForWorkspace(db, workspaceId);
+  return await withRlsContext(
+    db,
+    context,
+    async (tx) => {
+      const effectiveControl = await evaluateSessionControl(tx, workspaceId, sessionId, {
+        lock: "none",
+      });
+      const [session] = await tx
+        .select()
+        .from(schema.sessions)
+        .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
+        .limit(1);
+      const [goal] = await tx
+        .select()
+        .from(schema.sessionGoals)
+        .where(
+          and(
+            eq(schema.sessionGoals.workspaceId, workspaceId),
+            eq(schema.sessionGoals.sessionId, sessionId),
+          ),
+        )
+        .limit(1);
+      if (!session || !goal) return null;
+
+      const [turn] = await tx
+        .select({
+          id: schema.sessionTurns.id,
+          status: schema.sessionTurns.status,
+          source: schema.sessionTurns.source,
+        })
+        .from(schema.sessionTurns)
+        .where(
+          and(
+            eq(schema.sessionTurns.workspaceId, workspaceId),
+            eq(schema.sessionTurns.sessionId, sessionId),
+            inArray(schema.sessionTurns.status, [
+              "queued",
+              "running",
+              "requires_action",
+              "recovering",
+              "waiting_capacity",
+            ]),
+          ),
+        )
+        .orderBy(
+          // The active pointer is the authoritative current execution. A Send
+          // accepted while a goal turn is running can have a lower normalized
+          // queue position; that future human turn must not hide the live goal
+          // attempt in this projection.
+          sql`case when ${schema.sessionTurns.id} = ${session.activeTurnId} then 0 else 1 end`,
+          asc(schema.sessionTurns.position),
+          asc(schema.sessionTurns.createdAt),
+        )
+        .limit(1);
+      const [continuationUpdate] = await tx
+        .select({ id: schema.sessionSystemUpdates.id })
+        .from(schema.sessionSystemUpdates)
+        .where(
+          and(
+            eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
+            eq(schema.sessionSystemUpdates.sessionId, sessionId),
+            eq(schema.sessionSystemUpdates.kind, "goal_continuation"),
+            eq(schema.sessionSystemUpdates.state, "pending"),
+            sql`${schema.sessionSystemUpdates.payload} ->> 'goalId' = ${goal.id}`,
+            sql`(${schema.sessionSystemUpdates.payload} ->> 'goalVersion')::integer = ${goal.version}`,
+          ),
+        )
+        .limit(1);
+      const [capacityWait] = await tx
+        .select({ nextCheckAt: schema.codexCapacityWaiters.nextCheckAt })
+        .from(schema.codexCapacityWaiters)
+        .where(
+          and(
+            eq(schema.codexCapacityWaiters.workspaceId, workspaceId),
+            eq(schema.codexCapacityWaiters.sessionId, sessionId),
+            eq(schema.codexCapacityWaiters.goalId, goal.id),
+            eq(schema.codexCapacityWaiters.goalVersion, goal.version),
+            eq(schema.codexCapacityWaiters.status, "waiting"),
+          ),
+        )
+        .limit(1);
+      const [wake] = await tx
+        .select({
+          wakeRevision: schema.sessionWorkflowWakeOutbox.wakeRevision,
+          deliveredRevision: schema.sessionWorkflowWakeOutbox.deliveredRevision,
+          nextAttemptAt: schema.sessionWorkflowWakeOutbox.nextAttemptAt,
+          lastError: schema.sessionWorkflowWakeOutbox.lastError,
+        })
+        .from(schema.sessionWorkflowWakeOutbox)
+        .where(
+          and(
+            eq(schema.sessionWorkflowWakeOutbox.workspaceId, workspaceId),
+            eq(schema.sessionWorkflowWakeOutbox.sessionId, sessionId),
+          ),
+        )
+        .limit(1);
+
+      const pendingWorkflowWake =
+        wake !== undefined && wake.wakeRevision > wake.deliveredRevision ? wake : null;
+      const base = {
+        wakeRevision: goal.continuationWakeRevision,
+        observedRevision: goal.continuationObservedRevision,
+        nextAttemptAt:
+          capacityWait?.nextCheckAt.toISOString() ??
+          pendingWorkflowWake?.nextAttemptAt.toISOString() ??
+          null,
+        // Delivery errors belong to one still-undelivered workflow-wake
+        // revision. A late duplicate failure must not make already-accepted
+        // Temporal work look blocked or broken.
+        lastError: pendingWorkflowWake?.lastError ?? null,
+      };
+      let continuation: SessionGoalContinuationProjection;
+      if (goal.status !== "active") {
+        continuation = { state: "inactive", reason: "goal_inactive", ...base };
+      } else if (effectiveControl.state !== "active") {
+        continuation = { state: "blocked", reason: "workstream_paused", ...base };
+      } else if (session.status === "cancelled") {
+        continuation = { state: "blocked", reason: "session_cancelled", ...base };
+      } else if (capacityWait || turn?.status === "waiting_capacity") {
+        continuation = { state: "blocked", reason: "provider_backpressure", ...base };
+      } else if (turn?.status === "requires_action") {
+        continuation = { state: "blocked", reason: "approval_required", ...base };
+      } else if (turn && ["user", "api"].includes(turn.source)) {
+        // Human/API work is authoritative, but it is not an autonomous goal
+        // continuation. A live human turn blocks continuation; queued or
+        // recovering human work is scheduled. Reserve `running` exclusively
+        // for a live goal-owned attempt so clients never paint false pursuit.
+        continuation =
+          turn.status === "running"
+            ? { state: "blocked", reason: "human_turn_running", ...base }
+            : { state: "scheduled", reason: "human_work_pending", ...base };
+      } else if (turn?.source === "goal") {
+        continuation =
+          turn.status === "running"
+            ? { state: "running", reason: "goal_turn_running", ...base }
+            : { state: "scheduled", reason: "continuation_pending", ...base };
+      } else if (turn) {
+        continuation = {
+          state: turn.status === "running" ? "blocked" : "scheduled",
+          reason: "system_work_pending",
+          ...base,
+        };
+      } else if (continuationUpdate) {
+        continuation = { state: "scheduled", reason: "continuation_pending", ...base };
+      } else if (goal.continuationWakeRevision > goal.continuationObservedRevision) {
+        continuation = { state: "scheduled", reason: "wake_pending", ...base };
+      } else if (session.status === "queued") {
+        continuation = { state: "scheduled", reason: "system_work_pending", ...base };
+      } else {
+        continuation = { state: "invariant_broken", reason: "missing_obligation", ...base };
+      }
+      return { ...mapSessionGoal(goal), continuation };
+    },
+    { isolationLevel: "repeatable read", accessMode: "read only" },
+  );
+}
+
 export async function clearSessionGoal(
   db: Database,
   workspaceId: string,
@@ -17741,12 +18017,6 @@ export async function clearSessionGoal(
     workspaceId,
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
-        await tx
-          .select({ id: schema.workspaces.id })
-          .from(schema.workspaces)
-          .where(eq(schema.workspaces.id, workspaceId))
-          .for("update")
-          .limit(1);
         const [session] = await tx
           .select()
           .from(schema.sessions)
@@ -17863,6 +18133,7 @@ export async function upsertSessionGoal(
           noProgressStreak: 0,
           lastContinuationTurnId: null,
           versionAtLastContinuation: null,
+          continuationWakeRevision: existing.continuationWakeRevision + 1,
           updatedAt: new Date(),
         })
         .where(eq(schema.sessionGoals.id, existing.id))
@@ -17872,6 +18143,67 @@ export async function upsertSessionGoal(
       }
       return { goal: mapSessionGoal(row), replaced: true };
     },
+  );
+}
+
+/**
+ * Agent/API goal_set: session sequence ownership, the create-or-replace
+ * mutation, and goal.set timeline fact commit together. The session-first lock
+ * order matches active-turn event writes; goal_set must never hold a goal row
+ * while waiting for the session sequence owner.
+ */
+export async function upsertSessionGoalWithEvent(
+  db: Database,
+  input: CreateSessionGoalInput & { actor: "agent" | "api" },
+): Promise<{ goal: SessionGoal; replaced: boolean; events: SessionEvent[] }> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (rawTx) => {
+        const tx = rawTx as unknown as Database;
+        const [session] = await tx
+          .select()
+          .from(schema.sessions)
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, input.workspaceId),
+              eq(schema.sessions.id, input.sessionId),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (!session) throw new Error(`Session not found: ${input.sessionId}`);
+        const result = await upsertSessionGoal(tx, input);
+        const now = new Date();
+        const [event] = await tx
+          .insert(schema.sessionEvents)
+          .values({
+            accountId: session.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            sequence: session.lastSequence + 1,
+            type: "goal.set",
+            payload: sanitizeEventPayload({
+              goalId: result.goal.id,
+              text: result.goal.text,
+              ...(result.goal.successCriteria
+                ? { successCriteria: result.goal.successCriteria }
+                : {}),
+              version: result.goal.version,
+              actor: input.actor,
+              replaced: result.replaced,
+            }),
+            occurredAt: now,
+          })
+          .returning();
+        if (!event) throw new Error("Failed to append goal.set event");
+        await tx
+          .update(schema.sessions)
+          .set({ lastSequence: session.lastSequence + 1, updatedAt: now })
+          .where(eq(schema.sessions.id, input.sessionId));
+        return { ...result, events: [mapEvent(event)] };
+      }),
   );
 }
 
@@ -17910,6 +18242,167 @@ export async function updateSessionGoal(
     }
     return mapSessionGoal(row);
   });
+}
+
+/**
+ * Agent goal_update: session sequence ownership, goal mutation, and its audit
+ * event commit together. Locking the session before the goal also matches an
+ * active turn's event-write order and avoids the workspace->session inversion
+ * that previously self-locked root goal mutations.
+ */
+export async function updateSessionGoalWithEvent(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  input: {
+    text?: string;
+    successCriteria?: string | null;
+    progressNote?: string;
+    actor: "agent" | "api";
+    command?: {
+      accountId: string;
+      actor: Extract<SessionCommandActor, { type: "agent_attempt" }>;
+      operationKey: string;
+    };
+  },
+): Promise<{
+  goal: SessionGoal;
+  events: SessionEvent[];
+  operationId: string | null;
+  replay: boolean;
+}> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
+    scopedDb.transaction(async (rawTx) => {
+      const tx = rawTx as unknown as Database;
+      const [session] = await tx
+        .select()
+        .from(schema.sessions)
+        .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
+        .for("update")
+        .limit(1);
+      if (!session) throw new Error(`Session not found: ${sessionId}`);
+
+      const reserved = input.command
+        ? await reserveSessionCommandReceipt(tx, {
+            accountId: input.command.accountId,
+            workspaceId,
+            actor: input.command.actor,
+            action: "goal.update",
+            targetSessionId: sessionId,
+            targetTurnId: null,
+            operationKey: input.command.operationKey,
+            canonicalRequestHash: canonicalSessionCommandHash({
+              text: input.text ?? null,
+              successCriteria: input.successCriteria ?? null,
+              progressNote: input.progressNote ?? null,
+            }),
+            identityScope: "goal_operation",
+          })
+        : null;
+      if (reserved?.replay) {
+        const parsed = SessionGoalContract.safeParse(reserved.receipt.result.goal);
+        const goalVersion = reserved.receipt.result.goalVersion;
+        const eventId = reserved.receipt.result.eventId;
+        if (
+          !parsed.success ||
+          !Number.isSafeInteger(goalVersion) ||
+          parsed.data.version !== goalVersion ||
+          typeof eventId !== "string"
+        ) {
+          throw new SessionControlInvariantError(
+            `Goal update receipt ${reserved.receipt.id} has no valid committed result`,
+          );
+        }
+        return {
+          goal: parsed.data,
+          events: [],
+          operationId: reserved.receipt.id,
+          replay: true,
+        };
+      }
+
+      if (input.command) {
+        await assertAgentCommandAuthorityInTransaction(tx, {
+          workspaceId,
+          actor: input.command.actor,
+          targetSessionId: sessionId,
+          action: "goal",
+        });
+      }
+      const [existing] = await tx
+        .select()
+        .from(schema.sessionGoals)
+        .where(
+          and(
+            eq(schema.sessionGoals.workspaceId, workspaceId),
+            eq(schema.sessionGoals.sessionId, sessionId),
+          ),
+        )
+        .for("update")
+        .limit(1);
+      if (!existing) {
+        throw new Error("this session has no goal; use goal_set first");
+      }
+      if (existing.status === "completed") {
+        throw new Error("session goal is completed; use goal_set to start a new goal");
+      }
+      const [updated] = await tx
+        .update(schema.sessionGoals)
+        .set({
+          ...(input.text !== undefined ? { text: input.text } : {}),
+          ...(input.successCriteria !== undefined
+            ? { successCriteria: input.successCriteria }
+            : {}),
+          version: existing.version + 1,
+          noProgressStreak: 0,
+          updatedAt: new Date(),
+        })
+        .where(eq(schema.sessionGoals.id, existing.id))
+        .returning();
+      if (!updated) throw new Error(`Session goal not found: ${sessionId}`);
+      const goal = mapSessionGoal(updated);
+      const now = new Date();
+      const [event] = await tx
+        .insert(schema.sessionEvents)
+        .values({
+          accountId: session.accountId,
+          workspaceId,
+          sessionId,
+          sequence: session.lastSequence + 1,
+          type: "goal.updated",
+          payload: sanitizeEventPayload({
+            goalId: goal.id,
+            text: goal.text,
+            ...(goal.successCriteria ? { successCriteria: goal.successCriteria } : {}),
+            ...(input.progressNote ? { progressNote: input.progressNote } : {}),
+            version: goal.version,
+            actor: input.actor,
+          }),
+          occurredAt: now,
+        })
+        .returning();
+      if (!event) throw new Error("Failed to append goal.updated event");
+      await tx
+        .update(schema.sessions)
+        .set({ lastSequence: session.lastSequence + 1, updatedAt: now })
+        .where(eq(schema.sessions.id, sessionId));
+      if (reserved) {
+        await updateSessionCommandReceiptResult(tx, reserved.receipt.id, {
+          result: {
+            goal,
+            goalVersion: goal.version,
+            eventId: event.id,
+          },
+        });
+      }
+      return {
+        goal,
+        events: [mapEvent(event)],
+        operationId: reserved?.receipt.id ?? null,
+        replay: false,
+      };
+    }),
+  );
 }
 
 /**
@@ -17990,19 +18483,12 @@ export async function setSessionGoalStatus(
     const effectiveControl = await evaluateSessionControl(scopedDb, workspaceId, sessionId, {
       lock: "share",
     });
-    const [workspace] = await scopedDb
-      .select()
-      .from(schema.workspaces)
-      .where(eq(schema.workspaces.id, workspaceId))
-      .for("update")
-      .limit(1);
     const [session] = await scopedDb
       .select()
       .from(schema.sessions)
       .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
       .for("update")
       .limit(1);
-    if (!workspace) throw new Error(`Workspace not found: ${workspaceId}`);
     if (!session) throw new Error(`Session not found: ${sessionId}`);
     const [existing] = await scopedDb
       .select()
@@ -18034,12 +18520,14 @@ export async function setSessionGoalStatus(
           ? {
               evidence: input.evidence ?? null,
               pausedReason: null,
+              continuationObservedRevision: existing.continuationWakeRevision,
             }
           : {}),
         ...(input.status === "paused"
           ? {
               rationale: input.rationale ?? null,
               pausedReason: input.pausedReason ?? null,
+              continuationObservedRevision: existing.continuationWakeRevision,
             }
           : {}),
         ...(input.status === "active"
@@ -18052,6 +18540,7 @@ export async function setSessionGoalStatus(
               // a pre-pause continuation turn must not feed the progress detector.
               lastContinuationTurnId: null,
               versionAtLastContinuation: null,
+              continuationWakeRevision: existing.continuationWakeRevision + 1,
             }
           : {}),
       })
@@ -18077,6 +18566,99 @@ export async function setSessionGoalStatus(
     }
     return { goal: mapSessionGoal(row), changed: true, workflowWakeRevision };
   });
+}
+
+export type SetSessionGoalStatusEvent =
+  | { type: "goal.completed"; evidence: string }
+  | {
+      type: "goal.paused";
+      actor: "agent" | "api";
+      reason: string;
+      rationale?: string;
+    }
+  | { type: "goal.resumed"; actor: "api" };
+
+/** Status mutation and its timeline fact share the same session-first commit. */
+export async function setSessionGoalStatusWithEvent(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  input: {
+    status: SessionGoalStatus;
+    evidence?: string;
+    rationale?: string;
+    pausedReason?: string;
+    event: SetSessionGoalStatusEvent;
+  },
+): Promise<{
+  goal: SessionGoal;
+  changed: boolean;
+  workflowWakeRevision: number | null;
+  events: SessionEvent[];
+}> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
+    scopedDb.transaction(async (rawTx) => {
+      const tx = rawTx as unknown as Database;
+      const result = await setSessionGoalStatus(tx, workspaceId, sessionId, {
+        status: input.status,
+        ...(input.evidence !== undefined ? { evidence: input.evidence } : {}),
+        ...(input.rationale !== undefined ? { rationale: input.rationale } : {}),
+        ...(input.pausedReason !== undefined ? { pausedReason: input.pausedReason } : {}),
+      });
+      if (!result.changed) return { ...result, events: [] };
+      const [session] = await tx
+        .select()
+        .from(schema.sessions)
+        .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
+        .for("update")
+        .limit(1);
+      if (!session) throw new Error(`Session not found: ${sessionId}`);
+      const payload =
+        input.event.type === "goal.completed"
+          ? {
+              goalId: result.goal.id,
+              evidence: input.event.evidence,
+              version: result.goal.version,
+            }
+          : input.event.type === "goal.paused"
+            ? {
+                goalId: result.goal.id,
+                actor: input.event.actor,
+                reason: input.event.reason,
+                ...(input.event.rationale ? { rationale: input.event.rationale } : {}),
+                autoContinuations: result.goal.autoContinuations,
+                noProgressStreak: result.goal.noProgressStreak,
+              }
+            : {
+                goalId: result.goal.id,
+                text: result.goal.text,
+                ...(result.goal.successCriteria
+                  ? { successCriteria: result.goal.successCriteria }
+                  : {}),
+                version: result.goal.version,
+                actor: input.event.actor,
+              };
+      const now = new Date();
+      const [event] = await tx
+        .insert(schema.sessionEvents)
+        .values({
+          accountId: session.accountId,
+          workspaceId,
+          sessionId,
+          sequence: session.lastSequence + 1,
+          type: input.event.type,
+          payload: sanitizeEventPayload(payload),
+          occurredAt: now,
+        })
+        .returning();
+      if (!event) throw new Error(`Failed to append ${input.event.type} event`);
+      await tx
+        .update(schema.sessions)
+        .set({ lastSequence: session.lastSequence + 1, updatedAt: now })
+        .where(eq(schema.sessions.id, sessionId));
+      return { ...result, events: [mapEvent(event)] };
+    }),
+  );
 }
 
 export async function setSessionGoalLastContinuationTurn(
@@ -18382,6 +18964,356 @@ export async function evaluateGoalContinuation(
           goal: mapSessionGoal(updated!),
           autoContinuation: nextAutoContinuations,
           cap,
+        } as const;
+      }),
+  );
+}
+
+export type MaterializeGoalContinuationResult =
+  | { action: "none" | "queue"; events: [] }
+  | { action: "paused"; events: SessionEvent[] }
+  | {
+      action: "continue";
+      events: SessionEvent[];
+      update: SessionSystemUpdate;
+      goalWakeRevision: number;
+      workflowWakeRevision: number;
+    };
+
+/**
+ * Consume one durable goal-wake revision into one continuation obligation.
+ *
+ * This is deliberately one outer PostgreSQL transaction. The existing locked
+ * evaluator runs as a nested savepoint, so its no-progress/counter mutation is
+ * rolled back if prompt construction, update/event insertion, metering, or the
+ * workflow-wake outbox write fails. Retrying after a lost COMMIT response sees
+ * the same stable goal revision and the already-pending update; it never spends
+ * another continuation count or creates another usage row.
+ */
+export async function materializeGoalContinuation(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    workflowId: string;
+    defaultMaxAutoContinuations?: number | null;
+    noProgressLimit: number;
+    budgetBlocked?: string | null;
+    policy: {
+      model: string;
+      reasoningEffort: ReasoningEffort;
+      tools: ToolRef[];
+      sandboxBackend: SandboxBackend;
+    };
+    prompt: (goal: SessionGoal, autoContinuation: number, cap: number | null) => string;
+  },
+): Promise<MaterializeGoalContinuationResult> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (rawTx) => {
+        const tx = rawTx as unknown as Database;
+        const effectiveControl = await evaluateSessionControl(
+          tx,
+          input.workspaceId,
+          input.sessionId,
+          { lock: "share" },
+        );
+        const [session] = await tx
+          .select()
+          .from(schema.sessions)
+          .where(
+            and(
+              eq(schema.sessions.accountId, input.accountId),
+              eq(schema.sessions.workspaceId, input.workspaceId),
+              eq(schema.sessions.id, input.sessionId),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        const [goalRead] = await tx
+          .select()
+          .from(schema.sessionGoals)
+          .where(
+            and(
+              eq(schema.sessionGoals.workspaceId, input.workspaceId),
+              eq(schema.sessionGoals.sessionId, input.sessionId),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (
+          !session ||
+          !goalRead ||
+          goalRead.status !== "active" ||
+          session.status === "cancelled" ||
+          effectiveControl.state !== "active"
+        ) {
+          return { action: "none", events: [] } as const;
+        }
+
+        const [pendingTurn] = await tx
+          .select({
+            id: schema.sessionTurns.id,
+            status: schema.sessionTurns.status,
+            source: schema.sessionTurns.source,
+          })
+          .from(schema.sessionTurns)
+          .where(
+            and(
+              eq(schema.sessionTurns.workspaceId, input.workspaceId),
+              eq(schema.sessionTurns.sessionId, input.sessionId),
+              inArray(schema.sessionTurns.status, [
+                "queued",
+                "running",
+                "requires_action",
+                "recovering",
+                "waiting_capacity",
+              ]),
+            ),
+          )
+          .orderBy(asc(schema.sessionTurns.position), asc(schema.sessionTurns.createdAt))
+          .limit(1);
+        if (pendingTurn) {
+          return pendingTurn.status === "queued"
+            ? ({ action: "queue", events: [] } as const)
+            : ({ action: "none", events: [] } as const);
+        }
+
+        // A human/operator Steer is the authoritative next direction. Never
+        // synthesize a goal notice beside it; its own turn settlement will arm
+        // the coalesced goal revision afterward if the goal remains active.
+        const [pendingSteer] = await tx
+          .select({ id: schema.sessionSystemUpdates.id })
+          .from(schema.sessionSystemUpdates)
+          .where(
+            and(
+              eq(schema.sessionSystemUpdates.workspaceId, input.workspaceId),
+              eq(schema.sessionSystemUpdates.sessionId, input.sessionId),
+              eq(schema.sessionSystemUpdates.kind, "agent_steer_instruction"),
+              inArray(schema.sessionSystemUpdates.state, ["pending", "deferred"]),
+            ),
+          )
+          .limit(1);
+        if (pendingSteer) {
+          return { action: "queue", events: [] } as const;
+        }
+
+        const [existingContinuation] = await tx
+          .select()
+          .from(schema.sessionSystemUpdates)
+          .where(
+            and(
+              eq(schema.sessionSystemUpdates.workspaceId, input.workspaceId),
+              eq(schema.sessionSystemUpdates.sessionId, input.sessionId),
+              eq(schema.sessionSystemUpdates.kind, "goal_continuation"),
+              eq(schema.sessionSystemUpdates.state, "pending"),
+              sql`${schema.sessionSystemUpdates.payload} ->> 'goalId' = ${goalRead.id}`,
+              sql`(${schema.sessionSystemUpdates.payload} ->> 'goalVersion')::integer = ${goalRead.version}`,
+            ),
+          )
+          .orderBy(desc(schema.sessionSystemUpdates.createdAt))
+          .limit(1);
+        if (existingContinuation) {
+          return {
+            action: "continue",
+            events: [],
+            update: mapSessionSystemUpdate(existingContinuation),
+            goalWakeRevision: goalRead.continuationObservedRevision,
+            workflowWakeRevision: 0,
+          } as const;
+        }
+
+        const [capacityWait] = await tx
+          .select({ id: schema.codexCapacityWaiters.id })
+          .from(schema.codexCapacityWaiters)
+          .where(
+            and(
+              eq(schema.codexCapacityWaiters.workspaceId, input.workspaceId),
+              eq(schema.codexCapacityWaiters.sessionId, input.sessionId),
+              eq(schema.codexCapacityWaiters.status, "waiting"),
+            ),
+          )
+          .limit(1);
+        if (capacityWait) {
+          return { action: "none", events: [] } as const;
+        }
+
+        let goalWakeRevision = goalRead.continuationWakeRevision;
+        if (goalWakeRevision <= goalRead.continuationObservedRevision) {
+          // This is an invariant-repair path, not a polling loop: a workflow
+          // reached an admitted idle goal without the terminal-settlement arm.
+          // Persist one new monotonic obligation before evaluating it.
+          const [repaired] = await tx
+            .update(schema.sessionGoals)
+            .set({
+              continuationWakeRevision: sql`${schema.sessionGoals.continuationWakeRevision} + 1`,
+              updatedAt: new Date(),
+            })
+            .where(eq(schema.sessionGoals.id, goalRead.id))
+            .returning({ revision: schema.sessionGoals.continuationWakeRevision });
+          if (!repaired) throw new Error(`Session goal not found: ${input.sessionId}`);
+          goalWakeRevision = repaired.revision;
+        }
+
+        const decision = await evaluateGoalContinuation(tx, {
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          defaultMaxAutoContinuations: input.defaultMaxAutoContinuations ?? null,
+          noProgressLimit: input.noProgressLimit,
+          budgetBlocked: input.budgetBlocked ?? null,
+        });
+        if (decision.decision === "none" || decision.decision === "queue") {
+          return { action: decision.decision, events: [] } as const;
+        }
+
+        const now = new Date();
+        if (decision.decision === "paused") {
+          const [event] = await tx
+            .insert(schema.sessionEvents)
+            .values({
+              accountId: session.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              sequence: session.lastSequence + 1,
+              type: "goal.paused",
+              payload: sanitizeEventPayload({
+                goalId: decision.goal.id,
+                actor: "system",
+                reason: decision.reason,
+                ...(decision.goal.rationale ? { rationale: decision.goal.rationale } : {}),
+                autoContinuations: decision.goal.autoContinuations,
+                noProgressStreak: decision.goal.noProgressStreak,
+              }),
+              occurredAt: now,
+            })
+            .returning();
+          if (!event) throw new Error("Failed to append goal.paused event");
+          await tx
+            .update(schema.sessionGoals)
+            .set({ continuationObservedRevision: goalWakeRevision, updatedAt: now })
+            .where(eq(schema.sessionGoals.id, decision.goal.id));
+          await tx
+            .update(schema.sessions)
+            .set({ lastSequence: session.lastSequence + 1, updatedAt: now })
+            .where(eq(schema.sessions.id, session.id));
+          return { action: "paused", events: [mapEvent(event)] } as const;
+        }
+
+        const prompt = input.prompt(decision.goal, decision.autoContinuation, decision.cap);
+        const payload = {
+          type: "goal_continuation" as const,
+          goalId: decision.goal.id,
+          goalVersion: decision.goal.version,
+          goalWakeRevision,
+          autoContinuation: decision.autoContinuation,
+          maxAutoContinuations: decision.cap,
+          prompt,
+          policy: input.policy,
+        };
+        if (Buffer.byteLength(JSON.stringify(payload)) > MAX_INTERNAL_UPDATE_BYTES) {
+          throw new Error(`Internal update payload exceeds ${MAX_INTERNAL_UPDATE_BYTES} bytes`);
+        }
+        if (Buffer.byteLength(prompt) > MAX_INTERNAL_UPDATE_BYTES) {
+          throw new Error(`Internal update summary exceeds ${MAX_INTERNAL_UPDATE_BYTES} bytes`);
+        }
+        const [update] = await tx
+          .insert(schema.sessionSystemUpdates)
+          .values({
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            kind: "goal_continuation",
+            classification: "info",
+            sourceId: decision.goal.id,
+            dedupeKey: `goal-continuation:${decision.goal.id}:wake:${goalWakeRevision}`,
+            summary: prompt,
+            payload,
+            lineage: { goalId: decision.goal.id, goalWakeRevision },
+            state: "pending",
+          })
+          .returning();
+        if (!update) throw new Error("Failed to create goal continuation update");
+
+        await tx
+          .insert(schema.usageEvents)
+          .values({
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            eventType: "agent_run.created",
+            quantity: 1,
+            unit: "run",
+            sourceResourceType: "session_system_update",
+            sourceResourceId: update.id,
+            idempotencyKey: `agent_run.created:goal:${input.workspaceId}:${decision.goal.id}:${goalWakeRevision}`,
+            occurredAt: now,
+          })
+          .onConflictDoNothing({ target: schema.usageEvents.idempotencyKey });
+
+        const insertedEvents = await tx
+          .insert(schema.sessionEvents)
+          .values([
+            {
+              accountId: session.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              sequence: session.lastSequence + 1,
+              type: "system.update.pending",
+              payload: sanitizeEventPayload({
+                updateId: update.id,
+                kind: update.kind,
+                classification: update.classification,
+                sourceId: update.sourceId,
+                summary: update.summary,
+              }),
+              occurredAt: now,
+            },
+            {
+              accountId: session.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              sequence: session.lastSequence + 2,
+              type: "goal.continuation",
+              payload: sanitizeEventPayload({
+                goalId: decision.goal.id,
+                text: decision.goal.text,
+                version: decision.goal.version,
+                goalWakeRevision,
+                autoContinuation: decision.autoContinuation,
+              }),
+              occurredAt: now,
+            },
+          ])
+          .returning();
+        if (insertedEvents.length !== 2) {
+          throw new Error("Failed to append goal continuation events");
+        }
+        await tx
+          .update(schema.sessionGoals)
+          .set({ continuationObservedRevision: goalWakeRevision, updatedAt: now })
+          .where(eq(schema.sessionGoals.id, decision.goal.id));
+        const wake = await registerInternalUpdateWakeInTransaction(tx, {
+          accountId: session.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: session.id,
+          temporalWorkflowId: session.temporalWorkflowId ?? input.workflowId,
+        });
+        await tx
+          .update(schema.sessions)
+          .set({
+            status: "queued",
+            lastSequence: session.lastSequence + 2,
+            updatedAt: now,
+          })
+          .where(eq(schema.sessions.id, session.id));
+        return {
+          action: "continue",
+          events: insertedEvents.map(mapEvent),
+          update: mapSessionSystemUpdate(update),
+          goalWakeRevision,
+          workflowWakeRevision: wake.wakeRevision,
         } as const;
       }),
   );
@@ -20765,6 +21697,34 @@ export async function applySessionTurnSettlement(
             eq(schema.sessions.id, input.sessionId),
           ),
         );
+      if (terminal && input.activeTurnId === null) {
+        const [armedGoal] = await tx
+          .update(schema.sessionGoals)
+          .set({
+            continuationWakeRevision: sql`${schema.sessionGoals.continuationWakeRevision} + 1`,
+            updatedAt: now,
+          })
+          .where(
+            and(
+              eq(schema.sessionGoals.workspaceId, workspaceId),
+              eq(schema.sessionGoals.sessionId, input.sessionId),
+              eq(schema.sessionGoals.status, "active"),
+            ),
+          )
+          .returning({ id: schema.sessionGoals.id });
+        if (armedGoal) {
+          // The obligation and its repairable Temporal nudge commit with the
+          // terminal turn/session boundary. A worker death or lost activity
+          // response after COMMIT therefore cannot strand an active idle goal.
+          await enqueueSessionWorkflowWakeInTransaction(tx as unknown as Database, {
+            accountId: session.accountId,
+            workspaceId,
+            sessionId: input.sessionId,
+            temporalWorkflowId: session.temporalWorkflowId ?? `session-${input.sessionId}`,
+            reason: "goal_turn_settled",
+          });
+        }
+      }
       return {
         action: "settled" as const,
         events: [...closedTools.events, ...inserted.map(mapEvent)],
@@ -22129,7 +23089,10 @@ export async function enqueueSessionWorkflowWakeInTransaction(
         wakeRevision: sql`${schema.sessionWorkflowWakeOutbox.wakeRevision} + 1`,
         reason: input.reason,
         attempts: 0,
-        nextAttemptAt,
+        // Coalescing a delayed retry must never postpone an already-due wake
+        // owned by another producer. A later revision makes the batch richer;
+        // it does not revoke the earlier delivery obligation.
+        nextAttemptAt: sql`least(${schema.sessionWorkflowWakeOutbox.nextAttemptAt}, ${nextAttemptAt.toISOString()}::timestamptz)`,
         lastError: null,
         updatedAt: now,
       },
@@ -22296,6 +23259,7 @@ export async function markSessionWorkflowWakeFailed(
             eq(schema.sessionWorkflowWakeOutbox.sessionId, input.sessionId),
             eq(schema.sessionWorkflowWakeOutbox.workspaceId, input.workspaceId),
             eq(schema.sessionWorkflowWakeOutbox.wakeRevision, input.wakeRevision),
+            lt(schema.sessionWorkflowWakeOutbox.deliveredRevision, input.wakeRevision),
           ),
         )
         .returning({ sessionId: schema.sessionWorkflowWakeOutbox.sessionId });
@@ -22712,7 +23676,16 @@ export async function listSessionSystemUpdatesForTurn(
           eq(schema.sessionSystemUpdates.state, "delivered"),
         ),
       )
-      .orderBy(asc(schema.sessionSystemUpdates.createdAt), asc(schema.sessionSystemUpdates.id));
+      .orderBy(
+        // A Steer is the authoritative replacement direction even when its
+        // transaction started before, but committed after, a concurrently
+        // materialized goal continuation. Keep all coalesced work in one
+        // metered inference, but render the winning Steer last so transaction
+        // timestamps cannot let an older goal prompt override it.
+        sql`case when ${schema.sessionSystemUpdates.kind} = 'agent_steer_instruction' then 1 else 0 end`,
+        asc(schema.sessionSystemUpdates.createdAt),
+        asc(schema.sessionSystemUpdates.id),
+      );
     return rows.map(mapSessionSystemUpdate);
   });
 }

@@ -1189,7 +1189,8 @@ export const sessionTurnAttempts = pgTable(
       "session_turn_attempts_outcome_check",
       sql`${table.outcome} is null or ${table.outcome} in (
         'completed', 'failed', 'cancelled', 'superseded', 'requires_action',
-        'interrupted_recoverable', 'lease_lost_recoverable', 'pre_cutover_closed'
+        'waiting_capacity', 'interrupted_recoverable', 'lease_lost_recoverable',
+        'pre_cutover_closed'
       )`,
     ),
     closedConsistent: check(
@@ -1255,6 +1256,9 @@ export const sessionCommandReceipts = pgTable(
       table.targetSessionId,
       table.createdAt,
     ),
+    goalUpdateOperation: uniqueIndex("session_command_receipts_goal_update_operation_uq")
+      .on(table.workspaceId, table.action, table.targetSessionId, table.operationKey)
+      .where(sql`${table.action} = 'goal.update'`),
     actorValid: check(
       "session_command_receipts_actor_check",
       sql`(
@@ -1565,6 +1569,10 @@ export const sessionWorkflowWakeOutbox = pgTable(
       "session_workflow_wake_outbox_revision_check",
       sql`${table.wakeRevision} > 0 and ${table.deliveredRevision} >= 0 and ${table.deliveredRevision} <= ${table.wakeRevision}`,
     ),
+    revisionSafe: check(
+      "session_workflow_wake_outbox_revision_safe_check",
+      sql`${table.wakeRevision} <= 9007199254740991 and ${table.deliveredRevision} <= 9007199254740991`,
+    ),
     workspaceAccount: foreignKey({
       name: "session_workflow_wake_outbox_workspace_account_fk",
       columns: [table.workspaceId, table.accountId],
@@ -1611,6 +1619,18 @@ export const sessionGoals = pgTable(
     maxAutoContinuations: integer("max_auto_continuations"), // per-goal override; a configured settings cap (if any) remains the hard ceiling
     lastContinuationTurnId: uuid("last_continuation_turn_id"),
     versionAtLastContinuation: integer("version_at_last_continuation"),
+    // OPE-59: Postgres owns the continuation obligation. Terminal settlement
+    // advances wakeRevision in the same transaction that makes the session
+    // idle; materialization advances observedRevision only alongside the one
+    // typed update, timeline events, usage row, and workflow-wake outbox row.
+    // Temporal signals and workflow history are replaceable nudges over these
+    // monotonic revisions.
+    continuationWakeRevision: bigint("continuation_wake_revision", { mode: "number" })
+      .notNull()
+      .default(0),
+    continuationObservedRevision: bigint("continuation_observed_revision", { mode: "number" })
+      .notNull()
+      .default(0),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -1625,6 +1645,10 @@ export const sessionGoals = pgTable(
       table.sessionId,
     ),
     status: index("session_goals_workspace_status_idx").on(table.workspaceId, table.status),
+    continuationRevisionValid: check(
+      "session_goals_continuation_revision_check",
+      sql`${table.continuationWakeRevision} >= 0 and ${table.continuationObservedRevision} >= 0 and ${table.continuationObservedRevision} <= ${table.continuationWakeRevision} and ${table.continuationWakeRevision} <= 9007199254740991 and ${table.continuationObservedRevision} <= 9007199254740991`,
+    ),
   }),
 );
 
@@ -1635,9 +1659,11 @@ export const sessionGoals = pgTable(
 // allocator. Temporal signals are therefore repairable nudges rather than the
 // source of truth. No credential material or provider response is stored here.
 //
-// The session/goal/turn foreign keys are declared in migration 0053 so the
-// table keeps the same composite workspace-integrity posture as credential
-// leases. Control is evaluated independently at admission and never changes a
+// The session/turn foreign keys are declared in migration 0053. Goal identity
+// is an optional version fence, not waiter ownership: a goal-less human/API
+// turn can wait too, and deleting a goal must leave the waiter available for a
+// row-locked stale/superseded decision instead of cascading away the only wake
+// ledger. Control is evaluated independently at admission and never changes a
 // capacity waiter's identity. OPE-32 supplies policyHash when accepted-turn
 // pool routing lands.
 export const codexCapacityWaiters = pgTable(
@@ -1651,12 +1677,13 @@ export const codexCapacityWaiters = pgTable(
       .notNull()
       .references(() => workspaces.id, { onDelete: "cascade" }),
     sessionId: uuid("session_id").notNull(),
-    goalId: uuid("goal_id").notNull(),
+    goalId: uuid("goal_id"),
     blockedTurnId: uuid("blocked_turn_id").notNull(),
+    blockedTurnGeneration: integer("blocked_turn_generation").notNull(),
     workflowId: text("workflow_id").notNull(),
     generation: integer("generation").notNull().default(1),
     status: text("status").notNull().default("waiting"), // waiting | resumed | superseded
-    goalVersion: integer("goal_version").notNull(),
+    goalVersion: integer("goal_version"),
     policyHash: text("policy_hash"),
     earliestResetAt: timestamp("earliest_reset_at", { withTimezone: true }),
     nextCheckAt: timestamp("next_check_at", { withTimezone: true }).notNull(),

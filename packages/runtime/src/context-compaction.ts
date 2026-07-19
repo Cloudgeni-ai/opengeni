@@ -8,7 +8,6 @@
  * from the active model-facing history; the database audit rows remain.
  */
 
-import { TOOL_CALL_RESULT_TYPE_BY_CALL_TYPE } from "./history-sanitizer";
 import { createHash } from "node:crypto";
 
 export type CompactionItem = Record<string, unknown>;
@@ -52,8 +51,6 @@ export const SUMMARY_PREFIX =
 export const USER_MESSAGE_TRUNCATION_MARKER =
   "\n[... middle truncated for context compaction ...]\n";
 
-const RESULT_TYPE_BY_CALL_TYPE = TOOL_CALL_RESULT_TYPE_BY_CALL_TYPE;
-const RESULT_TYPES = new Set(Object.values(RESULT_TYPE_BY_CALL_TYPE));
 const MODEL_GENERATED_ITEM_TYPES = new Set([
   "reasoning",
   "function_call",
@@ -538,50 +535,4 @@ function messageText(item: CompactionItem): string {
       .join("");
   }
   return "";
-}
-
-export function renderCompactionPromptInputForChat(input: readonly CompactionItem[]): string {
-  return input.map(renderItem).join("\n");
-}
-
-function renderItem(item: CompactionItem): string {
-  const type = itemType(item) ?? "unknown";
-  if (type === "message") {
-    const role = itemRole(item) ?? "assistant";
-    return `[${role}] ${messageText(item)}`;
-  }
-  if (type === "reasoning") {
-    return "[reasoning] (omitted)";
-  }
-  if (RESULT_TYPES.has(type)) {
-    return `[tool_result] ${resultText(item)}`;
-  }
-  if (RESULT_TYPE_BY_CALL_TYPE[type]) {
-    return `[tool_call ${type}] ${callText(item)}`;
-  }
-  return `[${type}] ${safeStringify(item)}`;
-}
-
-function resultText(item: CompactionItem): string {
-  const output = (item as { output?: unknown }).output;
-  if (typeof output === "string") {
-    return output;
-  }
-  return safeStringify(output ?? item);
-}
-
-function callText(item: CompactionItem): string {
-  const name = (item as { name?: unknown }).name;
-  const args = (item as { arguments?: unknown }).arguments;
-  const namePart = typeof name === "string" ? name : "";
-  const argPart = typeof args === "string" ? args : safeStringify(args ?? {});
-  return `${namePart} ${argPart}`.trim();
-}
-
-function safeStringify(value: unknown): string {
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return String(value);
-  }
 }

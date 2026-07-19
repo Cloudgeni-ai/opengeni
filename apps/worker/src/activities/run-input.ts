@@ -9,8 +9,9 @@ import {
   type Database,
 } from "@opengeni/db";
 import {
-  stripReasoningEncryptedContent,
-  stripReasoningIdentityFromSerializedRunState,
+  assertNoRemoteCompactionItems,
+  assertNoRemoteCompactionItemsInSerializedRunState,
+  dropReasoningItemsFromSerializedRunState,
   neutralizeToolSearchItemsInSerializedRunState,
   type OpenGeniRuntime,
 } from "@opengeni/runtime";
@@ -43,8 +44,8 @@ const NON_CODEX_TURN: TurnCodexAccount = { currentCodexCredentialId: null };
  *    foreign `rs_…` id is validated by the Responses backend, which rejects a
  *    reasoning item that has a foreign id and no encrypted_content (store:false),
  *    so blanking only the blob is not enough — the whole item must go.
- *  - `compaction` → kept, with only its account-bound `encrypted_content` blob
- *    stripped (its summary is real conversation content that must survive).
+ *  - `compaction` → rejected. Provider-managed encrypted compaction is not
+ *    canonical conversation truth; OpenGeni checkpoints are plaintext messages.
  *  - everything else (messages, tool calls, tool outputs) → kept verbatim by
  *    reference; message and tool content are never account-bound, never touched.
  *
@@ -59,6 +60,10 @@ export function applyCodexHistoryStrip(
   rows: ReadonlyArray<{ item: Record<string, unknown>; producerCodexCredentialId: string | null }>,
   current: TurnCodexAccount,
 ): Array<Record<string, unknown>> {
+  assertNoRemoteCompactionItems(
+    rows.map((row) => row.item),
+    "session history",
+  );
   const out: Array<Record<string, unknown>> = [];
   for (const row of rows) {
     if (row.producerCodexCredentialId === current.currentCodexCredentialId) {
@@ -82,62 +87,63 @@ export function applyCodexHistoryStrip(
       // carry tool metadata, not conversation content.
       continue;
     }
-    if (type === "compaction") {
-      out.push(stripReasoningEncryptedContent(row.item));
-      continue;
-    }
     out.push(row.item);
   }
   return out;
 }
 
 /**
- * Resolve the serialized RunState used only for an approval resume, applying
- * the same cross-account rule as the canonical history-items path. The blob
- * carries no per-item producer tag, so we
- * compare the codex account that FROZE the state to the resuming turn's account:
- * when they differ, neutralize every reasoning item's account-bound identity
- * (encrypted_content + provider id) in the blob; when they match (including
- * null == null for non-codex / single-account) the blob replays byte-for-byte
- * (same string reference). This closes the gap where a frozen A-minted RunState
- * was replayed verbatim into a turn that switched to account B (or to a non-codex
- * turn), 400ing the resume.
+ * The exact persisted prefix shape used to seed the SDK state for this turn.
+ * Turn-end reconciliation must apply the identical transformation before using
+ * its length as the append watermark.
  */
-export function resumeRunStateForCodexAccount(
+export type ModelHistorySeed =
+  | "history_items"
+  | "run_state_same_account"
+  | "run_state_foreign_account";
+
+/**
+ * Prepare the serialized RunState used for an approval resume.
+ *
+ * A same-account blob replays byte-for-byte after rejecting any provider-managed
+ * compaction item. A cross-account blob drops every reasoning item whole because
+ * the blob has one freezing-account identity and no per-item producer tags. It
+ * also neutralizes account-specific tool-search execution metadata in place.
+ */
+export function prepareRunStateForCodexAccount(
   state: { serializedRunState: string; frozenCodexCredentialId: string | null },
   current: TurnCodexAccount,
-): string {
+): { serializedRunState: string; modelHistorySeed: ModelHistorySeed } {
   if (state.frozenCodexCredentialId === current.currentCodexCredentialId) {
-    return state.serializedRunState;
+    assertNoRemoteCompactionItemsInSerializedRunState(state.serializedRunState);
+    return {
+      serializedRunState: state.serializedRunState,
+      modelHistorySeed: "run_state_same_account",
+    };
   }
-  // Cross-account: neutralize reasoning identity in place AND flip frozen
-  // tool_search pairs to execution:"server" in place (count-preserving — HOLE E
-  // forbids removing blob items). The server flip makes the SDK skip its
+  // Cross-account: drop reasoning whole, then flip frozen tool_search pairs to
+  // execution:"server" in place. The server flip makes the SDK skip its
   // client-executor rehydration (which would THROW when the resuming account's
   // connector pool differs from the freezing account's); the flipped shape is
   // live-verified wire-safe. The model can still re-search on this account.
-  return neutralizeToolSearchItemsInSerializedRunState(
-    stripReasoningIdentityFromSerializedRunState(state.serializedRunState),
-  );
+  return {
+    serializedRunState: neutralizeToolSearchItemsInSerializedRunState(
+      dropReasoningItemsFromSerializedRunState(state.serializedRunState),
+    ),
+    modelHistorySeed: "run_state_foreign_account",
+  };
 }
 
 /**
  * A prepared turn input plus the watermark-seed discriminator the reconcile pass
- * needs (HOLE E). `modelHistoryFromItems` is TRUE iff `state.history` was seeded
- * from the cross-account-STRIPPED active history items (the items read path) — so
- * the turn-end reconcile must seed `persistedHistoryCount` from the SAME strip
- * (HOLE D). It is FALSE only when `state.history` was seeded from the approval
- * RunState: there
- * foreign reasoning is NEUTRALIZED-IN-PLACE by {@link resumeRunStateForCodexAccount}
- * (the item is KEPT, only its id/encrypted_content go), so the blob's history
- * length still COUNTS those items. Seeding the watermark with the strip on that
- * path under-counts by K and the reconcile re-appends K already-persisted items at
- * fresh positions — that is HOLE E. The watermark must therefore NOT strip on the
- * blob path (count the raw sanitized active length, matching the blob).
+ * needs. `modelHistorySeed` identifies the exact transformation that seeded
+ * `state.history`: per-row account filtering for ordinary history, raw history
+ * for a same-account RunState, or whole reasoning-item removal for a foreign
+ * RunState. The reconcile watermark applies that same transform.
  */
 export type PreparedTurnInput = {
   input: Awaited<ReturnType<OpenGeniRuntime["prepareInput"]>>;
-  modelHistoryFromItems: boolean;
+  modelHistorySeed: ModelHistorySeed;
 };
 
 export type TurnInputOptions = {
@@ -210,22 +216,16 @@ export async function turnInput(
     if (!state) {
       throw new Error("No saved run state is available for approval decision");
     }
+    const preparedState = prepareRunStateForCodexAccount(state, current);
     return {
       input: await runtime.prepareInput(agent, {
         kind: "approval",
-        // Cross-account run-state strip (HOLE C): if the account resuming this
-        // frozen approval differs from the one that froze it, neutralize the
-        // blob's account-bound reasoning before replay (else byte-for-byte).
-        serializedRunState: resumeRunStateForCodexAccount(state, current),
+        serializedRunState: preparedState.serializedRunState,
         approvalId: String(payload.approvalId ?? ""),
         decision: payload.decision === "approve" ? "approve" : "reject",
         ...(typeof payload.message === "string" ? { message: payload.message } : {}),
       }),
-      // Model seeded from the run-state BLOB (neutralize-in-place), NOT stripped
-      // items: the reconcile watermark must NOT apply the cross-account strip
-      // (HOLE E) — else a cross-account approval resume re-appends K
-      // already-persisted items at fresh positions.
-      modelHistoryFromItems: false,
+      modelHistorySeed: preparedState.modelHistorySeed,
     };
   }
   throw new Error(`Unsupported trigger event type: ${trigger.type}`);
@@ -276,7 +276,7 @@ async function messageInput(
       historyItems: historyItems as any,
       sandboxEnvelope: envelope,
     }),
-    modelHistoryFromItems: true,
+    modelHistorySeed: "history_items",
   };
 }
 

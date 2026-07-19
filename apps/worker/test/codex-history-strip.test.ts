@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { sanitizeHistoryItemsForModel } from "@opengeni/runtime";
-import { applyCodexHistoryStrip, resumeRunStateForCodexAccount } from "../src/activities/run-input";
+import { RemoteCompactionReplayError, sanitizeHistoryItemsForModel } from "@opengeni/runtime";
+import {
+  applyCodexHistoryStrip,
+  prepareRunStateForCodexAccount,
+} from "../src/activities/run-input";
 import { historyRowsToAppend, reconcileSeedCount } from "../src/activities/agent-turn";
 
 // Cross-account reasoning strip (multi-account codex, on top of P1, hardened by
@@ -141,7 +144,7 @@ describe("applyCodexHistoryStrip", () => {
     expect(out[1]).toBe(rows[1].item);
   });
 
-  test("foreign compaction summary is kept; only its encrypted_content blob is stripped", () => {
+  test("provider compaction is rejected instead of stripping and replaying it", () => {
     const rows = [
       {
         producerCodexCredentialId: "A",
@@ -152,21 +155,21 @@ describe("applyCodexHistoryStrip", () => {
         } as Record<string, unknown>,
       },
     ];
-    const out = applyCodexHistoryStrip(rows, { currentCodexCredentialId: "B" });
-    expect(out).toHaveLength(1);
-    expect(out[0].type).toBe("compaction");
-    expect("encrypted_content" in out[0]).toBe(false);
-    // The summary (real conversation content) survives.
-    expect(out[0].summary).toBe("the story so far");
+    expect(() => applyCodexHistoryStrip(rows, { currentCodexCredentialId: "B" })).toThrow(
+      RemoteCompactionReplayError,
+    );
+    expect(() => applyCodexHistoryStrip(rows, { currentCodexCredentialId: "A" })).toThrow(
+      RemoteCompactionReplayError,
+    );
   });
 });
 
 // HOLE C — the run-state REPLAY paths (approval resume + items-mode run-state
 // fallback). The blob carries no per-item producer tag, so the worker records the
-// FREEZING codex account on the run-state row and resumeRunStateForCodexAccount
-// neutralizes the blob's reasoning identity when the resuming turn's account
-// differs (else replays the blob byte-for-byte by reference).
-describe("resumeRunStateForCodexAccount", () => {
+// FREEZING codex account on the run-state row and prepareRunStateForCodexAccount
+// drops the blob's reasoning whole when the resuming turn's account differs
+// (else replays the blob byte-for-byte by reference).
+describe("prepareRunStateForCodexAccount", () => {
   const blobWithReasoning = (accountTag: string) =>
     JSON.stringify({
       $schemaVersion: "1.12",
@@ -212,11 +215,13 @@ describe("resumeRunStateForCodexAccount", () => {
       ],
     });
 
-  test("cross-account resume strips every reasoning item's id + encrypted_content from the blob", () => {
-    const out = resumeRunStateForCodexAccount(
+  test("cross-account resume drops every reasoning item whole from the blob", () => {
+    const prepared = prepareRunStateForCodexAccount(
       { serializedRunState: blobWithReasoning("A"), frozenCodexCredentialId: "A" },
       { currentCodexCredentialId: "B" },
     );
+    const out = prepared.serializedRunState;
+    expect(prepared.modelHistorySeed).toBe("run_state_foreign_account");
     // No encrypted reasoning blob and no foreign rs_ id survive anywhere…
     expect(out).not.toContain("enc-A-orig");
     expect(out).not.toContain("enc-A-resp");
@@ -229,39 +234,42 @@ describe("resumeRunStateForCodexAccount", () => {
   });
 
   test("codex→non-codex resume (current=null) also strips the codex-frozen reasoning", () => {
-    const out = resumeRunStateForCodexAccount(
+    const out = prepareRunStateForCodexAccount(
       { serializedRunState: blobWithReasoning("A"), frozenCodexCredentialId: "A" },
       { currentCodexCredentialId: null },
-    );
+    ).serializedRunState;
     expect(out).not.toContain("enc-A-gen");
     expect(out).not.toContain("rs_A_gen");
   });
 
   test("same-account resume replays the blob byte-for-byte (same string reference)", () => {
     const blob = blobWithReasoning("A");
-    const out = resumeRunStateForCodexAccount(
+    const prepared = prepareRunStateForCodexAccount(
       { serializedRunState: blob, frozenCodexCredentialId: "A" },
       { currentCodexCredentialId: "A" },
     );
-    expect(out).toBe(blob);
+    expect(prepared.serializedRunState).toBe(blob);
+    expect(prepared.modelHistorySeed).toBe("run_state_same_account");
   });
 
   test("non-codex freeze + non-codex resume (null == null) is a byte-for-byte no-op", () => {
     const blob = blobWithReasoning("A");
-    const out = resumeRunStateForCodexAccount(
+    const prepared = prepareRunStateForCodexAccount(
       { serializedRunState: blob, frozenCodexCredentialId: null },
       { currentCodexCredentialId: null },
     );
-    expect(out).toBe(blob);
+    expect(prepared.serializedRunState).toBe(blob);
+    expect(prepared.modelHistorySeed).toBe("run_state_same_account");
   });
 });
 
 // HOLE D + HOLE E — the reconcile watermark (`reconcileSeedCount`) must be seeded
 // from EXACTLY the view `state.history` was seeded from, so the model-input length
 // and the watermark can NEVER disagree. The strip drops foreign reasoning items, so
-// the seed is PATH-DEPENDENT (the `modelHistoryFromItems` flag run-input returns):
-//   - items read path  (model from STRIPPED items)        → seed applies the strip (D).
-//   - run-state blob path (model from neutralize-KEPT blob) → seed must NOT strip (E).
+// the seed is PATH-DEPENDENT (the `modelHistorySeed` discriminator run-input returns):
+//   - items read path → per-row foreign-item strip.
+//   - same-account RunState → raw active prefix.
+//   - foreign-account RunState → drop every reasoning item, keep tool-search counts.
 // These exercise the REAL exported reconcileSeedCount + applyCodexHistoryStrip +
 // sanitizeHistoryItemsForModel + historyRowsToAppend (no re-implementation).
 describe("cross-account reconcile-seed consistency (reconcileSeedCount)", () => {
@@ -282,11 +290,8 @@ describe("cross-account reconcile-seed consistency (reconcileSeedCount)", () => 
     ];
     const current = { currentCodexCredentialId: "B" };
 
-    // The REAL seed the worker computes this turn (modelHistoryFromItems = true).
-    const strippedSeed = reconcileSeedCount(activeRows, true, current);
-    // The OLD (pre-HOLE-D) seed: the un-stripped sanitized active count. This is
-    // exactly what the blob-path branch (modelHistoryFromItems = false) still yields.
-    const unstrippedCount = reconcileSeedCount(activeRows, false, current);
+    const strippedSeed = reconcileSeedCount(activeRows, "history_items", current);
+    const unstrippedCount = reconcileSeedCount(activeRows, "run_state_same_account", current);
 
     // The model-input length THIS turn is seeded from (prepareRunInput sanitizes the
     // stripped items): the watermark and state.history's starting length agree.
@@ -327,7 +332,7 @@ describe("cross-account reconcile-seed consistency (reconcileSeedCount)", () => 
     ]);
   });
 
-  test("HOLE E — blob path (approval resume): the seed must NOT strip, else the reconcile re-appends already-persisted items at fresh positions", () => {
+  test("HOLE E — foreign RunState seed drops reasoning whole so the first new item is not lost", () => {
     // Active rows persisted by the requires_action pause (producer A), incl. an
     // A-minted reasoning item. A B turn resumes the approval.
     const activeRows = [
@@ -337,34 +342,41 @@ describe("cross-account reconcile-seed consistency (reconcileSeedCount)", () => 
     ];
     const current = { currentCodexCredentialId: "B" };
 
-    // The model on the approval path is seeded from the run-state BLOB, where the
-    // A reasoning is NEUTRALIZED-IN-PLACE (id/encrypted_content gone) but the item is
-    // KEPT — so state.history's completed prefix still has all 3 items. Plus the
-    // post-approval reply this turn generated.
+    // The cross-account RunState transformer drops A reasoning whole. The SDK
+    // prefix therefore has two completed items plus this turn's new reply.
     const blobStateHistory = [
       messageRow("A", "u1").item,
-      { type: "reasoning", summary: [{ type: "summary_text", text: "cot-blob-A" }] }, // neutralized, KEPT
       messageRow("A", "a1").item,
       messageRow("B", "answer after approval").item, // genuinely new this turn
     ];
 
-    // The REAL seeds: blob path (modelHistoryFromItems = false) vs the WRONG strip.
-    const blobSeed = reconcileSeedCount(activeRows, false, current);
-    const strippedSeed = reconcileSeedCount(activeRows, true, current);
-    expect(blobSeed).toBe(3); // matches the blob's 3-item completed prefix
-    expect(strippedSeed).toBe(2); // the bug: under-counts by K=1 (drops the kept reasoning)
+    const blobSeed = reconcileSeedCount(activeRows, "run_state_foreign_account", current);
+    const staleRawSeed = reconcileSeedCount(activeRows, "run_state_same_account", current);
+    expect(blobSeed).toBe(2);
+    expect(staleRawSeed).toBe(3);
 
-    // FIXED seed (3): the reconcile appends ONLY the genuinely-new post-approval reply.
+    // The matching seed appends only the genuinely-new post-approval reply.
     const fixed = historyRowsToAppend(blobStateHistory, blobSeed);
     expect(fixed.rows.map((row) => row.item)).toEqual([
       messageRow("B", "answer after approval").item,
     ]);
 
-    // WRONG seed (2, the unconditional strip): the reconcile RE-APPENDS the already-
-    // persisted "a1" message at a fresh position — the HOLE E duplication the fix avoids.
-    const buggy = historyRowsToAppend(blobStateHistory, strippedSeed);
-    expect(buggy.rows.map((row) => row.item)).toContainEqual(messageRow("A", "a1").item);
-    expect(buggy.rows.length).toBeGreaterThan(fixed.rows.length);
+    // The stale count-preserving watermark slices past the new reply and loses it.
+    const stale = historyRowsToAppend(blobStateHistory, staleRawSeed);
+    expect(stale.rows).toEqual([]);
+  });
+
+  test("foreign RunState keeps neutralized tool-search pair counts unlike the ordinary items path", () => {
+    const activeRows = [
+      messageRow("A", "u1"),
+      reasoningRow("A", "blob-A"),
+      toolSearchCallRow("A", "tsA"),
+      toolSearchOutputRow("A", "tsA"),
+      messageRow("A", "a1"),
+    ];
+    const current = { currentCodexCredentialId: "B" };
+    expect(reconcileSeedCount(activeRows, "run_state_foreign_account", current)).toBe(4);
+    expect(reconcileSeedCount(activeRows, "history_items", current)).toBe(2);
   });
 
   test("no-op invariant: same-account and non-codex turns seed identically on BOTH paths (strip is a no-op)", () => {
@@ -374,8 +386,14 @@ describe("cross-account reconcile-seed consistency (reconcileSeedCount)", () => 
       messageRow("A", "a1"),
     ];
     // Same-account (current == producer A): items-path seed == blob-path seed.
-    expect(reconcileSeedCount(sameAccountRows, true, { currentCodexCredentialId: "A" })).toBe(
-      reconcileSeedCount(sameAccountRows, false, { currentCodexCredentialId: "A" }),
+    expect(
+      reconcileSeedCount(sameAccountRows, "history_items", {
+        currentCodexCredentialId: "A",
+      }),
+    ).toBe(
+      reconcileSeedCount(sameAccountRows, "run_state_same_account", {
+        currentCodexCredentialId: "A",
+      }),
     );
     // Non-codex over a no-codex history (every producer null == current null): identical.
     const nonCodexRows = [
@@ -383,8 +401,14 @@ describe("cross-account reconcile-seed consistency (reconcileSeedCount)", () => 
       reasoningRow(null, "azure-blob"),
       messageRow(null, "a1"),
     ];
-    expect(reconcileSeedCount(nonCodexRows, true, { currentCodexCredentialId: null })).toBe(
-      reconcileSeedCount(nonCodexRows, false, { currentCodexCredentialId: null }),
+    expect(
+      reconcileSeedCount(nonCodexRows, "history_items", {
+        currentCodexCredentialId: null,
+      }),
+    ).toBe(
+      reconcileSeedCount(nonCodexRows, "run_state_same_account", {
+        currentCodexCredentialId: null,
+      }),
     );
   });
 });
