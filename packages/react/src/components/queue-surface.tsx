@@ -82,6 +82,11 @@ export function QueueSurface({ queue, composer, readOnly = false }: QueueSurface
     projectedIndex: number;
   } | null>(null);
   const count = queue.queue.length;
+  const collapsedPreviewId = useId();
+  const collapsedPreview = useMemo(
+    () => queuePromptPreview(queue.queue[0]?.prompt ?? "", QUEUE_COLLAPSED_PREVIEW_CHARACTERS),
+    [queue.queue],
+  );
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }));
 
   const displayedQueue = useMemo(() => {
@@ -258,7 +263,9 @@ export function QueueSurface({ queue, composer, readOnly = false }: QueueSurface
           type="button"
           className="flex w-full min-w-0 items-center gap-2 px-3 py-2 text-left outline-none transition-colors hover:bg-surface-2/60 focus-visible:bg-surface-2/60 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/40 pointer-coarse:min-h-11"
           onClick={() => setOpen((value) => !value)}
+          aria-describedby={!open && count > 0 ? collapsedPreviewId : undefined}
           aria-expanded={open}
+          aria-label={`${count} queued prompt${count === 1 ? "" : "s"}${readOnly ? " Read-only" : ""}`}
         >
           <ChevronDownIcon
             aria-hidden="true"
@@ -274,12 +281,12 @@ export function QueueSurface({ queue, composer, readOnly = false }: QueueSurface
           ) : null}
           {!open && count > 0 ? (
             <span
-              aria-hidden="true"
+              id={collapsedPreviewId}
               className="min-w-0 flex-1 truncate text-xs text-fg-muted"
               data-testid="queue-collapsed-preview"
               dir="auto"
             >
-              {queuePromptPreview(queue.queue[0]?.prompt ?? "", QUEUE_COLLAPSED_PREVIEW_CHARACTERS)}
+              {collapsedPreview}
             </span>
           ) : null}
           {queue.loading ? <Loader2Icon className="ml-auto size-3.5 animate-spin" /> : null}
@@ -437,10 +444,11 @@ function QueuePrompt({
   return (
     <div className="min-w-0 max-w-full">
       <p
-        aria-hidden="true"
+        aria-label={`Queued prompt ${index + 1} summary: ${preview}`}
         className="line-clamp-1 max-w-full overflow-hidden whitespace-pre-wrap break-all text-xs leading-5 text-fg [unicode-bidi:plaintext] sm:line-clamp-3"
         data-testid={`queue-prompt-preview-${index + 1}`}
         dir="auto"
+        role="note"
       >
         {preview}
       </p>

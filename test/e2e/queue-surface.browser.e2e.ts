@@ -29,11 +29,34 @@ type BrowserMeasurement = {
   colorScheme: string;
 };
 
+type BrowserAccessibilityEvidence = {
+  viewport: { width: number; height: number };
+  queueSize: number;
+  collapsed: {
+    controlName: string;
+    boundedDescription: string;
+    exactTrailingSourcePresent: boolean;
+  };
+  expanded: {
+    summaryCount: number;
+    uniqueSummaryCount: number;
+    firstSummary: string;
+    lastSummary: string;
+    exactTrailingSourcePresent: boolean;
+  };
+  disclosed: {
+    regionName: string;
+    exactPromptPresent: boolean;
+    exactTrailingSourcePresent: boolean;
+  };
+};
+
 describe("queue surface browser acceptance", () => {
   let browser: Browser;
   let demo: StartedProcess;
   let baseUrl: string;
   const measurements: BrowserMeasurement[] = [];
+  let accessibilityEvidence: BrowserAccessibilityEvidence | null = null;
 
   beforeAll(async () => {
     const port = await freePort();
@@ -86,6 +109,12 @@ describe("queue surface browser acceptance", () => {
       `${evidenceDir}/measurements.json`,
       `${JSON.stringify({ measurements }, null, 2)}\n`,
     );
+    if (accessibilityEvidence) {
+      await writeFile(
+        `${evidenceDir}/accessibility.json`,
+        `${JSON.stringify(accessibilityEvidence, null, 2)}\n`,
+      );
+    }
     await Promise.allSettled([demo?.stop(), browser?.close()]);
   }, 60_000);
 
@@ -246,7 +275,120 @@ describe("queue surface browser acceptance", () => {
     expect((await pageMetrics(readOnlyPage)).documentOverflow).toBeLessThanOrEqual(1);
     await readOnlyContext.close();
   }, 30_000);
+
+  test("Chrome exposes 100 bounded prompt summaries before exact-source disclosure", async () => {
+    const viewport = { width: 320, height: 800 };
+    const context = await browser.newContext({ viewport, hasTouch: true, isMobile: true });
+    try {
+      const page = await context.newPage();
+      const diagnostics = observePageFailures(page);
+      await page.goto(`${baseUrl}/queue.html?count=100&theme=light`, {
+        waitUntil: "networkidle",
+      });
+
+      const collapsedTree = await chromeAccessibilityTree(page);
+      const collapsedControl = collapsedTree.find(
+        (node) => node.role === "button" && node.name === "100 queued prompts",
+      );
+      expect(collapsedControl).toBeDefined();
+      expect(collapsedControl?.description).toMatch(/^1 \/ 100\s+# Production migration/);
+      expect(Array.from(collapsedControl?.description ?? "").length).toBeLessThanOrEqual(181);
+      expect(accessibleTreeIncludes(collapsedTree, "Exact trailing line.")).toBe(false);
+
+      await page.getByRole("button", { name: "100 queued prompts", exact: true }).click();
+      const expandedTree = await chromeAccessibilityTree(page);
+      const summaries = expandedTree
+        .filter((node) => node.role === "note" && /^Queued prompt \d+ summary: /.test(node.name))
+        .map((node) => node.name);
+      expect(summaries).toHaveLength(100);
+      expect(new Set(summaries).size).toBe(100);
+      for (let index = 0; index < summaries.length; index += 1) {
+        expect(
+          summaries[index]?.startsWith(`Queued prompt ${index + 1} summary: ${index + 1} / 100`),
+        ).toBe(true);
+        expect(Array.from(summaries[index] ?? "").length).toBeLessThanOrEqual(400);
+      }
+      expect(accessibleTreeIncludes(expandedTree, "Exact trailing line.")).toBe(false);
+      expect(
+        expandedTree.some(
+          (node) => node.role === "region" && node.name === "Full content for queued prompt 1",
+        ),
+      ).toBe(false);
+
+      await page
+        .getByRole("button", {
+          name: "Show full content for queued prompt 1",
+          exact: true,
+        })
+        .click();
+      const exactPrompt = `1 / 100\n${HOSTILE_QUEUE_PROMPT}`;
+      const disclosedTree = await chromeAccessibilityTree(page);
+      const disclosedRegion = disclosedTree.find(
+        (node) => node.role === "region" && node.name === "Full content for queued prompt 1",
+      );
+      expect(disclosedRegion).toBeDefined();
+      expect(disclosedTree.some((node) => node.name === exactPrompt)).toBe(true);
+      expect(accessibleTreeIncludes(disclosedTree, "Exact trailing line.")).toBe(true);
+      expect((await pageMetrics(page)).documentOverflow).toBeLessThanOrEqual(1);
+      expect(diagnostics).toEqual([]);
+
+      accessibilityEvidence = {
+        viewport,
+        queueSize: summaries.length,
+        collapsed: {
+          controlName: collapsedControl?.name ?? "",
+          boundedDescription: collapsedControl?.description ?? "",
+          exactTrailingSourcePresent: accessibleTreeIncludes(collapsedTree, "Exact trailing line."),
+        },
+        expanded: {
+          summaryCount: summaries.length,
+          uniqueSummaryCount: new Set(summaries).size,
+          firstSummary: summaries[0] ?? "",
+          lastSummary: summaries.at(-1) ?? "",
+          exactTrailingSourcePresent: accessibleTreeIncludes(expandedTree, "Exact trailing line."),
+        },
+        disclosed: {
+          regionName: disclosedRegion?.name ?? "",
+          exactPromptPresent: disclosedTree.some((node) => node.name === exactPrompt),
+          exactTrailingSourcePresent: accessibleTreeIncludes(disclosedTree, "Exact trailing line."),
+        },
+      };
+      await capture(page, viewport.width, "light", "disclosed");
+    } finally {
+      await context.close();
+    }
+  }, 30_000);
 });
+
+type AccessibleTreeNode = {
+  role: string;
+  name: string;
+  description: string;
+};
+
+async function chromeAccessibilityTree(page: Page): Promise<AccessibleTreeNode[]> {
+  const session = await page.context().newCDPSession(page);
+  try {
+    const { nodes } = await session.send("Accessibility.getFullAXTree");
+    return nodes
+      .filter((node) => !node.ignored)
+      .map((node) => ({
+        role: accessibilityValue(node.role),
+        name: accessibilityValue(node.name),
+        description: accessibilityValue(node.description),
+      }));
+  } finally {
+    await session.detach();
+  }
+}
+
+function accessibilityValue(value: { value?: unknown } | undefined): string {
+  return typeof value?.value === "string" ? value.value : "";
+}
+
+function accessibleTreeIncludes(nodes: AccessibleTreeNode[], expected: string): boolean {
+  return nodes.some((node) => node.name.includes(expected) || node.description.includes(expected));
+}
 
 async function refreshQueue(page: Page): Promise<void> {
   await page.evaluate(() => window.__ope9SetQueueLoading?.(true));

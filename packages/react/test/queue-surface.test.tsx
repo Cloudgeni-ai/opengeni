@@ -147,19 +147,29 @@ describe("QueueSurface", () => {
     mounted = await renderComponent(<QueueSurface queue={state} composer={composer()} />);
 
     const collapsed = mounted.container.querySelector('[data-testid="queue-collapsed-preview"]');
-    expect(collapsed?.getAttribute("aria-hidden")).toBe("true");
+    const collapsedToggle = mounted.container.querySelector('button[aria-expanded="false"]');
+    expect(collapsed?.getAttribute("aria-hidden")).toBeNull();
+    expect(collapsed?.id).not.toBe("");
+    expect(collapsedToggle?.getAttribute("aria-describedby")).toBe(collapsed?.id);
+    expect(collapsedToggle?.getAttribute("aria-label")).toBe("1 queued prompt");
     expect(collapsed?.textContent?.endsWith("…")).toBe(true);
+    expect(Array.from(collapsed?.textContent ?? "")).toHaveLength(181);
     expect(collapsed?.textContent).not.toBe(prompt);
 
-    await click(mounted.container.querySelector('button[aria-expanded="false"]'));
+    await click(collapsedToggle);
     const preview = mounted.container.querySelector('[data-testid="queue-prompt-preview-1"]');
     expect(preview?.classList.contains("line-clamp-1")).toBe(true);
     expect(preview?.classList.contains("sm:line-clamp-3")).toBe(true);
     expect(preview?.classList.contains("break-all")).toBe(true);
-    expect(preview?.getAttribute("aria-hidden")).toBe("true");
+    expect(preview?.getAttribute("aria-hidden")).toBeNull();
+    expect(preview?.getAttribute("role")).toBe("note");
     expect(preview?.getAttribute("dir")).toBe("auto");
     expect(preview?.textContent?.endsWith("…")).toBe(true);
     expect(preview?.textContent).not.toBe(prompt);
+    expect(preview?.getAttribute("aria-label")).toBe(
+      `Queued prompt 1 summary: ${preview?.textContent}`,
+    );
+    expect(preview?.getAttribute("aria-label")).not.toContain("Exact trailing line.");
     expect(mounted.container.querySelector('[data-testid="queue-prompt-full-1"]')).toBeNull();
 
     const disclosure = mounted.container.querySelector(
@@ -187,12 +197,13 @@ describe("QueueSurface", () => {
   });
 
   test("keeps a 100-row queue inside one bounded scroll region", async () => {
-    const items = Array.from({ length: 100 }, (_, index) =>
-      fakeTurn({
+    const items = Array.from({ length: 100 }, (_, index) => {
+      const leading = `${index + 1}: `;
+      return fakeTurn({
         id: `${String(index + 1).padStart(8, "0")}-1111-4111-8111-111111111111`,
-        prompt: `${index + 1}: ${"x".repeat(2_000)}`,
-      }),
-    );
+        prompt: `${leading}${"x".repeat(360 - Array.from(leading).length - 1)}😀tail${"y".repeat(2_000)}`,
+      });
+    });
     mounted = await renderComponent(
       <QueueSurface queue={queue({ queue: items })} composer={composer()} />,
     );
@@ -212,6 +223,11 @@ describe("QueueSurface", () => {
       '[data-testid^="queue-prompt-preview-"]',
     )) {
       expect(Array.from(preview.textContent ?? "").length).toBeLessThanOrEqual(361);
+      expect(preview.textContent?.endsWith("😀…")).toBe(true);
+      const label = preview.getAttribute("aria-label") ?? "";
+      expect(label).toContain(" summary: ");
+      expect(label.endsWith(preview.textContent ?? "")).toBe(true);
+      expect(label.length).toBeLessThan(410);
     }
   });
 
