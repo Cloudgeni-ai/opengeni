@@ -24,10 +24,16 @@ import {
 } from "@opengeni/react";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { CheckIcon, Loader2Icon, MenuIcon, MessagesSquareIcon, XIcon } from "lucide-react";
+import { resolveWorkspaceTranscriptionPolicy } from "@opengeni/contracts";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { isApiErrorStatus, mintOpenAITranscriptionClientSecret } from "@/api";
+import {
+  isApiErrorStatus,
+  mintOpenAITranscriptionClientSecret,
+  reportOpenAITranscriptionUsage,
+  settleOpenAITranscriptionGrant,
+} from "@/api";
 import { ConsoleComposer } from "@/components/Composer";
 import { LoadingPanel, ProblemPanel } from "@/components/common";
 import { MarkdownText } from "@/components/markdown";
@@ -59,7 +65,10 @@ import { buildTools } from "@/lib/session-tools";
 import type { ComposerDraft, LineageNode } from "@opengeni/sdk";
 import type { ConnectionMetadata, Session, SessionEvent } from "@/types";
 
-function lazyOpenAITranscriptionProvider(workspaceId: string): TranscriptionProvider {
+function lazyOpenAITranscriptionProvider(
+  workspaceId: string,
+  workspaceSessionId: string,
+): TranscriptionProvider {
   return {
     id: "openai",
     createSession(request, emit) {
@@ -73,7 +82,12 @@ function lazyOpenAITranscriptionProvider(workspaceId: string): TranscriptionProv
           const { OpenAIRealtimeTranscriptionProvider } =
             await import("@opengeni/react/transcription/openai-realtime");
           delegate = new OpenAIRealtimeTranscriptionProvider({
-            mintClientSecret: (input) => mintOpenAITranscriptionClientSecret(workspaceId, input),
+            sessionId: workspaceSessionId,
+            mintClientSecret: (input, signal) =>
+              mintOpenAITranscriptionClientSecret(workspaceId, input, signal),
+            reportUsage: (input) => reportOpenAITranscriptionUsage(workspaceId, input),
+            settleGrant: (input, signal) =>
+              settleOpenAITranscriptionGrant(workspaceId, input, signal),
           }).createSession(request, emit);
           if (closed) {
             await delegate.close();
@@ -630,6 +644,12 @@ function SessionChatPane(props: {
     onSent: () => attachments.clear(),
   });
   const transcriptionProvider = useMemo(() => {
+    const workspace = context.workspaces.find(
+      (candidate) => candidate.id === props.session.workspaceId,
+    );
+    if (!resolveWorkspaceTranscriptionPolicy(workspace?.settings)) {
+      return null;
+    }
     if (
       typeof navigator === "undefined" ||
       !navigator.mediaDevices?.getUserMedia ||
@@ -637,8 +657,8 @@ function SessionChatPane(props: {
     ) {
       return null;
     }
-    return lazyOpenAITranscriptionProvider(props.session.workspaceId);
-  }, [props.session.workspaceId]);
+    return lazyOpenAITranscriptionProvider(props.session.workspaceId, props.session.id);
+  }, [context.workspaces, props.session.id, props.session.workspaceId]);
 
   // Slash-command palette context: the operator controls (/goal, /clear,
   // /compact, /help) act on THIS session. Permissions come from the workspace
@@ -832,16 +852,18 @@ function SessionChatPane(props: {
             }
             controls={
               <div className="flex min-w-0 items-center gap-1.5">
-                <VoiceDictationControl
-                  provider={transcriptionProvider}
-                  value={composer.value}
-                  setValue={composer.setValue}
-                  disabled={
-                    terminal ||
-                    composer.sending ||
-                    !workspacePermissions.includes("sessions:control")
-                  }
-                />
+                {transcriptionProvider ? (
+                  <VoiceDictationControl
+                    provider={transcriptionProvider}
+                    value={composer.value}
+                    setValue={composer.setValue}
+                    disabled={
+                      terminal ||
+                      composer.sending ||
+                      !workspacePermissions.includes("sessions:control")
+                    }
+                  />
+                ) : null}
                 <ModelPicker
                   config={context.clientConfig}
                   model={model}

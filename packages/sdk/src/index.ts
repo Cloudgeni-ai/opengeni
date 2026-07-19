@@ -354,6 +354,7 @@ export type {
   WorkspaceMemorySearchResult,
   WorkspaceMemorySearchResponse,
   WorkspaceSettings,
+  WorkspaceTranscriptionPolicy,
   WorkspaceRegisteredPack,
   // Bring-your-own-compute: Machines dashboard + per-machine metrics (M10).
   MetricSample,

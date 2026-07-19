@@ -4,8 +4,10 @@ import {
   configureClientAuth,
   createOpenGeniClient,
   mintOpenAITranscriptionClientSecret,
+  reportOpenAITranscriptionUsage,
   resolveApiBaseUrl,
   sendVerificationEmail,
+  settleOpenAITranscriptionGrant,
   setStoredAccessKey,
   clearStoredAccessKey,
   shouldReloadForDeploymentRevision,
@@ -114,47 +116,77 @@ describe("web API auth helpers", () => {
     expect(JSON.parse(String(request!.init?.body))).toEqual({ email: "user@example.com" });
   });
 
-  test("mints transcription credentials through the scoped workspace route", async () => {
+  test("mints, meters, and settles transcription through scoped workspace routes", async () => {
     const originalFetch = globalThis.fetch;
     const requests: Array<{ input: Parameters<typeof fetch>[0]; init?: RequestInit }> = [];
     globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
       requests.push({ input, init });
+      if (!String(input).endsWith("/client-secret")) return Response.json({ ok: true });
       return Response.json({
         value: "ek_ephemeral",
         expiresAt: 2_000_000_000,
         providerSessionId: "provider-session-1",
+        grantId: "33333333-3333-4333-8333-333333333333",
+        maxSessionDurationSeconds: 60,
       });
     }) as unknown as typeof fetch;
+    const controller = new AbortController();
 
     try {
       await expect(
-        mintOpenAITranscriptionClientSecret("workspace/id", {
-          sessionId: "dictation-1",
-          language: "en",
-          diarization: false,
-          privacy: {
-            retainAudio: false,
-            retainTranscript: false,
-            trainingAllowed: false,
+        mintOpenAITranscriptionClientSecret(
+          "workspace/id",
+          {
+            sessionId: "11111111-1111-4111-8111-111111111111",
+            requestId: "22222222-2222-4222-8222-222222222222:0",
+            language: "en",
+            diarization: false,
+            privacy: {
+              retainAudio: false,
+              retainTranscript: false,
+              trainingAllowed: false,
+            },
           },
-        }),
+          controller.signal,
+        ),
       ).resolves.toEqual({
         value: "ek_ephemeral",
         expiresAt: 2_000_000_000,
         providerSessionId: "provider-session-1",
+        grantId: "33333333-3333-4333-8333-333333333333",
+        maxSessionDurationSeconds: 60,
       });
+      await reportOpenAITranscriptionUsage("workspace/id", {
+        sessionId: "11111111-1111-4111-8111-111111111111",
+        grantId: "33333333-3333-4333-8333-333333333333",
+        providerSessionId: "provider-session-1",
+        providerEventId: "provider-event-1",
+        durationSeconds: 1.75,
+      });
+      await settleOpenAITranscriptionGrant(
+        "workspace/id",
+        {
+          sessionId: "11111111-1111-4111-8111-111111111111",
+          grantId: "33333333-3333-4333-8333-333333333333",
+          providerSessionId: "provider-session-1",
+          status: "completed",
+        },
+        controller.signal,
+      );
     } finally {
       globalThis.fetch = originalFetch;
     }
 
-    const request = requests[0];
-    expect(String(request?.input)).toBe(
+    const mintRequest = requests[0];
+    expect(String(mintRequest?.input)).toBe(
       "/v1/workspaces/workspace%2Fid/transcription/client-secret",
     );
-    expect(request?.init?.method).toBe("POST");
-    expect(request?.init?.credentials).toBe("include");
-    expect(JSON.parse(String(request?.init?.body))).toEqual({
-      sessionId: "dictation-1",
+    expect(mintRequest?.init?.method).toBe("POST");
+    expect(mintRequest?.init?.credentials).toBe("include");
+    expect(mintRequest?.init?.signal).toBe(controller.signal);
+    expect(JSON.parse(String(mintRequest?.init?.body))).toEqual({
+      sessionId: "11111111-1111-4111-8111-111111111111",
+      requestId: "22222222-2222-4222-8222-222222222222:0",
       language: "en",
       diarization: false,
       privacy: {
@@ -162,6 +194,28 @@ describe("web API auth helpers", () => {
         retainTranscript: false,
         trainingAllowed: false,
       },
+    });
+
+    const usageRequest = requests[1];
+    expect(String(usageRequest?.input)).toBe(
+      "/v1/workspaces/workspace%2Fid/transcription/grants/33333333-3333-4333-8333-333333333333/usage",
+    );
+    expect(JSON.parse(String(usageRequest?.init?.body))).toEqual({
+      sessionId: "11111111-1111-4111-8111-111111111111",
+      providerSessionId: "provider-session-1",
+      providerEventId: "provider-event-1",
+      durationSeconds: 1.75,
+    });
+
+    const settlementRequest = requests[2];
+    expect(String(settlementRequest?.input)).toBe(
+      "/v1/workspaces/workspace%2Fid/transcription/grants/33333333-3333-4333-8333-333333333333/settle",
+    );
+    expect(settlementRequest?.init?.signal).toBe(controller.signal);
+    expect(JSON.parse(String(settlementRequest?.init?.body))).toEqual({
+      sessionId: "11111111-1111-4111-8111-111111111111",
+      providerSessionId: "provider-session-1",
+      status: "completed",
     });
   });
 });

@@ -569,12 +569,74 @@ export type Workspace = z.infer<typeof Workspace>;
 // Validates the KNOWN keys of workspaces.settings; passthrough keeps unknown
 // (future) keys rather than stripping them. memoryEnabled gates Workspace Memory
 // V1 agent surfaces (turn injection + first-party memory tools); default false.
+// transcription is also default-off and resolves only from a complete enabled
+// provider/project/privacy/approval/limits policy.
 export const WorkspaceSettingsSchema = z
   .object({
     memoryEnabled: z.boolean().optional(),
+    transcription: z
+      .discriminatedUnion("enabled", [
+        z.object({ enabled: z.literal(false) }).passthrough(),
+        z.object({
+          enabled: z.literal(true),
+          provider: z.literal("openai"),
+          providerProjectId: z.string().trim().min(1).max(200),
+          endpoint: z.literal("https://api.openai.com/v1/realtime"),
+          privacy: z.object({
+            retainAudio: z.literal(false),
+            retainTranscript: z.literal(false),
+            trainingAllowed: z.literal(false),
+            zeroDataRetentionEligible: z.literal(true),
+            processingRegion: z.string().trim().min(1).max(100),
+            dataResidency: z.string().trim().min(1).max(200),
+            eligibilityVerifiedBy: z.string().trim().min(1).max(200),
+            eligibilityVerifiedAt: z.string().datetime({ offset: true }),
+          }),
+          approvals: z.object({
+            security: z.object({
+              approved: z.literal(true),
+              approvedBy: z.string().trim().min(1).max(200),
+              approvedAt: z.string().datetime({ offset: true }),
+            }),
+            finance: z.object({
+              approved: z.literal(true),
+              approvedBy: z.string().trim().min(1).max(200),
+              approvedAt: z.string().datetime({ offset: true }),
+            }),
+          }),
+          limits: z.object({
+            maxActiveGrantsPerWorkspace: z.number().int().min(1).max(100),
+            maxActiveGrantsPerSubject: z.number().int().min(1).max(20),
+            maxIssuancesPerMinutePerSubject: z.number().int().min(1).max(100),
+            maxSessionDurationSeconds: z.number().int().min(30).max(3_600),
+            maxMonthlyDurationSeconds: z.number().int().min(30),
+            maxMonthlyCostMicros: z.number().int().positive(),
+            reservationCostMicros: z.number().int().positive(),
+          }),
+        }),
+      ])
+      .optional(),
   })
   .passthrough();
 export type WorkspaceSettings = z.infer<typeof WorkspaceSettingsSchema>;
+
+export const OPENAI_REALTIME_TRANSCRIPTION_ENDPOINT = "https://api.openai.com/v1/realtime";
+export type EnabledWorkspaceTranscriptionPolicy = Extract<
+  NonNullable<WorkspaceSettings["transcription"]>,
+  { enabled: true }
+>;
+
+// One fail-closed resolver is shared by server admission and the client UI.
+// Missing, malformed, or explicitly disabled policy always resolves to null.
+export function resolveWorkspaceTranscriptionPolicy(
+  settings: unknown,
+): EnabledWorkspaceTranscriptionPolicy | null {
+  const parsed = WorkspaceSettingsSchema.safeParse(settings ?? {});
+  if (!parsed.success || parsed.data.transcription?.enabled !== true) {
+    return null;
+  }
+  return parsed.data.transcription;
+}
 
 // Resolve the effective memoryEnabled flag from a raw settings bag (default off).
 export function resolveWorkspaceMemoryEnabled(settings: unknown): boolean {
@@ -583,11 +645,12 @@ export function resolveWorkspaceMemoryEnabled(settings: unknown): boolean {
 }
 
 // PATCH body for workspace settings: a partial patch that deep-merges into the
-// stored bag. memoryEnabled is the only typed key today; passthrough carries
+// stored bag. memoryEnabled and transcription are typed; passthrough carries
 // forward-compatible unknown keys through validation.
 export const UpdateWorkspaceSettingsRequest = z
   .object({
     memoryEnabled: z.boolean().optional(),
+    transcription: WorkspaceSettingsSchema.shape.transcription,
   })
   .passthrough();
 export type UpdateWorkspaceSettingsRequest = z.infer<typeof UpdateWorkspaceSettingsRequest>;
@@ -1100,6 +1163,15 @@ export const UsageEventType = z.enum([
   "sandbox.warm_seconds",
   // usd_micros: warm-seconds x the per-provider per-second warm rate.
   "sandbox.warm_cost",
+  // Browser-direct transcription is conservatively reserved before a provider
+  // secret is minted. Provider-reported duration is observability only; it
+  // never refunds or weakens the authoritative reservation.
+  "transcription.grant_reserved",
+  "transcription.secret_issued",
+  "transcription.reserved_seconds",
+  "transcription.reserved_cost",
+  "transcription.reported_seconds",
+  "transcription.reported_cost",
 ]);
 export type UsageEventType = z.infer<typeof UsageEventType>;
 
@@ -1129,6 +1201,7 @@ export const LimitAction = z.enum([
   "schedule:create",
   "workspace:create",
   "api_key:create",
+  "transcription:issue",
 ]);
 export type LimitAction = z.infer<typeof LimitAction>;
 
@@ -1141,6 +1214,10 @@ export const StaticUsageLimits = z.object({
   maxMonthlyTokensPerWorkspace: z.number().int().positive().optional(),
   maxMonthlyCostMicrosPerAccount: z.number().int().positive().optional(),
   maxDocumentIndexedChunksPerWorkspace: z.number().int().positive().optional(),
+  maxActiveTranscriptionGrantsPerWorkspace: z.number().int().positive().optional(),
+  maxTranscriptionIssuancesPerMinutePerSubject: z.number().int().positive().optional(),
+  maxMonthlyTranscriptionSecondsPerWorkspace: z.number().int().positive().optional(),
+  maxMonthlyTranscriptionCostMicrosPerAccount: z.number().int().positive().optional(),
 });
 export type StaticUsageLimits = z.infer<typeof StaticUsageLimits>;
 

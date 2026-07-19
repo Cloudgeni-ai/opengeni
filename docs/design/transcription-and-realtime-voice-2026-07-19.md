@@ -33,7 +33,11 @@ The prototype is deliberately narrower than the eventual product:
   composer;
 - `gpt-4o-transcribe`, one browser stream, no diarization, no cross-provider
   fallback, and no OpenGeni raw-audio retention;
-- short-lived credential minting requires `sessions:control`; and
+- short-lived credential minting requires `sessions:control`, a real durable
+  workspace session, and the authoritative default-off workspace policy;
+- durable admission conservatively reserves the policy's maximum duration and
+  cost before provider access, and every reconnect uses a new grant and peer;
+  and
 - the adapter is loaded from a separate package subpath only when dictation
   starts, preserving the session-page bundle budget.
 
@@ -120,8 +124,11 @@ interface TranscriptionSession {
 }
 ```
 
-The session request carries an OpenGeni-generated session ID, optional language
-and diarization, plus explicit privacy intent. `retainAudio`,
+The provider-neutral session request carries an OpenGeni-generated local
+dictation ID, optional language and diarization, plus explicit privacy intent.
+The OpenAI adapter separately receives the existing durable OpenGeni workspace
+session UUID that authorization, admission, usage, and settlement bind to. The
+two identities must never be substituted for each other. `retainAudio`,
 `retainTranscript`, and `trainingAllowed` are required; `region` and
 `dataResidency` are optional. These fields express requested policy, not proof
 that a provider account or project is eligible for zero-data-retention or
@@ -177,11 +184,17 @@ Fallback is safe only at a proven boundary:
    bounded lifetime, deletion evidence, user disclosure, and a new security
    review; it is not part of this prototype.
 
-The OpenAI adapter handles same-connection `disconnected`/`connected` state,
-clears stale partials, and exposes retryable failure. It does not create a new
-peer or provider attempt automatically. Cancellation and unmount fence every
-asynchronous WebRTC setup boundary, stop microphone tracks, close the data
-channel/peer, and suppress late events.
+The OpenAI adapter does not wait for a disconnected peer to heal. It disposes
+the old channel and peer, settles the old grant as `replaced`, and—up to the
+configured retry bound—requests a fresh grant, creates a fresh peer/data
+channel, and performs a fresh SDP exchange. One setup deadline covers grant
+minting, peer setup, offer creation, SDP fetch/body read, and remote-description
+installation. Old-generation listeners/events are fenced, stale partials are
+cleared, and provider item IDs are deduplicated by `(attempt, itemId)`; a new
+attempt uses a new logical segment identity because no prior audio is replayed.
+Exhaustion emits sanitized `webrtc_reconnect_exhausted` and terminates. Cancel,
+close, and unmount abort pending setup, bound settlement, stop media tracks,
+close transport resources, and terminally settle even a late-minted credential.
 
 ## Composer and durable event mapping
 
@@ -200,27 +213,69 @@ channel/peer, and suppress late events.
 This separation preserves OPE-9 queue semantics and OPE-82 attachment/storage
 semantics. Dictation neither creates file attachments nor stores audio.
 
-## Authorization, credentials, and data handling
+## Workspace policy, authorization, and durable accounting
 
-The prototype's credential path is intentionally asymmetric:
+`workspaces.settings.transcription` is the one authoritative capability policy.
+The shared contract resolves missing, malformed, or `{ enabled: false }` policy
+to off. The web route uses that resolver and omits the microphone entirely when
+the capability is off; the server independently re-reads the policy before
+provider access and again inside serialized database admission.
 
-1. The browser asks OpenGeni API for a transcription client secret.
-2. API authorization requires the workspace-scoped `sessions:control` grant
-   **before** body parsing, credential inspection, or any provider call.
-3. The server validates bounded options, rejects unsupported diarization,
-   rejects Azure/custom base URLs, hashes workspace plus subject into a safety
-   identifier, and uses the deployment API key only server-side.
-4. OpenAI returns a transcription-session client secret with a 60-second mint
-   lifetime. API responses are `cache-control: no-store`; deployment credentials
-   and upstream error bodies are never returned.
-5. The browser obtains microphone media and sends it over the documented OpenAI
-   WebRTC flow. OpenGeni does not proxy or retain raw audio.
+An enabled policy must declare all of the following:
 
-Production hardening must add provider-specific egress allowlists, rate/cost
-limits, auditable settings changes, credential rotation, secret-redacted logs,
-native usage reconciliation, and endpoint-specific retention/residency
-admission. Transcript text is customer content and must not appear in routine
-metrics or errors.
+- provider `openai`, the exact configured project, and the official
+  `https://api.openai.com/v1/realtime` endpoint;
+- no OpenGeni/provider-request audio retention, no transcript retention, and no
+  training, plus explicit zero-data-retention eligibility;
+- processing region and data-residency declarations with verifier identity and
+  timestamp;
+- affirmative security and finance approvals with approver identity and
+  timestamp; and
+- workspace/subject concurrency, per-subject issuance rate, session-duration,
+  monthly-duration, monthly-cost, and conservative reservation-cost limits.
+
+This is a fail-closed declared policy gate, not evidence that provider-side ZDR
+or residency is actually enabled. The exact OpenAI project and endpoint still
+require provider-side verification before any rollout. The configured project
+comes from `OPENGENI_OPENAI_PROJECT_ID` (falling back to
+`OPENAI_PROJECT_ID`); the broker sends it as the exact `openai-project` header.
+
+The credential and accounting path is intentionally asymmetric:
+
+1. The browser asks OpenGeni for a client secret using the real durable
+   workspace session UUID and a one-use `${localDictationId}:${attempt}` request
+   ID. Reconnect attempts therefore cannot reuse issuance idempotency.
+2. Workspace-scoped `sessions:control` authorization happens **before** body
+   parsing, configuration inspection, database admission, or provider access.
+   The session must exist in the same workspace.
+3. Canonical usage limits and the stricter of platform/static and workspace
+   limits are enforced. Account-row then workspace-row locks serialize sibling
+   workspace cost and local concurrency decisions. One live grant per workspace
+   session is also protected by a partial unique index.
+4. Before any provider call, `transcription_grants` records a conservative
+   duration/cost reservation and idempotent usage/audit events. Denials are
+   audited. Expired reserved/active grants are reconciled during admission.
+5. The broker rejects Azure/custom endpoints and unsupported diarization,
+   hashes workspace plus subject into a provider safety identifier, applies a
+   10-second provider timeout, and uses the deployment key only server-side.
+   OpenAI's response must be a transcription session with a future expiry no
+   more than five minutes away. The returned credential is never persisted and
+   the browser response is `cache-control: no-store`.
+6. Activation, provider-event-idempotent usage reports, and terminal settlement
+   bind exact workspace, subject, durable session, grant, and provider-session
+   identities. Provider rejection or durable activation failure terminally
+   reconciles the row while retaining the conservative reservation.
+7. Browser-reported provider duration is observability only: it never refunds
+   or reduces the reservation and is never trusted to reopen paid capacity. The
+   browser sends microphone audio directly over the documented OpenAI WebRTC
+   flow; OpenGeni does not proxy or retain raw audio.
+
+The FORCE-RLS grant ledger stores identities, status, reserved/reported numeric
+usage, and timestamps only—never an API key, client secret, raw provider
+payload, audio, or transcript. Transcript text is customer content and must not
+appear in routine metrics, audit metadata, or errors. Provider egress
+allowlisting, managed credential rotation, and a workspace settings UI remain
+rollout work.
 
 ### Codex subscription entitlement
 
@@ -260,13 +315,17 @@ duplicating messages, tools, children, billing, or context.
 
 ## Rollout
 
-1. **Deterministic prototype:** land provider-neutral contracts, reducer, mock
-   tests, authorized client-secret broker, lazy OpenAI adapter, composer control,
-   and fixture Chromium evidence. No provider call and no production rollout.
-2. **Internal managed pilot:** feature flag by workspace; security/finance
-   approve the exact OpenAI project and endpoint; add rate/cost ceilings, native
-   usage reconciliation, redacted observability, and consented real-browser
-   testing. Keep diarization/fallback off.
+1. **Hardened deterministic prototype:** land provider-neutral contracts,
+   reducer, authoritative default-off workspace policy, durable admission and
+   conservative accounting, bounded fresh-peer recovery, authorized
+   client-secret broker, lazy OpenAI adapter, composer control, database test
+   sources, and fixture Chromium evidence. No provider call and no production
+   rollout.
+2. **Internal managed pilot:** add the admin settings UI and audited approval
+   workflow; independently verify provider-side ZDR/residency for the exact
+   OpenAI project and endpoint; add provider egress controls and consented real
+   browser/provider testing; then validate the reservation rate card against
+   actual provider billing. Keep diarization/fallback off.
 3. **Measured provider bakeoff:** run the same approved corpus and failure matrix
    across candidates. Publish measured accuracy/latency/cost separately from
    vendor claims, then select per-region defaults.
@@ -282,14 +341,22 @@ duplicating messages, tools, children, billing, or context.
 - reducer/provider tests cover stale partials/finals, batched accepted finals,
   final replay, fallback final deduplication, usage identity,
   permission/cancel/error handling, privacy admission before microphone access,
-  WebRTC event mapping, cleanup, and closure during pending microphone
-  permission;
-- API tests cover authorization-before-provider-call, payload validation,
-  exact no-retention/no-training privacy defaults, region/residency rejection,
-  configuration rejection, upstream sanitization, client-secret shape, and
-  no-store behavior;
-- web tests cover the privacy-bearing client-secret API path and the session
-  page passes its bundle budget with the adapter lazy-loaded;
+  WebRTC event mapping, fresh-grant/peer/SDP reconnect, generation fencing,
+  attempt-scoped provider item identity, bounded setup/reconnect/settlement,
+  cleanup, and closure during pending microphone permission or credential mint;
+- contract/config tests cover default-off and malformed workspace policy,
+  exact provider/project/endpoint/privacy/approval eligibility, settings patch
+  validation, project environment precedence, and positive integral static
+  transcription caps;
+- real-PostgreSQL API/DB/migration test sources cover authorization before
+  parsing/provider access; session/policy/config admission; reservation,
+  concurrency, rate, duration and cost limits; exact usage/settlement binding;
+  idempotency, expiry, audit; account caps across sibling workspaces; dedicated
+  schema installation; constraints, RLS, and credential/content-free storage.
+  PostgreSQL and Docker were unavailable in this sandbox, so those guarded
+  suites were typechecked but were **not executed here**;
+- web API tests cover mint/usage/settlement paths and abort propagation, and the
+  session page keeps the provider lazy-loaded;
 - deterministic Chromium checks cover 360/375/768/1440, light/dark,
   requesting/listening/partial/reconnecting/error/permission/final/cancelled/
   disabled, keyboard focus, Escape, editable final/send, axe, page errors,
@@ -304,9 +371,11 @@ duplicating messages, tools, children, billing, or context.
 - Automated axe checks are not a human screen-reader usability study.
 - The evidence harness uses real shared components but is not a production
   deployment or live production acceptance test.
-- Workspace policy/settings UI, BYOK, diarization, redaction, region admission,
-  provider fallback, usage persistence/reconciliation, and realtime voice are
-  designs only.
+- Workspace settings UI/approval workflow, BYOK, diarization, redaction,
+  provider fallback, provider-side billing reconciliation, and realtime voice
+  are designs only. The policy contract, server/UI gate, conservative durable
+  reservation, browser usage observation, terminal settlement, and expired-row
+  reconciliation are implemented prototype hardening.
 - Deepgram and AssemblyAI endpoint-specific retention/training/residency and
   contract compliance remain procurement/security diligence items.
 - OpenAI retention/residency eligibility must be verified for the exact Realtime

@@ -1437,13 +1437,47 @@ export type Workspace = {
 
 export type WorkspaceSettings = {
   memoryEnabled?: boolean | undefined;
+  transcription?: WorkspaceTranscriptionPolicy | undefined;
   [key: string]: unknown;
 };
 
 export type UpdateWorkspaceSettingsRequest = {
   memoryEnabled?: boolean | undefined;
+  transcription?: WorkspaceTranscriptionPolicy | undefined;
   [key: string]: unknown;
 };
+
+export type WorkspaceTranscriptionPolicy =
+  | ({ enabled: false } & Record<string, unknown>)
+  | {
+      enabled: true;
+      provider: "openai";
+      providerProjectId: string;
+      endpoint: "https://api.openai.com/v1/realtime";
+      privacy: {
+        retainAudio: false;
+        retainTranscript: false;
+        trainingAllowed: false;
+        zeroDataRetentionEligible: true;
+        processingRegion: string;
+        dataResidency: string;
+        eligibilityVerifiedBy: string;
+        eligibilityVerifiedAt: string;
+      };
+      approvals: {
+        security: { approved: true; approvedBy: string; approvedAt: string };
+        finance: { approved: true; approvedBy: string; approvedAt: string };
+      };
+      limits: {
+        maxActiveGrantsPerWorkspace: number;
+        maxActiveGrantsPerSubject: number;
+        maxIssuancesPerMinutePerSubject: number;
+        maxSessionDurationSeconds: number;
+        maxMonthlyDurationSeconds: number;
+        maxMonthlyCostMicros: number;
+        reservationCostMicros: number;
+      };
+    };
 
 export type SetWorkspaceDefaultRigRequest = {
   rigId: string | null;
@@ -2577,6 +2611,13 @@ export const KNOWN_USAGE_EVENT_TYPES = [
   // sandbox warm-time metering (P2.1) — mirrors contracts UsageEventType.
   "sandbox.warm_seconds",
   "sandbox.warm_cost",
+  // Browser-direct transcription reservations and provider observations.
+  "transcription.grant_reserved",
+  "transcription.secret_issued",
+  "transcription.reserved_seconds",
+  "transcription.reserved_cost",
+  "transcription.reported_seconds",
+  "transcription.reported_cost",
 ] as const;
 
 export type KnownUsageEventType = (typeof KNOWN_USAGE_EVENT_TYPES)[number];
