@@ -12727,11 +12727,7 @@ export async function recordPendingSessionToolCallResult(
   input: Omit<PendingSessionToolCallInput, "callType" | "callItem"> & {
     resultItem: Record<string, unknown>;
   },
-): Promise<{
-  accepted: boolean;
-  recorded: boolean;
-  allResultsRecorded: boolean;
-}> {
+): Promise<{ accepted: boolean; recorded: boolean }> {
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -12745,11 +12741,7 @@ export async function recordPendingSessionToolCallResult(
           attemptId: input.attemptId,
         });
         if (!fence.allowed) {
-          return {
-            accepted: false,
-            recorded: false,
-            allResultsRecorded: false,
-          };
+          return { accepted: false, recorded: false };
         }
         const [pending] = await tx
           .select()
@@ -12763,7 +12755,7 @@ export async function recordPendingSessionToolCallResult(
             ),
           )
           .limit(1);
-        if (!pending) return { accepted: true, recorded: false, allResultsRecorded: false };
+        if (!pending) return { accepted: true, recorded: false };
         const resultType = TOOL_RESULT_TYPE_BY_CALL_TYPE[pending.callType];
         if (
           !resultType ||
@@ -12785,21 +12777,9 @@ export async function recordPendingSessionToolCallResult(
             ),
           )
           .returning({ id: schema.sessionPendingToolCalls.id });
-        const [{ unresolved } = { unresolved: 0 }] = await tx
-          .select({ unresolved: sql<number>`count(*)::int` })
-          .from(schema.sessionPendingToolCalls)
-          .where(
-            and(
-              eq(schema.sessionPendingToolCalls.workspaceId, input.workspaceId),
-              eq(schema.sessionPendingToolCalls.sessionId, input.sessionId),
-              eq(schema.sessionPendingToolCalls.turnId, input.turnId),
-              sql`${schema.sessionPendingToolCalls.resultItem} is null`,
-            ),
-          );
         return {
           accepted: true,
           recorded: recorded.length === 1,
-          allResultsRecorded: Number(unresolved) === 0,
         };
       }),
   );
