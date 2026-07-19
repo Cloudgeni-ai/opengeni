@@ -2,7 +2,7 @@ import type { SessionTurn } from "@opengeni/sdk";
 import { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { QueueSurface, type ComposerState, type UseTurnQueueResult } from "../src/index";
-import { HOSTILE_QUEUE_PROMPT } from "./queue-fixtures";
+import { queueHarnessPrompt } from "./queue-fixtures";
 import "../../../apps/web/src/styles.css";
 import "./queue-harness.css";
 
@@ -36,7 +36,7 @@ function makeTurn(index: number): SessionTurn {
     status: "queued",
     source: "user",
     position: index + 1,
-    prompt: `${index + 1} / ${initialCount}\n${HOSTILE_QUEUE_PROMPT}`,
+    prompt: queueHarnessPrompt(index),
     resources: [{ kind: "file", fileId: `fixture-file-${index + 1}` }],
     tools: [],
     model: "gpt-5.3-codex",

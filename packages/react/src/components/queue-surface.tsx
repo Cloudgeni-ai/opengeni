@@ -58,10 +58,10 @@ const QUEUE_ROW_PREVIEW_CHARACTERS = 360;
 const QUEUE_COLLAPSED_PREVIEW_CHARACTERS = 180;
 
 /**
- * Build only a small visual prefix of an arbitrary queued prompt. `Array.from`
- * keeps a truncation boundary from splitting a surrogate pair, while the
- * initial slice prevents a multi-megabyte prompt from being copied/scanned in
- * full merely to render a queue row. The durable prompt remains untouched.
+ * Build a bounded head/tail summary of an arbitrary queued prompt. Sampling
+ * both ends distinguishes prompts with equal long prefixes, while `Array.from`
+ * keeps both boundaries from splitting a surrogate pair. Only small slices are
+ * scanned, so a multi-megabyte durable prompt is never copied in full.
  */
 function queuePromptPreview(prompt: string, maxCharacters: number): string {
   const scanned = prompt.slice(0, maxCharacters * 2 + 1);
@@ -69,7 +69,19 @@ function queuePromptPreview(prompt: string, maxCharacters: number): string {
   if (scanned.length === prompt.length && characters.length <= maxCharacters) {
     return prompt;
   }
-  return `${characters.slice(0, maxCharacters).join("").trimEnd()}…`;
+
+  const separator = " … ";
+  const suffixCharacters = Math.min(Math.floor(maxCharacters / 3), 120);
+  const prefixCharacters = maxCharacters - Array.from(separator).length - suffixCharacters;
+  const prefix = Array.from(prompt.slice(0, prefixCharacters * 2 + 1))
+    .slice(0, prefixCharacters)
+    .join("")
+    .trimEnd();
+  const suffix = Array.from(prompt.slice(-(suffixCharacters * 2 + 1)))
+    .slice(-suffixCharacters)
+    .join("")
+    .trimStart();
+  return `${prefix}${separator}${suffix}`;
 }
 
 export function QueueSurface({ queue, composer, readOnly = false }: QueueSurfaceProps) {
@@ -82,7 +94,6 @@ export function QueueSurface({ queue, composer, readOnly = false }: QueueSurface
     projectedIndex: number;
   } | null>(null);
   const count = queue.queue.length;
-  const collapsedPreviewId = useId();
   const collapsedPreview = useMemo(
     () => queuePromptPreview(queue.queue[0]?.prompt ?? "", QUEUE_COLLAPSED_PREVIEW_CHARACTERS),
     [queue.queue],
@@ -263,7 +274,7 @@ export function QueueSurface({ queue, composer, readOnly = false }: QueueSurface
           type="button"
           className="flex w-full min-w-0 items-center gap-2 px-3 py-2 text-left outline-none transition-colors hover:bg-surface-2/60 focus-visible:bg-surface-2/60 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/40 pointer-coarse:min-h-11"
           onClick={() => setOpen((value) => !value)}
-          aria-describedby={!open && count > 0 ? collapsedPreviewId : undefined}
+          aria-description={!open && count > 0 ? collapsedPreview : undefined}
           aria-expanded={open}
           aria-label={`${count} queued prompt${count === 1 ? "" : "s"}${readOnly ? " Read-only" : ""}`}
         >
@@ -281,7 +292,7 @@ export function QueueSurface({ queue, composer, readOnly = false }: QueueSurface
           ) : null}
           {!open && count > 0 ? (
             <span
-              id={collapsedPreviewId}
+              aria-hidden="true"
               className="min-w-0 flex-1 truncate text-xs text-fg-muted"
               data-testid="queue-collapsed-preview"
               dir="auto"
@@ -450,7 +461,7 @@ function QueuePrompt({
         dir="auto"
         role="note"
       >
-        {preview}
+        <span aria-hidden="true">{preview}</span>
       </p>
       <button
         type="button"
@@ -565,7 +576,7 @@ function SortableQueueRow({
       }}
       className={`bg-surface ${sortable.isDragging || keyboardDragging ? "relative z-10 shadow-lg ring-1 ring-brand/40" : ""}`}
     >
-      <div className="grid min-w-0 grid-cols-[auto_auto_minmax(0,1fr)_auto_auto_auto] items-start gap-x-1.5 px-2 py-2 sm:gap-x-2 sm:px-3">
+      <div className="grid min-w-0 grid-cols-[auto_auto_minmax(0,1fr)_auto_auto_auto] items-start gap-x-1.5 px-2 py-1.5 sm:gap-x-2 sm:px-3 sm:py-2">
         <button
           data-queue-handle
           ref={sortable.setActivatorNodeRef}
@@ -583,7 +594,7 @@ function SortableQueueRow({
         <span className="col-start-2 row-start-1 mt-1 shrink-0 font-mono text-2xs text-fg-subtle">
           {index + 1}
         </span>
-        <div className="col-span-full row-start-2 min-w-0 pt-1 sm:col-span-1 sm:col-start-3 sm:row-start-1 sm:pt-0">
+        <div className="col-span-full row-start-2 min-w-0 sm:col-span-1 sm:col-start-3 sm:row-start-1">
           <QueuePrompt prompt={turn.prompt} index={index} onDisclosureChange={onDisclosureChange} />
           <div className="mt-1 flex min-w-0 items-center gap-2 overflow-hidden whitespace-nowrap text-2xs text-fg-subtle">
             {turn.resources.length > 0 ? (
@@ -606,7 +617,7 @@ function SortableQueueRow({
           onClick={onSteer}
           aria-label={`Steer queued prompt ${index + 1}`}
           title="Make this the next direction"
-          className="col-start-4 row-start-1 inline-flex h-7 shrink-0 items-center justify-center gap-1 rounded-md px-2 text-xs font-medium outline-none transition-colors hover:bg-surface-2 focus-visible:ring-2 focus-visible:ring-ring/40 disabled:pointer-events-none disabled:opacity-50 pointer-coarse:min-h-11"
+          className="col-start-4 row-start-3 inline-flex h-7 shrink-0 items-center justify-center gap-1 rounded-md px-2 text-xs font-medium outline-none transition-colors hover:bg-surface-2 focus-visible:ring-2 focus-visible:ring-ring/40 disabled:pointer-events-none disabled:opacity-50 sm:row-start-1 pointer-coarse:min-h-11"
         >
           {pending === "steer" ? (
             <Loader2Icon className="size-3.5 animate-spin" />
@@ -621,7 +632,7 @@ function SortableQueueRow({
           onClick={onDelete}
           aria-label={`Delete queued prompt ${index + 1}`}
           title="Delete this queued prompt"
-          className="col-start-5 row-start-1 inline-flex size-7 shrink-0 items-center justify-center rounded-md outline-none transition-colors hover:bg-surface-2 hover:text-status-failed focus-visible:ring-2 focus-visible:ring-ring/40 disabled:pointer-events-none disabled:opacity-50 pointer-coarse:size-11"
+          className="col-start-5 row-start-3 inline-flex size-7 shrink-0 items-center justify-center rounded-md outline-none transition-colors hover:bg-surface-2 hover:text-status-failed focus-visible:ring-2 focus-visible:ring-ring/40 disabled:pointer-events-none disabled:opacity-50 sm:row-start-1 pointer-coarse:size-11"
         >
           {pending === "delete" ? (
             <Loader2Icon className="size-3.5 animate-spin" />
@@ -635,7 +646,7 @@ function SortableQueueRow({
               type="button"
               disabled={pending !== null}
               aria-label={`More actions for queued prompt ${index + 1}`}
-              className="col-start-6 row-start-1 inline-flex size-7 shrink-0 items-center justify-center rounded-md outline-none transition-colors hover:bg-surface-2 focus-visible:ring-2 focus-visible:ring-ring/40 disabled:pointer-events-none disabled:opacity-50 pointer-coarse:size-11"
+              className="col-start-6 row-start-3 inline-flex size-7 shrink-0 items-center justify-center rounded-md outline-none transition-colors hover:bg-surface-2 focus-visible:ring-2 focus-visible:ring-ring/40 disabled:pointer-events-none disabled:opacity-50 sm:row-start-1 pointer-coarse:size-11"
             >
               {pending && pending !== "steer" && pending !== "delete" ? (
                 <Loader2Icon className="size-3.5 animate-spin" />

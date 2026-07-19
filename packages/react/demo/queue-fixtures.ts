@@ -1,3 +1,5 @@
+export const OMITTED_QUEUE_SOURCE_MARKER = "Exact undisclosed middle source marker.";
+
 export const HOSTILE_QUEUE_PROMPT = [
   "# Production migration follow-up 👩🏽‍💻",
   "",
@@ -8,6 +10,7 @@ export const HOSTILE_QUEUE_PROMPT = [
   "```",
   "",
   `Bidirectional source: ${String.fromCodePoint(0x202e)}isolated${String.fromCodePoint(0x202c)}`,
+  OMITTED_QUEUE_SOURCE_MARKER,
   ...Array.from(
     { length: 80 },
     (_, index) =>
@@ -15,3 +18,11 @@ export const HOSTILE_QUEUE_PROMPT = [
   ),
   "Exact trailing line.",
 ].join("\n");
+
+export function queuePromptFingerprint(index: number): string {
+  return `Queued destination fingerprint: ${String(index + 1).padStart(3, "0")} 😀`;
+}
+
+export function queueHarnessPrompt(index: number): string {
+  return `${HOSTILE_QUEUE_PROMPT}\n${queuePromptFingerprint(index)}`;
+}

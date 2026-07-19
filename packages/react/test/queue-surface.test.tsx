@@ -148,12 +148,13 @@ describe("QueueSurface", () => {
 
     const collapsed = mounted.container.querySelector('[data-testid="queue-collapsed-preview"]');
     const collapsedToggle = mounted.container.querySelector('button[aria-expanded="false"]');
-    expect(collapsed?.getAttribute("aria-hidden")).toBeNull();
-    expect(collapsed?.id).not.toBe("");
-    expect(collapsedToggle?.getAttribute("aria-describedby")).toBe(collapsed?.id);
+    expect(collapsed?.getAttribute("aria-hidden")).toBe("true");
+    expect(collapsedToggle?.getAttribute("aria-description")).toBe(collapsed?.textContent);
+    expect(collapsedToggle?.getAttribute("aria-describedby")).toBeNull();
     expect(collapsedToggle?.getAttribute("aria-label")).toBe("1 queued prompt");
-    expect(collapsed?.textContent?.endsWith("…")).toBe(true);
-    expect(Array.from(collapsed?.textContent ?? "")).toHaveLength(181);
+    expect(collapsed?.textContent).toContain(" … ");
+    expect(collapsed?.textContent).toContain("Exact trailing line.");
+    expect(Array.from(collapsed?.textContent ?? "").length).toBeLessThanOrEqual(180);
     expect(collapsed?.textContent).not.toBe(prompt);
 
     await click(collapsedToggle);
@@ -164,12 +165,12 @@ describe("QueueSurface", () => {
     expect(preview?.getAttribute("aria-hidden")).toBeNull();
     expect(preview?.getAttribute("role")).toBe("note");
     expect(preview?.getAttribute("dir")).toBe("auto");
-    expect(preview?.textContent?.endsWith("…")).toBe(true);
+    expect(preview?.textContent).toContain(" … ");
+    expect(preview?.querySelector('[aria-hidden="true"]')?.textContent).toBe(preview?.textContent);
     expect(preview?.textContent).not.toBe(prompt);
     expect(preview?.getAttribute("aria-label")).toBe(
       `Queued prompt 1 summary: ${preview?.textContent}`,
     );
-    expect(preview?.getAttribute("aria-label")).not.toContain("Exact trailing line.");
     expect(mounted.container.querySelector('[data-testid="queue-prompt-full-1"]')).toBeNull();
 
     const disclosure = mounted.container.querySelector(
@@ -197,13 +198,16 @@ describe("QueueSurface", () => {
   });
 
   test("keeps a 100-row queue inside one bounded scroll region", async () => {
-    const items = Array.from({ length: 100 }, (_, index) => {
-      const leading = `${index + 1}: `;
-      return fakeTurn({
+    const sharedPrefix = `${"x".repeat(236)}😀${"x".repeat(1_800)}`;
+    const items = Array.from({ length: 100 }, (_, index) =>
+      fakeTurn({
         id: `${String(index + 1).padStart(8, "0")}-1111-4111-8111-111111111111`,
-        prompt: `${leading}${"x".repeat(360 - Array.from(leading).length - 1)}😀tail${"y".repeat(2_000)}`,
-      });
-    });
+        prompt: `${sharedPrefix}\nQueued destination fingerprint: ${String(index + 1).padStart(3, "0")} 😀`,
+      }),
+    );
+    expect(new Set(items.map((turn) => Array.from(turn.prompt).slice(0, 500).join(""))).size).toBe(
+      1,
+    );
     mounted = await renderComponent(
       <QueueSurface queue={queue({ queue: items })} composer={composer()} />,
     );
@@ -219,16 +223,23 @@ describe("QueueSurface", () => {
     expect(mounted.container.querySelectorAll('[data-testid^="queue-prompt-full-"]')).toHaveLength(
       0,
     );
+    const accessibleContent = new Set<string>();
+    let index = 0;
     for (const preview of mounted.container.querySelectorAll(
       '[data-testid^="queue-prompt-preview-"]',
     )) {
-      expect(Array.from(preview.textContent ?? "").length).toBeLessThanOrEqual(361);
-      expect(preview.textContent?.endsWith("😀…")).toBe(true);
+      expect(Array.from(preview.textContent ?? "").length).toBeLessThanOrEqual(360);
+      expect(preview.textContent).toContain("😀 … ");
+      expect(preview.textContent?.endsWith(`${String(index + 1).padStart(3, "0")} 😀`)).toBe(true);
       const label = preview.getAttribute("aria-label") ?? "";
       expect(label).toContain(" summary: ");
       expect(label.endsWith(preview.textContent ?? "")).toBe(true);
       expect(label.length).toBeLessThan(410);
+      expect(preview.querySelector('[aria-hidden="true"]')?.textContent).toBe(preview.textContent);
+      accessibleContent.add(label.replace(/^Queued prompt \d+ summary: /, ""));
+      index += 1;
     }
+    expect(accessibleContent.size).toBe(100);
   });
 
   test("explains the durable Steer shutdown fence instead of looking stuck in an ordinary queue", async () => {

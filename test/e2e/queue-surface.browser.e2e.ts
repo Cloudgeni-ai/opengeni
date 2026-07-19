@@ -3,11 +3,16 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdir, writeFile } from "node:fs/promises";
 import { chromium, type Browser, type Page } from "playwright";
 import { freePort, runCommand, startProcess, type StartedProcess } from "@opengeni/testing";
-import { HOSTILE_QUEUE_PROMPT } from "../../packages/react/demo/queue-fixtures";
+import {
+  OMITTED_QUEUE_SOURCE_MARKER,
+  queueHarnessPrompt,
+  queuePromptFingerprint,
+} from "../../packages/react/demo/queue-fixtures";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const evidenceDir = process.env.OPENGENI_OPE9_EVIDENCE_DIR ?? "/tmp/opengeni-ope9-queue-evidence";
 const viewports = [
+  { width: 320, height: 800 },
   { width: 360, height: 800 },
   { width: 375, height: 812 },
   { width: 768, height: 960 },
@@ -27,6 +32,13 @@ type BrowserMeasurement = {
   backgroundColor: string;
   backgroundLightness: number | null;
   colorScheme: string;
+  focusOrder: FocusMeasurement[];
+};
+
+type FocusMeasurement = {
+  name: string;
+  centerX: number;
+  centerY: number;
 };
 
 type BrowserAccessibilityEvidence = {
@@ -35,19 +47,22 @@ type BrowserAccessibilityEvidence = {
   collapsed: {
     controlName: string;
     boundedDescription: string;
-    exactTrailingSourcePresent: boolean;
+    fingerprintPresent: boolean;
+    omittedMiddleSourcePresent: boolean;
   };
   expanded: {
     summaryCount: number;
-    uniqueSummaryCount: number;
+    uniqueContentSummaryCount: number;
+    distinctiveFingerprintCount: number;
+    repeatedDescendantCount: number;
     firstSummary: string;
     lastSummary: string;
-    exactTrailingSourcePresent: boolean;
+    omittedMiddleSourcePresent: boolean;
   };
   disclosed: {
     regionName: string;
     exactPromptPresent: boolean;
-    exactTrailingSourcePresent: boolean;
+    omittedMiddleSourcePresent: boolean;
   };
 };
 
@@ -137,7 +152,7 @@ describe("queue surface browser acceptance", () => {
         const collapsed = await pageMetrics(page);
         expect(collapsed.documentOverflow).toBeLessThanOrEqual(1);
         expect(collapsed.surfaceHeight).toBeLessThanOrEqual(48);
-        expect(collapsed.collapsedPreviewCharacters).toBeLessThanOrEqual(181);
+        expect(collapsed.collapsedPreviewCharacters).toBeLessThanOrEqual(180);
         expect(collapsed.colorScheme).toBe(theme);
         expect(collapsed.backgroundLightness).not.toBeNull();
         if (theme === "light") {
@@ -145,6 +160,13 @@ describe("queue surface browser acceptance", () => {
         } else {
           expect(collapsed.backgroundLightness ?? 1).toBeLessThan(0.3);
         }
+        const collapsedTree = await chromeAccessibilityTree(page);
+        const collapsedControl = collapsedTree.find(
+          (node) => !node.ignored && node.role === "button" && node.name === "100 queued prompts",
+        );
+        expect(collapsedControl?.description).toContain(queuePromptFingerprint(0));
+        expect(exposedTreeIncludes(collapsedTree, OMITTED_QUEUE_SOURCE_MARKER)).toBe(false);
+        expect(exposedNodesContaining(collapsedTree, queuePromptFingerprint(0))).toHaveLength(1);
         await capture(page, viewport.width, theme, "collapsed");
 
         const toggle = page.getByRole("button", { name: "100 queued prompts" });
@@ -163,7 +185,36 @@ describe("queue surface browser acceptance", () => {
         );
         expect(expanded.listScrollHeight).toBeGreaterThan(expanded.listHeight);
         expect(expanded.maxPreviewHeight).toBeLessThanOrEqual(61);
-        expect(expanded.maxRowHeight).toBeLessThanOrEqual(160);
+        expect(expanded.maxRowHeight).toBeLessThanOrEqual(viewport.width <= 375 ? 194 : 160);
+
+        const expandedTree = await chromeAccessibilityTree(page);
+        const summaryNodes = queueSummaryNodes(expandedTree);
+        const contentSummaries = summaryNodes.map((node) =>
+          node.name.replace(/^Queued prompt \d+ summary: /, ""),
+        );
+        expect(summaryNodes).toHaveLength(100);
+        expect(new Set(contentSummaries).size).toBe(100);
+        expect(exposedTreeIncludes(expandedTree, OMITTED_QUEUE_SOURCE_MARKER)).toBe(false);
+        for (let index = 0; index < summaryNodes.length; index += 1) {
+          expect(summaryNodes[index]?.name).toContain(queuePromptFingerprint(index));
+          expect(
+            unignoredDescendants(expandedTree, summaryNodes[index]?.nodeId ?? ""),
+          ).toHaveLength(0);
+          expect(exposedNodesContaining(expandedTree, queuePromptFingerprint(index))).toHaveLength(
+            1,
+          );
+        }
+
+        const focusOrder = await sequentialQueueFocusOrder(page);
+        expect(focusOrder.map((item) => item.name)).toEqual([
+          "Reorder queued prompt 1",
+          "Show full content for queued prompt 1",
+          "Steer queued prompt 1",
+          "Delete queued prompt 1",
+          "More actions for queued prompt 1",
+          "Reorder queued prompt 2",
+        ]);
+        assertCoherentFocusGeometry(focusOrder, viewport.width);
 
         if (viewport.width <= 768) {
           for (const height of expanded.coarseControlHeights) {
@@ -190,7 +241,7 @@ describe("queue surface browser acceptance", () => {
           name: "Full content for queued prompt 1",
           exact: true,
         });
-        expect(await full.textContent()).toBe(`1 / 100\n${HOSTILE_QUEUE_PROMPT}`);
+        expect(await full.textContent()).toBe(queueHarnessPrompt(0));
 
         const disclosed = await pageMetrics(page);
         expect(disclosed.documentOverflow).toBeLessThanOrEqual(1);
@@ -208,7 +259,7 @@ describe("queue surface browser acceptance", () => {
         expect(refreshed.listHeight).toBeLessThanOrEqual(
           Math.min(480, Math.round(viewport.height * 0.6)) + 2,
         );
-        expect(await full.textContent()).toBe(`1 / 100\n${HOSTILE_QUEUE_PROMPT}`);
+        expect(await full.textContent()).toBe(queueHarnessPrompt(0));
 
         if (viewport.width === 360 || viewport.width === 1440) {
           const report = await new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa"]).analyze();
@@ -227,6 +278,7 @@ describe("queue surface browser acceptance", () => {
           backgroundColor: collapsed.backgroundColor,
           backgroundLightness: collapsed.backgroundLightness,
           colorScheme: collapsed.colorScheme,
+          focusOrder,
         });
         await context.close();
       }
@@ -271,12 +323,12 @@ describe("queue surface browser acceptance", () => {
       await readOnlyPage
         .getByRole("region", { name: "Full content for queued prompt 1", exact: true })
         .textContent(),
-    ).toBe(`1 / 1\n${HOSTILE_QUEUE_PROMPT}`);
+    ).toBe(queueHarnessPrompt(0));
     expect((await pageMetrics(readOnlyPage)).documentOverflow).toBeLessThanOrEqual(1);
     await readOnlyContext.close();
   }, 30_000);
 
-  test("Chrome exposes 100 bounded prompt summaries before exact-source disclosure", async () => {
+  test("Chrome exposes one useful bounded summary per duplicate-prefix prompt", async () => {
     const viewport = { width: 320, height: 800 };
     const context = await browser.newContext({ viewport, hasTouch: true, isMobile: true });
     try {
@@ -288,30 +340,38 @@ describe("queue surface browser acceptance", () => {
 
       const collapsedTree = await chromeAccessibilityTree(page);
       const collapsedControl = collapsedTree.find(
-        (node) => node.role === "button" && node.name === "100 queued prompts",
+        (node) => !node.ignored && node.role === "button" && node.name === "100 queued prompts",
       );
       expect(collapsedControl).toBeDefined();
-      expect(collapsedControl?.description).toMatch(/^1 \/ 100\s+# Production migration/);
-      expect(Array.from(collapsedControl?.description ?? "").length).toBeLessThanOrEqual(181);
-      expect(accessibleTreeIncludes(collapsedTree, "Exact trailing line.")).toBe(false);
+      expect(collapsedControl?.description).toMatch(/^# Production migration/);
+      expect(collapsedControl?.description).toContain(queuePromptFingerprint(0));
+      expect(Array.from(collapsedControl?.description ?? "").length).toBeLessThanOrEqual(180);
+      expect(exposedNodesContaining(collapsedTree, queuePromptFingerprint(0))).toHaveLength(1);
+      expect(exposedTreeIncludes(collapsedTree, OMITTED_QUEUE_SOURCE_MARKER)).toBe(false);
 
       await page.getByRole("button", { name: "100 queued prompts", exact: true }).click();
       const expandedTree = await chromeAccessibilityTree(page);
-      const summaries = expandedTree
-        .filter((node) => node.role === "note" && /^Queued prompt \d+ summary: /.test(node.name))
-        .map((node) => node.name);
-      expect(summaries).toHaveLength(100);
-      expect(new Set(summaries).size).toBe(100);
-      for (let index = 0; index < summaries.length; index += 1) {
-        expect(
-          summaries[index]?.startsWith(`Queued prompt ${index + 1} summary: ${index + 1} / 100`),
-        ).toBe(true);
-        expect(Array.from(summaries[index] ?? "").length).toBeLessThanOrEqual(400);
+      const summaryNodes = queueSummaryNodes(expandedTree);
+      const contentSummaries = summaryNodes.map((node) =>
+        node.name.replace(/^Queued prompt \d+ summary: /, ""),
+      );
+      expect(summaryNodes).toHaveLength(100);
+      expect(new Set(contentSummaries).size).toBe(100);
+      for (let index = 0; index < summaryNodes.length; index += 1) {
+        expect(summaryNodes[index]?.name).toContain(queuePromptFingerprint(index));
+        expect(Array.from(contentSummaries[index] ?? "").length).toBeLessThanOrEqual(360);
+        expect(unignoredDescendants(expandedTree, summaryNodes[index]?.nodeId ?? "")).toHaveLength(
+          0,
+        );
+        expect(exposedNodesContaining(expandedTree, queuePromptFingerprint(index))).toHaveLength(1);
       }
-      expect(accessibleTreeIncludes(expandedTree, "Exact trailing line.")).toBe(false);
+      expect(exposedTreeIncludes(expandedTree, OMITTED_QUEUE_SOURCE_MARKER)).toBe(false);
       expect(
         expandedTree.some(
-          (node) => node.role === "region" && node.name === "Full content for queued prompt 1",
+          (node) =>
+            !node.ignored &&
+            node.role === "region" &&
+            node.name === "Full content for queued prompt 1",
         ),
       ).toBe(false);
 
@@ -321,36 +381,59 @@ describe("queue surface browser acceptance", () => {
           exact: true,
         })
         .click();
-      const exactPrompt = `1 / 100\n${HOSTILE_QUEUE_PROMPT}`;
+      const exactPrompt = queueHarnessPrompt(0);
       const disclosedTree = await chromeAccessibilityTree(page);
       const disclosedRegion = disclosedTree.find(
-        (node) => node.role === "region" && node.name === "Full content for queued prompt 1",
+        (node) =>
+          !node.ignored &&
+          node.role === "region" &&
+          node.name === "Full content for queued prompt 1",
       );
       expect(disclosedRegion).toBeDefined();
-      expect(disclosedTree.some((node) => node.name === exactPrompt)).toBe(true);
-      expect(accessibleTreeIncludes(disclosedTree, "Exact trailing line.")).toBe(true);
+      expect(disclosedTree.some((node) => !node.ignored && node.name === exactPrompt)).toBe(true);
+      expect(exposedTreeIncludes(disclosedTree, OMITTED_QUEUE_SOURCE_MARKER)).toBe(true);
       expect((await pageMetrics(page)).documentOverflow).toBeLessThanOrEqual(1);
       expect(diagnostics).toEqual([]);
 
       accessibilityEvidence = {
         viewport,
-        queueSize: summaries.length,
+        queueSize: summaryNodes.length,
         collapsed: {
           controlName: collapsedControl?.name ?? "",
           boundedDescription: collapsedControl?.description ?? "",
-          exactTrailingSourcePresent: accessibleTreeIncludes(collapsedTree, "Exact trailing line."),
+          fingerprintPresent:
+            collapsedControl?.description.includes(queuePromptFingerprint(0)) ?? false,
+          omittedMiddleSourcePresent: exposedTreeIncludes(
+            collapsedTree,
+            OMITTED_QUEUE_SOURCE_MARKER,
+          ),
         },
         expanded: {
-          summaryCount: summaries.length,
-          uniqueSummaryCount: new Set(summaries).size,
-          firstSummary: summaries[0] ?? "",
-          lastSummary: summaries.at(-1) ?? "",
-          exactTrailingSourcePresent: accessibleTreeIncludes(expandedTree, "Exact trailing line."),
+          summaryCount: summaryNodes.length,
+          uniqueContentSummaryCount: new Set(contentSummaries).size,
+          distinctiveFingerprintCount: summaryNodes.filter((node, index) =>
+            node.name.includes(queuePromptFingerprint(index)),
+          ).length,
+          repeatedDescendantCount: summaryNodes.reduce(
+            (count, node) => count + unignoredDescendants(expandedTree, node.nodeId).length,
+            0,
+          ),
+          firstSummary: summaryNodes[0]?.name ?? "",
+          lastSummary: summaryNodes.at(-1)?.name ?? "",
+          omittedMiddleSourcePresent: exposedTreeIncludes(
+            expandedTree,
+            OMITTED_QUEUE_SOURCE_MARKER,
+          ),
         },
         disclosed: {
           regionName: disclosedRegion?.name ?? "",
-          exactPromptPresent: disclosedTree.some((node) => node.name === exactPrompt),
-          exactTrailingSourcePresent: accessibleTreeIncludes(disclosedTree, "Exact trailing line."),
+          exactPromptPresent: disclosedTree.some(
+            (node) => !node.ignored && node.name === exactPrompt,
+          ),
+          omittedMiddleSourcePresent: exposedTreeIncludes(
+            disclosedTree,
+            OMITTED_QUEUE_SOURCE_MARKER,
+          ),
         },
       };
       await capture(page, viewport.width, "light", "disclosed");
@@ -361,6 +444,10 @@ describe("queue surface browser acceptance", () => {
 });
 
 type AccessibleTreeNode = {
+  nodeId: string;
+  parentId: string | null;
+  childIds: string[];
+  ignored: boolean;
   role: string;
   name: string;
   description: string;
@@ -370,13 +457,15 @@ async function chromeAccessibilityTree(page: Page): Promise<AccessibleTreeNode[]
   const session = await page.context().newCDPSession(page);
   try {
     const { nodes } = await session.send("Accessibility.getFullAXTree");
-    return nodes
-      .filter((node) => !node.ignored)
-      .map((node) => ({
-        role: accessibilityValue(node.role),
-        name: accessibilityValue(node.name),
-        description: accessibilityValue(node.description),
-      }));
+    return nodes.map((node) => ({
+      nodeId: node.nodeId,
+      parentId: node.parentId ?? null,
+      childIds: node.childIds ?? [],
+      ignored: node.ignored,
+      role: accessibilityValue(node.role),
+      name: accessibilityValue(node.name),
+      description: accessibilityValue(node.description),
+    }));
   } finally {
     await session.detach();
   }
@@ -386,8 +475,86 @@ function accessibilityValue(value: { value?: unknown } | undefined): string {
   return typeof value?.value === "string" ? value.value : "";
 }
 
-function accessibleTreeIncludes(nodes: AccessibleTreeNode[], expected: string): boolean {
-  return nodes.some((node) => node.name.includes(expected) || node.description.includes(expected));
+function queueSummaryNodes(nodes: AccessibleTreeNode[]): AccessibleTreeNode[] {
+  return nodes.filter(
+    (node) =>
+      !node.ignored && node.role === "note" && /^Queued prompt \d+ summary: /.test(node.name),
+  );
+}
+
+function exposedTreeIncludes(nodes: AccessibleTreeNode[], expected: string): boolean {
+  return exposedNodesContaining(nodes, expected).length > 0;
+}
+
+function exposedNodesContaining(
+  nodes: AccessibleTreeNode[],
+  expected: string,
+): AccessibleTreeNode[] {
+  return nodes.filter(
+    (node) =>
+      !node.ignored && (node.name.includes(expected) || node.description.includes(expected)),
+  );
+}
+
+function unignoredDescendants(
+  nodes: AccessibleTreeNode[],
+  rootNodeId: string,
+): AccessibleTreeNode[] {
+  const byId = new Map(nodes.map((node) => [node.nodeId, node]));
+  const pending = [...(byId.get(rootNodeId)?.childIds ?? [])];
+  const descendants: AccessibleTreeNode[] = [];
+  const visited = new Set<string>();
+  while (pending.length > 0) {
+    const nodeId = pending.shift();
+    if (!nodeId || visited.has(nodeId)) continue;
+    visited.add(nodeId);
+    const node = byId.get(nodeId);
+    if (!node) continue;
+    if (!node.ignored) descendants.push(node);
+    pending.push(...node.childIds);
+  }
+  return descendants;
+}
+
+async function sequentialQueueFocusOrder(page: Page): Promise<FocusMeasurement[]> {
+  const order: FocusMeasurement[] = [];
+  for (let index = 0; index < 6; index += 1) {
+    await page.keyboard.press("Tab");
+    order.push(
+      await page.evaluate(() => {
+        const element = document.activeElement as HTMLElement | null;
+        const bounds = element?.getBoundingClientRect();
+        return {
+          name: element?.getAttribute("aria-label") ?? "",
+          centerX: (bounds?.x ?? 0) + (bounds?.width ?? 0) / 2,
+          centerY: (bounds?.y ?? 0) + (bounds?.height ?? 0) / 2,
+        };
+      }),
+    );
+  }
+  return order;
+}
+
+function assertCoherentFocusGeometry(order: FocusMeasurement[], viewportWidth: number): void {
+  expect(order).toHaveLength(6);
+  if (viewportWidth <= 375) {
+    for (let index = 1; index < order.length; index += 1) {
+      expect((order[index]?.centerY ?? 0) + 1).toBeGreaterThanOrEqual(
+        order[index - 1]?.centerY ?? Infinity,
+      );
+    }
+    expect(order[1]?.centerY ?? 0).toBeGreaterThan(order[0]?.centerY ?? Infinity);
+    expect(order[2]?.centerY ?? 0).toBeGreaterThan(order[1]?.centerY ?? Infinity);
+    expect(order[3]?.centerX ?? 0).toBeGreaterThan(order[2]?.centerX ?? Infinity);
+    expect(order[4]?.centerX ?? 0).toBeGreaterThan(order[3]?.centerX ?? Infinity);
+    expect(order[5]?.centerY ?? 0).toBeGreaterThan(order[4]?.centerY ?? Infinity);
+    return;
+  }
+
+  for (let index = 1; index < 5; index += 1) {
+    expect(order[index]?.centerX ?? 0).toBeGreaterThan(order[index - 1]?.centerX ?? Infinity);
+  }
+  expect(order[5]?.centerY ?? 0).toBeGreaterThan(order[4]?.centerY ?? Infinity);
 }
 
 async function refreshQueue(page: Page): Promise<void> {
