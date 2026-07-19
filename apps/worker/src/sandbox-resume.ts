@@ -682,6 +682,7 @@ export async function resumeBoxForTurn(
             workspaceId: ids.workspaceId,
             sandboxGroupId: ids.sandboxGroupId,
             expectedEpoch,
+            rematerializationId: rematerialization?.id ?? null,
             instanceId: created.instanceId,
             resumeBackendId: created.backendId,
             resumeState: resumeEnvelope,

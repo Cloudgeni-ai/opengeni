@@ -196,6 +196,7 @@ export async function establishApiSandboxSpawner(input: {
           workspaceId: input.workspaceId,
           sandboxGroupId: input.sandboxGroupId,
           expectedEpoch: input.expectedEpoch,
+          rematerializationId: rematerialization?.id ?? null,
           instanceId: created.instanceId,
           resumeBackendId: created.backendId,
           resumeState,

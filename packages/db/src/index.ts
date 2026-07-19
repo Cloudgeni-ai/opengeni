@@ -15068,6 +15068,10 @@ export async function recordWarmingSandboxCreated(
     workspaceId: string;
     sandboxGroupId: string;
     expectedEpoch: number;
+    /** Exact restore attempt elected before provider create. Null for a fresh
+     *  archive-less create. Provider attribution is accepted only while the
+     *  warming row still carries this same attempt as well as this epoch. */
+    rematerializationId?: string | null;
     instanceId: string;
     resumeBackendId?: string | null;
     resumeState?: Record<string, unknown> | null;
@@ -15098,6 +15102,9 @@ export async function recordWarmingSandboxCreated(
         }
         const now = new Date().toISOString();
         const current = recoveryStateFromLeaseRow(row);
+        if (current.restore.rematerializationId !== (input.rematerializationId ?? null)) {
+          return { recorded: false, lease: mapLeaseRow(row) };
+        }
         const recovery: SandboxRecoveryState = {
           ...current,
           provider: {
@@ -15598,17 +15605,59 @@ export async function reapStaleLeaseHolders(
       `);
 
         // (c1) WARMING-death before provider create returned: no instance_id was
-        // ever persisted, so there is no provider box to stop. Reset to cold so a
-        // queued turn can re-acquire and re-spawn.
-        const warmingReset = await tx.execute<{ id: string }>(sql`
-        update sandbox_leases set
-          liveness = 'cold', instance_id = null,
-          resume_backend_id = null, resume_state = null,
-          data_plane_url = null, terminal_data_plane_url = null, updated_at = now()
+        // ever persisted, so there is no provider box to stop. Preserve the
+        // selected durable archive as a pending, archive-only cold envelope and
+        // advance the epoch before re-election. The bump fences a late create()
+        // callback from attributing its provider id to the successor attempt.
+        const expiredWarming = await tx.execute<LeaseRow>(sql`
+        select * from sandbox_leases
         where workspace_id = ${input.workspaceId}
           and liveness = 'warming' and expires_at < now() and instance_id is null
-        returning id
+        for update
       `);
+        let warmingReset = 0;
+        for (const row of expiredWarming) {
+          const current = recoveryStateFromLeaseRow(row);
+          const hasArchive = current.archive.status !== "none";
+          const resetAt = new Date().toISOString();
+          const restoreStatus: SandboxRestoreStatus =
+            current.archive.status === "available" ? "pending" : "degraded";
+          const resetResumeState = hasArchive
+            ? archiveOnlyResumeState(row, {
+                provider: { status: "not_created", instanceId: null, observedAt: resetAt },
+                archive: current.archive,
+                restore: {
+                  status: restoreStatus,
+                  rematerializationId: null,
+                  selectedRevision: current.archive.current?.revision ?? null,
+                  startedAt: null,
+                  completedAt: resetAt,
+                  ...(restoreStatus === "degraded"
+                    ? { failureCode: "archive_unverified", retryable: false }
+                    : {}),
+                },
+                workspace: {
+                  status: restoreStatus === "pending" ? "not_ready" : "degraded",
+                  verifiedRevision: null,
+                  verifiedAt: null,
+                },
+              })
+            : null;
+          const reset = await tx.execute<{ id: string }>(sql`
+          update sandbox_leases set
+            liveness = 'cold', instance_id = null,
+            lease_epoch = lease_epoch + 1,
+            resume_backend_id = case when ${hasArchive} then coalesce(resume_backend_id, backend) else null end,
+            resume_state = ${resetResumeState ? JSON.stringify(resetResumeState) : null}::jsonb,
+            data_plane_url = null, terminal_data_plane_url = null, updated_at = now()
+          where id = ${row.id}
+            and liveness = 'warming'
+            and lease_epoch = ${Number(row.lease_epoch)}
+            and instance_id is null
+          returning id
+        `);
+          warmingReset += reset.length;
+        }
 
         // (c2) WARMING-death after provider create returned: instance_id is known,
         // so do NOT drop it. Convert to immediately-drainable so the caller's
@@ -15647,7 +15696,7 @@ export async function reapStaleLeaseHolders(
         return {
           reapedViewers: reaped.length,
           reapedTurns: reapedTurnRows.length,
-          warmingReset: warmingReset.length + warmingDrain.length,
+          warmingReset: warmingReset + warmingDrain.length,
           drained: drainable.map((r) => ({
             workspaceId: input.workspaceId,
             sandboxGroupId: r.sandbox_group_id,

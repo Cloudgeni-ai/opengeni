@@ -743,15 +743,45 @@ export class SandboxExecReadinessError extends Error {
 
   constructor(
     public readonly backend: string,
-    public readonly code: "exec_probe_unavailable" | "exec_probe_timeout",
+    public readonly code: "exec_probe_unavailable" | "exec_probe_timeout" | "exec_probe_failed",
     public readonly timeoutMs: number,
+    public readonly exitCode: number | null = null,
   ) {
     super(
       code === "exec_probe_timeout"
         ? `sandbox creation timed out waiting for ${backend} command readiness after ${timeoutMs}ms`
-        : `${backend} sandbox session does not expose an exec readiness probe`,
+        : code === "exec_probe_unavailable"
+          ? `${backend} sandbox session does not expose an exec readiness probe`
+          : exitCode === null
+            ? `${backend} sandbox exec readiness probe did not return a command exit code`
+            : `${backend} sandbox exec readiness probe failed with exit code ${exitCode}`,
     );
   }
+}
+
+function sandboxExecProbeExitCode(result: unknown): number | null {
+  if (typeof result === "string") {
+    const match = result.match(/Process exited with code (-?\d+)/);
+    return match ? Number(match[1]) : null;
+  }
+  if (!result || typeof result !== "object") return null;
+  const candidate = result as {
+    exitCode?: unknown;
+    exit_code?: unknown;
+    code?: unknown;
+    status?: unknown;
+  };
+  for (const value of [candidate.exitCode, candidate.exit_code, candidate.code, candidate.status]) {
+    if (typeof value === "number") return value;
+  }
+  return null;
+}
+
+function sandboxExecProbeStillRunning(result: unknown): boolean {
+  if (typeof result === "string") return /Process running with session ID \d+/u.test(result);
+  if (!result || typeof result !== "object") return false;
+  const candidate = result as { sessionId?: unknown; session_id?: unknown };
+  return typeof candidate.sessionId === "number" || typeof candidate.session_id === "number";
 }
 
 /** A provider handle is not workspace readiness. Modal can return a handle
@@ -780,7 +810,7 @@ export async function verifySandboxExecReadiness(
   }
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    await Promise.race([
+    const result = await Promise.race([
       run.call(session, {
         cmd: "true",
         yieldTimeMs: 1_000,
@@ -797,6 +827,15 @@ export async function verifySandboxExecReadiness(
         if (timer && "unref" in timer && typeof timer.unref === "function") timer.unref();
       }),
     ]);
+    const exitCode = sandboxExecProbeExitCode(result);
+    if (sandboxExecProbeStillRunning(result) || exitCode !== 0) {
+      throw new SandboxExecReadinessError(
+        established.backendId,
+        "exec_probe_failed",
+        timeoutMs,
+        exitCode,
+      );
+    }
   } finally {
     if (timer) clearTimeout(timer);
   }

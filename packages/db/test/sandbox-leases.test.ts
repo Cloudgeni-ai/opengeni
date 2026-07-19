@@ -132,6 +132,57 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     expect(typeof row?.lease_epoch).toBe("number");
   }, 60_000);
 
+  test("(0a) recovery fence rejects markerless legacy updates and mixed-version inserts", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    await admin`
+      insert into sandbox_leases
+        (account_id, workspace_id, sandbox_group_id, liveness, backend, expires_at)
+      values
+        (${accountId}, ${workspaceId}, ${groupId}, 'cold', 'modal', now() + interval '60 seconds')
+    `;
+    const legacy = postgres(shared!.appUrl, { max: 1 });
+    try {
+      await expect(
+        legacy.begin(async (tx) => {
+          await tx`select set_config('opengeni.account_id', ${accountId}, true)`;
+          await tx`select set_config('opengeni.workspace_id', ${workspaceId}, true)`;
+          await tx`
+            update sandbox_leases
+            set liveness = 'warming'
+            where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}
+          `;
+        }),
+      ).rejects.toMatchObject({ code: "55000" });
+
+      await expect(
+        legacy.begin(async (tx) => {
+          await tx`select set_config('opengeni.account_id', ${accountId}, true)`;
+          await tx`select set_config('opengeni.workspace_id', ${workspaceId}, true)`;
+          await tx`
+            insert into sandbox_leases
+              (account_id, workspace_id, sandbox_group_id, liveness, backend, expires_at)
+            values
+              (${accountId}, ${workspaceId}, ${crypto.randomUUID()}, 'cold', 'modal', now() + interval '60 seconds')
+          `;
+        }),
+      ).rejects.toMatchObject({ code: "55000" });
+    } finally {
+      await legacy.end();
+    }
+
+    const acquired = await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "protocol-v1-owner",
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
+    expect(acquired.role).toBe("spawner");
+  }, 60_000);
+
   test("(1) N=50 concurrent cold acquires -> exactly ONE spawner, 49 attached, refcount=50, warming", async () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
@@ -194,6 +245,209 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     const after = await readRow(workspaceId, groupId);
     expect(after?.liveness).toBe("warming");
     expect(after?.instance_id).toBeNull();
+  }, 60_000);
+
+  test("(1b-2) pre-create timeout advances epoch, preserves the selected archive, and fences late callbacks", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    const archive = Buffer.from("ope-60-pre-create-timeout-archive").toString("base64");
+    const archiveHash = "d".repeat(64);
+    const descriptor = {
+      version: 1 as const,
+      revision: `wa1:1900000001000:${archiveHash}`,
+      archiveSha256: archiveHash,
+      archiveBytes: Buffer.from(archive, "base64").length,
+      capturedAt: "2030-03-17T17:46:41.000Z",
+      workspace: {
+        algorithm: "sha256" as const,
+        sha256: "e".repeat(64),
+        entryCount: 2,
+        fileCount: 1,
+        totalFileBytes: 31,
+      },
+    };
+    const first = await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "expired-owner",
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
+    expect(first.role).toBe("spawner");
+    const firstAttempt = crypto.randomUUID();
+    const begun = await beginSandboxRematerialization(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: 0,
+      rematerializationId: firstAttempt,
+      archiveSource: {
+        backendId: "modal",
+        sessionState: { workspaceArchive: archive, workspaceArchiveMeta: descriptor },
+      },
+    });
+    expect(begun.status).toBe("started");
+    await admin`
+      update sandbox_leases
+      set expires_at = now() - interval '1 second'
+      where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}
+    `;
+
+    await reapStaleLeaseHoldersGlobal(db, {
+      viewerHolderTtlMs: 90_000,
+      turnHolderTtlMs: 0,
+      idleGraceMs: 45_000,
+    });
+    const reset = await readLease(db, workspaceId, groupId);
+    expect(reset).toMatchObject({
+      liveness: "cold",
+      leaseEpoch: 1,
+      instanceId: null,
+      recovery: {
+        archive: { status: "available", current: { revision: descriptor.revision } },
+        restore: { status: "pending", rematerializationId: null },
+        workspace: { status: "not_ready" },
+      },
+    });
+    expect(
+      (reset?.resumeState?.sessionState as Record<string, unknown> | undefined)?.workspaceArchive,
+    ).toBe(archive);
+
+    const successor = await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "successor-owner",
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
+    expect(successor.role).toBe("spawner");
+    expect(successor.lease.leaseEpoch).toBe(1);
+    const successorAttempt = crypto.randomUUID();
+    const successorBegun = await beginSandboxRematerialization(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: 1,
+      rematerializationId: successorAttempt,
+    });
+    expect(successorBegun.status).toBe("started");
+
+    const staleEpoch = await recordWarmingSandboxCreated(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: 0,
+      rematerializationId: firstAttempt,
+      instanceId: "late-old-box",
+      leaseTtlMs: 45_000,
+    });
+    expect(staleEpoch.recorded).toBe(false);
+    const wrongAttempt = await recordWarmingSandboxCreated(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: 1,
+      rematerializationId: firstAttempt,
+      instanceId: "wrong-attempt-box",
+      leaseTtlMs: 45_000,
+    });
+    expect(wrongAttempt.recorded).toBe(false);
+    const attributed = await recordWarmingSandboxCreated(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: 1,
+      rematerializationId: successorAttempt,
+      instanceId: "successor-box",
+      resumeBackendId: "modal",
+      resumeState: { backendId: "modal" },
+      leaseTtlMs: 45_000,
+    });
+    expect(attributed.recorded).toBe(true);
+    expect(attributed.lease?.instanceId).toBe("successor-box");
+    expect(attributed.lease?.recovery.archive.current?.revision).toBe(descriptor.revision);
+  }, 60_000);
+
+  test("(1b-3) workspace-scoped warming reset preserves the same archive/epoch invariant", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    const archive = Buffer.from("ope-60-scoped-timeout-archive").toString("base64");
+    const archiveHash = "f".repeat(64);
+    const descriptor = {
+      version: 1 as const,
+      revision: `wa1:1900000002000:${archiveHash}`,
+      archiveSha256: archiveHash,
+      archiveBytes: Buffer.from(archive, "base64").length,
+      capturedAt: "2030-03-17T17:46:42.000Z",
+      workspace: {
+        algorithm: "sha256" as const,
+        sha256: "1".repeat(64),
+        entryCount: 1,
+        fileCount: 1,
+        totalFileBytes: 29,
+      },
+    };
+    const acquired = await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "scoped-expired-owner",
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
+    expect(acquired.role).toBe("spawner");
+    const attempt = crypto.randomUUID();
+    const begun = await beginSandboxRematerialization(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: 0,
+      rematerializationId: attempt,
+      archiveSource: {
+        backendId: "modal",
+        sessionState: { workspaceArchive: archive, workspaceArchiveMeta: descriptor },
+      },
+    });
+    expect(begun.status).toBe("started");
+    await admin`
+      update sandbox_leases
+      set expires_at = now() - interval '1 second'
+      where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}
+    `;
+    const reaped = await reapStaleLeaseHolders(db, {
+      workspaceId,
+      viewerHolderTtlMs: 90_000,
+      turnHolderTtlMs: 0,
+      idleGraceMs: 45_000,
+    });
+    expect(reaped.warmingReset).toBe(1);
+    const reset = await readLease(db, workspaceId, groupId);
+    expect(reset).toMatchObject({
+      liveness: "cold",
+      leaseEpoch: 1,
+      recovery: {
+        archive: { status: "available", current: { revision: descriptor.revision } },
+        restore: { status: "pending", rematerializationId: null },
+      },
+    });
+    expect(
+      (reset?.resumeState?.sessionState as Record<string, unknown> | undefined)?.workspaceArchive,
+    ).toBe(archive);
+    const late = await recordWarmingSandboxCreated(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: 0,
+      rematerializationId: attempt,
+      instanceId: "late-scoped-box",
+      leaseTtlMs: 45_000,
+    });
+    expect(late.recorded).toBe(false);
   }, 60_000);
 
   test("(1c) SKIP-LOCKED counterfactual: a concurrent arrival is SKIPPED (no row), proving plain FOR UPDATE is load-bearing", async () => {
@@ -1400,6 +1654,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       workspaceId,
       sandboxGroupId: groupId,
       expectedEpoch: 2,
+      rematerializationId,
       instanceId: "box-after-loss",
       resumeBackendId: "modal",
       resumeState: {
