@@ -11,4 +11,5 @@
 Bound model-facing textual tool output with Codex-compatible, replay-idempotent semantics, account
 for complete current model input, make compaction failure/progress transitions
 durable and convergent, and replace recursive session discovery with a compact
-paginated projection.
+paginated projection. Bound each SSE connection to one complete size-capped frame,
+terminate stalled readers, and surface bounded-cardinality delivery-pressure metrics.

@@ -63,6 +63,7 @@ import { CompactionNeededError } from "../src/context-compaction";
 import { startTestMcpServer, testSettings } from "@opengeni/testing";
 import type { MCPServer } from "@openai/agents";
 import {
+  boundModelToolOutputItem,
   codexRequestStorage,
   type CodexRequestContext,
   type CodexTokenSnapshot,
@@ -4255,6 +4256,53 @@ describe("provider item id stripping", () => {
     expect(text).toContain("tokens truncated");
     expect(Buffer.byteLength(text, "utf8")).toBeLessThan(50_000);
     expect(((input[1] as any).output as { text: string }).text).toBe(original);
+  });
+
+  test("final model-input filtering matches canonical structured persistence bounds", async () => {
+    const settings = testSettings({ modelToolOutputTruncationTokens: 100 });
+    const filter = callModelInputFilterForSettings(settings)!;
+    const output: Record<string, unknown> = {
+      type: "界😀".repeat(100_000),
+      name: "n".repeat(500_000),
+      id: "i".repeat(500_000),
+      detail: "d".repeat(500_000),
+      ...Object.fromEntries(
+        Array.from({ length: 2_000 }, (_, index) => [
+          `property-${String(index).padStart(4, "0")}`,
+          `value-${index}`,
+        ]),
+      ),
+    };
+    let cursor = output;
+    for (let depth = 0; depth < 14; depth += 1) {
+      const child: Record<string, unknown> = {};
+      cursor.child = child;
+      cursor = child;
+    }
+    cursor.payload = "x".repeat(2_000_000);
+    const item = {
+      type: "function_call_result",
+      callId: "structured-parity-1",
+      output,
+    };
+    const input = [item] as any;
+
+    const result = await filter({
+      modelData: { input },
+      agent: {} as any,
+      context: undefined,
+    });
+    const expected = boundModelToolOutputItem(item, settings.modelToolOutputTruncationTokens);
+    expect(result.input[0]).toEqual(expected);
+    expect(JSON.stringify(result.input[0])).toContain("structured object properties");
+    expect(Buffer.byteLength(JSON.stringify(result.input[0]), "utf8")).toBeLessThan(100_000);
+
+    const replayed = await filter({
+      modelData: { input: result.input },
+      agent: {} as any,
+      context: undefined,
+    });
+    expect(replayed.input).toEqual(result.input);
   });
 
   test("same-run provider totals add the complete trailing tool result before the next call", async () => {

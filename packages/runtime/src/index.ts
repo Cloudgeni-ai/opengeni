@@ -905,12 +905,15 @@ export function compactionProviderFailureDiagnostics(error: unknown): Record<str
   let code: string | null = null;
   let type: string | null = null;
   let requestId: string | null = null;
+  let eventType: string | null = null;
   const seen = new Set<object>();
   for (let depth = 0; depth < 6 && current && typeof current === "object"; depth += 1) {
     if (seen.has(current)) break;
     seen.add(current);
     const record = current as Record<string, unknown>;
-    if (!errorName && current instanceof Error) errorName = current.name;
+    if (!errorName && current instanceof Error) {
+      errorName = boundCompactionDiagnosticField(current.name);
+    }
     if (
       httpStatus === null &&
       typeof record.status === "number" &&
@@ -919,28 +922,63 @@ export function compactionProviderFailureDiagnostics(error: unknown): Record<str
       httpStatus = record.status;
     }
     if (responseStatus === null && typeof record.status === "string") {
-      responseStatus = record.status;
+      responseStatus = boundCompactionDiagnosticField(record.status);
     }
-    if (responseId === null && typeof record.id === "string") responseId = record.id;
-    if (code === null && typeof record.code === "string") code = record.code;
-    if (type === null && typeof record.type === "string") type = record.type;
+    const directResponseStatus = record.response_status ?? record.responseStatus;
+    if (responseStatus === null && typeof directResponseStatus === "string") {
+      responseStatus = boundCompactionDiagnosticField(directResponseStatus);
+    }
+    const directResponseId = record.response_id ?? record.responseId ?? record.id;
+    if (responseId === null && typeof directResponseId === "string") {
+      responseId = boundCompactionDiagnosticField(directResponseId);
+    }
+    if (code === null && typeof record.code === "string") {
+      code = boundCompactionDiagnosticField(record.code);
+    }
+    if (type === null && typeof record.type === "string") {
+      type = boundCompactionDiagnosticField(record.type);
+    }
+    const directEventType = record.event_type ?? record.eventType;
+    if (eventType === null && typeof directEventType === "string") {
+      eventType = boundCompactionDiagnosticField(directEventType);
+    }
     if (requestId === null) {
       const directRequestId = record.request_id ?? record.requestId ?? record._request_id;
-      if (typeof directRequestId === "string") requestId = directRequestId;
+      if (typeof directRequestId === "string") {
+        requestId = boundCompactionDiagnosticField(directRequestId);
+      }
       const headers = record.headers;
       if (!requestId && headers && typeof headers === "object") {
         const get = (headers as { get?: unknown }).get;
         if (typeof get === "function") {
           const headerId = get.call(headers, "x-request-id");
-          if (typeof headerId === "string") requestId = headerId;
+          if (typeof headerId === "string") {
+            requestId = boundCompactionDiagnosticField(headerId);
+          }
         }
       }
     }
     const nestedError = record.error;
     if (nestedError && typeof nestedError === "object" && !seen.has(nestedError)) {
       const nested = nestedError as Record<string, unknown>;
-      if (code === null && typeof nested.code === "string") code = nested.code;
-      if (type === null && typeof nested.type === "string") type = nested.type;
+      if (code === null && typeof nested.code === "string") {
+        code = boundCompactionDiagnosticField(nested.code);
+      }
+      if (type === null && typeof nested.type === "string") {
+        type = boundCompactionDiagnosticField(nested.type);
+      }
+      const nestedResponseStatus = nested.response_status ?? nested.responseStatus;
+      if (responseStatus === null && typeof nestedResponseStatus === "string") {
+        responseStatus = boundCompactionDiagnosticField(nestedResponseStatus);
+      }
+      const nestedResponseId = nested.response_id ?? nested.responseId ?? nested.id;
+      if (responseId === null && typeof nestedResponseId === "string") {
+        responseId = boundCompactionDiagnosticField(nestedResponseId);
+      }
+      const nestedEventType = nested.event_type ?? nested.eventType;
+      if (eventType === null && typeof nestedEventType === "string") {
+        eventType = boundCompactionDiagnosticField(nestedEventType);
+      }
     }
     current = record.cause;
   }
@@ -952,7 +990,24 @@ export function compactionProviderFailureDiagnostics(error: unknown): Record<str
     code,
     type,
     requestId,
+    ...(eventType ? { eventType } : {}),
   };
+}
+
+const COMPACTION_DIAGNOSTIC_FIELD_MAX_BYTES = 256;
+const COMPACTION_DIAGNOSTIC_TRUNCATION_MARKER = "…[truncated]";
+
+function boundCompactionDiagnosticField(value: string): string {
+  const bytes = Buffer.from(value, "utf8");
+  if (bytes.length <= COMPACTION_DIAGNOSTIC_FIELD_MAX_BYTES) return value;
+  const markerBytes = Buffer.byteLength(COMPACTION_DIAGNOSTIC_TRUNCATION_MARKER, "utf8");
+  let end = COMPACTION_DIAGNOSTIC_FIELD_MAX_BYTES - markerBytes;
+  while (end > 0 && isUtf8ContinuationByte(bytes[end]!)) end -= 1;
+  return `${bytes.subarray(0, end).toString("utf8")}${COMPACTION_DIAGNOSTIC_TRUNCATION_MARKER}`;
+}
+
+function isUtf8ContinuationByte(value: number): boolean {
+  return (value & 0xc0) === 0x80;
 }
 
 /** Bounded, content-free diagnostics for a semantically empty checkpoint. */

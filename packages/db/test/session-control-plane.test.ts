@@ -58,6 +58,7 @@ import {
 import * as schema from "../src/schema";
 import { and, eq } from "drizzle-orm";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { boundModelToolOutputItem } from "@opengeni/codex";
 
 let shared: SharedTestDatabase;
 let client: ReturnType<typeof createDb>;
@@ -254,6 +255,24 @@ describe("clean session control plane", () => {
       { attemptId },
     );
     const huge = "x".repeat(500_000);
+    const structuredOutput: Record<string, unknown> = {
+      type: "界😀".repeat(100_000),
+      name: "n".repeat(500_000),
+      id: "i".repeat(500_000),
+      detail: "d".repeat(500_000),
+    };
+    let structuredCursor = structuredOutput;
+    for (let depth = 0; depth < 14; depth += 1) {
+      const child: Record<string, unknown> = {};
+      structuredCursor.child = child;
+      structuredCursor = child;
+    }
+    structuredCursor.payload = huge;
+    const structuredItem = {
+      type: "function_call_result",
+      callId: "structured-call",
+      output: structuredOutput,
+    };
     expect(
       await appendSessionHistoryItems(client.db, {
         accountId: grant.accountId,
@@ -281,6 +300,7 @@ describe("clean session control plane", () => {
               output: { type: "text", text: huge },
             },
           },
+          { position: 2, item: structuredItem },
         ],
       }),
     ).toBe(true);
@@ -288,6 +308,11 @@ describe("clean session control plane", () => {
     const canonicalText = (canonical[1]!.item.output as { text: string }).text;
     expect(canonicalText).toContain("tokens truncated");
     expect(canonicalText.length).toBeLessThan(1_000);
+    expect(canonical[2]!.item).toEqual(boundModelToolOutputItem(structuredItem, 100));
+    expect(JSON.stringify(canonical[2]!.item)).toContain(
+      "maximum structured tool-output depth exceeded",
+    );
+    expect(Buffer.byteLength(JSON.stringify(canonical[2]!.item), "utf8")).toBeLessThan(10_000);
 
     expect(
       await registerPendingSessionToolCall(client.db, {

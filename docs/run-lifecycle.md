@@ -227,13 +227,21 @@ wrong one is the classic mistake.
    the model or advertised as a full-output evidence store.
 
 Those durable stores are still not the realtime or browser representation.
-NATS chunks bounded encoded messages; SSE uses bounded frames, a byte-counted
-server queue, latest-wins live notification state, and bounded-page Postgres
-replay/gap fill; REST uses byte-bounded forward prefixes/backward
-suffixes; and React retains only a newest-suffix count+byte window while keeping
-its resume cursor and latest status separately. Historical oversized event rows
-remain readable during the rolling migration and are defensively normalized at
-each outbound boundary. Generic omitted output is unavailable unless a separate
+NATS chunks bounded encoded messages; each session/workspace-control SSE body
+queues at most one complete frame of at most 96 KiB, retains one latest-wins
+live notification, and uses bounded-page Postgres replay/gap fill. If a second
+write sees non-positive `desiredSize` for 30 seconds, the API errors only that
+connection, releases its upstream subscription, and records a fixed-label bound
+metric; reconnect resumes from the client's last observed durable sequence.
+REST uses byte-bounded forward prefixes/backward suffixes; and
+React retains one direction-aware count+byte window. Live/default accumulation
+keeps the newest suffix. If backward paging retains an older prefix and evicts
+the live tail, the hook aborts that iterator and reconnects from the retained
+high-water mark, replaying the evicted tail before appending newer live rows.
+Its highest-ever-observed sequence and latest status are stored separately from
+that rewindable resume cursor. Historical oversized event rows remain readable
+during the rolling migration and are defensively normalized at each outbound
+boundary. Generic omitted output is unavailable unless a separate
 access-controlled artifact/file receipt explicitly retained it.
 
 Sandbox recovery state is persisted separately again, in

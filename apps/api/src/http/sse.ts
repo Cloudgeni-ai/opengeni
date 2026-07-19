@@ -6,9 +6,26 @@ import {
   SESSION_EVENT_SSE_FRAME_MAX_BYTES,
   type EventBus,
 } from "@opengeni/events";
+import type { Observability } from "@opengeni/observability";
 
 const SESSION_REPLAY_PAGE_SIZE = 100;
 const WORKSPACE_CONTROL_REPLAY_PAGE_SIZE = 100;
+export const SSE_QUEUED_FRAME_MAX_COUNT = 1;
+export const SSE_WRITE_STALL_TIMEOUT_MS = 30_000;
+
+export type SseDeliveryBoundObservation = {
+  reason: "desired_size_non_positive" | "stall_timeout" | "frame_too_large";
+  desiredSize: number | null;
+  queuedFrames: number;
+  queuedBytes: number;
+};
+
+export type ByteBoundedSseStreamOptions = {
+  maxQueuedBytes?: number;
+  stallTimeoutMs?: number;
+  onStop?: () => void;
+  onObservation?: (observation: SseDeliveryBoundObservation) => void;
+};
 
 export type ByteBoundedSseStream = {
   stream: ReadableStream<Uint8Array>;
@@ -23,21 +40,30 @@ export type ByteBoundedSseStream = {
  * itself wait for a slow HTTP consumer, so replaying bounded frames without
  * checking `desiredSize` can still accumulate an unbounded server-side queue.
  *
- * One writer is expected per stream. A write waits until the full encoded frame
- * fits inside the byte high-water mark. Cancellation wakes that writer and
- * returns `false`, allowing durable replay to stop without reading more pages.
+ * One writer is expected per stream. The Web Streams queue holds at most one
+ * complete frame, and that frame must fit inside the byte cap. A second write
+ * waits for consumer pull only for a bounded interval; cancellation or a stalled
+ * reader wakes it and terminates upstream delivery before another durable page is
+ * read. One frame is deliberate: it makes both queued-frame count and queued
+ * bytes independently bounded instead of relying on byte accounting alone.
  */
 export function createByteBoundedSseStream(
-  maxQueuedBytes = SESSION_EVENT_SSE_FRAME_MAX_BYTES,
-  onCancel: () => void = () => {},
+  options: ByteBoundedSseStreamOptions = {},
 ): ByteBoundedSseStream {
+  const maxQueuedBytes = options.maxQueuedBytes ?? SESSION_EVENT_SSE_FRAME_MAX_BYTES;
+  const stallTimeoutMs = options.stallTimeoutMs ?? SSE_WRITE_STALL_TIMEOUT_MS;
   if (!Number.isSafeInteger(maxQueuedBytes) || maxQueuedBytes <= 0) {
     throw new RangeError("SSE byte high-water mark must be a positive safe integer");
+  }
+  if (!Number.isSafeInteger(stallTimeoutMs) || stallTimeoutMs <= 0) {
+    throw new RangeError("SSE write stall timeout must be a positive safe integer");
   }
   const encoder = new TextEncoder();
   let controller!: ReadableStreamDefaultController<Uint8Array>;
   let stopped = false;
   let capacityWake: (() => void) | null = null;
+  let queuedFrames = 0;
+  let queuedBytes = 0;
 
   const wakeWriter = () => {
     const wake = capacityWake;
@@ -48,6 +74,7 @@ export function createByteBoundedSseStream(
     if (stopped) return;
     stopped = true;
     wakeWriter();
+    options.onStop?.();
     try {
       settle();
     } catch {
@@ -61,18 +88,23 @@ export function createByteBoundedSseStream(
         controller = rawController;
       },
       pull: () => {
+        // With a one-frame high-water mark, pull after an enqueue means that
+        // frame has left the controller queue (either delivered to a pending
+        // read or consumed by the HTTP adapter). There is no hidden second frame.
+        queuedFrames = 0;
+        queuedBytes = 0;
         wakeWriter();
       },
       cancel: () => {
         if (stopped) return;
         stopped = true;
         wakeWriter();
-        onCancel();
+        options.onStop?.();
       },
     },
     {
-      highWaterMark: maxQueuedBytes,
-      size: (chunk) => chunk?.byteLength ?? 0,
+      highWaterMark: SSE_QUEUED_FRAME_MAX_COUNT,
+      size: () => 1,
     },
   );
 
@@ -81,21 +113,60 @@ export function createByteBoundedSseStream(
     write: async (frame) => {
       const chunk = encoder.encode(frame);
       if (chunk.byteLength > maxQueuedBytes) {
-        throw new RangeError(
+        const error = new RangeError(
           `SSE frame cannot fit in the configured queue (${chunk.byteLength} > ${maxQueuedBytes} bytes)`,
         );
+        options.onObservation?.({
+          reason: "frame_too_large",
+          desiredSize: controller.desiredSize,
+          queuedFrames,
+          queuedBytes,
+        });
+        stop(() => controller.error(error));
+        throw error;
       }
       for (;;) {
         if (stopped) return false;
         const desired = controller.desiredSize;
         if (desired === null) return false;
-        if (desired >= chunk.byteLength) {
+        if (desired >= 1 && queuedFrames === 0) {
           controller.enqueue(chunk);
+          queuedFrames = 1;
+          queuedBytes = chunk.byteLength;
           return true;
         }
-        await new Promise<void>((resolve) => {
-          capacityWake = resolve;
+        options.onObservation?.({
+          reason: "desired_size_non_positive",
+          desiredSize: desired,
+          queuedFrames,
+          queuedBytes,
         });
+        const outcome = await new Promise<"capacity" | "timeout">((resolve) => {
+          let settled = false;
+          const finish = (result: "capacity" | "timeout") => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            if (capacityWake === wake) capacityWake = null;
+            resolve(result);
+          };
+          const wake = () => finish("capacity");
+          const timer = setTimeout(() => finish("timeout"), stallTimeoutMs);
+          capacityWake = wake;
+        });
+        if (outcome === "timeout" && !stopped) {
+          const error = new TypeError(
+            `SSE consumer did not drain the single-frame queue within ${stallTimeoutMs}ms`,
+          );
+          options.onObservation?.({
+            reason: "stall_timeout",
+            desiredSize: controller.desiredSize,
+            queuedFrames,
+            queuedBytes,
+          });
+          stop(() => controller.error(error));
+          throw error;
+        }
       }
     },
     close: () => stop(() => controller.close()),
@@ -178,21 +249,28 @@ export async function sseSessionStream(
   sessionId: string,
   after: number,
   signal: AbortSignal,
+  options: SseDeliveryOptions = {},
 ): Promise<Response> {
   let lastSent = after;
   let bootstrapping = true;
   let newestBuffered: SessionEvent | null = null;
   let unsubscribe: (() => void) | null = null;
   let delivery: LatestWinsDelivery<SessionEvent> | null = null;
-  const channel = createByteBoundedSseStream(SESSION_EVENT_SSE_FRAME_MAX_BYTES, () => {
+  const stopUpstream = () => {
     delivery?.stop();
-    unsubscribe?.();
+    const release = unsubscribe;
+    unsubscribe = null;
+    release?.();
+  };
+  const channel = createByteBoundedSseStream({
+    maxQueuedBytes: options.maxQueuedBytes ?? SESSION_EVENT_SSE_FRAME_MAX_BYTES,
+    ...(options.stallTimeoutMs === undefined ? {} : { stallTimeoutMs: options.stallTimeoutMs }),
+    onObservation: sseObservationReporter("session", options),
+    onStop: stopUpstream,
   });
 
   const fail = (error: unknown) => {
-    delivery?.stop();
-    unsubscribe?.();
-    channel.fail(error);
+    channel.fail(retryableSseFailure("session event stream delivery failed", error));
   };
   const writeFrame = async (frame: string) => {
     if (!(await channel.write(frame))) {
@@ -233,7 +311,7 @@ export async function sseSessionStream(
   delivery = createLatestWinsDelivery(send, fail);
 
   void (async () => {
-    unsubscribe = await bus.subscribe(workspaceId, sessionId, (events) => {
+    const release = await bus.subscribe(workspaceId, sessionId, (events) => {
       if (bootstrapping) {
         for (const event of events) {
           if (!newestBuffered || event.sequence > newestBuffered.sequence) {
@@ -244,6 +322,11 @@ export async function sseSessionStream(
         delivery?.publish(events);
       }
     });
+    if (channel.stopped()) {
+      release();
+      return;
+    }
+    unsubscribe = release;
 
     await replaySessionEvents(
       (cursor, limit) => listSessionEvents(db, workspaceId, sessionId, cursor, limit),
@@ -261,8 +344,6 @@ export async function sseSessionStream(
   });
 
   const abort = () => {
-    delivery?.stop();
-    unsubscribe?.();
     channel.close();
   };
   if (signal.aborted) abort();
@@ -312,21 +393,28 @@ export async function sseWorkspaceControlStream(
   workspaceId: string,
   after: number,
   signal: AbortSignal,
+  options: SseDeliveryOptions = {},
 ): Promise<Response> {
   let lastSent = after;
   let bootstrapping = true;
   let newestBuffered: WorkspaceControlEvent | null = null;
   let unsubscribe: (() => void) | null = null;
   let delivery: LatestWinsDelivery<WorkspaceControlEvent> | null = null;
-  const channel = createByteBoundedSseStream(SESSION_EVENT_SSE_FRAME_MAX_BYTES, () => {
+  const stopUpstream = () => {
     delivery?.stop();
-    unsubscribe?.();
+    const release = unsubscribe;
+    unsubscribe = null;
+    release?.();
+  };
+  const channel = createByteBoundedSseStream({
+    maxQueuedBytes: options.maxQueuedBytes ?? SESSION_EVENT_SSE_FRAME_MAX_BYTES,
+    ...(options.stallTimeoutMs === undefined ? {} : { stallTimeoutMs: options.stallTimeoutMs }),
+    onObservation: sseObservationReporter("workspace_control", options),
+    onStop: stopUpstream,
   });
 
   const fail = (error: unknown) => {
-    delivery?.stop();
-    unsubscribe?.();
-    channel.fail(error);
+    channel.fail(retryableSseFailure("workspace control stream delivery failed", error));
   };
   const writeFrame = async (frame: string) => {
     if (!(await channel.write(frame))) throw new SseStreamStoppedError();
@@ -362,13 +450,18 @@ export async function sseWorkspaceControlStream(
   delivery = createLatestWinsDelivery(send, fail);
 
   void (async () => {
-    unsubscribe = await bus.subscribeWorkspaceControl(workspaceId, (event) => {
+    const release = await bus.subscribeWorkspaceControl(workspaceId, (event) => {
       if (bootstrapping) {
         if (!newestBuffered || event.sequence > newestBuffered.sequence) newestBuffered = event;
       } else {
         delivery?.publish([event]);
       }
     });
+    if (channel.stopped()) {
+      release();
+      return;
+    }
+    unsubscribe = release;
     await replayWorkspaceControlEvents(
       (cursor, limit) => listWorkspaceControlEvents(db, workspaceId, cursor, limit),
       send,
@@ -385,8 +478,6 @@ export async function sseWorkspaceControlStream(
   });
 
   const abort = () => {
-    delivery?.stop();
-    unsubscribe?.();
     channel.close();
   };
   if (signal.aborted) abort();
@@ -427,3 +518,37 @@ async function replayWorkspaceControlEvents(
 }
 
 class SseStreamStoppedError extends Error {}
+
+export type SseDeliveryOptions = {
+  maxQueuedBytes?: number;
+  stallTimeoutMs?: number;
+  observability?: Observability | undefined;
+  onObservation?: ((observation: SseDeliveryBoundObservation) => void) | undefined;
+};
+
+function sseObservationReporter(
+  stream: "session" | "workspace_control",
+  options: SseDeliveryOptions,
+): (observation: SseDeliveryBoundObservation) => void {
+  return (observation) => {
+    options.onObservation?.(observation);
+    options.observability?.incrementCounter({
+      name: "opengeni_sse_delivery_bound_events_total",
+      help: "SSE writes that encountered a configured queue, frame, or stall bound.",
+      labels: { stream, reason: observation.reason },
+    });
+    if (observation.reason !== "desired_size_non_positive") {
+      options.observability?.warn("SSE delivery terminated at a bounded stream seam", {
+        stream,
+        reason: observation.reason,
+        desiredSize: observation.desiredSize,
+        queuedFrames: observation.queuedFrames,
+        queuedBytes: observation.queuedBytes,
+      });
+    }
+  };
+}
+
+function retryableSseFailure(message: string, error: unknown): TypeError {
+  return error instanceof TypeError ? error : new TypeError(message, { cause: error });
+}

@@ -3,7 +3,7 @@ import { createByteBoundedSseStream, createLatestWinsDelivery } from "../src/htt
 
 describe("SSE server-side backpressure", () => {
   test("does not enqueue another frame until its encoded bytes fit", async () => {
-    const channel = createByteBoundedSseStream(8);
+    const channel = createByteBoundedSseStream({ maxQueuedBytes: 8 });
 
     expect(await channel.write("12345678")).toBeTrue();
     let secondSettled = false;
@@ -26,15 +26,17 @@ describe("SSE server-side backpressure", () => {
   });
 
   test("rejects a frame larger than the entire byte queue", async () => {
-    const channel = createByteBoundedSseStream(4);
+    const channel = createByteBoundedSseStream({ maxQueuedBytes: 4 });
     await expect(channel.write("12345")).rejects.toThrow("cannot fit");
-    channel.close();
   });
 
   test("consumer cancellation wakes a capacity-blocked writer", async () => {
     let cancelled = 0;
-    const channel = createByteBoundedSseStream(4, () => {
-      cancelled += 1;
+    const channel = createByteBoundedSseStream({
+      maxQueuedBytes: 4,
+      onStop: () => {
+        cancelled += 1;
+      },
     });
     expect(await channel.write("1234")).toBeTrue();
     const blocked = channel.write("5678");
@@ -43,6 +45,43 @@ describe("SSE server-side backpressure", () => {
 
     expect(await blocked).toBeFalse();
     expect(cancelled).toBe(1);
+  });
+
+  test("terminates a non-reading consumer with one queued frame and bounded bytes", async () => {
+    const observations: Array<{
+      reason: string;
+      desiredSize: number | null;
+      queuedFrames: number;
+      queuedBytes: number;
+    }> = [];
+    let stopped = 0;
+    const channel = createByteBoundedSseStream({
+      maxQueuedBytes: 8,
+      stallTimeoutMs: 10,
+      onStop: () => {
+        stopped += 1;
+      },
+      onObservation: (observation) => observations.push(observation),
+    });
+
+    expect(await channel.write("12345678")).toBeTrue();
+    await expect(channel.write("abcdefgh")).rejects.toThrow("single-frame queue");
+
+    expect(stopped).toBe(1);
+    expect(observations).toContainEqual({
+      reason: "desired_size_non_positive",
+      desiredSize: 0,
+      queuedFrames: 1,
+      queuedBytes: 8,
+    });
+    expect(observations).toContainEqual({
+      reason: "stall_timeout",
+      desiredSize: 0,
+      queuedFrames: 1,
+      queuedBytes: 8,
+    });
+    const reader = channel.stream.getReader();
+    await expect(reader.read()).rejects.toBeInstanceOf(TypeError);
   });
 });
 

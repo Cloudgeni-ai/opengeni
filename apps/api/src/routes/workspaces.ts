@@ -199,7 +199,14 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "workspace:read");
     const after = Math.max(0, Number.parseInt(c.req.query("after") ?? "0", 10) || 0);
-    return await sseWorkspaceControlStream(deps.db, deps.bus, workspaceId, after, c.req.raw.signal);
+    return await sseWorkspaceControlStream(
+      deps.db,
+      deps.bus,
+      workspaceId,
+      after,
+      c.req.raw.signal,
+      { observability: deps.observability },
+    );
   });
 
   app.put("/v1/workspaces/:workspaceId/default-rig", async (c) => {

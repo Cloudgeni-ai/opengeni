@@ -332,6 +332,11 @@ async function sseToJsonResponse(res: Response): Promise<Response> {
           ev.response?.error,
           "response_failed",
           "The Codex response failed",
+          {
+            eventType: ev.type,
+            responseId: ev.response?.id,
+            responseStatus: ev.response?.status,
+          },
         );
       } else if (ev.type === "error" || ev.type === "response.error") {
         terminalError = codexSseFailureResponse(
@@ -339,6 +344,11 @@ async function sseToJsonResponse(res: Response): Promise<Response> {
           ev.error ?? ev.response?.error ?? ev,
           "response_error",
           "The Codex response stream reported an error",
+          {
+            eventType: ev.type,
+            responseId: ev.response?.id,
+            responseStatus: ev.response?.status,
+          },
         );
       } else if (ev.type === "response.incomplete") {
         const details = ev.response?.incomplete_details;
@@ -357,6 +367,11 @@ async function sseToJsonResponse(res: Response): Promise<Response> {
           },
           "response_incomplete",
           "The Codex response was incomplete",
+          {
+            eventType: ev.type,
+            responseId: ev.response?.id,
+            responseStatus: ev.response?.status,
+          },
         );
       } else if (ev.type === "response.completed" || ev.type === "response.done") {
         final = ev.response ?? null;
@@ -467,6 +482,11 @@ function codexSseFailureResponse(
   rawError: unknown,
   fallbackCode: string,
   fallbackMessage: string,
+  metadata: {
+    eventType?: unknown;
+    responseId?: unknown;
+    responseStatus?: unknown;
+  } = {},
 ): Response {
   const record =
     rawError && typeof rawError === "object" && !Array.isArray(rawError)
@@ -479,6 +499,18 @@ function codexSseFailureResponse(
     CODEX_TERMINAL_ERROR_MESSAGE_MAX_BYTES,
   );
   const paramField = boundedTerminalErrorField(record.param, CODEX_TERMINAL_ERROR_FIELD_MAX_BYTES);
+  const eventTypeField = boundedTerminalErrorField(
+    metadata.eventType,
+    CODEX_TERMINAL_ERROR_FIELD_MAX_BYTES,
+  );
+  const responseIdField = boundedTerminalErrorField(
+    metadata.responseId,
+    CODEX_TERMINAL_ERROR_FIELD_MAX_BYTES,
+  );
+  const responseStatusField = boundedTerminalErrorField(
+    metadata.responseStatus,
+    CODEX_TERMINAL_ERROR_FIELD_MAX_BYTES,
+  );
   const providerType =
     typeField.value === "error" ||
     typeField.value === "response.error" ||
@@ -494,6 +526,9 @@ function codexSseFailureResponse(
     codeField.truncated ||
     messageField.truncated ||
     paramField.truncated ||
+    eventTypeField.truncated ||
+    responseIdField.truncated ||
+    responseStatusField.truncated ||
     Object.keys(record).some((key) => !["type", "code", "message", "param"].includes(key)) ||
     (rawError !== null &&
       rawError !== undefined &&
@@ -504,6 +539,9 @@ function codexSseFailureResponse(
     code,
     message: messageField.value?.length ? messageField.value : fallbackMessage,
     ...(paramField.value?.length ? { param: paramField.value } : {}),
+    ...(eventTypeField.value?.length ? { event_type: eventTypeField.value } : {}),
+    ...(responseIdField.value?.length ? { response_id: responseIdField.value } : {}),
+    ...(responseStatusField.value?.length ? { response_status: responseStatusField.value } : {}),
     ...(diagnosticTruncated ? { diagnostic_truncated: true } : {}),
   };
   const status =

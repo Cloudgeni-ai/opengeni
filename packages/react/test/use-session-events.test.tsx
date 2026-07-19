@@ -65,14 +65,15 @@ function scriptedClient(input: {
       return input.listEvents ? await input.listEvents(options) : listPage(input.store, options);
     },
     streamEvents: (_workspaceId, _sessionId, options = {}) => {
-      streamCalls.push(options.after ?? 0);
+      const after = options.after ?? 0;
+      streamCalls.push(after);
       const streamed = input.streamEvents ?? [];
       return (async function* () {
         for (const item of streamed) {
           if (options.signal?.aborted) {
             return;
           }
-          yield item;
+          if (item.sequence > after) yield item;
         }
       })();
     },
@@ -439,7 +440,7 @@ describe("useSessionEvents", () => {
         event(index + 2, "machine.op.recovered", { attempt: index + 1 }),
       ),
     ];
-    const { client, listCalls } = scriptedClient({
+    const { client, listCalls, streamCalls } = scriptedClient({
       store: streamed,
       streamEvents: streamed,
     });
@@ -468,9 +469,88 @@ describe("useSessionEvents", () => {
     await flush(20);
     expect(more).toBeFalse();
     expect(listCalls).toEqual([{ before: oldFirst, limit: 5000, compact: true }]);
-    expect(hook.result.current.events[0]?.sequence).toBe(1);
-    expect(hook.result.current.events[0]!.sequence).toBeLessThan(oldFirst);
-    expect(hook.result.current.hasOlder).toBeFalse();
+    // The loaded prefix temporarily retained 1..10000. Reconnecting from
+    // 10000 then replayed 10001..10051, restoring one contiguous newest suffix
+    // instead of appending live rows across a historical gap.
+    expect(streamCalls).toEqual([0, 10_000]);
+    expect(hook.result.current.events[0]?.sequence).toBe(oldFirst);
+    expect(hook.result.current.events.at(-1)?.sequence).toBe(streamed.length);
+    expect(hook.result.current.hasOlder).toBeTrue();
+    const recoveredSequences = hook.result.current.events.map((item) => item.sequence);
+    expect(
+      recoveredSequences.every(
+        (sequence, index) => index === 0 || sequence === recoveredSequences[index - 1]! + 1,
+      ),
+    ).toBeTrue();
+
+    await hook.unmount();
+  });
+
+  test("backward paging reconnects from the retained tail before appending live events", async () => {
+    const historical = Array.from({ length: SESSION_EVENT_BROWSER_MAX_COUNT + 51 }, (_, index) =>
+      event(index + 1),
+    );
+    const throughLive = [...historical, event(SESSION_EVENT_BROWSER_MAX_COUNT + 52)];
+    const listCalls: ListOptions[] = [];
+    const streamCalls: number[] = [];
+    let connection = 0;
+    const client = fakeClient({
+      listEvents: async (_workspaceId, _sessionId, options = {}) => {
+        listCalls.push(options);
+        return listPage(historical, options);
+      },
+      streamEvents: (_workspaceId, _sessionId, options = {}) => {
+        const after = options.after ?? 0;
+        streamCalls.push(after);
+        connection += 1;
+        const source = connection === 1 ? historical : throughLive;
+        return (async function* () {
+          for (const item of source) {
+            if (options.signal?.aborted) return;
+            if (item.sequence > after) yield item;
+          }
+          await new Promise<void>((resolve) => {
+            if (options.signal?.aborted) {
+              resolve();
+              return;
+            }
+            options.signal?.addEventListener("abort", () => resolve(), { once: true });
+          });
+        })();
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useSessionEvents(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          replay: "full",
+        }),
+      undefined,
+    );
+    await flush(100);
+
+    expect(hook.result.current.events[0]?.sequence).toBe(52);
+    expect(hook.result.current.events.at(-1)?.sequence).toBe(10_051);
+    expect(hook.result.current.lastSequence).toBe(10_051);
+
+    const more = await actRun(() => hook.result.current.loadOlder());
+    await flush(100);
+
+    expect(more).toBeFalse();
+    expect(listCalls).toEqual([{ before: 52, limit: 5000, compact: true }]);
+    // loadOlder retained 1..10000, then the restarted stream replayed the
+    // evicted 10001..10051 tail before delivering the new live row 10052.
+    expect(streamCalls).toEqual([0, 10_000]);
+    expect(hook.result.current.events[0]?.sequence).toBe(53);
+    expect(hook.result.current.events.at(-1)?.sequence).toBe(10_052);
+    expect(hook.result.current.lastSequence).toBe(10_052);
+    const sequences = hook.result.current.events.map((item) => item.sequence);
+    expect(
+      sequences.every((sequence, index) => index === 0 || sequence === sequences[index - 1]! + 1),
+    ).toBeTrue();
+    expect(sequences).toContain(10_001);
+    expect(sequences).toContain(10_051);
 
     await hook.unmount();
   });

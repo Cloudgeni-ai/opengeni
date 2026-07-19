@@ -744,6 +744,9 @@ describe("provider-proof compaction transcript", () => {
     expect(observed).toMatchObject({
       diagnostics: {
         httpStatus: 502,
+        responseStatus: "failed",
+        responseId: "resp_terminal_failure",
+        eventType: "response.failed",
         type: "server_error",
         code: "checkpoint_failed",
       },

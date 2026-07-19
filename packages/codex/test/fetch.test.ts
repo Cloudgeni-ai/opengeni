@@ -259,6 +259,9 @@ describe("codexSubscriptionFetch", () => {
         type: "context_length_exceeded",
         code: "context_length_exceeded",
         message: "input too large",
+        event_type: "response.failed",
+        response_id: "resp_failed",
+        response_status: "failed",
       },
     });
     expect(calls).toBe(1);
@@ -414,6 +417,9 @@ describe("codexSubscriptionFetch", () => {
         type: "server_error",
         code: "upstream_failed",
         message: "checkpoint backend failed",
+        event_type: "response.failed",
+        response_id: "resp_failed",
+        response_status: "failed",
       },
     });
   });
@@ -443,6 +449,7 @@ describe("codexSubscriptionFetch", () => {
         code: "service_unavailable",
         message: "stream worker unavailable",
         param: "input",
+        event_type: "response.error",
       },
     });
   });
@@ -547,8 +554,8 @@ describe("codexSubscriptionFetch", () => {
             `data: ${JSON.stringify({
               type: "response.failed",
               response: {
-                id: "resp_bounded",
-                status: "failed",
+                id: `resp_${oversized}`,
+                status: oversized,
                 error: {
                   type: "server_error",
                   code: "diagnostic_too_large",
@@ -577,6 +584,9 @@ describe("codexSubscriptionFetch", () => {
         type: "server_error",
         code: "diagnostic_too_large",
         message: expect.stringMatching(/… \[truncated\]$/),
+        event_type: "response.failed",
+        response_id: expect.stringMatching(/… \[truncated\]$/),
+        response_status: expect.stringMatching(/… \[truncated\]$/),
         diagnostic_truncated: true,
       },
     });

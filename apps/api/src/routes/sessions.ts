@@ -522,6 +522,7 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       sessionId,
       Number.isFinite(after) ? after : 0,
       c.req.raw.signal,
+      { observability: deps.observability },
     );
   });
 

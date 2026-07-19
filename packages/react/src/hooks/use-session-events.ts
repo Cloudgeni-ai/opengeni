@@ -119,10 +119,14 @@ export function useSessionEvents(
   );
   const [initialLoading, setInitialLoading] = useState(true);
   const [loadingOlder, setLoadingOlder] = useState(false);
+  const [streamEpoch, setStreamEpoch] = useState(0);
   const lastSequenceRef = useRef(after);
+  const streamResumeSequenceRef = useRef(after);
   const oldestSequenceRef = useRef<number | null>(null);
   const hasOlderRef = useRef(false);
   const loadingOlderRef = useRef(false);
+  const initialWindowLoadedRef = useRef(false);
+  const streamAbortRef = useRef<AbortController | null>(null);
   const streamKeyRef = useRef<string | null>(null);
   const generationRef = useRef(0);
   const eventWindowRef = useRef<BrowserSessionEventWindow>(EMPTY_EVENT_WINDOW);
@@ -153,15 +157,18 @@ export function useSessionEvents(
       setLoadingOlder(false);
       setInitialLoading(true);
       lastSequenceRef.current = after;
+      streamResumeSequenceRef.current = after;
       oldestSequenceRef.current = null;
       hasOlderRef.current = false;
       loadingOlderRef.current = false;
+      initialWindowLoadedRef.current = false;
     }
     if (!sessionId || !enabled) {
       setConnectionState("idle");
       return;
     }
     const controller = new AbortController();
+    streamAbortRef.current = controller;
     // Batch yielded events into one React update per flush window so a long
     // replay (thousands of events) does not render per event.
     let pending: SessionEvent[] = [];
@@ -178,9 +185,11 @@ export function useSessionEvents(
       // the next connect instead of being skipped.
       const lastInBatch = batch[batch.length - 1];
       if (lastInBatch) {
-        lastSequenceRef.current = Math.max(
-          lastSequenceRef.current,
-          ...batch.map(eventResumeSequence),
+        const batchResumeSequence = Math.max(...batch.map(eventResumeSequence));
+        lastSequenceRef.current = Math.max(lastSequenceRef.current, batchResumeSequence);
+        streamResumeSequenceRef.current = Math.max(
+          streamResumeSequenceRef.current,
+          batchResumeSequence,
         );
       }
       observeSessionStatus(batch, sessionStatusRef, setSessionStatusProjection);
@@ -204,7 +213,7 @@ export function useSessionEvents(
 
     void (async () => {
       try {
-        if (!fullReplay) {
+        if (!fullReplay && !initialWindowLoadedRef.current) {
           setConnectionState("connecting");
           // First paint is ONE compact fetch — the newest window, revealed at
           // the bottom in a few hundred ms. Deeper history loads only when the
@@ -226,6 +235,8 @@ export function useSessionEvents(
           oldestSequenceRef.current = retained.events[0]?.sequence ?? window.oldestSequence;
           hasOlderRef.current = window.hasOlder || retained.truncated;
           lastSequenceRef.current = window.newestSequence;
+          streamResumeSequenceRef.current = window.newestSequence;
+          initialWindowLoadedRef.current = true;
           setHasOlder(window.hasOlder || retained.truncated);
           setInitialLoading(false);
         }
@@ -233,7 +244,7 @@ export function useSessionEvents(
           setInitialLoading(false);
         }
         const stream = client.streamEvents(workspaceId, sessionId, {
-          after: lastSequenceRef.current,
+          after: streamResumeSequenceRef.current,
           signal: controller.signal,
           beforeLive: async () => await reconcileSession(sessionId),
           onStateChange: (state) => {
@@ -261,11 +272,24 @@ export function useSessionEvents(
 
     return () => {
       controller.abort();
+      if (streamAbortRef.current === controller) {
+        streamAbortRef.current = null;
+      }
       if (flushTimer !== null) {
         clearTimeout(flushTimer);
       }
     };
-  }, [client, workspaceId, sessionId, after, enabled, fullReplay, streamKey, reconcileSession]);
+  }, [
+    client,
+    workspaceId,
+    sessionId,
+    after,
+    enabled,
+    fullReplay,
+    streamKey,
+    streamEpoch,
+    reconcileSession,
+  ]);
 
   const loadOlder = useCallback(async (): Promise<boolean> => {
     if (!sessionId || loadingOlderRef.current || !hasOlderRef.current) {
@@ -298,6 +322,10 @@ export function useSessionEvents(
       }
       const current = eventWindowRef.current;
       assertPrependOrder(current.events, window.events);
+      // Freeze the live iterator before replacing its in-memory window. Rows
+      // pending in the aborted iterator were never cursor-committed and will
+      // be replayed from the retained high-water mark below.
+      streamAbortRef.current?.abort();
       observeSessionStatus(window.events, sessionStatusRef, setSessionStatusProjection);
       const next = boundBrowserSessionEventWindow([...window.events, ...current.events], {
         direction: "oldest",
@@ -313,12 +341,14 @@ export function useSessionEvents(
       eventWindowRef.current = retained;
       setEventWindow(retained);
       oldestSequenceRef.current = retainedOldest;
+      streamResumeSequenceRef.current = maxResumeSequence(retained.events);
       // Oldest-directed eviction can discard newer in-memory rows. That fact
       // keeps windowTruncated true, but it does not imply older durable rows
       // exist; only the backward DB page can answer hasOlder truthfully.
       const olderStillAvailable = window.hasOlder;
       hasOlderRef.current = olderStillAvailable;
       setHasOlder(olderStillAvailable);
+      setStreamEpoch((epoch) => epoch + 1);
       return olderStillAvailable;
     } finally {
       if (generationRef.current === generation) {
@@ -352,9 +382,10 @@ export function useSessionEvents(
  * Keep one direction-aware count+byte-bounded browser window. Live/default
  * accumulation retains the newest suffix; backward paging retains the oldest
  * prefix so newly fetched history cannot be immediately evicted. This is
- * deliberately separate from durable history and transport paging: eviction
- * changes neither the resume cursor nor whether the source event still exists
- * in PostgreSQL.
+ * deliberately separate from durable history and transport paging: when a
+ * backward page evicts the live tail, the hook reconnects from the retained
+ * high-water mark while preserving the highest-ever-observed sequence
+ * separately. The source event remains durable in PostgreSQL throughout.
  */
 export function boundBrowserSessionEventWindow(
   events: readonly SessionEvent[],
