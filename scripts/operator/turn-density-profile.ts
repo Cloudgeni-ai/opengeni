@@ -642,10 +642,9 @@ export async function runWave(input: {
       Promise.race([
         model.allStarted,
         allRuns.then((results) => {
-          const rejected = results.find((result) => result.status === "rejected");
-          throw (
-            rejected?.reason ?? new Error("Density turns settled before reaching the model gate")
-          );
+          const failure = densityActivityFailureBeforeGate(results);
+          if (failure) throw failure;
+          throw new Error("Density turns settled before reaching the model gate");
         }),
       ]),
       "model gate arrival",
@@ -748,6 +747,31 @@ export async function runWave(input: {
       await phase(allRuns, "fault cleanup settlement").catch(() => undefined);
     }
   }
+}
+
+export function densityActivityFailureBeforeGate(
+  results: PromiseSettledResult<unknown>[],
+): Error | null {
+  const rejected = results.find(
+    (result): result is PromiseRejectedResult => result.status === "rejected",
+  );
+  if (rejected) {
+    return rejected.reason instanceof Error
+      ? rejected.reason
+      : new Error(`Density activity rejected before model gate: ${errorMessage(rejected.reason)}`);
+  }
+  const failed = results.find(
+    (result) =>
+      result.status === "fulfilled" &&
+      typeof result.value === "object" &&
+      result.value !== null &&
+      "status" in result.value &&
+      result.value.status !== "idle",
+  );
+  if (failed?.status === "fulfilled") {
+    return new Error(`Density activity settled before model gate: ${JSON.stringify(failed.value)}`);
+  }
+  return null;
 }
 
 async function seedHistory(input: {

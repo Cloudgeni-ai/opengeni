@@ -9,6 +9,7 @@ import {
   DEFAULT_HISTORY_ROW_PAYLOAD_BYTES,
   DEFAULT_INACTIVE_HISTORY_BYTES,
   DEFAULT_DENSITY_WAVES,
+  densityActivityFailureBeforeGate,
   expectedCompactionCallsForDensity,
   FORCED_COMPACTION_RULE,
   historyRowShape,
@@ -206,6 +207,24 @@ describe("turn density profile release-gate helpers", () => {
     await expect(cleanupDensityWorkspace(() => new Promise(() => undefined), 5)).rejects.toThrow(
       "Timed out deleting density profile workspace",
     );
+  });
+
+  test("preserves an early activity failure instead of masking it as gate settlement", () => {
+    const rejected = new Error("driver decode rejected");
+    expect(densityActivityFailureBeforeGate([{ status: "rejected", reason: rejected }])).toBe(
+      rejected,
+    );
+    expect(
+      densityActivityFailureBeforeGate([
+        {
+          status: "fulfilled",
+          value: { status: "failed", code: "active_history_too_large", detail: "too many bytes" },
+        },
+      ])?.message,
+    ).toContain("active_history_too_large");
+    expect(
+      densityActivityFailureBeforeGate([{ status: "fulfilled", value: { status: "idle" } }]),
+    ).toBeNull();
   });
 
   test("reports exact synthetic buffer allocation by scenario", () => {
