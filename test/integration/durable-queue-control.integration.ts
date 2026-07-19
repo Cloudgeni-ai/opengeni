@@ -602,7 +602,11 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
         replacementWorkerRun = replacementWorker.run();
 
         const repaired = await replacementActivities.dispatchSessionWorkflowWakes();
-        expect(repaired).toMatchObject({ delivered: 1, failed: 0 });
+        // The repair sweep is global and may also drain prior fixtures. Exact
+        // once is asserted below on this session's model call, update bundle,
+        // terminal turn, and provider start rather than on the batch total.
+        expect(repaired.failed).toBe(0);
+        expect(repaired.delivered).toBeGreaterThanOrEqual(1);
         expect(await replacementActivities.dispatchSessionWorkflowWakes()).toMatchObject({
           claimed: 0,
           delivered: 0,
