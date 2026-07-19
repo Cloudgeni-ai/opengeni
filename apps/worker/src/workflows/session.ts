@@ -21,7 +21,7 @@ import {
 import {
   parseTurnPersistenceHandoff,
   turnPersistenceHandoffHeartbeatState,
-} from "../turn-persistence-handoff";
+} from "../turn-persistence-reference";
 
 /**
  * Deterministic backstop for continueAsNew. A session workflow is long-lived
