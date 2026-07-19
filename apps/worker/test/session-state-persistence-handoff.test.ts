@@ -67,6 +67,22 @@ const modelObligation: TurnPersistenceObligation = {
   },
 };
 
+const modelObligationWithoutUsage: TurnPersistenceObligation = {
+  kind: "model_call",
+  history: {
+    producerCodexCredentialId: null,
+    modelToolOutputTruncationTokens: 4096,
+    items: [
+      {
+        position: 9,
+        item: { type: "message", role: "assistant", content: "completed without usage" },
+      },
+    ],
+  },
+  metering: null,
+  event: null,
+};
+
 const compactionObligation: TurnPersistenceObligation = {
   kind: "context_compaction",
   metering: {
@@ -459,6 +475,26 @@ describe("persistTurnHandoffAndRecover", () => {
     });
     expect(operations[2]?.value).toMatchObject({ persistenceReceiptId: ids.receiptId });
     expect(recoveries[0]).toMatchObject({ reason: "persistence_model_call_activity_result" });
+  });
+
+  test("persists and settles a completed model response without inventing usage or billing", async () => {
+    const prepared = fixture(modelObligationWithoutUsage);
+    currentReceipt = prepared.receipt;
+
+    expect(await activities().persistTurnHandoffAndRecover(prepared.input)).toEqual({
+      action: "recovering",
+      turnId: ids.turnId,
+    });
+    expect(operations.map(({ phase }) => phase)).toEqual(["history", "receipt_settle", "recovery"]);
+    expect(operations[0]?.value).toMatchObject({
+      persistenceReceiptId: ids.receiptId,
+      items:
+        modelObligationWithoutUsage.kind === "model_call"
+          ? modelObligationWithoutUsage.history.items
+          : [],
+    });
+    expect(operations.some(({ phase }) => phase === "meter")).toBe(false);
+    expect(operations.some(({ phase }) => phase === "event")).toBe(false);
   });
 
   test("does not meter or recover model truth after its attempt fence is stale", async () => {

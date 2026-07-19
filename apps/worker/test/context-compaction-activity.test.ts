@@ -387,7 +387,7 @@ describe("standalone context compaction execution", () => {
     );
   });
 
-  test("a transient standalone summary failure keeps the request on the same recovering turn", async () => {
+  test("a transient standalone summary failure quarantines the admitted provider call without replay", async () => {
     const suffix = crypto.randomUUID();
     const access = await bootstrapWorkspace(client.db, {
       accountExternalSource: "test",
@@ -496,7 +496,7 @@ describe("standalone context compaction execution", () => {
       trigger: { kind: "next" },
     });
 
-    expect(result).toMatchObject({ status: "recovering", attemptId });
+    expect(result).toMatchObject({ status: "failed", attemptId });
     if (result.status === "unclaimed") throw new Error("Compaction was not claimed");
     expect(await isSessionCompactionRequested(client.db, grant.workspaceId!, session.id)).toBe(
       true,
@@ -508,21 +508,32 @@ describe("standalone context compaction execution", () => {
     ).toEqual(originalItems);
     expect(await getSessionTurn(client.db, grant.workspaceId!, result.turnId)).toMatchObject({
       source: "compaction",
-      status: "recovering",
+      status: "failed",
+      activeAttemptId: null,
     });
     expect(await getSession(client.db, grant.workspaceId!, session.id)).toMatchObject({
-      status: "recovering",
-      activeTurnId: result.turnId,
+      status: "failed",
+      activeTurnId: null,
     });
     const events = await listSessionEvents(client.db, grant.workspaceId!, session.id, {
       after: 0,
       limit: 100,
     });
     expect(events.map((event) => event.type)).not.toContain("session.context.compaction.skipped");
-    expect(events).toContainEqual(expect.objectContaining({ type: "turn.recovery.requested" }));
+    expect(events.map((event) => event.type)).not.toContain("turn.recovery.requested");
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "turn.failed",
+        payload: expect.objectContaining({
+          code: "ambiguous_model_call",
+          effectState: "unknown",
+          retryable: false,
+        }),
+      }),
+    );
   });
 
-  test("a transient /compact inside a queued user turn preserves the request for same-turn recovery", async () => {
+  test("a transient /compact quarantines the admitted provider call without replay", async () => {
     const suffix = crypto.randomUUID();
     const access = await bootstrapWorkspace(client.db, {
       accountExternalSource: "test",
@@ -634,25 +645,36 @@ describe("standalone context compaction execution", () => {
       trigger: { kind: "next" },
     });
 
-    expect(result).toMatchObject({ status: "recovering", attemptId });
+    expect(result).toMatchObject({ status: "failed", attemptId });
     if (result.status === "unclaimed") throw new Error("User turn was not claimed");
     expect(await isSessionCompactionRequested(client.db, grant.workspaceId!, session.id)).toBe(
       true,
     );
     expect(await getSessionTurn(client.db, grant.workspaceId!, result.turnId)).toMatchObject({
       source: "user",
-      status: "recovering",
+      status: "failed",
+      activeAttemptId: null,
     });
     expect(await getSession(client.db, grant.workspaceId!, session.id)).toMatchObject({
-      status: "recovering",
-      activeTurnId: result.turnId,
+      status: "failed",
+      activeTurnId: null,
     });
     const events = await listSessionEvents(client.db, grant.workspaceId!, session.id, {
       after: 0,
       limit: 100,
     });
     expect(events.map((event) => event.type)).not.toContain("session.context.compaction.skipped");
-    expect(events).toContainEqual(expect.objectContaining({ type: "turn.recovery.requested" }));
+    expect(events.map((event) => event.type)).not.toContain("turn.recovery.requested");
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "turn.failed",
+        payload: expect.objectContaining({
+          code: "ambiguous_model_call",
+          effectState: "unknown",
+          retryable: false,
+        }),
+      }),
+    );
   });
 
   test("consumes an operator request without replacing history when its summary is not smaller", async () => {

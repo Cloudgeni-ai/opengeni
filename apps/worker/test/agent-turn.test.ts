@@ -40,6 +40,7 @@ import {
   shouldRecoverCompactionProviderFailure,
   shouldStartOnTurnRecording,
   turnActivitySpanError,
+  turnFinalizationSpanError,
   shouldRunTurnEndWorkspacePersistence,
   turnOperationCancellationFailure,
   waitForTurnOperation,
@@ -1191,6 +1192,64 @@ describe("worker shutdown preemption", () => {
     expect(serialized).toContain("57P01");
     for (const secret of [
       "insert into session_history_items",
+      "params:",
+      "provider-output-secret",
+      "provider-text-secret",
+      "tool-arguments-secret",
+    ]) {
+      expect(serialized).not.toContain(secret);
+    }
+  });
+
+  test("serialized finalization spans exclude SQL, parameters, provider text, and tool arguments", async () => {
+    const exported: unknown[] = [];
+    const observability = createObservability(
+      {
+        serviceName: "opengeni",
+        environment: "test",
+        observabilityStructuredLogs: true,
+        observabilityMetricsEnabled: false,
+        observabilityOtlpEndpoint: "http://collector:4318",
+        observabilityOtlpHeaders: "",
+      },
+      {
+        component: "worker",
+        now: () => 1,
+        exporter: async (_url, body) => {
+          exported.push(body);
+        },
+      },
+    );
+    const rawFinalizationError = Object.assign(
+      new Error(
+        'Failed query: update session_turn_attempts set state=$1; params: ["provider-output-secret", "tool-arguments-secret"]',
+      ),
+      {
+        name: "DrizzleQueryError",
+        cause: Object.assign(new Error("provider-text-secret"), {
+          name: "PostgresError",
+          code: "57P01",
+        }),
+      },
+    );
+    const span = observability.startSpan("worker.run_agent_segment");
+    span.end({
+      attributes: {
+        "opengeni.failure_provenance": "finalization",
+        ...boundedTurnFailureTelemetry(rawFinalizationError),
+      },
+      error: turnFinalizationSpanError(rawFinalizationError),
+    });
+    await Bun.sleep(0);
+
+    expect(exported).toHaveLength(1);
+    const serialized = JSON.stringify(exported[0]);
+    expect(serialized).toContain("Turn finalization failed");
+    expect(serialized).toContain("TurnFinalizationError");
+    expect(serialized).toContain("PostgresError");
+    expect(serialized).toContain("57P01");
+    for (const secret of [
+      "update session_turn_attempts",
       "params:",
       "provider-output-secret",
       "provider-text-secret",

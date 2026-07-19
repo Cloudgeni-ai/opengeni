@@ -31,6 +31,8 @@ import {
   deserializeSandboxSessionStateEnvelope,
   ensureReadableStreamFrom,
   materializeSandboxFileDownloads,
+  modelResponseCompletionFromSdkEvent,
+  modelWithCallAdmission,
   repositoryCloneCommand,
   repositoryUsesSandboxClone,
   mcpToolErrorOutput,
@@ -160,6 +162,57 @@ describe("runtime event normalization", () => {
       },
     });
     expect(normalizeSdkEvent(event)).toEqual([]);
+  });
+
+  test("recognizes provider completion without manufacturing usage", () => {
+    const event = {
+      type: "raw_model_stream_event",
+      data: {
+        type: "response_done",
+        response: { id: "resp-without-usage", output: [] },
+      },
+    } as any;
+
+    expect(modelResponseCompletionFromSdkEvent(event)).toEqual({
+      responseId: "resp-without-usage",
+      usage: null,
+    });
+    expect(modelResponseUsageFromSdkEvent(event)).toBeNull();
+  });
+
+  test("awaits a fresh admission before each model invocation without changing identity", async () => {
+    const order: string[] = [];
+    class FakeModel {
+      async getResponse() {
+        order.push("response");
+        return { output: [] };
+      }
+
+      async *getStreamedResponse() {
+        order.push("stream");
+        yield { type: "response_done" };
+      }
+    }
+
+    const raw = new FakeModel();
+    let admission = 0;
+    const admitted = modelWithCallAdmission(raw as any, async () => {
+      order.push(`admit-${++admission}`);
+    });
+
+    expect(admitted.constructor).toBe(raw.constructor);
+    expect(admitted).toBeInstanceOf(FakeModel);
+    await admitted.getResponse({} as any);
+    for await (const _event of admitted.getStreamedResponse({} as any)) {
+      // Consuming the stream is what crosses the provider boundary.
+    }
+    expect(order).toEqual(["admit-1", "response", "admit-2", "stream"]);
+
+    const blocked = modelWithCallAdmission(raw as any, async () => {
+      throw new Error("admission unavailable");
+    });
+    await expect(blocked.getResponse({} as any)).rejects.toThrow("admission unavailable");
+    expect(order).toEqual(["admit-1", "response", "admit-2", "stream"]);
   });
 
   test("extracts raw Responses usage without manufacturing a durable event", () => {

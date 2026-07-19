@@ -367,35 +367,37 @@ export function createSessionStateActivities(
           if (disposition === "settled") break persistence;
           return { action: disposition };
         }
-        await recordModelUsageAndDebitCreditsFn(settings, db, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          turnId: handoff.turnId,
-          ...obligation.metering,
-          observability,
-        });
-        const eventResult = await appendOrConfirmAndPublishTurnEventsFencedFn(
-          db,
-          bus,
-          input.workspaceId,
-          input.sessionId,
-          handoff.turnId,
-          handoff.executionGeneration,
-          input.attemptId,
-          [
-            {
-              ...obligation.event,
-              occurredAt: new Date(obligation.event.occurredAt),
-            },
-          ],
-          undefined,
-          receiptId,
-        );
-        if (!eventResult.accepted) {
-          const disposition = await reconcileReceiptFenceRejection(db, input, handoff);
-          if (disposition === "settled") break persistence;
-          return { action: disposition };
+        if (obligation.metering && obligation.event) {
+          await recordModelUsageAndDebitCreditsFn(settings, db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: handoff.turnId,
+            ...obligation.metering,
+            observability,
+          });
+          const eventResult = await appendOrConfirmAndPublishTurnEventsFencedFn(
+            db,
+            bus,
+            input.workspaceId,
+            input.sessionId,
+            handoff.turnId,
+            handoff.executionGeneration,
+            input.attemptId,
+            [
+              {
+                ...obligation.event,
+                occurredAt: new Date(obligation.event.occurredAt),
+              },
+            ],
+            undefined,
+            receiptId,
+          );
+          if (!eventResult.accepted) {
+            const disposition = await reconcileReceiptFenceRejection(db, input, handoff);
+            if (disposition === "settled") break persistence;
+            return { action: disposition };
+          }
         }
       } else {
         if (obligation.metering) {
@@ -586,6 +588,15 @@ export function createSessionStateActivities(
     }
     await publishDurableSessionEventsFn(bus, input.workspaceId, input.sessionId, result.events);
     await refreshQueuedTurnsGauge(db, observability, countQueuedTurnsFn, recordTurnsQueuedGaugeFn);
+    if (result.action === "quarantined") {
+      await deliverFailedChildTurnToParentFn(
+        { db, bus, settings, observability, wakeSessionWorkflow },
+        input.workspaceId,
+        input.sessionId,
+        result.turnId,
+      );
+      return { action: "quarantined" };
+    }
     if (result.action === "exceeded") {
       await deliverFailedChildTurnToParentFn(
         { db, bus, settings, observability, wakeSessionWorkflow },

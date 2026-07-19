@@ -1206,6 +1206,89 @@ export const sessionTurnAttempts = pgTable(
   }),
 );
 
+// Immutable pre-call provenance closes the provider-completion ambiguity: a
+// worker must durably admit every exact model invocation before delegating to
+// the provider. A receipt links that admission only after the complete result
+// is available. Worker-death recovery refuses to replay an unlinked admission.
+export const sessionTurnModelCallAdmissions = pgTable(
+  "session_turn_model_call_admissions",
+  {
+    id: uuid("id").primaryKey(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sessionId: uuid("session_id").notNull(),
+    turnId: uuid("turn_id").notNull(),
+    attemptId: uuid("attempt_id").notNull(),
+    executionGeneration: integer("execution_generation").notNull(),
+    triggerEventId: uuid("trigger_event_id").notNull(),
+    callIndex: integer("call_index").notNull(),
+    callKind: text("call_kind").notNull(),
+    provider: text("provider").notNull(),
+    providerApi: text("provider_api").notNull(),
+    model: text("model").notNull(),
+    persistenceReceiptId: uuid("persistence_receipt_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    receiptEstablishedAt: timestamp("receipt_established_at", { withTimezone: true }),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "session_turn_model_call_admissions_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    workspaceSession: foreignKey({
+      name: "session_turn_model_call_admissions_workspace_session_fk",
+      columns: [table.workspaceId, table.sessionId],
+      foreignColumns: [sessions.workspaceId, sessions.id],
+    }).onDelete("restrict"),
+    workspaceTurn: foreignKey({
+      name: "session_turn_model_call_admissions_workspace_turn_fk",
+      columns: [table.workspaceId, table.turnId],
+      foreignColumns: [sessionTurns.workspaceId, sessionTurns.id],
+    }).onDelete("restrict"),
+    workspaceAttempt: foreignKey({
+      name: "session_turn_model_call_admissions_workspace_attempt_fk",
+      columns: [table.workspaceId, table.attemptId],
+      foreignColumns: [sessionTurnAttempts.workspaceId, sessionTurnAttempts.id],
+    }).onDelete("restrict"),
+    workspaceIdentity: uniqueIndex("session_turn_model_call_admissions_workspace_id_uq").on(
+      table.workspaceId,
+      table.id,
+    ),
+    attemptCallIndex: uniqueIndex("session_turn_model_call_admissions_attempt_index_uq").on(
+      table.workspaceId,
+      table.attemptId,
+      table.callIndex,
+    ),
+    oneUnlinkedAttempt: uniqueIndex("session_turn_model_call_admissions_one_unlinked_attempt_uq")
+      .on(table.workspaceId, table.attemptId)
+      .where(sql`${table.persistenceReceiptId} is null`),
+    receiptIdentity: uniqueIndex("session_turn_model_call_admissions_receipt_uq")
+      .on(table.workspaceId, table.persistenceReceiptId)
+      .where(sql`${table.persistenceReceiptId} is not null`),
+    indexValid: check(
+      "session_turn_model_call_admissions_index_check",
+      sql`${table.callIndex} > 0`,
+    ),
+    kindValid: check(
+      "session_turn_model_call_admissions_kind_check",
+      sql`${table.callKind} in ('agent_model', 'context_compaction')`,
+    ),
+    apiValid: check(
+      "session_turn_model_call_admissions_api_check",
+      sql`${table.providerApi} in ('responses', 'chat')`,
+    ),
+    receiptConsistent: check(
+      "session_turn_model_call_admissions_receipt_check",
+      sql`(
+        ${table.persistenceReceiptId} is null and ${table.receiptEstablishedAt} is null
+      ) or (
+        ${table.persistenceReceiptId} is not null and ${table.receiptEstablishedAt} is not null
+      )`,
+    ),
+  }),
+);
+
 // Full post-effect persistence obligations live in Postgres, never Temporal
 // history. A turn activity establishes one exact-attempt receipt after a
 // provider/tool boundary completes and before ordinary persistence begins.
@@ -1221,6 +1304,7 @@ export const sessionTurnPersistenceReceipts = pgTable(
     attemptId: uuid("attempt_id").notNull(),
     executionGeneration: integer("execution_generation").notNull(),
     triggerEventId: uuid("trigger_event_id").notNull(),
+    modelCallAdmissionId: uuid("model_call_admission_id"),
     obligationKind: text("obligation_kind").notNull(),
     obligationVersion: integer("obligation_version").notNull().default(1),
     obligationDigest: text("obligation_digest").notNull(),
@@ -1253,10 +1337,23 @@ export const sessionTurnPersistenceReceipts = pgTable(
       columns: [table.workspaceId, table.attemptId],
       foreignColumns: [sessionTurnAttempts.workspaceId, sessionTurnAttempts.id],
     }).onDelete("restrict"),
+    workspaceModelCallAdmission: foreignKey({
+      name: "session_turn_persistence_receipts_workspace_model_call_admission_fk",
+      columns: [table.workspaceId, table.modelCallAdmissionId],
+      foreignColumns: [
+        sessionTurnModelCallAdmissions.workspaceId,
+        sessionTurnModelCallAdmissions.id,
+      ],
+    }).onDelete("restrict"),
     workspaceIdentity: uniqueIndex("session_turn_persistence_receipts_workspace_id_uq").on(
       table.workspaceId,
       table.id,
     ),
+    modelCallAdmissionIdentity: uniqueIndex(
+      "session_turn_persistence_receipts_model_call_admission_uq",
+    )
+      .on(table.workspaceId, table.modelCallAdmissionId)
+      .where(sql`${table.modelCallAdmissionId} is not null`),
     onePendingAttempt: uniqueIndex("session_turn_persistence_receipts_one_pending_attempt_uq")
       .on(table.workspaceId, table.attemptId)
       .where(sql`${table.state} = 'pending'`),
@@ -1268,6 +1365,15 @@ export const sessionTurnPersistenceReceipts = pgTable(
     kindValid: check(
       "session_turn_persistence_receipts_kind_check",
       sql`${table.obligationKind} in ('pending_tool_call', 'model_call', 'context_compaction')`,
+    ),
+    modelCallAdmissionConsistent: check(
+      "session_turn_persistence_receipts_model_call_admission_check",
+      sql`(
+        ${table.obligationKind} = 'pending_tool_call' and ${table.modelCallAdmissionId} is null
+      ) or (
+        ${table.obligationKind} in ('model_call', 'context_compaction')
+        and ${table.modelCallAdmissionId} is not null
+      )`,
     ),
     versionValid: check(
       "session_turn_persistence_receipts_version_check",

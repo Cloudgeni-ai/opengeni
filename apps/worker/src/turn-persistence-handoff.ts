@@ -61,7 +61,7 @@ function validModelUsage(value: unknown): boolean {
 
 function usageEventMatches(
   event: unknown,
-  metering: ModelCallPersistenceObligation["metering"],
+  metering: NonNullable<ModelCallPersistenceObligation["metering"]>,
   turnId: string,
 ): event is ExactTurnEventPersistenceInput {
   if (!isRecord(event) || !isRecord(event.payload)) return false;
@@ -77,7 +77,9 @@ function usageEventMatches(
   );
 }
 
-function validMetering(value: unknown): value is ModelCallPersistenceObligation["metering"] {
+function validMetering(
+  value: unknown,
+): value is NonNullable<ModelCallPersistenceObligation["metering"]> {
   if (!isRecord(value) || !validModelUsage(value.usage)) return false;
   if (
     !isNonEmptyString(value.model) ||
@@ -148,6 +150,7 @@ export function parseTurnPersistenceObligation(
       return null;
     }
   } else if (obligation.kind === "model_call") {
+    const pairedUsage = obligation.metering !== null && obligation.event !== null;
     if (
       !isRecord(obligation.history) ||
       !Array.isArray(obligation.history.items) ||
@@ -163,8 +166,12 @@ export function parseTurnPersistenceObligation(
         isNonEmptyString(obligation.history.producerCodexCredentialId)
       ) ||
       !isNonNegativeSafeInteger(obligation.history.modelToolOutputTruncationTokens) ||
-      !validMetering(obligation.metering) ||
-      !usageEventMatches(obligation.event, obligation.metering, turnId)
+      !(
+        (obligation.metering === null && obligation.event === null) ||
+        (pairedUsage &&
+          validMetering(obligation.metering) &&
+          usageEventMatches(obligation.event, obligation.metering, turnId))
+      )
     ) {
       return null;
     }

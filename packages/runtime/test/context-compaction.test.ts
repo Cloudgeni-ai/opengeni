@@ -550,14 +550,18 @@ describe("provider-proof compaction transcript", () => {
 
   test("reports the validated summary and usage together at provider completion", async () => {
     const completions: unknown[] = [];
+    const order: string[] = [];
     const fakeClient = {
       chat: {
         completions: {
-          create: async () => ({
-            id: "chatcmpl_summary",
-            usage: { prompt_tokens: 21, completion_tokens: 4, total_tokens: 25 },
-            choices: [{ message: { content: "exact completed summary" } }],
-          }),
+          create: async () => {
+            order.push("provider");
+            return {
+              id: "chatcmpl_summary",
+              usage: { prompt_tokens: 21, completion_tokens: 4, total_tokens: 25 },
+              choices: [{ message: { content: "exact completed summary" } }],
+            };
+          },
         },
       },
     };
@@ -567,11 +571,20 @@ describe("provider-proof compaction transcript", () => {
         client: fakeClient as any,
         api: "chat",
         model: "scripted-model",
-        onCompleted: async (completion) => completions.push(completion),
+        onCallStart: async () => {
+          order.push("admission");
+          return "admission-exact";
+        },
+        onCompleted: async (completion) => {
+          order.push("completed");
+          completions.push(completion);
+        },
       }),
     ).toBe("exact completed summary");
+    expect(order).toEqual(["admission", "provider", "completed"]);
     expect(completions).toEqual([
       {
+        callAdmissionId: "admission-exact",
         summary: "exact completed summary",
         usage: {
           responseId: "chatcmpl_summary",

@@ -3,6 +3,7 @@ import { Client, Connection } from "@temporalio/client";
 import { NativeConnection, Worker } from "@temporalio/worker";
 import type { AccessGrant } from "@opengeni/contracts";
 import {
+  admitSessionTurnModelCall,
   applySessionTurnSettlement,
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
@@ -42,11 +43,10 @@ import {
 import { turnTaskQueue } from "../../apps/worker/src/workflows/activities";
 import { submitTestHumanPrompt } from "./helpers/session-control";
 
-// Proves the campaign's robustness contract: a worker rollout restart
-// (graceful SIGTERM shutdown) mid-turn must not produce a failed session.
-// The in-flight turn checkpoints, re-queues, and a second worker resumes it
-// from persisted conversation truth — without re-executing side effects the
-// first attempt already performed.
+// Proves the campaign's robustness contract across real PostgreSQL, Temporal,
+// and NATS: a worker restart can recover pre-effect or fully receipted progress,
+// but it must fail closed rather than replay an admitted provider/tool effect
+// whose complete result is unknown.
 type RequiredServices = Pick<
   TestServices,
   "databaseUrl" | "natsUrl" | "temporalHost" | "migrate" | "down"
@@ -94,7 +94,7 @@ describe("worker restart resilience", () => {
     await services?.down();
   }, 60_000);
 
-  test("graceful worker shutdown mid-turn recovers the same turn on a healthy worker", async () => {
+  test("graceful worker shutdown during an admitted model call quarantines without replay", async () => {
     const grant = await testGrant();
     const mcp = startTestMcpServer();
     const taskQueue = `worker-restart-${crypto.randomUUID()}`;
@@ -115,11 +115,12 @@ describe("worker restart resilience", () => {
         delayMs: 50,
         outputText: "never finished",
       },
-      // Model call 3: the resumed attempt's response on the second worker.
+      // Must remain unused: the admitted second call cannot be replayed merely
+      // because shutdown interrupted its stream before receipt establishment.
       {
         id: "restart-call-3",
-        outputText: "resumed and finished",
-        chunks: ["resumed ", "and ", "finished"],
+        outputText: "must not replay",
+        chunks: ["must ", "not ", "replay"],
       },
     ]);
     const settings = testSettings({
@@ -169,8 +170,8 @@ describe("worker restart resilience", () => {
     const firstWorker = await restartTestWorker(nativeConnection, taskQueue, activities);
     const firstRun = firstWorker.run();
     let firstWorkerStopped = false;
-    let secondWorker: Awaited<ReturnType<typeof restartTestWorker>> | null = null;
-    let secondRun: Promise<void> | null = null;
+    let completionWorker: Awaited<ReturnType<typeof restartTestWorker>> | null = null;
+    let completionRun: Promise<void> | null = null;
     try {
       const client = new Client({ connection });
       const handle = await client.workflow.start("sessionWorkflow", {
@@ -202,66 +203,48 @@ describe("worker restart resilience", () => {
       firstWorker.shutdown();
       firstWorkerStopped = true;
       await firstRun;
-
-      // Between workers the same logical turn is recoverable, not converted into
-      // queue work and not failed.
-      const recovering = await getSession(dbClient.db, grant.workspaceId, session.id);
-      expect(recovering?.status).toBe("recovering");
-      const turnsAfterShutdown = await listSessionTurns(dbClient.db, grant.workspaceId, session.id);
-      expect(turnsAfterShutdown.map((turn) => turn.status)).toEqual(["recovering"]);
-      expect(turnsAfterShutdown[0]?.id).toBe(accepted.turn.id);
-      const eventsAfterShutdown = await listSessionEvents(
-        dbClient.db,
-        grant.workspaceId,
-        session.id,
-        0,
-        200,
-      );
-      expect(eventsAfterShutdown.some((event) => event.type === "turn.recovery.requested")).toBe(
-        true,
-      );
-      expect(eventsAfterShutdown.some((event) => event.type === "turn.failed")).toBe(false);
-
-      secondWorker = await restartTestWorker(nativeConnection, taskQueue, activities);
-      secondRun = secondWorker.run();
+      // A healthy worker is still needed to drain the workflow task after the
+      // old turn activity exits. It must not receive a new inference attempt.
+      completionWorker = await restartTestWorker(nativeConnection, taskQueue, activities);
+      completionRun = completionWorker.run();
       await handle.result();
     } finally {
       if (!firstWorkerStopped) {
         firstWorker.shutdown();
         await firstRun.catch(() => undefined);
       }
-      if (secondWorker && secondRun) {
-        secondWorker.shutdown();
-        await secondRun;
+      if (completionWorker && completionRun) {
+        completionWorker.shutdown();
+        await completionRun;
       }
       mcp.close();
     }
 
-    const resumed = await getSession(dbClient.db, grant.workspaceId, session.id);
-    expect(resumed?.status).toBe("idle");
+    const quarantined = await getSession(dbClient.db, grant.workspaceId, session.id);
+    expect(quarantined).toMatchObject({ status: "failed", activeTurnId: null });
     const turns = await listSessionTurns(dbClient.db, grant.workspaceId, session.id);
-    expect(turns.map((turn) => turn.status)).toEqual(["completed"]);
+    expect(turns).toEqual([
+      expect.objectContaining({ id: accepted.turn.id, status: "failed", activeAttemptId: null }),
+    ]);
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 500);
-    expect(events.some((event) => event.type === "turn.failed")).toBe(false);
-    expect(events.filter((event) => event.type === "turn.recovery.requested")).toHaveLength(1);
-    expect(latestStatus(events)).toBe("idle");
-    // The new attempt receives the same canonical conversation truth, without
-    // a fabricated recovery message.
-    expect(model.calls).toBe(3);
-    const resumeRequest = JSON.stringify(
-      (model.requests.at(-1) as { input?: unknown })?.input ?? "",
+    expect(events.filter((event) => event.type === "turn.recovery.requested")).toHaveLength(0);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "turn.failed",
+        payload: expect.objectContaining({
+          code: "ambiguous_model_call",
+          effectState: "unknown",
+          retryable: false,
+        }),
+      }),
     );
-    expect(resumeRequest).toContain("do the work");
-    expect(resumeRequest).toContain("call-restart-1");
-    // ...and did not blindly replay the already-executed side effect.
+    expect(latestStatus(events)).toBe("failed");
+    // Both external boundaries happened once: the first tool result was fully
+    // durable, while the second provider call remained ambiguous. Neither is
+    // invoked again by a successor attempt.
+    expect(model.calls).toBe(2);
+    expect(model.requests).toHaveLength(2);
     expect(mcp.calls).toEqual([{ tool: "search_documents", args: { query: "current state" } }]);
-    expect(
-      events.some(
-        (event) =>
-          event.type === "agent.message.completed" &&
-          JSON.stringify(event.payload).includes("resumed and finished"),
-      ),
-    ).toBe(true);
   }, 180_000);
 
   test("worker death after a PostgreSQL model receipt but before heartbeat never replays inference", async () => {
@@ -348,6 +331,23 @@ describe("worker restart resilience", () => {
               },
             },
           });
+          const modelCallAdmissionId = crypto.randomUUID();
+          const admitted = await admitSessionTurnModelCall(dbClient.db, {
+            id: modelCallAdmissionId,
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: turn.id,
+            attemptId: input.attemptId,
+            executionGeneration: turn.executionGeneration,
+            triggerEventId: turn.triggerEventId,
+            callIndex: 1,
+            callKind: "agent_model",
+            provider: "scripted",
+            providerApi: "responses",
+            model: "scripted-model",
+          });
+          expect(admitted.action).toBe("established");
           const established = await establishSessionTurnPersistenceReceipt(dbClient.db, {
             id: prepared.handoff.receiptId,
             accountId: input.accountId,
@@ -357,6 +357,7 @@ describe("worker restart resilience", () => {
             attemptId: prepared.handoff.attemptId,
             executionGeneration: prepared.handoff.executionGeneration,
             triggerEventId: prepared.handoff.triggerEventId,
+            modelCallAdmissionId,
             obligationKind: prepared.handoff.obligationKind,
             obligationVersion: 1,
             obligationDigest: prepared.handoff.obligationDigest,

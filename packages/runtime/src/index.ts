@@ -464,7 +464,10 @@ export function buildOpenAIClientFromSettings(
     return new OpenAI({
       apiKey,
       baseURL,
-      maxRetries: settings.openaiMaxRetries,
+      // Durable model-call admission is one row per outbound SDK invocation.
+      // Client-internal retries bypass that seam and can replay accepted work,
+      // so retries belong to the runner where every attempt is re-admitted.
+      maxRetries: 0,
       defaultQuery: azureOpenAIDefaultQuery(settings, baseURL),
       defaultHeaders:
         settings.azureOpenaiAdToken && !settings.azureOpenaiApiKey
@@ -481,7 +484,7 @@ export function buildOpenAIClientFromSettings(
   return new OpenAI({
     apiKey: settings.openaiApiKey ?? process.env.OPENAI_API_KEY,
     ...(settings.openaiBaseUrl ? { baseURL: settings.openaiBaseUrl } : {}),
-    maxRetries: settings.openaiMaxRetries,
+    maxRetries: 0,
     fetch: instrumentedModelFetch(providerId, globalThis.fetch),
   });
 }
@@ -527,7 +530,8 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
         new OpenAI({
           ...(provider.apiKey ? { apiKey: provider.apiKey } : {}),
           ...(provider.baseUrl ? { baseURL: provider.baseUrl } : {}),
-          maxRetries: settings.openaiMaxRetries,
+          // See buildOpenAIClientFromSettings: no invisible client replay.
+          maxRetries: 0,
           ...(provider.defaultQuery ? { defaultQuery: provider.defaultQuery } : {}),
           ...(provider.defaultHeaders ? { defaultHeaders: provider.defaultHeaders } : {}),
           fetch: instrumentedModelFetch(provider.id, globalThis.fetch),
@@ -608,7 +612,10 @@ export function resolveTurnModel(
 export class MultiProviderModelProvider implements ModelProvider {
   private fallback: OpenAIProvider | undefined;
 
-  constructor(private readonly settings: Settings) {}
+  constructor(
+    private readonly settings: Settings,
+    private readonly onModelCall?: ModelCallAdmissionCallback,
+  ) {}
 
   async getModel(modelName?: string): Promise<Model> {
     if (modelName) {
@@ -631,7 +638,7 @@ export class MultiProviderModelProvider implements ModelProvider {
         ) {
           throw new CodexSubscriptionUnavailableError(modelName);
         }
-        return resolved.model;
+        return modelWithCallAdmission(resolved.model, this.onModelCall);
       }
       // A `codex/<slug>` id only resolves when the per-workspace worker overlay
       // (settingsWithCodexCredential) has injected the synthetic codex-subscription
@@ -652,8 +659,49 @@ export class MultiProviderModelProvider implements ModelProvider {
     // default OpenAIProvider, which uses the global default client/key
     // configureOpenAI set up (the built-in OpenAI/Azure provider).
     this.fallback ??= new OpenAIProvider();
-    return this.fallback.getModel(modelName);
+    return modelWithCallAdmission(await this.fallback.getModel(modelName), this.onModelCall);
   }
+}
+
+export type ModelCallAdmissionCallback = () => Promise<void>;
+
+/**
+ * Preserve the provider model's constructor/instance identity while inserting
+ * one awaited durable-admission callback immediately before every actual SDK
+ * model invocation. A Proxy is intentional: sandbox capabilities inspect the
+ * bound model constructor to select tool transports, which an ordinary wrapper
+ * class would silently change. Runner-managed retries and abort reconciliation
+ * call these methods again and therefore receive distinct admissions too.
+ */
+export function modelWithCallAdmission(
+  model: Model,
+  onModelCall: ModelCallAdmissionCallback | undefined,
+): Model {
+  if (!onModelCall) return model;
+  return new Proxy(model, {
+    get(target, property, receiver) {
+      // Capability/tool transport selection reads constructor identity. Do not
+      // turn it into a bound function through the generic method branch below.
+      if (property === "constructor") {
+        return Reflect.get(target, property, target);
+      }
+      if (property === "getResponse") {
+        return async (request: ModelRequest) => {
+          await onModelCall();
+          return await target.getResponse(request);
+        };
+      }
+      if (property === "getStreamedResponse") {
+        return (request: ModelRequest) =>
+          (async function* () {
+            await onModelCall();
+            yield* target.getStreamedResponse(request);
+          })();
+      }
+      const value = Reflect.get(target, property, receiver);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
 }
 
 function settingsForRunScopedModelResolution(settings: Settings, modelName: string): Settings {
@@ -823,10 +871,12 @@ export async function summarizeForCompaction(
     model?: string;
     promptCacheKey?: string;
     systemInstructions?: string;
+    onCallStart?: () => Promise<string>;
     onUsage?: (usage: ModelResponseUsage) => void | Promise<void>;
     onCompleted?: (result: {
       summary: string;
       usage: ModelResponseUsage | null;
+      callAdmissionId: string | null;
     }) => void | Promise<void>;
   } = {},
 ): Promise<string> {
@@ -837,6 +887,7 @@ export async function summarizeForCompaction(
   if (api === "chat") {
     const transcript = renderCompactionPromptInputForChat(input);
     let completion: unknown;
+    const callAdmissionId = (await options.onCallStart?.()) ?? null;
     try {
       completion = await client.chat.completions.create({
         model,
@@ -857,7 +908,7 @@ export async function summarizeForCompaction(
     if (!summary) {
       throw new EmptyCompactionSummaryError(compactionResponseDiagnostics(completion, summary));
     }
-    await options.onCompleted?.({ summary, usage });
+    await options.onCompleted?.({ summary, usage, callAdmissionId });
     return summary;
   }
   // Use the same SDK Responses adapter as the real agent call. It converts the
@@ -882,6 +933,7 @@ export async function summarizeForCompaction(
     tracing: false,
   };
   let response: unknown;
+  const callAdmissionId = (await options.onCallStart?.()) ?? null;
   try {
     response = await new CompactionResponsesModel(client, model).fetchResponse(request);
   } catch (error) {
@@ -898,7 +950,7 @@ export async function summarizeForCompaction(
   if (!summary) {
     throw new EmptyCompactionSummaryError(compactionResponseDiagnostics(response, summary));
   }
-  await options.onCompleted?.({ summary, usage });
+  await options.onCompleted?.({ summary, usage, callAdmissionId });
   return summary;
 }
 
@@ -1094,6 +1146,8 @@ export type GitCredentialTokenWriterSession = SandboxSessionLike;
 
 export type BuildAgentOptions = {
   model?: Model;
+  /** Awaited immediately before each actual provider-model invocation. */
+  onModelCall?: ModelCallAdmissionCallback;
   reasoningEffort?: ReasoningEffort;
   // Per-turn gating overrides for the multi-provider path. Each defaults to
   // today's settings-derived behaviour when omitted, so the legacy
@@ -1532,7 +1586,9 @@ export function buildOpenGeniAgent(
   const hostedTools = hostedWebSearch ? [webSearchTool()] : [];
   const baseConfig = {
     name: "OpenGeni Agent",
-    model: options.model ?? settings.openaiModel,
+    model: options.model
+      ? modelWithCallAdmission(options.model, options.onModelCall)
+      : settings.openaiModel,
     // White-label persona composition. The effective template is the per-call
     // override (options.instructionsTemplate, resolved by the caller as
     // session > workspace) falling back to the deployment default
@@ -3233,6 +3289,8 @@ export type RunAgentStreamOptions = {
   // model call and never touches `state.history`/`originalInput`, so the
   // reconcile dual-write never sees it.
   callModelInputFilter?: CallModelInputFilter;
+  /** Covers name re-resolution on sandbox runs where agent Model objects are dropped. */
+  onModelCall?: ModelCallAdmissionCallback;
 };
 
 export type ContextRobustnessFilterOptions = {
@@ -3607,7 +3665,11 @@ export async function runAgentStream(
       session,
       ...(sessionState ? { sessionState } : {}),
     } as SandboxRunConfig;
-    return await runScopedRunner(settings).run(agent, prepared.input, ownedRunOptions);
+    return await runScopedRunner(settings, overrides.onModelCall).run(
+      agent,
+      prepared.input,
+      ownedRunOptions,
+    );
   }
 
   const rawClient = overrides.sandboxClient ?? createSandboxClient(settings, environment);
@@ -3701,7 +3763,11 @@ export async function runAgentStream(
       ...(sandboxSessionState ? { sessionState: sandboxSessionState } : {}),
     } as SandboxRunConfig;
   }
-  return await runScopedRunner(settings).run(agent, prepared.input, runOptions);
+  return await runScopedRunner(settings, overrides.onModelCall).run(
+    agent,
+    prepared.input,
+    runOptions,
+  );
 }
 
 function appendSandboxFileDownloadFailureNote(
@@ -3742,9 +3808,9 @@ function appendSandboxFileDownloadFailureNote(
  * Runner inherits the SDK's default config for everything else, identical to the
  * default runner. setDefaultModelProvider remains only as a boot-time fallback.
  */
-function runScopedRunner(settings: Settings): Runner {
+function runScopedRunner(settings: Settings, onModelCall?: ModelCallAdmissionCallback): Runner {
   return new Runner({
-    modelProvider: new MultiProviderModelProvider(settings),
+    modelProvider: new MultiProviderModelProvider(settings, onModelCall),
   });
 }
 
@@ -4569,8 +4635,36 @@ export function normalizeSdkEvent(event: RunStreamEvent): NormalizedRuntimeEvent
 }
 
 export function modelResponseUsageFromSdkEvent(event: RunStreamEvent): ModelResponseUsage | null {
+  return modelResponseCompletionFromSdkEvent(event)?.usage ?? null;
+}
+
+export type ModelResponseCompletion = {
+  responseId?: string;
+  usage: ModelResponseUsage | null;
+};
+
+/**
+ * Recognize provider completion even when the provider omitted usage. Exact
+ * result persistence cannot be conditional on metering metadata: a completed
+ * response without usage is still an external inference that must not replay.
+ */
+export function modelResponseCompletionFromSdkEvent(
+  event: RunStreamEvent,
+): ModelResponseCompletion | null {
   const response = modelResponseFromSdkEvent(event);
-  return modelResponseUsageFromResponse(response);
+  if (!response) return null;
+  const usage = modelResponseUsageFromResponse(response);
+  const responseId =
+    usage?.responseId ??
+    (typeof (response as { id?: unknown }).id === "string"
+      ? (response as { id: string }).id
+      : typeof (response as { responseId?: unknown }).responseId === "string"
+        ? (response as { responseId: string }).responseId
+        : undefined);
+  return {
+    ...(responseId ? { responseId } : {}),
+    usage,
+  };
 }
 
 /** Normalize usage from either a Responses or Chat Completions result. */

@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "
 import {
   addSessionSystemUpdate,
   acceptSessionApprovalDecision,
+  admitSessionTurnModelCall,
   applyCreditDebitUpToBalance,
   applyCreditLedgerEntry,
   applyContextCompaction,
@@ -48,6 +49,7 @@ import {
   recordUsageEvent,
   recordSkippedContextCompaction,
   quarantineSessionTurnPersistenceAttempt,
+  quarantineAmbiguousSessionTurnModelCall,
   setSessionLastInputTokensForTurnAttempt,
   settleSessionIdleWithParentOutbox,
   settleSessionAttemptInterruptions,
@@ -1899,7 +1901,25 @@ describe("clean session control plane", () => {
     ).toBeNull();
 
     const receiptId = crypto.randomUUID();
+    const admissionId = crypto.randomUUID();
     const obligationDigest = "c".repeat(64);
+    expect(
+      await admitSessionTurnModelCall(client.db, {
+        id: admissionId,
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn.id,
+        attemptId,
+        executionGeneration: turn.executionGeneration,
+        triggerEventId: turn.triggerEventId,
+        callIndex: 1,
+        callKind: "agent_model",
+        provider: "scripted",
+        providerApi: "responses",
+        model: "scripted-model",
+      }),
+    ).toMatchObject({ action: "established", admission: { id: admissionId } });
     await establishSessionTurnPersistenceReceipt(client.db, {
       id: receiptId,
       accountId: grant.accountId,
@@ -1909,14 +1929,15 @@ describe("clean session control plane", () => {
       attemptId,
       executionGeneration: turn.executionGeneration,
       triggerEventId: turn.triggerEventId,
+      modelCallAdmissionId: admissionId,
       obligationKind: "model_call",
       obligationVersion: 1,
       obligationDigest,
       obligation: {
         kind: "model_call",
         history: { items: [] },
-        metering: { sourceKey: "completed-provider-response" },
-        event: { type: "agent.model.usage" },
+        metering: null,
+        event: null,
       },
     });
 
@@ -1966,6 +1987,289 @@ describe("clean session control plane", () => {
         receiptId,
       }),
     ).toMatchObject({ action: "settled", receipt: { id: receiptId } });
+  });
+
+  test("model-call admission is idempotent, provenance-exact, and allows only one unlinked call", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "admit one exact provider call");
+    const attemptId = crypto.randomUUID();
+    const turn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId },
+    );
+    if (!turn) throw new Error("model-call admission turn was not claimed");
+    const admissionInput = {
+      id: crypto.randomUUID(),
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      turnId: turn.id,
+      attemptId,
+      executionGeneration: turn.executionGeneration,
+      triggerEventId: turn.triggerEventId,
+      callIndex: 1,
+      callKind: "agent_model" as const,
+      provider: "scripted",
+      providerApi: "responses" as const,
+      model: "scripted-model",
+    };
+
+    expect(await admitSessionTurnModelCall(client.db, admissionInput)).toMatchObject({
+      action: "established",
+      admission: { id: admissionInput.id, callIndex: 1 },
+    });
+    expect(await admitSessionTurnModelCall(client.db, admissionInput)).toMatchObject({
+      action: "confirmed",
+      admission: { id: admissionInput.id },
+    });
+    await expect(
+      admitSessionTurnModelCall(client.db, {
+        ...admissionInput,
+        id: crypto.randomUUID(),
+        model: "conflicting-model",
+      }),
+    ).rejects.toThrow("has conflicting provenance");
+    await expect(
+      admitSessionTurnModelCall(client.db, {
+        ...admissionInput,
+        id: crypto.randomUUID(),
+        callIndex: 2,
+      }),
+    ).rejects.toThrow();
+  });
+
+  test("model receipts require the exact admission kind and maintain a bidirectional link", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "link completed inference truth");
+    const attemptId = crypto.randomUUID();
+    const turn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId },
+    );
+    if (!turn) throw new Error("model receipt admission turn was not claimed");
+    const receiptId = crypto.randomUUID();
+    const obligation = {
+      kind: "model_call",
+      history: { items: [] },
+      metering: null,
+      event: null,
+    };
+    const receiptInput = {
+      id: receiptId,
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      turnId: turn.id,
+      attemptId,
+      executionGeneration: turn.executionGeneration,
+      triggerEventId: turn.triggerEventId,
+      obligationKind: "model_call" as const,
+      obligationVersion: 1 as const,
+      obligationDigest: "d".repeat(64),
+      obligation,
+    };
+
+    await expect(establishSessionTurnPersistenceReceipt(client.db, receiptInput)).rejects.toThrow(
+      "conflicts with its exact ownership chain",
+    );
+
+    const admissionId = crypto.randomUUID();
+    await admitSessionTurnModelCall(client.db, {
+      id: admissionId,
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      turnId: turn.id,
+      attemptId,
+      executionGeneration: turn.executionGeneration,
+      triggerEventId: turn.triggerEventId,
+      callIndex: 1,
+      callKind: "agent_model",
+      provider: "scripted",
+      providerApi: "responses",
+      model: "scripted-model",
+    });
+    await expect(
+      establishSessionTurnPersistenceReceipt(client.db, {
+        ...receiptInput,
+        modelCallAdmissionId: admissionId,
+        obligationKind: "context_compaction",
+        obligation: { ...obligation, kind: "context_compaction" },
+      }),
+    ).rejects.toThrow("conflicts with its model-call admission");
+
+    expect(
+      await establishSessionTurnPersistenceReceipt(client.db, {
+        ...receiptInput,
+        modelCallAdmissionId: admissionId,
+      }),
+    ).toMatchObject({ action: "established", receipt: { id: receiptId } });
+    const [linkedAdmission] = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      db
+        .select({
+          receiptId: schema.sessionTurnModelCallAdmissions.persistenceReceiptId,
+          receiptEstablishedAt: schema.sessionTurnModelCallAdmissions.receiptEstablishedAt,
+        })
+        .from(schema.sessionTurnModelCallAdmissions)
+        .where(eq(schema.sessionTurnModelCallAdmissions.id, admissionId)),
+    );
+    expect(linkedAdmission).toMatchObject({
+      receiptId,
+      receiptEstablishedAt: expect.any(Date),
+    });
+    expect(
+      await recoverSessionDispatch(client.db, grant.workspaceId!, {
+        sessionId: session.id,
+        attemptId,
+        timeoutType: "HEARTBEAT",
+        maxRedispatches: 3,
+      }),
+    ).toMatchObject({ action: "persistence_pending", receipt: { id: receiptId } });
+
+    await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      db
+        .update(schema.sessionTurnModelCallAdmissions)
+        .set({ persistenceReceiptId: null, receiptEstablishedAt: null })
+        .where(eq(schema.sessionTurnModelCallAdmissions.id, admissionId)),
+    );
+    await expect(
+      establishSessionTurnPersistenceReceipt(client.db, {
+        ...receiptInput,
+        modelCallAdmissionId: admissionId,
+      }),
+    ).rejects.toThrow("already owns a different pending persistence receipt");
+  });
+
+  test("an unlinked admission atomically quarantines worker-death recovery and stale retries", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "never replay an ambiguously completed inference");
+    const attemptId = crypto.randomUUID();
+    const turn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId },
+    );
+    if (!turn) throw new Error("ambiguous model-call turn was not claimed");
+    const admissionId = crypto.randomUUID();
+    await admitSessionTurnModelCall(client.db, {
+      id: admissionId,
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      turnId: turn.id,
+      attemptId,
+      executionGeneration: turn.executionGeneration,
+      triggerEventId: turn.triggerEventId,
+      callIndex: 1,
+      callKind: "agent_model",
+      provider: "scripted",
+      providerApi: "responses",
+      model: "scripted-model",
+    });
+
+    const quarantined = await recoverSessionDispatch(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      attemptId,
+      timeoutType: "HEARTBEAT",
+      maxRedispatches: 3,
+    });
+    expect(quarantined).toMatchObject({ action: "quarantined", turnId: turn.id });
+    expect(quarantined.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "turn.failed",
+          payload: expect.objectContaining({
+            code: "ambiguous_model_call",
+            effectState: "unknown",
+            retryable: false,
+          }),
+        }),
+      ]),
+    );
+    expect(await getSession(client.db, grant.workspaceId!, session.id)).toMatchObject({
+      status: "failed",
+      activeTurnId: null,
+    });
+    expect(
+      await quarantineAmbiguousSessionTurnModelCall(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn.id,
+        attemptId,
+        executionGeneration: turn.executionGeneration,
+        admissionId,
+      }),
+    ).toEqual({ action: "stale", events: [] });
+    expect(
+      await recoverSessionDispatch(client.db, grant.workspaceId!, {
+        sessionId: session.id,
+        attemptId,
+        timeoutType: "HEARTBEAT",
+        maxRedispatches: 3,
+      }),
+    ).toMatchObject({ action: "stale" });
+  });
+
+  test("in-process ambiguous-call quarantine owns only the exact live attempt", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "quarantine this exact failed provider boundary");
+    const attemptId = crypto.randomUUID();
+    const turn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId },
+    );
+    if (!turn) throw new Error("in-process quarantine turn was not claimed");
+    const admissionId = crypto.randomUUID();
+    await admitSessionTurnModelCall(client.db, {
+      id: admissionId,
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      turnId: turn.id,
+      attemptId,
+      executionGeneration: turn.executionGeneration,
+      triggerEventId: turn.triggerEventId,
+      callIndex: 1,
+      callKind: "context_compaction",
+      provider: "scripted",
+      providerApi: "chat",
+      model: "scripted-model",
+    });
+
+    expect(
+      await quarantineAmbiguousSessionTurnModelCall(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn.id,
+        attemptId,
+        executionGeneration: turn.executionGeneration,
+        admissionId,
+      }),
+    ).toMatchObject({ action: "quarantined", turnId: turn.id });
+    expect(
+      await quarantineAmbiguousSessionTurnModelCall(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn.id,
+        attemptId,
+        executionGeneration: turn.executionGeneration,
+        admissionId,
+      }),
+    ).toEqual({ action: "stale", events: [] });
   });
 
   test("invalid persistence evidence atomically quarantines and removes the live-attempt wedge", async () => {

@@ -204,8 +204,8 @@ export type ModelCallPersistenceObligation = {
     isCodexTurn: boolean;
     usage: ModelUsageInput;
     sourceKey: string;
-  };
-  event: ExactTurnEventPersistenceInput;
+  } | null;
+  event: ExactTurnEventPersistenceInput | null;
 };
 
 export type PreparedContextCompactionPersistence =
