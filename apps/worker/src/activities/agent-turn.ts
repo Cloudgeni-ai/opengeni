@@ -162,7 +162,10 @@ import { mergeResourceRefs, mergeToolRefs } from "./common";
 import { maybeCompactContext, type MaybeCompactResult } from "./context-compaction";
 import { persistPreparedContextCompaction } from "./context-compaction-persistence";
 import { TurnAttemptFencedError } from "./turn-attempt-fenced";
-import { persistCompletedModelCallReceipt } from "./turn-persistence-sequencing";
+import {
+  persistCompletedModelCallReceipt,
+  TurnPersistenceSequencer,
+} from "./turn-persistence-sequencing";
 import { prepareTurnPersistenceHandoff } from "../turn-persistence-handoff";
 import {
   loadWorkspaceEnvironmentForRunWithCredentials,
@@ -1993,6 +1996,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           attemptId: input.attemptId,
           obligation,
         });
+      // The SDK may enter a function tool while the stream consumer is still
+      // persisting the model response that authorized it. Acquire this queue
+      // before each receipt's first await so PostgreSQL never observes two
+      // simultaneous pending obligations for one attempt. A boundary failure
+      // poisons the queue and blocks every later external effect.
+      const persistenceSequencer = new TurnPersistenceSequencer();
       const establishPersistenceReceipt = async (
         receipt: ReturnType<typeof preparePersistenceReceipt>,
       ) => {
@@ -2123,62 +2132,65 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         });
         const obligation = preparedReceipt.obligation as ModelCallPersistenceObligation;
         const handoff = preparedReceipt.handoff;
-        let appended: { events: SessionEvent[]; accepted: boolean };
-        try {
-          appended = await persistCompletedModelCallReceipt({
-            establishHandoff: async () => await establishPersistenceReceipt(preparedReceipt),
-            confirmOwnership: async () => {
-              await renewCodexLease("model_usage");
-              if (codexLeaseLost) {
-                throw new Error("Codex credential lease expired during the active turn");
-              }
-            },
-            persistHistory: async () => {
-              await persistPreparedConversationHistory(preparedHistory, handoff.receiptId);
-            },
-            persistMetering: async () => {
-              await recordModelUsageAndDebitCredits(settings, db, {
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                sessionId: input.sessionId,
-                turnId: usageInput.turnId,
-                ...obligation.metering,
-                observability,
-              });
-            },
-            persistEvent: async () =>
-              await appendOrConfirmAndPublishTurnEventsFenced(
-                db,
-                bus,
-                input.workspaceId,
-                input.sessionId,
-                turnId!,
-                executionGeneration,
-                input.attemptId,
-                [exactEvent],
-                undefined,
-                handoff.receiptId,
-              ),
+        const appended = await persistenceSequencer.run(async () => {
+          let persisted: { events: SessionEvent[]; accepted: boolean };
+          try {
+            persisted = await persistCompletedModelCallReceipt({
+              establishHandoff: async () => await establishPersistenceReceipt(preparedReceipt),
+              confirmOwnership: async () => {
+                await renewCodexLease("model_usage");
+                if (codexLeaseLost) {
+                  throw new Error("Codex credential lease expired during the active turn");
+                }
+              },
+              persistHistory: async () => {
+                await persistPreparedConversationHistory(preparedHistory, handoff.receiptId);
+              },
+              persistMetering: async () => {
+                await recordModelUsageAndDebitCredits(settings, db, {
+                  accountId: input.accountId,
+                  workspaceId: input.workspaceId,
+                  sessionId: input.sessionId,
+                  turnId: usageInput.turnId,
+                  ...obligation.metering,
+                  observability,
+                });
+              },
+              persistEvent: async () =>
+                await appendOrConfirmAndPublishTurnEventsFenced(
+                  db,
+                  bus,
+                  input.workspaceId,
+                  input.sessionId,
+                  turnId!,
+                  executionGeneration,
+                  input.attemptId,
+                  [exactEvent],
+                  undefined,
+                  handoff.receiptId,
+                ),
+            });
+            if (!persisted.accepted) {
+              throw new TurnAttemptFencedError(
+                "turn attempt ended while settling completed model usage",
+              );
+            }
+            await settlePersistenceReceipt(handoff);
+          } catch (persistenceError) {
+            if (persistenceError instanceof TurnAttemptFencedError) {
+              delete heartbeatDetails.persistenceHandoff;
+              throw persistenceError;
+            }
+            throw new TurnPersistenceBoundaryError(handoff, persistenceError);
+          }
+          delete heartbeatDetails.persistenceHandoff;
+          activityContext?.heartbeat({
+            ...heartbeatDetails,
+            phase: "model_call_persisted",
+            producerSeq,
+            at: new Date().toISOString(),
           });
-          if (!appended.accepted) {
-            throw new TurnAttemptFencedError(
-              "turn attempt ended while settling completed model usage",
-            );
-          }
-          await settlePersistenceReceipt(handoff);
-        } catch (persistenceError) {
-          if (persistenceError instanceof TurnAttemptFencedError) {
-            delete heartbeatDetails.persistenceHandoff;
-            throw persistenceError;
-          }
-          throw new TurnPersistenceBoundaryError(handoff, persistenceError);
-        }
-        delete heartbeatDetails.persistenceHandoff;
-        activityContext?.heartbeat({
-          ...heartbeatDetails,
-          phase: "model_call_persisted",
-          producerSeq,
-          at: new Date().toISOString(),
+          return persisted;
         });
         await emitModelCallUsage({
           observability,
@@ -3872,43 +3884,45 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         fileResourceDownloads,
         mcpServers: preparedTools.mcpServers,
         onFunctionToolCall: async (pendingToolCall) => {
-          const preparedReceipt = preparePersistenceReceipt({
-            kind: "pending_tool_call",
-            ...pendingToolCall,
-          });
-          const handoff = preparedReceipt.handoff;
-          const obligation = preparedReceipt.obligation as PendingToolCallPersistenceObligation;
-          try {
-            await establishPersistenceReceipt(preparedReceipt);
-            const registered = await registerPendingSessionToolCall(db, {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-              turnId: turnId!,
-              executionGeneration,
-              attemptId: input.attemptId,
-              persistenceReceiptId: handoff.receiptId,
-              callId: obligation.callId,
-              callType: obligation.callType,
-              callItem: obligation.callItem,
+          await persistenceSequencer.run(async () => {
+            const preparedReceipt = preparePersistenceReceipt({
+              kind: "pending_tool_call",
+              ...pendingToolCall,
             });
-            if (!registered.accepted) {
-              throw new TurnAttemptFencedError(
-                "turn attempt ended before a function tool could be durably registered",
-              );
+            const handoff = preparedReceipt.handoff;
+            const obligation = preparedReceipt.obligation as PendingToolCallPersistenceObligation;
+            try {
+              await establishPersistenceReceipt(preparedReceipt);
+              const registered = await registerPendingSessionToolCall(db, {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                turnId: turnId!,
+                executionGeneration,
+                attemptId: input.attemptId,
+                persistenceReceiptId: handoff.receiptId,
+                callId: obligation.callId,
+                callType: obligation.callType,
+                callItem: obligation.callItem,
+              });
+              if (!registered.accepted) {
+                throw new TurnAttemptFencedError(
+                  "turn attempt ended before a function tool could be durably registered",
+                );
+              }
+              await settlePersistenceReceipt(handoff);
+            } catch (persistenceError) {
+              if (persistenceError instanceof TurnAttemptFencedError) {
+                throw persistenceError;
+              }
+              throw new TurnPersistenceBoundaryError(handoff, persistenceError);
             }
-            await settlePersistenceReceipt(handoff);
-          } catch (persistenceError) {
-            if (persistenceError instanceof TurnAttemptFencedError) {
-              throw persistenceError;
-            }
-            throw new TurnPersistenceBoundaryError(handoff, persistenceError);
-          }
-          delete heartbeatDetails.persistenceHandoff;
-          activityContext?.heartbeat({
-            ...heartbeatDetails,
-            phase: "tool_call_registered",
-            at: new Date().toISOString(),
+            delete heartbeatDetails.persistenceHandoff;
+            activityContext?.heartbeat({
+              ...heartbeatDetails,
+              phase: "tool_call_registered",
+              at: new Date().toISOString(),
+            });
           });
         },
         // LIVE by-reference connector namespaces (fills during this turn's
