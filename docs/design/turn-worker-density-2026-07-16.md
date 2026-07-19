@@ -84,6 +84,17 @@ samples, 1,024 synthetic tool/fan-out/drain items, 2 MiB of synthetic working
 bytes per turn, and a 60-second synthetic wait. Plateau sampling cannot be more
 frequent than every 100 ms, and the per-wave timeout cannot exceed 30 minutes.
 
+History setup is intentionally isolated from RSS measurement. For each wave,
+the measured parent creates only the durable session identities, then a bounded
+child process writes history in 25-row batches and exits before baseline
+settlement and sampling. The parent subsequently runs the production turn
+activity path against those seeded rows and remains responsible for workspace
+cleanup if seeding, measurement, or verification fails. This prevents database
+driver/allocator pages retained while generating up to 64 MiB of active plus
+inactive seed input per turn from inflating the baseline and producing a
+misleading zero-increment result. Every artifact records this exact isolation
+protocol, and the verifier rejects a missing or altered declaration.
+
 Each activity uses `sandboxBackend: "none"`, a zero-priced
 `scripted-density-model`, no model-provider registry entries, and no API key.
 The model wrapper holds each request at a deterministic gate, then drains it
@@ -129,7 +140,8 @@ Strict verification requires the exact current deployment revision supplied by
 `--production-revision`, the complete canonical density sweep
 `1,2,4,8,12,16,24,32`, three waves, the default bounded history/row shape and
 sampling controls, the 50/100 MiB thresholds, and the scripted-model/no-provider
-isolation fields. A bounded smoke or pathological artifact may opt into
+isolation fields, including proof that the per-wave history-seed process exited
+before baseline sampling. A bounded smoke or pathological artifact may opt into
 `--allow-noncanonical`; that mode permits configured subsets and controls but
 still verifies the schema, deterministic history shape, scripted model,
 no-Azure/no-external/no-real-sandbox claims, raw samples, and cleanup contract.

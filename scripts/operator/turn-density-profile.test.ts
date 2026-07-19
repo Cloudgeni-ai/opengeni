@@ -14,6 +14,8 @@ import {
   FORCED_COMPACTION_RULE,
   historyRowShape,
   historyRows,
+  MEASUREMENT_ISOLATION,
+  parseDensitySeedManifest,
   SYNTHETIC_SCENARIOS,
   parseDensitySweep,
   PRODUCTION_ACTIVE_HISTORY_LIMITS,
@@ -147,12 +149,49 @@ describe("turn density profile release-gate helpers", () => {
     );
   });
 
+  test("strictly validates the bounded per-wave history seed protocol", () => {
+    const manifest = {
+      schemaVersion: 1,
+      accountId: "11111111-1111-4111-8111-111111111111",
+      workspaceId: "22222222-2222-4222-8222-222222222222",
+      activeHistoryBytes: DEFAULT_ACTIVE_HISTORY_BYTES,
+      inactiveHistoryBytes: DEFAULT_INACTIVE_HISTORY_BYTES,
+      compactionTailBytes: DEFAULT_COMPACTION_TAIL_BYTES,
+      historyRowPayloadBytes: DEFAULT_HISTORY_ROW_PAYLOAD_BYTES,
+      sessions: [
+        {
+          sessionId: "33333333-3333-4333-8333-333333333333",
+          sessionIndex: 0,
+        },
+      ],
+    };
+    expect(parseDensitySeedManifest(JSON.stringify(manifest))).toEqual(manifest);
+    expect(() =>
+      parseDensitySeedManifest(JSON.stringify({ ...manifest, unexpected: true })),
+    ).toThrow("must contain exactly");
+    expect(() =>
+      parseDensitySeedManifest(
+        JSON.stringify({
+          ...manifest,
+          sessions: [{ ...manifest.sessions[0], sessionIndex: 1 }],
+        }),
+      ),
+    ).toThrow("zero-based array position");
+    expect(MEASUREMENT_ISOLATION).toEqual({
+      historySetup: "per-wave seed subprocess",
+      seedProcessExitedBeforeBaseline: true,
+      measuredProcess: "production activity path",
+    });
+  });
+
   test("rejects unbounded profile controls and inconsistent thresholds", () => {
     expect(() => profileConfigFromEnv({ OPENGENI_DENSITY_WAVES: "11" })).toThrow(
       "OPENGENI_DENSITY_WAVES must be at most 10",
     );
     expect(() =>
-      profileConfigFromEnv({ OPENGENI_DENSITY_PLATEAU_SAMPLE_INTERVAL_MS: "1" }),
+      profileConfigFromEnv({
+        OPENGENI_DENSITY_PLATEAU_SAMPLE_INTERVAL_MS: "1",
+      }),
     ).toThrow("must be between 100 and 60000");
     expect(() => profileConfigFromEnv({ OPENGENI_DENSITY_SYNTHETIC_FAN_OUT: "1025" })).toThrow(
       "must be at most 1024",
@@ -218,7 +257,11 @@ describe("turn density profile release-gate helpers", () => {
       densityActivityFailureBeforeGate([
         {
           status: "fulfilled",
-          value: { status: "failed", code: "active_history_too_large", detail: "too many bytes" },
+          value: {
+            status: "failed",
+            code: "active_history_too_large",
+            detail: "too many bytes",
+          },
         },
       ])?.message,
     ).toContain("active_history_too_large");
@@ -241,7 +284,11 @@ describe("turn density profile release-gate helpers", () => {
   test("verifies schema-v3 raw samples, statistics, thresholds, cleanup, and exact SHA", () => {
     const text = profileArtifactText();
     const sha256 = createHash("sha256").update(text).digest("hex");
-    expect(verifyDensityProfileArtifactText(text, sha256, { allowNoncanonical: true })).toEqual({
+    expect(
+      verifyDensityProfileArtifactText(text, sha256, {
+        allowNoncanonical: true,
+      }),
+    ).toEqual({
       sha256,
       schemaVersion: 3,
       densities: [2],
@@ -254,7 +301,9 @@ describe("turn density profile release-gate helpers", () => {
       hardLimitMet: true,
     });
     expect(() =>
-      verifyDensityProfileArtifactText(text, "0".repeat(64), { allowNoncanonical: true }),
+      verifyDensityProfileArtifactText(text, "0".repeat(64), {
+        allowNoncanonical: true,
+      }),
     ).toThrow("SHA-256 mismatch");
   });
 
@@ -317,6 +366,16 @@ describe("turn density profile release-gate helpers", () => {
         allowNoncanonical: true,
       }),
     ).toThrow("productionActiveMaterializationLimits does not match");
+
+    const measurementIsolationAltered = JSON.parse(profileArtifactText());
+    measurementIsolationAltered.workload.measurementIsolation.seedProcessExitedBeforeBaseline = false;
+    expect(() =>
+      verifyDensityProfileArtifactText(
+        `${JSON.stringify(measurementIsolationAltered)}\n`,
+        undefined,
+        { allowNoncanonical: true },
+      ),
+    ).toThrow("measurementIsolation does not match");
   });
 
   test("strict verification requires the canonical sweep and current revision", () => {

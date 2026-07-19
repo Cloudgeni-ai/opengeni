@@ -1,12 +1,14 @@
 import { createHash } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 
 import { dbSearchPath, getSettings, type Settings } from "@opengeni/config";
 import {
   appendSessionEvents,
   bootstrapWorkspace,
   countActiveSessionHistoryItems,
+  countSessionHistoryItems,
   createDb,
   createSession,
   deleteWorkspace,
@@ -38,6 +40,8 @@ const MAX_SETTLE_DELAY_MS = 60_000;
 const MAX_TIMEOUT_MS = 30 * 60_000;
 const MAX_SYNTHETIC_ITEMS = 1_024;
 const MAX_SYNTHETIC_WAIT_MS = 60_000;
+const MAX_SEED_MANIFEST_BYTES = 64 * 1024;
+const DENSITY_SEED_MANIFEST_ENV = "OPENGENI_DENSITY_SEED_MANIFEST";
 
 export const DEFAULT_DENSITIES = [1, 2, 4, 8, 12, 16, 24, 32] as const;
 export const DEFAULT_HISTORY_ROW_PAYLOAD_BYTES = 4 * 1024;
@@ -65,6 +69,12 @@ export const FORCED_COMPACTION_RULE = {
   scenario: "streaming",
   selectionRule: "turnIndex % 6 === 0",
   expectedCallsPerWave: "ceil(density / 6)",
+} as const;
+
+export const MEASUREMENT_ISOLATION = {
+  historySetup: "per-wave seed subprocess",
+  seedProcessExitedBeforeBaseline: true,
+  measuredProcess: "production activity path",
 } as const;
 
 export type SyntheticScenario = (typeof SYNTHETIC_SCENARIOS)[number];
@@ -151,6 +161,20 @@ export type DensityMeasurement = {
 type SyntheticWork = {
   release: () => Promise<void>;
   waitBeforeGateMs: number;
+};
+
+export type DensitySeedManifest = {
+  schemaVersion: 1;
+  accountId: string;
+  workspaceId: string;
+  activeHistoryBytes: number;
+  inactiveHistoryBytes: number;
+  compactionTailBytes: number;
+  historyRowPayloadBytes: number;
+  sessions: Array<{
+    sessionId: string;
+    sessionIndex: number;
+  }>;
 };
 
 /**
@@ -425,6 +449,12 @@ export function profileConfigFromEnv(
 }
 
 async function main(): Promise<void> {
+  const seedManifestPath = process.env[DENSITY_SEED_MANIFEST_ENV];
+  if (seedManifestPath) {
+    await runDensitySeedChild(seedManifestPath);
+    return;
+  }
+
   const config = profileConfigFromEnv();
   const runId = crypto.randomUUID();
   const productionSettings = getSettings();
@@ -531,6 +561,12 @@ export async function runWave(input: {
     objectStorage: null,
   });
   const turnInputs = [];
+  const createdSessions: Array<{
+    id: string;
+    initialMessage: string;
+    index: number;
+    workflowId: string;
+  }> = [];
   const forcedCompactionSessions: Array<{
     sessionId: string;
     activeHistoryItemsBefore: number;
@@ -562,20 +598,34 @@ export async function runWave(input: {
         }),
         "session creation",
       );
-      await phase(
-        seedHistory({
-          db,
-          accountId,
-          workspaceId,
+      createdSessions.push({
+        id: session.id,
+        initialMessage: session.initialMessage,
+        index,
+        workflowId: `density-profile-${runId}-${density}-${wave}-${index}`,
+      });
+    }
+
+    await runHistorySeedSubprocess(
+      {
+        schemaVersion: 1,
+        accountId,
+        workspaceId,
+        activeHistoryBytes: config.activeHistoryBytes,
+        inactiveHistoryBytes: config.inactiveHistoryBytes,
+        compactionTailBytes: config.compactionTailBytes,
+        historyRowPayloadBytes: config.historyRowPayloadBytes,
+        sessions: createdSessions.map((session) => ({
           sessionId: session.id,
-          sessionIndex: index,
-          activeBytes: config.activeHistoryBytes,
-          inactiveBytes: config.inactiveHistoryBytes,
-          compactionTailBytes: config.compactionTailBytes,
-          rowPayloadTargetBytes: config.historyRowPayloadBytes,
-        }),
-        "history seeding",
-      );
+          sessionIndex: session.index,
+        })),
+      },
+      deadlineAt,
+      density,
+      wave,
+    );
+
+    for (const session of createdSessions) {
       const [trigger] = await phase(
         appendSessionEvents(db, workspaceId, session.id, [
           { type: "user.message", payload: { text: session.initialMessage } },
@@ -583,14 +633,13 @@ export async function runWave(input: {
         "trigger creation",
       );
       if (!trigger) throw new Error(`Failed to append trigger for density session ${session.id}`);
-      const workflowId = `density-profile-${runId}-${density}-${wave}-${index}`;
       await phase(
         enqueueSessionTurn(db, {
           accountId,
           workspaceId,
           sessionId: session.id,
           triggerEventId: trigger.id,
-          temporalWorkflowId: workflowId,
+          temporalWorkflowId: session.workflowId,
           source: "user",
           prompt: session.initialMessage,
           resources: [],
@@ -598,12 +647,17 @@ export async function runWave(input: {
           model: "scripted-density-model",
           reasoningEffort: "low",
           sandboxBackend: "none",
-          metadata: { densityProfileRunId: runId, density, wave, turnIndex: index },
+          metadata: {
+            densityProfileRunId: runId,
+            density,
+            wave,
+            turnIndex: session.index,
+          },
           placement: "tail",
         }),
         "turn enqueue",
       );
-      if (shouldForceCompactionForTurn(index)) {
+      if (shouldForceCompactionForTurn(session.index)) {
         const activeHistoryItemsBefore = await phase(
           countActiveSessionHistoryItems(db, workspaceId, session.id),
           "seeded active-history count",
@@ -612,13 +666,16 @@ export async function runWave(input: {
           requestSessionCompaction(db, workspaceId, session.id),
           "forced compaction request",
         );
-        forcedCompactionSessions.push({ sessionId: session.id, activeHistoryItemsBefore });
+        forcedCompactionSessions.push({
+          sessionId: session.id,
+          activeHistoryItemsBefore,
+        });
       }
       turnInputs.push({
         accountId,
         workspaceId,
         sessionId: session.id,
-        workflowId,
+        workflowId: session.workflowId,
         workflowRunId: crypto.randomUUID(),
         attemptId: crypto.randomUUID(),
         trigger: { kind: "next" } as const,
@@ -669,7 +726,12 @@ export async function runWave(input: {
             typeof result.value === "object" &&
             "status" in result.value &&
             result.value.status !== "idle"
-          ? [{ index, error: `unexpected activity status ${String(result.value.status)}` }]
+          ? [
+              {
+                index,
+                error: `unexpected activity status ${String(result.value.status)}`,
+              },
+            ]
           : [],
     );
     if (failures.length > 0) {
@@ -692,7 +754,11 @@ export async function runWave(input: {
                 `${activeHistoryItemsBefore} -> ${activeHistoryItemsAfter}`,
             );
           }
-          return { sessionId, activeHistoryItemsBefore, activeHistoryItemsAfter };
+          return {
+            sessionId,
+            activeHistoryItemsBefore,
+            activeHistoryItemsAfter,
+          };
         }),
       ),
       "forced compaction verification",
@@ -736,7 +802,11 @@ export async function runWave(input: {
       incrementalValues,
       retainedValues: [retainedValue / density],
       plateauToSettledValues,
-      rawMemory: { baseline: baselineSamples, plateau: plateauSamples, settled: settledSamples },
+      rawMemory: {
+        baseline: baselineSamples,
+        plateau: plateauSamples,
+        settled: settledSamples,
+      },
     };
   } finally {
     model.release();
@@ -747,6 +817,198 @@ export async function runWave(input: {
       await phase(allRuns, "fault cleanup settlement").catch(() => undefined);
     }
   }
+}
+
+export function parseDensitySeedManifest(text: string): DensitySeedManifest {
+  if (Buffer.byteLength(text, "utf8") > MAX_SEED_MANIFEST_BYTES) {
+    throw new Error(`Density seed manifest must not exceed ${MAX_SEED_MANIFEST_BYTES} bytes`);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (error) {
+    throw new Error(`Density seed manifest is not valid JSON: ${errorMessage(error)}`, {
+      cause: error,
+    });
+  }
+  const manifest = exactRecord(
+    parsed,
+    [
+      "schemaVersion",
+      "accountId",
+      "workspaceId",
+      "activeHistoryBytes",
+      "inactiveHistoryBytes",
+      "compactionTailBytes",
+      "historyRowPayloadBytes",
+      "sessions",
+    ],
+    "density seed manifest",
+  );
+  if (manifest.schemaVersion !== 1) {
+    throw new Error("Density seed manifest schemaVersion must be 1");
+  }
+  const accountId = uuidString(manifest.accountId, "density seed manifest.accountId");
+  const workspaceId = uuidString(manifest.workspaceId, "density seed manifest.workspaceId");
+  const activeHistoryBytes = safeInteger(
+    manifest.activeHistoryBytes,
+    "density seed manifest.activeHistoryBytes",
+  );
+  const inactiveHistoryBytes = safeInteger(
+    manifest.inactiveHistoryBytes,
+    "density seed manifest.inactiveHistoryBytes",
+  );
+  const compactionTailBytes = safeInteger(
+    manifest.compactionTailBytes,
+    "density seed manifest.compactionTailBytes",
+  );
+  const historyRowPayloadBytes = safeInteger(
+    manifest.historyRowPayloadBytes,
+    "density seed manifest.historyRowPayloadBytes",
+  );
+  historyRowShape(
+    activeHistoryBytes,
+    inactiveHistoryBytes,
+    historyRowPayloadBytes,
+    compactionTailBytes,
+  );
+  if (!Array.isArray(manifest.sessions) || manifest.sessions.length < 1) {
+    throw new Error("Density seed manifest.sessions must be a non-empty array");
+  }
+  if (manifest.sessions.length > Math.max(...DEFAULT_DENSITIES)) {
+    throw new Error(
+      `Density seed manifest.sessions must contain at most ${Math.max(...DEFAULT_DENSITIES)} entries`,
+    );
+  }
+  const seenSessionIds = new Set<string>();
+  const sessions = manifest.sessions.map((value, index) => {
+    const session = exactRecord(value, ["sessionId", "sessionIndex"], `sessions[${index}]`);
+    const sessionId = uuidString(session.sessionId, `sessions[${index}].sessionId`);
+    const sessionIndex = safeInteger(session.sessionIndex, `sessions[${index}].sessionIndex`);
+    if (sessionIndex !== index) {
+      throw new Error(`sessions[${index}].sessionIndex must equal its zero-based array position`);
+    }
+    if (seenSessionIds.has(sessionId)) {
+      throw new Error(`sessions[${index}].sessionId must be unique`);
+    }
+    seenSessionIds.add(sessionId);
+    return { sessionId, sessionIndex };
+  });
+  return {
+    schemaVersion: 1,
+    accountId,
+    workspaceId,
+    activeHistoryBytes,
+    inactiveHistoryBytes,
+    compactionTailBytes,
+    historyRowPayloadBytes,
+    sessions,
+  };
+}
+
+async function runDensitySeedChild(manifestPath: string): Promise<void> {
+  const manifestStat = await stat(manifestPath);
+  if (!manifestStat.isFile() || manifestStat.size > MAX_SEED_MANIFEST_BYTES) {
+    throw new Error(
+      `Density seed manifest must be a file of at most ${MAX_SEED_MANIFEST_BYTES} bytes`,
+    );
+  }
+  const manifest = parseDensitySeedManifest(await readFile(manifestPath, "utf8"));
+  const settings = densityProfileSettings(getSettings());
+  const searchPath = dbSearchPath(settings);
+  const dbClient = createDb(settings.databaseUrl, {
+    ...(searchPath ? { searchPath } : {}),
+    rlsStrategy: settings.rlsStrategy,
+  });
+  try {
+    for (const session of manifest.sessions) {
+      await seedHistory({
+        db: dbClient.db,
+        accountId: manifest.accountId,
+        workspaceId: manifest.workspaceId,
+        sessionId: session.sessionId,
+        sessionIndex: session.sessionIndex,
+        activeBytes: manifest.activeHistoryBytes,
+        inactiveBytes: manifest.inactiveHistoryBytes,
+        compactionTailBytes: manifest.compactionTailBytes,
+        rowPayloadTargetBytes: manifest.historyRowPayloadBytes,
+      });
+    }
+  } finally {
+    await dbClient.close();
+  }
+}
+
+async function runHistorySeedSubprocess(
+  manifest: DensitySeedManifest,
+  deadlineAt: number,
+  density: number,
+  wave: number,
+): Promise<void> {
+  const validated = parseDensitySeedManifest(JSON.stringify(manifest));
+  const temporaryDirectory = await mkdtemp(join(tmpdir(), "opengeni-turn-density-seed-"));
+  const manifestPath = join(temporaryDirectory, "manifest.json");
+  let child: ReturnType<typeof Bun.spawn> | null = null;
+  try {
+    await writeFile(manifestPath, `${JSON.stringify(validated)}\n`, {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+    child = Bun.spawn([process.execPath, import.meta.path], {
+      env: { ...process.env, [DENSITY_SEED_MANIFEST_ENV]: manifestPath },
+      stdin: "ignore",
+      stdout: "inherit",
+      stderr: "inherit",
+    });
+    const exitCode = await withDeadline(
+      child.exited,
+      deadlineAt,
+      `Timed out during isolated history seeding for density ${density} wave ${wave}`,
+    );
+    if (exitCode !== 0) {
+      throw new Error(
+        `Isolated history seed process exited ${exitCode} for density ${density} wave ${wave}`,
+      );
+    }
+  } catch (error) {
+    if (child && child.exitCode === null) {
+      child.kill(9);
+      void child.exited.catch(() => undefined);
+    }
+    throw error;
+  } finally {
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  }
+}
+
+function exactRecord(value: unknown, keys: string[], path: string): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error(`${path} must be an object`);
+  }
+  const record = value as Record<string, unknown>;
+  const actualKeys = Object.keys(record).sort();
+  const expectedKeys = [...keys].sort();
+  if (JSON.stringify(actualKeys) !== JSON.stringify(expectedKeys)) {
+    throw new Error(`${path} must contain exactly ${expectedKeys.join(", ")}`);
+  }
+  return record;
+}
+
+function uuidString(value: unknown, path: string): string {
+  if (
+    typeof value !== "string" ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
+  ) {
+    throw new Error(`${path} must be a UUID`);
+  }
+  return value;
+}
+
+function safeInteger(value: unknown, path: string): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value)) {
+    throw new Error(`${path} must be a safe integer`);
+  }
+  return value;
 }
 
 export function densityActivityFailureBeforeGate(
@@ -791,7 +1053,15 @@ async function seedHistory(input: {
     input.rowPayloadTargetBytes,
     input.compactionTailBytes,
   );
-  const activeRows = historyRows(
+  await seedHistoryRows(
+    input,
+    input.inactiveBytes,
+    false,
+    shape.activeRowCount,
+    input.rowPayloadTargetBytes,
+    0,
+  );
+  await seedHistoryRows(
     input,
     input.activeBytes,
     true,
@@ -799,23 +1069,57 @@ async function seedHistory(input: {
     input.rowPayloadTargetBytes,
     input.compactionTailBytes,
   );
-  const inactiveRows = historyRows(
-    input,
-    input.inactiveBytes,
-    false,
-    activeRows.length,
-    input.rowPayloadTargetBytes,
-    0,
-  );
+
+  const [activeRows, totalRows] = await Promise.all([
+    countActiveSessionHistoryItems(input.db, input.workspaceId, input.sessionId),
+    countSessionHistoryItems(input.db, input.workspaceId, input.sessionId),
+  ]);
+  const inactiveRows = totalRows - activeRows;
   if (
-    activeRows.length !== shape.activeRowCount ||
-    inactiveRows.length !== shape.inactiveRowCount
+    Number(activeRows) !== shape.activeRowCount ||
+    Number(inactiveRows) !== shape.inactiveRowCount
   ) {
     throw new Error("Deterministic density history row shape drifted while seeding");
   }
-  for (const rows of chunks([...inactiveRows, ...activeRows], 25)) {
+}
+
+async function seedHistoryRows(
+  input: {
+    db: Parameters<typeof withWorkspaceRls>[0];
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    sessionIndex: number;
+  },
+  totalBytes: number,
+  active: boolean,
+  positionOffset: number,
+  rowPayloadTargetBytes: number,
+  compactionTailBytes: number,
+): Promise<void> {
+  const itemCount = historyRowCount(totalBytes, rowPayloadTargetBytes);
+  if (itemCount === 0) return;
+  const payloadBytes = Math.max(1, Math.floor(totalBytes / itemCount) - HISTORY_ROW_OVERHEAD_BYTES);
+  const tailCount = active ? historyRowCount(compactionTailBytes, rowPayloadTargetBytes) : 0;
+  let rows: ReturnType<typeof historyRows> = [];
+  for (let itemIndex = 0; itemIndex < itemCount; itemIndex += 1) {
+    rows.push(
+      historyRowAt({
+        input,
+        active,
+        positionOffset,
+        itemIndex,
+        itemCount,
+        payloadBytes,
+        tailCount,
+        compactionTailBytes,
+      }),
+    );
+    if (rows.length < 25 && itemIndex + 1 < itemCount) continue;
+    const batch = rows;
+    rows = [];
     await withWorkspaceRls(input.db, input.workspaceId, async (db) => {
-      await db.insert(schema.sessionHistoryItems).values(rows);
+      await db.insert(schema.sessionHistoryItems).values(batch);
     });
   }
 }
@@ -837,40 +1141,67 @@ export function historyRows(
   const itemCount = historyRowCount(totalBytes, rowPayloadTargetBytes);
   const payloadBytes = Math.max(1, Math.floor(totalBytes / itemCount) - HISTORY_ROW_OVERHEAD_BYTES);
   const tailCount = active ? historyRowCount(compactionTailBytes, rowPayloadTargetBytes) : 0;
-  return Array.from({ length: itemCount }, (_, itemIndex) => {
-    const isCompactionTail = active && itemIndex >= itemCount - tailCount;
-    const isCheckpoint = active && itemIndex === 0;
-    const role = isCompactionTail ? "user" : itemIndex % 2 === 0 ? "user" : "assistant";
-    return {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      sessionId: input.sessionId,
-      position: positionOffset + itemIndex,
+  return Array.from({ length: itemCount }, (_, itemIndex) =>
+    historyRowAt({
+      input,
       active,
-      item: {
-        type: "message",
-        role,
-        status: "completed",
-        content: [
-          {
-            type: role === "user" ? "input_text" : "output_text",
-            text: deterministicText(input.sessionIndex, itemIndex, payloadBytes),
-          },
-        ],
-        ...(isCheckpoint
-          ? {
-              providerData: {
-                densityProfile: {
-                  shape: "compaction-checkpoint",
-                  bounded: true,
-                  tailBytes: compactionTailBytes,
-                },
+      positionOffset,
+      itemIndex,
+      itemCount,
+      payloadBytes,
+      tailCount,
+      compactionTailBytes,
+    }),
+  );
+}
+
+function historyRowAt(input: {
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    sessionIndex: number;
+  };
+  active: boolean;
+  positionOffset: number;
+  itemIndex: number;
+  itemCount: number;
+  payloadBytes: number;
+  tailCount: number;
+  compactionTailBytes: number;
+}) {
+  const isCompactionTail = input.active && input.itemIndex >= input.itemCount - input.tailCount;
+  const isCheckpoint = input.active && input.itemIndex === 0;
+  const role = isCompactionTail ? "user" : input.itemIndex % 2 === 0 ? "user" : "assistant";
+  return {
+    accountId: input.input.accountId,
+    workspaceId: input.input.workspaceId,
+    sessionId: input.input.sessionId,
+    position: input.positionOffset + input.itemIndex,
+    active: input.active,
+    item: {
+      type: "message",
+      role,
+      status: "completed",
+      content: [
+        {
+          type: role === "user" ? "input_text" : "output_text",
+          text: deterministicText(input.input.sessionIndex, input.itemIndex, input.payloadBytes),
+        },
+      ],
+      ...(isCheckpoint
+        ? {
+            providerData: {
+              densityProfile: {
+                shape: "compaction-checkpoint",
+                bounded: true,
+                tailBytes: input.compactionTailBytes,
               },
-            }
-          : {}),
-      },
-    };
-  });
+            },
+          }
+        : {}),
+    },
+  };
 }
 
 function deterministicText(sessionIndex: number, itemIndex: number, bytes: number): string {
@@ -1002,7 +1333,10 @@ function syntheticWorkForTurn(turnIndex: number, config: DensityProfileConfig): 
   switch (scenario) {
     case "streaming":
       allocate(1);
-      retained.push({ streamChunks: ["delta-1", "delta-2", "delta-3"], buffers });
+      retained.push({
+        streamChunks: ["delta-1", "delta-2", "delta-3"],
+        buffers,
+      });
       break;
     case "tool-burst":
       allocate(2);
@@ -1141,7 +1475,11 @@ export function buildProfileResult(input: {
     runId,
     generatedAt: new Date().toISOString(),
     productionRevision,
-    runtime: { bun: Bun.version, platform: process.platform, arch: process.arch },
+    runtime: {
+      bun: Bun.version,
+      platform: process.platform,
+      arch: process.arch,
+    },
     workload: {
       densities: config.densities,
       waves: config.waves,
@@ -1166,6 +1504,7 @@ export function buildProfileResult(input: {
         settleDelayMs: config.settleDelayMs,
         timeoutMs: config.timeoutMs,
       },
+      measurementIsolation: MEASUREMENT_ISOLATION,
       syntheticMix: {
         scenarios: SYNTHETIC_SCENARIOS,
         configuredWorkBytesPerTurn: config.syntheticWorkBytes,
@@ -1234,6 +1573,7 @@ function canonicalWorkload() {
       settleDelayMs: 1_000,
       timeoutMs: 120_000,
     },
+    measurementIsolation: MEASUREMENT_ISOLATION,
     syntheticMix: {
       scenarios: SYNTHETIC_SCENARIOS,
       configuredWorkBytesPerTurn: 256 * 1024,
@@ -1510,6 +1850,11 @@ export function verifyDensityProfileArtifactText(
     ),
     "artifact.workload.history.shape",
   );
+  assertArtifactEqual(
+    workload.measurementIsolation,
+    MEASUREMENT_ISOLATION,
+    "artifact.workload.measurementIsolation",
+  );
 
   const syntheticMix = artifactRecord(workload.syntheticMix, "artifact.workload.syntheticMix");
   assertArtifactEqual(
@@ -1771,7 +2116,11 @@ export function verifyDensityProfileArtifactText(
   );
   assertArtifactEqual(
     cleanup,
-    { workspacesCreated: 1, workspacesDeleted: 1, sessionsCreated: expectedSessions },
+    {
+      workspacesCreated: 1,
+      workspacesDeleted: 1,
+      sessionsCreated: expectedSessions,
+    },
     "artifact.cleanup",
   );
 
@@ -1899,14 +2248,6 @@ function densityProfileSettings(productionSettings: Settings): Settings {
     integrationsEnabled: false,
     toolspaceEnabled: false,
   };
-}
-
-function chunks<T>(values: T[], size: number): T[][] {
-  const out: T[][] = [];
-  for (let index = 0; index < values.length; index += size) {
-    out.push(values.slice(index, index + size));
-  }
-  return out;
 }
 
 function positiveIntegerFromEnv(
