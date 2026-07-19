@@ -115,14 +115,26 @@ registration blocks the effect. A completed ordinary model response prepares
 the exact new conversation rows, idempotent accounting source key, and reserved
 `agent.model.usage` producer event. A completed compaction response additionally
 prepares the exact apply/skip transition, replacement fingerprint, and
-persistence key. The activity heartbeats that versioned obligation before its
-first lease renewal or Postgres mutation.
+persistence key.
+
+The full prepared obligation is committed first to
+`session_turn_persistence_receipts` as JSONB with its canonical SHA-256 digest,
+exact attempt UUID, execution generation, trigger, turn, and kind. Only after
+that row is durable does the activity heartbeat a strict version-2 reference:
+receipt/turn/trigger/generation/attempt/kind/digest, with no extra keys and a
+maximum encoded size of 1 KiB. Raw provider output, model history, metering,
+tool arguments, and compaction replacement rows therefore never enter Temporal
+workflow history. The heartbeat precedes the first lease renewal or application
+of that prepared obligation.
 
 If the worker cannot prove final persistence, it returns internal status
-`persistence_pending`; if the process dies, the same obligation remains in the
-last Temporal heartbeat. The workflow validates every identity and timestamp,
-then invokes only `persistTurnHandoffAndRecover`, a retryable control activity
-whose dependency closure contains database/event persistence but no provider,
+`persistence_pending` with that same bounded reference. If the process dies
+after the receipt commit, the reference normally remains in the last Temporal
+heartbeat. If it dies before that heartbeat, the control lane discovers the one
+pending receipt directly by exact attempt. The workflow/control activity
+validates the receipt identity, digest, kind, and stored obligation, then invokes
+only `persistTurnHandoffAndRecover`, a retryable control activity whose
+dependency closure contains database/event persistence but no provider,
 runtime, tool, or sandbox execution. Its fixed orders are:
 
 - tool: pending-call receipt → same-turn recovery;
@@ -137,9 +149,14 @@ all Postgres obligations are confirmed does the transactionally fenced recovery
 advance the logical turn for a higher-generation attempt. Activity-response
 loss, Temporal control-activity retry, and old/new worker overlap therefore
 repeat persistence only—not inference, tool invocation, or an external effect.
-A present but malformed heartbeat obligation fails closed and cannot fall back
-to generic worker-death redispatch. PostgreSQL is the authority; NATS fanout is
-retried/best-effort delivery and never changes whether recovery is safe.
+A malformed heartbeat/result reference, a reference-to-row identity or digest
+mismatch, or a malformed stored obligation fails closed and cannot fall back to
+generic worker-death redispatch. One PostgreSQL transaction quarantines the
+receipt, closes the exact live attempt as failed, clears the active attempt,
+fails the turn/session, closes pending tool calls, and appends a non-retryable
+`turn.failed(code="invalid_turn_persistence_handoff", effectState="unknown")`.
+PostgreSQL is the authority; NATS fanout is retried/best-effort delivery and
+never changes whether recovery is safe.
 
 The turn activity span retains bounded failure provenance (`persistence_boundary`,
 `worker_shutdown`, `attempt_fenced`, or `activity_cancelled`) and, when a database
@@ -192,11 +209,14 @@ runs the graceful checkpoint; it surfaces to the session workflow as a
 heartbeat-timeout `ActivityFailure` carrying the exact dead activity id. The
 workflow does not fail the session independently for that shape: conversation
 truth was still persisted after every completed model response during the turn.
-When the heartbeat carries a pending exact persistence obligation, the workflow
-settles that receipt through `persistTurnHandoffAndRecover` before any
-redispatch. Otherwise the fenced `recoverTurnAfterWorkerDeath` activity
-atomically closes the lost attempt, marks the same
-logical turn `recovering` and the loop dispatches its next attempt. This is not
+When the heartbeat carries a pending exact persistence reference, the workflow
+settles that PostgreSQL receipt through `persistTurnHandoffAndRecover` before
+any redispatch. When no heartbeat reference exists, the same control lane first
+looks up a pending receipt by exact attempt, covering death in the
+receipt-commit-to-heartbeat gap. Only when neither source identifies a receipt
+does the fenced `recoverDispatch` activity atomically close the lost attempt,
+mark the same logical turn `recovering`, and let the loop dispatch its next
+attempt. This is not
 prompt-queue work and not an automatic Temporal retry of side-effectful work:
 the resumed attempt sees everything durably checkpointed, including explicit
 `interrupted / outcome unknown` tool results when an effect cannot be proven.

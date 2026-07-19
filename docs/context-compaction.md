@@ -189,23 +189,28 @@ the request as described above.
 ## Persistence-boundary recovery
 
 Once the summarizer has returned a validated non-empty response and its usage,
-the worker prepares one exact apply or skip receipt. The receipt fixes the
-replacement rows (when applying), result fields, accounting source, reserved
-usage event, compaction event payload, persistence key, occurrence time, and
-replacement fingerprint. The worker heartbeats that complete obligation before
-the first lease confirmation or persistence mutation.
+the worker prepares one exact apply or skip obligation. It fixes the replacement
+rows (when applying), result fields, accounting source, reserved usage event,
+compaction event payload, persistence key, occurrence time, and replacement
+fingerprint. The worker first commits that full obligation and canonical digest
+as a pending PostgreSQL receipt owned by the exact attempt. It then heartbeats
+only the strict, at-most-1-KiB version-2 receipt reference before the first lease
+confirmation or application of the prepared transition; replacement rows and
+summary text never enter Temporal history.
 
 The strict persistence order is ownership/lease confirmation, model usage
 metering, exact usage-event append or confirmation, and then application or
 confirmation of the prepared compaction result. A retry after process death or
 an ambiguous database response runs only this DB persistence path. The
 persistence key and replacement fingerprint must match the already-recorded
-result; a higher execution generation that discovers the settled receipt uses
-that result and never invokes the summarizer again.
+result. If the process dies after the PostgreSQL receipt commit but before the
+heartbeat, recovery discovers the pending receipt by exact attempt. A higher
+execution generation that discovers the settled receipt uses that result and
+never invokes the summarizer again.
 
 PostgreSQL rows are the authority for usage, events, history replacement, and
 the compaction receipt. NATS publication is secondary fanout: a failed or
 duplicate publication cannot make a compaction uncommitted and can never
 authorize resampling. The workflow may recover the same logical turn only after
-every obligation in the heartbeat receipt is durably applied or exactly
-confirmed.
+the PostgreSQL obligation named by the bounded reference—or discovered directly
+by exact attempt—is durably applied or exactly confirmed.
