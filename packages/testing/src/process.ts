@@ -487,17 +487,27 @@ export async function waitFor(
   const intervalMs = options.intervalMs ?? 100;
   let lastError: unknown;
   while (Date.now() < deadline) {
+    let attemptTimeout: ReturnType<typeof setTimeout> | undefined;
     try {
       const remainingMs = Math.max(1, deadline - Date.now());
       const result = await Promise.race([
         Promise.resolve(predicate()),
-        rejectAfter(remainingMs, "condition attempt exceeded the wait deadline"),
+        new Promise<never>((_resolve, reject) => {
+          attemptTimeout = setTimeout(
+            () => reject(new Error("condition attempt exceeded the wait deadline")),
+            remainingMs,
+          );
+        }),
       ]);
       if (result) {
         return;
       }
     } catch (error) {
       lastError = error;
+    } finally {
+      if (attemptTimeout !== undefined) {
+        clearTimeout(attemptTimeout);
+      }
     }
     await Bun.sleep(intervalMs);
   }
@@ -510,11 +520,6 @@ export async function waitFor(
 async function resolveTrue(promise: Promise<unknown>): Promise<true> {
   await promise;
   return true;
-}
-
-async function rejectAfter(delayMs: number, message: string): Promise<never> {
-  await Bun.sleep(delayMs);
-  throw new Error(message);
 }
 
 export async function makeTempDir(prefix = "opengeni-test-"): Promise<string> {

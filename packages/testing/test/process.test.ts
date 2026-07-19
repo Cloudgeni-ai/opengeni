@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { runCommand, startProcess, waitFor } from "../src/process";
 
 test("waitFor enforces its deadline when one predicate attempt never settles", async () => {
@@ -12,6 +15,21 @@ test("waitFor enforces its deadline when one predicate attempt never settles", a
     }),
   ).rejects.toThrow("Timed out waiting for condition");
   expect(Date.now() - startedAt).toBeLessThan(500);
+});
+
+test("a successful waitFor does not retain its deadline timer", () => {
+  const processModule = new URL("../src/process.ts", import.meta.url).href;
+  const result = spawnSync(
+    process.execPath,
+    [
+      "-e",
+      `import { waitFor } from ${JSON.stringify(processModule)}; await waitFor(() => true, { timeoutMs: 10_000 });`,
+    ],
+    { encoding: "utf8", timeout: 1_000 },
+  );
+  expect(result.error).toBeUndefined();
+  expect(result.signal).toBeNull();
+  expect(result.status).toBe(0);
 });
 
 describe("runCommand", () => {
@@ -119,6 +137,50 @@ describe("startProcess", () => {
     expect(processIsAlive(childPid)).toBe(false);
   }, 15_000);
 });
+
+test("stopping a Vite process releases its supervised stream handles", () => {
+  if (process.platform !== "linux") return;
+  const root = mkdtempSync(join(tmpdir(), "opengeni-vite-stop-"));
+  const fixture = join(root, "probe.ts");
+  const processModule = new URL("../src/process.ts", import.meta.url).href;
+  const webRoot = new URL("../../../apps/web", import.meta.url).pathname;
+  writeFileSync(
+    fixture,
+    `import { startProcess } from ${JSON.stringify(processModule)};
+const listener = Bun.listen({
+  hostname: "127.0.0.1",
+  port: 0,
+  socket: { data() {} },
+});
+const port = listener.port;
+listener.stop(true);
+const started = await startProcess(
+  ["bun", "run", "vite", "dev", "--port", String(port), "--strictPort", "--host", "127.0.0.1"],
+  {
+    cwd: ${JSON.stringify(webRoot)},
+    env: { VITE_API_BASE_URL: "http://127.0.0.1:1" },
+    ready: async () => (await fetch(\`http://127.0.0.1:\${port}\`).catch(() => null))?.ok === true,
+    timeoutMs: 10_000,
+  },
+);
+await started.stop();
+console.log("stopped");
+`,
+  );
+  try {
+    const result = spawnSync(process.execPath, [fixture], {
+      cwd: new URL("../../..", import.meta.url).pathname,
+      encoding: "utf8",
+      timeout: 15_000,
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.signal).toBeNull();
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim()).toBe("stopped");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}, 20_000);
 
 function wrapperWithDescendantCommand(): string[] {
   return [
