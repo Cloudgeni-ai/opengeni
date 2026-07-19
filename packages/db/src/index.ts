@@ -12362,6 +12362,117 @@ export async function getSessionTurnPersistenceReceipt(
   });
 }
 
+export type InspectSessionTurnPersistenceReceiptResult =
+  | {
+      action: "pending" | "settled" | "quarantined";
+      receipt: SessionTurnPersistenceReceipt;
+    }
+  | { action: "missing"; receipt: null }
+  | { action: "stale"; receipt: SessionTurnPersistenceReceipt | null };
+
+/**
+ * Re-read an exact persistence receipt together with its owning attempt under
+ * the canonical workspace -> session -> turn -> attempt -> receipt lock order.
+ *
+ * A persistence-only activity calls this after any receipt-fenced write is
+ * rejected. The rejection may mean either that a successor really owns the
+ * turn or that the original worker concurrently finished the exact receipt.
+ * Returning those as the same generic stale result can abandon a live turn, so
+ * this transaction classifies the durable receipt and ownership truth together.
+ */
+export async function inspectSessionTurnPersistenceReceipt(
+  db: Database,
+  workspaceId: string,
+  input: {
+    sessionId: string;
+    turnId: string;
+    attemptId: string;
+    executionGeneration: number;
+    receiptId: string;
+  },
+): Promise<InspectSessionTurnPersistenceReceiptResult> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    return await scopedDb.transaction(async (tx) => {
+      await evaluateSessionControl(tx as unknown as Database, workspaceId, input.sessionId, {
+        lock: "share",
+      });
+      const [workspace] = await tx
+        .select({ id: schema.workspaces.id })
+        .from(schema.workspaces)
+        .where(eq(schema.workspaces.id, workspaceId))
+        .for("update")
+        .limit(1);
+      const [session] = await tx
+        .select()
+        .from(schema.sessions)
+        .where(
+          and(
+            eq(schema.sessions.workspaceId, workspaceId),
+            eq(schema.sessions.id, input.sessionId),
+          ),
+        )
+        .for("update")
+        .limit(1);
+      const [turn] = await tx
+        .select()
+        .from(schema.sessionTurns)
+        .where(
+          and(
+            eq(schema.sessionTurns.workspaceId, workspaceId),
+            eq(schema.sessionTurns.sessionId, input.sessionId),
+            eq(schema.sessionTurns.id, input.turnId),
+          ),
+        )
+        .for("update")
+        .limit(1);
+      const [attempt] = await tx
+        .select()
+        .from(schema.sessionTurnAttempts)
+        .where(
+          and(
+            eq(schema.sessionTurnAttempts.workspaceId, workspaceId),
+            eq(schema.sessionTurnAttempts.id, input.attemptId),
+          ),
+        )
+        .for("update")
+        .limit(1);
+      const [receipt] = await tx
+        .select()
+        .from(schema.sessionTurnPersistenceReceipts)
+        .where(
+          and(
+            eq(schema.sessionTurnPersistenceReceipts.workspaceId, workspaceId),
+            eq(schema.sessionTurnPersistenceReceipts.id, input.receiptId),
+          ),
+        )
+        .for("update")
+        .limit(1);
+
+      const attemptIsLive = Boolean(
+        workspace &&
+        session &&
+        turn &&
+        attempt &&
+        session.activeTurnId === input.turnId &&
+        turn.activeAttemptId === input.attemptId &&
+        turn.executionGeneration === input.executionGeneration &&
+        ["running", "requires_action"].includes(turn.status) &&
+        attempt.accountId === session.accountId &&
+        attempt.sessionId === input.sessionId &&
+        attempt.turnId === input.turnId &&
+        attempt.executionGeneration === input.executionGeneration &&
+        ["claimed", "running"].includes(attempt.state),
+      );
+      if (!attemptIsLive) return { action: "stale" as const, receipt: receipt ?? null };
+      if (!receipt) return { action: "missing" as const, receipt: null };
+      if (receipt.state === "pending") return { action: "pending" as const, receipt };
+      if (receipt.state === "settled") return { action: "settled" as const, receipt };
+      if (receipt.state === "quarantined") return { action: "quarantined" as const, receipt };
+      throw new Error("Turn persistence receipt has an invalid state");
+    });
+  });
+}
+
 /** Mark an exactly validated pending obligation durable after all of its writes converge. */
 export async function settleSessionTurnPersistenceReceipt(
   db: Database,
@@ -22092,6 +22203,11 @@ export type RecoverSessionDispatchInput = {
 
 export type RecoverSessionDispatchResult =
   | { action: "unclaimed"; events: [] }
+  | {
+      action: "persistence_pending";
+      receipt: SessionTurnPersistenceReceipt;
+      events: [];
+    }
   | { action: "recovering"; turnId: string; redispatches: number; events: SessionEvent[] }
   | { action: "exceeded"; turnId: string; redispatches: number; events: SessionEvent[] }
   | {
@@ -22167,11 +22283,74 @@ export async function recoverSessionDispatch(
         !workspace ||
         parsedMetadata.kind === "malformed" ||
         parsedMetadata.attempt === null ||
-        effectiveControl.state !== "active" ||
         session.activeTurnId !== turn.id ||
         turnStatus !== "running" ||
         turn.activeAttemptId !== input.attemptId
       ) {
+        return {
+          action: "stale" as const,
+          events: [] as [],
+          turnStatus,
+          activeTurnId: session.activeTurnId,
+        };
+      }
+
+      // Lock the exact first-class attempt before checking for a receipt. The
+      // activity-side receipt establishment path takes these same locks before
+      // inserting, so this transaction has exactly two safe outcomes:
+      //
+      // 1. establishment wins and recovery returns that pending receipt; or
+      // 2. recovery wins, proves no pending receipt exists, closes the attempt,
+      //    and any later establishment is fenced.
+      //
+      // A separate preflight lookup cannot provide this proof: the timed-out
+      // worker may commit a completed inference/effect receipt between lookup
+      // and generic attempt closure.
+      const [attempt] = await tx
+        .select()
+        .from(schema.sessionTurnAttempts)
+        .where(
+          and(
+            eq(schema.sessionTurnAttempts.workspaceId, workspaceId),
+            eq(schema.sessionTurnAttempts.id, input.attemptId),
+            eq(schema.sessionTurnAttempts.sessionId, input.sessionId),
+            eq(schema.sessionTurnAttempts.turnId, turn.id),
+            eq(schema.sessionTurnAttempts.executionGeneration, turn.executionGeneration),
+          ),
+        )
+        .for("update")
+        .limit(1);
+      if (!attempt || !["claimed", "running"].includes(attempt.state)) {
+        return {
+          action: "stale" as const,
+          events: [] as [],
+          turnStatus,
+          activeTurnId: session.activeTurnId,
+        };
+      }
+      const [pendingReceipt] = await tx
+        .select()
+        .from(schema.sessionTurnPersistenceReceipts)
+        .where(
+          and(
+            eq(schema.sessionTurnPersistenceReceipts.workspaceId, workspaceId),
+            eq(schema.sessionTurnPersistenceReceipts.sessionId, input.sessionId),
+            eq(schema.sessionTurnPersistenceReceipts.turnId, turn.id),
+            eq(schema.sessionTurnPersistenceReceipts.attemptId, input.attemptId),
+            eq(schema.sessionTurnPersistenceReceipts.executionGeneration, turn.executionGeneration),
+            eq(schema.sessionTurnPersistenceReceipts.state, "pending"),
+          ),
+        )
+        .for("update")
+        .limit(1);
+      if (pendingReceipt) {
+        return {
+          action: "persistence_pending" as const,
+          receipt: pendingReceipt,
+          events: [] as [],
+        };
+      }
+      if (effectiveControl.state !== "active") {
         return {
           action: "stale" as const,
           events: [] as [],

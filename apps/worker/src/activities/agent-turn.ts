@@ -369,6 +369,27 @@ export function boundedTurnFailureTelemetry(error: unknown): {
   };
 }
 
+/**
+ * Persistence wrappers may embed raw SQL, parameters, model history, or tool
+ * arguments in their outer message. Keep the raw failure only long enough to
+ * derive bounded driver telemetry, then give OTLP a constant error identity so
+ * neither `error.message` nor span status can serialize persistence content.
+ */
+export function turnActivitySpanError(
+  error: unknown,
+  provenance:
+    | "persistence_boundary"
+    | "worker_shutdown"
+    | "attempt_fenced"
+    | "activity_cancelled"
+    | undefined,
+): unknown {
+  if (error === undefined || provenance !== "persistence_boundary") return error;
+  const sanitized = new Error("Turn persistence boundary failed");
+  sanitized.name = "TurnPersistenceBoundaryError";
+  return sanitized;
+}
+
 function compactionFailureReason(reason: string): string {
   return reason.startsWith("compaction summarization failed:")
     ? reason
@@ -5838,7 +5859,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           "opengeni.failure_provenance": activityFailureProvenance,
           ...boundedTurnFailureTelemetry(activityError),
         },
-        error: activityError,
+        error: turnActivitySpanError(activityError, activityFailureProvenance),
       });
       // Drain the buffered Connected Machine op events (infra failures + healed
       // recoveries) to durable session events — awaited, best-effort, never blocking

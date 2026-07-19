@@ -149,6 +149,12 @@ all Postgres obligations are confirmed does the transactionally fenced recovery
 advance the logical turn for a higher-generation attempt. Activity-response
 loss, Temporal control-activity retry, and old/new worker overlap therefore
 repeat persistence only—not inference, tool invocation, or an external effect.
+If any receipt-fenced phase rejects, the control activity reloads the exact
+receipt and attempt under workspace → session → turn → attempt → receipt locks.
+A settled receipt on the still-live attempt means another worker completed the
+same obligation and recovery continues; a still-pending live receipt raises a
+retryable control-activity failure; only a replaced or terminal attempt is
+stale. A generic stale result never substitutes for this classification.
 A malformed heartbeat/result reference, a reference-to-row identity or digest
 mismatch, or a malformed stored obligation fails closed and cannot fall back to
 generic worker-death redispatch. One PostgreSQL transaction quarantines the
@@ -162,7 +168,9 @@ The turn activity span retains bounded failure provenance (`persistence_boundary
 `worker_shutdown`, `attempt_fenced`, or `activity_cancelled`) and, when a database
 wrapper exposes it, the nested driver cause type and SQLSTATE/code. It never
 promotes SQL text, parameters, or arbitrary provider messages into those stable
-attributes.
+attributes. A persistence-boundary span also uses a constant error type/message
+for both OTLP error attributes and status; the raw wrapper error is never passed
+to the exporter.
 
 Claim, interruption, and event-writing settlement share one lock order:
 workspace, then session, then exact turn, then exact attempt. Event inserts also touch the workspace through
@@ -211,12 +219,14 @@ workflow does not fail the session independently for that shape: conversation
 truth was still persisted after every completed model response during the turn.
 When the heartbeat carries a pending exact persistence reference, the workflow
 settles that PostgreSQL receipt through `persistTurnHandoffAndRecover` before
-any redispatch. When no heartbeat reference exists, the same control lane first
-looks up a pending receipt by exact attempt, covering death in the
-receipt-commit-to-heartbeat gap. Only when neither source identifies a receipt
-does the fenced `recoverDispatch` activity atomically close the lost attempt,
-mark the same logical turn `recovering`, and let the loop dispatch its next
-attempt. This is not
+any redispatch. When no heartbeat reference exists, `recoverSessionDispatch`
+locks the exact attempt and checks for a pending receipt in the same transaction
+that would otherwise close it, covering both the receipt-commit-to-heartbeat gap
+and establishment racing worker-death recovery. If establishment commits first,
+the transaction returns the receipt; if closure commits first, later
+establishment is fenced. Only after atomically proving no pending receipt exists
+does `recoverDispatch` close the lost attempt, mark the same logical turn
+`recovering`, and let the loop dispatch its next attempt. This is not
 prompt-queue work and not an automatic Temporal retry of side-effectful work:
 the resumed attempt sees everything durably checkpointed, including explicit
 `interrupted / outcome unknown` tool results when an effect cannot be proven.

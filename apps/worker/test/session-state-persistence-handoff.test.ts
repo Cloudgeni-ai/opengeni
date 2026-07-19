@@ -171,6 +171,19 @@ let receiptSettleAction: "settled" | "confirmed" | "fenced" = "settled";
 let recoveryAction: "recovering" | "stale" = "recovering";
 let interruptionAction: "paused" | "continue" | "stale" = "paused";
 let fallbackRecoverDispatchCalls = 0;
+let receiptAttemptLive = true;
+let receiptStateOnFence: ReceiptState | null = null;
+
+function moveCurrentReceiptTo(state: ReceiptState) {
+  if (!currentReceipt) return;
+  currentReceipt = {
+    ...currentReceipt,
+    state,
+    settledAt: state === "settled" ? new Date("2026-07-18T22:22:38.000Z") : null,
+    quarantineReason: state === "quarantined" ? "test" : null,
+    quarantinedAt: state === "quarantined" ? new Date("2026-07-18T22:22:38.000Z") : null,
+  };
+}
 
 function activities() {
   return createSessionStateActivities(
@@ -188,15 +201,16 @@ function activities() {
         if (input.receiptId && input.receiptId !== currentReceipt.id) return null;
         return currentReceipt as any;
       }) as any,
+      inspectSessionTurnPersistenceReceipt: mock(async () => {
+        operations.push({ phase: "receipt_reload" });
+        if (!receiptAttemptLive) return { action: "stale", receipt: currentReceipt } as any;
+        if (!currentReceipt) return { action: "missing", receipt: null } as any;
+        return { action: currentReceipt.state, receipt: currentReceipt } as any;
+      }) as any,
       settleSessionTurnPersistenceReceipt: mock(async (_db, value) => {
         operations.push({ phase: "receipt_settle", value });
-        if (receiptSettleAction !== "fenced" && currentReceipt) {
-          currentReceipt = {
-            ...currentReceipt,
-            state: "settled",
-            settledAt: new Date("2026-07-18T22:22:38.000Z"),
-          };
-        }
+        if (receiptSettleAction !== "fenced") moveCurrentReceiptTo("settled");
+        else if (receiptStateOnFence) moveCurrentReceiptTo(receiptStateOnFence);
         return { action: receiptSettleAction };
       }) as any,
       quarantineSessionTurnPersistenceAttempt: mock(async (_db, _workspaceId, value) => {
@@ -218,11 +232,15 @@ function activities() {
       }) as any,
       appendSessionHistoryItems: mock(async (_db, value) => {
         operations.push({ phase: "history", value });
+        if (!historyAccepted && receiptStateOnFence) moveCurrentReceiptTo(receiptStateOnFence);
         return historyAccepted;
       }) as any,
       registerPendingSessionToolCall: mock(async (_db, value) => {
         operations.push({ phase: "registration", value });
         registrations.push(value);
+        if (!registrationAccepted && receiptStateOnFence) {
+          moveCurrentReceiptTo(receiptStateOnFence);
+        }
         return { accepted: registrationAccepted, registered: registrationAccepted };
       }) as any,
       requestSessionTurnRecovery: mock(async (_db, workspaceId, value) => {
@@ -246,11 +264,15 @@ function activities() {
           phase: "event",
           value: { events: args[7], persistenceReceiptId: args[9] },
         });
+        if (!eventAccepted && receiptStateOnFence) moveCurrentReceiptTo(receiptStateOnFence);
         return { events: [], accepted: eventAccepted };
       }) as any,
       persistPreparedContextCompaction: mock(async (_db, scope, prepared) => {
         operations.push({ phase: "compaction", value: { scope, prepared } });
-        if (compactionStale) throw new TurnAttemptFencedError("successor owns turn");
+        if (compactionStale) {
+          if (receiptStateOnFence) moveCurrentReceiptTo(receiptStateOnFence);
+          throw new TurnAttemptFencedError("successor owns turn");
+        }
         return {
           compacted: true,
           supersededFrom: 10,
@@ -269,6 +291,13 @@ function activities() {
       }) as any,
       recoverSessionDispatch: mock(async () => {
         fallbackRecoverDispatchCalls += 1;
+        if (currentReceipt?.state === "pending") {
+          return {
+            action: "persistence_pending",
+            receipt: currentReceipt,
+            events: [],
+          } as const;
+        }
         return { action: "unclaimed" } as const;
       }) as any,
       countQueuedTurns: mock(async () => 0) as any,
@@ -293,6 +322,8 @@ beforeEach(() => {
   recoveryAction = "recovering";
   interruptionAction = "paused";
   fallbackRecoverDispatchCalls = 0;
+  receiptAttemptLive = true;
+  receiptStateOnFence = null;
 });
 
 describe("persistTurnHandoffAndRecover", () => {
@@ -360,11 +391,29 @@ describe("persistTurnHandoffAndRecover", () => {
     const prepared = fixture(toolObligation);
     currentReceipt = prepared.receipt;
     registrationAccepted = false;
+    receiptAttemptLive = false;
 
     expect(await activities().persistTurnHandoffAndRecover(prepared.input)).toEqual({
       action: "stale",
     });
-    expect(operations.map(({ phase }) => phase)).toEqual(["registration"]);
+    expect(operations.map(({ phase }) => phase)).toEqual(["registration", "receipt_reload"]);
+  });
+
+  test("continues exact recovery when tool registration loses to concurrent receipt settlement", async () => {
+    const prepared = fixture(toolObligation);
+    currentReceipt = prepared.receipt;
+    registrationAccepted = false;
+    receiptStateOnFence = "settled";
+
+    expect(await activities().persistTurnHandoffAndRecover(prepared.input)).toEqual({
+      action: "recovering",
+      turnId: ids.turnId,
+    });
+    expect(operations.map(({ phase }) => phase)).toEqual([
+      "registration",
+      "receipt_reload",
+      "recovery",
+    ]);
   });
 
   test("treats receipt-settlement response loss as duplicate-safe replay", async () => {
@@ -416,11 +465,44 @@ describe("persistTurnHandoffAndRecover", () => {
     const prepared = fixture(modelObligation);
     currentReceipt = prepared.receipt;
     historyAccepted = false;
+    receiptAttemptLive = false;
 
     expect(await activities().persistTurnHandoffAndRecover(prepared.input)).toEqual({
       action: "stale",
     });
-    expect(operations.map(({ phase }) => phase)).toEqual(["history"]);
+    expect(operations.map(({ phase }) => phase)).toEqual(["history", "receipt_reload"]);
+  });
+
+  test("continues exact recovery when model-history persistence observes a concurrently settled receipt", async () => {
+    const prepared = fixture(modelObligation);
+    currentReceipt = prepared.receipt;
+    historyAccepted = false;
+    receiptStateOnFence = "settled";
+
+    expect(await activities().persistTurnHandoffAndRecover(prepared.input)).toEqual({
+      action: "recovering",
+      turnId: ids.turnId,
+    });
+    expect(operations.map(({ phase }) => phase)).toEqual(["history", "receipt_reload", "recovery"]);
+  });
+
+  test("continues exact recovery when exact-event persistence observes concurrent settlement", async () => {
+    const prepared = fixture(modelObligation);
+    currentReceipt = prepared.receipt;
+    eventAccepted = false;
+    receiptStateOnFence = "settled";
+
+    expect(await activities().persistTurnHandoffAndRecover(prepared.input)).toEqual({
+      action: "recovering",
+      turnId: ids.turnId,
+    });
+    expect(operations.map(({ phase }) => phase)).toEqual([
+      "history",
+      "meter",
+      "event",
+      "receipt_reload",
+      "recovery",
+    ]);
   });
 
   test("persists compaction accounting and replacement under the receipt fence", async () => {
@@ -457,11 +539,36 @@ describe("persistTurnHandoffAndRecover", () => {
     const prepared = fixture(compactionObligation);
     currentReceipt = prepared.receipt;
     compactionStale = true;
+    receiptAttemptLive = false;
 
     expect(await activities().persistTurnHandoffAndRecover(prepared.input)).toEqual({
       action: "stale",
     });
-    expect(operations.map(({ phase }) => phase)).toEqual(["meter", "event", "compaction"]);
+    expect(operations.map(({ phase }) => phase)).toEqual([
+      "meter",
+      "event",
+      "compaction",
+      "receipt_reload",
+    ]);
+  });
+
+  test("continues exact recovery when compaction persistence loses to concurrent settlement", async () => {
+    const prepared = fixture(compactionObligation);
+    currentReceipt = prepared.receipt;
+    compactionStale = true;
+    receiptStateOnFence = "settled";
+
+    expect(await activities().persistTurnHandoffAndRecover(prepared.input)).toEqual({
+      action: "recovering",
+      turnId: ids.turnId,
+    });
+    expect(operations.map(({ phase }) => phase)).toEqual([
+      "meter",
+      "event",
+      "compaction",
+      "receipt_reload",
+      "recovery",
+    ]);
   });
 
   test("quarantines a receipt/digest mismatch without entering any persistence effect path", async () => {
@@ -512,7 +619,7 @@ describe("persistTurnHandoffAndRecover", () => {
     expect(recoveries[0]).toMatchObject({
       reason: "persistence_pending_tool_call_heartbeat_timeout",
     });
-    expect(fallbackRecoverDispatchCalls).toBe(0);
+    expect(fallbackRecoverDispatchCalls).toBe(1);
   });
 
   test("reconciles a pending receipt before interruption settlement closes the attempt", async () => {
@@ -536,10 +643,32 @@ describe("persistTurnHandoffAndRecover", () => {
     expect(recoveries).toHaveLength(0);
   });
 
-  test("never closes an interruption when receipt settlement is fenced", async () => {
+  test("retries instead of closing an interruption while its exact receipt remains pending", async () => {
     const prepared = fixture(toolObligation);
     currentReceipt = prepared.receipt;
     receiptSettleAction = "fenced";
+
+    await expect(
+      activities().settleSessionInterruptions({
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sessionId: ids.sessionId,
+        attemptId: ids.attemptId,
+        workflowId: "session-workflow",
+      }),
+    ).rejects.toThrow("receipt remains pending");
+    expect(operations.map(({ phase }) => phase)).toEqual([
+      "registration",
+      "receipt_settle",
+      "receipt_reload",
+    ]);
+  });
+
+  test("settles the interruption when receipt settlement response loses to a concurrent settler", async () => {
+    const prepared = fixture(toolObligation);
+    currentReceipt = prepared.receipt;
+    receiptSettleAction = "fenced";
+    receiptStateOnFence = "settled";
 
     expect(
       await activities().settleSessionInterruptions({
@@ -549,7 +678,12 @@ describe("persistTurnHandoffAndRecover", () => {
         attemptId: ids.attemptId,
         workflowId: "session-workflow",
       }),
-    ).toEqual({ action: "stale" });
-    expect(operations.map(({ phase }) => phase)).toEqual(["registration", "receipt_settle"]);
+    ).toEqual({ action: "paused" });
+    expect(operations.map(({ phase }) => phase)).toEqual([
+      "registration",
+      "receipt_settle",
+      "receipt_reload",
+      "interruption",
+    ]);
   });
 });

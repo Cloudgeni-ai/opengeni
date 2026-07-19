@@ -2,6 +2,7 @@ import { describe, expect, mock, test } from "bun:test";
 import { CancelledFailure } from "@temporalio/activity";
 import { ModelItem } from "@openai/agents-core/types";
 import type { Settings } from "@opengeni/config";
+import { createObservability } from "@opengeni/observability";
 import {
   interruptedToolCallResult,
   SandboxImageConflictError,
@@ -37,6 +38,7 @@ import {
   resolveActiveSandboxBackend,
   shouldRecoverCompactionProviderFailure,
   shouldStartOnTurnRecording,
+  turnActivitySpanError,
 } from "../src/activities/agent-turn";
 import { sandboxLeaseHolderIdForAttempt } from "../src/sandbox-resume";
 import { settingsWithPackSandboxImage } from "../src/activities/packs";
@@ -1040,6 +1042,64 @@ describe("worker shutdown preemption", () => {
         },
       }),
     ).toEqual({});
+  });
+
+  test("serialized persistence-boundary spans exclude SQL, parameters, provider text, and tool arguments", async () => {
+    const exported: unknown[] = [];
+    const observability = createObservability(
+      {
+        serviceName: "opengeni",
+        environment: "test",
+        observabilityStructuredLogs: true,
+        observabilityMetricsEnabled: false,
+        observabilityOtlpEndpoint: "http://collector:4318",
+        observabilityOtlpHeaders: "",
+      },
+      {
+        component: "worker",
+        now: () => 1,
+        exporter: async (_url, body) => {
+          exported.push(body);
+        },
+      },
+    );
+    const rawPersistenceError = Object.assign(
+      new Error(
+        'Failed query: insert into session_history_items values ($1); params: ["provider-output-secret", "tool-arguments-secret"]',
+      ),
+      {
+        name: "DrizzleQueryError",
+        cause: Object.assign(new Error("provider-text-secret"), {
+          name: "PostgresError",
+          code: "57P01",
+        }),
+      },
+    );
+    const span = observability.startSpan("worker.run_agent_segment");
+    span.end({
+      attributes: {
+        "opengeni.failure_provenance": "persistence_boundary",
+        ...boundedTurnFailureTelemetry(rawPersistenceError),
+      },
+      error: turnActivitySpanError(rawPersistenceError, "persistence_boundary"),
+    });
+    await Bun.sleep(0);
+
+    expect(exported).toHaveLength(1);
+    const serialized = JSON.stringify(exported[0]);
+    expect(serialized).toContain("Turn persistence boundary failed");
+    expect(serialized).toContain("TurnPersistenceBoundaryError");
+    expect(serialized).toContain("PostgresError");
+    expect(serialized).toContain("57P01");
+    for (const secret of [
+      "insert into session_history_items",
+      "params:",
+      "provider-output-secret",
+      "provider-text-secret",
+      "tool-arguments-secret",
+    ]) {
+      expect(serialized).not.toContain(secret);
+    }
   });
 });
 

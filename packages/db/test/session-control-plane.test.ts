@@ -26,6 +26,7 @@ import {
   getSessionGoal,
   getSessionTurn,
   getSessionTurnPersistenceReceipt,
+  inspectSessionTurnPersistenceReceipt,
   listOutstandingSessionSystemUpdates,
   listSessionDiscoverySummaries,
   listSessionSystemUpdatesForTurn,
@@ -1457,6 +1458,99 @@ describe("clean session control plane", () => {
         receiptId,
       }),
     ).toBeNull();
+  });
+
+  test("worker-death closure atomically yields a receipt established after prior discovery", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "complete one provider boundary before worker death");
+    const attemptId = crypto.randomUUID();
+    const turn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId },
+    );
+    if (!turn) throw new Error("atomic receipt recovery turn was not claimed");
+
+    // This is the obsolete activity-side discovery result. Establishing the
+    // receipt immediately afterward must still prevent generic worker-death
+    // closure from abandoning the completed provider boundary.
+    expect(
+      await getSessionTurnPersistenceReceipt(client.db, grant.workspaceId!, {
+        sessionId: session.id,
+        attemptId,
+      }),
+    ).toBeNull();
+
+    const receiptId = crypto.randomUUID();
+    const obligationDigest = "c".repeat(64);
+    await establishSessionTurnPersistenceReceipt(client.db, {
+      id: receiptId,
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      turnId: turn.id,
+      attemptId,
+      executionGeneration: turn.executionGeneration,
+      triggerEventId: turn.triggerEventId,
+      obligationKind: "model_call",
+      obligationVersion: 1,
+      obligationDigest,
+      obligation: {
+        kind: "model_call",
+        history: { items: [] },
+        metering: { sourceKey: "completed-provider-response" },
+        event: { type: "agent.model.usage" },
+      },
+    });
+
+    const recovered = await recoverSessionDispatch(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      attemptId,
+      timeoutType: "HEARTBEAT",
+      maxRedispatches: 3,
+    });
+    expect(recovered).toMatchObject({
+      action: "persistence_pending",
+      receipt: { id: receiptId, attemptId, state: "pending" },
+      events: [],
+    });
+    expect(await getSessionTurn(client.db, grant.workspaceId!, turn.id)).toMatchObject({
+      status: "running",
+      activeAttemptId: attemptId,
+      executionGeneration: turn.executionGeneration,
+    });
+    expect(
+      await inspectSessionTurnPersistenceReceipt(client.db, grant.workspaceId!, {
+        sessionId: session.id,
+        turnId: turn.id,
+        attemptId,
+        executionGeneration: turn.executionGeneration,
+        receiptId,
+      }),
+    ).toMatchObject({ action: "pending", receipt: { id: receiptId } });
+
+    expect(
+      await settleSessionTurnPersistenceReceipt(client.db, {
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn.id,
+        attemptId,
+        executionGeneration: turn.executionGeneration,
+        receiptId,
+        obligationDigest,
+      }),
+    ).toEqual({ action: "settled" });
+    expect(
+      await inspectSessionTurnPersistenceReceipt(client.db, grant.workspaceId!, {
+        sessionId: session.id,
+        turnId: turn.id,
+        attemptId,
+        executionGeneration: turn.executionGeneration,
+        receiptId,
+      }),
+    ).toMatchObject({ action: "settled", receipt: { id: receiptId } });
   });
 
   test("invalid persistence evidence atomically quarantines and removes the live-attempt wedge", async () => {
