@@ -229,10 +229,12 @@ function Complete-Install($bin) {
   if (-not [string]::IsNullOrEmpty($enrollToken)) {
     Log "non-interactive enroll (OPENGENI_ENROLL_TOKEN set)"
     $apiUrl = [Environment]::GetEnvironmentVariable('OPENGENI_API_URL')
+    # The child inherits OPENGENI_ENROLL_TOKEN. Never duplicate this workspace
+    # enrollment grant into argv where process inspection could disclose it.
     if (-not [string]::IsNullOrEmpty($apiUrl)) {
-      & $bin --api-url $apiUrl enroll --token $enrollToken --non-interactive
+      & $bin --api-url $apiUrl enroll --non-interactive
     } else {
-      & $bin enroll --token $enrollToken --non-interactive
+      & $bin enroll --non-interactive
     }
     Log "enrolled. Start the agent (foreground) with:  $bin run"
     return
@@ -264,4 +266,8 @@ function Complete-Install($bin) {
   # performs enrollment and starts the supported foreground run.
 }
 
-Main
+# Test harnesses may dot-source the pure functions without downloading or
+# installing anything. A normal `irm ... | iex` never sets this variable.
+if ([Environment]::GetEnvironmentVariable('OPENGENI_INSTALL_LIB') -ne '1') {
+  Main
+}

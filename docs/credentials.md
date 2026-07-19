@@ -14,7 +14,7 @@ everything else is machinery you receive from OpenGeni rather than choose.
 | Managed web session | Better Auth cookie | Managed auth (email/password) | Better Auth session lookup | Session | Humans in the hosted web console |
 | Stream token | `ogs_…` (query/header) | API, on viewer/stream mint | HMAC, scope+TTL embedded | Minutes | Browsers attaching to desktop/terminal streams |
 | Machine enrollment bearer | `oge_…` | Enrollment flow (click-Grant or device flow) | HMAC + active enrollment row + exact credential generation | 30 days; generation-rotated on every re-enrollment | A self-hosted/connected machine agent |
-| Headless enrollment token | `oget_…` | Operator via enrollment API | One-time exchange for `oge_…` | Single use | Provisioning scripts for headless machines |
+| Headless enrollment token | `oget_…` | Operator via enrollment API | HMAC + embedded workspace/account/consent/expiry | Multi-use within its one-hour TTL | Fleet provisioning scripts for headless machines; passed to the agent through `OPENGENI_ENROLL_TOKEN`, never installer argv |
 | Relay producer token | `ogr_…` | API for self-hosted relay producers | HMAC | Short | The relay forwarding desktop frames |
 | NATS user JWT / callout | NATS credentials | API auth-callout service | NATS server (callout account) | At most 5 minutes, capped by the enrollment bearer's remaining life | Machine agents and internal services on the message bus |
 | Session MCP headers | Arbitrary headers, encrypted at rest | Embedding host per session (`mcpServers` on create; rotatable per user turn) | Never read back — write-only, decrypted only in the worker | Host-defined; version-bumped on rotation | Host's own MCP server called from a session |

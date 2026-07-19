@@ -31,11 +31,12 @@
 #   OPENGENI_INSTALL_DIR       Install dir. Default: ~/.local/bin (no sudo).
 #   OPENGENI_SYSTEM=1          Install to /usr/local/bin (needs sudo/root).
 #   OPENGENI_ENROLL_TOKEN      Non-interactive enroll token (CI/automation/fleet):
-#                              the script runs `enroll --token <tok>
-#                              --non-interactive` itself — the token IS the grant,
-#                              so there is NO device-approve step. The workspace is
-#                              encoded in the token; OPENGENI_WORKSPACE_ID is not
-#                              needed on this path.
+#                              the script runs `enroll --non-interactive` and the
+#                              child reads this inherited environment variable.
+#                              The token is NEVER copied into process arguments.
+#                              The token IS the grant, so there is NO device-approve
+#                              step. The workspace is encoded in it;
+#                              OPENGENI_WORKSPACE_ID is not needed on this path.
 #   OPENGENI_NO_RUN=1          Do not start a foreground run; just print the
 #                              enroll+run command (the default when stdin is not
 #                              a TTY, e.g. piped from curl).
@@ -670,15 +671,16 @@ finish() {
   echo ""
   if [ -n "${OPENGENI_ENROLL_TOKEN:-}" ]; then
     log "non-interactive enroll (OPENGENI_ENROLL_TOKEN set)"
-    # Forward OPENGENI_API_URL explicitly so the exchange targets THIS deployment
-    # (not a retired separate API host) even when the agent's env-inherit path is
-    # ever bypassed. The agent also reads $OPENGENI_API_URL via clap, so the env
-    # alone would suffice — this is belt-and-suspenders. The workspace is encoded
-    # in the token, so no --workspace-id is needed on this path.
+    # Forward OPENGENI_API_URL explicitly so the exchange targets THIS deployment.
+    # The enrollment grant itself stays only in the inherited environment; putting
+    # it after --token would expose it through process listings. The workspace is
+    # encoded in the token, so no --workspace-id is needed on this path.
     if [ -n "${OPENGENI_API_URL:-}" ]; then
-      "$_bin" --api-url "$OPENGENI_API_URL" enroll --token "$OPENGENI_ENROLL_TOKEN" --non-interactive
+      OPENGENI_ENROLL_TOKEN="$OPENGENI_ENROLL_TOKEN" \
+        "$_bin" --api-url "$OPENGENI_API_URL" enroll --non-interactive
     else
-      "$_bin" enroll --token "$OPENGENI_ENROLL_TOKEN" --non-interactive
+      OPENGENI_ENROLL_TOKEN="$OPENGENI_ENROLL_TOKEN" \
+        "$_bin" enroll --non-interactive
     fi
     log "enrolled. Start the agent (foreground) with:  $_bin run"
     return 0

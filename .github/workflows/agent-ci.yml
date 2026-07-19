@@ -176,9 +176,12 @@ jobs:
         run: |
           sh install/test/uninstall-contract.sh
           sh install/test/os-lifecycle-contract.sh
+          sh install/test/enroll-token-argv.sh
 
       - name: Smoke the install script (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         working-directory: agent
-        run: pwsh -File install/test/ci-install-smoke.ps1
+        run: |
+          pwsh -File install/test/ci-install-smoke.ps1
+          pwsh -File install/test/enroll-token-argv.ps1

@@ -141,8 +141,41 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       expect(
         readdirSync(join(home, ".opengeni", "bin")).filter((f) => f.includes(".tmp.")),
       ).toEqual([]);
-      // the askpass Password branch reads the token file
-      const askOut = execFileSync("sh", [askpass, "Password for host"], {
+      // Reinstall the helper with an exact authorized host for each provider.
+      expect(
+        runScript(
+          gitCredentialHelperInstallCommand(
+            [
+              {
+                provider: "github",
+                uri: "https://github.com/acme/private.git",
+                ref: "main",
+                repositoryId: 456,
+                installationId: 123,
+              },
+              {
+                provider: "gitlab",
+                uri: "https://gitlab.com/acme/private.git",
+                ref: "main",
+              },
+              {
+                provider: "azure_devops",
+                uri: "https://dev.azure.com/acme/project/_git/private",
+                ref: "main",
+              },
+            ],
+            {
+              github: "tok-atomic-123",
+              gitlab: "glpat-atomic-456",
+              azure_devops: "azdo-atomic-789",
+            },
+          ),
+          { HOME: home },
+        ).status,
+      ).toBe(0);
+
+      // Exact authorized hosts read the current provider token files.
+      const askOut = execFileSync("sh", [askpass, "Password for 'https://github.com':"], {
         env: isolatedSandboxEnv(home),
         encoding: "utf8",
       });
@@ -157,6 +190,25 @@ describe("lifecycle scripts — real sh execution semantics", () => {
         encoding: "utf8",
       });
       expect(azureOut).toBe("azdo-atomic-789");
+
+      // A global askpass must never disclose a provider token for an unknown,
+      // malformed, hostless, substring-only, or suffix-confusion prompt.
+      for (const prompt of [
+        "Password for host",
+        "Password for 'https://attacker.example':",
+        "Password for 'https://notgithub.com':",
+        "Password for 'https://github.com.evil':",
+        "Password for 'https://gitlab.attacker.example':",
+        "Password for 'https://dev.azure.com.attacker.example':",
+        "Password for 'https://':",
+      ]) {
+        expect(
+          execFileSync("sh", [askpass, prompt], {
+            env: isolatedSandboxEnv(home),
+            encoding: "utf8",
+          }),
+        ).toBe("\n");
+      }
       // and the clone landed as a real work tree
       expect(existsSync(join(target, "README.md"))).toBe(true);
     } finally {

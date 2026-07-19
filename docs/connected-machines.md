@@ -242,12 +242,15 @@ const { token, expiresAt, expiresInSeconds } =
 // Run on the machine (the installer dials OpenGeni and exchanges the token for
 // its own long-lived agent credentials — the token exchange happens on the
 // machine, not through this client):
-//   curl -fsSL https://…/install.sh | sh -s -- --token <token>
+//   curl -fsSL https://…/install.sh |
+//     OPENGENI_API_URL=https://… OPENGENI_ENROLL_TOKEN='<token>' sh
 ```
 
 `allowScreenControl` bakes the (optional) screen-control consent into the token;
 whole-machine access — exec, files, terminal — is implicit and mandatory for any
-enrollment.
+enrollment. The token is a secret workspace-scoped fleet grant that may enroll
+multiple machine public keys until its one-hour expiry; the installer keeps it in
+the child environment and never copies it into process arguments.
 
 ### Device flow (interactive, in-session)
 

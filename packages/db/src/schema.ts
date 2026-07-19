@@ -2417,7 +2417,12 @@ export const deviceEnrollmentRequests = pgTable(
     // row AND a sandbox row appear). Null until approved.
     enrollmentId: uuid("enrollment_id").references(() => enrollments.id, { onDelete: "set null" }),
     sandboxId: uuid("sandbox_id").references(() => sandboxes.id, { onDelete: "set null" }),
-    // The short-TTL expiry; a pending row past this is EXPIRED on poll.
+    // Exact credential family finalized by this approval. It remains nullable so
+    // pre-0068 approved/consumed rows fail closed rather than inheriting the
+    // enrollment row's current (possibly re-enrolled) generation.
+    credentialGeneration: integer("credential_generation"),
+    // The original short-TTL expiry applies to every status, including legitimate
+    // retries of approved/consumed polls.
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -2435,6 +2440,10 @@ export const deviceEnrollmentRequests = pgTable(
       table.createdAt,
     ),
     expires: index("device_enrollment_requests_expires_idx").on(table.expiresAt),
+    credentialGenerationPositive: check(
+      "device_enrollment_requests_credential_generation_positive",
+      sql`${table.credentialGeneration} IS NULL OR ${table.credentialGeneration} > 0`,
+    ),
   }),
 );
 

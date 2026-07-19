@@ -1701,15 +1701,14 @@ describe("runtime event normalization", () => {
     expect(command).toContain("cat > \"$git_askpass.tmp.$$\" <<'ASKPASS_EOF'");
     expect(command).toContain('chmod 0755 "$git_askpass.tmp.$$"');
     expect(command).toContain('mv -f "$git_askpass.tmp.$$" "$git_askpass"');
-    // The provisioned askpass' Password branch selects a provider by prompt host
-    // and reads the corresponding token FILE.
-    expect(command).toContain("*github.com*|*githubusercontent.com*) printf '%s\\n' github ;;");
-    expect(command).toContain("*gitlab*) printf '%s\\n' gitlab ;;");
+    // The provisioned askpass selects a provider only from the exact normalized
+    // resource host. It has no substring heuristic and no GitHub default.
+    expect(command).toContain("'github.com') printf '%s\\n' github; return 0 ;;");
+    expect(command).not.toContain("*github.com*");
+    expect(command).not.toContain("*gitlab*");
+    expect(command).not.toContain("*) printf '%s\\n' github ;;");
     expect(command).toContain(
-      "*dev.azure.com*|*.visualstudio.com*) printf '%s\\n' azure_devops ;;",
-    );
-    expect(command).toContain(
-      '*Password*) cat "$(token_file_for_provider "$provider")" 2>/dev/null || printf \'\\n\' ;;',
+      '*Password*) if [ -n "$provider" ]; then cat "$(token_file_for_provider "$provider")" 2>/dev/null || printf \'\\n\'; else printf \'\\n\'; fi ;;',
     );
     expect(command).toContain("github) printf '%s\\n' \"x-access-token\" ;;");
 
@@ -1908,14 +1907,15 @@ describe("runtime event normalization", () => {
       String(calls[0]?.cmd).indexOf("write_git_provider_token github"),
     );
     // TOKEN-BROKER (B2): the SAME per-exec command also provisions an EXECUTABLE git
-    // askpass into $GIT_ASKPASS whose Password branch reads the token file — so a warm
-    // box on ANY image gets a correct askpass at setup, no baked script required.
+    // askpass into $GIT_ASKPASS whose Password branch reads the token file only for
+    // an exact authorized provider host — so a warm box on ANY image gets a correct
+    // askpass at setup, no baked script required and no unknown-host token fallback.
     const cmd = String(calls[0]?.cmd);
     expect(cmd).toContain("cat > \"$git_askpass.tmp.$$\" <<'ASKPASS_EOF'");
     expect(cmd).toContain('chmod 0755 "$git_askpass.tmp.$$"');
     expect(cmd).toContain('mv -f "$git_askpass.tmp.$$" "$git_askpass"');
     expect(cmd).toContain(
-      '*Password*) cat "$(token_file_for_provider "$provider")" 2>/dev/null || printf \'\\n\' ;;',
+      '*Password*) if [ -n "$provider" ]; then cat "$(token_file_for_provider "$provider")" 2>/dev/null || printf \'\\n\'; else printf \'\\n\'; fi ;;',
     );
   });
 

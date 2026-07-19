@@ -55,7 +55,6 @@ import {
   denyDeviceEnrollmentRequest,
   finalizeEnrollmentByToken,
   getDeviceEnrollmentRequestByDeviceCode,
-  getEnrollment,
   getPendingDeviceEnrollmentRequestByUserCode,
   getPendingDeviceEnrollmentRequestByUserCodeGlobal,
   withActiveEnrollmentGeneration,
@@ -386,7 +385,7 @@ export async function exchangeEnrollToken(
  *   - unknown code              → "expired" (do not leak existence; an unknown code
  *                                  behaves like an expired one to the agent).
  *   - pending + within TTL      → "pending".
- *   - pending + past TTL        → "expired".
+ *   - any status past TTL       → "expired".
  *   - denied                    → "denied".
  *   - approved | consumed       → "authorized" + the EnrollmentCredentials (the
  *                                  approved row is flipped to consumed; a legitimate
@@ -407,18 +406,20 @@ export async function pollDeviceEnrollment(
   if (request.status === "denied") {
     return { state: "denied" };
   }
+  if (new Date(request.expiresAt).getTime() <= Date.now()) {
+    return { state: "expired" };
+  }
   if (request.status === "pending") {
-    if (new Date(request.expiresAt).getTime() <= Date.now()) {
-      return { state: "expired" };
-    }
     return { state: "pending" };
   }
 
-  // approved | consumed → AUTHORIZED. Build the credentials.
-  if (!request.enrollmentId) {
-    // Defensive: an approved row must carry the enrollment id.
+  // approved | consumed → AUTHORIZED only for the exact credential family that
+  // approval finalized. Migration-era rows intentionally have no generation and
+  // fail closed rather than inheriting the enrollment's current generation.
+  if (!request.enrollmentId || !request.credentialGeneration) {
     return { state: "expired" };
   }
+  const credentialGeneration = request.credentialGeneration;
   const secret = resolveEnrollmentSigningSecret(settings);
   if (!secret) {
     // The credential plane is off for this deployment (no signing secret) — surface
@@ -426,19 +427,32 @@ export async function pollDeviceEnrollment(
     return { state: "disabled" };
   }
 
-  const enrollment = await getEnrollment(db, request.workspaceId, request.enrollmentId);
-  if (!enrollment || enrollment.status !== "active") {
-    // The machine was revoked between approve and poll — treat as denied.
+  const minted = await withActiveEnrollmentGeneration(
+    db,
+    {
+      workspaceId: request.workspaceId,
+      enrollmentId: request.enrollmentId,
+      credentialGeneration,
+    },
+    async (enrollment) => {
+      // The public key is the durable machine identity. Even a corrupt request
+      // reference must not mint credentials for a different enrollment row.
+      if (enrollment.pubkey !== request.pubkey) {
+        return null;
+      }
+      return await buildEnrollmentCredentials(services, {
+        secret,
+        workspaceId: enrollment.workspaceId,
+        agentId: enrollment.id,
+        credentialGeneration,
+        consentedScreenControl: enrollment.allowScreenControl,
+      });
+    },
+  );
+  if (!minted.matched || !minted.value) {
+    // Revoked, re-enrolled, stale-generation, or identity-mismatched request.
     return { state: "denied" };
   }
-
-  const credentials = await buildEnrollmentCredentials(services, {
-    secret,
-    workspaceId: request.workspaceId,
-    agentId: enrollment.id,
-    credentialGeneration: enrollment.credentialGeneration,
-    consentedScreenControl: enrollment.allowScreenControl,
-  });
 
   // Single-use: flip approved → consumed (idempotent; a re-poll of an already-
   // consumed row still returns the creds above — the agent may legitimately retry).
@@ -450,7 +464,7 @@ export async function pollDeviceEnrollment(
     });
   }
 
-  return { state: DeviceEnrollmentState.enum.authorized, credentials };
+  return { state: DeviceEnrollmentState.enum.authorized, credentials: minted.value };
 }
 
 /** Build the EnrollmentCredentials the poll returns: the signed `oge_` bearer +

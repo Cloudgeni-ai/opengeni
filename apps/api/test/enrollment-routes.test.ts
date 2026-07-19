@@ -315,6 +315,99 @@ describe("M5 device-flow happy path: start -> approve -> poll -> EnrollmentCrede
     expect(verified!.agentId).toBe(approve.enrollmentId);
     expect(verified!.credentialGeneration).toBe(1);
     expect(verified!.subjectPrefix).toBe(creds.subjectPrefix);
+
+    // A lost authorized response may be retried while the ORIGINAL device-code
+    // TTL remains live. The consumed row stays bound to the same generation.
+    const retryWithinTtl = await app.request("/v1/enrollments/device/poll", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ deviceCode: start.deviceCode }),
+    });
+    expect(retryWithinTtl.status).toBe(200);
+    const retried = (await retryWithinTtl.json()) as {
+      state: string;
+      credentials?: EnrollmentCredentials;
+    };
+    expect(retried.state).toBe("authorized");
+    expect(
+      (await verifyEnrollmentBearer(SIGNING_SECRET, retried.credentials!.bearer))
+        ?.credentialGeneration,
+    ).toBe(1);
+
+    // Consumed is not an expiry bypass: retries stop at the original request TTL.
+    await admin`
+      UPDATE device_enrollment_requests
+         SET expires_at = now() - interval '1 second'
+       WHERE device_code = ${start.deviceCode}`;
+    const retryAfterTtl = await app.request("/v1/enrollments/device/poll", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ deviceCode: start.deviceCode }),
+    });
+    expect(((await retryAfterTtl.json()) as { state: string }).state).toBe("expired");
+  }, 90_000);
+
+  test("approved and generationless device codes fail closed before credential mint", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const app = appFor();
+    const manageBearer = `Bearer ${await bearer(accountId, workspaceId, ["enrollments:manage"])}`;
+
+    const startExpired = (await (
+      await app.request("/v1/enrollments/device/start", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ publicKey: "ed25519:APPROVED-EXPIRED", workspaceId }),
+      })
+    ).json()) as { deviceCode: string; userCode: string };
+    expect(
+      (
+        await app.request(`/v1/workspaces/${workspaceId}/enrollments/device/approve`, {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: manageBearer },
+          body: JSON.stringify({ userCode: startExpired.userCode, allowScreenControl: false }),
+        })
+      ).status,
+    ).toBe(201);
+    await admin`
+      UPDATE device_enrollment_requests
+         SET expires_at = now() - interval '1 second'
+       WHERE device_code = ${startExpired.deviceCode}`;
+    const expiredPoll = await app.request("/v1/enrollments/device/poll", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ deviceCode: startExpired.deviceCode }),
+    });
+    expect(((await expiredPoll.json()) as { state: string }).state).toBe("expired");
+
+    const startLegacy = (await (
+      await app.request("/v1/enrollments/device/start", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ publicKey: "ed25519:GENERATIONLESS", workspaceId }),
+      })
+    ).json()) as { deviceCode: string; userCode: string };
+    expect(
+      (
+        await app.request(`/v1/workspaces/${workspaceId}/enrollments/device/approve`, {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: manageBearer },
+          body: JSON.stringify({ userCode: startLegacy.userCode, allowScreenControl: false }),
+        })
+      ).status,
+    ).toBe(201);
+    // Model a row approved before migration 0068: no backfill may attach it to
+    // whatever enrollment generation happens to be current now.
+    await admin`
+      UPDATE device_enrollment_requests
+         SET credential_generation = NULL
+       WHERE device_code = ${startLegacy.deviceCode}`;
+    const legacyPoll = await app.request("/v1/enrollments/device/poll", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ deviceCode: startLegacy.deviceCode }),
+    });
+    expect(((await legacyPoll.json()) as { state: string }).state).toBe("expired");
   }, 90_000);
 
   test("screen-control OFF approve → consentedScreenControl false in the credentials", async () => {
@@ -675,6 +768,17 @@ describe("OPE-14 public-origin and self-revoke contracts", () => {
       })
     ).json()) as { enrollmentId: string };
     expect(approved2.enrollmentId).toBe(approved.enrollmentId);
+
+    // The consumed code from generation 1 remains within its original TTL, but
+    // it must not mint credentials for the now-active generation 2 enrollment.
+    const staleDeviceCodePoll = await app.request("/v1/enrollments/device/poll", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ deviceCode: start.deviceCode }),
+    });
+    expect(staleDeviceCodePoll.status).toBe(200);
+    expect(((await staleDeviceCodePoll.json()) as { state: string }).state).toBe("denied");
+
     const poll2 = (await (
       await app.request("/v1/enrollments/device/poll", {
         method: "POST",

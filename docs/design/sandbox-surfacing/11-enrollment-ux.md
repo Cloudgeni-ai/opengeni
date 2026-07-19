@@ -184,15 +184,17 @@ human approve). Stateless-signed — **no DB table, no migration**.
 
 ### A2.6 install.sh
 
-- Already invokes `enroll --token "$OPENGENI_ENROLL_TOKEN" --non-interactive` (line 315) and
-  documents `OPENGENI_ENROLL_TOKEN` (line 38). Only add `OPENGENI_API_URL` forwarding (A1).
+- Invokes `enroll --non-interactive`; Clap reads the inherited
+  `OPENGENI_ENROLL_TOKEN` environment variable. The secret grant is never copied
+  into child argv. `OPENGENI_API_URL` may still be forwarded explicitly (A1).
 
 ---
 
 ## Security notes (owner analysis)
 
-- The enroll token grants enrollment of **one machine identity (the agent's pubkey) into one
-  workspace** until expiry. Holding it ⇒ can enroll a rogue machine into that workspace.
+- The enroll token grants enrollment of **machine identities (agent public keys) into one
+  workspace** until expiry and is intentionally reusable for a bounded fleet rollout.
+  Holding it ⇒ can enroll a rogue machine into that workspace.
   This is the intended fleet semantic and is the same trust class as the existing `oge_`
   bearer (also a stateless bearer secret). Bounded by: short TTL (1h), workspace scope (not
   account-wide), post-hoc revocation (revoke endpoint, `enrollments.ts:174`), and copy-once

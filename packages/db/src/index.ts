@@ -16968,6 +16968,7 @@ export type DeviceEnrollmentRequestRecord = {
   approvedAt: string | null;
   enrollmentId: string | null;
   sandboxId: string | null;
+  credentialGeneration: number | null;
   expiresAt: string;
   createdAt: string;
   updatedAt: string;
@@ -16996,6 +16997,8 @@ function mapDeviceEnrollmentRequest(
     approvedAt: row.approvedAt ? row.approvedAt.toISOString() : null,
     enrollmentId: row.enrollmentId ?? null,
     sandboxId: row.sandboxId ?? null,
+    credentialGeneration:
+      row.credentialGeneration == null ? null : Number(row.credentialGeneration),
     expiresAt: row.expiresAt.toISOString(),
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
@@ -17333,12 +17336,17 @@ export async function approveDeviceEnrollmentRequest(
       if (!pending) {
         return { approved: false, enrollment: null, sandbox: null };
       }
+      const expired = pending.expiresAt.getTime() <= now.getTime();
+      if (expired) {
+        return { approved: false, enrollment: null, sandbox: null };
+      }
       // Already approved → idempotent return of the exact existing rows. Do not run
       // the finalize upsert again: that operation is the credential-generation
-      // rotation boundary for a genuinely new enrollment request.
+      // rotation boundary for a genuinely new enrollment request. Generationless
+      // migration-era rows and any identity/generation drift fail closed.
       if (pending.status === "approved") {
-        if (!pending.enrollmentId || !pending.sandboxId) {
-          throw new Error("Approved enrollment request is missing its finalized row ids");
+        if (!pending.enrollmentId || !pending.sandboxId || !pending.credentialGeneration) {
+          return { approved: false, enrollment: null, sandbox: null };
         }
         const [existingEnrollment] = await scopedDb
           .select()
@@ -17361,8 +17369,13 @@ export async function approveDeviceEnrollmentRequest(
             ),
           )
           .limit(1);
-        if (!existingEnrollment || !existingSandbox) {
-          throw new Error("Approved enrollment request references missing finalized rows");
+        if (
+          !existingEnrollment ||
+          !existingSandbox ||
+          existingEnrollment.pubkey !== pending.pubkey ||
+          Number(existingEnrollment.credentialGeneration) !== pending.credentialGeneration
+        ) {
+          return { approved: false, enrollment: null, sandbox: null };
         }
         return {
           approved: true,
@@ -17370,11 +17383,7 @@ export async function approveDeviceEnrollmentRequest(
           sandbox: mapSandbox(existingSandbox),
         };
       }
-      const expired = pending.expiresAt.getTime() <= now.getTime();
       if (pending.status === "denied" || pending.status === "consumed") {
-        return { approved: false, enrollment: null, sandbox: null };
-      }
-      if (pending.status === "pending" && expired) {
         return { approved: false, enrollment: null, sandbox: null };
       }
 
@@ -17407,6 +17416,7 @@ export async function approveDeviceEnrollmentRequest(
           approvedAt: now,
           enrollmentId: enrollment.id,
           sandboxId: sandbox.id,
+          credentialGeneration: enrollment.credentialGeneration,
           updatedAt: now,
         })
         .where(eq(schema.deviceEnrollmentRequests.id, pending.id));

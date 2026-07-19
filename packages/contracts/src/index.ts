@@ -771,7 +771,9 @@ export async function verifyEnrollmentBearer(
 // The SHORT-TTL, secret, workspace-scoped token the headless/fleet enroll path
 // presents to /v1/enrollments/token/exchange. The token IS the grant — there is
 // no human approve step — so it is stateless-signed (no DB row): the holder of an
-// unexpired token can enroll ONE machine identity into ONE workspace.
+// unexpired token can enroll machine identities into ONE workspace. Reuse within
+// the TTL is intentional for bounded fleet rollout; every exchange still binds
+// the resulting long-lived credential family to the supplied public key.
 //
 // It REUSES the SAME HMAC envelope as signEnrollmentBearer (base64Url payload +
 // hmacSha256Base64Url) with a DISTINCT `oget_` prefix and a `typ: "enroll"` claim.
