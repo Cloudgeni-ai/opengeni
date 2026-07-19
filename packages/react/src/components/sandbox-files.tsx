@@ -1,9 +1,11 @@
-import type { FsReadResponse } from "@opengeni/sdk";
 import { FileCode2Icon, FileWarningIcon, LoaderCircleIcon } from "lucide-react";
 import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { cn } from "../lib/cn";
 import { useThemeType } from "../lib/use-theme-type";
-import type { UseSandboxFilesResult } from "../hooks/use-sandbox-files";
+import {
+  CapturedFileUnavailableError,
+  type UseSandboxFilesResult,
+} from "../hooks/use-sandbox-files";
 import type { UseSandboxGitResult } from "../hooks/use-sandbox-git";
 import { CodeEditor } from "./code-editor";
 import { FileBrowser } from "./file-browser";
@@ -36,6 +38,15 @@ export type SandboxFilesProps = {
   requestedPathRequestId?: string | number | undefined;
   /** False while the parent is waking a cold sandbox for `requestedPath`. */
   requestedPathReady?: boolean | undefined;
+  /** The machine is cold and no durable capture exists yet. Render an explicit
+   *  wake gate instead of an empty-tree lie or an implicit Channel-A read. */
+  workspaceResting?: boolean | undefined;
+  /** A deliberate wake has started but the live file surface is not ready yet. */
+  workspaceWaking?: boolean | undefined;
+  /** Whether live reads are currently authoritative. */
+  liveWorkspaceReady?: boolean | undefined;
+  /** Deliberately wake the machine to read content absent from the capture. */
+  onWakeWorkspace?: (() => void) | undefined;
   themeType?: "dark" | "light" | undefined;
   className?: string | undefined;
 };
@@ -57,6 +68,10 @@ export function SandboxFiles({
   requestedPath,
   requestedPathRequestId,
   requestedPathReady = true,
+  workspaceResting = false,
+  workspaceWaking = false,
+  liveWorkspaceReady = true,
+  onWakeWorkspace,
   themeType,
   className,
 }: SandboxFilesProps) {
@@ -64,6 +79,8 @@ export function SandboxFiles({
   // View vs Edit for the selected file. Resets to View on every new selection so
   // opening a file never lands you in a stale dirty editor for a different path.
   const [editMode, setEditMode] = useState(false);
+  const [liveRequestedPath, setLiveRequestedPath] = useState<string | null>(null);
+  const [viewReloadRevision, setViewReloadRevision] = useState(0);
   const pendingRequestRef = useRef<string | number | null>(null);
   const handledRequestRef = useRef<string | number | null>(null);
   const requestKey = requestedPath ? (requestedPathRequestId ?? requestedPath) : null;
@@ -111,7 +128,7 @@ export function SandboxFiles({
   // writable). Nothing is auto-selected — the pane waits for a tree click, so the
   // Files tab opens as a calm browser, not a diff.
   const viewPath = selected;
-  const fileView = useFileView(viewPath, files.readFile);
+  const fileView = useFileView(viewPath, files.readFile, viewReloadRevision);
 
   // Selecting a (different) file always returns to View — never drop the user into
   // an editor whose buffer belongs to the previously-selected path. Manual
@@ -124,6 +141,8 @@ export function SandboxFiles({
     }
     setSelected(path);
     setEditMode(false);
+    setLiveRequestedPath(null);
+    setViewReloadRevision(0);
   }, []);
 
   // A tree file is editable only when it is a real, fully-loaded text file: not
@@ -139,6 +158,10 @@ export function SandboxFiles({
     !fileView.truncated &&
     fileView.content !== null;
   const showEditor = canEdit && editMode;
+  const captureFileUnavailable =
+    fileView.error instanceof CapturedFileUnavailableError ? fileView.error : null;
+  const waitingForSelectedFile =
+    liveRequestedPath === viewPath && !liveWorkspaceReady && captureFileUnavailable !== null;
 
   if (!fileSystemAvailable) {
     return (
@@ -146,9 +169,40 @@ export function SandboxFiles({
         className={className}
         icon={<FileWarningIcon className="size-5" aria-hidden />}
         title="Files unavailable"
+        announce="alert"
       >
         This sandbox does not expose a file system.
       </Notice>
+    );
+  }
+
+  if (workspaceResting || workspaceWaking) {
+    return (
+      <div className={cn("h-full", className)} data-opengeni-workspace-resting>
+        <Notice
+          icon={
+            workspaceWaking ? (
+              <LoaderCircleIcon
+                className="size-5 animate-spin motion-reduce:animate-none"
+                aria-hidden
+              />
+            ) : (
+              <FileCode2Icon className="size-5" aria-hidden />
+            )
+          }
+          title={workspaceWaking ? "Waking workspace" : "Workspace is resting"}
+          announce="status"
+        >
+          <p>
+            {workspaceWaking
+              ? "Connecting to the live file system…"
+              : "No captured revision is available yet. Wake the sandbox to browse its current files."}
+          </p>
+          {!workspaceWaking && onWakeWorkspace ? (
+            <WakeButton onClick={onWakeWorkspace}>Open live workspace</WakeButton>
+          ) : null}
+        </Notice>
+      </div>
     );
   }
 
@@ -214,16 +268,53 @@ export function SandboxFiles({
                   path={viewPath}
                   initialContents={fileView.content}
                   themeType={resolvedTheme}
-                  onSave={(contents) => files.writeFile(viewPath, contents)}
+                  onSave={(contents) =>
+                    files.writeFile(viewPath, contents, { expectedContent: fileView.content! })
+                  }
+                  onOverwrite={(contents) => files.writeFile(viewPath, contents, { force: true })}
+                  onReload={() => setViewReloadRevision((revision) => revision + 1)}
                   {...(onEditIntent ? { onEditIntent } : {})}
                   className="h-full"
                 />
+              ) : waitingForSelectedFile ? (
+                <Notice
+                  icon={
+                    <LoaderCircleIcon
+                      className="size-5 animate-spin motion-reduce:animate-none"
+                      aria-hidden
+                    />
+                  }
+                  title="Waking workspace"
+                  announce="status"
+                >
+                  Opening {viewPath} when the live file system is ready…
+                </Notice>
+              ) : captureFileUnavailable ? (
+                <Notice icon={<FileCode2Icon className="size-5" aria-hidden />} title="On machine">
+                  <p>
+                    {captureFileUnavailable.reason === "too-large"
+                      ? "This file is larger than the captured preview limit."
+                      : captureFileUnavailable.reason === "content-missing"
+                        ? "The captured copy is no longer available."
+                        : "This file was indexed, but it was not changed in the captured turn."}
+                  </p>
+                  {onWakeWorkspace ? (
+                    <WakeButton
+                      onClick={() => {
+                        setLiveRequestedPath(viewPath);
+                        onWakeWorkspace();
+                      }}
+                    >
+                      Open live file
+                    </WakeButton>
+                  ) : null}
+                </Notice>
               ) : fileView.error ? (
-                <Notice>
+                <Notice announce="alert">
                   Could not open {viewPath}: {fileView.error.message}
                 </Notice>
               ) : fileView.loading ? (
-                <Notice>Loading {viewPath}…</Notice>
+                <Notice announce="status">Loading {viewPath}…</Notice>
               ) : fileView.isBinary ? (
                 <Notice>
                   {viewPath} is a binary file ({fileView.sizeBytes ?? 0} bytes).
@@ -255,7 +346,7 @@ export function SandboxFiles({
                   )}
                 </>
               ) : (
-                <Notice>Loading {viewPath}…</Notice>
+                <Notice announce="status">Loading {viewPath}…</Notice>
               )
             ) : // Nothing selected — the tree shows the whole workspace; pick a file.
             requestedPath && !requestedPathReady ? (
@@ -267,6 +358,7 @@ export function SandboxFiles({
                   />
                 }
                 title="Waking sandbox"
+                announce="status"
               >
                 Opening {requestedPath} when the live workspace is ready…
               </Notice>
@@ -282,19 +374,36 @@ export function SandboxFiles({
   );
 }
 
+function WakeButton({ children, onClick }: { children: ReactNode; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="mt-1 inline-flex min-h-11 items-center justify-center rounded-og-md bg-og-accent px-3 py-2 text-og-sm font-medium text-og-on-accent shadow-sm transition-colors hover:bg-og-accent-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-og-accent focus-visible:ring-offset-2 focus-visible:ring-offset-og-bg"
+    >
+      {children}
+    </button>
+  );
+}
+
 function GitHeader({ git, dirtyCount }: { git: UseSandboxGitResult; dirtyCount: number }) {
   const dirty = dirtyCount > 0;
   return (
     <div className="flex shrink-0 items-center gap-2 border-b border-og-border bg-og-surface-1 px-2 py-1 text-og-sm">
       <span
+        aria-hidden="true"
         className={cn(
           "size-2 shrink-0 rounded-full",
           dirty ? "bg-og-status-running" : "bg-og-status-idle",
         )}
-        title={dirty ? `${dirtyCount} changed` : "clean"}
       />
+      <span className="sr-only">
+        {dirty ? `Working tree has ${dirtyCount} changed files` : "Working tree clean"}
+      </span>
       <span className="truncate font-og-mono text-og-fg">
-        {git.branch ?? (git.isRepo ? "(detached)" : "no repo")}
+        {git.repoCount > 1
+          ? `${git.repoCount} repositories`
+          : (git.branch ?? (git.isRepo ? "(detached)" : "no repo"))}
       </span>
       {(git.ahead > 0 || git.behind > 0) && (
         <span className="flex shrink-0 items-center gap-1.5 text-og-xs text-og-fg-subtle">
@@ -303,7 +412,11 @@ function GitHeader({ git, dirtyCount }: { git: UseSandboxGitResult; dirtyCount: 
         </span>
       )}
       {dirty && (
-        <span data-contrast-audited className="ml-auto shrink-0 text-og-xs text-og-fg-subtle">
+        <span
+          aria-hidden="true"
+          data-contrast-audited
+          className="ml-auto shrink-0 text-og-xs text-og-fg-subtle"
+        >
           {dirtyCount} changed
         </span>
       )}
@@ -328,7 +441,7 @@ function Segmented({
           type="button"
           onClick={() => onChange(opt.value)}
           className={cn(
-            "min-h-7 rounded-og-xs px-1.5 py-0.5 text-og-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-og-accent max-[1023px]:min-h-11 pointer-coarse:min-h-11",
+            "min-h-7 rounded-og-xs px-1.5 py-0.5 text-og-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-og-accent max-[1023px]:min-h-11 max-[1023px]:min-w-11 pointer-coarse:min-h-11 pointer-coarse:min-w-11",
             opt.value === value
               ? "bg-og-accent-soft text-og-fg"
               : "text-og-fg-subtle hover:text-og-fg",
@@ -361,7 +474,8 @@ type FileViewState = {
  */
 function useFileView(
   path: string | null,
-  readFile: (path: string) => Promise<FsReadResponse>,
+  readFile: UseSandboxFilesResult["readFile"],
+  reloadRevision = 0,
 ): FileViewState {
   const [state, setState] = useState<FileViewState>({
     content: null,
@@ -384,6 +498,7 @@ function useFileView(
       return;
     }
     let cancelled = false;
+    const abort = new AbortController();
     setState({
       content: null,
       isBinary: false,
@@ -392,7 +507,7 @@ function useFileView(
       loading: true,
       error: null,
     });
-    void readFile(path)
+    void readFile(path, { signal: abort.signal })
       .then((res) => {
         if (cancelled) return;
         const content = res.isBinary
@@ -422,8 +537,9 @@ function useFileView(
       });
     return () => {
       cancelled = true;
+      abort.abort();
     };
-  }, [path, readFile]);
+  }, [path, readFile, reloadRevision]);
   return state;
 }
 
@@ -447,14 +563,19 @@ function Notice({
   className,
   icon,
   title,
+  announce,
 }: {
   children: ReactNode;
   className?: string | undefined;
   icon?: ReactNode | undefined;
   title?: string | undefined;
+  announce?: "status" | "alert" | undefined;
 }) {
   return (
     <div
+      role={announce}
+      aria-atomic={announce ? "true" : undefined}
+      aria-live={announce === "alert" ? "assertive" : announce === "status" ? "polite" : undefined}
       className={cn(
         "flex h-full items-center justify-center p-4 text-center text-og-sm text-og-fg-subtle",
         className,

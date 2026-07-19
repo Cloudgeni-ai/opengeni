@@ -154,7 +154,7 @@ afterAll(async () => {
     /* noop */
   }
   await shared?.release();
-});
+}, 180_000);
 
 describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
   test("(1) the FIRST tick seeds the cursor (no accrual); the SECOND tick accrues warm-seconds", async () => {

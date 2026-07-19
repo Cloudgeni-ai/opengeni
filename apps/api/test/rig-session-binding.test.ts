@@ -125,7 +125,7 @@ afterAll(async () => {
     /* noop */
   }
   await shared?.release();
-});
+}, 180_000);
 
 describe("M3 rig binding: freeze at create", () => {
   test("binds the rig's active version and freezes it — a later promote never moves an existing session", async () => {

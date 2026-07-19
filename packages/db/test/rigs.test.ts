@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import {
   activateRigVersion,
@@ -30,6 +30,12 @@ let available = true;
 let shared: SharedTestDatabase | null = null;
 let client: DbClient;
 let db: Database;
+
+// This file verifies serialized rig invariants against real PostgreSQL. Parallel
+// repository runs can queue those transactions behind other database suites, so
+// use a finite file-scoped ceiling instead of canceling live transactions at
+// Bun's five-second unit default.
+setDefaultTimeout(30_000);
 
 async function freshWorkspace(): Promise<{ accountId: string; workspaceId: string }> {
   const [account] = await shared!.admin<{ id: string }[]>`

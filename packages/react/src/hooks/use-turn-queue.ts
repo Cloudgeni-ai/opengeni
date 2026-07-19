@@ -36,6 +36,8 @@ export type UseTurnQueueResult = {
   /** Human/API prompts exactly in server execution order. Never client-sorted. */
   queue: SessionTurn[];
   effectiveControl: EffectiveSessionControl | null;
+  /** Saved queue work is waiting only for its predecessor to reach quiescence. */
+  stoppingPreviousAttempt: boolean;
   loading: boolean;
   error: Error | null;
   refresh: () => Promise<void>;
@@ -260,6 +262,7 @@ export function useTurnQueue(
     snapshot,
     queue: snapshot?.items ?? [],
     effectiveControl: snapshot?.effectiveControl ?? null,
+    stoppingPreviousAttempt: snapshot?.stoppingPreviousAttempt ?? false,
     loading,
     error,
     refresh: load,

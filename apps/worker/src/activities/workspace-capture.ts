@@ -17,8 +17,9 @@
 //   • The whole capture is time-capped (60s) and best-effort: ANY failure logs
 //     "workspace capture failed — turn outcome unaffected" and returns; nothing
 //     throws past captureWorkspaceRevision.
-//   • The DB write is fenced on the lease epoch — a superseded lease writes zero
-//     rows (insertWorkspaceCapture).
+//   • The DB write is fenced on the exact attempt, accepted control requests,
+//     and lease epoch — a cancelled attempt or superseded lease writes zero rows
+//     (insertWorkspaceCapture).
 //   • F9 storage ordering: blobs + manifest are PUT and the row is committed
 //     BEFORE any GC delete runs.
 //
@@ -27,7 +28,7 @@
 // activity). The emitted `workspace.revision.captured` event is ANNOUNCE-ONLY
 // (metadata, never content) and must never gain a rendered timeline item.
 
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import type { Settings } from "@opengeni/config";
 import type { Database } from "@opengeni/db";
 import {
@@ -171,7 +172,7 @@ function classifyCaptureEntryError(error: unknown): BoxExitingError | null {
   return null;
 }
 const TREE_MAX_ENTRIES = 20_000; // whole-tree node cap (truncate beyond)
-const TREE_MAX_DIRS = 600; // BFS round-trip cap (bounds turn-end latency)
+const TREE_MAX_DEPTH = 600; // pathological nesting cap; still one remote round-trip
 
 // The capture row and announcement are committed together by @opengeni/db. This
 // callback performs only best-effort live fanout of those already-durable events.
@@ -189,8 +190,15 @@ export type CaptureWorkspaceRevisionInput = {
   accountId: string;
   workspaceId: string;
   sessionId: string;
-  turnId: string | null;
+  turnId: string;
+  attemptId: string;
   observability: Observability;
+  /**
+   * The owning turn activity's cancellation signal. Pause/Steer must preempt
+   * review-cache housekeeping immediately; correctness still comes from the
+   * activity plus the capture's transaction-level attempt/control/lease fences.
+   */
+  signal?: AbortSignal;
   /** Test-only: override keep-latest-N GC threshold (default 10). */
   keepLatest?: number;
 };
@@ -207,6 +215,13 @@ export async function captureWorkspaceRevision(
   input: CaptureWorkspaceRevisionInput,
 ): Promise<void> {
   const { observability } = input;
+  if (input.signal?.aborted) {
+    observability.incrementCounter({
+      name: "opengeni_workspace_capture_total",
+      labels: { result: "cancelled" },
+    });
+    return;
+  }
   if (!input.settings.workspaceCaptureEnabled) {
     return; // flag off → capture skipped; reads fall back to live/wake (status quo)
   }
@@ -224,6 +239,20 @@ export async function captureWorkspaceRevision(
 
   const startedAt = Date.now();
   const controller = new AbortController();
+  let rejectOwnerCancellation: ((reason?: unknown) => void) | undefined;
+  const ownerCancelled = input.signal
+    ? new Promise<never>((_resolve, reject) => {
+        rejectOwnerCancellation = reject;
+      })
+    : new Promise<never>(() => undefined);
+  const cancelFromOwner = (): void => {
+    controller.abort(input.signal?.reason);
+    rejectOwnerCancellation?.(
+      input.signal?.reason ?? new Error("workspace capture cancelled by its owning activity"),
+    );
+  };
+  input.signal?.addEventListener("abort", cancelFromOwner, { once: true });
+  if (input.signal?.aborted) cancelFromOwner();
   observability.incrementGauge({
     name: "opengeni_workspace_captures_inflight",
     help: "Current workspace-capture operations still resident in this worker process.",
@@ -244,6 +273,7 @@ export async function captureWorkspaceRevision(
   try {
     await Promise.race([
       capture,
+      ownerCancelled,
       new Promise<never>((_, reject) => {
         timer = setTimeout(() => {
           controller.abort();
@@ -252,6 +282,13 @@ export async function captureWorkspaceRevision(
       }),
     ]);
   } catch (error) {
+    if (input.signal?.aborted) {
+      observability.incrementCounter({
+        name: "opengeni_workspace_capture_total",
+        labels: { result: "cancelled" },
+      });
+      return;
+    }
     // The one and only place a capture failure surfaces — as a log line, never
     // an exception past this boundary (the turn already completed).
     observability.warn("workspace capture failed — turn outcome unaffected", {
@@ -266,6 +303,7 @@ export async function captureWorkspaceRevision(
     });
   } finally {
     if (timer) clearTimeout(timer);
+    input.signal?.removeEventListener("abort", cancelFromOwner);
     controller.abort();
   }
 }
@@ -294,6 +332,11 @@ async function runCapture(
   // ── 1. per-repo status + diff, union the touched set ──────────────────────
   const discovery = await svc.detectReposDetailed();
   throwIfCaptureAborted(signal);
+  if (process.env.OPENGENI_TEST_SCENARIO === "sandbox") {
+    console.log(
+      `[sandbox-e2e] capture discovery complete=${discovery.complete} repos=${JSON.stringify(discovery.repos)} degraded=${discovery.degradedReason ?? "none"}`,
+    );
+  }
   if (!discovery.complete) {
     const capturedAt = new Date();
     const reason = captureDegradedReason(discovery.degradedReason);
@@ -307,6 +350,7 @@ async function runCapture(
       workspaceId: input.workspaceId,
       sessionId: input.sessionId,
       turnId: input.turnId,
+      attemptId: input.attemptId,
       sandboxGroupId: input.sandboxGroupId,
       expectedEpoch: input.leaseEpoch,
       revision,
@@ -368,6 +412,7 @@ async function runCapture(
       diff = await svc.gitDiff({
         path: root,
         staged: false,
+        includeUntracked: true,
         fromRef: "HEAD",
         pathspec: [],
         contextLines: 3,
@@ -539,14 +584,14 @@ async function runCapture(
     return;
   }
 
-  // ── 5. tree index (bounded BFS; residue dirs collapsed, not descended) ─────
+  // ── 5. tree index (one bounded listing; residue dirs pruned at source) ─────
   const tree = await buildTreeIndex(svc, startedAt, signal);
   throwIfCaptureAborted(signal);
 
   // ── 6. PUT blobs + tree + manifest (F9: all writes BEFORE any delete) ──────
   // Key manifest/tree by the turn (one capture per turn) so the key is known
   // before the revision is committed; content blobs are content-addressed.
-  const turnKey = input.turnId ?? randomUUID();
+  const turnKey = input.turnId;
   const treeKey = `workspace-captures/${input.workspaceId}/${input.sessionId}/trees/${turnKey}.json`;
   const manifestKey = `workspace-captures/${input.workspaceId}/${input.sessionId}/manifests/${turnKey}.json`;
 
@@ -708,6 +753,7 @@ async function runCapture(
     workspaceId: input.workspaceId,
     sessionId: input.sessionId,
     turnId: input.turnId,
+    attemptId: input.attemptId,
     sandboxGroupId: input.sandboxGroupId,
     expectedEpoch: input.leaseEpoch,
     revision,
@@ -718,6 +764,11 @@ async function runCapture(
     stats,
     capturedAt,
   });
+  if (process.env.OPENGENI_TEST_SCENARIO === "sandbox") {
+    console.log(
+      `[sandbox-e2e] capture commit inserted=${Boolean(inserted)} revision=${revision} epoch=${input.leaseEpoch} group=${input.sandboxGroupId}`,
+    );
+  }
   throwIfCaptureAborted(signal);
   if (!inserted) {
     // Lease superseded/released between capture and commit. Best-effort clean up
@@ -871,94 +922,63 @@ async function safeDelete(
 }
 
 /**
- * Build the workspace tree index via bounded BFS over the PUBLIC fsList (depth 1
- * per directory). Residue dirs are emitted as collapsed nodes but never queued
- * for descent — a single deep fsList would let node_modules exhaust the entry
- * budget and truncate real files, so we prune at the source. Bounded by
- * TREE_MAX_ENTRIES, TREE_MAX_DIRS round-trips, and the outer capture deadline.
+ * Build the workspace tree index in ONE remote filesystem round-trip. Channel-A
+ * prunes residue directories inside `find` while still emitting their collapsed
+ * node, so node_modules cannot consume the authored-file budget. The former
+ * serial per-directory BFS took 55.8 seconds for a 4,522-entry production tree
+ * and blocked Steer cancellation. This path is bounded by entry count, nesting
+ * depth, the outer capture deadline, and the owning activity's cancellation.
  */
 async function buildTreeIndex(
   svc: SandboxChannelAService,
   startedAt: number,
   signal: AbortSignal,
 ): Promise<{ root: FsTreeNode; entryCount: number; truncated: boolean }> {
-  const root: FsTreeNode = {
-    name: "",
-    path: "",
-    type: "dir",
-    sizeBytes: null,
-    mtimeMs: null,
-    mode: null,
-    children: [],
-    truncated: false,
-  };
-  const byPath = new Map<string, FsTreeNode>([["", root]]);
-  const queue: string[] = [""];
-  let entryCount = 0;
-  let dirCalls = 0;
-  let truncated = false;
-
-  while (queue.length > 0) {
+  throwIfCaptureAborted(signal);
+  if (Date.now() - startedAt > CAPTURE_TIMEOUT_MS - 5_000) {
+    throw new Error("workspace capture tree index reached its deadline before listing");
+  }
+  let listing: Awaited<ReturnType<typeof svc.fsListPruned>>;
+  try {
+    listing = await svc.fsListPruned(
+      {
+        path: "",
+        depth: TREE_MAX_DEPTH,
+        maxEntries: TREE_MAX_ENTRIES,
+        includeHidden: true,
+      },
+      RESIDUE_DIRS,
+    );
     throwIfCaptureAborted(signal);
-    if (dirCalls >= TREE_MAX_DIRS || entryCount >= TREE_MAX_ENTRIES) {
-      truncated = true;
-      break;
+  } catch (error) {
+    if (isBoxExitingError(error)) {
+      throw new BoxExitingError(error instanceof Error ? error.message : String(error));
     }
-    if (Date.now() - startedAt > CAPTURE_TIMEOUT_MS - 5_000) {
-      truncated = true;
-      break;
-    } // leave headroom for PUTs
-    const dir = queue.shift()!;
-    dirCalls += 1;
-    // Per-dir resilience: a directory can vanish or fail to list mid-walk (fs
-    // churn on a desktop box, a permission edge). Skip the one directory and keep
-    // walking the rest — a single unreadable dir must never abort the tree index.
-    // A box death still aborts the whole capture (BoxExitingError).
-    let listing: Awaited<ReturnType<typeof svc.fsList>>;
-    try {
-      listing = await svc.fsList({ path: dir, depth: 1, maxEntries: 2_000, includeHidden: true });
-      throwIfCaptureAborted(signal);
-    } catch (error) {
-      if (isBoxExitingError(error)) {
-        throw new BoxExitingError(error instanceof Error ? error.message : String(error));
-      }
-      truncated = true; // this subtree is incomplete; continue with the rest
+    throw error;
+  }
+
+  let entryCount = 0;
+  let depthTruncated = false;
+  const stack = [...(listing.root.children ?? [])];
+  while (stack.length > 0) {
+    const node = stack.pop()!;
+    entryCount += 1;
+    if (node.type !== "dir") continue;
+    if (RESIDUE_DIR_SET.has(node.name)) {
+      node.truncated = true;
+      node.children = [];
       continue;
     }
-    if (listing.truncated) truncated = true;
-    const parent = byPath.get(dir) ?? root;
-    const children = collectImmediateChildren(listing.root);
-    for (const child of children) {
-      if (entryCount >= TREE_MAX_ENTRIES) {
-        truncated = true;
-        break;
-      }
-      const node: FsTreeNode = {
-        name: child.name,
-        path: child.path,
-        type: child.type,
-        sizeBytes: child.sizeBytes,
-        mtimeMs: child.mtimeMs,
-        mode: child.mode,
-        truncated: false,
-        ...(child.type === "dir" ? { children: [] as FsTreeNode[] } : {}),
-      };
-      (parent.children ??= []).push(node);
-      byPath.set(node.path, node);
-      entryCount += 1;
-      if (node.type === "dir") {
-        if (RESIDUE_DIR_SET.has(node.name)) {
-          node.truncated = true; // collapsed residue dir — contents on the machine
-        } else {
-          queue.push(node.path);
-        }
-      }
+    if (node.path.split("/").length >= TREE_MAX_DEPTH) {
+      node.truncated = true;
+      depthTruncated = true;
+      continue;
     }
+    stack.push(...(node.children ?? []));
   }
-  return { root, entryCount, truncated };
-}
-
-/** fsList returns a subtree; at depth 1 the immediate children hang off root. */
-function collectImmediateChildren(node: FsTreeNode): FsTreeNode[] {
-  return node.children ?? [];
+  return {
+    root: listing.root,
+    entryCount,
+    truncated: listing.truncated || depthTruncated,
+  };
 }

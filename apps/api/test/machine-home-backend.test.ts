@@ -189,7 +189,7 @@ afterAll(async () => {
     /* noop */
   }
   await shared?.release();
-});
+}, 180_000);
 
 describe("Stage-D honest label: machine-targeted home sandbox_backend", () => {
   test("a machine-targeted top-level create ⇒ home + first turn 'selfhosted'", async () => {
