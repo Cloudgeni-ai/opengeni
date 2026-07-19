@@ -2,6 +2,7 @@ import { mkdir, rm } from "node:fs/promises";
 import { readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { spawn, type ChildProcess } from "node:child_process";
 
 export type CommandResult = {
   stdout: string;
@@ -9,6 +10,8 @@ export type CommandResult = {
   exitCode: number;
   timedOut: boolean;
 };
+
+type OwnedProcess = ChildProcess | ReturnType<typeof Bun.spawn>;
 
 export async function runCommand(
   args: string[],
@@ -160,7 +163,7 @@ function collectCommandOutput(stream: ReadableStream<Uint8Array>): {
 }
 
 export type StartedProcess = {
-  proc: ReturnType<typeof Bun.spawn>;
+  proc: ChildProcess;
   logs: () => string;
   stop: () => Promise<void>;
 };
@@ -225,23 +228,38 @@ export async function startProcess(
     timeoutMs?: number;
   } = {},
 ): Promise<StartedProcess> {
+  const [command, ...commandArgs] = args;
+  if (!command) {
+    throw new Error("startProcess requires a command");
+  }
   let output = "";
-  // Own a whole process group, not just the package-manager wrapper. Bun's
-  // `detached` flag does not establish one when called from `bun test` on
-  // Linux (verified on 1.3.13 and 1.3.14), so use the OS primitive there.
-  const ownedArgs = process.platform === "linux" ? ["setsid", "--wait", ...args] : args;
-  const proc = Bun.spawn(ownedArgs, {
+  // Node's detached POSIX child becomes the leader of a new session/process
+  // group. Bun's detached subprocess does not establish that boundary when
+  // called from `bun test` on Linux, and wrapping it in `setsid --wait` leaves
+  // a racy Bun subprocess lifecycle under a saturated suite.
+  const proc = spawn(command, commandArgs, {
     env: compactEnv({ ...process.env, ...options.env }),
-    stdout: "pipe",
-    stderr: "pipe",
-    detached: !["linux", "win32"].includes(process.platform),
+    stdio: ["ignore", "pipe", "pipe"],
+    detached: process.platform !== "win32",
     ...(options.cwd ? { cwd: options.cwd } : {}),
   });
-  collect(proc.stdout, (chunk) => {
+  proc.stdout?.setEncoding("utf8");
+  proc.stderr?.setEncoding("utf8");
+  proc.stdout?.on("data", (chunk: string) => {
     output += chunk;
   });
-  collect(proc.stderr, (chunk) => {
+  proc.stderr?.on("data", (chunk: string) => {
     output += chunk;
+  });
+  let spawnError: Error | undefined;
+  proc.once("error", (error) => {
+    spawnError = error;
+    output += `\n${String(error)}`;
+  });
+  const closed = new Promise<void>((resolve) => {
+    // `close` settles only after the child is reaped and both output streams
+    // close. That is the ownership boundary a reusable test service needs.
+    proc.once("close", () => resolve());
   });
   let stopPromise: Promise<void> | undefined;
   const stopOwnedProcess = async (): Promise<void> => {
@@ -251,11 +269,14 @@ export async function startProcess(
       signalOwnedProcessGroup(proc, "SIGKILL");
       await waitForOwnedProcessGroupExit(proc, 3_000);
     }
-    // Never let a broken child reaper turn suite teardown into an unbounded
-    // wait. The process-group liveness check above is the leak proof.
-    await Promise.race([proc.exited.catch(() => undefined), Bun.sleep(3_000)]);
     if (ownedProcessGroupIsAlive(proc)) {
       throw new Error(`failed to stop owned process group ${proc.pid}: ${args.join(" ")}`);
+    }
+    if (!(await waitForProcessClose(closed, 3_000))) {
+      throw new Error(`owned process streams did not close for ${proc.pid}: ${args.join(" ")}`);
+    }
+    if (spawnError && proc.pid === undefined) {
+      throw new Error(`failed to start owned process: ${args.join(" ")}`, { cause: spawnError });
     }
   };
   const started = {
@@ -278,9 +299,9 @@ export async function startProcess(
   return started;
 }
 
-function signalOwnedProcessGroup(proc: ReturnType<typeof Bun.spawn>, signal: NodeJS.Signals): void {
+function signalOwnedProcessGroup(proc: OwnedProcess, signal: NodeJS.Signals): void {
   try {
-    if (process.platform === "win32") {
+    if (process.platform === "win32" || proc.pid === undefined) {
       proc.kill(signal);
     } else {
       process.kill(-proc.pid, signal);
@@ -390,9 +411,12 @@ async function waitForSubprocessExit(
   return exitCode;
 }
 
-function ownedProcessGroupIsAlive(proc: ReturnType<typeof Bun.spawn>): boolean {
+function ownedProcessGroupIsAlive(proc: OwnedProcess): boolean {
   if (process.platform === "win32") {
     return proc.exitCode === null;
+  }
+  if (proc.pid === undefined) {
+    return false;
   }
   if (process.platform === "linux") {
     // `kill(-pgid, 0)` also reports unreaped zombies. They cannot execute or
@@ -428,13 +452,26 @@ function ownedProcessGroupIsAlive(proc: ReturnType<typeof Bun.spawn>): boolean {
   }
 }
 
-async function waitForOwnedProcessGroupExit(
-  proc: ReturnType<typeof Bun.spawn>,
-  timeoutMs: number,
-): Promise<void> {
+async function waitForOwnedProcessGroupExit(proc: ChildProcess, timeoutMs: number): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (ownedProcessGroupIsAlive(proc) && Date.now() < deadline) {
     await Bun.sleep(50);
+  }
+}
+
+async function waitForProcessClose(closed: Promise<void>, timeoutMs: number): Promise<boolean> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      resolveTrue(closed),
+      new Promise<boolean>((resolve) => {
+        timeout = setTimeout(() => resolve(false), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeout !== undefined) {
+      clearTimeout(timeout);
+    }
   }
 }
 
@@ -454,9 +491,7 @@ export async function waitFor(
       const remainingMs = Math.max(1, deadline - Date.now());
       const result = await Promise.race([
         Promise.resolve(predicate()),
-        Bun.sleep(remainingMs).then(() => {
-          throw new Error("condition attempt exceeded the wait deadline");
-        }),
+        rejectAfter(remainingMs, "condition attempt exceeded the wait deadline"),
       ]);
       if (result) {
         return;
@@ -470,6 +505,16 @@ export async function waitFor(
   throw new Error(
     `Timed out waiting for condition${lastError ? `: ${String(lastError)}` : ""}${detail ? `\n${detail}` : ""}`,
   );
+}
+
+async function resolveTrue(promise: Promise<unknown>): Promise<true> {
+  await promise;
+  return true;
+}
+
+async function rejectAfter(delayMs: number, message: string): Promise<never> {
+  await Bun.sleep(delayMs);
+  throw new Error(message);
 }
 
 export async function makeTempDir(prefix = "opengeni-test-"): Promise<string> {
@@ -486,18 +531,4 @@ function compactEnv(env: Record<string, string | undefined>): Record<string, str
   return Object.fromEntries(
     Object.entries(env).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
   );
-}
-
-function collect(stream: ReadableStream<Uint8Array>, onChunk: (chunk: string) => void): void {
-  void (async () => {
-    const reader = stream.getReader();
-    const decoder = new TextDecoder();
-    while (true) {
-      const next = await reader.read();
-      if (next.done) {
-        break;
-      }
-      onChunk(decoder.decode(next.value));
-    }
-  })();
 }
