@@ -11,6 +11,7 @@ import {
   listSessionsForSubject,
   removeWorkspaceMember,
   reapExpiredSessionListSnapshots,
+  sessionTreeStatsForSessions,
   SessionListAccessError,
   SessionPinAccessError,
   SessionPinVersionConflictError,
@@ -134,6 +135,13 @@ afterAll(async () => {
 });
 
 describe("session pins (real PostgreSQL + FORCE RLS)", () => {
+  test("rejects an unbounded tree-stat root set before issuing SQL", async () => {
+    const rootIds = Array.from({ length: 601 }, () => crypto.randomUUID());
+    await expect(
+      sessionTreeStatsForSessions({} as Database, crypto.randomUUID(), rootIds),
+    ).rejects.toThrow("Session tree stats projection exceeds 600 roots");
+  });
+
   test("lists server-authoritative descendant summaries for roots and lazy child pages", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
@@ -279,6 +287,77 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       truncated: true,
     });
   }, 180_000);
+
+  test("bounds pinned roots before descendant projection and makes omission explicit", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const subjectId = "user:bounded-pinned-roots";
+    await grantMember(workspace, subjectId);
+    await admin`
+      with nodes as (
+        select gen_random_uuid() as id, ordinal
+        from generate_series(1, 105) as ordinal
+      ), inserted as (
+        insert into sessions (
+          id, account_id, workspace_id, status, initial_message, model,
+          sandbox_backend, sandbox_group_id, temporal_workflow_id
+        )
+        select
+          id, ${workspace.accountId}, ${workspace.workspaceId}, 'idle',
+          'pinned-root-' || ordinal::text, 'test-model', 'none', id,
+          'bounded-pinned-root-' || id::text
+        from nodes
+        returning id
+      )
+      insert into session_pins (
+        account_id, workspace_id, subject_id, session_id, pinned, pinned_at
+      )
+      select
+        ${workspace.accountId}, ${workspace.workspaceId}, ${subjectId}, id, true, now()
+      from inserted`;
+
+    const page = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId,
+      limit: 1,
+    });
+    expect(page.pinned).toHaveLength(100);
+    expect(page.pinnedTruncated).toBe(true);
+    expect(page.sessions).toEqual([]);
+    expect(new Set(page.pinned.map((row) => row.id)).size).toBe(100);
+  }, 60_000);
+
+  test("does not double-count cyclic legacy parent graphs", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const root = await session({ ...workspace, message: "cycle root" });
+    const child = await session({
+      ...workspace,
+      message: "cycle child",
+      parentSessionId: root.id,
+    });
+    const grandchild = await session({
+      ...workspace,
+      message: "cycle grandchild",
+      parentSessionId: child.id,
+    });
+    await admin`update sessions set parent_session_id = ${grandchild.id} where id = ${root.id}`;
+    const stats = await withWorkspaceRls(
+      db,
+      workspace.workspaceId,
+      async (scoped) =>
+        sessionTreeStatsForSessions(scoped, workspace.workspaceId, [root.id]),
+    );
+    expect(stats.get(root.id)).toEqual({
+      directChildren: 1,
+      totalDescendants: 2,
+      runningDescendants: 0,
+      queuedDescendants: 2,
+      attentionDescendants: 0,
+      pausedDescendants: 0,
+      failedDescendants: 0,
+      truncated: true,
+    });
+  }, 60_000);
 
   test("reaps expired list snapshots outside request transactions", async () => {
     if (!available) return;

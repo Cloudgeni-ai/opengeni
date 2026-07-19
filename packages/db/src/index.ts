@@ -10897,6 +10897,8 @@ type SessionTreeStatsRow = {
 
 const SESSION_TREE_STATS_MAX_DESCENDANTS = 1_000;
 const SESSION_TREE_STATS_MAX_DEPTH = 32;
+const SESSION_TREE_STATS_MAX_ROOTS = 600;
+const SESSION_LIST_MAX_PINNED = 100;
 
 /**
  * Return bounded descendant aggregates for the bounded set of rows being
@@ -10904,12 +10906,18 @@ const SESSION_TREE_STATS_MAX_DEPTH = 32;
  * fixed node/depth budget. `truncated=true` makes every count an explicit lower
  * bound when a deep, wide, overlapping, or cyclic graph reaches that budget.
  */
-async function sessionTreeStatsForSessions(
+export async function sessionTreeStatsForSessions(
   db: Database,
   workspaceId: string,
   rootIds: string[],
 ): Promise<Map<string, SessionTreeStats>> {
-  if (rootIds.length === 0) return new Map();
+  const uniqueRootIds = [...new Set(rootIds)];
+  if (uniqueRootIds.length === 0) return new Map();
+  if (uniqueRootIds.length > SESSION_TREE_STATS_MAX_ROOTS) {
+    throw new RangeError(
+      `Session tree stats projection exceeds ${SESSION_TREE_STATS_MAX_ROOTS} roots`,
+    );
+  }
   const rows = await rawRows<SessionTreeStatsRow>(
     db,
     sql`
@@ -10925,24 +10933,32 @@ async function sessionTreeStatsForSessions(
         stats.truncated
       from ${schema.sessions} root
       cross join lateral (
-        with recursive descendants(id, status, depth) as (
-          select root.id, root.status, 0
+        with recursive descendants(id, status, depth, path) as (
+          select root.id, root.status, 0, array[root.id]::uuid[]
 
           union all
 
-          select child.id, child.status, descendants.depth + 1
+          select
+            child.id,
+            child.status,
+            descendants.depth + 1,
+            descendants.path || child.id
           from descendants
           join ${schema.sessions} child on child.parent_session_id = descendants.id
           where child.workspace_id = ${workspaceId}
             and descendants.depth < ${SESSION_TREE_STATS_MAX_DEPTH}
+            -- Parent links are expected to form a tree, but legacy/manual rows
+            -- can be cyclic. The path is depth-bounded above, so cycle defense
+            -- cannot grow independently of this query's fixed work budget.
+            and not child.id = any(descendants.path)
         ), bounded as materialized (
           -- PostgreSQL evaluates the recursive producer only as far as this
           -- unsorted LIMIT is consumed. One extra descendant is lookahead.
-          select id, status, depth
+          select id, status, depth, path
           from descendants
           limit ${SESSION_TREE_STATS_MAX_DESCENDANTS + 2}
         ), numbered as (
-          select id, status, depth, row_number() over () as ordinal
+          select id, status, depth, path, row_number() over () as ordinal
           from bounded
         )
         select
@@ -10984,11 +11000,21 @@ async function sessionTreeStatsForSessions(
                   and deeper.parent_session_id = numbered.id
               )
             )
+            or (
+              ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
+              and exists (
+                select 1
+                from ${schema.sessions} cycle_edge
+                where cycle_edge.workspace_id = ${workspaceId}
+                  and cycle_edge.parent_session_id = numbered.id
+                  and cycle_edge.id = any(numbered.path)
+              )
+            )
           ), false) as truncated
         from numbered
       ) stats
       where root.workspace_id = ${workspaceId}
-        and ${inArray(sql`root.id`, rootIds)}
+        and ${inArray(sql`root.id`, uniqueRootIds)}
     `,
   );
   return new Map(
@@ -11123,7 +11149,10 @@ export async function listSessionsForSubject(
   workspaceId: string,
   options: ListSessionsForSubjectOptions,
 ): Promise<SessionListResponse> {
-  const limit = Math.max(1, options.limit ?? 50);
+  const requestedLimit = options.limit ?? 50;
+  const limit = Number.isFinite(requestedLimit)
+    ? Math.min(500, Math.max(1, Math.floor(requestedLimit)))
+    : 50;
   let membershipCheckSerializationFailure = false;
   const listInTransaction = async (): Promise<SessionListResponse> => {
     membershipCheckSerializationFailure = false;
@@ -11263,7 +11292,7 @@ export async function listSessionsForSubject(
             });
           }
         }
-        const pinnedRows = await tx
+        const pinnedLookaheadRows = await tx
           .select({ session: schema.sessions, pin: schema.sessionPins })
           .from(schema.sessionPins)
           .innerJoin(schema.sessions, eq(schema.sessions.id, schema.sessionPins.sessionId))
@@ -11275,7 +11304,10 @@ export async function listSessionsForSubject(
               ...filters,
             ),
           )
-          .orderBy(desc(schema.sessionPins.pinnedAt), desc(schema.sessions.id));
+          .orderBy(desc(schema.sessionPins.pinnedAt), desc(schema.sessions.id))
+          .limit(SESSION_LIST_MAX_PINNED + 1);
+        const pinnedTruncated = pinnedLookaheadRows.length > SESSION_LIST_MAX_PINNED;
+        const pinnedRows = pinnedLookaheadRows.slice(0, SESSION_LIST_MAX_PINNED);
         const ordinaryRows =
           pageIds.length === 0
             ? []
@@ -11335,6 +11367,7 @@ export async function listSessionsForSubject(
         };
         return {
           pinned: pinnedRows.map(mapListSession),
+          pinnedTruncated,
           sessions: pageRows.map(mapListSession),
           nextCursor,
         };

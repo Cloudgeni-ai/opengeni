@@ -102,8 +102,13 @@ export function SessionList() {
     enabled: hierarchyMode,
   });
   const { sessions, nextCursor, loading, error, refresh } = rootPage;
-  const { pinned: globalPinned, refresh: refreshGlobalPins } = globalPinPage;
+  const {
+    pinned: globalPinned,
+    pinnedTruncated: globalPinsTruncated,
+    refresh: refreshGlobalPins,
+  } = globalPinPage;
   const pinned = hierarchyMode ? globalPinned : rootPage.pinned;
+  const pinnedTruncated = hierarchyMode ? globalPinsTruncated : rootPage.pinnedTruncated;
   // The hierarchy and its global pinned shortcuts come from separate queries.
   // Every invalidation must refresh both or a pin changed in another tab/device
   // can disappear from the shortcut section until the next polling interval.
@@ -830,22 +835,29 @@ export function SessionList() {
         ) : (
           <>
             {pinnedNodes.length > 0 ? (
-              <SessionGroup
-                label="Pinned"
-                nodes={pinnedNodes}
-                flat={flat}
-                activeSessionId={activeSessionId}
-                focusIndex={focusIndex}
-                onFocusSession={setFocusedSessionId}
-                expanded={expanded}
-                onToggleExpand={toggleExpand}
-                onRevealActivePath={revealActivePath}
-                childPages={childPages}
-                onLoadMoreChildren={loadChildPage}
-                onSelect={rail.openSession}
-                onRename={context.updateSessionTitle}
-                onPin={onPin}
-              />
+              <>
+                <SessionGroup
+                  label="Pinned"
+                  nodes={pinnedNodes}
+                  flat={flat}
+                  activeSessionId={activeSessionId}
+                  focusIndex={focusIndex}
+                  onFocusSession={setFocusedSessionId}
+                  expanded={expanded}
+                  onToggleExpand={toggleExpand}
+                  onRevealActivePath={revealActivePath}
+                  childPages={childPages}
+                  onLoadMoreChildren={loadChildPage}
+                  onSelect={rail.openSession}
+                  onRename={context.updateSessionTitle}
+                  onPin={onPin}
+                />
+                {pinnedTruncated ? (
+                  <p className="px-2 pb-2 text-[11px] text-fg-subtle" role="status">
+                    Showing the 100 most recently pinned sessions. Older pins are omitted.
+                  </p>
+                ) : null}
+              </>
             ) : null}
             {forest.running.length > 0 ? (
               <SessionGroup

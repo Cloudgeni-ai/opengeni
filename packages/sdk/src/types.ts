@@ -444,6 +444,8 @@ export type SessionSummary = Session;
 /** Canonical session-list page; pinned rows are excluded from ordinary pages. */
 export type SessionListResponse = {
   pinned: Session[];
+  /** True when the server omitted older pins from its bounded pinned section. */
+  pinnedTruncated?: boolean;
   sessions: Session[];
   nextCursor: string | null;
 };

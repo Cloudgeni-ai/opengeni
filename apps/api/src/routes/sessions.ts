@@ -153,6 +153,10 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       }
       throw error;
     }
+    // The page body carries this fact directly. Preserve the historical array
+    // body for older clients while still making its older-pin omission visible
+    // to raw HTTP consumers without changing that response shape.
+    c.header("x-opengeni-pinned-truncated", page.pinnedTruncated === true ? "true" : "false");
     if (pageView) {
       return c.json(page);
     }

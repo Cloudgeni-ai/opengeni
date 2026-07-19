@@ -3536,11 +3536,15 @@ export type SessionSummary = Session;
 /**
  * The canonical session-list page. Pinned rows are returned separately and are
  * excluded from `sessions`, so a cursor can page ordinary recency rows without
- * duplicating a pin. Pins are filtered by the same parent/search predicates as
- * ordinary rows and ordered by pinnedAt DESC, id DESC.
+ * duplicating a pin. The newest 100 matching pins are returned, ordered by
+ * pinnedAt DESC, id DESC; `pinnedTruncated` makes an older-pin omission
+ * explicit. Pins are filtered by the same parent/search predicates as ordinary
+ * rows.
  */
 export const SessionListResponse = z.object({
   pinned: z.array(Session),
+  /** True when older matching pins were omitted from this bounded page. */
+  pinnedTruncated: z.boolean().optional(),
   sessions: z.array(Session),
   nextCursor: z.string().nullable(),
 });
@@ -4550,6 +4554,7 @@ export function boundSessionEvent(
   const duplicateOfEventId = canonicalOptionalSessionEventUuid(source.duplicateOfEventId);
   const envelopeFields = [
     sessionEventCustomSerializerProjection(event),
+    sessionEventAdditionalTopLevelFieldProjection(event),
     !typeIsSafe
       ? sessionEventEnvelopeFieldProjection(
           "type",
@@ -4703,43 +4708,93 @@ function sessionEventEnvelopeFieldProjection(
 function sessionEventCustomSerializerProjection(
   event: SessionEvent,
 ): { field: string; originalBytes: null; deliveredBytes: 0 } | null {
+  const projection = { field: "toJSON", originalBytes: null, deliveredBytes: 0 } as const;
+  let candidate: object | null = event;
   try {
-    const descriptor = Object.getOwnPropertyDescriptor(event, "toJSON");
-    if (!descriptor || ("value" in descriptor && typeof descriptor.value !== "function")) {
-      return null;
+    for (let depth = 0; depth <= SESSION_EVENT_PROTOTYPE_MAX_DEPTH; depth += 1) {
+      if (candidate === null) return null;
+      const descriptor = Object.getOwnPropertyDescriptor(candidate, "toJSON");
+      if (descriptor) {
+        // JSON.stringify performs an ordinary lookup, so an accessor is both
+        // executable behavior and an unknown possible serializer. A data
+        // property shadows the rest of the chain and is relevant only when it
+        // is callable.
+        return !("value" in descriptor) || typeof descriptor.value === "function"
+          ? projection
+          : null;
+      }
+      candidate = Object.getPrototypeOf(candidate);
     }
-    return { field: "toJSON", originalBytes: null, deliveredBytes: 0 };
+    // A hostile or malformed prototype chain that exceeds the fixed lookup
+    // budget cannot prove the absence of inherited serialization behavior.
+    return projection;
   } catch {
-    return { field: "toJSON", originalBytes: null, deliveredBytes: 0 };
+    return projection;
   }
 }
 
+const SESSION_EVENT_PROTOTYPE_MAX_DEPTH = 32;
 const SESSION_EVENT_ZERO_UUID = "00000000-0000-4000-8000-000000000000";
 const SESSION_EVENT_UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+const SESSION_EVENT_OWN_DATA_FIELDS = [
+  "id",
+  "workspaceId",
+  "sessionId",
+  "sequence",
+  "type",
+  "payload",
+  "occurredAt",
+  "clientEventId",
+  "turnId",
+  "turnGeneration",
+  "turnAttemptId",
+  "turnAssociation",
+  "duplicateOfEventId",
+  "duplicateReason",
+] as const satisfies readonly (keyof SessionEvent)[];
+const SESSION_EVENT_KNOWN_ENUMERABLE_FIELDS = new Set<string>([
+  ...SESSION_EVENT_OWN_DATA_FIELDS,
+  "toJSON",
+]);
+
+/**
+ * Detect future/legacy own enumerable envelope fields without reading their
+ * values. There can be at most the fixed known-key cardinality before an
+ * additional key must be observed, so the source-level iterator is bounded.
+ * A proxy/enumeration failure is conservatively surfaced as unknown loss.
+ */
+function sessionEventAdditionalTopLevelFieldProjection(
+  event: SessionEvent,
+): { field: string; originalBytes: null; deliveredBytes: 0 } | null {
+  const projection = {
+    field: "additionalTopLevelFields",
+    originalBytes: null,
+    deliveredBytes: 0,
+  } as const;
+  let inspected = 0;
+  try {
+    for (const key in event as SessionEvent & Record<string, unknown>) {
+      inspected += 1;
+      if (inspected > SESSION_EVENT_KNOWN_ENUMERABLE_FIELDS.size + 1) return projection;
+      const descriptor = Object.getOwnPropertyDescriptor(event, key);
+      if (descriptor?.enumerable && !SESSION_EVENT_KNOWN_ENUMERABLE_FIELDS.has(key)) {
+        return projection;
+      }
+    }
+    return null;
+  } catch {
+    return projection;
+  }
+}
 
 type SessionEventOwnField = { readable: true; value: unknown } | { readable: false };
 type SessionEventOwnDataFields = Record<keyof SessionEvent, SessionEventOwnField>;
 
 function sessionEventOwnDataFields(event: SessionEvent): SessionEventOwnDataFields {
-  const keys = [
-    "id",
-    "workspaceId",
-    "sessionId",
-    "sequence",
-    "type",
-    "payload",
-    "occurredAt",
-    "clientEventId",
-    "turnId",
-    "turnGeneration",
-    "turnAttemptId",
-    "turnAssociation",
-    "duplicateOfEventId",
-    "duplicateReason",
-  ] as const satisfies readonly (keyof SessionEvent)[];
   return Object.fromEntries(
-    keys.map((key) => {
+    SESSION_EVENT_OWN_DATA_FIELDS.map((key) => {
       try {
         const descriptor = Object.getOwnPropertyDescriptor(event, key);
         if (!descriptor) return [key, { readable: true, value: undefined }];

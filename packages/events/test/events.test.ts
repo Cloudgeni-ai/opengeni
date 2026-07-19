@@ -256,6 +256,83 @@ describe("session event transport envelopes", () => {
     expect(frame).not.toContain("must-not-run");
   });
 
+  test("makes inherited event serialization loss explicit without invoking it", () => {
+    let serializerCalls = 0;
+    const prototype = {
+      toJSON() {
+        serializerCalls += 1;
+        return { output: "must-not-run" };
+      },
+    };
+    const poison = Object.assign(
+      Object.create(prototype) as SessionEvent,
+      event(821, { output: "small" }),
+    );
+
+    const direct = boundSessionEvent(poison);
+    const batches = sessionEventBatchesByBytes(WORKSPACE_ID, SESSION_ID, [poison]);
+    const frame = formatSessionEventSse(poison);
+    const page = boundSessionEventHttpPage([poison], { direction: "after" });
+
+    expect(serializerCalls).toBe(0);
+    for (const projected of [direct, batches[0]![0]!, page.events[0]!]) {
+      expect(projected.payload).toMatchObject({
+        originalEventBytes: null,
+        envelopeProjection: {
+          truncated: true,
+          fields: expect.arrayContaining([
+            expect.objectContaining({ field: "toJSON", originalBytes: null }),
+          ]),
+        },
+        fullEvidence: { available: false, reason: "not_retained" },
+      });
+    }
+    expect(new TextEncoder().encode(frame).byteLength).toBeLessThanOrEqual(
+      SESSION_EVENT_SSE_FRAME_MAX_BYTES,
+    );
+    expect(frame).not.toContain("must-not-run");
+  });
+
+  test("makes omitted additive top-level event fields explicit without reading them", () => {
+    let accessorCalls = 0;
+    const poison = event(822, { output: "small" }) as SessionEvent & {
+      futureEnvelope?: unknown;
+    };
+    Object.defineProperty(poison, "futureEnvelope", {
+      enumerable: true,
+      get() {
+        accessorCalls += 1;
+        return "must-not-run";
+      },
+    });
+
+    const direct = boundSessionEvent(poison);
+    const batches = sessionEventBatchesByBytes(WORKSPACE_ID, SESSION_ID, [poison]);
+    const frame = formatSessionEventSse(poison);
+    const page = boundSessionEventHttpPage([poison], { direction: "after" });
+
+    expect(accessorCalls).toBe(0);
+    for (const projected of [direct, batches[0]![0]!, page.events[0]!]) {
+      expect(projected.payload).toMatchObject({
+        envelopeProjection: {
+          truncated: true,
+          fields: expect.arrayContaining([
+            expect.objectContaining({
+              field: "additionalTopLevelFields",
+              originalBytes: null,
+              deliveredBytes: 0,
+            }),
+          ]),
+        },
+        fullEvidence: { available: false, reason: "not_retained" },
+      });
+    }
+    expect(new TextEncoder().encode(frame).byteLength).toBeLessThanOrEqual(
+      SESSION_EVENT_SSE_FRAME_MAX_BYTES,
+    );
+    expect(frame).not.toContain("must-not-run");
+  });
+
   test("normalizes a top-level payload accessor with unknown source bytes on every surface", () => {
     let accessorCalls = 0;
     const poison = event(83, { output: "placeholder" });

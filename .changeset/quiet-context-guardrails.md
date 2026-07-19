@@ -21,3 +21,8 @@ Bound workspace-control reason/actor invalidations at ingress, storage, NATS, SS
 REST, and the typed SDK boundary with explicit non-retention accounting.
 Preserve the SDK's array-returning workspace-control list method while adding a
 separate continuation-aware page method.
+Bound human pinned-session pages to the newest 100 matches with explicit
+`pinnedTruncated` UI/SDK truth, make descendant summaries cycle-safe, and expose
+inherited serializers or omitted additive event-envelope fields as explicit loss.
+Keep the legacy session-list array shape while surfacing pin omission in an HTTP
+header, and reject unbounded tree-stat root projections before SQL.
