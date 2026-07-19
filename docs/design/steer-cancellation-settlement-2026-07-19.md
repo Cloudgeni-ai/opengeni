@@ -68,6 +68,44 @@ The public queue currently reports `items=[]` and
 Steer because it derives the stop flag only when a visible queued user/API turn
 exists. Agent Steer is an internal update and creates no such row.
 
+### Failed-workflow and exhausted-wake fixture
+
+A later mutation-free recovery inspection proved the same split-brain can
+survive Temporal workflow failure rather than only an indefinitely open run:
+
+```text
+Session:             94488075-bc13-4d03-b38a-cf9529d1bfca
+Attempt:             c2466b48-a615-4251-9f3f-168baaa2dc42
+Interruption:        d81b9ac6-f11e-42b5-89ed-ba2a6cc3d092
+Workflow:            session-94488075-bc13-4d03-b38a-cf9529d1bfca
+Run:                 a8c81b2e-db68-469c-a667-1b9879321db4
+Workflow disposition FAILED after unacknowledged cancellation + heartbeat timeout
+Attempt disposition  closed/superseded, quiesced_at=NULL
+Interruption         settled
+Wake revision        4 / 4 delivered, no retry remaining
+Public state         queued, active, activeTurnId=NULL, queue 0/1
+Pending direction    exact Steer update remains unassigned
+Next claim           rejected by the unquiesced-predecessor fence
+```
+
+The recovery operator returned `INCOMPLETE_FAIL_CLOSED` with zero mutation. A
+failed workflow and a fully delivered old wake revision are therefore durable
+dead-end states in the current implementation: the outbox has nothing to
+redeliver, while `claimSessionWorkForAttempt` correctly refuses to run past the
+unquiesced predecessor. Failure of the orchestration run neither proves that
+the activity/process stopped nor authorizes replay of its effects.
+
+Separate production timing evidence showed the bounded-but-pathological case:
+Temporal cancellation of a turn blocked in `exec_command sleep 300` took
+119.893 seconds from `ActivityTaskCancelRequested` to
+`ActivityTaskCanceled`; delivery to the activity abort path accounted for
+roughly 57 seconds and physical cancellation/finalization another 62.64
+seconds. The replacement eventually ran, but a session-wide projection join
+continued to treat unrelated historical settled interruptions with
+`quiesced_at=NULL` as the current predecessor. The contract must cover both
+active cancellation latency and episode-scoped projection truth; a historical
+receipt may not keep `stoppingPreviousAttempt` true forever.
+
 ### Correlated production states
 
 Read-only reconciliation found two related but distinct production classes.
@@ -135,6 +173,17 @@ physical-stop proof. The workflow then writes `attempt_quiesced` even though the
 local activity body may still be executing. The bounded contract must replace
 that inference with an authoritative exact operation/holder quiescence receipt.
 
+There is a third liveness edge after cancellation delivery stops. When the
+activity ceases heartbeating without acknowledging cancellation, Temporal
+eventually returns a typed heartbeat-timeout failure to the control path. That
+path deliberately refuses to write false quiescence and throws the activity
+failure, so the session workflow becomes `FAILED`. PostgreSQL remains fenced
+and truthful—superseded attempt, settled interruption, null `quiesced_at`,
+pending direction—but the already-delivered wake revision cannot start another
+run. A correct fence has become a permanent liveness failure. Recovery needs a
+new, idempotent, exact-run workflow-restart obligation after it classifies
+physical and effect truth; it must not weaken the claim fence.
+
 The real-service fixture additionally proves:
 
 - `AsyncCompletionClient.reportCancellation` can terminalize the exact Temporal
@@ -183,6 +232,17 @@ The real-service fixture additionally proves:
 10. **Canonical lock order.** Every new receipt/materialization transaction uses
     OPE-63's control-aware workspace -> actual workspace -> session -> exact
     turn -> exact attempt prefix before receipt/update/event/wake rows.
+11. **Workflow failure is recoverable orchestration truth, not quiescence.** An
+    exact failed run is retained on the cancellation episode. A typed recovery
+    transaction either establishes positive physical/effect safety or
+    materializes `requires_action`, then commits one new wake revision for the
+    same session workflow. It never clears the predecessor fence, consumes an
+    old delivered revision, or synthesizes a new direction merely because the
+    workflow failed.
+12. **Projection is episode-scoped.** `stoppingPreviousAttempt` and recovery
+    state derive from the exact current cancellation episode/replacement
+    predecessor. Historical settled interruptions with null legacy quiescence
+    do not contaminate a newer running or completed attempt.
 
 ## Required dependency seams
 
@@ -282,6 +342,7 @@ type SessionAttemptCancellationEpisode = {
     | "cancel_requested"
     | "terminalized"
     | "terminalization_unknown";
+  workflowDisposition: "running" | "failed" | "restart_pending" | "restarted";
   physicalDisposition: "not_confirmed" | "quiesced";
   effectDisposition:
     | "reconciling"
@@ -294,6 +355,8 @@ type SessionAttemptCancellationEpisode = {
   directionRevision: number;
   replacementTurnId: string | null;
   settlementRevision: number;
+  recoveryWakeRevision: number | null;
+  recoveryWorkflowRunId: string | null;
   terminalizedAt: Date | null;
   quiescedAt: Date | null;
   materializedAt: Date | null;
@@ -311,6 +374,11 @@ Required constraints:
 - unique non-null `(workspace_id, replacement_turn_id)`;
 - foreign keys retain account/workspace/session/turn/attempt/interruption truth;
 - exact workflow/run/activity identity is immutable after insert;
+- `workflowDisposition=failed` retains that exact failed run and never implies
+  Temporal activity terminalization or physical quiescence;
+- `restart_pending` requires one committed `recoveryWakeRevision`, while
+  `restarted` requires the newly observed `recoveryWorkflowRunId`; neither may
+  overwrite the immutable failed predecessor run;
 - `physicalDisposition=quiesced` requires the existing attempt's
   `quiesced_at` to be non-null;
 - `admit_replacement` requires both `effectDisposition=safe` and
@@ -470,7 +538,81 @@ receipt establishment is fenced. Therefore it cannot start a new effect after
 the fence; an effect already past its pre-effect fence is represented by the
 reconciliation result above.
 
-### 6. Materialize exactly one replacement
+### 6. Recover an exact failed session workflow
+
+Heartbeat timeout or worker loss can fail the session workflow after logical
+Steer settlement but before the workflow returns to its admission loop. A
+retryable control activity first reads the exact workflow history by immutable
+workflow/run/activity identity and supplies only a bounded terminal
+fingerprint—never history payloads, prompts, tool data, or credentials—to one
+idempotent PostgreSQL command:
+
+```ts
+type RecoverFailedCancellationWorkflowInput = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  episodeId: string;
+  attemptId: string;
+  interruptionId: string;
+  failedWorkflowId: string;
+  failedWorkflowRunId: string;
+  failedActivityId: string;
+  settlementRevision: number;
+  operationKey: string;
+};
+
+type RecoverFailedCancellationWorkflowResult =
+  | {
+      action: "restart_enqueued" | "already_enqueued";
+      replacementTurnId: string;
+      admissionDisposition: "admit_replacement" | "requires_action";
+      workflowWakeRevision: number;
+    }
+  | { action: "not_failed" | "stale" | "blocked" };
+```
+
+The command uses the OPE-63 lock prefix, then locks the exact cancellation
+episode, predecessor attempt/interruption, canonical direction batch, session,
+and replacement row. It verifies all of the following:
+
+1. the supplied workflow/run/activity identity matches the immutable episode;
+2. that exact run is durably classified `FAILED`, not merely absent or still
+   closing;
+3. the old attempt remains logically fenced and cannot establish a new
+   pre-effect receipt;
+4. OPE-73 and every other operation class have reached either positive safe
+   truth or a typed `effect_unknown`/`quarantined` disposition; and
+5. physical disposition is either positively `quiesced` or explicitly
+   `not_confirmed` for a `requires_action` replacement.
+
+It then materializes or reuses the one stable replacement turn and assigns the
+existing direction/update batch exactly once. As the final mutation in that
+same transaction it calls OPE-59's
+`enqueueSessionWorkflowWakeInTransaction(...)`, stores the returned new
+`recoveryWakeRevision`, and marks `workflowDisposition=restart_pending`. This
+new revision is required even when the failed run's prior wake is already fully
+delivered. Replay with the same `operationKey` returns the original replacement
+and revision; it does not increment the outbox again.
+
+The existing OPE-59 dispatcher uses `signalWithStart` for the same stable
+session workflow ID with `ALLOW_DUPLICATE`, allowing Temporal to create one new
+run after the failed run. The new workflow re-peeks PostgreSQL and may claim the
+replacement only when `admissionDisposition=admit_replacement`; a
+`requires_action` replacement remains non-runnable but truthfully visible. An
+attempt-fenced acknowledgement records the observed new run ID and
+`workflowDisposition=restarted`. A direct signal, the delivered old wake, or a
+raw workflow start without the committed recovery revision is never the
+correctness path.
+
+If the session is paused, the recovery command preserves the replacement and
+update assignment but returns no new wake revision until canonical Resume
+commits it. If failure truth, physical truth, or effect truth is contradictory,
+the command returns `blocked` and retains the exact evidence. It never marks
+`quiesced_at`, deletes the failed run, fabricates a human message, or retries a
+provider/tool effect.
+
+### 7. Materialize exactly one replacement
 
 One canonical transaction:
 
@@ -597,6 +739,8 @@ type SessionCancellationSettlementProjection = {
     | "cancel_requested"
     | "terminalized"
     | "terminalization_unknown";
+  workflowDisposition: "running" | "failed" | "restart_pending" | "restarted";
+  recoveryWakeRevision: number | null;
   physicalDisposition: "not_confirmed" | "quiesced";
   effectDisposition: "reconciling" | "safe" | "effect_unknown" | "quarantined";
   admissionDisposition: "blocked" | "admit_replacement" | "requires_action";
@@ -608,6 +752,7 @@ settlement blocks admission, even when `items=[]`. The new object explains the
 reason and avoids collapsing these distinct truths:
 
 - cancellation requested but activity still pending;
+- predecessor workflow failed and needs an exact revisioned restart;
 - activity terminalized but physical worker still running;
 - exact process physically quiesced;
 - external effect outcome unknown and human action required; or
@@ -615,10 +760,14 @@ reason and avoids collapsing these distinct truths:
 
 Session status, `active_turn_id`, queue head/tail, attempt/interruption receipt,
 canonical direction revision, replacement turn, assigned updates, exact sandbox
-holder/lease state, outbox revision, and Temporal disposition must be asserted
-from one repeatable-read snapshot in API tests. A session cannot project idle or
-`stoppingPreviousAttempt=false` while an episode is blocked, an exact operation
-or holder is unresolved, or a replacement is materialized but unclaimed.
+holder/lease state, outbox revision, failed/restarted Temporal run, and activity
+disposition must be asserted from one repeatable-read snapshot in API tests. A
+session cannot project idle or `stoppingPreviousAttempt=false` while the current
+episode is blocked, an exact operation or holder is unresolved, a failed run
+has no committed recovery revision, or a replacement is materialized but
+unclaimed. Conversely, historical settled interruptions with null legacy
+`quiesced_at` are not current episodes and cannot keep the flag true after a
+newer attempt is running or complete.
 
 ## Required deterministic coverage
 
@@ -627,7 +776,12 @@ or holder is unresolved, or a replacement is materialized but unclaimed.
 - cancellation-ignoring activity heartbeats beyond grace;
 - cooperative termination just before, at, and after the timer boundary;
 - force-terminalization response loss and idempotent retry;
+- unacknowledged cancellation followed by the real heartbeat timeout: exact
+  workflow failure is retained, the already-delivered old wake stays exhausted,
+  and one idempotent recovery command commits one new restart revision;
 - worker death during grace and during the control activity;
+- worker death after recovery-revision commit and before `signalWithStart`, plus
+  signal success before acknowledgement, both converge on one new workflow run;
 - workflow-task replay and continue-as-new on every state transition;
 - repeated Resume, Steer, `queueChanged`, and wake signals;
 - concurrent Steers, lost Steer commit responses, Steer before/after
@@ -672,17 +826,26 @@ or holder is unresolved, or a replacement is materialized but unclaimed.
 - approval approve/reject is idempotent and never makes a human queue row;
 - queue positions and `stoppingPreviousAttempt` remain truthful with no visible
   human/API item;
+- historical settled interruptions with null legacy quiescence do not keep the
+  current episode's stop flag true after a newer attempt runs or completes;
 - wake revision commit-to-signal loss is repaired by the existing dispatcher;
 - older delivery cannot mark a newer revision delivered;
+- a failed workflow with `wakeRevision=deliveredRevision` gets exactly one new
+  recovery revision; replay of the recovery command returns that revision and
+  never copies or redelivers the Steer direction;
 - OPE-63 barrier tests race receipt/materialization writers against title,
   usage, streaming, goal, and child-lifecycle writers in both arrival orders.
 
 ### Real-service fixture
 
-The current 40-assertion PostgreSQL/NATS/Temporal fixture is the pre-fix control.
-It proves exact cancellation releases the workflow and also exposes the current
-unsafe auto-admission/false-quiescence fallback. The post-fix variant must retain
-the physical zombie until after it asserts:
+The PostgreSQL/NATS/Temporal fixture contains two pre-fix controls. The first
+proves exact cancellation releases the workflow and exposes the current unsafe
+auto-admission/false-quiescence fallback. The second stops heartbeats only after
+the activity reaches `CANCEL_REQUESTED`, waits for the real two-minute runtime
+heartbeat timeout, and proves the workflow fails with the predecessor still
+closed-but-unquiesced, the Steer update pending, the wake fully delivered, and
+the next claim rejected. The first retains its physical zombie until after it
+asserts:
 
 - the exact Temporal activity disappears from `pendingActivities` before any
   workflow termination;
@@ -700,6 +863,33 @@ the physical zombie until after it asserts:
 - all seven internal updates are assigned once;
 - public and database truth agree; and
 - cleanup targets only the disposable workflow/activity and zombie gate.
+
+The failed-workflow control separately retains its local activity loop until
+after it asserts:
+
+- the activity first reaches `CANCEL_REQUESTED` and then stops heartbeating
+  without acknowledging cancellation;
+- the real heartbeat timeout removes the exact pending activity, rejects a
+  by-ID heartbeat, and leaves the workflow `FAILED`;
+- the attempt stays `closed/superseded` with `quiesced_at=NULL` and the
+  interruption stays settled;
+- the one Steer update remains pending, the wake revision equals its delivered
+  revision with no error/retry, and a direct claim returns `control-pending`;
+- no replacement dispatch or model call occurs; and
+- the in-process loop continues executing until exact disposable cleanup.
+
+The failed-workflow post-fix variant must additionally assert that the typed
+recovery command:
+
+- validates the exact failed workflow/run/activity identity;
+- classifies physical and effect truth without inferring either from timeout;
+- materializes the existing direction as one runnable replacement or one
+  `requires_action` turn;
+- commits exactly one new `recoveryWakeRevision` after the exhausted delivered
+  revision;
+- survives commit-to-signal and signal-to-ack worker death;
+- starts one new run for the stable session workflow ID; and
+- never invokes the old model/tool/provider effect or creates a human prompt.
 
 ## Production-safe canary design
 
@@ -729,6 +919,15 @@ This exercises the production binary, real PostgreSQL, real Temporal, real NATS,
 normal command service, exact force-terminalization path, and public projection
 without provider inference or external effects. It uses no Azure model credits.
 
+A separately authorized failure-path variant may stop only the disposable
+activity's heartbeats after `CANCEL_REQUESTED` while leaving its local no-effect
+loop gated. It waits for the normal heartbeat timeout, proves the exact workflow
+is `FAILED` and the old wake exhausted, invokes only the supported typed
+failed-run recovery command, and requires one new wake revision/run plus one
+replacement or `requires_action`. It must not use raw SQL, `temporal workflow
+start`, a human prompt, or any incident session. This slower variant is not a
+routine deployment smoke test; root/OPE-25 must grant it explicitly.
+
 ### Optional sandbox canary
 
 Only with a separate root-authorized disposable-sandbox grant, run a harmless
@@ -752,6 +951,8 @@ shared worker pod.
    - deterministic activity identity and bounded workflow race;
    - exact Temporal terminalization control activity;
    - cancellation-settlement DB module and migration;
+   - exact failed-run classification, idempotent recovery revision, and
+     workflow restart acknowledgement;
    - durable sandbox-operation cancellation handles;
    - replacement materialization/update assignment;
    - contracts/API projection and focused UI truth;
@@ -769,6 +970,8 @@ shared worker pod.
   replacement work;
 - treating `reportCancellation`, missing pending activity, heartbeat failure,
   grace expiry, or workflow completion as physical quiescence;
+- treating workflow `FAILED` as physical quiescence or clearing the predecessor
+  claim fence so a queued turn can run;
 - treating an admitted-but-unlinked provider call or a `starting` operation
   without exact identity as proof that no effect occurred;
 - setting `quiesced_at` from a timer;
@@ -780,6 +983,8 @@ shared worker pod.
   directions remain orphaned;
 - materializing an Agent Steer as a visible human/API queue row;
 - adding another wake scanner or recurring model poll;
+- expecting a fully delivered old wake revision to restart a failed workflow,
+  or starting one without a committed idempotent recovery revision;
 - writing cancellation receipts outside OPE-63's canonical lock prefix; and
 - placing raw model/tool payloads, command text, credentials, or sandbox output
   in Temporal payloads, cancellation receipts, heartbeats, errors, or logs.

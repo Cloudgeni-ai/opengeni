@@ -46,6 +46,7 @@ import * as schema from "../../packages/db/src/schema";
 import { submitTestHumanPrompt } from "./helpers/session-control";
 
 const fixtureTimeoutMs = 180_000;
+const failedWorkflowFixtureTimeoutMs = 300_000;
 type RequiredServices = Pick<
   TestServices,
   "databaseUrl" | "natsUrl" | "temporalHost" | "migrate" | "down"
@@ -504,6 +505,327 @@ describe("OPE-75 Agent Steer cancellation deadlock production fixture", () => {
       }
     },
     fixtureTimeoutMs,
+  );
+
+  test(
+    "a heartbeat timeout fails the workflow and exhausts the delivered wake without admitting the queued replacement",
+    async () => {
+      const suffix = crypto.randomUUID();
+      const access = await bootstrapWorkspace(dbClient.db, {
+        accountExternalSource: "test",
+        accountExternalId: `ope75-failed-account-${suffix}`,
+        accountName: "OPE-75 failed workflow fixture",
+        workspaceExternalSource: "test",
+        workspaceExternalId: `ope75-failed-workspace-${suffix}`,
+        workspaceName: "OPE-75 failed workflow fixture",
+        subjectId: `ope75-failed-subject-${suffix}`,
+      });
+      const grant = access.workspaceGrants[0]!;
+      const workspaceId = grant.workspaceId!;
+
+      const caller = await createSession(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId,
+        initialMessage: "caller",
+        resources: [],
+        tools: [],
+        metadata: {},
+        model: "scripted-model",
+        sandboxBackend: "none",
+      });
+      await submitTestHumanPrompt(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId,
+        sessionId: caller.id,
+        subjectId: grant.subjectId,
+        text: "caller is working",
+        resources: [],
+        tools: [],
+        reasoningEffortFallback: "low",
+      });
+      const callerAttemptId = crypto.randomUUID();
+      const callerClaim = await claimSessionWorkForAttempt(dbClient.db, workspaceId, {
+        sessionId: caller.id,
+        workflowId: `session-${caller.id}`,
+        workflowRunId: crypto.randomUUID(),
+        attemptId: callerAttemptId,
+        dispatchId: `caller-${callerAttemptId}`,
+        trigger: { kind: "next" },
+      });
+      if (callerClaim.action !== "claimed") {
+        throw new Error(`Caller attempt was not claimed: ${callerClaim.reason}`);
+      }
+      const actor: Extract<SessionCommandActor, { type: "agent_attempt" }> = {
+        type: "agent_attempt",
+        sessionId: caller.id,
+        turnId: callerClaim.turn.id,
+        attemptId: callerAttemptId,
+        executionGeneration: callerClaim.turn.executionGeneration,
+      };
+
+      const target = await createSession(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId,
+        initialMessage: "target",
+        resources: [],
+        tools: [],
+        metadata: {},
+        model: "scripted-model",
+        sandboxBackend: "none",
+      });
+      await submitTestHumanPrompt(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId,
+        sessionId: target.id,
+        subjectId: grant.subjectId,
+        text: "continue the target work before cancellation timeout",
+        resources: [],
+        tools: [],
+        reasoningEffortFallback: "low",
+      });
+
+      const taskQueue = `ope75-failed-workflow-${crypto.randomUUID()}`;
+      const settings = testSettings({
+        databaseUrl: services.databaseUrl,
+        natsUrl: services.natsUrl,
+        temporalHost: services.temporalHost,
+        temporalTaskQueue: taskQueue,
+      });
+      const model = new ScriptedModel([
+        { id: "must-not-run", outputText: "replacement must remain blocked" },
+      ]);
+      const activities = createActivityTestHarness({
+        settings,
+        db: dbClient.db,
+        bus,
+        runtime: createProductionAgentRuntime({ model }),
+      });
+      const realRunAgentTurn = activities.runAgentTurn;
+
+      let stopHeartbeats = false;
+      let releaseHungActivity = false;
+      let heartbeats = 0;
+      let hungTicks = 0;
+      let replacementDispatches = 0;
+      let targetClaim:
+        | Extract<Awaited<ReturnType<typeof claimSessionWorkForAttempt>>, { action: "claimed" }>
+        | undefined;
+      const ignoreCancellationThenTimeout = async (
+        input: RunAgentTurnInput,
+      ): Promise<RunAgentTurnResult> => {
+        if (targetClaim) {
+          replacementDispatches += 1;
+          return await realRunAgentTurn(input);
+        }
+        const activityId = Context.current().info.activityId;
+        const claim = await claimSessionWorkForAttempt(dbClient.db, input.workspaceId, {
+          sessionId: input.sessionId,
+          workflowId: input.workflowId,
+          workflowRunId: input.workflowRunId,
+          attemptId: input.attemptId,
+          dispatchId: activityId,
+          trigger: input.trigger,
+        });
+        if (claim.action !== "claimed") {
+          return { status: "unclaimed", reason: claim.reason };
+        }
+        targetClaim = claim;
+        for (;;) {
+          if (releaseHungActivity) break;
+          hungTicks += 1;
+          if (!stopHeartbeats) {
+            heartbeats += 1;
+            heartbeat({
+              attemptId: input.attemptId,
+              activityId,
+              heartbeats,
+              phase: "sandbox_command",
+            });
+          }
+          // Ignore both Temporal cancellation and the activity AbortSignal.
+          // Once the fixture stops heartbeating, the real two-minute runtime
+          // heartbeat timeout produces the production WorkflowFailed shape.
+          await Bun.sleep(25);
+        }
+        return {
+          status: "idle",
+          turnId: claim.turn.id,
+          attemptId: input.attemptId,
+        };
+      };
+
+      const worker = await fixtureWorker(nativeConnection, taskQueue, {
+        ...activities,
+        runAgentTurn: ignoreCancellationThenTimeout,
+      });
+      const workerRun = worker.run();
+      const client = new Client({ connection });
+      const asyncCompletion = new AsyncCompletionClient({
+        connection,
+        namespace: "default",
+      });
+      const workflowId = `session-${target.id}`;
+      const handle = await client.workflow.start("sessionWorkflow", {
+        taskQueue,
+        workflowId,
+        args: [
+          {
+            accountId: grant.accountId,
+            workspaceId,
+            sessionId: target.id,
+          },
+        ],
+      });
+
+      let pendingActivityId: string | undefined;
+      try {
+        await waitFor(() => targetClaim !== undefined && heartbeats >= 3);
+
+        const steered = await withWorkspaceRls(dbClient.db, workspaceId, (scoped) =>
+          scoped.transaction((tx) =>
+            steerAgentSessionInTransaction(tx as unknown as Database, {
+              accountId: grant.accountId,
+              workspaceId,
+              targetSessionId: target.id,
+              actor,
+              operationKey: `ope75-failed-steer-${suffix}`,
+              instruction: "deliver this existing direction exactly once after typed recovery",
+            }),
+          ),
+        );
+        expect(steered.interruptionCount).toBe(1);
+        expect(steered.wakeRevision).toBeGreaterThan(0);
+        await handle.signal("sessionControl");
+        await markSessionWorkflowWakeDelivered(dbClient.db, {
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId: target.id,
+          temporalWorkflowId: workflowId,
+          wakeRevision: steered.wakeRevision,
+        });
+
+        await waitFor(async () => {
+          const description = await handle.describe();
+          const pending = description.raw.pendingActivities?.find(
+            (activity) => activity.activityType?.name === "runAgentTurn",
+          );
+          pendingActivityId = pending?.activityId;
+          return pending?.state === encodePendingActivityState("CANCEL_REQUESTED");
+        });
+        expect(pendingActivityId).toBeTruthy();
+
+        // Stop acknowledging the server heartbeat contract without allowing
+        // the local function to settle. Temporal will fail the workflow only
+        // after its real production heartbeat timeout elapses.
+        stopHeartbeats = true;
+        const beatsAtStop = heartbeats;
+        await expect(handle.result()).rejects.toBeDefined();
+        expect(heartbeats).toBe(beatsAtStop);
+        const failedDescription = await handle.describe();
+        expect(failedDescription.status.name).toBe("FAILED");
+        expect(
+          failedDescription.raw.pendingActivities?.some(
+            (activity) => activity.activityId === pendingActivityId,
+          ) ?? false,
+        ).toBe(false);
+
+        const fullActivityId = {
+          workflowId,
+          runId: handle.firstExecutionRunId,
+          activityId: pendingActivityId!,
+        };
+        await expect(
+          asyncCompletion.heartbeat(fullActivityId, {
+            fixtureProbe: "after-heartbeat-timeout",
+          }),
+        ).rejects.toBeInstanceOf(ActivityNotFoundError);
+
+        // Workflow/activity terminalization still does not prove that the
+        // in-process body stopped. The disposable loop remains live until the
+        // fixture's exact cleanup gate is released.
+        const ticksAtWorkflowFailure = hungTicks;
+        await waitFor(() => hungTicks >= ticksAtWorkflowFailure + 3);
+
+        const rejectedReplacementAttemptId = crypto.randomUUID();
+        const rejectedClaim = await claimSessionWorkForAttempt(dbClient.db, workspaceId, {
+          sessionId: target.id,
+          workflowId,
+          workflowRunId: crypto.randomUUID(),
+          attemptId: rejectedReplacementAttemptId,
+          dispatchId: `replacement-${rejectedReplacementAttemptId}`,
+          trigger: { kind: "next" },
+        });
+        expect(rejectedClaim).toEqual({ action: "unclaimed", reason: "control-pending" });
+
+        const [session, turns, updates, queue, rows] = await Promise.all([
+          getSession(dbClient.db, workspaceId, target.id),
+          listSessionTurns(dbClient.db, workspaceId, target.id),
+          listOutstandingSessionSystemUpdates(dbClient.db, workspaceId, target.id),
+          getSessionQueueSnapshot(dbClient.db, workspaceId, target.id),
+          withWorkspaceRls(dbClient.db, workspaceId, async (scoped) => {
+            const attempts = await scoped
+              .select()
+              .from(schema.sessionTurnAttempts)
+              .where(eq(schema.sessionTurnAttempts.sessionId, target.id));
+            const [interruption] = await scoped
+              .select()
+              .from(schema.sessionAttemptInterruptions)
+              .where(eq(schema.sessionAttemptInterruptions.sessionId, target.id));
+            const [wake] = await scoped
+              .select()
+              .from(schema.sessionWorkflowWakeOutbox)
+              .where(eq(schema.sessionWorkflowWakeOutbox.sessionId, target.id));
+            return { attempts, interruption, wake };
+          }),
+        ]);
+
+        expect(session).toMatchObject({
+          status: "queued",
+          activeTurnId: null,
+          queueHeadPosition: 0,
+          queueTailPosition: 1,
+        });
+        expect(turns).toHaveLength(1);
+        expect(turns[0]).toMatchObject({
+          id: targetClaim!.turn.id,
+          status: "superseded",
+          activeAttemptId: null,
+        });
+        expect(updates).toHaveLength(1);
+        expect(updates[0]).toMatchObject({
+          kind: "agent_steer_instruction",
+          state: "pending",
+        });
+        expect(queue).toMatchObject({ items: [], stoppingPreviousAttempt: false });
+        expect(rows.attempts).toHaveLength(1);
+        expect(rows.attempts[0]).toMatchObject({
+          id: targetClaim!.turn.activeAttemptId,
+          state: "closed",
+          outcome: "superseded",
+          quiescedAt: null,
+          temporalActivityId: pendingActivityId,
+        });
+        expect(rows.interruption).toMatchObject({ kind: "steer", state: "settled" });
+        expect(rows.wake).toMatchObject({
+          wakeRevision: steered.wakeRevision,
+          deliveredRevision: steered.wakeRevision,
+          attempts: 0,
+          lastError: null,
+        });
+        expect(replacementDispatches).toBe(0);
+        expect(model.calls).toBe(0);
+      } finally {
+        releaseHungActivity = true;
+        try {
+          await handle.terminate("OPE-75 failed-workflow fixture final cleanup");
+        } catch {
+          // The workflow is expected to have failed at the heartbeat timeout.
+        }
+        worker.shutdown();
+        await workerRun;
+      }
+    },
+    failedWorkflowFixtureTimeoutMs,
   );
 });
 
