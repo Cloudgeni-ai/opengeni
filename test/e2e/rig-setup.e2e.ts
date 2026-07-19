@@ -91,19 +91,30 @@ describe("real Docker rig-setup e2e", () => {
     return ((await create.json()) as { id: string }).id;
   }
 
-  async function waitForTerminal(sessionId: string, timeoutMs = 180_000): Promise<SessionEvent[]> {
+  async function waitForTerminal(
+    sessionId: string,
+    afterSequence = 0,
+    timeoutMs = 180_000,
+  ): Promise<SessionEvent[]> {
+    let events: SessionEvent[] = [];
     await waitFor(
       async () => {
-        const events = await sessionEvents(sessionId);
+        events = await sessionEvents(sessionId, afterSequence);
         return events.some(
           (e) =>
             e.type === "session.status.changed" &&
             ["idle", "failed"].includes((e.payload as { status?: string }).status ?? ""),
         );
       },
-      { timeoutMs },
+      {
+        timeoutMs,
+        describe: () => {
+          const logs = worker.logs();
+          return `[worker tail]\n${logs.slice(-20_000)}\n[events after ${afterSequence}]\n${JSON.stringify(events, null, 2)}`;
+        },
+      },
     );
-    return await sessionEvents(sessionId);
+    return events;
   }
 
   // The rig-setup hook has a dedicated lifecycle event family. Keep this E2E
@@ -124,6 +135,7 @@ describe("real Docker rig-setup e2e", () => {
     // completed{skipped:false} is the proof the script ran to exit 0 (which wrote the file).
     const ran = firstRig.find((e) => e.type === "rig.setup.completed");
     expect(ran?.payload.skipped).toBe(false);
+    const firstTerminalSequence = Math.max(...firstEvents.map((event) => event.sequence));
 
     // Second turn on the SAME session reuses the warm box → the marker skips setup.
     const followUp = await fetch(apiPath(`/sessions/${sessionId}/events`), {
@@ -132,19 +144,14 @@ describe("real Docker rig-setup e2e", () => {
       body: JSON.stringify({ type: "user.message", payload: { text: "again" } }),
     });
     expect(followUp.ok).toBe(true);
-    await waitFor(
-      async () => {
-        const skips = rigSetupEvents(await sessionEvents(sessionId)).filter(
-          (e) => e.type === "rig.setup.skipped",
-        );
-        return skips.length >= 1;
-      },
-      { timeoutMs: 180_000 },
+    const secondEvents = await waitForTerminal(sessionId, firstTerminalSequence);
+    const secondRig = rigSetupEvents(secondEvents);
+    expect(secondRig.filter((event) => event.type === "rig.setup.started")).toHaveLength(1);
+    const secondTerminal = secondRig.filter((event) =>
+      ["rig.setup.completed", "rig.setup.skipped", "rig.setup.failed"].includes(event.type),
     );
-    const skipped = rigSetupEvents(await sessionEvents(sessionId)).find(
-      (e) => e.type === "rig.setup.skipped",
-    );
-    expect(skipped?.type).toBe("rig.setup.skipped");
+    expect(secondTerminal).toHaveLength(1);
+    expect(secondTerminal[0]?.type).toBe("rig.setup.skipped");
   }, 300_000);
 
   test("a failing setup script (exit 7) fails the turn closed with a rig.setup failure", async () => {
@@ -177,8 +184,10 @@ describe("real Docker rig-setup e2e", () => {
   }, 300_000);
 });
 
-async function sessionEvents(sessionId: string): Promise<SessionEvent[]> {
-  const response = await fetch(apiPath(`/sessions/${sessionId}/events?limit=200`));
+async function sessionEvents(sessionId: string, afterSequence = 0): Promise<SessionEvent[]> {
+  const response = await fetch(
+    apiPath(`/sessions/${sessionId}/events?after=${afterSequence}&limit=200`),
+  );
   expect(response.ok).toBe(true);
   return (await response.json()) as SessionEvent[];
 }

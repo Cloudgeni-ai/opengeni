@@ -5543,6 +5543,26 @@ const RIG_SETUP_OUTPUT_TAIL_LIMIT = 4_000;
 // exec round-trip.
 const RIG_SETUP_SKIPPED_SENTINEL = "__OPENGENI_RIG_SETUP_SKIPPED__";
 
+function isExactRigSetupSkipOutput(result: unknown): boolean {
+  const candidates =
+    result && typeof result === "object"
+      ? [
+          (result as { output?: unknown }).output,
+          (result as { stderr?: unknown }).stderr,
+          (result as { stdout?: unknown }).stdout,
+        ].filter((value): value is string => typeof value === "string" && value.length > 0)
+      : [sandboxCommandOutput(result)].filter((value) => value.length > 0);
+  return (
+    candidates.length > 0 &&
+    candidates.every(
+      (value) =>
+        value === RIG_SETUP_SKIPPED_SENTINEL ||
+        value === `${RIG_SETUP_SKIPPED_SENTINEL}\n` ||
+        value === `${RIG_SETUP_SKIPPED_SENTINEL}\r\n`,
+    )
+  );
+}
+
 /**
  * The rig-setup command (M3). One idempotent bash program:
  *   1. create a UID-scoped directory below XDG_RUNTIME_DIR/TMPDIR (or use the
@@ -5695,10 +5715,11 @@ export async function runRigSetupHook(
     });
     throw failure;
   }
-  // The wrapper's skip branch emits exactly this one line. Accept the
-  // transport-normalized no-newline form as well, but reject any prefix,
-  // suffix, or user-script output so only an authentic wrapper result skips.
-  if (output === RIG_SETUP_SKIPPED_SENTINEL || output === `${RIG_SETUP_SKIPPED_SENTINEL}\n`) {
+  // The wrapper's skip branch emits exactly this one line. Providers may expose
+  // the same stdout bytes in both `output` and `stdout`; accept such mirrors,
+  // but reject any conflicting field, prefix, suffix, or user-script output so
+  // only an authentic wrapper result skips.
+  if (isExactRigSetupSkipOutput(result)) {
     await context.onRuntimeEvent?.({ type: "rig.setup.skipped", payload });
     return;
   }

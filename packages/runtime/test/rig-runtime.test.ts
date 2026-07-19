@@ -238,6 +238,39 @@ describe("runRigSetupHook (M3)", () => {
     expect(terminal.payload.versionId).toBe("22222222-2222-4222-8222-222222222222");
   });
 
+  test("provider-mirrored exact marker output still skips", async () => {
+    const events: Array<{ type: string; payload: any }> = [];
+    const marker = "__OPENGENI_RIG_SETUP_SKIPPED__\n";
+    const { session } = fakeSession({ status: 0, output: marker, stdout: marker, stderr: "" });
+    await runRigSetupHook(session as any, {
+      environment: {},
+      rigSetup: rigSetup(),
+      onRuntimeEvent: (event) => {
+        events.push(event as any);
+      },
+    });
+    expect(events.map((e) => e.type)).toEqual(["rig.setup.started", "rig.setup.skipped"]);
+  });
+
+  test("a conflicting provider output field prevents skip classification", async () => {
+    const events: Array<{ type: string; payload: any }> = [];
+    const marker = "__OPENGENI_RIG_SETUP_SKIPPED__\n";
+    const { session } = fakeSession({
+      status: 0,
+      output: marker,
+      stdout: `unexpected prefix\n${marker}`,
+    });
+    await runRigSetupHook(session as any, {
+      environment: {},
+      rigSetup: rigSetup(),
+      onRuntimeEvent: (event) => {
+        events.push(event as any);
+      },
+    });
+    expect(events.map((e) => e.type)).toEqual(["rig.setup.started", "rig.setup.completed"]);
+    expect(events.at(-1)!.payload.skipped).toBe(false);
+  });
+
   test("script ran and exited 0 → completed{skipped:false}", async () => {
     const events: Array<{ type: string; payload: any }> = [];
     const { session } = fakeSession({ status: 0, output: "installed\n" });
