@@ -5,17 +5,17 @@ import {
 } from "@opengeni/db";
 import {
   SUMMARY_BUFFER_TOKENS,
-  buildCompactionPromptInput,
   buildCompactionReplacementHistory,
   compactionReplacementFingerprint,
   decideCompaction,
   estimateTokens,
   latestCompactionReplacementFingerprint,
+  prepareCompactionPromptInput,
   sanitizeHistoryItemsForModel,
   summarizeForCompaction,
   type CompactionItem,
 } from "@opengeni/runtime";
-import type { Settings } from "@opengeni/config";
+import { contextInputBudgetTokens, type Settings } from "@opengeni/config";
 import type { PreparedContextCompactionPersistence } from "./types";
 import {
   persistPreparedContextCompaction,
@@ -35,10 +35,10 @@ export type MaybeCompactResult = PersistedContextCompactionResult;
  * supersedes the old active rows and inserts replacement active rows:
  * all real user messages plus one summary.
  *
- * If the summarizer itself exceeds the context window, the oldest prompt item
- * is removed and the same compaction call is retried, exactly like Codex local
- * compaction. Other provider failures propagate. There is no non-model
- * fallback and no silent request-local history trimming.
+ * Before sampling, a temporary copy is fitted by minimizing old tool outputs
+ * and then removing whole oldest work units if necessary. One authoritative
+ * provider overflow permits one smaller refit. Other failures propagate. There
+ * is no non-model fallback or mutation of canonical history before success.
  *
  * There is no kept assistant/tool tail. Assistant messages,
  * tool calls/results, reasoning, and images stay only in inactive audit rows.
@@ -118,7 +118,8 @@ export async function maybeCompactContext(
   }
 
   const estimatedTokensBefore = estimateTokens(items);
-  const summaryBody = await summarizeWithCodexOverflowTrimming(summarize, settings, items);
+  const summarized = await summarizeWithCodexOverflowTrimming(summarize, settings, items);
+  const summaryBody = summarized.summaryBody;
   const replacementHistory = buildCompactionReplacementHistory(items, summaryBody);
   const estimatedTokensAfter = estimateTokens(replacementHistory);
   const replacementFingerprint = compactionReplacementFingerprint(replacementHistory);
@@ -187,6 +188,10 @@ export async function maybeCompactContext(
       estimatedTokensBefore,
       estimatedTokensAfter,
       replacementFingerprint,
+      compactionInputEstimatedTokens: summarized.preparation.estimatedInputTokens,
+      compactionInputToolOutputsRewritten: summarized.preparation.rewrittenToolOutputs,
+      compactionInputHistoryItemsDropped: summarized.preparation.droppedHistoryItems,
+      compactionInputProviderCalls: summarized.providerCalls,
     },
     result: {
       signalTokens: decision.signalTokens,
@@ -205,32 +210,72 @@ async function summarizeWithCodexOverflowTrimming(
   summarize: CompactionSummarizer,
   settings: Settings,
   activeHistory: CompactionItem[],
-): Promise<string> {
-  const compactionHistory = activeHistory.slice();
-  while (true) {
-    try {
-      return await summarize(settings, buildCompactionPromptInput(compactionHistory));
-    } catch (error) {
-      if (!isContextWindowExceeded(error) || compactionHistory.length === 0) {
-        throw error;
-      }
-      // Codex removes one oldest history item, keeps the synthesized checkpoint
-      // prompt, resets its stream retry count, and samples the summary again.
-      compactionHistory.shift();
-    }
+): Promise<{
+  summaryBody: string;
+  preparation: ReturnType<typeof prepareCompactionPromptInput>;
+  providerCalls: number;
+}> {
+  // Codex's estimator is intentionally coarse. Keep the explicit checkpoint
+  // request below both the effective input window and the raw window minus the
+  // requested summary, then leave 15% estimator headroom. This changes only the
+  // temporary summarizer input; durable active history remains untouched until
+  // applyContextCompaction succeeds under the attempt fence.
+  const summaryAwareBudget = Math.max(0, settings.contextWindowTokens - SUMMARY_BUFFER_TOKENS);
+  const configuredInputBudget = contextInputBudgetTokens(settings);
+  const structuralBudget = Math.min(
+    configuredInputBudget > 0 ? configuredInputBudget : summaryAwareBudget,
+    summaryAwareBudget,
+  );
+  const initialBudget = Math.floor(structuralBudget * 0.85);
+  let preparation = prepareCompactionPromptInput(activeHistory, initialBudget);
+  try {
+    return {
+      summaryBody: await summarize(settings, preparation.input),
+      preparation,
+      providerCalls: 1,
+    };
+  } catch (error) {
+    if (!isContextWindowExceeded(error)) throw error;
+    // The provider is more authoritative than the byte/4 estimate. Refit once
+    // to 70% of both the configured target and the actual prepared estimate;
+    // then fail terminally with prior history intact. Never issue one failing
+    // request per oldest item. The production incident proved that the
+    // provider can count slightly more than twice the byte/4 estimate, so a
+    // half-size retry is the smallest honest bound for that observed skew.
+    const retryBudget = Math.floor(
+      Math.min(initialBudget * 0.5, preparation.estimatedInputTokens * 0.5),
+    );
+    preparation = prepareCompactionPromptInput(activeHistory, retryBudget);
+    return {
+      summaryBody: await summarize(settings, preparation.input),
+      preparation,
+      providerCalls: 2,
+    };
   }
 }
 
-function isContextWindowExceeded(error: unknown): boolean {
+export function isContextWindowExceeded(error: unknown, seen = new WeakSet<object>()): boolean {
   if (!error || typeof error !== "object") return false;
+  if (seen.has(error)) return false;
+  seen.add(error);
   const record = error as Record<string, unknown>;
   const code = typeof record.code === "string" ? record.code.toLowerCase() : "";
-  const message = error instanceof Error ? error.message.toLowerCase() : "";
-  return (
+  const message =
+    typeof record.message === "string"
+      ? record.message.toLowerCase()
+      : error instanceof Error
+        ? error.message.toLowerCase()
+        : "";
+  const direct =
     code === "context_length_exceeded" ||
     code === "context_window_exceeded" ||
     message.includes("context window") ||
     message.includes("maximum context length") ||
-    message.includes("too many tokens")
+    message.includes("too many tokens");
+  return (
+    direct ||
+    isContextWindowExceeded(record.cause, seen) ||
+    isContextWindowExceeded(record.error, seen) ||
+    isContextWindowExceeded(record.diagnostics, seen)
   );
 }

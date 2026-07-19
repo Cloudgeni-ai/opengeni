@@ -15,7 +15,14 @@ import {
   PanelRightCloseIcon,
   XIcon,
 } from "lucide-react";
-import { Group, Panel, Separator, useDefaultLayout, usePanelRef } from "react-resizable-panels";
+import {
+  Group,
+  Panel,
+  Separator,
+  useDefaultLayout,
+  usePanelRef,
+  type LayoutStorage,
+} from "react-resizable-panels";
 import { cn } from "../lib/cn";
 
 export type WorkspaceTab = {
@@ -52,6 +59,24 @@ export type WorkspaceDockProps = {
   maxSize?: number | undefined;
   className?: string | undefined;
 };
+
+const SERVER_LAYOUT_STORAGE: LayoutStorage = {
+  getItem: () => null,
+  setItem: () => {},
+};
+
+/** `useDefaultLayout` defaults to the ambient `localStorage` identifier when
+ * storage is undefined, which throws during SSR. Access can also throw in a
+ * browser that blocks storage (sandboxed frames/private policy), so both cases
+ * use a stable, non-persisting implementation instead. */
+function getLayoutStorage(): LayoutStorage {
+  if (typeof window === "undefined") return SERVER_LAYOUT_STORAGE;
+  try {
+    return window.localStorage;
+  } catch {
+    return SERVER_LAYOUT_STORAGE;
+  }
+}
 
 /**
  * The resizable / collapsible / maximizable right-hand Workspace dock. Replaces
@@ -116,6 +141,7 @@ export function WorkspaceDock({
   const rootRef = useRef<HTMLDivElement | null>(null);
   const reopenRef = useRef<HTMLButtonElement | null>(null);
   const returnFocusRef = useRef<HTMLElement | null>(null);
+  const initialNarrowFocusRef = useRef(false);
   const dockPanelRef = usePanelRef();
   const [internalCollapsed, setInternalCollapsed] = useState(false);
   const [maximized, setMaximized] = useState(false);
@@ -132,9 +158,9 @@ export function WorkspaceDock({
   // Persisted layout (width split) keyed by autoSaveId.
   const { defaultLayout, onLayoutChanged } = useDefaultLayout({
     panelIds: ["primary", "dock"],
-    storage: typeof window !== "undefined" ? window.localStorage : undefined,
+    storage: getLayoutStorage(),
     id: autoSaveId,
-  } as Parameters<typeof useDefaultLayout>[0]);
+  });
 
   const requestedTab = activeTab ?? internalTab;
   const tabIds = tabs.map((tab) => tab.id);
@@ -206,6 +232,23 @@ export function WorkspaceDock({
     return () => cancelAnimationFrame(frame);
   }, [collapsed, hostControlled, narrow]);
 
+  // On the first narrow render there is no collapsed-state transition to drive
+  // focus into the modal: the overlay can already be open at mount. Place focus
+  // on its selected tab once, just as we do when an existing overlay is opened.
+  useEffect(() => {
+    if (!narrow || collapsed || initialNarrowFocusRef.current) return;
+    initialNarrowFocusRef.current = true;
+    const active = document.activeElement;
+    const workspaceSurface = rootRef.current?.querySelector<HTMLElement>('[role="dialog"]');
+    if (active instanceof HTMLElement && !workspaceSurface?.contains(active)) {
+      returnFocusRef.current = active;
+    }
+    const frame = requestAnimationFrame(() => {
+      workspaceSurface?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')?.focus();
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [collapsed, narrow]);
+
   // Keep the active tab valid if the available tabs change.
   useEffect(() => {
     if (firstTabId && !requestedTabIsValid) {
@@ -224,14 +267,55 @@ export function WorkspaceDock({
     setCollapsed(false);
   }, [dockPanelRef, setCollapsed]);
 
-  // Esc restores from maximize (desktop) and closes the mobile overlay.
+  // Esc restores from maximize (desktop) and closes the mobile overlay. Tab is
+  // fenced inside either full-screen surface: both visually cover the host, so
+  // keyboard focus must never move into invisible content behind them.
   useEffect(() => {
     const overlayOpen = maximized || (narrow && !collapsed);
     if (!overlayOpen) return;
     const onKey = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      if (maximized) setMaximized(false);
-      else collapse();
+      if (event.key === "Escape") {
+        if (maximized) setMaximized(false);
+        else collapse();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const surface = rootRef.current?.querySelector<HTMLElement>(
+        narrow ? '[role="dialog"]' : "[data-workspace-surface]",
+      );
+      if (!surface) return;
+      const focusable = Array.from(surface.querySelectorAll<HTMLElement>("*")).filter(
+        (element) =>
+          element.tabIndex >= 0 &&
+          !element.hasAttribute("disabled") &&
+          element.getClientRects().length > 0 &&
+          getComputedStyle(element).visibility !== "hidden",
+      );
+      const first = focusable[0];
+      const last = focusable.at(-1);
+      const active = document.activeElement;
+      if (!first || !last) {
+        event.preventDefault();
+        surface.focus();
+        return;
+      }
+      if (!surface.contains(active)) {
+        event.preventDefault();
+        (event.shiftKey ? last : first).focus();
+        return;
+      }
+      if ((event.shiftKey && active === first) || (!event.shiftKey && active === last)) {
+        event.preventDefault();
+        (event.shiftKey ? last : first).focus();
+        return;
+      }
+      // Focus can emerge from a shadow-DOM editor/highlighter host at a point
+      // the light-DOM order cannot predict. Repair any escape after the browser
+      // performs its default Tab move.
+      requestAnimationFrame(() => {
+        const next = document.activeElement;
+        if (!surface.contains(next)) (event.shiftKey ? last : first).focus();
+      });
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -243,8 +327,16 @@ export function WorkspaceDock({
   if (narrow) {
     return (
       <div ref={rootRef} className={cn("relative flex h-full min-h-0 w-full min-w-0", className)}>
-        <div className="min-h-0 min-w-0 flex-1">{primary}</div>
         <div
+          data-workspace-primary
+          aria-hidden={!collapsed ? true : undefined}
+          className="min-h-0 min-w-0 flex-1"
+          inert={!collapsed ? true : undefined}
+        >
+          {primary}
+        </div>
+        <div
+          data-workspace-surface
           role="dialog"
           aria-modal="true"
           aria-label="Workspace"
@@ -323,12 +415,19 @@ export function WorkspaceDock({
         onLayoutChanged={onLayoutChanged}
       >
         <Panel id="primary" minSize="30%" className="min-h-0 min-w-0">
-          {primary}
+          <div
+            data-workspace-primary
+            aria-hidden={maximized ? true : undefined}
+            className="h-full min-h-0 min-w-0"
+            inert={maximized ? true : undefined}
+          >
+            {primary}
+          </div>
         </Panel>
 
         {!collapsed && (
-          <Separator className="group relative w-1.5 shrink-0 outline-none">
-            <span className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-og-border transition-colors group-hover:bg-og-accent group-data-[separator-state=dragging]:bg-og-accent" />
+          <Separator className="group relative z-10 w-1.5 shrink-0 outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-og-accent max-[1023px]:-mx-[19px] max-[1023px]:w-11 pointer-coarse:-mx-[19px] pointer-coarse:w-11">
+            <span className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-og-border transition-colors group-hover:bg-og-accent group-focus-visible:bg-og-accent group-data-[separator-state=dragging]:bg-og-accent" />
           </Separator>
         )}
 
@@ -354,6 +453,9 @@ export function WorkspaceDock({
               layout changes must never destroy an editor buffer or terminal view. */}
           <div
             data-workspace-surface
+            role={maximized ? "dialog" : undefined}
+            aria-modal={maximized ? true : undefined}
+            aria-label={maximized ? "Workspace" : undefined}
             aria-hidden={collapsed ? true : undefined}
             className={cn(
               "flex h-full min-h-0 min-w-0 flex-col bg-og-bg",
@@ -429,8 +531,15 @@ function DockChrome({
   const active = tabs.find((t) => t.id === current) ?? tabs[0];
   const tabsetId = useId();
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const tabListRef = useRef<HTMLDivElement | null>(null);
   const [visitedTabs, setVisitedTabs] = useState<Set<string>>(() => new Set());
+  const [tabOverflow, setTabOverflow] = useState({ start: false, end: false });
   const activeId = active?.id ?? "";
+  const activeTabIndex = tabs.findIndex((tab) => tab.id === activeId);
+  const keepActiveTabVisible = useCallback(() => {
+    const selected = activeTabIndex >= 0 ? tabRefs.current[activeTabIndex] : null;
+    selected?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [activeTabIndex]);
 
   useEffect(() => {
     if (!activeId) return;
@@ -441,6 +550,55 @@ function DockChrome({
       return next;
     });
   }, [activeId]);
+
+  // A controlled/initial tab can become active without receiving focus (for
+  // example, a host routing a guarded diff into Files). Native scrolling only
+  // follows focus, so keep the selected tab inside the horizontally scrollable
+  // strip even when state — rather than a click or arrow key — selected it.
+  useDockLayoutEffect(() => {
+    keepActiveTabVisible();
+  }, [activeId, keepActiveTabVisible]);
+
+  // Hidden scrollbars keep the chrome quiet, but without an edge cue a clipped
+  // host label reads like corrupted copy. Fade only the edge(s) with more tabs,
+  // and recompute after scrolling, resizing, or late font metrics.
+  useDockLayoutEffect(() => {
+    const list = tabListRef.current;
+    if (!list) return;
+    const update = () => {
+      const max = Math.max(0, list.scrollWidth - list.clientWidth);
+      const next = { start: list.scrollLeft > 1, end: list.scrollLeft < max - 1 };
+      setTabOverflow((previous) =>
+        previous.start === next.start && previous.end === next.end ? previous : next,
+      );
+    };
+    update();
+    list.addEventListener("scroll", update, { passive: true });
+    const observer =
+      typeof ResizeObserver === "undefined"
+        ? null
+        : new ResizeObserver(() => {
+            keepActiveTabVisible();
+            update();
+          });
+    observer?.observe(list);
+    for (const tab of tabRefs.current) {
+      if (tab) observer?.observe(tab);
+    }
+    return () => {
+      list.removeEventListener("scroll", update);
+      observer?.disconnect();
+    };
+  }, [activeId, keepActiveTabVisible, tabs.length]);
+
+  const tabMask =
+    tabOverflow.start && tabOverflow.end
+      ? "linear-gradient(to right, transparent 0, black 14px, black calc(100% - 14px), transparent 100%)"
+      : tabOverflow.start
+        ? "linear-gradient(to right, transparent 0, black 14px, black 100%)"
+        : tabOverflow.end
+          ? "linear-gradient(to right, black 0, black calc(100% - 14px), transparent 100%)"
+          : undefined;
 
   const activateTab = (index: number) => {
     const tab = tabs[index];
@@ -465,8 +623,8 @@ function DockChrome({
 
   return (
     <>
-      <div className="grid shrink-0 grid-cols-[auto_minmax(0,1fr)_auto_auto] items-center gap-x-2 border-b border-og-border px-1.5 py-1 max-[1023px]:grid-cols-[auto_minmax(0,1fr)_auto] max-[1023px]:gap-y-0 max-[1023px]:px-2 max-[1023px]:pb-1 max-[1023px]:pt-0">
-        <div className="flex min-w-0 shrink-0 items-center max-[1023px]:min-h-11">
+      <div className="grid shrink-0 grid-cols-[auto_minmax(0,1fr)_auto_auto] items-center gap-x-2 border-b border-og-border px-1.5 py-1 max-[1023px]:grid-cols-[auto_minmax(0,1fr)_auto] max-[1023px]:gap-y-0 max-[1023px]:px-2 max-[1023px]:pb-1 max-[1023px]:pt-0 min-[640px]:max-[1023px]:grid-cols-[auto_minmax(0,1fr)_auto_auto]">
+        <div className="flex min-w-0 shrink-0 items-center max-[1023px]:min-h-11 min-[640px]:max-[1023px]:col-start-1 min-[640px]:max-[1023px]:row-start-1">
           {leading ?? (
             <span className="hidden truncate px-1 text-og-sm font-semibold text-og-fg max-[1023px]:inline">
               Workspace
@@ -477,11 +635,19 @@ function DockChrome({
             grow into or overlap the chrome controls (they stay shrink-0). The
             scrollbar is hidden to keep the strip calm. On the narrow overlay it
             owns a full second row, so status/close chrome can never squeeze the
-            canonical workspace navigation out of view. */}
+            canonical workspace navigation out of view. Tablets have enough
+            width to retain the denser single-row chrome, with this same strip
+            absorbing any unusually long host-injected labels. */}
         <div
-          className="flex min-w-0 items-center gap-0.5 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden max-[1023px]:col-span-3 max-[1023px]:row-start-2 max-[1023px]:w-full"
+          ref={tabListRef}
+          className="flex min-w-0 items-center gap-0.5 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden max-[1023px]:col-span-3 max-[1023px]:row-start-2 max-[1023px]:w-full min-[640px]:max-[1023px]:col-span-1 min-[640px]:max-[1023px]:col-start-2 min-[640px]:max-[1023px]:row-start-1"
           role="tablist"
           aria-orientation="horizontal"
+          style={{
+            maskImage: tabMask,
+            WebkitMaskImage: tabMask,
+            scrollPaddingInline: "16px",
+          }}
         >
           {tabs.map((tab, index) => (
             <button
@@ -504,13 +670,17 @@ function DockChrome({
                   : "text-og-fg-subtle hover:text-og-fg",
               )}
             >
-              <span>{tab.label}</span>
+              <span data-contrast-audited>{tab.label}</span>
               {tab.badge}
             </button>
           ))}
         </div>
-        <div className="flex min-w-0 shrink-0 items-center justify-self-end">{accessory}</div>
-        <div className="flex shrink-0 items-center gap-0.5 text-og-fg-subtle">{controls}</div>
+        <div className="flex min-w-0 shrink-0 items-center justify-self-end min-[640px]:max-[1023px]:col-start-3 min-[640px]:max-[1023px]:row-start-1">
+          {accessory}
+        </div>
+        <div className="flex shrink-0 items-center gap-0.5 text-og-fg-subtle min-[640px]:max-[1023px]:col-start-4 min-[640px]:max-[1023px]:row-start-1">
+          {controls}
+        </div>
       </div>
       <div className="min-h-0 min-w-0 flex-1 overflow-hidden">
         {tabs.length > 0 ? (

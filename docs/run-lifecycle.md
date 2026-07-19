@@ -80,8 +80,11 @@ failed full turn, poll with inference, or redeem a reset/boost entitlement.
 Provider context-window overflow is also handled inside the activity, not by a
 Temporal retry. When an OpenAI/Azure context overflow is classified,
 `runAgentTurn` invokes the portable Codex-local compaction path. The summarizer
-receives structured active history plus the checkpoint prompt; on context
-overflow it removes exactly one oldest input item and retries. Other failures
+receives a bounded, protocol-valid temporary copy of structured active history
+plus the checkpoint prompt. Aggregate tool outputs are replaced oldest-first in
+that copy; whole oldest user-delimited units are removed only if necessary. A
+provider overflow gets one smaller refit, so the path performs at most two
+provider calls rather than one failing request per history item. Other failures
 propagate without changing active history. After a fenced durable replacement,
 the same activity, turn, attempt, and sandbox rebuild model input and continue;
 compaction never creates queue or recovery work.
@@ -171,6 +174,17 @@ promotes SQL text, parameters, or arbitrary provider messages into those stable
 attributes. A persistence-boundary span also uses a constant error type/message
 for both OTLP error attributes and status; the raw wrapper error is never passed
 to the exporter.
+
+One model response's parallel tool calls are tracked as an in-memory settlement
+batch while its stream is active; batch identity is not durable schema. A
+completed response can reconcile and clear its exact call IDs even if an older
+response left an unresolved receipt. Turn-end recovery searches both active and
+compacted (inactive) canonical history. A complete pair made inactive by
+compaction is consumed silently; it is never reactivated and never produces a
+duplicate `agent.toolCall.output`. A still-active complete pair retains the
+existing recovery projection because its receipt can mark a crash after memory
+was saved but before the original event publish. Only genuinely unresolved
+execution gets one explicit `interrupted / outcome unknown` closure.
 
 Claim, interruption, and event-writing settlement share one lock order:
 workspace, then session, then exact turn, then exact attempt. Event inserts also touch the workspace through

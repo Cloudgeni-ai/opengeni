@@ -29,7 +29,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await blank?.release();
-});
+}, 180_000);
 
 describe("migration 0061 (revisioned workflow wake outbox)", () => {
   test("migrates populated control receipts and seeds already-committed maintenance work", async () => {

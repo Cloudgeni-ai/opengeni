@@ -60,6 +60,7 @@ import {
 } from "../src/index";
 
 import { Manifest } from "@openai/agents/sandbox";
+import { TurnSandboxCommandCancelledError } from "../src/sandbox/turn-tool-cancellation";
 import { CompactionNeededError } from "../src/context-compaction";
 import { startTestMcpServer, testSettings } from "@opengeni/testing";
 import type { MCPServer } from "@openai/agents";
@@ -1492,6 +1493,35 @@ describe("runtime event normalization", () => {
     expect(events[1]?.payload.exitCode).toBe(2);
     expect(events[1]?.payload.error).toContain("Illegal option");
     expect(JSON.stringify(events)).not.toContain("sig=secret");
+  });
+
+  test("propagates turn cancellation instead of downgrading it to a file-download failure", async () => {
+    const events: string[] = [];
+    await expect(
+      materializeSandboxFileDownloads(
+        {
+          state: { manifest: new Manifest({ root: "/workspace" }) },
+          exec: async () => ({ exitCode: 0 }),
+        } as any,
+        [
+          {
+            fileId: "file-1",
+            mountPath: "files/file-1",
+            filename: "input.txt",
+            url: "https://storage.example/input.txt",
+          },
+        ],
+        {
+          commandRunner: async () => {
+            throw new TurnSandboxCommandCancelledError(new Error("steered during setup"));
+          },
+          onRuntimeEvent: (event) => {
+            events.push(event.type);
+          },
+        },
+      ),
+    ).rejects.toThrow("steered during setup");
+    expect(events).toEqual(["sandbox.operation.started"]);
   });
 
   test("wraps sandbox clients with signed file downloads on create and resume", async () => {

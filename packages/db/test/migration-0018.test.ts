@@ -45,7 +45,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await blank?.release();
-});
+}, 180_000);
 
 describe("migration 0018 (sandbox_os + sandbox_group_id)", () => {
   test("applies the full chain, backfills, enforces CHECK + index, and is idempotent", async () => {

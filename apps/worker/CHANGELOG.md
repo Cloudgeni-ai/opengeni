@@ -1,5 +1,27 @@
 # @opengeni/worker-bundle
 
+## 0.7.6
+
+### Patch Changes
+
+- 14ce2e3: Bound model-facing textual tool output with Codex-compatible, replay-idempotent semantics, account
+  for complete current model input, make compaction failure/progress transitions
+  durable and convergent, and replace recursive session discovery with a compact
+  paginated projection.
+- ec0697a: Ship the production-hardened captured workspace workbench, physically verified Steer/Pause cancellation across cloud, local, and self-hosted model tools, pre-model preparation, sandbox provisioning, and lifecycle/setup commands, durable quiescence admission fencing, cancellation-aware SDK reads and turn cleanup, single-round-trip pruned workspace indexing, truthful shutdown states, a responsive and accessible review dock, Unicode coverage, and package-safe CSS/SSR integration.
+- Updated dependencies [14ce2e3]
+- Updated dependencies [053c5df]
+- Updated dependencies [ec0697a]
+  - @opengeni/codex@0.2.4
+  - @opengeni/config@0.5.2
+  - @opengeni/db@0.7.4
+  - @opengeni/runtime@0.8.0
+  - @opengeni/contracts@0.11.0
+  - @opengeni/core@0.4.11
+  - @opengeni/documents@0.2.13
+  - @opengeni/storage@0.2.11
+  - @opengeni/events@0.3.4
+
 ## 0.7.5
 
 ### Patch Changes

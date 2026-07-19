@@ -6,6 +6,7 @@ import {
   continueAsNew,
   defineSignal,
   isCancellation,
+  patched,
   setHandler,
   TimeoutFailure,
   uuid4,
@@ -119,6 +120,29 @@ export function turnPersistenceHandoffFromHeartbeat(
 ): activities.TurnPersistenceHandoff | null {
   const state = turnPersistenceHandoffHeartbeatState(details);
   return state.state === "valid" ? state.handoff : null;
+}
+
+/**
+ * WAIT_CANCELLATION_COMPLETED normally reports a cancelled activity to workflow
+ * code as an ActivityFailure whose typed cause is the cancellation. A control's
+ * database fence can, however, reach runAgentTurn immediately before Temporal's
+ * cancellation request. The activity still crosses its mandatory physical tool
+ * fence and throws TURN_ATTEMPT_FENCED, but @temporalio/worker 1.20 serializes
+ * that pre-request CancelledFailure as an ApplicationFailure with the stable
+ * `CancelledFailure` type. Accept only that exact agent-turn protocol shape in
+ * addition to the normal wrapper; never accept a timeout, arbitrary nested
+ * cause, or a differently messaged application failure as physical-stop proof.
+ */
+export function isConfirmedTurnActivityCancellation(error: unknown): boolean {
+  if (isCancellation(error)) return true;
+  if (!(error instanceof ActivityFailure)) return false;
+  if (error.cause !== undefined && isCancellation(error.cause)) return true;
+  return (
+    error.activityType === "runAgentTurn" &&
+    error.cause instanceof ApplicationFailure &&
+    error.cause.type === "CancelledFailure" &&
+    error.cause.message === "TURN_ATTEMPT_FENCED"
+  );
 }
 
 export const userMessage = defineSignal<[string]>("userMessage");
@@ -412,7 +436,7 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
         trigger,
       }),
     );
-    const outcome:
+    const racedOutcome:
       | { kind: "result"; result: activities.RunAgentTurnResult }
       | { kind: "control" }
       | { kind: "failure"; error: unknown } = await Promise.race([
@@ -427,6 +451,22 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
         kind: "control" as const,
       })),
     ]);
+    // A Steer/Pause transaction fences the active attempt before its Temporal
+    // signal is necessarily handled. That fence can make the activity's typed
+    // cancellation win Promise.race by one workflow activation. Give only that
+    // confirmed cancellation shape a short deterministic arbitration window;
+    // the durable control signal is authoritative once observed. Ordinary
+    // failures and timeouts never wait here, and a cancellation with no session
+    // control still follows the failure/cancellation path below.
+    if (
+      racedOutcome.kind === "failure" &&
+      isConfirmedTurnActivityCancellation(racedOutcome.error) &&
+      interruptionWakeups === interruptionBaseline
+    ) {
+      await condition(() => interruptionWakeups !== interruptionBaseline, "250ms");
+    }
+    const outcome =
+      interruptionWakeups !== interruptionBaseline ? ({ kind: "control" } as const) : racedOutcome;
 
     if (outcome.kind === "control") {
       scope.cancel();
@@ -435,7 +475,10 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       // attempt so a provider completion racing the signal can establish and
       // settle its narrow PostgreSQL post-effect receipt. Closing first creates
       // an unavoidable completion->receipt race and can discard truthful usage.
-      await turn.catch(() => undefined);
+      const termination = await turn.then(
+        () => ({ kind: "completed" as const }),
+        (error: unknown) => ({ kind: "failed" as const, error }),
+      );
       const settlement = await activity.settleSessionInterruptions({
         accountId,
         workspaceId,
@@ -443,6 +486,27 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
         attemptId,
         workflowId: workflowInfo().workflowId,
       });
+      // This is a new durable command in a long-lived workflow. The patch marker
+      // keeps histories that already crossed this point replay-safe. New workers
+      // record quiescence from inside the dying activity; this post-termination
+      // call is its idempotent recovery fallback. A fulfilled activity or a
+      // Temporal cancellation proves the worker crossed its mandatory physical
+      // tool fence. A timeout/worker-loss failure proves no such thing: a remote
+      // command may still be alive, so fail closed with the queue blocked rather
+      // than manufacture a false quiescence receipt.
+      const physicalStopConfirmed =
+        termination.kind === "completed" || isConfirmedTurnActivityCancellation(termination.error);
+      if (patched("session-attempt-quiescence-v1") && physicalStopConfirmed) {
+        await activity.settleSessionInterruptions({
+          accountId,
+          workspaceId,
+          sessionId,
+          attemptId,
+          workflowId: workflowInfo().workflowId,
+          phase: "attempt_quiesced",
+        });
+      }
+      if (!physicalStopConfirmed) throw termination.error;
       return settlement.action !== "paused" && settlement.action !== "failed";
     }
 

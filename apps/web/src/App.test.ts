@@ -35,6 +35,7 @@ import {
   buildRailForest,
   groupSessionsForRail,
   isRunningStatus,
+  mergeSessionForRail,
   recencyGroupFor,
   relativeTimeLabel,
   visibleForestRows,
@@ -263,6 +264,32 @@ describe("rail session grouping", () => {
     });
     const forest = buildRailForest([manager], NOW);
     expect(forest.running.map((node) => node.session.id)).toEqual(["manager-summary"]);
+  });
+
+  test("selected-session detail preserves the list-only hierarchy summary", () => {
+    const listProjection = railSession({
+      id: "selected-manager",
+      status: "idle",
+      treeStats: {
+        directChildren: 2,
+        totalDescendants: 4,
+        runningDescendants: 0,
+        queuedDescendants: 0,
+        attentionDescendants: 0,
+        pausedDescendants: 0,
+        failedDescendants: 0,
+      },
+    });
+    const selectedDetail = railSession({ id: "selected-manager", status: "running" });
+
+    const merged = mergeSessionForRail(listProjection, selectedDetail);
+    expect(merged.status).toBe("running");
+    expect(merged.treeStats).toEqual(listProjection.treeStats);
+
+    const refreshedStats = { ...listProjection.treeStats!, directChildren: 3 };
+    expect(
+      mergeSessionForRail(merged, { ...selectedDetail, treeStats: refreshedStats }).treeStats,
+    ).toEqual(refreshedStats);
   });
 
   test("visibleForestRows expands only where the set says so", () => {

@@ -44,13 +44,23 @@ async function heartbeatPersistenceThenDie(
   return await hangWithoutHeartbeating();
 }
 
-// Generous bound for the server to detect a missed-heartbeat activity
-// (2-minute heartbeat window + server detection slack) plus the rest of the
-// test. This timeout does not change runtime behavior; it only prevents a slow
-// CI host from killing the real heartbeat proof just before recovery settles.
-const workerDeathTestTimeoutMs = 240_000;
+// The end-to-end ownership chain has two independently bounded phases: the
+// server may spend the full two-minute heartbeat window detecting the dead turn
+// worker, then the control-plane recovery activity has its own two-minute
+// start-to-close contract. Leave scheduling and worker-drain slack after both
+// phases so a loaded CI host cannot cancel a valid recovery at the boundary.
+// This finite test ceiling does not change either runtime timeout.
+const workerDeathTestTimeoutMs = 360_000;
 
 const temporalWorkflowTestTimeoutMs = 30_000;
+
+// Goal-continuation cases run real workflow timers and activities after the two
+// long heartbeat-recovery proofs. On a loaded shared runner, task polling and
+// worker drain can legitimately exceed the general 30s test ceiling even though
+// the workflow's delay and settlement assertions still pass. Keep a finite,
+// narrowly scoped ceiling so a timed-out test cannot strand its worker and
+// cascade into the following cases; this does not change any runtime timeout.
+const goalContinuationTestTimeoutMs = 60_000;
 
 // continueAsNew tests legitimately span a continueAsNew chain (the handle only
 // resolves on the FINAL run) plus a possible 5s idle-wait window before the
@@ -867,9 +877,77 @@ describe("Temporal workflow integration", () => {
         await waitFor(() => runs.length === 2);
         expect(controls).toEqual([
           { ...scope, sessionId, attemptId: expect.any(String), workflowId },
+          {
+            ...scope,
+            sessionId,
+            attemptId: expect.any(String),
+            workflowId,
+            phase: "attempt_quiesced",
+          },
         ]);
+        expect((controls[1] as { attemptId: string }).attemptId).toBe(
+          (controls[0] as { attemptId: string }).attemptId,
+        );
         expect(runs[1]).toEqual(second);
       } finally {
+        worker.shutdown();
+        await run;
+      }
+    },
+    temporalWorkflowTestTimeoutMs,
+  );
+
+  test(
+    "Steer fails closed without a quiescence receipt when the cancelled activity terminates as a failure",
+    async () => {
+      const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+      const scope = workflowScope();
+      const sessionId = crypto.randomUUID();
+      const workflowId = `wf-${crypto.randomUUID()}`;
+      const first = queuedTurn("event-1");
+      const second = queuedTurn("event-2");
+      const queuedTurns = [first];
+      const controls: unknown[] = [];
+      let runs = 0;
+      let terminateFirst = false;
+      const admission = createTurnAdmission(queuedTurns, async () => {
+        runs += 1;
+        if (runs === 1) {
+          await waitFor(() => terminateFirst);
+          throw new Error("physical cancellation was not confirmed");
+        }
+        return { status: "idle" };
+      });
+      const worker = await testWorker(nativeConnection, taskQueue, {
+        ...admission.activities,
+        markSessionIdle: async () => undefined,
+        failSessionAttempt: async () => undefined,
+        settleSessionInterruptions: async (input: unknown) => {
+          controls.push(input);
+          terminateFirst = true;
+          return { action: "continue" as const };
+        },
+      });
+      const run = worker.run();
+      try {
+        const client = new Client({ connection });
+        const handle = await client.workflow.start("sessionWorkflow", {
+          taskQueue,
+          workflowId,
+          args: [{ ...scope, sessionId, initialEventId: first.triggerEventId }],
+        });
+        await waitFor(() => runs === 1);
+        queuedTurns.push(second);
+        await handle.signal("userMessage", second.triggerEventId);
+        await handle.signal("sessionControl", "control-event");
+        await expect(handle.result()).rejects.toBeDefined();
+
+        expect(runs).toBe(1);
+        expect(controls).toEqual([
+          { ...scope, sessionId, attemptId: expect.any(String), workflowId },
+        ]);
+      } finally {
+        terminateFirst = true;
         worker.shutdown();
         await run;
       }
@@ -982,7 +1060,7 @@ describe("Temporal workflow integration", () => {
         await run;
       }
     },
-    temporalWorkflowTestTimeoutMs,
+    goalContinuationTestTimeoutMs,
   );
 
   test(
@@ -1032,7 +1110,7 @@ describe("Temporal workflow integration", () => {
         await run;
       }
     },
-    temporalWorkflowTestTimeoutMs,
+    goalContinuationTestTimeoutMs,
   );
 
   test(
@@ -1089,7 +1167,7 @@ describe("Temporal workflow integration", () => {
         await run;
       }
     },
-    temporalWorkflowTestTimeoutMs,
+    goalContinuationTestTimeoutMs,
   );
 
   test(

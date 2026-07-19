@@ -6,6 +6,7 @@ import {
   countQueuedTurns,
   getSessionEvent,
   getSessionTurnForAttempt,
+  markSessionAttemptQuiesced,
   requireSession,
   appendSessionHistoryItems,
   registerPendingSessionToolCall,
@@ -66,6 +67,7 @@ export type SessionStateActivityOverrides = Partial<{
   recordModelUsageAndDebitCredits: typeof recordModelUsageAndDebitCredits;
   persistPreparedContextCompaction: typeof persistPreparedContextCompaction;
   settleSessionIdleWithParentOutbox: typeof settleSessionIdleWithParentOutbox;
+  markSessionAttemptQuiesced: typeof markSessionAttemptQuiesced;
   publishDurableSessionEvents: typeof publishDurableSessionEvents;
   deliverFailedChildTurnToParent: typeof deliverFailedChildTurnToParent;
   notifyParentOfChildIdle: typeof notifyParentOfChildIdle;
@@ -122,6 +124,8 @@ export function createSessionStateActivities(
     overrides.persistPreparedContextCompaction ?? persistPreparedContextCompaction;
   const settleSessionIdleWithParentOutboxFn =
     overrides.settleSessionIdleWithParentOutbox ?? settleSessionIdleWithParentOutbox;
+  const markSessionAttemptQuiescedFn =
+    overrides.markSessionAttemptQuiesced ?? markSessionAttemptQuiesced;
   const publishDurableSessionEventsFn =
     overrides.publishDurableSessionEvents ?? publishDurableSessionEvents;
   const deliverFailedChildTurnToParentFn =
@@ -502,6 +506,16 @@ export function createSessionStateActivities(
     input: SettleSessionInterruptionsInput,
   ): Promise<{ action: "paused" | "continue" | "stale" | "failed" }> {
     const { db, bus, observability } = await services();
+    if (input.phase === "attempt_quiesced") {
+      const events = await markSessionAttemptQuiescedFn(db, {
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        attemptId: input.attemptId,
+        temporalWorkflowId: input.workflowId,
+      });
+      await publishDurableSessionEventsFn(bus, input.workspaceId, input.sessionId, events);
+      return { action: "stale" };
+    }
     const pending = await pendingReceiptHandoff(input);
     if (pending === "invalid") {
       await quarantineTurnPersistenceAttempt({

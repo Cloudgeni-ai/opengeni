@@ -17,6 +17,7 @@ import {
 import * as schema from "@opengeni/db/schema";
 import type { EventBus } from "@opengeni/events";
 import {
+  CompactionProviderResponseError,
   EmptyCompactionSummaryError,
   SUMMARY_PREFIX,
   type OpenGeniRuntime,
@@ -27,7 +28,7 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import { createActivityTestHarness } from "../src/activities";
-import { maybeCompactContext } from "../src/activities/context-compaction";
+import { isContextWindowExceeded, maybeCompactContext } from "../src/activities/context-compaction";
 import { persistPreparedContextCompaction } from "../src/activities/context-compaction-persistence";
 import type { PreparedContextCompactionPersistence } from "../src/activities/types";
 
@@ -1184,5 +1185,24 @@ describe("standalone context compaction execution", () => {
         eventPayload: { ...prepared.eventPayload, replacementFingerprint: "collision" },
       }),
     ).rejects.toThrow("persistence key collision");
+  });
+
+  test("recognizes a provider overflow through the content-free compaction wrapper", () => {
+    const providerOverflow = Object.assign(new Error("maximum context length exceeded"), {
+      code: "context_length_exceeded",
+    });
+    const wrapped = new CompactionProviderResponseError(
+      { stage: "stream", responseFailed: true },
+      providerOverflow,
+    );
+    expect(isContextWindowExceeded(wrapped)).toBe(true);
+    expect(
+      isContextWindowExceeded(
+        new CompactionProviderResponseError(
+          { stage: "stream", responseFailed: true },
+          new Error("provider authentication failed"),
+        ),
+      ),
+    ).toBe(false);
   });
 });
