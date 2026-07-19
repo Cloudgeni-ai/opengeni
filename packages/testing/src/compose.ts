@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { makeTempDir, removeTempDir, runCommand, waitFor } from "./process";
+import { TEST_SERVICE_IMAGES } from "./service-images";
 
 export type TestServices = {
   projectName: string;
@@ -379,11 +380,14 @@ function testServiceImages(options: {
   objectStorage?: boolean;
 }): Record<string, string> {
   return {
-    postgres: "pgvector/pgvector:pg17",
-    nats: "nats:2-alpine",
-    ...((options.temporal ?? true) ? { temporal: "temporalio/auto-setup:1.28" } : {}),
+    postgres: TEST_SERVICE_IMAGES.pgvectorPg17,
+    nats: TEST_SERVICE_IMAGES.nats,
+    ...((options.temporal ?? true) ? { temporal: TEST_SERVICE_IMAGES.temporal } : {}),
     ...((options.objectStorage ?? false)
-      ? { minio: "minio/minio:latest", "minio-init": "minio/mc:latest" }
+      ? {
+          minio: TEST_SERVICE_IMAGES.minio,
+          "minio-init": TEST_SERVICE_IMAGES.minioClient,
+        }
       : {}),
   };
 }
@@ -574,7 +578,7 @@ function composeYaml(
 ): string {
   return `services:
   postgres:
-    image: pgvector/pgvector:pg17
+    image: ${TEST_SERVICE_IMAGES.pgvectorPg17}
     pull_policy: never
     environment:
       POSTGRES_DB: opengeni
@@ -589,7 +593,7 @@ function composeYaml(
       retries: 40
 
   nats:
-    image: nats:2-alpine
+    image: ${TEST_SERVICE_IMAGES.nats}
     pull_policy: never
     command: ["-m", "8222"]
     ports:
@@ -599,7 +603,7 @@ function composeYaml(
 ${
   options.temporal
     ? `  temporal:
-    image: temporalio/auto-setup:1.28
+    image: ${TEST_SERVICE_IMAGES.temporal}
     pull_policy: never
     # pg_isready can briefly report healthy during the official Postgres
     # image's temporary initialization server, immediately before that server
@@ -634,7 +638,7 @@ ${
 ${
   options.objectStorage
     ? `  minio:
-    image: minio/minio:latest
+    image: ${TEST_SERVICE_IMAGES.minio}
     pull_policy: never
     command: ["server", "/data", "--console-address", ":9001"]
     environment:
@@ -650,7 +654,7 @@ ${
       retries: 40
 
   minio-init:
-    image: minio/mc:latest
+    image: ${TEST_SERVICE_IMAGES.minioClient}
     pull_policy: never
     # Keep this one-shot bootstrap out of the initial compose-up. The harness
     # runs it explicitly after MinIO is healthy; including it here as well both

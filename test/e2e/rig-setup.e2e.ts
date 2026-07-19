@@ -91,42 +91,57 @@ describe("real Docker rig-setup e2e", () => {
     return ((await create.json()) as { id: string }).id;
   }
 
-  async function waitForTerminal(sessionId: string, timeoutMs = 180_000): Promise<SessionEvent[]> {
+  async function waitForTerminal(
+    sessionId: string,
+    afterSequence = 0,
+    timeoutMs = 180_000,
+  ): Promise<SessionEvent[]> {
+    let events: SessionEvent[] = [];
     await waitFor(
       async () => {
-        const events = await sessionEvents(sessionId);
+        events = await sessionEvents(sessionId, afterSequence);
         return events.some(
           (e) =>
             e.type === "session.status.changed" &&
             ["idle", "failed"].includes((e.payload as { status?: string }).status ?? ""),
         );
       },
-      { timeoutMs },
+      {
+        timeoutMs,
+        describe: () => {
+          const logs = worker.logs();
+          return `[worker tail]\n${logs.slice(-20_000)}\n[events after ${afterSequence}]\n${JSON.stringify(events, null, 2)}`;
+        },
+      },
     );
-    return await sessionEvents(sessionId);
+    return events;
   }
 
-  // The rig-setup hook rides sandbox.operation.* events with payload.name "rig-setup".
+  // The rig-setup hook has a dedicated lifecycle event family. Keep this E2E
+  // on that public contract rather than the legacy generic sandbox operation.
   function rigSetupEvents(events: SessionEvent[]): Array<{ type: string; payload: any }> {
     return events
-      .filter(
-        (e) =>
-          e.type.startsWith("sandbox.operation.") &&
-          (e.payload as { name?: string }).name === "rig-setup",
-      )
+      .filter((e) => e.type.startsWith("rig.setup."))
       .map((e) => ({ type: e.type, payload: e.payload as any }));
   }
 
   test("first turn runs the setup (started+completed), second warm turn SKIPS via the marker", async () => {
-    const rigId = await seedRig("proof-rig", "echo ok > /var/opengeni/proof && touch /tmp/x");
+    const rigId = await seedRig(
+      "proof-rig",
+      [
+        "if [ -e /tmp/opengeni-rig-proof ]; then echo setup-reran >&2; exit 19; fi",
+        "printf '%s\n' ok > /tmp/opengeni-rig-proof",
+      ].join("\n"),
+    );
     const sessionId = await createRigSession(rigId, "hello");
     const firstEvents = await waitForTerminal(sessionId);
 
     const firstRig = rigSetupEvents(firstEvents);
-    expect(firstRig.some((e) => e.type === "sandbox.operation.started")).toBe(true);
+    expect(firstRig.some((e) => e.type === "rig.setup.started")).toBe(true);
     // completed{skipped:false} is the proof the script ran to exit 0 (which wrote the file).
-    const ran = firstRig.find((e) => e.type === "sandbox.operation.completed");
+    const ran = firstRig.find((e) => e.type === "rig.setup.completed");
     expect(ran?.payload.skipped).toBe(false);
+    const firstTerminalSequence = Math.max(...firstEvents.map((event) => event.sequence));
 
     // Second turn on the SAME session reuses the warm box → the marker skips setup.
     const followUp = await fetch(apiPath(`/sessions/${sessionId}/events`), {
@@ -135,19 +150,14 @@ describe("real Docker rig-setup e2e", () => {
       body: JSON.stringify({ type: "user.message", payload: { text: "again" } }),
     });
     expect(followUp.ok).toBe(true);
-    await waitFor(
-      async () => {
-        const skips = rigSetupEvents(await sessionEvents(sessionId)).filter(
-          (e) => e.payload.skipped === true,
-        );
-        return skips.length >= 1;
-      },
-      { timeoutMs: 180_000 },
+    const secondEvents = await waitForTerminal(sessionId, firstTerminalSequence);
+    const secondRig = rigSetupEvents(secondEvents);
+    expect(secondRig.filter((event) => event.type === "rig.setup.started")).toHaveLength(1);
+    const secondTerminal = secondRig.filter((event) =>
+      ["rig.setup.completed", "rig.setup.skipped", "rig.setup.failed"].includes(event.type),
     );
-    const skipped = rigSetupEvents(await sessionEvents(sessionId)).find(
-      (e) => e.payload.skipped === true,
-    );
-    expect(skipped?.type).toBe("sandbox.operation.completed");
+    expect(secondTerminal).toHaveLength(1);
+    expect(secondTerminal[0]?.type).toBe("rig.setup.skipped");
   }, 300_000);
 
   test("a failing setup script (exit 7) fails the turn closed with a rig.setup failure", async () => {
@@ -155,7 +165,7 @@ describe("real Docker rig-setup e2e", () => {
     const sessionId = await createRigSession(rigId, "hello");
     const events = await waitForTerminal(sessionId);
 
-    const failed = rigSetupEvents(events).find((e) => e.type === "sandbox.operation.failed");
+    const failed = rigSetupEvents(events).find((e) => e.type === "rig.setup.failed");
     expect(failed).toBeDefined();
     expect(failed?.payload.error).toContain("exited with code 7");
     // The session surfaces the failure (turn.failed / status failed).
@@ -174,14 +184,16 @@ describe("real Docker rig-setup e2e", () => {
     const sessionId = await createRigSession(rigId, "hello");
     const events = await waitForTerminal(sessionId);
 
-    const failed = rigSetupEvents(events).find((e) => e.type === "sandbox.operation.failed");
+    const failed = rigSetupEvents(events).find((e) => e.type === "rig.setup.failed");
     expect(failed).toBeDefined();
-    expect(failed?.payload.error).toContain("rig setup timeout");
+    expect(failed?.payload.error).toContain("timed out or exited with code 124");
   }, 300_000);
 });
 
-async function sessionEvents(sessionId: string): Promise<SessionEvent[]> {
-  const response = await fetch(apiPath(`/sessions/${sessionId}/events?limit=200`));
+async function sessionEvents(sessionId: string, afterSequence = 0): Promise<SessionEvent[]> {
+  const response = await fetch(
+    apiPath(`/sessions/${sessionId}/events?after=${afterSequence}&limit=200`),
+  );
   expect(response.ok).toBe(true);
   return (await response.json()) as SessionEvent[];
 }
@@ -224,6 +236,10 @@ function stackEnv(services: TestServices, localApiPort: number): Record<string, 
     OPENGENI_DOCKER_IMAGE: "opengeni-sandbox:local",
     OPENGENI_DOCKER_NETWORK: services.dockerNetwork,
     OPENGENI_SANDBOX_PREPARATION_PROFILES: "none",
+    // The marker is per box. Ownership keeps this session's Docker box live
+    // across turns so the second turn exercises the warm-marker path rather
+    // than correctly running setup in a newly-created legacy box.
+    OPENGENI_SANDBOX_OWNERSHIP_ENABLED: "true",
     // Pin the rig setup budget tiny so the sleep-5 rig hits the timeout branch;
     // the echo/touch rigs finish well within it.
     OPENGENI_RIG_SETUP_TIMEOUT_MS: "2000",

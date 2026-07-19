@@ -11,11 +11,12 @@
  *   (c) @opengeni/sdk / @opengeni/react stop honoring the client-clean closure:
  *       the SDK remains zero-runtime-dep, and React only depends on SDK among
  *       @opengeni/* packages.
- *   (d) the BUILT sdk/react dist bundles reference any server/embed package.
+ *   (d) when --require-client-dist is supplied, the single upstream package
+ *       build produced sdk/react dist bundles which reference no server/embed
+ *       package.
  *
  * Wired into the release gate and safe to run locally without publishing.
  */
-import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -54,6 +55,11 @@ const publishableNames = new Set(publishable.map((pkg) => pkg.name));
 const ignored = changesetIgnoreSet();
 const workspaceNames = workspacePackageByName();
 const PREPUBLISH_GUARD_SCRIPT = "bash ../../scripts/prepublish-guard";
+const args = process.argv.slice(2);
+const requireClientDist = args.length === 1 && args[0] === "--require-client-dist";
+if (args.length > 0 && !requireClientDist) {
+  throw new Error("usage: bun scripts/publish-closure-guard.ts [--require-client-dist]");
+}
 
 function readPkg(pkgDir: string): PackageJson {
   return JSON.parse(readFileSync(join(repoRoot, pkgDir, "package.json"), "utf8")) as PackageJson;
@@ -198,39 +204,25 @@ const serverInternalPattern = new RegExp(
   `@opengeni/(${SERVER_EMBED_PACKAGES.join("|")})(?:/|["'\`]|$)`,
 );
 
-function ensureBuilt(pkgDir: string): void {
-  const distEntry = join(repoRoot, pkgDir, "dist", "index.js");
-  if (existsSync(distEntry)) {
-    return;
-  }
-  process.stdout.write(`[closure-guard] building ${pkgDir} (dist missing)...\n`);
-  const result = spawnSync("bun", ["run", "build"], {
-    cwd: join(repoRoot, pkgDir),
-    stdio: "inherit",
-  });
-  if (result.status !== 0) {
-    failures.push(`Failed to build ${pkgDir} for closure-guard inspection.`);
-  }
-}
-
-for (const { dir: pkgDir } of publishable) {
-  ensureBuilt(pkgDir);
-}
-
-for (const pkgDir of ["packages/sdk", "packages/react"]) {
-  for (const file of ["dist/index.js", "dist/index.d.ts"]) {
-    const path = join(repoRoot, pkgDir, file);
-    if (!existsSync(path)) {
-      continue;
-    }
-    const text = readFileSync(path, "utf8");
-    const match = text.match(serverInternalPattern);
-    if (match) {
-      const leaked = match[1] ? `@opengeni/${match[1]}` : "<unknown>";
-      failures.push(
-        `${pkgDir}/${file} references a server/embed package (${leaked}). ` +
-          `A server import leaked into a published client bundle.`,
-      );
+if (requireClientDist) {
+  for (const pkgDir of ["packages/sdk", "packages/react"]) {
+    for (const file of ["dist/index.js", "dist/index.d.ts"]) {
+      const path = join(repoRoot, pkgDir, file);
+      if (!existsSync(path)) {
+        failures.push(
+          `${pkgDir}/${file} is missing. Build the selected package outputs exactly once before running the closure guard.`,
+        );
+        continue;
+      }
+      const text = readFileSync(path, "utf8");
+      const match = text.match(serverInternalPattern);
+      if (match) {
+        const leaked = match[1] ? `@opengeni/${match[1]}` : "<unknown>";
+        failures.push(
+          `${pkgDir}/${file} references a server/embed package (${leaked}). ` +
+            `A server import leaked into a published client bundle.`,
+        );
+      }
     }
   }
 }
@@ -248,5 +240,9 @@ if (failures.length > 0) {
 }
 
 process.stdout.write(
-  `Publish closure guard passed: ${publishable.length} package(s) in the npm closure, client bundle is clean.\n`,
+  `Publish closure guard passed: ${publishable.length} package(s) in the npm closure, ${
+    requireClientDist
+      ? "required client bundles are clean"
+      : "client bundle inspection not selected"
+  }.\n`,
 );

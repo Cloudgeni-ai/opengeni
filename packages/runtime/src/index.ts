@@ -4859,7 +4859,7 @@ async function runSandboxLifecycleCommand(
 
 // M3: everything the rig-setup hook needs to run the frozen rig version's setup
 // script exactly once per box. `versionId` keys the idempotence marker
-// (/var/opengeni/rig-setup-<versionId>.done); `timeoutMs` is the rig-specific
+// (under a UID-scoped runtime directory); `timeoutMs` is the rig-specific
 // budget (settings.rigSetupTimeoutMs), NOT the 120s lifecycle default; `rigName`
 // is for human-readable events/errors only.
 export type RigSetupDescriptor = {
@@ -5543,59 +5543,122 @@ const RIG_SETUP_OUTPUT_TAIL_LIMIT = 4_000;
 // exec round-trip.
 const RIG_SETUP_SKIPPED_SENTINEL = "__OPENGENI_RIG_SETUP_SKIPPED__";
 
+function isExactRigSetupSkipOutput(result: unknown): boolean {
+  const candidates =
+    result && typeof result === "object"
+      ? [
+          (result as { output?: unknown }).output,
+          (result as { stderr?: unknown }).stderr,
+          (result as { stdout?: unknown }).stdout,
+        ].filter((value): value is string => typeof value === "string" && value.length > 0)
+      : [sandboxCommandOutput(result)].filter((value) => value.length > 0);
+  return (
+    candidates.length > 0 &&
+    candidates.every(
+      (value) =>
+        value === RIG_SETUP_SKIPPED_SENTINEL ||
+        value === `${RIG_SETUP_SKIPPED_SENTINEL}\n` ||
+        value === `${RIG_SETUP_SKIPPED_SENTINEL}\r\n`,
+    )
+  );
+}
+
 /**
  * The rig-setup command (M3). One idempotent bash program:
- *   1. `mkdir -p /var/opengeni` and, if the per-version marker already exists,
- *      print the SKIP sentinel and exit 0 (a warm box re-running the hook).
+ *   1. create and validate a private UID-scoped directory below
+ *      XDG_RUNTIME_DIR/TMPDIR (or use the explicit test root) and, if a private
+ *      regular per-version marker already exists, print the SKIP sentinel and
+ *      exit 0 (a warm box re-running the hook).
  *   2. otherwise atomically claim a per-version lock directory. A loser waits
  *      for the winner's marker, then skips; if the winner fails and releases the
  *      lock, the loser retries the claim.
  *   3. the winner writes the rig's setup script to a temp file and runs it under
  *      coreutils `timeout` (NOT `bash -e` — the script opts into `set -e`
- *      itself if it wants), then captures the exit code and `touch`es the marker
- *      ONLY on success (exit 0) so a failed/timed-out setup re-runs next turn.
- * The heredoc delimiter is quoted, so the script content is executed verbatim
- * with no host-side expansion.
+ *      itself if it wants), then captures the exit code and atomically persists
+ *      the marker ONLY on success (exit 0) so a failed/timed-out setup or marker
+ *      write re-runs next turn.
+ * The script is transported as one rigorously shell-quoted printf argument, so
+ * every character is written verbatim with no delimiter collision or host-side
+ * expansion. Setup output is captured while the script runs: successful user
+ * output cannot counterfeit the wrapper-owned skip sentinel, while failed setup
+ * still reports its diagnostics.
  */
 export function rigSetupScriptCommand(
   script: string,
   versionId: string,
   timeoutMs = 600_000,
-  markerRoot = "/var/opengeni",
+  markerRoot?: string,
 ): string {
   const timeoutSecs = Math.max(1, Math.ceil(timeoutMs / 1000));
   const lockWaitSecs = timeoutSecs + 6;
-  const marker = `${markerRoot.replace(/\/+$/, "")}/rig-setup-${versionId}.done`;
+  const markerName = `rig-setup-${versionId}.done`;
   return [
     "set -u",
-    `mkdir -p ${shellQuote(markerRoot)}`,
-    `__OG_RIG_MARKER=${shellQuote(marker)}`,
+    "umask 077",
+    markerRoot
+      ? `__OG_RIG_ROOT=${shellQuote(markerRoot.replace(/\/+$/, ""))}`
+      : '__OG_RIG_ROOT="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/opengeni-rig-setup-$(id -u)"',
+    'case "$__OG_RIG_ROOT" in /*) ;; *) printf \'%s\\n\' "rig setup marker root must be absolute: $__OG_RIG_ROOT" >&2; exit 73 ;; esac',
+    '__OG_RIG_UID="$(id -u)"',
+    'if [ -L "$__OG_RIG_ROOT" ]; then printf \'%s\\n\' "rig setup marker root must not be a symlink: $__OG_RIG_ROOT" >&2; exit 73; fi',
+    'if [ ! -e "$__OG_RIG_ROOT" ]; then mkdir -m 700 "$__OG_RIG_ROOT" 2>/dev/null || true; fi',
+    "__og_rig_validate_root() {",
+    '  if [ -L "$__OG_RIG_ROOT" ] || [ ! -d "$__OG_RIG_ROOT" ] || [ ! -w "$__OG_RIG_ROOT" ]; then printf \'%s\\n\' "rig setup marker root is not a private writable directory: $__OG_RIG_ROOT" >&2; return 73; fi',
+    '  __OG_RIG_ROOT_STAT="$(stat -c \'%u %a\' -- "$__OG_RIG_ROOT" 2>/dev/null)" || { printf \'%s\\n\' "cannot stat rig setup marker root: $__OG_RIG_ROOT" >&2; return 73; }',
+    '  if [ "$__OG_RIG_ROOT_STAT" != "$__OG_RIG_UID 700" ]; then printf \'%s\\n\' "rig setup marker root must be owned by uid $__OG_RIG_UID with mode 700: $__OG_RIG_ROOT" >&2; return 73; fi',
+    "}",
+    '__og_rig_validate_root || exit "$?"',
+    `__OG_RIG_MARKER="$__OG_RIG_ROOT"/${shellQuote(markerName)}`,
     '__OG_RIG_LOCK="$__OG_RIG_MARKER.lock"',
     `__OG_RIG_TIMEOUT_SECS=${timeoutSecs}`,
     `__OG_RIG_LOCK_WAIT_SECS=${lockWaitSecs}`,
-    `if [ -f "$__OG_RIG_MARKER" ]; then printf '%s\\n' ${shellQuote(RIG_SETUP_SKIPPED_SENTINEL)}; exit 0; fi`,
+    "__og_rig_marker_state() {",
+    '  if [ ! -e "$__OG_RIG_MARKER" ] && [ ! -L "$__OG_RIG_MARKER" ]; then return 1; fi',
+    '  if [ -L "$__OG_RIG_MARKER" ] || [ ! -f "$__OG_RIG_MARKER" ]; then printf \'%s\\n\' "rig setup marker must be a regular file: $__OG_RIG_MARKER" >&2; return 73; fi',
+    '  __OG_RIG_MARKER_STAT="$(stat -c \'%u %a\' -- "$__OG_RIG_MARKER" 2>/dev/null)" || { printf \'%s\\n\' "cannot stat rig setup marker: $__OG_RIG_MARKER" >&2; return 73; }',
+    '  if [ "$__OG_RIG_MARKER_STAT" != "$__OG_RIG_UID 600" ]; then printf \'%s\\n\' "rig setup marker must be owned by uid $__OG_RIG_UID with mode 600: $__OG_RIG_MARKER" >&2; return 73; fi',
+    "}",
+    "__og_rig_skip_if_ready() {",
+    "  __og_rig_marker_state",
+    "  __OG_RIG_MARKER_STATE=$?",
+    `  if [ "$__OG_RIG_MARKER_STATE" -eq 0 ]; then printf '%s\\n' ${shellQuote(RIG_SETUP_SKIPPED_SENTINEL)}; exit 0; fi`,
+    '  if [ "$__OG_RIG_MARKER_STATE" -ne 1 ]; then return "$__OG_RIG_MARKER_STATE"; fi',
+    "  return 0",
+    "}",
+    '__og_rig_skip_if_ready || exit "$?"',
     "while :; do",
     '  if mkdir "$__OG_RIG_LOCK" 2>/dev/null; then',
-    "    trap 'rm -rf \"$__OG_RIG_LOCK\"' EXIT",
-    `    if [ -f "$__OG_RIG_MARKER" ]; then printf '%s\\n' ${shellQuote(RIG_SETUP_SKIPPED_SENTINEL)}; exit 0; fi`,
+    '    __OG_RIG_MARKER_TMP=""',
+    '    trap \'rm -f "${__OG_RIG_MARKER_TMP:-}"; rm -rf "$__OG_RIG_LOCK"\' EXIT',
+    '    __og_rig_skip_if_ready || exit "$?"',
     '__OG_RIG_SCRIPT="$(mktemp)"',
-    "cat > \"$__OG_RIG_SCRIPT\" <<'__OPENGENI_RIG_SETUP_SCRIPT_EOF__'",
-    script,
-    "__OPENGENI_RIG_SETUP_SCRIPT_EOF__",
-    '    timeout -k 5s "${__OG_RIG_TIMEOUT_SECS}s" bash "$__OG_RIG_SCRIPT"',
+    `    printf '%s' ${shellQuote(script)} > "$__OG_RIG_SCRIPT"`,
+    '    __OG_RIG_OUTPUT="$(mktemp)"',
+    '    timeout -k 5s "${__OG_RIG_TIMEOUT_SECS}s" bash "$__OG_RIG_SCRIPT" >"$__OG_RIG_OUTPUT" 2>&1',
     "__OG_RIG_RC=$?",
-    '    rm -f "$__OG_RIG_SCRIPT"',
-    '    if [ "$__OG_RIG_RC" -eq 0 ]; then touch "$__OG_RIG_MARKER"; fi',
+    '    if [ "$__OG_RIG_RC" -ne 0 ]; then cat "$__OG_RIG_OUTPUT" >&2 || true; fi',
+    '    rm -f "$__OG_RIG_SCRIPT" "$__OG_RIG_OUTPUT"',
+    '    if [ "$__OG_RIG_RC" -eq 0 ]; then',
+    '      __og_rig_validate_root || exit "$?"',
+    '      __OG_RIG_MARKER_TMP="$(mktemp "$__OG_RIG_ROOT/.rig-setup-marker.XXXXXX")" || { printf \'%s\\n\' "cannot create rig setup marker temporary file" >&2; exit 73; }',
+    '      chmod 600 "$__OG_RIG_MARKER_TMP" || { printf \'%s\\n\' "cannot secure rig setup marker temporary file" >&2; exit 73; }',
+    '      ln -- "$__OG_RIG_MARKER_TMP" "$__OG_RIG_MARKER" || { printf \'%s\\n\' "cannot persist rig setup marker" >&2; exit 73; }',
+    '      rm -f "$__OG_RIG_MARKER_TMP" || { printf \'%s\\n\' "cannot remove rig setup marker temporary link" >&2; exit 73; }',
+    '      __OG_RIG_MARKER_TMP=""',
+    "      __og_rig_marker_state",
+    "      __OG_RIG_MARKER_STATE=$?",
+    '      if [ "$__OG_RIG_MARKER_STATE" -ne 0 ]; then printf \'%s\\n\' "persisted rig setup marker failed validation" >&2; exit 73; fi',
+    "    fi",
     '    exit "$__OG_RIG_RC"',
     "  fi",
     "  __OG_RIG_WAITED=0",
     '  while [ "$__OG_RIG_WAITED" -lt "$__OG_RIG_LOCK_WAIT_SECS" ]; do',
-    `    if [ -f "$__OG_RIG_MARKER" ]; then printf '%s\\n' ${shellQuote(RIG_SETUP_SKIPPED_SENTINEL)}; exit 0; fi`,
+    '    __og_rig_skip_if_ready || exit "$?"',
     '    if [ ! -d "$__OG_RIG_LOCK" ]; then break; fi',
     "    sleep 1",
     "    __OG_RIG_WAITED=$((__OG_RIG_WAITED + 1))",
     "  done",
-    `  if [ -f "$__OG_RIG_MARKER" ]; then printf '%s\\n' ${shellQuote(RIG_SETUP_SKIPPED_SENTINEL)}; exit 0; fi`,
+    '  __og_rig_skip_if_ready || exit "$?"',
     '  if [ ! -d "$__OG_RIG_LOCK" ]; then continue; fi',
     '  rmdir "$__OG_RIG_LOCK" 2>/dev/null || true',
     "done",
@@ -5656,13 +5719,9 @@ export async function runRigSetupHook(
     );
   }
   const output = sandboxCommandOutput(result);
-  // Marker present → the guard skipped the script. Distinct terminal signal.
-  if (output.includes(RIG_SETUP_SKIPPED_SENTINEL)) {
-    await context.onRuntimeEvent?.({ type: "rig.setup.skipped", payload });
-    return;
-  }
-  // Ran → classify. A "still running" result means the script outlived the rig
-  // timeout; any nonzero/absent exit code is a setup failure. Both fail closed.
+  // Classify execution status before interpreting any output. A failed or
+  // still-running command must never turn into a skip merely because the user
+  // script echoed the wrapper's sentinel.
   const stillRunning = sandboxCommandStillRunning(result);
   const exitCode = sandboxCommandExitCode(result);
   if (stillRunning || exitCode === null || exitCode !== 0) {
@@ -5674,7 +5733,9 @@ export async function runRigSetupHook(
       ? `did not finish within the rig setup timeout (${rigSetup.timeoutMs}ms)`
       : exitCode === null
         ? "did not report an exit code"
-        : `exited with code ${exitCode}`;
+        : exitCode === 124
+          ? "timed out or exited with code 124"
+          : `exited with code ${exitCode}`;
     const failure = new Error(
       `Rig setup failed for rig "${rigSetup.rigName}" (version ${rigSetup.versionId}): the setup script ${reason}${tail ? `:\n${tail}` : ""}`,
     );
@@ -5686,6 +5747,14 @@ export async function runRigSetupHook(
       },
     });
     throw failure;
+  }
+  // The wrapper's skip branch emits exactly this one line. Providers may expose
+  // the same stdout bytes in both `output` and `stdout`; accept such mirrors,
+  // but reject any conflicting field, prefix, suffix, or user-script output so
+  // only an authentic wrapper result skips.
+  if (isExactRigSetupSkipOutput(result)) {
+    await context.onRuntimeEvent?.({ type: "rig.setup.skipped", payload });
+    return;
   }
   await context.onRuntimeEvent?.({
     type: "rig.setup.completed",

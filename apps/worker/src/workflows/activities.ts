@@ -32,6 +32,25 @@ export const activity = proxyActivities<WorkflowControlActivities>({
   },
 });
 
+export const PRODUCTION_TURN_HEARTBEAT_TIMEOUT = "2 minutes" as const;
+export const TEST_ONLY_TURN_HEARTBEAT_TIMEOUT = "1 second" as const;
+
+// Production never supplies an override. The accelerated value is reachable
+// only from the non-production workflow bundle used by the real-Temporal
+// integration tests; unknown values fail closed instead of changing runtime
+// behavior accidentally.
+export function resolveTurnHeartbeatTimeout(
+  value: string | undefined,
+): typeof PRODUCTION_TURN_HEARTBEAT_TIMEOUT | typeof TEST_ONLY_TURN_HEARTBEAT_TIMEOUT {
+  if (value === undefined || value === PRODUCTION_TURN_HEARTBEAT_TIMEOUT) {
+    return PRODUCTION_TURN_HEARTBEAT_TIMEOUT;
+  }
+  if (value === TEST_ONLY_TURN_HEARTBEAT_TIMEOUT) {
+    return TEST_ONLY_TURN_HEARTBEAT_TIMEOUT;
+  }
+  throw new Error(`unsupported turn heartbeat timeout override: ${value}`);
+}
+
 /** Goal continuation is advisory at an idle boundary. A transient failure gets
  * a short retry window, then records an explicit delayed outbox wake instead
  * of relying on an unrelated future mutation. */
@@ -49,14 +68,17 @@ export function turnTaskQueue(baseTaskQueue: string): string {
   return `${baseTaskQueue}-turns`;
 }
 
-export function turnActivityForTaskQueue(baseTaskQueue: string) {
+export function turnActivityForTaskQueue(
+  baseTaskQueue: string,
+  options: { heartbeatTimeout?: string } = {},
+) {
   return proxyActivities<Pick<typeof activities, "runAgentTurn">>({
     taskQueue: turnTaskQueue(baseTaskQueue),
     // Agent segments legitimately run for days. A started turn heartbeats;
     // queued activities remain queued truthfully until a capped turn worker
     // accepts them and performs the atomic claim.
     startToCloseTimeout: "30 days",
-    heartbeatTimeout: "2 minutes",
+    heartbeatTimeout: resolveTurnHeartbeatTimeout(options.heartbeatTimeout),
     // Pause/Steer may complete the durable control transition immediately,
     // but the session workflow must remain open until the old turn activity is
     // physically gone. Leaving this implicit uses Temporal's try-cancel wire

@@ -191,6 +191,15 @@ interrupted post-publication run safely resumable. The final
 digest, and exact registry package identities. Ordinary pushes to `main` can
 open/update the Version PR but cannot publish.
 
+CI uses `docker/docker-bake.hcl` to build API, worker, and web from one shared
+BuildKit graph. The protected workload artifact builder may add the relay target
+and a content-addressed remote layer cache, but the private OPE-25 release
+operator is the sole deployment dispatcher: it must read back all pushed
+manifests and provenance, accept only the complete digest set, and promote the
+staging-proven set with `rebuild=false`. Partial layers from a failed or
+cancelled build are cache material only and never an accepted release artifact
+set.
+
 The sandbox image remains separate:
 
 ```bash

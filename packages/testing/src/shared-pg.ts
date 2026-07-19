@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import postgres from "postgres";
 import { migrate } from "@opengeni/db/migrate";
+import { TEST_SERVICE_IMAGES } from "./service-images";
 
 const execFileAsync = promisify(execFile);
 
@@ -48,7 +49,7 @@ const PORT = 61440;
 const CONTAINER = `opengeni-shared-test-pg-${PORT}`;
 const PASSWORD = "x";
 const APP_PASSWORD = "apppw";
-const IMAGE = "pgvector/pgvector:pg16";
+const IMAGE = TEST_SERVICE_IMAGES.pgvectorPg16;
 const ADMIN_BASE_URL = `postgres://postgres:${PASSWORD}@127.0.0.1:${PORT}`;
 // A once-migrated database every test file clones from via `CREATE DATABASE ...
 // TEMPLATE`. Postgres clones a template with a file-level copy, so each file
@@ -99,6 +100,8 @@ async function templateDbName(): Promise<string> {
 const STATE_DIR = join(tmpdir(), `opengeni-shared-pg-${PORT}`);
 const LOCK_DIR = join(STATE_DIR, "lock");
 const REFCOUNT_FILE = join(STATE_DIR, "refcount");
+const SHARED_POSTGRES_STARTUP_ATTEMPTS = 3;
+const SHARED_POSTGRES_STARTUP_RETRY_DELAY_MS = 250;
 
 export type SharedTestDatabase = {
   /** Superuser connection scoped to this file's own database (bypasses RLS). */
@@ -129,6 +132,28 @@ async function dockerOk(args: string[]): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/**
+ * Retry only the shared PostgreSQL container's bounded startup boundary. Test
+ * files must not retry migrations or assertions: a persistent Docker failure
+ * still leaves the service unavailable, while a short daemon/image race gets
+ * three deterministic chances to recover.
+ */
+export async function retrySharedPostgresStartup(
+  attempt: () => Promise<boolean>,
+  options: { sleep?: (delayMs: number) => Promise<void> } = {},
+): Promise<boolean> {
+  const sleep = options.sleep ?? Bun.sleep;
+  for (let number = 1; number <= SHARED_POSTGRES_STARTUP_ATTEMPTS; number += 1) {
+    if (await attempt().catch(() => false)) {
+      return true;
+    }
+    if (number < SHARED_POSTGRES_STARTUP_ATTEMPTS) {
+      await sleep(number * SHARED_POSTGRES_STARTUP_RETRY_DELAY_MS);
+    }
+  }
+  return false;
 }
 
 /** A cooperative cross-process lock via atomic mkdir, with stale-lock breaking. */
@@ -300,7 +325,6 @@ async function ensureContainerAndAcquire(): Promise<boolean> {
       // The postgres image declares an anonymous data volume. Remove it with
       // the container or every test-file lifecycle leaks a full migrated
       // cluster into the shared Docker filesystem.
-      await dockerOk(["rm", "-f", "-v", CONTAINER]);
       // ONE container is shared by every DB/API/worker integration test FILE in
       // the parallel `bun test` run. Each file opens its own connection pool (the
       // createDb pool + a superuser admin pool), so dozens of files together can
@@ -310,21 +334,24 @@ async function ensureContainerAndAcquire(): Promise<boolean> {
       // visible) rather than a clean error. Give the throwaway test server a
       // generous ceiling so the whole suite fits. `MAX_CONNECTIONS` keeps the
       // per-file pools small as a second line of defence.
-      const started = await dockerOk([
-        "run",
-        "-d",
-        "-e",
-        `POSTGRES_PASSWORD=${PASSWORD}`,
-        "-p",
-        `${PORT}:5432`,
-        "--name",
-        CONTAINER,
-        IMAGE,
-        "-c",
-        "max_connections=1000",
-        "-c",
-        "shared_buffers=256MB",
-      ]);
+      const started = await retrySharedPostgresStartup(async () => {
+        await dockerOk(["rm", "-f", "-v", CONTAINER]);
+        return dockerOk([
+          "run",
+          "-d",
+          "-e",
+          `POSTGRES_PASSWORD=${PASSWORD}`,
+          "-p",
+          `${PORT}:5432`,
+          "--name",
+          CONTAINER,
+          IMAGE,
+          "-c",
+          "max_connections=1000",
+          "-c",
+          "shared_buffers=256MB",
+        ]);
+      });
       if (!started) {
         return false; // docker unavailable
       }
