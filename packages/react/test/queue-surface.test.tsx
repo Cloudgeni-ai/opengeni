@@ -6,6 +6,12 @@ import type { ComposerState } from "../src/hooks/use-composer";
 import type { UseTurnQueueResult } from "../src/hooks/use-turn-queue";
 import { fakeTurn } from "./fake-client";
 import { registerDom, renderComponent, type RenderedComponent } from "./render-hook";
+import {
+  QUEUE_BOUNDARY_CLUSTERS,
+  queueBoundaryPrompt,
+  queueBoundarySummary,
+  type QueueBoundaryMaximum,
+} from "../demo/queue-fixtures";
 
 registerDom();
 
@@ -81,6 +87,68 @@ async function click(target: Element | null): Promise<void> {
     (target as HTMLElement).click();
     await Promise.resolve();
   });
+}
+
+async function renderedPromptSummary(
+  prompt: string,
+  maxCharacters: QueueBoundaryMaximum,
+): Promise<{ accessibleSummary: string; summary: string }> {
+  mounted = await renderComponent(
+    <QueueSurface
+      queue={queue({
+        queue: [
+          fakeTurn({
+            id: "33333333-3333-4333-8333-333333333333",
+            prompt,
+          }),
+        ],
+      })}
+      composer={composer()}
+    />,
+  );
+
+  let summaryElement: Element | null;
+  let accessibleSummary: string;
+  if (maxCharacters === 180) {
+    summaryElement = mounted.container.querySelector('[data-testid="queue-collapsed-preview"]');
+    accessibleSummary =
+      mounted.container
+        .querySelector('button[aria-label="1 queued prompt"]')
+        ?.getAttribute("aria-description") ?? "";
+  } else {
+    await click(mounted.container.querySelector('button[aria-expanded="false"]'));
+    summaryElement = mounted.container.querySelector('[data-testid="queue-prompt-preview-1"]');
+    accessibleSummary = (summaryElement?.getAttribute("aria-label") ?? "").replace(
+      /^Queued prompt 1 summary: /,
+      "",
+    );
+  }
+  const summary = summaryElement?.textContent ?? "";
+
+  const current = mounted;
+  mounted = null;
+  await current.unmount();
+  document.body.replaceChildren();
+  return { accessibleSummary, summary };
+}
+
+function isWellFormedUnicode(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const current = value.charCodeAt(index);
+    if (current >= 0xd800 && current <= 0xdbff) {
+      if (
+        index + 1 >= value.length ||
+        value.charCodeAt(index + 1) < 0xdc00 ||
+        value.charCodeAt(index + 1) > 0xdfff
+      ) {
+        return false;
+      }
+      index += 1;
+    } else if (current >= 0xdc00 && current <= 0xdfff) {
+      return false;
+    }
+  }
+  return true;
 }
 
 describe("QueueSurface", () => {
@@ -195,6 +263,116 @@ describe("QueueSurface", () => {
     await click(disclosure);
     expect(mounted.container.querySelector('[data-testid="queue-prompt-full-1"]')).toBeNull();
     expect(mounted.container.textContent).toContain("Full content for queued prompt 1 hidden.");
+  });
+
+  test("backs off whole graphemes at both preview cuts and both strict bounds", async () => {
+    for (const maxCharacters of [180, 360] as const) {
+      for (const edge of ["head", "tail"] as const) {
+        for (const clusterName of Object.keys(QUEUE_BOUNDARY_CLUSTERS) as Array<
+          keyof typeof QUEUE_BOUNDARY_CLUSTERS
+        >) {
+          const { accessibleSummary, summary } = await renderedPromptSummary(
+            queueBoundaryPrompt(maxCharacters, edge, clusterName),
+            maxCharacters,
+          );
+          expect(summary).toBe(queueBoundarySummary(maxCharacters, edge));
+          expect(accessibleSummary).toBe(summary);
+          expect(Array.from(summary)).toHaveLength(maxCharacters - 1);
+          expect(Array.from(summary).length).toBeLessThanOrEqual(maxCharacters);
+          expect(isWellFormedUnicode(summary)).toBe(true);
+        }
+      }
+    }
+  });
+
+  test("sanitizes malformed summaries but discloses the exact durable source", async () => {
+    const prompt = `${"a".repeat(116)}\ud800${"x".repeat(500)}\udc00${"z".repeat(59)}`;
+    const state = queue({
+      queue: [
+        fakeTurn({
+          id: "33333333-3333-4333-8333-333333333333",
+          prompt,
+        }),
+      ],
+    });
+    mounted = await renderComponent(<QueueSurface queue={state} composer={composer()} />);
+
+    const collapsed = mounted.container.querySelector('[data-testid="queue-collapsed-preview"]');
+    expect(collapsed?.textContent).toContain("�");
+    expect(isWellFormedUnicode(collapsed?.textContent ?? "")).toBe(true);
+
+    await click(mounted.container.querySelector('button[aria-expanded="false"]'));
+    const preview = mounted.container.querySelector('[data-testid="queue-prompt-preview-1"]');
+    expect(preview?.textContent).toContain("�");
+    expect(isWellFormedUnicode(preview?.textContent ?? "")).toBe(true);
+    expect(preview?.getAttribute("aria-label")).toBe(
+      `Queued prompt 1 summary: ${preview?.textContent}`,
+    );
+
+    await click(
+      mounted.container.querySelector('button[aria-label="Show full content for queued prompt 1"]'),
+    );
+    expect(
+      mounted.container.querySelector('[data-testid="queue-prompt-full-1"]')?.textContent,
+    ).toBe(prompt);
+  });
+
+  test("bounds grapheme segmentation work for huge pathological clusters", async () => {
+    const prototype = Intl.Segmenter.prototype;
+    const originalDescriptor = Object.getOwnPropertyDescriptor(prototype, "segment");
+    const originalSegment = prototype.segment;
+    const observedInputLengths: number[] = [];
+    Object.defineProperty(prototype, "segment", {
+      configurable: true,
+      writable: true,
+      value(this: Intl.Segmenter, input: string) {
+        if (input.length > 800) throw new Error(`unbounded queue preview segment: ${input.length}`);
+        observedInputLengths.push(input.length);
+        return originalSegment.call(this, input);
+      },
+    });
+
+    try {
+      const longMarks = "\u0301".repeat(500_000);
+      const regionalIndicator = String.fromCodePoint(0x1f1e6);
+      const prompts = [
+        `${"a".repeat(116)}e${longMarks}${"x".repeat(500_000)}${"z".repeat(120)}`,
+        `${"a".repeat(237)}${"x".repeat(500_000)}e${longMarks}`,
+        `${"a".repeat(237)}${"x".repeat(500_000)}${regionalIndicator.repeat(
+          100,
+        )}${"z".repeat(100)}`,
+      ];
+      const summaries: string[] = [];
+      for (const prompt of prompts) {
+        const { accessibleSummary, summary } = await renderedPromptSummary(prompt, 360);
+        expect(accessibleSummary).toBe(summary);
+        expect(Array.from(summary).length).toBeLessThanOrEqual(360);
+        expect(isWellFormedUnicode(summary)).toBe(true);
+        summaries.push(summary);
+      }
+      expect(summaries[2]).toBe(`${"a".repeat(237)} … ${"z".repeat(100)}`);
+      expect(summaries[2]).not.toContain(regionalIndicator);
+
+      for (const maxCharacters of [180, 360] as const) {
+        const suffixCharacters = maxCharacters / 3;
+        const prefixCharacters = maxCharacters - 3 - suffixCharacters;
+        const locallyRetainableFragment = `👩${"\u200d👩".repeat((suffixCharacters - 4) / 2)}`;
+        const oversizedCluster = `👩${"\u0301".repeat(33)}\u200d${locallyRetainableFragment}`;
+        const { accessibleSummary, summary } = await renderedPromptSummary(
+          `${"a".repeat(prefixCharacters)}${"x".repeat(500_000)}${oversizedCluster}zz`,
+          maxCharacters,
+        );
+        expect(summary).toBe(`${"a".repeat(prefixCharacters)} … zz`);
+        expect(accessibleSummary).toBe(summary);
+        expect(summary).not.toContain("👩");
+        expect(summary).not.toContain("\u200d");
+      }
+    } finally {
+      if (originalDescriptor) Object.defineProperty(prototype, "segment", originalDescriptor);
+    }
+
+    expect(observedInputLengths.length).toBeGreaterThan(0);
+    expect(Math.max(...observedInputLengths)).toBeLessThanOrEqual(538);
   });
 
   test("keeps a 100-row queue inside one bounded scroll region", async () => {

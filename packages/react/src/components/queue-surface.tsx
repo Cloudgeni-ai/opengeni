@@ -54,36 +54,6 @@ export type QueueSurfaceProps =
       readOnly: true;
     };
 
-const QUEUE_ROW_PREVIEW_CHARACTERS = 360;
-const QUEUE_COLLAPSED_PREVIEW_CHARACTERS = 180;
-
-/**
- * Build a bounded head/tail summary of an arbitrary queued prompt. Sampling
- * both ends distinguishes prompts with equal long prefixes, while `Array.from`
- * keeps both boundaries from splitting a surrogate pair. Only small slices are
- * scanned, so a multi-megabyte durable prompt is never copied in full.
- */
-function queuePromptPreview(prompt: string, maxCharacters: number): string {
-  const scanned = prompt.slice(0, maxCharacters * 2 + 1);
-  const characters = Array.from(scanned);
-  if (scanned.length === prompt.length && characters.length <= maxCharacters) {
-    return prompt;
-  }
-
-  const separator = " … ";
-  const suffixCharacters = Math.min(Math.floor(maxCharacters / 3), 120);
-  const prefixCharacters = maxCharacters - Array.from(separator).length - suffixCharacters;
-  const prefix = Array.from(prompt.slice(0, prefixCharacters * 2 + 1))
-    .slice(0, prefixCharacters)
-    .join("")
-    .trimEnd();
-  const suffix = Array.from(prompt.slice(-(suffixCharacters * 2 + 1)))
-    .slice(-suffixCharacters)
-    .join("")
-    .trimStart();
-  return `${prefix}${separator}${suffix}`;
-}
-
 export function QueueSurface({ queue, composer, readOnly = false }: QueueSurfaceProps) {
   const [open, setOpen] = useState(false);
   const [replaceDraftFor, setReplaceDraftFor] = useState<string | null>(null);
@@ -437,6 +407,178 @@ export function QueueSurface({ queue, composer, readOnly = false }: QueueSurface
       </p>
     </div>
   );
+}
+
+const QUEUE_ROW_PREVIEW_CHARACTERS = 360;
+const QUEUE_COLLAPSED_PREVIEW_CHARACTERS = 180;
+const QUEUE_PREVIEW_GRAPHEME_CONTEXT_CHARACTERS = 32;
+const QUEUE_PREVIEW_SEPARATOR = " … ";
+const queuePreviewSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+
+type BoundedPromptSample = {
+  value: string;
+  characters: number;
+  truncated: boolean;
+};
+
+/**
+ * Build a bounded head/tail summary of an arbitrary queued prompt. Sampling
+ * both ends distinguishes prompts with equal long prefixes. Each sampled edge
+ * has a small amount of grapheme context so ordinary emoji/combining sequences
+ * can be retained whole. A cluster that exceeds that context is omitted rather
+ * than fragmented, and malformed UTF-16 is replaced only in the summary. The
+ * durable prompt remains exact and no operation scans or copies it in full.
+ */
+function queuePromptPreview(prompt: string, maxCharacters: number): string {
+  const wholePromptProbe = samplePromptStart(prompt, maxCharacters + 1);
+  if (!wholePromptProbe.truncated && wholePromptProbe.characters <= maxCharacters) {
+    return replaceLoneSurrogates(wholePromptProbe.value);
+  }
+
+  const suffixCharacters = Math.min(Math.floor(maxCharacters / 3), 120);
+  const prefixCharacters =
+    maxCharacters - codePointLength(QUEUE_PREVIEW_SEPARATOR) - suffixCharacters;
+  const prefixSample = samplePromptStart(
+    prompt,
+    prefixCharacters + QUEUE_PREVIEW_GRAPHEME_CONTEXT_CHARACTERS,
+  );
+  const suffixSample = samplePromptEnd(
+    prompt,
+    suffixCharacters + QUEUE_PREVIEW_GRAPHEME_CONTEXT_CHARACTERS,
+  );
+  const prefixSegments = segmentPromptSample(prefixSample.value);
+  const suffixSegments = segmentPromptSample(suffixSample.value);
+
+  // A cluster at a truncated sampling edge may continue outside the sample.
+  // Prefix sampling starts at the true source start, so only its last segment
+  // is ambiguous. Suffix sampling ends at the true source end, so its first is.
+  if (prefixSample.truncated) prefixSegments.pop();
+  if (suffixSample.truncated) {
+    let ambiguousSegment = suffixSegments.shift();
+    // A locally segmented leading fragment ending in ZWJ can join the next
+    // pictographic segment when omitted left context supplies its base. Keep
+    // backing off until that uncertainty no longer propagates to the right.
+    while (ambiguousSegment?.endsWith("\u200d") && suffixSegments.length > 0) {
+      ambiguousSegment = suffixSegments.shift();
+    }
+    // Regional Indicator pairing depends on the parity of the preceding run.
+    // If that run reaches the unknown sample boundary, omit all of its visible
+    // leading segments rather than potentially recombining halves of flags.
+    while (suffixSegments[0] && startsWithRegionalIndicator(suffixSegments[0])) {
+      suffixSegments.shift();
+    }
+  }
+
+  const prefix = takeWholeGraphemesFromStart(prefixSegments, prefixCharacters);
+  const suffix = takeWholeGraphemesFromEnd(suffixSegments, suffixCharacters);
+  return `${prefix}${QUEUE_PREVIEW_SEPARATOR}${suffix}`;
+}
+
+function samplePromptStart(prompt: string, maxCharacters: number): BoundedPromptSample {
+  let end = 0;
+  let characters = 0;
+  while (end < prompt.length && characters < maxCharacters) {
+    const first = prompt.charCodeAt(end);
+    end +=
+      isHighSurrogate(first) &&
+      end + 1 < prompt.length &&
+      isLowSurrogate(prompt.charCodeAt(end + 1))
+        ? 2
+        : 1;
+    characters += 1;
+  }
+  return { value: prompt.slice(0, end), characters, truncated: end < prompt.length };
+}
+
+function samplePromptEnd(prompt: string, maxCharacters: number): BoundedPromptSample {
+  let start = prompt.length;
+  let characters = 0;
+  while (start > 0 && characters < maxCharacters) {
+    start -= 1;
+    if (
+      isLowSurrogate(prompt.charCodeAt(start)) &&
+      start > 0 &&
+      isHighSurrogate(prompt.charCodeAt(start - 1))
+    ) {
+      start -= 1;
+    }
+    characters += 1;
+  }
+  return { value: prompt.slice(start), characters, truncated: start > 0 };
+}
+
+function segmentPromptSample(sample: string): string[] {
+  return Array.from(
+    queuePreviewSegmenter.segment(replaceLoneSurrogates(sample)),
+    ({ segment }) => segment,
+  );
+}
+
+function replaceLoneSurrogates(value: string): string {
+  let sanitized = "";
+  for (let index = 0; index < value.length; index += 1) {
+    const current = value.charCodeAt(index);
+    if (
+      isHighSurrogate(current) &&
+      index + 1 < value.length &&
+      isLowSurrogate(value.charCodeAt(index + 1))
+    ) {
+      sanitized += value.slice(index, index + 2);
+      index += 1;
+    } else if (isHighSurrogate(current) || isLowSurrogate(current)) {
+      sanitized += "�";
+    } else {
+      sanitized += value[index];
+    }
+  }
+  return sanitized;
+}
+
+function takeWholeGraphemesFromStart(segments: string[], maxCharacters: number): string {
+  const selected: string[] = [];
+  let characters = 0;
+  for (const segment of segments) {
+    const segmentCharacters = codePointLength(segment);
+    if (characters + segmentCharacters > maxCharacters) break;
+    selected.push(segment);
+    characters += segmentCharacters;
+  }
+  while (selected.at(-1)?.trim().length === 0) selected.pop();
+  return selected.join("");
+}
+
+function takeWholeGraphemesFromEnd(segments: string[], maxCharacters: number): string {
+  const selected: string[] = [];
+  let characters = 0;
+  for (let index = segments.length - 1; index >= 0; index -= 1) {
+    const segment = segments[index];
+    if (!segment) continue;
+    const segmentCharacters = codePointLength(segment);
+    if (characters + segmentCharacters > maxCharacters) break;
+    selected.unshift(segment);
+    characters += segmentCharacters;
+  }
+  while (selected[0]?.trim().length === 0) selected.shift();
+  return selected.join("");
+}
+
+function codePointLength(value: string): number {
+  let characters = 0;
+  for (const _character of value) characters += 1;
+  return characters;
+}
+
+function startsWithRegionalIndicator(value: string): boolean {
+  const codePoint = value.codePointAt(0);
+  return codePoint !== undefined && codePoint >= 0x1f1e6 && codePoint <= 0x1f1ff;
+}
+
+function isHighSurrogate(codeUnit: number): boolean {
+  return codeUnit >= 0xd800 && codeUnit <= 0xdbff;
+}
+
+function isLowSurrogate(codeUnit: number): boolean {
+  return codeUnit >= 0xdc00 && codeUnit <= 0xdfff;
 }
 
 function QueuePrompt({

@@ -2,7 +2,14 @@ import type { SessionTurn } from "@opengeni/sdk";
 import { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { QueueSurface, type ComposerState, type UseTurnQueueResult } from "../src/index";
-import { queueHarnessPrompt } from "./queue-fixtures";
+import {
+  QUEUE_BOUNDARY_CLUSTERS,
+  queueBoundaryPrompt,
+  queueHarnessPrompt,
+  type QueueBoundaryCluster,
+  type QueueBoundaryEdge,
+  type QueueBoundaryMaximum,
+} from "./queue-fixtures";
 import "../../../apps/web/src/styles.css";
 import "./queue-harness.css";
 
@@ -18,6 +25,9 @@ const params = new URLSearchParams(window.location.search);
 const initialCount = Math.min(100, Math.max(1, Number(params.get("count") ?? "1") || 1));
 const theme = params.get("theme") === "light" ? "light" : "dark";
 const readOnly = params.get("readOnly") === "1";
+const boundaryMaximum = parseBoundaryMaximum(params.get("boundaryMax"));
+const boundaryEdge = parseBoundaryEdge(params.get("boundaryEdge"));
+const boundaryCluster = parseBoundaryCluster(params.get("boundaryCluster"));
 
 if (theme === "light") {
   document.documentElement.dataset.ogTheme = "light";
@@ -27,6 +37,10 @@ if (theme === "light") {
 
 function makeTurn(index: number): SessionTurn {
   const suffix = String(index + 1).padStart(12, "0");
+  const prompt =
+    index === 0 && boundaryMaximum && boundaryEdge && boundaryCluster
+      ? queueBoundaryPrompt(boundaryMaximum, boundaryEdge, boundaryCluster)
+      : queueHarnessPrompt(index);
   return {
     id: `${String(index + 1).padStart(8, "0")}-1111-4111-8111-${suffix}`,
     workspaceId: "11111111-1111-4111-8111-111111111111",
@@ -36,7 +50,7 @@ function makeTurn(index: number): SessionTurn {
     status: "queued",
     source: "user",
     position: index + 1,
-    prompt: queueHarnessPrompt(index),
+    prompt,
     resources: [{ kind: "file", fileId: `fixture-file-${index + 1}` }],
     tools: [],
     model: "gpt-5.3-codex",
@@ -53,6 +67,22 @@ function makeTurn(index: number): SessionTurn {
     createdAt: "2026-07-19T00:00:00.000Z",
     updatedAt: "2026-07-19T00:00:00.000Z",
   };
+}
+
+function parseBoundaryMaximum(value: string | null): QueueBoundaryMaximum | null {
+  if (value === "180") return 180;
+  if (value === "360") return 360;
+  return null;
+}
+
+function parseBoundaryEdge(value: string | null): QueueBoundaryEdge | null {
+  return value === "head" || value === "tail" ? value : null;
+}
+
+function parseBoundaryCluster(value: string | null): QueueBoundaryCluster | null {
+  return value && Object.hasOwn(QUEUE_BOUNDARY_CLUSTERS, value)
+    ? (value as QueueBoundaryCluster)
+    : null;
 }
 
 const composer: ComposerState = {

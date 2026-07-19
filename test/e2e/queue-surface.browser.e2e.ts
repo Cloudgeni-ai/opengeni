@@ -1,16 +1,23 @@
 import AxeBuilder from "@axe-core/playwright";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { chromium, type Browser, type Page } from "playwright";
 import { freePort, runCommand, startProcess, type StartedProcess } from "@opengeni/testing";
 import {
   OMITTED_QUEUE_SOURCE_MARKER,
+  queueBoundaryPrompt,
+  queueBoundarySummary,
   queueHarnessPrompt,
   queuePromptFingerprint,
+  type QueueBoundaryCluster,
+  type QueueBoundaryEdge,
+  type QueueBoundaryMaximum,
 } from "../../packages/react/demo/queue-fixtures";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
-const evidenceDir = process.env.OPENGENI_OPE9_EVIDENCE_DIR ?? "/tmp/opengeni-ope9-queue-evidence";
+const evidenceDir =
+  process.env.OPENGENI_OPE9_EVIDENCE_DIR ?? "/tmp/opengeni-ope9-queue-evidence-grapheme";
 const viewports = [
   { width: 320, height: 800 },
   { width: 360, height: 800 },
@@ -66,11 +73,23 @@ type BrowserAccessibilityEvidence = {
   };
 };
 
+type GraphemeBoundaryEvidence = {
+  viewport: { width: number; height: number };
+  maxCharacters: QueueBoundaryMaximum;
+  edge: QueueBoundaryEdge;
+  cluster: QueueBoundaryCluster;
+  summary: string;
+  codePointLength: number;
+  chromeAccessibleSummary: string;
+  exactDisclosure: boolean;
+};
+
 describe("queue surface browser acceptance", () => {
   let browser: Browser;
   let demo: StartedProcess;
   let baseUrl: string;
   const measurements: BrowserMeasurement[] = [];
+  const graphemeBoundaryEvidence: GraphemeBoundaryEvidence[] = [];
   let accessibilityEvidence: BrowserAccessibilityEvidence | null = null;
 
   beforeAll(async () => {
@@ -85,10 +104,11 @@ describe("queue surface browser acceptance", () => {
       if (build.exitCode !== 0) {
         throw new Error(`Queue demo build failed:\n${build.stdout}\n${build.stderr}`);
       }
-      browser = await chromium.launch({
-        executablePath:
-          process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ?? "/usr/local/bin/chromium",
-      });
+      const configuredChromium = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH;
+      const sandboxChromium = "/usr/local/bin/chromium";
+      const executablePath =
+        configuredChromium ?? (existsSync(sandboxChromium) ? sandboxChromium : undefined);
+      browser = await chromium.launch(executablePath ? { executablePath } : undefined);
       demo = await startProcess(
         [
           "bun",
@@ -130,6 +150,10 @@ describe("queue surface browser acceptance", () => {
         `${JSON.stringify(accessibilityEvidence, null, 2)}\n`,
       );
     }
+    await writeFile(
+      `${evidenceDir}/grapheme-boundaries.json`,
+      `${JSON.stringify({ cases: graphemeBoundaryEvidence }, null, 2)}\n`,
+    );
     await Promise.allSettled([demo?.stop(), browser?.close()]);
   }, 60_000);
 
@@ -441,6 +465,112 @@ describe("queue surface browser acceptance", () => {
       await context.close();
     }
   }, 30_000);
+
+  test("Chrome exposes whole graphemes at every head and tail preview boundary", async () => {
+    const boundaryViewports = [
+      { width: 320, height: 800 },
+      { width: 360, height: 800 },
+      { width: 375, height: 812 },
+    ] as const;
+    const clusterNames = ["zwj", "combining"] as const;
+
+    for (const viewport of boundaryViewports) {
+      const context = await browser.newContext({ viewport, hasTouch: true, isMobile: true });
+      try {
+        const page = await context.newPage();
+        const diagnostics = observePageFailures(page);
+        for (const maxCharacters of [180, 360] as const) {
+          for (const edge of ["head", "tail"] as const) {
+            for (const cluster of clusterNames) {
+              const search = new URLSearchParams({
+                boundaryCluster: cluster,
+                boundaryEdge: edge,
+                boundaryMax: String(maxCharacters),
+                count: "1",
+                theme: "light",
+              });
+              await page.goto(`${baseUrl}/queue.html?${search}`, { waitUntil: "networkidle" });
+
+              let summary: string;
+              let chromeAccessibleSummary: string;
+              if (maxCharacters === 180) {
+                summary = (await page.getByTestId("queue-collapsed-preview").textContent()) ?? "";
+                const tree = await chromeAccessibilityTree(page);
+                const control = tree.find(
+                  (node) =>
+                    !node.ignored && node.role === "button" && node.name === "1 queued prompt",
+                );
+                chromeAccessibleSummary = control?.description ?? "";
+                expect(exposedNodesContaining(tree, summary)).toHaveLength(1);
+                await page.getByRole("button", { name: "1 queued prompt", exact: true }).click();
+              } else {
+                await page.getByRole("button", { name: "1 queued prompt", exact: true }).click();
+                summary = (await page.getByTestId("queue-prompt-preview-1").textContent()) ?? "";
+                const tree = await chromeAccessibilityTree(page);
+                const summaryNode = queueSummaryNodes(tree)[0];
+                chromeAccessibleSummary = (summaryNode?.name ?? "").replace(
+                  /^Queued prompt 1 summary: /,
+                  "",
+                );
+                expect(unignoredDescendants(tree, summaryNode?.nodeId ?? "")).toHaveLength(0);
+              }
+
+              expect(summary).toBe(queueBoundarySummary(maxCharacters, edge));
+              expect(chromeAccessibleSummary).toBe(summary);
+              expect(Array.from(summary).length).toBeLessThanOrEqual(maxCharacters);
+              expect(isWellFormedUnicode(summary)).toBe(true);
+
+              if (
+                (cluster === "zwj" && edge === "head") ||
+                (cluster === "combining" && edge === "tail")
+              ) {
+                await page.screenshot({
+                  path: `${evidenceDir}/grapheme-${viewport.width}-${maxCharacters}-${edge}-${cluster}.png`,
+                  animations: "disabled",
+                });
+              }
+
+              await page
+                .getByRole("button", {
+                  name: "Show full content for queued prompt 1",
+                  exact: true,
+                })
+                .click();
+              const exactPrompt = queueBoundaryPrompt(maxCharacters, edge, cluster);
+              expect(
+                await page
+                  .getByRole("region", {
+                    name: "Full content for queued prompt 1",
+                    exact: true,
+                  })
+                  .textContent(),
+              ).toBe(exactPrompt);
+              const disclosedTree = await chromeAccessibilityTree(page);
+              const exactDisclosure = disclosedTree.some(
+                (node) => !node.ignored && node.name === exactPrompt,
+              );
+              expect(exactDisclosure).toBe(true);
+              expect((await pageMetrics(page)).documentOverflow).toBeLessThanOrEqual(1);
+
+              graphemeBoundaryEvidence.push({
+                viewport,
+                maxCharacters,
+                edge,
+                cluster,
+                summary,
+                codePointLength: Array.from(summary).length,
+                chromeAccessibleSummary,
+                exactDisclosure,
+              });
+            }
+          }
+        }
+        expect(diagnostics).toEqual([]);
+      } finally {
+        await context.close();
+      }
+    }
+  }, 90_000);
 });
 
 type AccessibleTreeNode = {
@@ -473,6 +603,25 @@ async function chromeAccessibilityTree(page: Page): Promise<AccessibleTreeNode[]
 
 function accessibilityValue(value: { value?: unknown } | undefined): string {
   return typeof value?.value === "string" ? value.value : "";
+}
+
+function isWellFormedUnicode(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const current = value.charCodeAt(index);
+    if (current >= 0xd800 && current <= 0xdbff) {
+      if (
+        index + 1 >= value.length ||
+        value.charCodeAt(index + 1) < 0xdc00 ||
+        value.charCodeAt(index + 1) > 0xdfff
+      ) {
+        return false;
+      }
+      index += 1;
+    } else if (current >= 0xdc00 && current <= 0xdfff) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function queueSummaryNodes(nodes: AccessibleTreeNode[]): AccessibleTreeNode[] {
