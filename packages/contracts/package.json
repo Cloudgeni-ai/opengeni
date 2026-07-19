@@ -29,6 +29,10 @@
     "./google-drive": {
       "types": "./src/google-drive.ts",
       "default": "./src/google-drive.ts"
+    },
+    "./session-archive": {
+      "types": "./src/session-archive.ts",
+      "default": "./src/session-archive.ts"
     }
   },
   "publishConfig": {
