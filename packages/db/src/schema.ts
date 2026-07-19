@@ -1015,9 +1015,7 @@ export const knowledgeMemories = pgTable(
     sourceRefs: jsonb("source_refs").$type<unknown[]>().notNull().default([]),
     confidence: integer("confidence").notNull().default(50),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
-    createdBySessionId: uuid("created_by_session_id").references(() => sessions.id, {
-      onDelete: "set null",
-    }),
+    createdBySessionId: uuid("created_by_session_id"),
     reviewedBy: text("reviewed_by"),
     reviewedAt: timestamp("reviewed_at", { withTimezone: true }),
     // Workspace Memory V1 (migration 0045). Embedding is nullable: fail-soft writes
@@ -1060,6 +1058,11 @@ export const knowledgeMemories = pgTable(
       table.workspaceId,
       table.createdBySessionId,
     ),
+    createdByWorkspaceSession: foreignKey({
+      name: "knowledge_memories_created_by_workspace_session_fk",
+      columns: [table.workspaceId, table.createdBySessionId],
+      foreignColumns: [sessions.workspaceId, sessions.id],
+    }),
     // Working-set selection (partial index mirrors migration 0045).
     workspaceVisible: index("knowledge_memories_workspace_visible_idx")
       .on(table.workspaceId, table.pinned, table.updatedAt)

@@ -203,7 +203,9 @@ wrong one is the classic mistake.
    what a new turn's input is built from. It is dual-written as the agent
    streams (reconciled after every model response and at every turn-end path)
    so a crash loses at most the single in-flight model call. Ordinary inference
-   has no second conversation-memory read path.
+   has no second conversation-memory read path. Private memory tool arguments
+   and results remain here so the model can continue truthfully; they are not
+   copied into the workspace-readable event projection.
 2. **`agent_run_states` — approval resume only.** The serialized SDK `RunState`
    blob is an opaque, SDK-version-gated process checkpoint. Its one legitimate
    job is resuming a turn that paused mid-flight for a human approval
@@ -212,8 +214,13 @@ wrong one is the classic mistake.
    Do not use it as conversation memory.
 3. **`session_events` — the redacted human/audit timeline.** Append-only,
    per-session sequence numbers, drives replay/SSE/UI. It is **secret-redacted
-   and lossy** (reasoning items and several item types are dropped), so it is
-   correct for humans and auditing and must never be fed back to the model.
+   and lossy** (reasoning items and several item types are dropped). The worker
+   allocates one projection state per SDK stream: private `memory_search`,
+   `memory_save`, and `memory_correct` calls retain only id/name plus
+   `redacted: true`, their correlated outputs retain only id plus
+   `redacted: true`, and memory lifecycle events retain ids/kind/action rather
+   than text, queries, reasons, sources, or metadata. This store is correct for
+   humans and auditing and must never be fed back to the model.
 
 Sandbox recovery state is persisted separately again, in
 `sandbox_session_envelopes`: the small versioned descriptor (provider handle /
@@ -233,6 +240,14 @@ session id, the session's persisted creator subject, and normalized persisted
 subject, role, session, or actor. Role/label matches affect relevance and never
 grant access. Missing trusted user context fails closed under subject-aware FORCE
 RLS.
+
+REST validates any signed session id against the requested workspace before all
+memory reads, writes, relationships, export, maintenance, or deprecated
+documents-MCP operations. The worker bearer is only a transport principal: the
+effective subject and creator/actor attribution come from the persisted session
+creator. Creator provenance is protected by the composite workspace/session FK.
+The curated review lane rejects direct approved/rejected creation and permits a
+reviewed transition only from a row-locked `proposed` record.
 
 When `settings.memoryEnabled` is on, `resolveWorkspaceMemoryBlock` filters before
 ranking, considers at most 50 candidates, excludes episodic records, and emits

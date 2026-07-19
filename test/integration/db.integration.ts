@@ -972,13 +972,36 @@ describe("DB integration", () => {
     const [evidence] = await dbClient.db.execute<{
       markerCount: number;
       indexName: string | null;
+      creatorConstraint: string | null;
+      legacyCreatorConstraintCount: number;
     }>(dbSql`
       select
         (select count(*)::int from schema_migrations where name = ${migrationName}) as "markerCount",
-        to_regclass('knowledge_memories_scope_visible_text_hash_uq')::text as "indexName"
+        to_regclass('knowledge_memories_scope_visible_text_hash_uq')::text as "indexName",
+        (
+          select pg_get_constraintdef(oid)
+          from pg_constraint
+          where conrelid = 'knowledge_memories'::regclass
+            and conname = 'knowledge_memories_created_by_workspace_session_fk'
+        ) as "creatorConstraint",
+        (
+          select count(*)::int
+          from pg_constraint as constraint_row
+          join pg_attribute as local_column
+            on local_column.attrelid = constraint_row.conrelid
+           and local_column.attnum = constraint_row.conkey[1]
+          where constraint_row.conrelid = 'knowledge_memories'::regclass
+            and constraint_row.contype = 'f'
+            and cardinality(constraint_row.conkey) = 1
+            and local_column.attname = 'created_by_session_id'
+        ) as "legacyCreatorConstraintCount"
     `);
     expect(Number(evidence?.markerCount ?? 0)).toBe(1);
     expect(evidence?.indexName).toBe("knowledge_memories_scope_visible_text_hash_uq");
+    expect(evidence?.creatorConstraint).toContain(
+      "FOREIGN KEY (workspace_id, created_by_session_id) REFERENCES sessions(workspace_id, id)",
+    );
+    expect(Number(evidence?.legacyCreatorConstraintCount ?? -1)).toBe(0);
   }, 180_000);
 
   test("RLS policies isolate session goal rows for a non-owner app role", async () => {
@@ -1169,6 +1192,67 @@ describe("DB integration", () => {
     } finally {
       await appDbClient.close();
     }
+  });
+
+  test("memory creator provenance is fenced by the session workspace", async () => {
+    const grantA = await testGrant(dbClient.db);
+    const grantB = await testGrant(dbClient.db);
+    const sessionA = await createSession(dbClient.db, {
+      accountId: grantA.accountId,
+      workspaceId: grantA.workspaceId,
+      initialMessage: "same-workspace creator provenance",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    const sessionB = await createSession(dbClient.db, {
+      accountId: grantB.accountId,
+      workspaceId: grantB.workspaceId,
+      initialMessage: "foreign-workspace creator provenance",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+
+    await expect(
+      createKnowledgeMemory(dbClient.db, {
+        accountId: grantA.accountId,
+        workspaceId: grantA.workspaceId,
+        status: "proposed",
+        text: "Valid same-workspace provenance.",
+        createdBySessionId: sessionA.id,
+      }),
+    ).resolves.toMatchObject({ createdBySessionId: sessionA.id });
+
+    await expect(
+      dbClient.db
+        .insert(dbSchema.knowledgeMemories)
+        .values({
+          accountId: grantA.accountId,
+          workspaceId: grantA.workspaceId,
+          status: "proposed",
+          kind: "semantic",
+          scope: "workspace",
+          scopeType: "workspace",
+          text: "Cross-workspace provenance must fail.",
+          createdBySessionId: sessionB.id,
+        })
+        .execute(),
+    ).rejects.toThrow();
+
+    const [constraint] = await dbClient.db.execute<{
+      definition: string;
+    }>(dbSql`
+      select pg_get_constraintdef(oid) as definition
+      from pg_constraint
+      where conrelid = 'knowledge_memories'::regclass
+        and conname = 'knowledge_memories_created_by_workspace_session_fk'
+    `);
+    expect(constraint?.definition).toContain(
+      "FOREIGN KEY (workspace_id, created_by_session_id) REFERENCES sessions(workspace_id, id)",
+    );
   });
 
   // ---- Workspace Memory V1 (M1) -------------------------------------------
@@ -1411,6 +1495,58 @@ describe("DB integration", () => {
           text: `Direct ${status} creation must not bypass review.`,
         }),
       ).rejects.toThrow(/only supports proposed status/i);
+    }
+  });
+
+  test("reviewed statuses are reachable only from a locked proposed row", async () => {
+    const grant = await testGrant(dbClient.db);
+    const proposed = await createKnowledgeMemory(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      status: "proposed",
+      text: "The valid proposed review candidate.",
+    });
+    await expect(
+      updateKnowledgeMemory(dbClient.db, grant.workspaceId, proposed.id, {
+        status: "approved",
+        reviewedBy: "reviewer",
+      }),
+    ).resolves.toMatchObject({ status: "approved", reviewedBy: "reviewer" });
+
+    const makeStatus = async (
+      status: "active" | "archived" | "superseded" | "approved" | "rejected",
+    ) => {
+      const row = await createKnowledgeMemory(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        status: "proposed",
+        text: `Review gate source ${status} ${crypto.randomUUID()}.`,
+      });
+      if (status === "active" || status === "archived" || status === "superseded") {
+        return await updateKnowledgeMemory(dbClient.db, grant.workspaceId, row.id, { status });
+      }
+      return await updateKnowledgeMemory(dbClient.db, grant.workspaceId, row.id, {
+        status,
+        reviewedBy: "initial reviewer",
+      });
+    };
+
+    for (const sourceStatus of [
+      "active",
+      "archived",
+      "superseded",
+      "approved",
+      "rejected",
+    ] as const) {
+      const source = await makeStatus(sourceStatus);
+      await expect(
+        updateKnowledgeMemory(dbClient.db, grant.workspaceId, source.id, {
+          status: sourceStatus === "approved" ? "rejected" : "approved",
+          reviewedBy: "bypass reviewer",
+        }),
+      ).rejects.toThrow(
+        new RegExp(`only reachable from proposed.*current status is ${sourceStatus}`, "i"),
+      );
     }
   });
 

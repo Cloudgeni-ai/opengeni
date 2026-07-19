@@ -4723,10 +4723,31 @@ describe("API component integration", () => {
       permissions: ["documents:search", "documents:manage"],
       sessionId: trustedSession.id,
     });
+    const workerSessionToken = await signDelegatedBearer(delegationSecret, grant, {
+      subjectId: "worker:first-party-mcp",
+      permissions: ["documents:search", "documents:manage"],
+      sessionId: trustedSession.id,
+    });
     const missingSessionTokenA = await signDelegatedBearer(delegationSecret, grant, {
       subjectId: subjectA,
       permissions: ["documents:search", "documents:manage"],
       sessionId: forgedSessionId,
+    });
+    const foreignGrant = await bootstrapMcpGrant(dbClient.db);
+    const foreignSession = await createSession(dbClient.db, {
+      accountId: foreignGrant.accountId,
+      workspaceId: foreignGrant.workspaceId,
+      initialMessage: "foreign REST memory context",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+      createdBySubjectId: subjectA,
+    });
+    const foreignSessionTokenA = await signDelegatedBearer(delegationSecret, grant, {
+      subjectId: subjectA,
+      permissions: ["documents:search", "documents:manage"],
+      sessionId: foreignSession.id,
     });
     const tokenB = await signDelegatedBearer(delegationSecret, grant, {
       subjectId: subjectB,
@@ -4820,6 +4841,61 @@ describe("API component integration", () => {
       },
     );
     expect(missingSessionWrite.status).toBe(403);
+    for (const [authorization, scopeSpec] of [
+      [missingSessionTokenA, { type: "workspace" }],
+      [missingSessionTokenA, { type: "user" }],
+      [foreignSessionTokenA, { type: "workspace" }],
+      [foreignSessionTokenA, { type: "user" }],
+    ] as const) {
+      const rejectedWrite = await app.request(
+        workspacePath(grant.workspaceId, "/knowledge/memories"),
+        {
+          method: "POST",
+          headers: jsonHeaders(authorization),
+          body: JSON.stringify({
+            text: `Untrusted signed session ${scopeSpec.type} write must fail closed.`,
+            scopeSpec,
+          }),
+        },
+      );
+      expect(rejectedWrite.status).toBe(403);
+    }
+
+    const workerPrivateResponse = await app.request(
+      workspacePath(grant.workspaceId, "/knowledge/memories"),
+      {
+        method: "POST",
+        headers: jsonHeaders(workerSessionToken),
+        body: JSON.stringify({
+          text: "Worker bearer must persist the session creator's private preference.",
+          kind: "preference",
+          scopeSpec: { type: "user" },
+        }),
+      },
+    );
+    expect(workerPrivateResponse.status).toBe(201);
+    const workerPrivate = (await workerPrivateResponse.json()) as {
+      id: string;
+      scopeSpec: { type: string; subjectId?: string };
+      createdBySessionId: string | null;
+    };
+    expect(workerPrivate).toMatchObject({
+      scopeSpec: { type: "user" },
+      createdBySessionId: trustedSession.id,
+    });
+    const [workerPrivateStored] = await dbClient.db.execute<{
+      scopeSubjectId: string | null;
+      createdBySessionId: string | null;
+    }>(dbSql`
+      select scope_subject_id as "scopeSubjectId",
+             created_by_session_id as "createdBySessionId"
+      from knowledge_memories
+      where id = ${workerPrivate.id}::uuid
+    `);
+    expect(workerPrivateStored).toEqual({
+      scopeSubjectId: subjectA,
+      createdBySessionId: trustedSession.id,
+    });
 
     const createTrustedScope = async (
       scopeSpec:
@@ -4873,7 +4949,7 @@ describe("API component integration", () => {
       workspacePath(grant.workspaceId, "/knowledge/memories/search"),
       {
         method: "POST",
-        headers: jsonHeaders(sessionTokenA),
+        headers: jsonHeaders(workerSessionToken),
         body: JSON.stringify({
           query: "Trusted REST selector",
           mode: "keyword",
@@ -4912,7 +4988,7 @@ describe("API component integration", () => {
       ).scopeSpec,
     ).toEqual({ type: "session", sessionId: trustedSession.id });
 
-    const reviewResponse = await app.request(
+    const invalidActiveReviewResponse = await app.request(
       workspacePath(grant.workspaceId, `/knowledge/memories/${created.id}`),
       {
         method: "PATCH",
@@ -4921,6 +4997,30 @@ describe("API component integration", () => {
           status: "approved",
           reviewedBy: "forged-reviewer",
         }),
+      },
+    );
+    expect(invalidActiveReviewResponse.status).toBe(400);
+
+    const proposedReviewResponse = await app.request(
+      workspacePath(grant.workspaceId, "/knowledge/memories"),
+      {
+        method: "POST",
+        headers: jsonHeaders(tokenA),
+        body: JSON.stringify({
+          status: "proposed",
+          text: "Subject A proposed private review candidate.",
+          scopeSpec: { type: "user" },
+        }),
+      },
+    );
+    expect(proposedReviewResponse.status).toBe(201);
+    const proposedReview = (await proposedReviewResponse.json()) as { id: string };
+    const reviewResponse = await app.request(
+      workspacePath(grant.workspaceId, `/knowledge/memories/${proposedReview.id}`),
+      {
+        method: "PATCH",
+        headers: jsonHeaders(tokenA),
+        body: JSON.stringify({ status: "approved", reviewedBy: "forged-reviewer" }),
       },
     );
     expect(reviewResponse.status).toBe(200);
@@ -6302,12 +6402,12 @@ describe("API component integration", () => {
       expect(workspaceSaveEvent?.payload).toMatchObject({
         memoryId: saved.memory.id,
         kind: "procedural",
-        preview: "Staging deploys from main only, via opengeni-ops.",
+        deduped: false,
       });
       for (const event of saveEvents) {
-        expect(
-          ((event.payload as { preview?: string } | undefined)?.preview ?? "").length,
-        ).toBeLessThanOrEqual(120);
+        expect(event.payload).not.toHaveProperty("preview");
+        expect(event.payload).not.toHaveProperty("sourceRefs");
+        expect(event.payload).not.toHaveProperty("metadata");
       }
 
       const search = JSON.parse(
@@ -6374,14 +6474,19 @@ describe("API component integration", () => {
       expect(correctionEvents[0]?.payload).toMatchObject({
         memoryId: saved.memory.id,
         action: "superseded",
-        reason: "Deployment branch changed",
         replacementMemoryId: superseded.replacement!.id,
       });
       expect(correctionEvents[1]?.payload).toMatchObject({
         memoryId: superseded.replacement!.id,
         action: "archived",
-        reason: "Staging deploy process moved into a runbook.",
       });
+      for (const event of correctionEvents) {
+        expect(event.payload).not.toHaveProperty("preview");
+        expect(event.payload).not.toHaveProperty("replacementPreview");
+        expect(event.payload).not.toHaveProperty("reason");
+        expect(event.payload).not.toHaveProperty("sourceRefs");
+        expect(event.payload).not.toHaveProperty("metadata");
+      }
     } finally {
       await prepared?.close().catch(() => undefined);
       server.stop(true);

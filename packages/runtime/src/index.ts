@@ -4277,7 +4277,30 @@ export function normalizeToolOutputForEvent(output: unknown): unknown {
   return output;
 }
 
-export function normalizeSdkEvent(event: RunStreamEvent): NormalizedRuntimeEvent[] {
+/**
+ * Per-stream state for the lossy session-event projection.
+ *
+ * Tool outputs do not reliably repeat the tool name, so a memory tool's output
+ * can only be identified from the call id emitted by its preceding call item.
+ * This state is intentionally owned by one worker stream/turn: a process-global
+ * map could correlate unrelated tenants or retain call ids indefinitely.
+ */
+export type SdkEventProjectionState = {
+  privateMemoryToolCallIds: Set<string>;
+};
+
+export function createSdkEventProjectionState(): SdkEventProjectionState {
+  return { privateMemoryToolCallIds: new Set<string>() };
+}
+
+function isPrivateMemoryToolName(name: unknown): name is string {
+  return typeof name === "string" && /(?:^|__)memory_(?:search|save|correct)$/.test(name);
+}
+
+export function normalizeSdkEvent(
+  event: RunStreamEvent,
+  projectionState?: SdkEventProjectionState,
+): NormalizedRuntimeEvent[] {
   const out: NormalizedRuntimeEvent[] = [];
   if (event.type === "raw_model_stream_event") {
     const data = (event as any).data;
@@ -4312,20 +4335,43 @@ export function normalizeSdkEvent(event: RunStreamEvent): NormalizedRuntimeEvent
   }
   if (item.type === "tool_call_item") {
     const raw = item.rawItem ?? {};
+    const id = raw.callId ?? raw.id ?? item.id ?? null;
+    const name = raw.name ?? raw.type ?? "tool";
+    if (isPrivateMemoryToolName(name)) {
+      if (typeof id === "string" && id.length > 0) {
+        projectionState?.privateMemoryToolCallIds.add(id);
+      }
+      // Session events are a workspace-readable, lossy audit/UI projection.
+      // Memory text/query/reason/source metadata remains in the separately
+      // persisted model conversation history, never in this projection.
+      out.push({
+        type: "agent.toolCall.created",
+        payload: { id, name, arguments: null, redacted: true },
+      });
+      return out;
+    }
     out.push({
       type: "agent.toolCall.created",
       payload: {
-        id: raw.callId ?? raw.id ?? item.id ?? null,
-        name: raw.name ?? raw.type ?? "tool",
+        id,
+        name,
         arguments: raw.arguments ?? raw.input ?? null,
         raw,
       },
     });
   } else if (item.type === "tool_call_output_item") {
+    const id = item.rawItem?.callId ?? item.id ?? null;
+    if (typeof id === "string" && projectionState?.privateMemoryToolCallIds.delete(id) === true) {
+      out.push({
+        type: "agent.toolCall.output",
+        payload: { id, output: null, redacted: true },
+      });
+      return out;
+    }
     out.push({
       type: "agent.toolCall.output",
       payload: {
-        id: item.rawItem?.callId ?? item.id ?? null,
+        id,
         // Compact any structured/binary image output to a data-URL string so a
         // screenshot never bloats session_events ~10x as an object-of-numbers.
         output: normalizeToolOutputForEvent(item.output),

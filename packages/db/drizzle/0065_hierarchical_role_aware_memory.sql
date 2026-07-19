@@ -68,6 +68,48 @@ FOR EACH ROW EXECUTE FUNCTION opengeni_private.derive_memory_scope_type();
 
 ALTER TABLE "knowledge_memories" ALTER COLUMN "scope_type" SET NOT NULL;
 
+-- Migration 0041 used a global single-column creator FK. Replace it with a
+-- workspace-qualified provenance fence so a valid session from another tenant
+-- can never be attached to this memory. Discover the legacy constraint by its
+-- referenced column rather than assuming PostgreSQL's generated name, making a
+-- retry safe across both raw-SQL and schema-created databases.
+DO $$
+DECLARE
+  legacy_constraint_name text;
+BEGIN
+  FOR legacy_constraint_name IN
+    SELECT constraint_row.conname
+    FROM pg_constraint AS constraint_row
+    JOIN pg_attribute AS local_column
+      ON local_column.attrelid = constraint_row.conrelid
+     AND local_column.attnum = constraint_row.conkey[1]
+    WHERE constraint_row.conrelid = 'knowledge_memories'::regclass
+      AND constraint_row.contype = 'f'
+      AND cardinality(constraint_row.conkey) = 1
+      AND local_column.attname = 'created_by_session_id'
+  LOOP
+    EXECUTE format(
+      'ALTER TABLE "knowledge_memories" DROP CONSTRAINT %I',
+      legacy_constraint_name
+    );
+  END LOOP;
+END $$;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'knowledge_memories_created_by_workspace_session_fk'
+      AND conrelid = 'knowledge_memories'::regclass
+  ) THEN
+    ALTER TABLE "knowledge_memories"
+      ADD CONSTRAINT "knowledge_memories_created_by_workspace_session_fk"
+      FOREIGN KEY ("workspace_id", "created_by_session_id")
+      REFERENCES "sessions"("workspace_id", "id")
+      ON DELETE SET NULL ("created_by_session_id");
+  END IF;
+END $$;
+
 DO $$
 BEGIN
   IF NOT EXISTS (

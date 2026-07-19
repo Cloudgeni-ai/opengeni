@@ -4,7 +4,12 @@ import {
   searchDocuments,
   type DocumentServices,
 } from "@opengeni/documents";
-import { createKnowledgeMemory, listKnowledgeMemories, type Database } from "@opengeni/db";
+import {
+  createKnowledgeMemory,
+  listKnowledgeMemories,
+  type Database,
+  type MemoryAccessContext,
+} from "@opengeni/db";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
 
@@ -44,7 +49,10 @@ export function buildDocumentsMcpServer(
   accountId: string,
   workspaceId: string,
   documentServices: DocumentServices,
-  options: { createdBySessionId?: string | undefined } = {},
+  options: {
+    createdBySessionId?: string | undefined;
+    access?: MemoryAccessContext | undefined;
+  } = {},
 ): McpServer {
   const server = new McpServer({
     name: "opengeni-documents",
@@ -141,6 +149,7 @@ export function buildDocumentsMcpServer(
               ...(kind ? { kind } : {}),
               ...(scope ? { scope } : {}),
               ...(limit ? { limit } : {}),
+              access: options.access,
             }),
           ),
         },
@@ -181,6 +190,7 @@ export function buildDocumentsMcpServer(
               confidence: confidence ?? 0.5,
               metadata: metadata ?? {},
               createdBySessionId: options.createdBySessionId,
+              access: options.access,
             }),
           ),
         },

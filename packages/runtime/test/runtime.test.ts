@@ -37,6 +37,7 @@ import {
   modelCallUsageTelemetry,
   modelResponseUsageFromSdkEvent,
   normalizeSdkEvent,
+  createSdkEventProjectionState,
   normalizeToolOutputForEvent,
   prepareRunInput,
   stripProviderItemIdsFilter,
@@ -311,6 +312,105 @@ describe("runtime event normalization", () => {
 
     expect(event?.type).toBe("agent.toolCall.created");
     expect((event?.payload as { id?: string } | undefined)?.id).toBe("call-1");
+  });
+
+  test("redacts private memory calls and correlates outputs only within one event stream", () => {
+    const state = createSdkEventProjectionState();
+    const otherStreamState = createSdkEventProjectionState();
+    const secret = "private-memory-event-sentinel";
+    const privateToolNames = [
+      "memory_search",
+      "opengeni__memory_save",
+      "workspace__memory_correct",
+    ];
+    const projectedCalls = privateToolNames.map((name, index) => {
+      const [created] = normalizeSdkEvent(
+        {
+          type: "run_item_stream_event",
+          item: {
+            id: `memory-call-item-${index}`,
+            type: "tool_call_item",
+            rawItem: {
+              callId: `memory-call-${index}`,
+              type: "function_call",
+              name,
+              arguments: JSON.stringify({
+                query: secret,
+                text: secret,
+                replacement: secret,
+                reason: secret,
+                sourceRefs: [{ metadata: { secret } }],
+              }),
+            },
+          },
+        } as any,
+        state,
+      );
+      expect(created).toEqual({
+        type: "agent.toolCall.created",
+        payload: {
+          id: `memory-call-${index}`,
+          name,
+          arguments: null,
+          redacted: true,
+        },
+      });
+      return created;
+    });
+
+    const [wrongStreamOutput] = normalizeSdkEvent(
+      {
+        type: "run_item_stream_event",
+        item: {
+          id: "wrong-stream-output-item",
+          type: "tool_call_output_item",
+          rawItem: { callId: "memory-call-1", type: "function_call_result" },
+          output: { memory: { text: secret } },
+        },
+      } as any,
+      otherStreamState,
+    );
+    expect(wrongStreamOutput).toEqual({
+      type: "agent.toolCall.output",
+      payload: { id: "memory-call-1", output: { memory: { text: secret } } },
+    });
+
+    const [output] = normalizeSdkEvent(
+      {
+        type: "run_item_stream_event",
+        item: {
+          id: "memory-output-item",
+          type: "tool_call_output_item",
+          rawItem: { callId: "memory-call-1", type: "function_call_result" },
+          output: {
+            memory: { text: secret, sourceRefs: [{ metadata: { secret } }] },
+          },
+        },
+      } as any,
+      state,
+    );
+
+    expect(output).toEqual({
+      type: "agent.toolCall.output",
+      payload: { id: "memory-call-1", output: null, redacted: true },
+    });
+    expect(JSON.stringify([...projectedCalls, output])).not.toContain(secret);
+    expect(state.privateMemoryToolCallIds).toEqual(new Set(["memory-call-0", "memory-call-2"]));
+    expect(otherStreamState.privateMemoryToolCallIds.size).toBe(0);
+
+    const [legacyOutput] = normalizeSdkEvent({
+      type: "run_item_stream_event",
+      item: {
+        id: "legacy-output-item",
+        type: "tool_call_output_item",
+        rawItem: { callId: "memory-call-1", type: "function_call_result" },
+        output: secret,
+      },
+    } as any);
+    expect(legacyOutput).toEqual({
+      type: "agent.toolCall.output",
+      payload: { id: "memory-call-1", output: secret },
+    });
   });
 
   test("compacts a codex computer_screenshot Uint8Array output to a data-URL string in the event", () => {

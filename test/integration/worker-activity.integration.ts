@@ -41,15 +41,21 @@ import {
   listScheduledTaskRuns,
   recordUsageEvent,
   requireScheduledTask,
+  saveWorkspaceMemory,
   saveRunState,
   mutateWorkspaceControlInTransaction,
   sumUsageQuantity,
   updateScheduledTask,
+  updateWorkspaceSettings,
   withWorkspaceRls,
   type Database,
 } from "@opengeni/db";
 import { submitTestHumanPrompt } from "./helpers/session-control";
-import type { AccessGrant, SessionStatus } from "@opengeni/contracts";
+import {
+  signDelegatedAccessToken,
+  type AccessGrant,
+  type SessionStatus,
+} from "@opengeni/contracts";
 import { createNatsEventBus, type EventBus } from "@opengeni/events";
 import { createObservability } from "@opengeni/observability";
 import {
@@ -405,6 +411,193 @@ describe("worker activities integration", () => {
       const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100);
       expect(events.some((event) => event.type === "turn.completed")).toBe(true);
       expect(events.some((event) => event.type === "turn.failed")).toBe(false);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("keeps private memory tool data in model history but out of events and API replay", async () => {
+    const noopWorkflowClient: SessionWorkflowClient = {
+      signalUserMessage: async () => undefined,
+      wakeSessionWorkflow: async () => undefined,
+      requestSessionWorkflowWakeDispatch: async () => undefined,
+      signalApprovalDecision: async () => undefined,
+      signalSessionControl: async () => undefined,
+      syncScheduledTask: async () => undefined,
+      deleteScheduledTaskSchedule: async () => undefined,
+      triggerScheduledTask: async () => undefined,
+    };
+    const grant = await testGrant(dbClient.db);
+    const delegationSecret = "test-memory-event-privacy-secret";
+    const apiSettings = testSettings({
+      databaseUrl: services.databaseUrl,
+      natsUrl: services.natsUrl,
+      productAccessMode: "configured",
+      delegationSecret,
+    });
+    const app = createApp({
+      settings: apiSettings,
+      db: dbClient.db,
+      bus,
+      workflowClient: noopWorkflowClient,
+    });
+    const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: app.fetch });
+    const saveSentinel = `private-memory-save-${crypto.randomUUID()}`;
+    const searchSentinel = `private-memory-search-${crypto.randomUUID()}`;
+    const replacementSentinel = `private-memory-replacement-${crypto.randomUUID()}`;
+    const reasonSentinel = `private-memory-reason-${crypto.randomUUID()}`;
+    const privateSentinels = [saveSentinel, searchSentinel, replacementSentinel, reasonSentinel];
+    try {
+      await updateWorkspaceSettings(dbClient.db, grant.workspaceId, { memoryEnabled: true });
+      const seeded = await saveWorkspaceMemory(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        text: "Seed record for the worker memory-correction privacy test.",
+        kind: "semantic",
+        access: { subjectId: grant.subjectId },
+      });
+      const session = await createOwnedSession(dbClient.db, grant, {
+        initialMessage: "exercise private workspace memory tools",
+        resources: [],
+        tools: [{ kind: "mcp", id: "opengeni" }],
+        metadata: {},
+        model: "scripted-model",
+        sandboxBackend: "none",
+        createdBySubjectId: grant.subjectId,
+        firstPartyMcpPermissions: ["workspace:read"],
+      });
+      await appendOwnedEvents(dbClient.db, grant, session.id, [
+        { type: "user.message", payload: { text: "exercise private workspace memory tools" } },
+      ]);
+
+      const model = new ScriptedModel([
+        {
+          id: "private-memory-save",
+          output: [
+            functionCall(
+              "opengeni__memory_save",
+              { text: saveSentinel, kind: "semantic" },
+              "call-private-memory-save",
+            ),
+          ],
+        },
+        {
+          id: "private-memory-search",
+          output: [
+            functionCall(
+              "opengeni__memory_search",
+              { query: searchSentinel, limit: 5 },
+              "call-private-memory-search",
+            ),
+          ],
+        },
+        {
+          id: "private-memory-correct",
+          output: [
+            functionCall(
+              "opengeni__memory_correct",
+              {
+                id: seeded.memory.id,
+                replacement_text: replacementSentinel,
+                reason: reasonSentinel,
+              },
+              "call-private-memory-correct",
+            ),
+          ],
+        },
+        {
+          id: "private-memory-finished",
+          outputText: "private memory operations completed",
+          chunks: ["private memory operations completed"],
+        },
+      ]);
+      const workerSettings = {
+        ...apiSettings,
+        mcpServers: [
+          {
+            id: "opengeni",
+            name: "OpenGeni",
+            url: `http://127.0.0.1:${server.port}/v1/workspaces/{workspaceId}/mcp`,
+            allowedTools: ["memory_search", "memory_save", "memory_correct"],
+            timeoutMs: undefined,
+            cacheToolsList: false,
+          },
+        ],
+      };
+      const activities = createWorkerActivities({
+        settings: workerSettings,
+        db: dbClient.db,
+        bus,
+        runtime: createProductionAgentRuntime({ model }),
+      });
+      await expect(
+        activities.runAgentTurn({
+          attemptId: crypto.randomUUID(),
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId: session.id,
+          trigger: { kind: "next" },
+          workflowId: "workflow-private-memory-event-projection",
+          workflowRunId: crypto.randomUUID(),
+        }),
+      ).resolves.toMatchObject({ status: "idle" });
+
+      const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 200);
+      const persistedProjection = JSON.stringify(events);
+      for (const sentinel of privateSentinels) {
+        expect(persistedProjection).not.toContain(sentinel);
+      }
+      const privateCalls = events.filter(
+        (event) =>
+          event.type === "agent.toolCall.created" &&
+          /(?:^|__)memory_(?:search|save|correct)$/.test(
+            String((event.payload as { name?: unknown }).name ?? ""),
+          ),
+      );
+      expect(privateCalls).toHaveLength(3);
+      for (const event of privateCalls) {
+        expect(event.payload).toMatchObject({ arguments: null, redacted: true });
+        expect(event.payload).not.toHaveProperty("raw");
+      }
+      const privateOutputs = events.filter(
+        (event) =>
+          event.type === "agent.toolCall.output" &&
+          [
+            "call-private-memory-save",
+            "call-private-memory-search",
+            "call-private-memory-correct",
+          ].includes(String((event.payload as { id?: unknown }).id ?? "")),
+      );
+      expect(privateOutputs).toHaveLength(3);
+      for (const event of privateOutputs) {
+        expect(event.payload).toMatchObject({ output: null, redacted: true });
+      }
+
+      const readerToken = await signDelegatedAccessToken(delegationSecret, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        subjectId: `test:memory-event-reader:${crypto.randomUUID()}`,
+        permissions: ["sessions:read"],
+        exp: Math.floor(Date.now() / 1000) + 60,
+      });
+      const replay = await fetch(
+        `http://127.0.0.1:${server.port}/v1/workspaces/${grant.workspaceId}/sessions/${session.id}/events?limit=200`,
+        { headers: { authorization: `Bearer ${readerToken}` } },
+      );
+      expect(replay.status).toBe(200);
+      const replayBody = await replay.text();
+      for (const sentinel of privateSentinels) {
+        expect(replayBody).not.toContain(sentinel);
+      }
+      expect(replayBody).toContain('"redacted":true');
+
+      const history = JSON.stringify(
+        await getSessionHistoryItems(dbClient.db, grant.workspaceId, session.id),
+      );
+      for (const sentinel of privateSentinels) {
+        expect(history).toContain(sentinel);
+      }
+      expect(model.calls).toBe(4);
     } finally {
       server.stop(true);
     }

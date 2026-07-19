@@ -877,11 +877,6 @@ function bindSessionMemoryScope(
   }
 }
 
-function memoryPreview(text: string): string {
-  const normalized = text.replace(/\s+/g, " ").trim();
-  return normalized.length <= 120 ? normalized : `${normalized.slice(0, 119)}…`;
-}
-
 function registerMemoryTools(
   server: McpServer,
   deps: ApiRouteDeps,
@@ -965,7 +960,6 @@ function registerMemoryTools(
           payload: {
             memoryId: result.memory.id,
             kind: result.memory.kind,
-            preview: memoryPreview(result.memory.text),
             deduped: result.deduped,
             ...(result.superseded ? { supersededMemoryId: result.superseded.id } : {}),
           },
@@ -1006,13 +1000,10 @@ function registerMemoryTools(
           payload: {
             memoryId: result.memory.id,
             kind: result.memory.kind,
-            preview: memoryPreview(result.memory.text),
             action: result.action,
-            ...(reason ? { reason: memoryPreview(reason) } : {}),
             ...(result.replacement
               ? {
                   replacementMemoryId: result.replacement.id,
-                  replacementPreview: memoryPreview(result.replacement.text),
                 }
               : {}),
           },

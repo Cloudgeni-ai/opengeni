@@ -4244,11 +4244,17 @@ export async function updateKnowledgeMemory(
           eq(schema.knowledgeMemories.id, memoryId),
         ),
       )
+      .for("update")
       .limit(1);
     if (!existing) {
       throw new Error(`Knowledge memory not found: ${memoryId}`);
     }
     const nextStatus = (input.status ?? existing.status) as KnowledgeMemoryStatus;
+    if (reviewStatus && existing.status !== "proposed") {
+      throw new Error(
+        `Reviewed memory status ${input.status} is only reachable from proposed; current status is ${existing.status}.`,
+      );
+    }
     const nextScope: StoredMemoryScope = scope ?? storedScopeFromRow(existing);
     const nextValidFrom = input.validFrom ?? existing.validFrom;
     const nextValidUntil = input.validUntil !== undefined ? input.validUntil : existing.validUntil;

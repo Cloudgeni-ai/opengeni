@@ -69,7 +69,13 @@ Implemented on the focused branch after the audited baseline:
   deterministic export, hard delete, and hash/row-version-fenced maintenance are
   wired through REST, capability-first MCP tools, contracts, and the SDK;
 - REST/MCP adapters bind user/role/session/actor selectors from signed grants and
-  persisted session context, never caller-controlled identity fields;
+  persisted session context, never caller-controlled identity fields; a worker
+  bearer is only the transport principal, while the persisted session creator
+  supplies private-memory subject and creator/actor attribution;
+- workspace-qualified creator provenance replaces the old global session FK;
+  reviewed `approved`/`rejected` states are created only by a row-locked
+  `proposed` transition; and workspace-readable session events redact private
+  memory call arguments/results and omit memory text/reason/source metadata;
 - a fresh PostgreSQL 17 + pgvector 0.8.5 migration and non-owner role probe proved
   multi-subject RLS, role/session/ephemeral retrieval, symmetric edge identity,
   private export audit, deletion tombstone, maintenance apply/revert, creator
@@ -141,6 +147,15 @@ Therefore OPE-29 adds nullable, immutable `sessions.created_by_subject_id`:
 - system/scheduled and historical sessions remain null unless a trusted creator
   already exists;
 - user-scope agent search, save, and injection fail closed when it is null.
+
+For REST and the deprecated documents-MCP route, a signed session id is resolved
+against the requested workspace before any memory operation. Missing or foreign
+sessions fail with 403. The worker bearer subject never substitutes for the
+persisted creator; a signed session without a creator fails closed for user writes,
+while workspace writes remain valid. Sessionless human/API grants retain their
+authenticated subject. Only the validated session id may become creator/actor
+provenance, and the composite `(workspace_id, created_by_session_id)` foreign key
+prevents a valid session from another tenant being attached to a memory.
 
 The creator subject stays an internal runtime field; it need not be exposed in the
 public `Session` response. Subject labels and arbitrary session metadata are never
@@ -255,6 +270,9 @@ precedence remains defense-in-depth, not the isolation mechanism.
 - `archive` is reversible and preferred for correction/cleanup.
 - `supersede` is an atomic correction with bidirectional compatibility links and
   a relationship edge.
+- curated creation accepts only `proposed`; `approved` and `rejected` are
+  update-only review outcomes, and the update locks the current row and rejects
+  every source status other than `proposed`.
 - `ephemeral` requires a bounded TTL and is excluded from default export.
 - workspace settings may define terminal/expired retention windows. Retention is
   evaluated by an explicit preview; it never runs as an invisible LLM rewrite.
@@ -299,6 +317,13 @@ V1 fields and endpoints remain valid. Additive contract shapes include:
 - score `components`, `reasonCodes`, freshness/conflict/provenance hints;
 - deterministic export;
 - explicit delete and maintenance preview/apply/revert responses.
+
+The workspace-readable `session_events` contract is intentionally lossy. New
+private memory tool call/output events carry ids, names/actions, and an explicit
+redaction marker only; `memory.saved`/`memory.corrected` omit text previews,
+queries, replacement text, reasons, sources, and metadata. Unredacted calls and
+results remain only in authorized `session_history_items` for model continuity.
+React readers continue accepting historical preview-bearing replay events.
 
 OPE-15 owns layout and interaction. OPE-29 supplies data semantics and only minimal
 compatibility rendering if necessary. Browser acceptance covers desktop/mobile,
@@ -347,7 +372,9 @@ Within that fenced cutover, `0065`:
 1. add nullable session creator provenance and typed memory columns with safe
    defaults;
 2. backfill `workspace` versus `legacy` scope in bounded SQL;
-3. add checks/indexes/composite FKs;
+3. replace every legacy one-column memory creator FK with the idempotent
+   workspace/session composite FK, then add the remaining checks/indexes/composite
+   FKs;
 4. create relationship and audit/operation tables with FORCE RLS;
 5. replace the memory policy with workspace + subject semantics;
 6. start compatible readers/writers and enable typed writes;

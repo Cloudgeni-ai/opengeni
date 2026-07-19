@@ -74,6 +74,7 @@ import {
   maxTurnsExceededRunState,
   modelCallUsageTelemetry,
   modelResponseUsageFromSdkEvent,
+  createSdkEventProjectionState,
   normalizeSdkEvent,
   sanitizeHistoryItemsForModel,
   isEphemeralInternalContext,
@@ -4003,6 +4004,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         );
 
         const iterator = stream.toStream()[Symbol.asyncIterator]();
+        // Session events are workspace-readable audit/UI data, unlike the
+        // model's private conversation history. Correlate memory call outputs
+        // only within this stream so their text never enters the event log.
+        const eventProjectionState = createSdkEventProjectionState();
         let streamDone = false;
         try {
           while (true) {
@@ -4167,7 +4172,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 }
               }
             }
-            const normalized = normalizeSdkEvent(next.value);
+            const normalized = normalizeSdkEvent(next.value, eventProjectionState);
             for (const event of normalized) {
               streamTiming.onEvent(event.type);
               await batcher.push(event);

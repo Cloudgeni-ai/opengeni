@@ -37,6 +37,8 @@ import {
   updateKnowledgeMemory,
   saveWorkspaceMemory,
   searchWorkspaceMemories,
+  type MemoryAccessContext,
+  type WorkspaceMemoryContext,
 } from "@opengeni/db";
 import {
   addDocumentToBase,
@@ -61,48 +63,87 @@ function trustedMemoryActorSessionId(grant: AccessGrant): string | null {
   return typeof grant.metadata?.sessionId === "string" ? grant.metadata.sessionId : null;
 }
 
-async function bindWritableMemoryScope(
+type ResolvedMemoryRequestContext = {
+  actorSessionId: string | null;
+  access: MemoryAccessContext;
+  sessionContext: WorkspaceMemoryContext | null;
+};
+
+/**
+ * Resolve a signed session claim once at the REST trust boundary.
+ *
+ * A worker bearer identifies the transport principal, not the human/user whose
+ * private memory is applicable. When it carries a session claim, the persisted
+ * session creator is the trusted subject and the claimed session must belong to
+ * the requested workspace before it can be used for either access or
+ * provenance. Sessionless human/API grants keep their authenticated subject.
+ */
+async function resolveMemoryRequestContext(
   db: ApiRouteDeps["db"],
   workspaceId: string,
-  scope: WritableMemoryScopeSpec | undefined,
   grant: AccessGrant,
-): Promise<Parameters<typeof saveWorkspaceMemory>[1]["scopeSpec"] | undefined> {
+): Promise<ResolvedMemoryRequestContext> {
+  const signedSessionId = trustedMemoryActorSessionId(grant);
+  if (!signedSessionId) {
+    return {
+      actorSessionId: null,
+      access: { subjectId: grant.subjectId },
+      sessionContext: null,
+    };
+  }
+  const sessionContext = await getSessionMemoryContext(db, workspaceId, signedSessionId);
+  if (!sessionContext?.sessionId) {
+    throw new HTTPException(403, {
+      message: "trusted signed memory session was not found in this workspace",
+    });
+  }
+  return {
+    actorSessionId: sessionContext.sessionId,
+    access: sessionContext.access ?? {},
+    sessionContext,
+  };
+}
+
+function bindWritableMemoryScope(
+  scope: WritableMemoryScopeSpec | undefined,
+  context: ResolvedMemoryRequestContext,
+): Parameters<typeof saveWorkspaceMemory>[1]["scopeSpec"] | undefined {
   if (!scope) return undefined;
   switch (scope.type) {
     case "workspace":
       return scope;
-    case "user":
-      return { type: "user", subjectId: grant.subjectId };
+    case "user": {
+      const subjectId = context.access.subjectId;
+      if (!subjectId) {
+        throw new HTTPException(403, {
+          message: "user-scoped memory requires a persisted session creator",
+        });
+      }
+      return { type: "user", subjectId };
+    }
     case "role":
     case "session":
     case "ephemeral": {
-      const signedSessionId = trustedMemoryActorSessionId(grant);
-      if (!signedSessionId) {
+      if (!context.sessionContext?.sessionId) {
         throw new HTTPException(403, {
           message: `${scope.type}-scoped memory requires a trusted signed session`,
         });
       }
-      const context = await getSessionMemoryContext(db, workspaceId, signedSessionId);
-      if (!context?.sessionId) {
-        throw new HTTPException(403, {
-          message: "trusted signed memory session was not found in this workspace",
-        });
-      }
       if (scope.type === "role") {
-        if (!context.roleKey) {
+        if (!context.sessionContext.roleKey) {
           throw new HTTPException(403, {
             message: "role-scoped memory requires a persisted session role",
           });
         }
-        return { type: "role", roleKey: context.roleKey };
+        return { type: "role", roleKey: context.sessionContext.roleKey };
       }
-      return { type: scope.type, sessionId: context.sessionId };
+      return { type: scope.type, sessionId: context.sessionContext.sessionId };
     }
   }
 }
 
-function memoryAccess(grant: AccessGrant, privateAdmin = false) {
-  return { subjectId: grant.subjectId, ...(privateAdmin ? { privateAdmin: true } : {}) };
+function memoryAccess(context: ResolvedMemoryRequestContext, privateAdmin = false) {
+  return { ...context.access, ...(privateAdmin ? { privateAdmin: true } : {}) };
 }
 
 function requestedBoolean(value: string | undefined, name: string): boolean {
@@ -332,6 +373,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/knowledge/memories", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "documents:search");
+    const requestContext = await resolveMemoryRequestContext(db, workspaceId, grant);
     const parsed = KnowledgeMemorySearchRequest.safeParse({
       query: c.req.query("query") || undefined,
       status: c.req.query("status") || undefined,
@@ -351,7 +393,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
       (
         await listKnowledgeMemories(db, workspaceId, {
           ...parsed.data,
-          access: memoryAccess(grant),
+          access: memoryAccess(requestContext),
         })
       ).map((memory) => KnowledgeMemory.parse(memory)),
     );
@@ -360,6 +402,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/knowledge/memories/relationships", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "documents:search");
+    const requestContext = await resolveMemoryRequestContext(db, workspaceId, grant);
     const type = c.req.query("type")
       ? MemoryRelationshipType.safeParse(c.req.query("type"))
       : undefined;
@@ -372,7 +415,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
         await listMemoryRelationships(db, workspaceId, {
           ...(memoryId ? { memoryId } : {}),
           ...(type?.success ? { type: type.data } : {}),
-          access: memoryAccess(grant),
+          access: memoryAccess(requestContext),
         })
       ).map((relationship) => MemoryRelationship.parse(relationship)),
     );
@@ -381,6 +424,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/knowledge/memories/relationships", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "documents:manage");
+    const requestContext = await resolveMemoryRequestContext(db, workspaceId, grant);
     const parsed = CreateMemoryRelationshipRequest.safeParse(await c.req.json());
     if (!parsed.success) {
       throw new HTTPException(400, { message: "invalid memory relationship request" });
@@ -392,8 +436,8 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
             accountId: grant.accountId,
             workspaceId,
             ...parsed.data,
-            actorSessionId: trustedMemoryActorSessionId(grant),
-            access: memoryAccess(grant),
+            actorSessionId: requestContext.actorSessionId,
+            access: memoryAccess(requestContext),
           }),
         ),
         201,
@@ -408,11 +452,12 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
     async (c) => {
       const workspaceId = c.req.param("workspaceId");
       const grant = await requireAccessGrant(c, deps, workspaceId, "documents:manage");
+      const requestContext = await resolveMemoryRequestContext(db, workspaceId, grant);
       const deleted = await deleteMemoryRelationship(
         db,
         workspaceId,
         c.req.param("relationshipId"),
-        memoryAccess(grant),
+        memoryAccess(requestContext),
       );
       if (!deleted) {
         throw new HTTPException(404, { message: "memory relationship not found" });
@@ -424,6 +469,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/knowledge/memories/export", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "documents:search");
+    const requestContext = await resolveMemoryRequestContext(db, workspaceId, grant);
     const includeEphemeral = requestedBoolean(c.req.query("includeEphemeral"), "includeEphemeral");
     const includePrivate = requestedBoolean(c.req.query("includePrivate"), "includePrivate");
     if (includePrivate) {
@@ -433,9 +479,9 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
       MemoryExportResponse.parse(
         await exportWorkspaceMemories(db, workspaceId, {
           accountId: grant.accountId,
-          access: memoryAccess(grant, includePrivate),
+          access: memoryAccess(requestContext, includePrivate),
           includeEphemeral,
-          actorSessionId: trustedMemoryActorSessionId(grant),
+          actorSessionId: requestContext.actorSessionId,
         }),
       ),
     );
@@ -444,6 +490,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/knowledge/memories/maintenance/preview", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const requestContext = await resolveMemoryRequestContext(db, workspaceId, grant);
     const parsed = PreviewMemoryMaintenanceRequest.safeParse(await c.req.json());
     if (!parsed.success) {
       throw new HTTPException(400, { message: "invalid memory maintenance preview request" });
@@ -462,8 +509,8 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
               ? { expiredBefore: new Date(parsed.data.expiredBefore) }
               : {}),
             ...(parsed.data.memoryIds ? { memoryIds: parsed.data.memoryIds } : {}),
-            actorSessionId: trustedMemoryActorSessionId(grant),
-            access: memoryAccess(grant, true),
+            actorSessionId: requestContext.actorSessionId,
+            access: memoryAccess(requestContext, true),
           }),
         ),
         201,
@@ -478,6 +525,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
     async (c) => {
       const workspaceId = c.req.param("workspaceId");
       const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+      const requestContext = await resolveMemoryRequestContext(db, workspaceId, grant);
       const parsed = ApplyMemoryMaintenanceRequest.safeParse(await c.req.json());
       if (!parsed.success) {
         throw new HTTPException(400, { message: "invalid memory maintenance apply request" });
@@ -490,8 +538,8 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
               workspaceId,
               c.req.param("operationId"),
               parsed.data.planHash,
-              memoryAccess(grant, true),
-              { actorSessionId: trustedMemoryActorSessionId(grant) },
+              memoryAccess(requestContext, true),
+              { actorSessionId: requestContext.actorSessionId },
             ),
           ),
         );
@@ -506,6 +554,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
     async (c) => {
       const workspaceId = c.req.param("workspaceId");
       const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+      const requestContext = await resolveMemoryRequestContext(db, workspaceId, grant);
       const parsed = ApplyMemoryMaintenanceRequest.safeParse(await c.req.json());
       if (!parsed.success) {
         throw new HTTPException(400, { message: "invalid memory maintenance revert request" });
@@ -518,8 +567,8 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
               workspaceId,
               c.req.param("operationId"),
               parsed.data.planHash,
-              memoryAccess(grant, true),
-              { actorSessionId: trustedMemoryActorSessionId(grant) },
+              memoryAccess(requestContext, true),
+              { actorSessionId: requestContext.actorSessionId },
             ),
           ),
         );
@@ -532,11 +581,12 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/knowledge/memories/:memoryId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "documents:search");
+    const requestContext = await resolveMemoryRequestContext(db, workspaceId, grant);
     const memory = await getKnowledgeMemory(
       db,
       workspaceId,
       c.req.param("memoryId"),
-      memoryAccess(grant),
+      memoryAccess(requestContext),
     );
     if (!memory) {
       throw new HTTPException(404, { message: "knowledge memory not found" });
@@ -549,25 +599,17 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/knowledge/memories/search", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "documents:search");
+    const requestContext = await resolveMemoryRequestContext(db, workspaceId, grant);
     const parsed = WorkspaceMemorySearchRequest.safeParse(await c.req.json());
     if (!parsed.success) {
       throw new HTTPException(400, { message: "invalid workspace memory search request" });
-    }
-    const signedSessionId = trustedMemoryActorSessionId(grant);
-    const signedContext = signedSessionId
-      ? await getSessionMemoryContext(db, workspaceId, signedSessionId)
-      : null;
-    if (signedSessionId && !signedContext) {
-      throw new HTTPException(403, {
-        message: "trusted signed memory session was not found in this workspace",
-      });
     }
     const results = await searchWorkspaceMemories(
       db,
       workspaceId,
       {
         ...parsed.data,
-        context: signedContext ?? { access: memoryAccess(grant) },
+        context: requestContext.sessionContext ?? { access: memoryAccess(requestContext) },
       },
       getDocumentServices().embedder,
     );
@@ -584,14 +626,15 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/knowledge/memories", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "documents:manage");
+    const requestContext = await resolveMemoryRequestContext(db, workspaceId, grant);
     const parsedBody = CreateKnowledgeMemoryRequest.safeParse(await c.req.json());
     if (!parsedBody.success) {
       throw new HTTPException(400, { message: "invalid knowledge memory request" });
     }
     const payload = parsedBody.data;
-    const scopeSpec = await bindWritableMemoryScope(db, workspaceId, payload.scopeSpec, grant);
-    const access = memoryAccess(grant);
-    const actorSessionId = trustedMemoryActorSessionId(grant);
+    const scopeSpec = bindWritableMemoryScope(payload.scopeSpec, requestContext);
+    const access = memoryAccess(requestContext);
+    const actorSessionId = requestContext.actorSessionId;
     // status `active` (the default) is a memory write → route through the single
     // gate (sanitize + embed + dedup). Explicit proposed enters the curated
     // review lane; approved/rejected are update-only reviewed states.
@@ -661,6 +704,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.patch("/v1/workspaces/:workspaceId/knowledge/memories/:memoryId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "documents:manage");
+    const requestContext = await resolveMemoryRequestContext(db, workspaceId, grant);
     const payload = UpdateKnowledgeMemoryRequest.parse(await c.req.json());
     const reviewedBy =
       payload.status === "approved" || payload.status === "rejected"
@@ -677,7 +721,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
               status: payload.status,
               kind: payload.kind,
               scope: payload.scope,
-              scopeSpec: await bindWritableMemoryScope(db, workspaceId, payload.scopeSpec, grant),
+              scopeSpec: bindWritableMemoryScope(payload.scopeSpec, requestContext),
               labels: payload.labels,
               text: payload.text,
               sourceRefs: payload.sourceRefs,
@@ -691,7 +735,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
                   : payload.validUntil
                     ? new Date(payload.validUntil)
                     : undefined,
-              access: memoryAccess(grant),
+              access: memoryAccess(requestContext),
               ...(reviewedBy ? { reviewedBy } : {}),
             },
             getDocumentServices().embedder,
@@ -706,6 +750,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.delete("/v1/workspaces/:workspaceId/knowledge/memories/:memoryId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "documents:manage");
+    const requestContext = await resolveMemoryRequestContext(db, workspaceId, grant);
     const includePrivate = requestedBoolean(c.req.query("includePrivate"), "includePrivate");
     if (includePrivate) {
       requirePrivateMemoryAdmin(grant);
@@ -717,8 +762,8 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
             accountId: grant.accountId,
             workspaceId,
             memoryId: c.req.param("memoryId"),
-            actorSessionId: trustedMemoryActorSessionId(grant),
-            access: memoryAccess(grant, includePrivate),
+            actorSessionId: requestContext.actorSessionId,
+            access: memoryAccess(requestContext, includePrivate),
           }),
         ),
       );
@@ -730,15 +775,19 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.all("/v1/workspaces/:workspaceId/mcp/docs", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "documents:search");
-    const sessionId =
-      typeof grant.metadata?.sessionId === "string" ? grant.metadata.sessionId : undefined;
+    const requestContext = await resolveMemoryRequestContext(db, workspaceId, grant);
     const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
     const server = buildDocumentsMcpServer(
       db,
       grant.accountId,
       workspaceId,
       getDocumentServices(),
-      { createdBySessionId: sessionId },
+      {
+        ...(requestContext.actorSessionId
+          ? { createdBySessionId: requestContext.actorSessionId }
+          : {}),
+        access: memoryAccess(requestContext),
+      },
     );
     await server.connect(transport);
     return await transport.handleRequest(c.req.raw);
@@ -759,7 +808,8 @@ function documentHttpException(error: unknown): HTTPException {
     message.includes("visible memory is full") ||
     message.includes("empty after sanitization") ||
     message.includes("does not match") ||
-    message.includes("Ambiguous memory id")
+    message.includes("Ambiguous memory id") ||
+    message.includes("only reachable from proposed")
   ) {
     return new HTTPException(400, { message });
   }
