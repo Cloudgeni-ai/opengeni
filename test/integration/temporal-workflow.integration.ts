@@ -824,13 +824,19 @@ describe("Temporal workflow integration", () => {
       const queuedTurns = [first];
       const runs: WorkflowTestTurn[] = [];
       const controls: unknown[] = [];
-      let allowFirstRunToFinish = false;
+      let firstActivityExited = false;
       const admission = createTurnAdmission(queuedTurns, async (_input, turn) => {
         runs.push(turn);
         if (runs.length === 1) {
-          while (true) {
-            if (allowFirstRunToFinish) break;
-            await Bun.sleep(10);
+          const context = currentActivityContext();
+          if (!context) throw new Error("active Steer fixture has no Temporal activity context");
+          try {
+            while (!context.cancellationSignal.aborted) {
+              context.heartbeat({ phase: "active-steer-fixture" });
+              await Bun.sleep(10);
+            }
+          } finally {
+            firstActivityExited = true;
           }
         }
         return { status: "idle" };
@@ -841,7 +847,8 @@ describe("Temporal workflow integration", () => {
         failSessionAttempt: async () => undefined,
         settleSessionInterruptions: async (input: unknown) => {
           controls.push(input);
-          allowFirstRunToFinish = true;
+          expect(firstActivityExited).toBe(true);
+          admission.supersede();
           return { action: "continue" as const };
         },
       });
@@ -863,7 +870,6 @@ describe("Temporal workflow integration", () => {
         ]);
         expect(runs[1]).toEqual(second);
       } finally {
-        allowFirstRunToFinish = true;
         worker.shutdown();
         await run;
       }
@@ -1995,6 +2001,11 @@ async function testWorker(
       taskQueue: turnTaskQueue(taskQueue),
       activities: { runAgentTurn },
       maxConcurrentActivityTaskExecutions: TURN_WORKER_MAX_CONCURRENT_TURNS,
+      // Cancellation is delivered on a heartbeat response. Production's
+      // default one-minute throttle is appropriate for days-long turns but
+      // exceeds this integration suite's 30-second bound; keep the test's
+      // cancellation-first Pause/Steer contract deterministic.
+      maxHeartbeatThrottleInterval: "100ms",
     }),
   ]);
   return {
