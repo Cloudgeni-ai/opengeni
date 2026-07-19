@@ -14,6 +14,7 @@ import {
 import {
   CAPABILITY_DESCRIPTORS,
   isClearedRunStateBlob,
+  isPrivateMemoryToolName,
   prefixedMcpToolName as sharedPrefixedMcpToolName,
   signDelegatedAccessToken,
   type GitCredentialProvider,
@@ -4291,10 +4292,6 @@ export type SdkEventProjectionState = {
 
 export function createSdkEventProjectionState(): SdkEventProjectionState {
   return { privateMemoryToolCallIds: new Set<string>() };
-}
-
-function isPrivateMemoryToolName(name: unknown): name is string {
-  return typeof name === "string" && /(?:^|__)memory_(?:search|save|correct)$/.test(name);
 }
 
 export function normalizeSdkEvent(

@@ -1599,6 +1599,16 @@ export const MemoryLabel = z
   .regex(/^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$/);
 export type MemoryLabel = z.infer<typeof MemoryLabel>;
 
+/**
+ * Memory tools return subject-scoped content that must stay in authorized
+ * model history rather than the workspace-readable session-event projection.
+ * Keep this classifier shared by live streaming and worker-death recovery so
+ * their privacy behavior cannot diverge.
+ */
+export function isPrivateMemoryToolName(name: unknown): name is string {
+  return typeof name === "string" && /(?:^|__)memory_(?:search|save|correct)$/.test(name);
+}
+
 // Public selectors intentionally omit the private user subject id. A user-scoped
 // response is already RLS-filtered to the caller; writes bind it from the trusted
 // grant/session creator rather than accepting an arbitrary subject on the wire.
