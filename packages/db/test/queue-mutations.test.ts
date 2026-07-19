@@ -234,6 +234,7 @@ describe("canonical queue commands", () => {
       text: "prompt 2",
       resources: value.turns[1]!.resources,
       tools: value.turns[1]!.tools,
+      toolsProvided: false,
       model: "model-2",
       reasoningEffort: "high",
       sourceTurnId: value.turns[1]!.id,
@@ -253,6 +254,39 @@ describe("canonical queue commands", () => {
         .where(eq(schema.sessionTurns.id, value.turns[1]!.id)),
     );
     expect(withdrawn).toEqual({ status: "withdrawn_for_edit", reason: "withdrawn_for_edit" });
+  });
+
+  test("Edit preserves an explicit empty turn tool selection in the durable draft", async () => {
+    const value = await fixture(1);
+    await withWorkspaceRls(client.db, value.grant.workspaceId!, (db) =>
+      db
+        .update(schema.sessionTurns)
+        .set({ tools: [], toolsProvided: true })
+        .where(eq(schema.sessionTurns.id, value.turns[0]!.id)),
+    );
+
+    const edited = await withWorkspaceSubjectRls(
+      client.db,
+      value.grant.workspaceId!,
+      value.grant.subjectId,
+      (db) =>
+        db.transaction((tx) =>
+          editQueuedTurnInTransaction(tx as typeof db, {
+            accountId: value.grant.accountId,
+            workspaceId: value.grant.workspaceId!,
+            sessionId: value.session.id,
+            turnId: value.turns[0]!.id,
+            subjectId: value.grant.subjectId,
+            expectedTurnVersion: value.turns[0]!.version,
+            expectedDraftRevision: 0,
+            replaceDraft: false,
+            actor: value.actor,
+            operationKey: crypto.randomUUID(),
+          }),
+        ),
+    );
+
+    expect(edited.draft).toMatchObject({ tools: [], toolsProvided: true });
   });
 
   test("Edit never overwrites a dirty draft without exact replacement consent", async () => {

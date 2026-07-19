@@ -14,6 +14,7 @@ export function fakeClient(partial: Partial<SessionClientLike>): SessionClientLi
     text: "",
     resources: [],
     tools: [],
+    toolsProvided: false,
     model: "model-x",
     reasoningEffort: "medium",
     sourceTurnId: null,

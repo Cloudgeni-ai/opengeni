@@ -3,6 +3,7 @@ import {
   SessionMcpCredentialUpdateInput,
   VariableSetVariableName,
   type AccessGrant,
+  type GitHubCapabilityHealth,
   type GitHubRepository,
   type Permission,
   type ResourceRef,
@@ -49,7 +50,6 @@ import {
 } from "@opengeni/db";
 import { appendAndPublishEvents } from "@opengeni/events";
 import {
-  createGitHubAppInstallationToken,
   createSignedState,
   GitHubAppConfigurationError,
   githubAppMissingSettings,
@@ -195,11 +195,11 @@ export function buildOpenGeniMcpServer(
   registerVariableSetTools(server, deps, grant, can, json);
   if (can("github:use")) {
     registerGitHubConnectTool(server, deps, grant, options, json);
-    // TOKEN-BROKER (B1): the agent-refreshable git token. Session-scoped (keys off the
-    // worker-signed sessionId claim so it mints for THIS session's repos), gated on
-    // the same github:use capability as github_connect_link.
+    // OPE-41/OPE-16: the host renews credentials off-model. The session-scoped
+    // first-party surface exposes only secret-safe availability and recovery
+    // truth; the historical github_token tool is deliberately not registered.
     if (sessionId !== null) {
-      registerGitHubTokenTool(server, deps, grant, sessionId, json);
+      registerGitHubCredentialStatusTool(server, deps, grant, sessionId, json);
     }
   }
 
@@ -1823,12 +1823,11 @@ function registerGitHubConnectTool(
   );
 }
 
-// TOKEN-BROKER (B1): mint a FRESH short-lived GitHub App installation token for the
-// session's repository resources. The agent calls this to refresh git auth before
-// the current token expires. The MCP server CANNOT write the box, so the tool RETURNS
-// the token as JSON; the agent writes it to the token file (via exec) to refresh
-// GIT_ASKPASS. Same github:use capability gate as github_connect_link.
-function registerGitHubTokenTool(
+// Secret-safe OPE-41 recovery surface. Token mint/write/renewal belongs to the
+// worker host and never crosses MCP/model output. This tool reports whether the
+// exact session has a renewable repository binding and names the human action
+// needed when it does not.
+function registerGitHubCredentialStatusTool(
   server: McpServer,
   deps: ApiRouteDeps,
   grant: AccessGrant,
@@ -1836,17 +1835,14 @@ function registerGitHubTokenTool(
   json: JsonResult,
 ): void {
   server.registerTool(
-    "github_token",
+    "github_credential_status",
     {
       description:
-        "Mint a fresh short-lived GitHub token for this session's repositories. Write it to $OPENGENI_GIT_TOKEN_FILE (default $HOME/.opengeni/git-token) to refresh git auth before the current token expires.",
+        "Check secret-safe GitHub credential availability for this session. The host renews selected repository credentials automatically; this returns typed connect/rebind guidance and never returns a token.",
       inputSchema: {},
     },
     async () => {
       const session = await requireSession(deps.db, grant.workspaceId, sessionId);
-      // Resolve the run-scoped installation + repository ids from THIS session's
-      // repository resources (same shape sandboxEnvironmentForRun mints against). Only
-      // private GitHub-App repos carry the installation/repository ids.
       const selected = (session.resources ?? []).flatMap((resource) => {
         if (resource.kind !== "repository") {
           return [];
@@ -1860,23 +1856,78 @@ function registerGitHubTokenTool(
           ? [{ installationId, repositoryId }]
           : [];
       });
-      if (selected.length === 0) {
-        throw new Error("this session has no GitHub App repository resources to mint a token for");
-      }
-      const installationId = selected[0]!.installationId;
-      if (selected.some((item) => item.installationId !== installationId)) {
-        throw new Error("GitHub App repository resources must belong to one installation");
-      }
-      const token = await createGitHubAppInstallationToken(deps.settings, {
-        installationId,
-        repositoryIds: selected.map((item) => item.repositoryId),
+      const configured = githubAppMissingSettings(deps.settings).length === 0;
+      const workspaceInstallationCount = configured
+        ? (await listGitHubInstallationIdsForWorkspace(deps.db, grant.workspaceId)).length
+        : 0;
+      const health = githubCredentialHealthForBindings({
+        configured,
+        workspaceInstallationCount,
+        sessionInstallationIds: selected.map((item) => item.installationId),
       });
       return json({
-        token,
-        tokenFile: "$OPENGENI_GIT_TOKEN_FILE (default $HOME/.opengeni/git-token)",
+        provider: "github",
+        credentialDelivery: "host_managed",
+        health,
+        repositoryBindings: selected.length,
+        ...(health.state === "unavailable"
+          ? {
+              recovery:
+                health.action === "connect"
+                  ? {
+                      action: "connect",
+                      tool: "github_connect_link",
+                      message:
+                        "Connect the GitHub App, select repositories, then bind them to a session.",
+                    }
+                  : health.action === "configure"
+                    ? {
+                        action: "configure",
+                        message: "A deployment administrator must configure the GitHub App.",
+                      }
+                    : {
+                        action: "rebind",
+                        message:
+                          "Select one installation's repositories when starting a session; this session has no usable GitHub repository binding.",
+                      },
+            }
+          : {}),
       });
     },
   );
+}
+
+export function githubCredentialHealthForBindings(input: {
+  configured: boolean;
+  workspaceInstallationCount: number;
+  sessionInstallationIds: number[];
+}): GitHubCapabilityHealth {
+  if (!input.configured) {
+    return {
+      state: "unavailable",
+      reason: "not_configured",
+      action: "configure",
+      renewal: "inactive",
+    };
+  }
+  const sessionInstallations = new Set(input.sessionInstallationIds);
+  if (sessionInstallations.size === 1 && input.sessionInstallationIds.length > 0) {
+    return { state: "ready", reason: null, action: "none", renewal: "automatic" };
+  }
+  if (sessionInstallations.size > 1 || input.workspaceInstallationCount > 0) {
+    return {
+      state: "unavailable",
+      reason: "session_repository_binding_required",
+      action: "rebind",
+      renewal: "inactive",
+    };
+  }
+  return {
+    state: "unavailable",
+    reason: "no_repository_binding",
+    action: "connect",
+    renewal: "inactive",
+  };
 }
 
 // Defense-in-depth for invariant "agents cannot self-attach": the worker's

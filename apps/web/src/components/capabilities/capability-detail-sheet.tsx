@@ -141,6 +141,14 @@ function DetailBody({
           </Notice>
         ) : null}
 
+        {item.runtime.catalogTrust?.state === "legacy_active" ? (
+          <Notice tone="waiting" title="Verification pending">
+            This connector was enabled before catalog verification was recorded. Its prior
+            connectivity evidence keeps it available during the rolling upgrade; new installs stay
+            blocked until a verified catalog refresh backfills it.
+          </Notice>
+        ) : null}
+
         {item.description ? (
           <p className="text-sm leading-6 text-fg-muted">{item.description}</p>
         ) : null}

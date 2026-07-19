@@ -263,6 +263,69 @@ describe("catalog import persistence", () => {
     expect(matching[0]?.url).toBe("https://workspace.enabled-dedupe.example/mcp");
   }, 180_000);
 
+  test("grandfathers only active legacy registry installs with connectivity and credential evidence", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const batch = await createImportBatch(db, {
+      source: "integrations.sh",
+      snapshotDate: new Date("2026-07-03T23:41:44.132Z"),
+      snapshotRef: "legacy-active-compatibility",
+      attributionNote: "MIT attribution",
+    });
+    const capabilityId = "mcp:integrations-sh:legacy-active";
+    await upsertRegistryCapabilityCatalogItem(
+      db,
+      registryRow({
+        id: capabilityId,
+        importBatchId: batch.id,
+        providerDomain: "legacy-active.example",
+        mcpUrl: "https://legacy-active.example/mcp",
+        name: "Legacy Active",
+        tier: "verified",
+        provenance: "pre-probe-import",
+        authKind: "oauth2",
+        metadata: {},
+      }),
+    );
+
+    expect(
+      (await listCapabilityCatalogItems(db, ws.workspaceId)).some(
+        (item) => item.id === capabilityId,
+      ),
+    ).toBe(false);
+
+    await enableCapabilityInstallation(db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      capabilityId,
+      kind: "mcp",
+      config: {
+        connectionRef: {
+          connectionId: crypto.randomUUID(),
+          providerDomain: "legacy-active.example",
+          kind: "oauth2",
+        },
+      },
+      metadata: { mcpConnectivity: { status: "auth_deferred" } },
+    });
+
+    const visible = (await listCapabilityCatalogItems(db, ws.workspaceId)).find(
+      (item) => item.id === capabilityId,
+    );
+    expect(visible?.runtime.catalogTrust).toEqual({
+      state: "legacy_active",
+      reason: "active_installation_compatibility",
+    });
+    expect((await getCapabilityCatalogItem(db, ws.workspaceId, capabilityId))?.id).toBe(
+      capabilityId,
+    );
+    expect(
+      (await listEnabledMcpCapabilityServers(db, ws.workspaceId)).some(
+        (server) => server.capabilityId === capabilityId,
+      ),
+    ).toBe(true);
+  }, 180_000);
+
   test("markStaleRegistryCatalogItems marks multiple removed registry rows in one call", async () => {
     if (!available) return;
     const batch1 = await createImportBatch(db, {
@@ -410,6 +473,8 @@ function registryRow(overrides: {
   tier: "verified" | "community";
   provenance: string;
   logoAssetPath?: string | null;
+  authKind?: "oauth2" | "api_key" | "none" | "unknown";
+  metadata?: Record<string, unknown>;
 }) {
   return {
     id: overrides.id,
@@ -418,10 +483,11 @@ function registryRow(overrides: {
     mcpUrl: overrides.mcpUrl,
     name: overrides.name,
     transport: "streamable-http" as const,
-    authKind: "none" as const,
+    authKind: overrides.authKind ?? ("none" as const),
     credentialFacts: [],
     tier: overrides.tier,
     provenance: overrides.provenance,
     logoAssetPath: overrides.logoAssetPath ?? null,
+    metadata: overrides.metadata ?? { mcpProbe: { status: "real", reason: "db_test" } },
   };
 }

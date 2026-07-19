@@ -636,6 +636,14 @@ function ScheduledTaskForm(props: {
           </label>
           <ScheduledTaskRepositoryPicker
             configured={context.githubStatus?.configured === true}
+            health={
+              context.githubStatus?.health ?? {
+                state: "unavailable",
+                reason: "unknown",
+                action: "retry",
+                renewal: "inactive",
+              }
+            }
             repositories={context.githubRepos}
             groups={context.repositoryGroups}
             resources={form.resources}

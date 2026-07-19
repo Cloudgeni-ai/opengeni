@@ -33,10 +33,11 @@ import {
   type RepositoryGroup,
 } from "@/lib/session-tools";
 import { cn } from "@/lib/utils";
-import type { GitHubRepository, ResourceRef } from "@/types";
+import type { GitHubCapabilityHealth, GitHubRepository, ResourceRef } from "@/types";
 
 export function RepositoryContextPicker(props: {
   configured: boolean;
+  health: GitHubCapabilityHealth;
   installUrl: string | null;
   repositories: GitHubRepository[];
   groups: RepositoryGroup[];
@@ -65,6 +66,11 @@ export function RepositoryContextPicker(props: {
   const manualCount = props.manualRepos.filter((repo) => repo.url.trim().length > 0).length;
   const selectedCount = selectedInstalledCount + manualCount;
   const hasRepos = props.repositories.length > 0;
+  const statusUnavailable =
+    props.health.state === "unavailable" &&
+    (props.health.reason === "provider_unavailable" ||
+      props.health.reason === "permission_denied" ||
+      props.health.reason === "unknown");
   // Two-step inline confirm for removing a manual repo, so a stray click in a
   // dense picker doesn't drop a repo the user typed out.
   const [confirmRemoveId, setConfirmRemoveId] = useState<number | null>(null);
@@ -171,7 +177,7 @@ export function RepositoryContextPicker(props: {
           <span
             className={cn(
               "size-1.5 shrink-0 rounded-full",
-              props.configured ? "bg-status-idle" : "bg-status-waiting",
+              props.health.state === "ready" ? "bg-status-idle" : "bg-status-waiting",
             )}
             aria-hidden="true"
           />
@@ -200,7 +206,11 @@ export function RepositoryContextPicker(props: {
               variant="ghost"
               size="icon-xs"
               onClick={() => void props.onRefresh()}
-              disabled={!props.configured || props.repoBusy}
+              disabled={
+                (props.health.state === "unavailable" &&
+                  props.health.reason === "not_configured") ||
+                props.repoBusy
+              }
               aria-label="Refresh repositories"
               className="size-7"
             >
@@ -210,7 +220,29 @@ export function RepositoryContextPicker(props: {
 
           <div className="max-h-[min(calc(var(--radix-dropdown-menu-content-available-height,70vh)-3.5rem),620px)] overflow-y-auto overscroll-contain">
             <div className="space-y-2.5 p-2.5">
-              {!props.configured ? (
+              {statusUnavailable ? (
+                <EmptyState
+                  icon={<GitBranchIcon className="size-5" />}
+                  title="GitHub repositories unavailable"
+                  description={
+                    props.health.reason === "permission_denied"
+                      ? "Your current OpenGeni access cannot read this workspace's GitHub repositories."
+                      : "OpenGeni couldn't verify repository access. Retry without changing your session selection."
+                  }
+                  action={
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-8 text-xs"
+                      onClick={() => void props.onRefresh()}
+                    >
+                      <RefreshCwIcon className="size-3.5" />
+                      Retry
+                    </Button>
+                  }
+                />
+              ) : !props.configured ? (
                 <div className="space-y-3">
                   <EmptyState
                     icon={<GitBranchIcon className="size-5" />}
@@ -509,6 +541,7 @@ export function RepositoryContextPicker(props: {
 
 export function ScheduledTaskRepositoryPicker(props: {
   configured: boolean;
+  health: GitHubCapabilityHealth;
   repositories: GitHubRepository[];
   groups: RepositoryGroup[];
   resources: ResourceRef[];
@@ -583,14 +616,35 @@ export function ScheduledTaskRepositoryPicker(props: {
           variant="ghost"
           size="xs"
           onClick={() => void props.onRefresh()}
-          disabled={!props.configured || props.repoBusy || props.busy}
+          disabled={
+            (props.health.state === "unavailable" && props.health.reason === "not_configured") ||
+            props.repoBusy ||
+            props.busy
+          }
         >
           <RefreshCwIcon className={cn("size-3", props.repoBusy && "animate-spin")} />
           Refresh
         </Button>
       </div>
 
-      {!props.configured ? (
+      {props.health.state === "unavailable" &&
+      (props.health.reason === "provider_unavailable" ||
+        props.health.reason === "permission_denied" ||
+        props.health.reason === "unknown") ? (
+        <div className="space-y-2 p-3 text-xs leading-5 text-fg-muted">
+          <p>GitHub repository access is unavailable. Existing task resources are unchanged.</p>
+          <Button
+            type="button"
+            variant="outline"
+            size="xs"
+            onClick={() => void props.onRefresh()}
+            disabled={props.repoBusy || props.busy}
+          >
+            <RefreshCwIcon className="size-3" />
+            Retry
+          </Button>
+        </div>
+      ) : !props.configured ? (
         <div className="p-3 text-xs leading-5 text-fg-muted">
           Configure the GitHub App to select repositories for scheduled runs.
         </div>

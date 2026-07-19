@@ -147,6 +147,7 @@ export type {
   FileUploadData,
   GetPackResponse,
   GitHubAppInfo,
+  GitHubCapabilityHealth,
   GitHubRepositoriesResponse,
   GitHubRepository,
   GoalSpec,

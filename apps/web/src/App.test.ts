@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { Permission } from "@opengeni/contracts";
+import { OpenGeniApiError } from "@opengeni/sdk";
 
 import {
   capabilityErrorToast,
@@ -56,6 +57,8 @@ import {
   mergeMcpServerOptions,
   reasoningEffortOrder,
   selectedAvailableCapabilityToolIds,
+  sessionPolicyPickerIds,
+  toolsForPolicySelection,
 } from "./lib/session-tools";
 import {
   agentConfigFromFormState,
@@ -65,6 +68,7 @@ import {
 } from "./lib/scheduled-tasks";
 import { entitlementEntries, formatEntitlementValue } from "./lib/format";
 import { listViewState } from "./lib/load-state";
+import { githubCapabilityHealthForError } from "./lib/github-health";
 import { upsertWorkspace, workspaceCreationAccountId } from "./lib/workspaces";
 import type {
   AccessContext,
@@ -99,6 +103,31 @@ describe("workspace route helpers", () => {
   test("builds the new workspace-settings and organization-settings paths", () => {
     expect(workspaceSettingsPath("workspace-1")).toBe("/workspaces/workspace-1/settings");
     expect(orgSettingsPath("workspace-1")).toBe("/workspaces/workspace-1/organization");
+  });
+});
+
+describe("GitHub capability health", () => {
+  test("preserves typed provider/configuration failures instead of pretending GitHub is disconnected", () => {
+    expect(
+      githubCapabilityHealthForError(new OpenGeniApiError(502, "upstream unavailable")),
+    ).toEqual({
+      state: "unavailable",
+      reason: "provider_unavailable",
+      action: "retry",
+      renewal: "inactive",
+    });
+    expect(githubCapabilityHealthForError(new OpenGeniApiError(409, "not configured"))).toEqual({
+      state: "unavailable",
+      reason: "not_configured",
+      action: "configure",
+      renewal: "inactive",
+    });
+    expect(githubCapabilityHealthForError(new TypeError("network"))).toEqual({
+      state: "unavailable",
+      reason: "unknown",
+      action: "retry",
+      renewal: "inactive",
+    });
   });
 });
 
@@ -979,6 +1008,58 @@ describe("buildTools", () => {
     ]);
   });
 
+  test("omits a canonical default selection including hidden docs helpers", () => {
+    expect(
+      toolsForPolicySelection({
+        selectedMcpServerIds: ["opengeni", "docs"],
+        baselineMcpServerIds: ["docs", "opengeni"],
+      }),
+    ).toBeUndefined();
+  });
+
+  test("preserves deliberate empty and explicit-equal selections", () => {
+    expect(
+      toolsForPolicySelection({
+        selectedMcpServerIds: [],
+        baselineMcpServerIds: ["opengeni", "cap-search"],
+      }),
+    ).toEqual([]);
+    expect(
+      toolsForPolicySelection({
+        selectedMcpServerIds: ["opengeni", "cap-search"],
+        baselineMcpServerIds: ["opengeni", "cap-search"],
+        forceExplicit: true,
+      }),
+    ).toEqual([
+      { kind: "mcp", id: "opengeni" },
+      { kind: "mcp", id: "cap-search" },
+    ]);
+  });
+
+  test("projects workspace-default and fixed session picker baselines honestly", () => {
+    const selectable = ["opengeni", "cap-live", "static-selected"];
+    expect([
+      ...sessionPolicyPickerIds(
+        {
+          tools: [{ kind: "mcp", id: "retired", optional: true }],
+          toolPolicy: { mode: "workspace_default", inheritedFromSessionId: null },
+        },
+        selectable,
+        ["opengeni", "cap-live"],
+      ),
+    ]).toEqual(["opengeni", "cap-live"]);
+    expect([
+      ...sessionPolicyPickerIds(
+        {
+          tools: [{ kind: "mcp", id: "static-selected" }],
+          toolPolicy: { mode: "explicit", inheritedFromSessionId: null },
+        },
+        selectable,
+        ["opengeni", "cap-live"],
+      ),
+    ]).toEqual(["static-selected"]);
+  });
+
   test("selects enabled custom MCPs by default for future agent turns", () => {
     expect([
       ...selectedAvailableCapabilityToolIds(new Set(["old"]), ["cap-4fetch", "cap-search"]),
@@ -1000,6 +1081,17 @@ describe("buildTools", () => {
         new Set(["cap-4fetch", "cap-search"]),
       ),
     ]).toEqual(["cap-search", "cap-new"]);
+  });
+
+  test("does not auto-select configured static MCPs outside workspace defaults", () => {
+    expect([
+      ...selectedAvailableCapabilityToolIds(
+        new Set(),
+        ["opengeni", "static-configured", "cap-search"],
+        new Set(),
+        ["opengeni", "cap-search"],
+      ),
+    ]).toEqual(["opengeni", "cap-search"]);
   });
 
   test("derives enabled runtime-ready MCPs from workspace capabilities", () => {

@@ -1397,6 +1397,7 @@ export const composerDrafts = pgTable(
     text: text("text").notNull().default(""),
     resources: jsonb("resources").$type<unknown[]>().notNull().default([]),
     tools: jsonb("tools").$type<unknown[]>().notNull().default([]),
+    toolsProvided: boolean("tools_provided").notNull().default(false),
     model: text("model").notNull(),
     reasoningEffort: text("reasoning_effort").notNull(),
     sourceTurnId: uuid("source_turn_id"),

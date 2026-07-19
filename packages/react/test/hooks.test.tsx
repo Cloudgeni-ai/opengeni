@@ -250,6 +250,7 @@ describe("useTurnQueue", () => {
           text: second.prompt,
           resources: [],
           tools: [],
+          toolsProvided: false,
           model: second.model,
           reasoningEffort: second.reasoningEffort,
           sourceTurnId: second.id,
@@ -763,6 +764,7 @@ describe("useComposer durable draft and control binding", () => {
       text: "first tab state",
       resources: [],
       tools: [],
+      toolsProvided: false,
       model: "model-x",
       reasoningEffort: "medium",
       sourceTurnId: null,
@@ -808,6 +810,7 @@ describe("useComposer durable draft and control binding", () => {
       text: "restored text",
       resources: [],
       tools: [],
+      toolsProvided: false,
       model: "model-x",
       reasoningEffort: "medium" as const,
       sourceTurnId: null,
@@ -849,12 +852,86 @@ describe("useComposer durable draft and control binding", () => {
     await hook.unmount();
   });
 
+  test("preserves an explicit draft tool array when the host does not override it", async () => {
+    const sent: unknown[] = [];
+    const initial: ComposerDraft = {
+      revision: 2,
+      text: "keep this narrowing",
+      resources: [],
+      tools: [{ kind: "mcp", id: "cap-search" }],
+      toolsProvided: true,
+      model: "model-x",
+      reasoningEffort: "medium",
+      sourceTurnId: null,
+      sourceTurnVersion: null,
+      updatedAt: new Date().toISOString(),
+    };
+    const client = fakeClient({
+      getComposerDraft: async () => initial,
+      sendMessage: async (_ws, _session, input) => {
+        sent.push(input);
+        return makeEvent(1, "user.message");
+      },
+    });
+    const hook = await renderHook(
+      () => useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush();
+    await flushing(async () => expect(await hook.result.current.send()).toBe(true));
+    expect(sent.at(-1)).toMatchObject({ tools: [{ kind: "mcp", id: "cap-search" }] });
+    await hook.unmount();
+  });
+
+  test("persists and sends an explicit empty tool override", async () => {
+    const saved: unknown[] = [];
+    const sent: unknown[] = [];
+    const initial: ComposerDraft = {
+      revision: 1,
+      text: "no optional tools",
+      resources: [],
+      tools: [],
+      toolsProvided: false,
+      model: "model-x",
+      reasoningEffort: "medium",
+      sourceTurnId: null,
+      sourceTurnVersion: null,
+      updatedAt: new Date().toISOString(),
+    };
+    const client = fakeClient({
+      getComposerDraft: async () => initial,
+      saveComposerDraft: async (_ws, _session, request) => {
+        saved.push(request);
+        return { ...initial, ...request, revision: request.expectedRevision + 1 };
+      },
+      sendMessage: async (_ws, _session, input) => {
+        sent.push(input);
+        return makeEvent(1, "user.message");
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          sendExtras: { tools: [] },
+        }),
+      undefined,
+    );
+    await flush();
+    await flushing(async () => expect(await hook.result.current.send()).toBe(true));
+    expect(saved.at(-1)).toMatchObject({ tools: [], toolsProvided: true });
+    expect(sent.at(-1)).toMatchObject({ tools: [] });
+    await hook.unmount();
+  });
+
   test("an autosave conflict preserves the local text and exposes both resolution choices", async () => {
     const initial = {
       revision: 1,
       text: "remote one",
       resources: [],
       tools: [],
+      toolsProvided: false,
       model: "model-x",
       reasoningEffort: "medium" as const,
       sourceTurnId: null,

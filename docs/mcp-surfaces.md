@@ -19,10 +19,20 @@ First-party OpenGeni MCP memory tools:
 - `memory_save` — save one durable, future-useful workspace memory through the deterministic write gate.
 - `memory_correct` — archive or supersede an incorrect/outdated workspace memory by id.
 
-These tools are session-scoped: they register only when the delegated bearer carries
-a worker-signed `sessionId` claim and the workspace's `settings.memoryEnabled`
-setting is true. The REST/UI memory audit and seed surfaces remain available when
-the setting is off.
+GitHub recovery is also first-party and permission-scoped:
+
+- `github_connect_link` returns a short-lived workspace-bound human install link.
+- `github_credential_status` reports whether the exact session has a host-managed,
+  automatically renewed repository binding, or a typed configure/connect/rebind
+  action. It never returns a provider token; the old model-visible `github_token`
+  surface is intentionally absent.
+
+The memory tools are session-scoped: they register only when the delegated bearer
+carries a worker-signed `sessionId` claim and the workspace's
+`settings.memoryEnabled` setting is true. The REST/UI memory audit and seed
+surfaces remain available when the setting is off. GitHub recovery is separately
+gated by `github:use`; its credential-status tool additionally requires the
+worker-signed session claim, while the connect-link tool remains workspace scoped.
 
 Docs MCP also has a `memory_search`, but it is the curated documents surface, not
 the first-party turn tool. It now reads both `active` and `approved` memory records

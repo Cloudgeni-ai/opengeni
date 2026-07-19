@@ -126,7 +126,12 @@ export function resolveSessionToolPolicy(input: SessionToolPolicyInput): Resolve
       )
     : [];
   const selectedIds = sortedIds(
-    selectedRefs.filter((tool) => !mandatoryIdSet.has(tool.id)).map((tool) => tool.id),
+    selectedRefs
+      .filter(
+        (tool) =>
+          !mandatoryIdSet.has(tool.id) && !(tracksWorkspaceDefaults && tool.optional === true),
+      )
+      .map((tool) => tool.id),
   );
   const projections = {
     selected: projectIds(selectedIds),

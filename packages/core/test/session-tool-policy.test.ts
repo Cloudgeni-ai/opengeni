@@ -114,7 +114,12 @@ describe("session tool policy resolution", () => {
       "retired-capability",
     ]);
     expect(result.effectivePolicy.droppedIds).toEqual(["retired-capability"]);
+    // Persisted optional refs are a materialized workspace-default snapshot,
+    // not a user-pinned selection. The current default and unavailable history
+    // stay visible through effective/deferred/dropped truth instead.
+    expect(result.effectivePolicy.selectedIds).toEqual([]);
     expect(result.effectivePolicy.counts).toMatchObject({
+      selected: 0,
       effective: 3,
       configured: 2,
       dropped: 1,

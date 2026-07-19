@@ -41,6 +41,12 @@ Rules that hold across the table:
   env vars. Renewal atomically replaces the same files, so multi-day turns see
   current credentials without model action or manifest mutation. Missing token
   files are clean passthroughs.
+- **Git tokens never cross the model-facing tool surface.** The first-party MCP
+  exposes `github_credential_status`, which reports only typed host-managed
+  renewal, unavailable, connect, or session-rebind truth. The historical
+  `github_token` tool is not registered. Token minting and atomic file updates
+  remain worker/host responsibilities and token values never appear in MCP
+  results, model output, events, or audit text.
 - **Toolspace is attenuated and attempt-fenced.** Its delegated token carries
   only `toolspace:call`; exact session, turn, attempt, and execution-generation
   claims; and subject `sandbox:<turnId>`. Every Toolspace admission, call-budget

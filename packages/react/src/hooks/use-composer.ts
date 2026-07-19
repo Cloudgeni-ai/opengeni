@@ -183,11 +183,13 @@ export function useComposer(
     const base = draftRef.current;
     if (!base) return null;
     const extras = resolveSendExtras(sendExtrasRef.current);
+    const toolsProvidedByHost = Object.prototype.hasOwnProperty.call(extras, "tools");
     return {
       expectedRevision: base.revision,
       text: value,
       resources: mergeResources(restoredResources, extras.resources ?? []),
-      tools: extras.tools ?? base.tools,
+      tools: toolsProvidedByHost ? (extras.tools ?? []) : base.tools,
+      toolsProvided: toolsProvidedByHost ? true : base.toolsProvided,
       model: extras.model ?? base.model,
       reasoningEffort: extras.reasoningEffort ?? base.reasoningEffort,
     };
@@ -270,7 +272,13 @@ export function useComposer(
         // worker rejects whitespace-only text; a file-only message therefore
         // carries a minimal default so the attachments still get delivered.
         const sendText = text || FILE_ONLY_MESSAGE_TEXT;
-        const input = composeSendInput(sendText, pendingClientEventId.current, extras, {
+        const acknowledgedDraft = draftRef.current;
+        const sendExtras =
+          acknowledgedDraft?.toolsProvided === true &&
+          !Object.prototype.hasOwnProperty.call(extras, "tools")
+            ? { ...extras, tools: acknowledgedDraft.tools }
+            : extras;
+        const input = composeSendInput(sendText, pendingClientEventId.current, sendExtras, {
           ...(options.effectiveControl?.controlEtag
             ? { controlEtag: options.effectiveControl.controlEtag }
             : {}),
@@ -543,6 +551,7 @@ function draftPayload(draft: ComposerDraft): SaveComposerDraftRequest {
     text: draft.text,
     resources: draft.resources,
     tools: draft.tools,
+    toolsProvided: draft.toolsProvided,
     model: draft.model,
     reasoningEffort: draft.reasoningEffort,
   };

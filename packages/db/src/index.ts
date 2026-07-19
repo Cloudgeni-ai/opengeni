@@ -3049,16 +3049,17 @@ export async function listCapabilityCatalogItems(
         ),
       )
       .orderBy(asc(schema.capabilityCatalogItems.kind), asc(schema.capabilityCatalogItems.name));
-    return rows
-      .filter((row) =>
-        capabilityCatalogItemIsTrustedForExposure({
-          source: row.source as CapabilitySource,
-          stale: row.stale,
-          authKind: row.authKind as CapabilityCatalogItem["authKind"],
-          metadata: row.metadata,
-        }),
-      )
-      .map(mapCapabilityCatalogItem);
+    const installations = await scopedDb
+      .select()
+      .from(schema.capabilityInstallations)
+      .where(eq(schema.capabilityInstallations.workspaceId, workspaceId));
+    const installationByCapabilityId = new Map(
+      installations.map((installation) => [installation.capabilityId, installation]),
+    );
+    return rows.flatMap((row) => {
+      const exposure = catalogExposureState(row, installationByCapabilityId.get(row.id) ?? null);
+      return exposure === "blocked" ? [] : [mapCapabilityCatalogItem(row, exposure)];
+    });
   });
 }
 
@@ -3082,18 +3083,21 @@ export async function getCapabilityCatalogItem(
       )
       .orderBy(asc(sql`(${schema.capabilityCatalogItems.workspaceId} is null)`))
       .limit(1);
-    if (
-      !row ||
-      !capabilityCatalogItemIsTrustedForExposure({
-        source: row.source as CapabilitySource,
-        stale: row.stale,
-        authKind: row.authKind as CapabilityCatalogItem["authKind"],
-        metadata: row.metadata,
-      })
-    ) {
+    if (!row) {
       return null;
     }
-    return mapCapabilityCatalogItem(row);
+    const [installation] = await scopedDb
+      .select()
+      .from(schema.capabilityInstallations)
+      .where(
+        and(
+          eq(schema.capabilityInstallations.workspaceId, workspaceId),
+          eq(schema.capabilityInstallations.capabilityId, capabilityId),
+        ),
+      )
+      .limit(1);
+    const exposure = catalogExposureState(row, installation ?? null);
+    return exposure === "blocked" ? null : mapCapabilityCatalogItem(row, exposure);
   });
 }
 
@@ -3272,12 +3276,7 @@ export async function listEnabledMcpCapabilityServers(
 
   return [...preferredByInstallation.values()].flatMap(({ item, installation }) => {
     if (
-      !capabilityCatalogItemIsTrustedForExposure({
-        source: item.source as CapabilitySource,
-        stale: item.stale,
-        authKind: item.authKind as CapabilityCatalogItem["authKind"],
-        metadata: item.metadata,
-      }) ||
+      catalogExposureState(item, installation) === "blocked" ||
       !item.endpointUrl ||
       !mcpConnectivityOk(installation.metadata)
     ) {
@@ -23713,9 +23712,76 @@ function mapImportBatch(row: typeof schema.importBatches.$inferSelect): ImportBa
   };
 }
 
+type CatalogExposureState = "trusted" | "legacy_active" | "blocked";
+
+function catalogExposureState(
+  item: typeof schema.capabilityCatalogItems.$inferSelect,
+  installation: typeof schema.capabilityInstallations.$inferSelect | null,
+): CatalogExposureState {
+  if (
+    capabilityCatalogItemIsTrustedForExposure({
+      source: item.source as CapabilitySource,
+      stale: item.stale,
+      authKind: item.authKind as CapabilityCatalogItem["authKind"],
+      metadata: item.metadata,
+    })
+  ) {
+    return "trusted";
+  }
+  // Rolling compatibility for installations enabled before registry probe
+  // provenance existed. This is deliberately narrower than the normal trust
+  // gate: only an already-active, non-stale, known-auth row with enable-time
+  // connectivity evidence can continue. A present-but-non-real probe is an
+  // explicit negative verdict and can never be grandfathered.
+  if (
+    item.source !== registryCapabilitySource ||
+    item.stale ||
+    Object.prototype.hasOwnProperty.call(item.metadata, "mcpProbe") ||
+    !item.authKind ||
+    item.authKind === "unknown" ||
+    installation?.status !== "active" ||
+    !mcpConnectivityOk(installation.metadata)
+  ) {
+    return "blocked";
+  }
+  const hasCredentialBinding =
+    !!encryptedHeadersConfig(installation.config.headersEncrypted) ||
+    !!connectionRefConfig(installation.config.connectionRef);
+  if (item.authModel && !hasCredentialBinding) {
+    return "blocked";
+  }
+  return "legacy_active";
+}
+
 function mapCapabilityCatalogItem(
   row: typeof schema.capabilityCatalogItems.$inferSelect,
+  exposure: "trusted" | "legacy_active" | "unverified" = capabilityCatalogItemIsTrustedForExposure({
+    source: row.source as CapabilitySource,
+    stale: row.stale,
+    authKind: row.authKind as CapabilityCatalogItem["authKind"],
+    metadata: row.metadata,
+  })
+    ? "trusted"
+    : "unverified",
 ): CapabilityCatalogItem {
+  const catalogTrust =
+    exposure === "legacy_active"
+      ? {
+          state: "legacy_active" as const,
+          reason: "active_installation_compatibility" as const,
+        }
+      : exposure === "trusted"
+        ? {
+            state: "trusted" as const,
+            reason:
+              row.source === registryCapabilitySource
+                ? ("verified_probe" as const)
+                : ("trusted_source" as const),
+          }
+        : {
+            state: "unverified" as const,
+            reason: "missing_verification" as const,
+          };
   const runtime =
     row.kind === "mcp" && row.endpointUrl
       ? {
@@ -23725,6 +23791,7 @@ function mapCapabilityCatalogItem(
           notes: row.authModel
             ? "Requires credential headers supplied in the enable request."
             : null,
+          catalogTrust,
         }
       : {
           available: false,
@@ -23732,6 +23799,7 @@ function mapCapabilityCatalogItem(
             row.kind === "mcp"
               ? "Remote streamable HTTP endpoint is required for runtime use."
               : null,
+          catalogTrust,
         };
   return {
     id: row.id,

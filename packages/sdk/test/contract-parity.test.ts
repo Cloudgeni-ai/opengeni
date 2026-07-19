@@ -8,6 +8,7 @@ import {
   ClientConfig as ContractClientConfig,
   ClientSessionEvent,
   CreateSessionRequest as ContractCreateSessionRequest,
+  GitHubCapabilityHealth as ContractGitHubCapabilityHealth,
   CreateKnowledgeMemoryRequest as ContractCreateKnowledgeMemoryRequest,
   KnowledgeMemory as ContractKnowledgeMemory,
   KnowledgeMemoryStatus as ContractKnowledgeMemoryStatus,
@@ -78,6 +79,7 @@ import type {
   ClientConfig,
   ClientSessionEventInput,
   CreateSessionRequest,
+  GitHubCapabilityHealth,
   ListWorkspaceMembersResponse,
   MachineState,
   MachineView,
@@ -176,6 +178,32 @@ describe("SDK / contracts parity", () => {
     expect(ContractSessionToolPolicy.safeParse(policy).success).toBe(true);
     expect(ContractSessionEffectiveToolPolicy.safeParse(effective).success).toBe(true);
     expect([acceptToolRef(tool), acceptPolicy(policy), acceptEffective(effective)]).toHaveLength(3);
+  });
+
+  test("GitHub capability-health union matches contracts", () => {
+    const acceptContract = (
+      value: z.infer<typeof ContractGitHubCapabilityHealth>,
+    ): GitHubCapabilityHealth => value;
+    const acceptSdk = (value: GitHubCapabilityHealth) =>
+      ContractGitHubCapabilityHealth.parse(value);
+    const ready: GitHubCapabilityHealth = {
+      state: "ready",
+      reason: null,
+      action: "none",
+      renewal: "automatic",
+    };
+    const rebind: GitHubCapabilityHealth = {
+      state: "unavailable",
+      reason: "session_repository_binding_required",
+      action: "rebind",
+      renewal: "inactive",
+    };
+    expect([
+      acceptContract(ready),
+      acceptSdk(ready),
+      acceptContract(rebind),
+      acceptSdk(rebind),
+    ]).toEqual([ready, ready, rebind, rebind]);
   });
 
   test("sandbox backend enum is 3-way parity across contracts / sdk / deployment", () => {

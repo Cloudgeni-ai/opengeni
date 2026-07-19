@@ -2180,6 +2180,9 @@ export const ComposerDraft = z.object({
   text: z.string(),
   resources: z.array(ResourceRef),
   tools: z.array(ToolRef),
+  // False means the draft inherits the session policy. True preserves an
+  // explicit array, including [], across autosave/reload and queue checkout.
+  toolsProvided: z.boolean().default(false),
   model: z.string().min(1),
   reasoningEffort: ReasoningEffort,
   sourceTurnId: z.string().uuid().nullable(),
@@ -2230,6 +2233,7 @@ export const SaveComposerDraftRequest = ComposerDraft.pick({
   text: true,
   resources: true,
   tools: true,
+  toolsProvided: true,
   model: true,
   reasoningEffort: true,
 }).extend({ expectedRevision: z.number().int().nonnegative() });
@@ -3167,6 +3171,21 @@ export const CapabilityRuntime = z.object({
   mcpServerId: z.string().min(1).optional(),
   transport: z.string().min(1).optional(),
   notes: z.string().nullable().default(null),
+  // Registry trust is server-derived and contains no endpoint or credential
+  // material. `legacy_active` is a rolling-upgrade compatibility state for an
+  // already-enabled connector with prior connectivity evidence; it is never
+  // granted to a new/uninstalled unverified row.
+  catalogTrust: z
+    .object({
+      state: z.enum(["trusted", "legacy_active", "unverified"]),
+      reason: z.enum([
+        "trusted_source",
+        "verified_probe",
+        "active_installation_compatibility",
+        "missing_verification",
+      ]),
+    })
+    .optional(),
 });
 export type CapabilityRuntime = z.infer<typeof CapabilityRuntime>;
 
@@ -4496,6 +4515,57 @@ export const GitHubRepository = z.object({
   accountType: z.string().nullable(),
 });
 export type GitHubRepository = z.infer<typeof GitHubRepository>;
+
+/**
+ * Secret-safe GitHub capability truth shared by the API, SDK, browser, and the
+ * first-party diagnostic MCP surface. `ready` means credentials are delivered
+ * and renewed by the host; token values are never part of this projection.
+ */
+export const GitHubCapabilityHealth = z.discriminatedUnion("state", [
+  z
+    .object({
+      state: z.literal("ready"),
+      reason: z.null(),
+      action: z.literal("none"),
+      renewal: z.literal("automatic"),
+    })
+    .strict(),
+  z
+    .object({
+      state: z.literal("unavailable"),
+      reason: z.enum([
+        "not_configured",
+        "no_repository_binding",
+        "session_repository_binding_required",
+        "provider_unavailable",
+        "permission_denied",
+        "unknown",
+      ]),
+      action: z.enum(["configure", "connect", "reconnect", "rebind", "retry"]),
+      renewal: z.literal("inactive"),
+    })
+    .strict(),
+]);
+export type GitHubCapabilityHealth = z.infer<typeof GitHubCapabilityHealth>;
+
+export const GitHubAppInfo = z.object({
+  configured: z.boolean(),
+  appId: z.string().nullable(),
+  clientId: z.string().nullable(),
+  appSlug: z.string().nullable(),
+  installUrl: z.string().url().nullable(),
+  missing: z.array(z.string()),
+  // Optional for rolling compatibility with API versions predating OPE-16.
+  health: GitHubCapabilityHealth.optional(),
+});
+export type GitHubAppInfo = z.infer<typeof GitHubAppInfo>;
+
+export const GitHubRepositoriesResponse = z.object({
+  repositories: z.array(GitHubRepository),
+  // Optional for rolling compatibility with API versions predating OPE-16.
+  health: GitHubCapabilityHealth.optional(),
+});
+export type GitHubRepositoriesResponse = z.infer<typeof GitHubRepositoriesResponse>;
 
 export const ClientAuthConfig = z.discriminatedUnion("mode", [
   z.object({

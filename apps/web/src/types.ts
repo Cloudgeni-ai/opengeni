@@ -37,6 +37,7 @@ export type {
   FileAsset,
   FileDownloadUrlResponse,
   GitHubAppInfo,
+  GitHubCapabilityHealth,
   GitHubRepository,
   GoalSpec,
   CreateKnowledgeMemoryRequest,

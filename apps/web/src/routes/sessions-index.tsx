@@ -328,6 +328,14 @@ function WorkspaceRepositoryPicker({
   return (
     <RepositoryContextPicker
       configured={context.githubStatus?.configured === true}
+      health={
+        context.githubStatus?.health ?? {
+          state: "unavailable",
+          reason: "unknown",
+          action: "retry",
+          renewal: "inactive",
+        }
+      }
       installUrl={context.githubStatus?.installUrl ?? null}
       repositories={context.githubRepos}
       groups={context.repositoryGroups}

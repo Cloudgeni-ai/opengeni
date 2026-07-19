@@ -1647,6 +1647,8 @@ export type ComposerDraft = {
   text: string;
   resources: ResourceRef[];
   tools: ToolRef[];
+  /** False inherits the session policy; true preserves an explicit array. */
+  toolsProvided: boolean;
   model: string;
   reasoningEffort: ReasoningEffort;
   sourceTurnId: string | null;
@@ -2438,6 +2440,17 @@ export type CapabilityRuntime = {
   mcpServerId?: string | undefined;
   transport?: string | undefined;
   notes: string | null;
+  /** Secret-safe server-derived registry exposure state. */
+  catalogTrust?:
+    | {
+        state: "trusted" | "legacy_active" | "unverified";
+        reason:
+          | "trusted_source"
+          | "verified_probe"
+          | "active_installation_compatibility"
+          | "missing_verification";
+      }
+    | undefined;
 };
 
 export type CapabilityCatalogItem = {
@@ -2551,6 +2564,26 @@ export type GitHubRepository = {
   accountType: string | null;
 };
 
+export type GitHubCapabilityHealth =
+  | {
+      state: "ready";
+      reason: null;
+      action: "none";
+      renewal: "automatic";
+    }
+  | {
+      state: "unavailable";
+      reason:
+        | "not_configured"
+        | "no_repository_binding"
+        | "session_repository_binding_required"
+        | "provider_unavailable"
+        | "permission_denied"
+        | "unknown";
+      action: "configure" | "connect" | "reconnect" | "rebind" | "retry";
+      renewal: "inactive";
+    };
+
 export type GitHubAppInfo = {
   configured: boolean;
   appId: string | null;
@@ -2560,10 +2593,14 @@ export type GitHubAppInfo = {
   installUrl: string | null;
   /** Setting names still missing when `configured` is false. */
   missing: string[];
+  /** Secret-safe capability health. Optional while older API replicas drain. */
+  health?: GitHubCapabilityHealth | undefined;
 };
 
 export type GitHubRepositoriesResponse = {
   repositories: GitHubRepository[];
+  /** Secret-safe capability health. Optional while older API replicas drain. */
+  health?: GitHubCapabilityHealth | undefined;
 };
 
 export type CreateGitHubAppManifestRequest = {
