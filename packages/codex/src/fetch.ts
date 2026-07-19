@@ -292,7 +292,11 @@ async function bufferCodexErrorResponse(res: Response): Promise<Response> {
   if (errorType === CODEX_USAGE_LIMIT_ERROR_TYPE) {
     headers.set("x-should-retry", "false");
   }
-  return new Response(bodyText, { status: res.status, statusText: res.statusText, headers });
+  return new Response(bodyText, {
+    status: res.status,
+    statusText: res.statusText,
+    headers,
+  });
 }
 
 /**
@@ -301,17 +305,12 @@ async function bufferCodexErrorResponse(res: Response): Promise<Response> {
  * event carries the full `response` payload.
  */
 async function sseToJsonResponse(res: Response): Promise<Response> {
-  const text = (await res.text()).replace(/\r\n/g, "\n");
+  const text = await res.text();
   let final: Record<string, unknown> | null = null;
   let terminalError: Response | null = null;
   const items: unknown[] = []; // assembled from output_item.done (the codex backend
   // leaves response.completed.response.output empty and emits the items separately).
-  for (const block of text.split("\n\n")) {
-    const data = block
-      .split("\n")
-      .filter((l) => l.startsWith("data:"))
-      .map((l) => l.slice(5).trim())
-      .join("\n");
+  for (const data of sseDataPayloads(text)) {
     if (!data || data === "[DONE]") {
       continue;
     }
@@ -399,6 +398,39 @@ const NON_RETRYABLE_SSE_ERROR_CODES = new Set([
   "invalid_prompt",
   "usage_limit_reached",
 ]);
+
+/**
+ * Project the data payloads from a complete SSE body. EventSource accepts LF,
+ * CRLF, and bare CR line endings; splitting only on `\n\n` can therefore merge
+ * a standards-valid terminal failure into the preceding event and silently
+ * turn it into `{}`. Preserve the SSE rule that multiple data lines are joined
+ * with `\n`, and tolerate a final event without a trailing blank line as the
+ * previous transport parser did.
+ */
+function sseDataPayloads(text: string): string[] {
+  const payloads: string[] = [];
+  let dataLines: string[] = [];
+  const dispatch = () => {
+    if (dataLines.length > 0) payloads.push(dataLines.join("\n"));
+    dataLines = [];
+  };
+
+  for (const line of text.split(/\r\n|\r|\n/)) {
+    if (line === "") {
+      dispatch();
+      continue;
+    }
+    if (line === "data") {
+      dataLines.push("");
+      continue;
+    }
+    if (!line.startsWith("data:")) continue;
+    const value = line.slice(5);
+    dataLines.push(value.startsWith(" ") ? value.slice(1) : value);
+  }
+  dispatch();
+  return payloads;
+}
 
 const CODEX_TERMINAL_ERROR_FIELD_MAX_BYTES = 256;
 const CODEX_TERMINAL_ERROR_MESSAGE_MAX_BYTES = 4 * 1024;
@@ -507,31 +539,75 @@ function repairCodexStream(res: Response): Response {
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
   let buffer = "";
+  const emitCompleteBlocks = (
+    controller: TransformStreamDefaultController<Uint8Array>,
+    final: boolean,
+  ) => {
+    let boundary = findSseBlockBoundary(buffer, final);
+    while (boundary) {
+      const block = buffer.slice(0, boundary.start);
+      const separator = buffer.slice(boundary.start, boundary.end);
+      buffer = buffer.slice(boundary.end);
+      controller.enqueue(encoder.encode(`${patchSseBlock(block, items)}${separator}`));
+      boundary = findSseBlockBoundary(buffer, final);
+    }
+  };
   const transform = new TransformStream<Uint8Array, Uint8Array>({
     transform(chunk, controller) {
       buffer += decoder.decode(chunk, { stream: true });
-      let idx = buffer.indexOf("\n\n");
-      while (idx !== -1) {
-        const block = buffer.slice(0, idx);
-        buffer = buffer.slice(idx + 2);
-        controller.enqueue(encoder.encode(`${patchSseBlock(block, items)}\n\n`));
-        idx = buffer.indexOf("\n\n");
-      }
+      emitCompleteBlocks(controller, false);
     },
     flush(controller) {
+      buffer += decoder.decode();
+      emitCompleteBlocks(controller, true);
       if (buffer.length > 0) {
         controller.enqueue(encoder.encode(patchSseBlock(buffer, items)));
+        buffer = "";
       }
     },
   });
   const headers = new Headers(res.headers);
   headers.delete("content-length");
-  return new Response(res.body.pipeThrough(transform), { status: res.status, headers });
+  return new Response(res.body.pipeThrough(transform), {
+    status: res.status,
+    headers,
+  });
+}
+
+type SseBlockBoundary = { start: number; end: number };
+
+/**
+ * Find two consecutive SSE line endings without misreading one CRLF as a bare
+ * CR followed by a bare LF. A trailing CR is intentionally held until the next
+ * chunk (or final flush), because only then can it be distinguished from the
+ * first byte of CRLF.
+ */
+function findSseBlockBoundary(value: string, final: boolean): SseBlockBoundary | null {
+  for (let index = 0; index < value.length; index += 1) {
+    const firstEnd = sseLineEndingEnd(value, index, final);
+    if (firstEnd === null) continue;
+    const secondEnd = sseLineEndingEnd(value, firstEnd, final);
+    if (secondEnd !== null) {
+      return { start: index, end: secondEnd };
+    }
+    index = firstEnd - 1;
+  }
+  return null;
+}
+
+function sseLineEndingEnd(value: string, index: number, final: boolean): number | null {
+  const current = value[index];
+  if (current === "\n") return index + 1;
+  if (current !== "\r") return null;
+  if (index + 1 < value.length) {
+    return value[index + 1] === "\n" ? index + 2 : index + 1;
+  }
+  return final ? index + 1 : null;
 }
 
 /** Collect output_item.done items (mutating `items`); rewrite the terminal event's empty output. */
 function patchSseBlock(block: string, items: unknown[]): string {
-  const lines = block.split("\n");
+  const lines = block.split(/\r\n|\r|\n/);
   const dataStr = lines
     .filter((l) => l.startsWith("data:"))
     .map((l) => l.slice(5).trim())
@@ -559,7 +635,8 @@ function patchSseBlock(block: string, items: unknown[]): string {
     if ((!Array.isArray(out) || out.length === 0) && items.length > 0) {
       ev.response = { ...ev.response, output: items };
       const nonData = lines.filter((l) => !l.startsWith("data:"));
-      return [...nonData, `data: ${JSON.stringify(ev)}`].join("\n");
+      const lineEnding = block.match(/\r\n|\r|\n/)?.[0] ?? "\n";
+      return [...nonData, `data: ${JSON.stringify(ev)}`].join(lineEnding);
     }
   }
   return block;

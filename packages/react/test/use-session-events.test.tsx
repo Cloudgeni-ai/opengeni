@@ -33,7 +33,12 @@ function event(
   };
 }
 
-type ListOptions = { after?: number; before?: number; limit?: number; compact?: boolean };
+type ListOptions = {
+  after?: number;
+  before?: number;
+  limit?: number;
+  compact?: boolean;
+};
 
 function listPage(store: SessionEvent[], options: ListOptions = {}): SessionEvent[] {
   const after = options.after ?? 0;
@@ -81,7 +86,10 @@ describe("useSessionEvents", () => {
     const { client, listCalls, streamCalls } = scriptedClient({ store });
     const lengths: number[] = [];
     const hook = await renderHook(() => {
-      const result = useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID });
+      const result = useSessionEvents(SESSION_ID, {
+        client,
+        workspaceId: WORKSPACE_ID,
+      });
       lengths.push(result.events.length);
       return result;
     }, undefined);
@@ -119,7 +127,10 @@ describe("useSessionEvents", () => {
     const observed: Array<{ sessionId: string; eventSessionIds: string[] }> = [];
     const hook = await renderHook(
       (props: { sessionId: string }) => {
-        const result = useSessionEvents(props.sessionId, { client, workspaceId: WORKSPACE_ID });
+        const result = useSessionEvents(props.sessionId, {
+          client,
+          workspaceId: WORKSPACE_ID,
+        });
         observed.push({
           sessionId: props.sessionId,
           eventSessionIds: result.events.map((item) => item.sessionId),
@@ -246,7 +257,10 @@ describe("useSessionEvents", () => {
   });
 
   test("full replay and nonzero after keep the stream-only behavior", async () => {
-    const full = scriptedClient({ store: [], streamEvents: [event(1), event(2)] });
+    const full = scriptedClient({
+      store: [],
+      streamEvents: [event(1), event(2)],
+    });
     const fullHook = await renderHook(
       () =>
         useSessionEvents(SESSION_ID, {
@@ -304,7 +318,10 @@ describe("useSessionEvents", () => {
   test("coalesced tail opens the stream after coalescedUntil", async () => {
     const coalescedTail = [
       event(1, "session.created", {}),
-      event(10, "agent.message.delta", { text: "streamed", coalescedUntil: 99 }),
+      event(10, "agent.message.delta", {
+        text: "streamed",
+        coalescedUntil: 99,
+      }),
     ];
     const { client, listCalls, streamCalls } = scriptedClient({
       store: [],
@@ -422,7 +439,10 @@ describe("useSessionEvents", () => {
         event(index + 2, "machine.op.recovered", { attempt: index + 1 }),
       ),
     ];
-    const { client } = scriptedClient({ store: [], streamEvents: streamed });
+    const { client, listCalls } = scriptedClient({
+      store: streamed,
+      streamEvents: streamed,
+    });
     const hook = await renderHook(
       () =>
         useSessionEvents(SESSION_ID, {
@@ -443,6 +463,15 @@ describe("useSessionEvents", () => {
     expect(hook.result.current.hasOlder).toBeTrue();
     expect(hook.result.current.sessionStatus).toBe("running");
 
+    const oldFirst = hook.result.current.events[0]!.sequence;
+    const more = await actRun(() => hook.result.current.loadOlder());
+    await flush(20);
+    expect(more).toBeFalse();
+    expect(listCalls).toEqual([{ before: oldFirst, limit: 5000, compact: true }]);
+    expect(hook.result.current.events[0]?.sequence).toBe(1);
+    expect(hook.result.current.events[0]!.sequence).toBeLessThan(oldFirst);
+    expect(hook.result.current.hasOlder).toBeFalse();
+
     await hook.unmount();
   });
 });
@@ -461,23 +490,62 @@ describe("boundBrowserSessionEventWindow", () => {
     expect(window.truncated).toBeFalse();
     expect(window.bytes).toBeLessThanOrEqual(SESSION_EVENT_BROWSER_SINGLE_EVENT_MAX_BYTES);
     expect(payload.id).toBe("call-1");
-    expect(payload.preview).toContain("browser rendering boundary");
     expect(truncation.surface).toBe("browser_legacy_guard");
-    expect(truncation.fullEvidence).toEqual({ available: false, reason: "not_retained" });
-    expect(JSON.stringify(retained)).not.toContain("HEAD-");
+    expect(truncation.fullEvidence).toEqual({
+      available: false,
+      reason: "not_retained",
+    });
+    expect(JSON.stringify(retained)).toContain("HEAD-");
+    expect(JSON.stringify(retained)).toContain("-TAIL");
+  });
+
+  test("canonically bounds oversized multibyte envelope fields before rendering", () => {
+    const legacy = {
+      ...event(7, "agent.toolCall.output", {
+        id: "call-envelope",
+        output: "ok",
+      }),
+      type: `bad\r\ntype-${"界".repeat(100_000)}`,
+      clientEventId: "🙂".repeat(100_000),
+      duplicateReason: "界".repeat(100_000),
+    } as SessionEvent;
+
+    const window = boundBrowserSessionEventWindow([legacy]);
+    const retained = window.events[0]!;
+    expect(retained.type).toBe("session.event.envelope_omitted");
+    expect(new TextEncoder().encode(JSON.stringify(retained)).byteLength).toBeLessThanOrEqual(
+      SESSION_EVENT_BROWSER_SINGLE_EVENT_MAX_BYTES,
+    );
+    expect(String(retained.clientEventId)).toEndWith("…[truncated]");
+    expect(String(retained.duplicateReason)).toEndWith("…[truncated]");
   });
 
   test("retains the newest exact byte-bounded suffix independently of the count cap", () => {
-    const events = Array.from({ length: 200 }, (_, index) =>
-      event(index + 1, "agent.message.completed", { text: "x".repeat(60_000) }),
+    const events = Array.from({ length: 3_000 }, (_, index) =>
+      event(index + 1, "agent.message.completed", { text: "x".repeat(4_000) }),
     );
     const window = boundBrowserSessionEventWindow(events);
 
     expect(window.truncated).toBeTrue();
     expect(window.events.length).toBeLessThan(events.length);
-    expect(window.events.at(-1)?.sequence).toBe(200);
-    expect(window.events[0]!.sequence).toBe(201 - window.events.length);
+    expect(window.events.at(-1)?.sequence).toBe(3_000);
+    expect(window.events[0]!.sequence).toBe(3_001 - window.events.length);
     expect(window.bytes).toBeLessThanOrEqual(SESSION_EVENT_BROWSER_MAX_BYTES);
     expect(new TextEncoder().encode(JSON.stringify(window.events)).byteLength).toBe(window.bytes);
+  });
+
+  test("retains the oldest exact byte-bounded prefix for backward paging", () => {
+    const events = Array.from({ length: 3_000 }, (_, index) =>
+      event(index + 1, "agent.message.completed", { text: "x".repeat(4_000) }),
+    );
+    const window = boundBrowserSessionEventWindow(events, {
+      direction: "oldest",
+    });
+
+    expect(window.truncated).toBeTrue();
+    expect(window.events.length).toBeLessThan(events.length);
+    expect(window.events[0]?.sequence).toBe(1);
+    expect(window.events.at(-1)?.sequence).toBe(window.events.length);
+    expect(window.bytes).toBeLessThanOrEqual(SESSION_EVENT_BROWSER_MAX_BYTES);
   });
 });

@@ -33,7 +33,11 @@ function event(sequence: number, payload: unknown): SessionEvent {
 
 function encodedBatchBytes(events: SessionEvent[]): number {
   return new TextEncoder().encode(
-    JSON.stringify({ workspaceId: WORKSPACE_ID, sessionId: SESSION_ID, events }),
+    JSON.stringify({
+      workspaceId: WORKSPACE_ID,
+      sessionId: SESSION_ID,
+      events,
+    }),
   ).byteLength;
 }
 
@@ -80,10 +84,46 @@ describe("SSE formatting", () => {
     expect(bytes).toBeLessThanOrEqual(SESSION_EVENT_SSE_FRAME_MAX_BYTES);
     expect(decoded.sequence).toBe(8);
     expect(boundary?.surface).toBe("sse_legacy_guard");
-    expect(boundary?.fullEvidence).toEqual({ available: false, reason: "not_retained" });
+    expect(boundary?.fullEvidence).toEqual({
+      available: false,
+      reason: "not_retained",
+    });
     expect(data).not.toContain("data:image/png;base64");
     expect(data).toContain("HEAD-");
     expect(data).toContain("-TAIL");
+  });
+
+  test("bounds and explicitly identifies malformed multibyte event envelope fields", () => {
+    const legacy = {
+      ...event(9, { id: "legacy-envelope", output: "small" }),
+      type: `bad\r\ntype-${"界".repeat(100_000)}`,
+      clientEventId: "🙂".repeat(100_000),
+      duplicateReason: "界".repeat(100_000),
+    } as SessionEvent;
+
+    const frame = formatSessionEventSse(legacy);
+    const decoded = JSON.parse(
+      frame
+        .split("\n")
+        .find((line) => line.startsWith("data: "))!
+        .slice("data: ".length),
+    ) as SessionEvent;
+    expect(new TextEncoder().encode(frame).byteLength).toBeLessThanOrEqual(
+      SESSION_EVENT_SSE_FRAME_MAX_BYTES,
+    );
+    expect(decoded.type).toBe("session.event.envelope_omitted");
+    expect(decoded.payload).toMatchObject({
+      envelopeProjection: {
+        truncated: true,
+        surface: "sse_legacy_guard",
+        fields: expect.arrayContaining([
+          expect.objectContaining({ field: "type" }),
+          expect.objectContaining({ field: "clientEventId" }),
+          expect.objectContaining({ field: "duplicateReason" }),
+        ]),
+      },
+      fullEvidence: { available: false, reason: "not_retained" },
+    });
   });
 });
 
@@ -120,7 +160,10 @@ describe("session event transport envelopes", () => {
     const events = Array.from({ length: 40 }, (_, index) =>
       event(index + 1, { output: `value-${index}-${"x".repeat(50_000)}` }),
     );
-    const page = boundSessionEventHttpPage(events, { direction: "after", maxBytes: 220_000 });
+    const page = boundSessionEventHttpPage(events, {
+      direction: "after",
+      maxBytes: 220_000,
+    });
 
     expect(page.truncated).toBeTrue();
     expect(page.events.length).toBeGreaterThan(0);
@@ -130,6 +173,21 @@ describe("session event transport envelopes", () => {
     expect(page.nextSequence).toBe(page.events.at(-1)?.sequence ?? null);
     expect(page.bytes).toBe(sessionEventJsonBytes(page.events));
     expect(page.bytes).toBeLessThanOrEqual(220_000);
+  });
+
+  test("advances a compact forward cursor through the coalesced raw range", () => {
+    const events = [
+      event(10, { text: "one", coalescedUntil: 49 }),
+      event(50, { text: "two", coalescedUntil: 73 }),
+    ];
+    const page = boundSessionEventHttpPage(events, {
+      direction: "after",
+      maxBytes: sessionEventJsonBytes([events[0]]),
+    });
+
+    expect(page.events.map((item) => item.sequence)).toEqual([10]);
+    expect(page.truncated).toBeTrue();
+    expect(page.nextSequence).toBe(49);
   });
 
   test("returns a byte-bounded backward suffix and defensively normalizes a legacy first row", () => {

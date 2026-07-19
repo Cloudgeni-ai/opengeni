@@ -50,6 +50,7 @@ import {
   getSessionQueueSnapshot,
   getStreamAcknowledgment,
   insertPtySession,
+  listSessionEventPage,
   listSessionEvents,
   listSessionIdsInGroup,
   listSessionsForSubject,
@@ -207,7 +208,10 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       }
       if (error instanceof SessionPinVersionConflictError) {
         return c.json(
-          { message: "session pin changed in another client", current: error.current },
+          {
+            message: "session pin changed in another client",
+            current: error.current,
+          },
           409,
         );
       }
@@ -233,7 +237,9 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const body = (await c.req.json()) as { target?: string };
     const target = typeof body.target === "string" ? body.target : "";
     if (!target) {
-      throw new HTTPException(400, { message: 'target is required ("auto" or an account id)' });
+      throw new HTTPException(400, {
+        message: 'target is required ("auto" or an account id)',
+      });
     }
     const pinned = target === "auto" ? null : target;
     const mutation = await withCodexCapacityMutation(
@@ -246,7 +252,9 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     );
     const ok = mutation.result;
     if (!ok) {
-      throw new HTTPException(404, { message: "session or codex account not found" });
+      throw new HTTPException(404, {
+        message: "session or codex account not found",
+      });
     }
     await Promise.allSettled(
       mutation.wakeTargets.map((wake) =>
@@ -465,7 +473,10 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       workflowId: requested.temporalWorkflowId,
       wakeRevision: requested.wakeRevision,
     });
-    return c.json({ status: "pending", message: "Compaction will run at the next safe boundary." });
+    return c.json({
+      status: "pending",
+      message: "Compaction will run at the next safe boundary.",
+    });
   });
 
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/events", async (c) => {
@@ -477,16 +488,17 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const before = optionalEventSequence(c.req.query("before"));
     const compact = compactEvents(c.req.query("compact"));
     const limit = eventListLimit(c.req.query("limit"), compact ? 5000 : 2000);
-    const events = await listSessionEvents(db, workspaceId, sessionId, {
+    const dbPage = await listSessionEventPage(db, workspaceId, sessionId, {
       after,
       ...(before !== undefined ? { before } : {}),
       limit,
     });
+    const events = dbPage.events;
     const projected = compact ? coalesceSessionEventDeltas(events) : events;
     const page = boundSessionEventHttpPage(projected, {
       direction: before !== undefined ? "before" : "after",
     });
-    const hasMore = page.truncated || events.length === limit;
+    const hasMore = dbPage.hasMore || page.truncated;
     c.header("X-OpenGeni-Page-Bytes", String(page.bytes));
     c.header("X-OpenGeni-Page-Truncated", String(hasMore));
     if (page.nextSequence !== null) {
@@ -543,7 +555,12 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       return c.json(
         await moveHumanQueuePrompt(
           { db, bus },
-          { accountId: grant.accountId, workspaceId, sessionId, subjectId: grant.subjectId },
+          {
+            accountId: grant.accountId,
+            workspaceId,
+            sessionId,
+            subjectId: grant.subjectId,
+          },
           c.req.param("turnId"),
           payload,
         ),
@@ -563,7 +580,12 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       return c.json(
         await editHumanQueuePrompt(
           { db, bus },
-          { accountId: grant.accountId, workspaceId, sessionId, subjectId: grant.subjectId },
+          {
+            accountId: grant.accountId,
+            workspaceId,
+            sessionId,
+            subjectId: grant.subjectId,
+          },
           c.req.param("turnId"),
           payload,
         ),
@@ -583,7 +605,12 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       return c.json(
         await steerHumanQueuePrompt(
           { db, bus },
-          { accountId: grant.accountId, workspaceId, sessionId, subjectId: grant.subjectId },
+          {
+            accountId: grant.accountId,
+            workspaceId,
+            sessionId,
+            subjectId: grant.subjectId,
+          },
           c.req.param("turnId"),
           payload,
         ),
@@ -603,7 +630,12 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       return c.json(
         await deleteHumanQueuePrompt(
           { db, bus },
-          { accountId: grant.accountId, workspaceId, sessionId, subjectId: grant.subjectId },
+          {
+            accountId: grant.accountId,
+            workspaceId,
+            sessionId,
+            subjectId: grant.subjectId,
+          },
           c.req.param("turnId"),
           payload,
         ),
@@ -636,7 +668,12 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       return c.json(
         await saveHumanComposerDraft(
           db,
-          { accountId: grant.accountId, workspaceId, sessionId, subjectId: grant.subjectId },
+          {
+            accountId: grant.accountId,
+            workspaceId,
+            sessionId,
+            subjectId: grant.subjectId,
+          },
           payload,
         ),
       );
@@ -654,7 +691,12 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       return c.json(
         await controlHumanSessionWorkstream(
           { db, bus, workflowClient },
-          { accountId: grant.accountId, workspaceId, sessionId, subjectId: grant.subjectId },
+          {
+            accountId: grant.accountId,
+            workspaceId,
+            sessionId,
+            subjectId: grant.subjectId,
+          },
           payload,
         ),
       );
@@ -974,7 +1016,9 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       }
       const parsed = AcknowledgeStreamRequest.safeParse(await c.req.json().catch(() => ({})));
       if (!parsed.success) {
-        throw new HTTPException(400, { message: "invalid stream acknowledgment request" });
+        throw new HTTPException(400, {
+          message: "invalid stream acknowledgment request",
+        });
       }
       const recorded = await recordStreamAcknowledgment(db, {
         accountId: grant.accountId,
@@ -1010,7 +1054,9 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
     const parsed = AttachViewerRequest.safeParse(await c.req.json().catch(() => ({})));
     if (!parsed.success) {
-      throw new HTTPException(400, { message: "invalid viewer attach request" });
+      throw new HTTPException(400, {
+        message: "invalid viewer attach request",
+      });
     }
     // Consent gate (P3.2 / addendum E.1): ONLY the un-redacted DESKTOP pixel plane
     // requires the calling principal's acknowledgment (recorded per group+subject;
@@ -1031,10 +1077,14 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
         subjectId: grant.subjectId,
       });
       if (!ack?.acknowledgedUnredacted) {
-        throw new HTTPException(409, { message: "stream_acknowledgment_required" });
+        throw new HTTPException(409, {
+          message: "stream_acknowledgment_required",
+        });
       }
       if (shared && !ack.acknowledgedShared) {
-        throw new HTTPException(409, { message: "shared_acknowledgment_required" });
+        throw new HTTPException(409, {
+          message: "shared_acknowledgment_required",
+        });
       }
     }
     // SELFHOSTED ACTIVE: when the session's active sandbox is selfhosted, skip
@@ -1191,7 +1241,9 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       }
       const parsed = ViewerHeartbeatRequest.safeParse(await c.req.json().catch(() => ({})));
       if (!parsed.success) {
-        throw new HTTPException(400, { message: "viewer heartbeat requires { leaseEpoch }" });
+        throw new HTTPException(400, {
+          message: "viewer heartbeat requires { leaseEpoch }",
+        });
       }
       const alive = await heartbeatViewer(
         { db, settings },
@@ -1254,7 +1306,10 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
         idleGraceMs: settings.sandboxIdleGraceMs,
       });
       // null ⇒ the lease was already cold-and-reaped (revoke is an idempotent no-op).
-      return c.json({ liveness: result?.liveness ?? null, refcount: result?.refcount ?? null });
+      return c.json({
+        liveness: result?.liveness ?? null,
+        refcount: result?.refcount ?? null,
+      });
     },
   );
 
@@ -1295,12 +1350,19 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!session) {
       throw new HTTPException(404, { message: "session not found" });
     }
-    return { accountId: grant.accountId, workspaceId, session, subjectId: grant.subjectId };
+    return {
+      accountId: grant.accountId,
+      workspaceId,
+      session,
+      subjectId: grant.subjectId,
+    };
   }
 
   async function parseChannelABody<T>(
     c: Context,
-    schema: { safeParse: (v: unknown) => { success: true; data: T } | { success: false } },
+    schema: {
+      safeParse: (v: unknown) => { success: true; data: T } | { success: false };
+    },
   ): Promise<T> {
     const raw = await c.req.json().catch(() => undefined);
     const result = schema.safeParse(raw ?? {});
@@ -1430,7 +1492,9 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const sessionId = c.req.param("sessionId") ?? "";
     const path = c.req.query("path");
     if (!path) {
-      throw new HTTPException(400, { message: "path query parameter is required" });
+      throw new HTTPException(400, {
+        message: "path query parameter is required",
+      });
     }
     const session = await getSession(db, workspaceId, sessionId);
     if (!session) {
@@ -1445,7 +1509,9 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (revisionParam !== undefined && revisionParam !== "") {
       const revision = Number(revisionParam);
       if (!Number.isInteger(revision) || revision < 0) {
-        throw new HTTPException(400, { message: "revision must be a non-negative integer" });
+        throw new HTTPException(400, {
+          message: "revision must be a non-negative integer",
+        });
       }
       row = await workspaceCaptureAtRevision(db, workspaceId, sessionId, revision);
     } else {
@@ -1517,7 +1583,9 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw new HTTPException(404, { message: "pty not found or closed" });
     }
     if (pty.execSessionId === null) {
-      throw new HTTPException(409, { message: "interactive terminal unsupported on this backend" });
+      throw new HTTPException(409, {
+        message: "interactive terminal unsupported on this backend",
+      });
     }
     let seq = 1;
     await withChannelA({ db, settings, bus }, ctx, async ({ service }) => {
@@ -1579,7 +1647,11 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
         workspaceId: ctx.workspaceId,
         ptyId: req.ptyId,
       });
-      const exited: TerminalPtyExitedPayload = { ptyId: req.ptyId, exitCode: 0, reason: "exit" };
+      const exited: TerminalPtyExitedPayload = {
+        ptyId: req.ptyId,
+        exitCode: 0,
+        reason: "exit",
+      };
       await appendAndPublishEvents(db, bus, ctx.workspaceId, ctx.session.id, [
         { type: "terminal.pty.exited", payload: exited },
       ]);
@@ -1625,7 +1697,9 @@ function sessionListQuery(
   }
   const search = query.search?.trim();
   if (search && search.length > 200) {
-    throw new HTTPException(400, { message: "search must be at most 200 characters" });
+    throw new HTTPException(400, {
+      message: "search must be at most 200 characters",
+    });
   }
   return {
     limit: query.limit,

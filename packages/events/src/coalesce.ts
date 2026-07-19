@@ -6,10 +6,15 @@ const COALESCIBLE_DELTA_TYPES = new Set([
   "sandbox.command.output.delta",
 ]);
 
+/** Flush long runs incrementally before concatenation can become unbounded. */
+export const SESSION_EVENT_COALESCED_TEXT_TARGET_BYTES = 48 * 1024;
+const encoder = new TextEncoder();
+
 type DeltaRun = {
   first: SessionEvent;
   lastSequence: number;
   text: string;
+  textBytes: number;
   sandboxName: string | undefined;
   sandboxStream: string | undefined;
   sandboxCommandId: string | undefined;
@@ -40,7 +45,9 @@ export function coalesceSessionEventDeltas(events: SessionEvent[]): SessionEvent
           };
     coalesced.push({
       ...run.first,
-      payload: boundSessionEventPayload(payload, { surface: "http_projection" }),
+      payload: boundSessionEventPayload(payload, {
+        surface: "http_projection",
+      }),
     });
     run = null;
   };
@@ -56,22 +63,36 @@ export function coalesceSessionEventDeltas(events: SessionEvent[]): SessionEvent
     const sandboxName = isSandbox ? sandboxDeltaName(event.payload) : undefined;
     const sandboxStream = isSandbox ? sandboxDeltaString(event.payload, "stream") : undefined;
     const sandboxCommandId = isSandbox ? sandboxDeltaString(event.payload, "commandId") : undefined;
+    const text = deltaText(event);
     if (
       run &&
       sameDeltaRun(run.first, event, run.sandboxName, sandboxName) &&
       run.sandboxStream === sandboxStream &&
       run.sandboxCommandId === sandboxCommandId
     ) {
-      run.text += deltaText(event);
-      run.lastSequence = event.sequence;
-      continue;
+      const textBytes = encoder.encode(text).byteLength;
+      if (
+        run.textBytes === 0 ||
+        run.textBytes + textBytes <= SESSION_EVENT_COALESCED_TEXT_TARGET_BYTES
+      ) {
+        run.text += text;
+        run.textBytes += textBytes;
+        run.lastSequence = event.sequence;
+        continue;
+      }
+      // The current segment is already useful and bounded. Flush before adding
+      // the next raw delta rather than building the full run and truncating it
+      // only after a multi-megabyte intermediate allocation.
+      flush();
+    } else {
+      flush();
     }
 
-    flush();
     run = {
       first: event,
       lastSequence: event.sequence,
-      text: deltaText(event),
+      text,
+      textBytes: encoder.encode(text).byteLength,
       sandboxName,
       sandboxStream,
       sandboxCommandId,

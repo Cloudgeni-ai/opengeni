@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { acquireBlankTestDatabase, type BlankTestDatabase } from "@opengeni/testing";
+import { createDb, listSessionEventPage } from "../src";
 import { readdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -121,6 +122,12 @@ describe("0065 session event payload bounds (real PostgreSQL)", () => {
         isError: true,
         output: "u".repeat(240_000),
       };
+      const historicalType = `legacy\r\ntype-${"界".repeat(100_000)}`;
+      const oversizedClientEventId = "🙂".repeat(1_000);
+      const oversizedProducerId = "界".repeat(1_000);
+      const oversizedTurnAssociation = "界".repeat(100);
+      const oversizedDuplicateReason = "界".repeat(2_000);
+      const duplicateCanonicalId = crypto.randomUUID();
       const [sizes] = await admin<Array<{ historical: number; inserted: number; updated: number }>>`
         select
           octet_length(${admin.json(historicalPayload)}::jsonb::text)::integer as historical,
@@ -137,6 +144,33 @@ describe("0065 session event payload bounds (real PostgreSQL)", () => {
           ${account!.id}, ${workspace!.id}, ${sessionId}, 2,
           'agent.tool_call.completed', ${admin.json({ id: "update-target", output: "small" })}
         )`;
+      await admin`
+        insert into session_events (
+          account_id, workspace_id, session_id, sequence, type, payload,
+          client_event_id, producer_id
+        ) values (
+          ${account!.id}, ${workspace!.id}, ${sessionId}, 5, ${historicalType},
+          ${admin.json({ id: "historical-envelope", output: "small" })},
+          ${oversizedClientEventId}, ${oversizedProducerId}
+        )`;
+      await admin`
+        insert into session_events (
+          id, account_id, workspace_id, session_id, sequence, type, payload,
+          turn_association
+        ) values (
+          ${duplicateCanonicalId}, ${account!.id}, ${workspace!.id}, ${sessionId},
+          6, 'agent.model.usage',
+          ${admin.json({ sourceKey: "historical-canonical" })}, 'current'
+        )`;
+      await admin`
+        insert into session_events (
+          account_id, workspace_id, session_id, sequence, type, payload,
+          turn_association, duplicate_of_event_id, duplicate_reason
+        ) values (
+          ${account!.id}, ${workspace!.id}, ${sessionId}, 7, 'agent.model.usage',
+          ${admin.json({ sourceKey: "historical-duplicate" })},
+          'duplicate', ${duplicateCanonicalId}, ${oversizedDuplicateReason}
+        )`;
 
       await applyFile(admin, migrationName);
 
@@ -148,12 +182,103 @@ describe("0065 session event payload bounds (real PostgreSQL)", () => {
       expect(historical?.payload.output).toStartWith("HEAD-");
       expect(historical?.payload.output).toEndWith("-TAIL");
 
-      const [constraint] = await admin<Array<{ validated: boolean }>>`
-        select convalidated as validated
+      const [projectedHistorical] = await admin<
+        Array<{ bytes: number; originalBytes: number; storedBytes: number }>
+      >`
+        select
+          octet_length(opengeni_private.project_session_event_payload(payload)::text)::integer
+            as bytes,
+          (opengeni_private.project_session_event_payload(payload) #>>
+            '{truncation,originalBytes}')::integer as "originalBytes",
+          octet_length(payload::text)::integer as "storedBytes"
+        from session_events where session_id = ${sessionId} and sequence = 1`;
+      expect(projectedHistorical?.bytes).toBeLessThanOrEqual(65_536);
+      expect(projectedHistorical?.originalBytes).toBe(projectedHistorical?.storedBytes);
+
+      const constraints = await admin<Array<{ name: string; validated: boolean }>>`
+        select conname as name, convalidated as validated
         from pg_constraint
         where conrelid = 'session_events'::regclass
-          and conname = 'session_events_payload_bytes_check'`;
-      expect(constraint).toEqual({ validated: false });
+          and conname in (
+            'session_events_payload_bytes_check',
+            'session_events_type_bytes_check',
+            'session_events_client_event_id_bytes_check',
+            'session_events_producer_id_bytes_check',
+            'session_events_turn_association_bytes_check',
+            'session_events_duplicate_reason_bytes_check'
+          )`;
+      expect(constraints).toHaveLength(6);
+      expect(constraints.every((constraint) => constraint.validated === false)).toBeTrue();
+
+      const [historicalEnvelope] = await admin<Array<{ typeBytes: number; clientBytes: number }>>`
+        select octet_length(type)::integer as "typeBytes",
+          octet_length(client_event_id)::integer as "clientBytes"
+        from session_events where session_id = ${sessionId} and sequence = 5`;
+      expect(historicalEnvelope?.typeBytes).toBeGreaterThan(256);
+      expect(historicalEnvelope?.clientBytes).toBeGreaterThan(1024);
+      const [historicalDuplicate] = await admin<Array<{ reasonBytes: number }>>`
+        select octet_length(duplicate_reason)::integer as "reasonBytes"
+        from session_events where session_id = ${sessionId} and sequence = 7`;
+      expect(historicalDuplicate?.reasonBytes).toBeGreaterThan(4096);
+
+      const projectionClient = createDb(blank.databaseUrl, { max: 1 });
+      try {
+        const projectedPayloadPage = await listSessionEventPage(
+          projectionClient.db,
+          workspace!.id,
+          sessionId,
+          { after: 0, limit: 1, batchSize: 1 },
+        );
+        expect(projectedPayloadPage.events).toHaveLength(1);
+        expect(projectedPayloadPage.hasMore).toBeTrue();
+        expect(projectedPayloadPage.bytes).toBe(
+          Buffer.byteLength(JSON.stringify(projectedPayloadPage.events), "utf8"),
+        );
+        expect(projectedPayloadPage.events[0]?.payload).toMatchObject({
+          truncation: {
+            truncated: true,
+            surface: "database_guard",
+            originalBytes: sizes!.historical,
+          },
+        });
+        expect(JSON.stringify(projectedPayloadPage.events)).not.toContain("HEAD-");
+
+        const projectedEnvelopePage = await listSessionEventPage(
+          projectionClient.db,
+          workspace!.id,
+          sessionId,
+          { after: 3, limit: 1, batchSize: 1 },
+        );
+        expect(projectedEnvelopePage.events[0]).toMatchObject({
+          sequence: 5,
+          type: "session.event.envelope_omitted",
+          payload: {
+            envelopeProjection: {
+              truncated: true,
+              surface: "database_read_projection",
+              fields: expect.arrayContaining([
+                expect.objectContaining({ field: "type" }),
+                expect.objectContaining({ field: "clientEventId" }),
+              ]),
+            },
+            fullEvidence: { available: false, reason: "not_retained" },
+          },
+        });
+        expect(
+          Buffer.byteLength(projectedEnvelopePage.events[0]?.clientEventId ?? "", "utf8"),
+        ).toBeLessThanOrEqual(1024);
+
+        const backwardPage = await listSessionEventPage(
+          projectionClient.db,
+          workspace!.id,
+          sessionId,
+          { after: 0, before: 8, limit: 2, batchSize: 1 },
+        );
+        expect(backwardPage.events.map((event) => event.sequence)).toEqual([6, 7]);
+        expect(backwardPage.hasMore).toBeTrue();
+      } finally {
+        await projectionClient.close();
+      }
 
       const [inserted] = await admin<GuardedRow[]>`
         insert into session_events (
@@ -184,6 +309,76 @@ describe("0065 session event payload bounds (real PostgreSQL)", () => {
         isError: true,
       });
 
+      const [boundedEnvelope] = await admin<
+        Array<{
+          type: string;
+          typeBytes: number;
+          clientBytes: number;
+          producerBytes: number;
+          associationBytes: number | null;
+          payload: {
+            envelopeProjection?: {
+              truncated?: boolean;
+              surface?: string;
+              fields?: unknown[];
+            };
+            fullEvidence?: unknown;
+          };
+        }>
+      >`
+        insert into session_events (
+          account_id, workspace_id, session_id, sequence, type, payload,
+          client_event_id, producer_id, turn_association
+        ) values (
+          ${account!.id}, ${workspace!.id}, ${sessionId}, 4, ${historicalType},
+          ${admin.json({ id: "new-envelope", output: "small" })},
+          ${oversizedClientEventId}, ${oversizedProducerId},
+          ${oversizedTurnAssociation}
+        ) returning
+          type,
+          octet_length(type)::integer as "typeBytes",
+          octet_length(client_event_id)::integer as "clientBytes",
+          octet_length(producer_id)::integer as "producerBytes",
+          octet_length(turn_association)::integer as "associationBytes",
+          payload`;
+      expect(boundedEnvelope?.type).toBe("session.event.envelope_omitted");
+      expect(boundedEnvelope?.typeBytes).toBeLessThanOrEqual(256);
+      expect(boundedEnvelope?.clientBytes).toBeLessThanOrEqual(1024);
+      expect(boundedEnvelope?.producerBytes).toBeLessThanOrEqual(1024);
+      expect(boundedEnvelope?.associationBytes).toBeNull();
+      expect(boundedEnvelope?.payload).toMatchObject({
+        envelopeProjection: {
+          truncated: true,
+          surface: "database_guard",
+          fields: expect.arrayContaining([
+            expect.objectContaining({ field: "type" }),
+            expect.objectContaining({ field: "clientEventId" }),
+            expect.objectContaining({ field: "producerId" }),
+            expect.objectContaining({ field: "turnAssociation" }),
+          ]),
+        },
+        fullEvidence: { available: false, reason: "not_retained" },
+      });
+
+      const [boundedDuplicate] = await admin<
+        Array<{
+          reasonBytes: number;
+          payload: { envelopeProjection?: { fields?: unknown[] } };
+        }>
+      >`
+        insert into session_events (
+          account_id, workspace_id, session_id, sequence, type, payload,
+          turn_association, duplicate_of_event_id, duplicate_reason
+        ) values (
+          ${account!.id}, ${workspace!.id}, ${sessionId}, 8, 'agent.model.usage',
+          ${admin.json({ sourceKey: "new-duplicate" })},
+          'duplicate', ${duplicateCanonicalId}, ${oversizedDuplicateReason}
+        ) returning octet_length(duplicate_reason)::integer as "reasonBytes", payload`;
+      expect(boundedDuplicate?.reasonBytes).toBeLessThanOrEqual(4096);
+      expect(boundedDuplicate?.payload.envelopeProjection?.fields).toEqual(
+        expect.arrayContaining([expect.objectContaining({ field: "duplicateReason" })]),
+      );
+
       // NOT VALID leaves historical rows untouched but still rejects every new
       // violating row. Disable the trigger briefly to prove the check itself.
       await admin.unsafe(
@@ -195,7 +390,7 @@ describe("0065 session event payload bounds (real PostgreSQL)", () => {
           insert into session_events (
             account_id, workspace_id, session_id, sequence, type, payload
           ) values (
-            ${account!.id}, ${workspace!.id}, ${sessionId}, 4,
+            ${account!.id}, ${workspace!.id}, ${sessionId}, 9,
             'agent.tool_call.completed', ${admin.json(insertPayload)}
           )`;
       } catch (error) {

@@ -148,7 +148,11 @@ export type StreamUrlRotatedPayload = {
   transport: "vnc-ws";
   viewerId: string | null;
 };
-export type StreamOpenedPayload = { viewerId: string; shared: boolean; viewerCount: number };
+export type StreamOpenedPayload = {
+  viewerId: string;
+  shared: boolean;
+  viewerCount: number;
+};
 export type StreamClosedPayload = {
   viewerId: string;
   reason: "client-disconnect" | "reaped" | "revoked" | "box-rollover";
@@ -164,7 +168,10 @@ export type StreamRevokedPayload = {
 // `desktop:true` opts into the un-redacted pixel plane (the consent-gated noVNC
 // stream); a terminal/files-only warm attach omits it (defaults false) so it
 // warms the box + mints the pty-ws terminal cell WITHOUT tripping the consent 409.
-export type AttachViewerRequest = { viewerId?: string | undefined; desktop?: boolean | undefined };
+export type AttachViewerRequest = {
+  viewerId?: string | undefined;
+  desktop?: boolean | undefined;
+};
 
 // Mirror of `@opengeni/contracts` ViewerHolder + the P4.2 desktop-stream fields
 // the POST /viewers handler folds in when the pixel plane is minted in-process.
@@ -202,7 +209,10 @@ export type AcknowledgeStreamRequest = {
   acknowledgeUnredacted?: boolean | undefined;
   acknowledgeShared?: boolean | undefined;
 };
-export type AcknowledgeStreamResponse = { acknowledged: boolean; acknowledgedShared: boolean };
+export type AcknowledgeStreamResponse = {
+  acknowledged: boolean;
+  acknowledgedShared: boolean;
+};
 
 // Mirror of `@opengeni/contracts` ViewerHeartbeatRequest/Response — the
 // Channel-A viewer-liveness ping, epoch-fenced (a stale-epoch beat → alive:false
@@ -503,6 +513,8 @@ export type SessionTurn = {
 
 export const SESSION_EVENT_TYPES = [
   "session.created",
+  // Defensive bounded projection for malformed/legacy oversized envelopes.
+  "session.event.envelope_omitted",
   "session.status.changed",
   "session.requiresAction",
   "session.context.compaction.requested",
@@ -771,8 +783,16 @@ export type FsListRequest = {
   maxEntries?: number;
   includeHidden?: boolean;
 };
-export type FsListResponse = { root: FsTreeNode; revision: number; truncated: boolean };
-export type FsReadRequest = { path: string; encoding?: FsEncoding; maxBytes?: number };
+export type FsListResponse = {
+  root: FsTreeNode;
+  revision: number;
+  truncated: boolean;
+};
+export type FsReadRequest = {
+  path: string;
+  encoding?: FsEncoding;
+  maxBytes?: number;
+};
 export type FsReadResponse = {
   path: string;
   encoding: FsEncoding;
@@ -789,7 +809,11 @@ export type FsWriteRequest = {
   overwrite?: boolean;
   createParents?: boolean;
 };
-export type FsWriteResponse = { path: string; sizeBytes: number; revision: number };
+export type FsWriteResponse = {
+  path: string;
+  sizeBytes: number;
+  revision: number;
+};
 export type FsDeleteRequest = { path: string; recursive?: boolean };
 export type FsDeleteResponse = { revision: number };
 export type FsMoveRequest = {
@@ -798,7 +822,11 @@ export type FsMoveRequest = {
   overwrite?: boolean;
   createParents?: boolean;
 };
-export type FsMoveResponse = { path: string; newPath: string; revision: number };
+export type FsMoveResponse = {
+  path: string;
+  newPath: string;
+  revision: number;
+};
 export type FsMkdirRequest = { path: string; recursive?: boolean };
 export type FsMkdirResponse = { path: string; revision: number };
 
@@ -895,7 +923,12 @@ export type GitShowRequest = {
 export type GitShowResponse = {
   commit: GitCommit | null;
   files: GitFileDiff[];
-  blob: { content: string; encoding: FsEncoding; sizeBytes: number; truncated: boolean } | null;
+  blob: {
+    content: string;
+    encoding: FsEncoding;
+    sizeBytes: number;
+    truncated: boolean;
+  } | null;
   revision: number;
 };
 
@@ -1018,8 +1051,17 @@ export type TerminalExecResponse = {
   running: boolean;
   wallTimeSeconds: number;
 };
-export type PtyOpenRequest = { cols?: number; rows?: number; cwd?: string; shell?: string };
-export type PtyOpenResponse = { ptyId: string; streamVia: "sse-events"; supportsInput: boolean };
+export type PtyOpenRequest = {
+  cols?: number;
+  rows?: number;
+  cwd?: string;
+  shell?: string;
+};
+export type PtyOpenResponse = {
+  ptyId: string;
+  streamVia: "sse-events";
+  supportsInput: boolean;
+};
 export type PtyWriteRequest = { ptyId: string; data: string };
 export type PtyResizeRequest = { ptyId: string; cols: number; rows: number };
 export type PtyCloseRequest = { ptyId: string };
@@ -1223,7 +1265,11 @@ export type CodexConnectionStatus = {
   lastError?: string | null;
   models?: ClientModel[];
   /** The account a session runs on when unpinned (label for the in-session indicator). */
-  activeAccount?: { id: string; label?: string | null; chatgptAccountId?: string | null } | null;
+  activeAccount?: {
+    id: string;
+    label?: string | null;
+    chatgptAccountId?: string | null;
+  } | null;
   /** How many Codex accounts the workspace has connected. */
   accountCount?: number;
 };
@@ -1329,7 +1375,12 @@ export type CodexConnectStart = {
 export type CodexConnectPoll =
   | { status: "pending" }
   | { status: "expired" }
-  | { status: "connected"; plan?: string | null; accountId?: string; isActive?: boolean };
+  | {
+      status: "connected";
+      plan?: string | null;
+      accountId?: string;
+      isActive?: boolean;
+    };
 
 /** Remaining usage/limits for one account. `usage` is the normalized P2 payload. */
 export type CodexUsage = {
@@ -1380,7 +1431,11 @@ export type ClientConfig = {
   // at all (P4.4). Per-session availability is negotiated on /stream-capabilities;
   // this is the coarse on/off the client uses to decide whether to even attempt
   // the fs/git/terminal panels.
-  structuredServices: { fileSystem: boolean; git: boolean; terminalEvents: boolean };
+  structuredServices: {
+    fileSystem: boolean;
+    git: boolean;
+    terminalEvents: boolean;
+  };
 };
 
 export type AccountRole = "owner" | "admin" | "member";
@@ -2439,7 +2494,11 @@ export type CapabilityCatalogItem = {
   enabled: boolean;
   enabledReason: string | null;
   /** The connection backing this enabled installation, or null when none is involved. */
-  connectionRef: { connectionId: string; providerDomain: string; kind: string } | null;
+  connectionRef: {
+    connectionId: string;
+    providerDomain: string;
+    kind: string;
+  } | null;
   metadata: Record<string, unknown>;
   createdAt?: string | undefined;
   updatedAt?: string | undefined;

@@ -88,7 +88,9 @@ export const workspaceInferenceControls = pgTable(
     accountId: uuid("account_id").notNull(),
     revision: bigint("revision", { mode: "number" }).notNull().default(0),
     workspaceState: text("workspace_state").notNull().default("active"),
-    workspacePauseRevision: bigint("workspace_pause_revision", { mode: "number" }),
+    workspacePauseRevision: bigint("workspace_pause_revision", {
+      mode: "number",
+    }),
     reason: text("reason"),
     changedBy: text("changed_by"),
     changedAt: timestamp("changed_at", { withTimezone: true }),
@@ -155,7 +157,9 @@ export const apiKeys = pgTable(
     accountId: uuid("account_id")
       .notNull()
       .references(() => managedAccounts.id, { onDelete: "cascade" }),
-    workspaceId: uuid("workspace_id").references(() => workspaces.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id").references(() => workspaces.id, {
+      onDelete: "cascade",
+    }),
     name: text("name").notNull(),
     prefix: text("prefix").notNull(),
     keyHash: text("key_hash").notNull(),
@@ -280,7 +284,9 @@ export const codexSubscriptionCredentials = pgTable(
     // excluded). The writer only ever sets a NON-empty set, so a flaky empty turn
     // can't false-drop coverage. connectorsCheckedAt is the freshness clock.
     connectorNamespaces: text("connector_namespaces").array(),
-    connectorsCheckedAt: timestamp("connectors_checked_at", { withTimezone: true }),
+    connectorsCheckedAt: timestamp("connectors_checked_at", {
+      withTimezone: true,
+    }),
     // Workspace-local, server-held fairness cursor. Provider usage headers are
     // capacity hints, never the sole allocator: live lease count is ranked first
     // and this cursor deterministically breaks equal-load/equal-capacity ties.
@@ -620,11 +626,15 @@ export const sessions = pgTable(
     queueTailPosition: bigint("queue_tail_position", { mode: "number" }).notNull().default(0),
     directControlState: text("direct_control_state").notNull().default("active"),
     directPauseRevision: bigint("direct_pause_revision", { mode: "number" }),
-    subtreeRunOverrideRevision: bigint("subtree_run_override_revision", { mode: "number" }),
+    subtreeRunOverrideRevision: bigint("subtree_run_override_revision", {
+      mode: "number",
+    }),
     controlVersion: bigint("control_version", { mode: "number" }).notNull().default(0),
     directControlReason: text("direct_control_reason"),
     directControlChangedBy: text("direct_control_changed_by"),
-    directControlChangedAt: timestamp("direct_control_changed_at", { withTimezone: true }),
+    directControlChangedAt: timestamp("direct_control_changed_at", {
+      withTimezone: true,
+    }),
     lastSequence: integer("last_sequence").notNull().default(0),
     // The session's PINNED Codex account (manual override from the in-session
     // switcher). NULL ⇒ follow the workspace active pointer. FK declared in the
@@ -1142,7 +1152,9 @@ export const sessionTurnAttempts = pgTable(
     workerId: text("worker_id"),
     leaseId: text("lease_id"),
     leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
-    verifiedControlRevision: bigint("verified_control_revision", { mode: "number" }).notNull(),
+    verifiedControlRevision: bigint("verified_control_revision", {
+      mode: "number",
+    }).notNull(),
     startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
     closedAt: timestamp("closed_at", { withTimezone: true }),
@@ -1217,7 +1229,9 @@ export const sessionCommandReceipts = pgTable(
     targetTurnId: uuid("target_turn_id"),
     operationKey: text("operation_key").notNull(),
     canonicalRequestHash: text("canonical_request_hash").notNull(),
-    appliedControlRevision: bigint("applied_control_revision", { mode: "number" }),
+    appliedControlRevision: bigint("applied_control_revision", {
+      mode: "number",
+    }),
     appliedQueueVersion: integer("applied_queue_version"),
     appliedTurnVersion: integer("applied_turn_version"),
     appliedDraftRevision: bigint("applied_draft_revision", { mode: "number" }),
@@ -1748,6 +1762,26 @@ export const sessionEvents = pgTable(
       "session_events_payload_bytes_check",
       sql`octet_length(${table.payload}::text) <= 65536`,
     ),
+    typeBytes: check(
+      "session_events_type_bytes_check",
+      sql`octet_length(${table.type}) <= 256 and position(E'\n' in ${table.type}) = 0 and position(E'\r' in ${table.type}) = 0`,
+    ),
+    clientEventIdBytes: check(
+      "session_events_client_event_id_bytes_check",
+      sql`${table.clientEventId} is null or octet_length(${table.clientEventId}) <= 1024`,
+    ),
+    producerIdBytes: check(
+      "session_events_producer_id_bytes_check",
+      sql`${table.producerId} is null or octet_length(${table.producerId}) <= 1024`,
+    ),
+    turnAssociationBytes: check(
+      "session_events_turn_association_bytes_check",
+      sql`${table.turnAssociation} is null or octet_length(${table.turnAssociation}) <= 64`,
+    ),
+    duplicateReasonBytes: check(
+      "session_events_duplicate_reason_bytes_check",
+      sql`${table.duplicateReason} is null or octet_length(${table.duplicateReason}) <= 4096`,
+    ),
   }),
 );
 
@@ -1762,7 +1796,9 @@ export const agentRunStates = pgTable("agent_run_states", {
   sessionId: uuid("session_id")
     .notNull()
     .references(() => sessions.id, { onDelete: "cascade" }),
-  turnId: uuid("turn_id").references(() => sessionTurns.id, { onDelete: "set null" }),
+  turnId: uuid("turn_id").references(() => sessionTurns.id, {
+    onDelete: "set null",
+  }),
   stateVersion: integer("state_version").notNull(),
   serializedRunState: text("serialized_run_state").notNull(),
   pendingApprovals: jsonb("pending_approvals").$type<unknown[]>().notNull().default([]),
@@ -1801,7 +1837,9 @@ export const sessionHistoryItems = pgTable(
     sessionId: uuid("session_id")
       .notNull()
       .references(() => sessions.id, { onDelete: "cascade" }),
-    turnId: uuid("turn_id").references(() => sessionTurns.id, { onDelete: "set null" }),
+    turnId: uuid("turn_id").references(() => sessionTurns.id, {
+      onDelete: "set null",
+    }),
     // Numeric (not integer) so the synthetic compaction-summary row can be
     // inserted at a FRACTIONAL position (boundaryPosition - 0.5) that sorts ahead
     // of the kept tail without colliding with — and thus overwriting — the real
@@ -2065,7 +2103,9 @@ export const sessionRecordings = pgTable(
     sessionId: uuid("session_id")
       .notNull()
       .references(() => sessions.id, { onDelete: "cascade" }),
-    turnId: uuid("turn_id").references(() => sessionTurns.id, { onDelete: "set null" }),
+    turnId: uuid("turn_id").references(() => sessionTurns.id, {
+      onDelete: "set null",
+    }),
 
     state: text("state", { enum: sessionRecordingStateValues }).notNull(),
     mode: text("mode", { enum: sessionRecordingModeValues }).notNull(),
@@ -2115,7 +2155,9 @@ export const workspaceCaptures = pgTable(
     sessionId: uuid("session_id")
       .notNull()
       .references(() => sessions.id, { onDelete: "cascade" }),
-    turnId: uuid("turn_id").references(() => sessionTurns.id, { onDelete: "set null" }),
+    turnId: uuid("turn_id").references(() => sessionTurns.id, {
+      onDelete: "set null",
+    }),
 
     revision: bigint("revision", { mode: "number" }).notNull(),
     leaseEpoch: integer("lease_epoch").notNull(),
@@ -2312,7 +2354,9 @@ export const deviceEnrollmentRequests = pgTable(
     machineName: text("machine_name"),
     // The exposure the agent REQUESTED (whole-machine in v1; loudly consented at
     // approve). Mirrors the enrollment column domain.
-    requestedExposure: text("requested_exposure", { enum: enrollmentExposureValues })
+    requestedExposure: text("requested_exposure", {
+      enum: enrollmentExposureValues,
+    })
       .notNull()
       .default("whole-machine"),
     // The agent CAN offer a display (a real screen / Xvfb is available) — gates
@@ -2332,8 +2376,12 @@ export const deviceEnrollmentRequests = pgTable(
     approvedAt: timestamp("approved_at", { withTimezone: true }),
     // The enrollment + sandbox the approve produced (acceptance #2: an enrollment
     // row AND a sandbox row appear). Null until approved.
-    enrollmentId: uuid("enrollment_id").references(() => enrollments.id, { onDelete: "set null" }),
-    sandboxId: uuid("sandbox_id").references(() => sandboxes.id, { onDelete: "set null" }),
+    enrollmentId: uuid("enrollment_id").references(() => enrollments.id, {
+      onDelete: "set null",
+    }),
+    sandboxId: uuid("sandbox_id").references(() => sandboxes.id, {
+      onDelete: "set null",
+    }),
     // The short-TTL expiry; a pending row past this is EXPIRED on poll.
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -2374,7 +2422,9 @@ export const sandboxes = pgTable(
       .references(() => workspaces.id, { onDelete: "cascade" }),
     kind: text("kind", { enum: sandboxKindValues }).notNull(),
     name: text("name").notNull(),
-    enrollmentId: uuid("enrollment_id").references(() => enrollments.id, { onDelete: "set null" }),
+    enrollmentId: uuid("enrollment_id").references(() => enrollments.id, {
+      onDelete: "set null",
+    }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -2525,7 +2575,9 @@ export const scheduledTaskRuns = pgTable(
     triggerType: text("trigger_type").notNull(),
     scheduledAt: timestamp("scheduled_at", { withTimezone: true }),
     firedAt: timestamp("fired_at", { withTimezone: true }).notNull().defaultNow(),
-    sessionId: uuid("session_id").references(() => sessions.id, { onDelete: "set null" }),
+    sessionId: uuid("session_id").references(() => sessions.id, {
+      onDelete: "set null",
+    }),
     triggerEventId: uuid("trigger_event_id"),
     // Stable Temporal producer identity. Activity replay/re-dispatch returns
     // the exact run instead of allocating a second schedule source row.
@@ -2595,7 +2647,9 @@ export const usageEvents = pgTable(
     idempotencyKey: text("idempotency_key").notNull(),
     occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
     recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull().defaultNow(),
-    exportedToBillingAt: timestamp("exported_to_billing_at", { withTimezone: true }),
+    exportedToBillingAt: timestamp("exported_to_billing_at", {
+      withTimezone: true,
+    }),
     billingProviderEventId: text("billing_provider_event_id"),
   },
   (table) => ({
@@ -2620,7 +2674,9 @@ export const creditLedgerEntries = pgTable(
     accountId: uuid("account_id")
       .notNull()
       .references(() => managedAccounts.id, { onDelete: "cascade" }),
-    workspaceId: uuid("workspace_id").references(() => workspaces.id, { onDelete: "set null" }),
+    workspaceId: uuid("workspace_id").references(() => workspaces.id, {
+      onDelete: "set null",
+    }),
     type: text("type").notNull(),
     amountMicros: bigint("amount_micros", { mode: "number" }).notNull(),
     currency: text("currency").notNull().default("usd"),
@@ -2678,8 +2734,12 @@ export const auditEvents = pgTable(
   "audit_events",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    accountId: uuid("account_id").references(() => managedAccounts.id, { onDelete: "set null" }),
-    workspaceId: uuid("workspace_id").references(() => workspaces.id, { onDelete: "set null" }),
+    accountId: uuid("account_id").references(() => managedAccounts.id, {
+      onDelete: "set null",
+    }),
+    workspaceId: uuid("workspace_id").references(() => workspaces.id, {
+      onDelete: "set null",
+    }),
     subjectId: text("subject_id"),
     action: text("action").notNull(),
     targetType: text("target_type"),
@@ -2774,8 +2834,12 @@ export const capabilityCatalogItems = pgTable(
   "capability_catalog_items",
   {
     id: text("id").notNull(),
-    accountId: uuid("account_id").references(() => managedAccounts.id, { onDelete: "cascade" }),
-    workspaceId: uuid("workspace_id").references(() => workspaces.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id").references(() => managedAccounts.id, {
+      onDelete: "cascade",
+    }),
+    workspaceId: uuid("workspace_id").references(() => workspaces.id, {
+      onDelete: "cascade",
+    }),
     kind: text("kind").notNull(),
     source: text("source").notNull().default("manual"),
     name: text("name").notNull(),

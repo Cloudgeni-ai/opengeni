@@ -1,4 +1,5 @@
 import type { SessionEvent, SessionStatus, StreamConnectionState } from "@opengeni/sdk";
+import { boundSessionEvent, type SessionEvent as ContractSessionEvent } from "@opengeni/contracts";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useOpenGeni, type ClientOverride } from "../provider";
 import {
@@ -102,7 +103,10 @@ export function useSessionEvents(
   const streamKeyRef = useRef<string | null>(null);
   const generationRef = useRef(0);
   const eventWindowRef = useRef<BrowserSessionEventWindow>(EMPTY_EVENT_WINDOW);
-  const sessionStatusRef = useRef<{ sequence: number; status: SessionStatus | null }>({
+  const sessionStatusRef = useRef<{
+    sequence: number;
+    status: SessionStatus | null;
+  }>({
     sequence: after,
     status: null,
   });
@@ -159,7 +163,10 @@ export function useSessionEvents(
       observeSessionStatus(batch, sessionStatusRef, setSessionStatusProjection);
       const current = eventWindowRef.current;
       const next = boundBrowserSessionEventWindow([...current.events, ...batch]);
-      const retained = { ...next, truncated: current.truncated || next.truncated };
+      const retained = {
+        ...next,
+        truncated: current.truncated || next.truncated,
+      };
       eventWindowRef.current = retained;
       setEventWindow(retained);
       oldestSequenceRef.current = retained.events[0]?.sequence ?? null;
@@ -238,7 +245,7 @@ export function useSessionEvents(
   }, [client, workspaceId, sessionId, after, enabled, fullReplay, streamKey, reconcileSession]);
 
   const loadOlder = useCallback(async (): Promise<boolean> => {
-    if (!sessionId || fullReplay || loadingOlderRef.current || !hasOlderRef.current) {
+    if (!sessionId || loadingOlderRef.current || !hasOlderRef.current) {
       return false;
     }
     const before = oldestSequenceRef.current;
@@ -269,12 +276,24 @@ export function useSessionEvents(
       const current = eventWindowRef.current;
       assertPrependOrder(current.events, window.events);
       observeSessionStatus(window.events, sessionStatusRef, setSessionStatusProjection);
-      const next = boundBrowserSessionEventWindow([...window.events, ...current.events]);
-      const retained = { ...next, truncated: current.truncated || next.truncated };
+      const next = boundBrowserSessionEventWindow([...window.events, ...current.events], {
+        direction: "oldest",
+      });
+      const retained = {
+        ...next,
+        truncated: current.truncated || next.truncated,
+      };
+      const retainedOldest = retained.events[0]?.sequence ?? null;
+      if (retainedOldest === null || retainedOldest >= before) {
+        throw new Error("@opengeni/react: loadOlder made no durable sequence progress");
+      }
       eventWindowRef.current = retained;
       setEventWindow(retained);
-      oldestSequenceRef.current = retained.events[0]?.sequence ?? window.oldestSequence;
-      const olderStillAvailable = window.hasOlder || retained.truncated;
+      oldestSequenceRef.current = retainedOldest;
+      // Oldest-directed eviction can discard newer in-memory rows. That fact
+      // keeps windowTruncated true, but it does not imply older durable rows
+      // exist; only the backward DB page can answer hasOlder truthfully.
+      const olderStillAvailable = window.hasOlder;
       hasOlderRef.current = olderStillAvailable;
       setHasOlder(olderStillAvailable);
       return olderStillAvailable;
@@ -284,7 +303,7 @@ export function useSessionEvents(
         setLoadingOlder(false);
       }
     }
-  }, [client, workspaceId, sessionId, fullReplay]);
+  }, [client, workspaceId, sessionId]);
 
   const identityMatches = stateStreamKey === streamKey;
   const visibleEvents = identityMatches ? eventWindow.events : EMPTY_EVENTS;
@@ -300,28 +319,38 @@ export function useSessionEvents(
     windowTruncated: identityMatches ? eventWindow.truncated : false,
     initialLoading: fullReplay ? false : identityMatches ? initialLoading : true,
     hasOlder: !identityMatches ? false : hasOlder,
-    loadingOlder: fullReplay || !identityMatches ? false : loadingOlder,
+    loadingOlder: !identityMatches ? false : loadingOlder,
     loadOlder,
     error: identityMatches ? error : null,
   };
 }
 
 /**
- * Keep only the newest count+byte-bounded browser window. This is deliberately
- * separate from durable history and transport paging: eviction changes neither
- * the resume cursor nor whether the source event still exists in PostgreSQL.
+ * Keep one direction-aware count+byte-bounded browser window. Live/default
+ * accumulation retains the newest suffix; backward paging retains the oldest
+ * prefix so newly fetched history cannot be immediately evicted. This is
+ * deliberately separate from durable history and transport paging: eviction
+ * changes neither the resume cursor nor whether the source event still exists
+ * in PostgreSQL.
  */
 export function boundBrowserSessionEventWindow(
   events: readonly SessionEvent[],
-  options: { maxBytes?: number; maxCount?: number } = {},
+  options: {
+    maxBytes?: number;
+    maxCount?: number;
+    direction?: "newest" | "oldest";
+  } = {},
 ): BrowserSessionEventWindow {
   const maxBytes = Math.max(1024, options.maxBytes ?? SESSION_EVENT_BROWSER_MAX_BYTES);
   const maxCount = Math.max(1, Math.floor(options.maxCount ?? SESSION_EVENT_BROWSER_MAX_COUNT));
   const safe = events.map(boundBrowserLegacyEvent);
   const selected: SessionEvent[] = [];
   let bytes = 2; // []
-  const countStart = Math.max(0, safe.length - maxCount);
-  for (let index = safe.length - 1; index >= countStart; index -= 1) {
+  const direction = options.direction ?? "newest";
+  const start = direction === "newest" ? safe.length - 1 : 0;
+  const end = direction === "newest" ? Math.max(-1, safe.length - maxCount - 1) : safe.length;
+  const step = direction === "newest" ? -1 : 1;
+  for (let index = start; index !== end && selected.length < maxCount; index += step) {
     const event = safe[index]!;
     const eventBytes = browserJsonBytes(event);
     const separator = selected.length === 0 ? 0 : 1;
@@ -329,7 +358,7 @@ export function boundBrowserSessionEventWindow(
     selected.push(event);
     bytes += separator + eventBytes;
   }
-  selected.reverse();
+  if (direction === "newest") selected.reverse();
   return {
     events: selected,
     bytes,
@@ -338,47 +367,10 @@ export function boundBrowserSessionEventWindow(
 }
 
 function boundBrowserLegacyEvent(event: SessionEvent): SessionEvent {
-  if (browserJsonBytes(event) <= SESSION_EVENT_BROWSER_SINGLE_EVENT_MAX_BYTES) return event;
-  const originalBytes = browserJsonBytes(event.payload);
-  const identity = browserPayloadIdentity(event.payload);
-  const payload: Record<string, unknown> = {
-    ...identity,
-    preview: "[legacy event payload omitted at browser rendering boundary]",
-    truncation: {
-      truncated: true,
-      surface: "browser_legacy_guard",
-      reason: "payload_bytes_exceeded",
-      originalBytes,
-      deliveredBytes: 0,
-      omittedBytes: originalBytes,
-      estimatedOriginalTokens: Math.ceil(originalBytes / 4),
-      estimatedDeliveredTokens: 0,
-      fullEvidence: { available: false, reason: "not_retained" },
-      details: [{ path: "$", kind: "object", originalBytes }],
-    },
-  };
-  const truncation = payload.truncation as Record<string, unknown>;
-  for (let pass = 0; pass < 6; pass += 1) {
-    const deliveredBytes = browserJsonBytes(payload);
-    truncation.deliveredBytes = deliveredBytes;
-    truncation.omittedBytes = Math.max(0, originalBytes - deliveredBytes);
-    truncation.estimatedDeliveredTokens = Math.ceil(deliveredBytes / 4);
-  }
-  return { ...event, payload };
-}
-
-function browserPayloadIdentity(payload: unknown): Record<string, unknown> {
-  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return {};
-  const record = payload as Record<string, unknown>;
-  const identity: Record<string, unknown> = {};
-  for (const key of ["id", "callId", "name", "toolName", "type", "status", "code", "isError"]) {
-    const value = record[key];
-    if (typeof value === "string") identity[key] = value.slice(0, 256);
-    else if (typeof value === "number" || typeof value === "boolean" || value === null) {
-      identity[key] = value;
-    }
-  }
-  return identity;
+  return boundSessionEvent(event as unknown as ContractSessionEvent, {
+    surface: "browser_legacy_guard",
+    maxBytes: SESSION_EVENT_BROWSER_SINGLE_EVENT_MAX_BYTES,
+  }) as unknown as SessionEvent;
 }
 
 function browserJsonBytes(value: unknown): number {

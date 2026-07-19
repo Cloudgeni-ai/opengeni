@@ -1,4 +1,9 @@
 import { z } from "zod";
+import {
+  boundSessionEventPayload,
+  sessionEventJsonBytes,
+  type SessionEventBoundarySurface,
+} from "./event-preview";
 
 export {
   SESSION_EVENT_PAYLOAD_MAX_BYTES,
@@ -75,9 +80,16 @@ export type CapabilityDescriptor = {
   os: { supported: SandboxOs[]; default: SandboxOs };
   capabilities: {
     FileSystem: { available: boolean; readOnly: boolean };
-    Terminal: { available: boolean; transport: "sse-events" | "pty-ws" | null; pty: boolean };
+    Terminal: {
+      available: boolean;
+      transport: "sse-events" | "pty-ws" | null;
+      pty: boolean;
+    };
     Git: { available: boolean };
-    DesktopStream: { available: boolean; transport: "vnc-ws" | "rdp-ws" | "webrtc" | null };
+    DesktopStream: {
+      available: boolean;
+      transport: "vnc-ws" | "rdp-ws" | "webrtc" | null;
+    };
     // Feasibility only (== DesktopStream.available && os==linux); NOT a request.
     Recording: { available: boolean };
   };
@@ -1166,7 +1178,11 @@ export type Entitlements = z.infer<typeof Entitlements>;
 
 export const LimitDecision = z.discriminatedUnion("allowed", [
   z.object({ allowed: z.literal(true) }),
-  z.object({ allowed: z.literal(false), code: z.string(), message: z.string() }),
+  z.object({
+    allowed: z.literal(false),
+    code: z.string(),
+    message: z.string(),
+  }),
 ]);
 export type LimitDecision = z.infer<typeof LimitDecision>;
 
@@ -2007,7 +2023,9 @@ export type ClearSessionContextRequest = z.infer<typeof ClearSessionContextReque
 export const CLEARED_RUN_STATE_MARKER = "$opengeniCleared" as const;
 
 /** The canonical sentinel serializedRunState value a context clear stores. */
-export const CLEARED_RUN_STATE_BLOB = JSON.stringify({ [CLEARED_RUN_STATE_MARKER]: true });
+export const CLEARED_RUN_STATE_BLOB = JSON.stringify({
+  [CLEARED_RUN_STATE_MARKER]: true,
+});
 
 /**
  * True when a serialized run-state blob is the cleared sentinel rather than a
@@ -2108,18 +2126,27 @@ export const EffectiveSessionControl = z.object({
   blockers: z.array(EffectiveControlBlocker),
   resumeOptions: z.array(EffectiveControlResumeOption),
   override: z
-    .object({ rootSessionId: z.string().uuid(), revision: z.number().int().nonnegative() })
+    .object({
+      rootSessionId: z.string().uuid(),
+      revision: z.number().int().nonnegative(),
+    })
     .nullable(),
   settlement: z
-    .object({ state: z.literal("stopping"), attemptCount: z.number().int().positive() })
+    .object({
+      state: z.literal("stopping"),
+      attemptCount: z.number().int().positive(),
+    })
     .nullable(),
 });
 export type EffectiveSessionControl = z.infer<typeof EffectiveSessionControl>;
 
+export const SESSION_OPERATION_KEY_MAX_CHARS = 256;
+const SessionOperationKey = z.string().min(1).max(SESSION_OPERATION_KEY_MAX_CHARS);
+
 export const SessionCommandReceipt = z.object({
   id: z.string().uuid(),
   action: z.string().min(1),
-  operationKey: z.string().min(1),
+  operationKey: z.string().min(1).max(SESSION_OPERATION_KEY_MAX_CHARS),
   targetSessionId: z.string().uuid().nullable(),
   targetTurnId: z.string().uuid().nullable(),
   appliedControlRevision: z.number().int().nonnegative().nullable(),
@@ -2149,8 +2176,6 @@ export const SessionQueueSnapshot = z.object({
   items: z.array(SessionTurn),
 });
 export type SessionQueueSnapshot = z.infer<typeof SessionQueueSnapshot>;
-
-const SessionOperationKey = z.string().min(1);
 
 export const MoveSessionQueueItemRequest = z.object({
   clientEventId: SessionOperationKey,
@@ -2541,7 +2566,10 @@ export type RigDefinitionEditPayload = z.infer<typeof RigDefinitionEditPayload>;
 
 export const ProposeRigChangeRequest = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("setup_append"), payload: RigSetupAppendPayload }),
-  z.object({ kind: z.literal("definition_edit"), payload: RigDefinitionEditPayload }),
+  z.object({
+    kind: z.literal("definition_edit"),
+    payload: RigDefinitionEditPayload,
+  }),
 ]);
 export type ProposeRigChangeRequest = z.infer<typeof ProposeRigChangeRequest>;
 
@@ -3375,6 +3403,11 @@ export type SessionLineageResponse = z.infer<typeof SessionLineageResponse>;
 
 export const SessionEventType = z.enum([
   "session.created",
+  // Defensive read/transport projection for a malformed or historically
+  // oversized retained event envelope. The original row stays durable; this
+  // explicit synthetic type prevents unbounded free-form envelope fields from
+  // crossing NATS, SSE, REST, or browser boundaries.
+  "session.event.envelope_omitted",
   "session.status.changed",
   "session.requiresAction",
   "session.context.compaction.requested",
@@ -3819,7 +3852,9 @@ export const FsDeleteRequest = z.object({
   recursive: z.boolean().default(false), // required true to delete a non-empty dir
 });
 export type FsDeleteRequest = z.infer<typeof FsDeleteRequest>;
-export const FsDeleteResponse = z.object({ revision: z.number().int().nonnegative() });
+export const FsDeleteResponse = z.object({
+  revision: z.number().int().nonnegative(),
+});
 export type FsDeleteResponse = z.infer<typeof FsDeleteResponse>;
 
 export const FsMoveRequest = z.object({
@@ -4126,14 +4161,25 @@ export const GitCommit = z.object({
   sha: z.string(),
   shortSha: z.string(),
   parents: z.array(z.string()),
-  author: z.object({ name: z.string(), email: z.string(), timestamp: z.number().int() }),
-  committer: z.object({ name: z.string(), email: z.string(), timestamp: z.number().int() }),
+  author: z.object({
+    name: z.string(),
+    email: z.string(),
+    timestamp: z.number().int(),
+  }),
+  committer: z.object({
+    name: z.string(),
+    email: z.string(),
+    timestamp: z.number().int(),
+  }),
   subject: z.string(),
   body: z.string(),
   refs: z.array(z.string()).default([]), // decorations: branch/tag pointers
 });
 export type GitCommit = z.infer<typeof GitCommit>;
-export const GitLogResponse = z.object({ commits: z.array(GitCommit), hasMore: z.boolean() });
+export const GitLogResponse = z.object({
+  commits: z.array(GitCommit),
+  hasMore: z.boolean(),
+});
 export type GitLogResponse = z.infer<typeof GitLogResponse>;
 
 export const GitShowRequest = z.object({
@@ -4205,7 +4251,10 @@ export const PtyOpenResponse = z.object({
   supportsInput: z.boolean(), // false on backends without writeStdin
 });
 export type PtyOpenResponse = z.infer<typeof PtyOpenResponse>;
-export const PtyWriteRequest = z.object({ ptyId: z.string().uuid(), data: z.string() }); // utf-8 stdin
+export const PtyWriteRequest = z.object({
+  ptyId: z.string().uuid(),
+  data: z.string(),
+}); // utf-8 stdin
 export type PtyWriteRequest = z.infer<typeof PtyWriteRequest>;
 export const PtyResizeRequest = z.object({
   ptyId: z.string().uuid(),
@@ -4220,7 +4269,11 @@ export type PtyCloseRequest = z.infer<typeof PtyCloseRequest>;
 // negotiation). The full SessionCapabilities doc already carries FileSystem /
 // Terminal / Git blocks (P0.1); this is the compact projection the SDK mirrors.
 export const SessionStructuredCapabilities = z.object({
-  FileSystem: z.object({ available: z.boolean(), readOnly: z.boolean(), root: z.string() }),
+  FileSystem: z.object({
+    available: z.boolean(),
+    readOnly: z.boolean(),
+    root: z.string(),
+  }),
   Terminal: z.object({
     events: z.boolean(), // command.output firehose (always on if a box exists)
     exec: z.boolean(), // synchronous terminal exec
@@ -4238,15 +4291,179 @@ export const SessionEvent = z.object({
   type: SessionEventType,
   payload: z.unknown().default({}),
   occurredAt: z.string(),
-  clientEventId: z.string().min(1).nullable().optional(),
+  clientEventId: SessionOperationKey.nullable().optional(),
   turnId: z.string().uuid().nullable().optional(),
   turnGeneration: z.number().int().nonnegative().nullable().optional(),
   turnAttemptId: z.string().uuid().nullable().optional(),
   turnAssociation: z.enum(["current", "late_rejected", "duplicate"]).nullable().optional(),
   duplicateOfEventId: z.string().uuid().nullable().optional(),
-  duplicateReason: z.string().min(1).nullable().optional(),
+  duplicateReason: z.string().min(1).max(1024).nullable().optional(),
 });
 export type SessionEvent = z.infer<typeof SessionEvent>;
+
+export const SESSION_EVENT_TYPE_MAX_BYTES = 256;
+export const SESSION_EVENT_CLIENT_EVENT_ID_MAX_BYTES = SESSION_OPERATION_KEY_MAX_CHARS * 4;
+export const SESSION_EVENT_TURN_ASSOCIATION_MAX_BYTES = 64;
+export const SESSION_EVENT_DUPLICATE_REASON_MAX_BYTES = 4 * 1024;
+export const SESSION_EVENT_ENVELOPE_MAX_BYTES = 80 * 1024;
+
+export type BoundSessionEventOptions = {
+  surface?: SessionEventBoundarySurface;
+  maxBytes?: number;
+};
+
+/**
+ * Canonical lossy projection for a complete session event. Payload bounds alone
+ * are insufficient: a malformed retained row can also carry an oversized type,
+ * client id, or duplicate diagnostic. Keep cursor/UUID identity intact, bound
+ * every free-form envelope string, and assert the exact final JSON envelope.
+ */
+export function boundSessionEvent(
+  event: SessionEvent,
+  options: BoundSessionEventOptions = {},
+): SessionEvent {
+  const surface = options.surface ?? "durable_audit";
+  const maxBytes = Math.max(8 * 1024, options.maxBytes ?? SESSION_EVENT_ENVELOPE_MAX_BYTES);
+  const originalBytes = sessionEventJsonBytes(event);
+  const typeIsSafe =
+    sessionEventUtf8Bytes(event.type) <= SESSION_EVENT_TYPE_MAX_BYTES &&
+    !event.type.includes("\n") &&
+    !event.type.includes("\r");
+  const clientEventId = boundOptionalSessionEventText(
+    event.clientEventId,
+    SESSION_EVENT_CLIENT_EVENT_ID_MAX_BYTES,
+  );
+  const turnAssociation =
+    event.turnAssociation === null ||
+    event.turnAssociation === undefined ||
+    event.turnAssociation === "current" ||
+    event.turnAssociation === "late_rejected" ||
+    event.turnAssociation === "duplicate"
+      ? event.turnAssociation
+      : null;
+  const duplicateReason = boundOptionalSessionEventText(
+    event.duplicateReason,
+    SESSION_EVENT_DUPLICATE_REASON_MAX_BYTES,
+  );
+  const envelopeFields = [
+    !typeIsSafe
+      ? sessionEventEnvelopeFieldProjection("type", event.type, "session.event.envelope_omitted")
+      : null,
+    event.clientEventId !== clientEventId
+      ? sessionEventEnvelopeFieldProjection("clientEventId", event.clientEventId, clientEventId)
+      : null,
+    event.turnAssociation !== turnAssociation
+      ? sessionEventEnvelopeFieldProjection(
+          "turnAssociation",
+          event.turnAssociation,
+          turnAssociation,
+        )
+      : null,
+    event.duplicateReason !== duplicateReason
+      ? sessionEventEnvelopeFieldProjection(
+          "duplicateReason",
+          event.duplicateReason,
+          duplicateReason,
+        )
+      : null,
+  ].filter((field) => field !== null);
+  const payload =
+    envelopeFields.length === 0
+      ? boundSessionEventPayload(event.payload, { surface })
+      : boundSessionEventPayload(
+          {
+            preview: "[legacy event envelope normalized at bounded projection boundary]",
+            originalEventBytes: originalBytes,
+            originalType: boundSessionEventText(event.type, 256),
+            envelopeProjection: {
+              truncated: true,
+              surface,
+              fields: envelopeFields,
+            },
+            fullEvidence: { available: false, reason: "not_retained" },
+          },
+          { surface, maxBytes: 8 * 1024 },
+        );
+  const bounded: SessionEvent = {
+    ...event,
+    type: typeIsSafe ? event.type : "session.event.envelope_omitted",
+    payload,
+    clientEventId,
+    turnAssociation,
+    duplicateReason,
+  };
+  if (sessionEventJsonBytes(bounded) <= maxBytes) return bounded;
+
+  const fallback: SessionEvent = {
+    id: event.id,
+    workspaceId: event.workspaceId,
+    sessionId: event.sessionId,
+    sequence: event.sequence,
+    type: "session.event.envelope_omitted",
+    payload: boundSessionEventPayload(
+      {
+        preview: "[legacy event envelope omitted at bounded projection boundary]",
+        originalEventBytes: originalBytes,
+        originalType: boundSessionEventText(event.type, 256),
+        fullEvidence: { available: false, reason: "not_retained" },
+      },
+      { surface, maxBytes: 4 * 1024 },
+    ),
+    occurredAt: event.occurredAt,
+    clientEventId: bounded.clientEventId ?? null,
+    turnId: event.turnId ?? null,
+    turnGeneration: event.turnGeneration ?? null,
+    turnAttemptId: event.turnAttemptId ?? null,
+    turnAssociation: bounded.turnAssociation ?? null,
+    duplicateOfEventId: event.duplicateOfEventId ?? null,
+    duplicateReason: bounded.duplicateReason ?? null,
+  };
+  const deliveredBytes = sessionEventJsonBytes(fallback);
+  if (deliveredBytes > maxBytes) {
+    throw new RangeError(
+      `Bounded session event exceeds its final envelope (${deliveredBytes} > ${maxBytes} bytes)`,
+    );
+  }
+  return fallback;
+}
+
+function sessionEventEnvelopeFieldProjection(
+  field: string,
+  original: string | null | undefined,
+  delivered: string | null | undefined,
+): { field: string; originalBytes: number; deliveredBytes: number } {
+  return {
+    field,
+    originalBytes: typeof original === "string" ? sessionEventUtf8Bytes(original) : 0,
+    deliveredBytes: typeof delivered === "string" ? sessionEventUtf8Bytes(delivered) : 0,
+  };
+}
+
+function boundOptionalSessionEventText<T extends string | null | undefined>(
+  value: T,
+  maxBytes: number,
+): T {
+  return (typeof value === "string" ? boundSessionEventText(value, maxBytes) : value) as T;
+}
+
+function boundSessionEventText(value: string, maxBytes: number): string {
+  const encoder = new TextEncoder();
+  const decoder = new TextDecoder();
+  const bytes = encoder.encode(value);
+  if (bytes.byteLength <= maxBytes) return value;
+  const marker = "…[truncated]";
+  const markerBytes = encoder.encode(marker).byteLength;
+  const prefixBudget = Math.max(0, maxBytes - markerBytes);
+  let prefixEnd = Math.min(prefixBudget, bytes.byteLength);
+  while (prefixEnd > 0 && prefixEnd < bytes.byteLength && (bytes[prefixEnd]! & 0xc0) === 0x80) {
+    prefixEnd -= 1;
+  }
+  return `${decoder.decode(bytes.subarray(0, prefixEnd))}${marker}`;
+}
+
+function sessionEventUtf8Bytes(value: string): number {
+  return new TextEncoder().encode(value).byteLength;
+}
 
 export const SessionQueueMutationResponse = z.object({
   receipt: SessionCommandReceipt,
@@ -4301,7 +4518,7 @@ export const CreateSessionRequest = withVariableSetIdAlias({
   // behavior). An id that does not name a rig in the workspace is a 422.
   rigId: z.string().uuid().optional(),
   goal: GoalSpec.optional(),
-  clientEventId: z.string().min(1).optional(),
+  clientEventId: SessionOperationKey.optional(),
   // Workspace-scoped CREATE idempotency key: collapses concurrent/retried
   // create calls carrying the same key to a single session (partial unique
   // index on (workspace_id, create_idempotency_key)). Distinct from
@@ -4343,7 +4560,7 @@ export type CreateSessionRequest = z.infer<typeof CreateSessionRequest>;
 export const ClientSessionEvent = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("user.message"),
-    clientEventId: z.string().min(1).optional(),
+    clientEventId: SessionOperationKey.optional(),
     payload: z.object({
       text: z.string().min(1),
       resources: z.array(ResourceRef).default([]),
@@ -4359,9 +4576,9 @@ export const ClientSessionEvent = z.discriminatedUnion("type", [
   }),
   z.object({
     type: z.literal("user.approvalDecision"),
-    clientEventId: z.string().min(1).optional(),
+    clientEventId: SessionOperationKey.optional(),
     payload: z.object({
-      approvalId: z.string().min(1),
+      approvalId: z.string().min(1).max(SESSION_OPERATION_KEY_MAX_CHARS),
       decision: z.enum(["approve", "reject"]),
       message: z.string().optional(),
     }),
@@ -4375,7 +4592,7 @@ export const SteerSessionMessageRequest = z.object({
   tools: z.array(ToolRef).default([]),
   model: z.string().min(1).optional(),
   reasoningEffort: ReasoningEffort.optional(),
-  clientEventId: z.string().min(1).optional(),
+  clientEventId: SessionOperationKey.optional(),
   controlEtag: z.string().min(1).optional(),
   expectedDraftRevision: z.number().int().nonnegative().optional(),
   mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),

@@ -227,8 +227,9 @@ wrong one is the classic mistake.
    the model or advertised as a full-output evidence store.
 
 Those durable stores are still not the realtime or browser representation.
-NATS chunks bounded encoded messages; SSE uses bounded frames plus bounded-page
-Postgres replay/gap fill; REST uses byte-bounded forward prefixes/backward
+NATS chunks bounded encoded messages; SSE uses bounded frames, a byte-counted
+server queue, latest-wins live notification state, and bounded-page Postgres
+replay/gap fill; REST uses byte-bounded forward prefixes/backward
 suffixes; and React retains only a newest-suffix count+byte window while keeping
 its resume cursor and latest status separately. Historical oversized event rows
 remain readable during the rolling migration and are defensively normalized at

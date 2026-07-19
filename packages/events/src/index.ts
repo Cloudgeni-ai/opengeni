@@ -1,4 +1,5 @@
 import {
+  boundSessionEvent,
   boundSessionEventPayload,
   sessionEventJsonBytes,
   sessionEventPayloadTruncation,
@@ -41,7 +42,7 @@ const silentLogger: Required<EventLogger> = {
   warn: () => {},
 };
 
-export { coalesceSessionEventDeltas } from "./coalesce";
+export { SESSION_EVENT_COALESCED_TEXT_TARGET_BYTES, coalesceSessionEventDeltas } from "./coalesce";
 
 /**
  * Reconnect + keepalive defaults applied to EVERY long-lived NATS connection
@@ -444,7 +445,11 @@ export async function createResponderConnection(
   auth: NatsConnectAuth,
   subject: string,
   handler: RequestHandler,
-  options: { name?: string; logger?: EventLogger; connect?: typeof connect } = {},
+  options: {
+    name?: string;
+    logger?: EventLogger;
+    connect?: typeof connect;
+  } = {},
 ): Promise<ResponderConnection> {
   const connectOptions: ConnectionOptions = { servers: natsUrl };
   if (options.name) {
@@ -519,7 +524,10 @@ export function observeSince(
     return;
   }
   try {
-    fn({ durationSeconds: Math.max(0, (performance.now() - startedAt) / 1000), count });
+    fn({
+      durationSeconds: Math.max(0, (performance.now() - startedAt) / 1000),
+      count,
+    });
   } catch {
     // Metrics emission must never affect the append/publish path.
   }
@@ -775,7 +783,11 @@ export function sessionEventBatchesByBytes(
   let current: SessionEvent[] = [];
   for (const event of bounded) {
     const candidate = [...current, event];
-    const encodedBytes = codec.encode({ workspaceId, sessionId, events: candidate }).byteLength;
+    const encodedBytes = codec.encode({
+      workspaceId,
+      sessionId,
+      events: candidate,
+    }).byteLength;
     if (current.length > 0 && encodedBytes > maxBytes) {
       batches.push(current);
       current = [event];
@@ -785,7 +797,11 @@ export function sessionEventBatchesByBytes(
   }
   if (current.length > 0) batches.push(current);
   for (const batch of batches) {
-    const encodedBytes = codec.encode({ workspaceId, sessionId, events: batch }).byteLength;
+    const encodedBytes = codec.encode({
+      workspaceId,
+      sessionId,
+      events: batch,
+    }).byteLength;
     if (encodedBytes > maxBytes) {
       throw new RangeError(
         `Session event cannot fit in the configured NATS envelope (${encodedBytes} > ${maxBytes} bytes)`,
@@ -799,7 +815,12 @@ export function sessionEventBatchesByBytes(
 export function boundSessionEventHttpPage(
   events: readonly SessionEvent[],
   options: { direction: "after" | "before"; maxBytes?: number },
-): { events: SessionEvent[]; truncated: boolean; nextSequence: number | null; bytes: number } {
+): {
+  events: SessionEvent[];
+  truncated: boolean;
+  nextSequence: number | null;
+  bytes: number;
+} {
   const maxBytes = options.maxBytes ?? SESSION_EVENT_HTTP_PAGE_MAX_BYTES;
   const selected: SessionEvent[] = [];
   let bytes = 2; // []
@@ -813,22 +834,43 @@ export function boundSessionEventHttpPage(
     bytes += separator + eventBytes;
   }
   if (options.direction === "before") selected.reverse();
+  if (projected.length > 0 && selected.length === 0) {
+    throw new RangeError(
+      `A bounded session event cannot fit in the configured HTTP page envelope (${maxBytes} bytes)`,
+    );
+  }
   const truncated = selected.length < projected.length;
   const edge = options.direction === "after" ? selected.at(-1) : selected[0];
   return {
     events: selected,
     truncated,
-    nextSequence: edge?.sequence ?? null,
+    nextSequence:
+      edge === undefined
+        ? null
+        : options.direction === "after"
+          ? sessionEventResumeSequence(edge)
+          : edge.sequence,
     bytes,
   };
+}
+
+/** Raw durable cursor covered by a possibly coalesced compact event. */
+export function sessionEventResumeSequence(event: SessionEvent): number {
+  if (!event.payload || typeof event.payload !== "object" || Array.isArray(event.payload)) {
+    return event.sequence;
+  }
+  const coalescedUntil = Number((event.payload as Record<string, unknown>).coalescedUntil);
+  return Math.max(
+    event.sequence,
+    Number.isFinite(coalescedUntil) ? Math.floor(coalescedUntil) : event.sequence,
+  );
 }
 
 function boundSessionEventForSurface(
   event: SessionEvent,
   surface: SessionEventBoundarySurface,
 ): SessionEvent {
-  const payload = boundSessionEventPayload(event.payload, { surface });
-  return payload === event.payload ? event : { ...event, payload };
+  return boundSessionEvent(event, { surface });
 }
 
 function observeEventBoundaries(events: readonly SessionEvent[], logger?: EventLogger): void {
