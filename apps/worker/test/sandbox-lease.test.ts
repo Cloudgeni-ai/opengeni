@@ -620,6 +620,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
   test("(1b-retention) the last verified fallback survives warm + drain rotations until a newer revision is verified", async () => {
     if (!available) return;
     const ids = await freshWorkspace();
+    const attempt = await freshWarmSnapshotAttempt(ids);
     const t0 = 1_910_000_000_000;
     const archive1 = Buffer.from(
       'MODAL_SANDBOX_FS_SNAPSHOT_V1\n{"snapshot_id":"verified-fallback"}',
@@ -675,6 +676,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     const warm2 = await persistWarmSnapshot(db, {
       accountId: ids.accountId,
       workspaceId: ids.workspaceId,
+      ...attempt,
       sandboxGroupId: ids.groupId,
       expectedEpoch: 11,
       workspaceArchive: archive2,
@@ -687,6 +689,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     const warm3 = await persistWarmSnapshot(db, {
       accountId: ids.accountId,
       workspaceId: ids.workspaceId,
+      ...attempt,
       sandboxGroupId: ids.groupId,
       expectedEpoch: 11,
       workspaceArchive: archive3,

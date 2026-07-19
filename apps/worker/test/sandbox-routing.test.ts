@@ -422,6 +422,11 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
     const warmEpoch = committed.lease!.leaseEpoch;
 
     const operationCalls = Array.from({ length: 24 }, () => 0);
+    let releaseProviderLoss!: () => void;
+    const providerLossBarrier = new Promise<void>((resolve) => {
+      releaseProviderLoss = resolve;
+    });
+    let providerCallsReached = 0;
     const missing = Object.assign(new Error("provider sandbox missing"), {
       code: "SANDBOX_NOT_FOUND",
       status: 404,
@@ -433,7 +438,9 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
         async writeFile(args: unknown) {
           const index = (args as { index: number }).index;
           operationCalls[index] += 1;
-          await Promise.resolve();
+          providerCallsReached += 1;
+          if (providerCallsReached === operationCalls.length) releaseProviderLoss();
+          await providerLossBarrier;
           throw missing;
         },
       },
