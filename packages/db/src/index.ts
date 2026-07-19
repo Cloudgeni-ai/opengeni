@@ -23228,7 +23228,8 @@ export async function appendSessionEventToSandboxGroup(
           occurredAt,
         }));
         const inserted = await tx.insert(schema.sessionEvents).values(values).returning();
-        await tx
+        const lockedSessionIds = rows.map((row) => row.id);
+        const updated = await tx
           .update(schema.sessions)
           .set({
             lastSequence: sql`${schema.sessions.lastSequence} + 1`,
@@ -23237,9 +23238,13 @@ export async function appendSessionEventToSandboxGroup(
           .where(
             and(
               eq(schema.sessions.workspaceId, workspaceId),
-              eq(schema.sessions.sandboxGroupId, sandboxGroupId),
+              inArray(schema.sessions.id, lockedSessionIds),
             ),
-          );
+          )
+          .returning({ id: schema.sessions.id });
+        if (updated.length !== lockedSessionIds.length) {
+          throw new Error("Sandbox-group event sequence update did not match locked sessions");
+        }
         return inserted.map(mapEvent);
       }),
   );

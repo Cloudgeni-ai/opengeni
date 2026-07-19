@@ -4,6 +4,7 @@ import { ModelItem } from "@openai/agents-core/types";
 import type { Settings } from "@opengeni/config";
 import {
   interruptedToolCallResult,
+  runIdempotentPersistenceTransaction,
   SandboxImageConflictError,
   SandboxLeaseSupersededError,
   SessionEventPersistenceError,
@@ -1171,6 +1172,52 @@ describe("transient provider error classifier", () => {
     expect(payload.retryable).toBeUndefined();
     expect(JSON.stringify(payload)).not.toContain("insert into");
     expect(JSON.stringify(payload)).not.toContain("parameters");
+  });
+
+  test("keeps no-SQLSTATE persistence failures safe for events, logs, and tracing", async () => {
+    const error = await runIdempotentPersistenceTransaction(
+      {
+        stage: "session_events.append_for_turn_attempt",
+        eventTypes: ["agent.model.usage"],
+        correlationId: "corr-unknown-safe",
+      },
+      async () => {
+        throw Object.assign(new Error("Failed query containing private-token"), {
+          query: "insert into session_events values ($1)",
+          params: ["private-token"],
+          driverError: {
+            table_name: "session_events",
+            detail: "private-token",
+          },
+        });
+      },
+    ).catch((caught) => caught);
+
+    expect(error).toBeInstanceOf(SessionEventPersistenceError);
+    const payload = agentRunFailurePayload(error);
+    expect(payload).toEqual({
+      error:
+        "Database failure while persisting agent.model.usage. The completed provider call and external effects were not retried.",
+      code: "db_failure",
+      detail: "The database rejected the idempotent persistence transaction.",
+      correlationId: "corr-unknown-safe",
+      stage: "session_events.append_for_turn_attempt",
+      sqlState: null,
+      attempts: 1,
+      retryOutcome: "not_retryable",
+      database: { table: "session_events" },
+    });
+    const telemetrySurface = JSON.stringify({
+      payload,
+      name: (error as Error).name,
+      message: (error as Error).message,
+      stack: (error as Error).stack,
+      details: (error as SessionEventPersistenceError).details,
+      cause: (error as Error & { cause?: unknown }).cause,
+    });
+    expect(telemetrySurface).not.toContain("private-token");
+    expect(telemetrySurface).not.toContain("insert into");
+    expect(telemetrySurface).not.toContain("values ($1)");
   });
 
   test("classifies 5xx status codes as transient (status is authoritative)", () => {

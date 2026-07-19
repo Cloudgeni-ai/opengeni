@@ -16,7 +16,7 @@ export type SafeDatabaseErrorFacts = {
 
 export type PersistenceFailureDetails = {
   code: DatabaseFailureCode;
-  sqlState: string;
+  sqlState: string | null;
   stage: string;
   eventTypes: string[];
   correlationId: string;
@@ -76,7 +76,7 @@ export function nestedPostgresSqlState(error: unknown): string | null {
   return fallback;
 }
 
-export function databaseFailureCode(sqlState: string): DatabaseFailureCode {
+export function databaseFailureCode(sqlState: string | null): DatabaseFailureCode {
   if (sqlState === "40P01") return "db_deadlock";
   if (sqlState === "40001") return "db_serialization_failure";
   return "db_failure";
@@ -166,7 +166,6 @@ export async function runIdempotentPersistenceTransaction<T>(
       return await transaction(attempt);
     } catch (error) {
       const sqlState = nestedPostgresSqlState(error);
-      if (!sqlState) throw error;
       const retryable = isRetryablePersistenceSqlState(sqlState);
       if (retryable && attempt < maxAttempts) {
         await options.onRetry?.({

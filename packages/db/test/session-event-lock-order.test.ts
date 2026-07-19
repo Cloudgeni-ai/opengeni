@@ -118,6 +118,23 @@ async function seedRunningSession(workspace?: WorkspaceFixture): Promise<Running
   };
 }
 
+async function seedSandboxGroupMember(
+  fixture: Pick<RunningFixture, "accountId" | "workspaceId" | "sandboxGroupId">,
+): Promise<string> {
+  const sessionId = crypto.randomUUID();
+  await admin`
+    insert into sessions (
+      id, account_id, workspace_id, initial_message, model,
+      sandbox_backend, sandbox_group_id, status, temporal_workflow_id
+    ) values (
+      ${sessionId}, ${fixture.accountId}, ${fixture.workspaceId}, 'OPE-63 group join',
+      'codex/gpt-5.6-sol', 'modal', ${fixture.sandboxGroupId}, 'idle',
+      ${`session-${sessionId}`}
+    )
+  `;
+  return sessionId;
+}
+
 async function seedGoal(fixture: RunningFixture): Promise<void> {
   await admin`
     insert into session_goals (
@@ -629,6 +646,69 @@ describe("OPE-63 canonical session-event lock order", () => {
     const rows = await assertCommittedSequence(fixture, 1);
     expect(rows[0]).toMatchObject({ sequence: 1, type: "goal.updated" });
   });
+
+  test("fanout advances only the group members in its locked snapshot", async () => {
+    const fixture = await seedRunningSession();
+    const lockId = nextBarrierId++;
+    await barrier`select pg_advisory_lock(${BARRIER_CLASS}, ${lockId})`;
+    await admin`
+      insert into ope63_event_barriers (event_type, lock_class, lock_id)
+      values ('sandbox.box.snapshot', ${BARRIER_CLASS}, ${lockId})
+    `;
+    let released = false;
+    let fanout: Promise<unknown> | null = null;
+    let joinedSessionId: string | null = null;
+    try {
+      fanout = appendSessionEventToSandboxGroup(db, fixture.workspaceId, fixture.sandboxGroupId, {
+        type: "sandbox.box.snapshot",
+        payload: { phase: "membership-snapshot" },
+      });
+      await waitForAdvisoryWaiter();
+      joinedSessionId = await within(
+        seedSandboxGroupMember(fixture),
+        "a new sandbox-group member to commit while fanout is blocked",
+        2_000,
+      );
+      await admin`delete from ope63_event_barriers where event_type = 'sandbox.box.snapshot'`;
+      await barrier`select pg_advisory_unlock(${BARRIER_CLASS}, ${lockId})`;
+      released = true;
+      await within(fanout, "the membership-snapshot fanout to commit");
+    } finally {
+      await admin`delete from ope63_event_barriers where event_type = 'sandbox.box.snapshot'`.catch(
+        () => undefined,
+      );
+      if (!released) {
+        await barrier`select pg_advisory_unlock(${BARRIER_CLASS}, ${lockId})`.catch(
+          () => undefined,
+        );
+      }
+      await fanout?.catch(() => undefined);
+    }
+
+    expect(joinedSessionId).not.toBeNull();
+    expect(await assertCommittedSequence(fixture, 1)).toMatchObject([
+      { sequence: 1, type: "sandbox.box.snapshot" },
+    ]);
+    expect(await assertCommittedSequence({ sessionId: joinedSessionId! }, 0)).toEqual([]);
+
+    const second = await appendSessionEventToSandboxGroup(
+      db,
+      fixture.workspaceId,
+      fixture.sandboxGroupId,
+      {
+        type: "sandbox.box.snapshot",
+        payload: { phase: "joined-member-visible" },
+      },
+    );
+    expect(second).toHaveLength(2);
+    expect(await assertCommittedSequence(fixture, 2)).toMatchObject([
+      { sequence: 1, type: "sandbox.box.snapshot" },
+      { sequence: 2, type: "sandbox.box.snapshot" },
+    ]);
+    expect(await assertCommittedSequence({ sessionId: joinedSessionId! }, 1)).toMatchObject([
+      { sequence: 1, type: "sandbox.box.snapshot" },
+    ]);
+  }, 60_000);
 
   test("does not serialize unrelated sessions in the same workspace", async () => {
     const workspace = await freshWorkspace();

@@ -87,4 +87,54 @@ describe("session event persistence failure truth", () => {
       "private-token",
     );
   });
+
+  test("sanitizes failures without SQLSTATE and never retries them", async () => {
+    let attempts = 0;
+    let retries = 0;
+    const error = await runIdempotentPersistenceTransaction(
+      {
+        stage: "session_events.append_for_turn_attempt",
+        eventTypes: ["agent.model.usage"],
+        correlationId: "unknown-state-correlation",
+        onRetry: () => {
+          retries += 1;
+        },
+      },
+      async () => {
+        attempts += 1;
+        throw Object.assign(new Error("Failed query: insert into session_events (private-token)"), {
+          query: "insert into session_events values ($1)",
+          params: ["private-token"],
+          cause: {
+            table_name: "session_events",
+            detail: "bound parameter private-token",
+          },
+        });
+      },
+    ).catch((caught) => caught);
+
+    expect(attempts).toBe(1);
+    expect(retries).toBe(0);
+    expect(error).toBeInstanceOf(SessionEventPersistenceError);
+    expect((error as SessionEventPersistenceError).details).toEqual({
+      code: "db_failure",
+      sqlState: null,
+      stage: "session_events.append_for_turn_attempt",
+      eventTypes: ["agent.model.usage"],
+      correlationId: "unknown-state-correlation",
+      attempts: 1,
+      retryOutcome: "not_retryable",
+      database: { table: "session_events" },
+    });
+    expect((error as Error & { cause?: unknown }).cause).toBeUndefined();
+    const observable = JSON.stringify({
+      message: (error as Error).message,
+      stack: (error as Error).stack,
+      details: (error as SessionEventPersistenceError).details,
+      cause: (error as Error & { cause?: unknown }).cause,
+    });
+    expect(observable).not.toContain("private-token");
+    expect(observable).not.toContain("insert into");
+    expect(observable).not.toContain("values ($1)");
+  });
 });

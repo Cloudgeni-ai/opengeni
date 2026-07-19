@@ -5275,7 +5275,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           turnId,
           attemptId: input.attemptId,
           code: error.details.code,
-          sqlState: error.details.sqlState,
+          sqlState: error.details.sqlState ?? "unknown",
           stage: error.details.stage,
           eventTypes: error.details.eventTypes.join(","),
           correlationId: error.details.correlationId,
@@ -5619,7 +5619,7 @@ export function agentRunFailurePayload(error: unknown): {
   detail?: string;
   correlationId?: string;
   stage?: string;
-  sqlState?: string;
+  sqlState?: string | null;
   attempts?: number;
   retryOutcome?: string;
   database?: Record<string, string>;
