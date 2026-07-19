@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -262,6 +263,29 @@ describe("content-addressed package build cache", () => {
     if (!restored.hit) expect(restored.reason).toContain("digest mismatch");
   });
 
+  test("a failed restore preserves the complete existing output tree", () => {
+    const { root, cacheRoot, pkg } = fixture();
+    const fingerprint = "d".repeat(64);
+    const dist = join(root, pkg.dir, "dist");
+    mkdirSync(join(dist, "nested"), { recursive: true });
+    writeFileSync(join(dist, "index.js"), "cached index\n");
+    writeFileSync(join(dist, "nested/chunk.js"), "cached chunk\n");
+    savePackageBuild({ root, cacheRoot, pkg, fingerprint });
+
+    writeFileSync(join(dist, "index.js"), "existing index\n");
+    writeFileSync(join(dist, "nested/chunk.js"), "existing chunk\n");
+    writeFileSync(
+      join(cacheRoot, "v1", "_opengeni_example", fingerprint, "dist/nested/chunk.js"),
+      "tampered cache\n",
+    );
+
+    const restored = restorePackageBuild({ root, cacheRoot, pkg, fingerprint });
+    expect(restored.hit).toBe(false);
+    if (!restored.hit) expect(restored.reason).toContain("digest mismatch");
+    expect(readFileSync(join(dist, "index.js"), "utf8")).toBe("existing index\n");
+    expect(readFileSync(join(dist, "nested/chunk.js"), "utf8")).toBe("existing chunk\n");
+  });
+
   test("one input fingerprint cannot silently accept nondeterministic output bytes", () => {
     const { root, cacheRoot, pkg } = fixture();
     const fingerprint = "b".repeat(64);
@@ -328,5 +352,50 @@ describe("content-addressed package build cache", () => {
     expect(restored.hit).toBe(false);
     if (!restored.hit) expect(restored.reason).toContain("symlink");
     expect(readFileSync(join(outside, "manifest.json"), "utf8")).toBe("{}\n");
+  });
+
+  test("a symlinked manifest is rejected without replacing existing output", () => {
+    if (process.platform === "win32") return;
+    const { root, cacheRoot, pkg } = fixture();
+    const fingerprint = "e".repeat(64);
+    const dist = join(root, pkg.dir, "dist");
+    mkdirSync(dist, { recursive: true });
+    writeFileSync(join(dist, "index.js"), "cached output\n");
+    savePackageBuild({ root, cacheRoot, pkg, fingerprint });
+
+    const manifest = join(cacheRoot, "v1", "_opengeni_example", fingerprint, "manifest.json");
+    const outside = join(root, "outside-manifest.json");
+    writeFileSync(outside, readFileSync(manifest));
+    rmSync(manifest);
+    symlinkSync(outside, manifest);
+    writeFileSync(join(dist, "index.js"), "existing output\n");
+
+    const restored = restorePackageBuild({ root, cacheRoot, pkg, fingerprint });
+    expect(restored.hit).toBe(false);
+    if (!restored.hit) expect(restored.reason).toContain("manifest is a symlink");
+    expect(readFileSync(join(dist, "index.js"), "utf8")).toBe("existing output\n");
+    expect(readFileSync(outside, "utf8")).toContain('"fingerprint"');
+  });
+
+  test("saving replaces a cache entry with a symlinked manifest without following it", () => {
+    if (process.platform === "win32") return;
+    const { root, cacheRoot, pkg } = fixture();
+    const fingerprint = "f".repeat(64);
+    const dist = join(root, pkg.dir, "dist");
+    mkdirSync(dist, { recursive: true });
+    writeFileSync(join(dist, "index.js"), "deterministic output\n");
+    savePackageBuild({ root, cacheRoot, pkg, fingerprint });
+
+    const manifest = join(cacheRoot, "v1", "_opengeni_example", fingerprint, "manifest.json");
+    const outside = join(root, "outside-existing-manifest.json");
+    const outsideContents = readFileSync(manifest, "utf8");
+    writeFileSync(outside, outsideContents);
+    rmSync(manifest);
+    symlinkSync(outside, manifest);
+
+    savePackageBuild({ root, cacheRoot, pkg, fingerprint });
+    expect(lstatSync(manifest).isSymbolicLink()).toBe(false);
+    expect(readFileSync(outside, "utf8")).toBe(outsideContents);
+    expect(restorePackageBuild({ root, cacheRoot, pkg, fingerprint })).toEqual({ hit: true });
   });
 });

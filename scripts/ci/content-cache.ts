@@ -298,6 +298,58 @@ function validateManifest(value: unknown): CacheManifest {
   return manifest as CacheManifest;
 }
 
+function readCacheManifest(path: string): CacheManifest {
+  const metadata = lstatSync(path);
+  if (metadata.isSymbolicLink()) throw new Error("cached manifest is a symlink");
+  if (!metadata.isFile()) throw new Error("cached manifest is not a regular file");
+  return validateManifest(JSON.parse(readFileSync(path, "utf8")));
+}
+
+function restoreOutputDirectory(
+  cacheDist: string,
+  destination: string,
+  manifest: CacheManifest,
+): void {
+  const staging = `${destination}.restore-${process.pid}-${crypto.randomUUID()}`;
+  const backup = `${destination}.backup-${process.pid}-${crypto.randomUUID()}`;
+  let existingMoved = false;
+  let installed = false;
+  try {
+    mkdirSync(staging, { recursive: true });
+    for (const entry of manifest.outputs) {
+      const source = safeOutputPath(cacheDist, entry.path);
+      const target = safeOutputPath(staging, entry.path);
+      mkdirSync(dirname(target), { recursive: true });
+      cpSync(source, target);
+      chmodSync(target, entry.mode);
+    }
+    if (JSON.stringify(outputEntries(staging)) !== JSON.stringify(manifest.outputs)) {
+      throw new Error("restored output digest mismatch");
+    }
+
+    if (existsSync(destination)) {
+      renameSync(destination, backup);
+      existingMoved = true;
+    }
+    try {
+      renameSync(staging, destination);
+      installed = true;
+    } catch (error) {
+      if (existingMoved) {
+        renameSync(backup, destination);
+        existingMoved = false;
+      }
+      throw error;
+    }
+  } finally {
+    rmSync(staging, { recursive: true, force: true });
+    if (installed) rmSync(backup, { recursive: true, force: true });
+    else if (existingMoved && !existsSync(destination) && existsSync(backup)) {
+      renameSync(backup, destination);
+    }
+  }
+}
+
 export function restorePackageBuild(options: {
   root: string;
   pkg: WorkspacePackage;
@@ -321,7 +373,7 @@ export function restorePackageBuild(options: {
     }
     safeToRemove = true;
     if (lstatSync(cacheDist).isSymbolicLink()) throw new Error("cached dist is a symlink");
-    const manifest = validateManifest(JSON.parse(readFileSync(manifestPath, "utf8")));
+    const manifest = readCacheManifest(manifestPath);
     if (manifest.packageName !== options.pkg.name || manifest.fingerprint !== options.fingerprint) {
       throw new Error("cache identity mismatch");
     }
@@ -330,15 +382,7 @@ export function restorePackageBuild(options: {
       throw new Error("cached output digest mismatch");
     }
     const destination = join(options.root, options.pkg.dir, "dist");
-    rmSync(destination, { recursive: true, force: true });
-    mkdirSync(destination, { recursive: true });
-    for (const entry of manifest.outputs) {
-      const source = safeOutputPath(cacheDist, entry.path);
-      const target = safeOutputPath(destination, entry.path);
-      mkdirSync(dirname(target), { recursive: true });
-      cpSync(source, target);
-      chmodSync(target, entry.mode);
-    }
+    restoreOutputDirectory(cacheDist, destination, manifest);
     return { hit: true };
   } catch (error) {
     if (safeToRemove) rmSync(cacheDirectory, { recursive: true, force: true });
@@ -386,9 +430,7 @@ export function savePackageBuild(options: {
         renameSync(temporary, destination);
       } else {
         try {
-          const existingManifest = validateManifest(
-            JSON.parse(readFileSync(join(destination, "manifest.json"), "utf8")),
-          );
+          const existingManifest = readCacheManifest(join(destination, "manifest.json"));
           const existingOutputs = outputEntries(join(destination, "dist"));
           if (
             existingManifest.packageName !== options.pkg.name ||
