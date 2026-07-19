@@ -27,8 +27,10 @@ const repoRoot = new URL("../..", import.meta.url).pathname;
 const RUN_ID = crypto.randomUUID();
 const OWNER_USER_ID = `ope24-browser-owner-${RUN_ID}`;
 const OWNER_COOKIE_VALUE = `ope24-browser-cookie-${RUN_ID}`;
+const ROTATED_OWNER_COOKIE_VALUE = `ope24-browser-cookie-rotated-${RUN_ID}`;
+const FINAL_OWNER_COOKIE_VALUE = `ope24-browser-cookie-final-${RUN_ID}`;
 const OWNER_COOKIE = `better-auth.session_token=${OWNER_COOKIE_VALUE}`;
-const EVIDENCE_DIR = "/workspace/ope24-evidence";
+const EVIDENCE_DIR = process.env.OPENGENI_OPE24_EVIDENCE_DIR ?? "/tmp/ope24-evidence";
 
 let shared: SharedTestDatabase | null = null;
 let client: DbClient;
@@ -206,9 +208,9 @@ beforeAll(async () => {
     environmentsEncryptionKey: Buffer.alloc(32, 91).toString("base64"),
     codexSubscriptionEnabled: true,
   });
-  const session = {
+  const ownerSession = (suffix: string) => ({
     session: {
-      id: `ope24-browser-session-${RUN_ID}`,
+      id: `ope24-browser-session-${suffix}-${RUN_ID}`,
       userId: OWNER_USER_ID,
       expiresAt: new Date(Date.now() + 60_000),
     },
@@ -217,6 +219,13 @@ beforeAll(async () => {
       name: "OPE-24 Owner",
       email: `ope24-owner-${RUN_ID}@example.com`,
     },
+  });
+  const sessionForHeaders = (headers: Headers) => {
+    const cookie = headers.get("cookie") ?? "";
+    if (cookie.includes(FINAL_OWNER_COOKIE_VALUE)) return ownerSession("final");
+    if (cookie.includes(ROTATED_OWNER_COOKIE_VALUE)) return ownerSession("rotated");
+    if (cookie.includes(OWNER_COOKIE_VALUE)) return ownerSession("initial");
+    return null;
   };
   const api = createApp({
     settings,
@@ -226,11 +235,10 @@ beforeAll(async () => {
     managedAuth: {
       handler: async (request: Request) =>
         new URL(request.url).pathname.endsWith("/get-session")
-          ? json(session)
+          ? json(sessionForHeaders(request.headers))
           : new Response("not found", { status: 404 }),
       api: {
-        getSession: async ({ headers }: { headers: Headers }) =>
-          headers.get("cookie")?.includes(OWNER_COOKIE_VALUE) ? session : null,
+        getSession: async ({ headers }: { headers: Headers }) => sessionForHeaders(headers),
       },
     } as any,
     codexFetch: provider.fetch.bind(provider) as typeof fetch,
@@ -497,38 +505,105 @@ describe("OPE-24 real browser/API/Postgres reset overview", () => {
       .waitFor({ timeout: 10_000 });
     expect(provider.consumeBodies).toHaveLength(1);
     const callsBeforeFreshCacheReload = provider.overviewCalls;
-    await page.reload({ waitUntil: "domcontentloaded" });
-    await page.getByRole("heading", { name: "Codex subscriptions" }).waitFor({ timeout: 20_000 });
+    await context.close();
+
+    // A genuinely separate Better Auth session represents a new device/browser:
+    // it has no sessionStorage checkpoint and a different hashed session id.
+    // Owner-scoped server recovery must still reveal and adopt the exact attempt.
+    const recoveryContext = await browser.newContext({
+      viewport: { width: 1280, height: 900 },
+    });
+    await recoveryContext.addCookies([
+      {
+        name: "better-auth.session_token",
+        value: ROTATED_OWNER_COOKIE_VALUE,
+        url: `http://127.0.0.1:${publicPort}`,
+        sameSite: "Lax",
+      },
+    ]);
+    const recoveryPage = await recoveryContext.newPage();
+    await recoveryPage.goto(`http://127.0.0.1:${publicPort}/workspaces/${workspaceId}/settings`, {
+      waitUntil: "domcontentloaded",
+    });
+    await recoveryPage
+      .getByRole("heading", { name: "Codex subscriptions" })
+      .waitFor({ timeout: 20_000 });
     // Usage/count caches are still fresh, but detailed rows are never cached as
     // authority. A remount must therefore issue one live overview and restore the
     // durable same-attempt resume affordance rather than rendering no inventory.
     await waitFor(async () => provider.overviewCalls > callsBeforeFreshCacheReload, {
       timeoutMs: 10_000,
     });
+    expect(
+      await recoveryPage.evaluate(() =>
+        Object.keys(sessionStorage).some((key) => key.startsWith("opengeni.codexResetAttempt:")),
+      ),
+    ).toBe(false);
     // The provider has removed the credit after the ambiguous first call. The
-    // browser still exposes only the durable same-attempt resume path.
-    await page
+    // browser exposes only the durable same-attempt resume path. With no stale
+    // local provider title, the fallback label remains deliberately generic.
+    await recoveryPage
       .getByRole("button", {
-        name: /Resume uncertain redemption of Full reset/,
+        name: "Resume uncertain redemption of usage limit reset",
       })
       .click();
-    await page
+    await recoveryPage
       .getByRole("dialog")
       .getByRole("button", { name: "Redeem usage limit reset" })
       .click();
-    await page.getByText(/earlier redemption succeeded/i).waitFor({ timeout: 20_000 });
+    await recoveryPage.getByText(/earlier redemption succeeded/i).waitFor({ timeout: 20_000 });
     expect(provider.consumeBodies).toHaveLength(2);
     expect(new Set(provider.consumeBodies.map((body) => body.redeem_request_id)).size).toBe(1);
     expect(
-      await page
+      await recoveryPage
         .getByRole("checkbox", {
           name: "Use Detailed account for new automatic turns",
         })
         .isChecked(),
     ).toBe(false);
-    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
-      true,
+    expect(
+      await recoveryPage.evaluate(() => document.documentElement.scrollWidth <= innerWidth),
+    ).toBe(true);
+    await expectNoWcagAxeViolations(
+      recoveryPage,
+      'section[aria-labelledby="codex-subscriptions-heading"]',
     );
-    await context.close();
+    await recoveryContext.close();
+
+    // A third session also starts without local state. Durable completion must
+    // render directly from PostgreSQL even though the provider no longer lists
+    // the credit; no further consume or uncertain-resume affordance is allowed.
+    const completedContext = await browser.newContext({
+      viewport: { width: 375, height: 740 },
+      hasTouch: true,
+      isMobile: true,
+    });
+    await completedContext.addCookies([
+      {
+        name: "better-auth.session_token",
+        value: FINAL_OWNER_COOKIE_VALUE,
+        url: `http://127.0.0.1:${publicPort}`,
+        sameSite: "Lax",
+      },
+    ]);
+    const completedPage = await completedContext.newPage();
+    await completedPage.goto(`http://127.0.0.1:${publicPort}/workspaces/${workspaceId}/settings`, {
+      waitUntil: "domcontentloaded",
+    });
+    await completedPage
+      .getByText("The earlier redemption succeeded; usage was refreshed.")
+      .waitFor({ timeout: 20_000 });
+    expect(
+      await completedPage.getByRole("button", { name: /Resume uncertain redemption/ }).count(),
+    ).toBe(0);
+    expect(provider.consumeBodies).toHaveLength(2);
+    expect(
+      await completedPage.evaluate(() => document.documentElement.scrollWidth <= innerWidth),
+    ).toBe(true);
+    await expectNoWcagAxeViolations(
+      completedPage,
+      'section[aria-labelledby="codex-subscriptions-heading"]',
+    );
+    await completedContext.close();
   }, 120_000);
 });

@@ -52,6 +52,14 @@ jobs:
       - name: Install pinned Playwright Chromium runtime
         run: bunx playwright install --with-deps chromium
 
+      - name: OPE-24 Codex quota and entitlement browser acceptance
+        env:
+          # Human-only redemption recovery and allocator independence require
+          # the real FORCE-RLS/OCC/PostgreSQL boundary; no skipped green path.
+          OPENGENI_REQUIRE_REAL_DB: "1"
+          OPENGENI_OPE24_EVIDENCE_DIR: /tmp/ope24-evidence
+        run: bun scripts/run-browser-e2e.ts ./test/e2e/codex-overview.e2e.ts
+
       - name: OPE-26 session pin browser acceptance
         env:
           # This browser gate must fail when its real PostgreSQL boundary is unavailable.
@@ -73,6 +81,19 @@ jobs:
             /tmp/ope26-session-pin-desktop-dark.png
             /tmp/ope26-session-pin-mobile-light.png
             /tmp/ope26-session-pin-mobile-dark.png
+
+      - name: Upload OPE-24 visual evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: ope24-codex-quota-entitlement-visual-evidence
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            /tmp/ope24-evidence/ope24-desktop-light.png
+            /tmp/ope24-evidence/ope24-desktop-dark.png
+            /tmp/ope24-evidence/ope24-mobile-light.png
+            /tmp/ope24-evidence/ope24-mobile-dark.png
 
       - name: Upload workbench visual evidence
         if: ${{ always() }}

@@ -9,6 +9,7 @@ import type {
   CodexAccountsResponse,
   CodexOverviewResponse,
   CodexResetCredit,
+  CodexResetRedemptionRecovery,
   CodexRotationSettings,
   CodexUsage,
   CodexUsageMap,
@@ -33,6 +34,7 @@ import { Input } from "@/components/ui/input";
 import { MetaChip } from "@/components/ui/meta-chip";
 import { useAppContext } from "@/context";
 import {
+  ApiError,
   prepareCodexResetRedemption,
   redeemCodexResetCredit,
   type CodexResetRedemptionPreparation,
@@ -67,6 +69,30 @@ type StoredRedemptionAttempt = {
   title: string | null;
   expiresAt: number | null;
 };
+
+type RedemptionAttemptView = StoredRedemptionAttempt & {
+  status: "local" | CodexResetRedemptionRecovery["status"];
+  outcome: CodexResetRedemptionRecovery["outcome"];
+};
+
+function redemptionOutcomeCopy(outcome: NonNullable<CodexResetRedemptionRecovery["outcome"]>) {
+  return {
+    reset: "Usage limits reset.",
+    alreadyRedeemed: "The earlier redemption succeeded; usage was refreshed.",
+    nothingToReset: "The provider found no eligible usage window to reset.",
+    noCredit: "The provider found no reset credit to use.",
+  }[outcome];
+}
+
+function managedRedemptionErrorStatus(error: unknown): string | null {
+  if (!(error instanceof ApiError)) return null;
+  try {
+    const parsed = JSON.parse(error.body) as { status?: unknown };
+    return typeof parsed.status === "string" ? parsed.status : null;
+  } catch {
+    return null;
+  }
+}
 
 function redemptionAttemptStoragePrefix(workspaceId: string, accountId: string): string {
   return `opengeni.codexResetAttempt:${workspaceId}:${accountId}:`;
@@ -160,6 +186,43 @@ function storedRedemptionAttempts(
     // invisible. A new irreversible attempt will fail closed in storeRedemptionAttempt.
   }
   return attempts.sort((left, right) => left.creditId.localeCompare(right.creditId));
+}
+
+function redemptionAttemptViews(
+  workspaceId: string,
+  accountId: string,
+  overview: CodexAccountOverview | undefined,
+): RedemptionAttemptView[] {
+  const local = storedRedemptionAttempts(workspaceId, accountId);
+  const localByCredit = new Map(local.map((attempt) => [attempt.creditId, attempt]));
+  const creditById = new Map(
+    (overview?.resetCredits.credits ?? []).map((credit) => [credit.id, credit]),
+  );
+  const server = (overview?.redemptions ?? []).map((recovery) => {
+    const saved = localByCredit.get(recovery.creditId);
+    const credit = creditById.get(recovery.creditId);
+    return {
+      attemptId: recovery.attemptId,
+      creditId: recovery.creditId,
+      title: credit?.title ?? saved?.title ?? null,
+      expiresAt: credit?.expiresAt ?? saved?.expiresAt ?? null,
+      status: recovery.status,
+      outcome: recovery.outcome,
+    } satisfies RedemptionAttemptView;
+  });
+  const serverCreditIds = new Set(server.map((attempt) => attempt.creditId));
+  return [
+    ...server,
+    ...local
+      .filter((attempt) => !serverCreditIds.has(attempt.creditId))
+      .map(
+        (attempt): RedemptionAttemptView => ({
+          ...attempt,
+          status: "local",
+          outcome: null,
+        }),
+      ),
+  ].sort((left, right) => left.creditId.localeCompare(right.creditId));
 }
 
 export function resetLabel(seconds: number | null | undefined): string {
@@ -302,16 +365,14 @@ function ResetCreditInventory({
   overview,
   now,
   busy,
-  pendingAttempts,
+  recoveryAttempts,
   onRedeem,
-  onResumePending,
 }: {
   overview: CodexAccountOverview | undefined;
   now: number;
   busy: boolean;
-  pendingAttempts: StoredRedemptionAttempt[];
-  onRedeem: (credit: CodexResetCredit, requireResumable: boolean) => void;
-  onResumePending: (attempt: StoredRedemptionAttempt) => void;
+  recoveryAttempts: RedemptionAttemptView[];
+  onRedeem: (credit: CodexResetCredit, recovery?: RedemptionAttemptView) => void;
 }) {
   if (!overview) return null;
   const reset = overview.resetCredits;
@@ -325,7 +386,7 @@ function ResetCreditInventory({
     error: "Reset-credit inventory is unavailable. Refresh to retry.",
   };
   const visibleCreditIds = new Set(reset.credits.map((credit) => credit.id));
-  const hiddenPending = pendingAttempts.filter(
+  const hiddenRecoveries = recoveryAttempts.filter(
     (attempt) => !visibleCreditIds.has(attempt.creditId),
   );
   return (
@@ -354,9 +415,14 @@ function ResetCreditInventory({
       {reset.credits.length > 0 ? (
         <div className="grid min-w-0 gap-1.5">
           {reset.credits.map((credit) => {
-            const resumable =
-              overview.canResumeRedemption &&
-              pendingAttempts.some((attempt) => attempt.creditId === credit.id);
+            const recovery = recoveryAttempts.find((attempt) => attempt.creditId === credit.id);
+            const resumable = Boolean(
+              overview.canResumeRedemption && recovery && recovery.status !== "completed",
+            );
+            const completedOutcome =
+              recovery?.status === "completed" && recovery.outcome
+                ? redemptionOutcomeCopy(recovery.outcome)
+                : null;
             const expiry =
               credit.expiresAt == null
                 ? "Does not expire"
@@ -379,7 +445,14 @@ function ResetCreditInventory({
                     </div>
                   ) : null}
                 </div>
-                {credit.actionable || resumable ? (
+                {completedOutcome ? (
+                  <div
+                    className="max-w-56 text-right text-2xs text-status-success"
+                    aria-live="polite"
+                  >
+                    {completedOutcome}
+                  </div>
+                ) : credit.actionable || resumable ? (
                   <Button
                     type="button"
                     size="sm"
@@ -387,9 +460,9 @@ function ResetCreditInventory({
                     className="min-h-11 shrink-0"
                     disabled={busy}
                     aria-label={`${resumable ? "Resume redemption of" : "Redeem"} ${credit.title ?? "usage limit reset"}`}
-                    onClick={() => onRedeem(credit, !credit.actionable)}
+                    onClick={() => onRedeem(credit, recovery)}
                   >
-                    {resumable ? "Resume" : "Redeem"}
+                    {resumable ? "Resume uncertain attempt" : "Redeem"}
                   </Button>
                 ) : null}
               </div>
@@ -397,9 +470,9 @@ function ResetCreditInventory({
           })}
         </div>
       ) : null}
-      {overview.canResumeRedemption && hiddenPending.length > 0 ? (
+      {overview.canResumeRedemption && hiddenRecoveries.length > 0 ? (
         <div className="grid min-w-0 gap-1.5">
-          {hiddenPending.map((attempt) => (
+          {hiddenRecoveries.map((attempt) => (
             <div
               key={attempt.attemptId}
               className="flex min-w-0 flex-wrap items-start justify-between gap-2 rounded border border-status-waiting/30 bg-status-waiting/10 p-2"
@@ -408,22 +481,39 @@ function ResetCreditInventory({
                 <div className="break-words text-xs font-medium">
                   {attempt.title ?? "Usage limit reset"}
                 </div>
-                <div className="mt-0.5 break-words text-2xs text-fg-subtle">
-                  The provider no longer lists this reset. Resume only the same uncertain attempt;
-                  OpenGeni will never mint a replacement key.
+                <div className="mt-0.5 break-words text-2xs text-fg">
+                  {attempt.status === "completed" && attempt.outcome
+                    ? redemptionOutcomeCopy(attempt.outcome)
+                    : "The provider no longer lists this reset. Resume only the same uncertain attempt; OpenGeni will never mint a replacement key."}
                 </div>
               </div>
-              <Button
-                type="button"
-                size="sm"
-                variant="secondary"
-                className="min-h-11 shrink-0"
-                disabled={busy}
-                aria-label={`Resume uncertain redemption of ${attempt.title ?? "usage limit reset"}`}
-                onClick={() => onResumePending(attempt)}
-              >
-                Resume
-              </Button>
+              {attempt.status !== "completed" ? (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="secondary"
+                  className="min-h-11 shrink-0"
+                  disabled={busy}
+                  aria-label={`Resume uncertain redemption of ${attempt.title ?? "usage limit reset"}`}
+                  onClick={() =>
+                    onRedeem(
+                      {
+                        id: attempt.creditId,
+                        resetType: "codexRateLimits",
+                        status: "redeeming",
+                        grantedAt: 0,
+                        expiresAt: attempt.expiresAt,
+                        title: attempt.title,
+                        description: null,
+                        actionable: false,
+                      },
+                      attempt,
+                    )
+                  }
+                >
+                  Resume uncertain attempt
+                </Button>
+              ) : null}
             </div>
           ))}
         </div>
@@ -688,27 +778,28 @@ export function CodexSubscriptionsCard({
   );
 
   const beginRedemption = useCallback(
-    async (accountId: string, credit: CodexResetCredit, requireResumable = false) => {
+    async (accountId: string, credit: CodexResetCredit, recovery?: RedemptionAttemptView) => {
       setPreparingReset(credit.id);
       let createdLocalAttempt = false;
       try {
         const stored = storedRedemptionAttempt(workspaceId, accountId, credit.id);
-        const attempt: StoredRedemptionAttempt = stored ?? {
-          attemptId: crypto.randomUUID(),
-          creditId: credit.id,
-          title: credit.title,
-          expiresAt: credit.expiresAt,
-        };
-        createdLocalAttempt = stored == null;
-        if (!storeRedemptionAttempt(workspaceId, accountId, attempt)) {
-          toast.error("Browser session storage is required for ambiguity-safe redemption.");
-          return;
-        }
+        const attempt: StoredRedemptionAttempt = recovery ??
+          stored ?? {
+            attemptId: crypto.randomUUID(),
+            creditId: credit.id,
+            title: credit.title,
+            expiresAt: credit.expiresAt,
+          };
+        createdLocalAttempt = recovery == null && stored == null;
+        // Session storage is only a convenience checkpoint. Durable server
+        // discovery restores provider_started/completed attempts if storage is
+        // unavailable or the owning human opens a new browser session.
+        storeRedemptionAttempt(workspaceId, accountId, attempt);
         const preparation = await prepareCodexResetRedemption(workspaceId, accountId, {
           attemptId: attempt.attemptId,
           creditId: credit.id,
         });
-        if (requireResumable && !preparation.resumable) {
+        if (recovery && !preparation.resumable) {
           removeStoredRedemptionAttempt(workspaceId, accountId, credit.id);
           toast.error("This reset was not sent to the provider and is no longer actionable.");
           await refreshUsage();
@@ -741,19 +832,28 @@ export function CodexSubscriptionsCard({
         confirmation: "REDEEM_USAGE_LIMIT_RESET",
       });
       removeStoredRedemptionAttempt(workspaceId, redemption.accountId, redemption.credit.id);
-      const outcomeCopy = {
-        reset: "Usage limits reset.",
-        alreadyRedeemed: "The earlier redemption succeeded; usage was refreshed.",
-        nothingToReset: "The provider found no eligible usage window to reset.",
-        noCredit: "The provider found no reset credit to use.",
-      } as const;
-      toast.success(outcomeCopy[result.outcome]);
+      toast.success(redemptionOutcomeCopy(result.outcome));
       setRedemption(null);
       await refreshUsage();
       return true;
     } catch (error) {
-      // Keep the dialog and sessionStorage logical id. An ambiguous provider
-      // failure must retry the same server-held upstream key, never mint another.
+      const status = managedRedemptionErrorStatus(error);
+      const definitePreProviderFailure =
+        redemption.preparation.recoveryStatus == null &&
+        ((error instanceof ApiError && (error.status === 400 || error.status === 403)) ||
+          status === "not_actionable" ||
+          status === "preflight_unavailable" ||
+          status === "provider_unavailable" ||
+          status === "confirmation_expired");
+      if (definitePreProviderFailure) {
+        removeStoredRedemptionAttempt(workspaceId, redemption.accountId, redemption.credit.id);
+        setRedemption(null);
+        await refreshUsage();
+        toast.error(error instanceof Error ? error.message : "Redemption was not sent");
+        return false;
+      }
+      // Preserve only genuinely ambiguous provider work under the same logical
+      // id. The overview is the durable discovery authority after tab loss.
       setRedemption((current) => (current ? { ...current, uncertain: true } : current));
       toast.error(
         error instanceof Error
@@ -1042,25 +1142,13 @@ export function CodexSubscriptionsCard({
                   overview={overviewMap[account.id]}
                   now={now}
                   busy={busy || preparingReset != null}
-                  pendingAttempts={storedRedemptionAttempts(workspaceId, account.id)}
-                  onRedeem={(credit, requireResumable) =>
-                    void beginRedemption(account.id, credit, requireResumable)
-                  }
-                  onResumePending={(attempt) =>
-                    void beginRedemption(
-                      account.id,
-                      {
-                        id: attempt.creditId,
-                        resetType: "codexRateLimits",
-                        status: "redeeming",
-                        grantedAt: 0,
-                        expiresAt: attempt.expiresAt,
-                        title: attempt.title,
-                        description: null,
-                        actionable: false,
-                      },
-                      true,
-                    )
+                  recoveryAttempts={redemptionAttemptViews(
+                    workspaceId,
+                    account.id,
+                    overviewMap[account.id],
+                  )}
+                  onRedeem={(credit, recovery) =>
+                    void beginRedemption(account.id, credit, recovery)
                   }
                 />
                 {canManage ? (

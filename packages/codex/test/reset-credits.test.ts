@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import {
   consumeCodexRateLimitResetCredit,
+  fetchCodexModels,
   fetchCodexRateLimitResetCredits,
+  fetchCodexUsage,
   parseCodexRateLimitResetConsumeResponse,
   parseCodexRateLimitResetCreditsDetails,
   parseCodexRateLimitResetCreditsSummary,
@@ -221,6 +223,42 @@ describe("Codex v0.144.6 reset-credit server calls", () => {
         });
       });
     expect(await fetchCodexRateLimitResetCredits(auth, waitsForAbort, 1)).toEqual({
+      ok: false,
+      status: 0,
+      reason: "timeout",
+    });
+  });
+
+  test("complete-operation deadlines bound ignored signals and body reads", async () => {
+    const neverFetches = async () => await new Promise<Response>(() => undefined);
+    expect(await fetchCodexRateLimitResetCredits(auth, neverFetches, 5)).toEqual({
+      ok: false,
+      status: 0,
+      reason: "timeout",
+    });
+    expect(
+      await consumeCodexRateLimitResetCredit(
+        auth,
+        { idempotencyKey: "bounded-consume", creditId: "credit-known" },
+        neverFetches,
+        5,
+      ),
+    ).toEqual({ ok: false, status: 0, reason: "timeout" });
+    expect(await fetchCodexModels(auth, neverFetches, 5)).toEqual({
+      ok: false,
+      status: 0,
+      slugs: [],
+    });
+    await expect(fetchCodexUsage(auth, neverFetches, 5)).rejects.toThrow(
+      "Codex usage request timeout",
+    );
+
+    const bodyNeverSettles = async () => {
+      const response = new Response("{}", { status: 200 });
+      response.json = async () => await new Promise<never>(() => undefined);
+      return response;
+    };
+    expect(await fetchCodexRateLimitResetCredits(auth, bodyNeverSettles, 5)).toEqual({
       ok: false,
       status: 0,
       reason: "timeout",

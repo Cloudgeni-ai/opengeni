@@ -26,6 +26,7 @@ const RUN_ID = crypto.randomUUID();
 const OWNER_USER_ID = `owner-${RUN_ID}`;
 const OTHER_USER_ID = `other-${RUN_ID}`;
 const OWNER_COOKIE = `better-auth.session_token=${OWNER_USER_ID}`;
+const ROTATED_OWNER_COOKIE = `better-auth.session_token=${OWNER_USER_ID}-rotated`;
 const OTHER_COOKIE = `better-auth.session_token=${OTHER_USER_ID}`;
 const DELEGATION_SECRET = "ope24-api-delegation-secret";
 const settings = testSettings({
@@ -145,10 +146,13 @@ function json(body: unknown, status = 200): Response {
 
 function cookieSession(headers: Headers) {
   const cookie = headers.get("cookie");
-  if (cookie === OWNER_COOKIE) {
+  if (cookie === OWNER_COOKIE || cookie === ROTATED_OWNER_COOKIE) {
     return {
       session: {
-        id: `session-${OWNER_USER_ID}`,
+        id:
+          cookie === ROTATED_OWNER_COOKIE
+            ? `session-${OWNER_USER_ID}-rotated`
+            : `session-${OWNER_USER_ID}`,
         userId: OWNER_USER_ID,
         expiresAt: new Date(Date.now() + 60_000),
       },
@@ -176,9 +180,14 @@ function cookieSession(headers: Headers) {
   return null;
 }
 
-function app() {
+function app(
+  options: {
+    appSettings?: typeof settings;
+    codexFetch?: typeof fetch;
+  } = {},
+) {
   return createApp({
-    settings,
+    settings: options.appSettings ?? settings,
     db: client.db,
     bus: {} as never,
     workflowClient: {} as never,
@@ -188,7 +197,7 @@ function app() {
         getSession: async ({ headers }: { headers: Headers }) => cookieSession(headers),
       },
     } as any,
-    codexFetch: provider.fetch.bind(provider) as typeof fetch,
+    codexFetch: options.codexFetch ?? (provider.fetch.bind(provider) as typeof fetch),
   });
 }
 
@@ -317,6 +326,52 @@ describe("OPE-24 managed-cookie-only reset redemption API", () => {
     expect(provider.consumeBodies).toHaveLength(consumeBefore);
   }, 60_000);
 
+  test("redemption fails closed when the deployment has no configured public origin", async () => {
+    if (!available) return;
+    const access = await app().request("/v1/access/me", {
+      headers: { cookie: OWNER_COOKIE },
+    });
+    const context = (await access.json()) as AccessContext;
+    const key = Buffer.from(settings.environmentsEncryptionKey!, "base64");
+    const account = await upsertCodexSubscriptionCredential(client.db, {
+      accountId: context.defaultAccountId!,
+      workspaceId: context.defaultWorkspaceId!,
+      credentialEncrypted: encryptEnvironmentValue(
+        key,
+        JSON.stringify({ access_token: "token", refresh_token: "refresh", id_token: "id" }),
+      ),
+      chatgptAccountId: `origin-fail-closed-${crypto.randomUUID()}`,
+      scopes: null,
+      planType: "pro",
+      isFedramp: false,
+      expiresAt: new Date(Date.now() + 60 * 60_000),
+      lastRefreshAt: new Date(),
+      connectedBySubjectId: `user:${OWNER_USER_ID}`,
+    });
+    const unconfigured = app({
+      appSettings: { ...settings, publicBaseUrl: undefined },
+    });
+    const callsBefore = provider.calls;
+    const response = await unconfigured.request(
+      `http://attacker-controlled.test/v1/workspaces/${context.defaultWorkspaceId}/codex/accounts/${account.id}/reset-credits/prepare`,
+      {
+        method: "POST",
+        headers: {
+          ...browserHeaders(),
+          host: "attacker-controlled.test",
+          origin: "http://attacker-controlled.test",
+        },
+        body: JSON.stringify({
+          attemptId: crypto.randomUUID(),
+          creditId: "credit-reset",
+        }),
+      },
+    );
+    expect(response.status).toBe(503);
+    expect(await response.text()).toContain("managed browser origin is not configured");
+    expect(provider.calls).toBe(callsBefore);
+  });
+
   test("owner cookie works; overview/allocator never consume; another admin and nonhuman auth fail closed", async () => {
     if (!available) return;
     provider.calls = 0;
@@ -389,7 +444,11 @@ describe("OPE-24 managed-cookie-only reset redemption API", () => {
       workspaceId,
       credentialEncrypted: encryptEnvironmentValue(
         key,
-        JSON.stringify({ access_token: "token", refresh_token: "refresh", id_token: "id" }),
+        JSON.stringify({
+          access_token: "token",
+          refresh_token: "refresh",
+          id_token: "id",
+        }),
       ),
       chatgptAccountId: `unhealthy-${crypto.randomUUID()}`,
       scopes: null,
@@ -446,9 +505,11 @@ describe("OPE-24 managed-cookie-only reset redemption API", () => {
       outcome: "reset",
     });
     expect(provider.consumeBodies).toHaveLength(1);
-    expect((await listCodexAccountStatuses(client.db, workspaceId))[0]?.allocatorEnabled).toBe(
-      false,
-    );
+    expect(
+      (await listCodexAccountStatuses(client.db, workspaceId)).find(
+        (account) => account.id === connected.id,
+      )?.allocatorEnabled,
+    ).toBe(false);
 
     const otherOverview = await api.request(`/v1/workspaces/${workspaceId}/codex/overview`, {
       headers: { cookie: OTHER_COOKIE },
@@ -537,6 +598,58 @@ describe("OPE-24 managed-cookie-only reset redemption API", () => {
     expect(delegatedAttempt.response.status).toBe(403);
     expect(provider.consumeBodies).toHaveLength(1);
   }, 60_000);
+
+  test("overview returns every account from cache/error state when provider fetch ignores cancellation", async () => {
+    if (!available) return;
+    const access = await app().request("/v1/access/me", {
+      headers: { cookie: OWNER_COOKIE },
+    });
+    const context = (await access.json()) as AccessContext;
+    const key = Buffer.from(settings.environmentsEncryptionKey!, "base64");
+    for (let index = 0; index < 5; index += 1) {
+      await upsertCodexSubscriptionCredential(client.db, {
+        accountId: context.defaultAccountId!,
+        workspaceId: context.defaultWorkspaceId!,
+        credentialEncrypted: encryptEnvironmentValue(
+          key,
+          JSON.stringify({ access_token: "token", refresh_token: "refresh", id_token: "id" }),
+        ),
+        chatgptAccountId: `aggregate-timeout-${index}-${crypto.randomUUID()}`,
+        scopes: null,
+        planType: "pro",
+        isFedramp: false,
+        expiresAt: new Date(Date.now() + 60 * 60_000),
+        lastRefreshAt: new Date(),
+        connectedBySubjectId: `user:${OWNER_USER_ID}`,
+      });
+    }
+    const accounts = await listCodexAccountStatuses(client.db, context.defaultWorkspaceId!);
+    expect(accounts.length).toBeGreaterThan(4);
+    const neverSettles = (() => new Promise<Response>(() => undefined)) as typeof fetch;
+    const bounded = app({ codexFetch: neverSettles });
+    const startedAt = Date.now();
+    const response = await Promise.race([
+      bounded.request(`/v1/workspaces/${context.defaultWorkspaceId}/codex/overview`, {
+        headers: { cookie: OWNER_COOKIE },
+      }),
+      Bun.sleep(16_000).then(() => {
+        throw new Error("Codex overview exceeded its aggregate route deadline");
+      }),
+    ]);
+    expect(response.status).toBe(200);
+    expect(Date.now() - startedAt).toBeLessThan(15_000);
+    const body = (await response.json()) as any;
+    expect(Object.keys(body.accounts).sort()).toEqual(accounts.map((account) => account.id).sort());
+    for (const account of accounts) {
+      expect(body.accounts[account.id].usage.error).toBeString();
+      expect(body.accounts[account.id].resetCredits.error).toBeString();
+      expect(
+        body.accounts[account.id].resetCredits.credits.every(
+          (credit: { actionable: boolean }) => !credit.actionable,
+        ),
+      ).toBe(true);
+    }
+  }, 25_000);
 
   test("missing/wrong content type, origin, fetch metadata, cookie, CSRF and explicit confirmation make zero provider calls", async () => {
     if (!available) return;
@@ -630,7 +743,22 @@ describe("OPE-24 managed-cookie-only reset redemption API", () => {
 
   test("a lost completed HTTP response replays its durable outcome without another consume", async () => {
     if (!available) return;
-    const api = app();
+    let providerCompleted = false;
+    let postCompletionReadbacks = 0;
+    const completionFetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (
+        providerCompleted &&
+        (url.endsWith("/wham/usage") || url.endsWith("/wham/rate-limit-reset-credits"))
+      ) {
+        postCompletionReadbacks += 1;
+        return await new Promise<Response>(() => undefined);
+      }
+      const response = await provider.fetch(input, init);
+      if (url.endsWith("/wham/rate-limit-reset-credits/consume")) providerCompleted = true;
+      return response;
+    }) as typeof fetch;
+    const api = app({ codexFetch: completionFetch });
     const access = await api.request("/v1/access/me", {
       headers: { cookie: OWNER_COOKIE },
     });
@@ -642,7 +770,11 @@ describe("OPE-24 managed-cookie-only reset redemption API", () => {
       workspaceId,
       credentialEncrypted: encryptEnvironmentValue(
         key,
-        JSON.stringify({ access_token: "token", refresh_token: "refresh", id_token: "id" }),
+        JSON.stringify({
+          access_token: "token",
+          refresh_token: "refresh",
+          id_token: "id",
+        }),
       ),
       chatgptAccountId: `completed-replay-${crypto.randomUUID()}`,
       scopes: null,
@@ -670,9 +802,16 @@ describe("OPE-24 managed-cookie-only reset redemption API", () => {
       },
     );
     expect(first.status).toBe(200);
-    // Treat the successful response as lost by not relying on its body. A reload
-    // obtains a fresh session-bound confirmation for the same logical attempt.
-    // Even a later token-health transition cannot erase durable completion.
+    expect((await first.json()) as any).toMatchObject({
+      status: "completed",
+      outcome: "reset",
+      overview: null,
+    });
+    expect(postCompletionReadbacks).toBe(0);
+    // Treat the successful response as lost. A reload obtains a fresh
+    // session-bound confirmation for the same logical attempt. Even a later
+    // token-health transition cannot erase durable completion or require a
+    // provider overview readback.
     await admin`
       update codex_subscription_credentials
       set status = 'needs_relogin', last_error = 'injected after durable completion'
@@ -702,9 +841,98 @@ describe("OPE-24 managed-cookie-only reset redemption API", () => {
     expect((await replay.json()) as any).toMatchObject({
       status: "completed",
       outcome: "reset",
+      overview: null,
     });
     expect(provider.consumeBodies).toHaveLength(consumeBefore + 1);
+    expect(postCompletionReadbacks).toBe(0);
   }, 60_000);
+
+  test("DB-time confirmation expiry after preflight prevents the provider send", async () => {
+    if (!available) return;
+    const access = await app().request("/v1/access/me", {
+      headers: { cookie: OWNER_COOKIE },
+    });
+    const context = (await access.json()) as AccessContext;
+    const workspaceId = context.defaultWorkspaceId!;
+    const externalId = `expiry-fence-${crypto.randomUUID()}`;
+    const key = Buffer.from(settings.environmentsEncryptionKey!, "base64");
+    const account = await upsertCodexSubscriptionCredential(client.db, {
+      accountId: context.defaultAccountId!,
+      workspaceId,
+      credentialEncrypted: encryptEnvironmentValue(
+        key,
+        JSON.stringify({
+          access_token: "token",
+          refresh_token: "refresh",
+          id_token: "id",
+        }),
+      ),
+      chatgptAccountId: externalId,
+      scopes: null,
+      planType: "pro",
+      isFedramp: false,
+      expiresAt: new Date(Date.now() + 60 * 60_000),
+      lastRefreshAt: new Date(),
+      connectedBySubjectId: `user:${OWNER_USER_ID}`,
+    });
+    let signalPreflightStarted!: () => void;
+    let releasePreflight!: () => void;
+    const preflightStarted = new Promise<void>((resolve) => {
+      signalPreflightStarted = resolve;
+    });
+    const preflightGate = new Promise<void>((resolve) => {
+      releasePreflight = resolve;
+    });
+    const gatedFetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      const providerAccount = new Headers(init?.headers).get("chatgpt-account-id");
+      if (providerAccount === externalId && url.endsWith("/wham/rate-limit-reset-credits")) {
+        signalPreflightStarted();
+        await preflightGate;
+      }
+      return await provider.fetch(input, init);
+    }) as typeof fetch;
+    const api = app({ codexFetch: gatedFetch });
+    const prepared = await prepare(api, workspaceId, account.id, "credit-reset");
+    expect(prepared.response.status).toBe(200);
+    const consumesBefore = provider.consumeBodies.length;
+    const redeeming = api.request(
+      `/v1/workspaces/${workspaceId}/codex/accounts/${account.id}/reset-credits/redeem`,
+      {
+        method: "POST",
+        headers: browserHeaders(),
+        body: JSON.stringify({
+          attemptId: prepared.attemptId,
+          creditId: "credit-reset",
+          confirmationToken: prepared.body.confirmationToken,
+          confirmation: "REDEEM_USAGE_LIMIT_RESET",
+        }),
+      },
+    );
+    await Promise.race([
+      preflightStarted,
+      Bun.sleep(5_000).then(() => {
+        throw new Error("redemption preflight did not reach the test barrier");
+      }),
+    ]);
+    await admin`
+      update codex_reset_redemption_attempts
+      set confirmation_expires_at = now() - interval '1 second'
+      where workspace_id = ${workspaceId} and id = ${prepared.attemptId}`;
+    releasePreflight();
+    const response = await redeeming;
+    expect(response.status).toBe(403);
+    expect((await response.json()) as any).toMatchObject({
+      status: "confirmation_expired",
+      retryable: true,
+    });
+    expect(provider.consumeBodies).toHaveLength(consumesBefore);
+    const [remaining] = await admin<{ count: number }[]>`
+      select count(*)::int as count
+      from codex_reset_redemption_attempts
+      where workspace_id = ${workspaceId} and id = ${prepared.attemptId}`;
+    expect(remaining?.count).toBe(0);
+  }, 30_000);
 
   test("timeout ambiguity survives reload/prepare and retries the same upstream key", async () => {
     if (!available) return;
@@ -715,7 +943,26 @@ describe("OPE-24 managed-cookie-only reset redemption API", () => {
     });
     const context = (await access.json()) as AccessContext;
     const workspaceId = context.defaultWorkspaceId!;
-    const account = (await listCodexAccountStatuses(client.db, workspaceId))[0]!;
+    const key = Buffer.from(settings.environmentsEncryptionKey!, "base64");
+    const account = await upsertCodexSubscriptionCredential(client.db, {
+      accountId: context.defaultAccountId!,
+      workspaceId,
+      credentialEncrypted: encryptEnvironmentValue(
+        key,
+        JSON.stringify({
+          access_token: "token",
+          refresh_token: "refresh",
+          id_token: "id",
+        }),
+      ),
+      chatgptAccountId: `session-rotation-${crypto.randomUUID()}`,
+      scopes: null,
+      planType: "pro",
+      isFedramp: false,
+      expiresAt: new Date(Date.now() + 60 * 60_000),
+      lastRefreshAt: new Date(),
+      connectedBySubjectId: `user:${OWNER_USER_ID}`,
+    });
     const attemptId = crypto.randomUUID();
     const firstPreparation = await prepare(
       api,
@@ -724,12 +971,12 @@ describe("OPE-24 managed-cookie-only reset redemption API", () => {
       "credit-ambiguous",
       attemptId,
     );
-    const redeem = (confirmationToken: string) =>
+    const redeem = (confirmationToken: string, headers = browserHeaders()) =>
       api.request(
         `/v1/workspaces/${workspaceId}/codex/accounts/${account.id}/reset-credits/redeem`,
         {
           method: "POST",
-          headers: browserHeaders(),
+          headers,
           body: JSON.stringify({
             attemptId,
             creditId: "credit-ambiguous",
@@ -745,8 +992,36 @@ describe("OPE-24 managed-cookie-only reset redemption API", () => {
       retryable: true,
     });
 
-    // A browser reload asks for a fresh five-minute confirmation but preserves
-    // the same logical attempt. The durable provider_started state skips a new
+    const disconnectOne = await api.request(
+      `/v1/workspaces/${workspaceId}/codex/accounts/${account.id}`,
+      { method: "DELETE", headers: { cookie: OWNER_COOKIE } },
+    );
+    expect(disconnectOne.status).toBe(409);
+    const disconnectAll = await api.request(`/v1/workspaces/${workspaceId}/codex`, {
+      method: "DELETE",
+      headers: { cookie: OWNER_COOKIE },
+    });
+    expect(disconnectAll.status).toBe(409);
+
+    // A second authenticated browser session for the same owning human has no
+    // local/sessionStorage hint. The owner-scoped overview is the discovery
+    // authority and returns the exact durable attempt id without provider keys.
+    const rotatedOverview = await api.request(`/v1/workspaces/${workspaceId}/codex/overview`, {
+      headers: { cookie: ROTATED_OWNER_COOKIE },
+    });
+    expect(rotatedOverview.status).toBe(200);
+    const rotatedBody = (await rotatedOverview.json()) as any;
+    expect(rotatedBody.accounts[account.id].redemptions).toContainEqual(
+      expect.objectContaining({
+        attemptId,
+        creditId: "credit-ambiguous",
+        status: "provider_started",
+        outcome: null,
+      }),
+    );
+
+    // The rotated session asks for a fresh five-minute confirmation and adopts
+    // the same logical attempt. Durable provider_started state skips a new
     // availability preflight and reuses the one server key.
     const resumedPreparation = await prepare(
       api,
@@ -754,13 +1029,19 @@ describe("OPE-24 managed-cookie-only reset redemption API", () => {
       account.id,
       "credit-ambiguous",
       attemptId,
+      browserHeaders(ROTATED_OWNER_COOKIE),
     );
     expect(resumedPreparation.body.resumable).toBe(true);
-    const second = await redeem(resumedPreparation.body.confirmationToken);
+    expect(resumedPreparation.body.recoveryStatus).toBe("provider_started");
+    const second = await redeem(
+      resumedPreparation.body.confirmationToken,
+      browserHeaders(ROTATED_OWNER_COOKIE),
+    );
     expect(second.status).toBe(200);
     expect((await second.json()) as any).toMatchObject({
       status: "completed",
       outcome: "alreadyRedeemed",
+      overview: null,
     });
     const bodies = provider.consumeBodies.filter((body) => body.credit_id === "credit-ambiguous");
     expect(bodies).toHaveLength(2);

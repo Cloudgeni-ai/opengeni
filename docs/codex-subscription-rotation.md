@@ -101,12 +101,15 @@ OPE-24 adds three deliberately separate product seams:
 
 - **Overview reads** fetch `/wham/usage` and the detailed reset-credit inventory
   independently for each workspace credential, with at most four provider calls in
-  flight. Every result names its provider/cache source, timestamp, staleness and
+  flight and a bounded whole-route deadline. Every result names its provider/cache
+  source, timestamp, staleness, error and
   typed detail authority (`detailed`, `count_only`, `capped`, `unsupported`,
   `unknown`, or `error`). `available_count` is cached as summary metadata;
   detailed opaque ids are never cached as activation authority. Missing/capped
   detail, unknown enums, expired/non-available rows, and summary disagreement are
-  view-only.
+  view-only. Valid quota windows advance `usage_checked_at` independently from
+  valid reset-summary data advancing `reset_credits_checked_at`; a malformed or
+  timed-out reset inventory cannot erase fresh five-hour/weekly provider truth.
 - **Allocator control** writes only `allocator_enabled` plus its independent
   `allocator_version`/actor/timestamp. Same desired state is idempotent even with
   a stale expected version; a conflicting stale transition returns the current
@@ -120,17 +123,32 @@ OPE-24 adds three deliberately separate product seams:
   `Authorization` header, workspace admin, the exact `user:<id>` who most
   recently connected the credential through a direct cookie session, exact
   same-origin `Origin`, `Sec-Fetch-Site: same-origin`, and a five-minute
-  session-bound HMAC confirmation. Legacy/nonhuman-connected rows are view-only.
+  session-bound HMAC confirmation. The deployment must configure
+  `publicBaseUrl`; the route never derives a trusted origin from request
+  `Host`/URL headers. Legacy/nonhuman-connected rows are view-only.
 
 The durable redemption attempt separates `processing` (fresh exact actionable
 detail still owed) from `provider_started` (the consume POST may have begun).
 The browser supplies one stable logical UUID; the server creates one upstream
-idempotency key. A crash before `provider_started` re-fetches detail. Any
+idempotency key. Immediately before every consume POST, including a recovery
+retry, a DB-time fence locks and revalidates the credential owner/health, exact
+browser claim, live claim lease, and unexpired confirmation, then atomically
+records `provider_started`. A crash before `provider_started` re-fetches detail. Any
 timeout/network/invalid response after `provider_started` preserves that state
 and retries with the same upstream key even if inventory has since changed;
 `alreadyRedeemed` resolves the ambiguity as success. Concurrent claims return
-in-progress. Exact `reset`, `nothingToReset`, `noCredit`, or `alreadyRedeemed`
-outcomes are persisted and audited once, followed by an overview refetch.
+in-progress. Unresolved `provider_started` work blocks credential disconnect and
+ownership-changing reconnect so its only durable provider key cannot be
+orphaned; a same-owner browser-session rotation can discover the attempt in the
+owner-scoped overview and explicitly adopt it. Browser `sessionStorage` retains
+only optional title/expiry convenience and is never recovery authority.
+
+Exact `reset`, `nothingToReset`, `noCredit`, or `alreadyRedeemed` outcomes are
+persisted and audited once. The redeem response returns that durable outcome
+with `overview: null` and never waits for provider usage/detail readback; the
+browser refreshes the independently bounded overview afterward. A completed
+outcome remains server-discoverable after tab/session loss or later credential
+health changes and never triggers a second consume.
 Only `reset`/`alreadyRedeemed` clear provider-exhaustion cooldown, and no outcome
 changes allocator eligibility. The one-credit fence remains permanent only for
 those successful outcomes; `nothingToReset`/`noCredit` permit a later, newly
@@ -299,7 +317,13 @@ correlate those alerts with `codex.credential.selected`,
   `packages/codex/test/fetch.test.ts`.
 - Real Postgres concurrency/RLS/failure injection:
   `packages/db/test/codex-credential-leases.test.ts` and
-  `packages/db/test/codex-capacity-waiters.test.ts`.
+  `packages/db/test/codex-capacity-waiters.test.ts`. OPE-24 redemption-specific
+  FORCE-RLS/OCC/idempotency coverage lives in
+  `packages/db/test/codex-subscription-overview.test.ts` and
+  `apps/api/test/codex-redemption-routes.test.ts`.
+- Authenticated desktop/mobile/a11y/browser-session recovery evidence:
+  `test/e2e/codex-overview.e2e.ts`; the mutation-surface denylist is
+  `test/ope24-redemption-surface.test.ts`.
 - Real Temporal signal/timer/restart/continue-as-new coverage:
   `test/integration/temporal-workflow.integration.ts`.
 - Production release proof must additionally show concurrent live turns selecting

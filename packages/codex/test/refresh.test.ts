@@ -67,6 +67,14 @@ describe("refreshCodexToken", () => {
       CodexRefreshTransient,
     );
   });
+
+  test("bounds a custom fetch that ignores AbortSignal", async () => {
+    const startedAt = Date.now();
+    await expect(
+      refreshCodexToken("rf", async () => await new Promise<Response>(() => undefined), 20),
+    ).rejects.toBeInstanceOf(CodexRefreshTransient);
+    expect(Date.now() - startedAt).toBeLessThan(500);
+  });
 });
 
 describe("parseIdToken", () => {

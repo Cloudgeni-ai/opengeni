@@ -313,6 +313,8 @@ function freshActionableCredit(
 
 type CodexProviderCall = <T>(operation: () => Promise<T>) => Promise<T>;
 
+const CODEX_OVERVIEW_ROUTE_TIMEOUT_MS = 12_000;
+
 function createProviderCallLimiter(limit: number): CodexProviderCall {
   if (!Number.isInteger(limit) || limit <= 0) {
     throw new Error("Codex provider concurrency limit must be a positive integer");
@@ -436,7 +438,12 @@ async function fetchCodexAccountOverview(
           ? (liveUsage?.fetchedAt ?? new Date().toISOString())
           : (row.resetCreditsCheckedAt?.toISOString() ?? null),
       stale: resetSource === "provider" ? false : staleAt(row.resetCreditsCheckedAt),
-      error: detailsResult && !detailsResult.ok ? detailsResult.reason : null,
+      error:
+        detailsResult && !detailsResult.ok
+          ? detailsResult.reason
+          : detailsSettled.status === "rejected"
+            ? "unavailable"
+            : null,
       detailState,
       detailsComplete,
       availableCount: availableCount ?? null,
@@ -1013,8 +1020,10 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
     // the actual provider calls, not merely account workers, so aggregate
     // concurrency never exceeds four.
     const providerCall = createProviderCallLimiter(4);
+    let routeTimedOut = false;
     const worker = async (): Promise<void> => {
       for (;;) {
+        if (routeTimedOut) return;
         const account = queue.shift();
         if (!account) return;
         const canResumeRedemption = Boolean(
@@ -1037,13 +1046,61 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
         );
       }
     };
-    await Promise.all(
+    const workers = Promise.all(
       Array.from({ length: Math.min(4, Math.max(1, accounts.length)) }, () => worker()),
     );
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      workers,
+      new Promise<void>((resolve) => {
+        deadline = setTimeout(() => {
+          routeTimedOut = true;
+          queue.length = 0;
+          resolve();
+        }, CODEX_OVERVIEW_ROUTE_TIMEOUT_MS);
+      }),
+    ]);
+    if (deadline) clearTimeout(deadline);
+    if (routeTimedOut) {
+      // Fill every unscheduled account from persisted cache without performing
+      // more provider work. In-flight account operations remain rejection-
+      // handled and are themselves bounded; they cannot delay this response or
+      // leave limiter waiters permanently queued.
+      const unavailableProviderCall: CodexProviderCall = async () => {
+        throw new Error("Codex overview route deadline reached");
+      };
+      await Promise.all(
+        accounts
+          .filter((account) => overview[account.id] == null)
+          .map(async (account) => {
+            const canResumeRedemption = Boolean(
+              human &&
+              human.subjectId === grant.subjectId &&
+              human.subjectId === account.connectedBySubjectId &&
+              hasPermission(grant.permissions, "workspace:admin"),
+            );
+            const fallback = await fetchCodexAccountOverview(
+              deps,
+              workspaceId,
+              account,
+              false,
+              canResumeRedemption,
+              canResumeRedemption
+                ? ownerRecoveries.filter((recovery) => recovery.credentialId === account.id)
+                : [],
+              unavailableProviderCall,
+            );
+            // A bounded in-flight worker may have completed while fallback was
+            // assembled; prefer that fresh truth when present.
+            overview[account.id] ??= fallback;
+          }),
+      );
+      void workers.catch(() => undefined);
+    }
     // Overview writes the same authoritative usage snapshots as the explicit
     // refresh routes. Deliver any committed capacity outbox entries instead of
     // leaving quota-recovered waiters dormant until a later unrelated refresh.
-    await signalPendingCodexCapacityTargets(deps, workspaceId);
+    void signalPendingCodexCapacityTargets(deps, workspaceId).catch(() => undefined);
     return c.json({ accounts: overview });
   });
 
@@ -1365,7 +1422,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       }
       // The outbox is durable; signaling is best-effort and must not hold the
       // owning human's already-completed provider outcome hostage.
-      void signalCodexCapacityTargets(deps, completion.wakeTargets);
+      void signalCodexCapacityTargets(deps, completion.wakeTargets).catch(() => undefined);
       return finishResponse(completed.outcome!);
     },
   );

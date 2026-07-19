@@ -6,14 +6,20 @@ import {
 } from "@opengeni/testing";
 import postgres from "postgres";
 import {
+  abandonCodexResetRedemptionBeforeProvider,
+  adoptCodexResetRedemptionAttempt,
   claimCodexResetRedemption,
   completeCodexResetRedemption,
   createDb,
+  disconnectAllCodexAccounts,
+  disconnectCodexAccount,
   encryptEnvironmentValue,
   ensureCodexRotationSettings,
+  fetchCodexUsageForAccount,
   fenceCodexResetRedemptionSend,
   getCodexResetRedemptionAttempt,
   listCodexAccountStatuses,
+  listCodexResetRedemptionRecoveries,
   loadCodexCredentialForRun,
   recordCodexAccountUsage,
   recordCodexTokenRefresh,
@@ -643,5 +649,380 @@ describe("OPE-24 Codex overview and irreversible reset state", () => {
       claimHolderId: crypto.randomUUID(),
     });
     expect(wrongSession.kind).toBe("conflict");
+  });
+
+  test("final send fence rechecks DB-time expiry, identity, health, and extends both fresh and resumed sends", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace("final-send-fence");
+    const credentialId = await connectCredential(ws, "final-send-provider");
+    const claim = async (suffix: string, claimTtlMs = 60_000) => {
+      const result = await claimCodexResetRedemption(dbA, {
+        id: crypto.randomUUID(),
+        ...ws,
+        credentialId,
+        subjectId: "user:owner",
+        browserSessionHash: "session-final-send",
+        creditId: `credit-${suffix}`,
+        confirmationExpiresAt: new Date(Date.now() + 5 * 60_000),
+        claimHolderId: crypto.randomUUID(),
+        claimTtlMs,
+      });
+      if (result.kind !== "claimed") throw new Error(`expected ${suffix} claim`);
+      return result.attempt;
+    };
+    const fence = async (attempt: Awaited<ReturnType<typeof claim>>) =>
+      await fenceCodexResetRedemptionSend(dbA, {
+        ...ws,
+        attemptId: attempt.id,
+        claimHolderId: attempt.claimHolderId!,
+        credentialId,
+        subjectId: "user:owner",
+        browserSessionHash: "session-final-send",
+        sendLeaseMs: 11_000,
+      });
+
+    const expiredConfirmation = await claim("confirmation-expiry");
+    await admin`
+      update codex_reset_redemption_attempts
+      set confirmation_expires_at = now() - interval '1 second'
+      where id = ${expiredConfirmation.id}`;
+    expect(await fence(expiredConfirmation)).toEqual({
+      kind: "not_ready",
+      reason: "confirmation_expired",
+    });
+    expect(
+      await getCodexResetRedemptionAttempt(dbA, ws.workspaceId, expiredConfirmation.id),
+    ).toBeNull();
+
+    const expiredClaim = await claim("claim-expiry");
+    await admin`
+      update codex_reset_redemption_attempts
+      set claim_expires_at = now() - interval '1 second'
+      where id = ${expiredClaim.id}`;
+    expect(await fence(expiredClaim)).toEqual({ kind: "not_ready", reason: "claim_expired" });
+    expect(await getCodexResetRedemptionAttempt(dbA, ws.workspaceId, expiredClaim.id)).toBeNull();
+
+    const wrongIdentity = await claim("wrong-identity");
+    expect(
+      await fenceCodexResetRedemptionSend(dbA, {
+        ...ws,
+        attemptId: wrongIdentity.id,
+        claimHolderId: wrongIdentity.claimHolderId!,
+        credentialId,
+        subjectId: "user:owner",
+        browserSessionHash: "session-other",
+      }),
+    ).toEqual({ kind: "not_ready", reason: "identity_mismatch" });
+    expect(
+      await abandonCodexResetRedemptionBeforeProvider(dbA, {
+        ...ws,
+        attemptId: wrongIdentity.id,
+        claimHolderId: wrongIdentity.claimHolderId!,
+      }),
+    ).toBe(true);
+
+    const unhealthy = await claim("unhealthy");
+    await admin`
+      update codex_subscription_credentials set status = 'needs_relogin'
+      where id = ${credentialId}`;
+    expect(await fence(unhealthy)).toEqual({
+      kind: "not_ready",
+      reason: "credential_unavailable",
+    });
+    expect(await getCodexResetRedemptionAttempt(dbA, ws.workspaceId, unhealthy.id)).toBeNull();
+    await admin`
+      update codex_subscription_credentials set status = 'active', last_error = null
+      where id = ${credentialId}`;
+
+    const fresh = await claim("fresh");
+    const ready = await fence(fresh);
+    expect(ready.kind).toBe("ready");
+    if (ready.kind !== "ready") throw new Error("expected fresh final-send fence");
+    expect(ready.attempt.status).toBe("provider_started");
+    expect(ready.attempt.claimExpiresAt!.getTime()).toBeGreaterThan(Date.now() + 9_000);
+    const originalProviderKey = ready.attempt.upstreamIdempotencyKey;
+    await releaseCodexResetRedemptionClaim(dbA, {
+      ...ws,
+      attemptId: ready.attempt.id,
+      claimHolderId: ready.attempt.claimHolderId!,
+      failureKind: "provider_timeout",
+    });
+    const resumed = await claimCodexResetRedemption(dbB, {
+      id: ready.attempt.id,
+      ...ws,
+      credentialId,
+      subjectId: "user:owner",
+      browserSessionHash: "session-final-send",
+      creditId: ready.attempt.creditId,
+      confirmationExpiresAt: new Date(Date.now() + 5 * 60_000),
+      claimHolderId: crypto.randomUUID(),
+    });
+    expect(resumed.kind).toBe("claimed");
+    if (resumed.kind !== "claimed") throw new Error("expected resumed final-send claim");
+    const resumedFence = await fence(resumed.attempt);
+    expect(resumedFence.kind).toBe("ready");
+    if (resumedFence.kind !== "ready") throw new Error("expected resumed final-send fence");
+    expect(resumedFence.attempt.status).toBe("provider_started");
+    expect(resumedFence.attempt.upstreamIdempotencyKey).toBe(originalProviderKey);
+  });
+
+  test("malformed quota preserves the last valid windows while a valid reset summary advances independently", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace("independent-freshness");
+    const credentialId = await connectCredential(ws, "independent-freshness-provider");
+    const usageCheckedAt = new Date(Date.now() - 60_000);
+    const primaryResetAt = new Date(Date.now() + 60 * 60_000);
+    const secondaryResetAt = new Date(Date.now() + 7 * 24 * 60 * 60_000);
+    expect(
+      await recordCodexAccountUsage(dbA, ws.workspaceId, credentialId, {
+        primaryUsedPercent: 41,
+        primaryResetAt,
+        secondaryUsedPercent: 17,
+        secondaryResetAt,
+        checkedAt: usageCheckedAt,
+        resetCreditAvailableCount: 2,
+        resetCreditsCheckedAt: usageCheckedAt,
+      }),
+    ).toBe(true);
+
+    const result = await fetchCodexUsageForAccount(
+      dbA,
+      settings,
+      ws.workspaceId,
+      credentialId,
+      async () =>
+        new Response(
+          JSON.stringify({
+            // This invalid shape makes quota parsing fail closed, while the
+            // reset summary remains independently valid provider truth.
+            rate_limit: "malformed",
+            rate_limit_reset_credits: { available_count: 7 },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+    );
+    expect(result.status).toBe("error");
+    expect(result.rateLimitResetCredits).toEqual({ availableCount: 7, credits: null });
+    const [after] = await listCodexAccountStatuses(dbA, ws.workspaceId);
+    expect(after?.primaryUsedPercent).toBe(41);
+    expect(after?.primaryResetAt?.getTime()).toBe(primaryResetAt.getTime());
+    expect(after?.secondaryUsedPercent).toBe(17);
+    expect(after?.secondaryResetAt?.getTime()).toBe(secondaryResetAt.getTime());
+    expect(after?.usageCheckedAt?.getTime()).toBe(usageCheckedAt.getTime());
+    expect(after?.resetCreditAvailableCount).toBe(7);
+    expect(after?.resetCreditsCheckedAt?.getTime()).toBeGreaterThan(usageCheckedAt.getTime());
+  });
+
+  test("owner-scoped server discovery adopts released ambiguity across browser sessions without changing its provider key", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace("server-recovery");
+    const otherWs = await freshWorkspace("server-recovery-other");
+    const credentialId = await connectCredential(ws, "server-recovery-provider");
+    const attemptId = crypto.randomUUID();
+    const claimed = await claimCodexResetRedemption(dbA, {
+      id: attemptId,
+      ...ws,
+      credentialId,
+      subjectId: "user:owner",
+      browserSessionHash: "browser-session-old",
+      creditId: "server-recovery-credit",
+      confirmationExpiresAt: new Date(Date.now() + 5 * 60_000),
+      claimHolderId: crypto.randomUUID(),
+    });
+    expect(claimed.kind).toBe("claimed");
+    if (claimed.kind !== "claimed") throw new Error("expected server recovery claim");
+    const ready = await fenceCodexResetRedemptionSend(dbA, {
+      ...ws,
+      attemptId,
+      claimHolderId: claimed.attempt.claimHolderId!,
+      credentialId,
+      subjectId: "user:owner",
+      browserSessionHash: "browser-session-old",
+    });
+    expect(ready.kind).toBe("ready");
+    if (ready.kind !== "ready") throw new Error("expected server recovery send fence");
+    const providerKey = ready.attempt.upstreamIdempotencyKey;
+    await releaseCodexResetRedemptionClaim(dbA, {
+      ...ws,
+      attemptId,
+      claimHolderId: ready.attempt.claimHolderId!,
+      failureKind: "lost_http_response",
+    });
+
+    expect(
+      await listCodexResetRedemptionRecoveries(dbA, { ...ws, subjectId: "user:owner" }),
+    ).toMatchObject([
+      {
+        attemptId,
+        credentialId,
+        creditId: "server-recovery-credit",
+        status: "provider_started",
+        outcome: null,
+      },
+    ]);
+    expect(
+      await listCodexResetRedemptionRecoveries(dbA, { ...ws, subjectId: "user:other" }),
+    ).toEqual([]);
+    expect(
+      await listCodexResetRedemptionRecoveries(dbA, {
+        ...otherWs,
+        subjectId: "user:owner",
+      }),
+    ).toEqual([]);
+
+    const adopted = await adoptCodexResetRedemptionAttempt(dbB, {
+      ...ws,
+      attemptId,
+      credentialId,
+      creditId: "server-recovery-credit",
+      subjectId: "user:owner",
+      browserSessionHash: "browser-session-new",
+    });
+    expect(adopted.kind).toBe("adopted");
+    if (adopted.kind !== "adopted") throw new Error("expected server recovery adoption");
+    expect(adopted.attempt.browserSessionHash).toBe("browser-session-new");
+    expect(adopted.attempt.upstreamIdempotencyKey).toBe(providerKey);
+    const resumed = await claimCodexResetRedemption(dbB, {
+      id: attemptId,
+      ...ws,
+      credentialId,
+      subjectId: "user:owner",
+      browserSessionHash: "browser-session-new",
+      creditId: "server-recovery-credit",
+      confirmationExpiresAt: new Date(Date.now() + 5 * 60_000),
+      claimHolderId: crypto.randomUUID(),
+    });
+    expect(resumed.kind).toBe("claimed");
+    if (resumed.kind !== "claimed") throw new Error("expected adopted recovery claim");
+    expect(resumed.attempt.upstreamIdempotencyKey).toBe(providerKey);
+    const oldBrowser = await claimCodexResetRedemption(dbA, {
+      id: attemptId,
+      ...ws,
+      credentialId,
+      subjectId: "user:owner",
+      browserSessionHash: "browser-session-old",
+      creditId: "server-recovery-credit",
+      confirmationExpiresAt: new Date(Date.now() + 5 * 60_000),
+      claimHolderId: crypto.randomUUID(),
+    });
+    expect(oldBrowser.kind).toBe("conflict");
+  });
+
+  test("disconnect and ownership transfer serialize with final send and durable ambiguity survives credential deletion", async () => {
+    if (!available) return;
+    const raceWs = await freshWorkspace("disconnect-send-race");
+    const raceCredentialId = await connectCredential(raceWs, "disconnect-send-race-provider");
+    const raceClaim = await claimCodexResetRedemption(dbA, {
+      id: crypto.randomUUID(),
+      ...raceWs,
+      credentialId: raceCredentialId,
+      subjectId: "user:owner",
+      browserSessionHash: "browser-race",
+      creditId: "credit-race",
+      confirmationExpiresAt: new Date(Date.now() + 5 * 60_000),
+      claimHolderId: crypto.randomUUID(),
+    });
+    expect(raceClaim.kind).toBe("claimed");
+    if (raceClaim.kind !== "claimed") throw new Error("expected disconnect race claim");
+    const [raceFence, raceDisconnect] = await Promise.all([
+      fenceCodexResetRedemptionSend(dbA, {
+        ...raceWs,
+        attemptId: raceClaim.attempt.id,
+        claimHolderId: raceClaim.attempt.claimHolderId!,
+        credentialId: raceCredentialId,
+        subjectId: "user:owner",
+        browserSessionHash: "browser-race",
+      }),
+      disconnectCodexAccount(dbB, raceWs.workspaceId, raceCredentialId),
+    ]);
+    if (raceFence.kind === "ready") {
+      expect(raceDisconnect).toMatchObject({
+        removed: false,
+        blockedByUnresolvedRedemption: true,
+      });
+    } else {
+      expect(raceDisconnect.removed).toBe(true);
+      expect(["not_found", "credential_unavailable"]).toContain(raceFence.reason);
+    }
+    expect(raceFence.kind === "ready" && raceDisconnect.removed).toBe(false);
+
+    const ws = await freshWorkspace("disconnect-blocked");
+    const credentialId = await connectCredential(ws, "disconnect-blocked-provider");
+    const secondCredentialId = await connectCredential(ws, "disconnect-unblocked-provider");
+    const claim = await claimCodexResetRedemption(dbA, {
+      id: crypto.randomUUID(),
+      ...ws,
+      credentialId,
+      subjectId: "user:owner",
+      browserSessionHash: "browser-blocked",
+      creditId: "credit-blocked",
+      confirmationExpiresAt: new Date(Date.now() + 5 * 60_000),
+      claimHolderId: crypto.randomUUID(),
+    });
+    expect(claim.kind).toBe("claimed");
+    if (claim.kind !== "claimed") throw new Error("expected blocked disconnect claim");
+    const fenced = await fenceCodexResetRedemptionSend(dbA, {
+      ...ws,
+      attemptId: claim.attempt.id,
+      claimHolderId: claim.attempt.claimHolderId!,
+      credentialId,
+      subjectId: "user:owner",
+      browserSessionHash: "browser-blocked",
+    });
+    expect(fenced.kind).toBe("ready");
+    if (fenced.kind !== "ready") throw new Error("expected blocked disconnect fence");
+    await releaseCodexResetRedemptionClaim(dbA, {
+      ...ws,
+      attemptId: claim.attempt.id,
+      claimHolderId: fenced.attempt.claimHolderId!,
+      failureKind: "provider_timeout",
+    });
+
+    expect(await disconnectCodexAccount(dbB, ws.workspaceId, credentialId)).toMatchObject({
+      removed: false,
+      blockedByUnresolvedRedemption: true,
+    });
+    expect(await disconnectAllCodexAccounts(dbB, ws.workspaceId)).toEqual({
+      removed: 0,
+      blockedCredentialIds: [credentialId],
+    });
+    expect(
+      (await listCodexAccountStatuses(dbA, ws.workspaceId)).map((row) => row.id).sort(),
+    ).toEqual([credentialId, secondCredentialId].sort());
+
+    const key = Buffer.from(settings.environmentsEncryptionKey!, "base64");
+    const reconnect = async (subjectId: string) =>
+      await upsertCodexSubscriptionCredential(dbB, {
+        ...ws,
+        credentialEncrypted: encryptEnvironmentValue(
+          key,
+          JSON.stringify({ access_token: "next", refresh_token: "next", id_token: "next" }),
+        ),
+        chatgptAccountId: "disconnect-blocked-provider",
+        scopes: null,
+        planType: "pro",
+        isFedramp: false,
+        expiresAt: new Date(Date.now() + 60 * 60_000),
+        lastRefreshAt: new Date(),
+        connectedBySubjectId: subjectId,
+      });
+    expect(await reconnect("user:owner")).toMatchObject({
+      kind: "upserted",
+      id: credentialId,
+      isNew: false,
+    });
+    expect(await reconnect("user:other")).toEqual({
+      kind: "unresolved_redemption",
+      id: credentialId,
+      isNew: false,
+    });
+
+    const [deleted] = await admin<{ id: string }[]>`
+      delete from codex_subscription_credentials where id = ${credentialId} returning id`;
+    expect(deleted?.id).toBe(credentialId);
+    const [durableAttempt] = await admin<{ count: number }[]>`
+      select count(*)::int as count from codex_reset_redemption_attempts
+      where id = ${claim.attempt.id}`;
+    expect(durableAttempt?.count).toBe(1);
   });
 });
