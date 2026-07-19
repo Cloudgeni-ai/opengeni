@@ -19942,18 +19942,18 @@ export async function markSessionAttemptQuiesced(
     const session = locks.sessions[0];
     const turn = locks.turns[0];
     const attempt = locks.attempts[0];
+    // Revalidate immutable ownership only. Control settlement may already have
+    // advanced the session/turn workflow identity or turn generation while the
+    // exact predecessor attempt is still acknowledging physical quiescence.
     if (
       !session ||
       !turn ||
       !attempt ||
-      session.temporalWorkflowId !== input.temporalWorkflowId ||
       turn.accountId !== session.accountId ||
       turn.sessionId !== session.id ||
-      turn.temporalWorkflowId !== input.temporalWorkflowId ||
       attempt.accountId !== session.accountId ||
       attempt.sessionId !== session.id ||
       attempt.turnId !== turn.id ||
-      attempt.executionGeneration !== turn.executionGeneration ||
       attempt.temporalWorkflowId !== input.temporalWorkflowId
     ) {
       throw new SessionControlInvariantError(
