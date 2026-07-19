@@ -58,6 +58,12 @@ jobs:
           OPENGENI_REQUIRE_REAL_DB: "1"
         run: bun test --max-concurrency=1 --timeout 180000 ./test/e2e/session-pins.browser.e2e.ts
 
+      - name: OPE-20 durable waits browser acceptance
+        env:
+          # Durable UI acceptance must traverse real FORCE-RLS PostgreSQL state.
+          OPENGENI_REQUIRE_REAL_DB: "1"
+        run: bun test --max-concurrency=1 --timeout 180000 ./test/e2e/durable-waits.browser.e2e.ts
+
       - name: Workbench browser acceptance
         run: bun test --max-concurrency=1 --timeout 180000 ./test/e2e/workbench.browser.e2e.ts
 
@@ -73,6 +79,19 @@ jobs:
             /tmp/ope26-session-pin-desktop-dark.png
             /tmp/ope26-session-pin-mobile-light.png
             /tmp/ope26-session-pin-mobile-dark.png
+
+      - name: Upload OPE-20 durable waits visual evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: ope20-durable-waits-visual-evidence
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            /tmp/ope20-durable-desktop-light.png
+            /tmp/ope20-durable-desktop-dark.png
+            /tmp/ope20-durable-mobile-light.png
+            /tmp/ope20-durable-mobile-dark.png
 
       - name: Upload workbench visual evidence
         if: ${{ always() }}
