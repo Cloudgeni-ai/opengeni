@@ -172,6 +172,27 @@ dev/source builds). There is deliberately **no runtime version negotiation** —
 the policy above plus tolerant readers is the mechanism; a client that wants to
 assert compatibility reads `serverVersion` and compares majors.
 
+### 3.11 Recovery history is precomputed outside source-row locks and admitted through an exact revision fence
+
+- Recursive session/history enumeration, canonicalization, serialization,
+  hashing, indexing, and partition preparation occur before the final lock.
+  Precompute is a paged, read-only repeatable-read transaction and persistence
+  writes immutable content-addressed truth.
+- Recovery-relevant writers take a compatible workspace barrier and advance
+  exact per-session revisions. Final admission alone takes the barrier
+  exclusively, revalidates the workspace-control revision and complete session
+  revision set, and appends at most one idempotent admission. Concurrent truth
+  either invalidates the artifact before admission or linearizes after it.
+- Persistence retries never wrap inference, tools, sandboxes, providers,
+  publication, workflow signals, or other external effects. A typed stale
+  result restarts precompute; it never admits or replays work.
+- Recovery fence state, artifacts, and admissions are FORCE-RLS scoped. The
+  database-owned admission function is the sole runtime admission insert path.
+
+> Canonical: `packages/db/src/recovery-artifacts.ts`,
+> `packages/db/drizzle/0076_recovery_artifact_fence.sql`,
+> [`recovery-artifacts.md`](recovery-artifacts.md).
+
 ---
 
 ## 4. System architecture
@@ -389,7 +410,7 @@ Both are single large single-file packages. `contracts` (~3148 lines) owns the e
 
 ### 7.6 `db` — Postgres data layer
 
-Forward-only migrations under `drizzle/0000..` applied by a bespoke runner (`migrate.ts`, advisory-locked, tracked in its own `schema_migrations` table — **the `drizzle/meta/_journal.json` is stale and not authoritative**). Migrations are schema-agnostic: standalone runs in the server default schema, while embedded runs may set a target schema/search path through `migrate(databaseUrl, schema)` / `runMigrations(adminConnection, targetSchema)`. The SQL must use `current_schema()` in policy guards and avoid hard-pinning `public` except for extension/type lookup through the trailing `public` search-path entry. The schema declares **63** `pgTable`s. Session pins are per-subject workspace state joined to sessions by composite `(account_id, workspace_id, session_id)` keys and are FORCE-RLS scoped with the same subject/workspace GUC context. Expired session-list snapshots are deleted only by the bounded global `SKIP LOCKED` reaper; member list transactions never perform cross-subject TTL cleanup. Every workspace-scoped table carries `account_id` + `workspace_id`, FORCE RLS, and a `workspace_isolation` policy. The `connections` table stores workspace/subject-scoped third-party credential metadata plus one encrypted credential bundle; broker helpers are the only read path that decrypts it and use `(id, version)` CAS for refresh/status updates. MCP OAuth DCR client registrations are stored deployment-wide in `integration_oauth_clients` keyed by AS issuer, while consumed callback nonces live in workspace-scoped `integration_oauth_state_nonces`. Codex credential selection uses one workspace-local `codex_credential_leases` row per live turn plus fairness cursors on workspace credential rows; all-exhausted active goals use one FORCE-RLS `codex_capacity_waiters` row per session as durable wait plus coalescing commit→signal outbox. Neither table creates a cross-workspace capacity identity or lease. Sandbox leases enforce one-box-per-group via `UNIQUE (workspace_id, sandbox_group_id)` + `FOR UPDATE` + cold→warming CAS + integer epoch fence. Note: pgvector embeddings are `vector(3072)` with **no ANN index** (3072 dims exceed pgvector's HNSW limit) — document and memory vector arms are sequential scans; keyword arms use GIN FTS indexes (`document_chunks_text_fts_idx`, `knowledge_memories_text_fts_idx`).
+Forward-only migrations under `drizzle/0000..` applied by a bespoke runner (`migrate.ts`, advisory-locked, tracked in its own `schema_migrations` table — **the `drizzle/meta/_journal.json` is stale and not authoritative**). Migrations are schema-agnostic: standalone runs in the server default schema, while embedded runs may set a target schema/search path through `migrate(databaseUrl, schema)` / `runMigrations(adminConnection, targetSchema)`. The SQL must use `current_schema()` in policy guards and avoid hard-pinning `public` except for extension/type lookup through the trailing `public` search-path entry. The schema declares **63** `pgTable`s. Session pins are per-subject workspace state joined to sessions by composite `(account_id, workspace_id, session_id)` keys and are FORCE-RLS scoped with the same subject/workspace GUC context. Expired session-list snapshots are deleted only by the bounded global `SKIP LOCKED` reaper; member list transactions never perform cross-subject TTL cleanup. Recovery-history artifacts use a dedicated compatible writer barrier plus exact per-session revisions: paged precompute and immutable persistence happen outside source-row locks, and a database-owned final function alone takes the exclusive barrier to compare the complete persisted revision set and append one idempotent admission. Every workspace-scoped table carries `account_id` + `workspace_id`, FORCE RLS, and a `workspace_isolation` policy. The `connections` table stores workspace/subject-scoped third-party credential metadata plus one encrypted credential bundle; broker helpers are the only read path that decrypts it and use `(id, version)` CAS for refresh/status updates. MCP OAuth DCR client registrations are stored deployment-wide in `integration_oauth_clients` keyed by AS issuer, while consumed callback nonces live in workspace-scoped `integration_oauth_state_nonces`. Codex credential selection uses one workspace-local `codex_credential_leases` row per live turn plus fairness cursors on workspace credential rows; all-exhausted active goals use one FORCE-RLS `codex_capacity_waiters` row per session as durable wait plus coalescing commit→signal outbox. Neither table creates a cross-workspace capacity identity or lease. Sandbox leases enforce one-box-per-group via `UNIQUE (workspace_id, sandbox_group_id)` + `FOR UPDATE` + cold→warming CAS + integer epoch fence. Note: pgvector embeddings are `vector(3072)` with **no ANN index** (3072 dims exceed pgvector's HNSW limit) — document and memory vector arms are sequential scans; keyword arms use GIN FTS indexes (`document_chunks_text_fts_idx`, `knowledge_memories_text_fts_idx`).
 
 ### 7.7 `runtime` — the agent loop + sandbox abstraction
 
@@ -467,6 +488,12 @@ The current map:
 ## 9. Data & storage
 
 - **Event store.** `session_events` is the redacted, append-only, per-session-monotonic-`sequence` human/audit timeline (the replay/SSE source). Every payload passes through `sanitizeEventPayload` (NUL + lone-surrogate repair) before insert or the jsonb write can reject the row and kill a turn.
+- **Recovery history artifacts.** Full session/event rows are canonicalized and
+  hashed in a lock-free repeatable-read snapshot; the retained manifest stores
+  hashes, sequence bounds, exact revisions, aggregate counts/bytes, and
+  deterministic partitions. Immutable artifacts are usable only after the
+  short exact revision-fenced admission in §3.11. Operator contract:
+  [`recovery-artifacts.md`](recovery-artifacts.md).
 - **Three memory stores + envelope.** See §3.5: `session_history_items` (model truth), `agent_run_states` (approval resume), `session_events` (audit), and `sandbox_session_envelopes` (sandbox recovery). Workspace knowledge memory (`knowledge_memories`, human-reviewed) is separate again — see §3.5.
 - **pgvector documents.** `document_bases`/`documents`/`document_chunks` with `embedding vector(3072)`. No ANN index (vector search is a sequential scan; keyword search uses a GIN FTS index); embedding model is stored per chunk and filtered on at search time. Documents carry source metadata + `aclTags` (retrieval filters, not authz); `knowledge_memories` stores reviewed workspace memory with its own FTS index.
 - **Object storage.** `s3-compatible` (MinIO local), `aws-s3`, `azure-blob`, `gcs` for file bytes + recordings. Presigned URLs are **host-bound** (host is part of the S3 signature) — the public endpoint and the in-Docker `minio:9000` endpoint are not interchangeable; use `putObject` for server-side writes on split topologies. Direct upload completion validates provider HEAD metadata before making the file ready, while a completed-request retry re-enters the row lock and idempotently repairs a missing `file.uploaded` usage event. Unfinalized PUTs are retained through URL expiry plus cleanup grace, then reclaimed by the worker schedule described in §7.2.
@@ -529,6 +556,7 @@ A typed `DeploymentContract` (`@opengeni/deployment`) turns an abstract profile 
 | The agent turn activity (streaming, billing, history dual-write) | `apps/worker/src/activities/agent-turn.ts` | [`run-lifecycle.md`](run-lifecycle.md) |
 | Temporal activity registration / cutover boundary | `apps/worker/src/activities.ts` and `apps/worker/src/workflows/activities.ts` | [`run-lifecycle.md`](run-lifecycle.md) |
 | Worker-death / exact-attempt interruption / same-turn recovery | `apps/worker/src/activities/session-state.ts`, `packages/db/src/index.ts` | [`run-lifecycle.md`](run-lifecycle.md) |
+| Recovery-session/history artifact precompute, fencing, or admission | `packages/db/src/recovery-artifacts.ts`, `packages/db/drizzle/0076_recovery_artifact_fence.sql` | [`recovery-artifacts.md`](recovery-artifacts.md) |
 | Codex subscription selection / leasing / failover | `apps/worker/src/activities/codex-rotation.ts`, `apps/worker/src/activities/agent-turn.ts`, `packages/db/src/index.ts` | [`codex-subscription-rotation.md`](codex-subscription-rotation.md) |
 | Goals / continuation loop | `apps/worker/src/activities/goals.ts` | [`goals.md`](goals.md) |
 | Scheduled tasks / cron | `packages/core/src/domain/scheduled-tasks.ts`, `apps/worker/src/activities/scheduled-tasks.ts` | [`reliability-fixes.md`](reliability-fixes.md) |
@@ -571,6 +599,7 @@ A typed `DeploymentContract` (`@opengeni/deployment`) turns an abstract profile 
 | [`README.md`](README.md) | The audience-tiered docs map: canonical homes, current-vs-record rules, and freshness enforcement. |
 | [`architecture.md`](architecture.md) (this file) | The whole-system map, invariants, repo layout, and the change-decision table. |
 | [`run-lifecycle.md`](run-lifecycle.md) | Turns, the no-length-limit doctrine, model-memory truth, fenced attempts, and graceful/ungraceful same-turn recovery. |
+| [`recovery-artifacts.md`](recovery-artifacts.md) | Exact recovery-history precompute/admission fencing, persistence-only retry boundary, telemetry, canary, stress, and rollback guidance. |
 | [`goals.md`](goals.md) | Goal-driven long runs: lifecycle, the replay-safe continuation loop, no-progress/budget guards, goal MCP tools, settings. |
 | [`context-compaction.md`](context-compaction.md) | Codex-parity local compaction: exact token policy, summary generation, durable replacement history, same-turn continuation, and failure semantics. |
 | [`model-providers.md`](model-providers.md) | Multi-provider model support; per-model routing via `MultiProviderModelProvider`; responses vs chat wire APIs. |
