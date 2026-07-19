@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { Context, heartbeat } from "@temporalio/activity";
 import {
+  ActivityNotFoundError,
   AsyncCompletionClient,
   Client,
   Connection,
@@ -160,23 +161,32 @@ describe("OPE-75 Agent Steer cancellation deadlock production fixture", () => {
         temporalHost: services.temporalHost,
         temporalTaskQueue: taskQueue,
       });
+      const model = new ScriptedModel([
+        { id: "replacement-completed", outputText: "replacement completed exactly once" },
+      ]);
       const activities = createActivityTestHarness({
         settings,
         db: dbClient.db,
         bus,
         runtime: createProductionAgentRuntime({
-          // The fixture never invokes a provider. This scripted response is a
-          // fail-safe if a future cleanup path accidentally dispatches again.
-          model: new ScriptedModel([{ id: "must-not-run", outputText: "must not run" }]),
+          // The first manually claimed activity never invokes a provider. The
+          // real activity consumes this sole response for the replacement.
+          model,
         }),
       });
+      const realRunAgentTurn = activities.runAgentTurn;
 
       let releaseZombie = false;
       let heartbeats = 0;
+      let replacementDispatches = 0;
       let targetClaim:
         | Extract<Awaited<ReturnType<typeof claimSessionWorkForAttempt>>, { action: "claimed" }>
         | undefined;
       const ignoreCancellation = async (input: RunAgentTurnInput): Promise<RunAgentTurnResult> => {
+        if (targetClaim) {
+          replacementDispatches += 1;
+          return await realRunAgentTurn(input);
+        }
         const activityId = Context.current().info.activityId;
         const claim = await claimSessionWorkForAttempt(dbClient.db, input.workspaceId, {
           sessionId: input.sessionId,
@@ -364,37 +374,130 @@ describe("OPE-75 Agent Steer cancellation deadlock production fixture", () => {
         expect(rows.wake?.wakeRevision).toBe(rows.wake?.deliveredRevision);
 
         let workflowSettled = false;
-        void handle.result().then(
-          () => {
-            workflowSettled = true;
-          },
-          () => {
-            workflowSettled = true;
-          },
-        );
+        const workflowResult = handle.result().finally(() => {
+          workflowSettled = true;
+        });
         await Bun.sleep(300);
         expect(workflowSettled).toBe(false);
 
-        // Dispose of only this exact local activity. Temporal terminalization
-        // is intentionally not treated as physical quiescence: the activity
-        // keeps executing after the by-id RPC, which is independently proven.
-        await asyncCompletion.reportCancellation(
-          {
-            workflowId,
-            runId: handle.firstExecutionRunId,
-            activityId: pendingActivityId!,
-          },
-          { fixtureCleanup: "OPE-75" },
-        );
-        await handle.terminate("OPE-75 fixture cleanup after exact activity terminalization");
+        // Terminalize only this exact Temporal activity. This must release the
+        // workflow's WAIT_CANCELLATION_COMPLETED promise without terminating
+        // the workflow itself.
+        const fullActivityId = {
+          workflowId,
+          runId: handle.firstExecutionRunId,
+          activityId: pendingActivityId!,
+        };
+        await asyncCompletion.reportCancellation(fullActivityId, { fixtureCleanup: "OPE-75" });
+
+        await waitFor(async () => {
+          const current = await handle.describe();
+          return !current.raw.pendingActivities?.some(
+            (activity) => activity.activityId === pendingActivityId,
+          );
+        });
+        await expect(
+          asyncCompletion.heartbeat(fullActivityId, {
+            fixtureProbe: "after-exact-terminalization",
+          }),
+        ).rejects.toBeInstanceOf(ActivityNotFoundError);
+
+        // Temporal terminalization is not physical quiescence. The local
+        // activity body still executes, but its worker heartbeat helper has no
+        // per-call acknowledgement. The by-ID probe above is the independent
+        // server-side proof that the activity is no longer pending.
         const beatsAtTemporalTerminalization = heartbeats;
         await waitFor(() => heartbeats >= beatsAtTemporalTerminalization + 3);
+
+        // The workflow must progress naturally after exact terminalization;
+        // terminating it here would hide the production deadlock boundary.
+        const workflowProgress = await Promise.race([
+          workflowResult.then(() => "settled" as const),
+          Bun.sleep(15_000).then(() => "timed_out" as const),
+        ]);
+        expect(workflowProgress).toBe("settled");
+        expect(workflowSettled).toBe(true);
+        expect(replacementDispatches).toBe(1);
+        expect(model.calls).toBe(1);
+
+        // This records a second current defect rather than endorsing it: the
+        // workflow fallback equates Temporal's cancellation result with a
+        // physical stop and writes quiesced_at even though the zombie proof
+        // above shows the activity body is still executing.
+        const [finalSession, finalTurns, finalOutstandingUpdates, finalQueue, finalRows] =
+          await Promise.all([
+            getSession(dbClient.db, workspaceId, target.id),
+            listSessionTurns(dbClient.db, workspaceId, target.id),
+            listOutstandingSessionSystemUpdates(dbClient.db, workspaceId, target.id),
+            getSessionQueueSnapshot(dbClient.db, workspaceId, target.id),
+            withWorkspaceRls(dbClient.db, workspaceId, async (scoped) => {
+              const attempts = await scoped
+                .select()
+                .from(schema.sessionTurnAttempts)
+                .where(eq(schema.sessionTurnAttempts.sessionId, target.id));
+              const allUpdates = await scoped
+                .select()
+                .from(schema.sessionSystemUpdates)
+                .where(eq(schema.sessionSystemUpdates.sessionId, target.id));
+              const [interruption] = await scoped
+                .select()
+                .from(schema.sessionAttemptInterruptions)
+                .where(eq(schema.sessionAttemptInterruptions.sessionId, target.id));
+              const [wake] = await scoped
+                .select()
+                .from(schema.sessionWorkflowWakeOutbox)
+                .where(eq(schema.sessionWorkflowWakeOutbox.sessionId, target.id));
+              return { attempts, allUpdates, interruption, wake };
+            }),
+          ]);
+        const replacementTurn = finalTurns.find((turn) => turn.id !== targetClaim!.turn.id);
+        const terminalizedAttempt = finalRows.attempts.find(
+          (attempt) => attempt.id === targetClaim!.turn.activeAttemptId,
+        );
+        const replacementAttempt = finalRows.attempts.find(
+          (attempt) => attempt.turnId === replacementTurn?.id,
+        );
+
+        expect(finalSession).toMatchObject({
+          status: "idle",
+          activeTurnId: null,
+          queueHeadPosition: 0,
+          queueTailPosition: 1,
+        });
+        expect(finalTurns).toHaveLength(2);
+        expect(replacementTurn).toMatchObject({ source: "system", status: "completed" });
+        expect(finalOutstandingUpdates).toHaveLength(0);
+        expect(finalRows.allUpdates).toHaveLength(7);
+        expect(
+          finalRows.allUpdates.every(
+            (update) =>
+              update.state === "delivered" &&
+              update.deliveredTurnId === replacementTurn?.id &&
+              update.deliveredAt !== null,
+          ),
+        ).toBe(true);
+        expect(
+          finalRows.allUpdates.filter((update) => update.kind === "agent_steer_instruction"),
+        ).toHaveLength(1);
+        expect(finalRows.attempts).toHaveLength(2);
+        expect(terminalizedAttempt).toMatchObject({
+          state: "closed",
+          outcome: "superseded",
+        });
+        expect(terminalizedAttempt?.quiescedAt).not.toBeNull();
+        expect(replacementAttempt).toMatchObject({
+          state: "closed",
+          outcome: "completed",
+        });
+        expect(finalRows.interruption).toMatchObject({ kind: "steer", state: "settled" });
+        expect(finalRows.wake?.wakeRevision).toBe(finalRows.wake?.deliveredRevision);
+        expect(finalQueue).toMatchObject({ items: [], stoppingPreviousAttempt: false });
       } finally {
         releaseZombie = true;
         try {
           await handle.terminate("OPE-75 fixture final cleanup");
         } catch {
-          // The workflow was already terminated by the exact-activity cleanup.
+          // The workflow already completed naturally after exact-activity cleanup.
         }
         worker.shutdown();
         await workerRun;
