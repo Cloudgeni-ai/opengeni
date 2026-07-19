@@ -121,6 +121,41 @@ async function actualCodexStreamingFailure(event: Record<string, unknown>): Prom
   return { calls, error, forwarded };
 }
 
+async function actualCodexNullBodyFailure(): Promise<{ calls: number; error: unknown }> {
+  let calls = 0;
+  const token = {
+    accessToken: "worker-test-token",
+    chatgptAccountId: "worker-test-account",
+    isFedramp: false,
+  };
+  const context: CodexRequestContext = {
+    clientVersion: "ope64-worker-test",
+    getToken: async () => token,
+    refresh: async () => token,
+    resolveModel: (model) => model,
+  };
+  const response = await codexRequestStorage.run(context, () =>
+    codexSubscriptionFetch(async () => {
+      calls += 1;
+      return new Response(null, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
+    })("https://chatgpt.com/backend-api/responses", {
+      method: "POST",
+      body: JSON.stringify({ stream: true, model: "gpt-5.6-sol", input: [] }),
+    }),
+  );
+
+  let error: unknown;
+  try {
+    await response.text();
+  } catch (streamError) {
+    error = streamError;
+  }
+  return { calls, error };
+}
+
 /**
  * Drive a sequence of reconcile passes the way the live worker does: each
  * element is the SDK's computed `state.history` at one reconcile point, and the
@@ -1348,6 +1383,27 @@ describe("escaped MCP transport timeout classifier", () => {
 // goal-continuation recovery instead of a terminal session.failed — the gap that
 // hard-failed a fleet of prod sessions during a provider degradation window.
 describe("transient provider error classifier", () => {
+  test("a null accepted Codex stream settles terminally without same-turn recovery", async () => {
+    const observed = await actualCodexNullBodyFailure();
+    expect(observed.calls).toBe(1);
+    expect(agentRunFailurePayload(observed.error)).toEqual({
+      error: "The Codex response stream ended without a terminal response",
+      code: "invalid_sse_terminal",
+      retryable: false,
+    });
+
+    const wrapped = new CompactionProviderResponseError(
+      { httpStatus: 502, code: "invalid_sse_terminal", type: "invalid_sse_terminal" },
+      observed.error,
+    );
+    expect(agentRunFailurePayload(wrapped)).toEqual({
+      error: "The Codex response stream ended without a terminal response",
+      code: "invalid_sse_terminal",
+      retryable: false,
+    });
+    expect(shouldRecoverCompactionProviderFailure(wrapped)).toBe(false);
+  });
+
   test("an actual streamed Codex server failure settles as redacted same-turn recovery", async () => {
     const observed = await actualCodexStreamingFailure({
       type: "response.failed",

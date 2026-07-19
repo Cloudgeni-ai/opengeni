@@ -388,6 +388,37 @@ describe("Codex-parity model tool-output truncation", () => {
     expect(boundModelToolOutputItem(bounded, 5)).toEqual(bounded);
   });
 
+  test("normalizes cumulatively exhausted image IDs as whole schema-valid image parts", () => {
+    const item = {
+      type: "function_call_result",
+      callId: "opaque-image-id-overflow",
+      output: [
+        {
+          type: "input_image",
+          imageUrl: MODEL_TOOL_OUTPUT_OVERSIZED_IMAGE_CARD_DATA_URL,
+        },
+        { type: "input_image", fileId: "file_123" },
+        { type: "input_image", image: { id: "file_456" } },
+      ],
+    };
+
+    const bounded = boundModelToolOutputItem(item);
+    expect(bounded.output).toEqual([
+      item.output[0]!,
+      {
+        type: "input_image",
+        imageUrl: MODEL_TOOL_OUTPUT_OVERSIZED_IMAGE_CARD_DATA_URL,
+      },
+      {
+        type: "input_image",
+        imageUrl: MODEL_TOOL_OUTPUT_OVERSIZED_IMAGE_CARD_DATA_URL,
+      },
+    ]);
+    expect(JSON.stringify(bounded.output)).not.toContain("file_123");
+    expect(JSON.stringify(bounded.output)).not.toContain("file_456");
+    expect(boundModelToolOutputItem(bounded)).toEqual(bounded);
+  });
+
   test("replaces oversized and cumulatively exhausted files with typed text, never fake URLs", () => {
     const firstFile = `data:text/plain;base64,${"a".repeat(
       MODEL_TOOL_OUTPUT_OPAQUE_PAYLOAD_MAX_BYTES - 512,

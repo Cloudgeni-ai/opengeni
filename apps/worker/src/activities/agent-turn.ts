@@ -6076,6 +6076,17 @@ export function agentRunFailurePayload(error: unknown): {
     typeof error === "object" && error !== null && "code" in error
       ? String((error as { code?: unknown }).code)
       : undefined;
+  // An accepted Codex stream with no terminal response is malformed/partial,
+  // not provider backpressure. Replaying the same accepted turn could repeat
+  // model or tool effects, so this marked transport failure must outrank the
+  // generic 5xx retry classifier (CodexStreamingTerminalError uses status 502).
+  if (isCodexTransportError(error) && code === "invalid_sse_terminal") {
+    return {
+      error: "The Codex response stream ended without a terminal response",
+      code: "invalid_sse_terminal",
+      retryable: false,
+    };
+  }
   // A ChatGPT/Codex usage cap is a HARD limit, not transient backpressure: it
   // must NOT be reported as a generic, retryable rate-limit (which would loop a
   // goal against a capped backend). Surface a precise, actionable message with

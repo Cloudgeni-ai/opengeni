@@ -818,6 +818,65 @@ describe("provider-proof compaction transcript", () => {
     expect((observed as Error).message).not.toContain("provider checkpoint worker failed");
   });
 
+  test("classifies a null HTTP-200 Codex stream as provider failure, never empty summary", async () => {
+    let calls = 0;
+    const client = new OpenAI({
+      apiKey: "test-key",
+      baseURL: "https://chatgpt.com/backend-api",
+      maxRetries: 2,
+      fetch: codexSubscriptionFetch(async () => {
+        calls += 1;
+        return new Response(null, {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      }),
+    });
+    let observed: unknown;
+    try {
+      await codexRequestStorage.run(
+        {
+          clientVersion: "test",
+          getToken: async () => ({
+            accessToken: "test-token",
+            chatgptAccountId: "test-account",
+            isFedramp: false,
+          }),
+          refresh: async () => ({
+            accessToken: "refreshed-test-token",
+            chatgptAccountId: "test-account",
+            isFedramp: false,
+          }),
+          resolveModel: (model) => model,
+        },
+        () =>
+          summarizeForCompaction(
+            testSettings({ openaiProvider: "openai" }),
+            buildCompactionPromptInput([user("preserve the active history")]),
+            {
+              client,
+              api: "responses",
+              model: "gpt-5.6-sol",
+            },
+          ),
+      );
+    } catch (error) {
+      observed = error;
+    }
+
+    expect(calls).toBe(1);
+    expect(observed).not.toBeInstanceOf(EmptyCompactionSummaryError);
+    expect(observed).toBeInstanceOf(CompactionProviderResponseError);
+    expect(observed).toMatchObject({
+      diagnostics: {
+        httpStatus: 502,
+        code: "invalid_sse_terminal",
+        type: "invalid_sse_terminal",
+      },
+    });
+    expect(isCodexTransportError((observed as CompactionProviderResponseError).cause)).toBe(true);
+  });
+
   test("renders the full checkpoint input without silently dropping old records", () => {
     const rendered = renderCompactionPromptInputForChat(
       buildCompactionPromptInput([

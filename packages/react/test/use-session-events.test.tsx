@@ -649,6 +649,75 @@ describe("useSessionEvents", () => {
     }
   });
 
+  test("keeps one flush timer across a long synchronously yielded replay", async () => {
+    let releaseStream!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      releaseStream = resolve;
+    });
+    const heldTimers = new Map<number, () => void>();
+    const originalSetTimeout = globalThis.setTimeout;
+    const originalClearTimeout = globalThis.clearTimeout;
+    let nextTimer = 1_500_000;
+    let maxHeldTimers = 0;
+    globalThis.setTimeout = ((callback: TimerHandler, delay?: number, ...args: unknown[]) => {
+      if (delay === 16 && typeof callback === "function") {
+        const timer = nextTimer++;
+        heldTimers.set(timer, () => callback(...args));
+        maxHeldTimers = Math.max(maxHeldTimers, heldTimers.size);
+        return timer;
+      }
+      return originalSetTimeout(callback, delay, ...args);
+    }) as typeof setTimeout;
+    globalThis.clearTimeout = ((timer: ReturnType<typeof setTimeout>) => {
+      if (typeof timer === "number" && heldTimers.delete(timer)) return;
+      originalClearTimeout(timer);
+    }) as typeof clearTimeout;
+
+    const streamedCount = SESSION_EVENT_BROWSER_PENDING_MAX_COUNT * 20;
+    let hook: Awaited<ReturnType<typeof renderHook<UseSessionEventsResult, undefined>>> | null =
+      null;
+    try {
+      const client = fakeClient({
+        streamEvents: () =>
+          (async function* () {
+            for (let index = 0; index < streamedCount; index += 1) {
+              yield event(index + 1, "machine.op.recovered", { attempt: index + 1 });
+            }
+            await blocked;
+          })(),
+      });
+      hook = await renderHook(
+        () =>
+          useSessionEvents(SESSION_ID, {
+            client,
+            workspaceId: WORKSPACE_ID,
+            replay: "full",
+          }),
+        undefined,
+      );
+      await flush(20);
+
+      expect(maxHeldTimers).toBeLessThanOrEqual(1);
+      expect(heldTimers.size).toBeLessThanOrEqual(1);
+      expect(hook.result.current.lastSequence).toBe(streamedCount);
+      expect(hook.result.current.events.length).toBeLessThanOrEqual(
+        SESSION_EVENT_BROWSER_MAX_COUNT,
+      );
+      expect(hook.result.current.windowBytes).toBeLessThanOrEqual(SESSION_EVENT_BROWSER_MAX_BYTES);
+
+      releaseStream();
+      await flush(1);
+      expect(hook.result.current.lastSequence).toBe(streamedCount);
+    } finally {
+      releaseStream();
+      if (hook) await hook.unmount();
+      const heldTimersAfterUnmount = heldTimers.size;
+      globalThis.setTimeout = originalSetTimeout;
+      globalThis.clearTimeout = originalClearTimeout;
+      expect(heldTimersAfterUnmount).toBe(0);
+    }
+  });
+
   test("projects oversized events and flushes pending bytes before the timer can run", async () => {
     let releaseStream!: () => void;
     const blocked = new Promise<void>((resolve) => {

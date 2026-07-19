@@ -12,6 +12,7 @@ import {
   CODEX_PROVIDER_BASE_URL,
   CODEX_PROVIDER_ID,
   CODEX_TRANSPORT_ERROR_HEADER,
+  MODEL_TOOL_OUTPUT_OVERSIZED_IMAGE_CARD_DATA_URL,
   MODEL_TOOL_OUTPUT_OPAQUE_PAYLOAD_MAX_BYTES,
   boundModelToolOutputItem,
   codexRequestStorage,
@@ -146,6 +147,43 @@ describe("pinned Responses large-output boundary", () => {
       },
     ]);
     expect(JSON.stringify(wire.output)).not.toContain("file_url");
+  });
+
+  test("serializes exhausted image IDs as omission image_url values, never fake file_id values", async () => {
+    const { getInputItems } = await pinnedResponsesModule();
+    const prefix = "data:application/octet-stream;base64,";
+    const bounded = boundModelToolOutputItem({
+      type: "function_call_result",
+      callId: "call_exhausted_image_ids",
+      output: [
+        {
+          type: "input_file",
+          fileData: `${prefix}${"a".repeat(
+            MODEL_TOOL_OUTPUT_OPAQUE_PAYLOAD_MAX_BYTES - Buffer.byteLength(prefix, "utf8"),
+          )}`,
+          filename: "allowance.bin",
+        },
+        { type: "input_image", fileId: "file_123" },
+        { type: "input_image", image: { id: "file_456" } },
+      ],
+    });
+
+    const [wire] = getInputItems([bounded]) as Array<Record<string, unknown>>;
+    const output = wire.output as Array<Record<string, unknown>>;
+    expect(output.slice(1)).toEqual([
+      {
+        type: "input_image",
+        image_url: MODEL_TOOL_OUTPUT_OVERSIZED_IMAGE_CARD_DATA_URL,
+      },
+      {
+        type: "input_image",
+        image_url: MODEL_TOOL_OUTPUT_OVERSIZED_IMAGE_CARD_DATA_URL,
+      },
+    ]);
+    expect(output.slice(1).some((part) => "file_id" in part)).toBe(false);
+    expect(JSON.stringify(output.slice(1))).not.toContain("file_123");
+    expect(JSON.stringify(output.slice(1))).not.toContain("file_456");
+    expect(boundModelToolOutputItem(bounded)).toEqual(bounded);
   });
 });
 
@@ -290,6 +328,53 @@ describe("pinned Responses streamed terminal failures", () => {
       expect(serialized).not.toContain("SECRET");
     });
   }
+
+  test("real OpenAIResponsesModel rejects a null accepted stream without response_done or replay", async () => {
+    let calls = 0;
+    const client = new OpenAI({
+      apiKey: "test-key",
+      baseURL: CODEX_PROVIDER_BASE_URL,
+      maxRetries: 2,
+      fetch: codexSubscriptionFetch(async () => {
+        calls += 1;
+        return new Response(null, {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      }),
+    });
+    const model = new OpenAIResponsesModel(client, "gpt-5.6-sol");
+    const events: Array<{ type?: unknown }> = [];
+    let observed: unknown;
+
+    await codexRequestStorage.run(codexTestContext(), async () => {
+      try {
+        for await (const event of model.getStreamedResponse({
+          input: "null terminal test",
+          modelSettings: {},
+          tools: [],
+          handoffs: [],
+          outputType: "text",
+          tracing: false,
+        } as never)) {
+          events.push(event);
+        }
+      } catch (error) {
+        observed = error;
+      }
+    });
+
+    expect(calls).toBe(1);
+    expect(events.some((event) => event.type === "response_done")).toBe(false);
+    expect(observed).toMatchObject({
+      status: 502,
+      code: "invalid_sse_terminal",
+      type: "invalid_sse_terminal",
+    });
+    expect((observed as { headers?: Headers }).headers?.get(CODEX_TRANSPORT_ERROR_HEADER)).toBe(
+      "1",
+    );
+  });
 });
 
 // A host exposing the built-in OpenAI provider plus Fireworks (the `chat` wire

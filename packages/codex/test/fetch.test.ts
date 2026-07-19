@@ -755,6 +755,32 @@ describe("codexSubscriptionFetch", () => {
     expect(calls).toBe(1);
   });
 
+  test("streaming caller: a null accepted body fails as invalid_sse_terminal", async () => {
+    let calls = 0;
+    const response = await codexRequestStorage.run(ctx(), () =>
+      codexSubscriptionFetch(async () => {
+        calls += 1;
+        return new Response(null, {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      })("https://chatgpt.com/backend-api/responses", {
+        method: "POST",
+        body: JSON.stringify({ model: "gpt-5.6-sol", stream: true, input: [] }),
+      }),
+    );
+
+    let observed: unknown;
+    try {
+      await response.text();
+    } catch (error) {
+      observed = error;
+    }
+    expect(observed).toMatchObject({ status: 502, code: "invalid_sse_terminal" });
+    expect(isCodexTransportError(observed)).toBe(true);
+    expect(calls).toBe(1);
+  });
+
   test.each([
     ["CRLF", "\r\n"],
     ["bare CR", "\r"],

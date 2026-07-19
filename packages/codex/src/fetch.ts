@@ -674,7 +674,24 @@ function codexSseFailureError(
  */
 function repairCodexStream(res: Response): Response {
   if (!res.body) {
-    return res;
+    const error = codexSseFailureError(
+      res,
+      null,
+      "invalid_sse_terminal",
+      "The Codex response stream ended without a terminal response",
+    );
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.error(error);
+      },
+    });
+    const headers = new Headers(res.headers);
+    headers.delete("content-length");
+    return new Response(body, {
+      status: res.status,
+      statusText: res.statusText,
+      headers,
+    });
   }
   const items: unknown[] = [];
   const decoder = new TextDecoder();

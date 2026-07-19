@@ -190,7 +190,14 @@ export function useSessionEvents(
     let pendingBytes = 2; // []
     let flushTimer: ReturnType<typeof setTimeout> | null = null;
     const flush = () => {
-      flushTimer = null;
+      // A synchronous count/byte high-water flush can run before the scheduled
+      // callback gets a macrotask. Cancel that callback before clearing its
+      // handle so a long synchronously yielding replay retains at most one
+      // timer rather than one stale callback per flushed batch.
+      if (flushTimer !== null) {
+        clearTimeout(flushTimer);
+        flushTimer = null;
+      }
       if (!isCurrent()) {
         pending = [];
         pendingBytes = 2;

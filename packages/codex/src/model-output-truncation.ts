@@ -284,6 +284,16 @@ function boundResponsesProtocolContentItem(
 ): Record<string, unknown> {
   const opaqueOmissionsBefore = state.opaqueOmissions;
   const bounded = boundTextLeaves(item, state, 1) as Record<string, unknown>;
+  // Agents interprets fileId/file_id (and nested image.id) as a provider file
+  // reference. Replacing only that string with our data URL would manufacture
+  // a fictitious file_id. Normalize the whole overflowing image part instead,
+  // removing every ID field while staying inside the Responses content union.
+  if (item.type === "input_image" && state.opaqueOmissions > opaqueOmissionsBefore) {
+    return {
+      type: "input_image",
+      imageUrl: MODEL_TOOL_OUTPUT_OVERSIZED_IMAGE_CARD_DATA_URL,
+    };
+  }
   // A marker string in `input_file.file` is interpreted by pinned Agents as a
   // file_url. Replace the whole content part instead, so every generated
   // omission remains inside the Responses text/image/file union without
@@ -452,7 +462,10 @@ function boundOpaqueProtocolString(
     return value;
   }
   state.remainingOpaqueBytes = 0;
-  if (kind === "image") return MODEL_TOOL_OUTPUT_OVERSIZED_IMAGE_CARD_DATA_URL;
+  if (kind === "image") {
+    state.opaqueOmissions += 1;
+    return MODEL_TOOL_OUTPUT_OVERSIZED_IMAGE_CARD_DATA_URL;
+  }
   const marker = `[OpenGeni omitted ${kind} payload: ${bytes} bytes exceeded the bounded model-input allowance]`;
   state.opaqueOmissions += 1;
   state.lastOpaqueOmissionMarker = marker;
