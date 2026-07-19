@@ -333,12 +333,17 @@ export {
   RoutingBackendRecoveryRequiredError,
   RoutingSandboxSession,
   RoutingUnsupportedError,
+  SandboxMutationAcceptanceUnknownError,
+  SandboxMutationRetryExhaustedError,
+  isMutatingRoutingOperation,
+  mutationTransportCode,
   type ActivePointer,
   type DefaultBackendLossResult,
   type RoutableBackendSession,
   type ResolvedActiveBackend,
   type RoutingSandboxSessionDeps,
   type RoutingTransitionEvent,
+  type SandboxMutationAcceptanceCheckpoint,
 } from "./routing/routing-session";
 export {
   makeActiveBackendResolver,

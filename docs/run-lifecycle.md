@@ -35,18 +35,29 @@ symptoms, never by counts**: the no-progress detector and budget exhaustion are
 the real guards. Do not reintroduce count- or duration-based caps on legitimate
 run length; if a run is misbehaving, detect the pathology, do not cap the clock.
 
-Recoverable conditions end a turn gracefully (idle the session, keep the
-context) instead of failing it, so a long run survives them: hitting the
-model-call cap (if one is configured), provider rate-limit backpressure,
-escaped MCP request timeouts, and budget/credit exhaustion. With an active
-goal, provider/MCP backpressure resumes after a pacing delay; without one, the
-session idles until the next user message (a long-lived session between goals
-must not go terminal because an external service had a bad minute). For an MCP
-timeout that escapes after a successful tool output, conversation truth is
-checkpointed before the turn settles and the continuation is a new follow-up —
-the completed tool call/full turn is never blindly replayed. Budget/credit
-exhaustion likewise idles the turn rather than failing the session, so a top-up
-lets the same session continue.
+Recoverable conditions preserve the session and its context so a long run can
+survive them, but they do not all settle the current turn the same way. Hitting
+the model-call cap (if configured) and budget/credit exhaustion end the turn
+gracefully and idle the session. By contrast, provider rate-limit/5xx/network
+uncertainty and escaped MCP request timeouts may arrive after external work was
+accepted: the worker requires one final exact-attempt conversation checkpoint,
+truthfully marks that current turn `failed`, and leaves the session `idle`
+rather than replaying it. When that checkpoint succeeds, an active goal may
+start a **new** follow-up turn after pacing; without a goal, a later user
+message may continue. A checkpoint failure suppresses automatic continuation.
+For an MCP timeout after a successful tool output, the durable call/result
+lineage remains exactly once — neither the completed tool call nor the full
+turn is blindly replayed. Budget/credit exhaustion likewise leaves the session
+available, so a top-up lets it continue.
+
+A status-less OpenAI Responses-stream `APIError` whose message begins with the
+exact invalid-content marker is an accepted provider failure, not a schema
+rejection or pre-accept transport error. Its public event/span diagnostics are
+product-owned and allow-list only bounded request/type/code/param scalars; raw
+provider bodies, headers, streamed payloads, and transcripts never enter the
+audit event. Missing usage is not proof of non-acceptance. The accepted call's
+turn fails once, the same turn never re-enters the model, and only the
+checkpoint-gated new-turn paths above can continue it.
 
 Codex-subscription turns add one explicit recovery boundary before the model
 run. With workspace-local leasing enabled, the worker atomically selects and
@@ -120,6 +131,22 @@ duplicate `agent.toolCall.output`. A still-active complete pair retains the
 existing recovery projection because its receipt can mark a crash after memory
 was saved but before the original event publish. Only genuinely unresolved
 execution gets one explicit `interrupted / outcome unknown` closure.
+
+Sandbox command transport has the same acceptance discipline at each routing
+boundary. Read-only operations may use the existing bounded epoch-fence retry,
+but a mutating `exec`, PTY input, file/materialization/editor write, or desktop
+input is invoked only once when a transport/fence failure leaves acceptance
+unknown. The caller receives a secret-safe
+`sandbox_mutation_acceptance_unknown` checkpoint containing the operation,
+backend, and exact active epoch; it must reconcile the existing effect before
+trying again. A bounded mutation retry is permitted only when a trusted typed
+backend error proves that the invocation never crossed admission (currently a
+selfhosted `neverSent` or `fenced` error), or when a future backend can preserve
+the exact provider execution identity. Arbitrary `execId`/process fields are
+never treated as that identity. DNS or gRPC `UNAVAILABLE` is transport
+uncertainty and dominates nested `NotFound` prose; it does not prove provider
+absence or authorize route rematerialization/replay. Canonical:
+`packages/runtime/src/sandbox/routing/routing-session.ts`.
 
 Claim, interruption, and event-writing settlement share one lock order:
 workspace, then session, then exact turn, then exact attempt. Event inserts also touch the workspace through

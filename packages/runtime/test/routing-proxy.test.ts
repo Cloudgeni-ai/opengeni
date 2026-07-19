@@ -18,10 +18,15 @@
 //       never two active concurrently.
 
 import { describe, expect, test } from "bun:test";
+import { ErrorCode } from "@opengeni/agent-proto";
 import {
   RoutingBackendRecoveryRequiredError,
   RoutingSandboxSession,
   RoutingUnsupportedError,
+  SandboxMutationAcceptanceUnknownError,
+  SandboxMutationRetryExhaustedError,
+  SelfhostedControlError,
+  mutationTransportCode,
   makeActiveBackendResolver,
   ActiveBackendUnresolvableError,
   swapTargetEstablishability,
@@ -45,6 +50,7 @@ class FakeBackend implements RoutableBackendSession {
   readonly calls: string[] = [];
   // When set, exec throws a fence error UNTIL the pointer's epoch moves past it.
   fenceUntilEpoch: number | null = null;
+  fenceProvesNonAcceptance = false;
   private epochProvider: () => number;
   readonly state: { instanceId: string };
 
@@ -56,11 +62,18 @@ class FakeBackend implements RoutableBackendSession {
 
   async exec(args: unknown): Promise<{ stdout: string; exitCode: number }> {
     if (this.fenceUntilEpoch !== null && this.epochProvider() <= this.fenceUntilEpoch) {
-      const err = new Error("sandbox lease superseded; op fenced by a stale epoch") as Error & {
-        fenced: boolean;
-      };
-      err.fenced = true;
-      throw err;
+      if (this.fenceProvesNonAcceptance) {
+        throw new SelfhostedControlError({
+          message: "sandbox lease superseded; op fenced by a stale epoch",
+          code: ErrorCode.ERROR_CODE_FENCED,
+          reason: null,
+          retryable: true,
+          fenced: true,
+        });
+      }
+      throw Object.assign(new Error("sandbox lease superseded; op fenced by a stale epoch"), {
+        fenced: true,
+      });
     }
     this.calls.push(String((args as { cmd?: string }).cmd ?? ""));
     return { stdout: this.tag, exitCode: 0 };
@@ -173,7 +186,7 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
     expect(selfhosted.calls).toEqual(["c"]);
   });
 
-  test("(2) stale-epoch in-flight op: the backend fences a stale epoch -> the proxy retries against the new active sandbox", async () => {
+  test("(2) proved pre-acceptance fence: a mutating exec retries against the new active sandbox", async () => {
     // The default (modal) box fences any op while the pointer is still at epoch 0
     // (simulating an in-flight op the active_epoch bumped under). After a swap to
     // selfhosted (epoch 1), the proxy must re-resolve and land the op on selfhosted.
@@ -181,6 +194,7 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
     const modal = new FakeBackend("modal", () => ptr.current().activeEpoch);
     const selfhosted = new FakeBackend("selfhosted", () => ptr.current().activeEpoch);
     modal.fenceUntilEpoch = 0; // modal rejects while epoch <= 0
+    modal.fenceProvesNonAcceptance = true;
 
     let resolveCount = 0;
     const proxy = new RoutingSandboxSession({
@@ -211,6 +225,208 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
     expect(modal.calls).toEqual([]);
     // Re-resolved at least twice (initial + post-fence).
     expect(resolveCount).toBeGreaterThanOrEqual(2);
+  });
+
+  test("(2b) a read-only op may re-resolve after a message-only fence", async () => {
+    const ptr = mutablePointer();
+    let oldCalls = 0;
+    let newCalls = 0;
+    const oldBackend: RoutableBackendSession = {
+      async readFile() {
+        oldCalls += 1;
+        throw new Error("stale epoch fenced");
+      },
+    };
+    const newBackend: RoutableBackendSession = {
+      async readFile() {
+        newCalls += 1;
+        return new TextEncoder().encode("new");
+      },
+    };
+    const proxy = new RoutingSandboxSession({
+      readPointer: ptr.read,
+      resolveActiveBackend: async (pointer) =>
+        pointer.activeSandboxId === null
+          ? { session: oldBackend, sandboxId: null, kind: "modal" }
+          : { session: newBackend, sandboxId: pointer.activeSandboxId, kind: "modal" },
+      onTransition: (event) => {
+        if (event.type === "fenced-retry") {
+          expect(event.fromEpoch).toBe(0);
+          expect(event.toEpoch).toBeNull();
+          ptr.swap("replacement");
+        }
+      },
+    });
+
+    expect(new TextDecoder().decode(await proxy.readFile({ path: "/workspace/a" }))).toBe("new");
+    expect(oldCalls).toBe(1);
+    expect(newCalls).toBe(1);
+  });
+
+  test("(2c) typed transient mutation failures are invoked once and expose no raw error or guessed execution identity", async () => {
+    const calls = new Map<string, number>();
+    const fail = (op: string): never => {
+      calls.set(op, (calls.get(op) ?? 0) + 1);
+      throw Object.assign(new Error(`secret command output for ${op}`), {
+        code: "UNAVAILABLE",
+        execId: `untrusted-${op}`,
+      });
+    };
+    const backend: RoutableBackendSession = {
+      exec: async () => fail("exec"),
+      execCommand: async () => fail("execCommand"),
+      writeStdin: async () => fail("writeStdin"),
+      writeFile: async () => fail("writeFile"),
+      materializeEntry: async () => fail("materializeEntry"),
+      desktopInput: async () => fail("desktopInput"),
+      screenshot: async () => ({
+        png: new Uint8Array(),
+        width: 1,
+        height: 1,
+        nativeWidth: 1,
+        nativeHeight: 1,
+      }),
+      createEditor: () => ({
+        createFile: async () => fail("editor.createFile"),
+        updateFile: async () => fail("editor.updateFile"),
+        deleteFile: async () => fail("editor.deleteFile"),
+      }),
+    };
+    const proxy = new RoutingSandboxSession({
+      defaultResolved: { session: backend, sandboxId: null, kind: "modal" },
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 7 }),
+      resolveActiveBackend: async () => ({ session: backend, sandboxId: null, kind: "modal" }),
+    });
+    const editor = proxy.createEditor() as Record<string, (operation: unknown) => Promise<unknown>>;
+    const operations: Array<[string, () => Promise<unknown>]> = [
+      ["exec", () => proxy.exec({ cmd: "mutate" })],
+      ["execCommand", () => proxy.execCommand({ cmd: "mutate" })],
+      ["writeStdin", () => proxy.writeStdin({ id: 1, data: "x" })],
+      ["writeFile", () => proxy.writeFile({ path: "/workspace/a", content: "x" })],
+      ["materializeEntry", () => proxy.materializeEntry({ path: "/workspace/a" })],
+      ["desktopInput", () => proxy.desktopInput!({ action: "click" })],
+      ["editor.createFile", () => editor.createFile!({ path: "/workspace/a" })],
+      ["editor.updateFile", () => editor.updateFile!({ path: "/workspace/a" })],
+      ["editor.deleteFile", () => editor.deleteFile!({ path: "/workspace/a" })],
+    ];
+
+    for (const [op, invoke] of operations) {
+      const error = await invoke().catch((caught) => caught);
+      expect(error).toBeInstanceOf(SandboxMutationAcceptanceUnknownError);
+      expect((error as SandboxMutationAcceptanceUnknownError).checkpoint).toEqual({
+        op,
+        backend: "modal",
+        activeEpoch: 7,
+        acceptance: "unknown",
+        transportCode: "UNAVAILABLE",
+      });
+      expect(String(error)).not.toContain("secret command output");
+      expect(JSON.stringify(error)).not.toContain("untrusted-");
+      expect(calls.get(op)).toBe(1);
+    }
+  });
+
+  test("(2d) a message-only mutation fence cannot authorize replay", async () => {
+    let calls = 0;
+    const backend: RoutableBackendSession = {
+      async exec() {
+        calls += 1;
+        throw new Error("epoch superseded after an unknown provider outcome");
+      },
+    };
+    const proxy = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 11 }),
+      resolveActiveBackend: async () => ({ session: backend, sandboxId: null, kind: "modal" }),
+    });
+
+    const error = await proxy.exec({ cmd: "once" }).catch((caught) => caught);
+    expect(error).toBeInstanceOf(SandboxMutationAcceptanceUnknownError);
+    expect((error as SandboxMutationAcceptanceUnknownError).checkpoint.transportCode).toBe(
+      "FENCED",
+    );
+    expect(calls).toBe(1);
+  });
+
+  test("(2e) typed non-acceptance permits only a bounded retry and surfaces safe exhaustion", async () => {
+    let calls = 0;
+    const backend: RoutableBackendSession = {
+      async exec() {
+        calls += 1;
+        throw new SelfhostedControlError({
+          message: "raw transport payload",
+          code: ErrorCode.ERROR_CODE_AGENT_OFFLINE,
+          reason: "agent_offline",
+          retryable: true,
+          neverSent: true,
+        });
+      },
+    };
+    const proxy = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 13 }),
+      resolveActiveBackend: async () => ({ session: backend, sandboxId: null, kind: "modal" }),
+      maxFenceRetries: 2,
+    });
+
+    const error = await proxy.exec({ cmd: "safe-to-retry" }).catch((caught) => caught);
+    expect(error).toBeInstanceOf(SandboxMutationRetryExhaustedError);
+    expect((error as SandboxMutationRetryExhaustedError).invocations).toBe(3);
+    expect(String(error)).not.toContain("raw transport payload");
+    expect(calls).toBe(3);
+  });
+
+  test("(2f) untyped non-acceptance lookalikes cannot authorize mutation replay", async () => {
+    let calls = 0;
+    const backend: RoutableBackendSession = {
+      async exec() {
+        calls += 1;
+        throw Object.assign(new Error("untrusted proof lookalike"), {
+          code: "UNAVAILABLE",
+          neverSent: true,
+          nonAcceptanceProven: true,
+        });
+      },
+    };
+    const proxy = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 14 }),
+      resolveActiveBackend: async () => ({ session: backend, sandboxId: null, kind: "modal" }),
+    });
+
+    const error = await proxy.exec({ cmd: "once" }).catch((caught) => caught);
+    expect(error).toBeInstanceOf(SandboxMutationAcceptanceUnknownError);
+    expect(calls).toBe(1);
+  });
+
+  test("(2g) typed transient evidence dominates nested NotFound text without inspecting prose", () => {
+    const cyclic: Record<string, unknown> = { code: "NOT_FOUND" };
+    cyclic.cause = cyclic;
+    const error = {
+      code: "NOT_FOUND",
+      message: "sandbox not found",
+      cause: { status: 14, error: cyclic },
+    };
+    expect(mutationTransportCode(error)).toBe("UNAVAILABLE");
+    expect(mutationTransportCode(new Error("TaskExecStart UNAVAILABLE"))).toBeNull();
+  });
+
+  test("(2h) hostile proxies and selfhosted protobuf enum numbers cannot fabricate transport", () => {
+    const enumOnly = new SelfhostedControlError({
+      message: "typed host error without admission proof",
+      code: ErrorCode.ERROR_CODE_AGENT_OFFLINE,
+      reason: "agent_offline",
+      retryable: true,
+    });
+    expect(mutationTransportCode(enumOnly)).toBeNull();
+
+    const hostileProxy = new Proxy(
+      { code: "UNAVAILABLE" },
+      {
+        getPrototypeOf() {
+          throw new Error("prototype trap must not escape");
+        },
+      },
+    );
+    expect(() => mutationTransportCode(hostileProxy)).not.toThrow();
+    expect(mutationTransportCode(hostileProxy)).toBe("UNAVAILABLE");
   });
 
   test("(3) heterogeneous swap (>=2 flips): ops land on the new active box each flip", async () => {
