@@ -722,6 +722,10 @@ function createDensityModel(expected: number, config: DensityProfileConfig) {
     private released = false;
     private readonly activeWork = new Set<SyntheticWork>();
     private readonly delegate: ScriptedModel;
+    private readonly forcedTurnIndexes: number[];
+    private readonly ordinaryTurnIndexes: number[];
+    private forcedArrivals = 0;
+    private ordinaryArrivals = 0;
 
     constructor() {
       this.allStarted = new Promise((resolve) => {
@@ -731,15 +735,20 @@ function createDensityModel(expected: number, config: DensityProfileConfig) {
         this.resolveGate = resolve;
       });
       this.delegate = new ScriptedModel([syntheticModelStep()]);
+      const turnIndexes = Array.from({ length: expected }, (_, index) => index);
+      this.forcedTurnIndexes = turnIndexes.filter(shouldForceCompactionForTurn);
+      this.ordinaryTurnIndexes = turnIndexes.filter(
+        (turnIndex) => !shouldForceCompactionForTurn(turnIndex),
+      );
     }
 
     async getResponse(request: Parameters<ScriptedModel["getResponse"]>[0]) {
-      await this.arrive(request);
+      await this.arrive(request, "ordinary");
       return await this.delegate.getResponse(request);
     }
 
     async *getStreamedResponse(request: Parameters<ScriptedModel["getStreamedResponse"]>[0]) {
-      await this.arrive(request);
+      await this.arrive(request, "ordinary");
       yield* this.delegate.getStreamedResponse(request);
     }
 
@@ -748,7 +757,7 @@ function createDensityModel(expected: number, config: DensityProfileConfig) {
       input: Array<Record<string, unknown>>,
     ): Promise<string> => {
       this.compactionCalls += 1;
-      await this.arrive({ input });
+      await this.arrive({ input }, "forced-compaction");
       return "Deterministic bounded density-profile context summary.";
     };
 
@@ -762,7 +771,7 @@ function createDensityModel(expected: number, config: DensityProfileConfig) {
       this.delegate.requests.length = 0;
     }
 
-    private async arrive(request: { input?: unknown }) {
+    private async arrive(request: { input?: unknown }, path: "ordinary" | "forced-compaction") {
       // A proactive compaction call is the first memory boundary for a
       // pathological history. After that boundary is released, the same turn's
       // main model call must pass through instead of counting as a second turn.
@@ -773,7 +782,13 @@ function createDensityModel(expected: number, config: DensityProfileConfig) {
       if (this.started >= expected) {
         throw new Error(`Density model received more than ${expected} model calls`);
       }
-      const turnIndex = this.started;
+      const turnIndex =
+        path === "forced-compaction"
+          ? this.forcedTurnIndexes[this.forcedArrivals++]
+          : this.ordinaryTurnIndexes[this.ordinaryArrivals++];
+      if (turnIndex === undefined) {
+        throw new Error(`Density model received an unexpected ${path} arrival`);
+      }
       this.started += 1;
       const work = syntheticWorkForTurn(turnIndex, config);
       this.activeWork.add(work);
