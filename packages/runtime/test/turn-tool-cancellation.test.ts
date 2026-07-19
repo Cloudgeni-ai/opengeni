@@ -85,6 +85,7 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     let processAlive = true;
     let execInput: Record<string, unknown> | null = null;
     const signals: string[] = [];
+    const signalCommands: string[] = [];
     const writes: string[] = [];
 
     const exec = functionTool("exec_command", async (_context, rawInput) => {
@@ -94,15 +95,18 @@ describe("turn sandbox-tool physical cancellation fence", () => {
         return exited(0, "4200 4200\n");
       }
       if (cmd.includes("command kill -TERM")) {
+        signalCommands.push(cmd);
         signals.push("TERM");
         return exited(0);
       }
       if (cmd.includes("command kill -KILL")) {
+        signalCommands.push(cmd);
         signals.push("KILL");
         processAlive = false;
         return exited(0);
       }
       if (cmd.includes("command kill -0")) {
+        signalCommands.push(cmd);
         return exited(processAlive ? 75 : 0);
       }
       execInput = input;
@@ -132,6 +136,11 @@ describe("turn sandbox-tool physical cancellation fence", () => {
 
     expect(writes[0]).toBe("\u0003");
     expect(signals).toEqual(["TERM", "KILL"]);
+    expect(signalCommands.some((cmd) => cmd.includes(' -- "-'))).toBe(false);
+    expect(signalCommands.some((cmd) => cmd.includes('command kill -0 "-$__opengeni_pgid"'))).toBe(
+      true,
+    );
+    expect(signalCommands.some((cmd) => cmd.includes('command kill -TERM "-4200"'))).toBe(true);
     expect(processAlive).toBe(false);
   });
 

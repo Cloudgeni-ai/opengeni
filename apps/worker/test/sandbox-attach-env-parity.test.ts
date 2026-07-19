@@ -136,7 +136,7 @@ describe("repo-attached turn: token VALUE is OFF the manifest, only the FILE PAT
     const settings = baseSettings();
     const repoResource: ResourceRef = {
       kind: "repository",
-      uri: "github.com/acme/repo",
+      uri: "https://github.com/acme/repo",
       ref: "main",
       githubInstallationId: 123,
       githubRepositoryId: 456,

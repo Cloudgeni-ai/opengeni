@@ -866,12 +866,12 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     const script = state.identityValidated
       ? [
           `__opengeni_pgid=${state.identity?.processGroupId ?? 0}`,
-          'command kill -0 -- "-$__opengeni_pgid" 2>/dev/null && exit 75',
+          'command kill -0 "-$__opengeni_pgid" 2>/dev/null && exit 75',
           "exit 0",
         ].join("\n")
       : identityGuardScript(
           state,
-          'command kill -0 -- "-$__opengeni_pgid" 2>/dev/null && exit 75\nexit 0',
+          'command kill -0 "-$__opengeni_pgid" 2>/dev/null && exit 75\nexit 0',
           76,
         );
     try {
@@ -890,10 +890,10 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
 
   private async signalIdentity(state: ActiveShellSession, signal: "TERM" | "KILL"): Promise<void> {
     const script = state.identityValidated
-      ? `command kill -${signal} -- "-${state.identity?.processGroupId ?? 0}" 2>/dev/null || exit 76`
+      ? `command kill -${signal} "-${state.identity?.processGroupId ?? 0}" 2>/dev/null || exit 76`
       : identityGuardScript(
           state,
-          `command kill -${signal} -- "-$__opengeni_pgid" 2>/dev/null || exit 76\nexit 0`,
+          `command kill -${signal} "-$__opengeni_pgid" 2>/dev/null || exit 76\nexit 0`,
           76,
         );
     try {

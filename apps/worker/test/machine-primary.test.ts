@@ -19,6 +19,8 @@ import { establishSelfhostedTurnSession } from "../src/sandbox-routing";
 
 const repoResource = (): ResourceRef => ({
   kind: "repository",
+  // Deliberately non-canonical: a Connected Machine must bypass platform
+  // repository discovery and validation as well as token minting.
   uri: "github.com/acme/repo",
   ref: "main",
   githubInstallationId: 123,
