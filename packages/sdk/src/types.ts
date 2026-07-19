@@ -1193,6 +1193,68 @@ export type Permission = KnownPermission | (string & {});
 
 export type ProductAccessMode = "local" | "configured" | "managed";
 
+export type ModelCapabilitySupportV1 = "supported" | "unsupported" | "unknown";
+
+export type ModelCapabilityStateV1 = {
+  upstream: ModelCapabilitySupportV1;
+  runnable: boolean;
+};
+
+export type ModelCapabilitiesV1 = {
+  reasoning: ModelCapabilityStateV1 & {
+    efforts: ReasoningEffort[];
+    defaultEffort: ReasoningEffort | null;
+    required: boolean;
+  };
+  functionCalling: ModelCapabilityStateV1;
+  structuredOutput: ModelCapabilityStateV1;
+  hostedTools: {
+    webSearch: ModelCapabilityStateV1;
+    xSearch: ModelCapabilityStateV1;
+    codeExecution: ModelCapabilityStateV1;
+  };
+  inputModalities: Array<"text" | "image" | "audio">;
+  outputModalities: Array<"text" | "image" | "audio">;
+  transports: {
+    sse: ModelCapabilityStateV1;
+    responsesWebSocket: ModelCapabilityStateV1;
+    realtimeAudio: ModelCapabilityStateV1;
+  };
+  latencyModes: Array<{
+    id: "standard" | "priority" | "fast";
+    upstream: ModelCapabilitySupportV1;
+    runnable: boolean;
+    billingMultiplierBps?: number | undefined;
+  }>;
+};
+
+export type ModelCredentialSourceV1 =
+  | { kind: "deployment"; mechanism: "api_key" | "azure_ad_bearer" }
+  | { kind: "connected_subscription"; provider: "codex" }
+  | { kind: "workspace_connection"; mechanism: "api_key" };
+
+export type ModelBillingAttributionV1 = {
+  upstreamPayer: "deployment" | "workspace" | "connected_subscription";
+  metering: "opengeni_credits" | "external";
+};
+
+export type ModelPricingV1 = {
+  inputMicrosPerMillionTokens: number;
+  cachedInputMicrosPerMillionTokens?: number | undefined;
+  outputMicrosPerMillionTokens: number;
+  marginBps?: number | undefined;
+};
+
+export type ModelPricingScheduleV1 = {
+  default: ModelPricingV1;
+  inputTokenTiers?:
+    | Array<{
+        minimumInputTokens: number;
+        pricing: ModelPricingV1;
+      }>
+    | undefined;
+};
+
 /**
  * One model a client may select at send time, plus the provider that serves it.
  * The wire API (`responses` | `chat`) lets a client reason about provider
@@ -1207,6 +1269,49 @@ export type ClientModel = {
   providerLabel: string;
   api: "responses" | "chat";
   contextWindowTokens?: number | undefined;
+  schemaVersion?: 1 | undefined;
+  aliases?: string[] | undefined;
+  deployment?:
+    | {
+        upstreamModelId: string;
+        wireApi: "responses" | "chat";
+      }
+    | undefined;
+  executionLimits?:
+    | {
+        contextWindowTokens: number | null;
+        effectiveContextWindowTokens: number | null;
+        autoCompactTokenLimit: number | null;
+        toolOutputTruncationTokens: number | null;
+      }
+    | undefined;
+  credentialSource?: ModelCredentialSourceV1 | undefined;
+  billing?: ModelBillingAttributionV1 | undefined;
+  capabilities?: ModelCapabilitiesV1 | undefined;
+  pricing?: ModelPricingScheduleV1 | undefined;
+  definitionVersion?: string | undefined;
+};
+
+export type ModelAvailabilityV1 = {
+  status: "available" | "unavailable" | "degraded" | "unknown";
+  selectable: boolean;
+  reason:
+    | "missing_credential"
+    | "needs_reauth"
+    | "not_entitled"
+    | "provider_unhealthy"
+    | "policy_blocked"
+    | "unsupported"
+    | null;
+  checkedAt: string | null;
+};
+
+export type WorkspaceModelCatalogModel = ClientModel & {
+  availability: ModelAvailabilityV1;
+};
+
+export type WorkspaceModelCatalogResponse = {
+  models: WorkspaceModelCatalogModel[];
 };
 
 /**

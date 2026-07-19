@@ -908,14 +908,25 @@ describe("GET /v1/config/client", () => {
 
     expect(config.models.map((model) => model.id)).toEqual(configuredAllowedModels(settings));
     const glm = config.models.find((model) => model.id === "accounts/fireworks/models/glm-5p2");
-    expect(glm).toEqual({
+    expect(glm).toMatchObject({
       id: "accounts/fireworks/models/glm-5p2",
       label: "GLM 5.2",
       provider: "fireworks",
       providerLabel: "Fireworks AI",
       api: "chat",
       contextWindowTokens: 1_048_576,
+      schemaVersion: 1,
+      aliases: [],
+      deployment: {
+        upstreamModelId: "accounts/fireworks/models/glm-5p2",
+        wireApi: "chat",
+      },
+      credentialSource: { kind: "deployment", mechanism: "api_key" },
+      billing: { upstreamPayer: "deployment", metering: "opengeni_credits" },
     });
+    expect(glm?.definitionVersion).toMatch(/^sha256:[a-f0-9]{64}$/u);
+    expect(glm).not.toHaveProperty("availability");
+    expect(JSON.stringify(config)).not.toContain("fw_test");
   });
 });
 

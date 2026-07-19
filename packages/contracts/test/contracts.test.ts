@@ -6,6 +6,7 @@ import {
   CapabilityPack,
   ClientConfig,
   ClientModel,
+  WorkspaceModelCatalogResponse,
   ClientSessionEvent,
   CreateCapabilityCatalogItemRequest,
   CreateKnowledgeMemoryRequest,
@@ -274,6 +275,86 @@ describe("contracts", () => {
         api: "grpc",
       }),
     ).toThrow();
+  });
+
+  test("accepts additive normalized model definitions and authenticated availability", () => {
+    const normalized = ClientModel.parse({
+      id: "xai/grok-4.5",
+      label: "Grok 4.5",
+      provider: "xai",
+      providerLabel: "xAI",
+      api: "responses",
+      contextWindowTokens: 500_000,
+      schemaVersion: 1,
+      aliases: ["grok-4.5"],
+      deployment: { upstreamModelId: "grok-4.5", wireApi: "responses" },
+      executionLimits: {
+        contextWindowTokens: 500_000,
+        effectiveContextWindowTokens: null,
+        autoCompactTokenLimit: null,
+        toolOutputTruncationTokens: 10_000,
+      },
+      credentialSource: { kind: "deployment", mechanism: "api_key" },
+      billing: { upstreamPayer: "deployment", metering: "opengeni_credits" },
+      capabilities: {
+        reasoning: {
+          upstream: "supported",
+          runnable: true,
+          efforts: ["low", "medium", "high"],
+          defaultEffort: "high",
+          required: true,
+        },
+        functionCalling: { upstream: "supported", runnable: true },
+        structuredOutput: { upstream: "supported", runnable: true },
+        hostedTools: {
+          webSearch: { upstream: "supported", runnable: true },
+          xSearch: { upstream: "supported", runnable: false },
+          codeExecution: { upstream: "supported", runnable: false },
+        },
+        inputModalities: ["text", "image"],
+        outputModalities: ["text"],
+        transports: {
+          sse: { upstream: "supported", runnable: true },
+          responsesWebSocket: { upstream: "supported", runnable: false },
+          realtimeAudio: { upstream: "unsupported", runnable: false },
+        },
+        latencyModes: [{ id: "standard", upstream: "supported", runnable: true }],
+      },
+      pricing: {
+        default: {
+          inputMicrosPerMillionTokens: 2_000_000,
+          cachedInputMicrosPerMillionTokens: 300_000,
+          outputMicrosPerMillionTokens: 6_000_000,
+        },
+        inputTokenTiers: [
+          {
+            minimumInputTokens: 200_000,
+            pricing: {
+              inputMicrosPerMillionTokens: 4_000_000,
+              cachedInputMicrosPerMillionTokens: 600_000,
+              outputMicrosPerMillionTokens: 12_000_000,
+            },
+          },
+        ],
+      },
+      definitionVersion: `sha256:${"a".repeat(64)}`,
+    });
+    expect(normalized.deployment?.upstreamModelId).toBe("grok-4.5");
+
+    const catalog = WorkspaceModelCatalogResponse.parse({
+      models: [
+        {
+          ...normalized,
+          availability: {
+            status: "unknown",
+            selectable: true,
+            reason: null,
+            checkedAt: null,
+          },
+        },
+      ],
+    });
+    expect(catalog.models[0]?.availability.selectable).toBe(true);
   });
 
   test("accepts checkout requests that use the caller default account", () => {

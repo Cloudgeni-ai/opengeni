@@ -9,7 +9,17 @@ import {
   StaticUsageLimits,
   UsageLimitsMode,
 } from "@opengeni/contracts";
-import { CODEX_MODEL_ID_PREFIX, CODEX_PROVIDER_ID } from "@opengeni/codex/constants";
+import { CODEX_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS } from "@opengeni/codex";
+import {
+  CODEX_FALLBACK_MODEL_SLUGS,
+  CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
+  CODEX_MODEL_CONTEXT_WINDOW_TOKENS,
+  CODEX_MODEL_EFFECTIVE_CONTEXT_WINDOW_TOKENS,
+  CODEX_MODEL_ID_PREFIX,
+  CODEX_PROVIDER_BASE_URL,
+  CODEX_PROVIDER_ID,
+} from "@opengeni/codex/constants";
+import { createHash } from "node:crypto";
 import { z } from "zod";
 
 const envName = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -711,6 +721,15 @@ export type ModelPricing = {
   outputMicrosPerMillionTokens: number;
   marginBps?: number | undefined;
 };
+export type ModelPricingScheduleV1 = {
+  default: ModelPricing;
+  inputTokenTiers?:
+    | Array<{
+        minimumInputTokens: number;
+        pricing: ModelPricing;
+      }>
+    | undefined;
+};
 export type ModelUsageInput = {
   inputTokens?: number | undefined;
   outputTokens?: number | undefined;
@@ -728,6 +747,164 @@ const ModelPricingSchema = z.object({
   outputMicrosPerMillionTokens: z.number().int().nonnegative(),
   marginBps: z.number().int().min(0).max(100_000).optional(),
 });
+
+const ModelPricingScheduleSchema = z
+  .object({
+    default: ModelPricingSchema,
+    inputTokenTiers: z
+      .array(
+        z.object({
+          minimumInputTokens: z.number().int().nonnegative(),
+          pricing: ModelPricingSchema,
+        }),
+      )
+      .optional(),
+  })
+  .superRefine((schedule, ctx) => {
+    let previous = -1;
+    for (const [index, tier] of (schedule.inputTokenTiers ?? []).entries()) {
+      if (tier.minimumInputTokens <= previous) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["inputTokenTiers", index, "minimumInputTokens"],
+          message: "input-token tier thresholds must be strictly increasing",
+        });
+      }
+      previous = tier.minimumInputTokens;
+    }
+  });
+
+export const CapabilitySupportV1 = z.enum(["supported", "unsupported", "unknown"]);
+export type CapabilitySupportV1 = z.infer<typeof CapabilitySupportV1>;
+
+export const CapabilityStateV1Schema = z
+  .object({
+    upstream: CapabilitySupportV1,
+    runnable: z.boolean(),
+  })
+  .superRefine((state, ctx) => {
+    if (state.upstream === "unsupported" && state.runnable) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["runnable"],
+        message: "an upstream-unsupported capability cannot be runnable",
+      });
+    }
+  });
+export type CapabilityStateV1 = z.infer<typeof CapabilityStateV1Schema>;
+
+const ModelModalityV1 = z.enum(["text", "image", "audio"]);
+const ModelLatencyModeV1 = z.enum(["standard", "priority", "fast"]);
+
+export const ModelCapabilitiesV1Schema = z
+  .object({
+    reasoning: CapabilityStateV1Schema.extend({
+      efforts: z.array(ReasoningEffort),
+      defaultEffort: ReasoningEffort.nullable(),
+      required: z.boolean(),
+    }),
+    functionCalling: CapabilityStateV1Schema,
+    structuredOutput: CapabilityStateV1Schema,
+    hostedTools: z.object({
+      webSearch: CapabilityStateV1Schema,
+      xSearch: CapabilityStateV1Schema,
+      codeExecution: CapabilityStateV1Schema,
+    }),
+    inputModalities: z.array(ModelModalityV1).min(1),
+    outputModalities: z.array(ModelModalityV1).min(1),
+    transports: z.object({
+      sse: CapabilityStateV1Schema,
+      responsesWebSocket: CapabilityStateV1Schema,
+      realtimeAudio: CapabilityStateV1Schema,
+    }),
+    latencyModes: z
+      .array(
+        z.object({
+          id: ModelLatencyModeV1,
+          upstream: CapabilitySupportV1,
+          runnable: z.boolean(),
+          billingMultiplierBps: z.number().int().positive().optional(),
+        }),
+      )
+      .min(1),
+  })
+  .superRefine((capabilities, ctx) => {
+    const efforts = new Set(capabilities.reasoning.efforts);
+    if (efforts.size !== capabilities.reasoning.efforts.length) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["reasoning", "efforts"],
+        message: "reasoning efforts must be unique",
+      });
+    }
+    if (
+      capabilities.reasoning.defaultEffort !== null &&
+      !efforts.has(capabilities.reasoning.defaultEffort)
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["reasoning", "defaultEffort"],
+        message: "the default reasoning effort must be one of the supported efforts",
+      });
+    }
+    if (capabilities.reasoning.runnable && capabilities.reasoning.efforts.length === 0) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["reasoning", "efforts"],
+        message: "a runnable reasoning capability must declare at least one effort",
+      });
+    }
+    for (const field of ["inputModalities", "outputModalities"] as const) {
+      if (new Set(capabilities[field]).size !== capabilities[field].length) {
+        ctx.addIssue({
+          code: "custom",
+          path: [field],
+          message: `${field} must be unique`,
+        });
+      }
+    }
+    const latencyIds = new Set<string>();
+    for (const [index, mode] of capabilities.latencyModes.entries()) {
+      if (latencyIds.has(mode.id)) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["latencyModes", index, "id"],
+          message: "latency mode ids must be unique",
+        });
+      }
+      latencyIds.add(mode.id);
+      if (mode.upstream === "unsupported" && mode.runnable) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["latencyModes", index, "runnable"],
+          message: "an upstream-unsupported latency mode cannot be runnable",
+        });
+      }
+    }
+  });
+export type ModelCapabilitiesV1 = z.infer<typeof ModelCapabilitiesV1Schema>;
+
+export type ModelDeploymentV1 = {
+  upstreamModelId: string;
+  wireApi: ModelProviderApi;
+};
+
+export type ModelExecutionLimitsV1 = {
+  contextWindowTokens: number | null;
+  effectiveContextWindowTokens: number | null;
+  autoCompactTokenLimit: number | null;
+  toolOutputTruncationTokens: number | null;
+};
+
+export type CredentialSourceV1 =
+  | { kind: "deployment"; mechanism: "api_key" | "azure_ad_bearer" }
+  | { kind: "connected_subscription"; provider: "codex" }
+  | { kind: "workspace_connection"; mechanism: "api_key" };
+
+export type BillingAttributionV1 = {
+  upstreamPayer: "deployment" | "workspace" | "connected_subscription";
+  metering: "opengeni_credits" | "external";
+};
 
 /**
  * Wire API a provider speaks. The built-in OpenAI/Azure provider always uses
@@ -748,19 +925,51 @@ export const RegistryProviderKind = z.enum(["api-key", "codex-subscription"]);
 export type RegistryProviderKind = z.infer<typeof RegistryProviderKind>;
 
 /** A single model exposed by a registry provider. */
-const RegistryModelSchema = z.object({
-  id: z.string().min(1), // model id sent to the provider, e.g. "accounts/fireworks/models/glm-5p2"
-  label: z.string().min(1).optional(), // display name; defaults to id
-  contextWindowTokens: z.number().int().positive().optional(),
-  effectiveContextWindowTokens: z.number().int().positive().optional(),
-  autoCompactTokenLimit: z.number().int().positive().optional(),
-  // Canonical model-facing function/tool-result policy. The runtime applies
-  // the same 1.2x serialization allowance as Codex when materializing output.
-  toolOutputTruncationTokens: z.number().int().positive().optional(),
-  reasoningEffort: z.boolean().optional(), // model accepts a reasoning-effort control
-  hostedWebSearch: z.boolean().optional(), // provider executes the hosted web_search tool for this model
-  pricing: ModelPricingSchema.optional(),
-});
+const RegistryModelSchema = z
+  .object({
+    id: z.string().min(1), // canonical OpenGeni product id
+    upstreamModelId: z.string().min(1).optional(), // exact provider slug; defaults to id
+    aliases: z.array(z.string().min(1)).optional(), // accepted input only; never sent upstream
+    label: z.string().min(1).optional(), // display name; defaults to id
+    contextWindowTokens: z.number().int().positive().optional(),
+    effectiveContextWindowTokens: z.number().int().positive().optional(),
+    autoCompactTokenLimit: z.number().int().positive().optional(),
+    // Canonical model-facing function/tool-result policy. The runtime applies
+    // the same 1.2x serialization allowance as Codex when materializing output.
+    toolOutputTruncationTokens: z.number().int().positive().optional(),
+    reasoningEffort: z.boolean().optional(), // legacy compatibility input/projection
+    hostedWebSearch: z.boolean().optional(), // legacy compatibility input/projection
+    capabilities: ModelCapabilitiesV1Schema.optional(),
+    pricing: z.union([ModelPricingSchema, ModelPricingScheduleSchema]).optional(),
+    // Reserved normalized contracts are derived by OpenGeni in V1. Generic
+    // registry JSON must not opt itself into workspace BYOK or reattribute cost.
+    credentialSource: z.never().optional(),
+    billing: z.never().optional(),
+  })
+  .superRefine((model, ctx) => {
+    if (
+      model.capabilities &&
+      model.reasoningEffort !== undefined &&
+      model.reasoningEffort !== model.capabilities.reasoning.runnable
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["reasoningEffort"],
+        message: "legacy reasoningEffort must agree with capabilities.reasoning.runnable",
+      });
+    }
+    if (
+      model.capabilities &&
+      model.hostedWebSearch !== undefined &&
+      model.hostedWebSearch !== model.capabilities.hostedTools.webSearch.runnable
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["hostedWebSearch"],
+        message: "legacy hostedWebSearch must agree with capabilities.hostedTools.webSearch.runnable",
+      });
+    }
+  });
 
 /** A non-built-in provider declared by the host via OPENGENI_MODEL_PROVIDERS_JSON. */
 const RegistryProviderSchema = z.object({
@@ -773,6 +982,12 @@ const RegistryProviderSchema = z.object({
   apiKeyEnv: z.string().optional(), // ... OR name of the env var holding the key (preferred)
   defaultQuery: z.record(z.string(), z.string()).optional(),
   defaultHeaders: z.record(z.string(), z.string()).optional(),
+  publicDefaultQueryNames: z.array(z.string().min(1)).optional(),
+  publicDefaultHeaderNames: z.array(z.string().min(1)).optional(),
+  // V1 derives these from provider kind. Workspace BYOK is deliberately not a
+  // registry switch and requires a separately reviewed encrypted broker.
+  credentialSource: z.never().optional(),
+  billing: z.never().optional(),
   models: z.array(RegistryModelSchema).min(1),
 });
 export type RegistryProvider = z.infer<typeof RegistryProviderSchema>;
@@ -803,15 +1018,29 @@ export interface ResolvedModelProvider {
   apiKey?: string | undefined;
   defaultQuery?: Record<string, string> | undefined;
   defaultHeaders?: Record<string, string> | undefined;
+  publicDefaultQueryNames?: string[] | undefined;
+  publicDefaultHeaderNames?: string[] | undefined;
+  credentialSource: CredentialSourceV1;
+  billing: BillingAttributionV1;
 }
 
 /** A single exposed model + the provider that serves it. */
 export interface ConfiguredModel {
+  schemaVersion: 1;
   id: string;
+  aliases: string[];
   label: string;
   providerId: string;
   providerLabel: string;
   api: ModelProviderApi;
+  upstreamModelId: string;
+  deployment: ModelDeploymentV1;
+  executionLimits: ModelExecutionLimitsV1;
+  credentialSource: CredentialSourceV1;
+  billing: BillingAttributionV1;
+  capabilities: ModelCapabilitiesV1;
+  pricing?: ModelPricingScheduleV1 | undefined;
+  definitionVersion: string;
   contextWindowTokens?: number | undefined;
   effectiveContextWindowTokens?: number | undefined;
   autoCompactTokenLimit?: number | undefined;
@@ -1256,6 +1485,353 @@ export function resolveProviderApiKey(
   return undefined;
 }
 
+const HTTP_FIELD_NAME = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+const CREDENTIAL_LIKE_NAME_PARTS = new Set([
+  "apikey",
+  "auth",
+  "authorization",
+  "bearer",
+  "credential",
+  "cookie",
+  "key",
+  "password",
+  "secret",
+  "session",
+  "signature",
+  "token",
+]);
+const REASONING_EFFORT_ORDER = new Map(
+  ReasoningEffort.options.map((effort, index) => [effort, index]),
+);
+const MODALITY_ORDER = new Map(["text", "image", "audio"].map((value, index) => [value, index]));
+const LATENCY_MODE_ORDER = new Map(
+  ["standard", "priority", "fast"].map((value, index) => [value, index]),
+);
+
+function normalizeRegistryBaseUrl(value: string, providerId: string): string {
+  const url = new URL(value);
+  if (url.username || url.password) {
+    throw new Error(`provider ${providerId} baseUrl must not contain userinfo`);
+  }
+  if (url.search) {
+    throw new Error(
+      `provider ${providerId} baseUrl must not contain a query; move query entries to defaultQuery`,
+    );
+  }
+  if (url.hash) {
+    throw new Error(`provider ${providerId} baseUrl must not contain a fragment`);
+  }
+  return url.toString();
+}
+
+function isCredentialLikeMetadataName(name: string): boolean {
+  return name
+    .toLowerCase()
+    .split(/[-_.]/u)
+    .some((part) => CREDENTIAL_LIKE_NAME_PARTS.has(part));
+}
+
+function normalizeHeaderMap(
+  providerId: string,
+  headers: Record<string, string> | undefined,
+): Record<string, string> | undefined {
+  if (!headers) {
+    return undefined;
+  }
+  const normalized: Record<string, string> = {};
+  const rawByNormalized = new Map<string, string>();
+  for (const [rawName, value] of Object.entries(headers)) {
+    if (!HTTP_FIELD_NAME.test(rawName)) {
+      throw new Error(
+        `provider ${providerId} defaultHeaders contains invalid HTTP field name ${JSON.stringify(rawName)}`,
+      );
+    }
+    const name = rawName.toLowerCase();
+    const previous = rawByNormalized.get(name);
+    if (previous !== undefined) {
+      throw new Error(
+        `provider ${providerId} defaultHeaders names ${JSON.stringify(previous)} and ${JSON.stringify(rawName)} collide after lowercase normalization`,
+      );
+    }
+    if (name === "authorization") {
+      throw new Error(
+        `provider ${providerId} defaultHeaders must not override SDK-managed Authorization`,
+      );
+    }
+    rawByNormalized.set(name, rawName);
+    normalized[name] = value;
+  }
+  return normalized;
+}
+
+function normalizePublicHeaderNames(
+  providerId: string,
+  names: string[] | undefined,
+  headers: Record<string, string> | undefined,
+): string[] | undefined {
+  if (!names) {
+    return undefined;
+  }
+  const normalized: string[] = [];
+  const seen = new Set<string>();
+  for (const rawName of names) {
+    if (!HTTP_FIELD_NAME.test(rawName)) {
+      throw new Error(
+        `provider ${providerId} publicDefaultHeaderNames contains invalid HTTP field name ${JSON.stringify(rawName)}`,
+      );
+    }
+    const name = rawName.toLowerCase();
+    if (seen.has(name)) {
+      throw new Error(
+        `provider ${providerId} publicDefaultHeaderNames contains duplicate normalized name ${JSON.stringify(name)}`,
+      );
+    }
+    if (!(name in (headers ?? {}))) {
+      throw new Error(
+        `provider ${providerId} publicDefaultHeaderNames declares absent defaultHeaders entry ${JSON.stringify(name)}`,
+      );
+    }
+    if (isCredentialLikeMetadataName(name)) {
+      throw new Error(
+        `provider ${providerId} publicDefaultHeaderNames cannot classify credential-like name ${JSON.stringify(name)} as public`,
+      );
+    }
+    seen.add(name);
+    normalized.push(name);
+  }
+  return normalized;
+}
+
+function normalizeQueryMap(
+  providerId: string,
+  query: Record<string, string> | undefined,
+): Record<string, string> | undefined {
+  if (!query) {
+    return undefined;
+  }
+  for (const name of Object.keys(query)) {
+    if (!name) {
+      throw new Error(`provider ${providerId} defaultQuery contains an empty name`);
+    }
+  }
+  return { ...query };
+}
+
+function normalizePublicQueryNames(
+  providerId: string,
+  names: string[] | undefined,
+  query: Record<string, string> | undefined,
+): string[] | undefined {
+  if (!names) {
+    return undefined;
+  }
+  const seen = new Set<string>();
+  for (const name of names) {
+    if (seen.has(name)) {
+      throw new Error(
+        `provider ${providerId} publicDefaultQueryNames contains duplicate name ${JSON.stringify(name)}`,
+      );
+    }
+    if (!(name in (query ?? {}))) {
+      throw new Error(
+        `provider ${providerId} publicDefaultQueryNames declares absent defaultQuery entry ${JSON.stringify(name)}`,
+      );
+    }
+    if (isCredentialLikeMetadataName(name)) {
+      throw new Error(
+        `provider ${providerId} publicDefaultQueryNames cannot classify credential-like name ${JSON.stringify(name)} as public`,
+      );
+    }
+    seen.add(name);
+  }
+  return [...names];
+}
+
+function normalizeRegistryProvider(provider: RegistryProvider): RegistryProvider {
+  const defaultHeaders = normalizeHeaderMap(provider.id, provider.defaultHeaders);
+  const defaultQuery = normalizeQueryMap(provider.id, provider.defaultQuery);
+  return {
+    ...provider,
+    baseUrl: normalizeRegistryBaseUrl(provider.baseUrl, provider.id),
+    ...(defaultHeaders === undefined ? {} : { defaultHeaders }),
+    ...(defaultQuery === undefined ? {} : { defaultQuery }),
+    ...(provider.publicDefaultHeaderNames === undefined
+      ? {}
+      : {
+          publicDefaultHeaderNames: normalizePublicHeaderNames(
+            provider.id,
+            provider.publicDefaultHeaderNames,
+            defaultHeaders,
+          ),
+        }),
+    ...(provider.publicDefaultQueryNames === undefined
+      ? {}
+      : {
+          publicDefaultQueryNames: normalizePublicQueryNames(
+            provider.id,
+            provider.publicDefaultQueryNames,
+            defaultQuery,
+          ),
+        }),
+  };
+}
+
+function normalizeModelPricingSchedule(
+  pricing: ModelPricing | ModelPricingScheduleV1,
+): ModelPricingScheduleV1 {
+  return "default" in pricing ? pricing : { default: pricing };
+}
+
+function normalizeCapabilities(capabilities: ModelCapabilitiesV1): ModelCapabilitiesV1 {
+  const parsed = ModelCapabilitiesV1Schema.parse(capabilities);
+  return {
+    ...parsed,
+    reasoning: {
+      ...parsed.reasoning,
+      efforts: [...parsed.reasoning.efforts].sort(
+        (left, right) =>
+          (REASONING_EFFORT_ORDER.get(left) ?? 0) - (REASONING_EFFORT_ORDER.get(right) ?? 0),
+      ),
+    },
+    inputModalities: [...parsed.inputModalities].sort(
+      (left, right) => (MODALITY_ORDER.get(left) ?? 0) - (MODALITY_ORDER.get(right) ?? 0),
+    ),
+    outputModalities: [...parsed.outputModalities].sort(
+      (left, right) => (MODALITY_ORDER.get(left) ?? 0) - (MODALITY_ORDER.get(right) ?? 0),
+    ),
+    latencyModes: [...parsed.latencyModes].sort(
+      (left, right) =>
+        (LATENCY_MODE_ORDER.get(left.id) ?? 0) - (LATENCY_MODE_ORDER.get(right.id) ?? 0),
+    ),
+  };
+}
+
+function legacyModelCapabilities(
+  settings: Settings,
+  input: { reasoningEffort: boolean; hostedWebSearch: boolean },
+): ModelCapabilitiesV1 {
+  const reasoningEfforts = input.reasoningEffort ? configuredAllowedReasoningEfforts(settings) : [];
+  return normalizeCapabilities({
+    reasoning: {
+      upstream: input.reasoningEffort ? "supported" : "unknown",
+      runnable: input.reasoningEffort,
+      efforts: reasoningEfforts,
+      defaultEffort: input.reasoningEffort ? settings.openaiReasoningEffort : null,
+      required: false,
+    },
+    functionCalling: { upstream: "unknown", runnable: true },
+    structuredOutput: { upstream: "unknown", runnable: false },
+    hostedTools: {
+      webSearch: {
+        upstream: input.hostedWebSearch ? "supported" : "unknown",
+        runnable: input.hostedWebSearch,
+      },
+      xSearch: { upstream: "unknown", runnable: false },
+      codeExecution: { upstream: "unknown", runnable: false },
+    },
+    inputModalities: ["text"],
+    outputModalities: ["text"],
+    transports: {
+      sse: { upstream: "unknown", runnable: true },
+      responsesWebSocket: { upstream: "unknown", runnable: false },
+      realtimeAudio: { upstream: "unknown", runnable: false },
+    },
+    latencyModes: [{ id: "standard", upstream: "unknown", runnable: true }],
+  });
+}
+
+function registryCredentialSource(provider: RegistryProvider): CredentialSourceV1 {
+  return provider.kind === "codex-subscription"
+    ? { kind: "connected_subscription", provider: "codex" }
+    : { kind: "deployment", mechanism: "api_key" };
+}
+
+function registryBilling(provider: RegistryProvider): BillingAttributionV1 {
+  return provider.kind === "codex-subscription"
+    ? { upstreamPayer: "connected_subscription", metering: "external" }
+    : { upstreamPayer: "deployment", metering: "opengeni_credits" };
+}
+
+function builtinCredentialSource(settings: Settings): CredentialSourceV1 {
+  if (settings.openaiProvider === "azure" && !settings.azureOpenaiApiKey) {
+    return { kind: "deployment", mechanism: "azure_ad_bearer" };
+  }
+  return { kind: "deployment", mechanism: "api_key" };
+}
+
+function staticRequestMetadataForDigest(provider: ResolvedModelProvider): {
+  headers: Array<{ name: string; classification: "public" | "secret"; value?: string }>;
+  query: Array<{ name: string; classification: "public" | "secret"; value?: string }>;
+} {
+  const publicHeaders = new Set(provider.publicDefaultHeaderNames ?? []);
+  const publicQuery = new Set(provider.publicDefaultQueryNames ?? []);
+  return {
+    headers: Object.entries(provider.defaultHeaders ?? {})
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([name, value]) =>
+        publicHeaders.has(name)
+          ? { name, classification: "public" as const, value }
+          : { name, classification: "secret" as const },
+      ),
+    query: Object.entries(provider.defaultQuery ?? {})
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([name, value]) =>
+        publicQuery.has(name)
+          ? { name, classification: "public" as const, value }
+          : { name, classification: "secret" as const },
+      ),
+  };
+}
+
+function canonicalJson(value: unknown): string {
+  const normalize = (input: unknown): unknown => {
+    if (Array.isArray(input)) {
+      return input.map((entry) => normalize(entry));
+    }
+    if (input && typeof input === "object") {
+      const out: Record<string, unknown> = {};
+      for (const key of Object.keys(input).sort()) {
+        const child = (input as Record<string, unknown>)[key];
+        if (child !== undefined) {
+          out[key] = normalize(child);
+        }
+      }
+      return out;
+    }
+    return input;
+  };
+  return JSON.stringify(normalize(value));
+}
+
+function definitionVersionFor(
+  model: Omit<ConfiguredModel, "definitionVersion">,
+  provider: ResolvedModelProvider,
+): string {
+  const requestMetadata = staticRequestMetadataForDigest(provider);
+  const digestInput = canonicalJson({
+    schemaVersion: model.schemaVersion,
+    id: model.id,
+    providerId: model.providerId,
+    deployment: model.deployment,
+    provider: {
+      adapterKind: provider.kind,
+      wireApi: provider.api,
+      baseUrl: provider.baseUrl ?? null,
+      defaultHeaders: requestMetadata.headers,
+      defaultQuery: requestMetadata.query,
+    },
+    credentialSource: model.credentialSource,
+    billing: model.billing,
+    executionLimits: model.executionLimits,
+    capabilities: model.capabilities,
+    pricing: model.pricing ?? null,
+  });
+  return `sha256:${createHash("sha256")
+    .update("opengeni:model-definition:v1\n", "utf8")
+    .update(digestInput, "utf8")
+    .digest("hex")}`;
+}
+
 /**
  * The built-in provider's stable id: "openai" on the OpenAI platform, "azure"
  * on Azure. Exported because the workspace model-policy gate must attribute
@@ -1280,18 +1856,24 @@ function builtinProviderLabel(settings: Pick<Settings, "openaiProvider">): strin
  * id — validateSettings rejects that at boot.
  */
 export function configuredProviders(settings: Settings): ResolvedModelProvider[] {
+  const credentialSource = builtinCredentialSource(settings);
   const builtin: ResolvedModelProvider = {
     id: builtinProviderId(settings),
     label: builtinProviderLabel(settings),
     kind: "api-key",
     api: "responses",
     builtin: true,
+    credentialSource,
+    billing: { upstreamPayer: "deployment", metering: "opengeni_credits" },
   };
   if (settings.openaiProvider === "azure") {
-    builtin.baseUrl = settings.azureOpenaiBaseUrl ?? settings.azureOpenaiEndpoint;
+    const baseUrl = settings.azureOpenaiBaseUrl ?? settings.azureOpenaiEndpoint;
+    builtin.baseUrl = baseUrl ? normalizeRegistryBaseUrl(baseUrl, builtin.id) : undefined;
     builtin.apiKey = settings.azureOpenaiApiKey ?? settings.azureOpenaiAdToken;
   } else {
-    builtin.baseUrl = settings.openaiBaseUrl;
+    builtin.baseUrl = settings.openaiBaseUrl
+      ? normalizeRegistryBaseUrl(settings.openaiBaseUrl, builtin.id)
+      : undefined;
     builtin.apiKey = settings.openaiApiKey;
   }
   const registry = parseModelProvidersJson(settings.modelProvidersJson).map(
@@ -1305,9 +1887,43 @@ export function configuredProviders(settings: Settings): ResolvedModelProvider[]
       apiKey: resolveProviderApiKey(provider),
       defaultQuery: provider.defaultQuery,
       defaultHeaders: provider.defaultHeaders,
+      publicDefaultQueryNames: provider.publicDefaultQueryNames,
+      publicDefaultHeaderNames: provider.publicDefaultHeaderNames,
+      credentialSource: registryCredentialSource(provider),
+      billing: registryBilling(provider),
     }),
   );
   return [builtin, ...registry];
+}
+
+/**
+ * Pure catalog overlay for a workspace whose existing Codex connection seam
+ * reports ready. This describes product/provider identity only; it does not
+ * select, lease, refresh, or expose a concrete credential (OPE-21 remains the
+ * owner of those runtime operations).
+ */
+export function withCodexCatalogProvider(settings: Settings): Settings {
+  const providers = parseModelProvidersJson(settings.modelProvidersJson);
+  if (providers.some((provider) => provider.id === CODEX_PROVIDER_ID)) {
+    return settings;
+  }
+  const provider: RegistryProvider = {
+    kind: "codex-subscription",
+    id: CODEX_PROVIDER_ID,
+    label: "Codex (ChatGPT subscription)",
+    api: "responses",
+    baseUrl: CODEX_PROVIDER_BASE_URL,
+    models: CODEX_FALLBACK_MODEL_SLUGS.map((slug) => ({
+      id: `${CODEX_MODEL_ID_PREFIX}${slug}`,
+      label: slug,
+      reasoningEffort: true,
+      contextWindowTokens: CODEX_MODEL_CONTEXT_WINDOW_TOKENS,
+      effectiveContextWindowTokens: CODEX_MODEL_EFFECTIVE_CONTEXT_WINDOW_TOKENS,
+      autoCompactTokenLimit: CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
+      toolOutputTruncationTokens: CODEX_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS,
+    })),
+  };
+  return { ...settings, modelProvidersJson: JSON.stringify([...providers, provider]) };
 }
 
 /**
@@ -1324,11 +1940,81 @@ export function configuredProviders(settings: Settings): ResolvedModelProvider[]
  *     serves. A policy blocking the built-in must block this path too.
  */
 export function policyProviderIdForModel(settings: Settings, modelId: string): string {
-  if (modelId.startsWith(CODEX_MODEL_ID_PREFIX)) {
+  const canonicalModelId = canonicalizeConfiguredModelId(settings, modelId);
+  if (canonicalModelId.startsWith(CODEX_MODEL_ID_PREFIX)) {
     return CODEX_PROVIDER_ID;
   }
-  const configured = configuredModels(settings).find((model) => model.id === modelId);
+  const configured = configuredModels(settings).find((model) => model.id === canonicalModelId);
   return configured?.providerId ?? builtinProviderId(settings);
+}
+
+function resolvedExecutionLimits(
+  settings: Settings,
+  model: {
+    contextWindowTokens?: number | undefined;
+    effectiveContextWindowTokens?: number | undefined;
+    autoCompactTokenLimit?: number | undefined;
+    toolOutputTruncationTokens?: number | undefined;
+  },
+): ModelExecutionLimitsV1 {
+  return {
+    contextWindowTokens: model.contextWindowTokens ?? settings.contextWindowTokens,
+    effectiveContextWindowTokens:
+      model.effectiveContextWindowTokens ?? settings.contextEffectiveWindowTokens ?? null,
+    autoCompactTokenLimit:
+      model.autoCompactTokenLimit ?? settings.contextAutoCompactThresholdTokens ?? null,
+    toolOutputTruncationTokens:
+      model.toolOutputTruncationTokens ?? settings.modelToolOutputTruncationTokens ?? null,
+  };
+}
+
+function finalizeConfiguredModel(
+  settings: Settings,
+  provider: ResolvedModelProvider,
+  input: Omit<ConfiguredModel, "schemaVersion" | "definitionVersion" | "executionLimits">,
+): ConfiguredModel {
+  const modelWithoutVersion: Omit<ConfiguredModel, "definitionVersion"> = {
+    schemaVersion: 1,
+    ...input,
+    executionLimits: resolvedExecutionLimits(settings, input),
+  };
+  return {
+    ...modelWithoutVersion,
+    definitionVersion: definitionVersionFor(modelWithoutVersion, provider),
+  };
+}
+
+function assertUniqueModelIdentities(models: ConfiguredModel[]): void {
+  const canonicalOwners = new Map<string, string>();
+  for (const model of models) {
+    const previous = canonicalOwners.get(model.id);
+    if (previous !== undefined) {
+      throw new Error(
+        `OPENGENI_MODEL_PROVIDERS_JSON model id ${JSON.stringify(model.id)} is declared by both ${previous} and ${model.providerId}`,
+      );
+    }
+    canonicalOwners.set(model.id, model.providerId);
+  }
+
+  const acceptedInputs = new Map(canonicalOwners);
+  for (const model of models) {
+    const ownAliases = new Set<string>();
+    for (const alias of model.aliases) {
+      if (ownAliases.has(alias)) {
+        throw new Error(
+          `OPENGENI_MODEL_PROVIDERS_JSON model ${JSON.stringify(model.id)} contains duplicate alias ${JSON.stringify(alias)}`,
+        );
+      }
+      ownAliases.add(alias);
+      const previous = acceptedInputs.get(alias);
+      if (previous !== undefined) {
+        throw new Error(
+          `OPENGENI_MODEL_PROVIDERS_JSON alias ${JSON.stringify(alias)} for model ${JSON.stringify(model.id)} collides with model/provider ${previous}`,
+        );
+      }
+      acceptedInputs.set(alias, model.id);
+    }
+  }
 }
 
 /**
@@ -1342,6 +2028,9 @@ export function policyProviderIdForModel(settings: Settings, modelId: string): s
 export function configuredModels(settings: Settings): ConfiguredModel[] {
   const builtinId = builtinProviderId(settings);
   const builtinLabel = builtinProviderLabel(settings);
+  const providers = configuredProviders(settings);
+  const providerById = new Map(providers.map((provider) => [provider.id, provider]));
+  const pricingSchedules = configuredModelPricingSchedules(settings);
   // The built-in (OpenAI/Azure) provider must NEVER claim a registry-namespaced
   // model id. The worker overwrites settings.openaiModel with the turn's model
   // (apps/worker agent-turn runSettings) — including a `codex/<slug>` id, or a
@@ -1358,63 +2047,112 @@ export function configuredModels(settings: Settings): ConfiguredModel[] {
   // a codex/ id has NO codex provider injected (no active subscription) it then
   // resolves to nothing and getModel fails loud with
   // CodexSubscriptionUnavailableError instead of mis-routing to Azure.
+  const parsedRegistry = parseModelProvidersJson(settings.modelProvidersJson);
   const registryOwnedIds = new Set(
-    parseModelProvidersJson(settings.modelProvidersJson).flatMap((provider) =>
-      provider.models.map((model) => model.id),
+    parsedRegistry.flatMap((provider) => provider.models.map((model) => model.id)),
+  );
+  const registryAliases = new Set(
+    parsedRegistry.flatMap((provider) =>
+      provider.models.flatMap((model) => model.aliases ?? []),
     ),
   );
   const isRegistryNamespaced = (id: string): boolean =>
-    id.startsWith(CODEX_MODEL_ID_PREFIX) || (id.includes("/") && registryOwnedIds.has(id));
+    id.startsWith(CODEX_MODEL_ID_PREFIX) ||
+    registryAliases.has(id) ||
+    (id.includes("/") && registryOwnedIds.has(id));
+  const builtinProvider = providerById.get(builtinId);
+  if (!builtinProvider) {
+    throw new Error(`Built-in model provider ${builtinId} is not configured`);
+  }
   const out: ConfiguredModel[] = uniqueValues([
     settings.openaiModel,
     ...splitCsv(settings.openaiAllowedModels),
   ])
     .filter((id) => !isRegistryNamespaced(id))
-    .map((id) => ({
-      id,
-      label: id,
-      providerId: builtinId,
-      providerLabel: builtinLabel,
-      api: "responses" as const,
-      contextWindowTokens: settings.contextWindowTokens,
-      toolOutputTruncationTokens: settings.modelToolOutputTruncationTokens,
-      reasoningEffort: true,
-      hostedWebSearch: settings.webSearchEnabled,
-    }));
-  for (const provider of parseModelProvidersJson(settings.modelProvidersJson)) {
-    const providerLabel = provider.label ?? provider.id;
-    for (const model of provider.models) {
-      out.push({
-        id: model.id,
-        label: model.label ?? model.id,
-        providerId: provider.id,
-        providerLabel,
-        api: provider.api,
-        ...(model.contextWindowTokens === undefined
-          ? {}
-          : { contextWindowTokens: model.contextWindowTokens }),
-        ...(model.effectiveContextWindowTokens === undefined
-          ? {}
-          : { effectiveContextWindowTokens: model.effectiveContextWindowTokens }),
-        ...(model.autoCompactTokenLimit === undefined
-          ? {}
-          : { autoCompactTokenLimit: model.autoCompactTokenLimit }),
-        ...(model.toolOutputTruncationTokens === undefined
-          ? {}
-          : { toolOutputTruncationTokens: model.toolOutputTruncationTokens }),
-        reasoningEffort: model.reasoningEffort ?? false,
-        hostedWebSearch: model.hostedWebSearch ?? false,
+    .map((id) => {
+      const capabilities = legacyModelCapabilities(settings, {
+        reasoningEffort: true,
+        hostedWebSearch: settings.webSearchEnabled,
       });
+      return finalizeConfiguredModel(settings, builtinProvider, {
+        id,
+        aliases: [],
+        label: id,
+        providerId: builtinId,
+        providerLabel: builtinLabel,
+        api: "responses" as const,
+        upstreamModelId: id,
+        deployment: { upstreamModelId: id, wireApi: "responses" },
+        credentialSource: builtinProvider.credentialSource,
+        billing: builtinProvider.billing,
+        capabilities,
+        ...(pricingSchedules[id] === undefined ? {} : { pricing: pricingSchedules[id] }),
+        contextWindowTokens: settings.contextWindowTokens,
+        toolOutputTruncationTokens: settings.modelToolOutputTruncationTokens,
+        reasoningEffort: capabilities.reasoning.runnable,
+        hostedWebSearch: capabilities.hostedTools.webSearch.runnable,
+      });
+    });
+  for (const provider of parsedRegistry) {
+    const providerLabel = provider.label ?? provider.id;
+    const resolvedProvider = providerById.get(provider.id);
+    if (!resolvedProvider) {
+      throw new Error(`Registry model provider ${provider.id} is not configured`);
+    }
+    for (const model of provider.models) {
+      const capabilities = model.capabilities
+        ? normalizeCapabilities(model.capabilities)
+        : legacyModelCapabilities(settings, {
+            reasoningEffort: model.reasoningEffort ?? false,
+            hostedWebSearch: model.hostedWebSearch ?? false,
+          });
+      const upstreamModelId = model.upstreamModelId ?? model.id;
+      out.push(
+        finalizeConfiguredModel(settings, resolvedProvider, {
+          id: model.id,
+          aliases: [...(model.aliases ?? [])],
+          label: model.label ?? model.id,
+          providerId: provider.id,
+          providerLabel,
+          api: provider.api,
+          upstreamModelId,
+          deployment: { upstreamModelId, wireApi: provider.api },
+          credentialSource: resolvedProvider.credentialSource,
+          billing: resolvedProvider.billing,
+          capabilities,
+          ...(pricingSchedules[model.id] === undefined
+            ? {}
+            : { pricing: pricingSchedules[model.id] }),
+          ...(model.contextWindowTokens === undefined
+            ? {}
+            : { contextWindowTokens: model.contextWindowTokens }),
+          ...(model.effectiveContextWindowTokens === undefined
+            ? {}
+            : { effectiveContextWindowTokens: model.effectiveContextWindowTokens }),
+          ...(model.autoCompactTokenLimit === undefined
+            ? {}
+            : { autoCompactTokenLimit: model.autoCompactTokenLimit }),
+          ...(model.toolOutputTruncationTokens === undefined
+            ? {}
+            : { toolOutputTruncationTokens: model.toolOutputTruncationTokens }),
+          reasoningEffort: capabilities.reasoning.runnable,
+          hostedWebSearch: capabilities.hostedTools.webSearch.runnable,
+        }),
+      );
     }
   }
-  const seen = new Set<string>();
-  return out.filter((model) => {
-    if (seen.has(model.id)) {
-      return false;
-    }
-    seen.add(model.id);
-    return true;
-  });
+  assertUniqueModelIdentities(out);
+  return out;
+}
+
+/** Resolve a known canonical id or alias. Unknown strings are returned unchanged. */
+export function canonicalizeConfiguredModelId(settings: Settings, modelId: string): string {
+  const models = configuredModels(settings);
+  const canonical = models.find((model) => model.id === modelId);
+  if (canonical) {
+    return canonical.id;
+  }
+  return models.find((model) => model.aliases.includes(modelId))?.id ?? modelId;
 }
 
 /**
@@ -1438,7 +2176,8 @@ export function resolveModelProvider(
   settings: Settings,
   modelId: string,
 ): { provider: ResolvedModelProvider; model: ConfiguredModel } | undefined {
-  const model = configuredModels(settings).find((candidate) => candidate.id === modelId);
+  const canonicalModelId = canonicalizeConfiguredModelId(settings, modelId);
+  const model = configuredModels(settings).find((candidate) => candidate.id === canonicalModelId);
   if (!model) {
     return undefined;
   }
@@ -1452,25 +2191,63 @@ export function resolveModelProvider(
 }
 
 /**
- * Effective per-model pricing. Merge order (later wins):
- *   defaultModelPricing → registry model `pricing` entries (keyed by model id)
- *   → parseModelPricingJson(settings.modelPricingJson) (explicit JSON wins).
+ * Effective per-model pricing schedules. Merge order (later wins): built-in
+ * flat defaults → registry model flat/scheduled pricing → explicit legacy flat
+ * OPENGENI_MODEL_PRICING_JSON. The explicit legacy map intentionally replaces
+ * a registry schedule with one flat default so its historical precedence stays
+ * exact.
  */
-export function configuredModelPricing(settings: Settings): Record<string, ModelPricing> {
-  const registry: Record<string, ModelPricing> = {};
+export function configuredModelPricingSchedules(
+  settings: Settings,
+): Record<string, ModelPricingScheduleV1> {
+  const defaults = Object.fromEntries(
+    Object.entries(defaultModelPricing).map(([model, pricing]) => [model, { default: pricing }]),
+  );
+  const registry: Record<string, ModelPricingScheduleV1> = {};
   for (const provider of parseModelProvidersJson(settings.modelProvidersJson)) {
     for (const model of provider.models) {
       if (model.pricing) {
-        registry[model.id] = model.pricing;
+        registry[model.id] = normalizeModelPricingSchedule(model.pricing);
       }
     }
   }
-  const configured = parseModelPricingJson(settings.modelPricingJson);
+  const configured = Object.fromEntries(
+    Object.entries(parseModelPricingJson(settings.modelPricingJson)).map(([model, pricing]) => [
+      model,
+      { default: pricing },
+    ]),
+  );
   return {
-    ...defaultModelPricing,
+    ...defaults,
     ...registry,
     ...configured,
   };
+}
+
+/** Legacy flat projection: returns the default/below-threshold price. */
+export function configuredModelPricing(settings: Settings): Record<string, ModelPricing> {
+  return Object.fromEntries(
+    Object.entries(configuredModelPricingSchedules(settings)).map(([model, schedule]) => [
+      model,
+      schedule.default,
+    ]),
+  );
+}
+
+/** Select the per-provider-request price at an exact input-token threshold. */
+export function selectModelPricing(
+  schedule: ModelPricingScheduleV1,
+  inputTokens: number,
+): ModelPricing {
+  const normalizedInputTokens = Math.max(0, Math.floor(inputTokens));
+  let selected = schedule.default;
+  for (const tier of schedule.inputTokenTiers ?? []) {
+    if (normalizedInputTokens < tier.minimumInputTokens) {
+      break;
+    }
+    selected = tier.pricing;
+  }
+  return selected;
 }
 
 /**
@@ -1552,17 +2329,28 @@ export function calculateModelUsageCostMicros(
   model: string,
   usage: ModelUsageInput,
 ): number {
-  const pricing = configuredModelPricing(settings)[model];
-  if (!pricing) {
+  const schedule = configuredModelPricingSchedules(settings)[model];
+  if (!schedule) {
     throw new Error(`Missing model pricing for ${model}`);
   }
   const entries =
     usage.requestUsageEntries && usage.requestUsageEntries.length > 0
       ? usage.requestUsageEntries
       : [usage];
-  const rawCost = entries.reduce((sum, entry) => sum + calculateEntryCostMicros(pricing, entry), 0);
-  const marginBps = pricing.marginBps ?? 0;
-  return Math.ceil((rawCost * (10_000 + marginBps)) / 10_000);
+  const rawCostByPricing = new Map<ModelPricing, number>();
+  for (const entry of entries) {
+    const pricing = selectModelPricing(schedule, positiveInt(entry.inputTokens));
+    rawCostByPricing.set(
+      pricing,
+      (rawCostByPricing.get(pricing) ?? 0) + calculateEntryCostMicros(pricing, entry),
+    );
+  }
+  let total = 0;
+  for (const [pricing, rawCost] of rawCostByPricing) {
+    const marginBps = pricing.marginBps ?? 0;
+    total += Math.ceil((rawCost * (10_000 + marginBps)) / 10_000);
+  }
+  return total;
 }
 
 export function configuredAllowedReasoningEfforts(
@@ -2002,7 +2790,15 @@ export function parseModelProvidersJson(raw: string): RegistryProvider[] {
         `OPENGENI_MODEL_PROVIDERS_JSON provider[${index}] is invalid: ${result.error.message}`,
       );
     }
-    return result.data;
+    try {
+      return normalizeRegistryProvider(result.data);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(
+        `OPENGENI_MODEL_PROVIDERS_JSON provider[${index}] is invalid: ${message}`,
+        { cause: error },
+      );
+    }
   });
 }
 
@@ -2570,6 +3366,10 @@ function validateSettings(settings: Settings): void {
       );
     }
   }
+  // Materialize the normalized catalog at boot so canonical product ids,
+  // aliases, definition digests, and capability/pricing normalization are
+  // validated even when managed billing is disabled.
+  configuredModels(settings);
 }
 
 /**

@@ -1,4 +1,5 @@
 import {
+  canonicalizeConfiguredModelId,
   configuredAllowedModels,
   configuredAllowedReasoningEfforts,
   configuredModels,
@@ -50,6 +51,7 @@ import { registerScheduledTaskRoutes } from "./routes/scheduled-tasks";
 import { registerSessionRoutes } from "./routes/sessions";
 import { registerSocialRoutes } from "./routes/social";
 import { registerWorkspaceRoutes } from "./routes/workspaces";
+import { projectClientModel } from "./model-catalog";
 
 export type {
   ApiRouteDeps,
@@ -283,22 +285,16 @@ export function createApp(deps: AppDependencies): Hono {
         deploymentRevision: deps.settings.deploymentRevision,
         apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
         ...(deps.settings.serverVersion ? { serverVersion: deps.settings.serverVersion } : {}),
-        defaultModel: deps.settings.openaiModel,
+        defaultModel: canonicalizeConfiguredModelId(
+          deps.settings,
+          deps.settings.openaiModel,
+        ),
         allowedModels: configuredAllowedModels(deps.settings),
         // Provider-grouped model list for the picker. configuredModels() carries the
         // union of the built-in allow-list and every registry provider's models, in
         // selection order (default model first); project each to the client-safe
         // ClientModel shape (ConfiguredModel.providerId → ClientModel.provider).
-        models: configuredModels(deps.settings).map((model) => ({
-          id: model.id,
-          label: model.label,
-          provider: model.providerId,
-          providerLabel: model.providerLabel,
-          api: model.api,
-          ...(model.contextWindowTokens === undefined
-            ? {}
-            : { contextWindowTokens: model.contextWindowTokens }),
-        })),
+        models: configuredModels(deps.settings).map(projectClientModel),
         defaultReasoningEffort: deps.settings.openaiReasoningEffort,
         allowedReasoningEfforts: configuredAllowedReasoningEfforts(deps.settings),
         mcpServers: deps.settings.mcpServers.map((server) => ({

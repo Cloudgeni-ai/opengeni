@@ -4997,6 +4997,80 @@ export type MachineMetricsSeriesResponse = z.infer<typeof MachineMetricsSeriesRe
  * provider id/label drive the picker's grouping. This mirrors the runtime's
  * ConfiguredModel (packages/config) projected to the client-safe fields.
  */
+export const ModelCapabilitySupportV1 = z.enum(["supported", "unsupported", "unknown"]);
+export type ModelCapabilitySupportV1 = z.infer<typeof ModelCapabilitySupportV1>;
+
+export const ModelCapabilityStateV1 = z.object({
+  upstream: ModelCapabilitySupportV1,
+  runnable: z.boolean(),
+});
+export type ModelCapabilityStateV1 = z.infer<typeof ModelCapabilityStateV1>;
+
+export const ModelCapabilitiesV1 = z.object({
+  reasoning: ModelCapabilityStateV1.extend({
+    efforts: z.array(ReasoningEffort),
+    defaultEffort: ReasoningEffort.nullable(),
+    required: z.boolean(),
+  }),
+  functionCalling: ModelCapabilityStateV1,
+  structuredOutput: ModelCapabilityStateV1,
+  hostedTools: z.object({
+    webSearch: ModelCapabilityStateV1,
+    xSearch: ModelCapabilityStateV1,
+    codeExecution: ModelCapabilityStateV1,
+  }),
+  inputModalities: z.array(z.enum(["text", "image", "audio"])),
+  outputModalities: z.array(z.enum(["text", "image", "audio"])),
+  transports: z.object({
+    sse: ModelCapabilityStateV1,
+    responsesWebSocket: ModelCapabilityStateV1,
+    realtimeAudio: ModelCapabilityStateV1,
+  }),
+  latencyModes: z.array(
+    z.object({
+      id: z.enum(["standard", "priority", "fast"]),
+      upstream: ModelCapabilitySupportV1,
+      runnable: z.boolean(),
+      billingMultiplierBps: z.number().int().positive().optional(),
+    }),
+  ),
+});
+export type ModelCapabilitiesV1 = z.infer<typeof ModelCapabilitiesV1>;
+
+export const ModelCredentialSourceV1 = z.union([
+  z.object({ kind: z.literal("deployment"), mechanism: z.enum(["api_key", "azure_ad_bearer"]) }),
+  z.object({ kind: z.literal("connected_subscription"), provider: z.literal("codex") }),
+  z.object({ kind: z.literal("workspace_connection"), mechanism: z.literal("api_key") }),
+]);
+export type ModelCredentialSourceV1 = z.infer<typeof ModelCredentialSourceV1>;
+
+export const ModelBillingAttributionV1 = z.object({
+  upstreamPayer: z.enum(["deployment", "workspace", "connected_subscription"]),
+  metering: z.enum(["opengeni_credits", "external"]),
+});
+export type ModelBillingAttributionV1 = z.infer<typeof ModelBillingAttributionV1>;
+
+export const ModelPricingV1 = z.object({
+  inputMicrosPerMillionTokens: z.number().int().nonnegative(),
+  cachedInputMicrosPerMillionTokens: z.number().int().nonnegative().optional(),
+  outputMicrosPerMillionTokens: z.number().int().nonnegative(),
+  marginBps: z.number().int().min(0).max(100_000).optional(),
+});
+export type ModelPricingV1 = z.infer<typeof ModelPricingV1>;
+
+export const ModelPricingScheduleV1 = z.object({
+  default: ModelPricingV1,
+  inputTokenTiers: z
+    .array(
+      z.object({
+        minimumInputTokens: z.number().int().nonnegative(),
+        pricing: ModelPricingV1,
+      }),
+    )
+    .optional(),
+});
+export type ModelPricingScheduleV1 = z.infer<typeof ModelPricingScheduleV1>;
+
 export const ClientModel = z.object({
   id: z.string(),
   label: z.string(),
@@ -5004,8 +5078,58 @@ export const ClientModel = z.object({
   providerLabel: z.string(),
   api: z.enum(["responses", "chat"]),
   contextWindowTokens: z.number().int().positive().optional(),
+  // Additive normalized definition metadata. Optional so older server payloads
+  // remain parseable; current servers project the complete V1 set.
+  schemaVersion: z.literal(1).optional(),
+  aliases: z.array(z.string()).optional(),
+  deployment: z
+    .object({
+      upstreamModelId: z.string().min(1),
+      wireApi: z.enum(["responses", "chat"]),
+    })
+    .optional(),
+  executionLimits: z
+    .object({
+      contextWindowTokens: z.number().int().positive().nullable(),
+      effectiveContextWindowTokens: z.number().int().positive().nullable(),
+      autoCompactTokenLimit: z.number().int().positive().nullable(),
+      toolOutputTruncationTokens: z.number().int().positive().nullable(),
+    })
+    .optional(),
+  credentialSource: ModelCredentialSourceV1.optional(),
+  billing: ModelBillingAttributionV1.optional(),
+  capabilities: ModelCapabilitiesV1.optional(),
+  pricing: ModelPricingScheduleV1.optional(),
+  definitionVersion: z.string().regex(/^sha256:[a-f0-9]{64}$/u).optional(),
 });
 export type ClientModel = z.infer<typeof ClientModel>;
+
+export const ModelAvailabilityV1 = z.object({
+  status: z.enum(["available", "unavailable", "degraded", "unknown"]),
+  selectable: z.boolean(),
+  reason: z
+    .enum([
+      "missing_credential",
+      "needs_reauth",
+      "not_entitled",
+      "provider_unhealthy",
+      "policy_blocked",
+      "unsupported",
+    ])
+    .nullable(),
+  checkedAt: z.string().datetime().nullable(),
+});
+export type ModelAvailabilityV1 = z.infer<typeof ModelAvailabilityV1>;
+
+export const WorkspaceModelCatalogModel = ClientModel.extend({
+  availability: ModelAvailabilityV1,
+});
+export type WorkspaceModelCatalogModel = z.infer<typeof WorkspaceModelCatalogModel>;
+
+export const WorkspaceModelCatalogResponse = z.object({
+  models: z.array(WorkspaceModelCatalogModel),
+});
+export type WorkspaceModelCatalogResponse = z.infer<typeof WorkspaceModelCatalogResponse>;
 
 /**
  * Exact public HTTP protocol revision spoken by this release train.
