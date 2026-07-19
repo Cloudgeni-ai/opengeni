@@ -6,9 +6,11 @@ import {
 } from "@opengeni/core";
 import {
   beginRigChangeVerificationAttempt,
+  deactivateSandboxEphemeralOwner,
   getRig,
   getRigChange,
   getRigVersionById,
+  registerSandboxEphemeralOwner,
   sanitizeEventPayload,
   sanitizeEventString,
   sanitizeMemoryText,
@@ -20,6 +22,7 @@ import {
   runRigSetupHook,
   sandboxCommandExitCode,
   sandboxCommandOutput,
+  tagModalSandboxEphemeralOwner,
   type EstablishedSandboxSession,
 } from "@opengeni/runtime";
 import type { ActivityServices } from "./types";
@@ -40,6 +43,13 @@ type CommandSession = {
 };
 
 const OUTPUT_TAIL_LIMIT = 64 * 1024;
+// The Temporal activity has a 15-minute start-to-close timeout. Keep ownership
+// through that complete contract plus five minutes for cancellation delivery
+// and finally cleanup; a dead process then becomes sweep-eligible without any
+// lease-holder fiction or manual recovery.
+export const RIG_VERIFICATION_OWNER_TTL_MS = 20 * 60_000;
+export const RIG_VERIFICATION_OWNERS_DISABLED_MESSAGE =
+  "Rig verification ephemeral ownership is disabled; refusing to create an unowned verifier sandbox";
 
 function tail(value: string, limit = OUTPUT_TAIL_LIMIT): string {
   return value.length > limit ? value.slice(-limit) : value;
@@ -68,7 +78,7 @@ async function terminateThrowaway(established: EstablishedSandboxSession | null)
   }
   const client = established.client as { delete?: (state: unknown) => Promise<unknown> };
   if (typeof client.delete === "function" && established.sessionState !== undefined) {
-    await client.delete(established.sessionState).catch(() => undefined);
+    await client.delete(established.sessionState);
     return;
   }
   const session = established.session as {
@@ -78,11 +88,175 @@ async function terminateThrowaway(established: EstablishedSandboxSession | null)
     closed?: boolean;
   };
   if (session.terminate) {
-    await session.terminate().catch(() => undefined);
+    await session.terminate();
   } else if (session.kill) {
-    await session.kill().catch(() => undefined);
+    await session.kill();
   } else if (session.close && !session.closed) {
-    await session.close().catch(() => undefined);
+    await session.close();
+  }
+}
+
+export type RigVerificationOwnershipDependencies = {
+  establish: typeof establishSandboxSessionFromEnvelope;
+  register: typeof registerSandboxEphemeralOwner;
+  deactivate: typeof deactivateSandboxEphemeralOwner;
+  tag: typeof tagModalSandboxEphemeralOwner;
+  terminate: typeof terminateThrowaway;
+  randomUUID: () => string;
+  now: () => number;
+};
+
+const defaultOwnershipDependencies: RigVerificationOwnershipDependencies = {
+  establish: establishSandboxSessionFromEnvelope,
+  register: registerSandboxEphemeralOwner,
+  deactivate: deactivateSandboxEphemeralOwner,
+  tag: tagModalSandboxEphemeralOwner,
+  terminate: terminateThrowaway,
+  randomUUID: () => crypto.randomUUID(),
+  now: () => Date.now(),
+};
+
+/**
+ * Run one verifier against one exactly attributed standalone sandbox.
+ *
+ * Ordering is deliberate and source-of-truth safe:
+ *   create callback -> durable owner row -> best-effort provider tags -> setup.
+ * Every exact create callback is remembered before the registration await, so
+ * commit-then-lost-response ambiguity still has enough identity for finally to
+ * issue idempotent exact deactivation. All candidate deactivations and provider
+ * termination are independent all-settled operations, so failure of one can
+ * never suppress another. Expiry is the process-death/provider-delete-failure
+ * backstop.
+ */
+export async function runWithOwnedRigVerificationSandbox<T>(
+  input: {
+    settings: ActivityServices["settings"];
+    db: Database;
+    observability: ActivityServices["observability"];
+    accountId: string;
+    workspaceId: string;
+    sessionIdPrefix: string;
+  },
+  run: (established: EstablishedSandboxSession) => Promise<T>,
+  dependencies: RigVerificationOwnershipDependencies = defaultOwnershipDependencies,
+): Promise<T> {
+  // Phase B must remain inert throughout its code rollout. A disabled or
+  // omitted flag rejects before establish() can invoke any provider create;
+  // falling back to the legacy unowned verifier is never safe.
+  if (!input.settings.rigVerificationEphemeralOwnersEnabled) {
+    throw new Error(RIG_VERIFICATION_OWNERS_DISABLED_MESSAGE);
+  }
+
+  const executionId = dependencies.randomUUID();
+  let cleanupTarget: EstablishedSandboxSession | null = null;
+  const createdInstanceIds = new Set<string>();
+  try {
+    const established = await dependencies.establish(input.settings, null, {
+      sessionId: `${input.sessionIdPrefix}-${executionId}`,
+      recovery: "create-or-restore",
+      environment: {},
+      onSandboxCreated: async (created) => {
+        // Retain the exact handle even if durable attribution fails. The runtime
+        // establishment seam also terminates fail-closed; finally retries the
+        // provider cleanup independently.
+        cleanupTarget = created;
+        // Record before awaiting register(). A database commit followed by a
+        // lost response is indistinguishable from a failed write to this
+        // process, but exact cleanup remains safe in both cases.
+        createdInstanceIds.add(created.instanceId);
+        await dependencies.register(input.db, {
+          executionId,
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          kind: "rig_verification",
+          backend: input.settings.sandboxBackend,
+          instanceId: created.instanceId,
+          expiresAt: new Date(dependencies.now() + RIG_VERIFICATION_OWNER_TTL_MS),
+        });
+
+        if (input.settings.sandboxBackend === "modal") {
+          try {
+            await dependencies.tag(input.settings, created.instanceId, {
+              ownerKind: "rig_verification",
+              ownerId: executionId,
+              workspaceId: input.workspaceId,
+            });
+          } catch (error) {
+            input.observability.warn("rig verifier: Modal ownership tag failed", {
+              executionId,
+              instanceId: created.instanceId,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+        }
+      },
+    });
+    cleanupTarget = established;
+    createdInstanceIds.add(established.instanceId);
+    return await run(established);
+  } finally {
+    const instanceIds = [...createdInstanceIds];
+    // Start every operation from its own microtask. Even an injected dependency
+    // that throws synchronously cannot suppress any sibling cleanup operation.
+    const deactivationOperations = instanceIds.map((instanceId) =>
+      Promise.resolve().then(() =>
+        dependencies.deactivate(input.db, {
+          executionId,
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          kind: "rig_verification",
+          backend: input.settings.sandboxBackend,
+          instanceId,
+        }),
+      ),
+    );
+    const cleanupResults = await Promise.allSettled([
+      ...deactivationOperations,
+      Promise.resolve().then(() => dependencies.terminate(cleanupTarget)),
+    ]);
+
+    let deactivatedExactOwner = false;
+    let deactivationRejected = false;
+    for (const [index, instanceId] of instanceIds.entries()) {
+      const result = cleanupResults[index]!;
+      if (result.status === "fulfilled" && result.value === true) {
+        deactivatedExactOwner = true;
+      } else if (result.status === "rejected") {
+        deactivationRejected = true;
+        input.observability.warn("rig verifier: ownership cleanup failed", {
+          executionId,
+          instanceId,
+          operation: "deactivate",
+          error: result.reason instanceof Error ? result.reason.message : String(result.reason),
+        });
+      }
+    }
+    // False is expected for stale candidates after a successful replacement
+    // rebind. It is actionable only when no candidate matched and no more
+    // specific database error was already reported.
+    if (instanceIds.length > 0 && !deactivatedExactOwner && !deactivationRejected) {
+      input.observability.warn("rig verifier: ownership cleanup failed", {
+        executionId,
+        instanceId: instanceIds[instanceIds.length - 1]!,
+        candidateInstanceIds: instanceIds.join(","),
+        operation: "deactivate",
+        error:
+          "no exact active ownership row was deactivated; registration may not have committed or expiry remains the backstop",
+      });
+    }
+
+    const terminateResult = cleanupResults[instanceIds.length]!;
+    if (terminateResult.status === "rejected") {
+      input.observability.warn("rig verifier: ownership cleanup failed", {
+        executionId,
+        instanceId: cleanupTarget?.instanceId ?? null,
+        operation: "terminate",
+        error:
+          terminateResult.reason instanceof Error
+            ? terminateResult.reason.message
+            : String(terminateResult.reason),
+      });
+    }
   }
 }
 
@@ -193,7 +367,7 @@ async function loadVersionTarget(
 export function createRigVerificationActivities(services: () => Promise<ActivityServices>) {
   return {
     verifyRigChange: async (input: { workspaceId: string; changeId: string }) => {
-      const { settings, db } = await services();
+      const { settings, db, observability } = await services();
       const { rig, baseVersion, change } = await loadChangeTarget(
         db,
         input.workspaceId,
@@ -212,119 +386,125 @@ export function createRigVerificationActivities(services: () => Promise<Activity
         metadata: { changeId: change.id },
       });
 
-      let established: EstablishedSandboxSession | null = null;
       const verification: Record<string, unknown> = { startedAt, checkResults: [] };
       try {
         const candidateVersion = candidateVersionForChange(baseVersion, change);
         const runSettings = settingsWithRigImage(settings, candidateVersion.image);
-        established = await establishSandboxSessionFromEnvelope(runSettings, null, {
-          sessionId: `rig-verification-${change.id}`,
-          recovery: "create-or-restore",
-          environment: {},
-        });
-        if ((candidateVersion.setupScript ?? "").trim()) {
-          await runRigSetupHook(established.session as never, {
-            environment: {},
-            runAs: "root",
-            rigSetup: {
-              rigId: rig.id,
-              rigName: rig.name,
-              versionId: candidateVersion.id,
-              script: candidateVersion.setupScript ?? "",
-              timeoutMs: settings.rigSetupTimeoutMs,
-            },
-          });
-          verification.setupResult = { exitCode: 0, output: "" };
-        }
-        const command = setupAppendCommand(change);
-        if (command) {
-          const commandResult = await runCommand(
-            established.session as CommandSession,
-            command,
-            settings.rigSetupTimeoutMs,
-          );
-          verification.commandResult = commandResult;
-          if (commandResult.exitCode !== 0) {
+        return await runWithOwnedRigVerificationSandbox(
+          {
+            settings: runSettings,
+            db,
+            observability,
+            accountId: rig.accountId,
+            workspaceId: input.workspaceId,
+            sessionIdPrefix: `rig-verification-${change.id}`,
+          },
+          async (established) => {
+            if ((candidateVersion.setupScript ?? "").trim()) {
+              await runRigSetupHook(established.session as never, {
+                environment: {},
+                runAs: "root",
+                rigSetup: {
+                  rigId: rig.id,
+                  rigName: rig.name,
+                  versionId: candidateVersion.id,
+                  script: candidateVersion.setupScript ?? "",
+                  timeoutMs: settings.rigSetupTimeoutMs,
+                },
+              });
+              verification.setupResult = { exitCode: 0, output: "" };
+            }
+            const command = setupAppendCommand(change);
+            if (command) {
+              const commandResult = await runCommand(
+                established.session as CommandSession,
+                command,
+                settings.rigSetupTimeoutMs,
+              );
+              verification.commandResult = commandResult;
+              if (commandResult.exitCode !== 0) {
+                verification.finishedAt = new Date().toISOString();
+                verification.passed = false;
+                const updated = await updateRigChangeStatus(db, input.workspaceId, change.id, {
+                  status: "rejected",
+                  verification: scrubVerificationPayload(verification),
+                });
+                await recordRigAuditEvent(db, {
+                  grant,
+                  action: "rig.verification.failed",
+                  rigId: rig.id,
+                  metadata: { changeId: change.id, status: "rejected" },
+                });
+                await recordRigAuditEvent(db, {
+                  grant,
+                  action: "rig.change.rejected",
+                  rigId: rig.id,
+                  metadata: { changeId: change.id },
+                });
+                return updated;
+              }
+            }
+            const checkResults = [];
+            for (const check of candidateVersion.checks) {
+              const result = await runCommand(
+                established.session as CommandSession,
+                check.command,
+                settings.rigSetupTimeoutMs,
+              );
+              checkResults.push({
+                name: check.name,
+                command: scrubVerificationOutput(check.command),
+                ...result,
+              });
+            }
+            verification.checkResults = checkResults;
+            const passed = checkResults.every((result) => result.exitCode === 0);
             verification.finishedAt = new Date().toISOString();
-            verification.passed = false;
+            verification.passed = passed;
+            const classified = classifyRigVerificationOutcome({ kind: change.kind, passed });
+            if (classified.action === "auto_promote") {
+              // Keep the change `verifying` (NOT `proposed`) across the write→promote
+              // gap: promoteSetupAppendChange accepts `verifying`, and leaving it
+              // `verifying` keeps beginRigChangeVerificationAttempt blocking a
+              // concurrent /verify — resetting to `proposed` would reopen that race
+              // (a second run could reject a change whose first verification passed).
+              await updateRigChangeStatus(db, input.workspaceId, change.id, {
+                status: "verifying",
+                verification: scrubVerificationPayload(verification),
+              });
+              const { change: merged } = await promoteSetupAppendChange({ db }, grant, rig, {
+                ...change,
+                verification,
+              });
+              await recordRigAuditEvent(db, {
+                grant,
+                action: "rig.verification.passed",
+                rigId: rig.id,
+                metadata: { changeId: change.id },
+              });
+              return merged;
+            }
             const updated = await updateRigChangeStatus(db, input.workspaceId, change.id, {
-              status: "rejected",
+              status: classified.status,
               verification: scrubVerificationPayload(verification),
             });
             await recordRigAuditEvent(db, {
               grant,
-              action: "rig.verification.failed",
+              action: passed ? "rig.verification.passed" : "rig.verification.failed",
               rigId: rig.id,
-              metadata: { changeId: change.id, status: "rejected" },
+              metadata: { changeId: change.id, status: classified.status },
             });
-            await recordRigAuditEvent(db, {
-              grant,
-              action: "rig.change.rejected",
-              rigId: rig.id,
-              metadata: { changeId: change.id },
-            });
+            if (!passed) {
+              await recordRigAuditEvent(db, {
+                grant,
+                action: "rig.change.rejected",
+                rigId: rig.id,
+                metadata: { changeId: change.id },
+              });
+            }
             return updated;
-          }
-        }
-        const checkResults = [];
-        for (const check of candidateVersion.checks) {
-          const result = await runCommand(
-            established.session as CommandSession,
-            check.command,
-            settings.rigSetupTimeoutMs,
-          );
-          checkResults.push({
-            name: check.name,
-            command: scrubVerificationOutput(check.command),
-            ...result,
-          });
-        }
-        verification.checkResults = checkResults;
-        const passed = checkResults.every((result) => result.exitCode === 0);
-        verification.finishedAt = new Date().toISOString();
-        verification.passed = passed;
-        const classified = classifyRigVerificationOutcome({ kind: change.kind, passed });
-        if (classified.action === "auto_promote") {
-          // Keep the change `verifying` (NOT `proposed`) across the write→promote
-          // gap: promoteSetupAppendChange accepts `verifying`, and leaving it
-          // `verifying` keeps beginRigChangeVerificationAttempt blocking a
-          // concurrent /verify — resetting to `proposed` would reopen that race
-          // (a second run could reject a change whose first verification passed).
-          await updateRigChangeStatus(db, input.workspaceId, change.id, {
-            status: "verifying",
-            verification: scrubVerificationPayload(verification),
-          });
-          const { change: merged } = await promoteSetupAppendChange({ db }, grant, rig, {
-            ...change,
-            verification,
-          });
-          await recordRigAuditEvent(db, {
-            grant,
-            action: "rig.verification.passed",
-            rigId: rig.id,
-            metadata: { changeId: change.id },
-          });
-          return merged;
-        }
-        const updated = await updateRigChangeStatus(db, input.workspaceId, change.id, {
-          status: classified.status,
-          verification: scrubVerificationPayload(verification),
-        });
-        await recordRigAuditEvent(db, {
-          grant,
-          action: passed ? "rig.verification.passed" : "rig.verification.failed",
-          rigId: rig.id,
-          metadata: { changeId: change.id, status: classified.status },
-        });
-        if (!passed) {
-          await recordRigAuditEvent(db, {
-            grant,
-            action: "rig.change.rejected",
-            rigId: rig.id,
-            metadata: { changeId: change.id },
-          });
-        }
-        return updated;
+          },
+        );
       } catch (error) {
         verification.finishedAt = new Date().toISOString();
         verification.passed = false;
@@ -348,13 +528,11 @@ export function createRigVerificationActivities(services: () => Promise<Activity
           metadata: { changeId: change.id },
         });
         return updated;
-      } finally {
-        await terminateThrowaway(established);
       }
     },
 
     verifyRigVersion: async (input: { workspaceId: string; versionId: string }) => {
-      const { settings, db } = await services();
+      const { settings, db, observability } = await services();
       const { rig, version } = await loadVersionTarget(db, input.workspaceId, input.versionId);
       const grant = systemGrant(rig);
       const startedAt = new Date().toISOString();
@@ -364,53 +542,59 @@ export function createRigVerificationActivities(services: () => Promise<Activity
         rigId: rig.id,
         metadata: { versionId: version.id },
       });
-      let established: EstablishedSandboxSession | null = null;
       try {
         const runSettings = settingsWithRigImage(settings, version.image);
-        established = await establishSandboxSessionFromEnvelope(runSettings, null, {
-          sessionId: `rig-version-verification-${version.id}`,
-          recovery: "create-or-restore",
-          environment: {},
-        });
-        if ((version.setupScript ?? "").trim()) {
-          await runRigSetupHook(established.session as never, {
-            environment: {},
-            runAs: "root",
-            rigSetup: {
+        return await runWithOwnedRigVerificationSandbox(
+          {
+            settings: runSettings,
+            db,
+            observability,
+            accountId: rig.accountId,
+            workspaceId: input.workspaceId,
+            sessionIdPrefix: `rig-version-verification-${version.id}`,
+          },
+          async (established) => {
+            if ((version.setupScript ?? "").trim()) {
+              await runRigSetupHook(established.session as never, {
+                environment: {},
+                runAs: "root",
+                rigSetup: {
+                  rigId: rig.id,
+                  rigName: rig.name,
+                  versionId: version.id,
+                  script: version.setupScript ?? "",
+                  timeoutMs: settings.rigSetupTimeoutMs,
+                },
+              });
+            }
+            const checkResults = [];
+            for (const check of version.checks) {
+              checkResults.push({
+                name: check.name,
+                command: scrubVerificationOutput(check.command),
+                ...(await runCommand(
+                  established.session as CommandSession,
+                  check.command,
+                  settings.rigSetupTimeoutMs,
+                )),
+              });
+            }
+            const passed = checkResults.every((result) => result.exitCode === 0);
+            await recordRigAuditEvent(db, {
+              grant,
+              action: passed ? "rig.verification.passed" : "rig.verification.failed",
               rigId: rig.id,
-              rigName: rig.name,
-              versionId: version.id,
-              script: version.setupScript ?? "",
-              timeoutMs: settings.rigSetupTimeoutMs,
-            },
-          });
-        }
-        const checkResults = [];
-        for (const check of version.checks) {
-          checkResults.push({
-            name: check.name,
-            command: scrubVerificationOutput(check.command),
-            ...(await runCommand(
-              established.session as CommandSession,
-              check.command,
-              settings.rigSetupTimeoutMs,
-            )),
-          });
-        }
-        const passed = checkResults.every((result) => result.exitCode === 0);
-        await recordRigAuditEvent(db, {
-          grant,
-          action: passed ? "rig.verification.passed" : "rig.verification.failed",
-          rigId: rig.id,
-          metadata: scrubVerificationPayload({
-            versionId: version.id,
-            startedAt,
-            finishedAt: new Date().toISOString(),
-            passed,
-            checkResults,
-          }),
-        });
-        return { versionId: version.id, passed, checkResults };
+              metadata: scrubVerificationPayload({
+                versionId: version.id,
+                startedAt,
+                finishedAt: new Date().toISOString(),
+                passed,
+                checkResults,
+              }),
+            });
+            return { versionId: version.id, passed, checkResults };
+          },
+        );
       } catch (error) {
         // Infra failure (sandbox establish / setup / check exec threw) — record
         // rig.verification.failed so activeVersionHealth reflects the failed
@@ -433,8 +617,6 @@ export function createRigVerificationActivities(services: () => Promise<Activity
           }),
         });
         throw error;
-      } finally {
-        await terminateThrowaway(established);
       }
     },
   };
