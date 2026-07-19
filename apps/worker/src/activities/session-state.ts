@@ -42,7 +42,6 @@ import type {
   QuarantineTurnPersistenceAttemptInput,
   QuarantineTurnPersistenceAttemptResult,
   TurnPersistenceHandoff,
-  TurnPersistenceObligation,
 } from "./types";
 
 export type SessionStateActivityOverrides = Partial<{
