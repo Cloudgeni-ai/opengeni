@@ -68,7 +68,7 @@ describe("migration 0068 (workflow wake runtime grant)", () => {
       await admin`set role opengeni_app`;
       const claims = await admin`
         select * from opengeni_private.claim_session_workflow_wakes(1)`;
-      expect(claims).toEqual([]);
+      expect(claims).toHaveLength(0);
       await admin`reset role`;
     } finally {
       await admin`reset role`.catch(() => undefined);
