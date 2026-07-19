@@ -1554,9 +1554,10 @@ export function buildOpenGeniAgent(
     // spread; the SDK concatenates these with MCP and sandbox capability tools.
     ...(hostedTools.length ? { tools: hostedTools } : {}),
     ...(options.mcpServers?.length ? { mcpServers: options.mcpServers } : {}),
-    // Passive durable waits are turn boundaries, not polling tools. Their MCP
-    // call commits the wait against the signed attempt, then its output becomes
-    // this run's final output so the SDK never performs another model call.
+    // Durable waits and background jobs are turn boundaries, not polling tools.
+    // Their MCP call commits the suspension against the signed attempt, then its
+    // output becomes this run's final output so the SDK never performs another
+    // model call.
     toolUseBehavior: {
       stopAtToolNames: [
         "opengeni__wait_until",

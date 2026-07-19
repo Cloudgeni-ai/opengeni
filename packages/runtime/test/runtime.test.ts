@@ -477,11 +477,15 @@ describe("runtime event normalization", () => {
     });
   });
 
-  test("durable passive waits stop the run after their MCP tool output", () => {
+  test("durable suspensions stop the run after their MCP tool output", () => {
     for (const backend of ["none", "docker"] as const) {
       const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: backend }), []);
       expect(agent.toolUseBehavior).toEqual({
-        stopAtToolNames: ["opengeni__wait_until", "opengeni__wait_for_event"],
+        stopAtToolNames: [
+          "opengeni__wait_until",
+          "opengeni__wait_for_event",
+          "opengeni__start_background_job",
+        ],
       });
     }
   });
