@@ -157,9 +157,10 @@ describe("resolveTurnModel", () => {
     });
 
     const resolved = resolveTurnModel(settings, "acme/product-model");
-    expect(resolved?.configured.id).toBe("acme/product-model");
-    expect(resolved?.configured.upstreamModelId).toBe("provider-deployment-slug");
-    expect((resolved?.model as unknown as { _model: string })._model).toBe(
+    expect(resolved).not.toBeNull();
+    expect(resolved!.configured.id).toBe("acme/product-model");
+    expect(resolved!.configured.upstreamModelId).toBe("provider-deployment-slug");
+    expect((resolved!.model as unknown as { _model: string })._model).toBe(
       "provider-deployment-slug",
     );
   });
