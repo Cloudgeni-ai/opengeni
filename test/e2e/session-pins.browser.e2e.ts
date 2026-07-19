@@ -616,6 +616,16 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         sandboxBackend: "none",
         parentSessionId: manager.id,
       });
+      const intermediarySibling = await createSession(dbClient.db, {
+        accountId: manager.accountId,
+        workspaceId,
+        initialMessage: "Ordinary intermediary child",
+        resources: [],
+        metadata: {},
+        model: "scripted-model",
+        sandboxBackend: "none",
+        parentSessionId: intermediary.id,
+      });
       const descendant = await createSession(dbClient.db, {
         accountId: manager.accountId,
         workspaceId,
@@ -689,11 +699,30 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         await managerChildren.locator(`button[data-session-row="${descendant.id}"]`).count(),
       ).toBe(0);
 
-      // The manager's lazy page includes the complete pinned projection, so
-      // the nested descendant now exists as a positive pin in that child-page
-      // cache even though pin ownership prunes it from the visible branch. A
-      // later remote unpin must reconcile that cached revision rather than
-      // leave a permanent stale top-level shortcut.
+      // The intermediary retains an expand affordance for its ordinary child
+      // even while pin ownership prunes the direct pinned child. Its lazy page
+      // returns both projections, which puts the descendant's positive pin in
+      // the child-page cache without rendering it twice. A later remote unpin
+      // must reconcile that cached revision rather than leave a permanent stale
+      // top-level shortcut.
+      const intermediaryChildPage = page.waitForResponse((response) => {
+        const url = new URL(response.url());
+        return (
+          successfulSessionPageResponse(response, workspaceId) &&
+          url.searchParams.get("parentSessionId") === intermediary.id
+        );
+      });
+      await managerChildren.getByRole("button", { name: "Expand spawned sessions" }).click();
+      await intermediaryChildPage;
+      const intermediaryChildren = managerChildren.getByRole("list", {
+        name: "Spawned sessions from Lazy hierarchy intermediary",
+      });
+      await intermediaryChildren
+        .locator(`button[data-session-row="${intermediarySibling.id}"]`)
+        .waitFor();
+      expect(
+        await intermediaryChildren.locator(`button[data-session-row="${descendant.id}"]`).count(),
+      ).toBe(0);
 
       // The descendant shortcut owns its unpinned leaf. Its nested list is
       // explicit to assistive technology, and keyboard order includes every
@@ -750,10 +779,6 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       );
       await waitFor(async () => (await topLevelPinnedDescendant.count()) === 0, {
         timeoutMs: 10_000,
-      });
-      await managerChildren.getByRole("button", { name: "Expand spawned sessions" }).click();
-      const intermediaryChildren = managerChildren.getByRole("list", {
-        name: "Spawned sessions from Lazy hierarchy intermediary",
       });
       await intermediaryChildren.locator(`button[data-session-row="${descendant.id}"]`).waitFor();
       expect(ordinaryChild.id).toBeTruthy();
