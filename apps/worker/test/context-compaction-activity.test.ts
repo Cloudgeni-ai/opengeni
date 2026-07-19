@@ -913,9 +913,9 @@ describe("standalone context compaction execution", () => {
     });
     expect(heldClaim).toEqual({ action: "unclaimed", reason: "no-work" });
     expect(
-      (
-        await listOutstandingSessionSystemUpdates(client.db, grant.workspaceId!, session.id)
-      ).map((update) => update.id),
+      (await listOutstandingSessionSystemUpdates(client.db, grant.workspaceId!, session.id)).map(
+        (update) => update.id,
+      ),
     ).toEqual(expect.arrayContaining([ordinary.update.id, newUpdate.update.id]));
 
     await withWorkspaceSubjectRls(
@@ -923,21 +923,22 @@ describe("standalone context compaction execution", () => {
       grant.workspaceId!,
       grant.subjectId,
       async (db) =>
-        await db.transaction(async (tx) =>
-          await submitHumanPromptInTransaction(tx as typeof db, {
-            accountId: grant.accountId,
-            workspaceId: grant.workspaceId!,
-            sessionId: session.id,
-            subjectId: grant.subjectId,
-            actor: { type: "human", subjectId: grant.subjectId },
-            operationKey: crypto.randomUUID(),
-            delivery: "send",
-            text: "Retry after the compaction failure with new human input",
-            resources: [],
-            tools: [],
-            reasoningEffortFallback: "low",
-            source: "user",
-          }),
+        await db.transaction(
+          async (tx) =>
+            await submitHumanPromptInTransaction(tx as typeof db, {
+              accountId: grant.accountId,
+              workspaceId: grant.workspaceId!,
+              sessionId: session.id,
+              subjectId: grant.subjectId,
+              actor: { type: "human", subjectId: grant.subjectId },
+              operationKey: crypto.randomUUID(),
+              delivery: "send",
+              text: "Retry after the compaction failure with new human input",
+              resources: [],
+              tools: [],
+              reasoningEffortFallback: "low",
+              source: "user",
+            }),
         ),
     );
     const retryClaim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {

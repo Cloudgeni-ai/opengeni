@@ -341,11 +341,8 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       parentSessionId: child.id,
     });
     await admin`update sessions set parent_session_id = ${grandchild.id} where id = ${root.id}`;
-    const stats = await withWorkspaceRls(
-      db,
-      workspace.workspaceId,
-      async (scoped) =>
-        sessionTreeStatsForSessions(scoped, workspace.workspaceId, [root.id]),
+    const stats = await withWorkspaceRls(db, workspace.workspaceId, async (scoped) =>
+      sessionTreeStatsForSessions(scoped, workspace.workspaceId, [root.id]),
     );
     expect(stats.get(root.id)).toEqual({
       directChildren: 1,

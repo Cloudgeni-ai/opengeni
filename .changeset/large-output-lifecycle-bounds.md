@@ -8,7 +8,6 @@
 "@opengeni/react": patch
 "@opengeni/runtime": patch
 "@opengeni/sdk": patch
-"@opengeni/testing": patch
 "@opengeni/worker-bundle": patch
 ---
 
