@@ -703,6 +703,7 @@ export async function appendOrConfirmAndPublishTurnEventsFenced(
     append: appendSessionEventsForTurnAttempt,
     find: listSessionEventsByProducer,
   },
+  persistenceReceiptId?: string,
 ): Promise<{ events: SessionEvent[]; accepted: boolean }> {
   if (events.length === 0) return { events: [], accepted: true };
   const producerIds = new Set(events.map((event) => event.producerId));
@@ -732,6 +733,7 @@ export async function appendOrConfirmAndPublishTurnEventsFenced(
       executionGeneration,
       attemptId,
       events,
+      persistenceReceiptId,
     );
     await publishDurableSessionEvents(bus, workspaceId, sessionId, appended.events);
     return appended;

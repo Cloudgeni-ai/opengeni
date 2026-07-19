@@ -5,15 +5,19 @@ import type { AccessGrant } from "@opengeni/contracts";
 import {
   applySessionTurnSettlement,
   bootstrapWorkspace,
+  claimSessionWorkForAttempt,
   createDb,
   createSession,
+  establishSessionTurnPersistenceReceipt,
   getSession,
   getSessionHistoryItems,
+  getSessionTurnPersistenceReceipt,
   listSessionEvents,
   listSessionTurns,
   mutateSessionControlInTransaction,
   withWorkspaceRls,
 } from "@opengeni/db";
+import * as schema from "../../packages/db/src/schema";
 import { migrate } from "@opengeni/db/migrate";
 import { createNatsEventBus, type EventBus } from "@opengeni/events";
 import { createProductionAgentRuntime } from "@opengeni/runtime";
@@ -31,6 +35,7 @@ import { postUserMessageTurn } from "@opengeni/core";
 import type { SessionWorkflowClient } from "../../apps/api/src/app";
 import { createActivityTestHarness } from "../../apps/worker/src/activities";
 import { currentActivityContext } from "../../apps/worker/src/activities/streaming";
+import { prepareTurnPersistenceHandoff } from "../../apps/worker/src/turn-persistence-handoff";
 import {
   CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES,
   TURN_WORKER_MAX_CONCURRENT_TURNS,
@@ -47,6 +52,22 @@ type RequiredServices = Pick<
   TestServices,
   "databaseUrl" | "natsUrl" | "temporalHost" | "migrate" | "down"
 >;
+
+async function hangWithoutHeartbeating(): Promise<never> {
+  await new Promise<void>((_resolve, reject) => {
+    const signal = currentActivityContext()?.cancellationSignal;
+    if (!signal || signal.aborted) {
+      reject(new Error("simulated dead turn worker cancelled after timeout"));
+      return;
+    }
+    signal.addEventListener(
+      "abort",
+      () => reject(new Error("simulated dead turn worker cancelled after timeout")),
+      { once: true },
+    );
+  });
+  throw new Error("unreachable simulated dead turn worker completion");
+}
 
 describe("worker restart resilience", () => {
   let services: RequiredServices;
@@ -227,6 +248,201 @@ describe("worker restart resilience", () => {
       ),
     ).toBe(true);
   }, 180_000);
+
+  test("worker death after a PostgreSQL model receipt but before heartbeat never replays inference", async () => {
+    const grant = await testGrant();
+    const taskQueue = `receipt-before-heartbeat-${crypto.randomUUID()}`;
+    const settings = testSettings({
+      databaseUrl: services.databaseUrl,
+      natsUrl: services.natsUrl,
+      temporalHost: services.temporalHost,
+      temporalTaskQueue: taskQueue,
+    });
+    const baseActivities = createActivityTestHarness({
+      settings,
+      db: dbClient.db,
+      bus,
+      runtime: createProductionAgentRuntime({ model: new ScriptedModel("must not be called") }),
+    });
+    let providerInferenceEffects = 0;
+    let turnDispatches = 0;
+    let committedReceiptId: string | null = null;
+    let receiptAttemptId: string | null = null;
+    const activities = {
+      ...baseActivities,
+      runAgentTurn: async (input: Parameters<typeof baseActivities.runAgentTurn>[0]) => {
+        const context = currentActivityContext();
+        if (!context) throw new Error("receipt fault fixture has no Temporal activity context");
+        const claim = await claimSessionWorkForAttempt(dbClient.db, input.workspaceId, {
+          sessionId: input.sessionId,
+          workflowId: input.workflowId,
+          workflowRunId: input.workflowRunId,
+          attemptId: input.attemptId,
+          dispatchId: context.info.activityId,
+          trigger: input.trigger,
+        });
+        if (claim.action === "unclaimed") {
+          return { status: "unclaimed" as const, reason: claim.reason };
+        }
+        turnDispatches += 1;
+        const turn = claim.turn;
+        if (turnDispatches === 1) {
+          providerInferenceEffects += 1;
+          const sourceKey = `provider-response-${input.attemptId}`;
+          const prepared = prepareTurnPersistenceHandoff({
+            turnId: turn.id,
+            triggerEventId: turn.triggerEventId,
+            executionGeneration: turn.executionGeneration,
+            attemptId: input.attemptId,
+            obligation: {
+              kind: "model_call",
+              history: {
+                producerCodexCredentialId: null,
+                modelToolOutputTruncationTokens: 4_096,
+                items: [
+                  {
+                    position: 0,
+                    item: {
+                      type: "message",
+                      role: "assistant",
+                      content: "provider completed exactly once",
+                    },
+                  },
+                ],
+              },
+              metering: {
+                model: "scripted-model",
+                isCodexTurn: false,
+                usage: { inputTokens: 10, outputTokens: 3, totalTokens: 13 },
+                sourceKey,
+              },
+              event: {
+                type: "agent.model.usage",
+                payload: {
+                  turnId: turn.id,
+                  model: "scripted-model",
+                  sourceKey,
+                  inputTokens: 10,
+                  outputTokens: 3,
+                },
+                turnId: turn.id,
+                producerId: `turn-attempt:${input.attemptId}`,
+                producerSeq: 1,
+                occurredAt: new Date().toISOString(),
+              },
+            },
+          });
+          const established = await establishSessionTurnPersistenceReceipt(dbClient.db, {
+            id: prepared.handoff.receiptId,
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: prepared.handoff.turnId,
+            attemptId: prepared.handoff.attemptId,
+            executionGeneration: prepared.handoff.executionGeneration,
+            triggerEventId: prepared.handoff.triggerEventId,
+            obligationKind: prepared.handoff.obligationKind,
+            obligationVersion: 1,
+            obligationDigest: prepared.handoff.obligationDigest,
+            obligation: prepared.obligation,
+          });
+          expect(established.action).toBe("established");
+          committedReceiptId = prepared.handoff.receiptId;
+          receiptAttemptId = input.attemptId;
+          // No heartbeat and no activity result follows this committed row.
+          // Temporal's real heartbeat timeout supplies the worker-death edge.
+          return await hangWithoutHeartbeating();
+        }
+
+        const settled = await applySessionTurnSettlement(dbClient.db, input.workspaceId, {
+          sessionId: input.sessionId,
+          turnId: turn.id,
+          triggerEventId: turn.triggerEventId,
+          attemptId: input.attemptId,
+          turnStatus: "completed",
+          sessionStatus: "idle",
+          activeTurnId: null,
+          events: [{ type: "turn.completed", payload: { recoveredReceipt: true } }],
+        });
+        expect(settled.action).toBe("settled");
+        return {
+          status: "idle" as const,
+          turnId: turn.id,
+          attemptId: input.attemptId,
+        };
+      },
+    };
+    const session = await createSession(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "complete one provider call",
+      resources: [],
+      tools: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    await submitTestHumanPrompt(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      subjectId: grant.subjectId,
+      text: "complete one provider call",
+      resources: [],
+      tools: [],
+      delivery: "send",
+      reasoningEffortFallback: settings.openaiReasoningEffort,
+    });
+
+    const worker = await restartTestWorker(nativeConnection, taskQueue, activities);
+    const run = worker.run();
+    const client = new Client({ connection });
+    try {
+      const handle = await client.workflow.start("sessionWorkflow", {
+        taskQueue,
+        workflowId: `session-${session.id}`,
+        args: [
+          {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            sessionId: session.id,
+          },
+        ],
+      });
+      await handle.result();
+    } finally {
+      worker.shutdown();
+      await run;
+    }
+
+    expect(providerInferenceEffects).toBe(1);
+    expect(turnDispatches).toBe(2);
+    expect(committedReceiptId).not.toBeNull();
+    const turns = await listSessionTurns(dbClient.db, grant.workspaceId, session.id);
+    expect(turns).toHaveLength(1);
+    expect(turns[0]).toMatchObject({ status: "completed", executionGeneration: 2 });
+    const attempts = await withWorkspaceRls(dbClient.db, grant.workspaceId, (db) =>
+      db
+        .select({ id: schema.sessionTurnAttempts.id, state: schema.sessionTurnAttempts.state })
+        .from(schema.sessionTurnAttempts)
+        .where(eq(schema.sessionTurnAttempts.turnId, turns[0]!.id)),
+    );
+    expect(attempts).toHaveLength(2);
+    expect(attempts.every((attempt) => attempt.state === "closed")).toBe(true);
+    expect(
+      await getSessionTurnPersistenceReceipt(dbClient.db, grant.workspaceId, {
+        sessionId: session.id,
+        attemptId: receiptAttemptId!,
+        receiptId: committedReceiptId!,
+      }),
+    ).toMatchObject({ state: "settled" });
+    const history = await getSessionHistoryItems(dbClient.db, grant.workspaceId, session.id);
+    expect(JSON.stringify(history)).toContain("provider completed exactly once");
+    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 500);
+    expect(events.filter((event) => event.type === "agent.model.usage")).toHaveLength(1);
+    expect(events.filter((event) => event.type === "turn.recovery.requested")).toHaveLength(1);
+    expect(events.filter((event) => event.type === "turn.failed")).toHaveLength(0);
+  }, 240_000);
 
   test("graceful worker shutdown before model progress recovers the same turn untouched", async () => {
     const grant = await testGrant();

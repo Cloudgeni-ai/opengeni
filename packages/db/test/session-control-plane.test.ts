@@ -15,6 +15,7 @@ import {
   createDb,
   createSession,
   createSessionGoal,
+  establishSessionTurnPersistenceReceipt,
   evaluateSessionControl,
   evaluateSessionControls,
   evaluateGoalContinuation,
@@ -24,6 +25,7 @@ import {
   getSession,
   getSessionGoal,
   getSessionTurn,
+  getSessionTurnPersistenceReceipt,
   listOutstandingSessionSystemUpdates,
   listSessionDiscoverySummaries,
   listSessionSystemUpdatesForTurn,
@@ -42,9 +44,11 @@ import {
   recordPendingSessionToolCallResult,
   recordUsageEvent,
   recordSkippedContextCompaction,
+  quarantineSessionTurnPersistenceAttempt,
   setSessionLastInputTokensForTurnAttempt,
   settleSessionIdleWithParentOutbox,
   settleSessionAttemptInterruptions,
+  settleSessionTurnPersistenceReceipt,
   submitHumanPromptInTransaction,
   deleteSessionQueueItemInTransaction,
   withWorkspaceRls,
@@ -1324,6 +1328,236 @@ describe("clean session control plane", () => {
     expect(await isSessionCompactionRequested(client.db, grant.workspaceId!, session.id)).toBe(
       true,
     );
+  });
+
+  test("an exact pending persistence receipt alone crosses Pause and settles idempotently", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "run one external effect");
+    const attemptId = crypto.randomUUID();
+    const turn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId },
+    );
+    if (!turn) throw new Error("receipt test turn was not claimed");
+    const receiptId = crypto.randomUUID();
+    const obligation = {
+      kind: "pending_tool_call",
+      callId: "effect-call",
+      callType: "function_call",
+      callItem: {
+        type: "function_call",
+        callId: "effect-call",
+        name: "external_effect",
+        arguments: "{}",
+      },
+    };
+    const receiptInput = {
+      id: receiptId,
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      turnId: turn.id,
+      attemptId,
+      executionGeneration: turn.executionGeneration,
+      triggerEventId: turn.triggerEventId,
+      obligationKind: "pending_tool_call" as const,
+      obligationVersion: 1 as const,
+      obligationDigest: "a".repeat(64),
+      obligation,
+    };
+
+    const paused = await controlSession(grant, session.id, "pause");
+    expect(paused.interruptionCount).toBe(1);
+    expect(
+      await registerPendingSessionToolCall(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn.id,
+        executionGeneration: turn.executionGeneration,
+        attemptId,
+        callId: "ordinary-call",
+        callType: "function_call",
+        callItem: { type: "function_call", callId: "ordinary-call" },
+      }),
+    ).toEqual({ accepted: false, registered: false });
+
+    const established = await establishSessionTurnPersistenceReceipt(client.db, receiptInput);
+    expect(established).toMatchObject({ action: "established", receipt: { id: receiptId } });
+    expect(await establishSessionTurnPersistenceReceipt(client.db, receiptInput)).toMatchObject({
+      action: "confirmed",
+      receipt: { id: receiptId },
+    });
+    await expect(
+      establishSessionTurnPersistenceReceipt(client.db, {
+        ...receiptInput,
+        id: crypto.randomUUID(),
+      }),
+    ).rejects.toThrow("already owns a different pending persistence receipt");
+
+    expect(
+      await registerPendingSessionToolCall(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn.id,
+        executionGeneration: turn.executionGeneration,
+        attemptId,
+        persistenceReceiptId: receiptId,
+        callId: obligation.callId,
+        callType: obligation.callType,
+        callItem: obligation.callItem,
+      }),
+    ).toEqual({ accepted: true, registered: true });
+
+    const settlement = {
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      turnId: turn.id,
+      attemptId,
+      executionGeneration: turn.executionGeneration,
+      receiptId,
+      obligationDigest: receiptInput.obligationDigest,
+    };
+    expect(await settleSessionTurnPersistenceReceipt(client.db, settlement)).toEqual({
+      action: "settled",
+    });
+    expect(await settleSessionTurnPersistenceReceipt(client.db, settlement)).toEqual({
+      action: "confirmed",
+    });
+    expect(
+      await getSessionTurnPersistenceReceipt(client.db, grant.workspaceId!, {
+        sessionId: session.id,
+        attemptId,
+        receiptId,
+      }),
+    ).toMatchObject({ state: "settled", settledAt: expect.any(Date) });
+
+    expect(
+      await appendSessionHistoryItems(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn.id,
+        expectedExecutionGeneration: turn.executionGeneration,
+        expectedAttemptId: attemptId,
+        persistenceReceiptId: receiptId,
+        items: [{ position: 0, item: { type: "message", role: "assistant", content: "late" } }],
+      }),
+    ).toBe(false);
+
+    const foreign = await fixture();
+    expect(
+      await getSessionTurnPersistenceReceipt(client.db, foreign.grant.workspaceId!, {
+        sessionId: session.id,
+        attemptId,
+        receiptId,
+      }),
+    ).toBeNull();
+  });
+
+  test("invalid persistence evidence atomically quarantines and removes the live-attempt wedge", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "perform an uncertain effect");
+    const attemptId = crypto.randomUUID();
+    const turn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId },
+    );
+    if (!turn) throw new Error("quarantine test turn was not claimed");
+    const receiptId = crypto.randomUUID();
+    await establishSessionTurnPersistenceReceipt(client.db, {
+      id: receiptId,
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      turnId: turn.id,
+      attemptId,
+      executionGeneration: turn.executionGeneration,
+      triggerEventId: turn.triggerEventId,
+      obligationKind: "pending_tool_call",
+      obligationVersion: 1,
+      obligationDigest: "b".repeat(64),
+      obligation: {
+        kind: "pending_tool_call",
+        callId: "unknown-effect",
+        callType: "function_call",
+        callItem: { type: "function_call", callId: "unknown-effect" },
+      },
+    });
+
+    const quarantined = await quarantineSessionTurnPersistenceAttempt(
+      client.db,
+      grant.workspaceId!,
+      {
+        sessionId: session.id,
+        attemptId,
+        reason: "malformed_heartbeat",
+      },
+    );
+    expect(quarantined).toMatchObject({ action: "quarantined", turnId: turn.id });
+    expect(quarantined.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "turn.failed",
+          payload: expect.objectContaining({
+            code: "invalid_turn_persistence_handoff",
+            effectState: "unknown",
+            retryable: false,
+          }),
+        }),
+      ]),
+    );
+    expect(
+      await getSessionTurnPersistenceReceipt(client.db, grant.workspaceId!, {
+        sessionId: session.id,
+        attemptId,
+        receiptId,
+      }),
+    ).toMatchObject({
+      state: "quarantined",
+      quarantineReason: "malformed_heartbeat",
+      quarantinedAt: expect.any(Date),
+    });
+    expect(await getSession(client.db, grant.workspaceId!, session.id)).toMatchObject({
+      status: "failed",
+      activeTurnId: null,
+    });
+    expect(await getSessionTurn(client.db, grant.workspaceId!, turn.id)).toMatchObject({
+      status: "failed",
+      activeAttemptId: null,
+    });
+    const [attempt] = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      db
+        .select({
+          state: schema.sessionTurnAttempts.state,
+          outcome: schema.sessionTurnAttempts.outcome,
+        })
+        .from(schema.sessionTurnAttempts)
+        .where(
+          and(
+            eq(schema.sessionTurnAttempts.workspaceId, grant.workspaceId!),
+            eq(schema.sessionTurnAttempts.id, attemptId),
+          ),
+        ),
+    );
+    expect(attempt).toEqual({ state: "closed", outcome: "failed" });
+
+    const revived = await send(grant, session.id, "operator-approved retry as a new turn");
+    const successor = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+    );
+    expect(successor?.id).toBe(revived.turn.id);
+    expect(successor?.activeAttemptId).not.toBe(attemptId);
   });
 
   test("Steer supersedes maintenance compaction and leaves the request for the new prompt", async () => {

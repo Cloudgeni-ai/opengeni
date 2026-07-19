@@ -1200,6 +1200,103 @@ export const sessionTurnAttempts = pgTable(
   }),
 );
 
+// Full post-effect persistence obligations live in Postgres, never Temporal
+// history. A turn activity establishes one exact-attempt receipt after a
+// provider/tool boundary completes and before ordinary persistence begins.
+// Temporal heartbeat/result payloads carry only the bounded opaque reference.
+export const sessionTurnPersistenceReceipts = pgTable(
+  "session_turn_persistence_receipts",
+  {
+    id: uuid("id").primaryKey(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sessionId: uuid("session_id").notNull(),
+    turnId: uuid("turn_id").notNull(),
+    attemptId: uuid("attempt_id").notNull(),
+    executionGeneration: integer("execution_generation").notNull(),
+    triggerEventId: uuid("trigger_event_id").notNull(),
+    obligationKind: text("obligation_kind").notNull(),
+    obligationVersion: integer("obligation_version").notNull().default(1),
+    obligationDigest: text("obligation_digest").notNull(),
+    obligation: jsonb("obligation").$type<Record<string, unknown>>().notNull(),
+    state: text("state").notNull().default("pending"),
+    quarantineReason: text("quarantine_reason"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    settledAt: timestamp("settled_at", { withTimezone: true }),
+    quarantinedAt: timestamp("quarantined_at", { withTimezone: true }),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "session_turn_persistence_receipts_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    workspaceSession: foreignKey({
+      name: "session_turn_persistence_receipts_workspace_session_fk",
+      columns: [table.workspaceId, table.sessionId],
+      foreignColumns: [sessions.workspaceId, sessions.id],
+    }).onDelete("restrict"),
+    workspaceTurn: foreignKey({
+      name: "session_turn_persistence_receipts_workspace_turn_fk",
+      columns: [table.workspaceId, table.turnId],
+      foreignColumns: [sessionTurns.workspaceId, sessionTurns.id],
+    }).onDelete("restrict"),
+    workspaceAttempt: foreignKey({
+      name: "session_turn_persistence_receipts_workspace_attempt_fk",
+      columns: [table.workspaceId, table.attemptId],
+      foreignColumns: [sessionTurnAttempts.workspaceId, sessionTurnAttempts.id],
+    }).onDelete("restrict"),
+    workspaceIdentity: uniqueIndex("session_turn_persistence_receipts_workspace_id_uq").on(
+      table.workspaceId,
+      table.id,
+    ),
+    onePendingAttempt: uniqueIndex("session_turn_persistence_receipts_one_pending_attempt_uq")
+      .on(table.workspaceId, table.attemptId)
+      .where(sql`${table.state} = 'pending'`),
+    attemptHistory: index("session_turn_persistence_receipts_attempt_created_idx").on(
+      table.workspaceId,
+      table.attemptId,
+      table.createdAt,
+    ),
+    kindValid: check(
+      "session_turn_persistence_receipts_kind_check",
+      sql`${table.obligationKind} in ('pending_tool_call', 'model_call', 'context_compaction')`,
+    ),
+    versionValid: check(
+      "session_turn_persistence_receipts_version_check",
+      sql`${table.obligationVersion} = 1`,
+    ),
+    digestValid: check(
+      "session_turn_persistence_receipts_digest_check",
+      sql`${table.obligationDigest} ~ '^[0-9a-f]{64}$'`,
+    ),
+    stateValid: check(
+      "session_turn_persistence_receipts_state_check",
+      sql`${table.state} in ('pending', 'settled', 'quarantined')`,
+    ),
+    terminalConsistent: check(
+      "session_turn_persistence_receipts_terminal_check",
+      sql`(
+        ${table.state} = 'pending'
+        and ${table.settledAt} is null
+        and ${table.quarantinedAt} is null
+        and ${table.quarantineReason} is null
+      ) or (
+        ${table.state} = 'settled'
+        and ${table.settledAt} is not null
+        and ${table.quarantinedAt} is null
+        and ${table.quarantineReason} is null
+      ) or (
+        ${table.state} = 'quarantined'
+        and ${table.settledAt} is null
+        and ${table.quarantinedAt} is not null
+        and ${table.quarantineReason} is not null
+      )`,
+    ),
+  }),
+);
+
 // One durable idempotency/operation record for every queue, control,
 // foreground Send/Steer, and Agent MCP mutation. The database migration owns
 // the NULLS NOT DISTINCT uniqueness form because Drizzle does not model it.

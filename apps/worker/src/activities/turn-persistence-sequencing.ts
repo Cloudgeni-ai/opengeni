@@ -4,13 +4,13 @@
  * their required order. The callbacks are intentionally persistence-only.
  */
 export async function persistCompletedModelCallReceipt<T>(input: {
-  establishHandoff: () => void;
+  establishHandoff: () => Promise<void>;
   confirmOwnership?: () => Promise<void>;
   persistHistory: () => Promise<void>;
   persistMetering: () => Promise<void>;
   persistEvent: () => Promise<T>;
 }): Promise<T> {
-  input.establishHandoff();
+  await input.establishHandoff();
   await input.confirmOwnership?.();
   await input.persistHistory();
   await input.persistMetering();

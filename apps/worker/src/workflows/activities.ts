@@ -6,6 +6,7 @@ type WorkflowControlActivities = Pick<
   | "dispatchScheduledTaskRun"
   | "enqueueGoalRetryWake"
   | "failSessionAttempt"
+  | "quarantineTurnPersistenceAttempt"
   | "getCodexCapacityWait"
   | "markSessionIdle"
   | "peekSessionWork"

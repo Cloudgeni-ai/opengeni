@@ -37,6 +37,8 @@ import {
   requireSession,
   recordUsageEvent,
   registerPendingSessionToolCall,
+  establishSessionTurnPersistenceReceipt,
+  settleSessionTurnPersistenceReceipt,
   recordPendingSessionToolCallResult,
   clearDurablePendingSessionToolCalls,
   appendSessionHistoryItems,
@@ -161,6 +163,7 @@ import { maybeCompactContext, type MaybeCompactResult } from "./context-compacti
 import { persistPreparedContextCompaction } from "./context-compaction-persistence";
 import { TurnAttemptFencedError } from "./turn-attempt-fenced";
 import { persistCompletedModelCallReceipt } from "./turn-persistence-sequencing";
+import { prepareTurnPersistenceHandoff } from "../turn-persistence-handoff";
 import {
   loadWorkspaceEnvironmentForRunWithCredentials,
   mintRunGitCredentials,
@@ -192,10 +195,12 @@ import type {
   ActivityServices,
   ContextCompactionPersistenceObligation,
   ModelCallPersistenceObligation,
+  PendingToolCallPersistenceObligation,
   PreparedContextCompactionPersistence,
   RunAgentTurnInput,
   RunAgentTurnResult,
   TurnPersistenceHandoff,
+  TurnPersistenceObligation,
 } from "./types";
 import {
   resumeBoxForTurn,
@@ -1782,6 +1787,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     };
     const persistPreparedConversationHistory = async (
       prepared: PreparedConversationHistory,
+      persistenceReceiptId?: string,
     ): Promise<void> => {
       if (prepared.rows.length > 0) {
         const appended = await appendSessionHistoryItems(db, {
@@ -1791,6 +1797,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           turnId: turnId!,
           expectedExecutionGeneration: executionGeneration,
           expectedAttemptId: input.attemptId,
+          ...(persistenceReceiptId ? { persistenceReceiptId } : {}),
           producerCodexCredentialId: effectiveCodexCredentialId,
           modelToolOutputTruncationTokens: modelRunSettings.modelToolOutputTruncationTokens,
           items: prepared.rows,
@@ -1956,22 +1963,16 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       const opJournal = makeTurnOpJournal(activityContext, heartbeatDetails);
       heartbeatTimer = startActivityHeartbeat(activityContext, heartbeatDetails);
       let producerSeq = 0;
-      // One producer per activity execution, not per turn: a turn can run
-      // again on the same workflow (recovery, approval rerun), and
-      // each execution restarts producerSeq at 1 — a shared producer id would
-      // trip the per-producer uniqueness constraint on the event log. The
-      // Temporal activity id is unique per scheduled execution.
-      const producerId = `${input.workflowId}:${turnId}${activityContext ? `:${activityContext.info.activityId}` : ""}`;
-      // Unique per scheduled activity execution (Temporal activityId). Folded
-      // into positional usage source keys so a re-dispatch of this turn does
-      // not collide its model-call charges with the prior dispatch's. A genuine
-      // activity retry reuses the same activityId, so its re-emitted calls keep
-      // deduping (no double charge).
-      // Local/tests have no Temporal activity id; still generate an execution-
-      // unique holder so a second dispatch of the same durable turn fences this
-      // one exactly like production.
+      // The durable attempt UUID is globally unique across Temporal
+      // continue-as-new runs and stable across a genuine activity retry. It is
+      // therefore the canonical producer/usage dispatch identity; workflow-local
+      // activity IDs may repeat after continue-as-new and must never own ledger
+      // or event dedupe keys.
+      const producerId = `turn-attempt:${input.attemptId}`;
+      // Lease holder remains dispatch-local; producer and usage identity above
+      // are the durable cross-run contract.
       codexLeaseHolderId = dispatchId;
-      const modelUsageDispatchId = activityContext?.info.activityId ?? dispatchId;
+      const modelUsageDispatchId = input.attemptId;
       const emittedModelUsageSourceKeys = new Set<string>();
       const reserveTurnEvents = (
         events: Array<Omit<AppendEventInput, "producerId" | "producerSeq" | "turnId">>,
@@ -1984,6 +1985,59 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           producerSeq: ++producerSeq,
           occurredAt: event.occurredAt ?? new Date(),
         }));
+      const preparePersistenceReceipt = (obligation: TurnPersistenceObligation) =>
+        prepareTurnPersistenceHandoff({
+          turnId: turnId!,
+          triggerEventId: triggerEventId!,
+          executionGeneration,
+          attemptId: input.attemptId,
+          obligation,
+        });
+      const establishPersistenceReceipt = async (
+        receipt: ReturnType<typeof preparePersistenceReceipt>,
+      ) => {
+        const established = await establishSessionTurnPersistenceReceipt(db, {
+          id: receipt.handoff.receiptId,
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: receipt.handoff.turnId,
+          attemptId: receipt.handoff.attemptId,
+          executionGeneration: receipt.handoff.executionGeneration,
+          triggerEventId: receipt.handoff.triggerEventId,
+          obligationKind: receipt.handoff.obligationKind,
+          obligationVersion: 1,
+          obligationDigest: receipt.handoff.obligationDigest,
+          obligation: receipt.obligation,
+        });
+        if (established.action === "fenced") {
+          throw new TurnAttemptFencedError(
+            `turn attempt was fenced while establishing persistence receipt: ${established.reason}`,
+          );
+        }
+        heartbeatDetails.persistenceHandoff = receipt.handoff;
+        activityContext?.heartbeat({
+          ...heartbeatDetails,
+          phase: "persistence_pending",
+          at: new Date().toISOString(),
+        });
+      };
+      const settlePersistenceReceipt = async (handoff: TurnPersistenceHandoff) => {
+        const settled = await settleSessionTurnPersistenceReceipt(db, {
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: handoff.turnId,
+          attemptId: handoff.attemptId,
+          executionGeneration: handoff.executionGeneration,
+          receiptId: handoff.receiptId,
+          obligationDigest: handoff.obligationDigest,
+        });
+        if (settled.action === "fenced") {
+          throw new TurnAttemptFencedError(
+            "turn attempt was fenced while settling its persistence receipt",
+          );
+        }
+      };
       publish = async (
         events: Array<Omit<AppendEventInput, "producerId" | "producerSeq" | "turnId">>,
         immediate = false,
@@ -2045,7 +2099,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 advanceWatermark: false,
               }
             : prepareConversationHistory();
-        const obligation: ModelCallPersistenceObligation = {
+        const preparedReceipt = preparePersistenceReceipt({
           kind: "model_call",
           history: {
             producerCodexCredentialId: effectiveCodexCredentialId,
@@ -2066,25 +2120,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             producerSeq: exactEvent.producerSeq,
             occurredAt: exactEvent.occurredAt.toISOString(),
           },
-        };
-        const handoff: TurnPersistenceHandoff = {
-          version: 1,
-          turnId: turnId!,
-          triggerEventId: triggerEventId!,
-          executionGeneration,
-          obligation,
-        };
+        });
+        const obligation = preparedReceipt.obligation as ModelCallPersistenceObligation;
+        const handoff = preparedReceipt.handoff;
         let appended: { events: SessionEvent[]; accepted: boolean };
         try {
           appended = await persistCompletedModelCallReceipt({
-            establishHandoff: () => {
-              heartbeatDetails.persistenceHandoff = handoff;
-              activityContext?.heartbeat({
-                ...heartbeatDetails,
-                phase: "persistence_pending",
-                at: new Date().toISOString(),
-              });
-            },
+            establishHandoff: async () => await establishPersistenceReceipt(preparedReceipt),
             confirmOwnership: async () => {
               await renewCodexLease("model_usage");
               if (codexLeaseLost) {
@@ -2092,7 +2134,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               }
             },
             persistHistory: async () => {
-              await persistPreparedConversationHistory(preparedHistory);
+              await persistPreparedConversationHistory(preparedHistory, handoff.receiptId);
             },
             persistMetering: async () => {
               await recordModelUsageAndDebitCredits(settings, db, {
@@ -2114,6 +2156,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 executionGeneration,
                 input.attemptId,
                 [exactEvent],
+                undefined,
+                handoff.receiptId,
               ),
           });
           if (!appended.accepted) {
@@ -2121,6 +2165,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               "turn attempt ended while settling completed model usage",
             );
           }
+          await settlePersistenceReceipt(handoff);
         } catch (persistenceError) {
           if (persistenceError instanceof TurnAttemptFencedError) {
             delete heartbeatDetails.persistenceHandoff;
@@ -3051,28 +3096,21 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         if (!completed) {
           throw new Error("context compaction completed without a provider result receipt");
         }
-        const obligation: ContextCompactionPersistenceObligation = {
+        const preparedReceipt = preparePersistenceReceipt({
           kind: "context_compaction",
           compaction: prepared,
           metering: completed.metering,
           event: completed.event,
-        };
-        const handoff: TurnPersistenceHandoff = {
-          version: 1,
-          turnId: turn.id,
-          triggerEventId: triggerEventId!,
-          executionGeneration,
-          obligation,
-        };
-        heartbeatDetails.persistenceHandoff = handoff;
-        activityContext?.heartbeat({
-          ...heartbeatDetails,
-          phase: "persistence_pending",
-          at: new Date().toISOString(),
         });
-        let appendedUsage: { events: SessionEvent[]; accepted: boolean } | null = null;
+        const obligation = preparedReceipt.obligation as ContextCompactionPersistenceObligation;
+        const handoff = preparedReceipt.handoff;
+        let appendedUsage: {
+          events: SessionEvent[];
+          accepted: boolean;
+        } | null = null;
         let persistedOutcome: MaybeCompactResult | null = null;
         try {
+          await establishPersistenceReceipt(preparedReceipt);
           await recordCompletedModelCallBeforeOwnershipFences({
             renewLease: () => renewCodexLease("model_usage"),
             leaseLost: () => codexLeaseLost,
@@ -3097,7 +3135,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   turn.id,
                   executionGeneration,
                   input.attemptId,
-                  [{ ...obligation.event, occurredAt: new Date(obligation.event.occurredAt) }],
+                  [
+                    {
+                      ...obligation.event,
+                      occurredAt: new Date(obligation.event.occurredAt),
+                    },
+                  ],
+                  undefined,
+                  handoff.receiptId,
                 );
                 if (!appendedUsage.accepted) {
                   throw new TurnAttemptFencedError(
@@ -3114,11 +3159,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   turnId: turn.id,
                   executionGeneration,
                   attemptId: input.attemptId,
+                  persistenceReceiptId: handoff.receiptId,
                 },
-                prepared,
+                obligation.compaction,
               );
             },
           });
+          await settlePersistenceReceipt(handoff);
           completedCompactionModelCall = null;
           delete heartbeatDetails.persistenceHandoff;
           activityContext?.heartbeat({
@@ -3143,7 +3190,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 ? { servingAccountHash: completed.servingAccountHash }
                 : {}),
               ...(completed.accountChangedFromPrevCall !== undefined
-                ? { accountChangedFromPrevCall: completed.accountChangedFromPrevCall }
+                ? {
+                    accountChangedFromPrevCall: completed.accountChangedFromPrevCall,
+                  }
                 : {}),
               emittedSourceKeys: emittedModelUsageSourceKeys,
             });
@@ -3228,7 +3277,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                       compacted: false,
                     },
                   },
-                  { type: "session.status.changed", payload: { status: "idle" } },
+                  {
+                    type: "session.status.changed",
+                    payload: { status: "idle" },
+                  },
                 ],
                 turnStatus: "failed",
                 sessionStatus: "idle",
@@ -3820,20 +3872,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         fileResourceDownloads,
         mcpServers: preparedTools.mcpServers,
         onFunctionToolCall: async (pendingToolCall) => {
-          const handoff: TurnPersistenceHandoff = {
-            version: 1,
-            turnId: turnId!,
-            triggerEventId: triggerEventId!,
-            executionGeneration,
-            obligation: { kind: "pending_tool_call", ...pendingToolCall },
-          };
-          heartbeatDetails.persistenceHandoff = handoff;
-          activityContext?.heartbeat({
-            ...heartbeatDetails,
-            phase: "persistence_pending",
-            at: new Date().toISOString(),
+          const preparedReceipt = preparePersistenceReceipt({
+            kind: "pending_tool_call",
+            ...pendingToolCall,
           });
+          const handoff = preparedReceipt.handoff;
+          const obligation = preparedReceipt.obligation as PendingToolCallPersistenceObligation;
           try {
+            await establishPersistenceReceipt(preparedReceipt);
             const registered = await registerPendingSessionToolCall(db, {
               accountId: input.accountId,
               workspaceId: input.workspaceId,
@@ -3841,13 +3887,17 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               turnId: turnId!,
               executionGeneration,
               attemptId: input.attemptId,
-              ...pendingToolCall,
+              persistenceReceiptId: handoff.receiptId,
+              callId: obligation.callId,
+              callType: obligation.callType,
+              callItem: obligation.callItem,
             });
             if (!registered.accepted) {
               throw new TurnAttemptFencedError(
                 "turn attempt ended before a function tool could be durably registered",
               );
             }
+            await settlePersistenceReceipt(handoff);
           } catch (persistenceError) {
             if (persistenceError instanceof TurnAttemptFencedError) {
               throw persistenceError;

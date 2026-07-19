@@ -296,23 +296,7 @@ describe("Temporal workflow integration", () => {
         return runs.length === 1
           ? {
               status: "persistence_pending",
-              persistenceHandoff: {
-                version: 1,
-                turnId: turn.id,
-                triggerEventId: turn.triggerEventId,
-                executionGeneration: 1,
-                obligation: {
-                  kind: "pending_tool_call",
-                  callId: "call-1",
-                  callType: "function_call",
-                  callItem: {
-                    type: "function_call",
-                    callId: "call-1",
-                    name: "external_effect",
-                    arguments: "{}",
-                  },
-                },
-              },
+              persistenceHandoff: persistenceReference(turn, input.attemptId, "pending_tool_call"),
             }
           : { status: "idle" };
       });
@@ -442,7 +426,7 @@ describe("Temporal workflow integration", () => {
       const taskQueue = `workflow-test-${crypto.randomUUID()}`;
       const scope = workflowScope();
       const turn = queuedTurn("event-1");
-      const handoff = modelPersistenceHandoff(turn);
+      let handoff: ReturnType<typeof persistenceReference> | null = null;
       const queuedTurns = [turn];
       const runs: Array<{ attemptId: string }> = [];
       let completedInferenceEffects = 0;
@@ -456,6 +440,7 @@ describe("Temporal workflow integration", () => {
           // replacement activity is dispatched, but the completed inference
           // obligation is persisted rather than invoking the provider again.
           completedInferenceEffects += 1;
+          handoff = persistenceReference(turn, input.attemptId, "model_call");
           return await heartbeatPersistenceThenDie(handoff);
         }
         return { status: "idle" };
@@ -515,6 +500,7 @@ describe("Temporal workflow integration", () => {
       const persistenceRetries: unknown[] = [];
       const genericRecoveries: unknown[] = [];
       const failures: unknown[] = [];
+      const quarantines: unknown[] = [];
       const admission = createTurnAdmission(queuedTurns, async (input) => {
         runs.push(input);
         return await heartbeatPersistenceThenDie({ version: 1, obligation: "corrupt" });
@@ -529,6 +515,10 @@ describe("Temporal workflow integration", () => {
         recoverDispatch: async (input: unknown) => {
           genericRecoveries.push(input);
           return { action: "stale" as const };
+        },
+        quarantineTurnPersistenceAttempt: async (input: unknown) => {
+          quarantines.push(input);
+          return { action: "quarantined" as const };
         },
         failSessionAttempt: async (input: unknown) => {
           failures.push(input);
@@ -560,6 +550,12 @@ describe("Temporal workflow integration", () => {
         expect(persistenceRetries).toHaveLength(0);
         expect(genericRecoveries).toHaveLength(0);
         expect(failures).toHaveLength(0);
+        expect(quarantines).toEqual([
+          expect.objectContaining({
+            attemptId: expect.any(String),
+            reason: "malformed_heartbeat",
+          }),
+        ]);
       } finally {
         worker.shutdown();
         await run;
@@ -1933,46 +1929,20 @@ function queuedTurn(triggerEventId: string): WorkflowTestTurn {
   };
 }
 
-function modelPersistenceHandoff(turn: WorkflowTestTurn) {
-  const sourceKey = `response-${turn.id}`;
+function persistenceReference(
+  turn: WorkflowTestTurn,
+  attemptId: string,
+  obligationKind: "pending_tool_call" | "model_call" | "context_compaction",
+) {
   return {
-    version: 1 as const,
+    version: 2 as const,
+    receiptId: crypto.randomUUID(),
     turnId: turn.id,
     triggerEventId: turn.triggerEventId,
     executionGeneration: 1,
-    obligation: {
-      kind: "model_call" as const,
-      history: {
-        producerCodexCredentialId: null,
-        modelToolOutputTruncationTokens: 4_096,
-        items: [
-          {
-            position: 4,
-            item: { type: "message", role: "assistant", content: "completed once" },
-          },
-        ],
-      },
-      metering: {
-        model: "gpt-5.6-sol",
-        isCodexTurn: false,
-        usage: { inputTokens: 10, outputTokens: 2, totalTokens: 12 },
-        sourceKey,
-      },
-      event: {
-        type: "agent.model.usage" as const,
-        payload: {
-          turnId: turn.id,
-          model: "gpt-5.6-sol",
-          sourceKey,
-          inputTokens: 10,
-          outputTokens: 2,
-        },
-        turnId: turn.id,
-        producerId: "workflow:turn:activity",
-        producerSeq: 17,
-        occurredAt: "2026-07-18T22:22:36.000Z",
-      },
-    },
+    attemptId,
+    obligationKind,
+    obligationDigest: "a".repeat(64),
   };
 }
 

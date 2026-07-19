@@ -12073,6 +12073,7 @@ export type TurnAttemptFenceRejectReason =
   | "workspace_paused"
   | "session_paused"
   | "pending_control"
+  | "persistence_receipt_changed"
   | "active_turn_changed"
   | "generation_changed"
   | "attempt_changed"
@@ -12112,6 +12113,8 @@ async function lockTurnAttemptWriteFenceTx(
     turnId: string;
     executionGeneration: number;
     attemptId: string;
+    persistenceReceiptId?: string;
+    allowReceiptEstablishment?: boolean;
   },
 ): Promise<TurnAttemptFenceResult> {
   const effectiveControl = await evaluateSessionControl(tx, input.workspaceId, input.sessionId, {
@@ -12145,18 +12148,12 @@ async function lockTurnAttemptWriteFenceTx(
     )
     .for("update")
     .limit(1);
-  const base = { workspace: workspace ?? null, session: session ?? null, turn: turn ?? null };
+  const base = {
+    workspace: workspace ?? null,
+    session: session ?? null,
+    turn: turn ?? null,
+  };
   if (!workspace || !session || !turn) return { allowed: false, reason: "not_found", ...base };
-  if (effectiveControl.state === "paused") {
-    return {
-      allowed: false,
-      reason:
-        effectiveControl.primaryBlocker?.kind === "workspace"
-          ? "workspace_paused"
-          : "session_paused",
-      ...base,
-    };
-  }
   if (session.activeTurnId !== input.turnId) {
     return { allowed: false, reason: "active_turn_changed", ...base };
   }
@@ -12165,6 +12162,61 @@ async function lockTurnAttemptWriteFenceTx(
   }
   if (turn.activeAttemptId !== input.attemptId) {
     return { allowed: false, reason: "attempt_changed", ...base };
+  }
+  if (!["running", "requires_action"].includes(turn.status)) {
+    return { allowed: false, reason: "turn_terminal", ...base };
+  }
+  let postEffectSettlement = false;
+  if (input.persistenceReceiptId) {
+    const [receipt] = await tx
+      .select({ id: schema.sessionTurnPersistenceReceipts.id })
+      .from(schema.sessionTurnPersistenceReceipts)
+      .where(
+        and(
+          eq(schema.sessionTurnPersistenceReceipts.workspaceId, input.workspaceId),
+          eq(schema.sessionTurnPersistenceReceipts.id, input.persistenceReceiptId),
+          eq(schema.sessionTurnPersistenceReceipts.sessionId, input.sessionId),
+          eq(schema.sessionTurnPersistenceReceipts.turnId, input.turnId),
+          eq(schema.sessionTurnPersistenceReceipts.attemptId, input.attemptId),
+          eq(schema.sessionTurnPersistenceReceipts.executionGeneration, input.executionGeneration),
+          eq(schema.sessionTurnPersistenceReceipts.state, "pending"),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    if (!receipt) {
+      return { allowed: false, reason: "persistence_receipt_changed", ...base };
+    }
+    postEffectSettlement = true;
+  }
+  if (input.allowReceiptEstablishment) {
+    const [attempt] = await tx
+      .select({ state: schema.sessionTurnAttempts.state })
+      .from(schema.sessionTurnAttempts)
+      .where(
+        and(
+          eq(schema.sessionTurnAttempts.workspaceId, input.workspaceId),
+          eq(schema.sessionTurnAttempts.id, input.attemptId),
+          eq(schema.sessionTurnAttempts.sessionId, input.sessionId),
+          eq(schema.sessionTurnAttempts.turnId, input.turnId),
+          eq(schema.sessionTurnAttempts.executionGeneration, input.executionGeneration),
+          inArray(schema.sessionTurnAttempts.state, ["claimed", "running"]),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    if (!attempt) return { allowed: false, reason: "attempt_changed", ...base };
+    postEffectSettlement = true;
+  }
+  if (effectiveControl.state === "paused" && !postEffectSettlement) {
+    return {
+      allowed: false,
+      reason:
+        effectiveControl.primaryBlocker?.kind === "workspace"
+          ? "workspace_paused"
+          : "session_paused",
+      ...base,
+    };
   }
   const [interruption] = await tx
     .select({ id: schema.sessionAttemptInterruptions.id })
@@ -12178,13 +12230,200 @@ async function lockTurnAttemptWriteFenceTx(
       ),
     )
     .limit(1);
-  if (interruption) {
+  if (interruption && !postEffectSettlement) {
     return { allowed: false, reason: "pending_control", ...base };
   }
-  if (!["running", "requires_action"].includes(turn.status)) {
-    return { allowed: false, reason: "turn_terminal", ...base };
-  }
   return { allowed: true, workspace, session, turn };
+}
+
+export type SessionTurnPersistenceObligationKind =
+  | "pending_tool_call"
+  | "model_call"
+  | "context_compaction";
+
+export type SessionTurnPersistenceReceipt =
+  typeof schema.sessionTurnPersistenceReceipts.$inferSelect;
+
+export type EstablishSessionTurnPersistenceReceiptInput = {
+  id: string;
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  turnId: string;
+  attemptId: string;
+  executionGeneration: number;
+  triggerEventId: string;
+  obligationKind: SessionTurnPersistenceObligationKind;
+  obligationVersion: 1;
+  obligationDigest: string;
+  obligation: Record<string, unknown>;
+};
+
+/**
+ * Durably establish full post-effect persistence truth before replay can be
+ * considered. This narrow writer may cross a pending Pause/Steer fence because
+ * it cannot execute an effect: it only records the exact obligation produced by
+ * the still-owning attempt. The control lane later settles that receipt before
+ * it closes, recovers, or redispatches the attempt.
+ */
+export async function establishSessionTurnPersistenceReceipt(
+  db: Database,
+  input: EstablishSessionTurnPersistenceReceiptInput,
+): Promise<
+  | {
+      action: "established" | "confirmed";
+      receipt: SessionTurnPersistenceReceipt;
+    }
+  | { action: "fenced"; reason: TurnAttemptFenceRejectReason }
+> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        const fence = await lockTurnAttemptWriteFenceTx(tx, {
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+          executionGeneration: input.executionGeneration,
+          attemptId: input.attemptId,
+          allowReceiptEstablishment: true,
+        });
+        if (!fence.allowed) return { action: "fenced" as const, reason: fence.reason };
+        if (
+          fence.session.accountId !== input.accountId ||
+          fence.turn.triggerEventId !== input.triggerEventId ||
+          input.obligation.kind !== input.obligationKind
+        ) {
+          throw new Error("Turn persistence receipt conflicts with its exact ownership chain");
+        }
+        const [pending] = await tx
+          .select()
+          .from(schema.sessionTurnPersistenceReceipts)
+          .where(
+            and(
+              eq(schema.sessionTurnPersistenceReceipts.workspaceId, input.workspaceId),
+              eq(schema.sessionTurnPersistenceReceipts.attemptId, input.attemptId),
+              eq(schema.sessionTurnPersistenceReceipts.state, "pending"),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (pending) {
+          if (
+            pending.id !== input.id ||
+            pending.sessionId !== input.sessionId ||
+            pending.turnId !== input.turnId ||
+            pending.executionGeneration !== input.executionGeneration ||
+            pending.triggerEventId !== input.triggerEventId ||
+            pending.obligationKind !== input.obligationKind ||
+            pending.obligationVersion !== input.obligationVersion ||
+            pending.obligationDigest !== input.obligationDigest ||
+            !isDeepStrictEqual(pending.obligation, input.obligation)
+          ) {
+            throw new Error(
+              `Attempt ${input.attemptId} already owns a different pending persistence receipt`,
+            );
+          }
+          return { action: "confirmed" as const, receipt: pending };
+        }
+        const [inserted] = await tx
+          .insert(schema.sessionTurnPersistenceReceipts)
+          .values(input)
+          .returning();
+        if (!inserted) throw new Error("Failed to establish turn persistence receipt");
+        return { action: "established" as const, receipt: inserted };
+      }),
+  );
+}
+
+export async function getSessionTurnPersistenceReceipt(
+  db: Database,
+  workspaceId: string,
+  input: { sessionId: string; attemptId: string; receiptId?: string },
+): Promise<SessionTurnPersistenceReceipt | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [receipt] = await scopedDb
+      .select()
+      .from(schema.sessionTurnPersistenceReceipts)
+      .where(
+        and(
+          eq(schema.sessionTurnPersistenceReceipts.workspaceId, workspaceId),
+          eq(schema.sessionTurnPersistenceReceipts.sessionId, input.sessionId),
+          eq(schema.sessionTurnPersistenceReceipts.attemptId, input.attemptId),
+          ...(input.receiptId
+            ? [eq(schema.sessionTurnPersistenceReceipts.id, input.receiptId)]
+            : [eq(schema.sessionTurnPersistenceReceipts.state, "pending")]),
+        ),
+      )
+      .orderBy(desc(schema.sessionTurnPersistenceReceipts.createdAt))
+      .limit(1);
+    return receipt ?? null;
+  });
+}
+
+/** Mark an exactly validated pending obligation durable after all of its writes converge. */
+export async function settleSessionTurnPersistenceReceipt(
+  db: Database,
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    attemptId: string;
+    executionGeneration: number;
+    receiptId: string;
+    obligationDigest: string;
+  },
+): Promise<{ action: "settled" | "confirmed" | "fenced" }> {
+  return await withWorkspaceRls(
+    db,
+    input.workspaceId,
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        const [receipt] = await tx
+          .select()
+          .from(schema.sessionTurnPersistenceReceipts)
+          .where(
+            and(
+              eq(schema.sessionTurnPersistenceReceipts.workspaceId, input.workspaceId),
+              eq(schema.sessionTurnPersistenceReceipts.id, input.receiptId),
+              eq(schema.sessionTurnPersistenceReceipts.sessionId, input.sessionId),
+              eq(schema.sessionTurnPersistenceReceipts.turnId, input.turnId),
+              eq(schema.sessionTurnPersistenceReceipts.attemptId, input.attemptId),
+              eq(
+                schema.sessionTurnPersistenceReceipts.executionGeneration,
+                input.executionGeneration,
+              ),
+              eq(schema.sessionTurnPersistenceReceipts.obligationDigest, input.obligationDigest),
+            ),
+          )
+          .limit(1);
+        if (!receipt || receipt.state === "quarantined") return { action: "fenced" as const };
+        if (receipt.state === "settled") return { action: "confirmed" as const };
+        const fence = await lockTurnAttemptWriteFenceTx(tx, {
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+          executionGeneration: input.executionGeneration,
+          attemptId: input.attemptId,
+          persistenceReceiptId: input.receiptId,
+        });
+        if (!fence.allowed) return { action: "fenced" as const };
+        const now = new Date();
+        const [settled] = await tx
+          .update(schema.sessionTurnPersistenceReceipts)
+          .set({ state: "settled", settledAt: now, updatedAt: now })
+          .where(
+            and(
+              eq(schema.sessionTurnPersistenceReceipts.workspaceId, input.workspaceId),
+              eq(schema.sessionTurnPersistenceReceipts.id, input.receiptId),
+              eq(schema.sessionTurnPersistenceReceipts.state, "pending"),
+            ),
+          )
+          .returning({ id: schema.sessionTurnPersistenceReceipts.id });
+        return { action: settled ? ("settled" as const) : ("fenced" as const) };
+      }),
+  );
 }
 
 /**
@@ -12202,6 +12441,7 @@ export async function appendSessionHistoryItems(
     turnId: string;
     expectedExecutionGeneration: number;
     expectedAttemptId: string;
+    persistenceReceiptId?: string;
     // The codex account that produced these items (the turn's resolved credential
     // id), or null/undefined on the non-codex path. Stored verbatim so the read
     // path can strip cross-account reasoning.encrypted_content blobs per turn.
@@ -12224,6 +12464,9 @@ export async function appendSessionHistoryItems(
           turnId: input.turnId,
           executionGeneration: input.expectedExecutionGeneration,
           attemptId: input.expectedAttemptId,
+          ...(input.persistenceReceiptId
+            ? { persistenceReceiptId: input.persistenceReceiptId }
+            : {}),
         });
         if (!allowed.allowed) return false;
         await tx
@@ -12264,6 +12507,7 @@ export type PendingSessionToolCallInput = {
   turnId: string;
   executionGeneration: number;
   attemptId: string;
+  persistenceReceiptId?: string;
   callId: string;
   callType: string;
   callItem: Record<string, unknown>;
@@ -12291,6 +12535,9 @@ export async function registerPendingSessionToolCall(
           turnId: input.turnId,
           executionGeneration: input.executionGeneration,
           attemptId: input.attemptId,
+          ...(input.persistenceReceiptId
+            ? { persistenceReceiptId: input.persistenceReceiptId }
+            : {}),
         });
         if (!fence.allowed) return { accepted: false, registered: false };
         const inserted = await tx
@@ -12720,6 +12967,7 @@ export async function applyContextCompaction(
     turnId: string;
     expectedExecutionGeneration: number;
     expectedAttemptId: string;
+    persistenceReceiptId?: string;
     replacementItems: Array<Record<string, unknown>>;
     summaryItem: Record<string, unknown>;
     replacementInputTokens: number;
@@ -12740,6 +12988,9 @@ export async function applyContextCompaction(
           turnId: input.turnId,
           executionGeneration: input.expectedExecutionGeneration,
           attemptId: input.expectedAttemptId,
+          ...(input.persistenceReceiptId
+            ? { persistenceReceiptId: input.persistenceReceiptId }
+            : {}),
         });
         if (!fence.allowed) {
           return { applied: false as const, reason: fence.reason };
@@ -12891,6 +13142,7 @@ export async function recordSkippedContextCompaction(
     turnId: string;
     expectedExecutionGeneration: number;
     expectedAttemptId: string;
+    persistenceReceiptId?: string;
     reason:
       | "no_history"
       | "replacement_not_smaller"
@@ -12916,6 +13168,9 @@ export async function recordSkippedContextCompaction(
           turnId: input.turnId,
           executionGeneration: input.expectedExecutionGeneration,
           attemptId: input.expectedAttemptId,
+          ...(input.persistenceReceiptId
+            ? { persistenceReceiptId: input.persistenceReceiptId }
+            : {}),
         });
         if (!fence.allowed) return { recorded: false as const, reason: fence.reason };
         if (input.persistenceKey) {
@@ -21630,6 +21885,204 @@ export async function requestSessionTurnRecovery(
   });
 }
 
+export type QuarantineSessionTurnPersistenceAttemptResult =
+  | { action: "quarantined"; turnId: string; events: SessionEvent[] }
+  | { action: "stale"; events: [] };
+
+/**
+ * Fail closed when Temporal supplies malformed persistence evidence or a
+ * bounded reference cannot be matched to PostgreSQL. The exact attempt and all
+ * of its pending receipts are settled in one transaction, retaining explicit
+ * unknown-effect evidence while ensuring the live-attempt uniqueness fence
+ * cannot wedge future operator recovery.
+ */
+export async function quarantineSessionTurnPersistenceAttempt(
+  db: Database,
+  workspaceId: string,
+  input: { sessionId: string; attemptId: string; reason: string },
+): Promise<QuarantineSessionTurnPersistenceAttemptResult> {
+  return await withWorkspaceRls(
+    db,
+    workspaceId,
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        await evaluateSessionControl(tx as unknown as Database, workspaceId, input.sessionId, {
+          lock: "share",
+        });
+        const [workspace] = await tx
+          .select({ id: schema.workspaces.id })
+          .from(schema.workspaces)
+          .where(eq(schema.workspaces.id, workspaceId))
+          .for("update")
+          .limit(1);
+        const [session] = await tx
+          .select()
+          .from(schema.sessions)
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, workspaceId),
+              eq(schema.sessions.id, input.sessionId),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (!workspace || !session) throw new Error(`Session not found: ${input.sessionId}`);
+        const [attempt] = await tx
+          .select()
+          .from(schema.sessionTurnAttempts)
+          .where(
+            and(
+              eq(schema.sessionTurnAttempts.workspaceId, workspaceId),
+              eq(schema.sessionTurnAttempts.id, input.attemptId),
+              eq(schema.sessionTurnAttempts.sessionId, input.sessionId),
+            ),
+          )
+          .limit(1);
+        if (!attempt || attempt.state === "closed") return { action: "stale", events: [] };
+        const [turn] = await tx
+          .select()
+          .from(schema.sessionTurns)
+          .where(
+            and(
+              eq(schema.sessionTurns.workspaceId, workspaceId),
+              eq(schema.sessionTurns.sessionId, input.sessionId),
+              eq(schema.sessionTurns.id, attempt.turnId),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (
+          !turn ||
+          session.activeTurnId !== turn.id ||
+          turn.activeAttemptId !== attempt.id ||
+          turn.executionGeneration !== attempt.executionGeneration ||
+          !["running", "requires_action"].includes(turn.status)
+        ) {
+          return { action: "stale", events: [] };
+        }
+        const now = new Date();
+        await tx
+          .update(schema.sessionTurnPersistenceReceipts)
+          .set({
+            state: "quarantined",
+            quarantineReason: input.reason,
+            quarantinedAt: now,
+            updatedAt: now,
+          })
+          .where(
+            and(
+              eq(schema.sessionTurnPersistenceReceipts.workspaceId, workspaceId),
+              eq(schema.sessionTurnPersistenceReceipts.attemptId, input.attemptId),
+              eq(schema.sessionTurnPersistenceReceipts.state, "pending"),
+            ),
+          );
+        await closeSessionTurnAttemptInTransaction(tx as unknown as Database, {
+          id: input.attemptId,
+          accountId: session.accountId,
+          workspaceId,
+          sessionId: input.sessionId,
+          turnId: turn.id,
+          executionGeneration: turn.executionGeneration,
+          outcome: "failed",
+          closedAt: now,
+        });
+        let sequence = session.lastSequence;
+        const closedTools = await closePendingSessionToolCallsInTransaction(
+          tx as unknown as Database,
+          {
+            accountId: session.accountId,
+            workspaceId,
+            sessionId: input.sessionId,
+            turnId: turn.id,
+            reason: "invalid_persistence_handoff",
+            sequence,
+            now,
+          },
+        );
+        sequence = closedTools.sequence;
+        const inserted = await tx
+          .insert(schema.sessionEvents)
+          .values([
+            {
+              accountId: session.accountId,
+              workspaceId,
+              sessionId: input.sessionId,
+              sequence: ++sequence,
+              type: "turn.failed",
+              turnId: turn.id,
+              turnGeneration: turn.executionGeneration,
+              turnAttemptId: input.attemptId,
+              turnAssociation: "current",
+              payload: sanitizeEventPayload({
+                triggerEventId: turn.triggerEventId,
+                code: "invalid_turn_persistence_handoff",
+                error: "Persistence evidence was invalid; automatic effect replay was refused.",
+                effectState: "unknown",
+                retryable: false,
+              }),
+              occurredAt: now,
+            },
+            {
+              accountId: session.accountId,
+              workspaceId,
+              sessionId: input.sessionId,
+              sequence: ++sequence,
+              type: "session.status.changed",
+              turnId: turn.id,
+              turnGeneration: turn.executionGeneration,
+              turnAttemptId: input.attemptId,
+              turnAssociation: "current",
+              payload: sanitizeEventPayload({ status: "failed" }),
+              occurredAt: now,
+            },
+          ])
+          .returning();
+        await tx
+          .update(schema.sessionTurns)
+          .set({
+            status: "failed",
+            activeAttemptId: null,
+            metadata: metadataWithoutTurnDispatchAttempt(turn.metadata),
+            version: turn.version + 1,
+            finishedAt: now,
+            updatedAt: now,
+          })
+          .where(
+            and(
+              eq(schema.sessionTurns.workspaceId, workspaceId),
+              eq(schema.sessionTurns.id, turn.id),
+            ),
+          );
+        await enqueueFailedChildOutboxForTurnTx(
+          tx as unknown as Database,
+          workspaceId,
+          session,
+          turn,
+        );
+        await tx
+          .update(schema.sessions)
+          .set({
+            status: "failed",
+            activeTurnId: null,
+            lastSequence: sequence,
+            queueVersion: session.queueVersion + 1,
+            updatedAt: now,
+          })
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, workspaceId),
+              eq(schema.sessions.id, input.sessionId),
+            ),
+          );
+        return {
+          action: "quarantined" as const,
+          turnId: turn.id,
+          events: [...closedTools.events, ...inserted.map(mapEvent)],
+        };
+      }),
+  );
+}
+
 export type RecoverSessionDispatchInput = {
   sessionId: string;
   attemptId: string;
@@ -23149,6 +23602,7 @@ export async function appendSessionEventsForTurnAttempt(
   executionGeneration: number,
   attemptId: string,
   inputs: AppendEventInput[],
+  persistenceReceiptId?: string,
 ): Promise<{ events: SessionEvent[]; accepted: boolean }> {
   if (inputs.length === 0) return { events: [], accepted: true };
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
@@ -23159,6 +23613,7 @@ export async function appendSessionEventsForTurnAttempt(
         turnId,
         executionGeneration,
         attemptId,
+        ...(persistenceReceiptId ? { persistenceReceiptId } : {}),
       });
       const session = fence.session;
       if (!session) throw new Error(`Session not found: ${sessionId}`);
@@ -23181,7 +23636,10 @@ export async function appendSessionEventsForTurnAttempt(
       const existingUsageRows =
         fence.allowed && incomingUsageKeys.length > 0
           ? await tx
-              .select({ id: schema.sessionEvents.id, payload: schema.sessionEvents.payload })
+              .select({
+                id: schema.sessionEvents.id,
+                payload: schema.sessionEvents.payload,
+              })
               .from(schema.sessionEvents)
               .where(
                 and(

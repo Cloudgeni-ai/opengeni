@@ -126,6 +126,18 @@ export type SettleSessionInterruptionsInput = {
   workflowId: string;
 };
 
+export type QuarantineTurnPersistenceAttemptInput = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  attemptId: string;
+  reason: "malformed_heartbeat" | "malformed_activity_result" | "invalid_receipt_reference";
+};
+
+export type QuarantineTurnPersistenceAttemptResult = {
+  action: "quarantined" | "stale";
+};
+
 export type FailSessionAttemptInput = {
   accountId: string;
   workspaceId: string;
@@ -151,6 +163,7 @@ export type RecoverDispatchResult =
   // a zombie that actually settled the turn after the server gave up on its
   // heartbeats. Nothing to redo; the workflow just continues its loop.
   | { action: "stale" }
+  | { action: "quarantined" }
   // The per-turn crash-loop guard tripped; the workflow must fail the
   // session for real. `redispatches` is the count already consumed (== the
   // ceiling), so the failed attempt was worker death number redispatches + 1.
@@ -222,20 +235,24 @@ export type ContextCompactionPersistenceObligation = {
   event: ExactTurnEventPersistenceInput | null;
 };
 
+export type TurnPersistenceObligation =
+  | PendingToolCallPersistenceObligation
+  | ModelCallPersistenceObligation
+  | ContextCompactionPersistenceObligation;
+
 /**
- * Exact persistence work a turn worker had accepted but could not prove
- * durable. This is intentionally operation-scoped: the control worker may
- * retry the database write, but never provider inference or tool execution.
+ * Bounded Temporal reference to exact persistence work stored in PostgreSQL.
+ * Raw model/tool/compaction content must never enter workflow history.
  */
 export type TurnPersistenceHandoff = {
-  version: 1;
+  version: 2;
+  receiptId: string;
   turnId: string;
   triggerEventId: string;
   executionGeneration: number;
-  obligation:
-    | PendingToolCallPersistenceObligation
-    | ModelCallPersistenceObligation
-    | ContextCompactionPersistenceObligation;
+  attemptId: string;
+  obligationKind: TurnPersistenceObligation["kind"];
+  obligationDigest: string;
 };
 
 export type PersistTurnHandoffAndRecoverInput = {
@@ -249,7 +266,8 @@ export type PersistTurnHandoffAndRecoverInput = {
 
 export type PersistTurnHandoffAndRecoverResult =
   | { action: "recovering"; turnId: string }
-  | { action: "stale" };
+  | { action: "stale" }
+  | { action: "quarantined" };
 
 export type PeekSessionWorkInput = {
   workspaceId: string;

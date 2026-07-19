@@ -2,7 +2,11 @@ import type {
   ExactTurnEventPersistenceInput,
   ModelCallPersistenceObligation,
   TurnPersistenceHandoff,
+  TurnPersistenceObligation,
 } from "./activities/types";
+import { createHash, randomUUID } from "node:crypto";
+
+export const TURN_PERSISTENCE_HANDOFF_MAX_BYTES = 1_024;
 
 type HandoffFieldState =
   | { state: "absent" }
@@ -128,24 +132,13 @@ function validPreparedCompaction(value: unknown): boolean {
   );
 }
 
-/**
- * Pure, deterministic validation for a persistence-only turn handoff. The
- * control lane treats these bytes as an exact receipt, so cross-field identity
- * (turn, source key, model, producer and compaction fingerprint) is checked in
- * addition to the serialized shape.
- */
-export function parseTurnPersistenceHandoff(value: unknown): TurnPersistenceHandoff | null {
-  if (!isRecord(value) || !isRecord(value.obligation)) return null;
-  if (
-    value.version !== 1 ||
-    !isNonEmptyString(value.turnId) ||
-    !isNonEmptyString(value.triggerEventId) ||
-    !isPositiveSafeInteger(value.executionGeneration)
-  ) {
-    return null;
-  }
-
-  const obligation = value.obligation;
+/** Validate the full PostgreSQL-only obligation and all cross-field identity. */
+export function parseTurnPersistenceObligation(
+  value: unknown,
+  turnId: string,
+): TurnPersistenceObligation | null {
+  if (!isRecord(value)) return null;
+  const obligation = value;
   if (obligation.kind === "pending_tool_call") {
     if (
       !isNonEmptyString(obligation.callId) ||
@@ -173,7 +166,7 @@ export function parseTurnPersistenceHandoff(value: unknown): TurnPersistenceHand
       ) ||
       !isNonNegativeSafeInteger(obligation.history.modelToolOutputTruncationTokens) ||
       !validMetering(obligation.metering) ||
-      !usageEventMatches(obligation.event, obligation.metering, value.turnId)
+      !usageEventMatches(obligation.event, obligation.metering, turnId)
     ) {
       return null;
     }
@@ -185,12 +178,114 @@ export function parseTurnPersistenceHandoff(value: unknown): TurnPersistenceHand
         (obligation.metering === null && obligation.event === null) ||
         (pairedUsage &&
           validMetering(obligation.metering) &&
-          usageEventMatches(obligation.event, obligation.metering, value.turnId))
+          usageEventMatches(obligation.event, obligation.metering, turnId))
       )
     ) {
       return null;
     }
   } else {
+    return null;
+  }
+  return obligation as TurnPersistenceObligation;
+}
+
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value === "boolean" || typeof value === "string") {
+    return JSON.stringify(value);
+  }
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new Error("Persistence obligation contains non-finite data");
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (!isRecord(value)) throw new Error("Persistence obligation is not JSON-compatible");
+  return `{${Object.keys(value)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`)
+    .join(",")}}`;
+}
+
+export function turnPersistenceObligationDigest(obligation: TurnPersistenceObligation): string {
+  return createHash("sha256").update(canonicalJson(obligation), "utf8").digest("hex");
+}
+
+/** Normalize exactly as JSONB transport will, then validate and hash those bytes. */
+export function normalizeTurnPersistenceObligation(
+  value: TurnPersistenceObligation,
+  turnId: string,
+): { obligation: TurnPersistenceObligation; digest: string } {
+  const serialized = JSON.stringify(value);
+  if (serialized === undefined) throw new Error("Persistence obligation is not JSON-compatible");
+  const obligation = parseTurnPersistenceObligation(JSON.parse(serialized), turnId);
+  if (!obligation) throw new Error("Invalid turn persistence obligation");
+  return { obligation, digest: turnPersistenceObligationDigest(obligation) };
+}
+
+export function prepareTurnPersistenceHandoff(input: {
+  turnId: string;
+  triggerEventId: string;
+  executionGeneration: number;
+  attemptId: string;
+  obligation: TurnPersistenceObligation;
+}): { handoff: TurnPersistenceHandoff; obligation: TurnPersistenceObligation } {
+  const normalized = normalizeTurnPersistenceObligation(input.obligation, input.turnId);
+  return {
+    handoff: {
+      version: 2,
+      receiptId: randomUUID(),
+      turnId: input.turnId,
+      triggerEventId: input.triggerEventId,
+      executionGeneration: input.executionGeneration,
+      attemptId: input.attemptId,
+      obligationKind: normalized.obligation.kind,
+      obligationDigest: normalized.digest,
+    },
+    obligation: normalized.obligation,
+  };
+}
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const DIGEST_PATTERN = /^[0-9a-f]{64}$/;
+const HANDOFF_KEYS = new Set([
+  "version",
+  "receiptId",
+  "turnId",
+  "triggerEventId",
+  "executionGeneration",
+  "attemptId",
+  "obligationKind",
+  "obligationDigest",
+]);
+
+/** Pure validation for the bounded Temporal receipt reference. */
+export function parseTurnPersistenceHandoff(value: unknown): TurnPersistenceHandoff | null {
+  if (!isRecord(value)) return null;
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(value);
+  } catch {
+    return null;
+  }
+  if (Buffer.byteLength(serialized, "utf8") > TURN_PERSISTENCE_HANDOFF_MAX_BYTES) return null;
+  if (
+    Object.keys(value).length !== HANDOFF_KEYS.size ||
+    Object.keys(value).some((key) => !HANDOFF_KEYS.has(key)) ||
+    value.version !== 2 ||
+    !isNonEmptyString(value.receiptId) ||
+    !UUID_PATTERN.test(value.receiptId) ||
+    !isNonEmptyString(value.turnId) ||
+    !UUID_PATTERN.test(value.turnId) ||
+    !isNonEmptyString(value.triggerEventId) ||
+    !UUID_PATTERN.test(value.triggerEventId) ||
+    !isPositiveSafeInteger(value.executionGeneration) ||
+    !isNonEmptyString(value.attemptId) ||
+    !UUID_PATTERN.test(value.attemptId) ||
+    !["pending_tool_call", "model_call", "context_compaction"].includes(
+      String(value.obligationKind),
+    ) ||
+    typeof value.obligationDigest !== "string" ||
+    !DIGEST_PATTERN.test(value.obligationDigest)
+  ) {
     return null;
   }
   return value as TurnPersistenceHandoff;

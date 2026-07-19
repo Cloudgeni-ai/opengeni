@@ -430,6 +430,12 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
 
     if (outcome.kind === "control") {
       scope.cancel();
+      // The durable interruption row already fences every ordinary activity
+      // write. Wait for Temporal to observe cancellation before closing the
+      // attempt so a provider completion racing the signal can establish and
+      // settle its narrow PostgreSQL post-effect receipt. Closing first creates
+      // an unavoidable completion->receipt race and can discard truthful usage.
+      await turn.catch(() => undefined);
       const settlement = await activity.settleSessionInterruptions({
         accountId,
         workspaceId,
@@ -437,17 +443,7 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
         attemptId,
         workflowId: workflowInfo().workflowId,
       });
-      // Keep the workflow alive until the cancelled activity has actually
-      // stopped. Temporal delivers activity cancellation through a heartbeat;
-      // returning while the activity promise is still detached lets the
-      // workflow complete first, after which the worker can keep streaming for
-      // the activity's entire start-to-close window. Postgres settlement above
-      // is intentionally first: it fences every late write immediately while
-      // the physical activity winds down. The control outcome is authoritative,
-      // so a concurrent activity completion or cancellation failure is ignored
-      // only after Temporal has durably observed that terminal activity state.
-      await turn.catch(() => undefined);
-      return settlement.action !== "paused";
+      return settlement.action !== "paused" && settlement.action !== "failed";
     }
 
     if (outcome.kind === "failure") {
@@ -472,13 +468,20 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       const workerDeath = workerDeathFailure(outcome.error);
       if (workerDeath) {
         if (workerDeath.invalidPersistenceHandoff) {
+          await activity.quarantineTurnPersistenceAttempt({
+            accountId,
+            workspaceId,
+            sessionId,
+            attemptId,
+            reason: "malformed_heartbeat",
+          });
           throw ApplicationFailure.nonRetryable(
             "Worker heartbeat carried an invalid persistence handoff; automatic turn replay refused",
             "InvalidTurnPersistenceHandoff",
           );
         }
         if (workerDeath.persistenceHandoff) {
-          await activity.persistTurnHandoffAndRecover({
+          const persisted = await activity.persistTurnHandoffAndRecover({
             accountId,
             workspaceId,
             sessionId,
@@ -486,6 +489,12 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
             handoff: workerDeath.persistenceHandoff,
             reason: "heartbeat_timeout",
           });
+          if (persisted.action === "quarantined") {
+            throw ApplicationFailure.nonRetryable(
+              "Worker persistence reference did not match durable receipt truth; automatic turn replay refused",
+              "InvalidTurnPersistenceHandoff",
+            );
+          }
           return true;
         }
         const recovery = await activity.recoverDispatch({
@@ -495,6 +504,12 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
           attemptId,
           timeoutType: workerDeath.timeoutType,
         });
+        if (recovery.action === "quarantined") {
+          throw ApplicationFailure.nonRetryable(
+            "Worker persistence receipt was invalid; automatic turn replay refused",
+            "InvalidTurnPersistenceHandoff",
+          );
+        }
         if (recovery.action !== "exceeded") {
           // "recovering": the next claim creates a new attempt for this same
           // current inference. "stale": the
@@ -523,9 +538,19 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
     if (outcome.result.status === "persistence_pending") {
       const handoff = parseTurnPersistenceHandoff(outcome.result.persistenceHandoff);
       if (!handoff || handoff.turnId !== outcome.result.turnId) {
-        throw new Error("persistence_pending turn result carried an invalid handoff");
+        await activity.quarantineTurnPersistenceAttempt({
+          accountId,
+          workspaceId,
+          sessionId,
+          attemptId,
+          reason: "malformed_activity_result",
+        });
+        throw ApplicationFailure.nonRetryable(
+          "persistence_pending turn result carried an invalid handoff",
+          "InvalidTurnPersistenceHandoff",
+        );
       }
-      await activity.persistTurnHandoffAndRecover({
+      const persisted = await activity.persistTurnHandoffAndRecover({
         accountId,
         workspaceId,
         sessionId,
@@ -533,6 +558,12 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
         handoff,
         reason: "activity_result",
       });
+      if (persisted.action === "quarantined") {
+        throw ApplicationFailure.nonRetryable(
+          "Activity persistence reference did not match durable receipt truth; automatic turn replay refused",
+          "InvalidTurnPersistenceHandoff",
+        );
+      }
       return true;
     }
 

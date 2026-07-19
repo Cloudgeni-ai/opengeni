@@ -33,6 +33,7 @@ export type ContextCompactionPersistenceScope = {
   turnId: string;
   executionGeneration: number;
   attemptId: string;
+  persistenceReceiptId?: string;
 };
 
 /**
@@ -50,6 +51,7 @@ export async function persistPreparedContextCompaction(
       ...scope,
       expectedExecutionGeneration: scope.executionGeneration,
       expectedAttemptId: scope.attemptId,
+      ...(scope.persistenceReceiptId ? { persistenceReceiptId: scope.persistenceReceiptId } : {}),
       reason: prepared.reason,
       clearRequestedCompaction: prepared.clearRequestedCompaction,
       persistenceKey: prepared.persistenceKey,
@@ -73,6 +75,7 @@ export async function persistPreparedContextCompaction(
     ...scope,
     expectedExecutionGeneration: scope.executionGeneration,
     expectedAttemptId: scope.attemptId,
+    ...(scope.persistenceReceiptId ? { persistenceReceiptId: scope.persistenceReceiptId } : {}),
     replacementItems: prepared.replacementItems,
     summaryItem: prepared.summaryItem,
     replacementInputTokens: prepared.replacementInputTokens,
