@@ -50,6 +50,13 @@ const PASSWORD = "x";
 const APP_PASSWORD = "apppw";
 const IMAGE = "pgvector/pgvector:pg16";
 const ADMIN_BASE_URL = `postgres://postgres:${PASSWORD}@127.0.0.1:${PORT}`;
+// Optional escape hatch for environments that provide a disposable Postgres
+// cluster but no Docker daemon. The URL must be a superuser connection to a
+// TEST cluster: the harness creates and drops only uniquely-prefixed databases
+// and ensures the cluster-global opengeni_app test role exists. Docker remains
+// the default so CI and ordinary local runs retain the shared-template fast
+// path below.
+const EXTERNAL_ADMIN_URL = process.env.OPENGENI_TEST_POSTGRES_ADMIN_URL?.trim() || null;
 // A once-migrated database every test file clones from via `CREATE DATABASE ...
 // TEMPLATE`. Postgres clones a template with a file-level copy, so each file
 // gets a fully-migrated + app-granted database in ~100ms instead of replaying
@@ -431,6 +438,127 @@ function uniqueDbName(label: string): string {
     .slice(0, 24)}_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
 }
 
+function databaseUrl(
+  baseUrl: string,
+  dbName: string,
+  credentials?: { username: string; password: string },
+): string {
+  const url = new URL(baseUrl);
+  url.pathname = `/${dbName}`;
+  if (credentials) {
+    url.username = credentials.username;
+    url.password = credentials.password;
+  }
+  return url.toString();
+}
+
+async function ensureExternalCluster(adminBaseUrl: string): Promise<void> {
+  const rootUrl = databaseUrl(adminBaseUrl, "postgres");
+  await waitForReady(rootUrl);
+  const root = postgres(rootUrl, { max: 1 });
+  try {
+    await root.unsafe(`
+      DO $$ BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='opengeni_app') THEN
+          CREATE ROLE opengeni_app LOGIN PASSWORD '${APP_PASSWORD}';
+        ELSE
+          ALTER ROLE opengeni_app LOGIN PASSWORD '${APP_PASSWORD}';
+        END IF;
+      END $$;`);
+  } finally {
+    await root.end().catch(() => undefined);
+  }
+}
+
+async function createExternalDatabase(adminBaseUrl: string, dbName: string): Promise<void> {
+  const root = postgres(databaseUrl(adminBaseUrl, "postgres"), { max: 1 });
+  try {
+    await root.unsafe(`CREATE DATABASE "${dbName}"`);
+  } finally {
+    await root.end().catch(() => undefined);
+  }
+}
+
+async function dropExternalDatabase(adminBaseUrl: string, dbName: string): Promise<void> {
+  const root = postgres(databaseUrl(adminBaseUrl, "postgres"), { max: 1 });
+  try {
+    await root.unsafe(`DROP DATABASE IF EXISTS "${dbName}" WITH (FORCE)`).catch(() => undefined);
+  } finally {
+    await root.end().catch(() => undefined);
+  }
+}
+
+async function grantExternalAppRole(adminUrl: string): Promise<void> {
+  const grantsSql = postgres(adminUrl, { max: 1 });
+  try {
+    await grantsSql.unsafe(`
+      GRANT USAGE ON SCHEMA public TO opengeni_app;
+      GRANT USAGE ON SCHEMA opengeni_private TO opengeni_app;
+      GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO opengeni_app;
+      GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA opengeni_private TO opengeni_app;
+    `);
+  } finally {
+    await grantsSql.end().catch(() => undefined);
+  }
+}
+
+async function acquireExternalSharedTestDatabase(
+  adminBaseUrl: string,
+  label: string,
+): Promise<SharedTestDatabase> {
+  await ensureExternalCluster(adminBaseUrl);
+  const dbName = uniqueDbName(label);
+  const adminUrl = databaseUrl(adminBaseUrl, dbName);
+  const appUrl = databaseUrl(adminBaseUrl, dbName, {
+    username: "opengeni_app",
+    password: APP_PASSWORD,
+  });
+  await createExternalDatabase(adminBaseUrl, dbName);
+  try {
+    await migrate(adminUrl);
+    await grantExternalAppRole(adminUrl);
+    const admin = postgres(adminUrl, { max: 4 });
+    let released = false;
+    return {
+      admin,
+      adminUrl,
+      appUrl,
+      release: async () => {
+        if (released) {
+          return;
+        }
+        released = true;
+        await admin.end().catch(() => undefined);
+        await dropExternalDatabase(adminBaseUrl, dbName);
+      },
+    };
+  } catch (err) {
+    await dropExternalDatabase(adminBaseUrl, dbName);
+    throw err;
+  }
+}
+
+async function acquireExternalBlankTestDatabase(
+  adminBaseUrl: string,
+  label: string,
+): Promise<BlankTestDatabase> {
+  await ensureExternalCluster(adminBaseUrl);
+  const dbName = uniqueDbName(label);
+  const databaseUrlForTest = databaseUrl(adminBaseUrl, dbName);
+  await createExternalDatabase(adminBaseUrl, dbName);
+  let released = false;
+  return {
+    databaseUrl: databaseUrlForTest,
+    release: async () => {
+      if (released) {
+        return;
+      }
+      released = true;
+      await dropExternalDatabase(adminBaseUrl, dbName);
+    },
+  };
+}
+
 /**
  * Acquire a fresh, fully-migrated database in the shared container for the
  * calling test file. Returns `null` if docker is unavailable so the caller can
@@ -443,6 +571,9 @@ function uniqueDbName(label: string): string {
 export async function acquireSharedTestDatabase(
   label = "test",
 ): Promise<SharedTestDatabase | null> {
+  if (EXTERNAL_ADMIN_URL) {
+    return acquireExternalSharedTestDatabase(EXTERNAL_ADMIN_URL, label);
+  }
   const acquired = await ensureContainerAndAcquire();
   if (!acquired) {
     return null;
@@ -488,6 +619,9 @@ export async function acquireSharedTestDatabase(
  * whatever schema it wants. Returns `null` if docker is unavailable.
  */
 export async function acquireBlankTestDatabase(label = "blank"): Promise<BlankTestDatabase | null> {
+  if (EXTERNAL_ADMIN_URL) {
+    return acquireExternalBlankTestDatabase(EXTERNAL_ADMIN_URL, label);
+  }
   const acquired = await ensureContainerAndAcquire();
   if (!acquired) {
     return null;

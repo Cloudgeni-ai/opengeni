@@ -249,7 +249,7 @@ export async function listFleet(
 /** Resolve a swap target id → the value `setActiveSandbox` writes. The session's
  *  own group id maps to NULL (the default pointer); a first-class sandbox id is
  *  validated (workspace ownership + liveness) and written verbatim. */
-async function resolveTarget(
+export async function resolveSandboxTarget(
   services: FleetServices,
   ctx: FleetContext,
   target: string,
@@ -328,7 +328,7 @@ export async function swapActiveSandbox(
   // never touches it); threaded straight into the epoch-fenced setActiveSandbox CAS.
   workingDir?: string | null,
 ): Promise<FleetSwapResult> {
-  const resolved = await resolveTarget(services, ctx, target);
+  const resolved = await resolveSandboxTarget(services, ctx, target);
   if (!resolved.ok) {
     const pointer = (await readActiveSandbox(services.db, ctx.workspaceId, ctx.sessionId)) ?? {
       activeSandboxId: null,

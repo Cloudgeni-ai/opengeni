@@ -98,6 +98,7 @@ import {
   ilike,
   isNull,
   lt,
+  lte,
   ne,
   or,
   sql,
@@ -105,6 +106,7 @@ import {
 } from "drizzle-orm";
 import type { PgDatabase, PgTransactionConfig } from "drizzle-orm/pg-core";
 import { drizzle } from "drizzle-orm/postgres-js";
+import { isDeepStrictEqual } from "node:util";
 import postgres from "postgres";
 import { decryptEnvironmentValue } from "./environment-crypto";
 import { sanitizeEventPayload, sanitizeModelPayload } from "./event-payload-sanitizer";
@@ -784,7 +786,10 @@ export async function ensureManagedAccessForUser(
     if (!workspaceControl) {
       await tx
         .insert(schema.workspaceInferenceControls)
-        .values({ workspaceId: defaultWorkspace.id, accountId: defaultWorkspace.accountId })
+        .values({
+          workspaceId: defaultWorkspace.id,
+          accountId: defaultWorkspace.accountId,
+        })
         .onConflictDoNothing();
     }
     // The remainder lists every membership in the account, so restore account-
@@ -1561,7 +1566,9 @@ export async function applyCreditLedgerEntry(
           metadata: input.metadata ?? {},
           occurredAt: input.occurredAt ?? new Date(),
         })
-        .onConflictDoNothing({ target: schema.creditLedgerEntries.idempotencyKey });
+        .onConflictDoNothing({
+          target: schema.creditLedgerEntries.idempotencyKey,
+        });
       return await getBillingBalance(scopedDb, input.accountId);
     },
   );
@@ -1582,7 +1589,10 @@ export async function applyCreditDebitUpToBalance(
   },
 ): Promise<{ balance: BillingBalance; debitedMicros: number }> {
   if (input.requestedAmountMicros <= 0) {
-    return { balance: await getBillingBalance(db, input.accountId), debitedMicros: 0 };
+    return {
+      balance: await getBillingBalance(db, input.accountId),
+      debitedMicros: 0,
+    };
   }
   return await withRlsContext(
     db,
@@ -1613,11 +1623,16 @@ export async function applyCreditDebitUpToBalance(
             },
             occurredAt: input.occurredAt ?? new Date(),
           })
-          .onConflictDoNothing({ target: schema.creditLedgerEntries.idempotencyKey })
+          .onConflictDoNothing({
+            target: schema.creditLedgerEntries.idempotencyKey,
+          })
           .returning({ id: schema.creditLedgerEntries.id });
         debitedMicros = inserted.length === 1 ? candidateDebitMicros : 0;
       }
-      return { balance: await getBillingBalance(scopedDb, input.accountId), debitedMicros };
+      return {
+        balance: await getBillingBalance(scopedDb, input.accountId),
+        debitedMicros,
+      };
     },
   );
 }
@@ -2187,7 +2202,10 @@ export async function createFileUpload(
             status: "pending",
             expiresAt: input.expiresAt,
           })
-          .returning({ id: schema.fileUploads.id, expiresAt: schema.fileUploads.expiresAt });
+          .returning({
+            id: schema.fileUploads.id,
+            expiresAt: schema.fileUploads.expiresAt,
+          });
         if (!uploadRow) {
           throw new Error("Failed to create file upload");
         }
@@ -2231,7 +2249,12 @@ export async function getFileUpload(
   db: Database,
   workspaceId: string,
   uploadId: string,
-): Promise<{ id: string; status: FileUploadStatus; expiresAt: Date; file: FileAsset } | null> {
+): Promise<{
+  id: string;
+  status: FileUploadStatus;
+  expiresAt: Date;
+  file: FileAsset;
+} | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [row] = await scopedDb
       .select({
@@ -2387,7 +2410,10 @@ export async function claimFileUploadCleanup(
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
         const [upload] = await tx
-          .select({ status: schema.fileUploads.status, fileId: schema.fileUploads.fileId })
+          .select({
+            status: schema.fileUploads.status,
+            fileId: schema.fileUploads.fileId,
+          })
           .from(schema.fileUploads)
           .where(
             and(
@@ -2409,13 +2435,19 @@ export async function claimFileUploadCleanup(
           .for("update")
           .limit(1);
         if (!file) {
-          return { outcome: "unavailable", status: upload.status as FileUploadStatus };
+          return {
+            outcome: "unavailable",
+            status: upload.status as FileUploadStatus,
+          };
         }
         if (upload.status === "completed" && file.status === "ready") {
           return { outcome: "completed", file: mapFile(file) };
         }
         if (upload.status !== "pending") {
-          return { outcome: "unavailable", status: upload.status as FileUploadStatus };
+          return {
+            outcome: "unavailable",
+            status: upload.status as FileUploadStatus,
+          };
         }
         const now = new Date();
         await tx
@@ -2505,7 +2537,10 @@ export async function completeFileUploadCleanup(
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
         const [upload] = await tx
-          .select({ status: schema.fileUploads.status, fileId: schema.fileUploads.fileId })
+          .select({
+            status: schema.fileUploads.status,
+            fileId: schema.fileUploads.fileId,
+          })
           .from(schema.fileUploads)
           .where(
             and(
@@ -2560,7 +2595,10 @@ export async function completeExpiredFileUploadCleanup(
     fileId: string;
   },
 ): Promise<boolean> {
-  return await completeFileUploadCleanup(db, { ...input, terminalStatus: "expired" });
+  return await completeFileUploadCleanup(db, {
+    ...input,
+    terminalStatus: "expired",
+  });
 }
 
 export async function enablePackInstallation(
@@ -3842,7 +3880,9 @@ export async function consumeIntegrationOAuthStateNonce(
           expiresAt: input.expiresAt,
           usedAt: input.now,
         })
-        .onConflictDoNothing({ target: schema.integrationOauthStateNonces.nonce })
+        .onConflictDoNothing({
+          target: schema.integrationOauthStateNonces.nonce,
+        })
         .returning({ nonce: schema.integrationOauthStateNonces.nonce });
       return inserted.length > 0;
     },
@@ -4089,7 +4129,9 @@ export async function updateKnowledgeMemory(
         nextTextHash,
         memoryId,
       );
-      throw new Error(visibleTextHashConflictMessage(duplicate), { cause: error });
+      throw new Error(visibleTextHashConflictMessage(duplicate), {
+        cause: error,
+      });
     }
     if (!row) {
       throw new Error(`Knowledge memory not found: ${memoryId}`);
@@ -4810,7 +4852,11 @@ export async function correctWorkspaceMemory(
     if (!archived) {
       throw new Error(`Memory "${input.id}" not found in this workspace.`);
     }
-    return { action: "archived", memory: mapKnowledgeMemory(archived), replacement: null };
+    return {
+      action: "archived",
+      memory: mapKnowledgeMemory(archived),
+      replacement: null,
+    };
   });
 }
 
@@ -4900,7 +4946,10 @@ export async function searchWorkspaceMemories(
         const keywordScore =
           Number.isFinite(rankValue) && rankValue > 0 ? rankValue / (rankValue + 1) : 0;
         const prev = scored.get(row.id);
-        scored.set(row.id, { vectorScore: prev?.vectorScore ?? null, keywordScore });
+        scored.set(row.id, {
+          vectorScore: prev?.vectorScore ?? null,
+          keywordScore,
+        });
       }
     }
 
@@ -4920,7 +4969,13 @@ export async function searchWorkspaceMemories(
             : mode === "keyword"
               ? keyword
               : Math.min(1, 0.65 * vector + 0.35 * keyword + (matchType === "hybrid" ? 0.1 : 0));
-        return { id, score: Number(score.toFixed(6)), matchType, vectorScore, keywordScore };
+        return {
+          id,
+          score: Number(score.toFixed(6)),
+          matchType,
+          vectorScore,
+          keywordScore,
+        };
       })
       .sort(
         (left, right) =>
@@ -5346,7 +5401,40 @@ export async function createScheduledTaskRun(
     if (!row) {
       throw new Error("Failed to create scheduled task run");
     }
+    if (row.taskId !== input.taskId || row.triggerType !== input.triggerType) {
+      throw new ScheduledTaskRunProducerConflictError();
+    }
     return mapScheduledTaskRun(row);
+  });
+}
+
+export class ScheduledTaskRunProducerConflictError extends Error {
+  readonly code = "scheduled_task_run_producer_conflict";
+
+  constructor() {
+    super("scheduled task run producer key was already used for another request");
+    this.name = "ScheduledTaskRunProducerConflictError";
+  }
+}
+
+/** Find the exact durable source row for a stable Temporal producer identity. */
+export async function getScheduledTaskRunByProducerKey(
+  db: Database,
+  workspaceId: string,
+  producerKey: string,
+): Promise<ScheduledTaskRun | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select()
+      .from(schema.scheduledTaskRuns)
+      .where(
+        and(
+          eq(schema.scheduledTaskRuns.workspaceId, workspaceId),
+          eq(schema.scheduledTaskRuns.producerKey, producerKey),
+        ),
+      )
+      .limit(1);
+    return row ? mapScheduledTaskRun(row) : null;
   });
 }
 
@@ -6529,7 +6617,10 @@ export async function createRigVersionForChangePromotion(
       .update(schema.rigs)
       .set({ updatedAt: new Date() })
       .where(and(eq(schema.rigs.workspaceId, workspaceId), eq(schema.rigs.id, rigId)));
-    return { version: mapRigVersion(versionRow), change: mapRigChange(changeRow) };
+    return {
+      version: mapRigVersion(versionRow),
+      change: mapRigChange(changeRow),
+    };
   });
 }
 
@@ -7011,7 +7102,11 @@ export type WorkspaceEnvironmentForRun = VariableSetForRun;
 // `getCodexCredentialStatus` returns metadata only (never the secret column).
 // ---------------------------------------------------------------------------
 
-export type CodexCredentialTokens = { accessToken: string; refreshToken: string; idToken: string };
+export type CodexCredentialTokens = {
+  accessToken: string;
+  refreshToken: string;
+  idToken: string;
+};
 
 export type CodexCredentialForRun = {
   id: string; // row id — for compare-and-set writes (P1-c)
@@ -7386,7 +7481,9 @@ async function getCodexCredentialStatusScoped(
     lastError: schema.codexSubscriptionCredentials.lastError,
   } as const;
   const [settingsRow] = await scopedDb
-    .select({ activeCredentialId: schema.codexRotationSettings.activeCredentialId })
+    .select({
+      activeCredentialId: schema.codexRotationSettings.activeCredentialId,
+    })
     .from(schema.codexRotationSettings)
     .where(eq(schema.codexRotationSettings.workspaceId, workspaceId))
     .limit(1);
@@ -7924,7 +8021,10 @@ export async function acquireCodexCredentialLease<
       // inside exactly the same RLS-scoped workspace/account. A downstream
       // accepted-turn policy is parsed from this locked metadata while the
       // rotation transaction is held.
-      const turns = await tx.execute(sql<{ id: string; metadata: Record<string, unknown> | null }>`
+      const turns = await tx.execute(sql<{
+        id: string;
+        metadata: Record<string, unknown> | null;
+      }>`
         select id, metadata from session_turns
         where account_id = ${input.accountId}
           and workspace_id = ${input.workspaceId}
@@ -7972,7 +8072,11 @@ export async function acquireCodexCredentialLease<
       }
       const existingRows = leaseRotationEnabled
         ? await tx.execute(
-            sql<{ credential_id: string; holder_id: string; generation: number }>`
+            sql<{
+              credential_id: string;
+              holder_id: string;
+              generation: number;
+            }>`
               select credential_id, holder_id, generation from codex_credential_leases
               where workspace_id = ${input.workspaceId}
                 and turn_id = ${input.turnId}
@@ -8093,7 +8197,11 @@ export async function acquireCodexCredentialLease<
 
       const reused = existingCredentialId === selected.credentialId;
       const leaseRows = await tx.execute(
-        sql<{ holder_id: string; generation: number; leased_until: Date | string }>`
+        sql<{
+          holder_id: string;
+          generation: number;
+          leased_until: Date | string;
+        }>`
         insert into codex_credential_leases
           (account_id, workspace_id, credential_id, turn_id, holder_id, generation, leased_until)
         values
@@ -8198,7 +8306,11 @@ export type CodexCapacityMutationResult<T> = {
 };
 
 export type CodexCapacityAvailabilityDecision =
-  | { kind: "available"; credentialId: string; diagnostic?: Record<string, unknown> }
+  | {
+      kind: "available";
+      credentialId: string;
+      diagnostic?: Record<string, unknown>;
+    }
   | {
       kind: "unavailable";
       earliestResetAt: Date | null;
@@ -8219,7 +8331,11 @@ export type CodexCapacitySelectionContext<
 
 export type ArmCodexCapacityWaitResult =
   | { action: "waiting"; waiter: CodexCapacityWait; events: SessionEvent[] }
-  | { action: "stale"; waiter: CodexCapacityWait | null; events: SessionEvent[] };
+  | {
+      action: "stale";
+      waiter: CodexCapacityWait | null;
+      events: SessionEvent[];
+    };
 
 export type ReconcileCodexCapacityWaitResult =
   | { action: "waiting"; waiter: CodexCapacityWait; events: SessionEvent[] }
@@ -8230,7 +8346,11 @@ export type ReconcileCodexCapacityWaitResult =
       events: SessionEvent[];
     }
   | { action: "superseded"; waiter: CodexCapacityWait; events: SessionEvent[] }
-  | { action: "stale"; waiter: CodexCapacityWait | null; events: SessionEvent[] };
+  | {
+      action: "stale";
+      waiter: CodexCapacityWait | null;
+      events: SessionEvent[];
+    };
 
 export const CODEX_CAPACITY_REFRESH_MIN_MS = 60_000;
 export const CODEX_CAPACITY_REFRESH_MAX_MS = 15 * 60_000;
@@ -8829,7 +8949,10 @@ async function supersedeCodexCapacityWaitInTransaction(
         eq(schema.sessions.id, input.session.id),
       ),
     );
-  return { waiter: mapCodexCapacityWaiter(updated), events: inserted.map(mapEvent) };
+  return {
+    waiter: mapCodexCapacityWaiter(updated),
+    events: inserted.map(mapEvent),
+  };
 }
 
 /**
@@ -9362,7 +9485,9 @@ export async function listCodexAccountStatuses(
 ): Promise<CodexAccountStatus[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [settingsRow] = await scopedDb
-      .select({ activeCredentialId: schema.codexRotationSettings.activeCredentialId })
+      .select({
+        activeCredentialId: schema.codexRotationSettings.activeCredentialId,
+      })
       .from(schema.codexRotationSettings)
       .where(eq(schema.codexRotationSettings.workspaceId, workspaceId))
       .limit(1);
@@ -9591,7 +9716,9 @@ export async function ensureCodexRotationSettings(
         workspaceId,
         leaseRotationEnabled: false,
       })
-      .onConflictDoNothing({ target: [schema.codexRotationSettings.workspaceId] });
+      .onConflictDoNothing({
+        target: [schema.codexRotationSettings.workspaceId],
+      });
   });
 }
 
@@ -9697,7 +9824,10 @@ export async function setCodexCredentialExhaustedWithWakeTargets(
 ): Promise<CodexCapacityMutationResult<boolean>> {
   return await withCodexCapacityMutation(
     db,
-    { workspaceId, reason: until === null ? "codex_cooldown_cleared" : "codex_cooldown_changed" },
+    {
+      workspaceId,
+      reason: until === null ? "codex_cooldown_cleared" : "codex_cooldown_changed",
+    },
     async (tx) => {
       const updated = await tx
         .update(schema.codexSubscriptionCredentials)
@@ -9828,7 +9958,10 @@ export type CodexRotationStrategy = (typeof CODEX_ROTATION_STRATEGIES)[number];
 export async function updateCodexRotationSettings(
   db: Database,
   workspaceId: string,
-  patch: { rotationEnabled?: boolean; rotationStrategy?: CodexRotationStrategy },
+  patch: {
+    rotationEnabled?: boolean;
+    rotationStrategy?: CodexRotationStrategy;
+  },
 ): Promise<CodexRotationSettings | null> {
   if (
     patch.rotationStrategy !== undefined &&
@@ -10030,12 +10163,17 @@ export async function disconnectCodexAccount(
       .returning({ id: schema.codexSubscriptionCredentials.id });
     // The FK SET NULL already cleared the pointer if we deleted the active row.
     const [settingsRow] = await scopedDb
-      .select({ activeCredentialId: schema.codexRotationSettings.activeCredentialId })
+      .select({
+        activeCredentialId: schema.codexRotationSettings.activeCredentialId,
+      })
       .from(schema.codexRotationSettings)
       .where(eq(schema.codexRotationSettings.workspaceId, workspaceId))
       .limit(1);
     if (removedRows.length === 0) {
-      return { removed: false, newActiveCredentialId: settingsRow?.activeCredentialId ?? null };
+      return {
+        removed: false,
+        newActiveCredentialId: settingsRow?.activeCredentialId ?? null,
+      };
     }
     let newActive = settingsRow?.activeCredentialId ?? null;
     if (newActive === null) {
@@ -10577,6 +10715,97 @@ export async function getSessionByCreateIdempotencyKey(
     const grouped = await sessionMcpServerMetadataForSessions(scopedDb, workspaceId, [row.id]);
     return await mapSessionWithControl(scopedDb, row, grouped.get(row.id) ?? []);
   });
+}
+
+/**
+ * Secret-free initialization receipt used to decide whether a keyed request is
+ * a retry before repeating quota checks or create-time target liveness probes.
+ * The canonical transaction remains the authoritative locked verifier.
+ */
+export async function getSessionCreateReceipt(
+  db: Database,
+  workspaceId: string,
+  createIdempotencyKey: string,
+): Promise<{
+  sessionId: string;
+  createRequestFingerprint: string | null;
+  initializationVersion: number;
+} | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({
+        sessionId: schema.sessions.id,
+        createRequestFingerprint: schema.sessions.createRequestFingerprint,
+        initializationVersion: schema.sessions.initializationVersion,
+      })
+      .from(schema.sessions)
+      .where(
+        and(
+          eq(schema.sessions.workspaceId, workspaceId),
+          eq(schema.sessions.createIdempotencyKey, createIdempotencyKey),
+        ),
+      )
+      .limit(1);
+    return row ?? null;
+  });
+}
+
+/**
+ * Replay a scheduled source's complete canonical initialization receipt.
+ *
+ * The source run is the stable request identity, so mutable task configuration
+ * is intentionally not consulted here. A dispatched pre-v1 source with no
+ * canonical keyed session returns null for backward continuation. A keyed but
+ * legacy or malformed receipt fails closed in the shared verifier.
+ */
+export async function replayCanonicalScheduledSessionStartByRun(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    runId: string;
+    usageIdempotencyKey?: string;
+  },
+): Promise<InitializeSessionStartResult | null> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        await lockSessionInitializationWorkspaceRows(
+          tx as unknown as Database,
+          input.accountId,
+          input.workspaceId,
+        );
+        const [session] = await tx
+          .select()
+          .from(schema.sessions)
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, input.workspaceId),
+              eq(schema.sessions.createIdempotencyKey, `scheduled-run:${input.runId}`),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (!session) return null;
+        return await verifyCanonicalSessionStartInTransaction(
+          tx as unknown as Database,
+          {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            admission: { kind: "scheduled", runId: input.runId },
+            usage: {
+              idempotencyKey:
+                input.usageIdempotencyKey ?? `usage:agent_run.created:scheduled:${input.runId}`,
+              sourceResourceType: "scheduled_task_run",
+              sourceResourceId: input.runId,
+            },
+          },
+          session,
+        );
+      }),
+  );
 }
 
 export async function getSession(
@@ -11490,7 +11719,12 @@ export async function listSessionDiscoverySummaries(
       .from(schema.sessions)
       .where(eq(schema.sessions.workspaceId, workspaceId));
     if (ids.length === 0) {
-      return { sessions: [], hasMore: false, nextCursor: null, total: Number(total) };
+      return {
+        sessions: [],
+        hasMore: false,
+        nextCursor: null,
+        total: Number(total),
+      };
     }
 
     const controls = await sessionControlProjections(scopedDb, workspaceId, ids);
@@ -11842,7 +12076,9 @@ export async function reserveToolspaceCallForTurn(
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [row] = await scopedDb
       .update(schema.sessionTurns)
-      .set({ toolspaceCallCount: sql`${schema.sessionTurns.toolspaceCallCount} + 1` })
+      .set({
+        toolspaceCallCount: sql`${schema.sessionTurns.toolspaceCallCount} + 1`,
+      })
       .where(
         and(
           eq(schema.sessionTurns.workspaceId, workspaceId),
@@ -12096,7 +12332,11 @@ async function lockTurnAttemptWriteFenceTx(
     )
     .for("update")
     .limit(1);
-  const base = { workspace: workspace ?? null, session: session ?? null, turn: turn ?? null };
+  const base = {
+    workspace: workspace ?? null,
+    session: session ?? null,
+    turn: turn ?? null,
+  };
   if (!workspace || !session || !turn) return { allowed: false, reason: "not_found", ...base };
   if (effectiveControl.state === "paused") {
     return {
@@ -12725,7 +12965,9 @@ export async function applyContextCompaction(
             lastInputTokens: Math.max(0, Math.floor(input.replacementInputTokens)),
             ...(input.clearRequestedCompaction ? { compactRequested: false } : {}),
             ...(insertedEvents.length > 0
-              ? { lastSequence: fence.session.lastSequence + insertedEvents.length }
+              ? {
+                  lastSequence: fence.session.lastSequence + insertedEvents.length,
+                }
               : {}),
             updatedAt: new Date(),
           })
@@ -12769,7 +13011,10 @@ export async function recordSkippedContextCompaction(
   },
 ): Promise<
   | { recorded: true; events: SessionEvent[] }
-  | { recorded: false; reason: TurnAttemptFenceRejectReason | "request_not_pending" }
+  | {
+      recorded: false;
+      reason: TurnAttemptFenceRejectReason | "request_not_pending";
+    }
 > {
   return await withRlsContext(
     db,
@@ -12785,7 +13030,10 @@ export async function recordSkippedContextCompaction(
         });
         if (!fence.allowed) return { recorded: false as const, reason: fence.reason };
         if (!fence.session.compactRequested) {
-          return { recorded: false as const, reason: "request_not_pending" as const };
+          return {
+            recorded: false as const,
+            reason: "request_not_pending" as const,
+          };
         }
         const inserted = await tx
           .insert(schema.sessionEvents)
@@ -13273,7 +13521,9 @@ export async function updateRecording(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
-      const set: Partial<typeof schema.sessionRecordings.$inferInsert> = { state: input.state };
+      const set: Partial<typeof schema.sessionRecordings.$inferInsert> = {
+        state: input.state,
+      };
       if (input.storageKey !== undefined) set.storageKey = input.storageKey;
       if (input.sizeBytes !== undefined) set.sizeBytes = input.sizeBytes;
       if (input.durationSeconds !== undefined) set.durationSeconds = input.durationSeconds;
@@ -13855,7 +14105,11 @@ async function recomputeAndStampLease(
   leaseTtlMs: number,
   setLiveness: SandboxLeaseLiveness | null,
 ): Promise<LeaseRow> {
-  const counts = await tx.execute<{ total: number; turns: number; viewers: number }>(sql`
+  const counts = await tx.execute<{
+    total: number;
+    turns: number;
+    viewers: number;
+  }>(sql`
     select count(*)::int as total,
            count(*) filter (where kind = 'turn')::int   as turns,
            count(*) filter (where kind = 'viewer')::int as viewers
@@ -14340,7 +14594,11 @@ export async function releaseLeaseHolder(
         where lease_id = ${row.id} and kind = ${input.kind} and holder_id = ${input.holderId}
       `);
 
-        const counts = await tx.execute<{ total: number; turns: number; viewers: number }>(sql`
+        const counts = await tx.execute<{
+          total: number;
+          turns: number;
+          viewers: number;
+        }>(sql`
         select count(*)::int as total,
                count(*) filter (where kind = 'turn')::int   as turns,
                count(*) filter (where kind = 'viewer')::int as viewers
@@ -14731,7 +14989,10 @@ export async function countSandboxLeasesByLiveness(
     warm: 0,
     draining: 0,
   };
-  const rows = await rawRows<{ liveness: SandboxLeaseLiveness; count: number | string }>(
+  const rows = await rawRows<{
+    liveness: SandboxLeaseLiveness;
+    count: number | string;
+  }>(
     db,
     sql`
     select liveness, count
@@ -14752,7 +15013,10 @@ export type CreditBalanceByAccount = {
 };
 
 export async function listCreditBalancesByAccount(db: Database): Promise<CreditBalanceByAccount[]> {
-  const rows = await rawRows<{ account_id: string; balance_micros: number | string }>(
+  const rows = await rawRows<{
+    account_id: string;
+    balance_micros: number | string;
+  }>(
     db,
     sql`
     select account_id, balance_micros
@@ -14924,7 +15188,11 @@ export async function persistDrainSnapshot(
      *  Pass null to CAS-check without writing (for backends with no persistWorkspace). */
     workspaceArchive: string | null;
   },
-): Promise<{ wrote: boolean; priorArchive: string | null; priorArchivePrev: string | null }> {
+): Promise<{
+  wrote: boolean;
+  priorArchive: string | null;
+  priorArchivePrev: string | null;
+}> {
   // withRlsContext already runs `fn` inside ONE transaction with the RLS GUCs set,
   // so the SELECT...FOR UPDATE + UPDATE below are atomic (one snapshot, one lock)
   // WITHOUT an extra nested savepoint — nesting a second transaction here under
@@ -15131,7 +15399,12 @@ export async function persistWarmSnapshot(
         interruption ||
         !attemptMayPersistWorkspace
       ) {
-        return { wrote: false, throttled: false, superseded: true, priorArchiveForGc: null };
+        return {
+          wrote: false,
+          throttled: false,
+          superseded: true,
+          priorArchiveForGc: null,
+        };
       }
       const guard = await scopedDb.execute<{
         prior_archive: string | null;
@@ -15148,7 +15421,12 @@ export async function persistWarmSnapshot(
         for update
       `);
       if (guard.length === 0) {
-        return { wrote: false, throttled: false, superseded: false, priorArchiveForGc: null };
+        return {
+          wrote: false,
+          throttled: false,
+          superseded: false,
+          priorArchiveForGc: null,
+        };
       }
       const priorArchive = guard[0]!.prior_archive ?? null;
       const priorArchivePrev = guard[0]!.prior_archive_prev ?? null;
@@ -15160,14 +15438,24 @@ export async function persistWarmSnapshot(
       // fresher turn-end one). No-op — do NOT overwrite and do NOT advance the
       // throttle clock. This is what makes the bounded snapshot wait safe.
       if (Number.isFinite(priorAtMs) && capturedAtMs <= priorAtMs) {
-        return { wrote: false, throttled: false, superseded: true, priorArchiveForGc: null };
+        return {
+          wrote: false,
+          throttled: false,
+          superseded: true,
+          priorArchiveForGc: null,
+        };
       }
       if (
         input.minIntervalMs > 0 &&
         Number.isFinite(priorAtMs) &&
         capturedAtMs - priorAtMs < input.minIntervalMs
       ) {
-        return { wrote: false, throttled: true, superseded: false, priorArchiveForGc: null };
+        return {
+          wrote: false,
+          throttled: true,
+          superseded: false,
+          priorArchiveForGc: null,
+        };
       }
       await foldWorkspaceArchiveOntoLease(scopedDb, {
         workspaceId: input.workspaceId,
@@ -15394,7 +15682,9 @@ async function commitWorkspaceCaptureRevision(
         // commits its exact attempt interruption first and the checks below reject
         // the late capture. Never rely on an in-process AbortSignal for that race.
         const [workspaceControl] = await tx
-          .select({ workspaceId: schema.workspaceInferenceControls.workspaceId })
+          .select({
+            workspaceId: schema.workspaceInferenceControls.workspaceId,
+          })
           .from(schema.workspaceInferenceControls)
           .where(eq(schema.workspaceInferenceControls.workspaceId, input.workspaceId))
           .for("share")
@@ -15715,7 +16005,11 @@ export function computeWorkspaceCaptureGcPlan(
     if (r.treeIndexKey) deletePerRevisionKeys.push(r.treeIndexKey);
     for (const k of r.blobKeys) if (!survivingBlobKeys.has(k)) deleteBlobKeys.add(k);
   }
-  return { evictedRowIds, deleteBlobKeys: [...deleteBlobKeys], deletePerRevisionKeys };
+  return {
+    evictedRowIds,
+    deleteBlobKeys: [...deleteBlobKeys],
+    deletePerRevisionKeys,
+  };
 }
 
 export async function planWorkspaceCaptureGc(
@@ -16066,7 +16360,11 @@ export async function revokeEnrollment(
     async (scopedDb) => {
       const rows = await scopedDb
         .update(schema.enrollments)
-        .set({ status: "revoked", revokedAt: new Date(), updatedAt: new Date() })
+        .set({
+          status: "revoked",
+          revokedAt: new Date(),
+          updatedAt: new Date(),
+        })
         .where(
           and(
             eq(schema.enrollments.workspaceId, input.workspaceId),
@@ -16176,7 +16474,11 @@ export async function clearEnrollmentWentOffline(
     async (scopedDb) => {
       const rows = await scopedDb
         .update(schema.enrollments)
-        .set({ wentOfflineAt: null, wentOfflineReason: null, updatedAt: new Date() })
+        .set({
+          wentOfflineAt: null,
+          wentOfflineReason: null,
+          updatedAt: new Date(),
+        })
         .where(
           and(
             eq(schema.enrollments.workspaceId, input.workspaceId),
@@ -16413,7 +16715,10 @@ export async function getDeviceEnrollmentRequestByDeviceCode(
   db: Database,
   deviceCode: string,
 ): Promise<DeviceEnrollmentRequestRecord | null> {
-  const resolved = await db.execute<{ account_id: string; workspace_id: string }>(sql`
+  const resolved = await db.execute<{
+    account_id: string;
+    workspace_id: string;
+  }>(sql`
     select account_id, workspace_id from opengeni_private.resolve_device_enrollment_request(${deviceCode})
   `);
   const ctx = resolved[0];
@@ -16470,7 +16775,10 @@ export async function getPendingDeviceEnrollmentRequestByUserCodeGlobal(
   db: Database,
   userCode: string,
 ): Promise<DeviceEnrollmentRequestRecord | null> {
-  const resolved = await db.execute<{ account_id: string; workspace_id: string }>(sql`
+  const resolved = await db.execute<{
+    account_id: string;
+    workspace_id: string;
+  }>(sql`
     select account_id, workspace_id from opengeni_private.resolve_pending_device_enrollment_by_user_code(${userCode})
   `);
   const ctx = resolved[0];
@@ -17520,7 +17828,12 @@ export async function accrueWarmSeconds(
     debitCredits?: boolean;
   },
 ): Promise<AccrueWarmSecondsResult> {
-  const none: AccrueWarmSecondsResult = { accrued: false, seconds: 0, tick: 0, costMicros: 0 };
+  const none: AccrueWarmSecondsResult = {
+    accrued: false,
+    seconds: 0,
+    tick: 0,
+    costMicros: 0,
+  };
   const result = await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -17869,7 +18182,11 @@ export async function clearSessionGoal(
   db: Database,
   workspaceId: string,
   sessionId: string,
-): Promise<{ cleared: boolean; goal: SessionGoal | null; event: SessionEvent | null }> {
+): Promise<{
+  cleared: boolean;
+  goal: SessionGoal | null;
+  event: SessionEvent | null;
+}> {
   return await withWorkspaceRls(
     db,
     workspaceId,
@@ -17933,7 +18250,11 @@ export async function clearSessionGoal(
         if (!event) {
           throw new Error("Failed to append goal.cleared event");
         }
-        return { cleared: true, goal: mapSessionGoal(existing), event: mapEvent(event) };
+        return {
+          cleared: true,
+          goal: mapSessionGoal(existing),
+          event: mapEvent(event),
+        };
       }),
   );
 }
@@ -18119,7 +18440,11 @@ export async function setSessionGoalStatus(
     rationale?: string;
     pausedReason?: string;
   },
-): Promise<{ goal: SessionGoal; changed: boolean; workflowWakeRevision: number | null }> {
+): Promise<{
+  goal: SessionGoal;
+  changed: boolean;
+  workflowWakeRevision: number | null;
+}> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const effectiveControl = await evaluateSessionControl(scopedDb, workspaceId, sessionId, {
       lock: "share",
@@ -18153,7 +18478,11 @@ export async function setSessionGoalStatus(
       throw new Error(`Session goal not found: ${sessionId}`);
     }
     if (existing.status === input.status) {
-      return { goal: mapSessionGoal(existing), changed: false, workflowWakeRevision: null };
+      return {
+        goal: mapSessionGoal(existing),
+        changed: false,
+        workflowWakeRevision: null,
+      };
     }
     if (existing.status === "completed") {
       throw new Error("session goal is completed; set a new goal to continue");
@@ -18243,7 +18572,12 @@ export type GoalContinuationDecision =
       reason: "no_progress" | "max_auto_continuations" | "limits";
       goal: SessionGoal;
     }
-  | { decision: "continue"; goal: SessionGoal; autoContinuation: number; cap: number | null };
+  | {
+      decision: "continue";
+      goal: SessionGoal;
+      autoContinuation: number;
+      cap: number | null;
+    };
 
 async function turnHasFailureCodeTx(
   tx: Database,
@@ -18356,7 +18690,10 @@ export async function evaluateGoalContinuation(
           return { decision: "none" } as const;
         }
         const [pendingTurn] = await tx
-          .select({ id: schema.sessionTurns.id, status: schema.sessionTurns.status })
+          .select({
+            id: schema.sessionTurns.id,
+            status: schema.sessionTurns.status,
+          })
           .from(schema.sessionTurns)
           .where(
             and(
@@ -18534,7 +18871,11 @@ export async function evaluateGoalContinuation(
             })
             .where(eq(schema.sessionGoals.id, row.id))
             .returning();
-          return { decision: "paused", reason: "limits", goal: mapSessionGoal(paused!) } as const;
+          return {
+            decision: "paused",
+            reason: "limits",
+            goal: mapSessionGoal(paused!),
+          } as const;
         }
         // Freeze the counter on a rotation failover (invariant: a rotation walk never
         // consumes continuation budget); a normal continuation increments as before.
@@ -18585,30 +18926,491 @@ function mapSessionGoal(row: typeof schema.sessionGoals.$inferSelect): SessionGo
 export type InitializeSessionStartInput = {
   accountId: string;
   workspaceId: string;
+  /** Stable candidate generated before entering any persistence retry loop. */
   sessionId: string;
-  clientEventId?: string;
-  reasoningEffortFallback: ReasoningEffort;
+  createIdempotencyKey?: string | null;
+  createRequestFingerprint: string;
+  session: {
+    initialMessage: string;
+    resources: ResourceRef[];
+    tools: ToolRef[];
+    metadata: Record<string, unknown>;
+    model: string;
+    sandboxBackend: SandboxBackend;
+    sandboxOs?: SandboxOs;
+    sandboxGroupId?: string | null;
+    activeSandboxId?: string | null;
+    activeEpoch?: number;
+    workingDir?: string | null;
+    variableSetId?: string | null;
+    rigId?: string | null;
+    rigVersionId?: string | null;
+    firstPartyMcpPermissions?: Permission[] | null;
+    instructions?: string | null;
+    parentSessionId?: string | null;
+    mcpServers?: CreateSessionMcpServerInput[];
+  };
   createdEventPayload: Record<string, unknown>;
   goal?: {
     text: string;
     successCriteria?: string | null;
     maxAutoContinuations?: number | null;
+    createdBy?: SessionGoalCreatedBy;
   } | null;
+  admission:
+    | {
+        kind: "user";
+        clientEventId?: string;
+        reasoningEffort: ReasoningEffort;
+      }
+    | {
+        kind: "scheduled";
+        taskId: string;
+        runId: string;
+        summary: string;
+        payload: Extract<SessionSystemUpdatePayload, { type: "scheduled_occurrence" }>;
+        lineage: Record<string, unknown>;
+        setReusableSession: boolean;
+      };
+  usage: {
+    subjectId?: string | null;
+    idempotencyKey?: string;
+    sourceResourceType: string;
+    sourceResourceId?: string;
+  };
+  /** Tests only: throwing rolls the whole initialization transaction back. */
+  failpoint?: (stage: SessionInitializationFailpointStage) => void | Promise<void>;
 };
 
+export type SessionInitializationFailpointStage =
+  | "after_session_insert"
+  | "after_reference_state"
+  | "after_goal"
+  | "after_canonical_events"
+  | "after_admission"
+  | "after_queue_state"
+  | "after_usage_and_source"
+  | "after_wake"
+  | "before_commit";
+
+export class SessionCreateConflictError extends Error {
+  readonly code = "session_create_idempotency_conflict";
+
+  constructor(message = "session create idempotency key was already used for another request") {
+    super(message);
+    this.name = "SessionCreateConflictError";
+  }
+}
+
+export class SessionInitializationInvariantError extends Error {
+  readonly code = "session_initialization_invariant";
+
+  constructor(message: string) {
+    super(message);
+    this.name = "SessionInitializationInvariantError";
+  }
+}
+
 export type InitializeSessionStartResult = {
+  session: Session;
   events: SessionEvent[];
   turn: SessionTurn | null;
   temporalWorkflowId: string;
   workflowWakeRevision: number | null;
+  triggerEventId: string;
+  created: boolean;
 };
 
+export type ReplaySessionStartInput = {
+  accountId: string;
+  workspaceId: string;
+  createIdempotencyKey: string;
+  createRequestFingerprint: string;
+  admission:
+    | { kind: "user" }
+    | {
+        kind: "scheduled";
+        runId: string;
+      };
+  usage: {
+    idempotencyKey?: string;
+    sourceResourceType: string;
+    sourceResourceId?: string;
+  };
+};
+
+async function lockSessionInitializationWorkspaceRows(
+  tx: Database,
+  accountId: string,
+  workspaceId: string,
+): Promise<void> {
+  // OPE-63 replaces this pair with lockSessionEventWriteRows. Keep the
+  // current-main order identical: inference control, then workspace key-share.
+  await lockWorkspaceInferenceControl(tx, workspaceId, "share");
+  const [workspace] = await tx
+    .select()
+    .from(schema.workspaces)
+    .where(eq(schema.workspaces.id, workspaceId))
+    .for("key share")
+    .limit(1);
+  if (!workspace || workspace.accountId !== accountId) {
+    throw new Error(`Workspace not found: ${workspaceId}`);
+  }
+}
+
+function eventPayloadRecord(payload: unknown): Record<string, unknown> | null {
+  return payload !== null && typeof payload === "object" && !Array.isArray(payload)
+    ? (payload as Record<string, unknown>)
+    : null;
+}
+
+async function verifyCanonicalSessionStartInTransaction(
+  tx: Database,
+  input: Omit<ReplaySessionStartInput, "createIdempotencyKey" | "createRequestFingerprint">,
+  session: typeof schema.sessions.$inferSelect,
+): Promise<InitializeSessionStartResult> {
+  if (session.initializationVersion !== 1 || !session.temporalWorkflowId) {
+    throw new SessionInitializationInvariantError(
+      "existing session create receipt is legacy or incomplete and cannot be repaired safely",
+    );
+  }
+
+  const initialEvents = await tx
+    .select()
+    .from(schema.sessionEvents)
+    .where(
+      and(
+        eq(schema.sessionEvents.workspaceId, input.workspaceId),
+        eq(schema.sessionEvents.sessionId, session.id),
+        lte(schema.sessionEvents.sequence, 5),
+      ),
+    )
+    .orderBy(asc(schema.sessionEvents.sequence));
+  const hasInitialGoal = initialEvents[1]?.type === "goal.set";
+  const expectedTypes =
+    input.admission.kind === "user"
+      ? [
+          "session.created",
+          ...(hasInitialGoal ? ["goal.set"] : []),
+          "user.message",
+          "session.status.changed",
+          "turn.queued",
+        ]
+      : [
+          "session.created",
+          ...(hasInitialGoal ? ["goal.set"] : []),
+          "session.status.changed",
+          "system.update.pending",
+        ];
+  const initialPrefix = initialEvents.slice(0, expectedTypes.length);
+  if (
+    initialPrefix.length !== expectedTypes.length ||
+    initialPrefix.some(
+      (event, index) => event.sequence !== index + 1 || event.type !== expectedTypes[index],
+    )
+  ) {
+    throw new SessionInitializationInvariantError(
+      "canonical session receipt has an invalid initial event prefix",
+    );
+  }
+  const createdPayload = eventPayloadRecord(initialPrefix[0]?.payload);
+  const statusPayload = eventPayloadRecord(
+    initialPrefix.find((event) => event.type === "session.status.changed")?.payload,
+  );
+  if (createdPayload?.status !== "queued" || statusPayload?.status !== "queued") {
+    throw new SessionInitializationInvariantError(
+      "canonical session receipt has invalid initial session state events",
+    );
+  }
+  if (hasInitialGoal) {
+    const goalEvent = initialPrefix[1];
+    const goalPayload = eventPayloadRecord(goalEvent?.payload);
+    const [goal] =
+      typeof goalPayload?.goalId === "string"
+        ? await tx
+            .select({ id: schema.sessionGoals.id })
+            .from(schema.sessionGoals)
+            .where(
+              and(
+                eq(schema.sessionGoals.workspaceId, input.workspaceId),
+                eq(schema.sessionGoals.sessionId, session.id),
+                eq(schema.sessionGoals.id, goalPayload.goalId),
+              ),
+            )
+            .limit(1)
+        : [];
+    if (!goal) {
+      throw new SessionInitializationInvariantError(
+        "canonical session receipt has invalid initial goal state",
+      );
+    }
+  }
+  const triggerEvent = initialPrefix.find((event) =>
+    input.admission.kind === "user"
+      ? event.type === "user.message"
+      : event.type === "system.update.pending",
+  );
+  if (!triggerEvent) {
+    throw new SessionInitializationInvariantError(
+      "canonical session receipt has no initial trigger event",
+    );
+  }
+
+  let turn: typeof schema.sessionTurns.$inferSelect | undefined;
+  if (input.admission.kind === "user") {
+    const triggerPayload = eventPayloadRecord(triggerEvent.payload);
+    if (
+      triggerPayload?.text !== session.initialMessage ||
+      !isDeepStrictEqual(triggerPayload.resources ?? [], session.resources) ||
+      !isDeepStrictEqual(triggerPayload.tools ?? [], session.tools)
+    ) {
+      throw new SessionInitializationInvariantError(
+        "canonical session receipt has invalid initial user event state",
+      );
+    }
+    const turns = await tx
+      .select()
+      .from(schema.sessionTurns)
+      .where(
+        and(
+          eq(schema.sessionTurns.workspaceId, input.workspaceId),
+          eq(schema.sessionTurns.sessionId, session.id),
+          eq(schema.sessionTurns.triggerEventId, triggerEvent.id),
+        ),
+      )
+      .orderBy(asc(schema.sessionTurns.createdAt));
+    if (
+      turns.length !== 1 ||
+      turns[0]?.source !== "user" ||
+      turns[0]?.position !== 1 ||
+      turns[0]?.temporalWorkflowId !== session.temporalWorkflowId
+    ) {
+      throw new SessionInitializationInvariantError(
+        "canonical session receipt does not own exactly one initial turn",
+      );
+    }
+    turn = turns[0];
+    const queuedPayload = eventPayloadRecord(
+      initialPrefix.find((event) => event.type === "turn.queued")?.payload,
+    );
+    if (
+      queuedPayload?.turnId !== turn.id ||
+      queuedPayload.triggerEventId !== triggerEvent.id ||
+      queuedPayload.source !== "user"
+    ) {
+      throw new SessionInitializationInvariantError(
+        "canonical session receipt has invalid initial turn event state",
+      );
+    }
+  } else {
+    const [update] = await tx
+      .select()
+      .from(schema.sessionSystemUpdates)
+      .where(
+        and(
+          eq(schema.sessionSystemUpdates.workspaceId, input.workspaceId),
+          eq(schema.sessionSystemUpdates.sessionId, session.id),
+          eq(schema.sessionSystemUpdates.dedupeKey, `scheduled-wake:${input.admission.runId}`),
+        ),
+      )
+      .limit(1);
+    const [run] = await tx
+      .select()
+      .from(schema.scheduledTaskRuns)
+      .where(
+        and(
+          eq(schema.scheduledTaskRuns.workspaceId, input.workspaceId),
+          eq(schema.scheduledTaskRuns.id, input.admission.runId),
+        ),
+      )
+      .limit(1);
+    const triggerPayload = eventPayloadRecord(triggerEvent.payload);
+    if (
+      !update ||
+      update.sourceId !== input.admission.runId ||
+      !run ||
+      run.status !== "dispatched" ||
+      run.sessionId !== session.id ||
+      run.triggerEventId !== triggerEvent.id ||
+      triggerPayload?.updateId !== update.id ||
+      triggerPayload.kind !== update.kind ||
+      triggerPayload.classification !== update.classification ||
+      triggerPayload.sourceId !== update.sourceId ||
+      triggerPayload.summary !== update.summary
+    ) {
+      throw new SessionInitializationInvariantError(
+        "canonical scheduled-session receipt has invalid source settlement",
+      );
+    }
+  }
+
+  const usageKey =
+    input.usage.idempotencyKey ?? `agent_run.created:${input.workspaceId}:${session.id}`;
+  const [usage] = await tx
+    .select()
+    .from(schema.usageEvents)
+    .where(eq(schema.usageEvents.idempotencyKey, usageKey))
+    .limit(1);
+  if (
+    !usage ||
+    usage.accountId !== input.accountId ||
+    usage.workspaceId !== input.workspaceId ||
+    usage.eventType !== "agent_run.created" ||
+    usage.quantity !== 1 ||
+    usage.unit !== "run" ||
+    usage.sourceResourceType !== input.usage.sourceResourceType ||
+    usage.sourceResourceId !== (input.usage.sourceResourceId ?? session.id)
+  ) {
+    throw new SessionInitializationInvariantError(
+      "canonical session receipt has invalid usage settlement",
+    );
+  }
+  if (session.initialWorkflowWakeRevision !== null) {
+    const [wake] = await tx
+      .select()
+      .from(schema.sessionWorkflowWakeOutbox)
+      .where(
+        and(
+          eq(schema.sessionWorkflowWakeOutbox.workspaceId, input.workspaceId),
+          eq(schema.sessionWorkflowWakeOutbox.sessionId, session.id),
+        ),
+      )
+      .limit(1);
+    if (
+      !wake ||
+      wake.accountId !== input.accountId ||
+      wake.temporalWorkflowId !== session.temporalWorkflowId ||
+      wake.wakeRevision < session.initialWorkflowWakeRevision ||
+      (wake.wakeRevision === session.initialWorkflowWakeRevision &&
+        wake.reason !== "initial_session")
+    ) {
+      throw new SessionInitializationInvariantError(
+        "canonical session receipt has invalid workflow wake settlement",
+      );
+    }
+  }
+
+  const mcpRows = await tx
+    .select()
+    .from(schema.sessionMcpServers)
+    .where(
+      and(
+        eq(schema.sessionMcpServers.workspaceId, input.workspaceId),
+        eq(schema.sessionMcpServers.sessionId, session.id),
+      ),
+    )
+    .orderBy(asc(schema.sessionMcpServers.serverId));
+  const createdMcpValue = createdPayload.mcpServers;
+  if (createdMcpValue !== undefined && !Array.isArray(createdMcpValue)) {
+    throw new SessionInitializationInvariantError(
+      "canonical session receipt has malformed MCP initialization metadata",
+    );
+  }
+  const createdMcp = (createdMcpValue ?? []).map((candidate) => {
+    const server = eventPayloadRecord(candidate);
+    if (
+      !server ||
+      typeof server.id !== "string" ||
+      (server.name !== null && server.name !== undefined && typeof server.name !== "string") ||
+      typeof server.url !== "string" ||
+      !Array.isArray(server.headerNames) ||
+      server.headerNames.some((name) => typeof name !== "string") ||
+      typeof server.credentialVersion !== "number" ||
+      !Number.isInteger(server.credentialVersion) ||
+      server.credentialVersion < 1
+    ) {
+      throw new SessionInitializationInvariantError(
+        "canonical session receipt has malformed MCP initialization metadata",
+      );
+    }
+    return {
+      id: server.id,
+      name: server.name ?? null,
+      url: server.url,
+    };
+  });
+  createdMcp.sort((left, right) => (left.id < right.id ? -1 : left.id > right.id ? 1 : 0));
+  const persistedMcp = mcpRows.map((server) => ({
+    id: server.serverId,
+    name: server.name ?? null,
+    url: server.url,
+  }));
+  if (!isDeepStrictEqual(createdMcp, persistedMcp)) {
+    throw new SessionInitializationInvariantError(
+      "canonical session receipt has invalid MCP reference state",
+    );
+  }
+
+  const effectiveControl = await evaluateSessionControl(tx, input.workspaceId, session.id, {
+    lock: "share",
+  });
+  return {
+    session: mapSession(
+      session,
+      serializeEffectiveSessionControl(effectiveControl),
+      mcpRows.map(mapSessionMcpServerMetadata),
+    ),
+    events: [],
+    turn: turn ? mapSessionTurn(turn) : null,
+    temporalWorkflowId: session.temporalWorkflowId,
+    workflowWakeRevision: session.initialWorkflowWakeRevision,
+    triggerEventId: triggerEvent.id,
+    created: false,
+  };
+}
+
 /**
- * Install a newly created session's complete first runnable unit atomically.
- * The canonical user event, optional goal, queued turn, public status, and
- * workflow wake revision either all commit or all roll back. Retrying the same
- * create repairs any pre-transaction partial state and emits only missing
- * records; it never creates a second initial turn.
+ * Return a complete canonical start for an exact keyed retry without repeating
+ * mutable create-time lookups. Null means no committed receipt exists yet; a
+ * conflicting or legacy/incomplete receipt fails closed.
+ */
+export async function replaySessionStartByCreateIdempotencyKey(
+  db: Database,
+  input: ReplaySessionStartInput,
+): Promise<InitializeSessionStartResult | null> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        await lockSessionInitializationWorkspaceRows(
+          tx as unknown as Database,
+          input.accountId,
+          input.workspaceId,
+        );
+        const [session] = await tx
+          .select()
+          .from(schema.sessions)
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, input.workspaceId),
+              eq(schema.sessions.createIdempotencyKey, input.createIdempotencyKey),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (!session) return null;
+        if (session.createRequestFingerprint !== input.createRequestFingerprint) {
+          throw new SessionCreateConflictError();
+        }
+        return await verifyCanonicalSessionStartInTransaction(
+          tx as unknown as Database,
+          input,
+          session,
+        );
+      }),
+  );
+}
+
+/**
+ * Create a session and its complete first durable admission atomically.
+ *
+ * A keyed retry may return only a version-1 receipt whose fingerprint matches
+ * and whose immutable initial durable shape verifies. Version-0 rows are legacy
+ * and intentionally rejected: the lost request semantics needed to repair them
+ * do not exist in Postgres, so "repairing" one would fabricate history. The
+ * initialization marker is written only after every row, usage receipt, source
+ * settlement, and wake obligation has been installed in this transaction.
  */
 export async function initializeSessionStartAtomically(
   db: Database,
@@ -18619,53 +19421,94 @@ export async function initializeSessionStartAtomically(
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
-        const effectiveControl = await evaluateSessionControl(
+        const fail = async (stage: SessionInitializationFailpointStage): Promise<void> => {
+          await input.failpoint?.(stage);
+        };
+
+        await lockSessionInitializationWorkspaceRows(
           tx as unknown as Database,
+          input.accountId,
           input.workspaceId,
-          input.sessionId,
-          { lock: "share" },
         );
-        const [workspace] = await tx
-          .select()
-          .from(schema.workspaces)
-          .where(eq(schema.workspaces.id, input.workspaceId))
-          .for("update")
-          .limit(1);
-        const [session] = await tx
-          .select()
-          .from(schema.sessions)
-          .where(
-            and(
-              eq(schema.sessions.workspaceId, input.workspaceId),
-              eq(schema.sessions.id, input.sessionId),
-            ),
-          )
-          .for("update")
-          .limit(1);
-        if (!workspace || !session) throw new Error(`Session not found: ${input.sessionId}`);
 
-        const temporalWorkflowId = session.temporalWorkflowId ?? `session-${session.id}`;
-        if (session.status === "cancelled") {
-          return {
-            events: [],
-            turn: null,
-            temporalWorkflowId,
-            workflowWakeRevision: null,
-          };
+        const temporalWorkflowId = `session-${input.sessionId}`;
+        const sessionValues: typeof schema.sessions.$inferInsert = {
+          id: input.sessionId,
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          initialMessage: input.session.initialMessage,
+          resources: input.session.resources,
+          tools: input.session.tools,
+          metadata: input.session.metadata,
+          model: input.session.model,
+          sandboxBackend: input.session.sandboxBackend,
+          sandboxOs: input.session.sandboxOs ?? "linux",
+          sandboxGroupId: input.session.sandboxGroupId ?? input.sessionId,
+          activeSandboxId: input.session.activeSandboxId ?? null,
+          activeEpoch: input.session.activeEpoch ?? 0,
+          workingDir: input.session.workingDir ?? null,
+          variableSetId: input.session.variableSetId ?? null,
+          rigId: input.session.rigId ?? null,
+          rigVersionId: input.session.rigVersionId ?? null,
+          firstPartyMcpPermissions: input.session.firstPartyMcpPermissions ?? null,
+          instructions: input.session.instructions ?? null,
+          parentSessionId: input.session.parentSessionId ?? null,
+          createIdempotencyKey: input.createIdempotencyKey ?? null,
+          createRequestFingerprint: input.createRequestFingerprint,
+          initializationVersion: 0,
+          temporalWorkflowId,
+          status: "queued",
+        };
+
+        const [insertedSession] = input.createIdempotencyKey
+          ? await tx
+              .insert(schema.sessions)
+              .values(sessionValues)
+              .onConflictDoNothing({
+                target: [schema.sessions.workspaceId, schema.sessions.createIdempotencyKey],
+                where: sql`${schema.sessions.createIdempotencyKey} is not null`,
+              })
+              .returning()
+          : await tx.insert(schema.sessions).values(sessionValues).returning();
+
+        let session = insertedSession;
+        if (!session) {
+          if (!input.createIdempotencyKey) {
+            throw new Error("Failed to insert canonical session");
+          }
+          [session] = await tx
+            .select()
+            .from(schema.sessions)
+            .where(
+              and(
+                eq(schema.sessions.workspaceId, input.workspaceId),
+                eq(schema.sessions.createIdempotencyKey, input.createIdempotencyKey),
+              ),
+            )
+            .for("update")
+            .limit(1);
+          if (!session) throw new Error("Canonical session idempotency winner disappeared");
+          if (session.createRequestFingerprint !== input.createRequestFingerprint) {
+            throw new SessionCreateConflictError();
+          }
+          return await verifyCanonicalSessionStartInTransaction(
+            tx as unknown as Database,
+            input,
+            session,
+          );
         }
+        await fail("after_session_insert");
 
-        let [goal] = await tx
-          .select()
-          .from(schema.sessionGoals)
-          .where(
-            and(
-              eq(schema.sessionGoals.workspaceId, input.workspaceId),
-              eq(schema.sessionGoals.sessionId, session.id),
-            ),
-          )
-          .for("update")
-          .limit(1);
-        if (!goal && input.goal) {
+        const mcpMetadata = await insertSessionMcpServers(tx as unknown as Database, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: session.id,
+          servers: input.session.mcpServers ?? [],
+        });
+        await fail("after_reference_state");
+
+        let goal: typeof schema.sessionGoals.$inferSelect | undefined;
+        if (input.goal) {
           [goal] = await tx
             .insert(schema.sessionGoals)
             .values({
@@ -18675,115 +19518,100 @@ export async function initializeSessionStartAtomically(
               text: input.goal.text,
               successCriteria: input.goal.successCriteria ?? null,
               maxAutoContinuations: input.goal.maxAutoContinuations ?? null,
-              createdBy: "api",
+              createdBy: input.goal.createdBy ?? "api",
             })
             .returning();
           if (!goal) throw new Error("Failed to create initial session goal");
         }
+        await fail("after_goal");
 
-        let [userEvent] = await tx
-          .select()
-          .from(schema.sessionEvents)
-          .where(
-            and(
-              eq(schema.sessionEvents.workspaceId, input.workspaceId),
-              eq(schema.sessionEvents.sessionId, session.id),
-              eq(schema.sessionEvents.type, "user.message"),
-            ),
-          )
-          .orderBy(asc(schema.sessionEvents.sequence))
-          .limit(1);
-        let sequence = session.lastSequence;
+        const effectiveControl = await evaluateSessionControl(
+          tx as unknown as Database,
+          input.workspaceId,
+          session.id,
+          { lock: "share" },
+        );
+        let sequence = 0;
         const insertedEvents: Array<typeof schema.sessionEvents.$inferSelect> = [];
         const runnable = effectiveControl.state === "active";
         const publicQueuedStatus: SessionStatus = "queued";
+        const baseEvents = await tx
+          .insert(schema.sessionEvents)
+          .values([
+            {
+              accountId: session.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: session.id,
+              sequence: ++sequence,
+              type: "session.created",
+              payload: sanitizeEventPayload({
+                ...input.createdEventPayload,
+                status: publicQueuedStatus,
+              }),
+            },
+            ...(goal
+              ? [
+                  {
+                    accountId: session.accountId,
+                    workspaceId: input.workspaceId,
+                    sessionId: session.id,
+                    sequence: ++sequence,
+                    type: "goal.set" as const,
+                    payload: sanitizeEventPayload({
+                      goalId: goal.id,
+                      text: goal.text,
+                      ...(goal.successCriteria ? { successCriteria: goal.successCriteria } : {}),
+                      version: goal.version,
+                      actor: input.goal?.createdBy ?? "api",
+                      replaced: false,
+                    }),
+                  },
+                ]
+              : []),
+            ...(input.admission.kind === "user"
+              ? [
+                  {
+                    accountId: session.accountId,
+                    workspaceId: input.workspaceId,
+                    sessionId: session.id,
+                    sequence: ++sequence,
+                    type: "user.message" as const,
+                    payload: sanitizeEventPayload({
+                      text: session.initialMessage,
+                      ...(session.resources.length ? { resources: session.resources } : {}),
+                      ...(session.tools.length ? { tools: session.tools } : {}),
+                    }),
+                    clientEventId: input.admission.clientEventId ?? `session-initial:${session.id}`,
+                  },
+                ]
+              : []),
+            {
+              accountId: session.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: session.id,
+              sequence: ++sequence,
+              type: "session.status.changed",
+              payload: sanitizeEventPayload({ status: publicQueuedStatus }),
+            },
+          ])
+          .returning();
+        insertedEvents.push(...baseEvents);
+        await fail("after_canonical_events");
 
-        if (!userEvent) {
-          const initialPayload = {
-            text: session.initialMessage,
-            ...(session.resources.length ? { resources: session.resources } : {}),
-            ...(session.tools.length ? { tools: session.tools } : {}),
-          };
-          const rows = await tx
-            .insert(schema.sessionEvents)
-            .values([
-              {
-                accountId: session.accountId,
-                workspaceId: input.workspaceId,
-                sessionId: session.id,
-                sequence: ++sequence,
-                type: "session.created",
-                payload: sanitizeEventPayload({
-                  ...input.createdEventPayload,
-                  status: publicQueuedStatus,
-                }),
-              },
-              ...(goal
-                ? [
-                    {
-                      accountId: session.accountId,
-                      workspaceId: input.workspaceId,
-                      sessionId: session.id,
-                      sequence: ++sequence,
-                      type: "goal.set" as const,
-                      payload: sanitizeEventPayload({
-                        goalId: goal.id,
-                        text: goal.text,
-                        ...(goal.successCriteria ? { successCriteria: goal.successCriteria } : {}),
-                        version: goal.version,
-                        actor: "api",
-                        replaced: false,
-                      }),
-                    },
-                  ]
-                : []),
-              {
-                accountId: session.accountId,
-                workspaceId: input.workspaceId,
-                sessionId: session.id,
-                sequence: ++sequence,
-                type: "user.message",
-                payload: sanitizeEventPayload(initialPayload),
-                clientEventId: input.clientEventId ?? `session-initial:${session.id}`,
-              },
-              {
-                accountId: session.accountId,
-                workspaceId: input.workspaceId,
-                sessionId: session.id,
-                sequence: ++sequence,
-                type: "session.status.changed",
-                payload: sanitizeEventPayload({ status: publicQueuedStatus }),
-              },
-            ])
-            .returning();
-          insertedEvents.push(...rows);
-          userEvent = rows.find((event) => event.type === "user.message");
-          if (!userEvent) throw new Error("Failed to create initial user event");
-        }
-
-        let [turn] = await tx
-          .select()
-          .from(schema.sessionTurns)
-          .where(
-            and(
-              eq(schema.sessionTurns.workspaceId, input.workspaceId),
-              eq(schema.sessionTurns.sessionId, session.id),
-              eq(schema.sessionTurns.triggerEventId, userEvent.id),
-            ),
-          )
-          .orderBy(asc(schema.sessionTurns.createdAt))
-          .limit(1);
-        let insertedTurn = false;
-        let queueTailPosition = Number(session.queueTailPosition);
-        if (!turn) {
-          queueTailPosition += 1;
+        let turn: typeof schema.sessionTurns.$inferSelect | undefined;
+        let triggerEvent: typeof schema.sessionEvents.$inferSelect | undefined;
+        let queueTailPosition = 0;
+        if (input.admission.kind === "user") {
+          triggerEvent = baseEvents.find((event) => event.type === "user.message");
+          if (!triggerEvent) throw new Error("Failed to create initial user event");
+          queueTailPosition = 1;
           [turn] = await tx
             .insert(schema.sessionTurns)
             .values({
               accountId: session.accountId,
               workspaceId: input.workspaceId,
               sessionId: session.id,
-              triggerEventId: userEvent.id,
+              triggerEventId: triggerEvent.id,
               temporalWorkflowId,
               status: "queued",
               source: "user",
@@ -18792,10 +19620,7 @@ export async function initializeSessionStartAtomically(
               resources: session.resources,
               tools: session.tools,
               model: session.model,
-              reasoningEffort: reasoningEffortForMetadata(
-                session.metadata,
-                input.reasoningEffortFallback,
-              ),
+              reasoningEffort: input.admission.reasoningEffort,
               sandboxBackend: session.sandboxBackend,
               sandboxOs: session.sandboxOs,
               metadata: {},
@@ -18803,22 +19628,6 @@ export async function initializeSessionStartAtomically(
             })
             .returning();
           if (!turn) throw new Error("Failed to create initial session turn");
-          insertedTurn = true;
-        }
-
-        const [queuedEvent] = await tx
-          .select({ id: schema.sessionEvents.id })
-          .from(schema.sessionEvents)
-          .where(
-            and(
-              eq(schema.sessionEvents.workspaceId, input.workspaceId),
-              eq(schema.sessionEvents.sessionId, session.id),
-              eq(schema.sessionEvents.turnId, turn.id),
-              eq(schema.sessionEvents.type, "turn.queued"),
-            ),
-          )
-          .limit(1);
-        if (!queuedEvent) {
           const [event] = await tx
             .insert(schema.sessionEvents)
             .values({
@@ -18830,28 +19639,61 @@ export async function initializeSessionStartAtomically(
               type: "turn.queued",
               payload: sanitizeEventPayload({
                 turnId: turn.id,
-                triggerEventId: userEvent.id,
+                triggerEventId: triggerEvent.id,
                 source: turn.source,
               }),
             })
             .returning();
           if (!event) throw new Error("Failed to create initial turn event");
           insertedEvents.push(event);
+        } else {
+          const [update] = await tx
+            .insert(schema.sessionSystemUpdates)
+            .values({
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: session.id,
+              kind: "scheduled_occurrence",
+              classification: "info",
+              sourceId: input.admission.runId,
+              dedupeKey: `scheduled-wake:${input.admission.runId}`,
+              summary: input.admission.summary,
+              payload: input.admission.payload,
+              lineage: input.admission.lineage,
+              state: "pending",
+            })
+            .returning();
+          if (!update) throw new Error("Failed to create initial scheduled update");
+          const [event] = await tx
+            .insert(schema.sessionEvents)
+            .values({
+              accountId: session.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: session.id,
+              sequence: ++sequence,
+              type: "system.update.pending",
+              payload: sanitizeEventPayload({
+                updateId: update.id,
+                kind: update.kind,
+                classification: update.classification,
+                sourceId: update.sourceId,
+                summary: update.summary,
+              }),
+            })
+            .returning();
+          if (!event) throw new Error("Failed to create scheduled pending event");
+          insertedEvents.push(event);
+          triggerEvent = event;
         }
+        await fail("after_admission");
 
-        const turnNeedsWake = turn.status === "queued" && runnable;
-        await tx
+        const [updatedSession] = await tx
           .update(schema.sessions)
           .set({
             temporalWorkflowId,
             lastSequence: sequence,
-            ...(insertedTurn
-              ? {
-                  queueVersion: session.queueVersion + 1,
-                  queueTailPosition,
-                }
-              : {}),
-            ...(turn.status === "queued" ? { status: publicQueuedStatus } : {}),
+            ...(turn ? { queueVersion: 1, queueTailPosition } : {}),
+            status: publicQueuedStatus,
             updatedAt: new Date(),
           })
           .where(
@@ -18859,8 +19701,69 @@ export async function initializeSessionStartAtomically(
               eq(schema.sessions.workspaceId, input.workspaceId),
               eq(schema.sessions.id, session.id),
             ),
+          )
+          .returning();
+        if (!updatedSession) throw new Error("Failed to update canonical session queue state");
+        session = updatedSession;
+        await fail("after_queue_state");
+
+        if (input.admission.kind === "scheduled") {
+          if (!triggerEvent) throw new Error("Scheduled initialization has no trigger event");
+          await settleScheduledTaskRunInTransaction(tx as unknown as Database, {
+            workspaceId: input.workspaceId,
+            runId: input.admission.runId,
+            sessionId: session.id,
+            triggerEventId: triggerEvent.id,
+            status: "dispatched",
+          });
+          if (input.admission.setReusableSession) {
+            const [task] = await tx
+              .update(schema.scheduledTasks)
+              .set({ reusableSessionId: session.id, updatedAt: new Date() })
+              .where(
+                and(
+                  eq(schema.scheduledTasks.workspaceId, input.workspaceId),
+                  eq(schema.scheduledTasks.id, input.admission.taskId),
+                  or(
+                    isNull(schema.scheduledTasks.reusableSessionId),
+                    eq(schema.scheduledTasks.reusableSessionId, session.id),
+                  ),
+                ),
+              )
+              .returning({ id: schema.scheduledTasks.id });
+            if (!task) {
+              throw new SessionCreateConflictError(
+                "scheduled task acquired a different reusable session during initialization",
+              );
+            }
+          }
+        }
+        const usageKey =
+          input.usage.idempotencyKey ?? `agent_run.created:${input.workspaceId}:${session.id}`;
+        const [usage] = await tx
+          .insert(schema.usageEvents)
+          .values({
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            subjectId: input.usage.subjectId ?? null,
+            eventType: "agent_run.created",
+            quantity: 1,
+            unit: "run",
+            sourceResourceType: input.usage.sourceResourceType,
+            sourceResourceId: input.usage.sourceResourceId ?? session.id,
+            idempotencyKey: usageKey,
+            occurredAt: new Date(),
+          })
+          .onConflictDoNothing({ target: schema.usageEvents.idempotencyKey })
+          .returning();
+        if (!usage) {
+          throw new SessionCreateConflictError(
+            "agent-run usage idempotency key was already used outside this initialization",
           );
-        const workflowWakeRevision = turnNeedsWake
+        }
+        await fail("after_usage_and_source");
+
+        const workflowWakeRevision = runnable
           ? await enqueueSessionWorkflowWakeInTransaction(tx as unknown as Database, {
               accountId: session.accountId,
               workspaceId: input.workspaceId,
@@ -18869,11 +19772,43 @@ export async function initializeSessionStartAtomically(
               reason: "initial_session",
             })
           : null;
+        await fail("after_wake");
+
+        const [completeSession] = await tx
+          .update(schema.sessions)
+          .set({
+            initializationVersion: 1,
+            initialWorkflowWakeRevision: workflowWakeRevision,
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, input.workspaceId),
+              eq(schema.sessions.id, session.id),
+              eq(schema.sessions.initializationVersion, 0),
+              eq(schema.sessions.createRequestFingerprint, input.createRequestFingerprint),
+            ),
+          )
+          .returning();
+        if (!completeSession) {
+          throw new SessionInitializationInvariantError(
+            "canonical session completion fence was not acquired",
+          );
+        }
+        await fail("before_commit");
+        if (!triggerEvent) throw new Error("Canonical initialization has no trigger event");
         return {
+          session: mapSession(
+            completeSession,
+            serializeEffectiveSessionControl(effectiveControl),
+            mcpMetadata,
+          ),
           events: insertedEvents.map(mapEvent),
-          turn: mapSessionTurn(turn),
+          turn: turn ? mapSessionTurn(turn) : null,
           temporalWorkflowId,
           workflowWakeRevision,
+          triggerEventId: triggerEvent.id,
+          created: true,
         };
       }),
   );
@@ -19064,7 +19999,12 @@ export async function claimSessionWorkForAttempt(
             .for("update");
           const updates = agentSteer ? [agentSteer, ...ordinary] : ordinary;
           if (updates.length === 0) {
-            return { count: 0, lastSequence: nextSequence - 1, triggerEventId: null, updates: [] };
+            return {
+              count: 0,
+              lastSequence: nextSequence - 1,
+              triggerEventId: null,
+              updates: [],
+            };
           }
           const deliverable: typeof updates = [];
           let deliveredBytes = 0;
@@ -19120,11 +20060,20 @@ export async function claimSessionWorkForAttempt(
             deliveredBytes += updateBytes;
           }
           if (deliverable.length === 0) {
-            return { count: 0, lastSequence: nextSequence - 1, triggerEventId: null, updates: [] };
+            return {
+              count: 0,
+              lastSequence: nextSequence - 1,
+              triggerEventId: null,
+              updates: [],
+            };
           }
           await tx
             .update(schema.sessionSystemUpdates)
-            .set({ state: "delivered", deliveredTurnId: turnId, deliveredAt: occurredAt })
+            .set({
+              state: "delivered",
+              deliveredTurnId: turnId,
+              deliveredAt: occurredAt,
+            })
             .where(
               and(
                 eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
@@ -19649,7 +20598,9 @@ export async function claimSessionWorkForAttempt(
               ? goalPolicy.model
               : (latestStarted?.model ?? session.model);
           const reasoningEffort = reasoningEffortForMetadata(
-            { reasoningEffort: goalPolicy?.reasoningEffort ?? latestStarted?.reasoningEffort },
+            {
+              reasoningEffort: goalPolicy?.reasoningEffort ?? latestStarted?.reasoningEffort,
+            },
             reasoningEffortForMetadata(session.metadata, "medium"),
           );
           const tools = Array.isArray(goalPolicy?.tools)
@@ -19794,7 +20745,11 @@ export async function claimSessionWorkForAttempt(
           sessionId,
           turnId: row.id,
           position: Number(historyPosition),
-          item: sanitizeModelPayload({ type: "message", role: "user", content: row.prompt }),
+          item: sanitizeModelPayload({
+            type: "message",
+            role: "user",
+            content: row.prompt,
+          }),
           producerCodexCredentialId: null,
         });
         const delivered = await deliverPendingUpdates(
@@ -20316,7 +21271,10 @@ export async function peekSessionWork(
       )
       .limit(1);
     if (interruption) {
-      return { kind: "interruption-pending", attemptId: interruption.attemptId };
+      return {
+        kind: "interruption-pending",
+        attemptId: interruption.attemptId,
+      };
     }
     if (effectiveControl.state !== "active") return { kind: "idle" };
 
@@ -20468,7 +21426,12 @@ export async function settleSessionIdleWithParentOutbox(
   workspaceId: string,
   sessionId: string,
 ): Promise<
-  | { action: "settled"; changed: boolean; episodeKey: string; events: SessionEvent[] }
+  | {
+      action: "settled";
+      changed: boolean;
+      episodeKey: string;
+      events: SessionEvent[];
+    }
   | { action: "stale"; episodeKey: null; events: [] }
 > {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
@@ -20540,7 +21503,12 @@ export async function settleSessionIdleWithParentOutbox(
         if (event) events.push(mapEvent(event));
         await tx
           .update(schema.sessions)
-          .set({ status: "idle", activeTurnId: null, lastSequence: sequence, updatedAt: now })
+          .set({
+            status: "idle",
+            activeTurnId: null,
+            lastSequence: sequence,
+            updatedAt: now,
+          })
           .where(
             and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)),
           );
@@ -20570,8 +21538,15 @@ export async function settleSessionIdleWithParentOutbox(
           classification: "success",
           sourceId: session.id,
           summary: "Child session reached a terminal idle boundary.",
-          payload: { type: "child_terminal_result", childSessionId: session.id, status: "idle" },
-          lineage: { childSessionId: session.id, parentSessionId: session.parentSessionId },
+          payload: {
+            type: "child_terminal_result",
+            childSessionId: session.id,
+            status: "idle",
+          },
+          lineage: {
+            childSessionId: session.id,
+            parentSessionId: session.parentSessionId,
+          },
         })
         .onConflictDoNothing({
           target: [
@@ -20654,7 +21629,10 @@ function readTurnDispatchMetadata(metadata: unknown): TurnDispatchMetadata {
     hasGeneration &&
     (typeof rawGeneration !== "number" || !Number.isSafeInteger(rawGeneration) || rawGeneration < 0)
   ) {
-    return { kind: "malformed", reason: "dispatchGeneration is not a safe non-negative integer" };
+    return {
+      kind: "malformed",
+      reason: "dispatchGeneration is not a safe non-negative integer",
+    };
   }
   const generation = hasGeneration ? (rawGeneration as number) : null;
 
@@ -20679,10 +21657,16 @@ function readTurnDispatchMetadata(metadata: unknown): TurnDispatchMetadata {
     typeof attempt.triggerEventId !== "string" ||
     attempt.triggerEventId.length === 0
   ) {
-    return { kind: "malformed", reason: "dispatchAttempt has an invalid shape" };
+    return {
+      kind: "malformed",
+      reason: "dispatchAttempt has an invalid shape",
+    };
   }
   if (generation === null || generation !== attempt.generation) {
-    return { kind: "malformed", reason: "dispatchGeneration does not match dispatchAttempt" };
+    return {
+      kind: "malformed",
+      reason: "dispatchGeneration does not match dispatchAttempt",
+    };
   }
   return {
     kind: "valid",
@@ -20816,7 +21800,11 @@ export type ApplySessionTurnSettlementInput = {
 };
 
 export type ApplySessionTurnSettlementResult =
-  | { action: "settled"; events: SessionEvent[]; recordingMutationApplied: boolean }
+  | {
+      action: "settled";
+      events: SessionEvent[];
+      recordingMutationApplied: boolean;
+    }
   | {
       action: "stale";
       events: [];
@@ -21559,7 +22547,11 @@ export async function settleCodexCredentialFailover(
           turn.activeAttemptId !== input.attemptId ||
           currentRedispatches !== input.expectedRedispatches
         ) {
-          return { action: "stale", failoverCount: currentFailovers, events: [] } as const;
+          return {
+            action: "stale",
+            failoverCount: currentFailovers,
+            events: [],
+          } as const;
         }
 
         const leaseRows = await tx.execute(
@@ -21576,12 +22568,20 @@ export async function settleCodexCredentialFailover(
           lease &&
           (lease.holder_id !== input.holderId || Number(lease.generation) !== input.generation)
         ) {
-          return { action: "stale", failoverCount: currentFailovers, events: [] } as const;
+          return {
+            action: "stale",
+            failoverCount: currentFailovers,
+            events: [],
+          } as const;
         }
 
         const failoverCount = currentFailovers + 1;
         if (failoverCount > input.maxFailovers) {
-          return { action: "limit_exceeded", failoverCount, events: [] } as const;
+          return {
+            action: "limit_exceeded",
+            failoverCount,
+            events: [],
+          } as const;
         }
         const now = new Date();
         await closeSessionTurnAttemptInTransaction(tx as unknown as Database, {
@@ -21651,7 +22651,10 @@ export async function settleCodexCredentialFailover(
           .set({
             status: "recovering",
             activeAttemptId: null,
-            metadata: { ...turn.metadata, codexCredentialFailovers: failoverCount },
+            metadata: {
+              ...turn.metadata,
+              codexCredentialFailovers: failoverCount,
+            },
             finishedAt: null,
             updatedAt: now,
           })
@@ -21900,8 +22903,18 @@ export type RecoverSessionDispatchInput = {
 
 export type RecoverSessionDispatchResult =
   | { action: "unclaimed"; events: [] }
-  | { action: "recovering"; turnId: string; redispatches: number; events: SessionEvent[] }
-  | { action: "exceeded"; turnId: string; redispatches: number; events: SessionEvent[] }
+  | {
+      action: "recovering";
+      turnId: string;
+      redispatches: number;
+      events: SessionEvent[];
+    }
+  | {
+      action: "exceeded";
+      turnId: string;
+      redispatches: number;
+      events: SessionEvent[];
+    }
   | {
       action: "stale";
       events: [];
@@ -22903,7 +23916,12 @@ export async function markSessionSystemUpdateOutboxDeliveredInTransaction(
 ): Promise<void> {
   const [row] = await tx
     .update(schema.sessionSystemUpdateOutbox)
-    .set({ status: "delivered", deliveredAt: new Date(), lastError: null, updatedAt: new Date() })
+    .set({
+      status: "delivered",
+      deliveredAt: new Date(),
+      lastError: null,
+      updatedAt: new Date(),
+    })
     .where(
       and(
         eq(schema.sessionSystemUpdateOutbox.workspaceId, input.workspaceId),
@@ -23441,7 +24459,10 @@ export async function acceptSessionApprovalDecision(
           )
           .limit(1);
         if (alreadyAccepted) {
-          return { action: "conflict", sessionStatus: "requires_action" } as const;
+          return {
+            action: "conflict",
+            sessionStatus: "requires_action",
+          } as const;
         }
         const [event] = await tx
           .insert(schema.sessionEvents)
@@ -23461,7 +24482,10 @@ export async function acceptSessionApprovalDecision(
         if (!event) throw new Error("Failed to append approval decision");
         await tx
           .update(schema.sessions)
-          .set({ lastSequence: session.lastSequence + 1, updatedAt: new Date() })
+          .set({
+            lastSequence: session.lastSequence + 1,
+            updatedAt: new Date(),
+          })
           .where(eq(schema.sessions.id, session.id));
         const workflowWakeRevision = await enqueueSessionWorkflowWakeInTransaction(
           tx as unknown as Database,
@@ -23530,7 +24554,10 @@ export async function appendSessionEventsForTurnAttempt(
       const existingUsageRows =
         fence.allowed && incomingUsageKeys.length > 0
           ? await tx
-              .select({ id: schema.sessionEvents.id, payload: schema.sessionEvents.payload })
+              .select({
+                id: schema.sessionEvents.id,
+                payload: schema.sessionEvents.payload,
+              })
               .from(schema.sessionEvents)
               .where(
                 and(
@@ -23872,7 +24899,9 @@ async function sessionControlProjections(
   workspaceId: string,
   sessionIds: string[],
 ): Promise<Map<string, Session["effectiveControl"]>> {
-  const controls = await evaluateSessionControls(db, workspaceId, sessionIds, { lock: "share" });
+  const controls = await evaluateSessionControls(db, workspaceId, sessionIds, {
+    lock: "share",
+  });
   return new Map(
     [...controls].map(([sessionId, control]) => [
       sessionId,
