@@ -10,7 +10,7 @@ This map defines who each doc tier serves and where volatile facts belong.
 | Maintainer | `CONTRIBUTING.md`, `docs/architecture.md`, topic docs | Contributors changing code, packages, workflows, or release mechanics. |
 | Repo agent | `AGENTS.md`, `.agents/skills/opengeni/SKILL.md`, this map | Coding agents working in this repository. |
 | Product agent | Bundled skills in `packages/runtime/src/bundled_hashicorp_terraform_skills` | Versioned product content; not covered by this freshness system. |
-| Operator | `docs/deployment.md`, deployment contracts and chart docs | People deploying and operating OpenGeni. |
+| Operator | `docs/deployment.md`, `docs/recovery-artifacts.md`, deployment contracts and chart docs | People deploying and operating OpenGeni. |
 | Record | `docs/design/**`, historical results, design dossiers | Point-in-time records; banner-label, never "fix" them. |
 
 ## Canonical Homes
@@ -20,6 +20,7 @@ This map defines who each doc tier serves and where volatile facts belong.
 | Architecture & package layout | `docs/architecture.md` | `README.md`, `AGENTS.md`, package READMEs should link or summarize lightly. |
 | Embedding & ports | `docs/embedding.md` | `README.md`, `CONTRIBUTING.md`, SDK/client examples should link. |
 | Run lifecycle | `docs/run-lifecycle.md` | `AGENTS.md`, `.agents/skills/opengeni/SKILL.md`, architecture summaries should link. |
+| Recovery history artifacts | `docs/recovery-artifacts.md` | `docs/architecture.md` summarizes the invariant; recovery callers should link instead of restating fence/retry semantics. |
 | Codex subscription rotation | `docs/codex-subscription-rotation.md` | `docs/run-lifecycle.md`, `docs/architecture.md`, and operator notes should link instead of restating allocator/failure semantics. |
 | Per-session MCP servers | `docs/session-mcp-servers.md` | `docs/architecture.md`, SDK/client examples should link instead of restating credential semantics. |
 | Connected machines | `docs/connected-machines.md` | `README.md`, `AGENTS.md`, client docs and skills should link. |

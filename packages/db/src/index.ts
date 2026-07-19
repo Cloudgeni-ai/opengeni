@@ -173,6 +173,7 @@ export {
 } from "./provision-roles";
 // Workspace Memory V1 pure domain surface (gates, render, canonical prompt text).
 export * from "./memory-domain";
+export * from "./recovery-artifacts";
 
 // §7.7 driver widening (Step I). `Database` is the structural, cross-driver
 // query-layer port: every helper in this file accepts `db: Database` and uses
