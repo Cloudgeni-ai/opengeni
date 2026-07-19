@@ -251,6 +251,21 @@ describe("worker restart resilience", () => {
   test("worker shutdown after an approved tool begins continues from canonical history without replay", async () => {
     const grant = await testGrant();
     let activeActivityCancellation: Promise<void> | null = null;
+    let resolveCancellationObserved!: () => void;
+    const cancellationObserved = new Promise<void>((resolve) => {
+      resolveCancellationObserved = resolve;
+    });
+    let resolveCancelledActivityFinalized!: () => void;
+    const cancelledActivityFinalized = new Promise<void>((resolve) => {
+      resolveCancelledActivityFinalized = resolve;
+    });
+    let releaseCancelledActivityReturn!: () => void;
+    const cancelledActivityReturnGate = new Promise<void>((resolve) => {
+      releaseCancelledActivityReturn = resolve;
+    });
+    let activityHeartbeats = 0;
+    let heartbeatsAtCancellation = 0;
+    let activityHeartbeatError: unknown;
     const mcp = startTestMcpServer({
       beforeToolResult: async () => {
         if (!activeActivityCancellation) {
@@ -305,18 +320,53 @@ describe("worker restart resilience", () => {
     const activities = {
       ...baseActivities,
       runAgentTurn: async (input: Parameters<typeof baseActivities.runAgentTurn>[0]) => {
-        const signal = currentActivityContext()?.cancellationSignal;
-        if (!signal) {
+        const context = currentActivityContext();
+        if (!context) {
           throw new Error("approved-tool restart fixture has no Temporal activity context");
         }
+        const signal = context.cancellationSignal;
+        let resolveActiveActivityCancellation!: () => void;
         activeActivityCancellation = new Promise<void>((resolve) => {
-          if (signal.aborted) {
-            resolve();
-            return;
-          }
-          signal.addEventListener("abort", () => resolve(), { once: true });
+          resolveActiveActivityCancellation = resolve;
         });
-        return await baseActivities.runAgentTurn(input);
+        const noteCancellation = () => {
+          heartbeatsAtCancellation = activityHeartbeats;
+          resolveActiveActivityCancellation();
+          resolveCancellationObserved();
+        };
+        if (signal.aborted) {
+          noteCancellation();
+        } else {
+          signal.addEventListener("abort", noteCancellation, { once: true });
+        }
+        const heartbeat = () => {
+          try {
+            context.heartbeat({
+              phase: "approved-tool-rolling-overlap-fixture",
+              count: activityHeartbeats + 1,
+            });
+            activityHeartbeats += 1;
+          } catch (error) {
+            activityHeartbeatError ??= error;
+          }
+        };
+        heartbeat();
+        const heartbeatTimer = setInterval(heartbeat, 25);
+        try {
+          return await baseActivities.runAgentTurn(input);
+        } finally {
+          // Hold the cancelled activity only after the production finalizer has
+          // completed and published its quiescence receipt. This leaves the old
+          // Temporal activity physically alive and heartbeating while a new
+          // worker polls both queues, proving Temporal does not dispatch the
+          // successor merely because cancellation and DB quiescence are known.
+          if (signal.aborted && mcp.calls.length === 1) {
+            resolveCancelledActivityFinalized();
+            await cancelledActivityReturnGate;
+          }
+          clearInterval(heartbeatTimer);
+          signal.removeEventListener("abort", noteCancellation);
+        }
       },
     };
     const session = await createSession(dbClient.db, {
@@ -344,7 +394,16 @@ describe("worker restart resilience", () => {
 
     const firstWorker = await restartTestWorker(nativeConnection, taskQueue, activities);
     const firstRun = firstWorker.run();
-    let firstWorkerStopped = false;
+    let firstRunSettled = false;
+    void firstRun.then(
+      () => {
+        firstRunSettled = true;
+      },
+      () => {
+        firstRunSettled = true;
+      },
+    );
+    let firstWorkerShutdownRequested = false;
     let completionWorker: Awaited<ReturnType<typeof restartTestWorker>> | null = null;
     let completionRun: Promise<void> | null = null;
     try {
@@ -391,17 +450,50 @@ describe("worker restart resilience", () => {
         describe: () => `modelCalls=${model.calls} mcpCalls=${mcp.calls.length}`,
       });
       firstWorker.shutdown();
-      firstWorkerStopped = true;
-      await firstRun;
+      firstWorkerShutdownRequested = true;
+      await cancellationObserved;
+      await cancelledActivityFinalized;
 
       completionWorker = await restartTestWorker(nativeConnection, taskQueue, activities);
       completionRun = completionWorker.run();
+      await waitFor(() => activityHeartbeats >= heartbeatsAtCancellation + 3, {
+        timeoutMs: 5_000,
+        intervalMs: 10,
+        describe: () =>
+          `heartbeats=${activityHeartbeats} cancellationBaseline=${heartbeatsAtCancellation}`,
+      });
+
+      expect(activityHeartbeatError).toBeUndefined();
+      expect(firstRunSettled).toBe(false);
+      expect(mcp.calls).toEqual([
+        { tool: "search_documents", args: { query: "rolling deploy state" } },
+      ]);
+      expect(model.calls).toBe(1);
+      expect(model.requests).toHaveLength(1);
+      const overlapTurns = await listSessionTurns(dbClient.db, grant.workspaceId, session.id);
+      expect(overlapTurns).toHaveLength(1);
+      expect(overlapTurns[0]?.executionGeneration).toBe(2);
+      const overlapAttempts = await withWorkspaceRls(dbClient.db, grant.workspaceId, async (db) =>
+        (await db.query.sessionTurnAttempts.findMany()).filter(
+          (attempt) => attempt.turnId === overlapTurns[0]!.id,
+        ),
+      );
+      expect(overlapAttempts).toHaveLength(2);
+      // Worker shutdown cancellation is not itself a durable session-control
+      // interruption, so it cannot mint a PostgreSQL quiescence receipt. The
+      // still-open Temporal activity promise is the admission gate until its
+      // physical return lets the workflow settle recovery.
+      expect(overlapAttempts.filter((attempt) => attempt.quiescedAt !== null)).toHaveLength(0);
+
+      releaseCancelledActivityReturn();
+      await firstRun;
       await handle.result();
     } finally {
-      if (!firstWorkerStopped) {
+      releaseCancelledActivityReturn();
+      if (!firstWorkerShutdownRequested) {
         firstWorker.shutdown();
-        await firstRun.catch(() => undefined);
       }
+      await firstRun.catch(() => undefined);
       if (completionWorker && completionRun) {
         completionWorker.shutdown();
         await completionRun;
