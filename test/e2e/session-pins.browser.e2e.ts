@@ -339,12 +339,19 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     // A different device has no shared browser channel. Returning focus must
     // trigger a real server reconciliation without reloading the document.
     const crossDeviceRefresh = pageA.waitForResponse(
-      (response) => successfulSessionPageResponse(response, workspaceId),
+      (response) => {
+        const url = new URL(response.url());
+        return (
+          successfulSessionPageResponse(response, workspaceId) &&
+          url.searchParams.get("pinsOnly") === "true"
+        );
+      },
       { timeout: 10_000 },
     );
     await pageA.evaluate(() => window.dispatchEvent(new Event("focus")));
     await crossDeviceRefresh;
     await pageA.getByRole("button", { name: "Pin session" }).waitFor();
+    await pageA.getByRole("group", { name: "Pinned" }).waitFor({ state: "detached" });
     expect(await pageA.getByRole("group", { name: "Pinned" }).count()).toBe(0);
 
     // Pin from the header as a fresh OCC revision, then prove both the second
@@ -682,19 +689,11 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         await managerChildren.locator(`button[data-session-row="${descendant.id}"]`).count(),
       ).toBe(0);
 
-      // Load the pinned descendant into the intermediary's lazy child cache.
-      // Pin ownership still prunes it from that branch, but a later remote
-      // unpin must reconcile this cached positive projection rather than leave
-      // a permanent stale top-level shortcut.
-      const intermediaryChildPage = page.waitForResponse((response) => {
-        const url = new URL(response.url());
-        return (
-          successfulSessionPageResponse(response, workspaceId) &&
-          url.searchParams.get("parentSessionId") === intermediary.id
-        );
-      });
-      await managerChildren.getByRole("button", { name: "Expand spawned sessions" }).click();
-      await intermediaryChildPage;
+      // The manager's lazy page includes the complete pinned projection, so
+      // the nested descendant now exists as a positive pin in that child-page
+      // cache even though pin ownership prunes it from the visible branch. A
+      // later remote unpin must reconcile that cached revision rather than
+      // leave a permanent stale top-level shortcut.
 
       // The descendant shortcut owns its unpinned leaf. Its nested list is
       // explicit to assistive technology, and keyboard order includes every
@@ -748,6 +747,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await waitFor(async () => (await topLevelPinnedDescendant.count()) === 0, {
         timeoutMs: 10_000,
       });
+      await managerChildren.getByRole("button", { name: "Expand spawned sessions" }).click();
       const intermediaryChildren = managerChildren.getByRole("list", {
         name: "Spawned sessions from Lazy hierarchy intermediary",
       });
