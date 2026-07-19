@@ -364,6 +364,40 @@ describe("makeActiveBackendResolver — heterogeneous default/modal/selfhosted d
     expect(r.session).toBe(defaultBackend);
   });
 
+  test("null pointer after a home repair uses the current durable backend, not the stale default handle", async () => {
+    const original = new FakeBackend("group-before-repair");
+    const replacement = new FakeBackend("group-after-repair");
+    let reboundCalls = 0;
+    const resolve = makeActiveBackendResolver({
+      workspaceId: WS,
+      defaultBackend: original,
+      defaultKind: "modal",
+      resolveDefaultBackend: async (pointer) => {
+        reboundCalls += 1;
+        expect(pointer).toEqual({ activeSandboxId: null, activeEpoch: 1 });
+        return { session: replacement, sandboxId: null, kind: "modal" };
+      },
+      getSandbox: async () => null,
+      controlRpcFactory: () => new MockAgentResponder(),
+      relay: RELAY,
+    });
+    const ptr = mutablePointer();
+    const proxy = new RoutingSandboxSession({
+      defaultResolved: { session: original, sandboxId: null, kind: "modal" },
+      readPointer: ptr.read,
+      resolveActiveBackend: resolve,
+    });
+
+    await proxy.exec({ cmd: "before" });
+    ptr.swap(null); // same home target, but a repair advanced the route epoch
+    const result = (await proxy.exec({ cmd: "after" })) as { stdout: string };
+
+    expect(result.stdout).toBe("group-after-repair");
+    expect(original.calls).toEqual(["before"]);
+    expect(replacement.calls).toEqual(["after"]);
+    expect(reboundCalls).toBe(1);
+  });
+
   test("selfhosted target -> a SelfhostedSession bound to the enrollment agentId, fenced under active_epoch", async () => {
     const mock = new MockAgentResponder({ hostname: "the-laptop" });
     const resolve = makeActiveBackendResolver({

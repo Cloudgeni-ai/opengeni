@@ -185,12 +185,49 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
       enrollmentId: enrollment.id,
     });
 
+    // Seed the durable warm home so a same-target route epoch change exercises
+    // the worker's lease-backed home resolver instead of the static fallback.
+    const acquired = await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: session.sandboxGroupId,
+      kind: "turn",
+      holderId: "home-rebind-turn",
+      subjectId: session.id,
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
+    const committed = await commitWarmingToWarm(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: session.sandboxGroupId,
+      expectedEpoch: acquired.lease.leaseEpoch,
+      instanceId: "group-box",
+      resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: { providerState: { sandboxId: "group-box" } },
+      },
+      leaseTtlMs: 45_000,
+    });
+    expect(committed.committed).toBe(true);
+
     const bus = busWithAgent(workspaceId, enrollment.id, "the-laptop") as never;
 
     // Wrap the established group box in the routing proxy (what the turn does).
     const established = wrapTurnBoxWithRouting(
       { db, settings, bus },
-      { workspaceId, sessionId: session.id },
+      {
+        workspaceId,
+        sessionId: session.id,
+        homeLease: {
+          accountId,
+          sandboxGroupId: session.sandboxGroupId,
+          leaseEpoch: committed.lease!.leaseEpoch,
+          instanceId: "group-box",
+          backend: "modal",
+        },
+      },
       fakeGroupBox("group-box-marker"),
     );
     const proxy = established.session as { exec: (a: unknown) => Promise<{ stdout: string }> };

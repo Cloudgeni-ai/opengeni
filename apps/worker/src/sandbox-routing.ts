@@ -18,22 +18,28 @@ import type { Settings } from "@opengeni/config";
 import {
   getSandbox,
   markWarmLeaseInstanceLost,
+  readLease,
   readActiveSandbox,
   type Database,
 } from "@opengeni/db";
 import type { EventBus } from "@opengeni/events";
 import {
   buildSelfhostedBackendSession,
+  establishSandboxSessionFromEnvelope,
   isProviderSandboxGoneDuringRoutedOperation,
+  isProviderSandboxNotFoundError,
   makeActiveBackendResolver,
   NatsControlRpc,
   NatsOpStreamTransport,
+  RoutingBackendRecoveryRequiredError,
   RoutingSandboxSession,
+  verifySandboxExecReadiness,
   type ControlRpc,
   type EstablishedSandboxSession,
   type NatsRequestConnection,
   type RoutableBackendSession,
   type RoutableSandbox,
+  type ResolvedActiveBackend,
   type SelfhostedOpObserver,
   type SelfhostedRelayConfig,
   type OpStreamJournal,
@@ -62,6 +68,11 @@ export type RoutingWiringServices = {
     instanceId: string;
     leaseEpoch: number;
   }) => Promise<void>;
+  /** Called when a route repair replaces the worker's original home handle. */
+  onHomeSandboxRebound?: (input: {
+    established: EstablishedSandboxSession;
+    leaseEpoch: number;
+  }) => void;
 };
 
 export type RoutingWiringIds = {
@@ -149,6 +160,203 @@ function selfhostedResolverTimeouts(settings: Settings): {
   return { selfhostedTimeoutMs: timeoutMs, selfhostedExecTimeoutMs: execTimeoutMs };
 }
 
+type HomeRouteLeaseIdentity = {
+  accountId: string;
+  sandboxGroupId: string;
+  backend: string;
+};
+
+type HomeRouteResolutionIds = HomeRouteLeaseIdentity & {
+  workspaceId: string;
+  sessionId: string;
+};
+
+type HomeRouteRecovery =
+  | "pending"
+  | "degraded"
+  | "unrecoverable"
+  | "superseded";
+
+/**
+ * Translate the durable lease/recovery state into the typed disposition the
+ * routing proxy exposes when the home cannot be safely resumed. A route repair
+ * must never fall back to the old in-memory provider handle when the lease is
+ * warming, restoring, unverifiable, or otherwise inconsistent.
+ */
+function homeRouteRecoveryDisposition(
+  lease: Awaited<ReturnType<typeof readLease>>,
+): HomeRouteRecovery {
+  if (!lease) return "unrecoverable";
+  if (lease.liveness === "warming") return "pending";
+  if (lease.liveness === "draining") return "superseded";
+  if (
+    lease.recovery.restore.status === "pending" ||
+    lease.recovery.restore.status === "restoring" ||
+    lease.recovery.restore.status === "verifying"
+  ) {
+    return "pending";
+  }
+  if (
+    lease.recovery.restore.status === "degraded" ||
+    lease.recovery.workspace.status === "degraded" ||
+    lease.recovery.archive.status === "unverified" ||
+    lease.recovery.archive.status === "invalid"
+  ) {
+    return "degraded";
+  }
+  return "unrecoverable";
+}
+
+function homeRouteRecoveryError(
+  lease: Awaited<ReturnType<typeof readLease>>,
+  fallbackEpoch: number,
+): RoutingBackendRecoveryRequiredError {
+  return new RoutingBackendRecoveryRequiredError(
+    "resolve_home_backend",
+    lease?.leaseEpoch ?? fallbackEpoch,
+    homeRouteRecoveryDisposition(lease),
+  );
+}
+
+function providerIdentityFromResumeState(resumeState: Record<string, unknown>): string | null {
+  const sessionState =
+    resumeState.sessionState && typeof resumeState.sessionState === "object"
+      ? (resumeState.sessionState as Record<string, unknown>)
+      : null;
+  const providerState =
+    sessionState?.providerState && typeof sessionState.providerState === "object"
+      ? (sessionState.providerState as Record<string, unknown>)
+      : null;
+  for (const field of [
+    "sandboxId",
+    "instanceId",
+    "id",
+    "hostId",
+    "containerId",
+    "workspaceRootPath",
+    "agentId",
+  ]) {
+    const value = providerState?.[field];
+    if (typeof value === "string" && value.length > 0) return value;
+  }
+  return null;
+}
+
+/**
+ * Resolve the current durable home identity after the route epoch changes.
+ *
+ * Same-target attach/repair can replace the provider instance while a worker
+ * turn still holds the stable routing proxy. The proxy must therefore resume
+ * the lease's CURRENT identity, not reuse the object captured at turn start.
+ * This seam is deliberately resume-only: lease election/rematerialization is
+ * owned by the API/lease state machine, and a routed tool call must never create
+ * a rival provider or replay an ambiguous mutation.
+ */
+async function resolveCurrentHomeBackend(
+  services: RoutingWiringServices,
+  ids: HomeRouteResolutionIds,
+  established: EstablishedSandboxSession,
+): Promise<ResolvedActiveBackend> {
+  const lease = await readLease(services.db, ids.workspaceId, ids.sandboxGroupId);
+  const fallbackEpoch = lease?.leaseEpoch ?? 0;
+  if (
+    !lease ||
+    lease.liveness !== "warm" ||
+    lease.recovery.provider.status !== "exists" ||
+    lease.instanceId === null ||
+    lease.recovery.provider.instanceId !== lease.instanceId ||
+    lease.recovery.workspace.status !== "ready" ||
+    (lease.recovery.restore.status !== "not_required" &&
+      lease.recovery.restore.status !== "ready")
+  ) {
+    throw homeRouteRecoveryError(lease, fallbackEpoch);
+  }
+
+  // A route epoch can advance without a provider replacement. Reuse the exact
+  // established handle only when its identity still equals the durable one.
+  if (lease.instanceId === established.instanceId) {
+    services.onHomeSandboxRebound?.({ established, leaseEpoch: lease.leaseEpoch });
+    return {
+      session: established.session as RoutableBackendSession,
+      sandboxId: null,
+      kind: established.backendId,
+    };
+  }
+
+  const resumeState = lease.resumeState;
+  const resumeBackend = lease.resumeBackendId ?? lease.backend ?? ids.backend;
+  if (
+    !resumeState ||
+    resumeBackend !== ids.backend ||
+    providerIdentityFromResumeState(resumeState) !== lease.instanceId
+  ) {
+    throw homeRouteRecoveryError(lease, lease.leaseEpoch);
+  }
+
+  let rebound: EstablishedSandboxSession;
+  try {
+    rebound = await establishSandboxSessionFromEnvelope(services.settings, resumeState, {
+      sessionId: ids.sessionId,
+      recovery: "resume-only",
+      backendOverride: resumeBackend as never,
+    });
+    // A resumed handle is not enough evidence for the route to use it. Keep the
+    // same bounded readiness gate used before publishing a Modal lease warm.
+    await verifySandboxExecReadiness(rebound);
+  } catch (error) {
+    if (!isProviderSandboxNotFoundError(resumeBackend, error)) {
+      // The durable identity is present, but a transient resume/provider error
+      // did not prove the box gone. Keep the lease untouched and make the next
+      // independent route operation retry the resume; never use the old handle.
+      throw new RoutingBackendRecoveryRequiredError(
+        "resolve_home_backend",
+        lease.leaseEpoch,
+        "pending",
+      );
+    }
+    const marked = await markWarmLeaseInstanceLost(services.db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sandboxGroupId: ids.sandboxGroupId,
+      expectedEpoch: lease.leaseEpoch,
+      expectedInstanceId: lease.instanceId,
+      diagnostic: "provider_not_found_during_home_route_rebind",
+    });
+    if (marked.status === "marked") {
+      await services.onHomeSandboxLost?.({
+        sandboxGroupId: ids.sandboxGroupId,
+        instanceId: lease.instanceId,
+        leaseEpoch: marked.lease.leaseEpoch,
+      });
+    }
+    throw new RoutingBackendRecoveryRequiredError(
+      "resolve_home_backend",
+      marked.lease?.leaseEpoch ?? lease.leaseEpoch,
+      marked.status === "stale"
+        ? "superseded"
+        : homeRouteRecoveryDisposition(marked.lease),
+    );
+  }
+
+  // The provider identity must agree with the exact durable lease row before
+  // any caller can publish or route through this rebound handle. A mismatch is
+  // unverifiable local state, not permission to try the old handle.
+  if (rebound.instanceId !== lease.instanceId || rebound.backendId !== resumeBackend) {
+    throw homeRouteRecoveryError(lease, lease.leaseEpoch);
+  }
+  services.onHomeSandboxRebound?.({ established: rebound, leaseEpoch: lease.leaseEpoch });
+  // Keep the resolver's mutable home reference on the latest verified handle so
+  // a later route epoch does not resume the same replacement again. This is only
+  // a worker-side handle update; the SDK-facing RoutingSandboxSession remains the
+  // stable object returned below and is never replaced.
+  Object.assign(established, rebound);
+  return {
+    session: rebound.session as RoutableBackendSession,
+    sandboxId: null,
+    kind: rebound.backendId,
+  };
+}
+
 /** Build the selfhosted `ControlRpc` over the events bus's request/reply
  *  connection. A null bus / unconfigured NATS yields a NatsControlRpc whose
  *  connection factory returns null → agent_offline on every op (never a throw). */
@@ -230,6 +438,22 @@ export function wrapTurnBoxWithRouting(
     // the pinned machine — passing defaultIsHome:false makes the null branch throw typed
     // `home_unavailable_this_turn` instead. Forward the explicit boolean (including false).
     ...(ids.defaultIsHome !== undefined ? { defaultIsHome: ids.defaultIsHome } : {}),
+    ...(ids.homeLease
+      ? {
+          resolveDefaultBackend: () =>
+            resolveCurrentHomeBackend(
+              services,
+              {
+                workspaceId: ids.workspaceId,
+                sessionId: ids.sessionId,
+                accountId: ids.homeLease!.accountId,
+                sandboxGroupId: ids.homeLease!.sandboxGroupId,
+                backend: ids.homeLease!.backend,
+              },
+              established,
+            ),
+        }
+      : {}),
   });
 
   const proxy = new RoutingSandboxSession({
@@ -353,6 +577,19 @@ export function wrapLazyTurnBoxWithRouting(
     resolveActiveBackend: async (pointer) => {
       if (pointer.activeSandboxId === null || !routingEnabled(settings)) {
         const provisioned = await args.provisioner.get();
+        if (args.homeLeaseIdentity && provisioned.leaseEpoch !== undefined) {
+          return resolveCurrentHomeBackend(
+            services,
+            {
+              workspaceId: ids.workspaceId,
+              sessionId: ids.sessionId,
+              accountId: args.homeLeaseIdentity.accountId,
+              sandboxGroupId: args.homeLeaseIdentity.sandboxGroupId,
+              backend: args.homeLeaseIdentity.backend,
+            },
+            provisioned.established,
+          );
+        }
         return {
           session: provisioned.established.session as RoutableBackendSession,
           sandboxId: null,

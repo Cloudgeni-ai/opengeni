@@ -47,6 +47,18 @@ export interface ActiveBackendResolverDeps {
   defaultBackend: RoutableBackendSession;
   /** A label for the default backend (its backend id: "modal"/"selfhosted"/…). */
   defaultKind: string;
+  /**
+   * Re-resolve the session's HOME backend after the route cache is fenced.
+   *
+   * The normal path returns `defaultBackend` (the turn's already-established
+   * handle), but an API-side same-target repair can rematerialize that lease
+   * while a worker turn is still alive. Such a repair advances the route epoch
+   * without changing the null pointer; callers that can resume the current
+   * lease-owned identity may provide this callback so the next epoch does not
+   * keep dispatching to the dead pre-repair object. This callback must never
+   * create a provider or replay an operation.
+   */
+  resolveDefaultBackend?: (pointer: ActivePointer) => Promise<ResolvedActiveBackend>;
   /** Look up a first-class sandbox by id (the swap target). Returns null when the
    *  id is unknown or not in this workspace (the caller 409s the swap). */
   getSandbox(sandboxId: string): Promise<RoutableSandbox | null>;
@@ -235,6 +247,9 @@ export function makeActiveBackendResolver(
           "home_unavailable_this_turn",
           "the active sandbox was detached to the session default (home), but this turn started pinned to a machine and established no home box; the detach is accepted and takes effect on the next turn — this turn has no active home box",
         );
+      }
+      if (deps.resolveDefaultBackend) {
+        return await deps.resolveDefaultBackend(pointer);
       }
       return { session: deps.defaultBackend, sandboxId: null, kind: deps.defaultKind };
     }
