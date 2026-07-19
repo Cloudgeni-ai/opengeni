@@ -7,7 +7,10 @@ import {
   ReasoningEffort,
   SandboxBackend,
   StaticUsageLimits,
+  TurnExecutionPolicyV1,
   UsageLimitsMode,
+  type TurnExecutionModelSourceV1,
+  type TurnExecutionReasoningSourceV1,
 } from "@opengeni/contracts";
 import { CODEX_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS } from "@opengeni/codex";
 import {
@@ -2188,6 +2191,137 @@ export function resolveModelProvider(
     return undefined;
   }
   return { provider, model };
+}
+
+export type ResolveTurnExecutionPolicyV1Input = {
+  /** Effective persisted turn model. Aliases are accepted and canonicalized. */
+  modelId: string;
+  /** Exact caller-supplied input before canonicalization, only for explicit switches. */
+  requestedModelId: string | null;
+  modelSource: TurnExecutionModelSourceV1;
+  reasoningEffort: Settings["openaiReasoningEffort"];
+  reasoningSource: TurnExecutionReasoningSourceV1;
+};
+
+function settingsForTurnExecutionPolicy(
+  settings: Settings,
+  modelId: string,
+): Settings {
+  return settings.codexSubscriptionEnabled &&
+    modelId.startsWith(CODEX_MODEL_ID_PREFIX)
+    ? withCodexCatalogProvider(settings)
+    : settings;
+}
+
+/**
+ * Build a trusted, secret-safe execution policy from the normalized catalog.
+ * The Codex overlay here contains static product/provider identity only; it
+ * neither proves readiness nor chooses, decrypts, leases, or exposes an account.
+ */
+export function resolveTurnExecutionPolicyV1(
+  settings: Settings,
+  input: ResolveTurnExecutionPolicyV1Input,
+): TurnExecutionPolicyV1 {
+  const catalogSettings = settingsForTurnExecutionPolicy(
+    settings,
+    input.modelId,
+  );
+  const productModelId = canonicalizeConfiguredModelId(
+    catalogSettings,
+    input.modelId,
+  );
+  const resolved = resolveModelProvider(catalogSettings, productModelId);
+  if (!resolved) {
+    throw new Error(
+      "Turn execution policy model is not present in the configured catalog",
+    );
+  }
+  if (
+    input.requestedModelId !== null &&
+    canonicalizeConfiguredModelId(catalogSettings, input.requestedModelId) !==
+      productModelId
+  ) {
+    throw new Error(
+      "Turn execution policy requested model does not canonicalize to its product",
+    );
+  }
+  return TurnExecutionPolicyV1.parse({
+    schemaVersion: 1,
+    productModelId,
+    requestedModelId: input.requestedModelId,
+    modelSource: input.modelSource,
+    reasoningEffort: input.reasoningEffort,
+    reasoningSource: input.reasoningSource,
+    providerId: resolved.provider.id,
+    upstreamModelId: resolved.model.upstreamModelId,
+    wireApi: resolved.model.api,
+    credentialSource: resolved.model.credentialSource,
+    billing: resolved.model.billing,
+    definitionVersion: resolved.model.definitionVersion,
+  });
+}
+
+/**
+ * Parse-time validation lives in @opengeni/contracts; this verifier binds a
+ * present snapshot to the current executable definition and exact turn row.
+ * Any deployment/provider drift fails before a provider or compaction call.
+ */
+export function assertTurnExecutionPolicyMatchesConfigV1(
+  settings: Settings,
+  policy: TurnExecutionPolicyV1,
+  expected: {
+    modelId: string;
+    reasoningEffort: Settings["openaiReasoningEffort"];
+  },
+): {
+  policy: TurnExecutionPolicyV1;
+  provider: ResolvedModelProvider;
+  model: ConfiguredModel;
+} {
+  const parsed = TurnExecutionPolicyV1.parse(policy);
+  const catalogSettings = settingsForTurnExecutionPolicy(
+    settings,
+    parsed.productModelId,
+  );
+  const canonicalExpectedModel = canonicalizeConfiguredModelId(
+    catalogSettings,
+    expected.modelId,
+  );
+  if (
+    parsed.productModelId !== canonicalExpectedModel ||
+    parsed.reasoningEffort !== expected.reasoningEffort
+  ) {
+    throw new Error(
+      "Turn execution policy does not match the accepted turn model/reasoning",
+    );
+  }
+  if (
+    parsed.requestedModelId !== null &&
+    canonicalizeConfiguredModelId(catalogSettings, parsed.requestedModelId) !==
+      parsed.productModelId
+  ) {
+    throw new Error(
+      "Turn execution policy requested model does not match its product model",
+    );
+  }
+  const resolved = resolveModelProvider(catalogSettings, parsed.productModelId);
+  if (!resolved) {
+    throw new Error("Turn execution policy model is no longer configured");
+  }
+  const mismatched =
+    parsed.providerId !== resolved.provider.id ||
+    parsed.upstreamModelId !== resolved.model.upstreamModelId ||
+    parsed.wireApi !== resolved.model.api ||
+    parsed.definitionVersion !== resolved.model.definitionVersion ||
+    canonicalJson(parsed.credentialSource) !==
+      canonicalJson(resolved.model.credentialSource) ||
+    canonicalJson(parsed.billing) !== canonicalJson(resolved.model.billing);
+  if (mismatched) {
+    throw new Error(
+      "Turn execution policy does not match the current provider definition",
+    );
+  }
+  return { policy: parsed, provider: resolved.provider, model: resolved.model };
 }
 
 /**

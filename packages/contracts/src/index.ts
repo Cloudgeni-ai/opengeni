@@ -5050,6 +5050,159 @@ export const ModelBillingAttributionV1 = z.object({
 });
 export type ModelBillingAttributionV1 = z.infer<typeof ModelBillingAttributionV1>;
 
+export const TURN_EXECUTION_POLICY_METADATA_KEY =
+  "turnExecutionPolicyV1" as const;
+
+export const TurnExecutionModelSourceV1 = z.enum([
+  "explicit",
+  "session",
+  "deployment",
+  "continuation",
+]);
+export type TurnExecutionModelSourceV1 = z.infer<
+  typeof TurnExecutionModelSourceV1
+>;
+
+export const TurnExecutionReasoningSourceV1 = z.enum([
+  "explicit",
+  "session",
+  "deployment",
+  "continuation",
+]);
+export type TurnExecutionReasoningSourceV1 = z.infer<
+  typeof TurnExecutionReasoningSourceV1
+>;
+
+/**
+ * Secret-safe execution identity frozen onto one accepted logical turn.
+ *
+ * This is deliberately a strict, normalized reference to the deployment
+ * definition rather than a serialized provider client. It must never contain
+ * a key/token, concrete connected credential id, account label, authorization
+ * header, or credential-bearing URL/query value.
+ */
+export const TurnExecutionPolicyV1 = z
+  .object({
+    schemaVersion: z.literal(1),
+    productModelId: z.string().min(1),
+    requestedModelId: z.string().min(1).nullable(),
+    modelSource: TurnExecutionModelSourceV1,
+    reasoningEffort: ReasoningEffort,
+    reasoningSource: TurnExecutionReasoningSourceV1,
+    providerId: z.string().min(1),
+    upstreamModelId: z.string().min(1),
+    wireApi: z.enum(["responses", "chat"]),
+    credentialSource: ModelCredentialSourceV1,
+    billing: ModelBillingAttributionV1,
+    definitionVersion: z.string().regex(/^sha256:[a-f0-9]{64}$/u),
+  })
+  .strict()
+  .superRefine((policy, context) => {
+    if (policy.modelSource === "explicit" && policy.requestedModelId === null) {
+      context.addIssue({
+        code: "custom",
+        path: ["requestedModelId"],
+        message: "an explicit model source requires a requested model id",
+      });
+    }
+    if (policy.modelSource !== "explicit" && policy.requestedModelId !== null) {
+      context.addIssue({
+        code: "custom",
+        path: ["requestedModelId"],
+        message:
+          "only an explicit model source may retain a requested model id",
+      });
+    }
+  });
+export type TurnExecutionPolicyV1 = z.infer<typeof TurnExecutionPolicyV1>;
+
+export type TurnExecutionPolicyReadV1 =
+  { kind: "absent" } | { kind: "valid"; policy: TurnExecutionPolicyV1 };
+
+/**
+ * Read the policy from turn metadata. Only a literally absent key is legacy;
+ * null, undefined, an unknown schema version, extra fields, and every other
+ * malformed present value fail closed. Error text reports paths only and never
+ * reflects the untrusted value into logs or events.
+ */
+export function readTurnExecutionPolicyV1(
+  metadata: unknown,
+): TurnExecutionPolicyReadV1 {
+  if (metadata === null || metadata === undefined) {
+    return { kind: "absent" };
+  }
+  if (typeof metadata !== "object" || Array.isArray(metadata)) {
+    throw new Error(
+      "Malformed turn execution policy metadata: turn metadata is not an object",
+    );
+  }
+  const record = metadata as Record<string, unknown>;
+  if (
+    !Object.prototype.hasOwnProperty.call(
+      record,
+      TURN_EXECUTION_POLICY_METADATA_KEY,
+    )
+  ) {
+    return { kind: "absent" };
+  }
+  const parsed = TurnExecutionPolicyV1.safeParse(
+    record[TURN_EXECUTION_POLICY_METADATA_KEY],
+  );
+  if (!parsed.success) {
+    const paths = [
+      ...new Set(
+        parsed.error.issues.map((issue) =>
+          issue.path.length === 0 ? "policy" : `policy.${issue.path.join(".")}`,
+        ),
+      ),
+    ].join(", ");
+    throw new Error(
+      `Malformed turn execution policy metadata at ${paths || "policy"}`,
+    );
+  }
+  return { kind: "valid", policy: parsed.data };
+}
+
+/** Merge a trusted policy into metadata without disturbing dispatch/recovery state. */
+export function metadataWithTurnExecutionPolicyV1(
+  metadata: Readonly<Record<string, unknown>> | null | undefined,
+  policy: TurnExecutionPolicyV1,
+): Record<string, unknown> {
+  return {
+    ...(metadata ?? {}),
+    [TURN_EXECUTION_POLICY_METADATA_KEY]: TurnExecutionPolicyV1.parse(policy),
+  };
+}
+
+/**
+ * Minimal, stable evidence projection for command receipts and audit events.
+ * It intentionally excludes aliases, URLs, request metadata, and all concrete
+ * credential-selection identity.
+ */
+export function turnExecutionPolicyAuditMetadata(
+  policy: TurnExecutionPolicyV1,
+  turnId: string,
+): Record<string, unknown> {
+  const parsed = TurnExecutionPolicyV1.parse(policy);
+  return {
+    turnId,
+    requestedModelId: parsed.requestedModelId,
+    effectiveModelId: parsed.productModelId,
+    modelSource: parsed.modelSource,
+    effectiveReasoningEffort: parsed.reasoningEffort,
+    reasoningSource: parsed.reasoningSource,
+    providerId: parsed.providerId,
+    credentialSourceKind: parsed.credentialSource.kind,
+    credentialSourceMechanism:
+      parsed.credentialSource.kind === "connected_subscription"
+        ? parsed.credentialSource.provider
+        : parsed.credentialSource.mechanism,
+    billingOwner: parsed.billing.upstreamPayer,
+    billingMetering: parsed.billing.metering,
+    definitionVersion: parsed.definitionVersion,
+  };
+}
+
 export const ModelPricingV1 = z.object({
   inputMicrosPerMillionTokens: z.number().int().nonnegative(),
   cachedInputMicrosPerMillionTokens: z.number().int().nonnegative().optional(),

@@ -54,6 +54,7 @@ import type {
   SystemUpdateClassification,
   SessionTurnSource,
   SessionTurnStatus,
+  TurnExecutionPolicyV1,
   SocialConnection,
   SocialConnectionStatus,
   SocialPost,
@@ -76,6 +77,7 @@ import type {
   RigCheck,
 } from "@opengeni/contracts";
 import {
+  metadataWithTurnExecutionPolicyV1,
   reasoningEffortForMetadata,
   resolveWorkspaceMemoryEnabled,
   RigChange as RigChangeContract,
@@ -18414,6 +18416,8 @@ export type InitializeSessionStartInput = {
   sessionId: string;
   clientEventId?: string;
   reasoningEffortFallback: ReasoningEffort;
+  /** Trusted create-session policy. Omitted only by legacy low-level callers. */
+  turnExecutionPolicy?: TurnExecutionPolicyV1;
   createdEventPayload: Record<string, unknown>;
   goal?: {
     text: string;
@@ -18624,7 +18628,12 @@ export async function initializeSessionStartAtomically(
               ),
               sandboxBackend: session.sandboxBackend,
               sandboxOs: session.sandboxOs,
-              metadata: {},
+              metadata: input.turnExecutionPolicy
+                ? metadataWithTurnExecutionPolicyV1(
+                    {},
+                    input.turnExecutionPolicy,
+                  )
+                : {},
               lineage: {},
             })
             .returning();

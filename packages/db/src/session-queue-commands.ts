@@ -1,9 +1,12 @@
 import {
+  metadataWithTurnExecutionPolicyV1,
   mergeResourceRefs,
   mergeToolRefs,
+  turnExecutionPolicyAuditMetadata,
   type ReasoningEffort,
   type ResourceRef,
   type ToolRef,
+  type TurnExecutionPolicyV1,
 } from "@opengeni/contracts";
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import type { Database } from "./index";
@@ -1009,6 +1012,8 @@ export async function submitHumanPromptInTransaction(
     model?: string | null;
     reasoningEffort?: ReasoningEffort | null;
     reasoningEffortFallback: ReasoningEffort;
+    /** Trusted API/core admission snapshot. Omitted only by legacy low-level callers. */
+    turnExecutionPolicy?: TurnExecutionPolicyV1;
     source: "user" | "api";
     mcpCredentialUpdates?: Array<{ id: string; headersEncrypted: Record<string, string> }>;
   },
@@ -1198,7 +1203,9 @@ export async function submitHumanPromptInTransaction(
       model: input.model ?? session.model,
       reasoningEffort: input.reasoningEffort ?? input.reasoningEffortFallback,
       sandboxBackend: session.sandboxBackend,
-      metadata: {},
+      metadata: input.turnExecutionPolicy
+        ? metadataWithTurnExecutionPolicyV1({}, input.turnExecutionPolicy)
+        : {},
       lineage: { actor: input.actor.type },
     })
     .returning();
@@ -1331,7 +1338,14 @@ export async function submitHumanPromptInTransaction(
     action: input.delivery === "steer" ? "session.prompt.steer" : "session.prompt.send",
     targetType: "session_turn",
     targetId: turnId,
-    metadata: { operationId: reserved.receipt.id, replacedTurnId, interruptionCount },
+    metadata: {
+      operationId: reserved.receipt.id,
+      replacedTurnId,
+      interruptionCount,
+      ...(input.turnExecutionPolicy
+        ? turnExecutionPolicyAuditMetadata(input.turnExecutionPolicy, turnId)
+        : {}),
+    },
   });
   const eventIds = eventRows.map((event) => event.id);
   const receipt = await updateSessionCommandReceiptResult(db, reserved.receipt.id, {
@@ -1347,6 +1361,14 @@ export async function submitHumanPromptInTransaction(
       interruptionCount,
       replacedTurnId,
       workspaceControlEventId: resumed.workspaceControlEventId,
+      ...(input.turnExecutionPolicy
+        ? {
+            executionPolicy: turnExecutionPolicyAuditMetadata(
+              input.turnExecutionPolicy,
+              turnId,
+            ),
+          }
+        : {}),
     },
   });
   return {
