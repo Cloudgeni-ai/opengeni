@@ -164,6 +164,44 @@ that keeps running from publishing contradictory history or terminal truth.
 Each Pause/Steer cause is a durable `session_attempt_interruptions` row; the
 workflow's `sessionControl` signal is only a wake hint to settle those rows.
 
+Control settlement and physical cancellation are deliberately separate
+boundaries. A receipt-gated v2 workflow first atomically settles the exact
+interruption and closes the attempt in Postgres, fencing every
+model/tool/history/UI write. Only after that transaction commits does it request
+Temporal cancellation using `TRY_CANCEL`; it does not await the activity
+promise. Histories without the `session-attempt-quiescence-v2` patch retain the
+v1 WAIT/fallback command order only for deterministic replay; new workflow runs
+never select that path, and the current activity still writes the authoritative
+receipt. Temporal cancellation,
+completion, or failure is transport state and can never prove that a sandbox
+process or parallel tool operation stopped. Worker heartbeat throttles cap
+cancellation delivery at five seconds independently of the two-minute
+heartbeat timeout and the activity's ten-second heartbeat timer.
+
+The dying `runAgentTurn` activity owns physical proof. It cancels the exact
+turn's tool/sandbox controller, waits for all controller-owned operations to
+quiesce, and immediately writes `session_turn_attempts.quiesced_at` before
+credential, cache, recording, provider, lease, or workspace housekeeping. The
+receipt, its `session.queue.changed` event, the session queue/sequence update,
+and the exact `session_workflow_wake_outbox` revision commit in one retryable,
+idempotent transaction. Provider completion and batch flushes that ignore
+cancellation are detached with rejection handlers; all later housekeeping is
+attempt-fenced and detachable. If receipt persistence exhausts its retries,
+cleanup can still release local ownership but admission remains fail-closed:
+no Temporal terminal state can reconstruct or substitute for physical proof.
+
+While a settled interruption lacks that receipt, `peekSessionWork` returns a
+durable `cancellation-wait` and every claim path remains `control-pending`. The
+workflow waits up to five seconds for a wake and may then close without running
+another activity. Once the receipt commits, its coalescing outbox wake uses
+`signalWithStart` on the same stable workflow id, which restarts the exact
+session and admits the replacement once. This path needs no quiescence scanner,
+synthetic user message, or duplicate visible queue row. Queue telemetry follows
+the latest session attempt only: `stoppingPreviousAttempt` can truthfully be
+`true` with an empty human/API queue (internal Agent Steer), ignores replacement
+metadata corruption/withdrawal, and is not contaminated by an older attempt
+after a newer one exists.
+
 Sandbox lease warming is bounded for the same reason: it is a capacity/setup
 symptom, not legitimate agent work. A turn that attaches while another worker is
 creating the group sandbox waits at most

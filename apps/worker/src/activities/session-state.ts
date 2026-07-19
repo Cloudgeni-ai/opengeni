@@ -122,6 +122,9 @@ export function createSessionStateActivities(
   ): Promise<{ action: "paused" | "continue" | "stale" }> {
     const { db, bus, observability } = await services();
     if (input.phase === "attempt_quiesced") {
+      // Replay compatibility only: v1 histories scheduled this idempotent
+      // fallback after WAIT_CANCELLATION_COMPLETED. Receipt-gated v2 workflows
+      // never call it; runAgentTurn writes immediately after its hard fence.
       const events = await markSessionAttemptQuiescedFn(db, {
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,

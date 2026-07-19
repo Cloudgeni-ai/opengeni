@@ -119,6 +119,13 @@ export async function createOpenGeniWorker(options: WorkerOptions): Promise<{
       options.role === "turn"
         ? TURN_WORKER_MAX_CONCURRENT_TURNS
         : CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES,
+    // Cancellation is delivered through an activity heartbeat. The SDK would
+    // otherwise throttle a two-minute heartbeat timeout to its 60-second cap,
+    // making Pause/Steer take roughly a minute even though runAgentTurn emits a
+    // heartbeat every ten seconds. Keep delivery bounded independently of the
+    // heartbeat timeout and local timer cadence.
+    maxHeartbeatThrottleInterval: "5s",
+    defaultHeartbeatThrottleInterval: "5s",
     // GRACEFUL DEPLOY SHUTDOWN (with the SIGTERM handler in startWorker):
     // after shutdown() stops polling, in-flight activities get this long to
     // finish naturally; the rest are then CANCELLED with WORKER_SHUTDOWN —

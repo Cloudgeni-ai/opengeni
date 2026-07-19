@@ -2177,12 +2177,11 @@ export const SessionQueueSnapshot = z.object({
   version: z.number().int().nonnegative(),
   effectiveControl: EffectiveSessionControl,
   /**
-   * True while saved queued work is waiting for an interrupted predecessor to
-   * reach durable quiescence: no more inference, user-visible output, or
-   * workspace-persistence authority. Temporal still waits for physical
-   * activity termination before dispatch. This is distinct from ordinary
-   * capacity queueing and remains true if the original Steer row is reordered
-   * or removed while another prompt is waiting.
+   * True while the latest attempt is interrupted but has not durably proved
+   * quiescence: no more inference, user-visible output, or workspace-persistence
+   * authority. Temporal cancellation/terminalization is not that proof. This is
+   * distinct from ordinary capacity queueing, remains accurate with an empty
+   * visible queue, and is independent of Steer-row metadata or withdrawal.
    */
   stoppingPreviousAttempt: z.boolean(),
   items: z.array(SessionTurn),

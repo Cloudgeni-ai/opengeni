@@ -48,6 +48,7 @@ import {
   turnOperationCancellationFailure,
   waitForTurnOperation,
   waitForTurnFinalizerStep,
+  waitForTurnStreamCleanup,
   TurnOperationCancelledError,
 } from "../src/activities/agent-turn";
 import { sandboxLeaseHolderIdForAttempt } from "../src/sandbox-resume";
@@ -1263,6 +1264,26 @@ describe("worker shutdown preemption", () => {
     await expect(waiting).resolves.toBeUndefined();
     expect(performance.now() - startedAt).toBeLessThan(100);
     rejectLate?.(new Error("late cleanup failure"));
+    await Bun.sleep(0);
+  });
+
+  test("a cancelled activity detaches both hung batch flush and provider completion", async () => {
+    const controller = new AbortController();
+    let rejectFlush: ((error: Error) => void) | undefined;
+    let rejectProvider: ((error: Error) => void) | undefined;
+    const flush = new Promise<never>((_resolve, reject) => {
+      rejectFlush = reject;
+    });
+    const providerCompleted = new Promise<never>((_resolve, reject) => {
+      rejectProvider = reject;
+    });
+    const startedAt = performance.now();
+    const cleanup = waitForTurnStreamCleanup(flush, providerCompleted, controller.signal);
+    controller.abort(new Error("STEER"));
+    await expect(cleanup).resolves.toBeUndefined();
+    expect(performance.now() - startedAt).toBeLessThan(100);
+    rejectFlush?.(new Error("late batch failure"));
+    rejectProvider?.(new Error("late provider failure"));
     await Bun.sleep(0);
   });
 });

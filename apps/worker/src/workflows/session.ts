@@ -113,17 +113,15 @@ function workerDeathFailure(
 }
 
 /**
- * WAIT_CANCELLATION_COMPLETED normally reports a cancelled activity to workflow
- * code as an ActivityFailure whose typed cause is the cancellation. A control's
- * database fence can, however, reach runAgentTurn immediately before Temporal's
- * cancellation request. The activity still crosses its mandatory physical tool
- * fence and throws TURN_ATTEMPT_FENCED, but @temporalio/worker 1.20 serializes
- * that pre-request CancelledFailure as an ApplicationFailure with the stable
- * `CancelledFailure` type. Accept only that exact agent-turn protocol shape in
- * addition to the normal wrapper; never accept a timeout, arbitrary nested
- * cause, or a differently messaged application failure as physical-stop proof.
+ * Classify only the exact turn-fence cancellation protocol used to arbitrate a
+ * database control commit that reaches the activity just before its Temporal
+ * signal reaches this workflow. This shape is never physical-quiescence proof:
+ * only the activity's durable post-tool-fence receipt can open replacement
+ * admission. @temporalio/worker 1.20 serializes the pre-request
+ * CancelledFailure as an ApplicationFailure with the stable `CancelledFailure`
+ * type, so accept that exact wire shape in addition to normal cancellation.
  */
-export function isConfirmedTurnActivityCancellation(error: unknown): boolean {
+export function isTurnActivityFenceCancellation(error: unknown): boolean {
   if (isCancellation(error)) return true;
   if (!(error instanceof ActivityFailure)) return false;
   if (error.cause !== undefined && isCancellation(error.cause)) return true;
@@ -157,7 +155,11 @@ export type SessionWorkflowInput = {
 };
 
 export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void> {
-  const turnActivity = turnActivityForTaskQueue(workflowInfo().taskQueue);
+  // Existing histories recorded the v1 WAIT_CANCELLATION_COMPLETED command
+  // order and workflow-side idempotent fallback. Keep that exact replay path;
+  // every new run records v2 and uses the activity-owned receipt contract.
+  const receiptGatedCancellation = patched("session-attempt-quiescence-v2");
+  const turnActivity = turnActivityForTaskQueue(workflowInfo().taskQueue, receiptGatedCancellation);
   let approvalWakeups = 0;
   let interruptionWakeups = 0;
   let wakeups = 0;
@@ -329,6 +331,18 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       }
       continue;
     }
+    if (peek.kind === "cancellation-wait") {
+      // Logical settlement is complete, but the exact predecessor activity has
+      // not yet durably proved sandbox/tool quiescence. Wait only briefly for
+      // its transactional queueChanged wake. If provider/tool cancellation is
+      // genuinely slow, close this workflow run rather than consuming a turn
+      // slot or churning control activities; the outbox uses signalWithStart to
+      // restart this exact workflow after the receipt commits.
+      const seenSignalVersion = signalVersion;
+      const woke = await condition(() => signalVersion !== seenSignalVersion, "5s");
+      if (woke) continue;
+      return;
+    }
     if (peek.kind === "capacity-wait") {
       await waitForCodexCapacity(peek.ref);
       continue;
@@ -450,7 +464,7 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
     // control still follows the failure/cancellation path below.
     if (
       racedOutcome.kind === "failure" &&
-      isConfirmedTurnActivityCancellation(racedOutcome.error) &&
+      isTurnActivityFenceCancellation(racedOutcome.error) &&
       interruptionWakeups === interruptionBaseline
     ) {
       await condition(() => interruptionWakeups !== interruptionBaseline, "250ms");
@@ -459,7 +473,37 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       interruptionWakeups !== interruptionBaseline ? ({ kind: "control" } as const) : racedOutcome;
 
     if (outcome.kind === "control") {
-      scope.cancel();
+      if (!receiptGatedCancellation) {
+        // Replay-only v1 command order. New histories always take the v2 path
+        // below. The current runAgentTurn still owns and writes the truthful
+        // hard-fence receipt; this call remains an idempotent history command.
+        scope.cancel();
+        const settlement = await activity.settleSessionInterruptions({
+          accountId,
+          workspaceId,
+          sessionId,
+          attemptId,
+          workflowId: workflowInfo().workflowId,
+        });
+        const termination = await turn.then(
+          () => ({ kind: "completed" as const }),
+          (error: unknown) => ({ kind: "failed" as const, error }),
+        );
+        const physicalStopConfirmed =
+          termination.kind === "completed" || isTurnActivityFenceCancellation(termination.error);
+        if (patched("session-attempt-quiescence-v1") && physicalStopConfirmed) {
+          await activity.settleSessionInterruptions({
+            accountId,
+            workspaceId,
+            sessionId,
+            attemptId,
+            workflowId: workflowInfo().workflowId,
+            phase: "attempt_quiesced",
+          });
+        }
+        if (!physicalStopConfirmed) throw termination.error;
+        return settlement.action !== "paused";
+      }
       const settlement = await activity.settleSessionInterruptions({
         accountId,
         workspaceId,
@@ -467,40 +511,12 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
         attemptId,
         workflowId: workflowInfo().workflowId,
       });
-      // Keep the workflow alive until the cancelled activity has actually
-      // stopped. Temporal delivers activity cancellation through a heartbeat;
-      // returning while the activity promise is still detached lets the
-      // workflow complete first, after which the worker can keep streaming for
-      // the activity's entire start-to-close window. Postgres settlement above
-      // is intentionally first: it fences every late write immediately while
-      // the physical activity winds down. The control outcome is authoritative,
-      // so a concurrent activity completion or cancellation failure is ignored
-      // only after Temporal has durably observed that terminal activity state.
-      const termination = await turn.then(
-        () => ({ kind: "completed" as const }),
-        (error: unknown) => ({ kind: "failed" as const, error }),
-      );
-      // This is a new durable command in a long-lived workflow. The patch marker
-      // keeps histories that already crossed this point replay-safe. New workers
-      // record quiescence from inside the dying activity; this post-termination
-      // call is its idempotent recovery fallback. A fulfilled activity or a
-      // Temporal cancellation proves the worker crossed its mandatory physical
-      // tool fence. A timeout/worker-loss failure proves no such thing: a remote
-      // command may still be alive, so fail closed with the queue blocked rather
-      // than manufacture a false quiescence receipt.
-      const physicalStopConfirmed =
-        termination.kind === "completed" || isConfirmedTurnActivityCancellation(termination.error);
-      if (patched("session-attempt-quiescence-v1") && physicalStopConfirmed) {
-        await activity.settleSessionInterruptions({
-          accountId,
-          workspaceId,
-          sessionId,
-          attemptId,
-          workflowId: workflowInfo().workflowId,
-          phase: "attempt_quiesced",
-        });
-      }
-      if (!physicalStopConfirmed) throw termination.error;
+      // The transaction above is the authority fence: every late model/tool/UI
+      // write is rejected from this point onward. Request cancellation only
+      // after it commits, then stop observing the Temporal activity promise.
+      // TRY_CANCEL allows this workflow to move to cancellation-wait without
+      // confusing Temporal completion/cancellation with local process safety.
+      scope.cancel();
       return settlement.action !== "paused";
     }
 

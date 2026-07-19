@@ -264,7 +264,10 @@ function identityGuardScript(
     `__opengeni_pid=${identity.pid}`,
     `__opengeni_pgid=${identity.processGroupId}`,
     `__opengeni_token=${token}`,
-    '__opengeni_args="$(command ps -o args= -p "$__opengeni_pid" 2>/dev/null)"',
+    // The randomized token lands late in the wrapped command line. Procps
+    // otherwise truncates `args` to the terminal width, which can make a live
+    // group look stale and open the quiescence fence without signalling it.
+    '__opengeni_args="$(command ps -ww -o args= -p "$__opengeni_pid" 2>/dev/null)"',
     'case "$__opengeni_args" in *"$__opengeni_token"*) ;; *) exit 0 ;; esac',
     '__opengeni_live_pgid="$(command ps -o pgid= -p "$__opengeni_pid" 2>/dev/null | command tr -d \'[:space:]\')"',
     '[ "$__opengeni_live_pgid" = "$__opengeni_pgid" ] || exit 0',
@@ -866,12 +869,12 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     const script = state.identityValidated
       ? [
           `__opengeni_pgid=${state.identity?.processGroupId ?? 0}`,
-          'command kill -0 -- "-$__opengeni_pgid" 2>/dev/null && exit 75',
+          'command kill -0 "-$__opengeni_pgid" 2>/dev/null && exit 75',
           "exit 0",
         ].join("\n")
       : identityGuardScript(
           state,
-          'command kill -0 -- "-$__opengeni_pgid" 2>/dev/null && exit 75\nexit 0',
+          'command kill -0 "-$__opengeni_pgid" 2>/dev/null && exit 75\nexit 0',
           76,
         );
     try {
@@ -890,10 +893,10 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
 
   private async signalIdentity(state: ActiveShellSession, signal: "TERM" | "KILL"): Promise<void> {
     const script = state.identityValidated
-      ? `command kill -${signal} -- "-${state.identity?.processGroupId ?? 0}" 2>/dev/null || exit 76`
+      ? `command kill -${signal} "-${state.identity?.processGroupId ?? 0}" 2>/dev/null || exit 76`
       : identityGuardScript(
           state,
-          `command kill -${signal} -- "-$__opengeni_pgid" 2>/dev/null || exit 76\nexit 0`,
+          `command kill -${signal} "-$__opengeni_pgid" 2>/dev/null || exit 76\nexit 0`,
           76,
         );
     try {

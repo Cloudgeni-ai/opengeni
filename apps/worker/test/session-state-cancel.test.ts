@@ -29,10 +29,6 @@ describe("session-state interrupt settlement", () => {
           wakeSessionWorkflow: null,
         }) as any,
       {
-        markSessionAttemptQuiesced: mock(async (_db, input) => {
-          quiescenceReceipts.push(input);
-          return [];
-        }),
         settleSessionAttemptInterruptions: mock(
           async (_db, workspaceId: string, sessionId: string, attemptId: string) => {
             controlApplications.push({ workspaceId, sessionId, attemptId });
@@ -105,7 +101,7 @@ describe("session-state interrupt settlement", () => {
     });
   });
 
-  test("records the exact quiescence boundary without replaying logical settlement", async () => {
+  test("keeps the v1 receipt command replay-compatible without repeating logical settlement", async () => {
     quiescenceReceipts.length = 0;
     controlApplications.length = 0;
     const activities = createSessionStateActivities(

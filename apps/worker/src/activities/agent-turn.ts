@@ -320,11 +320,11 @@ export function shouldRunTurnEndWorkspacePersistence(input: {
 }
 
 /**
- * A Temporal cancellation is accepted by the workflow as proof that the dying
- * activity crossed its mandatory sandbox-tool fence. Never let a fence failure
- * retain that cancellation shape: the workflow would otherwise publish its
- * fallback quiescence receipt and admit a replacement while a remote side
- * effect may still be alive.
+ * Temporal cancellation is delivery/transport state, never proof that the
+ * dying activity crossed its mandatory sandbox-tool fence. If that fence
+ * fails, surface the fence failure instead of retaining a misleading typed
+ * cancellation; replacement admission remains closed because no durable
+ * quiescence receipt was written.
  */
 export function assertPhysicalToolQuiescenceForCancellation(input: {
   acknowledgeQuiescence: boolean;
@@ -342,8 +342,8 @@ export function assertPhysicalToolQuiescenceForCancellation(input: {
  * Await a finalizer operation only while this Temporal activity still owns its
  * execution window. Once Pause/Steer cancellation arrives, the operation keeps
  * its own rejection handler and may finish its idempotent, attempt-scoped
- * cleanup in the background, but it cannot hold the replacement dispatch
- * behind WAIT_CANCELLATION_COMPLETED.
+ * cleanup in the background, but it cannot pin activity terminalization or
+ * delay the separately receipt-gated replacement dispatch.
  */
 export async function waitForTurnFinalizerStep<T>(
   operation: Promise<T>,
@@ -369,6 +369,21 @@ export async function waitForTurnFinalizerStep<T>(
   } finally {
     signal.removeEventListener("abort", cancel);
   }
+}
+
+/**
+ * Flush provider-facing stream state while the attempt still owns its activity
+ * window. On Pause/Steer, both promises are detached with rejection handlers:
+ * neither a runtime batcher nor an uncooperative provider completion promise
+ * may pin the activity behind cancellation after durable writes are fenced.
+ */
+export async function waitForTurnStreamCleanup(
+  batcherFlush: Promise<unknown>,
+  providerCompleted: Promise<unknown>,
+  signal: AbortSignal | undefined,
+): Promise<void> {
+  await waitForTurnFinalizerStep(batcherFlush, signal);
+  await waitForTurnFinalizerStep(providerCompleted, signal);
 }
 
 function turnFinalizerCancellationSignal(
@@ -1345,6 +1360,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     let turnMetricOutcome: TurnOutcome | null = null;
     let activityError: unknown;
     let acknowledgeQuiescence = false;
+    const acknowledgeLostAttemptOwnership = (): void => {
+      // A stale terminal/recovery settlement can lose either to a benign
+      // successor or to Pause/Steer closing this exact attempt. Only the
+      // receipt transaction can distinguish those cases after the hard tool
+      // fence: allowUninterrupted makes the benign case an event-free no-op.
+      acknowledgeQuiescence = true;
+      noteCancellationRequested();
+    };
     let turnId: string | undefined;
     let triggerEventId: string | undefined;
     const claimedResult = (
@@ -2138,6 +2161,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           ...(compactionRequestFailure ? { compactionRequestFailure } : {}),
         });
         if (result.action === "stale") {
+          // The terminal write can lose to a control transaction before the
+          // workflow delivers Temporal cancellation. That control may settle
+          // the already-closed attempt as rejected_stale, so returning without
+          // this flag would strand its replacement behind quiesced_at forever.
+          // Enter the same hard tool-fence/receipt path as an explicit
+          // TurnAttemptFencedError. If ownership was lost for an unrelated
+          // reason, allowUninterrupted makes the receipt transaction a no-op.
+          acknowledgeLostAttemptOwnership();
           if (recordingForSettlement) {
             await abandonActiveRecording(
               "recording settlement lost attempt ownership",
@@ -4495,8 +4526,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             void iterator.return?.().catch(() => undefined);
           }
         }
-        await batcher.flush();
-        await stream.completed.catch(() => undefined);
+        await waitForTurnStreamCleanup(
+          batcher.flush(),
+          stream.completed.catch(() => undefined),
+          cancellationSignal,
+        );
         if (responseUsageCount === 0) {
           const aggregateUsage = stream.state.usage;
           const aggregateInput = (aggregateUsage as { inputTokens?: unknown } | undefined)
@@ -4807,6 +4841,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             reason: "sandbox_lease_superseded",
           });
           if (recovery.action === "stale") {
+            acknowledgeLostAttemptOwnership();
             activityStatus = "cancelled";
             turnMetricOutcome = "cancelled";
             return claimedResult({ status: "cancelled" });
@@ -4849,6 +4884,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             reason: "worker_shutdown",
           });
           if (recovery.action === "stale") {
+            acknowledgeLostAttemptOwnership();
             activityStatus = "cancelled";
             turnMetricOutcome = "cancelled";
             return claimedResult({ status: "cancelled" });
@@ -4880,11 +4916,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           turnFinalizerCancellationSignal(cancellationSignal, activityStatus),
         );
         // Ownership already moved to a newer attempt or an authoritative
-        // control transaction. Surface a transport cancellation instead of a
-        // normal activity result: with WAIT_CANCELLATION_COMPLETED, Temporal
-        // must observe a terminal cancellation before the session workflow may
-        // close. Returning normally after a cancel request is rejected by the
-        // server and leaves the worker task detached indefinitely.
+        // control transaction. Surface the exact transport cancellation rather
+        // than a normal result. Temporal terminalization remains diagnostic
+        // only; replacement admission waits for the activity-owned durable
+        // quiescence receipt written from the hard tool fence below.
         turnMetricOutcome = "cancelled";
         throw new CancelledFailure("TURN_ATTEMPT_FENCED", [], error);
       }
@@ -5221,9 +5256,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             if (settlement.action === "stale") {
               // One transaction proves both exact-holder recovery (including a
               // just-expired or reaped lease row) and successor/control-gate
-              // rejection. A stale activity performs no second settlement.
-              activityStatus = "recovering";
-              turnMetricOutcome = "recovering";
+              // rejection. Cross the hard tool fence so a control-gate loss can
+              // write its quiescence receipt; a successor-only loss is a no-op.
+              acknowledgeLostAttemptOwnership();
+              activityStatus = "cancelled";
+              turnMetricOutcome = "cancelled";
               return claimedResult({ status: "recovering" });
             }
           }
@@ -5646,6 +5683,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           },
         });
         if (recovery.action === "stale") {
+          acknowledgeLostAttemptOwnership();
           activityStatus = "cancelled";
           turnMetricOutcome = "cancelled";
           return claimedResult({ status: "cancelled" });
@@ -5720,6 +5758,33 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // construction itself fails closed when a backend is present but no
           // controller was installed.
           physicalToolQuiescenceConfirmed = true;
+        }
+        if (acknowledgeQuiescence && physicalToolQuiescenceConfirmed) {
+          // This receipt is part of the hard cancellation boundary, not
+          // housekeeping. Persist it immediately after the sandbox/tool fence
+          // and before lease, cache, recording, or provider cleanup. Its
+          // transaction also enqueues the exact workflow wake that will admit
+          // the replacement; Temporal activity terminalization does neither.
+          try {
+            const events = await markSessionAttemptQuiesced(db, {
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              attemptId: input.attemptId,
+              temporalWorkflowId: input.workflowId,
+              allowUninterrupted: true,
+            });
+            await waitForTurnFinalizerStep(
+              publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, events),
+              finalizerSignal,
+            );
+          } catch (error) {
+            // The receipt transaction is retried and idempotent. Exhaustion is
+            // fail-closed: no replacement can claim without quiesced_at. Keep
+            // releasing timers/leases and detaching housekeeping so one DB
+            // outage does not also leak worker-local ownership indefinitely.
+            finalizationError ??= error;
+            console.error("agent turn quiescence receipt failed", error);
+          }
         }
         gitCredentialRenewalClosed = true;
         const renewalToStop = gitCredentialRenewal as GitCredentialRenewalController | null;
@@ -5968,24 +6033,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           );
         }
       } catch (error) {
-        finalizationError = error;
+        finalizationError ??= error;
         console.error("agent turn finalization failed (turn outcome unaffected)", error);
       } finally {
-        if (acknowledgeQuiescence && physicalToolQuiescenceConfirmed) {
-          try {
-            const events = await markSessionAttemptQuiesced(db, {
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-              attemptId: input.attemptId,
-              temporalWorkflowId: input.workflowId,
-              allowUninterrupted: true,
-            });
-            await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, events);
-          } catch (error) {
-            finalizationError ??= error;
-            console.error("agent turn quiescence receipt failed", error);
-          }
-        }
         cancellationSignal?.removeEventListener("abort", noteCancellationRequested);
         const completedAt = performance.now();
         const durationSeconds = (completedAt - activityStarted) / 1000;

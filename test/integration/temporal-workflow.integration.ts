@@ -584,7 +584,7 @@ describe("Temporal workflow integration", () => {
   );
 
   test(
-    "Steer during an active run supersedes the active attempt and continues queued work",
+    "Steer waits for the activity quiescence receipt then admits one replacement",
     async () => {
       const taskQueue = `workflow-test-${crypto.randomUUID()}`;
       const scope = workflowScope();
@@ -595,7 +595,10 @@ describe("Temporal workflow integration", () => {
       const queuedTurns = [first];
       const runs: WorkflowTestTurn[] = [];
       const controls: unknown[] = [];
+      let cancellationWaitAttemptId: string | null = null;
+      let cancellationWaitPeeks = 0;
       let allowFirstRunToFinish = false;
+      let wakeWorkflow: (() => Promise<void>) | null = null;
       const admission = createTurnAdmission(queuedTurns, async (_input, turn) => {
         runs.push(turn);
         if (runs.length === 1) {
@@ -603,16 +606,32 @@ describe("Temporal workflow integration", () => {
             if (allowFirstRunToFinish) break;
             await Bun.sleep(10);
           }
+          // Model the exact activity-owned boundary: the hard tool fence has
+          // completed, its receipt transaction cleared cancellation-wait, and
+          // the same transaction's outbox now wakes this workflow.
+          cancellationWaitAttemptId = null;
+          await wakeWorkflow?.();
         }
         return { status: "idle" };
       });
+      const peekAdmission = admission.activities.peekSessionWork;
       const worker = await testWorker(nativeConnection, taskQueue, {
         ...admission.activities,
+        peekSessionWork: async () => {
+          if (cancellationWaitAttemptId) {
+            cancellationWaitPeeks += 1;
+            return {
+              kind: "cancellation-wait" as const,
+              attemptId: cancellationWaitAttemptId,
+            };
+          }
+          return await peekAdmission();
+        },
         markSessionIdle: async () => undefined,
         failSessionAttempt: async () => undefined,
-        settleSessionInterruptions: async (input: unknown) => {
+        settleSessionInterruptions: async (input: { attemptId: string }) => {
           controls.push(input);
-          allowFirstRunToFinish = true;
+          cancellationWaitAttemptId = input.attemptId;
           return { action: "continue" as const };
         },
       });
@@ -624,25 +643,21 @@ describe("Temporal workflow integration", () => {
           workflowId,
           args: [{ ...scope, sessionId, initialEventId: first.triggerEventId }],
         });
+        wakeWorkflow = async () => await handle.signal("queueChanged");
         await waitFor(() => runs.length === 1);
         queuedTurns.push(second);
         await handle.signal("userMessage", second.triggerEventId);
         await handle.signal("sessionControl", "control-event");
+        await waitFor(() => cancellationWaitPeeks > 0);
+        expect(runs).toHaveLength(1);
+        allowFirstRunToFinish = true;
         await waitFor(() => runs.length === 2);
         expect(controls).toEqual([
           { ...scope, sessionId, attemptId: expect.any(String), workflowId },
-          {
-            ...scope,
-            sessionId,
-            attemptId: expect.any(String),
-            workflowId,
-            phase: "attempt_quiesced",
-          },
         ]);
-        expect((controls[1] as { attemptId: string }).attemptId).toBe(
-          (controls[0] as { attemptId: string }).attemptId,
-        );
         expect(runs[1]).toEqual(second);
+        await handle.result();
+        expect(runs).toHaveLength(2);
       } finally {
         allowFirstRunToFinish = true;
         worker.shutdown();
@@ -653,7 +668,7 @@ describe("Temporal workflow integration", () => {
   );
 
   test(
-    "Steer fails closed without a quiescence receipt when the cancelled activity terminates as a failure",
+    "Temporal activity failure never manufactures quiescence or pins workflow completion",
     async () => {
       const taskQueue = `workflow-test-${crypto.randomUUID()}`;
       const scope = workflowScope();
@@ -664,6 +679,7 @@ describe("Temporal workflow integration", () => {
       const queuedTurns = [first];
       const controls: unknown[] = [];
       let runs = 0;
+      let cancellationWaitAttemptId: string | null = null;
       let terminateFirst = false;
       const admission = createTurnAdmission(queuedTurns, async () => {
         runs += 1;
@@ -673,12 +689,21 @@ describe("Temporal workflow integration", () => {
         }
         return { status: "idle" };
       });
+      const peekAdmission = admission.activities.peekSessionWork;
       const worker = await testWorker(nativeConnection, taskQueue, {
         ...admission.activities,
+        peekSessionWork: async () =>
+          cancellationWaitAttemptId
+            ? ({
+                kind: "cancellation-wait" as const,
+                attemptId: cancellationWaitAttemptId,
+              } as const)
+            : await peekAdmission(),
         markSessionIdle: async () => undefined,
         failSessionAttempt: async () => undefined,
-        settleSessionInterruptions: async (input: unknown) => {
+        settleSessionInterruptions: async (input: { attemptId: string }) => {
           controls.push(input);
+          cancellationWaitAttemptId = input.attemptId;
           terminateFirst = true;
           return { action: "continue" as const };
         },
@@ -695,7 +720,7 @@ describe("Temporal workflow integration", () => {
         queuedTurns.push(second);
         await handle.signal("userMessage", second.triggerEventId);
         await handle.signal("sessionControl", "control-event");
-        await expect(handle.result()).rejects.toBeDefined();
+        await handle.result();
 
         expect(runs).toBe(1);
         expect(controls).toEqual([

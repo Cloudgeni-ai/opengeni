@@ -124,10 +124,9 @@ export type SettleSessionInterruptionsInput = {
   attemptId: string;
   workflowId: string;
   /**
-   * The established Temporal activity wire serves both halves of one control
-   * transition. Omitted/"logical" is replay-compatible logical settlement;
-   * "attempt_quiesced" is emitted after WAIT_CANCELLATION_COMPLETED as an
-   * idempotent recovery fallback for workers predating the in-activity receipt.
+   * Replay-only compatibility for session workflow histories created before
+   * the receipt-gated cancellation v2 patch. New histories never send this
+   * phase; the exact activity writes the authoritative receipt itself.
    */
   phase?: "logical" | "attempt_quiesced";
 };
