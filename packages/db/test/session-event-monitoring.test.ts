@@ -87,7 +87,9 @@ beforeAll(async () => {
       (${fixture.accountId}, ${workspaceId}, ${sessionId}, 200004,
         'turn.completed', ${shared.admin.json({ result: "stale" })}, 6),
       (${fixture.accountId}, ${workspaceId}, ${sessionId}, 200005,
-        'turn.completed', ${shared.admin.json({ result: "authoritative" })}, 7)`;
+        'turn.completed', ${shared.admin.json({ result: "authoritative" })}, 7),
+      (${fixture.accountId}, ${workspaceId}, ${sessionId}, 200006,
+        'machine.op.failed', ${shared.admin.json({ code: "NEWER_UNRELATED_FAILURE" })}, 7)`;
   await shared.admin`
     insert into session_events (
       account_id, workspace_id, session_id, sequence, type, payload
@@ -113,10 +115,10 @@ describe("session event monitoring (real PostgreSQL)", () => {
     });
 
     expect(page.events.map((event) => event.sequence)).toEqual([
-      200001, 200002, 200003, 200004, 200005,
+      200001, 200002, 200003, 200004, 200005, 200006,
     ]);
     expect(page.events.some((event) => event.type === "agent.message.delta")).toBeFalse();
-    expect(page.coveredSequence).toEqual({ first: 200001, last: 200005 });
+    expect(page.coveredSequence).toEqual({ first: 200001, last: 200006 });
     expect(page.nextBefore).toBe(200001);
     expect(page.bytes).toBe(Buffer.byteLength(JSON.stringify(page.events), "utf8"));
     expect(page.bytes).toBeLessThan(10_000);
@@ -179,9 +181,9 @@ describe("session event monitoring (real PostgreSQL)", () => {
       before = page.nextBefore!;
     }
     expect([...new Set(backwardSequences)].sort((a, b) => a - b)).toEqual([
-      200001, 200002, 200003, 200004, 200005,
+      200001, 200002, 200003, 200004, 200005, 200006,
     ]);
-    expect(backwardSequences).toHaveLength(5);
+    expect(backwardSequences).toHaveLength(6);
 
     const forwardSequences: number[] = [];
     let after = 199990;

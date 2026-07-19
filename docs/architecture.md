@@ -479,19 +479,27 @@ The current map:
 
   Truncation metadata records the surface, exact delivered/original/omitted byte accounting where a JSON representation exists, coarse token estimates, and `fullEvidence: { available: false, reason: "not_retained" }`. There is no generic “download full tool output” route. A full view is valid only when a separate access-controlled artifact/file receipt explicitly retained those bytes.
 
-- **Workspace-control invalidations are compact, not evidence storage.** Human control requests reject NUL-containing or over-8-KiB UTF-8 reasons and authenticated actor identifiers over 1 KiB. `workspace_control_events` stores bounded reason/actor heads plus exact original/delivered/omitted byte facts when a legacy/direct writer exceeds those caps; the complete source is explicitly unavailable because this path never retained it. A rolling trigger backfills and guards old writers. Each event has a 16-KiB hard envelope, NATS has a 32-KiB assertion, SSE shares the 96-KiB one-frame/one-connection bound, and REST replay is count-plus-1-MiB-byte bounded with an exact next cursor. A poison historical row therefore cannot block later sequence delivery or reconnect progress.
+- **Workspace-control invalidations are compact, not evidence storage.** Human control requests reject NUL-containing or over-8-KiB UTF-8 reasons and authenticated actor identifiers over 1 KiB. `workspace_control_events` stores bounded reason/actor heads plus exact original/delivered/omitted byte facts when a legacy/direct writer exceeds those caps; the complete source is explicitly unavailable because this path never retained it. Migration 0068 installs a rolling trigger before rewriting only pre-existing cap violations; already-bounded legacy rows remain untouched with nullable metadata and project their delivered byte lengths as exact original facts. Each event has a 16-KiB hard envelope, NATS has a 32-KiB assertion, SSE shares the 96-KiB one-frame/one-connection bound, and REST replay is count-plus-1-MiB-byte bounded with an exact next cursor. A poison historical row therefore cannot block later sequence delivery or reconnect progress.
 
 - **Event store.** Every `session_events.payload` passes through `sanitizeEventPayload` (NUL + lone-surrogate repair, secret redaction, and the canonical audit bound) before insert; otherwise jsonb rejection or unconstrained output could kill or grow a turn. The SQL fallback is defense in depth, not the normal semantic preview path.
 - **Event monitoring indexes.** Tail and typed lookups execute inside the RLS transaction using `(workspace_id, session_id, type, sequence)` and a partial `(workspace_id, session_id, sequence)` index that excludes the four raw delta firehoses. A caller can therefore ask for current terminal/checkpoint/tool-receipt truth without scanning or serializing the session's durable history.
 - **Compact session discovery.** `sessions_list` selects only its monitoring
   summary fields and traverses deterministic descending `(created_at, id)` or
-  `(updated_at, id)` keysets through matching workspace-prefixed indexes.
-  Opaque cursors bind the order, exact PostgreSQL-microsecond keyset, first-page
-  timestamp ceiling, and incremental `updatedAfter` scope. Updated-order pages
-  expose that ceiling as `updatedThrough` for the next scan; it is a timestamp
-  watermark, not a global commit sequence. Raw message/reasoning/command/PTY
-  deltas advance `last_sequence` without moving `updated_at`, while semantic
-  events and explicit session mutations advance monitoring activity.
+  `(activity_revision, updated_at, id)` keysets through matching
+  workspace-prefixed indexes. Revision zero is the rolling-upgrade legacy
+  bucket and retains exact `(updated_at, id)` suffix order. For updated order,
+  a first page takes the workspace inference-control lock before a shared lock
+  on the workspace activity counter, then reads session rows through ordinary
+  MVCC. Control-aware semantic writers take workspace control, UUID-sorted
+  session rows, then the counter; inserts/direct writers never invert that
+  order. The counter lock makes the returned `updatedThrough` decimal revision
+  an exact snapshot fence: later activity receives a greater revision and a
+  subsequent scan passes the token as `updatedAfter`. Opaque cursors bind that
+  fence, revision keyset, exact PostgreSQL-microsecond timestamp suffix, order,
+  and incremental scope. Contention is bounded to one short counter allocation
+  per semantic activity in that workspace. Raw message/reasoning/command/PTY
+  deltas advance `last_sequence` without moving `updated_at` or allocating a
+  revision. Known targets should still use direct exact-ID `session_get`.
 - **Model-facing entity details are independently bounded.** `session_get`
   uses an exact-ID, field/count/byte-aware projection, and `rig_get` selects
   summary-only historical versions/changes while retaining one bounded active

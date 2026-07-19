@@ -190,18 +190,44 @@ describe("session event byte-bounded HTTP pages", () => {
         (${session!.accountId}, ${workspaceId}, ${sessionId}, 1, 'agent.model.usage',
           ${admin.json({ inputTokens: 10, outputTokens: 2 })}),
         (${session!.accountId}, ${workspaceId}, ${sessionId}, 2, 'machine.op.failed',
-          ${admin.json({ code: "OFFLINE", detail: "x" })})`;
+          ${admin.json({ code: "OFFLINE", detail: "x" })}),
+        (${session!.accountId}, ${workspaceId}, ${sessionId}, 3, 'turn.completed',
+          ${admin.json({ result: "requested-terminal" })}),
+        (${session!.accountId}, ${workspaceId}, ${sessionId}, 4, 'machine.op.failed',
+          ${admin.json({ code: "NEWER_FAILURE" })})`;
 
     const response = await app.request(
       `http://x/v1/workspaces/${workspaceId}/sessions/${sessionId}/events?includeClasses=failure&payloadMode=none`,
       { headers: { authorization } },
     );
     const body = (await response.json()) as Array<{ type: string; payload: unknown }>;
-    expect(body).toHaveLength(1);
-    expect(body[0]).toMatchObject({
+    expect(body).toHaveLength(2);
+    expect(body.at(-1)).toMatchObject({
       type: "machine.op.failed",
       payload: { _monitoring: { payloadMode: "none", payloadOmitted: true } },
     });
+
+    const latest = await app.request(
+      `http://x/v1/workspaces/${workspaceId}/sessions/${sessionId}/events?latest=terminal`,
+      { headers: { authorization } },
+    );
+    expect(latest.status).toBe(200);
+    expect(await latest.json()).toEqual([
+      expect.objectContaining({ sequence: 3, type: "turn.completed" }),
+    ]);
+
+    for (const incompatible of [
+      "includeTypes=machine.op.failed",
+      "excludeTypes=turn.completed",
+      "includeClasses=failure",
+      "excludeClasses=terminal",
+    ]) {
+      const rejected = await app.request(
+        `http://x/v1/workspaces/${workspaceId}/sessions/${sessionId}/events?latest=terminal&${incompatible}`,
+        { headers: { authorization } },
+      );
+      expect(rejected.status).toBe(400);
+    }
 
     const invalid = await app.request(
       `http://x/v1/workspaces/${workspaceId}/sessions/${sessionId}/events?includeTypes=not.real`,

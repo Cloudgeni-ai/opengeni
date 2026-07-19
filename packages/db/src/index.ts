@@ -80,6 +80,7 @@ import type {
 } from "@opengeni/contracts";
 import {
   boundWorkspaceControlEvent,
+  workspaceControlUtf8Bytes,
   SESSION_EVENT_RAW_DELTA_TYPES,
   SESSION_EVENT_CLIENT_EVENT_ID_MAX_BYTES,
   SESSION_EVENT_DUPLICATE_REASON_MAX_BYTES,
@@ -11818,12 +11819,16 @@ export async function listSessions(
 export type SessionDiscoveryOrderBy = "createdAt" | "updatedAt";
 export type SessionDiscoveryCursor = {
   orderBy: SessionDiscoveryOrderBy;
+  /** Decimal database activity revision; zero is the legacy/created-order bucket. */
+  sortRevision: string;
   /** Exact PostgreSQL timestamp text (including microseconds), not a JS Date. */
   sortAt: string;
   id: string;
-  /** First-page ceiling: rows that move past it belong to the next incremental scan. */
+  /** Created-order timestamp ceiling; retained as diagnostic context for updated order. */
   snapshotAt: string;
-  /** The incremental filter is cursor-bound so continuation cannot silently change scope. */
+  /** First-page revision fence: later activity belongs to the next incremental scan. */
+  snapshotRevision: string;
+  /** Incremental revision scope is cursor-bound and cannot change on continuation. */
   updatedAfter: string | null;
 };
 export const SESSION_DISCOVERY_GOAL_MAX_CHARS = 600;
@@ -11845,9 +11850,54 @@ export type SessionDiscoverySummary = {
   } | null;
   createdAt: string;
   updatedAt: string;
+  /** Internal exact revision key; omitted from the MCP row projection. */
+  sortRevision: string;
   /** Internal exact keyset timestamp; omitted from the MCP row projection. */
   sortAt: string;
 };
+
+const SESSION_ACTIVITY_REVISION_PATTERN = /^(?:0|[1-9]\d*)$/;
+const SESSION_ACTIVITY_REVISION_MAX = 9_223_372_036_854_775_807n;
+
+function normalizeSessionActivityRevision(value: string, label: string): string {
+  if (!SESSION_ACTIVITY_REVISION_PATTERN.test(value)) {
+    throw new Error(`sessions_list ${label} must be a decimal activity revision`);
+  }
+  const revision = BigInt(value);
+  if (revision > SESSION_ACTIVITY_REVISION_MAX) {
+    throw new Error(`sessions_list ${label} exceeds the database activity revision range`);
+  }
+  return revision.toString();
+}
+
+async function lockWorkspaceSessionActivityRevision(
+  db: Database,
+  workspaceId: string,
+): Promise<string> {
+  // The caller already holds workspace_inference_controls FOR SHARE. This
+  // insert makes an untouched workspace's zero fence durable and waits for an
+  // in-flight first allocation instead of observing a missing counter as zero.
+  await db.execute(sql`
+    insert into ${schema.workspaceSessionActivityRevisions} (
+      workspace_id, account_id, revision
+    )
+    select ${schema.workspaces.id}, ${schema.workspaces.accountId}, 0
+    from ${schema.workspaces}
+    where ${schema.workspaces.id} = ${workspaceId}
+    on conflict (workspace_id) do nothing
+  `);
+  const rows = await db.execute<{ revision: string }>(sql`
+    select revision::text as revision
+    from ${schema.workspaceSessionActivityRevisions}
+    where workspace_id = ${workspaceId}
+    for share
+  `);
+  const revision = rows[0]?.revision;
+  if (revision === undefined) {
+    throw new Error("sessions_list workspace activity revision is unavailable");
+  }
+  return normalizeSessionActivityRevision(revision, "snapshot revision");
+}
 
 /**
  * Compact-by-construction discovery projection for the first-party
@@ -11871,13 +11921,18 @@ export async function listSessionDiscoverySummaries(
   total: number;
   orderBy: SessionDiscoveryOrderBy;
   snapshotAt: string;
-  updatedThrough: string;
+  snapshotRevision: string;
+  updatedThrough: string | null;
   updatedAfter: string | null;
 }> {
   const limit = Math.max(1, Math.min(100, Math.floor(options.limit)));
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const orderBy = options.orderBy ?? options.cursor?.orderBy ?? "createdAt";
-    const updatedAfter = options.updatedAfter ?? options.cursor?.updatedAfter ?? null;
+    const requestedUpdatedAfter = options.updatedAfter ?? options.cursor?.updatedAfter ?? null;
+    const updatedAfter =
+      requestedUpdatedAfter === null
+        ? null
+        : normalizeSessionActivityRevision(requestedUpdatedAfter, "updatedAfter");
     if (options.cursor?.orderBy !== undefined && options.cursor.orderBy !== orderBy) {
       throw new Error("sessions_list cursor order does not match the request");
     }
@@ -11887,8 +11942,6 @@ export async function listSessionDiscoverySummaries(
     if (updatedAfter !== null && orderBy !== "updatedAt") {
       throw new Error("sessions_list updatedAfter requires orderBy=updatedAt");
     }
-    const sortColumn =
-      orderBy === "updatedAt" ? schema.sessions.updatedAt : schema.sessions.createdAt;
     const snapshotAt =
       options.cursor?.snapshotAt ??
       (
@@ -11897,24 +11950,74 @@ export async function listSessionDiscoverySummaries(
           sql`select to_char(statement_timestamp() at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as value`,
         )
       )[0]!.value;
+    const needsUpdatedSnapshot =
+      orderBy === "updatedAt" && options.cursor?.snapshotRevision === undefined;
+    if (needsUpdatedSnapshot) {
+      // Canonical semantic writers lock workspace control, then UUID-sorted
+      // sessions, then allocate this counter. Taking the same workspace lock
+      // before the first-page counter fence preserves that order. Page queries
+      // are plain MVCC reads and never wait on session row locks, so a writer
+      // blocked at the counter cannot deadlock the reader. Holding FOR SHARE
+      // until transaction end ensures every later committed activity receives a
+      // greater revision. Continuations reuse the established fence and need no
+      // new control/counter lock.
+      await lockWorkspaceInferenceControl(scopedDb, workspaceId, "share");
+    }
+    const snapshotRevision =
+      orderBy === "updatedAt"
+        ? options.cursor?.snapshotRevision !== undefined
+          ? normalizeSessionActivityRevision(
+              options.cursor.snapshotRevision,
+              "cursor snapshot revision",
+            )
+          : await lockWorkspaceSessionActivityRevision(scopedDb, workspaceId)
+        : "0";
+    const cursorSortRevision = options.cursor
+      ? normalizeSessionActivityRevision(options.cursor.sortRevision, "cursor sort revision")
+      : null;
+    if (
+      orderBy === "createdAt" &&
+      options.cursor &&
+      (cursorSortRevision !== "0" || options.cursor.snapshotRevision !== "0")
+    ) {
+      throw new Error("sessions_list created-order cursor cannot carry activity revisions");
+    }
     const cursorPredicate = options.cursor
-      ? or(
-          // Cast through text deliberately. postgres.js otherwise infers a
-          // timestamptz parameter and serializes this exact cursor string via
-          // JS Date, which discards PostgreSQL's sub-millisecond precision.
-          sql`${sortColumn} < ${options.cursor.sortAt}::text::timestamptz`,
-          and(
-            sql`${sortColumn} = ${options.cursor.sortAt}::text::timestamptz`,
-            lt(schema.sessions.id, options.cursor.id),
-          ),
-        )
+      ? orderBy === "updatedAt"
+        ? or(
+            sql`${schema.sessions.activityRevision} < ${cursorSortRevision!}::text::bigint`,
+            and(
+              sql`${schema.sessions.activityRevision} = ${cursorSortRevision!}::text::bigint`,
+              or(
+                sql`${schema.sessions.updatedAt} < ${options.cursor.sortAt}::text::timestamptz`,
+                and(
+                  sql`${schema.sessions.updatedAt} = ${options.cursor.sortAt}::text::timestamptz`,
+                  lt(schema.sessions.id, options.cursor.id),
+                ),
+              ),
+            ),
+          )
+        : or(
+            // Cast through text deliberately. postgres.js otherwise infers a
+            // timestamptz parameter and serializes this exact cursor string via
+            // JS Date, which discards PostgreSQL's sub-millisecond precision.
+            sql`${schema.sessions.createdAt} < ${options.cursor.sortAt}::text::timestamptz`,
+            and(
+              sql`${schema.sessions.createdAt} = ${options.cursor.sortAt}::text::timestamptz`,
+              lt(schema.sessions.id, options.cursor.id),
+            ),
+          )
       : undefined;
-    const snapshotFilters: SQL[] = [
-      eq(schema.sessions.workspaceId, workspaceId),
-      sql`${sortColumn} <= ${snapshotAt}::text::timestamptz`,
-    ];
+    const snapshotFilters: SQL[] = [eq(schema.sessions.workspaceId, workspaceId)];
+    snapshotFilters.push(
+      orderBy === "updatedAt"
+        ? sql`${schema.sessions.activityRevision} <= ${snapshotRevision}::text::bigint`
+        : sql`${schema.sessions.createdAt} <= ${snapshotAt}::text::timestamptz`,
+    );
     if (updatedAfter !== null) {
-      snapshotFilters.push(sql`${schema.sessions.updatedAt} > ${updatedAfter}::text::timestamptz`);
+      snapshotFilters.push(
+        sql`${schema.sessions.activityRevision} > ${updatedAfter}::text::bigint`,
+      );
     }
     const rows = await scopedDb
       .select({
@@ -11927,6 +12030,10 @@ export async function listSessionDiscoverySummaries(
         status: schema.sessions.status,
         createdAt: schema.sessions.createdAt,
         updatedAt: schema.sessions.updatedAt,
+        sortRevision:
+          orderBy === "updatedAt"
+            ? sql<string>`${schema.sessions.activityRevision}::text`
+            : sql<string>`'0'`,
         sortAt:
           orderBy === "updatedAt"
             ? sql<string>`to_char(${schema.sessions.updatedAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`
@@ -11934,7 +12041,15 @@ export async function listSessionDiscoverySummaries(
       })
       .from(schema.sessions)
       .where(and(...snapshotFilters, cursorPredicate))
-      .orderBy(desc(sortColumn), desc(schema.sessions.id))
+      .orderBy(
+        ...(orderBy === "updatedAt"
+          ? [
+              desc(schema.sessions.activityRevision),
+              desc(schema.sessions.updatedAt),
+              desc(schema.sessions.id),
+            ]
+          : [desc(schema.sessions.createdAt), desc(schema.sessions.id)]),
+      )
       .limit(limit + 1);
     const hasMore = rows.length > limit;
     const page = rows.slice(0, limit);
@@ -11951,7 +12066,8 @@ export async function listSessionDiscoverySummaries(
         total: Number(total),
         orderBy,
         snapshotAt,
-        updatedThrough: snapshotAt,
+        snapshotRevision,
+        updatedThrough: orderBy === "updatedAt" ? snapshotRevision : null,
         updatedAfter,
       };
     }
@@ -12061,6 +12177,7 @@ export async function listSessionDiscoverySummaries(
           : null,
         createdAt: row.createdAt.toISOString(),
         updatedAt: row.updatedAt.toISOString(),
+        sortRevision: row.sortRevision,
         sortAt: row.sortAt,
       };
     });
@@ -12072,16 +12189,19 @@ export async function listSessionDiscoverySummaries(
         hasMore && last
           ? {
               orderBy,
+              sortRevision: last.sortRevision,
               sortAt: last.sortAt,
               id: last.id,
               snapshotAt,
+              snapshotRevision,
               updatedAfter,
             }
           : null,
       total: Number(total),
       orderBy,
       snapshotAt,
-      updatedThrough: snapshotAt,
+      snapshotRevision,
+      updatedThrough: orderBy === "updatedAt" ? snapshotRevision : null,
       updatedAfter,
     };
   });
@@ -12720,8 +12840,13 @@ function mapWorkspaceControlEvent(
     },
     {
       surface: "durable_control",
-      reasonOriginalBytes: row.reasonOriginalBytes,
-      actorOriginalBytes: row.actorOriginalBytes,
+      // Untouched bounded rows from before migration 0068 intentionally retain
+      // null metadata. Their delivered bytes are the exact original facts.
+      reasonOriginalBytes:
+        row.reason === null
+          ? null
+          : (row.reasonOriginalBytes ?? workspaceControlUtf8Bytes(row.reason)),
+      actorOriginalBytes: row.actorOriginalBytes ?? workspaceControlUtf8Bytes(row.actor),
     },
   );
 }

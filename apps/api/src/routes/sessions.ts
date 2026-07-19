@@ -513,6 +513,16 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       "latest",
       undefined,
     );
+    if (
+      latestClass &&
+      ["includeTypes", "excludeTypes", "includeClasses", "excludeClasses"].some(
+        (name) => c.req.query(name) !== undefined,
+      )
+    ) {
+      throw new HTTPException(400, {
+        message: "latest cannot be combined with event filters",
+      });
+    }
     const direction = latestClass
       ? "before"
       : eventEnumValue(
@@ -548,7 +558,6 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       SessionEventSemanticClass,
       "includeClasses",
     );
-    if (latestClass && !includeClasses.includes(latestClass)) includeClasses.push(latestClass);
     const excludeClasses = eventEnumList(
       c.req.query("excludeClasses"),
       SessionEventSemanticClass,
@@ -569,7 +578,7 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       payloadMode,
       includeTypes,
       excludeTypes,
-      includeClasses,
+      includeClasses: latestClass ? [latestClass] : includeClasses,
       excludeClasses,
       ...(mode === "monitoring" ? { defaultExcludeTypes: SESSION_EVENT_RAW_DELTA_TYPES } : {}),
     });

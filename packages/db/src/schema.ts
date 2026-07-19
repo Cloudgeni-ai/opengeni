@@ -123,6 +123,30 @@ export const workspaceInferenceControls = pgTable(
   }),
 );
 
+// One transactionally allocated activity clock per workspace. An updated-order
+// first page takes a SHARE lock on this row after the workspace-control lock;
+// semantic writers allocate after UUID-ordered session locks. Plain MVCC page
+// reads never lock session rows, so that ordering cannot form a cycle.
+export const workspaceSessionActivityRevisions = pgTable(
+  "workspace_session_activity_revisions",
+  {
+    workspaceId: uuid("workspace_id").primaryKey(),
+    accountId: uuid("account_id").notNull(),
+    revision: bigint("revision", { mode: "number" }).notNull().default(0),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "workspace_session_activity_revisions_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    revisionValid: check(
+      "workspace_session_activity_revisions_revision_check",
+      sql`${table.revision} >= 0`,
+    ),
+  }),
+);
+
 export const workspaceMemberships = pgTable(
   "workspace_memberships",
   {
@@ -655,6 +679,10 @@ export const sessions = pgTable(
     codexPinSource: text("codex_pin_source"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    // Assigned by the database trigger whenever canonical updated_at activity
+    // advances. Legacy rows remain zero until touched; raw delta-only writers
+    // intentionally omit updated_at and therefore do not allocate revisions.
+    activityRevision: bigint("activity_revision", { mode: "number" }).notNull().default(0),
   },
   (table) => ({
     workspaceIdentity: uniqueIndex("sessions_workspace_id_idx").on(table.workspaceId, table.id),
@@ -672,6 +700,12 @@ export const sessions = pgTable(
     ),
     workspaceUpdatedId: index("sessions_workspace_updated_id_idx").on(
       table.workspaceId,
+      table.updatedAt.desc(),
+      table.id.desc(),
+    ),
+    workspaceActivityRevision: index("sessions_workspace_activity_revision_idx").on(
+      table.workspaceId,
+      table.activityRevision.desc(),
       table.updatedAt.desc(),
       table.id.desc(),
     ),
@@ -1321,7 +1355,9 @@ export const workspaceControlEvents = pgTable(
     reason: text("reason"),
     reasonOriginalBytes: integer("reason_original_bytes"),
     actor: text("actor").notNull(),
-    actorOriginalBytes: integer("actor_original_bytes").notNull(),
+    // Null is the rolling-upgrade shape for untouched, already-bounded legacy
+    // rows. New writes and rewritten poison rows carry exact source byte facts.
+    actorOriginalBytes: integer("actor_original_bytes"),
     occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({

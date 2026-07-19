@@ -527,6 +527,14 @@ export class OpenGeniClient {
     sessionId: string,
     options: SessionEventListOptions = {},
   ): Promise<SessionEventPage> {
+    if (
+      options.latest &&
+      ["includeTypes", "excludeTypes", "includeClasses", "excludeClasses"].some((name) =>
+        Object.prototype.hasOwnProperty.call(options, name),
+      )
+    ) {
+      throw new TypeError("latest cannot be combined with event filters");
+    }
     const response = await this.fetchImpl(
       this.url(`/v1/workspaces/${workspaceId}/sessions/${sessionId}/events`, {
         ...(options.after !== undefined ? { after: String(options.after) } : {}),

@@ -109,6 +109,11 @@ beforeAll(async () => {
       payload: { result: "authoritative" },
       turnGeneration: 2,
     },
+    {
+      type: "machine.op.failed" as const,
+      payload: { code: "NEWER_UNRELATED_FAILURE" },
+      turnGeneration: 2,
+    },
   ]);
 }, 180_000);
 
@@ -129,6 +134,7 @@ describe("session_events MCP model boundary (real PostgreSQL)", () => {
       [41, "session.context.compacted"],
       [42, "turn.completed"],
       [43, "turn.completed"],
+      [44, "machine.op.failed"],
     ]);
     expect(monitoring.direction).toBe("before");
     expect(monitoring.nextAfter).toBeNull();
@@ -170,6 +176,19 @@ describe("session_events MCP model boundary (real PostgreSQL)", () => {
     ]);
   });
 
+  test("rejects filters that could displace or exclude an exclusive latest lookup", async () => {
+    for (const filters of [
+      { includeTypes: ["machine.op.failed"] },
+      { excludeTypes: ["turn.completed"] },
+      { includeClasses: ["failure"] },
+      { excludeClasses: ["terminal"] },
+    ]) {
+      await expect(
+        callMcpTool("session_events", { sessionId, latest: "terminal", ...filters }),
+      ).rejects.toThrow("latest cannot be combined with event filters");
+    }
+  });
+
   test("enforces the exact 64 KiB pretty-JSON model envelope", async () => {
     await appendSessionEvents(
       client.db,
@@ -191,7 +210,7 @@ describe("session_events MCP model boundary (real PostgreSQL)", () => {
       maxBytes: number;
     }>("session_events", {
       sessionId,
-      after: 43,
+      after: 44,
       limit: 40,
       mode: "forensic",
       payloadMode: "full",

@@ -662,7 +662,7 @@ export type SessionEventPayloadMode = "none" | "summary" | "full";
 export type SessionEventReadMode = "monitoring" | "forensic";
 export type SessionEventReadDirection = "after" | "before";
 
-export type SessionEventListOptions = {
+type SessionEventListCommonOptions = {
   after?: number;
   before?: number;
   limit?: number;
@@ -670,12 +670,26 @@ export type SessionEventListOptions = {
   mode?: SessionEventReadMode;
   direction?: SessionEventReadDirection;
   payloadMode?: SessionEventPayloadMode;
-  includeTypes?: SessionEventType[];
-  excludeTypes?: SessionEventType[];
-  includeClasses?: SessionEventSemanticClass[];
-  excludeClasses?: SessionEventSemanticClass[];
-  latest?: SessionEventSemanticClass;
 };
+
+export type SessionEventListOptions = SessionEventListCommonOptions &
+  (
+    | {
+        latest?: never;
+        includeTypes?: SessionEventType[];
+        excludeTypes?: SessionEventType[];
+        includeClasses?: SessionEventSemanticClass[];
+        excludeClasses?: SessionEventSemanticClass[];
+      }
+    | {
+        /** Exclusive lookup for the newest event in exactly this semantic class. */
+        latest: SessionEventSemanticClass;
+        includeTypes?: never;
+        excludeTypes?: never;
+        includeClasses?: never;
+        excludeClasses?: never;
+      }
+  );
 
 export type SessionEventPage = {
   events: SessionEvent[];

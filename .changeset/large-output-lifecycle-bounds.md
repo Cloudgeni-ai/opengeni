@@ -14,3 +14,6 @@
 Bound model-facing tool output, complete input accounting, compact session discovery,
 event and realtime projections, authorized evidence retrieval, and compaction failure
 convergence with explicit truncation and loss metadata throughout the output lifecycle.
+Session event `latest` lookups are now class-exclusive across REST, MCP, and SDK clients.
+Updated-order session discovery now uses a transactional workspace activity-revision fence,
+and the workspace-control bounds migration rewrites only historical cap violations.

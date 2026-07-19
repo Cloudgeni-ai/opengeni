@@ -1311,7 +1311,7 @@ function registerWorkspaceOrchestrationTools(
       "sessions_list",
       {
         description:
-          "List compact high-level session status in this workspace. Defaults to creation order; use orderBy=updatedAt with updatedAfter/updatedThrough for indexed incremental monitoring. Cursors are opaque snapshot-bound keysets. Use session_get for exact known targets and detailed resources/tools/settings. The list never returns full session objects or history.",
+          "List compact high-level session status in this workspace. Defaults to creation order; use orderBy=updatedAt with decimal activity-revision updatedAfter/updatedThrough tokens for gap-free indexed incremental monitoring independent of application clocks. Cursors are opaque revision-fenced keysets. Use session_get for exact known targets and detailed resources/tools/settings. The list never returns full session objects or history.",
         inputSchema: {
           limit: z4.number().int().positive().max(100).optional(),
           cursor: z4.string().max(512).optional(),
@@ -1329,7 +1329,7 @@ function registerWorkspaceOrchestrationTools(
         }
         const normalizedUpdatedAfter =
           updatedAfter !== undefined
-            ? normalizeSessionDiscoveryTimestamp(updatedAfter, "updatedAfter")
+            ? normalizeSessionDiscoveryRevision(updatedAfter, "updatedAfter")
             : (decodedCursor?.updatedAfter ?? undefined);
         if (normalizedUpdatedAfter !== undefined && orderBy !== "updatedAt") {
           throw new Error("sessions_list updatedAfter requires orderBy=updatedAt");
@@ -1369,7 +1369,7 @@ function registerWorkspaceOrchestrationTools(
       "session_events",
       {
         description:
-          "Read a compact semantic tail only when session_get status is insufficient. With no cursor, this returns the newest matching events and excludes raw message/reasoning/command/PTY deltas. Use `latest` for the newest typed terminal/checkpoint/receipt without replaying intermediates; use nextBefore to page older or explicit after/nextAfter to page forward. Type/class filters run in the RLS-scoped database query. payloadMode none|summary|full controls retained audit payload projection, but every model result is independently byte-capped with explicit truncation and exact covered sequence bounds. Exact retained forensic payloads require the access-controlled REST/SDK events API with mode=forensic&payloadMode=full; generic source bytes never retained by the audit boundary remain unavailable.",
+          "Read a compact semantic tail only when session_get status is insufficient. With no cursor, this returns the newest matching events and excludes raw message/reasoning/command/PTY deltas. Use `latest` as an exclusive lookup for the newest event in exactly one semantic class; it cannot be combined with type or class filters. Use nextBefore to page older or explicit after/nextAfter to page forward. Type/class filters run in the RLS-scoped database query. payloadMode none|summary|full controls retained audit payload projection, but every model result is independently byte-capped with explicit truncation and exact covered sequence bounds. Exact retained forensic payloads require the access-controlled REST/SDK events API with mode=forensic&payloadMode=full; generic source bytes never retained by the audit boundary remain unavailable.",
         inputSchema: {
           sessionId: z4.string().uuid(),
           after: z4.number().int().nonnegative().optional(),
@@ -1399,31 +1399,37 @@ function registerWorkspaceOrchestrationTools(
         direction: requestedDirection,
         mode: requestedMode,
         payloadMode: requestedPayloadMode,
-        includeTypes = [],
-        excludeTypes = [],
-        includeClasses = [],
-        excludeClasses = [],
+        includeTypes,
+        excludeTypes,
+        includeClasses,
+        excludeClasses,
         latest,
       }) => {
         await requireSession(deps.db, grant.workspaceId, sessionId);
+        if (
+          latest &&
+          [includeTypes, excludeTypes, includeClasses, excludeClasses].some(
+            (filter) => filter !== undefined,
+          )
+        ) {
+          throw new Error("latest cannot be combined with event filters");
+        }
         const mode = requestedMode ?? (after !== undefined ? "forensic" : "monitoring");
         const direction = latest
           ? "before"
           : (requestedDirection ??
             (before !== undefined ? "before" : after !== undefined ? "after" : "before"));
         const payloadMode = requestedPayloadMode ?? (mode === "monitoring" ? "summary" : "full");
-        const effectiveClasses = [...includeClasses];
-        if (latest && !effectiveClasses.includes(latest)) effectiveClasses.push(latest);
         const dbPage = await listSessionEventPage(deps.db, grant.workspaceId, sessionId, {
           after: after ?? 0,
           ...(before !== undefined ? { before } : {}),
           direction,
           limit: latest ? 1 : boundedSessionEventMcpLimit(limit),
           payloadMode,
-          includeTypes,
-          excludeTypes,
-          includeClasses: effectiveClasses,
-          excludeClasses,
+          includeTypes: includeTypes ?? [],
+          excludeTypes: excludeTypes ?? [],
+          includeClasses: latest ? [latest] : (includeClasses ?? []),
+          excludeClasses: excludeClasses ?? [],
           ...(mode === "monitoring" ? { defaultExcludeTypes: SESSION_EVENT_RAW_DELTA_TYPES } : {}),
           maxBytes: SESSION_EVENT_MCP_MAX_BYTES * 4,
         });
@@ -2075,11 +2081,13 @@ function boundedSessionDiscoveryLimit(limit: number | undefined): number {
 export function encodeSessionDiscoveryCursor(cursor: SessionDiscoveryCursor): string {
   return Buffer.from(
     JSON.stringify({
-      v: 1,
+      v: 2,
       orderBy: cursor.orderBy,
+      sortRevision: cursor.sortRevision,
       sortAt: cursor.sortAt,
       id: cursor.id,
       snapshotAt: cursor.snapshotAt,
+      snapshotRevision: cursor.snapshotRevision,
       updatedAfter: cursor.updatedAfter,
     }),
     "utf8",
@@ -2087,6 +2095,8 @@ export function encodeSessionDiscoveryCursor(cursor: SessionDiscoveryCursor): st
 }
 
 const SESSION_DISCOVERY_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$/;
+const SESSION_DISCOVERY_REVISION = /^(?:0|[1-9]\d*)$/;
+const SESSION_DISCOVERY_REVISION_MAX = 9_223_372_036_854_775_807n;
 const SESSION_DISCOVERY_UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -2099,15 +2109,28 @@ function normalizeSessionDiscoveryTimestamp(value: string, label: string): strin
   return value;
 }
 
+function normalizeSessionDiscoveryRevision(value: string, label: string): string {
+  if (!SESSION_DISCOVERY_REVISION.test(value)) {
+    throw new Error(`sessions_list ${label} must be a decimal activity revision`);
+  }
+  const revision = BigInt(value);
+  if (revision > SESSION_DISCOVERY_REVISION_MAX) {
+    throw new Error(`sessions_list ${label} exceeds the database activity revision range`);
+  }
+  return revision.toString();
+}
+
 export function decodeSessionDiscoveryCursor(value: string): SessionDiscoveryCursor {
   try {
     const parsed = JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as {
       v?: unknown;
       orderBy?: unknown;
+      sortRevision?: unknown;
       sortAt?: unknown;
       createdAt?: unknown;
       id?: unknown;
       snapshotAt?: unknown;
+      snapshotRevision?: unknown;
       updatedAfter?: unknown;
     };
     if (
@@ -2122,17 +2145,43 @@ export function decodeSessionDiscoveryCursor(value: string): SessionDiscoveryCur
       );
       return {
         orderBy: "createdAt",
+        sortRevision: "0",
         sortAt: createdAt,
         id: parsed.id,
         snapshotAt: createdAt,
+        snapshotRevision: "0",
+        updatedAfter: null,
+      };
+    }
+    // The timestamp-fenced v1 format was never safe for updated-order
+    // continuation. Preserve rolling compatibility only for creation cursors,
+    // whose immutable ordering does not need an activity revision.
+    if (
+      parsed.v === 1 &&
+      parsed.orderBy === "createdAt" &&
+      typeof parsed.sortAt === "string" &&
+      typeof parsed.snapshotAt === "string" &&
+      parsed.updatedAfter === null &&
+      typeof parsed.id === "string" &&
+      SESSION_DISCOVERY_UUID.test(parsed.id)
+    ) {
+      return {
+        orderBy: "createdAt",
+        sortRevision: "0",
+        sortAt: normalizeSessionDiscoveryTimestamp(parsed.sortAt, "cursor sortAt"),
+        id: parsed.id,
+        snapshotAt: normalizeSessionDiscoveryTimestamp(parsed.snapshotAt, "cursor snapshotAt"),
+        snapshotRevision: "0",
         updatedAfter: null,
       };
     }
     if (
-      parsed.v !== 1 ||
+      parsed.v !== 2 ||
       (parsed.orderBy !== "createdAt" && parsed.orderBy !== "updatedAt") ||
+      typeof parsed.sortRevision !== "string" ||
       typeof parsed.sortAt !== "string" ||
       typeof parsed.snapshotAt !== "string" ||
+      typeof parsed.snapshotRevision !== "string" ||
       (parsed.updatedAfter !== null && typeof parsed.updatedAfter !== "string") ||
       typeof parsed.id !== "string" ||
       !SESSION_DISCOVERY_UUID.test(parsed.id)
@@ -2141,18 +2190,31 @@ export function decodeSessionDiscoveryCursor(value: string): SessionDiscoveryCur
     }
     const sortAt = normalizeSessionDiscoveryTimestamp(parsed.sortAt, "cursor sortAt");
     const snapshotAt = normalizeSessionDiscoveryTimestamp(parsed.snapshotAt, "cursor snapshotAt");
+    const sortRevision = normalizeSessionDiscoveryRevision(
+      parsed.sortRevision,
+      "cursor sortRevision",
+    );
+    const snapshotRevision = normalizeSessionDiscoveryRevision(
+      parsed.snapshotRevision,
+      "cursor snapshotRevision",
+    );
     const normalizedUpdatedAfter =
       parsed.updatedAfter === null
         ? null
-        : normalizeSessionDiscoveryTimestamp(parsed.updatedAfter, "cursor updatedAfter");
+        : normalizeSessionDiscoveryRevision(parsed.updatedAfter, "cursor updatedAfter");
     if (normalizedUpdatedAfter !== null && parsed.orderBy !== "updatedAt") {
       throw new Error("incremental cursor requires updatedAt order");
     }
+    if (parsed.orderBy === "createdAt" && (sortRevision !== "0" || snapshotRevision !== "0")) {
+      throw new Error("creation cursor cannot carry activity revisions");
+    }
     return {
       orderBy: parsed.orderBy,
+      sortRevision,
       sortAt,
       id: parsed.id,
       snapshotAt,
+      snapshotRevision,
       updatedAfter: normalizedUpdatedAfter,
     };
   } catch {
@@ -2271,9 +2333,11 @@ export function capSessionDiscoveryPage(
       ? sourceLast
         ? encodeSessionDiscoveryCursor({
             orderBy: page.orderBy,
+            sortRevision: sourceLast.sortRevision,
             sortAt: sourceLast.sortAt,
             id: sourceLast.id,
             snapshotAt: page.snapshotAt,
+            snapshotRevision: page.snapshotRevision,
             updatedAfter: page.updatedAfter,
           })
         : null
@@ -2287,6 +2351,7 @@ export function capSessionDiscoveryPage(
       nextCursor,
       orderBy: page.orderBy,
       snapshotAt: page.snapshotAt,
+      snapshotRevision: page.snapshotRevision,
       updatedAfter: page.updatedAfter,
       updatedThrough: page.updatedThrough,
       responseTruncated: droppedForByteCap,

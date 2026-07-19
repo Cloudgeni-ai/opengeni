@@ -178,7 +178,6 @@ describe("OpenGeniClient", () => {
       excludeTypes: ["turn.failed"],
       includeClasses: ["terminal", "checkpoint"],
       excludeClasses: ["failure"],
-      latest: "terminal",
     });
 
     expect(page).toEqual({
@@ -197,8 +196,29 @@ describe("OpenGeniClient", () => {
       forensicExact: true,
     });
     expect(requests[0]!.url).toBe(
-      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/events?after=12&before=99&limit=3&compact=1&mode=forensic&direction=after&payloadMode=full&includeTypes=turn.completed%2Cturn.failed&excludeTypes=turn.failed&includeClasses=terminal%2Ccheckpoint&excludeClasses=failure&latest=terminal`,
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/events?after=12&before=99&limit=3&compact=1&mode=forensic&direction=after&payloadMode=full&includeTypes=turn.completed%2Cturn.failed&excludeTypes=turn.failed&includeClasses=terminal%2Ccheckpoint&excludeClasses=failure`,
     );
+  });
+
+  test("listEventPage sends exclusive latest lookups and rejects runtime filter conflicts", async () => {
+    const event = makeEvent(42, "turn.completed", { result: "authoritative" });
+    const { client, requests } = makeClient(() => jsonResponse([event]));
+
+    await client.listEventPage(WORKSPACE_ID, SESSION_ID, {
+      latest: "terminal",
+      payloadMode: "summary",
+    });
+    expect(requests[0]!.url).toBe(
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/events?payloadMode=summary&latest=terminal`,
+    );
+
+    await expect(
+      client.listEventPage(WORKSPACE_ID, SESSION_ID, {
+        latest: "terminal",
+        includeClasses: ["failure"],
+      } as never),
+    ).rejects.toThrow("latest cannot be combined with event filters");
+    expect(requests).toHaveLength(1);
   });
 
   test("sendMessage wraps text in a user.message control event", async () => {

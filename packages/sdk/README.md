@@ -51,7 +51,10 @@ raw message/reasoning/command/PTY deltas. The page returns exact
 `coveredSequence`, `nextBefore`/`nextAfter`, byte, truncation, and projection
 metadata. Filters can select canonical event types or the `control`, `terminal`,
 `failure`, `checkpoint`, `tool_receipt`, and `provider_account` semantic classes;
-`latest` returns the newest matching class directly.
+`latest` is an exclusive typed lookup that returns the newest event in exactly
+the requested class. It cannot be combined with any type or class include/exclude
+filter, so an unrelated newer event cannot displace the requested result and an
+exclusion cannot remove it.
 
 ```ts
 const terminal = await client.listEventPage(workspaceId, sessionId, {

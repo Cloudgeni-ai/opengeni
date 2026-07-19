@@ -41,6 +41,7 @@ describe("sessions_list compact discovery projection", () => {
         },
         createdAt: new Date(Date.UTC(2026, 6, 18, 0, 0, index)).toISOString(),
         updatedAt: new Date(Date.UTC(2026, 6, 18, 1, 0, index)).toISOString(),
+        sortRevision: "0",
         sortAt: new Date(Date.UTC(2026, 6, 18, 0, 0, index))
           .toISOString()
           .replace(".000Z", ".123456Z"),
@@ -52,7 +53,8 @@ describe("sessions_list compact discovery projection", () => {
         nextCursor: null,
         orderBy: "createdAt",
         snapshotAt: "2026-07-18T02:00:00.654321Z",
-        updatedThrough: "2026-07-18T02:00:00.654321Z",
+        snapshotRevision: "0",
+        updatedThrough: null,
         updatedAfter: null,
       } as const;
 
@@ -112,6 +114,7 @@ describe("sessions_list compact discovery projection", () => {
       latestMessage: { type: "agent.message.completed", preview: huge },
       createdAt: new Date(Date.UTC(2026, 6, 18, 0, 0, index)).toISOString(),
       updatedAt: new Date(Date.UTC(2026, 6, 18, 0, 0, index)).toISOString(),
+      sortRevision: "0",
       sortAt: new Date(Date.UTC(2026, 6, 18, 0, 0, index))
         .toISOString()
         .replace(".000Z", ".123456Z"),
@@ -124,7 +127,8 @@ describe("sessions_list compact discovery projection", () => {
         nextCursor: null,
         orderBy: "createdAt",
         snapshotAt: "2026-07-18T01:00:00.654321Z",
-        updatedThrough: "2026-07-18T01:00:00.654321Z",
+        snapshotRevision: "0",
+        updatedThrough: null,
         updatedAfter: null,
       } as any,
       true,
@@ -178,6 +182,7 @@ describe("sessions_list compact discovery projection", () => {
             latestMessage: { type: "user.message", preview: "secret tail" },
             createdAt: "2026-07-18T00:00:00.000Z",
             updatedAt: "2026-07-18T00:00:00.000Z",
+            sortRevision: "0",
             sortAt: "2026-07-18T00:00:00.000001Z",
           },
         ],
@@ -186,7 +191,8 @@ describe("sessions_list compact discovery projection", () => {
         nextCursor: null,
         orderBy: "createdAt",
         snapshotAt: "2026-07-18T01:00:00.000001Z",
-        updatedThrough: "2026-07-18T01:00:00.000001Z",
+        snapshotRevision: "0",
+        updatedThrough: null,
         updatedAfter: null,
       } as any,
       false,
@@ -197,10 +203,12 @@ describe("sessions_list compact discovery projection", () => {
   test("round-trips versioned cursors, upgrades legacy cursors, and rejects tampering", () => {
     const cursor = {
       orderBy: "updatedAt" as const,
+      sortRevision: "42",
       sortAt: "2026-07-19T14:58:57.123456Z",
       id: uuid(9),
       snapshotAt: "2026-07-19T15:00:00.654321Z",
-      updatedAfter: "2026-07-19T14:00:00.000001Z",
+      snapshotRevision: "50",
+      updatedAfter: "12",
     };
     const encoded = encodeSessionDiscoveryCursor(cursor);
     expect(encoded).not.toContain("2026");
@@ -212,13 +220,15 @@ describe("sessions_list compact discovery projection", () => {
     ).toString("base64url");
     expect(decodeSessionDiscoveryCursor(legacy)).toEqual({
       orderBy: "createdAt",
+      sortRevision: "0",
       sortAt: cursor.sortAt,
       id: cursor.id,
       snapshotAt: cursor.sortAt,
+      snapshotRevision: "0",
       updatedAfter: null,
     });
     const incompatible = Buffer.from(
-      JSON.stringify({ v: 1, ...cursor, orderBy: "createdAt" }),
+      JSON.stringify({ v: 2, ...cursor, orderBy: "createdAt" }),
       "utf8",
     ).toString("base64url");
     expect(() => decodeSessionDiscoveryCursor(incompatible)).toThrow(

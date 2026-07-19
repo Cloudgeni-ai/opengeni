@@ -91,17 +91,21 @@ BEFORE INSERT OR UPDATE OF reason, actor, reason_original_bytes, actor_original_
 ON workspace_control_events
 FOR EACH ROW EXECUTE FUNCTION opengeni_private.bound_workspace_control_event();
 
--- Backfill historical rows through the newly installed trigger. The original
+-- Rewrite only historical rows that violate the new durable caps. Already
+-- bounded rows are safe to serve as-is and retain null metadata as the explicit
+-- rolling-upgrade legacy shape; avoiding a blanket UPDATE keeps installation
+-- work proportional to poison rows instead of table cardinality. The original
 -- counts are supplied in the same statement so truncation never erases truth.
 UPDATE workspace_control_events
 SET
   reason_original_bytes = CASE WHEN reason IS NULL THEN NULL ELSE octet_length(reason) END,
   actor_original_bytes = octet_length(actor),
   reason = reason,
-  actor = actor;
+  actor = actor
+WHERE octet_length(reason) > 8192
+   OR octet_length(actor) > 1024;
 
 ALTER TABLE workspace_control_events
-  ALTER COLUMN actor_original_bytes SET NOT NULL,
   ADD CONSTRAINT workspace_control_events_reason_bytes_check
     CHECK (reason IS NULL OR octet_length(reason) <= 8192) NOT VALID,
   ADD CONSTRAINT workspace_control_events_actor_bytes_check
@@ -111,11 +115,17 @@ ALTER TABLE workspace_control_events
       (reason IS NULL AND reason_original_bytes IS NULL)
       OR (
         reason IS NOT NULL
-        AND reason_original_bytes >= octet_length(reason)
+        AND (
+          reason_original_bytes IS NULL
+          OR reason_original_bytes >= octet_length(reason)
+        )
       )
     ) NOT VALID,
   ADD CONSTRAINT workspace_control_events_actor_original_bytes_check
-    CHECK (actor_original_bytes >= octet_length(actor)) NOT VALID;
+    CHECK (
+      actor_original_bytes IS NULL
+      OR actor_original_bytes >= octet_length(actor)
+    ) NOT VALID;
 
 ALTER TABLE workspace_control_events
   VALIDATE CONSTRAINT workspace_control_events_reason_bytes_check,

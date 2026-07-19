@@ -271,8 +271,10 @@ and PTY deltas, uses `summary` payloads, and returns exact covered-sequence and
 continuation facts. Type filters and the `control`, `terminal`, `failure`,
 `checkpoint`, `tool_receipt`, and `provider_account` semantic classes share one
 union-then-subtract algebra; explicit exclusions win, while an explicit include
-can opt a type back in from the monitoring defaults. `latest` performs a typed
-newest lookup rather than replaying intermediates. Explicit forensic REST/SDK
+can opt a type back in from the monitoring defaults. `latest` is instead an
+exclusive typed newest lookup: it cannot be combined with include/exclude type
+or class filters, so its requested class cannot be unioned away or subtracted.
+Explicit forensic REST/SDK
 pages can return the exact retained audit projection, but remain count/byte
 bounded and cannot recover source bytes that the audit boundary omitted. The
 MCP result is separately capped to 64 KiB of exact pretty-printed JSON and never
@@ -280,21 +282,34 @@ advances a cursor over an event it did not return.
 
 Session discovery is a separate compact monitoring projection, not a list of
 full session rows. `sessions_list` defaults to deterministic descending
-`(created_at, id)` order and can instead use descending `(updated_at, id)`
-order. Both paths use opaque, versioned, snapshot-bound keyset cursors and their
-matching workspace/timestamp/id indexes. An updated-order first page returns
-`updatedThrough`; a later incremental scan passes that value as
-`updatedAfter`, so a row that moves beyond the old snapshot is deliberately
-handed to the next scan rather than duplicated in the old traversal. These are
-timestamp watermarks, not a global commit sequence. Known targets should be
+`(created_at, id)` order and can instead use the durable descending
+`(activity_revision, updated_at, id)` activity order. `updated_at` is the
+display/keyset suffix, not the snapshot clock. Revision zero is the untouched
+legacy bucket and still traverses by exact PostgreSQL timestamp/UUID suffix.
+Both paths use opaque, versioned, snapshot-bound keyset cursors and matching
+workspace-prefixed indexes. For updated order the first-page transaction takes
+workspace inference-control `FOR SHARE`, then the workspace activity counter
+`FOR SHARE`, and reads session rows with ordinary MVCC. Control-aware semantic
+writers use workspace control → UUID-sorted session rows → counter; inserts and
+direct writers may omit the control/session prefix but never acquire those
+locks after the counter. Holding the counter fence makes every later activity
+receive a strictly greater transactional revision. The page returns that
+decimal revision as `updatedThrough`; the next incremental scan passes it as
+`updatedAfter`, so application-clock timestamps, equal timestamps, inserts,
+and repeated updates cannot create a handoff gap. The one-row counter is touched
+only for semantic monitoring activity, not raw deltas. Known targets should be
 read with exact-ID `session_get`, whose model-facing projection independently
-bounds every aggregate and the complete pretty-printed response to 64 KiB;
-the REST session detail contract remains unchanged.
+bounds every aggregate and the complete pretty-printed response to 64 KiB; the
+REST session detail contract remains unchanged.
 
-`sessions.updated_at` is canonical monitoring activity, not stream volume. A
-batch containing only raw message, reasoning, sandbox-command-output, or PTY
-deltas advances `last_sequence` but does not advance `updated_at`. A semantic
-event or explicit session mutation advances both as applicable. This keeps
+`sessions.updated_at` records semantic monitoring activity time, while
+`sessions.activity_revision` is its transactional monotonic ordering fact; raw
+stream volume advances neither. A batch containing only raw message, reasoning,
+sandbox-command-output, or PTY
+deltas advances `last_sequence` but does not advance `updated_at` or
+`activity_revision`. A semantic event or explicit session mutation advances
+the timestamp and transactionally allocates the workspace's next activity
+revision as applicable. This keeps
 updated-order discovery useful even while a productive session emits a large
 raw token or terminal stream; `session_events` remains the exact sequenced
 audit path for those retained previews.

@@ -66,6 +66,7 @@ import * as schema from "../src/schema";
 import { and, eq } from "drizzle-orm";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import { boundModelToolOutputItem } from "@opengeni/codex";
+import postgres from "postgres";
 
 let shared: SharedTestDatabase;
 let client: ReturnType<typeof createDb>;
@@ -324,11 +325,23 @@ describe("clean session control plane", () => {
       );
     }
     const exactEqualTimestamp = "2020-01-02T03:04:05.123456Z";
-    await shared.admin`
-      update sessions
-      set created_at = ${exactEqualTimestamp}::text::timestamptz,
-          updated_at = ${exactEqualTimestamp}::text::timestamptz
-      where workspace_id = ${grant.workspaceId!}`;
+    // Preserve a representative legacy revision-zero bucket so the timestamp/id
+    // suffix remains fully covered after the rolling migration.
+    await shared.admin.unsafe(
+      "alter table sessions disable trigger sessions_assign_activity_revision",
+    );
+    try {
+      await shared.admin`
+        update sessions
+        set created_at = ${exactEqualTimestamp}::text::timestamptz,
+            updated_at = ${exactEqualTimestamp}::text::timestamptz,
+            activity_revision = 0
+        where workspace_id = ${grant.workspaceId!}`;
+    } finally {
+      await shared.admin.unsafe(
+        "alter table sessions enable trigger sessions_assign_activity_revision",
+      );
+    }
 
     const expectedEqualOrder = sessions
       .map((session) => session.id)
@@ -353,7 +366,9 @@ describe("clean session control plane", () => {
       createdCursor = page.nextCursor ?? undefined;
       if (createdCursor) {
         expect(createdCursor.sortAt).toBe(exactEqualTimestamp);
+        expect(createdCursor.sortRevision).toBe("0");
         expect(createdCursor.snapshotAt).toBe(page.snapshotAt);
+        expect(createdCursor.snapshotRevision).toBe("0");
       }
     } while (createdCursor);
     expect(createdIds).toEqual(expectedEqualOrder);
@@ -366,6 +381,7 @@ describe("clean session control plane", () => {
       expectedEqualOrder.slice(0, 2),
     );
     expect(firstUpdatedPage.nextCursor?.sortAt).toBe(exactEqualTimestamp);
+    expect(firstUpdatedPage.nextCursor?.sortRevision).toBe("0");
     const movedId = expectedEqualOrder.at(-1)!;
     const newcomer = await createSession(client.db, {
       accountId: grant.accountId,
@@ -394,6 +410,7 @@ describe("clean session control plane", () => {
         cursor: oldCursor,
       });
       expect(page.snapshotAt).toBe(firstUpdatedPage.snapshotAt);
+      expect(page.snapshotRevision).toBe(firstUpdatedPage.snapshotRevision);
       for (const session of page.sessions) {
         expect(oldTraversalIds).not.toContain(session.id);
         oldTraversalIds.push(session.id);
@@ -411,7 +428,7 @@ describe("clean session control plane", () => {
       const page = await listSessionDiscoverySummaries(client.db, grant.workspaceId!, {
         limit: 1,
         orderBy: "updatedAt",
-        updatedAfter: firstUpdatedPage.updatedThrough,
+        updatedAfter: firstUpdatedPage.updatedThrough!,
         ...(changedCursor ? { cursor: changedCursor } : {}),
       });
       expect(page.updatedAfter).toBe(firstUpdatedPage.updatedThrough);
@@ -429,9 +446,248 @@ describe("clean session control plane", () => {
       listSessionDiscoverySummaries(client.db, grant.workspaceId!, {
         limit: 1,
         orderBy: "createdAt",
-        updatedAfter: firstUpdatedPage.updatedThrough,
+        updatedAfter: firstUpdatedPage.updatedThrough!,
       }),
     ).rejects.toThrow("updatedAfter requires orderBy=updatedAt");
+  });
+
+  test("session discovery cannot lose rows that cross a timestamp cursor below the returned watermark", async () => {
+    const { grant, session: newest } = await fixture();
+    const second = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      initialMessage: "revision-second",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    const third = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      initialMessage: "revision-third",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    const moved = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      initialMessage: "revision-moved",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+
+    // A revision-aware schema installs this trigger. Disable it only while
+    // constructing the reviewer's historical 10/9/8/5 ordering; the actual
+    // concurrent writes below run through the production trigger.
+    const [activityTrigger] = await shared.admin<Array<{ present: boolean }>>`
+      select exists (
+        select 1 from pg_trigger
+        where tgrelid = 'sessions'::regclass
+          and tgname = 'sessions_assign_activity_revision'
+          and not tgisinternal
+      ) as present`;
+    if (activityTrigger?.present) {
+      await shared.admin.unsafe(
+        "alter table sessions disable trigger sessions_assign_activity_revision",
+      );
+    }
+    try {
+      const [activityColumn] = await shared.admin<Array<{ present: boolean }>>`
+        select exists (
+          select 1 from information_schema.columns
+          where table_schema = current_schema()
+            and table_name = 'sessions'
+            and column_name = 'activity_revision'
+        ) as present`;
+      if (activityColumn?.present) {
+        await shared.admin`
+          update sessions
+          set updated_at = case id
+                when ${newest.id} then '2020-01-01T00:00:10Z'::timestamptz
+                when ${second.id} then '2020-01-01T00:00:09Z'::timestamptz
+                when ${third.id} then '2020-01-01T00:00:08Z'::timestamptz
+                when ${moved.id} then '2020-01-01T00:00:05Z'::timestamptz
+              end,
+              activity_revision = 0
+          where workspace_id = ${grant.workspaceId!}`;
+      } else {
+        await shared.admin`
+          update sessions
+          set updated_at = case id
+                when ${newest.id} then '2020-01-01T00:00:10Z'::timestamptz
+                when ${second.id} then '2020-01-01T00:00:09Z'::timestamptz
+                when ${third.id} then '2020-01-01T00:00:08Z'::timestamptz
+                when ${moved.id} then '2020-01-01T00:00:05Z'::timestamptz
+              end
+          where workspace_id = ${grant.workspaceId!}`;
+      }
+    } finally {
+      if (activityTrigger?.present) {
+        await shared.admin.unsafe(
+          "alter table sessions enable trigger sessions_assign_activity_revision",
+        );
+      }
+    }
+
+    const firstPage = await listSessionDiscoverySummaries(client.db, grant.workspaceId!, {
+      limit: 2,
+      orderBy: "updatedAt",
+    });
+    expect(firstPage.sessions.map((session) => session.id)).toEqual([newest.id, second.id]);
+
+    // This is the exact missed-row shape from the independent review: an
+    // unvisited 5 moves above the 9 cursor but remains far below the old
+    // timestamp watermark. Repeat the same timestamp to prove equal clocks do
+    // not collapse two semantic updates into one ordering fact.
+    const [firstMove] = await shared.admin<Array<{ activityRevision: string }>>`
+      update sessions set updated_at = '2020-01-01T00:00:09.5Z'::timestamptz
+      where workspace_id = ${grant.workspaceId!} and id = ${moved.id}
+      returning activity_revision::text as "activityRevision"`;
+    const [repeatedMove] = await shared.admin<Array<{ activityRevision: string }>>`
+      update sessions set updated_at = '2020-01-01T00:00:09.5Z'::timestamptz
+      where workspace_id = ${grant.workspaceId!} and id = ${moved.id}
+      returning activity_revision::text as "activityRevision"`;
+    expect(BigInt(repeatedMove!.activityRevision)).toBeGreaterThan(
+      BigInt(firstMove!.activityRevision),
+    );
+    await shared.admin`
+      update sessions set updated_at = '2020-01-01T00:00:09.5Z'::timestamptz
+      where workspace_id = ${grant.workspaceId!} and id = ${third.id}`;
+    const inserted = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      initialMessage: "revision-inserted",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    await shared.admin`
+      update sessions set updated_at = '2020-01-01T00:00:09.5Z'::timestamptz
+      where workspace_id = ${grant.workspaceId!} and id = ${inserted.id}`;
+
+    const oldTraversalIds = firstPage.sessions.map((session) => session.id);
+    let oldCursor = firstPage.nextCursor ?? undefined;
+    while (oldCursor) {
+      const page = await listSessionDiscoverySummaries(client.db, grant.workspaceId!, {
+        limit: 2,
+        orderBy: "updatedAt",
+        cursor: oldCursor,
+      });
+      oldTraversalIds.push(...page.sessions.map((session) => session.id));
+      oldCursor = page.nextCursor ?? undefined;
+    }
+
+    const changedIds: string[] = [];
+    let changedCursor: Parameters<typeof listSessionDiscoverySummaries>[2]["cursor"];
+    do {
+      const page = await listSessionDiscoverySummaries(client.db, grant.workspaceId!, {
+        limit: 1,
+        orderBy: "updatedAt",
+        updatedAfter: firstPage.updatedThrough!,
+        ...(changedCursor ? { cursor: changedCursor } : {}),
+      });
+      changedIds.push(...page.sessions.map((session) => session.id));
+      changedCursor = page.nextCursor ?? undefined;
+    } while (changedCursor);
+
+    const allSeen = [...oldTraversalIds, ...changedIds];
+    expect(new Set(allSeen)).toEqual(
+      new Set([newest.id, second.id, third.id, moved.id, inserted.id]),
+    );
+    expect(allSeen).toHaveLength(new Set(allSeen).size);
+    expect(new Set(changedIds)).toEqual(new Set([third.id, moved.id, inserted.id]));
+  });
+
+  test("the first-page revision fence blocks semantic activity without blocking raw deltas", async () => {
+    const { grant, session } = await fixture();
+    const reader = postgres(shared.adminUrl, { max: 1 });
+    const writer = postgres(shared.adminUrl, { max: 1 });
+    let readerTransactionOpen = true;
+    await reader.unsafe("begin");
+    try {
+      // This is the exact lock prefix used by an updated-order first page.
+      await reader`
+        select workspace_id
+        from workspace_inference_controls
+        where workspace_id = ${grant.workspaceId!}
+        for share`;
+      await reader`
+        insert into workspace_session_activity_revisions (
+          workspace_id, account_id, revision
+        ) values (${grant.workspaceId!}, ${grant.accountId}, 0)
+        on conflict (workspace_id) do nothing`;
+      const [fence] = await reader<Array<{ revision: string }>>`
+        select revision::text as revision
+        from workspace_session_activity_revisions
+        where workspace_id = ${grant.workspaceId!}
+        for share`;
+      expect(fence).toBeDefined();
+
+      // Raw stream volume omits updated_at/activity_revision, so it never
+      // contends on the activity counter even while the snapshot fence is held.
+      const [rawDelta] = await writer<Array<{ lastSequence: number }>>`
+        update sessions
+        set last_sequence = last_sequence + 1
+        where workspace_id = ${grant.workspaceId!} and id = ${session.id}
+        returning last_sequence as "lastSequence"`;
+      expect(rawDelta?.lastSequence).toBe(1);
+
+      // A semantic/direct writer mentions updated_at, reaches the trigger after
+      // locking the session, and must wait rather than committing at or below
+      // the already returned fence.
+      await writer.unsafe("set lock_timeout = '100ms'");
+      let lockError: unknown;
+      try {
+        await writer`
+          update sessions
+          set updated_at = clock_timestamp()
+          where workspace_id = ${grant.workspaceId!} and id = ${session.id}`;
+      } catch (error) {
+        lockError = error;
+      }
+      expect((lockError as { code?: string } | undefined)?.code).toBe("55P03");
+
+      await reader.unsafe("commit");
+      readerTransactionOpen = false;
+      await writer.unsafe("set lock_timeout = '0'");
+      const [semantic] = await writer<Array<{ activityRevision: string }>>`
+        update sessions
+        set updated_at = clock_timestamp()
+        where workspace_id = ${grant.workspaceId!} and id = ${session.id}
+        returning activity_revision::text as "activityRevision"`;
+      expect(BigInt(semantic!.activityRevision)).toBeGreaterThan(BigInt(fence!.revision));
+    } finally {
+      if (readerTransactionOpen) {
+        await reader.unsafe("rollback").catch(() => undefined);
+      }
+      await Promise.all([reader.end().catch(() => undefined), writer.end().catch(() => undefined)]);
+    }
+  });
+
+  test("workspace activity counters remain tenant-isolated under forced RLS", async () => {
+    const first = await fixture();
+    const second = await fixture();
+    await listSessionDiscoverySummaries(client.db, first.grant.workspaceId!, {
+      limit: 1,
+      orderBy: "updatedAt",
+    });
+    await listSessionDiscoverySummaries(client.db, second.grant.workspaceId!, {
+      limit: 1,
+      orderBy: "updatedAt",
+    });
+
+    const visible = await withWorkspaceRls(client.db, first.grant.workspaceId!, (scopedDb) =>
+      scopedDb
+        .select({ workspaceId: schema.workspaceSessionActivityRevisions.workspaceId })
+        .from(schema.workspaceSessionActivityRevisions),
+    );
+    expect(visible).toEqual([{ workspaceId: first.grant.workspaceId! }]);
   });
 
   test("session monitoring traversal uses both composite keyset indexes", async () => {
@@ -448,8 +704,11 @@ describe("clean session control plane", () => {
         statement_timestamp() - make_interval(secs => 5001 - n)
       from generate_series(1, 5000) as generated(n)`;
     await shared.admin`analyze sessions`;
-    const [cursor] = await shared.admin<Array<{ id: string; createdAt: Date; updatedAt: Date }>>`
-      select id, created_at as "createdAt", updated_at as "updatedAt"
+    const [cursor] = await shared.admin<
+      Array<{ id: string; createdAt: Date; updatedAt: Date; activityRevision: string }>
+    >`
+      select id, created_at as "createdAt", updated_at as "updatedAt",
+        activity_revision::text as "activityRevision"
       from sessions where workspace_id = ${grant.workspaceId!}
       order by created_at desc, id desc offset 2500 limit 1`;
     expect(cursor).toBeDefined();
@@ -470,17 +729,23 @@ describe("clean session control plane", () => {
         explain (format json, costs off)
         select id from sessions
         where workspace_id = ${grant.workspaceId!}
-          and updated_at > '2000-01-01T00:00:00Z'::timestamptz
-          and updated_at <= statement_timestamp()
+          and activity_revision > 0
+          and activity_revision <= 1000000
           and (
-            updated_at < ${cursor!.updatedAt}
-            or (updated_at = ${cursor!.updatedAt} and id < ${cursor!.id})
+            activity_revision < ${cursor!.activityRevision}::text::bigint
+            or (
+              activity_revision = ${cursor!.activityRevision}::text::bigint
+              and (
+                updated_at < ${cursor!.updatedAt}
+                or (updated_at = ${cursor!.updatedAt} and id < ${cursor!.id})
+              )
+            )
           )
-        order by updated_at desc, id desc limit 20`;
+        order by activity_revision desc, updated_at desc, id desc limit 20`;
       return { created, updated };
     });
     expect(JSON.stringify(plans.created)).toContain("sessions_workspace_created_id_idx");
-    expect(JSON.stringify(plans.updated)).toContain("sessions_workspace_updated_id_idx");
+    expect(JSON.stringify(plans.updated)).toContain("sessions_workspace_activity_revision_idx");
   });
 
   test("raw delta writers advance sequence without advancing monitoring activity", async () => {
@@ -496,9 +761,12 @@ describe("clean session control plane", () => {
         where workspace_id = ${workspaceId} and id = ${sessionId}`;
     };
     const activity = async (workspaceId: string, sessionId: string) => {
-      const [row] = await shared.admin<Array<{ lastSequence: number; updatedAt: string }>>`
+      const [row] = await shared.admin<
+        Array<{ lastSequence: number; updatedAt: string; activityRevision: string }>
+      >`
         select last_sequence as "lastSequence",
-          to_char(updated_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "updatedAt"
+          to_char(updated_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "updatedAt",
+          activity_revision::text as "activityRevision"
         from sessions where workspace_id = ${workspaceId} and id = ${sessionId}`;
       return row!;
     };
@@ -515,12 +783,15 @@ describe("clean session control plane", () => {
     expect(await activity(generic.grant.workspaceId!, generic.session.id)).toEqual({
       lastSequence: genericBefore.lastSequence + SESSION_EVENT_RAW_DELTA_TYPES.length,
       updatedAt: baseline,
+      activityRevision: genericBefore.activityRevision,
     });
     await appendSessionEvents(client.db, generic.grant.workspaceId!, generic.session.id, [
       { type: "agent.message.completed", payload: { text: "semantic" } },
     ]);
-    expect((await activity(generic.grant.workspaceId!, generic.session.id)).updatedAt).not.toBe(
-      baseline,
+    const genericSemantic = await activity(generic.grant.workspaceId!, generic.session.id);
+    expect(genericSemantic.updatedAt).not.toBe(baseline);
+    expect(BigInt(genericSemantic.activityRevision)).toBeGreaterThan(
+      BigInt(genericBefore.activityRevision),
     );
 
     const attempt = await fixture();
@@ -552,6 +823,7 @@ describe("clean session control plane", () => {
     expect(await activity(attempt.grant.workspaceId!, attempt.session.id)).toEqual({
       lastSequence: attemptBefore.lastSequence + SESSION_EVENT_RAW_DELTA_TYPES.length,
       updatedAt: baseline,
+      activityRevision: attemptBefore.activityRevision,
     });
     await appendSessionEventsForTurnAttempt(
       client.db,
@@ -562,8 +834,10 @@ describe("clean session control plane", () => {
       attemptId,
       [{ type: "agent.message.completed", payload: { text: "semantic" } }],
     );
-    expect((await activity(attempt.grant.workspaceId!, attempt.session.id)).updatedAt).not.toBe(
-      baseline,
+    const attemptSemantic = await activity(attempt.grant.workspaceId!, attempt.session.id);
+    expect(attemptSemantic.updatedAt).not.toBe(baseline);
+    expect(BigInt(attemptSemantic.activityRevision)).toBeGreaterThan(
+      BigInt(attemptBefore.activityRevision),
     );
 
     const grouped = await fixture();
@@ -578,6 +852,7 @@ describe("clean session control plane", () => {
     expect(await activity(grouped.grant.workspaceId!, grouped.session.id)).toEqual({
       lastSequence: groupedBefore.lastSequence + 1,
       updatedAt: baseline,
+      activityRevision: groupedBefore.activityRevision,
     });
 
     const updated = await fixture();
@@ -593,6 +868,7 @@ describe("clean session control plane", () => {
     expect(await activity(updated.grant.workspaceId!, updated.session.id)).toEqual({
       lastSequence: updatedBefore.lastSequence + 1,
       updatedAt: baseline,
+      activityRevision: updatedBefore.activityRevision,
     });
     await appendSessionEventsAndUpdateSession(
       client.db,
@@ -601,8 +877,10 @@ describe("clean session control plane", () => {
       [rawDeltas()[0]!],
       { metadata: { activity: "explicit mutation" } },
     );
-    expect((await activity(updated.grant.workspaceId!, updated.session.id)).updatedAt).not.toBe(
-      baseline,
+    const updatedSemantic = await activity(updated.grant.workspaceId!, updated.session.id);
+    expect(updatedSemantic.updatedAt).not.toBe(baseline);
+    expect(BigInt(updatedSemantic.activityRevision)).toBeGreaterThan(
+      BigInt(updatedBefore.activityRevision),
     );
 
     const locked = await fixture();
@@ -617,6 +895,7 @@ describe("clean session control plane", () => {
     expect(await activity(locked.grant.workspaceId!, locked.session.id)).toEqual({
       lastSequence: lockedBefore.lastSequence + 1,
       updatedAt: baseline,
+      activityRevision: lockedBefore.activityRevision,
     });
     await appendSessionEventsWithLockedSessionUpdate(
       client.db,
@@ -627,8 +906,10 @@ describe("clean session control plane", () => {
         update: { metadata: { activity: "explicit locked mutation" } },
       }),
     );
-    expect((await activity(locked.grant.workspaceId!, locked.session.id)).updatedAt).not.toBe(
-      baseline,
+    const lockedSemantic = await activity(locked.grant.workspaceId!, locked.session.id);
+    expect(lockedSemantic.updatedAt).not.toBe(baseline);
+    expect(BigInt(lockedSemantic.activityRevision)).toBeGreaterThan(
+      BigInt(lockedBefore.activityRevision),
     );
   });
 
