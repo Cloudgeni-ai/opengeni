@@ -8,6 +8,7 @@ const permissionGroupAssignments: Record<Permission, string> = {
   "sessions:create": "Sessions",
   "sessions:read": "Sessions",
   "sessions:control": "Sessions",
+  "events:ingest": "Sessions",
   "stream:view": "Sessions",
   "stream:control": "Sessions",
   "stream:acknowledge": "Sessions",

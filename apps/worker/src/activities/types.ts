@@ -4,11 +4,12 @@ import type {
   EntitlementsPort,
   ScheduledTaskTriggerType,
 } from "@opengeni/contracts";
-import type { Database } from "@opengeni/db";
+import type { Database, DurableWaitPeekRef } from "@opengeni/db";
 import type { DocumentServices } from "@opengeni/documents";
 import type { EventBus } from "@opengeni/events";
 import type { Observability } from "@opengeni/observability";
 import type { OpenGeniRuntime } from "@opengeni/runtime";
+import type { BackgroundJobExecutionProvider } from "@opengeni/runtime";
 import type { ObjectStorage } from "@opengeni/storage";
 
 // Signal (start-if-needed) a session's Temporal workflow so a queued turn it
@@ -36,6 +37,13 @@ export type SignalCodexCapacityWorkflow = (input: {
   wakeRevision: number;
 }) => Promise<void>;
 
+export type StartBackgroundJobWorkflow = (input: {
+  accountId: string;
+  workspaceId: string;
+  jobId: string;
+  workflowId: string;
+}) => Promise<void>;
+
 export type ActivityServices = {
   settings: Settings;
   db: Database;
@@ -47,6 +55,8 @@ export type ActivityServices = {
   wakeSessionWorkflow: WakeSessionWorkflowSignal | null;
   /** Revision-carrying capacity nudge; generic outbox repair is also sufficient. */
   signalCodexCapacityWorkflow?: SignalCodexCapacityWorkflow | null;
+  startBackgroundJobWorkflow?: StartBackgroundJobWorkflow | null;
+  backgroundJobProvider: BackgroundJobExecutionProvider;
   // §7.5 P3 — host-entitlements port, the WORKER half of the same seam the API
   // edge exposes on `AppDependencies`. When set, `ensureRunAllowed` (turn-entry
   // AND the mid-stream budget valve) delegates the funding decision to
@@ -107,6 +117,16 @@ export type ReconcileCodexCapacityWaitResult =
 
 export type ActivityDependencies = Partial<ActivityServices>;
 
+export type BackgroundJobControllerInput = {
+  accountId: string;
+  workspaceId: string;
+  jobId: string;
+};
+
+export type BackgroundJobControllerResult = {
+  status: "completed" | "failed" | "cancelled" | "lost";
+};
+
 export type RunAgentTurnInput = {
   accountId: string;
   workspaceId: string;
@@ -159,6 +179,18 @@ export type PeekSessionWorkInput = {
   workspaceId: string;
   sessionId: string;
 };
+
+export type ReconcileDurableWaitTimerInput = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  waitId: string;
+  cause: "deadline" | "reminder";
+};
+
+export type ReconcileDurableWaitTimerResult =
+  | { action: "reminded"; ref: DurableWaitPeekRef }
+  | { action: "resolved" | "stale" };
 
 export type MarkSessionIdleInput = {
   workspaceId: string;

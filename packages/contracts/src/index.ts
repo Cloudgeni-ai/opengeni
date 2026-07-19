@@ -443,6 +443,9 @@ export const Permission = z.enum([
   "sessions:create",
   "sessions:read",
   "sessions:control",
+  // Accept authenticated, idempotent events for durable wait_for_event
+  // boundaries. This is intentionally distinct from controlling a session.
+  "events:ingest",
   // Sandbox-surfacing (master-spine §C.3 / crosscut PART 1.2). stream:view is a
   // REAL, distinct permission — strictly BROADER than sessions:read — because the
   // pixel plane (Channel B) is UN-REDACTED: a viewer of raw pixels can see cloud
@@ -2225,6 +2228,317 @@ export type WorkspaceControlEvent = z.infer<typeof WorkspaceControlEvent>;
 export const SystemUpdateClassification = z.enum(["success", "failure", "action_required", "info"]);
 export type SystemUpdateClassification = z.infer<typeof SystemUpdateClassification>;
 
+export const DurableWaitKind = z.enum(["ask_user", "until", "event", "background_job"]);
+export type DurableWaitKind = z.infer<typeof DurableWaitKind>;
+
+export const DurableWaitOutcome = z.enum([
+  "answered",
+  "time_reached",
+  "event_received",
+  "completed",
+  "failed",
+  "cancelled",
+  "lost",
+  "timed_out",
+]);
+export type DurableWaitOutcome = z.infer<typeof DurableWaitOutcome>;
+
+export const DurableWaitState = z.enum(["waiting", "resolved"]);
+export type DurableWaitState = z.infer<typeof DurableWaitState>;
+
+export const DurableQuestionOption = z.object({
+  value: z.string().min(1).max(200),
+  label: z.string().min(1).max(500),
+});
+export type DurableQuestionOption = z.infer<typeof DurableQuestionOption>;
+
+const durableQuestionBase = {
+  id: z.string().min(1).max(128),
+  prompt: z.string().min(1).max(2_000),
+  description: z.string().max(4_000).optional(),
+  required: z.boolean().default(true),
+};
+
+export const DurableTextQuestion = z.object({
+  ...durableQuestionBase,
+  type: z.literal("text"),
+  placeholder: z.string().max(500).optional(),
+  minLength: z.number().int().nonnegative().optional(),
+  maxLength: z.number().int().positive().max(32_768).optional(),
+});
+export type DurableTextQuestion = z.infer<typeof DurableTextQuestion>;
+
+export const DurableSingleSelectQuestion = z.object({
+  ...durableQuestionBase,
+  type: z.literal("single_select"),
+  options: z.array(DurableQuestionOption).min(1).max(100),
+});
+export type DurableSingleSelectQuestion = z.infer<typeof DurableSingleSelectQuestion>;
+
+export const DurableMultiSelectQuestion = z.object({
+  ...durableQuestionBase,
+  type: z.literal("multi_select"),
+  options: z.array(DurableQuestionOption).min(1).max(100),
+  minSelections: z.number().int().nonnegative().optional(),
+  maxSelections: z.number().int().positive().max(100).optional(),
+});
+export type DurableMultiSelectQuestion = z.infer<typeof DurableMultiSelectQuestion>;
+
+export const DurableQuestion = z.discriminatedUnion("type", [
+  DurableTextQuestion,
+  DurableSingleSelectQuestion,
+  DurableMultiSelectQuestion,
+]);
+export type DurableQuestion = z.infer<typeof DurableQuestion>;
+
+export const AskUserRequest = z
+  .object({
+    requestKey: z.string().min(1).max(200),
+    title: z.string().min(1).max(500).optional(),
+    description: z.string().max(4_000).optional(),
+    questions: z.array(DurableQuestion).min(1).max(20),
+    timeoutAt: z.string().datetime({ offset: true }).optional(),
+    reminderIntervalSeconds: z
+      .number()
+      .int()
+      .positive()
+      .max(30 * 24 * 60 * 60)
+      .optional(),
+  })
+  .superRefine((input, ctx) => {
+    const ids = new Set<string>();
+    for (const [questionIndex, question] of input.questions.entries()) {
+      if (ids.has(question.id)) {
+        ctx.addIssue({
+          code: "custom",
+          message: `duplicate question id: ${question.id}`,
+          path: ["questions", questionIndex, "id"],
+        });
+      }
+      ids.add(question.id);
+      if (question.type === "text") {
+        if (
+          question.minLength !== undefined &&
+          question.maxLength !== undefined &&
+          question.minLength > question.maxLength
+        ) {
+          ctx.addIssue({
+            code: "custom",
+            message: "minLength must not exceed maxLength",
+            path: ["questions", questionIndex, "minLength"],
+          });
+        }
+        continue;
+      }
+      const values = new Set<string>();
+      for (const [optionIndex, option] of question.options.entries()) {
+        if (values.has(option.value)) {
+          ctx.addIssue({
+            code: "custom",
+            message: `duplicate option value: ${option.value}`,
+            path: ["questions", questionIndex, "options", optionIndex, "value"],
+          });
+        }
+        values.add(option.value);
+      }
+      if (question.type === "multi_select") {
+        if (
+          question.minSelections !== undefined &&
+          question.maxSelections !== undefined &&
+          question.minSelections > question.maxSelections
+        ) {
+          ctx.addIssue({
+            code: "custom",
+            message: "minSelections must not exceed maxSelections",
+            path: ["questions", questionIndex, "minSelections"],
+          });
+        }
+        if (
+          question.maxSelections !== undefined &&
+          question.maxSelections > question.options.length
+        ) {
+          ctx.addIssue({
+            code: "custom",
+            message: "maxSelections must not exceed the option count",
+            path: ["questions", questionIndex, "maxSelections"],
+          });
+        }
+      }
+    }
+  });
+export type AskUserRequest = z.infer<typeof AskUserRequest>;
+
+export const DurableAnswer = z.object({
+  questionId: z.string().min(1).max(128),
+  value: z.union([z.string().max(32_768), z.array(z.string().max(200)).max(100)]),
+});
+export type DurableAnswer = z.infer<typeof DurableAnswer>;
+
+export const ResolveAskUserRequest = z.discriminatedUnion("outcome", [
+  z.object({
+    outcome: z.literal("answered"),
+    answers: z.array(DurableAnswer).max(20),
+    clientEventId: SessionOperationKey,
+  }),
+  z.object({
+    outcome: z.literal("cancelled"),
+    reason: z.string().min(1).max(2_000).optional(),
+    clientEventId: SessionOperationKey,
+  }),
+]);
+export type ResolveAskUserRequest = z.infer<typeof ResolveAskUserRequest>;
+
+export const WaitUntilRequest = z.object({
+  requestKey: z.string().min(1).max(200),
+  until: z.string().datetime({ offset: true }),
+  description: z.string().max(4_000).optional(),
+});
+export type WaitUntilRequest = z.infer<typeof WaitUntilRequest>;
+
+export const WaitForEventRequest = z.object({
+  requestKey: z.string().min(1).max(200),
+  type: z.string().min(1).max(200),
+  correlationKey: z.string().min(1).max(500),
+  subject: z.string().min(1).max(500).optional(),
+  description: z.string().max(4_000).optional(),
+  timeoutAt: z.string().datetime({ offset: true }).optional(),
+});
+export type WaitForEventRequest = z.infer<typeof WaitForEventRequest>;
+
+export const DurableIngressEvent = z.object({
+  version: z.literal(1),
+  eventId: z.string().min(1).max(500),
+  type: z.string().min(1).max(200),
+  subject: z.string().min(1).max(500).optional(),
+  correlationKey: z.string().min(1).max(500),
+  occurredAt: z.string().datetime({ offset: true }),
+  payload: z.record(z.string(), z.unknown()).default({}),
+});
+export type DurableIngressEvent = z.infer<typeof DurableIngressEvent>;
+
+export const BackgroundJobProvider = z.enum(["modal"]);
+export type BackgroundJobProvider = z.infer<typeof BackgroundJobProvider>;
+
+export const BackgroundJobStatus = z.enum([
+  "queued",
+  "starting",
+  "running",
+  "cancelling",
+  "completed",
+  "failed",
+  "cancelled",
+  "lost",
+]);
+export type BackgroundJobStatus = z.infer<typeof BackgroundJobStatus>;
+
+export const BackgroundJobSpec = z.object({
+  command: z.string().min(1).max(32_768),
+  args: z.array(z.string().max(8_192)).max(256).default([]),
+  cwd: z.string().min(1).max(4_096).optional(),
+  artifactPaths: z.array(z.string().min(1).max(4_096)).max(32).default([]),
+  timeoutSeconds: z
+    .number()
+    .int()
+    .positive()
+    .max(30 * 24 * 60 * 60)
+    .optional(),
+  metadata: z.record(z.string(), z.unknown()).default({}),
+});
+export type BackgroundJobSpec = z.infer<typeof BackgroundJobSpec>;
+
+export const CreateBackgroundJobRequest = BackgroundJobSpec.extend({
+  sessionId: z.string().uuid(),
+  turnId: z.string().uuid().optional(),
+  provider: BackgroundJobProvider.default("modal"),
+  fireKey: z.string().min(1).max(200).optional(),
+});
+export type CreateBackgroundJobRequest = z.infer<typeof CreateBackgroundJobRequest>;
+
+export const DurableWait = z.object({
+  id: z.string().uuid(),
+  sessionId: z.string().uuid(),
+  originTurnId: z.string().uuid().nullable(),
+  kind: DurableWaitKind,
+  requestKey: z.string().min(1),
+  state: DurableWaitState,
+  outcome: DurableWaitOutcome.nullable(),
+  request: z.record(z.string(), z.unknown()),
+  wakeAt: z.string().nullable(),
+  nextReminderAt: z.string().nullable(),
+  reminderSequence: z.number().int().nonnegative(),
+  backgroundJobId: z.string().uuid().nullable(),
+  createdAt: z.string(),
+  resolvedAt: z.string().nullable(),
+});
+export type DurableWait = z.infer<typeof DurableWait>;
+
+export const BackgroundJob = z.object({
+  id: z.string().uuid(),
+  accountId: z.string().uuid(),
+  workspaceId: z.string().uuid(),
+  originSessionId: z.string().uuid(),
+  originTurnId: z.string().uuid().nullable(),
+  waitId: z.string().uuid().nullable(),
+  provider: BackgroundJobProvider,
+  spec: BackgroundJobSpec,
+  fireKey: z.string(),
+  status: BackgroundJobStatus,
+  providerRef: z.string().nullable(),
+  providerInstanceId: z.string().nullable(),
+  startCount: z.number().int().nonnegative(),
+  cancelRequestedAt: z.string().nullable(),
+  exitCode: z.number().int().nullable(),
+  error: z.string().nullable(),
+  startedAt: z.string().nullable(),
+  finishedAt: z.string().nullable(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type BackgroundJob = z.infer<typeof BackgroundJob>;
+
+export const BackgroundJobLog = z.object({
+  jobId: z.string().uuid(),
+  attemptId: z.string().uuid().nullable(),
+  sequence: z.number().int().positive(),
+  providerOffset: z.number().int().nonnegative(),
+  stream: z.enum(["stdout", "stderr", "system"]),
+  text: z.string(),
+  occurredAt: z.string(),
+});
+export type BackgroundJobLog = z.infer<typeof BackgroundJobLog>;
+
+export const BackgroundJobArtifact = z.object({
+  id: z.string().uuid(),
+  jobId: z.string().uuid(),
+  path: z.string(),
+  filename: z.string(),
+  contentType: z.string(),
+  sizeBytes: z.number().int().nonnegative(),
+  sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  storageKey: z.string(),
+  createdAt: z.string(),
+});
+export type BackgroundJobArtifact = z.infer<typeof BackgroundJobArtifact>;
+
+export const ScheduledOccurrence = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("durable_wait"),
+    waitId: z.string().uuid(),
+    waitKind: z.enum(["until", "event"]),
+    outcome: z.enum(["time_reached", "event_received", "cancelled", "timed_out"]),
+    requestKey: z.string().min(1),
+  }),
+  z.object({
+    type: z.literal("background_job_terminal"),
+    waitId: z.string().uuid(),
+    jobId: z.string().uuid(),
+    status: z.enum(["completed", "failed", "cancelled", "lost"]),
+    exitCode: z.number().int().nullable().optional(),
+    error: z.string().nullable().optional(),
+  }),
+]);
+export type ScheduledOccurrence = z.infer<typeof ScheduledOccurrence>;
+
 export const SessionSystemUpdateKind = z.enum([
   "scheduled_occurrence",
   "goal_continuation",
@@ -2234,7 +2548,7 @@ export const SessionSystemUpdateKind = z.enum([
 ]);
 export type SessionSystemUpdateKind = z.infer<typeof SessionSystemUpdateKind>;
 
-export const SessionSystemUpdatePayload = z.discriminatedUnion("type", [
+export const ScheduledOccurrencePayload = z.union([
   z
     .object({
       type: z.literal("scheduled_occurrence"),
@@ -2245,6 +2559,17 @@ export const SessionSystemUpdatePayload = z.discriminatedUnion("type", [
       tools: z.array(ToolRef).optional(),
     })
     .passthrough(),
+  z
+    .object({
+      type: z.literal("scheduled_occurrence"),
+      occurrence: ScheduledOccurrence,
+    })
+    .passthrough(),
+]);
+export type ScheduledOccurrencePayload = z.infer<typeof ScheduledOccurrencePayload>;
+
+export const SessionSystemUpdatePayload = z.union([
+  ScheduledOccurrencePayload,
   z
     .object({
       type: z.literal("goal_continuation"),
@@ -3412,6 +3737,10 @@ export const SessionEventType = z.enum([
   "session.queue.changed",
   "session.queue.prompt.cancelled",
   "session.queue.history",
+  // OPE-20 ask_user reminder. Metadata-only audit/UI notification: it never
+  // enters the prompt queue or the closed internal-update union and therefore
+  // never starts inference by itself.
+  "session.wait.reminder",
   // A terminal/stale activity callback is retained as an audit wrapper rather
   // than being dropped or emitted as though it belonged to the current turn.
   "turn.event.rejected_late",

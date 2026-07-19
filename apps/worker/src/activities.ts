@@ -3,7 +3,7 @@ import { createDb } from "@opengeni/db";
 import { createDocumentServices } from "@opengeni/documents";
 import { createNatsEventBus } from "@opengeni/events";
 import { createObservability } from "@opengeni/observability";
-import { createProductionAgentRuntime } from "@opengeni/runtime";
+import { createModalBackgroundJobProvider, createProductionAgentRuntime } from "@opengeni/runtime";
 import { createObjectStorage } from "@opengeni/storage";
 import { createRunAgentTurnActivity } from "./activities/agent-turn";
 import { createCodexCapacityActivities } from "./activities/codex-capacity";
@@ -14,8 +14,10 @@ import { createSandboxLeaseActivities } from "./activities/sandbox-lease";
 import { createScheduledTaskActivities } from "./activities/scheduled-tasks";
 import { createSessionStateActivities } from "./activities/session-state";
 import { createWorkflowWakeActivities } from "./activities/workflow-wake";
+import { createBackgroundJobActivities } from "./activities/background-jobs";
 import { createRigVerificationActivities } from "./activities/rig-verification";
 import type { ActivityDependencies, ActivityServices } from "./activities/types";
+export type { DurableWaitPeekRef } from "@opengeni/db";
 import {
   observabilityEventLogger,
   runtimeMetricsHooksForObservability,
@@ -34,6 +36,10 @@ export type {
   ReconcileCodexCapacityWaitResult,
   RecoverDispatchInput,
   RecoverDispatchResult,
+  ReconcileDurableWaitTimerInput,
+  ReconcileDurableWaitTimerResult,
+  BackgroundJobControllerInput,
+  BackgroundJobControllerResult,
   RunAgentTurnInput,
   RunAgentTurnResult,
 } from "./activities/types";
@@ -98,6 +104,9 @@ function createActivityServices(
         observability,
         wakeSessionWorkflow: dependencies.wakeSessionWorkflow ?? null,
         signalCodexCapacityWorkflow: dependencies.signalCodexCapacityWorkflow ?? null,
+        startBackgroundJobWorkflow: dependencies.startBackgroundJobWorkflow ?? null,
+        backgroundJobProvider:
+          dependencies.backgroundJobProvider ?? createModalBackgroundJobProvider(settings),
         // §7.5 P3 — host-entitlements port. No constructed default: standalone
         // has no host meter, so unset → null → `ensureRunAllowed` reads the
         // local ledger exactly as today (mirrors `wakeSessionWorkflow`'s
@@ -127,6 +136,7 @@ function controlActivities(services: () => Promise<ActivityServices>) {
     ...createRigVerificationActivities(services),
     ...createFileUploadReaperActivities(services),
     ...createWorkflowWakeActivities(services),
+    ...createBackgroundJobActivities(services),
     // P1.3: the SOLE liveness/GC/cost-stop driver. Only reapSandboxLeases — no
     // *ForViewer activities, no ownerHeartbeat, no resolveOwnerTaskQueue.
     ...createSandboxLeaseActivities(services),
@@ -156,6 +166,7 @@ export const failSessionAttempt = defaultControlActivities.failSessionAttempt;
 export const settleSessionInterruptions = defaultControlActivities.settleSessionInterruptions;
 export const recoverDispatch = defaultControlActivities.recoverDispatch;
 export const peekSessionWork = defaultControlActivities.peekSessionWork;
+export const reconcileDurableWaitTimer = defaultControlActivities.reconcileDurableWaitTimer;
 export const markSessionIdle = defaultControlActivities.markSessionIdle;
 export const dispatchScheduledTaskRun = defaultControlActivities.dispatchScheduledTaskRun;
 export const enqueueGoalRetryWake = defaultControlActivities.enqueueGoalRetryWake;
@@ -165,5 +176,8 @@ export const reconcileCodexCapacityWait = defaultControlActivities.reconcileCode
 export const reapSandboxLeases = defaultControlActivities.reapSandboxLeases;
 export const reapExpiredFileUploads = defaultControlActivities.reapExpiredFileUploads;
 export const dispatchSessionWorkflowWakes = defaultControlActivities.dispatchSessionWorkflowWakes;
+export const dispatchBackgroundJobControllers =
+  defaultControlActivities.dispatchBackgroundJobControllers;
+export const runBackgroundJobController = defaultControlActivities.runBackgroundJobController;
 export const verifyRigChange = defaultControlActivities.verifyRigChange;
 export const verifyRigVersion = defaultControlActivities.verifyRigVersion;

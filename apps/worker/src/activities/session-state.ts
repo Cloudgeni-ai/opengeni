@@ -1,4 +1,8 @@
 import {
+  advanceAskUserReminder,
+  getDurableWait,
+  resolveAskUserWait,
+  resolvePassiveDurableWait,
   settleSessionAttemptInterruptions,
   applySessionTurnSettlement,
   recoverSessionDispatch,
@@ -18,6 +22,8 @@ import type {
   FailSessionAttemptInput,
   SettleSessionInterruptionsInput,
   MarkSessionIdleInput,
+  ReconcileDurableWaitTimerInput,
+  ReconcileDurableWaitTimerResult,
   RecoverDispatchInput,
   RecoverDispatchResult,
 } from "./types";
@@ -36,6 +42,10 @@ export type SessionStateActivityOverrides = Partial<{
   deliverFailedChildTurnToParent: typeof deliverFailedChildTurnToParent;
   notifyParentOfChildIdle: typeof notifyParentOfChildIdle;
   recordTurnsQueuedGauge: typeof recordTurnsQueuedGauge;
+  advanceAskUserReminder: typeof advanceAskUserReminder;
+  getDurableWait: typeof getDurableWait;
+  resolveAskUserWait: typeof resolveAskUserWait;
+  resolvePassiveDurableWait: typeof resolvePassiveDurableWait;
 }>;
 
 // Crash-loop guard for worker-death re-dispatch: a turn that takes a worker
@@ -66,6 +76,11 @@ export function createSessionStateActivities(
     overrides.deliverFailedChildTurnToParent ?? deliverFailedChildTurnToParent;
   const notifyParentOfChildIdleFn = overrides.notifyParentOfChildIdle ?? notifyParentOfChildIdle;
   const recordTurnsQueuedGaugeFn = overrides.recordTurnsQueuedGauge ?? recordTurnsQueuedGauge;
+  const advanceAskUserReminderFn = overrides.advanceAskUserReminder ?? advanceAskUserReminder;
+  const getDurableWaitFn = overrides.getDurableWait ?? getDurableWait;
+  const resolveAskUserWaitFn = overrides.resolveAskUserWait ?? resolveAskUserWait;
+  const resolvePassiveDurableWaitFn =
+    overrides.resolvePassiveDurableWait ?? resolvePassiveDurableWait;
 
   async function failSessionAttempt(input: FailSessionAttemptInput): Promise<void> {
     const { db, bus, settings, observability, wakeSessionWorkflow } = await services();
@@ -177,6 +192,76 @@ export function createSessionStateActivities(
     return peek;
   }
 
+  /** Re-read and reconcile one Temporal timer edge against PostgreSQL truth. */
+  async function reconcileDurableWaitTimer(
+    input: ReconcileDurableWaitTimerInput,
+  ): Promise<ReconcileDurableWaitTimerResult> {
+    const { db, bus, wakeSessionWorkflow } = await services();
+    const current = await getDurableWaitFn(db, input.workspaceId, input.sessionId, input.waitId);
+    if (!current || current.state !== "waiting") return { action: "stale" };
+
+    if (input.cause === "reminder") {
+      if (current.kind !== "ask_user") return { action: "stale" };
+      const result = await advanceAskUserReminderFn(db, input);
+      if (result.action !== "reminded") return { action: "stale" };
+      await publishDurableSessionEventsFn(bus, input.workspaceId, input.sessionId, [result.event]);
+      return {
+        action: "reminded",
+        ref: {
+          waitId: result.wait.id,
+          kind: result.wait.kind,
+          wakeAt: result.wait.wakeAt,
+          nextReminderAt: result.wait.nextReminderAt,
+          reminderSequence: result.wait.reminderSequence,
+        },
+      };
+    }
+
+    if (current.kind === "ask_user") {
+      const result = await resolveAskUserWaitFn(db, { ...input, outcome: "timed_out" });
+      if (result.action === "conflict") return { action: "stale" };
+      await publishDurableSessionEventsFn(bus, input.workspaceId, input.sessionId, result.events);
+      if (wakeSessionWorkflow && result.workflowWakeRevision !== null) {
+        await wakeSessionWorkflow({
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          workflowId: result.temporalWorkflowId,
+          wakeRevision: result.workflowWakeRevision,
+        });
+      }
+      return { action: "resolved" };
+    }
+    if (current.kind !== "until" && current.kind !== "event") {
+      return { action: "stale" };
+    }
+    const result = await resolvePassiveDurableWaitFn(db, {
+      ...input,
+      outcome: current.kind === "until" ? "time_reached" : "timed_out",
+    });
+    if (result.delivery.reason === "session_cancelled") return { action: "resolved" };
+    await publishDurableSessionEventsFn(
+      bus,
+      input.workspaceId,
+      input.sessionId,
+      result.delivery.events,
+    );
+    if (
+      wakeSessionWorkflow &&
+      result.delivery.temporalWorkflowId &&
+      result.delivery.workflowWakeRevision !== null
+    ) {
+      await wakeSessionWorkflow({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        workflowId: result.delivery.temporalWorkflowId,
+        wakeRevision: result.delivery.workflowWakeRevision,
+      });
+    }
+    return { action: "resolved" };
+  }
+
   async function markSessionIdle(input: MarkSessionIdleInput): Promise<void> {
     const { db, bus, settings, observability, wakeSessionWorkflow } = await services();
     const settled = await settleSessionIdleWithParentOutboxFn(
@@ -209,6 +294,7 @@ export function createSessionStateActivities(
     settleSessionInterruptions,
     recoverDispatch,
     peekSessionWork,
+    reconcileDurableWaitTimer,
     markSessionIdle,
   };
 }

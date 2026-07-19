@@ -36,6 +36,7 @@ import { registerCatalogAssetRoutes } from "./routes/catalog-assets";
 import { registerCodexRoutes } from "./routes/codex";
 import { registerConnectionRoutes } from "./routes/connections";
 import { registerDocumentRoutes } from "./routes/documents";
+import { registerDurableWaitRoutes } from "./routes/durable-waits";
 import { registerEnrollmentRoutes } from "./routes/enrollments";
 import { registerMachineRoutes } from "./routes/machines";
 import { registerEnvironmentRoutes } from "./routes/environments";
@@ -360,6 +361,7 @@ export function createApp(deps: AppDependencies): Hono {
   registerRigRoutes(app, routeDeps);
   registerPackRoutes(app, routeDeps);
   registerSessionRoutes(app, routeDeps);
+  registerDurableWaitRoutes(app, routeDeps);
   registerScheduledTaskRoutes(app, routeDeps);
   registerCodexRoutes(app, routeDeps);
 

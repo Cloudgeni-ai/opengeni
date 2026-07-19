@@ -962,7 +962,8 @@ describe("Temporal workflow integration", () => {
     "workflow-wake dispatcher delegates one bounded canonical outbox sweep",
     async () => {
       const taskQueue = `workflow-test-${crypto.randomUUID()}`;
-      let dispatches = 0;
+      let wakeDispatches = 0;
+      let backgroundDispatches = 0;
       const expected = {
         claimed: 4,
         delivered: 4,
@@ -972,8 +973,12 @@ describe("Temporal workflow integration", () => {
       const worker = await testWorker(nativeConnection, taskQueue, {
         runAgentTurn: async () => ({ status: "idle" }),
         dispatchSessionWorkflowWakes: async () => {
-          dispatches += 1;
+          wakeDispatches += 1;
           return expected;
+        },
+        dispatchBackgroundJobControllers: async () => {
+          backgroundDispatches += 1;
+          return 3;
         },
       });
       const run = worker.run();
@@ -985,7 +990,8 @@ describe("Temporal workflow integration", () => {
           args: [],
         });
         expect(await handle.result()).toEqual(expected);
-        expect(dispatches).toBe(1);
+        expect(wakeDispatches).toBe(1);
+        expect(backgroundDispatches).toBe(1);
       } finally {
         worker.shutdown();
         await run;
@@ -1169,6 +1175,328 @@ describe("Temporal workflow integration", () => {
         expect(runs).toEqual(["event-1", "capacity-resume"]);
       } finally {
         releaseFirstRun();
+        worker.shutdown();
+        await run;
+      }
+    },
+    temporalWorkflowTestTimeoutMs,
+  );
+
+  test(
+    "an indefinite event wait consumes no inference and duplicate wake hints resume once",
+    async () => {
+      const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+      const scope = workflowScope();
+      const sessionId = crypto.randomUUID();
+      const ref = workflowDurableWaitRef("event");
+      let waiting = true;
+      let runnable = false;
+      let peeks = 0;
+      let runs = 0;
+      let goalChecks = 0;
+      let reconciliations = 0;
+      const worker = await testWorker(nativeConnection, taskQueue, {
+        peekSessionWork: async () => {
+          peeks += 1;
+          if (waiting) return { kind: "durable-wait", ref } as const;
+          if (runnable) return { kind: "runnable" } as const;
+          return { kind: "idle" } as const;
+        },
+        runAgentTurn: async (input: { attemptId: string }) => {
+          runs += 1;
+          runnable = false;
+          return { status: "idle", turnId: "event-resume", attemptId: input.attemptId };
+        },
+        reconcileDurableWaitTimer: async () => {
+          reconciliations += 1;
+          return { action: "stale" } as const;
+        },
+        maybeContinueGoal: async () => {
+          goalChecks += 1;
+          return { action: "none" } as const;
+        },
+        markSessionIdle: async () => undefined,
+        failSessionAttempt: async () => undefined,
+        settleSessionInterruptions: async () => ({ action: "continue" as const }),
+      });
+      const run = worker.run();
+      try {
+        const client = new Client({ connection });
+        const handle = await client.workflow.start("sessionWorkflow", {
+          taskQueue,
+          workflowId: `session-${sessionId}`,
+          args: [{ ...scope, sessionId }],
+        });
+        await waitFor(() => peeks >= 1);
+        await Bun.sleep(250);
+        expect(runs).toBe(0);
+        expect(goalChecks).toBe(0);
+        expect(reconciliations).toBe(0);
+
+        waiting = false;
+        runnable = true;
+        await handle.signal("queueChanged");
+        await handle.signal("queueChanged");
+        await handle.result();
+        expect(runs).toBe(1);
+        expect(reconciliations).toBe(0);
+      } finally {
+        worker.shutdown();
+        await run;
+      }
+    },
+    temporalWorkflowTestTimeoutMs,
+  );
+
+  test(
+    "a durable deadline survives duplicate pre-deadline signals and reconciles once",
+    async () => {
+      const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+      const scope = workflowScope();
+      const sessionId = crypto.randomUUID();
+      const ref = workflowDurableWaitRef("until", {
+        wakeAt: new Date(Date.now() + 700).toISOString(),
+      });
+      let waiting = true;
+      let runnable = false;
+      let peeks = 0;
+      let runs = 0;
+      const reconciliations: unknown[] = [];
+      const worker = await testWorker(nativeConnection, taskQueue, {
+        peekSessionWork: async () => {
+          peeks += 1;
+          if (waiting) return { kind: "durable-wait", ref } as const;
+          if (runnable) return { kind: "runnable" } as const;
+          return { kind: "idle" } as const;
+        },
+        reconcileDurableWaitTimer: async (input: unknown) => {
+          reconciliations.push(input);
+          waiting = false;
+          runnable = true;
+          return { action: "resolved" } as const;
+        },
+        runAgentTurn: async (input: { attemptId: string }) => {
+          runs += 1;
+          runnable = false;
+          return { status: "idle", turnId: "deadline-resume", attemptId: input.attemptId };
+        },
+        markSessionIdle: async () => undefined,
+        failSessionAttempt: async () => undefined,
+        settleSessionInterruptions: async () => ({ action: "continue" as const }),
+      });
+      const run = worker.run();
+      try {
+        const client = new Client({ connection });
+        const handle = await client.workflow.start("sessionWorkflow", {
+          taskQueue,
+          workflowId: `session-${sessionId}`,
+          args: [{ ...scope, sessionId }],
+        });
+        await waitFor(() => peeks >= 1);
+        await handle.signal("queueChanged");
+        await handle.signal("queueChanged");
+        await handle.result();
+        expect(peeks).toBeGreaterThanOrEqual(2);
+        expect(reconciliations).toHaveLength(1);
+        expect(reconciliations[0]).toMatchObject({ waitId: ref.waitId, cause: "deadline" });
+        expect(runs).toBe(1);
+      } finally {
+        worker.shutdown();
+        await run;
+      }
+    },
+    temporalWorkflowTestTimeoutMs,
+  );
+
+  test(
+    "ask-user reminders reconstruct across continue-as-new and duplicate answers resume once",
+    async () => {
+      const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+      const scope = workflowScope();
+      const sessionId = crypto.randomUUID();
+      const workflowId = `session-${sessionId}`;
+      const runs: string[] = [];
+      let reminders = 0;
+      let goalChecks = 0;
+      const admission = createTurnAdmission([queuedTurn("ask-origin")], async (input, turn) => {
+        runs.push(
+          input.trigger.kind === "approval" ? input.trigger.triggerEventId : turn.triggerEventId,
+        );
+        return { status: runs.length === 1 ? "requires_action" : "idle" };
+      });
+      let ref = workflowDurableWaitRef("ask_user", {
+        nextReminderAt: new Date(Date.now() + 500).toISOString(),
+      });
+      admission.setApprovalWaitRef(ref);
+      const worker = await testWorker(nativeConnection, taskQueue, {
+        ...admission.activities,
+        reconcileDurableWaitTimer: async (input: { waitId: string; cause: string }) => {
+          expect(input).toMatchObject({ waitId: ref.waitId, cause: "reminder" });
+          reminders += 1;
+          ref = { ...ref, nextReminderAt: null, reminderSequence: 1 };
+          admission.setApprovalWaitRef(ref);
+          return { action: "reminded", ref } as const;
+        },
+        maybeContinueGoal: async () => {
+          goalChecks += 1;
+          return { action: "none" } as const;
+        },
+        markSessionIdle: async () => undefined,
+        failSessionAttempt: async () => undefined,
+        settleSessionInterruptions: async () => ({ action: "continue" as const }),
+      });
+      const run = worker.run();
+      try {
+        const client = new Client({ connection });
+        const handle = await client.workflow.start("sessionWorkflow", {
+          taskQueue,
+          workflowId,
+          args: [{ ...scope, sessionId, initialEventId: "ask-origin", maxTurnsPerRun: 1 }],
+        });
+        await waitFor(() => runs.length === 1);
+        await waitFor(() => reminders === 1);
+        expect(goalChecks).toBe(0);
+
+        admission.approve("answer-event");
+        await handle.signal("approvalDecision", "answer-event");
+        await handle.signal("approvalDecision", "answer-event");
+        await handle.result();
+        expect(runs).toEqual(["ask-origin", "answer-event"]);
+        expect(reminders).toBe(1);
+
+        const firstRun = client.workflow.getHandle(workflowId, handle.firstExecutionRunId);
+        const history = await firstRun.fetchHistory();
+        expect(
+          (history.events ?? []).some(
+            (event) => event.workflowExecutionContinuedAsNewEventAttributes != null,
+          ),
+        ).toBe(true);
+      } finally {
+        worker.shutdown();
+        await run;
+      }
+    },
+    continueAsNewTestTimeoutMs,
+  );
+
+  test(
+    "a durable timer after worker replacement resumes without restarting inference",
+    async () => {
+      const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+      const scope = workflowScope();
+      const sessionId = crypto.randomUUID();
+      const ref = workflowDurableWaitRef("until", {
+        wakeAt: new Date(Date.now() + 1_200).toISOString(),
+      });
+      let waiting = true;
+      let runnable = false;
+      let peeks = 0;
+      let runs = 0;
+      let reconciliations = 0;
+      const activities = {
+        peekSessionWork: async () => {
+          peeks += 1;
+          if (waiting) return { kind: "durable-wait", ref } as const;
+          if (runnable) return { kind: "runnable" } as const;
+          return { kind: "idle" } as const;
+        },
+        reconcileDurableWaitTimer: async () => {
+          reconciliations += 1;
+          waiting = false;
+          runnable = true;
+          return { action: "resolved" } as const;
+        },
+        runAgentTurn: async (input: { attemptId: string }) => {
+          runs += 1;
+          runnable = false;
+          return { status: "idle", turnId: "timer-resume", attemptId: input.attemptId };
+        },
+        markSessionIdle: async () => undefined,
+        failSessionAttempt: async () => undefined,
+        settleSessionInterruptions: async () => ({ action: "continue" as const }),
+      };
+      const firstWorker = await testWorker(nativeConnection, taskQueue, activities);
+      const firstRun = firstWorker.run();
+      const client = new Client({ connection });
+      const handle = await client.workflow.start("sessionWorkflow", {
+        taskQueue,
+        workflowId: `session-${sessionId}`,
+        args: [{ ...scope, sessionId }],
+      });
+      await waitFor(() => peeks >= 1);
+      firstWorker.shutdown();
+      await firstRun;
+
+      const replacement = await testWorker(nativeConnection, taskQueue, activities);
+      const replacementRun = replacement.run();
+      try {
+        await handle.result();
+        expect(reconciliations).toBe(1);
+        expect(runs).toBe(1);
+      } finally {
+        replacement.shutdown();
+        await replacementRun;
+      }
+    },
+    continueAsNewTestTimeoutMs,
+  );
+
+  test(
+    "a paused branch signal received during peek fences an indefinite durable wait",
+    async () => {
+      const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+      const scope = workflowScope();
+      const sessionId = crypto.randomUUID();
+      const ref = workflowDurableWaitRef("event");
+      let firstPeek = true;
+      let releasePeek!: () => void;
+      const peekRelease = new Promise<void>((resolve) => {
+        releasePeek = resolve;
+      });
+      let enteredPeek!: () => void;
+      const peekEntered = new Promise<void>((resolve) => {
+        enteredPeek = resolve;
+      });
+      let runs = 0;
+      let reconciliations = 0;
+      const worker = await testWorker(nativeConnection, taskQueue, {
+        peekSessionWork: async () => {
+          if (firstPeek) {
+            firstPeek = false;
+            enteredPeek();
+            await peekRelease;
+            return { kind: "durable-wait", ref } as const;
+          }
+          return { kind: "idle" } as const;
+        },
+        reconcileDurableWaitTimer: async () => {
+          reconciliations += 1;
+          return { action: "stale" } as const;
+        },
+        runAgentTurn: async () => {
+          runs += 1;
+          return { status: "idle" };
+        },
+        markSessionIdle: async () => undefined,
+        failSessionAttempt: async () => undefined,
+        settleSessionInterruptions: async () => ({ action: "paused" as const }),
+      });
+      const run = worker.run();
+      try {
+        const client = new Client({ connection });
+        const handle = await client.workflow.start("sessionWorkflow", {
+          taskQueue,
+          workflowId: `session-${sessionId}`,
+          args: [{ ...scope, sessionId }],
+        });
+        await peekEntered;
+        await handle.signal("sessionControl", "pause-event");
+        releasePeek();
+        await handle.result();
+        expect(runs).toBe(0);
+        expect(reconciliations).toBe(0);
+      } finally {
+        releasePeek();
         worker.shutdown();
         await run;
       }
@@ -1594,9 +1922,13 @@ function createTurnAdmission(
     nextCheckAt: string;
     wakeRevision: number;
   } | null = null;
+  let approvalWaitRef: WorkflowDurableWaitRef | null = null;
   return {
     approve(eventId: string) {
       approvalEventId = eventId;
+    },
+    setApprovalWaitRef(ref: WorkflowDurableWaitRef | null) {
+      approvalWaitRef = ref;
     },
     recover() {
       if (!current) throw new Error("cannot recover without a current turn");
@@ -1619,6 +1951,7 @@ function createTurnAdmission(
       currentState = null;
       interruptionPending = false;
       approvalEventId = null;
+      approvalWaitRef = null;
       capacityRef = null;
     },
     activities: {
@@ -1636,7 +1969,9 @@ function createTurnAdmission(
                 kind: "approval-pending",
                 triggerEventId: approvalEventId,
               } as const)
-            : ({ kind: "approval-wait" } as const);
+            : approvalWaitRef
+              ? ({ kind: "approval-wait", ref: approvalWaitRef } as const)
+              : ({ kind: "approval-wait" } as const);
         }
         if (currentState === "capacity") {
           if (!capacityRef) throw new Error("capacity admission lost its durable waiter");
@@ -1701,6 +2036,27 @@ function queuedTurn(triggerEventId: string): WorkflowTestTurn {
   };
 }
 
+type WorkflowDurableWaitRef = {
+  waitId: string;
+  kind: "ask_user" | "until" | "event" | "background_job";
+  wakeAt: string | null;
+  nextReminderAt: string | null;
+  reminderSequence: number;
+};
+
+function workflowDurableWaitRef(
+  kind: WorkflowDurableWaitRef["kind"],
+  input: Partial<Omit<WorkflowDurableWaitRef, "kind">> = {},
+): WorkflowDurableWaitRef {
+  return {
+    waitId: input.waitId ?? crypto.randomUUID(),
+    kind,
+    wakeAt: input.wakeAt ?? null,
+    nextReminderAt: input.nextReminderAt ?? null,
+    reminderSequence: input.reminderSequence ?? 0,
+  };
+}
+
 function workflowScope(): { accountId: string; workspaceId: string } {
   return {
     accountId: crypto.randomUUID(),
@@ -1718,6 +2074,7 @@ async function testWorker(
     maybeContinueGoal: async () => ({ action: "none" }),
     getCodexCapacityWait: async () => null,
     reconcileCodexCapacityWait: async () => ({ action: "stale" }),
+    reconcileDurableWaitTimer: async () => ({ action: "stale" }),
     ...activities,
   };
   const { runAgentTurn, ...controlActivities } = defaults;

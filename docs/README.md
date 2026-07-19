@@ -20,6 +20,7 @@ This map defines who each doc tier serves and where volatile facts belong.
 | Architecture & package layout | `docs/architecture.md` | `README.md`, `AGENTS.md`, package READMEs should link or summarize lightly. |
 | Embedding & ports | `docs/embedding.md` | `README.md`, `CONTRIBUTING.md`, SDK/client examples should link. |
 | Run lifecycle | `docs/run-lifecycle.md` | `AGENTS.md`, `.agents/skills/opengeni/SKILL.md`, architecture summaries should link. |
+| Durable waits & one-shot background jobs | `docs/durable-waits-and-background-jobs.md` | `docs/run-lifecycle.md`, `docs/architecture.md`, SDK/API/UI summaries should link instead of restating state-machine details. |
 | Codex subscription rotation | `docs/codex-subscription-rotation.md` | `docs/run-lifecycle.md`, `docs/architecture.md`, and operator notes should link instead of restating allocator/failure semantics. |
 | Per-session MCP servers | `docs/session-mcp-servers.md` | `docs/architecture.md`, SDK/client examples should link instead of restating credential semantics. |
 | Connected machines | `docs/connected-machines.md` | `README.md`, `AGENTS.md`, client docs and skills should link. |

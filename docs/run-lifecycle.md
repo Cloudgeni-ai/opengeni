@@ -17,6 +17,14 @@ rows. One execution attempt runs as one non-retryable Temporal `runAgentTurn`
 activity. Inside the activity the OpenAI Agents SDK loop makes as many model
 calls and tool calls as the work needs.
 
+An exact signed attempt may also register an inference-free durable boundary:
+structured `ask_user` resumes the same saved SDK `RunState`, while
+`wait_until`, `wait_for_event`, and one-shot background jobs end the current
+model run and resume the existing session through one typed internal update.
+PostgreSQL remains authoritative across browser/worker/workflow loss; recurring
+scheduled-task definitions are separate. See
+[`durable-waits-and-background-jobs.md`](durable-waits-and-background-jobs.md).
+
 Synthesized goal continuations inherit the model and reasoning effort from the
 newest turn with a durable `turn.started` event. The session default is used
 only when no turn has actually started. This keeps routing and billing
@@ -181,6 +189,25 @@ cannot strand the prompt. Repaired wakes inspect unsettled exact-attempt
 interruptions so a live Pause/Steer still reaches settlement. The workflow
 records a monotonic signal version before its final activity chain and refuses to
 return when a signal arrived during that chain, closing the completion race.
+
+## Durable waits — suspend without polling
+
+Durable waits obey the same turn-attempt and admission fences as ordinary run
+settlement. The workflow captures its signal baseline before the durable work
+peek, reconstructs the nearest stored deadline/reminder timer, and re-peeks
+PostgreSQL after every signal, timer, restart, and `continueAsNew` boundary.
+Duplicate hints cannot manufacture work.
+
+`ask_user` is the only same-turn private continuation: answer, cancel, or
+timeout consumes one pending SDK approval and resumes its saved `RunState`
+once. Reminders are audit/UI events only. Passive time/event waits and
+background-job terminals instead settle one deduped `scheduled_occurrence`
+internal update for a new system turn. They never add a human queue row or
+extend the closed top-level internal-update union. Background controllers may
+retry observation and reattach to one durably recorded provider instance, but
+never restart provider work after the start fence. Full contract and failure
+semantics:
+[`durable-waits-and-background-jobs.md`](durable-waits-and-background-jobs.md).
 
 ## Goals — what makes long runs continue
 

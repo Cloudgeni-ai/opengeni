@@ -466,6 +466,7 @@ describe("sandbox preparation profiles", () => {
       // session's grant dictate every later session's tool visibility. Must
       // stay uncached.
       cacheToolsList: false,
+      requireApproval: ["ask_user"],
     });
     expect(settings.mcpServers.find((server) => server.id === "files")).toMatchObject({
       name: "Files",

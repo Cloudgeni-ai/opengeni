@@ -5,20 +5,29 @@ import type { AccessGrant, SessionEvent } from "@opengeni/contracts";
 import { postUserMessageTurn } from "@opengeni/core";
 import {
   addSessionSystemUpdate,
+  applySessionTurnSettlement,
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
+  createBackgroundJobForTurn,
   createDb,
   createSession,
+  getBackgroundJob,
   getSession,
   getSessionQueueSnapshot,
+  initializeSessionStartAtomically,
+  listBackgroundJobLogs,
   listOutstandingSessionSystemUpdates,
   listSessionEvents,
   listSessionSystemUpdatesForTurn,
   listSessionTurns,
+  markSessionWorkflowWakeDelivered,
 } from "@opengeni/db";
 import { migrate } from "@opengeni/db/migrate";
 import { createNatsEventBus, type EventBus } from "@opengeni/events";
-import { createProductionAgentRuntime } from "@opengeni/runtime";
+import {
+  createProductionAgentRuntime,
+  type BackgroundJobExecutionProvider,
+} from "@opengeni/runtime";
 import {
   ScriptedModel,
   startTestServices,
@@ -56,7 +65,9 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
     dbClient = createDb(services.databaseUrl);
     bus = await createNatsEventBus(services.natsUrl);
     connection = await Connection.connect({ address: services.temporalHost });
-    nativeConnection = await NativeConnection.connect({ address: services.temporalHost });
+    nativeConnection = await NativeConnection.connect({
+      address: services.temporalHost,
+    });
   }, 300_000);
 
   afterAll(async () => {
@@ -91,7 +102,10 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
           chunks: Array.from({ length: 10_000 }, () => "working "),
           delayMs: 10,
         },
-        { id: "fan-in-urgent", outputText: "urgent correction and internal updates handled" },
+        {
+          id: "fan-in-urgent",
+          outputText: "urgent correction and internal updates handled",
+        },
       ]);
       const settings = testSettings({
         databaseUrl: services.databaseUrl,
@@ -258,7 +272,11 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
       const input = systemUpdateInput(grant, session.id, "lost-wake:integration", 0);
       const committed = await addSessionSystemUpdate(dbClient.db, input);
       if (committed.reason === "session_cancelled") throw new Error("unexpected cancelled session");
-      expect(committed).toMatchObject({ added: true, reason: "added", shouldWake: true });
+      expect(committed).toMatchObject({
+        added: true,
+        reason: "added",
+        shouldWake: true,
+      });
       const committedEventIds = committed.events.map((event) => event.id);
 
       // Simulate the process dying after the Postgres commit but before NATS
@@ -343,6 +361,293 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
         unsubscribe();
         secondWorker.shutdown();
         await secondRun;
+      }
+    },
+    integrationTimeoutMs,
+  );
+
+  test(
+    "a background terminal survives a real NATS outage and wakes once through outbox repair",
+    async () => {
+      const grant = await testGrant(dbClient.db, "background-nats-outage");
+      const session = await createDurableSession(
+        dbClient.db,
+        grant,
+        "run a durable background subprocess",
+      );
+      const origin = await initializeSessionStartAtomically(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        clientEventId: `integration-background-${crypto.randomUUID()}`,
+        reasoningEffortFallback: "low",
+        createdEventPayload: {},
+      });
+      if (!origin.turn || origin.workflowWakeRevision === null) {
+        throw new Error("background origin did not initialize a runnable human turn");
+      }
+      await markSessionWorkflowWakeDelivered(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        temporalWorkflowId: origin.temporalWorkflowId,
+        wakeRevision: origin.workflowWakeRevision,
+      });
+      const attemptId = crypto.randomUUID();
+      const claim = await claimSessionWorkForAttempt(dbClient.db, grant.workspaceId, {
+        sessionId: session.id,
+        workflowId: origin.turn.temporalWorkflowId,
+        workflowRunId: crypto.randomUUID(),
+        attemptId,
+        dispatchId: `background-origin-${crypto.randomUUID()}`,
+        trigger: { kind: "next" },
+      });
+      if (claim.action !== "claimed") {
+        throw new Error(`background origin was not claimable: ${claim.reason}`);
+      }
+      const created = await createBackgroundJobForTurn(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        turnId: claim.turn.id,
+        expectedExecutionGeneration: claim.turn.executionGeneration,
+        expectedAttemptId: attemptId,
+        provider: "modal",
+        spec: {
+          command: "/bin/sh",
+          args: ["-lc", "printf 'ope20-real-stdout\\n'"],
+          artifactPaths: [],
+          metadata: { purpose: "real-nats-outage-integration" },
+          timeoutSeconds: 30,
+        },
+        requestKey: "real-background-nats-outage",
+      });
+      const originSettlement = await applySessionTurnSettlement(dbClient.db, grant.workspaceId, {
+        sessionId: session.id,
+        turnId: claim.turn.id,
+        triggerEventId: claim.turn.triggerEventId,
+        attemptId,
+        turnStatus: "completed",
+        sessionStatus: "idle",
+        activeTurnId: null,
+        events: [
+          {
+            type: "turn.completed",
+            payload: { output: "background job registered" },
+          },
+          { type: "session.status.changed", payload: { status: "idle" } },
+        ],
+      });
+      expect(originSettlement.action).toBe("settled");
+
+      const taskQueue = `durable-background-outage-${crypto.randomUUID()}`;
+      const settings = testSettings({
+        databaseUrl: services.databaseUrl,
+        natsUrl: services.natsUrl,
+        temporalHost: services.temporalHost,
+        temporalTaskQueue: taskQueue,
+      });
+      const temporal = new Client({ connection });
+      const outageBus = await createNatsEventBus(services.natsUrl);
+      const processes = new Map<string, ReturnType<typeof Bun.spawn>>();
+      let providerStarts = 0;
+      const provider: BackgroundJobExecutionProvider = {
+        start: async (input) => {
+          providerStarts += 1;
+          const providerInstanceId = `local-process-${input.jobId}`;
+          processes.set(
+            providerInstanceId,
+            Bun.spawn([input.spec.command, ...input.spec.args], {
+              ...(input.spec.cwd ? { cwd: input.spec.cwd } : {}),
+              stdout: "pipe",
+              stderr: "pipe",
+            }),
+          );
+          return {
+            providerRef: `test:process:${providerInstanceId}`,
+            providerInstanceId,
+          };
+        },
+        observe: async (input) => {
+          const process = processes.get(input.providerInstanceId);
+          if (!process) throw new Error(`test process disappeared: ${input.providerInstanceId}`);
+          const [stdout, stderr, exitCode] = await Promise.all([
+            new Response(process.stdout).text(),
+            new Response(process.stderr).text(),
+            process.exited,
+          ]);
+          if (stdout) {
+            await input.hooks.onLog({
+              stream: "stdout",
+              providerOffset: 0,
+              text: stdout,
+            });
+          }
+          if (stderr) {
+            await input.hooks.onLog({
+              stream: "stderr",
+              providerOffset: 0,
+              text: stderr,
+            });
+          }
+          // Simulate broker/process loss after provider observation but before
+          // terminal settlement. PostgreSQL remains authoritative.
+          await outageBus.close();
+          return {
+            status: exitCode === 0 ? ("completed" as const) : ("failed" as const),
+            exitCode,
+            ...(exitCode === 0 ? {} : { error: `subprocess exited ${exitCode}` }),
+            artifacts: [],
+          };
+        },
+        terminate: async (providerInstanceId) => {
+          const process = processes.get(providerInstanceId);
+          if (process && process.exitCode === null) process.kill();
+          if (process) await process.exited.catch(() => undefined);
+          processes.delete(providerInstanceId);
+        },
+      };
+      const model = new ScriptedModel("background terminal consumed once");
+      let immediateWakeAttempts = 0;
+      const outageActivities = createActivityTestHarness({
+        settings,
+        db: dbClient.db,
+        bus: outageBus,
+        runtime: createProductionAgentRuntime({ model }),
+        backgroundJobProvider: provider,
+        wakeSessionWorkflow: async () => {
+          immediateWakeAttempts += 1;
+          throw new Error("simulated process loss after terminal commit");
+        },
+        startBackgroundJobWorkflow: async (input) => {
+          await temporal.workflow.start("backgroundJobWorkflow", {
+            taskQueue,
+            workflowId: input.workflowId,
+            workflowIdReusePolicy: "REJECT_DUPLICATE",
+            args: [
+              {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                jobId: input.jobId,
+              },
+            ],
+          });
+        },
+      });
+      const outageWorker = await integrationWorker(nativeConnection, taskQueue, outageActivities);
+      const outageWorkerRun = outageWorker.run();
+      let replacementWorker: Awaited<ReturnType<typeof integrationWorker>> | null = null;
+      let replacementWorkerRun: Promise<void> | null = null;
+      const live: SessionEvent[] = [];
+      const unsubscribe = await bus.subscribe(grant.workspaceId, session.id, (events) => {
+        live.push(...events);
+      });
+      try {
+        expect(await outageActivities.dispatchBackgroundJobControllers()).toBe(1);
+        await temporal.workflow.getHandle(`background-job-${created.job.id}`).result();
+
+        expect(
+          await getBackgroundJob(dbClient.db, grant.workspaceId, created.job.id),
+        ).toMatchObject({
+          status: "completed",
+          startCount: 1,
+          exitCode: 0,
+        });
+        expect(providerStarts).toBe(1);
+        expect(immediateWakeAttempts).toBe(1);
+        expect(await listBackgroundJobLogs(dbClient.db, grant.workspaceId, created.job.id)).toEqual(
+          [
+            expect.objectContaining({
+              stream: "stdout",
+              providerOffset: 0,
+              text: "ope20-real-stdout\n",
+            }),
+          ],
+        );
+        const pending = await listOutstandingSessionSystemUpdates(
+          dbClient.db,
+          grant.workspaceId,
+          session.id,
+        );
+        expect(pending).toHaveLength(1);
+        expect(pending[0]).toMatchObject({
+          kind: "scheduled_occurrence",
+          payload: {
+            type: "scheduled_occurrence",
+            occurrence: {
+              type: "background_job_terminal",
+              jobId: created.job.id,
+              status: "completed",
+            },
+          },
+        });
+        expect(model.calls).toBe(0);
+        expect(live).toHaveLength(0);
+
+        outageWorker.shutdown();
+        await outageWorkerRun;
+        const workflowClient = sessionWorkflowClient(temporal, taskQueue);
+        const replacementActivities = createActivityTestHarness({
+          settings,
+          db: dbClient.db,
+          bus,
+          runtime: createProductionAgentRuntime({ model }),
+          wakeSessionWorkflow: workflowClient.wakeSessionWorkflow,
+        });
+        replacementWorker = await integrationWorker(
+          nativeConnection,
+          taskQueue,
+          replacementActivities,
+        );
+        replacementWorkerRun = replacementWorker.run();
+
+        const repaired = await replacementActivities.dispatchSessionWorkflowWakes();
+        // The repair sweep is global and may also drain prior fixtures. Exact
+        // once is asserted below on this session's model call, update bundle,
+        // terminal turn, and provider start rather than on the batch total.
+        expect(repaired.failed).toBe(0);
+        expect(repaired.delivered).toBeGreaterThanOrEqual(1);
+        expect(await replacementActivities.dispatchSessionWorkflowWakes()).toMatchObject({
+          claimed: 0,
+          delivered: 0,
+          failed: 0,
+        });
+        await waitFor(async () => {
+          const current = await getSession(dbClient.db, grant.workspaceId, session.id);
+          return model.calls === 1 && current?.status === "idle" && current.activeTurnId === null;
+        });
+
+        expect(model.calls).toBe(1);
+        const turns = await listSessionTurns(dbClient.db, grant.workspaceId, session.id);
+        expect(turns).toHaveLength(2);
+        const terminalTurn = turns.find((turn) => turn.source === "system");
+        expect(terminalTurn).toMatchObject({ status: "completed" });
+        expect(
+          await listSessionSystemUpdatesForTurn(
+            dbClient.db,
+            grant.workspaceId,
+            session.id,
+            terminalTurn!.id,
+          ),
+        ).toHaveLength(1);
+        expect(
+          await listOutstandingSessionSystemUpdates(dbClient.db, grant.workspaceId, session.id),
+        ).toHaveLength(0);
+        expect(
+          (await getBackgroundJob(dbClient.db, grant.workspaceId, created.job.id))?.startCount,
+        ).toBe(1);
+        expect(
+          live.some((event) => event.type === "turn.started" && event.turnId === terminalTurn!.id),
+        ).toBe(true);
+      } finally {
+        unsubscribe();
+        outageWorker.shutdown();
+        replacementWorker?.shutdown();
+        await Promise.all([
+          outageWorkerRun.catch(() => undefined),
+          replacementWorkerRun?.catch(() => undefined),
+          outageBus.close().catch(() => undefined),
+        ]);
       }
     },
     integrationTimeoutMs,
@@ -620,11 +925,14 @@ async function integrationWorker(
       maxConcurrentActivityTaskExecutions: TURN_WORKER_MAX_CONCURRENT_TURNS,
     }),
   ]);
+  let stopped = false;
   return {
     run: async () => {
       await Promise.all([control.run(), turns.run()]);
     },
     shutdown: () => {
+      if (stopped) return;
+      stopped = true;
       control.shutdown();
       turns.shutdown();
     },

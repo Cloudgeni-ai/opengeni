@@ -130,6 +130,63 @@ describe("OpenGeniClient", () => {
     });
   });
 
+  test("durable waits, ingress, and background jobs use their dedicated routes", async () => {
+    const waitId = "00000000-0000-4000-8000-000000000020";
+    const jobId = "00000000-0000-4000-8000-000000000021";
+    const artifactId = "00000000-0000-4000-8000-000000000022";
+    const { client, requests } = makeClient((request) => {
+      if (request.url.endsWith("/cancel")) return jsonResponse({ id: jobId }, 202);
+      if (request.method === "POST") return jsonResponse({ action: "accepted" }, 202);
+      return jsonResponse(request.url.endsWith(waitId) || request.url.endsWith(jobId) ? {} : []);
+    });
+
+    await client.listDurableWaits(WORKSPACE_ID, SESSION_ID, { state: "waiting", limit: 7 });
+    await client.getDurableWait(WORKSPACE_ID, SESSION_ID, waitId);
+    await client.resolveAskUser(WORKSPACE_ID, SESSION_ID, waitId, {
+      outcome: "answered",
+      answers: [{ questionId: "choice", value: "yes" }],
+      clientEventId: "answer-1",
+    });
+    await client.ingestDurableEvent(WORKSPACE_ID, {
+      version: 1,
+      eventId: "provider-event-1",
+      type: "build.completed",
+      correlationKey: "build-1",
+      occurredAt: "2026-07-10T12:00:00.000Z",
+    });
+    await client.listBackgroundJobs(WORKSPACE_ID, SESSION_ID, { limit: 8 });
+    await client.getBackgroundJob(WORKSPACE_ID, jobId);
+    await client.listBackgroundJobLogs(WORKSPACE_ID, jobId, { after: 4, limit: 9 });
+    await client.listBackgroundJobArtifacts(WORKSPACE_ID, jobId);
+    await client.createBackgroundJobArtifactDownloadUrl(WORKSPACE_ID, jobId, artifactId);
+    await client.cancelBackgroundJob(WORKSPACE_ID, jobId);
+
+    expect(requests.map((request) => `${request.method} ${request.url}`)).toEqual([
+      `GET https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/durable-waits?state=waiting&limit=7`,
+      `GET https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/durable-waits/${waitId}`,
+      `POST https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/durable-waits/${waitId}/resolve`,
+      `POST https://api.example.test/v1/workspaces/${WORKSPACE_ID}/durable-events`,
+      `GET https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/background-jobs?limit=8`,
+      `GET https://api.example.test/v1/workspaces/${WORKSPACE_ID}/background-jobs/${jobId}`,
+      `GET https://api.example.test/v1/workspaces/${WORKSPACE_ID}/background-jobs/${jobId}/logs?after=4&limit=9`,
+      `GET https://api.example.test/v1/workspaces/${WORKSPACE_ID}/background-jobs/${jobId}/artifacts`,
+      `POST https://api.example.test/v1/workspaces/${WORKSPACE_ID}/background-jobs/${jobId}/artifacts/${artifactId}/download-url`,
+      `POST https://api.example.test/v1/workspaces/${WORKSPACE_ID}/background-jobs/${jobId}/cancel`,
+    ]);
+    expect(JSON.parse(requests[2]!.body!)).toEqual({
+      outcome: "answered",
+      answers: [{ questionId: "choice", value: "yes" }],
+      clientEventId: "answer-1",
+    });
+    expect(JSON.parse(requests[3]!.body!)).toEqual({
+      version: 1,
+      eventId: "provider-event-1",
+      type: "build.completed",
+      correlationKey: "build-1",
+      occurredAt: "2026-07-10T12:00:00.000Z",
+    });
+  });
+
   test("clearSessionContext posts an explicit confirm to the context/clear route (204, no body)", async () => {
     const { client, requests } = makeClient(() => new Response(null, { status: 204 }));
     await client.clearSessionContext(WORKSPACE_ID, SESSION_ID);

@@ -1759,6 +1759,10 @@ export const agentRunStates = pgTable("agent_run_states", {
     .notNull()
     .references(() => sessions.id, { onDelete: "cascade" }),
   turnId: uuid("turn_id").references(() => sessionTurns.id, { onDelete: "set null" }),
+  // Exact approval-freeze owner. Nullable for rolling compatibility with
+  // pre-OPE-20 workers; every newly written RunState stamps both values.
+  executionGeneration: integer("execution_generation"),
+  attemptId: uuid("attempt_id"),
   stateVersion: integer("state_version").notNull(),
   serializedRunState: text("serialized_run_state").notNull(),
   pendingApprovals: jsonb("pending_approvals").$type<unknown[]>().notNull().default([]),
@@ -1780,6 +1784,489 @@ export const agentRunStates = pgTable("agent_run_states", {
   frozenCodexCredentialId: uuid("frozen_codex_credential_id"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+// OPE-20 provider-neutral background jobs. A job's side effects are started at
+// most once; controller attempts may be replaced only to reattach to the same
+// persisted provider coordinates.
+export const backgroundJobs = pgTable(
+  "background_jobs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    originSessionId: uuid("origin_session_id").notNull(),
+    originTurnId: uuid("origin_turn_id"),
+    waitId: uuid("wait_id"),
+    provider: text("provider").notNull().default("modal"),
+    spec: jsonb("spec").$type<Record<string, unknown>>().notNull(),
+    fireKey: text("fire_key").notNull(),
+    status: text("status").notNull().default("queued"),
+    providerRef: text("provider_ref"),
+    providerInstanceId: text("provider_instance_id"),
+    startCount: integer("start_count").notNull().default(0),
+    cancelRequestedAt: timestamp("cancel_requested_at", { withTimezone: true }),
+    exitCode: integer("exit_code"),
+    error: text("error"),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "background_jobs_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    workspaceSession: foreignKey({
+      name: "background_jobs_workspace_session_fk",
+      columns: [table.workspaceId, table.originSessionId],
+      foreignColumns: [sessions.workspaceId, sessions.id],
+    }).onDelete("cascade"),
+    workspaceTurn: foreignKey({
+      name: "background_jobs_workspace_turn_fk",
+      columns: [table.workspaceId, table.originTurnId],
+      foreignColumns: [sessionTurns.workspaceId, sessionTurns.id],
+    }).onDelete("restrict"),
+    workspaceIdentity: uniqueIndex("background_jobs_workspace_id_uq").on(
+      table.workspaceId,
+      table.id,
+    ),
+    fireKey: uniqueIndex("background_jobs_workspace_fire_key_uq").on(
+      table.workspaceId,
+      table.fireKey,
+    ),
+    origin: index("background_jobs_origin_idx").on(
+      table.workspaceId,
+      table.originSessionId,
+      table.createdAt,
+    ),
+    status: index("background_jobs_workspace_status_idx").on(
+      table.workspaceId,
+      table.status,
+      table.updatedAt,
+    ),
+    providerValid: check("background_jobs_provider_check", sql`${table.provider} in ('modal')`),
+    statusValid: check(
+      "background_jobs_status_check",
+      sql`${table.status} in ('queued','starting','running','cancelling','completed','failed','cancelled','lost')`,
+    ),
+    startCountValid: check(
+      "background_jobs_start_count_check",
+      sql`${table.startCount} between 0 and 1`,
+    ),
+  }),
+);
+
+export const backgroundJobAttempts = pgTable(
+  "background_job_attempts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    jobId: uuid("job_id").notNull(),
+    attemptNumber: integer("attempt_number").notNull(),
+    controllerId: text("controller_id"),
+    providerRef: text("provider_ref"),
+    providerInstanceId: text("provider_instance_id"),
+    status: text("status").notNull().default("observing"),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+    error: text("error"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "background_job_attempts_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    workspaceJob: foreignKey({
+      name: "background_job_attempts_workspace_job_fk",
+      columns: [table.workspaceId, table.jobId],
+      foreignColumns: [backgroundJobs.workspaceId, backgroundJobs.id],
+    }).onDelete("cascade"),
+    attempt: uniqueIndex("background_job_attempts_job_attempt_uq").on(
+      table.workspaceId,
+      table.jobId,
+      table.attemptNumber,
+    ),
+    workspaceJobIdentity: uniqueIndex("background_job_attempts_workspace_job_id_uq").on(
+      table.workspaceId,
+      table.jobId,
+      table.id,
+    ),
+    status: index("background_job_attempts_job_status_idx").on(
+      table.workspaceId,
+      table.jobId,
+      table.status,
+      table.createdAt,
+    ),
+    statusValid: check(
+      "background_job_attempts_status_check",
+      sql`${table.status} in ('observing','completed','failed','cancelled','lost')`,
+    ),
+    attemptNumberValid: check(
+      "background_job_attempts_number_check",
+      sql`${table.attemptNumber} > 0`,
+    ),
+  }),
+);
+
+export const backgroundJobLogChunks = pgTable(
+  "background_job_log_chunks",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    jobId: uuid("job_id").notNull(),
+    attemptId: uuid("attempt_id"),
+    sequence: integer("sequence").notNull(),
+    providerOffset: bigint("provider_offset", { mode: "number" }).notNull(),
+    providerLength: bigint("provider_length", { mode: "number" }).notNull(),
+    stream: text("stream").notNull(),
+    text: text("text").notNull(),
+    contentHash: text("content_hash").notNull(),
+    occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "background_job_log_chunks_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    workspaceJob: foreignKey({
+      name: "background_job_log_chunks_workspace_job_fk",
+      columns: [table.workspaceId, table.jobId],
+      foreignColumns: [backgroundJobs.workspaceId, backgroundJobs.id],
+    }).onDelete("cascade"),
+    workspaceAttempt: foreignKey({
+      name: "background_job_log_chunks_workspace_attempt_fk",
+      columns: [table.workspaceId, table.jobId, table.attemptId],
+      foreignColumns: [
+        backgroundJobAttempts.workspaceId,
+        backgroundJobAttempts.jobId,
+        backgroundJobAttempts.id,
+      ],
+    }).onDelete("restrict"),
+    jobSequence: uniqueIndex("background_job_log_chunks_job_sequence_uq").on(
+      table.workspaceId,
+      table.jobId,
+      table.sequence,
+    ),
+    providerOffset: uniqueIndex("background_job_log_chunks_job_provider_offset_uq").on(
+      table.workspaceId,
+      table.jobId,
+      table.stream,
+      table.providerOffset,
+    ),
+    occurred: index("background_job_log_chunks_job_occurred_idx").on(
+      table.workspaceId,
+      table.jobId,
+      table.occurredAt,
+    ),
+    streamValid: check(
+      "background_job_log_chunks_stream_check",
+      sql`${table.stream} in ('stdout','stderr','system')`,
+    ),
+    sequenceValid: check("background_job_log_chunks_sequence_check", sql`${table.sequence} > 0`),
+    offsetValid: check("background_job_log_chunks_offset_check", sql`${table.providerOffset} >= 0`),
+    lengthValid: check("background_job_log_chunks_length_check", sql`${table.providerLength} >= 0`),
+  }),
+);
+
+export const backgroundJobDispatches = pgTable(
+  "background_job_dispatches",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    jobId: uuid("job_id").notNull(),
+    dispatchKey: text("dispatch_key").notNull(),
+    workflowId: text("workflow_id").notNull(),
+    status: text("status").notNull().default("requested"),
+    attemptId: uuid("attempt_id"),
+    attempts: integer("attempts").notNull().default(0),
+    nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }).notNull().defaultNow(),
+    requestedAt: timestamp("requested_at", { withTimezone: true }).notNull().defaultNow(),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+    error: text("error"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "background_job_dispatches_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    workspaceJob: foreignKey({
+      name: "background_job_dispatches_workspace_job_fk",
+      columns: [table.workspaceId, table.jobId],
+      foreignColumns: [backgroundJobs.workspaceId, backgroundJobs.id],
+    }).onDelete("cascade"),
+    workspaceAttempt: foreignKey({
+      name: "background_job_dispatches_workspace_attempt_fk",
+      columns: [table.workspaceId, table.jobId, table.attemptId],
+      foreignColumns: [
+        backgroundJobAttempts.workspaceId,
+        backgroundJobAttempts.jobId,
+        backgroundJobAttempts.id,
+      ],
+    }).onDelete("restrict"),
+    jobKey: uniqueIndex("background_job_dispatches_job_key_uq").on(
+      table.workspaceId,
+      table.jobId,
+      table.dispatchKey,
+    ),
+    due: index("background_job_dispatches_due_idx").on(
+      table.status,
+      table.nextAttemptAt,
+      table.updatedAt,
+    ),
+    statusValid: check(
+      "background_job_dispatches_status_check",
+      sql`${table.status} in ('requested','started','completed','failed')`,
+    ),
+    attemptsValid: check("background_job_dispatches_attempts_check", sql`${table.attempts} >= 0`),
+  }),
+);
+
+export const backgroundJobArtifacts = pgTable(
+  "background_job_artifacts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    jobId: uuid("job_id").notNull(),
+    path: text("path").notNull(),
+    filename: text("filename").notNull(),
+    contentType: text("content_type").notNull(),
+    sizeBytes: bigint("size_bytes", { mode: "number" }).notNull(),
+    sha256: text("sha256").notNull(),
+    storageKey: text("storage_key").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "background_job_artifacts_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    workspaceJob: foreignKey({
+      name: "background_job_artifacts_workspace_job_fk",
+      columns: [table.workspaceId, table.jobId],
+      foreignColumns: [backgroundJobs.workspaceId, backgroundJobs.id],
+    }).onDelete("cascade"),
+    jobPath: uniqueIndex("background_job_artifacts_job_path_uq").on(
+      table.workspaceId,
+      table.jobId,
+      table.path,
+    ),
+    sizeValid: check("background_job_artifacts_size_check", sql`${table.sizeBytes} >= 0`),
+  }),
+);
+
+// One typed passive-suspension state machine. Resolution is private; public
+// projections expose request/state/outcome only. ask_user shares the exact turn
+// attempt fence with agent_run_states, while until/event/job waits settle a
+// normal turn and later create one canonical scheduled_occurrence update.
+export const durableWaits = pgTable(
+  "durable_waits",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sessionId: uuid("session_id").notNull(),
+    originTurnId: uuid("origin_turn_id"),
+    executionGeneration: integer("execution_generation"),
+    attemptId: uuid("attempt_id"),
+    approvalId: text("approval_id"),
+    kind: text("kind").notNull(),
+    requestKey: text("request_key").notNull(),
+    request: jsonb("request").$type<Record<string, unknown>>().notNull().default({}),
+    state: text("state").notNull().default("waiting"),
+    outcome: text("outcome"),
+    resolution: jsonb("resolution").$type<Record<string, unknown>>(),
+    wakeAt: timestamp("wake_at", { withTimezone: true }),
+    nextReminderAt: timestamp("next_reminder_at", { withTimezone: true }),
+    reminderIntervalSeconds: integer("reminder_interval_seconds"),
+    reminderSequence: integer("reminder_sequence").notNull().default(0),
+    eventSourceIdentity: text("event_source_identity"),
+    eventType: text("event_type"),
+    eventSubject: text("event_subject"),
+    eventCorrelationKey: text("event_correlation_key"),
+    backgroundJobId: uuid("background_job_id"),
+    answerClientEventId: text("answer_client_event_id"),
+    resolutionEventId: uuid("resolution_event_id"),
+    resolvedAt: timestamp("resolved_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "durable_waits_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    workspaceSession: foreignKey({
+      name: "durable_waits_workspace_session_fk",
+      columns: [table.workspaceId, table.sessionId],
+      foreignColumns: [sessions.workspaceId, sessions.id],
+    }).onDelete("cascade"),
+    workspaceTurn: foreignKey({
+      name: "durable_waits_workspace_turn_fk",
+      columns: [table.workspaceId, table.originTurnId],
+      foreignColumns: [sessionTurns.workspaceId, sessionTurns.id],
+    }).onDelete("restrict"),
+    workspaceAttempt: foreignKey({
+      name: "durable_waits_workspace_attempt_fk",
+      columns: [table.workspaceId, table.attemptId],
+      foreignColumns: [sessionTurnAttempts.workspaceId, sessionTurnAttempts.id],
+    }).onDelete("restrict"),
+    workspaceJob: foreignKey({
+      name: "durable_waits_workspace_job_fk",
+      columns: [table.workspaceId, table.backgroundJobId],
+      foreignColumns: [backgroundJobs.workspaceId, backgroundJobs.id],
+    }).onDelete("restrict"),
+    workspaceIdentity: uniqueIndex("durable_waits_workspace_id_uq").on(table.workspaceId, table.id),
+    requestKey: uniqueIndex("durable_waits_session_request_key_uq").on(
+      table.workspaceId,
+      table.sessionId,
+      table.requestKey,
+    ),
+    approval: uniqueIndex("durable_waits_session_approval_uq")
+      .on(table.workspaceId, table.sessionId, table.approvalId)
+      .where(sql`${table.approvalId} is not null`),
+    answerEvent: uniqueIndex("durable_waits_answer_event_uq")
+      .on(table.workspaceId, table.sessionId, table.answerClientEventId)
+      .where(sql`${table.answerClientEventId} is not null`),
+    job: uniqueIndex("durable_waits_background_job_uq")
+      .on(table.workspaceId, table.backgroundJobId)
+      .where(sql`${table.backgroundJobId} is not null`),
+    sessionState: index("durable_waits_session_state_idx").on(
+      table.workspaceId,
+      table.sessionId,
+      table.state,
+      table.wakeAt,
+      table.createdAt,
+    ),
+    eventMatch: index("durable_waits_event_match_idx")
+      .on(
+        table.workspaceId,
+        table.eventSourceIdentity,
+        table.eventType,
+        table.eventCorrelationKey,
+        table.state,
+        table.createdAt,
+      )
+      .where(sql`${table.kind} = 'event'`),
+    kindValid: check(
+      "durable_waits_kind_check",
+      sql`${table.kind} in ('ask_user','until','event','background_job')`,
+    ),
+    stateValid: check("durable_waits_state_check", sql`${table.state} in ('waiting','resolved')`),
+    outcomeValid: check(
+      "durable_waits_outcome_check",
+      sql`${table.outcome} is null or ${table.outcome} in ('answered','time_reached','event_received','completed','failed','cancelled','lost','timed_out')`,
+    ),
+    stateOutcomeConsistent: check(
+      "durable_waits_state_outcome_check",
+      sql`(${table.state} = 'waiting' and ${table.outcome} is null and ${table.resolvedAt} is null)
+        or (${table.state} = 'resolved' and ${table.outcome} is not null and ${table.resolvedAt} is not null)`,
+    ),
+    reminderValid: check(
+      "durable_waits_reminder_check",
+      sql`${table.reminderIntervalSeconds} is null or ${table.reminderIntervalSeconds} > 0`,
+    ),
+    shapeValid: check(
+      "durable_waits_shape_check",
+      sql`(${table.kind} = 'ask_user'
+          and ${table.originTurnId} is not null
+          and ${table.executionGeneration} is not null
+          and ${table.attemptId} is not null
+          and ${table.approvalId} is not null
+          and ${table.backgroundJobId} is null)
+        or (${table.kind} = 'until'
+          and ${table.originTurnId} is not null
+          and ${table.executionGeneration} is not null
+          and ${table.attemptId} is not null
+          and ${table.wakeAt} is not null
+          and ${table.approvalId} is null
+          and ${table.backgroundJobId} is null)
+        or (${table.kind} = 'event'
+          and ${table.originTurnId} is not null
+          and ${table.executionGeneration} is not null
+          and ${table.attemptId} is not null
+          and ${table.eventSourceIdentity} is not null
+          and ${table.eventType} is not null
+          and ${table.eventCorrelationKey} is not null
+          and ${table.approvalId} is null
+          and ${table.backgroundJobId} is null)
+        or (${table.kind} = 'background_job'
+          and ${table.originTurnId} is not null
+          and ${table.executionGeneration} is not null
+          and ${table.attemptId} is not null
+          and ${table.backgroundJobId} is not null
+          and ${table.approvalId} is null)`,
+    ),
+  }),
+);
+
+// Authenticated event ingress ledger. The source identity is derived from the
+// access grant, never accepted from request JSON. Same identity/id/content is a
+// replay; same identity/id with a different content hash is a conflict.
+export const durableWaitEvents = pgTable(
+  "durable_wait_events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    version: integer("version").notNull().default(1),
+    sourceIdentity: text("source_identity").notNull(),
+    eventId: text("event_id").notNull(),
+    contentHash: text("content_hash").notNull(),
+    type: text("type").notNull(),
+    subject: text("subject"),
+    correlationKey: text("correlation_key").notNull(),
+    occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
+    payload: jsonb("payload").$type<Record<string, unknown>>().notNull().default({}),
+    state: text("state").notNull().default("accepted"),
+    matchedWaitId: uuid("matched_wait_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "durable_wait_events_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    workspaceWait: foreignKey({
+      name: "durable_wait_events_workspace_wait_fk",
+      columns: [table.workspaceId, table.matchedWaitId],
+      foreignColumns: [durableWaits.workspaceId, durableWaits.id],
+    }).onDelete("restrict"),
+    sourceEvent: uniqueIndex("durable_wait_events_source_event_uq").on(
+      table.workspaceId,
+      table.sourceIdentity,
+      table.eventId,
+    ),
+    match: index("durable_wait_events_match_idx").on(
+      table.workspaceId,
+      table.sourceIdentity,
+      table.type,
+      table.correlationKey,
+      table.createdAt,
+    ),
+    versionValid: check("durable_wait_events_version_check", sql`${table.version} = 1`),
+    stateValid: check(
+      "durable_wait_events_state_check",
+      sql`${table.state} in ('accepted','matched')`,
+    ),
+  }),
+);
 
 // Conversation truth: ordered, verbatim SDK input items (issue #35). The
 // model-facing memory store — unredacted and replay-ready. session_events
