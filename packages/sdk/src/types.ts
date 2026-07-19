@@ -334,8 +334,10 @@ export type SessionArchivePlanResponse = {
   roots: SessionArchivePlanRoot[];
 };
 export type SessionArchiveApplyRequest = {
-  manifest: SessionArchiveManifest;
+  /** Full bulk manifest until the server registers manifestChecksum; null on replay/resume. */
+  manifest: SessionArchiveManifest | null;
   manifestChecksum: SessionArchiveChecksum;
+  rootSessionId: string;
   rootChecksum: SessionArchiveChecksum;
   idempotencyKey: string;
 };

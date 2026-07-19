@@ -149,14 +149,33 @@ describe("session archive manifest", () => {
     ).toThrow("must name their target seal");
 
     const checksum = sessionArchiveManifestChecksum(manifest());
+    expect(
+      SessionArchiveApplyRequest.parse({
+        manifest: manifest(),
+        manifestChecksum: checksum,
+        rootSessionId: rootA,
+        rootChecksum: sessionArchiveRootChecksum(manifest(), rootA),
+        idempotencyKey: "bulk:root-a",
+      }).rootSessionId,
+    ).toBe(rootA);
+    expect(
+      SessionArchiveApplyRequest.parse({
+        manifest: null,
+        manifestChecksum: checksum,
+        rootSessionId: rootA,
+        rootChecksum: sessionArchiveRootChecksum(manifest(), rootA),
+        idempotencyKey: "bulk:root-a",
+      }).manifest,
+    ).toBeNull();
     expect(() =>
       SessionArchiveApplyRequest.parse({
         manifest: manifest(),
         manifestChecksum: checksum,
+        rootSessionId: "00000000-0000-4000-8000-000000000099",
         rootChecksum: sessionArchiveRootChecksum(manifest(), rootA),
         idempotencyKey: "bulk:root-a",
       }),
-    ).toThrow("exactly one atomic root");
+    ).toThrow("must be present in the supplied bulk manifest");
 
     expect(
       SessionArchiveProjection.parse({

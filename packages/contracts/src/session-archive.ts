@@ -209,15 +209,30 @@ export type SessionArchivePlanResponse = z.infer<typeof SessionArchivePlanRespon
 
 export const SessionArchiveApplyRequest = z
   .object({
-    manifest: SessionArchiveManifest,
+    /**
+     * The full bulk manifest is required until the server has durably
+     * registered this exact manifestChecksum. Resumptions may then send null.
+     */
+    manifest: SessionArchiveManifest.nullable(),
     manifestChecksum: SessionArchiveChecksum,
+    rootSessionId: z.string().uuid(),
     rootChecksum: SessionArchiveChecksum,
     idempotencyKey: z.string().min(1).max(200),
   })
   .strict()
-  .refine((request) => request.manifest.roots.length === 1, {
-    message: "one apply request must contain exactly one atomic root",
-    path: ["manifest", "roots"],
+  .superRefine((request, context) => {
+    if (
+      request.manifest !== null &&
+      !request.manifest.roots.some(
+        (root) => root.rootSessionId.toLowerCase() === request.rootSessionId.toLowerCase(),
+      )
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "apply rootSessionId must be present in the supplied bulk manifest",
+        path: ["rootSessionId"],
+      });
+    }
   });
 export type SessionArchiveApplyRequest = z.infer<typeof SessionArchiveApplyRequest>;
 

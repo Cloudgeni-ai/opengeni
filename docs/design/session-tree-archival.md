@@ -148,7 +148,15 @@ receipt has one unambiguous atomic owner.
 Dry-run is read-only. It returns the canonical manifest/checksum, per-root
 checksums, exact blockers, and coverage proof without creating an operation,
 seal, receipt, event, or source mutation. Apply requires the caller-supplied
-checksum and an idempotency key. The durable receipt binds:
+bulk checksum, one root id/checksum, and an idempotency key. The first committed
+root for a bulk checksum supplies and durably registers the complete canonical
+bulk manifest; that root's transaction both registers the immutable manifest
+and applies the root or rolls both back. Later root applications and resumptions
+may omit the manifest and address the registered operation by checksum. A
+manifest-less request for an unknown checksum fails closed. This proves that
+every independently applied root belongs to the approved bulk manifest without
+resending a potentially million-member manifest for every root. The durable
+receipt binds:
 
 - workspace, action, root, target/new seal, manifest and per-root checksums;
 - canonical request hash and idempotency key;
@@ -162,6 +170,17 @@ is a typed manifest conflict and has zero partial side effects. The operator can
 resume by asking for receipts keyed by `(bulk checksum, root checksum)` and only
 submitting missing roots. It must verify post-commit member coverage and
 effective state before marking a root complete.
+
+The generic operator is `bun run session-archive:operator -- plan|apply`. Plan
+is read-only and writes the locally revalidated canonical plan to an
+operator-supplied private path. Apply requires the exact approved checksum and a
+second exact workspace-id confirmation, resumes only from fully verified
+durable receipts, and writes a complete verified receipt-evidence bundle. The
+CLI rejects manifest and evidence paths inside the public repository, accepts
+authentication only through an environment variable, and normal progress
+prints only aggregate counts rather than private manifest members or
+credentials. It does not confer production authorization; deployment policy
+must still grant the exact checksum and workspace operation.
 
 ## 7. Required acceptance evidence
 

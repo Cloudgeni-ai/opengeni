@@ -284,6 +284,7 @@ describe("OpenGeniClient", () => {
     await client.applySessionArchive(WORKSPACE_ID, {
       manifest,
       manifestChecksum,
+      rootSessionId: SESSION_ID,
       rootChecksum,
       idempotencyKey: "bulk-061/root-001",
     });
@@ -318,6 +319,7 @@ describe("OpenGeniClient", () => {
     expect(JSON.parse(requests[1]!.body!)).toEqual({
       manifest,
       manifestChecksum,
+      rootSessionId: SESSION_ID,
       rootChecksum,
       idempotencyKey: "bulk-061/root-001",
     });
