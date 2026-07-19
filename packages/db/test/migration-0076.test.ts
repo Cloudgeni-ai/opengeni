@@ -1,18 +1,12 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import {
-  acquireBlankTestDatabase,
-  type BlankTestDatabase,
-} from "@opengeni/testing";
+import { acquireBlankTestDatabase, type BlankTestDatabase } from "@opengeni/testing";
 import { readdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import postgres from "postgres";
 import { migrate } from "../src/migrate";
 
-const migrationsDir = join(
-  dirname(fileURLToPath(import.meta.url)),
-  "../drizzle",
-);
+const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../drizzle");
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
 let blank: BlankTestDatabase | null = null;
@@ -40,17 +34,10 @@ describe("migration 0076 (atomic session initialization receipt)", () => {
 
     const admin = postgres(blank.databaseUrl, { max: 1 });
     try {
-      const files = (await readdir(migrationsDir))
-        .filter((file) => file.endsWith(".sql"))
-        .sort();
+      const files = (await readdir(migrationsDir)).filter((file) => file.endsWith(".sql")).sort();
       const migrationName = "0076_atomic_session_initialization.sql";
-      const migrationSql = await readFile(
-        join(migrationsDir, migrationName),
-        "utf8",
-      );
-      expect(migrationSql.split(/\r?\n/, 1)[0]).toBe(
-        "-- deployment-mode: rolling",
-      );
+      const migrationSql = await readFile(join(migrationsDir, migrationName), "utf8");
+      expect(migrationSql.split(/\r?\n/, 1)[0]).toBe("-- deployment-mode: rolling");
 
       await admin.unsafe(
         "create table if not exists schema_migrations (name text primary key, applied_at timestamptz not null default now())",
@@ -101,9 +88,7 @@ describe("migration 0076 (atomic session initialization receipt)", () => {
         initial_workflow_wake_revision: null,
       });
 
-      const constraints = await admin<
-        Array<{ name: string; validated: boolean }>
-      >`
+      const constraints = await admin<Array<{ name: string; validated: boolean }>>`
         select conname as name, convalidated as validated
         from pg_constraint
         where conrelid = 'sessions'::regclass
@@ -115,9 +100,7 @@ describe("migration 0076 (atomic session initialization receipt)", () => {
           )
         order by conname`;
       expect(constraints).toHaveLength(4);
-      expect(
-        constraints.every((constraint) => constraint.validated === false),
-      ).toBe(true);
+      expect(constraints.every((constraint) => constraint.validated === false)).toBe(true);
 
       const [defaultMetadata] = await admin<
         Array<{ has_missing: boolean; missing_value: string | null }>
@@ -134,9 +117,7 @@ describe("migration 0076 (atomic session initialization receipt)", () => {
       // A pre-0076 binary names only its known columns. Its reads, updates, and
       // inserts remain valid; omitted receipt fields keep the row explicitly
       // legacy rather than fabricating a canonical initialization.
-      const [oldRead] = await admin<
-        Array<{ initial_message: string; model: string }>
-      >`
+      const [oldRead] = await admin<Array<{ initial_message: string; model: string }>>`
         select initial_message, model from sessions where id = ${legacySessionId}`;
       expect(oldRead).toEqual({
         initial_message: "legacy request semantics are unavailable",

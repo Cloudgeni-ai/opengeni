@@ -46,6 +46,18 @@ the same AES-GCM helper used by workspace variable sets. The deployment must set
 `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY` before accepting session MCP credentials;
 otherwise create/rotation requests fail with 503.
 
+For an idempotent session create, normalized credential headers are also
+keyed-HMACed with the decoded bytes of that encryption key before the outer
+request fingerprint is persisted. The HMAC is only an input to the outer
+SHA-256 fingerprint; the receipt persists that outer fingerprint, never a
+credential value or an unkeyed secret hash. The keyed construction prevents
+offline dictionary testing of low-entropy headers by a reader of the receipt.
+Keep the key stable while create retries may still arrive. Rotating it changes
+the credential HMAC and therefore makes an otherwise identical outstanding
+keyed create conflict with its prior receipt. Rotate only through a coordinated
+compatibility window that accounts for outstanding retries as well as
+re-encryption/recovery of variable-set and MCP credentials.
+
 Credentials rotate through a `user.message` payload:
 
 ```json

@@ -23,6 +23,51 @@ over this summary. Canonical sources:
 - `packages/core/src/domain/scheduled-tasks.ts` — the manual-trigger idempotency
   helpers and `assertReusableSessionRevivable`.
 
+## Current and unreleased: atomic initial session creation
+
+This section describes the OPE-51 change under review, not one of the five
+deployed fixes below. No staging or production mutation or live canary is
+claimed.
+
+`initializeSessionStartAtomically` replaces split initial-session persistence
+with one canonical Postgres transaction. It commits the session and
+reference/sandbox state, encrypted session-MCP rows, optional goal, canonical
+events, first user turn or scheduled system update, queue/source/usage state,
+stable workflow identity, and any currently eligible `initial_session` wake
+revision before sealing a version-1 receipt. Failpoints after every former
+boundary (`session`, references, goal, events, admission, queue, source/usage,
+wake, and immediately before commit) must roll the whole transition back.
+Temporal `signalWithStart` and best-effort event publication happen only after
+commit.
+
+A workspace-scoped idempotency key and normalized `v1:<sha256>` fingerprint
+collapse sequential and concurrent identical requests onto the same receipt.
+Replay verifies the receipt's immutable initial shape and re-delivers its exact
+wake revision without creating a second turn. Conflicting fingerprints and
+legacy/incomplete receipts fail closed. Migration 0076 is rolling,
+metadata-only, and intentionally unbackfilled: version-0 sessions continue
+normally but cannot be reinterpreted as repairable create receipts.
+
+Verification for this unreleased change is local and automated:
+
+- `packages/db/test/session-workflow-wake-outbox.test.ts` uses real PostgreSQL
+  for all initialization failpoints, response-loss retry, concurrent identical
+  and conflicting requests, process death, RLS, goal/no-goal, root/child and
+  shared-sandbox paths, scheduled settlement, revision races, and stale wake
+  acknowledgements.
+- `packages/db/test/migration-0076.test.ts` applies the migration to real
+  PostgreSQL and checks rolling old-binary compatibility, metadata-only defaults,
+  unvalidated constraints, valid/invalid version-1 receipts, and migration-ledger
+  idempotence.
+- `test/integration/session-create-temporal.integration.ts` uses real
+  PostgreSQL and Temporal to hold a pre-commit boundary, kill processes before
+  and after commit, repair the commit-to-signal gap, retry after response loss,
+  replay the worker, and assert exactly one admitted/completed turn and one
+  `turn.started` event.
+
+The production-safe rollout and canary procedure is documented in
+[`deployment.md`](deployment.md#atomic-session-initialization-rollout).
+
 ## The five fixes
 
 | # | Severity | Failure mode | Symptom if unfixed | Shipped |

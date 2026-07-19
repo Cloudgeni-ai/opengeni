@@ -28,6 +28,15 @@ Rules that hold across the table:
 - **Secrets are write-only.** Anything a caller supplies (MCP headers, Codex
   tokens) is encrypted at rest and never echoed by any read endpoint — responses
   expose header *names* and credential *versions* only.
+- **The variable-set encryption key also protects idempotency receipts.** The
+  decoded `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY` bytes key the HMAC of normalized
+  per-session MCP credential headers before those headers participate in a
+  persisted session-create fingerprint. This is deliberately not an unkeyed
+  hash: a database reader must not be able to dictionary-test low-entropy
+  secrets. Keep the operator key stable for the full outstanding create-retry
+  window. Rotation changes those HMACs, so use a coordinated compatibility
+  window; losing or changing the key also affects decryption/recovery of stored
+  variable-set and MCP credentials.
 - **Rotation over longevity.** Rotating credentials are never stored in
   long-lived artifacts such as sandbox manifests. Git provider tokens are
   delivered at setup and proactively re-minted by the worker throughout an

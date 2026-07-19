@@ -179,6 +179,38 @@ crash loops: the transaction that exceeds the ceiling appends the failure
 events and fails the exact turn/session, and the workflow performs no second
 split failure settlement.
 
+**Initial session creation is one durable transition.**
+`initializeSessionStartAtomically` commits the session and its reference/sandbox
+state, encrypted per-session MCP rows, optional goal, canonical event prefix,
+first user turn or scheduled system update, queue state, scheduled-source and
+usage settlement, workflow identity, and any immediately eligible workflow-wake
+revision in one Postgres transaction. Only the final fenced write marks the row
+`initialization_version = 1`. No Temporal call or NATS publication occurs
+inside that transaction.
+
+The public create idempotency identity is workspace-scoped and combines the
+caller key with a normalized version-1 request fingerprint. After response loss,
+an exact retry rechecks the immutable initial events, goal/reference state,
+exactly one initial user turn (or scheduled update/source settlement), usage
+receipt, workflow identity, and wake obligation before returning the original
+session. It re-delivers the receipt's existing wake revision; it never increments
+the revision or creates another turn. A conflicting fingerprint, malformed
+receipt, or incomplete/legacy version-0 receipt fails with 409. The rolling
+migration deliberately does not backfill old sessions because their original
+goal, client event, and other request semantics are not recoverable. Those
+sessions remain valid for ordinary continuation, but create retry never blesses
+them or synthesizes missing history.
+
+When initial admission is open, the transaction writes an `initial_session`
+row in `session_workflow_wake_outbox`; direct delivery and the bounded
+`SKIP LOCKED` reaper both call the same revisioned post-commit
+`signalWithStart` path used by ordinary admission. A crash before commit leaves
+no session start; a crash after commit leaves a repairable outbox revision.
+Duplicate delivery and worker replay are only nudges because Postgres admission
+and exact-attempt fences remain authoritative. A create blocked by recursive
+control has durable queue state but no currently eligible wake; opening its
+admission later commits the ordinary wake revision.
+
 **Failed sessions are revivable by talking to them.** Conversation truth is
 items, so a failed turn does not invalidate history. A new `user.message`
 into a failed session transitions it failed → queued, restarts the session
