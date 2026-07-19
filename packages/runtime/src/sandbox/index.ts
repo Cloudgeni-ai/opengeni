@@ -1057,6 +1057,31 @@ export async function establishSandboxSessionFromEnvelope(
           { retryable: true },
         );
       }
+      // hydrateWorkspace may replace the provider box (Modal's native snapshot
+      // restore does this). Attribute the newly-active identity immediately,
+      // before restore-state marking, fingerprint verification, or any caller
+      // can publish the box warm. The callback is the durable lease/tagging
+      // boundary; if it cannot persist the replacement, the caller fails closed
+      // and this exact replacement is terminated below.
+      const hydratedState = (restored as { state?: unknown }).state;
+      const hydratedInstanceId = readInstanceId(restored);
+      if (hydratedInstanceId && hydratedInstanceId !== established.instanceId) {
+        established = {
+          client,
+          session: restored,
+          sessionState: hydratedState ?? resumeFallbackState,
+          instanceId: hydratedInstanceId,
+          backendId: client.backendId,
+        };
+        if (opts.onSandboxCreated) {
+          try {
+            await opts.onSandboxCreated(established);
+          } catch (createCallbackError) {
+            await terminateCreatedSandbox(client, restored, hydratedState);
+            throw createCallbackError;
+          }
+        }
+      }
       if (opts.onWorkspaceRestoreVerifying) {
         try {
           await opts.onWorkspaceRestoreVerifying(workspaceArchive.descriptor);
@@ -1082,25 +1107,6 @@ export async function establishSandboxSessionFromEnvelope(
       console.info(
         `[sandbox] cold-restore verified workspace archive revision ${workspaceArchive.descriptor.revision}`,
       );
-      const hydratedState = (restored as { state?: unknown }).state;
-      const hydratedInstanceId = readInstanceId(restored);
-      if (hydratedInstanceId && hydratedInstanceId !== established.instanceId) {
-        established = {
-          client,
-          session: restored,
-          sessionState: hydratedState ?? resumeFallbackState,
-          instanceId: hydratedInstanceId,
-          backendId: client.backendId,
-        };
-        if (opts.onSandboxCreated) {
-          try {
-            await opts.onSandboxCreated(established);
-          } catch (createCallbackError) {
-            await terminateCreatedSandbox(client, restored, hydratedState);
-            throw createCallbackError;
-          }
-        }
-      }
     }
     restoredState = (restored as { state?: unknown }).state;
     return {
@@ -1284,6 +1290,64 @@ export async function serializeEstablishedSandboxEnvelope(
     // for this box (it stays resumable-by-instance only via the next cold path).
     return null;
   }
+}
+
+const PROVIDER_IDENTITY_FIELDS = [
+  "sandboxId",
+  "instanceId",
+  "id",
+  "hostId",
+  "containerId",
+  "workspaceRootPath",
+  "agentId",
+] as const;
+
+/**
+ * Whether a replacement envelope contains a provider-resumable identity. An
+ * archive-only envelope is intentionally valid recovery metadata, but it is
+ * never proof that the newly-created provider box can be resumed or attached.
+ */
+export function hasPersistableSandboxProviderIdentity(
+  envelope: Record<string, unknown> | null | undefined,
+): boolean {
+  const sessionState =
+    envelope?.sessionState && typeof envelope.sessionState === "object"
+      ? (envelope.sessionState as Record<string, unknown>)
+      : null;
+  const providerState =
+    sessionState?.providerState && typeof sessionState.providerState === "object"
+      ? (sessionState.providerState as Record<string, unknown>)
+      : null;
+  return Boolean(
+    providerState &&
+    PROVIDER_IDENTITY_FIELDS.some(
+      (field) => typeof providerState[field] === "string" && providerState[field].length > 0,
+    ),
+  );
+}
+
+/** A replacement provider may not be published warm without a resumable
+ * identity. Archive-only state is retained only when the caller rolls back to
+ * cold and needs the verified workspace bytes for the next attempt. */
+export class SandboxReplacementProviderStateError extends Error {
+  readonly code = "replacement_provider_state_unpersistable" as const;
+
+  constructor(public readonly backend: string) {
+    super(
+      `sandbox backend "${backend}" replacement provider state could not be serialized; refusing to publish an attachable lease`,
+    );
+    this.name = "SandboxReplacementProviderStateError";
+  }
+}
+
+export function requirePersistableReplacementSandboxEnvelope(
+  envelope: Record<string, unknown> | null,
+  backend: string,
+): Record<string, unknown> {
+  if (!hasPersistableSandboxProviderIdentity(envelope)) {
+    throw new SandboxReplacementProviderStateError(backend);
+  }
+  return envelope;
 }
 
 const DURABLE_WORKSPACE_ARCHIVE_FIELDS = [

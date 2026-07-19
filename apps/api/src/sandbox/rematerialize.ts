@@ -14,6 +14,7 @@ import {
 import {
   establishSandboxSessionFromEnvelope,
   isProviderSandboxNotFoundError,
+  requirePersistableReplacementSandboxEnvelope,
   serializeReplacementSandboxEnvelope,
   tagModalSandbox,
   verifySandboxExecReadiness,
@@ -152,7 +153,10 @@ export async function establishApiSandboxSpawner(input: {
       environment: input.environment,
       onSandboxCreated: async (created) => {
         established = created;
-        const resumeState = await serializeReplacementSandboxEnvelope(created, spawnEnvelope);
+        const resumeState = requirePersistableReplacementSandboxEnvelope(
+          await serializeReplacementSandboxEnvelope(created, spawnEnvelope),
+          created.backendId,
+        );
         const recorded = await recordWarmingSandboxCreated(input.db, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
@@ -206,7 +210,10 @@ export async function establishApiSandboxSpawner(input: {
         "sandbox restore completed without the exact selected durable archive revision",
       );
     }
-    const resumeState = await serializeReplacementSandboxEnvelope(established, spawnEnvelope);
+    const resumeState = requirePersistableReplacementSandboxEnvelope(
+      await serializeReplacementSandboxEnvelope(established, spawnEnvelope),
+      established.backendId,
+    );
     const committed = await commitWarmingToWarm(input.db, {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
@@ -215,7 +222,7 @@ export async function establishApiSandboxSpawner(input: {
       instanceId: established.instanceId,
       dataPlaneUrl: input.dataPlaneUrl,
       resumeBackendId: established.backendId,
-      resumeState: resumeState ?? null,
+      resumeState,
       ...(rematerialization
         ? {
             rematerialization: {

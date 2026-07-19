@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  requirePersistableReplacementSandboxEnvelope,
   serializeReplacementSandboxEnvelope,
   type EstablishedSandboxSession,
 } from "../src/sandbox";
@@ -71,6 +72,9 @@ describe("replacement sandbox envelope publication", () => {
     expect(envelope).toHaveProperty("sessionState.workspaceArchiveMeta.revision", "wa1:verified");
     expect(envelope).not.toHaveProperty("sessionState.providerState");
     expect(JSON.stringify(envelope)).not.toContain("sb-dead-provider");
+    expect(() => requirePersistableReplacementSandboxEnvelope(envelope, "modal")).toThrow(
+      /could not be serialized/i,
+    );
   });
 
   test("successful serialization binds the replacement provider and preserves durable archives", async () => {
@@ -101,6 +105,7 @@ describe("replacement sandbox envelope publication", () => {
       },
     });
     expect(JSON.stringify(envelope)).not.toContain("sb-dead-provider");
+    expect(requirePersistableReplacementSandboxEnvelope(envelope, "modal")).toBe(envelope);
   });
 
   test("failed serialization without an archive publishes null", async () => {

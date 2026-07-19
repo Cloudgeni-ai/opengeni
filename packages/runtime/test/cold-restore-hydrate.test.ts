@@ -27,6 +27,8 @@ let hydrateWorkspaceFailuresRemaining = 0;
 const deleteCalls: unknown[] = [];
 const EXPECTED_WORKSPACE_SHA = "a".repeat(64);
 let observedWorkspaceSha = EXPECTED_WORKSPACE_SHA;
+let replaceInstanceOnHydrate = false;
+const restoreEvents: string[] = [];
 
 class FakeModalSandboxClient {
   backendId = "modal";
@@ -44,9 +46,10 @@ class FakeModalSandboxClient {
         "assertCoreSnapshotUnsupported: ModalSandboxClient.create({ snapshot }) is unsupported",
       );
     }
-    return {
+    const session = {
       state: { sandboxId: "sb-fresh" },
       async exec() {
+        restoreEvents.push("fingerprint-exec");
         return {
           stdout: `OPENGENI_WORKSPACE_FINGERPRINT_V1 ${observedWorkspaceSha} 7 4 1234\n`,
         };
@@ -59,8 +62,13 @@ class FakeModalSandboxClient {
           );
         }
         hydrateCalls.push(data);
+        restoreEvents.push("hydrate");
+        if (replaceInstanceOnHydrate) {
+          session.state.sandboxId = "sb-restored";
+        }
       },
     };
+    return session;
   }
   async delete(state: unknown) {
     deleteCalls.push(state);
@@ -200,6 +208,44 @@ describe("cold-restore archive+hydrate (sandbox-file-persistence)", () => {
     expect(established.instanceId).toBe("sb-fresh");
     expect(established.origin).toBe("restored");
     expect(established.restoredArchive?.archiveSha256).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  test("attributes a hydrate replacement before restore verification runs on it", async () => {
+    hydrateCalls.length = 0;
+    createArgs.length = 0;
+    restoreEvents.length = 0;
+    replaceInstanceOnHydrate = true;
+    try {
+      const createdIds: string[] = [];
+      const established = await establishSandboxSessionFromEnvelope(
+        modalSettings(),
+        envelopeWithArchive(SNAPSHOT_B64),
+        {
+          sessionId: "sess-hydrate-replacement-order",
+          recovery: "create-or-restore",
+          environment: {},
+          onSandboxCreated: async (created) => {
+            createdIds.push(created.instanceId);
+            restoreEvents.push(`attributed:${created.instanceId}`);
+          },
+          onWorkspaceRestoreVerifying: async () => {
+            restoreEvents.push("restore-verifying");
+          },
+        },
+      );
+
+      expect(createdIds).toEqual(["sb-fresh", "sb-restored"]);
+      expect(restoreEvents).toEqual([
+        "attributed:sb-fresh",
+        "hydrate",
+        "attributed:sb-restored",
+        "restore-verifying",
+        "fingerprint-exec",
+      ]);
+      expect(established.instanceId).toBe("sb-restored");
+    } finally {
+      replaceInstanceOnHydrate = false;
+    }
   });
 
   test("cold-restore with NO archive creates a fresh box and does NOT hydrate", async () => {
