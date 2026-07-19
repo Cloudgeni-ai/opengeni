@@ -23,6 +23,7 @@ export default defineConfig({
         workbenchDock: resolve(__dirname, "workbench-dock.html"),
         workbenchEmbed: resolve(__dirname, "workbench-embed.html"),
         terminal: resolve(__dirname, "terminal.html"),
+        transcription: resolve(__dirname, "transcription.html"),
       },
     },
   },

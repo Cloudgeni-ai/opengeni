@@ -3,6 +3,7 @@ import {
   authHeadersForAccessKey,
   configureClientAuth,
   createOpenGeniClient,
+  mintOpenAITranscriptionClientSecret,
   resolveApiBaseUrl,
   sendVerificationEmail,
   setStoredAccessKey,
@@ -111,6 +112,57 @@ describe("web API auth helpers", () => {
     expect(request!.init?.method).toBe("POST");
     expect(request!.init?.credentials).toBe("include");
     expect(JSON.parse(String(request!.init?.body))).toEqual({ email: "user@example.com" });
+  });
+
+  test("mints transcription credentials through the scoped workspace route", async () => {
+    const originalFetch = globalThis.fetch;
+    const requests: Array<{ input: Parameters<typeof fetch>[0]; init?: RequestInit }> = [];
+    globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      requests.push({ input, init });
+      return Response.json({
+        value: "ek_ephemeral",
+        expiresAt: 2_000_000_000,
+        providerSessionId: "provider-session-1",
+      });
+    }) as unknown as typeof fetch;
+
+    try {
+      await expect(
+        mintOpenAITranscriptionClientSecret("workspace/id", {
+          sessionId: "dictation-1",
+          language: "en",
+          diarization: false,
+          privacy: {
+            retainAudio: false,
+            retainTranscript: false,
+            trainingAllowed: false,
+          },
+        }),
+      ).resolves.toEqual({
+        value: "ek_ephemeral",
+        expiresAt: 2_000_000_000,
+        providerSessionId: "provider-session-1",
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    const request = requests[0];
+    expect(String(request?.input)).toBe(
+      "/v1/workspaces/workspace%2Fid/transcription/client-secret",
+    );
+    expect(request?.init?.method).toBe("POST");
+    expect(request?.init?.credentials).toBe("include");
+    expect(JSON.parse(String(request?.init?.body))).toEqual({
+      sessionId: "dictation-1",
+      language: "en",
+      diarization: false,
+      privacy: {
+        retainAudio: false,
+        retainTranscript: false,
+        trainingAllowed: false,
+      },
+    });
   });
 });
 

@@ -1,6 +1,10 @@
-// The console's only bespoke HTTP surface: client config bootstrap and the
-// Better Auth (managed session) endpoints, which sit outside the public API
-// the SDK covers. Everything else goes through `@opengeni/sdk`.
+// The console's bespoke HTTP surface: client config bootstrap, short-lived
+// transcription credentials, and Better Auth (managed session) endpoints.
+// Everything covered by the public SDK still goes through `@opengeni/sdk`.
+import type {
+  OpenAIClientSecret,
+  OpenAIClientSecretRequest,
+} from "@opengeni/react/transcription/openai-realtime";
 import {
   OpenGeniApiError,
   OpenGeniClient,
@@ -196,6 +200,19 @@ export async function fetchClientConfig(): Promise<ClientConfig> {
   reloadIfStaleDeployment(config);
   configureClientAuth(config.auth);
   return config;
+}
+
+export async function mintOpenAITranscriptionClientSecret(
+  workspaceId: string,
+  input: OpenAIClientSecretRequest,
+): Promise<OpenAIClientSecret> {
+  return await request<OpenAIClientSecret>(
+    `/v1/workspaces/${encodeURIComponent(workspaceId)}/transcription/client-secret`,
+    {
+      method: "POST",
+      body: JSON.stringify(input),
+    },
+  );
 }
 
 export function shouldReloadForApiContractRevision(

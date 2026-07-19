@@ -49,6 +49,7 @@ import { registerRigRoutes } from "./routes/rigs";
 import { registerScheduledTaskRoutes } from "./routes/scheduled-tasks";
 import { registerSessionRoutes } from "./routes/sessions";
 import { registerSocialRoutes } from "./routes/social";
+import { registerTranscriptionRoutes } from "./routes/transcription";
 import { registerWorkspaceRoutes } from "./routes/workspaces";
 
 export type {
@@ -362,6 +363,7 @@ export function createApp(deps: AppDependencies): Hono {
   registerSessionRoutes(app, routeDeps);
   registerScheduledTaskRoutes(app, routeDeps);
   registerCodexRoutes(app, routeDeps);
+  registerTranscriptionRoutes(app, routeDeps);
 
   return app;
 }
@@ -508,6 +510,10 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/codex\/connect\/start$/,
     label: "/v1/workspaces/:workspaceId/codex/connect/start",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/transcription\/client-secret$/,
+    label: "/v1/workspaces/:workspaceId/transcription/client-secret",
   },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/codex\/connect\/poll$/,

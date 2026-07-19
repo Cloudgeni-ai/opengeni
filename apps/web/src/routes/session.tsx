@@ -13,10 +13,13 @@ import {
   useSessionLineage,
   QueueSurface,
   useTurnQueue,
+  VoiceDictationControl,
   type AgentMessageItem,
   type AuthNeededItem,
   type PendingApproval,
   type TimelineItem,
+  type TranscriptionProvider,
+  type TranscriptionSession,
   type UserMessageItem,
 } from "@opengeni/react";
 import { Link, useNavigate } from "@tanstack/react-router";
@@ -24,7 +27,7 @@ import { CheckIcon, Loader2Icon, MenuIcon, MessagesSquareIcon, XIcon } from "luc
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { isApiErrorStatus } from "@/api";
+import { isApiErrorStatus, mintOpenAITranscriptionClientSecret } from "@/api";
 import { ConsoleComposer } from "@/components/Composer";
 import { LoadingPanel, ProblemPanel } from "@/components/common";
 import { MarkdownText } from "@/components/markdown";
@@ -55,6 +58,45 @@ import {
 import { buildTools } from "@/lib/session-tools";
 import type { ComposerDraft, LineageNode } from "@opengeni/sdk";
 import type { ConnectionMetadata, Session, SessionEvent } from "@/types";
+
+function lazyOpenAITranscriptionProvider(workspaceId: string): TranscriptionProvider {
+  return {
+    id: "openai",
+    createSession(request, emit) {
+      let delegate: TranscriptionSession | null = null;
+      let cancelled = false;
+      let closed = false;
+      return {
+        id: request.sessionId,
+        providerId: "openai",
+        async start() {
+          const { OpenAIRealtimeTranscriptionProvider } =
+            await import("@opengeni/react/transcription/openai-realtime");
+          delegate = new OpenAIRealtimeTranscriptionProvider({
+            mintClientSecret: (input) => mintOpenAITranscriptionClientSecret(workspaceId, input),
+          }).createSession(request, emit);
+          if (closed) {
+            await delegate.close();
+            return;
+          }
+          if (cancelled) {
+            await delegate.cancel("user_cancelled");
+            return;
+          }
+          await delegate.start();
+        },
+        async cancel(reason) {
+          cancelled = true;
+          await delegate?.cancel(reason);
+        },
+        async close() {
+          closed = true;
+          await delegate?.close();
+        },
+      };
+    },
+  };
+}
 
 export function SessionRoute({
   workspaceId,
@@ -587,6 +629,16 @@ function SessionChatPane(props: {
     onDraftApplied: applyComposerSettings,
     onSent: () => attachments.clear(),
   });
+  const transcriptionProvider = useMemo(() => {
+    if (
+      typeof navigator === "undefined" ||
+      !navigator.mediaDevices?.getUserMedia ||
+      typeof RTCPeerConnection === "undefined"
+    ) {
+      return null;
+    }
+    return lazyOpenAITranscriptionProvider(props.session.workspaceId);
+  }, [props.session.workspaceId]);
 
   // Slash-command palette context: the operator controls (/goal, /clear,
   // /compact, /help) act on THIS session. Permissions come from the workspace
@@ -780,6 +832,16 @@ function SessionChatPane(props: {
             }
             controls={
               <div className="flex min-w-0 items-center gap-1.5">
+                <VoiceDictationControl
+                  provider={transcriptionProvider}
+                  value={composer.value}
+                  setValue={composer.setValue}
+                  disabled={
+                    terminal ||
+                    composer.sending ||
+                    !workspacePermissions.includes("sessions:control")
+                  }
+                />
                 <ModelPicker
                   config={context.clientConfig}
                   model={model}
