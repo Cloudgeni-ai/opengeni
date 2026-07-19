@@ -69,8 +69,11 @@ paused prompt stays queued in Postgres but never schedules `runAgentTurn`.
 PromQL alerts and the bundled dashboard select one exact namespace,
 environment, Helm release, and turn-worker component. Cross-fleet aggregation
 must be an explicit operator query, never the default capacity or paging path.
-The stale-monitor alert includes a release-scoped `absent()` arm, while the
-dashboard exposes minimum monitor freshness and maximum last-success age.
+Backlog alert and dashboard queries correlate queue values, freshness, and the
+last-success timestamp by the same Prometheus scrape `instance` before fleet
+aggregation. The stale-monitor alert includes a release-scoped `absent()` arm,
+worst-pod freshness/timestamp, and expected turn-worker scrape counts, while
+the dashboard exposes minimum monitor freshness and maximum last-success age.
 Kubernetes memory and HPA series are joined through exact
 `app.kubernetes.io/instance` and worker component labels, not pod/HPA name
 prefixes that can mix similarly named releases.

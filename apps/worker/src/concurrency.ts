@@ -83,11 +83,13 @@ type TurnSlotPermit = SlotPermit & {
  * only when both independent safety checks pass:
  *
  *   baseline + reserved-after × hard-turn-budget + native headroom <= limit
- *   current  + pending-after  × hard-turn-budget + native headroom <= limit
+ *   current  + reserved-after × hard-turn-budget + native headroom <= limit
  *
  * The first check enforces the release contract even when current RSS happens
  * to be low. The second accounts for native/retained memory observed after
- * startup and for poll permits that have not begun allocating turn state yet.
+ * startup and keeps the complete hard budget reserved for every live permit.
+ * A used permit is not evidence that its allocation is already visible in the
+ * cgroup, and unrelated native growth cannot safely be attributed to a turn.
  * Kubernetes OOM is never an admission mechanism.
  */
 export class MemoryAwareTurnSlotSupplier implements CustomSlotSupplier<ActivitySlotInfo> {
@@ -95,7 +97,7 @@ export class MemoryAwareTurnSlotSupplier implements CustomSlotSupplier<ActivityS
 
   private readonly owner = Symbol("opengeni-turn-admission");
   private readonly permits = new Set<TurnSlotPermit>();
-  private readonly baselineBytes: number;
+  private baselineBytes: number;
   private readonly maximumTurns: number;
   private readonly hardBytesPerTurn: number;
   private readonly nativeHeadroomBytes: number;
@@ -178,23 +180,30 @@ export class MemoryAwareTurnSlotSupplier implements CustomSlotSupplier<ActivityS
   }
 
   /**
-   * Recheck the one-turn startup invariant after Temporal/native construction.
-   * Worker.create can retain memory after the constructor's baseline sample;
-   * a pod that can no longer reserve one permit must fail before readiness.
+   * Finalize the admission baseline after Temporal/native construction.
+   * Worker.create can retain memory after the constructor's provisional
+   * sample. That initialization delta must remain in the baseline for every
+   * later projection rather than competing with turn reservations.
    */
-  assertCanAdmitOne(): void {
+  finalizeStartupBaseline(): void {
     const memory = this.memorySnapshot();
     if (this.permits.size !== 0) {
       throw new Error("Turn worker startup admission check ran after slot reservation");
     }
-    if (this.availableSlots(memory) < 1) {
+    const finalizedBaselineBytes = memory.currentBytes;
+    const finalizedCapacity =
+      memory.limitBytes === null
+        ? this.maximumTurns
+        : this.memoryBoundCapacity(memory.limitBytes, finalizedBaselineBytes);
+    if (memory.limitBytes !== null && finalizedCapacity < 1) {
       throw new Error(
         "Turn worker memory limit cannot safely admit one turn after worker initialization: " +
-          `baseline=${this.baselineBytes} current=${memory.currentBytes} ` +
+          `provisionalBaseline=${this.baselineBytes} finalizedBaseline=${finalizedBaselineBytes} ` +
           `hardTurn=${this.hardBytesPerTurn} nativeHeadroom=${this.nativeHeadroomBytes} ` +
           `limit=${String(memory.limitBytes)}`,
       );
     }
+    this.baselineBytes = finalizedBaselineBytes;
     this.refreshMetrics(memory);
   }
 
@@ -223,21 +232,15 @@ export class MemoryAwareTurnSlotSupplier implements CustomSlotSupplier<ActivityS
       Math.floor(
         (memory.limitBytes - memory.currentBytes - this.nativeHeadroomBytes) /
           this.hardBytesPerTurn,
-      ) - this.pendingSlots();
+      ) - this.permits.size;
     return Math.max(0, Math.min(densityRemaining, baselineRemaining, observedRemaining));
   }
 
-  private memoryBoundCapacity(limitBytes: number): number {
+  private memoryBoundCapacity(limitBytes: number, baselineBytes = this.baselineBytes): number {
     return Math.max(
       0,
-      Math.floor(
-        (limitBytes - this.baselineBytes - this.nativeHeadroomBytes) / this.hardBytesPerTurn,
-      ),
+      Math.floor((limitBytes - baselineBytes - this.nativeHeadroomBytes) / this.hardBytesPerTurn),
     );
-  }
-
-  private pendingSlots(): number {
-    return this.permits.size - this.usedSlots();
   }
 
   private usedSlots(): number {
@@ -288,7 +291,7 @@ export class MemoryAwareTurnSlotSupplier implements CustomSlotSupplier<ActivityS
     );
     set(
       "opengeni_turn_admission_memory_baseline_bytes",
-      "Turn-worker cgroup memory at admission-controller startup.",
+      "Turn-worker cgroup memory after Temporal/native worker initialization.",
       value.baselineBytes,
     );
     set(

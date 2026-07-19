@@ -100,7 +100,7 @@
     {
       "type": "timeseries",
       "title": "Turns inflight vs eligible backlog (fleet total)",
-      "description": "Temporal activity backlog contains only runAgentTurn work eligible for worker admission. Paused human prompts are intentionally excluded.",
+      "description": "Temporal activity backlog contains only runAgentTurn work eligible for worker admission. Paused human prompts are intentionally excluded. Backlog is shown only when freshness and last-success age come from the same scrape instance.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -142,7 +142,7 @@
         },
         {
           "refId": "B",
-          "expr": "max(opengeni_turn_eligible_backlog{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"})",
+          "expr": "max(opengeni_turn_eligible_backlog{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"} and on(namespace, release, environment, component, instance) opengeni_turn_capacity_monitor_fresh{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"} == 1 and on(namespace, release, environment, component, instance) time() - opengeni_turn_capacity_monitor_last_success_timestamp_seconds{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"} < 45)",
           "legendFormat": "eligible backlog",
           "datasource": {
             "type": "prometheus",
@@ -277,7 +277,7 @@
     {
       "type": "timeseries",
       "title": "Oldest eligible turn backlog age",
-      "description": "Temporal schedule-to-start pressure. Sustained age means runnable work is waiting for admission; paused human prompts never enter this series.",
+      "description": "Temporal schedule-to-start pressure. Sustained age means runnable work is waiting for admission; paused human prompts never enter this series. Backlog is shown only when freshness and last-success age come from the same scrape instance.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -308,7 +308,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max(opengeni_turn_eligible_backlog_oldest_age_seconds{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"})",
+          "expr": "max(opengeni_turn_eligible_backlog_oldest_age_seconds{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"} and on(namespace, release, environment, component, instance) opengeni_turn_capacity_monitor_fresh{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"} == 1 and on(namespace, release, environment, component, instance) time() - opengeni_turn_capacity_monitor_last_success_timestamp_seconds{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"} < 45)",
           "legendFormat": "oldest eligible",
           "datasource": {
             "type": "prometheus",

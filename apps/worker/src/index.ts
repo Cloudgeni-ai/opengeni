@@ -138,7 +138,7 @@ export async function createOpenGeniWorker(options: WorkerOptions): Promise<{
       // into the kubelet's SIGKILL mid-DB-write.
       shutdownForceTime: "100s",
     });
-    turnTuner?.admission.assertCanAdmitOne();
+    turnTuner?.admission.finalizeStartupBaseline();
     return { worker, connection };
   } catch (error) {
     await connection.close().catch(() => undefined);

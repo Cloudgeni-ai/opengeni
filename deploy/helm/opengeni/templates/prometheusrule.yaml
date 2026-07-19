@@ -151,13 +151,15 @@ spec:
         # observability.prometheusRule.rules for a custom name.
         - alert: OpenGeniTurnEligibleBacklogOld
           expr: |
-            max(opengeni_turn_eligible_backlog_oldest_age_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-turn"}) > 30
-            and on()
-            max(opengeni_turn_eligible_backlog{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-turn"}) > 0
-            and on()
-            max(opengeni_turn_capacity_monitor_fresh{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-turn"}) == 1
-            and on()
-            time() - max(opengeni_turn_capacity_monitor_last_success_timestamp_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-turn"}) < 45
+            max(
+              opengeni_turn_eligible_backlog_oldest_age_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-turn"} > 30
+              and on(namespace, release, environment, component, instance)
+              opengeni_turn_eligible_backlog{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-turn"} > 0
+              and on(namespace, release, environment, component, instance)
+              opengeni_turn_capacity_monitor_fresh{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-turn"} == 1
+              and on(namespace, release, environment, component, instance)
+              time() - opengeni_turn_capacity_monitor_last_success_timestamp_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-turn"} < 45
+            ) > 0
           for: 5m
           labels:
             severity: warning
@@ -166,13 +168,15 @@ spec:
             description: Temporal's runAgentTurn activity queue contains eligible work. Paused human prompts are deliberately excluded from this capacity signal.
         - alert: OpenGeniTurnSlotsSaturated
           expr: |
-            max(opengeni_turn_slot_saturation_ratio{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-turn"}) > 0.9
-            and on()
-            max(opengeni_turn_eligible_backlog{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-turn"}) > 0
-            and on()
-            max(opengeni_turn_capacity_monitor_fresh{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-turn"}) == 1
-            and on()
-            time() - max(opengeni_turn_capacity_monitor_last_success_timestamp_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-turn"}) < 45
+            max(
+              opengeni_turn_slot_saturation_ratio{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-turn"} > 0.9
+              and on(namespace, release, environment, component, instance)
+              opengeni_turn_eligible_backlog{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-turn"} > 0
+              and on(namespace, release, environment, component, instance)
+              opengeni_turn_capacity_monitor_fresh{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-turn"} == 1
+              and on(namespace, release, environment, component, instance)
+              time() - opengeni_turn_capacity_monitor_last_success_timestamp_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-turn"} < 45
+            ) > 0
           for: 5m
           labels:
             severity: warning
@@ -183,15 +187,20 @@ spec:
           expr: |
             absent(opengeni_turn_capacity_monitor_fresh{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-turn"}) == 1
             or
-            max(opengeni_turn_capacity_monitor_fresh{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-turn"}) < 1
+            min(opengeni_turn_capacity_monitor_fresh{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-turn"}) < 1
             or
-            time() - max(opengeni_turn_capacity_monitor_last_success_timestamp_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-turn"}) > 45
+            time() - min(opengeni_turn_capacity_monitor_last_success_timestamp_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-turn"}) > 45
+            or
+            min(up{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},opengeni_workload_component="worker-turns"}) < 1
+            or
+            count(up{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},opengeni_workload_component="worker-turns"} == 1)
+              > count(opengeni_turn_capacity_monitor_fresh{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-turn"})
           for: 2m
           labels:
             severity: warning
           annotations:
             summary: OpenGeni eligible-turn backlog monitoring is stale
-            description: Temporal DescribeTaskQueue has not produced a fresh sample for this exact namespace, release, and environment. Backlog values are diagnostic only until freshness recovers.
+            description: At least one expected turn-worker scrape is down, missing its monitor series, or has not produced a fresh Temporal DescribeTaskQueue sample for this exact namespace, release, and environment. Backlog values are diagnostic only until freshness recovers.
         - alert: OpenGeniWorkerMemoryNearLimit
           expr: |
             max by (namespace, pod, container) (

@@ -27,6 +27,7 @@ import {
   syntheticAllocatedWorkBytesByScenario,
   verifyDensityProfileArtifactText,
   withDeadline,
+  withDensitySeedChildCleanup,
   withTimeout,
   type DensityMemorySample,
   type DensityMeasurement,
@@ -250,6 +251,74 @@ describe("turn density profile release-gate helpers", () => {
     await expect(cleanupDensityWorkspace(() => new Promise(() => undefined), 5)).rejects.toThrow(
       "Timed out deleting density profile workspace",
     );
+  });
+
+  test("reaps a killed seed child before cleanup and preserves the wave failure", async () => {
+    const events: string[] = [];
+    const primaryFailure = new Error("wave deadline elapsed");
+    let exitCode: number | null = null;
+    let resolveExit!: (code: number) => void;
+    const exited = new Promise<number>((resolve) => {
+      resolveExit = resolve;
+    });
+    const child = {
+      get exitCode() {
+        return exitCode;
+      },
+      exited,
+      kill(signal?: number) {
+        events.push(`kill:${String(signal)}`);
+      },
+    };
+
+    const lifecycle = withDensitySeedChildCleanup(
+      async () => {
+        throw primaryFailure;
+      },
+      () => child,
+      async () => {
+        events.push("cleanup");
+      },
+      100,
+    );
+    await Bun.sleep(1);
+    expect(events).toEqual(["kill:9"]);
+
+    exitCode = 137;
+    events.push("exit");
+    resolveExit(137);
+    await expect(lifecycle).rejects.toBe(primaryFailure);
+    expect(events).toEqual(["kill:9", "exit", "cleanup"]);
+  });
+
+  test("uses a separate bounded reap timeout without masking its primary cause", async () => {
+    const primaryFailure = new Error("wave deadline elapsed");
+    let cleaned = false;
+    const lifecycle = withDensitySeedChildCleanup(
+      async () => {
+        throw primaryFailure;
+      },
+      () => ({
+        exitCode: null,
+        exited: new Promise<number>(() => undefined),
+        kill: () => undefined,
+      }),
+      async () => {
+        cleaned = true;
+      },
+      5,
+    );
+
+    try {
+      await lifecycle;
+      throw new Error("expected seed lifecycle to fail");
+    } catch (error) {
+      expect(error).toBe(primaryFailure);
+      expect((error as Error).message).toBe(primaryFailure.message);
+      expect((error as Error).cause).toBeInstanceOf(Error);
+      expect(String((error as Error).cause)).toContain("waiting for killed density seed process");
+    }
+    expect(cleaned).toBe(true);
   });
 
   test("preserves an early activity failure instead of masking it as gate settlement", () => {

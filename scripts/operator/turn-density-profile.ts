@@ -42,6 +42,7 @@ const MAX_SYNTHETIC_ITEMS = 1_024;
 const MAX_SYNTHETIC_WAIT_MS = 60_000;
 const MAX_SEED_MANIFEST_BYTES = 64 * 1024;
 const DENSITY_SEED_MANIFEST_ENV = "OPENGENI_DENSITY_SEED_MANIFEST";
+const DENSITY_SEED_REAP_TIMEOUT_MS = 5_000;
 
 export const DEFAULT_DENSITIES = [1, 2, 4, 8, 12, 16, 24, 32] as const;
 export const DEFAULT_HISTORY_ROW_PAYLOAD_BYTES = 4 * 1024;
@@ -175,6 +176,12 @@ export type DensitySeedManifest = {
     sessionId: string;
     sessionIndex: number;
   }>;
+};
+
+export type DensitySeedChild = {
+  readonly exitCode: number | null;
+  readonly exited: Promise<number>;
+  kill(signal?: number): void;
 };
 
 /**
@@ -949,35 +956,68 @@ async function runHistorySeedSubprocess(
   const temporaryDirectory = await mkdtemp(join(tmpdir(), "opengeni-turn-density-seed-"));
   const manifestPath = join(temporaryDirectory, "manifest.json");
   let child: ReturnType<typeof Bun.spawn> | null = null;
-  try {
-    await writeFile(manifestPath, `${JSON.stringify(validated)}\n`, {
-      encoding: "utf8",
-      mode: 0o600,
-    });
-    child = Bun.spawn([process.execPath, import.meta.path], {
-      env: { ...process.env, [DENSITY_SEED_MANIFEST_ENV]: manifestPath },
-      stdin: "ignore",
-      stdout: "inherit",
-      stderr: "inherit",
-    });
-    const exitCode = await withDeadline(
-      child.exited,
-      deadlineAt,
-      `Timed out during isolated history seeding for density ${density} wave ${wave}`,
-    );
-    if (exitCode !== 0) {
-      throw new Error(
-        `Isolated history seed process exited ${exitCode} for density ${density} wave ${wave}`,
+  await withDensitySeedChildCleanup(
+    async () => {
+      await writeFile(manifestPath, `${JSON.stringify(validated)}\n`, {
+        encoding: "utf8",
+        mode: 0o600,
+      });
+      child = Bun.spawn([process.execPath, import.meta.path], {
+        env: { ...process.env, [DENSITY_SEED_MANIFEST_ENV]: manifestPath },
+        stdin: "ignore",
+        stdout: "inherit",
+        stderr: "inherit",
+      });
+      const exitCode = await withDeadline(
+        child.exited,
+        deadlineAt,
+        `Timed out during isolated history seeding for density ${density} wave ${wave}`,
       );
-    }
+      if (exitCode !== 0) {
+        throw new Error(
+          `Isolated history seed process exited ${exitCode} for density ${density} wave ${wave}`,
+        );
+      }
+    },
+    () => child,
+    () => rm(temporaryDirectory, { recursive: true, force: true }),
+  );
+}
+
+/**
+ * Own a seed subprocess and its manifest directory as one ordered lifecycle.
+ * The reap timeout is deliberately independent from the wave deadline: the
+ * latter is normally already expired when this failure path runs.
+ */
+export async function withDensitySeedChildCleanup<T>(
+  work: () => Promise<T>,
+  currentChild: () => DensitySeedChild | null,
+  cleanup: () => Promise<void>,
+  reapTimeoutMs = DENSITY_SEED_REAP_TIMEOUT_MS,
+): Promise<T> {
+  try {
+    return await work();
   } catch (error) {
+    const child = currentChild();
     if (child && child.exitCode === null) {
-      child.kill(9);
-      void child.exited.catch(() => undefined);
+      let reapFailure: unknown;
+      try {
+        child.kill(9);
+        await withTimeout(
+          child.exited,
+          reapTimeoutMs,
+          `Timed out after ${reapTimeoutMs}ms waiting for killed density seed process to exit`,
+        );
+      } catch (reapError) {
+        reapFailure = reapError;
+      }
+      if (reapFailure !== undefined && error instanceof Error && error.cause === undefined) {
+        error.cause = reapFailure;
+      }
     }
     throw error;
   } finally {
-    await rm(temporaryDirectory, { recursive: true, force: true });
+    await cleanup();
   }
 }
 

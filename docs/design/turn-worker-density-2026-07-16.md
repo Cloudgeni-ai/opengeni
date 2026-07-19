@@ -94,7 +94,10 @@ cleanup if seeding, measurement, or verification fails. This prevents database
 driver/allocator pages retained while generating up to 64 MiB of active plus
 inactive seed input per turn from inflating the baseline and producing a
 misleading zero-increment result. Every artifact records this exact isolation
-protocol, and the verifier rejects a missing or altered declaration.
+protocol, and the verifier rejects a missing or altered declaration. On seed
+failure or timeout, the parent kills the child and awaits its exit under a new
+bounded five-second reap deadline before removing the private manifest
+directory; it never reuses the already-expired wave deadline.
 
 Each activity uses `sandboxBackend: "none"`, a zero-priced
 `scripted-density-model`, no model-provider registry entries, and no API key.
@@ -266,15 +269,19 @@ Turn workers use a Temporal custom activity-slot supplier instead of accepting
 must satisfy both projections below using the pod cgroup v1/v2 current/limit:
 
 ```text
-startup_baseline + reserved_after * 100 MiB + 512 MiB <= cgroup_limit
-current_usage    + pending_after  * 100 MiB + 512 MiB <= cgroup_limit
+post_create_baseline + reserved_after * 100 MiB + 512 MiB <= cgroup_limit
+current_usage        + reserved_after * 100 MiB + 512 MiB <= cgroup_limit
 ```
 
-The worker rejects startup if even one turn is unsafe. After startup, available
-slots are the minimum of the density remainder, baseline-contract remainder,
-and live cgroup-usage remainder after pending permits. Advertised capacity is
-already-reserved slots plus those currently available slots, so retained native
-memory contracts new admission without pretending admitted work disappeared.
+The worker finalizes its baseline after Temporal/native `Worker.create` and
+rejects startup if even one turn is unsafe. After startup, available slots are
+the minimum of the density remainder, baseline-contract remainder, and live
+cgroup-usage remainder after every live permit. Marking a permit used does not
+release its reservation: the turn's allocation may not yet be visible in RSS,
+and unrelated native growth cannot safely be attributed to it. Advertised
+capacity is already-reserved slots plus those currently available slots, so
+retained native memory contracts new admission without pretending admitted
+work disappeared.
 Malformed, partial, unreadable, nonpositive, or unsafe finite cgroup controller
 values fail closed; only explicit v2 `max` and valid v1 unlimited sentinels are
 unlimited. The worker publishes capacity, reserved/used/available slots,
@@ -292,10 +299,15 @@ session counts. The exported series cover eligible backlog/count/age/rates,
 monitor read success/timestamp/age/freshness, and slot
 capacity/reservation/use/availability/saturation. A failed or hung Temporal
 read leaves the old value visible for diagnosis but marks it stale; backlog and
-saturation alerts require a successful sample less than 45 seconds old.
-Dashboard queries use `max`, not `sum`, for queue state because each worker
-observes the same task queue, and require one exact namespace, environment, and
-Helm release so independent fleets cannot aggregate by default. A Pods HPA
+saturation alerts require a successful sample less than 45 seconds old from
+the same Prometheus scrape instance as the queue and saturation inputs. A fresh
+pod therefore cannot authorize another pod's stale-high value. Dashboard
+queries apply the same gate before using `max`, not `sum`, for queue state
+because each worker observes the same task queue, and require one exact
+namespace, environment, and Helm release so independent fleets cannot
+aggregate by default. The stale alert uses worst-pod freshness/timestamp and
+expected scrape-target counts so one fresh pod cannot hide another stale or
+missing monitor. A Pods HPA
 metric named `opengeni_turn_slot_saturation_ratio` targets
 `750m`; it is deliberately disabled until a verified `custom.metrics.k8s.io`
 adapter exists. CPU 70% and memory 80% remain the production fallback. This is

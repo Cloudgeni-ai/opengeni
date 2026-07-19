@@ -28,6 +28,8 @@ spec:
           targetLabel: namespace
         - sourceLabels: [__meta_kubernetes_service_label_app_kubernetes_io_instance]
           targetLabel: release
+        - sourceLabels: [__meta_kubernetes_service_label_app_kubernetes_io_component]
+          targetLabel: opengeni_workload_component
 {{- end }}
 {{- if and .Values.worker.enabled ((.Values.observability).serviceMonitor).enabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1") }}
 {{- range $role := list "control" "turns" }}
@@ -61,6 +63,8 @@ spec:
           targetLabel: namespace
         - sourceLabels: [__meta_kubernetes_service_label_app_kubernetes_io_instance]
           targetLabel: release
+        - sourceLabels: [__meta_kubernetes_service_label_app_kubernetes_io_component]
+          targetLabel: opengeni_workload_component
 {{- end }}
 {{- end }}
 {{- if and .Values.relay.enabled ((.Values.observability).serviceMonitor).enabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1") }}

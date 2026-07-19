@@ -47,7 +47,7 @@ describe("worker concurrency contract", () => {
     });
   });
 
-  test("accounts for pending poll permits and observed native-memory growth", () => {
+  test("keeps pending and used permits charged through observed memory growth", () => {
     const memory = mutableMemory(300 * MIB, 2_100 * MIB);
     const supplier = new MemoryAwareTurnSlotSupplier({
       maximumTurns: 16,
@@ -63,7 +63,7 @@ describe("worker concurrency contract", () => {
     supplier.markSlotUsed(used(first!));
     memory.currentBytes = 1_550 * MIB;
 
-    // observed + one pending + one new hard budget + headroom = 2,250 MiB
+    // observed + two live permits + one new hard budget + headroom = 2,350 MiB
     expect(supplier.tryReserveSlot({} as never)).toBeNull();
     expect(supplier.snapshot()).toMatchObject({
       reservedSlots: 2,
@@ -71,9 +71,67 @@ describe("worker concurrency contract", () => {
       memoryBoundCapacity: 2,
     });
     supplier.releaseSlot(released(second!));
-    // observed + one new pending budget + headroom = 2,150 MiB
+    // observed + one used permit + one new hard budget + headroom = 2,250 MiB
     expect(supplier.tryReserveSlot({} as never)).toBeNull();
-    memory.currentBytes = 1_450 * MIB;
+    memory.currentBytes = 1_400 * MIB;
+    expect(supplier.tryReserveSlot({} as never)).not.toBeNull();
+  });
+
+  test("does not release a reservation when mark-used races ahead of RSS", () => {
+    const memory = mutableMemory(300 * MIB, 999 * MIB);
+    const supplier = new MemoryAwareTurnSlotSupplier({
+      maximumTurns: 4,
+      hardBytesPerTurn: 100 * MIB,
+      nativeHeadroomBytes: 500 * MIB,
+      memorySnapshot: memory.read,
+    });
+
+    const permit = supplier.tryReserveSlot({} as never)!;
+    supplier.markSlotUsed(used(permit));
+
+    // RSS has not risen yet, but current + used + new + headroom would exceed
+    // the limit. Marking the first permit used must not admit the second.
+    expect(memory.currentBytes).toBe(300 * MIB);
+    expect(supplier.tryReserveSlot({} as never)).toBeNull();
+    expect(supplier.snapshot()).toMatchObject({
+      reservedSlots: 1,
+      usedSlots: 1,
+      availableSlots: 0,
+      memoryBoundCapacity: 1,
+    });
+  });
+
+  test("charges multiple permits across pending-to-used transitions until release", () => {
+    const memory = mutableMemory(200 * MIB, 1_101 * MIB);
+    const supplier = new MemoryAwareTurnSlotSupplier({
+      maximumTurns: 4,
+      hardBytesPerTurn: 100 * MIB,
+      nativeHeadroomBytes: 500 * MIB,
+      memorySnapshot: memory.read,
+    });
+
+    const first = supplier.tryReserveSlot({} as never)!;
+    const second = supplier.tryReserveSlot({} as never)!;
+    const third = supplier.tryReserveSlot({} as never)!;
+    supplier.markSlotUsed(used(first));
+    supplier.markSlotUsed(used(second));
+    expect(supplier.snapshot()).toMatchObject({
+      reservedSlots: 3,
+      usedSlots: 2,
+      availableSlots: 1,
+    });
+
+    const fourth = supplier.tryReserveSlot({} as never)!;
+    supplier.markSlotUsed(used(third));
+    supplier.markSlotUsed(used(fourth));
+    expect(supplier.tryReserveSlot({} as never)).toBeNull();
+
+    supplier.releaseSlot(released(second));
+    expect(supplier.snapshot()).toMatchObject({
+      reservedSlots: 3,
+      usedSlots: 3,
+      availableSlots: 1,
+    });
     expect(supplier.tryReserveSlot({} as never)).not.toBeNull();
   });
 
@@ -146,11 +204,35 @@ describe("worker concurrency contract", () => {
       memorySnapshot: memory.read,
     });
     memory.currentBytes = 450 * MIB;
-    expect(() => supplier.assertCanAdmitOne()).toThrow(
+    expect(() => supplier.finalizeStartupBaseline()).toThrow(
       "cannot safely admit one turn after worker initialization",
     );
     memory.currentBytes = 400 * MIB;
-    expect(() => supplier.assertCanAdmitOne()).not.toThrow();
+    expect(() => supplier.finalizeStartupBaseline()).not.toThrow();
+    expect(supplier.snapshot()).toMatchObject({
+      baselineBytes: 400 * MIB,
+      currentBytes: 400 * MIB,
+      memoryBoundCapacity: 1,
+    });
+  });
+
+  test("rebases capacity after worker creation retains native memory", () => {
+    const memory = mutableMemory(200 * MIB, 1_500 * MIB);
+    const supplier = new MemoryAwareTurnSlotSupplier({
+      maximumTurns: 16,
+      hardBytesPerTurn: 100 * MIB,
+      nativeHeadroomBytes: 500 * MIB,
+      memorySnapshot: memory.read,
+    });
+    expect(supplier.snapshot()).toMatchObject({ baselineBytes: 200 * MIB });
+
+    memory.currentBytes = 400 * MIB;
+    supplier.finalizeStartupBaseline();
+    expect(supplier.snapshot()).toMatchObject({
+      baselineBytes: 400 * MIB,
+      memoryBoundCapacity: 6,
+      availableSlots: 6,
+    });
   });
 
   test("a blocked reservation exits with AbortError rather than leaking a poll", async () => {
