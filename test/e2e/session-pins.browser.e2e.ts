@@ -371,6 +371,14 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       const goal = desktopPage.getByTestId("goal-surface");
       const agents = desktopPage.getByTestId("composer-agents-pill");
       const composer = desktopPage.getByLabel("Message the agent");
+      const waitForDraftSave = () =>
+        desktopPage.waitForResponse(
+          (response) =>
+            response.request().method() === "PUT" &&
+            response.url() ===
+              `${apiBaseUrl}/v1/workspaces/${workspaceId}/sessions/${manager.id}/composer-draft` &&
+            response.ok(),
+        );
       await queue.getByText("1 queued prompt", { exact: true }).waitFor();
       await goal.waitFor();
       await agents.waitFor();
@@ -437,7 +445,10 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       // complete durable prompt into the composer, where Enter submits it again.
       // A pre-existing draft is never silently destroyed: the queue row stays
       // put until the user explicitly confirms replacement.
+      const currentDraftSaved = waitForDraftSave();
       await composer.fill("Unsent local draft that must not be overwritten");
+      await currentDraftSaved;
+      await desktopPage.getByText("Saving draft…", { exact: true }).waitFor({ state: "hidden" });
       await queue.getByRole("button", { name: "More actions for queued prompt 2" }).click();
       await desktopPage.getByRole("menuitem", { name: "Edit in composer" }).click();
       await queue.getByText("Replace it with this queued prompt?").waitFor();
@@ -445,13 +456,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       expect(await composer.inputValue()).toBe("Unsent local draft that must not be overwritten");
       await queue.getByRole("button", { name: "Keep current draft" }).click();
       expect(await queuedRows.count()).toBe(2);
-      const clearedDraftSaved = desktopPage.waitForResponse(
-        (response) =>
-          response.request().method() === "PUT" &&
-          response.url() ===
-            `${apiBaseUrl}/v1/workspaces/${workspaceId}/sessions/${manager.id}/composer-draft` &&
-          response.ok(),
-      );
+      const clearedDraftSaved = waitForDraftSave();
       await composer.fill("");
       await clearedDraftSaved;
       await desktopPage.getByText("Saving draft…", { exact: true }).waitFor({ state: "hidden" });
