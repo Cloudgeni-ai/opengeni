@@ -286,7 +286,7 @@ describe("Temporal workflow integration", () => {
       const scope = workflowScope();
       const sessionId = crypto.randomUUID();
       const workflowId = `wf-${crypto.randomUUID()}`;
-      const turn = queuedTurn("event-1");
+      const turn = queuedTurn(crypto.randomUUID());
       const queuedTurns = [turn];
       const runs: Array<{ attemptId: string }> = [];
       const handoffs: unknown[] = [];
@@ -319,7 +319,14 @@ describe("Temporal workflow integration", () => {
         const handle = await client.workflow.start("sessionWorkflow", {
           taskQueue,
           workflowId,
-          args: [{ ...scope, sessionId, initialEventId: "event-1", maxTurnsPerRun: 1 }],
+          args: [
+            {
+              ...scope,
+              sessionId,
+              initialEventId: turn.triggerEventId,
+              maxTurnsPerRun: 1,
+            },
+          ],
         });
         await handle.result();
         expect(runs).toHaveLength(2);
@@ -425,7 +432,7 @@ describe("Temporal workflow integration", () => {
     async () => {
       const taskQueue = `workflow-test-${crypto.randomUUID()}`;
       const scope = workflowScope();
-      const turn = queuedTurn("event-1");
+      const turn = queuedTurn(crypto.randomUUID());
       let handoff: ReturnType<typeof persistenceReference> | null = null;
       const queuedTurns = [turn];
       const runs: Array<{ attemptId: string }> = [];
@@ -468,7 +475,13 @@ describe("Temporal workflow integration", () => {
         const handle = await client.workflow.start("sessionWorkflow", {
           taskQueue,
           workflowId: `wf-${crypto.randomUUID()}`,
-          args: [{ ...scope, sessionId: crypto.randomUUID(), initialEventId: "event-1" }],
+          args: [
+            {
+              ...scope,
+              sessionId: crypto.randomUUID(),
+              initialEventId: turn.triggerEventId,
+            },
+          ],
         });
         await handle.result();
         expect(runs).toHaveLength(2);

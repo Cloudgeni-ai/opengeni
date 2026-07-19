@@ -168,56 +168,72 @@ describe("worker restart resilience", () => {
 
     const firstWorker = await restartTestWorker(nativeConnection, taskQueue, activities);
     const firstRun = firstWorker.run();
-    const client = new Client({ connection });
-    const handle = await client.workflow.start("sessionWorkflow", {
-      taskQueue,
-      workflowId,
-      args: [
-        {
-          accountId: grant.accountId,
-          workspaceId: grant.workspaceId,
-          sessionId: session.id,
-        },
-      ],
-    });
-
-    // Wait until the side effect ran, its progress was checkpointed to items,
-    // and the second (slow) model call is in flight — then pull the plug.
-    await waitFor(() => mcp.calls.length === 1);
-    await waitFor(
-      async () =>
-        (await getSessionHistoryItems(dbClient.db, grant.workspaceId, session.id)).length > 0,
-    );
-    await waitFor(() => model.calls === 2);
-    firstWorker.shutdown();
-    await firstRun;
-
-    // Between workers the same logical turn is recoverable, not converted into
-    // queue work and not failed.
-    const recovering = await getSession(dbClient.db, grant.workspaceId, session.id);
-    expect(recovering?.status).toBe("recovering");
-    const turnsAfterShutdown = await listSessionTurns(dbClient.db, grant.workspaceId, session.id);
-    expect(turnsAfterShutdown.map((turn) => turn.status)).toEqual(["recovering"]);
-    expect(turnsAfterShutdown[0]?.id).toBe(accepted.turn.id);
-    const eventsAfterShutdown = await listSessionEvents(
-      dbClient.db,
-      grant.workspaceId,
-      session.id,
-      0,
-      200,
-    );
-    expect(eventsAfterShutdown.some((event) => event.type === "turn.recovery.requested")).toBe(
-      true,
-    );
-    expect(eventsAfterShutdown.some((event) => event.type === "turn.failed")).toBe(false);
-
-    const secondWorker = await restartTestWorker(nativeConnection, taskQueue, activities);
-    const secondRun = secondWorker.run();
+    let firstWorkerStopped = false;
+    let secondWorker: Awaited<ReturnType<typeof restartTestWorker>> | null = null;
+    let secondRun: Promise<void> | null = null;
     try {
+      const client = new Client({ connection });
+      const handle = await client.workflow.start("sessionWorkflow", {
+        taskQueue,
+        workflowId,
+        args: [
+          {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            sessionId: session.id,
+          },
+        ],
+      });
+
+      // Wait until the side effect ran, its progress was checkpointed to items,
+      // and the second (slow) model call is in flight — then pull the plug. The
+      // first workflow bundle load can exceed the generic 30s polling default on
+      // a cold native Temporal worker, so keep this below the enclosing test
+      // bound and emit state that makes a genuine failure actionable.
+      await waitFor(() => mcp.calls.length === 1, {
+        timeoutMs: 120_000,
+        describe: () => `modelCalls=${model.calls} mcpCalls=${mcp.calls.length}`,
+      });
+      await waitFor(
+        async () =>
+          (await getSessionHistoryItems(dbClient.db, grant.workspaceId, session.id)).length > 0,
+      );
+      await waitFor(() => model.calls === 2);
+      firstWorker.shutdown();
+      firstWorkerStopped = true;
+      await firstRun;
+
+      // Between workers the same logical turn is recoverable, not converted into
+      // queue work and not failed.
+      const recovering = await getSession(dbClient.db, grant.workspaceId, session.id);
+      expect(recovering?.status).toBe("recovering");
+      const turnsAfterShutdown = await listSessionTurns(dbClient.db, grant.workspaceId, session.id);
+      expect(turnsAfterShutdown.map((turn) => turn.status)).toEqual(["recovering"]);
+      expect(turnsAfterShutdown[0]?.id).toBe(accepted.turn.id);
+      const eventsAfterShutdown = await listSessionEvents(
+        dbClient.db,
+        grant.workspaceId,
+        session.id,
+        0,
+        200,
+      );
+      expect(eventsAfterShutdown.some((event) => event.type === "turn.recovery.requested")).toBe(
+        true,
+      );
+      expect(eventsAfterShutdown.some((event) => event.type === "turn.failed")).toBe(false);
+
+      secondWorker = await restartTestWorker(nativeConnection, taskQueue, activities);
+      secondRun = secondWorker.run();
       await handle.result();
     } finally {
-      secondWorker.shutdown();
-      await secondRun;
+      if (!firstWorkerStopped) {
+        firstWorker.shutdown();
+        await firstRun.catch(() => undefined);
+      }
+      if (secondWorker && secondRun) {
+        secondWorker.shutdown();
+        await secondRun;
+      }
       mcp.close();
     }
 
@@ -615,53 +631,11 @@ describe("worker restart resilience", () => {
       runtime: createProductionAgentRuntime({ model }),
     });
     let dispatchedAttemptId: string | null = null;
-    let interruptSettled!: () => void;
-    const interruptSettlement = new Promise<void>((resolve) => {
-      interruptSettled = resolve;
-    });
-    let lateSettlement: Awaited<ReturnType<typeof applySessionTurnSettlement>> | null = null;
     const activities = {
       ...baseActivities,
-      settleSessionInterruptions: async (
-        input: Parameters<typeof baseActivities.settleSessionInterruptions>[0],
-      ) => {
-        const result = await baseActivities.settleSessionInterruptions(input);
-        interruptSettled();
-        return result;
-      },
       runAgentTurn: async (input: Parameters<typeof baseActivities.runAgentTurn>[0]) => {
         dispatchedAttemptId = input.attemptId;
-        let result: Awaited<ReturnType<typeof baseActivities.runAgentTurn>> | null = null;
-        let activityError: unknown;
-        try {
-          result = await baseActivities.runAgentTurn(input);
-          if (result.status === "unclaimed") return result;
-        } catch (error) {
-          activityError = error;
-        }
-        // Deterministically model the production zombie boundary: the real
-        // activity has observed cancellation, then this wrapper publishes a
-        // terminal settlement from that fenced attempt after Pause committed.
-        await interruptSettlement;
-        const [turn] = await listSessionTurns(dbClient.db, input.workspaceId, input.sessionId);
-        if (!turn) throw new Error(`zombie fixture turn disappeared for ${input.sessionId}`);
-        lateSettlement = await applySessionTurnSettlement(dbClient.db, input.workspaceId, {
-          sessionId: input.sessionId,
-          turnId: turn.id,
-          triggerEventId: turn.triggerEventId,
-          attemptId: input.attemptId,
-          turnStatus: "completed",
-          sessionStatus: "idle",
-          activeTurnId: null,
-          events: [
-            {
-              type: "turn.completed",
-              payload: { output: "late zombie output" },
-            },
-          ],
-        });
-        if (activityError) throw activityError;
-        return result!;
+        return await baseActivities.runAgentTurn(input);
       },
     };
     const session = await createSession(dbClient.db, {
@@ -731,6 +705,29 @@ describe("worker restart resilience", () => {
       await workerRun;
     }
 
+    // The workflow now waits for activity cancellation before it settles Pause.
+    // Model the old worker's terminal write after that durable settlement rather
+    // than blocking cancellation on the settlement activity (which deadlocks the
+    // ordering under test). The attempt fence must reject this exact zombie write.
+    const [pausedTurn] = await listSessionTurns(dbClient.db, grant.workspaceId, session.id);
+    if (!pausedTurn || !dispatchedAttemptId) {
+      throw new Error(`pause fixture lost its turn attempt for ${session.id}`);
+    }
+    const lateSettlement = await applySessionTurnSettlement(dbClient.db, grant.workspaceId, {
+      sessionId: session.id,
+      turnId: pausedTurn.id,
+      triggerEventId: pausedTurn.triggerEventId,
+      attemptId: dispatchedAttemptId,
+      turnStatus: "completed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [
+        {
+          type: "turn.completed",
+          payload: { output: "late zombie output" },
+        },
+      ],
+    });
     expect(lateSettlement).toMatchObject({
       action: "stale",
       turnStatus: "recovering",
