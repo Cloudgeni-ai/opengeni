@@ -1,13 +1,13 @@
 -- deployment-mode: rolling
--- Rig verification creates a standalone provider sandbox without a session
--- lease. Register that exact instance as a bounded, independently typed owner
--- before setup so the 30-second Modal orphan sweep cannot terminate a valid
--- verifier after the two-minute unattributed grace.
+-- Phase A of the rig-verifier ownership rollout. Install the bounded owner
+-- registry and make the Modal orphan reaper recognize exact future verifier
+-- owners before any verifier is permitted to create them. Phase B activates
+-- owner creation only after every shared-queue worker runs this reaper.
 
 CREATE TABLE "sandbox_ephemeral_owners" (
   "execution_id" uuid PRIMARY KEY NOT NULL,
-  "account_id" uuid NOT NULL REFERENCES "managed_accounts"("id") ON DELETE CASCADE,
-  "workspace_id" uuid NOT NULL REFERENCES "workspaces"("id") ON DELETE CASCADE,
+  "account_id" uuid NOT NULL,
+  "workspace_id" uuid NOT NULL,
   "kind" text NOT NULL,
   "backend" text NOT NULL,
   "instance_id" text NOT NULL,
@@ -16,6 +16,10 @@ CREATE TABLE "sandbox_ephemeral_owners" (
   "deactivated_at" timestamptz,
   "created_at" timestamptz NOT NULL DEFAULT now(),
   "updated_at" timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT "sandbox_ephemeral_owners_workspace_account_fk"
+    FOREIGN KEY ("workspace_id", "account_id")
+    REFERENCES "workspaces"("id", "account_id")
+    ON DELETE CASCADE,
   CONSTRAINT "sandbox_ephemeral_owners_kind_check"
     CHECK ("kind" IN ('rig_verification'))
 );

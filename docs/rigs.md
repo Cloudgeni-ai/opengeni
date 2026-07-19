@@ -7,13 +7,14 @@ A workspace owns named **rigs**: versioned sandbox machine definitions (a base i
 1. **Versions are append-only and content-immutable.** `rig_versions` rows are never updated in place; only the `active` flag flips. Exactly one version per rig can be active at a time (a partial unique index on `(rig_id) WHERE active`).
 2. **A session's rig binding is frozen at creation.** `sessions.rig_id`/`sessions.rig_version_id` are set once, from the explicit `rigId` on create or the workspace's default rig, and never move — even if the rig is promoted to a new active version mid-session. A shared box (`sandbox: 'shared'` or an explicit group) must carry the same frozen `rig_version_id` as the rest of its group; a mismatch 422s at create.
 3. **Two change kinds, two trust levels.** `setup_append` is additive (one already-verified-in-a-live-box shell command) and **auto-merges into a new active version on a green clean-replay run** — no `rigs:manage` needed. `definition_edit` is a full next-version edit (image/script/checks/credential hooks/default variable sets) that still runs the same clean-replay verification but always lands `proposed`; promoting it to a new active version requires `rigs:manage`.
-4. **Verification runs in a throwaway, secret-free sandbox with bounded ownership.** Rig CI establishes its own sandbox session (id `rig-verification-<changeId>` / `rig-version-verification-<versionId>`). Its provider-create callback retains the cleanup handle, persists the exact instance under a globally unique `rig_verification` execution owner with a 20-minute expiry, and only then applies diagnostic provider tags best-effort and permits setup. This is a separate owner type, never a fabricated turn/viewer lease. The run executes the rig-setup hook, the proposed command for `setup_append`, and every declared check; its `finally` independently deactivates ownership and terminates the provider. Nothing persists, and expiry is the process-death cleanup backstop.
+4. **Bounded verifier ownership requires a two-phase shared-queue rollout.** A rig verifier is a standalone throwaway sandbox, not a turn/viewer lease. This Phase A revision installs the tenant-consistent `rig_verification` owner registry and teaches the reaper to recognize active exact owner rows, but intentionally leaves verifier creation on the legacy unowned path. Rig-verification dispatches must remain paused throughout Phase A and until Phase B is deployed everywhere with its activation gate still false. Phase B may register owners only after live worker-revision evidence proves no lease-only predecessor can receive the shared reaper activity.
 5. **Workspace isolation.** `rigs`, `rig_versions`, and `rig_changes` are all FORCE-RLS workspace-scoped tables, same as every other workspace table.
 6. **Rig setup never touches selfhosted.** The rig-setup hook is part of the same owned-hooks block as the repository-clone and credential hooks, which is skipped entirely when the turn's effective sandbox backend is `selfhosted` (a [Connected Machine](connected-machines.md) is the user's own computer; the platform never runs setup against it). A machine-targeted turn therefore always behaves as if rig-less for setup purposes, even when the session carries a rig binding.
 
 ## Configuration
 
 - `OPENGENI_RIG_SETUP_TIMEOUT_MS` — the budget for the rig's own setup script, separate from the general 120s sandbox-lifecycle-hook default. Defaults to 600000 (10 minutes). Applies to both a live turn's setup hook and a rig-CI verification run.
+- `OPENGENI_RIG_VERIFICATION_EPHEMERAL_OWNERS_ENABLED` — strict boolean Phase-B activation gate, default `false`. Phase A parses this setting but intentionally does not consume it or create verifier owner rows. Keep it false through both code rollouts; Phase B must fail closed before provider creation while false. Enable it only after every shared-queue worker is proven to run the Phase-B revision and the owner-aware reaper.
 - No dedicated encryption key: a rig's `setupScript`/`image`/`checks` are not secret material — secrets are attached only via the rig's `defaultVariableSetIds`, which reference workspace variable-sets and are subject to their own encryption (see [`variable-sets.md`](variable-sets.md)).
 
 ## Rig setup at runtime
@@ -74,14 +75,15 @@ A session's rig binding resolves at create as: the explicit `rigId` on the creat
 
 ## Verification and change promotion (rig CI)
 
+> **Phase A dispatch freeze:** this revision still executes the legacy unowned verifier path. Do not enqueue or re-run rig verification while Phase A is rolling out or resident. Resume only after completing the Phase-B activation procedure in [Bounded verifier ownership rollout](#bounded-verifier-ownership-rollout). Existing business-outcome behavior below is unchanged, but provider lifetime is not considered safe until that procedure completes.
+
 Every proposed change is verified the same way, in a throwaway sandbox with no attached secrets:
 
 1. Establish a fresh sandbox session (`rig-verification-<changeId>` or `rig-version-verification-<versionId>`), applying the candidate version's image via the same `rig > pack > deployment` precedence as a live turn.
-2. As soon as the provider returns the exact instance, persist its active `rig_verification` execution owner **before** best-effort tags, readiness, setup, or checks. The Modal orphan sweep protects only that matching active, unexpired instance; stale/wrong tags do not protect a box.
-3. If the candidate version has a non-empty `setupScript`, run the rig-setup hook against it.
-4. For a `setup_append` change, run the proposed command; a nonzero exit rejects the change immediately without running the declared checks.
-5. Run every declared check (`RigCheck.command`), recording `exitCode`/`output` per check.
-6. Classify the outcome and, whether verification passed, failed, timed out, was cancelled, or threw during setup, run durable-owner deactivation and provider termination as independent cleanup operations in a `finally`:
+2. If the candidate version has a non-empty `setupScript`, run the rig-setup hook against it.
+3. For a `setup_append` change, run the proposed command; a nonzero exit rejects the change immediately without running the declared checks.
+4. Run every declared check (`RigCheck.command`), recording `exitCode`/`output` per check.
+5. Classify the outcome and terminate the throwaway provider session in `finally`.
 
 | Kind | Checks passed? | Infra error? | Outcome |
 |---|---|---|---|
@@ -93,6 +95,29 @@ Every proposed change is verified the same way, in a throwaway sandbox with no a
 A `definition_edit` promote (`POST .../changes/:changeId/promote`) re-validates that the change is `proposed` with `verification.passed === true` before minting the new version from the change's base version plus its payload overrides (fields the payload omits inherit from the base). Both promotion paths (`setup_append` auto-merge and `definition_edit` explicit promote) mint the new version with `activate: true` in the same call, so a rig never has a moment with zero active versions.
 
 Rig audit events (`rig.change.proposed`, `rig.verification.started`/`.passed`/`.failed`, `rig.change.merged`/`.rejected`/`.failed`, `rig.version.activated`/`.promoted`) are recorded through the standard workspace audit log for every step above.
+
+## Bounded verifier ownership rollout
+
+The worker replicas share one Temporal control task queue. Any compatible worker can execute a reaper activity, so a normal rolling deployment does **not** prove that the worker which registered a verifier will also perform the next sweep. A Phase-B verifier owner is safe only when every worker eligible for that queue understands the owner registry.
+
+### Upgrade and activation
+
+1. Start from the Phase-A predecessor with rig-verification dispatch paused. Do not enqueue new change or version verification, and let already-running legacy verifiers finish or be cleaned up.
+2. Apply migration `0068_rig_verification_ephemeral_ownership.sql` and deploy Phase A. Keep `OPENGENI_RIG_VERIFICATION_EPHEMERAL_OWNERS_ENABLED=false` (its value is parsed but inert in Phase A).
+3. Prove every API/worker replica and every worker polling the shared control queue runs Phase A or newer. A partial Phase-A/predecessor rollout is safe only because no revision is creating verifier owner rows; dispatch stays paused.
+4. Deploy Phase B with the flag still false. Its verifier path must reject before provider creation while false; no fallback to an unowned sandbox is allowed.
+5. Again prove every worker polling the shared queue runs Phase B and its owner-aware reaper. Exercise queue routing so reaper activities land on multiple replicas; verify each one consumes the unified lease-plus-owner projection.
+6. Enable `OPENGENI_RIG_VERIFICATION_EPHEMERAL_OWNERS_ENABLED=true` in a separate configuration rollout. Only now may rig-verification dispatch resume.
+7. Run a live verifier longer than two minutes and observe at least the +120s, +150s, and +180s reaper sweeps. The exact active owner row must protect only its registered provider instance; on every exit, exact deactivation and provider termination run independently. Expiry is the process-death backstop, not ordinary cleanup.
+
+Provider tags remain best-effort diagnostics throughout. Missing or copied tags never establish ownership; the database projection is authoritative.
+
+### Partial rollout, rollback, and downgrade
+
+- **Phase-B worker rollback to Phase A:** first disable the flag and pause dispatch. Phase-A reapers still recognize active Phase-B owner rows, so already-created exact instances remain protected while they finish, deactivate, or expire. Phase-A workers must not receive new verifier work during the rollback because their verifier path is legacy/unowned.
+- **Rollback to the Phase-A predecessor:** forbidden while any active verifier owner row exists. Disable Phase-B creation, pause dispatch, prove all active rows have deactivated or expired and their providers are gone, and only then roll workers back. Keep the expand-only migration/table in place; do not reverse schema during worker rollback.
+- **Mixed Phase-B/Phase-A workers:** safe only with activation false and dispatch paused. If activation is true, a Phase-A worker can receive verifier work and create an unowned sandbox even though its reaper recognizes other owners.
+- **Mixed Phase-A/predecessor reapers:** never safe for Phase-B owner creation. A predecessor reaper sees only leases and will terminate a valid verifier after the unattributed grace, regardless of which worker created it.
 
 ## Composition with variable sets
 

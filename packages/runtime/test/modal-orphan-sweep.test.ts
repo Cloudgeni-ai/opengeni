@@ -213,6 +213,36 @@ describe("sweepModalOrphanSandboxes rig-verification ownership", () => {
     expiresAt: new Date(createdAtMs + 20 * 60_000),
   };
 
+  test("partial rollout proves activation is unsafe until every lease-only reaper is drained", async () => {
+    const futureOwnerAwareWorker = fakeModalClient([
+      { id: "sb-verifier", createdAt: createdAtMs / 1000, tags: [] },
+    ]);
+    const ownerAwareResult = await sweepModalOrphanSandboxes(
+      testSettings(MODAL_SETTINGS),
+      [liveOwner],
+      {
+        client: futureOwnerAwareWorker.client as never,
+        now: new Date(createdAtMs + 180_000),
+      },
+    );
+    expect(futureOwnerAwareWorker.terminated).toEqual([]);
+    expect(ownerAwareResult.skipped).toBe(1);
+
+    // An old shared-queue worker supplies only its lease projection. The same
+    // exact provider instance is therefore unattributed and is terminated once
+    // the two-minute grace has elapsed. Phase B may not create owners while any
+    // worker can still execute this legacy view.
+    const legacyLeaseOnlyWorker = fakeModalClient([
+      { id: "sb-verifier", createdAt: createdAtMs / 1000, tags: [] },
+    ]);
+    const legacyResult = await sweepModalOrphanSandboxes(testSettings(MODAL_SETTINGS), [], {
+      client: legacyLeaseOnlyWorker.client as never,
+      now: new Date(createdAtMs + 180_000),
+    });
+    expect(legacyLeaseOnlyWorker.terminated).toEqual(["sb-verifier"]);
+    expect(legacyResult.terminated[0]?.reason).toBe("unattributed");
+  });
+
   test("an active exact verifier survives 120s, 150s, and 180s reaper sweeps", async () => {
     for (const elapsedMs of [120_000, 150_000, 180_000]) {
       const { client, terminated } = fakeModalClient([

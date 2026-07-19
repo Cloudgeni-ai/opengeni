@@ -2051,12 +2051,8 @@ export const sandboxEphemeralOwners = pgTable(
     // deliberately not defaulted so an activity must carry one identity across
     // create callbacks, cleanup, and any provider replacement callback.
     executionId: uuid("execution_id").primaryKey(),
-    accountId: uuid("account_id")
-      .notNull()
-      .references(() => managedAccounts.id, { onDelete: "cascade" }),
-    workspaceId: uuid("workspace_id")
-      .notNull()
-      .references(() => workspaces.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
     kind: text("kind", { enum: sandboxEphemeralOwnerKindValues }).notNull(),
     backend: text("backend").notNull(),
     instanceId: text("instance_id").notNull(),
@@ -2067,6 +2063,13 @@ export const sandboxEphemeralOwners = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
+    // One composite parent identity prevents an account from being paired with
+    // another tenant's otherwise-valid workspace id.
+    workspaceAccount: foreignKey({
+      name: "sandbox_ephemeral_owners_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
     // Two active executions may never claim the same exact provider instance.
     activeInstance: uniqueIndex("sandbox_ephemeral_owners_active_instance_idx")
       .on(table.backend, table.instanceId)

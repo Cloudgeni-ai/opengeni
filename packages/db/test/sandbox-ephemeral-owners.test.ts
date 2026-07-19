@@ -124,6 +124,49 @@ describe("sandbox ephemeral ownership (real PostgreSQL + FORCE RLS)", () => {
     expect(fn?.prosecdef).toBe(true);
     expect(fn?.proconfig).toContain("search_path=pg_catalog");
     expect(fn?.executable).toBe(true);
+
+    const [tenantConstraint] = await admin<{ definition: string }[]>`
+      select pg_get_constraintdef(C.oid) as definition
+      from pg_constraint C
+      join pg_class T on T.oid = C.conrelid
+      join pg_namespace N on N.oid = T.relnamespace
+      where C.conname = 'sandbox_ephemeral_owners_workspace_account_fk'
+        and T.relname = 'sandbox_ephemeral_owners'
+        and N.nspname = current_schema()`;
+    expect(tenantConstraint?.definition).toContain(
+      "FOREIGN KEY (workspace_id, account_id) REFERENCES workspaces(id, account_id) ON DELETE CASCADE",
+    );
+  });
+
+  test("PostgreSQL rejects an account paired with another tenant's workspace", async () => {
+    if (!available) return;
+    const first = await freshWorkspace();
+    const second = await freshWorkspace();
+    const error = await admin`
+      insert into sandbox_ephemeral_owners (
+        execution_id,
+        account_id,
+        workspace_id,
+        kind,
+        backend,
+        instance_id,
+        expires_at
+      ) values (
+        ${crypto.randomUUID()},
+        ${first.accountId},
+        ${second.workspaceId},
+        'rig_verification',
+        'modal',
+        ${`modal-cross-tenant-${crypto.randomUUID()}`},
+        ${new Date(Date.now() + 10 * 60_000)}
+      )`
+      .then(() => null)
+      .catch((cause: unknown) => cause);
+
+    expect(error).toMatchObject({
+      code: "23503",
+      constraint_name: "sandbox_ephemeral_owners_workspace_account_fk",
+    });
   });
 
   test("unified projection includes a live lease and an active exact verifier", async () => {

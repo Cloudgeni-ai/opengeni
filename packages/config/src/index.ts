@@ -611,6 +611,12 @@ const SettingsSchema = z.object({
   // default (a rig may compile/install heavy tooling on first cold create).
   // Env: OPENGENI_RIG_SETUP_TIMEOUT_MS. Default 10min.
   rigSetupTimeoutMs: z.coerce.number().int().positive().default(600_000),
+  // Phase-B activation gate for bounded rig-verifier ownership. Phase A only
+  // parses and ships this default-off setting while deploying the owner-aware
+  // reaper everywhere; it does not consume the flag or create owner rows. The
+  // Phase-B verifier must fail closed before provider create while this is off.
+  // EnvBoolean is required so an explicit string "false" cannot activate it.
+  rigVerificationEphemeralOwnersEnabled: EnvBoolean.default(false),
   // --- sandbox warm-time billing (P2.1) ---
   // Per-backend warm rate (usd_micros/sec), like modelPricingJson: an empty {}
   // means warm-cost is not debited (warm-seconds are still metered for audit).
@@ -1142,6 +1148,9 @@ export function getSettings(): Settings {
     sandboxLeaseWarmingTtlMs: optional("OPENGENI_SANDBOX_LEASE_WARMING_TTL_MS"),
     sandboxWarmingTimeoutMs: optional("OPENGENI_SANDBOX_WARMING_TIMEOUT_MS"),
     rigSetupTimeoutMs: optional("OPENGENI_RIG_SETUP_TIMEOUT_MS"),
+    rigVerificationEphemeralOwnersEnabled: optional(
+      "OPENGENI_RIG_VERIFICATION_EPHEMERAL_OWNERS_ENABLED",
+    ),
     sandboxWarmRateMicrosPerSecondJson: optional(
       "OPENGENI_SANDBOX_WARM_RATE_MICROS_PER_SECOND_JSON",
     ),
