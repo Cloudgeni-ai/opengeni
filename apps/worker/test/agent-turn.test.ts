@@ -21,6 +21,7 @@ import {
   assertPhysicalToolQuiescenceForCancellation,
   classifyContextWindowOverflowError,
   classifyMcpTransportTimeoutError,
+  claimModelResponseCompletion,
   codexCredentialLeaseDeadlineExpired,
   computerToolModeForTurn,
   createTurnSandboxProvisioner,
@@ -495,6 +496,47 @@ describe("model usage source key (re-dispatch charge stability)", () => {
         positionalKey: "aggregate",
       }),
     ).toBe("aggregate");
+  });
+});
+
+describe("model response completion admission correlation", () => {
+  test("links distinct admitted calls even when the provider repeats a response id", () => {
+    const pendingAdmissionIds = ["admission-1", "admission-2"];
+    const unlinkedAdmissionIds = new Set(pendingAdmissionIds);
+
+    const first = claimModelResponseCompletion({
+      pendingAdmissionIds,
+      unlinkedAdmissionIds,
+      completedCallCount: 0,
+      responseId: "repeated-provider-response-id",
+      dispatchId: "attempt-1",
+    });
+    unlinkedAdmissionIds.delete(first.modelCallAdmissionId);
+    const second = claimModelResponseCompletion({
+      pendingAdmissionIds,
+      unlinkedAdmissionIds,
+      completedCallCount: first.completedCallCount,
+      responseId: "repeated-provider-response-id",
+      dispatchId: "attempt-1",
+    });
+
+    expect(first.modelCallAdmissionId).toBe("admission-1");
+    expect(second.modelCallAdmissionId).toBe("admission-2");
+    expect(second.completedCallCount).toBe(2);
+    expect(first.responseSourceKey).toBe(second.responseSourceKey);
+    expect(pendingAdmissionIds).toEqual([]);
+  });
+
+  test("fails closed when a completion has no exact unlinked admission", () => {
+    expect(() =>
+      claimModelResponseCompletion({
+        pendingAdmissionIds: [],
+        unlinkedAdmissionIds: new Set(),
+        completedCallCount: 0,
+        responseId: "unexpected-response",
+        dispatchId: "attempt-1",
+      }),
+    ).toThrow("provider response completed without a matching exact model-call admission");
   });
 });
 

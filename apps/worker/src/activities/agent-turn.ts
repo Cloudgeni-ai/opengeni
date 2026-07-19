@@ -643,6 +643,44 @@ export function modelUsageSourceKey(input: {
   return input.dispatchId ? `${input.dispatchId}:${input.positionalKey}` : input.positionalKey;
 }
 
+/**
+ * Correlate one provider-authoritative response completion with the exact model
+ * call admission that preceded it. Admission order, not the provider response
+ * id, is the execution identity: a provider may repeat an id (and tests do so
+ * deliberately), while each accepted invocation still needs its own linked
+ * persistence receipt before the turn may settle or recover.
+ *
+ * The returned source key deliberately retains the response-id dedupe contract
+ * for metering and timeline usage events. Reusing that accounting key must never
+ * suppress admission/receipt linkage or conversation-history persistence.
+ */
+export function claimModelResponseCompletion(input: {
+  pendingAdmissionIds: string[];
+  unlinkedAdmissionIds: ReadonlySet<string>;
+  completedCallCount: number;
+  responseId?: string | null | undefined;
+  dispatchId: string | null;
+}): {
+  modelCallAdmissionId: string;
+  completedCallCount: number;
+  responseSourceKey: string;
+} {
+  const modelCallAdmissionId = input.pendingAdmissionIds.shift();
+  if (!modelCallAdmissionId || !input.unlinkedAdmissionIds.has(modelCallAdmissionId)) {
+    throw new Error("provider response completed without a matching exact model-call admission");
+  }
+  const completedCallCount = input.completedCallCount + 1;
+  return {
+    modelCallAdmissionId,
+    completedCallCount,
+    responseSourceKey: modelUsageSourceKey({
+      responseId: input.responseId,
+      dispatchId: input.dispatchId,
+      positionalKey: `response-${completedCallCount}`,
+    }),
+  };
+}
+
 export function providerContextTokens(
   usage:
     | {
@@ -4824,7 +4862,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         stream = undefined;
         batcher = null;
         let responseCompletionCount = 0;
-        const completedModelResponseSourceKeys = new Set<string>();
         // The SDK emits every processed call item for one model response before
         // it emits any result for that response. Keep that response-local batch
         // in memory so an orphan from an older response cannot pin later stable
@@ -4928,87 +4965,77 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             let completedCurrentToolBatch = false;
             const responseCompletion = modelResponseCompletionFromSdkEvent(next.value);
             if (responseCompletion) {
-              const responseSourceKey = modelUsageSourceKey({
+              const claimedCompletion = claimModelResponseCompletion({
+                pendingAdmissionIds: pendingAgentModelCallAdmissionIds,
+                unlinkedAdmissionIds: unlinkedModelCallAdmissionIds,
+                completedCallCount: responseCompletionCount,
                 responseId: responseCompletion.responseId,
                 dispatchId: modelUsageDispatchId,
-                positionalKey: `response-${responseCompletionCount + 1}`,
               });
-              if (!completedModelResponseSourceKeys.has(responseSourceKey)) {
-                responseCompletionCount += 1;
-                const modelCallAdmissionId = pendingAgentModelCallAdmissionIds.shift();
-                if (
-                  !modelCallAdmissionId ||
-                  !unlinkedModelCallAdmissionIds.has(modelCallAdmissionId)
-                ) {
-                  throw new Error(
-                    "provider response completed without a matching exact model-call admission",
-                  );
-                }
-                // Within a turn the serving credential is fixed, so a switch can only
-                // surface on the turn's FIRST model call (vs the session's prior).
-                const responseAccountCtx = modelCallAccountContext({
-                  servingCredentialId: effectiveCodexCredentialId,
-                  priorSessionCredentialId: priorSessionCodexCredentialId,
-                  isFirstCallOfTurn: responseCompletionCount === 1,
+              responseCompletionCount = claimedCompletion.completedCallCount;
+              // Within a turn the serving credential is fixed, so a switch can only
+              // surface on the turn's FIRST model call (vs the session's prior).
+              const responseAccountCtx = modelCallAccountContext({
+                servingCredentialId: effectiveCodexCredentialId,
+                priorSessionCredentialId: priorSessionCodexCredentialId,
+                isFirstCallOfTurn: responseCompletionCount === 1,
+              });
+              await persistCompletedModelCall({
+                modelCallAdmissionId: claimedCompletion.modelCallAdmissionId,
+                turnId: activeTurnId,
+                provider: resolvedModel?.provider.id ?? settings.openaiProvider,
+                providerApi: resolvedModel?.provider.api ?? "responses",
+                model: turn.model,
+                sourceKey: claimedCompletion.responseSourceKey,
+                usage: responseCompletion.usage,
+                servingAccountHash: responseAccountCtx.servingAccountHash,
+                accountChangedFromPrevCall: responseAccountCtx.accountChangedFromPrevCall,
+              });
+              const observed = responseCompletion.usage?.usage.inputTokens;
+              if (typeof observed === "number" && observed > 0) {
+                recordModelInputTokens(observability, streamProvider, observed);
+                await setLastInputTokensFenced(observed);
+              }
+              const observedTotal = providerContextTokens(responseCompletion.usage?.usage);
+              if (observedTotal !== null) {
+                lastProviderContextTokensObserved = observedTotal;
+                providerContextRevision += 1;
+              }
+              if (responseCompletion.usage) {
+                // Prompt-cache efficiency for this response — same usage frame as the
+                // input-token accounting above, so the two are always consistent.
+                recordModelCacheTokens(observability, streamProvider, {
+                  cachedTokens: modelCallUsageTelemetry(responseCompletion.usage.usage)
+                    .cachedTokens,
+                  promptTokens: responseCompletion.usage.usage.inputTokens,
                 });
-                await persistCompletedModelCall({
-                  modelCallAdmissionId,
-                  turnId: activeTurnId,
-                  provider: resolvedModel?.provider.id ?? settings.openaiProvider,
-                  providerApi: resolvedModel?.provider.api ?? "responses",
-                  model: turn.model,
-                  sourceKey: responseSourceKey,
-                  usage: responseCompletion.usage,
-                  servingAccountHash: responseAccountCtx.servingAccountHash,
-                  accountChangedFromPrevCall: responseAccountCtx.accountChangedFromPrevCall,
-                });
-                completedModelResponseSourceKeys.add(responseSourceKey);
-                const observed = responseCompletion.usage?.usage.inputTokens;
-                if (typeof observed === "number" && observed > 0) {
-                  recordModelInputTokens(observability, streamProvider, observed);
-                  await setLastInputTokensFenced(observed);
-                }
-                const observedTotal = providerContextTokens(responseCompletion.usage?.usage);
-                if (observedTotal !== null) {
-                  lastProviderContextTokensObserved = observedTotal;
-                  providerContextRevision += 1;
-                }
-                if (responseCompletion.usage) {
-                  // Prompt-cache efficiency for this response — same usage frame as the
-                  // input-token accounting above, so the two are always consistent.
-                  recordModelCacheTokens(observability, streamProvider, {
-                    cachedTokens: modelCallUsageTelemetry(responseCompletion.usage.usage)
-                      .cachedTokens,
-                    promptTokens: responseCompletion.usage.usage.inputTokens,
-                  });
-                }
-                currentToolBatchCallIds = new Set<string>();
-                currentToolBatchCompletedCallIds = new Set<string>();
-                await reconcileConversationTruth();
+              }
+              currentToolBatchCallIds = new Set<string>();
+              currentToolBatchCompletedCallIds = new Set<string>();
+              await reconcileConversationTruth();
+              try {
+                await ensureRunAllowed(
+                  settings,
+                  db,
+                  input.accountId,
+                  input.workspaceId,
+                  isCodexTurn,
+                  entitlements,
+                );
+              } catch (limitError) {
+                // Capture the run state at the boundary so the budget valve in
+                // the outer catch can end this segment gracefully with full
+                // conversation context preserved for the post-top-up resume.
+                let serializedRunState: string | null = null;
                 try {
-                  await ensureRunAllowed(
-                    settings,
-                    db,
-                    input.accountId,
-                    input.workspaceId,
-                    isCodexTurn,
-                    entitlements,
-                  );
-                } catch (limitError) {
-                  // Capture the run state at the boundary so the budget valve in
-                  // the outer catch can end this segment gracefully with full
-                  // conversation context preserved for the post-top-up resume.
-                  let serializedRunState: string | null = null;
-                  try {
-                    serializedRunState = stream.state.toString();
-                  } catch {
-                    serializedRunState = null;
-                  }
-                  throw new BudgetExhaustedError(
-                    limitError instanceof Error ? limitError.message : String(limitError),
-                    serializedRunState,
-                  );
+                  serializedRunState = stream.state.toString();
+                } catch {
+                  serializedRunState = null;
                 }
+                throw new BudgetExhaustedError(
+                  limitError instanceof Error ? limitError.message : String(limitError),
+                  serializedRunState,
+                );
               }
             }
             const pendingToolCall = pendingToolCallFromSdkEvent(next.value);
