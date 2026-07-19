@@ -12,6 +12,8 @@ const BASE_ID = "77777777-7777-4777-8777-777777777777";
 const DOCUMENT_ID = "88888888-8888-4888-8888-888888888888";
 const TURN_A = "99999999-9999-4999-8999-999999999991";
 const TURN_B = "99999999-9999-4999-8999-999999999992";
+const RIG_ID = "22222222-2222-4222-8222-222222222222";
+const RIG_CHANGE_ID = "23232323-2323-4232-8232-232323232323";
 
 type RecordedRequest = {
   url: string;
@@ -294,6 +296,44 @@ describe("OpenGeniClient scheduled tasks", () => {
       `DELETE /v1/workspaces/${WORKSPACE_ID}/scheduled-tasks/${TASK_ID}`,
       `GET /v1/workspaces/${WORKSPACE_ID}/scheduled-tasks/${TASK_ID}/runs?limit=5`,
     ]);
+  });
+});
+
+describe("OpenGeniClient rigs", () => {
+  test("read, idempotent propose, verify, and manager promote use the documented routes", async () => {
+    const { client, requests } = makeClient(() => jsonResponse({ id: RIG_ID }));
+    await client.listRigs(WORKSPACE_ID);
+    await client.getRig(WORKSPACE_ID, RIG_ID);
+    await client.listRigVersions(WORKSPACE_ID, RIG_ID);
+    await client.listRigChanges(WORKSPACE_ID, RIG_ID);
+    await client.proposeRigChange(WORKSPACE_ID, RIG_ID, {
+      kind: "setup_append",
+      payload: { command: "true", note: "already worked" },
+      idempotencyKey: "sdk-rig-proposal-1",
+    });
+    await client.getRigChange(WORKSPACE_ID, RIG_ID, RIG_CHANGE_ID);
+    await client.verifyRigChange(WORKSPACE_ID, RIG_ID, RIG_CHANGE_ID);
+    await client.promoteRigChange(WORKSPACE_ID, RIG_ID, RIG_CHANGE_ID);
+    await client.verifyRig(WORKSPACE_ID, RIG_ID);
+
+    expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual(
+      [
+        `GET /v1/workspaces/${WORKSPACE_ID}/rigs`,
+        `GET /v1/workspaces/${WORKSPACE_ID}/rigs/${RIG_ID}`,
+        `GET /v1/workspaces/${WORKSPACE_ID}/rigs/${RIG_ID}/versions`,
+        `GET /v1/workspaces/${WORKSPACE_ID}/rigs/${RIG_ID}/changes`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/rigs/${RIG_ID}/changes`,
+        `GET /v1/workspaces/${WORKSPACE_ID}/rigs/${RIG_ID}/changes/${RIG_CHANGE_ID}`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/rigs/${RIG_ID}/changes/${RIG_CHANGE_ID}/verify`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/rigs/${RIG_ID}/changes/${RIG_CHANGE_ID}/promote`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/rigs/${RIG_ID}/verify`,
+      ],
+    );
+    expect(JSON.parse(requests[4]!.body!)).toEqual({
+      kind: "setup_append",
+      payload: { command: "true", note: "already worked" },
+      idempotencyKey: "sdk-rig-proposal-1",
+    });
   });
 });
 

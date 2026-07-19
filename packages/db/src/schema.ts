@@ -587,6 +587,12 @@ export const sessions = pgTable(
     // file (forward-reference pattern, same as activeSandboxId). Consumed in M3.
     rigId: uuid("rig_id"),
     rigVersionId: uuid("rig_version_id"),
+    // Provenance fence for rig default variable-set decryption (migration
+    // 0066). Missing/false legacy rows may keep using secret-free rigs, but the
+    // worker refuses to decrypt defaults for them.
+    rigDefaultVariableSetsAuthorized: boolean("rig_default_variable_sets_authorized")
+      .notNull()
+      .default(false),
     // Non-default first-party MCP token permissions (manager-style sessions);
     // null means the fixed worker default set in @opengeni/runtime.
     firstPartyMcpPermissions: jsonb("first_party_mcp_permissions").$type<string[]>(),
@@ -2487,6 +2493,11 @@ export const scheduledTasks = pgTable(
     // (migration 0047). NULL ⇒ no rig. FK (-> rigs(id) ON DELETE SET NULL) lives
     // in migration 0047 (forward-reference pattern). Consumed in M3.
     rigId: uuid("rig_id"),
+    // Set only by validated create/update paths whose grant held
+    // variable-sets:use. Copied onto each dispatched session.
+    rigDefaultVariableSetsAuthorized: boolean("rig_default_variable_sets_authorized")
+      .notNull()
+      .default(false),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -3013,7 +3024,7 @@ export const rigVersions = pgTable(
 );
 
 // Proposed/verified rig changes (M4 substrate). M2 creates the table + CRUD only;
-// verification/auto-merge/promotion land in M4.
+// verification/manager-promotion land in M4.
 export const rigChanges = pgTable(
   "rig_changes",
   {
@@ -3036,6 +3047,9 @@ export const rigChanges = pgTable(
     // 'proposed' | 'verifying' | 'merged' | 'rejected' | 'failed' (CHECK in 0047).
     status: text("status").notNull().default("proposed"),
     proposedBy: text("proposed_by"),
+    // Workspace-scoped proposal retry key (migration 0066). Null means each
+    // proposal is independent.
+    idempotencyKey: text("idempotency_key"),
     verification: jsonb("verification").$type<Record<string, unknown>>(),
     resultVersionId: uuid("result_version_id").references(() => rigVersions.id, {
       onDelete: "set null",
@@ -3049,6 +3063,9 @@ export const rigChanges = pgTable(
       table.rigId,
       table.createdAt,
     ),
+    idempotency: uniqueIndex("rig_changes_workspace_idempotency_idx")
+      .on(table.workspaceId, table.idempotencyKey)
+      .where(sql`${table.idempotencyKey} is not null`),
     workspaceStatus: index("rig_changes_workspace_status_idx").on(table.workspaceId, table.status),
   }),
 );

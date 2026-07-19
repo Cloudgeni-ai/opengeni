@@ -390,6 +390,7 @@ export type Session = {
   // rig-less session. Frozen at create; a later rig promote never moves them.
   rigId: string | null;
   rigVersionId: string | null;
+  rigDefaultVariableSetsAuthorized?: boolean | undefined;
   firstPartyMcpPermissions: string[] | null;
   mcpServers: SessionMcpServerMetadata[];
   parentSessionId: string | null;
@@ -1089,6 +1090,7 @@ export type ScheduledTask = {
   environmentId: string | null;
   // The rig each run binds to (M3); active version resolved per fire. Null ⇒ rig-less.
   rigId: string | null;
+  rigDefaultVariableSetsAuthorized?: boolean | undefined;
   metadata: Record<string, unknown>;
   createdAt: string;
   updatedAt: string;
@@ -1873,7 +1875,7 @@ export type RigVersion = {
 };
 
 export type RigVerificationHealth = {
-  checkHealth: "passing" | "failing" | "unknown";
+  checkHealth: "passing" | "failing" | "unknown" | "not_configured";
   lastVerifiedAt: string | null;
 };
 
@@ -1900,6 +1902,10 @@ export type RigCheckResult = {
   command: string;
   exitCode: number | null;
   output?: string | undefined;
+  status?: "passed" | "failed" | "skipped" | undefined;
+  durationMs?: number | undefined;
+  timedOut?: boolean | undefined;
+  skippedReason?: string | undefined;
 };
 
 export type RigChangeVerification = {
@@ -1907,6 +1913,20 @@ export type RigChangeVerification = {
   finishedAt?: string | undefined;
   log?: string | undefined;
   checkResults?: RigCheckResult[] | undefined;
+  setupResult?:
+    | {
+        exitCode: number | null;
+        output?: string | undefined;
+        status: "passed" | "failed" | "skipped";
+        durationMs: number;
+        timedOut?: boolean | undefined;
+        skippedReason?: string | undefined;
+      }
+    | undefined;
+  checksConfigured?: boolean | undefined;
+  passed?: boolean | null | undefined;
+  attempt?: number | undefined;
+  error?: string | null | undefined;
   [key: string]: unknown;
 };
 
@@ -1918,6 +1938,7 @@ export type RigChange = {
   payload: Record<string, unknown>;
   status: RigChangeStatus;
   proposedBy: string | null;
+  idempotencyKey?: string | null | undefined;
   verification: RigChangeVerification | null;
   resultVersionId: string | null;
   createdAt: string;
@@ -1954,8 +1975,12 @@ export type RigDefinitionEditPayload = {
 };
 
 export type ProposeRigChangeRequest =
-  | { kind: "setup_append"; payload: RigSetupAppendPayload }
-  | { kind: "definition_edit"; payload: RigDefinitionEditPayload };
+  | { kind: "setup_append"; payload: RigSetupAppendPayload; idempotencyKey?: string | undefined }
+  | {
+      kind: "definition_edit";
+      payload: RigDefinitionEditPayload;
+      idempotencyKey?: string | undefined;
+    };
 
 // --- Files ---------------------------------------------------------------------
 

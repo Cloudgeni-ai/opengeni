@@ -63,6 +63,13 @@ describe("rig contracts", () => {
     expect(
       ProposeRigChangeRequest.safeParse({ kind: "delete_everything", payload: {} }).success,
     ).toBe(false);
+    expect(
+      ProposeRigChangeRequest.safeParse({
+        kind: "setup_append",
+        payload: { command: "true" },
+        idempotencyKey: "retry-1",
+      }).success,
+    ).toBe(true);
   });
 
   test("RigChangeStatus enumerates the full lifecycle", () => {
@@ -113,6 +120,12 @@ describe("rig contracts", () => {
         activeVersionHealth: { checkHealth: "passing", lastVerifiedAt: "2026-07-08T00:00:00.000Z" },
       }).success,
     ).toBe(true);
+    expect(
+      Rig.safeParse({
+        ...rig,
+        activeVersionHealth: { checkHealth: "not_configured", lastVerifiedAt: null },
+      }).success,
+    ).toBe(true);
 
     const change = {
       id: "55555555-5555-4555-8555-555555555555",
@@ -130,5 +143,27 @@ describe("rig contracts", () => {
     };
     const parsedChange = RigChange.parse(change);
     expect(parsedChange.verification).toMatchObject({ futureField: 1 });
+    expect(parsedChange.idempotencyKey).toBeNull();
+
+    const structured = RigChange.parse({
+      ...change,
+      verification: {
+        passed: true,
+        checksConfigured: false,
+        setupResult: { status: "passed", exitCode: 0, durationMs: 12 },
+        checkResults: [
+          {
+            name: "not-run",
+            command: "true",
+            status: "skipped",
+            exitCode: null,
+            durationMs: 0,
+            skippedReason: "setup failed",
+          },
+        ],
+      },
+    });
+    expect(structured.verification?.setupResult?.durationMs).toBe(12);
+    expect(structured.verification?.checkResults?.[0]?.status).toBe("skipped");
   });
 });

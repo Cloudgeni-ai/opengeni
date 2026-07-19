@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { Settings } from "@opengeni/config";
 import {
+  beginRigChangeVerificationAttempt,
   bootstrapWorkspace,
   createDb,
   createRig,
@@ -9,6 +10,7 @@ import {
   getRig,
   getRigChange,
   setRlsContext,
+  updateRigChangeStatus,
   type DbClient,
 } from "@opengeni/db";
 import {
@@ -27,6 +29,7 @@ import {
 import { createRigVerificationActivities } from "../../apps/worker/src/activities/rig-verification";
 import { settingsWithRigImage } from "../../apps/worker/src/activities/packs";
 import type { ActivityServices } from "../../apps/worker/src/activities/types";
+import { promoteVerifiedRigChangeForApi } from "@opengeni/core";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 
@@ -68,7 +71,7 @@ describe("real Docker rig verification e2e", () => {
     await services?.down();
   }, 60_000);
 
-  test("A10 setup_append verifies in a clean Docker box and auto-merges into the next active version", async () => {
+  test("A10 setup_append verifies clean but activates only after manager promotion", async () => {
     const rig = await createRig(db.db, {
       accountId,
       workspaceId,
@@ -91,20 +94,36 @@ describe("real Docker rig verification e2e", () => {
     });
 
     const verified = await verifier().verifyRigChange({ workspaceId, changeId: change.id });
-    if (verified.status !== "merged") {
+    if (verified.status !== "proposed") {
       console.error("A10 verification payload", JSON.stringify(verified.verification, null, 2));
     }
-    expect(verified.status).toBe("merged");
+    expect(verified.status).toBe("proposed");
     expect(verified.verification?.passed).toBe(true);
-    expect(verified.resultVersionId).toBeString();
+    expect(verified.resultVersionId).toBeNull();
 
+    const stillV1 = await getRig(db.db, workspaceId, rig.id);
+    expect(stillV1?.activeVersion?.id).toBe(rig.activeVersion!.id);
+    expect(stillV1?.versionCount).toBe(1);
+
+    const promoted = await promoteVerifiedRigChangeForApi(
+      { db: db.db },
+      {
+        accountId,
+        workspaceId,
+        subjectId: "user:manager",
+        permissions: ["rigs:manage"],
+      },
+      stillV1!,
+      verified,
+    );
+    expect(promoted.promoted).toBe(true);
     const promotedRig = await getRig(db.db, workspaceId, rig.id);
-    expect(promotedRig?.activeVersion?.id).toBe(verified.resultVersionId);
+    expect(promotedRig?.activeVersion?.id).toBe(promoted.version.id);
     expect(promotedRig?.activeVersion?.version).toBe(2);
     expect(promotedRig?.activeVersion?.setupScript).toContain("mkdir -p /opt/rigtest");
     expect(promotedRig?.activeVersion?.setupScript).toContain("touch /opt/rigtest/tool");
 
-    await expectFreshMaterializationHasTool(promotedRig!.activeVersion!);
+    await expectFreshMaterializationHasTool(promoted.version);
   }, 300_000);
 
   test("A11 poisoned setup_append is rejected because clean replay lacks proposer-local state", async () => {
@@ -135,10 +154,7 @@ describe("real Docker rig verification e2e", () => {
     }
     expect(verified.status).toBe("rejected");
     expect(verified.verification?.passed).toBe(false);
-    expect(
-      (verified.verification as { commandResult?: { exitCode?: number | null; output?: string } })
-        .commandResult?.exitCode,
-    ).toBe(1);
+    expect(verified.verification?.setupResult?.exitCode).toBe(1);
 
     const stored = await getRigChange(db.db, workspaceId, change.id);
     expect(stored?.status).toBe("rejected");
@@ -148,7 +164,179 @@ describe("real Docker rig verification e2e", () => {
           | { commandResult?: { exitCode?: number | null; output?: string } }
           | undefined
       )?.commandResult?.exitCode,
-    ).toBe(1);
+    ).toBeUndefined();
+    expect(stored?.verification?.setupResult?.exitCode).toBe(1);
+    expect((await getRig(db.db, workspaceId, rig.id))?.activeVersion?.id).toBe(
+      rig.activeVersion!.id,
+    );
+  }, 300_000);
+
+  test("candidate setup preserves Bash state across base + append and leaves state for checks", async () => {
+    const rig = await createRig(db.db, {
+      accountId,
+      workspaceId,
+      name: "state-fidelity-rig",
+      createdBy: "user:e2e",
+      initialVersion: {
+        setupScript: [
+          "mkdir -p /opt/rig-state",
+          "cd /opt/rig-state",
+          "export RIG_STATE=preserved",
+          'verify_state() { test "$RIG_STATE" = preserved && test "$PWD" = /opt/rig-state; }',
+          "set -euo pipefail",
+          "trap 'touch /opt/rig-state/trap-ran' EXIT",
+        ].join("\n"),
+        checks: [
+          { name: "append-ran", command: "test -f /opt/rig-state/append-ran" },
+          { name: "trap-ran", command: "test -f /opt/rig-state/trap-ran" },
+        ],
+      },
+    });
+    const change = await createRigChange(db.db, {
+      accountId,
+      workspaceId,
+      rigId: rig.id,
+      baseVersionId: rig.activeVersion!.id,
+      kind: "setup_append",
+      payload: { command: "verify_state && touch append-ran" },
+    });
+    const verified = await verifier().verifyRigChange({ workspaceId, changeId: change.id });
+    expect(verified.status).toBe("proposed");
+    expect(verified.verification?.passed).toBe(true);
+    expect(verified.verification?.checkResults).toHaveLength(2);
+    expect(verified.verification?.checkResults?.every((result) => result.status === "passed")).toBe(
+      true,
+    );
+  }, 300_000);
+
+  test("base pipefail applies to the appended command and rejects the exact candidate", async () => {
+    const rig = await createRig(db.db, {
+      accountId,
+      workspaceId,
+      name: "pipefail-fidelity-rig",
+      initialVersion: {
+        setupScript: "set -o pipefail",
+        checks: [{ name: "not-run", command: "false" }],
+      },
+    });
+    const change = await createRigChange(db.db, {
+      accountId,
+      workspaceId,
+      rigId: rig.id,
+      baseVersionId: rig.activeVersion!.id,
+      kind: "setup_append",
+      payload: { command: "false | true" },
+    });
+    const verified = await verifier().verifyRigChange({ workspaceId, changeId: change.id });
+    expect(verified.status).toBe("rejected");
+    expect(verified.verification?.setupResult).toMatchObject({ status: "failed" });
+    expect(verified.verification?.checkResults).toEqual([
+      expect.objectContaining({
+        name: "not-run",
+        status: "skipped",
+        exitCode: null,
+        skippedReason: expect.stringContaining("setup failed"),
+      }),
+    ]);
+    expect((await getRig(db.db, workspaceId, rig.id))?.activeVersion?.id).toBe(
+      rig.activeVersion!.id,
+    );
+  }, 300_000);
+
+  test("candidate setup timeout is hard and leaves the prior active version unchanged", async () => {
+    const rig = await createRig(db.db, {
+      accountId,
+      workspaceId,
+      name: "timeout-rig",
+      initialVersion: { setupScript: "true", checks: [] },
+    });
+    const change = await createRigChange(db.db, {
+      accountId,
+      workspaceId,
+      rigId: rig.id,
+      baseVersionId: rig.activeVersion!.id,
+      kind: "setup_append",
+      payload: { command: "sleep 30" },
+    });
+    const started = Date.now();
+    const verified = await verifier({ rigSetupTimeoutMs: 250 }).verifyRigChange({
+      workspaceId,
+      changeId: change.id,
+    });
+    expect(verified.status).toBe("rejected");
+    expect(verified.verification?.setupResult).toMatchObject({
+      status: "failed",
+      timedOut: true,
+    });
+    expect(Date.now() - started).toBeLessThan(10_000);
+    expect((await getRig(db.db, workspaceId, rig.id))?.activeVersion?.id).toBe(
+      rig.activeVersion!.id,
+    );
+  }, 300_000);
+
+  test("verification exception fails closed and preserves the prior active version", async () => {
+    const rig = await createRig(db.db, {
+      accountId,
+      workspaceId,
+      name: "exception-rig",
+      // Direct DB callers can represent historical malformed records; the
+      // verifier must still reject duplicate result names fail-closed.
+      initialVersion: {
+        setupScript: "true",
+        checks: [
+          { name: "duplicate", command: "true" },
+          { name: "duplicate", command: "true" },
+        ],
+      },
+    });
+    const change = await createRigChange(db.db, {
+      accountId,
+      workspaceId,
+      rigId: rig.id,
+      baseVersionId: rig.activeVersion!.id,
+      kind: "setup_append",
+      payload: { command: "true" },
+    });
+    const verified = await verifier().verifyRigChange({ workspaceId, changeId: change.id });
+    expect(verified.status).toBe("failed");
+    expect(verified.verification?.error).toContain("duplicate rig check name");
+    expect((await getRig(db.db, workspaceId, rig.id))?.activeVersion?.id).toBe(
+      rig.activeVersion!.id,
+    );
+  }, 300_000);
+
+  test("a stale workflow attempt cannot create a new verifying attempt", async () => {
+    const rig = await createRig(db.db, {
+      accountId,
+      workspaceId,
+      name: "stale-workflow-attempt-rig",
+      initialVersion: { setupScript: "true" },
+    });
+    const change = await createRigChange(db.db, {
+      accountId,
+      workspaceId,
+      rigId: rig.id,
+      baseVersionId: rig.activeVersion!.id,
+      kind: "setup_append",
+      payload: { command: "true" },
+    });
+    const attempt = await beginRigChangeVerificationAttempt(db.db, workspaceId, change.id, {
+      startedAt: new Date().toISOString(),
+    });
+    await updateRigChangeStatus(db.db, workspaceId, change.id, {
+      status: "failed",
+      verification: { ...attempt.verification, passed: false, error: "cancelled" },
+    });
+
+    await expect(
+      verifier().verifyRigChange({ workspaceId, changeId: change.id, attempt: 1 }),
+    ).rejects.toThrow(/verification attempt moved/);
+    const stored = await getRigChange(db.db, workspaceId, change.id);
+    expect(stored?.status).toBe("failed");
+    expect(stored?.verification?.attempt).toBe(1);
+    expect((await getRig(db.db, workspaceId, rig.id))?.activeVersion?.id).toBe(
+      rig.activeVersion!.id,
+    );
   }, 300_000);
 
   test("verification output is redacted before persistence and audit metadata", async () => {
@@ -199,11 +387,11 @@ describe("real Docker rig verification e2e", () => {
   }, 300_000);
 });
 
-function verifier() {
+function verifier(overrides: Partial<Settings> = {}) {
   return createRigVerificationActivities(
     async () =>
       ({
-        settings,
+        settings: { ...settings, ...overrides },
         db: db.db,
       }) as ActivityServices,
   );

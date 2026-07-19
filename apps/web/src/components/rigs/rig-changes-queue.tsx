@@ -1,7 +1,7 @@
 // The rig's change queue: proposed → verifying → merged / rejected. Each change
 // is a literal command (or a full definition edit) that must reproduce from a
-// clean sandbox before it merges. Setup commands auto-merge on green; a verified
-// definition edit waits here for a human to promote it.
+// clean sandbox before a manager may promote it. Verification never merges or
+// activates by itself, including for setup commands proposed by agents.
 import {
   ChevronDownIcon,
   GitBranchIcon,
@@ -173,7 +173,7 @@ function ChangeRow({
                 disabled={mutating || !canManage}
                 title={
                   canManage
-                    ? "Promote into a new active version"
+                    ? "Promote this verified change into a new active version"
                     : "Requires the Rigs manage permission"
                 }
                 onClick={async () => {
@@ -191,7 +191,7 @@ function ChangeRow({
           </div>
           {promotable && !canManage ? (
             <p className="text-right text-2xs text-fg-subtle">
-              Promoting needs the Rigs manage permission.
+              Verified only — promotion needs the Rigs manage permission.
             </p>
           ) : null}
         </div>

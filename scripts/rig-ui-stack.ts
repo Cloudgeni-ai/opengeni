@@ -238,7 +238,7 @@ async function seed(db: Database, accountId: string, workspaceId: string) {
     },
   ];
 
-  // a) A merged setup command (auto-promoted on green).
+  // a) A historical merged setup command (verified, then manager-promoted).
   const merged = await createRigChange(db, {
     ...ws,
     rigId: dev.id,

@@ -152,7 +152,7 @@ export type UseRigResult = {
   proposeChange: (request: ProposeRigChangeRequest) => Promise<RigChange | null>;
   /** Re-run verification for a change (asynchronous — poll for the outcome). */
   verifyChange: (changeId: string) => Promise<RigChange | null>;
-  /** Promote a verified definition_edit into a new active version (rigs:manage). */
+  /** Promote either verified change kind into a new active version (rigs:manage). */
   promoteChange: (changeId: string) => Promise<RigVersion | null>;
   /** Re-verify the active version's checks in a clean throwaway sandbox. */
   verify: () => Promise<{ ok: boolean; versionId: string } | null>;
