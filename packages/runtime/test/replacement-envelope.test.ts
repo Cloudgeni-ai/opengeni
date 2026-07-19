@@ -68,10 +68,7 @@ describe("replacement sandbox envelope publication", () => {
       archiveSource,
     );
 
-    expect(envelope).toHaveProperty(
-      "sessionState.workspaceArchiveMeta.revision",
-      "wa1:verified",
-    );
+    expect(envelope).toHaveProperty("sessionState.workspaceArchiveMeta.revision", "wa1:verified");
     expect(envelope).not.toHaveProperty("sessionState.providerState");
     expect(JSON.stringify(envelope)).not.toContain("sb-dead-provider");
   });

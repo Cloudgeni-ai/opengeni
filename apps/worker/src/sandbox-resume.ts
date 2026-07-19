@@ -649,10 +649,7 @@ export async function resumeBoxForTurn(
         ...(services.sandboxMetrics ? { metrics: services.sandboxMetrics } : {}),
         onSandboxCreated: async (created) => {
           createdEstablished = created;
-          const resumeEnvelope = await serializeReplacementSandboxEnvelope(
-            created,
-            spawnEnvelope,
-          );
+          const resumeEnvelope = await serializeReplacementSandboxEnvelope(created, spawnEnvelope);
           const recorded = await recordWarmingSandboxCreated(db, {
             accountId: ids.accountId,
             workspaceId: ids.workspaceId,
@@ -720,10 +717,7 @@ export async function resumeBoxForTurn(
       // fires would otherwise make truthful recovery impossible. Failed hydrate
       // attempts terminate the replacement and fail closed; they never publish a
       // clean or mixed workspace.
-      const resumeEnvelope = await serializeReplacementSandboxEnvelope(
-        established,
-        spawnEnvelope,
-      );
+      const resumeEnvelope = await serializeReplacementSandboxEnvelope(established, spawnEnvelope);
       if (
         rematerialization &&
         established.restoredArchive?.revision !== rematerialization.selectedRevision
