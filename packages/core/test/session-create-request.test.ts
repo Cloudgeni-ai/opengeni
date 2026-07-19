@@ -20,6 +20,7 @@ import {
 } from "@opengeni/testing";
 import { HTTPException } from "hono/http-exception";
 import type { ApiRouteDeps, SessionWorkflowClient } from "../src/dependencies";
+import { hasPermission } from "../src/access";
 import { createSessionForRequest } from "../src/domain/sessions";
 
 let shared: SharedTestDatabase;
@@ -120,10 +121,22 @@ async function expectHttpStatus(promise: Promise<unknown>, status: number): Prom
   throw new Error(`expected HTTP ${status}`);
 }
 
-function withoutPermission(grant: AccessGrant, permission: Permission): AccessGrant {
+function withoutEffectivePermission(grant: AccessGrant, permission: Permission): AccessGrant {
+  const aliases: Partial<Record<Permission, Permission[]>> = {
+    "variable-sets:use": ["environments:use" as Permission],
+    "variable-sets:manage": ["environments:manage" as Permission],
+  };
+  const denied = new Set<Permission>([
+    permission,
+    "workspace:admin",
+    ...(aliases[permission] ?? []),
+  ]);
+  const permissions = grant.permissions.filter((candidate) => !denied.has(candidate));
+  if (!permissions.includes("sessions:create")) permissions.push("sessions:create");
+  expect(hasPermission(permissions, permission)).toBe(false);
   return {
     ...grant,
-    permissions: grant.permissions.filter((candidate) => candidate !== permission),
+    permissions,
   };
 }
 
@@ -241,7 +254,7 @@ describe("canonical session create request boundary", () => {
     await expectHttpStatus(
       createSessionForRequest(
         deps(client.db, settings()),
-        withoutPermission(grant, "variable-sets:use"),
+        withoutEffectivePermission(grant, "variable-sets:use"),
         grant.workspaceId,
         request,
       ),
@@ -287,7 +300,7 @@ describe("canonical session create request boundary", () => {
     await expectHttpStatus(
       createSessionForRequest(
         deps(client.db, settings()),
-        withoutPermission(grant, "mcp_servers:attach"),
+        withoutEffectivePermission(grant, "mcp_servers:attach"),
         grant.workspaceId,
         request,
       ),
