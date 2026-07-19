@@ -977,6 +977,50 @@ describe("clean session control plane", () => {
       },
     );
     expect(resumedTurn?.id).toBe(turn!.id);
+    const receiptId = crypto.randomUUID();
+    const obligationDigest = "a".repeat(64);
+    const obligation = {
+      kind: "pending_tool_call",
+      callId: "approval-call",
+      callType: "function_call",
+      callItem: {
+        type: "function_call",
+        name: "protected_tool",
+        callId: "approval-call",
+        status: "in_progress",
+        arguments: "{}",
+      },
+    };
+    expect(
+      await establishSessionTurnPersistenceReceipt(client.db, {
+        id: receiptId,
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn!.id,
+        attemptId: resumedAttemptId,
+        executionGeneration: resumedTurn!.executionGeneration,
+        triggerEventId: approval!.id,
+        obligationKind: "pending_tool_call",
+        obligationVersion: 1,
+        obligationDigest,
+        obligation,
+      }),
+    ).toMatchObject({ action: "established", receipt: { id: receiptId } });
+    expect(
+      await registerPendingSessionToolCall(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn!.id,
+        executionGeneration: resumedTurn!.executionGeneration,
+        attemptId: resumedAttemptId,
+        persistenceReceiptId: receiptId,
+        callId: obligation.callId,
+        callType: obligation.callType,
+        callItem: obligation.callItem,
+      }),
+    ).toEqual({ accepted: true, registered: false });
     expect(
       await recordPendingSessionToolCallResult(client.db, {
         accountId: grant.accountId,
@@ -985,6 +1029,7 @@ describe("clean session control plane", () => {
         turnId: turn!.id,
         executionGeneration: resumedTurn!.executionGeneration,
         attemptId: resumedAttemptId,
+        persistenceReceiptId: receiptId,
         callId: "approval-call",
         resultItem: {
           type: "function_call_result",
@@ -995,6 +1040,17 @@ describe("clean session control plane", () => {
         },
       }),
     ).toEqual({ accepted: true, recorded: true });
+    expect(
+      await settleSessionTurnPersistenceReceipt(client.db, {
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn!.id,
+        attemptId: resumedAttemptId,
+        executionGeneration: resumedTurn!.executionGeneration,
+        receiptId,
+        obligationDigest,
+      }),
+    ).toEqual({ action: "settled" });
     const recovery = await requestSessionTurnRecovery(client.db, grant.workspaceId!, {
       sessionId: session.id,
       turnId: turn!.id,
@@ -1014,6 +1070,9 @@ describe("clean session control plane", () => {
         .slice(-2)
         .map((row) => row.item.type),
     ).toEqual(["function_call", "function_call_result"]);
+    expect(await getSessionTurn(client.db, grant.workspaceId!, turn!.id)).toMatchObject({
+      metadata: { approvalRecoveryMode: "canonical_history" },
+    });
   });
 
   test("Pause preserves a pending approval, while Steer permanently closes it", async () => {

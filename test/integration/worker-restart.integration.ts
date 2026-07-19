@@ -3,6 +3,7 @@ import { Client, Connection } from "@temporalio/client";
 import { NativeConnection, Worker } from "@temporalio/worker";
 import type { AccessGrant } from "@opengeni/contracts";
 import {
+  acceptSessionApprovalDecision,
   admitSessionTurnModelCall,
   applySessionTurnSettlement,
   bootstrapWorkspace,
@@ -246,6 +247,216 @@ describe("worker restart resilience", () => {
     expect(model.requests).toHaveLength(2);
     expect(mcp.calls).toEqual([{ tool: "search_documents", args: { query: "current state" } }]);
   }, 180_000);
+
+  test("worker shutdown after an approved tool begins continues from canonical history without replay", async () => {
+    const grant = await testGrant();
+    let activeActivityCancellation: Promise<void> | null = null;
+    const mcp = startTestMcpServer({
+      beforeToolResult: async () => {
+        if (!activeActivityCancellation) {
+          throw new Error("approved-tool restart fixture has no active cancellation signal");
+        }
+        // The external effect is recorded before this hook. Hold its response
+        // until Temporal has actually cancelled the resumed activity, so the
+        // result cannot race ahead of the worker-shutdown boundary.
+        await activeActivityCancellation;
+      },
+    });
+    const taskQueue = `approved-tool-restart-${crypto.randomUUID()}`;
+    const model = new ScriptedModel([
+      {
+        id: "approved-tool-call-1",
+        output: [
+          functionCall(
+            "docs__search_documents",
+            { query: "rolling deploy state" },
+            "call-approved-restart",
+          ),
+        ],
+      },
+      {
+        id: "approved-tool-call-2",
+        outputText: "continued from the explicit unknown outcome",
+        chunks: ["continued from ", "the explicit unknown outcome"],
+      },
+    ]);
+    const settings = testSettings({
+      databaseUrl: services.databaseUrl,
+      natsUrl: services.natsUrl,
+      temporalHost: services.temporalHost,
+      temporalTaskQueue: taskQueue,
+      mcpServers: [
+        {
+          id: "docs",
+          name: "Document Search",
+          url: mcp.url,
+          allowedTools: ["search_documents"],
+          cacheToolsList: false,
+          requireApproval: true,
+        },
+      ],
+    });
+    const baseActivities = createActivityTestHarness({
+      settings,
+      db: dbClient.db,
+      bus,
+      runtime: createProductionAgentRuntime({ model }),
+    });
+    const activities = {
+      ...baseActivities,
+      runAgentTurn: async (input: Parameters<typeof baseActivities.runAgentTurn>[0]) => {
+        const signal = currentActivityContext()?.cancellationSignal;
+        if (!signal) {
+          throw new Error("approved-tool restart fixture has no Temporal activity context");
+        }
+        activeActivityCancellation = new Promise<void>((resolve) => {
+          if (signal.aborted) {
+            resolve();
+            return;
+          }
+          signal.addEventListener("abort", () => resolve(), { once: true });
+        });
+        return await baseActivities.runAgentTurn(input);
+      },
+    };
+    const session = await createSession(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "inspect the rolling deploy state",
+      resources: [],
+      tools: [{ kind: "mcp", id: "docs" }],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    const workflowId = `session-${session.id}`;
+    await submitTestHumanPrompt(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      subjectId: grant.subjectId,
+      text: "inspect the rolling deploy state",
+      resources: [],
+      tools: [{ kind: "mcp", id: "docs" }],
+      delivery: "send",
+      reasoningEffortFallback: settings.openaiReasoningEffort,
+    });
+
+    const firstWorker = await restartTestWorker(nativeConnection, taskQueue, activities);
+    const firstRun = firstWorker.run();
+    let firstWorkerStopped = false;
+    let completionWorker: Awaited<ReturnType<typeof restartTestWorker>> | null = null;
+    let completionRun: Promise<void> | null = null;
+    try {
+      const client = new Client({ connection });
+      const handle = await client.workflow.start("sessionWorkflow", {
+        taskQueue,
+        workflowId,
+        args: [
+          {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            sessionId: session.id,
+          },
+        ],
+      });
+      await waitFor(
+        async () =>
+          (await getSession(dbClient.db, grant.workspaceId, session.id))?.status ===
+          "requires_action",
+        { timeoutMs: 120_000 },
+      );
+      const approvalEvent = (
+        await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 200)
+      ).find((event) => event.type === "session.requiresAction");
+      const approvalId = (
+        approvalEvent?.payload as {
+          approvals?: Array<{ rawItem?: { id?: unknown } }>;
+        }
+      )?.approvals?.[0]?.rawItem?.id;
+      expect(approvalId).toBe("call-approved-restart");
+      const approval = await acceptSessionApprovalDecision(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        payload: { approvalId, decision: "approve" },
+      });
+      if (approval.action !== "accepted") {
+        throw new Error(`approval was not accepted: session is ${approval.sessionStatus}`);
+      }
+      await handle.signal("approvalDecision", approval.event.id);
+
+      await waitFor(() => mcp.calls.length === 1, {
+        timeoutMs: 120_000,
+        describe: () => `modelCalls=${model.calls} mcpCalls=${mcp.calls.length}`,
+      });
+      firstWorker.shutdown();
+      firstWorkerStopped = true;
+      await firstRun;
+
+      completionWorker = await restartTestWorker(nativeConnection, taskQueue, activities);
+      completionRun = completionWorker.run();
+      await handle.result();
+    } finally {
+      if (!firstWorkerStopped) {
+        firstWorker.shutdown();
+        await firstRun.catch(() => undefined);
+      }
+      if (completionWorker && completionRun) {
+        completionWorker.shutdown();
+        await completionRun;
+      }
+      mcp.close();
+    }
+
+    expect(mcp.calls).toEqual([
+      { tool: "search_documents", args: { query: "rolling deploy state" } },
+    ]);
+    expect(model.calls).toBe(2);
+    expect(model.requests).toHaveLength(2);
+    const turns = await listSessionTurns(dbClient.db, grant.workspaceId, session.id);
+    expect(turns).toHaveLength(1);
+    expect(turns[0]).toMatchObject({ status: "completed", executionGeneration: 3 });
+    const attempts = await withWorkspaceRls(dbClient.db, grant.workspaceId, async (db) =>
+      (await db.query.sessionTurnAttempts.findMany()).filter(
+        (attempt) => attempt.turnId === turns[0]!.id,
+      ),
+    );
+    expect(attempts).toHaveLength(3);
+    expect(attempts.every((attempt) => attempt.state === "closed")).toBe(true);
+
+    const history = await getSessionHistoryItems(dbClient.db, grant.workspaceId, session.id);
+    expect(history.map((row) => row.item)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "function_call",
+          callId: "call-approved-restart",
+        }),
+        expect.objectContaining({
+          type: "function_call_result",
+          callId: "call-approved-restart",
+          status: "incomplete",
+          output: expect.objectContaining({
+            text: expect.stringContaining("side-effect outcome is unknown"),
+          }),
+        }),
+      ]),
+    );
+    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 500);
+    const unknownOutputIndex = events.findIndex(
+      (event) =>
+        event.type === "agent.toolCall.output" &&
+        (event.payload as { id?: unknown; recovery?: { outcome?: unknown } }).id ===
+          "call-approved-restart" &&
+        (event.payload as { recovery?: { outcome?: unknown } }).recovery?.outcome === "unknown",
+    );
+    const recoveryIndex = events.findIndex((event) => event.type === "turn.recovery.requested");
+    expect(unknownOutputIndex).toBeGreaterThan(-1);
+    expect(recoveryIndex).toBeGreaterThan(unknownOutputIndex);
+    expect(events.filter((event) => event.type === "turn.recovery.requested")).toHaveLength(1);
+    expect(events.filter((event) => event.type === "turn.failed")).toHaveLength(0);
+    expect(latestStatus(events)).toBe("idle");
+  }, 240_000);
 
   test("worker death after a PostgreSQL model receipt but before heartbeat never replays inference", async () => {
     const grant = await testGrant();

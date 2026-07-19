@@ -20846,6 +20846,17 @@ export async function settleSessionAttemptInterruptions(
         outcome,
         closedAt: now,
       });
+      const recoveryMetadata = steer
+        ? metadataWithoutTurnDispatchAttempt(turn.metadata)
+        : await metadataForSameTurnRecoveryTx(tx as unknown as Database, {
+            workspaceId,
+            sessionId,
+            turnId: turn.id,
+            triggerEventId: turn.triggerEventId,
+            attemptId,
+            executionGeneration: turn.executionGeneration,
+            metadata: turn.metadata,
+          });
       await requeueInterruptedSessionSystemUpdatesForTurnTx(
         tx as unknown as Database,
         workspaceId,
@@ -20914,7 +20925,7 @@ export async function settleSessionAttemptInterruptions(
             ? {
                 status: "superseded",
                 activeAttemptId: null,
-                metadata: metadataWithoutTurnDispatchAttempt(turn.metadata),
+                metadata: recoveryMetadata,
                 version: turn.version + 1,
                 finishedAt: turn.finishedAt ?? now,
                 updatedAt: now,
@@ -20922,7 +20933,7 @@ export async function settleSessionAttemptInterruptions(
             : {
                 status: "recovering",
                 activeAttemptId: null,
-                metadata: metadataWithoutTurnDispatchAttempt(turn.metadata),
+                metadata: recoveryMetadata,
                 cancelledBy: null,
                 cancelReason: null,
                 version: turn.version + 1,
@@ -21413,6 +21424,81 @@ function metadataWithoutTurnDispatchAttempt(
   const next = { ...(metadata ?? {}) };
   delete next[TURN_DISPATCH_ATTEMPT_METADATA_KEY];
   return next;
+}
+
+export const CANONICAL_APPROVAL_RECOVERY_MODE = "canonical_history" as const;
+
+export type SessionTurnApprovalRecoveryMode = typeof CANONICAL_APPROVAL_RECOVERY_MODE;
+
+/** Return the monotonic recovery mode selected for an approval-triggered turn. */
+export function sessionTurnApprovalRecoveryMode(
+  metadata: unknown,
+): SessionTurnApprovalRecoveryMode | null {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return null;
+  return (metadata as Record<string, unknown>).approvalRecoveryMode ===
+    CANONICAL_APPROVAL_RECOVERY_MODE
+    ? CANONICAL_APPROVAL_RECOVERY_MODE
+    : null;
+}
+
+/**
+ * Build metadata for a successor attempt of the same logical turn.
+ *
+ * A settled pending-tool receipt proves the durable registration callback
+ * returned to the runtime, after which the approved external effect may have
+ * begun. If that exact attempt is recovered, reapplying the frozen approval
+ * RunState could execute the same effect again. The monotonic marker makes the
+ * successor continue from canonical history, where tool closure records either
+ * the durable result or an explicit incomplete/unknown result.
+ */
+async function metadataForSameTurnRecoveryTx(
+  tx: Database,
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    triggerEventId: string;
+    attemptId: string;
+    executionGeneration: number;
+    metadata: Record<string, unknown> | null | undefined;
+  },
+): Promise<Record<string, unknown>> {
+  const metadata = metadataWithoutTurnDispatchAttempt(input.metadata);
+  if (sessionTurnApprovalRecoveryMode(metadata) === CANONICAL_APPROVAL_RECOVERY_MODE) {
+    return metadata;
+  }
+  const [approvalTrigger] = await tx
+    .select({ id: schema.sessionEvents.id })
+    .from(schema.sessionEvents)
+    .where(
+      and(
+        eq(schema.sessionEvents.workspaceId, input.workspaceId),
+        eq(schema.sessionEvents.sessionId, input.sessionId),
+        eq(schema.sessionEvents.id, input.triggerEventId),
+        eq(schema.sessionEvents.type, "user.approvalDecision"),
+      ),
+    )
+    .limit(1);
+  if (!approvalTrigger) return metadata;
+  const [settledToolReceipt] = await tx
+    .select({ id: schema.sessionTurnPersistenceReceipts.id })
+    .from(schema.sessionTurnPersistenceReceipts)
+    .where(
+      and(
+        eq(schema.sessionTurnPersistenceReceipts.workspaceId, input.workspaceId),
+        eq(schema.sessionTurnPersistenceReceipts.sessionId, input.sessionId),
+        eq(schema.sessionTurnPersistenceReceipts.turnId, input.turnId),
+        eq(schema.sessionTurnPersistenceReceipts.attemptId, input.attemptId),
+        eq(schema.sessionTurnPersistenceReceipts.executionGeneration, input.executionGeneration),
+        eq(schema.sessionTurnPersistenceReceipts.obligationKind, "pending_tool_call"),
+        eq(schema.sessionTurnPersistenceReceipts.state, "settled"),
+      ),
+    )
+    .limit(1);
+  if (settledToolReceipt) {
+    metadata.approvalRecoveryMode = CANONICAL_APPROVAL_RECOVERY_MODE;
+  }
+  return metadata;
 }
 
 type WorkerDeathRedispatchMetadata =
@@ -21968,6 +22054,7 @@ export async function settleCodexCredentialLeaseLoss(
         const [turn] = await tx
           .select({
             sessionId: schema.sessionTurns.sessionId,
+            triggerEventId: schema.sessionTurns.triggerEventId,
             status: schema.sessionTurns.status,
             metadata: schema.sessionTurns.metadata,
             activeAttemptId: schema.sessionTurns.activeAttemptId,
@@ -22026,6 +22113,17 @@ export async function settleCodexCredentialLeaseLoss(
           outcome: input.checkpointDurable ? "lease_lost_recoverable" : "failed",
           closedAt: now,
         });
+        const recoveryMetadata = input.checkpointDurable
+          ? await metadataForSameTurnRecoveryTx(tx as unknown as Database, {
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              turnId: input.turnId,
+              triggerEventId: turn.triggerEventId,
+              attemptId: input.attemptId,
+              executionGeneration: turn.executionGeneration,
+              metadata: turn.metadata,
+            })
+          : turn.metadata;
         let sequence = session.lastSequence;
         const closedTools = await closePendingSessionToolCallsInTransaction(
           tx as unknown as Database,
@@ -22115,6 +22213,7 @@ export async function settleCodexCredentialLeaseLoss(
               ? {
                   status: "recovering",
                   activeAttemptId: null,
+                  metadata: recoveryMetadata,
                   finishedAt: null,
                   updatedAt: now,
                 }
@@ -22232,6 +22331,7 @@ export async function settleCodexCredentialFailover(
         const [turn] = await tx
           .select({
             sessionId: schema.sessionTurns.sessionId,
+            triggerEventId: schema.sessionTurns.triggerEventId,
             status: schema.sessionTurns.status,
             metadata: schema.sessionTurns.metadata,
             activeAttemptId: schema.sessionTurns.activeAttemptId,
@@ -22295,6 +22395,15 @@ export async function settleCodexCredentialFailover(
           outcome: "lease_lost_recoverable",
           closedAt: now,
         });
+        const recoveryMetadata = await metadataForSameTurnRecoveryTx(tx as unknown as Database, {
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+          triggerEventId: turn.triggerEventId,
+          attemptId: input.attemptId,
+          executionGeneration: turn.executionGeneration,
+          metadata: turn.metadata,
+        });
         let sequence = session.lastSequence;
         const closedTools = await closePendingSessionToolCallsInTransaction(
           tx as unknown as Database,
@@ -22352,7 +22461,7 @@ export async function settleCodexCredentialFailover(
           .set({
             status: "recovering",
             activeAttemptId: null,
-            metadata: { ...turn.metadata, codexCredentialFailovers: failoverCount },
+            metadata: { ...recoveryMetadata, codexCredentialFailovers: failoverCount },
             finishedAt: null,
             updatedAt: now,
           })
@@ -22488,6 +22597,15 @@ export async function requestSessionTurnRecovery(
         outcome: "interrupted_recoverable",
         closedAt: now,
       });
+      const recoveryMetadata = await metadataForSameTurnRecoveryTx(tx as unknown as Database, {
+        workspaceId,
+        sessionId: input.sessionId,
+        turnId: input.turnId,
+        triggerEventId: turn.triggerEventId,
+        attemptId: input.attemptId,
+        executionGeneration: turn.executionGeneration,
+        metadata: turn.metadata,
+      });
       let sequence = session.lastSequence;
       const closedTools = await closePendingSessionToolCallsInTransaction(
         tx as unknown as Database,
@@ -22547,7 +22665,7 @@ export async function requestSessionTurnRecovery(
           cancelledBy: null,
           cancelReason: null,
           version: turn.version + 1,
-          metadata: metadataWithoutTurnDispatchAttempt(turn.metadata),
+          metadata: recoveryMetadata,
           updatedAt: now,
         })
         .where(
@@ -23154,6 +23272,21 @@ export async function recoverSessionDispatch(
         outcome: redispatches > input.maxRedispatches ? "failed" : "lease_lost_recoverable",
         closedAt: now,
       });
+      const recoveryMetadata =
+        redispatches > input.maxRedispatches
+          ? metadata
+          : {
+              ...(await metadataForSameTurnRecoveryTx(tx as unknown as Database, {
+                workspaceId,
+                sessionId: input.sessionId,
+                turnId: turn.id,
+                triggerEventId: turn.triggerEventId,
+                attemptId: input.attemptId,
+                executionGeneration: turn.executionGeneration,
+                metadata,
+              })),
+              workerDeathRedispatches: redispatches,
+            };
       let sequence = session.lastSequence;
       const closedTools = await closePendingSessionToolCallsInTransaction(
         tx as unknown as Database,
@@ -23210,7 +23343,7 @@ export async function recoverSessionDispatch(
           .set({
             status: "failed",
             activeAttemptId: null,
-            metadata,
+            metadata: recoveryMetadata,
             version: turn.version + 1,
             finishedAt: now,
             updatedAt: now,
@@ -23286,13 +23419,12 @@ export async function recoverSessionDispatch(
           },
         ])
         .returning();
-      const requeuedMetadata = metadataWithoutTurnDispatchAttempt(metadata);
       await tx
         .update(schema.sessionTurns)
         .set({
           status: "recovering",
           triggerEventId: turn.triggerEventId,
-          metadata: requeuedMetadata,
+          metadata: recoveryMetadata,
           activeAttemptId: null,
           cancelledBy: null,
           cancelReason: null,

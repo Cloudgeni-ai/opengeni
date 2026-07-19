@@ -40,6 +40,7 @@ export function startTestMcpServer(
     // expired signed bearer — so a test can prove a token that is valid at
     // connect is rejected once the clock advances past its TTL.
     validateAuthorization?: (authorization: string | null) => boolean | Promise<boolean>;
+    beforeToolResult?: (call: TestMcpToolCall) => Promise<void>;
   } = {},
 ): TestMcpServer {
   const calls: TestMcpToolCall[] = [];
@@ -127,7 +128,7 @@ export function startTestMcpServer(
       const scopedTools = options.toolsForAuthorization
         ? options.toolsForAuthorization(request.headers.get("authorization"))
         : undefined;
-      const mcp = buildServer(calls, scopedTools);
+      const mcp = buildServer(calls, scopedTools, options.beforeToolResult);
       await mcp.connect(transport);
       return await transport.handleRequest(request);
     },
@@ -173,7 +174,11 @@ async function forbiddenToolName(
   }
 }
 
-function buildServer(calls: TestMcpToolCall[], scopedTools?: string[]): McpServer {
+function buildServer(
+  calls: TestMcpToolCall[],
+  scopedTools?: string[],
+  beforeToolResult?: (call: TestMcpToolCall) => Promise<void>,
+): McpServer {
   const server = new McpServer({
     name: "test-document-search",
     version: "1.0.0",
@@ -187,7 +192,9 @@ function buildServer(calls: TestMcpToolCall[], scopedTools?: string[]): McpServe
       },
     },
     async ({ query }) => {
-      calls.push({ tool: "search_documents", args: { query } });
+      const call = { tool: "search_documents", args: { query } };
+      calls.push(call);
+      await beforeToolResult?.(call);
       return {
         content: [{ type: "text", text: `found document for ${query}` }],
       };
@@ -202,7 +209,9 @@ function buildServer(calls: TestMcpToolCall[], scopedTools?: string[]): McpServe
       },
     },
     async ({ id }) => {
-      calls.push({ tool: "fetch_document", args: { id } });
+      const call = { tool: "fetch_document", args: { id } };
+      calls.push(call);
+      await beforeToolResult?.(call);
       return {
         content: [{ type: "text", text: `document ${id}` }],
       };
@@ -219,7 +228,9 @@ function buildServer(calls: TestMcpToolCall[], scopedTools?: string[]): McpServe
         inputSchema: {},
       },
       async () => {
-        calls.push({ tool: toolName, args: {} });
+        const call = { tool: toolName, args: {} };
+        calls.push(call);
+        await beforeToolResult?.(call);
         return {
           content: [{ type: "text", text: `ran ${toolName}` }],
         };

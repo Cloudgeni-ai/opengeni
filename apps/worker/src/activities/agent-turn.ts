@@ -1,6 +1,8 @@
 import {
+  CANONICAL_APPROVAL_RECOVERY_MODE,
   applySessionTurnSettlement,
   requestSessionTurnRecovery,
+  sessionTurnApprovalRecoveryMode,
   claimSessionWorkForAttempt,
   getBillingBalance,
   getRigName,
@@ -1462,7 +1464,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     const noteCancellationRequested = (): void => {
       cancellationRequestedAt ??= performance.now();
     };
-    cancellationSignal?.addEventListener("abort", noteCancellationRequested, { once: true });
+    cancellationSignal?.addEventListener("abort", noteCancellationRequested, {
+      once: true,
+    });
     const dispatchId = activityContext?.info.activityId ?? randomUUID();
     const activityStarted = performance.now();
     const activitySpan = observability.startSpan("worker.run_agent_segment", {
@@ -1717,7 +1721,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       await current?.flush().catch(() => undefined);
     };
     let preparedTools: Awaited<ReturnType<OpenGeniRuntime["prepareTools"]>> | null = null;
-    const toolCancellationFenceRef: { current: TurnToolCancellationFence | null } = {
+    const toolCancellationFenceRef: {
+      current: TurnToolCancellationFence | null;
+    } = {
       current: null,
     };
     let publish: TurnEventPublisher | null = null;
@@ -4717,6 +4723,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           {
             turnId: activeTurnId,
             recovering: turn.executionGeneration > 1,
+            ...(sessionTurnApprovalRecoveryMode(turn.metadata) === CANONICAL_APPROVAL_RECOVERY_MODE
+              ? { approvalRecoveryMode: CANONICAL_APPROVAL_RECOVERY_MODE }
+              : {}),
             ...(unavailableSandboxFilesNote ? { unavailableSandboxFilesNote } : {}),
           },
         );
@@ -5421,13 +5430,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         try {
           await flushRuntimeBatcher();
           await reconcileConversationTruth();
-          // An approval-decision rerun always replays its original trigger:
-          // the decision is applied through the approval resume path reading
-          // the frozen RunState blob (the only representation of a turn
-          // paused mid-flight), so swapping the trigger for a resume notice
-          // could drop the user's decision. Re-applying an already-consumed
-          // approval re-executes at most the single approved step — the same
-          // bound every recovery already accepts.
+          // Preserve the original approval trigger. The recovery transaction
+          // atomically switches this logical turn to canonical-history input if
+          // an approved tool crossed its durable-before-effect receipt; before
+          // that boundary, replaying the frozen RunState remains safe and is the
+          // only representation of the still-pending approval decision.
           const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
             sessionId: input.sessionId,
             turnId: recoveryTurnId,
@@ -6557,7 +6564,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         observability.observeHistogram({
           name: "opengeni_turn_finalization_duration_seconds",
           help: "Agent turn finalization duration, including workspace housekeeping and lease release.",
-          labels: { cancellation_requested: String(cancellationRequestedAt !== null) },
+          labels: {
+            cancellation_requested: String(cancellationRequestedAt !== null),
+          },
           value: finalizationDurationSeconds,
         });
         if (cancellationRequestedAt !== null) {

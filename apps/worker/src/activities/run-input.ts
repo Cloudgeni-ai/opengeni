@@ -56,7 +56,10 @@ const NON_CODEX_TURN: TurnCodexAccount = { currentCodexCredentialId: null };
  * non-codex turn over a history with no codex-produced reasoning.
  */
 export function applyCodexHistoryStrip(
-  rows: ReadonlyArray<{ item: Record<string, unknown>; producerCodexCredentialId: string | null }>,
+  rows: ReadonlyArray<{
+    item: Record<string, unknown>;
+    producerCodexCredentialId: string | null;
+  }>,
   current: TurnCodexAccount,
 ): Array<Record<string, unknown>> {
   const out: Array<Record<string, unknown>> = [];
@@ -143,6 +146,7 @@ export type PreparedTurnInput = {
 export type TurnInputOptions = {
   turnId: string;
   recovering?: boolean;
+  approvalRecoveryMode?: "canonical_history";
   unavailableSandboxFilesNote?: string;
 };
 
@@ -199,6 +203,14 @@ export async function turnInput(
     return await messageInput(db, runtime, agent, trigger, undefined, internalContext, current);
   }
   if (trigger.type === "user.approvalDecision") {
+    if (options.approvalRecoveryMode === "canonical_history") {
+      // The approved tool crossed its durable-before-effect boundary in an
+      // earlier attempt. Canonical history now contains either its durable
+      // result or an explicit incomplete/unknown result, so reapplying the
+      // frozen RunState approval would risk executing the same external effect
+      // again. Continue from that canonical truth with no duplicate user text.
+      return await messageInput(db, runtime, agent, trigger, undefined, internalContext, current);
+    }
     const payload = trigger.payload as {
       approvalId?: unknown;
       decision?: unknown;

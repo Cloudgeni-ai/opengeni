@@ -204,6 +204,15 @@ existing recovery projection because its receipt can mark a crash after memory
 was saved but before the original event publish. Only genuinely unresolved
 execution gets one explicit `interrupted / outcome unknown` closure.
 
+For an approval-triggered turn, a settled exact `pending_tool_call` receipt is
+also the monotonic approved-effect boundary: it proves the durable registration
+callback returned, after which the external effect may have begun. Before that
+receipt settles, replaying the frozen approval `RunState` remains valid because
+the effect was still blocked. Once it settles, same-turn recovery records
+`approvalRecoveryMode="canonical_history"`; every successor builds from the
+canonical call plus its durable result or explicit unknown result and must never
+reapply the frozen approval.
+
 Claim, interruption, and event-writing settlement share one lock order:
 workspace, then session, then exact turn, then exact attempt. Event inserts also touch the workspace through
 their foreign keys, so acquiring it later would reintroduce a claim/preemption
@@ -327,7 +336,10 @@ wrong one is the classic mistake.
    blob is an opaque, SDK-version-gated process checkpoint. Its one legitimate
    job is resuming a turn that paused mid-flight for a human approval
    (`requires_action`); a half-finished tool approval cannot be represented as
-   plain history items. The blob is written only for that case.
+   plain history items. The blob is written only for that case. It may be
+   replayed only before the approved tool crosses its settled pending-tool
+   receipt boundary; after that boundary, recovery must use canonical history
+   and must not reapply the approval.
    Do not use it as conversation memory.
 3. **`session_events` — the redacted human/audit timeline.** Append-only,
    per-session sequence numbers, drives replay/SSE/UI. It is **secret-redacted
