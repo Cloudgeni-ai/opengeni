@@ -770,7 +770,13 @@ describe("OPE-63 canonical session-event lock order", () => {
   test("root goal append and root-to-lower-UUID child command finish in both arrival orders", async () => {
     for (const first of ["goal", "command"] as const) {
       const workspace = await freshWorkspace();
-      const ids = orderedParentChildIds("child-first");
+      // Exact 2026-07-19 production fixture: the command supplied root first,
+      // even though the child UUID sorts first. Only persistence may retry;
+      // publish and workflow wake must remain exactly once.
+      const ids = {
+        parentSessionId: "aed24825-71d0-465e-8f9b-37f4d51b8eac",
+        childSessionId: "74f49e50-467b-43e1-b1f7-bcc895211649",
+      };
       expect(ids.childSessionId < ids.parentSessionId).toBe(true);
       const root = await seedRunningSession(workspace, { sessionId: ids.parentSessionId });
       const child = await seedIdleChild(workspace, ids.childSessionId, ids.parentSessionId);
@@ -818,6 +824,9 @@ describe("OPE-63 canonical session-event lock order", () => {
           and kind = 'agent_message'
       `;
       expect(updates?.count).toBe(1);
+      // Session IDs are global, so drop this isolated fixture before reseeding
+      // the same production UUID pair for the opposite arrival order.
+      await admin`delete from managed_accounts where id = ${workspace.accountId}`;
     }
   }, 60_000);
 
