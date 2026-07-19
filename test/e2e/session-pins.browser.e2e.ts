@@ -19,6 +19,7 @@ import {
   type BrowserContext,
   type BrowserContextOptions,
   type Page,
+  type Response as PlaywrightResponse,
 } from "playwright";
 import postgres from "postgres";
 
@@ -135,6 +136,14 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     );
 
     const targetUrl = `${webBaseUrl}/workspaces/${workspaceId}/sessions/${target.id}`;
+    const successfulTargetPinMutation = (response: PlaywrightResponse): boolean => {
+      const url = new URL(response.url());
+      return (
+        response.ok() &&
+        response.request().method() === "PUT" &&
+        url.pathname === `/v1/workspaces/${workspaceId}/sessions/${target.id}/pin`
+      );
+    };
     await pageA.goto(targetUrl);
     // Pin from the ordinary list-row action, not just the header. The header
     // must reconcile from the same server-authoritative member relation.
@@ -144,7 +153,11 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     const pinMenuItem = pageA.getByRole("menuitem", { name: "Pin", exact: true });
     await pinMenuItem.waitFor();
     await pinMenuItem.focus();
+    const initialPinMutation = pageA.waitForResponse(successfulTargetPinMutation, {
+      timeout: 10_000,
+    });
     await pageA.keyboard.press("Enter");
+    await initialPinMutation;
     await pageA.getByRole("button", { name: "Unpin session" }).waitFor();
     const pinnedA = pageA.getByRole("group", { name: "Pinned" });
     await pinnedA.getByRole("button", { name: /^Open Master pin target/ }).waitFor();
@@ -154,6 +167,41 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     expect(
       await pageA.evaluate(() => document.activeElement?.getAttribute("aria-label")),
     ).toStartWith("Actions for Master pin target");
+
+    // A sibling tab in the same browser context must reconcile through the
+    // document-scoped invalidation channel without a reload or the 15s poll.
+    // Wait for its actual rail row so the subscription is mounted before the
+    // mutation, then require an observable list GET inside a strict 10s bound.
+    const sameDeviceTab = await deviceA.newPage();
+    await sameDeviceTab.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions`);
+    const sameTabPinned = sameDeviceTab.getByRole("group", { name: "Pinned" });
+    const sameTabPinnedTarget = sameTabPinned.getByRole("button", {
+      name: /^Open Master pin target/,
+    });
+    await sameTabPinnedTarget.waitFor();
+    const sameTabUnpinRefresh = sameDeviceTab.waitForResponse(
+      (response) => successfulSessionPageResponse(response, workspaceId),
+      { timeout: 10_000 },
+    );
+    const unpinMutation = pageA.waitForResponse(successfulTargetPinMutation, {
+      timeout: 10_000,
+    });
+    await pageA.getByRole("button", { name: "Unpin session" }).click();
+    await pageA.getByRole("button", { name: "Pin session" }).waitFor();
+    await Promise.all([unpinMutation, sameTabUnpinRefresh]);
+    await sameTabPinnedTarget.waitFor({ state: "detached" });
+
+    const sameTabRepinRefresh = sameDeviceTab.waitForResponse(
+      (response) => successfulSessionPageResponse(response, workspaceId),
+      { timeout: 10_000 },
+    );
+    const repinMutation = pageA.waitForResponse(successfulTargetPinMutation, {
+      timeout: 10_000,
+    });
+    await pageA.getByRole("button", { name: "Pin session" }).click();
+    await pageA.getByRole("button", { name: "Unpin session" }).waitFor();
+    await Promise.all([repinMutation, sameTabRepinRefresh]);
+    await sameTabPinnedTarget.waitFor();
 
     // A genuinely separate browser context represents another device: it owns
     // independent document, cache, BroadcastChannel, and focus state, while the
@@ -285,8 +333,14 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     await pageB.getByRole("button", { name: "Unpin session" }).click();
     await pageB.getByRole("button", { name: "Pin session" }).waitFor();
 
-    // Unpin is immediate and reconciles back to the first device on refresh.
-    await pageA.reload();
+    // A different device has no shared browser channel. Returning focus must
+    // trigger a real server reconciliation without reloading the document.
+    const crossDeviceRefresh = pageA.waitForResponse(
+      (response) => successfulSessionPageResponse(response, workspaceId),
+      { timeout: 10_000 },
+    );
+    await pageA.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await crossDeviceRefresh;
     await pageA.getByRole("button", { name: "Pin session" }).waitFor();
     expect(await pageA.getByRole("group", { name: "Pinned" }).count()).toBe(0);
 
@@ -367,7 +421,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     }
   }, 90_000);
 
-  test("keeps loaded continuation rows visible across a first-page poll", async () => {
+  test("rebases one expired cursor while retaining rows and leaves unrelated failures retryable", async () => {
     const context = await configuredContext(browser, {
       viewport: { width: 1280, height: 800 },
       extraHTTPHeaders: ownerHeaders,
@@ -376,39 +430,288 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     try {
       await page.goto(webBaseUrl);
       const workspaceId = await workspaceFromPage(page);
-      const sentinel = await createSessionThroughApi(
-        page,
-        apiBaseUrl,
-        workspaceId,
-        "Loaded continuation sentinel",
-      );
-      await Bun.sleep(25);
-      for (let index = 0; index < 50; index += 1) {
-        await createSessionThroughApi(
+      const batch = `Expired cursor batch ${Date.now()}`;
+      let sentinel: BrowserSession | null = null;
+      for (let index = 0; index < 106; index += 1) {
+        const created = await createSessionThroughApi(
           page,
           apiBaseUrl,
           workspaceId,
-          `Continuation page filler ${index + 1}`,
+          `${batch} ${index === 0 ? "oldest sentinel" : `row ${index + 1}`}`,
         );
+        if (index === 0) sentinel = created;
       }
 
       await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions`);
+      const search = page.getByRole("searchbox", { name: "Search sessions" });
+      const firstPageResponse = page.waitForResponse(
+        (response) =>
+          successfulSessionPageResponse(response, workspaceId, {
+            search: batch,
+            cursor: null,
+          }),
+        { timeout: 10_000 },
+      );
+      await search.fill(batch);
+      const firstPage = (await (await firstPageResponse).json()) as BrowserSessionPage;
+      expect(firstPage.sessions).toHaveLength(50);
+      expect(firstPage.nextCursor).toBeTruthy();
+
       const loadOlder = page.getByRole("button", { name: "Load older sessions" });
       await loadOlder.waitFor({ timeout: 15_000 });
+      const secondPageResponse = page.waitForResponse(
+        (response) =>
+          successfulSessionPageResponse(response, workspaceId, {
+            search: batch,
+            cursor: firstPage.nextCursor,
+          }),
+        { timeout: 10_000 },
+      );
       await loadOlder.click();
-      await page
-        .getByRole("button", { name: /^Open Loaded continuation sentinel/ })
-        .waitFor({ timeout: 15_000 });
+      const secondPage = (await (await secondPageResponse).json()) as BrowserSessionPage;
+      expect(secondPage.sessions).toHaveLength(50);
+      expect(secondPage.nextCursor).toBeTruthy();
+      const retainedId = secondPage.sessions[0]!.id;
+      const visibleRows = page.locator("[data-ope26-session-list] button[data-session-row]");
+      await page.locator(`button[data-session-row="${retainedId}"]`).waitFor();
+      expect(await visibleRows.count()).toBe(100);
 
-      await createSessionThroughApi(page, apiBaseUrl, workspaceId, "Poll-only newest session");
-      await page.evaluate(() => window.dispatchEvent(new Event("focus")));
-      await page
-        .getByRole("button", { name: /^Open Poll-only newest session/ })
-        .waitFor({ timeout: 15_000 });
-      await page
-        .getByRole("button", { name: /^Open Loaded continuation sentinel/ })
-        .waitFor({ timeout: 15_000 });
-      expect(sentinel.id).toBeTruthy();
+      // A generic 500 is not treated as cursor expiry: loaded rows stay put and
+      // the exact current cursor remains explicitly retryable.
+      let injectedFailure = false;
+      await page.route(`${apiBaseUrl}/v1/workspaces/${workspaceId}/sessions?**`, async (route) => {
+        const url = new URL(route.request().url());
+        if (
+          !injectedFailure &&
+          url.searchParams.get("cursor") === secondPage.nextCursor &&
+          url.searchParams.get("search") === batch
+        ) {
+          injectedFailure = true;
+          await route.fulfill({
+            status: 500,
+            contentType: "application/json",
+            body: JSON.stringify({ error: "synthetic unrelated failure" }),
+          });
+          return;
+        }
+        await route.continue();
+      });
+      await loadOlder.click();
+      const retryOlder = page.getByRole("button", { name: "Retry older sessions" });
+      await retryOlder.waitFor({ timeout: 10_000 });
+      expect(injectedFailure).toBe(true);
+      expect(await visibleRows.count()).toBe(100);
+      await page.locator(`button[data-session-row="${retainedId}"]`).waitFor();
+
+      // Delete the exact server-owned snapshot named by the live continuation.
+      // The API must type that response as 410; the client then creates one new
+      // snapshot and immediately continues from its page-two cursor.
+      const expiredCursor = secondPage.nextCursor!;
+      const expiredSnapshotId = decodeBrowserSessionCursor(expiredCursor).snapshotId;
+      const deleted = await shared.admin<{ id: string }[]>`
+        delete from session_list_snapshots where id = ${expiredSnapshotId} returning id`;
+      expect(deleted.map((row) => row.id)).toEqual([expiredSnapshotId]);
+
+      const expiredResponse = page.waitForResponse(
+        (response) =>
+          sessionPageResponse(response, workspaceId, { search: batch, cursor: expiredCursor }),
+        { timeout: 10_000 },
+      );
+      const freshFirstResponse = page.waitForResponse(
+        (response) =>
+          successfulSessionPageResponse(response, workspaceId, { search: batch, cursor: null }),
+        { timeout: 10_000 },
+      );
+      const rebasedSecondResponse = page.waitForResponse(
+        (response) => {
+          const cursor = new URL(response.url()).searchParams.get("cursor");
+          return (
+            cursor !== null &&
+            cursor !== expiredCursor &&
+            successfulSessionPageResponse(response, workspaceId, { search: batch, cursor })
+          );
+        },
+        { timeout: 10_000 },
+      );
+      await retryOlder.click();
+      expect((await expiredResponse).status()).toBe(410);
+      const freshFirst = (await (await freshFirstResponse).json()) as BrowserSessionPage;
+      const rebasedSecond = (await (await rebasedSecondResponse).json()) as BrowserSessionPage;
+      expect(freshFirst.nextCursor).toBeTruthy();
+      expect(decodeBrowserSessionCursor(freshFirst.nextCursor!).snapshotId).not.toBe(
+        expiredSnapshotId,
+      );
+      expect(rebasedSecond.sessions).toHaveLength(50);
+      expect(await visibleRows.count()).toBe(100);
+      await page.locator(`button[data-session-row="${retainedId}"]`).waitFor();
+
+      // The rebased page-two response exposes the last cursor. All 106 matching
+      // rows remain reachable exactly once, including the oldest sentinel.
+      expect(rebasedSecond.nextCursor).toBeTruthy();
+      const finalPageResponse = page.waitForResponse(
+        (response) =>
+          successfulSessionPageResponse(response, workspaceId, {
+            search: batch,
+            cursor: rebasedSecond.nextCursor,
+          }),
+        { timeout: 10_000 },
+      );
+      await page.getByRole("button", { name: "Load older sessions" }).click();
+      const finalPage = (await (await finalPageResponse).json()) as BrowserSessionPage;
+      expect(finalPage.sessions).toHaveLength(6);
+      expect(finalPage.nextCursor).toBeNull();
+      await page.locator(`button[data-session-row="${sentinel!.id}"]`).waitFor();
+      const visibleIds = await visibleRows.evaluateAll((rows) =>
+        rows.map((row) => row.getAttribute("data-session-row")),
+      );
+      expect(visibleIds).toHaveLength(106);
+      expect(new Set(visibleIds).size).toBe(106);
+    } finally {
+      await context.close();
+    }
+  }, 180_000);
+
+  test("keeps lazy hierarchy, nested pins, keyboard order, and nested-list semantics truthful", async () => {
+    const context = await configuredContext(browser, {
+      viewport: { width: 1280, height: 800 },
+      extraHTTPHeaders: ownerHeaders,
+    });
+    const page = await context.newPage();
+    try {
+      await page.goto(webBaseUrl);
+      const workspaceId = await workspaceFromPage(page);
+      const manager = await createSessionThroughApi(
+        page,
+        apiBaseUrl,
+        workspaceId,
+        "Pinned hierarchy manager",
+      );
+      const ordinaryChild = await createSession(dbClient.db, {
+        accountId: manager.accountId,
+        workspaceId,
+        initialMessage: "Ordinary manager child",
+        resources: [],
+        metadata: {},
+        model: "scripted-model",
+        sandboxBackend: "none",
+        parentSessionId: manager.id,
+      });
+      const intermediary = await createSession(dbClient.db, {
+        accountId: manager.accountId,
+        workspaceId,
+        initialMessage: "Lazy hierarchy intermediary",
+        resources: [],
+        metadata: {},
+        model: "scripted-model",
+        sandboxBackend: "none",
+        parentSessionId: manager.id,
+      });
+      const descendant = await createSession(dbClient.db, {
+        accountId: manager.accountId,
+        workspaceId,
+        initialMessage: "Pinned hierarchy descendant",
+        resources: [],
+        metadata: {},
+        model: "scripted-model",
+        sandboxBackend: "none",
+        parentSessionId: intermediary.id,
+      });
+      const leaf = await createSession(dbClient.db, {
+        accountId: manager.accountId,
+        workspaceId,
+        initialMessage: "Descendant-owned leaf",
+        resources: [],
+        metadata: {},
+        model: "scripted-model",
+        sandboxBackend: "none",
+        parentSessionId: descendant.id,
+      });
+
+      await setSessionPinThroughApi(page, apiBaseUrl, workspaceId, manager, true);
+      await Bun.sleep(10);
+      await setSessionPinThroughApi(page, apiBaseUrl, workspaceId, descendant, true);
+      await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions/${manager.id}`);
+
+      const pinnedList = page.getByRole("list", { name: "Pinned sessions" });
+      await pinnedList.waitFor();
+      const topLevelPin = (sessionId: string) =>
+        pinnedList.locator(
+          `:scope > [role="listitem"] > div > button[data-session-row="${sessionId}"]`,
+        );
+      const topLevelPinItem = (sessionId: string) => topLevelPin(sessionId).locator("xpath=../..");
+      await topLevelPin(descendant.id).waitFor();
+      await topLevelPin(manager.id).waitFor();
+      const hierarchyPinOrder = await pinnedList
+        .locator(':scope > [role="listitem"] > div > button[data-session-row]')
+        .evaluateAll(
+          (rows, hierarchyIds) =>
+            rows
+              .map((row) => row.getAttribute("data-session-row"))
+              .filter((id): id is string => id !== null && hierarchyIds.includes(id)),
+          [descendant.id, manager.id],
+        );
+      // Other scenarios deliberately retain their own pins in this real
+      // workspace. Assert the deterministic order of this hierarchy's two
+      // explicit pin roots without assuming the authenticated member has no
+      // unrelated personal pins.
+      expect(hierarchyPinOrder).toEqual([descendant.id, manager.id]);
+
+      // The manager arrives with only a server hierarchy summary. Expanding it
+      // loads the two direct children, but the explicit nested pin remains an
+      // independent top-level shortcut and is pruned from the manager branch.
+      const managerItem = topLevelPinItem(manager.id);
+      await managerItem.getByRole("button", { name: "Expand spawned sessions" }).click();
+      const managerChildren = managerItem.getByRole("list", {
+        name: "Spawned sessions from Pinned hierarchy manager",
+      });
+      await managerChildren.getByRole("button", { name: /^Open Ordinary manager child/ }).waitFor();
+      await managerChildren
+        .getByRole("button", { name: /^Open Lazy hierarchy intermediary/ })
+        .waitFor();
+      expect(await topLevelPin(descendant.id).count()).toBe(1);
+      expect(
+        await managerChildren.locator(`button[data-session-row="${descendant.id}"]`).count(),
+      ).toBe(0);
+
+      // The descendant shortcut owns its unpinned leaf. Its nested list is
+      // explicit to assistive technology, and keyboard order includes every
+      // expanded descendant once before advancing to the next pin root.
+      const descendantItem = topLevelPinItem(descendant.id);
+      await descendantItem.getByRole("button", { name: "Expand spawned sessions" }).click();
+      const descendantChildren = descendantItem.getByRole("list", {
+        name: "Spawned sessions from Pinned hierarchy descendant",
+      });
+      await descendantChildren.locator(`button[data-session-row="${leaf.id}"]`).waitFor();
+      const descendantRow = topLevelPin(descendant.id);
+      await descendantRow.focus();
+      await page.keyboard.press("ArrowDown");
+      expect(
+        await page.evaluate(() => document.activeElement?.getAttribute("data-session-row")),
+      ).toBe(leaf.id);
+      await page.keyboard.press("ArrowDown");
+      expect(
+        await page.evaluate(() => document.activeElement?.getAttribute("data-session-row")),
+      ).toBe(manager.id);
+      const visiblePinIds = await pinnedList
+        .locator("button[data-session-row]")
+        .evaluateAll((rows) => rows.map((row) => row.getAttribute("data-session-row")));
+      expect(new Set(visiblePinIds).size).toBe(visiblePinIds.length);
+      await expectNoAxeViolations(page, ["[data-ope26-session-list]"]);
+
+      // After unpinning, the descendant may truthfully remain nested under its
+      // pinned manager. Assert only that it is no longer an explicit top-level
+      // pin root—the section as a whole must not be required to lose the row.
+      await descendantRow.click();
+      await page.getByRole("button", { name: "Unpin session" }).waitFor();
+      await page.getByRole("button", { name: "Unpin session" }).click();
+      await page.getByRole("button", { name: "Pin session" }).waitFor();
+      const topLevelPinnedDescendant = page.locator(
+        `[role="list"][aria-label="Pinned sessions"] > [role="listitem"] > div > button[data-session-row="${descendant.id}"]`,
+      );
+      await waitFor(async () => (await topLevelPinnedDescendant.count()) === 0, {
+        timeoutMs: 10_000,
+      });
+      expect(ordinaryChild.id).toBeTruthy();
     } finally {
       await context.close();
     }
@@ -562,7 +865,15 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       expect(await composer.inputValue()).toBe("Unsent local draft that must not be overwritten");
       await queue.getByRole("button", { name: "Keep current draft" }).click();
       expect(await queuedRows.count()).toBe(2);
+      const emptyDraftSaved = desktopPage.waitForResponse(
+        (response) =>
+          response.request().method() === "PUT" &&
+          response.url().endsWith(`/sessions/${manager.id}/composer-draft`) &&
+          response.ok(),
+        { timeout: 10_000 },
+      );
       await composer.fill("");
+      await emptyDraftSaved;
       await queue.getByRole("button", { name: "More actions for queued prompt 2" }).click();
       await desktopPage.getByRole("menuitem", { name: "Edit in composer" }).click();
       await waitFor(
@@ -1040,6 +1351,51 @@ type BrowserSessionPage = {
   sessions: BrowserSession[];
   nextCursor: string | null;
 };
+
+function sessionPageResponse(
+  response: PlaywrightResponse,
+  workspaceId: string,
+  filters: { search?: string; cursor?: string | null } = {},
+): boolean {
+  const url = new URL(response.url());
+  if (
+    response.request().method() !== "GET" ||
+    url.pathname !== `/v1/workspaces/${workspaceId}/sessions` ||
+    url.searchParams.get("view") !== "page"
+  ) {
+    return false;
+  }
+  if (filters.search !== undefined && url.searchParams.get("search") !== filters.search) {
+    return false;
+  }
+  if (
+    filters.cursor !== undefined &&
+    (filters.cursor === null
+      ? url.searchParams.has("cursor")
+      : url.searchParams.get("cursor") !== filters.cursor)
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function successfulSessionPageResponse(
+  response: PlaywrightResponse,
+  workspaceId: string,
+  filters: { search?: string; cursor?: string | null } = {},
+): boolean {
+  return response.ok() && sessionPageResponse(response, workspaceId, filters);
+}
+
+function decodeBrowserSessionCursor(cursor: string): { snapshotId: string } {
+  const parsed = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as {
+    snapshotId?: unknown;
+  };
+  if (typeof parsed.snapshotId !== "string") {
+    throw new Error("session cursor did not contain a snapshot id");
+  }
+  return { snapshotId: parsed.snapshotId };
+}
 
 const browserDiagnostics = new WeakMap<BrowserContext, string[]>();
 

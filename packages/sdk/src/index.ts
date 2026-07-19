@@ -8,6 +8,7 @@ export type {
 export {
   OpenGeniApiContractMismatchError,
   OpenGeniApiError,
+  OpenGeniSessionListCursorError,
   OpenGeniStreamError,
   isRetryableStreamError,
 } from "./errors";

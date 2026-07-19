@@ -14,6 +14,7 @@ import {
   createWorkspaceEnvironment,
   dbSql,
   decryptEnvironmentValue,
+  decodeSessionListCursor,
   enableCapabilityInstallation,
   encryptEnvironmentValue,
   getActiveSessionHistoryItems,
@@ -306,6 +307,23 @@ describe("API component integration", () => {
       (await app.request(workspacePath(workspaceId, "/sessions?view=page&cursor=not-a-cursor")))
         .status,
     ).toBe(400);
+    const decodedCursor = decodeSessionListCursor(firstPage.nextCursor!);
+    expect(decodedCursor).not.toBeNull();
+    await dbClient.db.execute(dbSql`
+      update session_list_snapshots
+      set expires_at = now() - interval '1 second'
+      where id = ${decodedCursor!.snapshotId}
+    `);
+    expect(
+      (
+        await app.request(
+          workspacePath(
+            workspaceId,
+            `/sessions?view=page&limit=1&cursor=${encodeURIComponent(firstPage.nextCursor!)}`,
+          ),
+        )
+      ).status,
+    ).toBe(410);
 
     const unpinned = await setPin({ pinned: false, expectedVersion: 1 });
     expect(unpinned.status).toBe(200);

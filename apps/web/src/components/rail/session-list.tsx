@@ -4,6 +4,7 @@
 // dot + single-line truncated title + relative time (visible at rest). The
 // active session (from the URL) is highlighted with an accent bar.
 import { useSessionLineage, useWorkspaceSessions } from "@opengeni/react";
+import { OpenGeniSessionListCursorError, type SessionListResponse } from "@opengeni/sdk";
 import { useRouterState } from "@tanstack/react-router";
 import {
   ChevronRightIcon,
@@ -38,6 +39,7 @@ import {
   advanceSessionPageIdentity,
   emptySessionContinuation,
   mergeSessionContinuation,
+  rebaseSessionContinuation,
   sessionPageKey,
 } from "@/lib/session-pagination";
 import { pinLiveAnnouncement } from "@/lib/pin-live-announcement";
@@ -54,17 +56,17 @@ import {
   shouldRestoreSessionFocus,
   type SessionFocusTarget,
 } from "@/lib/session-focus";
-import { applySessionPinProjection, subscribeToSessionPinChanges } from "@/lib/session-pins";
 import {
-  SESSION_GROUP_LABELS,
-  SESSION_GROUP_ORDER,
-  buildRailForest,
+  applySessionPinProjection,
+  applySessionRailProjection,
+  subscribeToSessionPinChanges,
+} from "@/lib/session-pins";
+import {
+  buildPinnedRailSections,
   groupSessionsForRail,
-  nodeIsActive,
-  recencyGroupFor,
   relativeTimeLabel,
-  sessionActivityTime,
   visibleForestRows,
+  visibleTreeRows,
   type SessionTreeNode,
 } from "@/lib/sessions-group";
 import { cn } from "@/lib/utils";
@@ -116,17 +118,21 @@ export function SessionList() {
   const globalPinPage = useWorkspaceSessions({
     limit: 1,
     pollIntervalMs: 15_000,
-    enabled: hierarchyMode,
   });
   const { sessions, nextCursor, loading, error, refresh } = rootPage;
-  const { pinned: globalPinned, refresh: refreshGlobalPins } = globalPinPage;
+  const {
+    pinned: globalPinned,
+    loading: globalPinsLoading,
+    error: globalPinsError,
+    refresh: refreshGlobalPins,
+  } = globalPinPage;
   const pinned = hierarchyMode ? globalPinned : rootPage.pinned;
   // The hierarchy and its global pinned shortcuts come from separate queries.
   // Every invalidation must refresh both or a pin changed in another tab/device
   // can disappear from the shortcut section until the next polling interval.
   const refreshSessionPages = useCallback(async () => {
-    await Promise.all([refresh(), ...(hierarchyMode ? [refreshGlobalPins()] : [])]);
-  }, [hierarchyMode, refresh, refreshGlobalPins]);
+    await Promise.all([refresh(), refreshGlobalPins()]);
+  }, [refresh, refreshGlobalPins]);
   // Ordinary rows page independently of the complete pinned section. The
   // polled hook owns page one; additional pages are appended and deduplicated.
   // A filter change starts a fresh cursor chain rather than mixing snapshots.
@@ -186,20 +192,21 @@ export function SessionList() {
     // then adds only explicitly loaded child pages and the active session's
     // lineage. A child can therefore never become a fake root merely because
     // its parent fell outside a global recency page.
+    // List/page projections own personal pin revisions and server treeStats.
+    // Insert those first, with the current pinned section last so an older
+    // ordinary continuation cannot overwrite a newer pin projection.
+    for (const session of [...extraSessions, ...sessions, ...loadedChildren, ...pinned]) {
+      source.set(session.id, session);
+    }
+    // Route/lineage projections own lifecycle and content. Merge list-owned
+    // fields into them rather than replacing either domain wholesale; in
+    // particular, a stale route object must not resurrect a cross-device pin.
     const lineageSessions = hierarchyMode
       ? [...(activeLineage.lineage?.ancestors ?? []), ...(context.session ? [context.session] : [])]
       : [];
-    // Precedence is continuation < current page < lazy children < active
-    // lineage < current pinned section. Pins carry the freshest personal pin
-    // revision, while route/SSE data wins for the currently open lifecycle.
-    for (const session of [
-      ...extraSessions,
-      ...sessions,
-      ...loadedChildren,
-      ...lineageSessions,
-      ...pinned,
-    ]) {
-      source.set(session.id, session);
+    for (const session of lineageSessions) {
+      const projected = source.get(session.id);
+      source.set(session.id, projected ? applySessionRailProjection(session, projected) : session);
     }
     return [...source.values()];
   }, [
@@ -216,12 +223,10 @@ export function SessionList() {
     for (const [id, override] of pinOverrides) source.set(id, override.session);
     return [...source.values()];
   }, [pinOverrides, serverSessions]);
-  const pinnedSessions = useMemo(
-    () => allSessions.filter((session) => Boolean(session.pinned)),
-    [allSessions],
-  );
   const openSessionId = context.session?.id;
   const openSessionWorkspaceId = context.session?.workspaceId;
+  const openSessionPinned = Boolean(context.session?.pinned);
+  const openSessionPinVersion = context.session?.pinVersion ?? 0;
   const setContextSession = context.setSession;
 
   // The route header and rail intentionally keep separate projections. Merge
@@ -239,6 +244,57 @@ export function SessionList() {
     setContextSession((current) => applySessionPinProjection(current, projected));
   }, [openSessionId, openSessionWorkspaceId, rail.workspaceId, serverSessions, setContextSession]);
 
+  const activePinProbe = useRef<{ key: string | null; operation: number }>({
+    key: null,
+    operation: 0,
+  });
+  useEffect(() => {
+    const globalPageContainsOpenSession = globalPinned.some(
+      (candidate) => candidate.id === openSessionId,
+    );
+    if (
+      !openSessionId ||
+      openSessionWorkspaceId !== rail.workspaceId ||
+      !openSessionPinned ||
+      globalPinsLoading ||
+      globalPinsError ||
+      globalPageContainsOpenSession
+    ) {
+      activePinProbe.current.key = null;
+      activePinProbe.current.operation += 1;
+      return;
+    }
+
+    const key = `${openSessionId}:${openSessionPinVersion}`;
+    if (activePinProbe.current.key === key) return;
+    const operation = ++activePinProbe.current.operation;
+    activePinProbe.current.key = key;
+    void context.client
+      .getSession(rail.workspaceId, openSessionId)
+      .then((authoritative) => {
+        if (activePinProbe.current.operation !== operation) return;
+        // Point reads are used only for the absent pin projection. Route/SSE
+        // remains authoritative for every lifecycle and content field.
+        setContextSession((current) => applySessionPinProjection(current, authoritative));
+      })
+      .catch(() => {
+        if (activePinProbe.current.operation === operation) {
+          activePinProbe.current.key = null;
+        }
+      });
+  }, [
+    context.client,
+    globalPinned,
+    globalPinsError,
+    globalPinsLoading,
+    openSessionId,
+    openSessionPinned,
+    openSessionPinVersion,
+    openSessionWorkspaceId,
+    rail.workspaceId,
+    setContextSession,
+  ]);
+
   const activeSessionId = useRouterState({
     select: (state): string | null => {
       const match = /\/sessions\/([^/]+)/.exec(state.location.pathname);
@@ -247,140 +303,20 @@ export function SessionList() {
   });
 
   // Search results are deliberately flat: a partial match set is not a tree.
-  // Normal navigation contains only true roots, lazily loaded children, and the
-  // active lineage, so buildRailForest never has to invent root placement.
-  const completeForest = useMemo(
+  // Normal navigation contains only true roots, lazily loaded children, and
+  // the active lineage. The helper builds all three projections together so
+  // explicit nested pins never disappear into an ancestor shortcut.
+  const railSections = useMemo(
     () =>
-      buildRailForest(
+      buildPinnedRailSections(
         hierarchyMode
           ? allSessions
-          : allSessions.map((session) => ({
-              ...session,
-              parentSessionId: null,
-            })),
+          : allSessions.map((session) => ({ ...session, parentSessionId: null })),
       ),
     [allSessions, hierarchyMode],
   );
-  const forest = useMemo(() => {
-    // A pinned node is promoted with its subtree into the Pinned section. Prune
-    // it recursively from the ordinary hierarchy so a pinned child is not
-    // rendered twice (and keyboard focus never has two rows with one identity).
-    type RemovedCounts = {
-      total: number;
-      running: number;
-      queued: number;
-      attention: number;
-      paused: number;
-      failed: number;
-    };
-    const emptyCounts = (): RemovedCounts => ({
-      total: 0,
-      running: 0,
-      queued: 0,
-      attention: 0,
-      paused: 0,
-      failed: 0,
-    });
-    const addCounts = (target: RemovedCounts, source: RemovedCounts): void => {
-      target.total += source.total;
-      target.running += source.running;
-      target.queued += source.queued;
-      target.attention += source.attention;
-      target.paused += source.paused;
-      target.failed += source.failed;
-    };
-    const subtreeCounts = (node: SessionTreeNode): RemovedCounts => {
-      const stats = node.session.treeStats;
-      const status = node.session.status;
-      const counts: RemovedCounts = {
-        total: 1,
-        running: status === "running" || status === "recovering" ? 1 : 0,
-        queued: status === "queued" || status === "waiting_capacity" ? 1 : 0,
-        attention: status === "requires_action" ? 1 : 0,
-        paused: node.session.effectiveControl.state === "paused" ? 1 : 0,
-        failed: status === "failed" ? 1 : 0,
-      };
-      if (stats) {
-        counts.total += stats.totalDescendants;
-        counts.running += stats.runningDescendants;
-        counts.queued += stats.queuedDescendants;
-        counts.attention += stats.attentionDescendants;
-        counts.paused += stats.pausedDescendants;
-        counts.failed += stats.failedDescendants;
-      } else {
-        for (const child of node.children) addCounts(counts, subtreeCounts(child));
-      }
-      return counts;
-    };
-    const prune = (
-      node: SessionTreeNode,
-    ): { node: SessionTreeNode | null; removed: RemovedCounts } => {
-      if (node.session.pinned) return { node: null, removed: subtreeCounts(node) };
-      const removed = emptyCounts();
-      let removedDirectChildren = 0;
-      const children: SessionTreeNode[] = [];
-      for (const child of node.children) {
-        const result = prune(child);
-        addCounts(removed, result.removed);
-        if (result.node) children.push(result.node);
-        else removedDirectChildren += 1;
-      }
-      const stats = node.session.treeStats;
-      const session = stats
-        ? {
-            ...node.session,
-            treeStats: {
-              directChildren: Math.max(0, stats.directChildren - removedDirectChildren),
-              totalDescendants: Math.max(0, stats.totalDescendants - removed.total),
-              runningDescendants: Math.max(0, stats.runningDescendants - removed.running),
-              queuedDescendants: Math.max(0, stats.queuedDescendants - removed.queued),
-              attentionDescendants: Math.max(0, stats.attentionDescendants - removed.attention),
-              pausedDescendants: Math.max(0, stats.pausedDescendants - removed.paused),
-              failedDescendants: Math.max(0, stats.failedDescendants - removed.failed),
-            },
-          }
-        : node.session;
-      const pruned = {
-        session,
-        children,
-        hasActiveDescendant: children.some((child) => nodeIsActive(child)),
-      };
-      return { node: pruned, removed };
-    };
-    const roots = [
-      ...completeForest.running,
-      ...completeForest.grouped.flatMap((bucket) => bucket.sessions),
-    ];
-    const prunedRoots = roots.flatMap((node) => {
-      const result = prune(node).node;
-      return result ? [result] : [];
-    });
-    const running = prunedRoots
-      .filter((node) => nodeIsActive(node))
-      .sort(
-        (left, right) => sessionActivityTime(right.session) - sessionActivityTime(left.session),
-      );
-    const buckets = new Map<(typeof SESSION_GROUP_ORDER)[number], SessionTreeNode[]>();
-    for (const node of prunedRoots
-      .filter((candidate) => !nodeIsActive(candidate))
-      .sort(
-        (left, right) => sessionActivityTime(right.session) - sessionActivityTime(left.session),
-      )) {
-      const group = recencyGroupFor(sessionActivityTime(node.session));
-      const groupSessions = buckets.get(group) ?? [];
-      groupSessions.push(node);
-      buckets.set(group, groupSessions);
-    }
-    return {
-      running,
-      grouped: SESSION_GROUP_ORDER.flatMap((group) => {
-        const nodes = buckets.get(group);
-        return nodes?.length
-          ? [{ group, label: SESSION_GROUP_LABELS[group], sessions: nodes }]
-          : [];
-      }),
-    };
-  }, [completeForest]);
+  const forest = railSections.ordinary;
+  const pinnedNodes = railSections.pinned;
   const nodesById = useMemo(() => {
     const result = new Map<string, SessionTreeNode>();
     const visit = (node: SessionTreeNode): void => {
@@ -388,45 +324,12 @@ export function SessionList() {
       result.set(node.session.id, node);
       for (const child of node.children) visit(child);
     };
-    for (const node of completeForest.running) visit(node);
-    for (const bucket of completeForest.grouped) {
+    for (const node of railSections.complete.running) visit(node);
+    for (const bucket of railSections.complete.grouped) {
       for (const node of bucket.sessions) visit(node);
     }
     return result;
-  }, [completeForest]);
-  // Pins are promoted shortcuts, not a second ownership model. If both a
-  // parent and its descendant are pinned, the parent owns the visible pinned
-  // subtree so no session row appears twice.
-  const pinnedNodes = useMemo<SessionTreeNode[]>(() => {
-    const byId = new Map(allSessions.map((session) => [session.id, session]));
-    const hasPinnedAncestor = (session: Session): boolean => {
-      const seen = new Set<string>();
-      let parentId = session.parentSessionId;
-      while (parentId && !seen.has(parentId)) {
-        seen.add(parentId);
-        const parent = byId.get(parentId);
-        if (!parent) return false;
-        if (parent.pinned) return true;
-        parentId = parent.parentSessionId;
-      }
-      return false;
-    };
-    return [...pinnedSessions]
-      .filter((session) => !hasPinnedAncestor(session))
-      .sort(
-        (left, right) =>
-          Date.parse(right.pinnedAt ?? "") - Date.parse(left.pinnedAt ?? "") ||
-          right.id.localeCompare(left.id),
-      )
-      .map(
-        (session) =>
-          nodesById.get(session.id) ?? {
-            session,
-            children: [],
-            hasActiveDescendant: false,
-          },
-      );
-  }, [allSessions, nodesById, pinnedSessions]);
+  }, [railSections.complete]);
 
   // Manual state is separate from the small derived active-path expansion.
   // Polls can therefore never reopen a branch the user explicitly collapsed.
@@ -545,14 +448,14 @@ export function SessionList() {
   const visibleRows = useMemo(() => {
     const seen = new Set<string>();
     return [
-      ...pinnedNodes.map((node) => ({ node, depth: 0 })),
+      ...visibleTreeRows(pinnedNodes, expanded),
       ...visibleForestRows(forest, expanded),
     ].filter(({ node }) => {
       if (seen.has(node.session.id)) return false;
       seen.add(node.session.id);
       return true;
     });
-  }, [pinnedNodes, forest, expanded]);
+  }, [expanded, forest, pinnedNodes]);
   const flat = useMemo<Session[]>(() => visibleRows.map((row) => row.node.session), [visibleRows]);
 
   useLayoutEffect(() => {
@@ -689,24 +592,49 @@ export function SessionList() {
     if (!continuationCursor || loadingMore) return;
     const requestGeneration = pageGeneration;
     const attempt = ++loadMoreAttempt.current;
+    const requestIsCurrent = (): boolean =>
+      paginationIdentity.current.generation === requestGeneration &&
+      loadMoreAttempt.current === attempt;
+    const listPage = async (cursor?: string): Promise<SessionListResponse> =>
+      await context.client.listSessionPage(rail.workspaceId, {
+        limit: 50,
+        ...(cursor ? { cursor } : {}),
+        ...(search ? { search } : {}),
+        ...(hierarchyMode ? { parentSessionId: null } : {}),
+      });
     setLoadingMoreGeneration(requestGeneration);
     setContinuation((current) => ({
       ...activeSessionContinuation(current, requestGeneration),
       failed: false,
     }));
     try {
-      const page = await context.client.listSessionPage(rail.workspaceId, {
-        limit: 50,
-        cursor: continuationCursor,
-        ...(search ? { search } : {}),
-        ...(hierarchyMode ? { parentSessionId: null } : {}),
-      });
-      if (
-        paginationIdentity.current.generation !== requestGeneration ||
-        loadMoreAttempt.current !== attempt
-      ) {
-        return;
+      let page: SessionListResponse;
+      try {
+        page = await listPage(continuationCursor);
+      } catch (cursorError) {
+        if (!(cursorError instanceof OpenGeniSessionListCursorError)) throw cursorError;
+
+        // The snapshot behind the retained cursor expired. Re-read page one
+        // once, fence it to this query, and continue immediately from its new
+        // cursor. A second expiry bubbles to the normal retryable failure path
+        // instead of creating an unbounded cursor-refresh loop.
+        const freshFirstPage = await listPage();
+        if (!requestIsCurrent()) return;
+        setContinuation((current) =>
+          rebaseSessionContinuation(
+            current,
+            pageGeneration,
+            requestGeneration,
+            freshFirstPage.nextCursor,
+          ),
+        );
+        if (!freshFirstPage.nextCursor) {
+          setAnnouncement("No more older sessions.");
+          return;
+        }
+        page = await listPage(freshFirstPage.nextCursor);
       }
+      if (!requestIsCurrent()) return;
       setContinuation((current) =>
         mergeSessionContinuation(current, pageGeneration, requestGeneration, page),
       );
@@ -716,12 +644,7 @@ export function SessionList() {
           : `Loaded ${page.sessions.length} older session${page.sessions.length === 1 ? "" : "s"}.`,
       );
     } catch {
-      if (
-        paginationIdentity.current.generation !== requestGeneration ||
-        loadMoreAttempt.current !== attempt
-      ) {
-        return;
-      }
+      if (!requestIsCurrent()) return;
       // Keep already loaded rows and make this bounded page explicitly
       // retryable; a silent no-op would look like pagination had ended.
       setContinuation((current) => ({
@@ -730,10 +653,7 @@ export function SessionList() {
       }));
       setAnnouncement("Older sessions did not load. Retry is available.");
     } finally {
-      if (
-        paginationIdentity.current.generation === requestGeneration &&
-        loadMoreAttempt.current === attempt
-      ) {
+      if (requestIsCurrent()) {
         setLoadingMoreGeneration(null);
       }
     }
@@ -1118,8 +1038,11 @@ function SessionTreeRow(props: {
     hiddenActivePath && hiddenActivePath.length > 1
       ? hiddenActivePath[hiddenActivePath.length - 1]!.session
       : null;
+  const title =
+    node.session.title?.trim() || node.session.initialMessage?.trim() || "Untitled session";
+  const hasVisibleChildRegion = Boolean(hiddenActiveSession || (isExpanded && childCount > 0));
   return (
-    <>
+    <div role="listitem" className="min-w-0">
       <SessionRow
         session={node.session}
         index={index}
@@ -1136,55 +1059,59 @@ function SessionTreeRow(props: {
         onRename={props.onRename}
         onPin={props.onPin}
       />
-      {hiddenActiveSession ? (
-        <ActivePathShortcut
-          session={hiddenActiveSession}
-          depth={props.depth + 1}
-          hiddenLevels={hiddenActivePath!.length - 1}
-          onReveal={props.onRevealActivePath}
-        />
-      ) : null}
-      {childCount > 0 && isExpanded
-        ? node.children.map((child) => (
-            <SessionTreeRow
-              key={child.session.id}
-              node={child}
+      {hasVisibleChildRegion ? (
+        <div role="list" aria-label={`Spawned sessions from ${title}`}>
+          {hiddenActiveSession ? (
+            <ActivePathShortcut
+              session={hiddenActiveSession}
               depth={props.depth + 1}
-              flat={props.flat}
-              activeSessionId={props.activeSessionId}
-              focusIndex={props.focusIndex}
-              onFocusSession={props.onFocusSession}
-              expanded={props.expanded}
-              onToggleExpand={props.onToggleExpand}
-              onRevealActivePath={props.onRevealActivePath}
-              childPages={props.childPages}
-              onLoadMoreChildren={props.onLoadMoreChildren}
-              onSelect={props.onSelect}
-              onRename={props.onRename}
-              onPin={props.onPin}
+              hiddenLevels={hiddenActivePath!.length - 1}
+              onReveal={props.onRevealActivePath}
             />
-          ))
-        : null}
-      {isExpanded && childPage?.loading ? (
-        <TreeLoadRow depth={props.depth + 1} text="Loading sessions…" />
+          ) : null}
+          {childCount > 0 && isExpanded
+            ? node.children.map((child) => (
+                <SessionTreeRow
+                  key={child.session.id}
+                  node={child}
+                  depth={props.depth + 1}
+                  flat={props.flat}
+                  activeSessionId={props.activeSessionId}
+                  focusIndex={props.focusIndex}
+                  onFocusSession={props.onFocusSession}
+                  expanded={props.expanded}
+                  onToggleExpand={props.onToggleExpand}
+                  onRevealActivePath={props.onRevealActivePath}
+                  childPages={props.childPages}
+                  onLoadMoreChildren={props.onLoadMoreChildren}
+                  onSelect={props.onSelect}
+                  onRename={props.onRename}
+                  onPin={props.onPin}
+                />
+              ))
+            : null}
+          {isExpanded && childPage?.loading ? (
+            <TreeLoadRow depth={props.depth + 1} text="Loading sessions…" />
+          ) : null}
+          {isExpanded && childPage?.failed ? (
+            <TreeLoadRow
+              depth={props.depth + 1}
+              text="Retry loading sessions"
+              onClick={() =>
+                void props.onLoadMoreChildren(node.session.id, childPage.nextCursor ?? undefined)
+              }
+            />
+          ) : null}
+          {isExpanded && !childPage?.loading && !childPage?.failed && childPage?.nextCursor ? (
+            <TreeLoadRow
+              depth={props.depth + 1}
+              text="Show more"
+              onClick={() => void props.onLoadMoreChildren(node.session.id, childPage.nextCursor!)}
+            />
+          ) : null}
+        </div>
       ) : null}
-      {isExpanded && childPage?.failed ? (
-        <TreeLoadRow
-          depth={props.depth + 1}
-          text="Retry loading sessions"
-          onClick={() =>
-            void props.onLoadMoreChildren(node.session.id, childPage.nextCursor ?? undefined)
-          }
-        />
-      ) : null}
-      {isExpanded && !childPage?.loading && !childPage?.failed && childPage?.nextCursor ? (
-        <TreeLoadRow
-          depth={props.depth + 1}
-          text="Show more"
-          onClick={() => void props.onLoadMoreChildren(node.session.id, childPage.nextCursor!)}
-        />
-      ) : null}
-    </>
+    </div>
   );
 }
 
@@ -1240,17 +1167,21 @@ function TreeLoadRow({
 }) {
   const style = { paddingLeft: 26 + visualTreeDepth(depth) * 12 };
   return onClick ? (
-    <button
-      type="button"
-      onClick={onClick}
-      style={style}
-      className="h-8 w-full rounded-md pr-2 text-left text-xs text-fg-subtle hover:bg-surface-2 hover:text-fg pointer-coarse:h-11"
-    >
-      {text}
-    </button>
+    <div role="listitem">
+      <button
+        type="button"
+        onClick={onClick}
+        style={style}
+        className="h-8 w-full rounded-md pr-2 text-left text-xs text-fg-subtle hover:bg-surface-2 hover:text-fg pointer-coarse:h-11"
+      >
+        {text}
+      </button>
+    </div>
   ) : (
-    <div style={style} className="flex h-8 items-center text-xs text-fg-subtle" role="status">
-      {text}
+    <div role="listitem">
+      <div style={style} className="flex h-8 items-center text-xs text-fg-subtle" role="status">
+        {text}
+      </div>
     </div>
   );
 }
@@ -1322,11 +1253,11 @@ function SessionRow(props: {
     </span>
   );
 
-  // While renaming, the row body becomes an inline input. Keep it as a
-  // listitem so the surrounding list semantics and the active accent bar hold.
+  // While renaming, the row body becomes an inline input. SessionTreeRow owns
+  // the listitem semantics so its spawned-session list can remain nested.
   if (rename.editing) {
     return (
-      <div role="listitem" className={rowClassName}>
+      <div className={rowClassName}>
         <ActiveAccent active={props.active} />
         {lead}
         <RailStatusDot status={props.session.status} />
@@ -1362,7 +1293,7 @@ function SessionRow(props: {
   return (
     <ContextMenu>
       <ContextMenuTrigger asChild>
-        <div role="listitem" title={`${title} — ${stateLabel}`} className={rowClassName}>
+        <div title={`${title} — ${stateLabel}`} className={rowClassName}>
           <ActiveAccent active={props.active} />
           {lead}
           <button

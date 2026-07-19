@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { OpenGeniClient } from "../src/client";
-import { OpenGeniApiContractMismatchError, OpenGeniApiError } from "../src/errors";
+import {
+  OpenGeniApiContractMismatchError,
+  OpenGeniApiError,
+  OpenGeniSessionListCursorError,
+} from "../src/errors";
 import { OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION } from "../src/types";
 import { collect, makeEvent, SESSION_ID, sseBlock, WORKSPACE_ID } from "./helpers";
 
@@ -277,6 +281,26 @@ describe("OpenGeniClient", () => {
     await expect(
       client.listSessions(WORKSPACE_ID, { search: "unsupported-on-legacy" }),
     ).rejects.toThrow("does not support session search");
+  });
+
+  test("listSessionPage types only an expired snapshot cursor as recoverable", async () => {
+    const expired = makeClient(() => new Response("snapshot expired", { status: 410 })).client;
+    const unavailable = makeClient(
+      () => new Response("temporarily unavailable", { status: 500 }),
+    ).client;
+
+    const expiredError = await expired
+      .listSessionPage(WORKSPACE_ID, { cursor: "expired" })
+      .catch((error: unknown) => error);
+    expect(expiredError).toBeInstanceOf(OpenGeniSessionListCursorError);
+    expect(expiredError).toMatchObject({ status: 410, body: "snapshot expired" });
+
+    const unavailableError = await unavailable
+      .listSessionPage(WORKSPACE_ID, { cursor: "still-valid" })
+      .catch((error: unknown) => error);
+    expect(unavailableError).toBeInstanceOf(OpenGeniApiError);
+    expect(unavailableError).not.toBeInstanceOf(OpenGeniSessionListCursorError);
+    expect(unavailableError).toMatchObject({ status: 500, body: "temporarily unavailable" });
   });
 
   test("listSessions search flattens the pin-aware page without losing section order", async () => {

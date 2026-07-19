@@ -49,6 +49,28 @@ export function compareSessionActivity(left: Session, right: Session): number {
   return sessionActivityTime(right) - sessionActivityTime(left) || right.id.localeCompare(left.id);
 }
 
+/** Deterministic personal-pin order: newest pin first, then descending id. */
+export function compareSessionPins(left: Session, right: Session): number {
+  const leftPinnedAt = Date.parse(left.pinnedAt ?? "");
+  const rightPinnedAt = Date.parse(right.pinnedAt ?? "");
+  const leftTime = Number.isNaN(leftPinnedAt) ? 0 : leftPinnedAt;
+  const rightTime = Number.isNaN(rightPinnedAt) ? 0 : rightPinnedAt;
+  return rightTime - leftTime || right.id.localeCompare(left.id);
+}
+
+/** Split explicit personal pins from ordinary rows without changing the input. */
+export function partitionPinnedSessions(sessions: Session[]): {
+  pinned: Session[];
+  ordinary: Session[];
+} {
+  const pinned: Session[] = [];
+  const ordinary: Session[] = [];
+  for (const session of sessions) {
+    (session.pinned ? pinned : ordinary).push(session);
+  }
+  return { pinned: pinned.sort(compareSessionPins), ordinary };
+}
+
 /**
  * Which recency bucket a timestamp falls into, relative to `now`. "Today" and
  * "Yesterday" are calendar-local; "Previous 7 days" is the rest of the trailing
@@ -146,6 +168,15 @@ export type SessionForest = {
   }[];
 };
 
+export type PinnedRailSections = {
+  /** Complete loaded hierarchy, used for expansion and lineage lookups. */
+  complete: SessionForest;
+  /** Every explicit pin is an independently ordered shortcut root. */
+  pinned: SessionTreeNode[];
+  /** The ordinary hierarchy with every pin-owned subtree removed. */
+  ordinary: SessionForest;
+};
+
 /** Whether the node's own status, or any descendant, is in a live state. */
 export function nodeIsActive(node: SessionTreeNode): boolean {
   const stats = node.session.treeStats;
@@ -153,6 +184,39 @@ export function nodeIsActive(node: SessionTreeNode): boolean {
     stats && stats.runningDescendants + stats.queuedDescendants + stats.attentionDescendants > 0,
   );
   return isRunningStatus(node.session.status) || node.hasActiveDescendant || summarizedActive;
+}
+
+/** Bucket already-built roots using the rail's activity and recency rules. */
+export function categorizeRailRoots(
+  rootNodes: SessionTreeNode[],
+  now: Date = new Date(),
+): SessionForest {
+  const running = rootNodes
+    .filter((node) => nodeIsActive(node))
+    .sort((a, b) => compareSessionActivity(a.session, b.session));
+  const rest = rootNodes
+    .filter((node) => !nodeIsActive(node))
+    .sort((a, b) => compareSessionActivity(a.session, b.session));
+
+  const buckets = new Map<SessionRecencyGroup, SessionTreeNode[]>();
+  for (const node of rest) {
+    const group = recencyGroupFor(sessionActivityTime(node.session), now);
+    const list = buckets.get(group) ?? [];
+    list.push(node);
+    buckets.set(group, list);
+  }
+  const grouped: SessionForest["grouped"] = [];
+  for (const group of SESSION_GROUP_ORDER) {
+    const list = buckets.get(group);
+    if (list && list.length > 0) {
+      grouped.push({
+        group,
+        label: SESSION_GROUP_LABELS[group],
+        sessions: list,
+      });
+    }
+  }
+  return { running, grouped };
 }
 
 /**
@@ -208,39 +272,156 @@ export function buildRailForest(sessions: Session[], now: Date = new Date()): Se
       reachable.add(session.id);
     }
   }
-  const running = rootNodes
-    .filter((node) => nodeIsActive(node))
-    .sort((a, b) => compareSessionActivity(a.session, b.session));
-  const rest = rootNodes
-    .filter((node) => !nodeIsActive(node))
-    .sort((a, b) => compareSessionActivity(a.session, b.session));
+  return categorizeRailRoots(rootNodes, now);
+}
 
-  const buckets = new Map<SessionRecencyGroup, SessionTreeNode[]>();
-  for (const node of rest) {
-    const group = recencyGroupFor(sessionActivityTime(node.session), now);
-    const list = buckets.get(group) ?? [];
-    list.push(node);
-    buckets.set(group, list);
+type RemovedCounts = {
+  total: number;
+  running: number;
+  queued: number;
+  attention: number;
+  paused: number;
+  failed: number;
+};
+
+function emptyRemovedCounts(): RemovedCounts {
+  return { total: 0, running: 0, queued: 0, attention: 0, paused: 0, failed: 0 };
+}
+
+function addRemovedCounts(target: RemovedCounts, source: RemovedCounts): void {
+  target.total += source.total;
+  target.running += source.running;
+  target.queued += source.queued;
+  target.attention += source.attention;
+  target.paused += source.paused;
+  target.failed += source.failed;
+}
+
+function subtreeCounts(node: SessionTreeNode): RemovedCounts {
+  const status = node.session.status;
+  const counts: RemovedCounts = {
+    total: 1,
+    running: status === "running" || status === "recovering" ? 1 : 0,
+    queued: status === "queued" || status === "waiting_capacity" ? 1 : 0,
+    attention: status === "requires_action" ? 1 : 0,
+    paused: node.session.effectiveControl.state === "paused" ? 1 : 0,
+    failed: status === "failed" ? 1 : 0,
+  };
+  const stats = node.session.treeStats;
+  if (stats) {
+    counts.total += stats.totalDescendants;
+    counts.running += stats.runningDescendants;
+    counts.queued += stats.queuedDescendants;
+    counts.attention += stats.attentionDescendants;
+    counts.paused += stats.pausedDescendants;
+    counts.failed += stats.failedDescendants;
+  } else {
+    for (const child of node.children) addRemovedCounts(counts, subtreeCounts(child));
   }
-  const grouped: SessionForest["grouped"] = [];
-  for (const group of SESSION_GROUP_ORDER) {
-    const list = buckets.get(group);
-    if (list && list.length > 0) {
-      grouped.push({
-        group,
-        label: SESSION_GROUP_LABELS[group],
-        sessions: list,
-      });
-    }
+  return counts;
+}
+
+function prunePinnedSubtreesWithCounts(
+  node: SessionTreeNode,
+  keepRoot: boolean,
+): { node: SessionTreeNode | null; removed: RemovedCounts } {
+  if (node.session.pinned && !keepRoot) {
+    return { node: null, removed: subtreeCounts(node) };
   }
-  return { running, grouped };
+
+  const removed = emptyRemovedCounts();
+  let removedDirectChildren = 0;
+  const children: SessionTreeNode[] = [];
+  for (const child of node.children) {
+    const result = prunePinnedSubtreesWithCounts(child, false);
+    addRemovedCounts(removed, result.removed);
+    if (result.node) children.push(result.node);
+    else removedDirectChildren += 1;
+  }
+
+  const stats = node.session.treeStats;
+  const session = stats
+    ? {
+        ...node.session,
+        treeStats: {
+          directChildren: Math.max(0, stats.directChildren - removedDirectChildren),
+          totalDescendants: Math.max(0, stats.totalDescendants - removed.total),
+          runningDescendants: Math.max(0, stats.runningDescendants - removed.running),
+          queuedDescendants: Math.max(0, stats.queuedDescendants - removed.queued),
+          attentionDescendants: Math.max(0, stats.attentionDescendants - removed.attention),
+          pausedDescendants: Math.max(0, stats.pausedDescendants - removed.paused),
+          failedDescendants: Math.max(0, stats.failedDescendants - removed.failed),
+        },
+      }
+    : node.session;
+  return {
+    node: {
+      session,
+      children,
+      hasActiveDescendant: children.some((child) => nodeIsActive(child)),
+    },
+    removed,
+  };
+}
+
+/**
+ * Remove explicit pinned roots below `node`. `keepRoot` is used to build one
+ * pin shortcut: that pin stays, but any nested explicit pin is promoted to its
+ * own globally ordered shortcut instead of appearing twice.
+ */
+export function prunePinnedSubtrees(
+  node: SessionTreeNode,
+  keepRoot = false,
+): SessionTreeNode | null {
+  return prunePinnedSubtreesWithCounts(node, keepRoot).node;
+}
+
+function forestRoots(forest: SessionForest): SessionTreeNode[] {
+  return [...forest.running, ...forest.grouped.flatMap((bucket) => bucket.sessions)];
+}
+
+/** Build the complete, explicit-pin, and ordinary rail projections together. */
+export function buildPinnedRailSections(
+  sessions: Session[],
+  now: Date = new Date(),
+): PinnedRailSections {
+  const complete = buildRailForest(sessions, now);
+  const roots = forestRoots(complete);
+  const nodesById = new Map<string, SessionTreeNode>();
+  const visit = (node: SessionTreeNode): void => {
+    if (nodesById.has(node.session.id)) return;
+    nodesById.set(node.session.id, node);
+    for (const child of node.children) visit(child);
+  };
+  for (const root of roots) visit(root);
+
+  const { pinned: pinnedSessions } = partitionPinnedSessions(sessions);
+  const pinned = pinnedSessions.flatMap((session) => {
+    const completeNode = nodesById.get(session.id) ?? {
+      session,
+      children: [],
+      hasActiveDescendant: false,
+    };
+    const pruned = prunePinnedSubtrees(completeNode, true);
+    return pruned ? [pruned] : [];
+  });
+  const ordinaryRoots = roots.flatMap((root) => {
+    const pruned = prunePinnedSubtrees(root);
+    return pruned ? [pruned] : [];
+  });
+
+  return {
+    complete,
+    pinned,
+    ordinary: categorizeRailRoots(ordinaryRoots, now),
+  };
 }
 
 /** Flatten the forest to the rows currently VISIBLE, given the expanded set —
  *  a node, then its children only when the node is expanded (depth-first). The
  *  rail's keyboard navigation walks this. */
-export function visibleForestRows(
-  forest: SessionForest,
+export function visibleTreeRows(
+  roots: SessionTreeNode[],
   expanded: ReadonlySet<string>,
 ): { node: SessionTreeNode; depth: number }[] {
   const rows: { node: SessionTreeNode; depth: number }[] = [];
@@ -252,15 +433,15 @@ export function visibleForestRows(
       }
     }
   };
-  for (const node of forest.running) {
-    walk(node, 0);
-  }
-  for (const bucket of forest.grouped) {
-    for (const node of bucket.sessions) {
-      walk(node, 0);
-    }
-  }
+  for (const node of roots) walk(node, 0);
   return rows;
+}
+
+export function visibleForestRows(
+  forest: SessionForest,
+  expanded: ReadonlySet<string>,
+): { node: SessionTreeNode; depth: number }[] {
+  return visibleTreeRows(forestRoots(forest), expanded);
 }
 
 /** Compact relative-time label, e.g. "now", "5m", "3h", "2d", "Mar 4". */

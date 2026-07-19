@@ -1,4 +1,8 @@
-import { OpenGeniApiContractMismatchError, OpenGeniApiError } from "./errors";
+import {
+  OpenGeniApiContractMismatchError,
+  OpenGeniApiError,
+  OpenGeniSessionListCursorError,
+} from "./errors";
 import {
   streamSessionEvents,
   type SessionEventStreamTransport,
@@ -297,24 +301,32 @@ export class OpenGeniClient {
       search?: string;
     } = {},
   ): Promise<SessionListResponse> {
-    const response = await this.requestJson<SessionListResponse | Session[]>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/sessions`,
-      undefined,
-      {
-        view: "page",
-        ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
-        ...(options.cursor !== undefined ? { cursor: options.cursor } : {}),
-        ...(options.search?.trim() ? { search: options.search.trim() } : {}),
-        ...(Object.prototype.hasOwnProperty.call(options, "parentSessionId") &&
-        options.parentSessionId !== undefined
-          ? {
-              parentSessionId:
-                options.parentSessionId === null ? "null" : String(options.parentSessionId),
-            }
-          : {}),
-      },
-    );
+    let response: SessionListResponse | Session[];
+    try {
+      response = await this.requestJson<SessionListResponse | Session[]>(
+        "GET",
+        `/v1/workspaces/${workspaceId}/sessions`,
+        undefined,
+        {
+          view: "page",
+          ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
+          ...(options.cursor !== undefined ? { cursor: options.cursor } : {}),
+          ...(options.search?.trim() ? { search: options.search.trim() } : {}),
+          ...(Object.prototype.hasOwnProperty.call(options, "parentSessionId") &&
+          options.parentSessionId !== undefined
+            ? {
+                parentSessionId:
+                  options.parentSessionId === null ? "null" : String(options.parentSessionId),
+              }
+            : {}),
+        },
+      );
+    } catch (error) {
+      if (error instanceof OpenGeniApiError && error.status === 410) {
+        throw new OpenGeniSessionListCursorError(error.status, error.body);
+      }
+      throw error;
+    }
     if (Array.isArray(response)) {
       // Rolling/same-major compatibility: an older API ignores `view=page` and
       // returns the historical array. That is an honest one-page projection;
