@@ -76,6 +76,9 @@ The port can bind either or both legs:
 ```ts
 type ConnectionCredentialsPort = {
   gitCredentials?(input: GitCredentialsRequest): Promise<GitCredentials>;
+  rebindGitCredentials?(
+    input: RebindGitCredentialsRequest,
+  ): Promise<RebindGitCredentialsResult>;
   sandboxSecrets?(input: SandboxSecretsRequest): Promise<SandboxSecrets>;
 };
 ```
@@ -94,6 +97,18 @@ The returned token plus scoped `workspaceId` is checked by the FORK-7
 workspace-echo assert before the worker injects anything. A mismatch hard-fails
 before tenant B's credential can land in tenant A's run.
 
+`rebindGitCredentials` is the token-free recovery seam for a managed sandbox
+whose existing checkout outlives, or is rematerialized without, the session's
+original repository resource attachment. The worker discovers raw remotes only
+inside the sandbox and sends the host sanitized
+`{ provider, canonical }` identities. The host returns either `bound` with
+typed `repositoryRefs`, or the typed `not_found`, `ambiguous`, `unavailable`, or
+`revoked` status. Every result must echo the exact `workspaceId`; a bound result
+must cover the observed identity set exactly. Credential-bearing URL userinfo,
+query strings, and fragments are rejected before persistence. The operation
+never returns a token: after a binding succeeds, the existing `gitCredentials`
+leg mints the short-lived provider credential from those typed refs.
+
 The worker never writes token values into the sandbox manifest or attach-time
 environment delta. It passes current provider tokens to the runtime as
 off-manifest seeds; the sandbox setup writes them to
@@ -103,6 +118,15 @@ off-manifest seeds; the sandbox setup writes them to
 the lifetime of an active managed-sandbox turn, the worker proactively calls
 the same provider for every selected Git host and atomically replaces the token
 files. This renewal requires no model/MCP call and never mutates the manifest.
+The secret-free repository binding is durable per session/provider. Every
+authorization identity or status change advances a generation, and the worker
+locks the exact active generations around each final token-file install,
+refresh, expiry removal, and revocation invalidation. A late mint therefore
+cannot write after a committed rebind or revoke. Resource-less recovery fails
+closed on incomplete discovery, zero or ambiguous authorization matches, an
+unsafe host response, or workspace/identity mismatch. Connected Machines never
+enter this path: OpenGeni performs no discovery, binding, mint, helper install,
+refresh, or token-file invalidation on the user's machine.
 `sandboxSecrets` receives `{ accountId, workspaceId, variableSetId }` and returns
 plaintext variable set values plus the scoped `workspaceId`, with the same echo
 check.

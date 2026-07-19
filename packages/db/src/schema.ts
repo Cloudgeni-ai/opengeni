@@ -1,4 +1,5 @@
 import { sql } from "drizzle-orm";
+import type { GitCredentialRepositoryRef } from "@opengeni/contracts";
 import {
   bigint,
   boolean,
@@ -1916,6 +1917,76 @@ export const sandboxSessionEnvelopes = pgTable(
     sessionIdx: uniqueIndex("sandbox_session_envelopes_session_idx").on(
       table.workspaceId,
       table.sessionId,
+    ),
+  }),
+);
+
+export const sandboxGitCredentialBindingSourceValues = [
+  "explicit_resource",
+  "observed_checkout",
+] as const;
+export const sandboxGitCredentialBindingStatusValues = [
+  "active",
+  "rebind_required",
+  "revoked",
+  "unavailable",
+] as const;
+
+// Secret-free authorization recovered for a session's existing checkout. A
+// token value is never stored here. `generation` fences every final sandbox
+// token-file mutation against concurrent revocation/rebinding.
+export const sandboxGitCredentialBindings = pgTable(
+  "sandbox_git_credential_bindings",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    sessionId: uuid("session_id")
+      .notNull()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    provider: text("provider", { enum: ["github", "gitlab", "azure_devops"] }).notNull(),
+    source: text("source", { enum: sandboxGitCredentialBindingSourceValues }).notNull(),
+    status: text("status", { enum: sandboxGitCredentialBindingStatusValues })
+      .notNull()
+      .default("active"),
+    repositoryRefs: jsonb("repository_refs").$type<GitCredentialRepositoryRef[]>().notNull(),
+    generation: integer("generation").notNull().default(1),
+    reasonCode: text("reason_code"),
+    lastValidatedAt: timestamp("last_validated_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "sandbox_git_credential_bindings_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    workspaceSession: foreignKey({
+      name: "sandbox_git_credential_bindings_workspace_session_fk",
+      columns: [table.workspaceId, table.sessionId],
+      foreignColumns: [sessions.workspaceId, sessions.id],
+    }).onDelete("cascade"),
+    sessionProvider: uniqueIndex("sandbox_git_credential_bindings_session_provider_idx").on(
+      table.workspaceId,
+      table.sessionId,
+      table.provider,
+    ),
+    workspace: index("sandbox_git_credential_bindings_workspace_idx").on(
+      table.workspaceId,
+      table.updatedAt,
+    ),
+    repositoryRefsNonempty: check(
+      "sandbox_git_credential_bindings_repository_refs_check",
+      sql`jsonb_typeof(${table.repositoryRefs}) = 'array' and jsonb_array_length(${table.repositoryRefs}) > 0`,
+    ),
+    generationPositive: check(
+      "sandbox_git_credential_bindings_generation_check",
+      sql`${table.generation} > 0`,
     ),
   }),
 );

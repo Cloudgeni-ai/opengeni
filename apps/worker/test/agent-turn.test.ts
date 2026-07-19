@@ -31,6 +31,7 @@ import {
   recordCompletedModelCallBeforeOwnershipFences,
   modelUsageSourceKey,
   pointerReconcileReason,
+  platformManagesGitCredentialsForTurn,
   PROVIDER_BACKPRESSURE_DELAY_MS,
   providerRecoveryResult,
   requireActiveMachineHome,
@@ -720,6 +721,18 @@ describe("model call usage observability", () => {
     });
 
     expect(infos).toEqual([]);
+  });
+});
+
+describe("platform Git credential management gate", () => {
+  test("Connected Machines take the structural zero path", () => {
+    expect(platformManagesGitCredentialsForTurn("selfhosted")).toBe(false);
+  });
+
+  test("managed cloud boxes retain platform credential management", () => {
+    for (const backend of ["modal", "docker", "daytona", "runloop", "e2b"] as const) {
+      expect(platformManagesGitCredentialsForTurn(backend)).toBe(true);
+    }
   });
 });
 

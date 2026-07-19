@@ -237,6 +237,22 @@ export async function mintRunGitCredentials(
     : undefined;
 }
 
+export async function mintRunGitCredentialsFromRepositoryRefs(
+  settings: Settings,
+  repositoryRefs: readonly GitCredentialRepositoryRef[],
+  options: {
+    scope?: ConnectionScope;
+    gitCredentials?: ConnectionCredentialsPort["gitCredentials"];
+  } = {},
+): Promise<MintedRunGitCredentials | undefined> {
+  const selections = gitCredentialSelectionsFromRepositoryRefs(repositoryRefs);
+  if (selections.length === 0) return undefined;
+  const minted = await mintRunGitTokensWithIdentity(settings, selections, options);
+  return Object.keys(minted.gitTokens).length > 0
+    ? { gitTokens: minted.gitTokens, expiresAt: minted.expiresAt }
+    : undefined;
+}
+
 export async function mintRunGitTokens(
   settings: Settings,
   resources: ResourceRef[],
@@ -400,28 +416,37 @@ function gitCredentialsRequestForSelection(
 }
 
 function gitCredentialSelections(resources: ResourceRef[]): GitCredentialSelection[] {
-  const byProvider = new Map<GitCredentialProvider, GitCredentialSelection>();
-  for (const resource of resources) {
-    if (resource.kind !== "repository") {
-      continue;
-    }
+  return gitCredentialSelectionsFromRepositoryRefs(gitCredentialRepositoryRefs(resources));
+}
+
+/** Convert explicit resource attachments to the token-free durable ref shape. */
+export function gitCredentialRepositoryRefs(
+  resources: readonly ResourceRef[],
+): GitCredentialRepositoryRef[] {
+  return resources.flatMap((resource) => {
+    if (resource.kind !== "repository") return [];
     const provider = repositoryCredentialProvider(resource);
-    if (!provider) {
-      continue;
-    }
+    return provider ? [gitCredentialRepositoryRefForResource(resource, provider)] : [];
+  });
+}
+
+function gitCredentialSelectionsFromRepositoryRefs(
+  repositoryRefs: readonly GitCredentialRepositoryRef[],
+): GitCredentialSelection[] {
+  const byProvider = new Map<GitCredentialProvider, GitCredentialSelection>();
+  for (const ref of repositoryRefs) {
+    const provider = ref.provider;
+    if (!provider) continue;
     const entry = byProvider.get(provider) ?? {
       provider,
       installationId: 0,
       repositoryIds: [],
       repositoryRefs: [],
     };
-    const ref = gitCredentialRepositoryRef(resource, provider);
     entry.repositoryRefs.push(ref);
     if (provider === "github") {
-      const installationId = positiveInteger(
-        resource.githubInstallationId ?? resource.installationId,
-      );
-      const repositoryId = positiveInteger(resource.githubRepositoryId ?? resource.repositoryId);
+      const installationId = positiveInteger(ref.installationId);
+      const repositoryId = positiveInteger(ref.repositoryId);
       if (installationId && repositoryId) {
         if (entry.installationId > 0 && entry.installationId !== installationId) {
           throw new Error("GitHub App repository resources must belong to one installation");
@@ -450,7 +475,7 @@ function repositoryCredentialProvider(
   return null;
 }
 
-function gitCredentialRepositoryRef(
+function gitCredentialRepositoryRefForResource(
   resource: Extract<ResourceRef, { kind: "repository" }>,
   provider: GitCredentialProvider,
 ): GitCredentialRepositoryRef {

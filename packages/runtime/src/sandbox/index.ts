@@ -183,6 +183,8 @@ export {
   type SandboxChannelAServiceOptions,
   type RepositoryDiscoveryDegradedReason,
   type RepositoryDiscoveryResult,
+  type ObservedGitRepositoryIdentity,
+  type GitRepositoryIdentityDiscoveryResult,
   type NumstatEntry,
 } from "./channel-a";
 

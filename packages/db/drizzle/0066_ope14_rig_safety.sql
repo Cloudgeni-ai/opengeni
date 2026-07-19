@@ -1,3 +1,4 @@
+-- deployment-mode: rolling
 -- OPE-14 rig authorization/recovery hardening (migration 0066).
 --
 -- Proposal idempotency is workspace-scoped, matching session-create keys: a

@@ -21,6 +21,7 @@ export type GitCredentialRenewalFailure = {
 
 export type GitCredentialRenewalController = {
   refreshNow(): Promise<void>;
+  invalidateNow(providers?: readonly GitCredentialProvider[]): Promise<void>;
   stop(): Promise<void>;
 };
 
@@ -29,6 +30,12 @@ export type GitCredentialRenewalOptions = {
   initialExpiresAt?: GitTokenExpiries;
   mint: () => Promise<MintedRunGitCredentials | undefined>;
   write: (tokens: GitTokenSeeds) => Promise<void>;
+  /**
+   * Remove the platform-owned token files for these providers. The controller
+   * serializes this with token writes, so readers see either a complete old
+   * token, no token after expiry/revocation, or a complete replacement.
+   */
+  invalidate?: (providers: readonly GitCredentialProvider[]) => Promise<void>;
   now?: () => number;
   schedule?: (callback: () => void, delayMs: number) => RenewalTimer;
   clearSchedule?: (timer: RenewalTimer) => void;
@@ -79,24 +86,82 @@ export function startGitCredentialRenewalLoop(
     ((timer: RenewalTimer): void => clearTimeout(timer as ReturnType<typeof setTimeout>));
 
   let stopped = false;
-  let timer: RenewalTimer | null = null;
+  let refreshTimer: RenewalTimer | null = null;
+  let expiryTimer: RenewalTimer | null = null;
   let inFlight: Promise<void> | null = null;
-  let writeInFlight: Promise<void> | null = null;
+  let mutationTail: Promise<void> = Promise.resolve();
   let retryDelayMs = GIT_CREDENTIAL_MIN_REFRESH_MS;
+  let credentialRevision = 0;
+  let currentExpiresAt: GitTokenExpiries = { ...(options.initialExpiresAt ?? {}) };
 
-  const clearTimer = (): void => {
-    if (timer === null) return;
-    clearSchedule(timer);
-    timer = null;
+  const clearRefreshTimer = (): void => {
+    if (refreshTimer === null) return;
+    clearSchedule(refreshTimer);
+    refreshTimer = null;
+  };
+
+  const clearExpiryTimer = (): void => {
+    if (expiryTimer === null) return;
+    clearSchedule(expiryTimer);
+    expiryTimer = null;
   };
 
   const scheduleRefresh = (delayMs: number): void => {
     if (stopped || providers.length === 0) return;
-    clearTimer();
-    timer = schedule(() => {
-      timer = null;
+    clearRefreshTimer();
+    refreshTimer = schedule(() => {
+      refreshTimer = null;
       void refreshNow();
     }, delayMs);
+  };
+
+  const enqueueMutation = (mutation: () => Promise<void>): Promise<void> => {
+    const operation = mutationTail.then(mutation, mutation);
+    // Keep the serialization chain usable after a failed sandbox mutation. The
+    // caller still receives the original rejection through `operation`.
+    mutationTail = operation.catch(() => undefined);
+    return operation;
+  };
+
+  const scheduleExpiry = (): void => {
+    clearExpiryTimer();
+    if (stopped || !options.invalidate) return;
+    let earliest = Number.POSITIVE_INFINITY;
+    for (const provider of providers) {
+      const raw = currentExpiresAt[provider];
+      if (!raw) continue;
+      const parsed = Date.parse(raw);
+      if (Number.isFinite(parsed)) earliest = Math.min(earliest, parsed);
+    }
+    if (!Number.isFinite(earliest)) return;
+    const scheduledRevision = credentialRevision;
+    expiryTimer = schedule(
+      () => {
+        expiryTimer = null;
+        const expiredAtCallback = providers.filter((provider) => {
+          const raw = currentExpiresAt[provider];
+          return Boolean(raw) && Date.parse(raw!) <= now();
+        });
+        if (expiredAtCallback.length === 0) {
+          scheduleExpiry();
+          return;
+        }
+        void enqueueMutation(async () => {
+          if (credentialRevision !== scheduledRevision || !options.invalidate) return;
+          const expired = expiredAtCallback.filter((provider) => {
+            const raw = currentExpiresAt[provider];
+            return Boolean(raw) && Date.parse(raw!) <= now();
+          });
+          if (expired.length === 0) return;
+          await options.invalidate(expired);
+          for (const provider of expired) delete currentExpiresAt[provider];
+          credentialRevision += 1;
+        }).finally(() => {
+          if (!stopped) scheduleExpiry();
+        });
+      },
+      Math.max(0, earliest - now()),
+    );
   };
 
   const validateMintedTokens = (
@@ -117,16 +182,15 @@ export function startGitCredentialRenewalLoop(
     try {
       const minted = validateMintedTokens(await options.mint());
       if (stopped) return;
-      const write = options.write(minted.gitTokens);
-      writeInFlight = write;
-      try {
-        await write;
-      } finally {
-        if (writeInFlight === write) writeInFlight = null;
-      }
+      await enqueueMutation(async () => {
+        await options.write(minted.gitTokens);
+        currentExpiresAt = { ...minted.expiresAt };
+        credentialRevision += 1;
+      });
       if (stopped) return;
       retryDelayMs = GIT_CREDENTIAL_MIN_REFRESH_MS;
       const nextDelayMs = nextGitCredentialRenewalDelay(minted.expiresAt, providers, now());
+      scheduleExpiry();
       try {
         options.onSuccess?.({ providers, nextDelayMs });
       } catch {
@@ -153,7 +217,7 @@ export function startGitCredentialRenewalLoop(
   const refreshNow = (): Promise<void> => {
     if (stopped || providers.length === 0) return Promise.resolve();
     if (inFlight) return inFlight;
-    clearTimer();
+    clearRefreshTimer();
     const operation = performRefresh();
     inFlight = operation;
     void operation.finally(() => {
@@ -163,17 +227,35 @@ export function startGitCredentialRenewalLoop(
   };
 
   scheduleRefresh(nextGitCredentialRenewalDelay(options.initialExpiresAt, providers, now()));
+  scheduleExpiry();
 
   return {
     refreshNow,
+    invalidateNow: async (requestedProviders = providers) => {
+      if (stopped || !options.invalidate) return;
+      const selected = [...new Set(requestedProviders)].filter((provider) =>
+        providers.includes(provider),
+      );
+      if (selected.length === 0) return;
+      clearExpiryTimer();
+      await enqueueMutation(async () => {
+        if (!options.invalidate) return;
+        await options.invalidate(selected);
+        for (const provider of selected) delete currentExpiresAt[provider];
+        credentialRevision += 1;
+      });
+      scheduleExpiry();
+    },
     stop: async () => {
       stopped = true;
-      clearTimer();
+      clearRefreshTimer();
+      clearExpiryTimer();
       // A broker mint can be a remote host call with no cancellation seam. It
       // cannot mutate the sandbox, and the stopped check above rejects its late
-      // result, so never hold turn settlement hostage to a hung mint. A write
-      // does mutate the box and must drain before capture/teardown.
-      await writeInFlight?.catch(() => undefined);
+      // result, so never hold turn settlement hostage to a hung mint. Token-file
+      // writes and invalidations do mutate the box and must drain before
+      // capture/teardown.
+      await mutationTail.catch(() => undefined);
     },
   };
 }

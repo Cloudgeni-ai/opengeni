@@ -38,8 +38,12 @@ Rules that hold across the table:
   `GIT_ASKPASS` reads those files for git, and the `gh`, `glab`, and `az`
   wrappers read them at invocation time before setting child-process-only token
   env vars. Renewal atomically replaces the same files, so multi-day turns see
-  current credentials without model action or manifest mutation. Missing token
-  files are clean passthroughs.
+  current credentials without model action or manifest mutation. A token file
+  is never authorization: resource-less/rematerialized managed boxes bind only
+  an in-box-sanitized repository identity to an exact workspace-authorized
+  catalog/host ref, and every final token-file write checks the binding's active
+  generation under a row lock. Revocation, an unprovable refresh, or exact token
+  expiry unlinks the provider file. Missing token files are clean passthroughs.
 - **The perimeter is not identity.** The deployment access key gates who can
   talk to a deployment at all; workspace identity and permissions always come
   from one of the identity-bearing credentials above it.

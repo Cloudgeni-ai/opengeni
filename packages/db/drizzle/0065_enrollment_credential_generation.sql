@@ -1,3 +1,4 @@
+-- deployment-mode: rolling
 -- OPE-14 enrollment credential-generation fence.
 --
 -- Schema-first/backward-compatible rollout: every pre-existing enrollment is

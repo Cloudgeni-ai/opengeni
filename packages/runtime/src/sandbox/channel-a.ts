@@ -36,6 +36,7 @@ import type {
   FsTreeNode,
   FsWriteRequest,
   FsWriteResponse,
+  GitCredentialProvider,
   GitChangedPayload,
   GitCommit,
   GitDiffHunk,
@@ -162,6 +163,17 @@ export type RepositoryDiscoveryDegradedReason =
   | "result_limit_exceeded";
 export type RepositoryDiscoveryResult = {
   repos: string[];
+  complete: boolean;
+  degradedReason: RepositoryDiscoveryDegradedReason | null;
+};
+
+/** A secret-free, provider-qualified repository identity observed in-box. */
+export type ObservedGitRepositoryIdentity = {
+  provider: GitCredentialProvider;
+  canonical: string;
+};
+export type GitRepositoryIdentityDiscoveryResult = {
+  repositories: ObservedGitRepositoryIdentity[];
   complete: boolean;
   degradedReason: RepositoryDiscoveryDegradedReason | null;
 };
@@ -818,6 +830,94 @@ export class SandboxChannelAService {
   /** Detect repo roots within the workspace (for the Git.repos capability). */
   async detectRepos(): Promise<string[]> {
     return (await this.detectReposDetailed()).repos;
+  }
+
+  /**
+   * Discover only normalized, non-secret origin identities.
+   *
+   * Raw remotes can contain HTTPS userinfo or query credentials. They are read
+   * and sanitized inside the sandbox process; neither stdout nor thrown errors
+   * ever contain the original remote. An incomplete root scan is not eligible
+   * for authorization rebinding and therefore returns no identities.
+   */
+  async detectGitRepositoryIdentities(): Promise<GitRepositoryIdentityDiscoveryResult> {
+    const roots = await this.detectReposDetailed();
+    if (!roots.complete) {
+      return {
+        repositories: [],
+        complete: false,
+        degradedReason: roots.degradedReason,
+      };
+    }
+    if (roots.repos.length === 0) {
+      return { repositories: [], complete: true, degradedReason: null };
+    }
+    try {
+      const rootArguments = roots.repos.map((root) => shellQuote(root || ".")).join(" ");
+      const sanitizer = [
+        "emit_sanitized_origin() {",
+        '  repo="$1"',
+        '  remote="$(git -C "$repo" config --get remote.origin.url 2>/dev/null)" || return 0',
+        '  [ -n "$remote" ] || return 0',
+        '  case "$remote" in',
+        '    *://*) rest="${remote#*://}"; authority="${rest%%/*}"; path="${rest#*/}"; host="${authority##*@}"; host="${host%%:*}" ;;',
+        '    *@*:*|*:*) authority="${remote%%:*}"; path="${remote#*:}"; host="${authority##*@}" ;;',
+        "    *) return 0 ;;",
+        "  esac",
+        "  host=\"$(printf '%s' \"$host\" | tr '[:upper:]' '[:lower:]')\"",
+        '  path="${path%%\#*}"',
+        '  path="${path%%\\?*}"',
+        '  path="${path#/}"',
+        '  path="${path%.git}"',
+        '  case "$host" in *[!a-z0-9._-]*|"") return 0 ;; esac',
+        '  case "$path" in *[!A-Za-z0-9._~%+@/-]*|""|*".."*) return 0 ;; esac',
+        '  case "$host" in',
+        "    github.com) printf 'github\\tgithub.com/%s\\n' \"$path\" ;;",
+        '    *gitlab*) printf \'gitlab\\t%s/%s\\n\' "$host" "$path" ;;',
+        "    ssh.dev.azure.com)",
+        '      case "$path" in v3/*/*/*) path="${path#v3/}"; org="${path%%/*}"; rest="${path#*/}"; project="${rest%%/*}"; repo="${rest#*/}"; printf \'azure_devops\\tdev.azure.com/%s/%s/_git/%s\\n\' "$org" "$project" "$repo" ;; esac ;;',
+        '    dev.azure.com) case "$path" in */*/_git/*) printf \'azure_devops\\tdev.azure.com/%s\\n\' "$path" ;; esac ;;',
+        '    *.visualstudio.com) org="${host%.visualstudio.com}"; case "$path" in */_git/*) printf \'azure_devops\\tdev.azure.com/%s/%s\\n\' "$org" "$path" ;; esac ;;',
+        "  esac",
+        "}",
+        `for repo in ${rootArguments}; do emit_sanitized_origin "$repo"; done`,
+      ].join("\n");
+      const { stdout } = await this.run({
+        cmd: `bash -lc ${shellQuote(sanitizer)}`,
+        workdir: this.workspaceRoot || undefined,
+        yieldTimeMs: 20_000,
+        maxOutputTokens: 16_000,
+      });
+      const repositories = [
+        ...new Map(
+          stdout
+            .split("\n")
+            .map((line) => line.trim())
+            .filter(Boolean)
+            .flatMap((line): Array<[string, ObservedGitRepositoryIdentity]> => {
+              const [provider, canonical, ...extra] = line.split("\t");
+              if (
+                extra.length > 0 ||
+                !canonical ||
+                (provider !== "github" && provider !== "gitlab" && provider !== "azure_devops") ||
+                !/^[A-Za-z0-9._~%+@/-]+$/.test(canonical)
+              ) {
+                return [];
+              }
+              const identity = {
+                provider: provider as GitCredentialProvider,
+                canonical,
+              };
+              return [[`${provider}:${canonical}`, identity]];
+            }),
+        ).values(),
+      ].sort((left, right) =>
+        `${left.provider}:${left.canonical}`.localeCompare(`${right.provider}:${right.canonical}`),
+      );
+      return { repositories, complete: true, degradedReason: null };
+    } catch {
+      return { repositories: [], complete: false, degradedReason: "command_failed" };
+    }
   }
 
   // ════════════════════════ Terminal exec + PTY (A2) ════════════════════════

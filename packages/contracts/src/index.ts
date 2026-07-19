@@ -1224,6 +1224,38 @@ export const GitCredentialRepositoryRef = z.object({
 });
 export type GitCredentialRepositoryRef = z.infer<typeof GitCredentialRepositoryRef>;
 
+/** A repository identity observed inside a sandbox after all URL secrets are removed. */
+export const ObservedGitRepositoryIdentity = z.object({
+  provider: GitCredentialProvider,
+  canonical: z.string().min(1).max(1024),
+});
+export type ObservedGitRepositoryIdentity = z.infer<typeof ObservedGitRepositoryIdentity>;
+
+export type RebindGitCredentialsRequest = {
+  accountId: string;
+  workspaceId: string;
+  repositories: ObservedGitRepositoryIdentity[];
+};
+
+export const RebindGitCredentialsResult = z.discriminatedUnion("status", [
+  z.object({
+    status: z.literal("bound"),
+    workspaceId: z.string().uuid(),
+    repositoryRefs: z.array(GitCredentialRepositoryRef).min(1),
+  }),
+  ...(["not_found", "ambiguous", "unavailable", "revoked"] as const).map((status) =>
+    z.object({
+      status: z.literal(status),
+      workspaceId: z.string().uuid(),
+      reasonCode: z
+        .string()
+        .regex(/^[a-z0-9_]{1,64}$/)
+        .optional(),
+    }),
+  ),
+]);
+export type RebindGitCredentialsResult = z.infer<typeof RebindGitCredentialsResult>;
+
 // ============ P4a — Connection-credential provider (§7.6) ============
 //
 // The host-providable per-run credential-mint seam over OpenGeni's TWO
@@ -1313,6 +1345,10 @@ export type ConnectionCredentialsPort = {
   // and leave sandbox secrets to OpenGeni's local decrypt, or vice-versa. An
   // unset leg falls through to today's self-mint for THAT leg only.
   gitCredentials?(input: GitCredentialsRequest): Promise<GitCredentials>;
+  // Secret-free authorization recovery for an existing checkout whose session
+  // no longer carries explicit repository resources. This operation never
+  // returns a token; token minting remains on gitCredentials.
+  rebindGitCredentials?(input: RebindGitCredentialsRequest): Promise<RebindGitCredentialsResult>;
   sandboxSecrets?(input: SandboxSecretsRequest): Promise<SandboxSecrets>;
 };
 

@@ -74,8 +74,11 @@ import type {
   RigChangeKind,
   RigChangeStatus,
   RigCheck,
+  GitCredentialProvider,
+  GitCredentialRepositoryRef,
 } from "@opengeni/contracts";
 import {
+  GitCredentialRepositoryRef as GitCredentialRepositoryRefContract,
   reasoningEffortForMetadata,
   resolveWorkspaceMemoryEnabled,
   RigChange as RigChangeContract,
@@ -13373,6 +13376,291 @@ export async function getSandboxSessionEnvelope(
       .limit(1);
     return row?.envelope ?? null;
   });
+}
+
+export type SandboxGitCredentialBindingSource =
+  (typeof schema.sandboxGitCredentialBindingSourceValues)[number];
+export type SandboxGitCredentialBindingStatus =
+  (typeof schema.sandboxGitCredentialBindingStatusValues)[number];
+export type SandboxGitCredentialBinding = {
+  id: string;
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  provider: GitCredentialProvider;
+  source: SandboxGitCredentialBindingSource;
+  status: SandboxGitCredentialBindingStatus;
+  repositoryRefs: GitCredentialRepositoryRef[];
+  generation: number;
+  reasonCode: string | null;
+  lastValidatedAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
+function normalizedGitCredentialRepositoryRefs(
+  refs: readonly GitCredentialRepositoryRef[],
+): GitCredentialRepositoryRef[] {
+  return [...GitCredentialRepositoryRefContract.array().min(1).parse(refs)].sort((left, right) =>
+    JSON.stringify(left).localeCompare(JSON.stringify(right)),
+  );
+}
+
+function checkedGitCredentialBindingReason(reasonCode: string | null | undefined): string | null {
+  if (reasonCode === null || reasonCode === undefined) return null;
+  if (!/^[a-z0-9_]{1,64}$/.test(reasonCode)) {
+    throw new Error("Git credential binding reasonCode must match [a-z0-9_]{1,64}");
+  }
+  return reasonCode;
+}
+
+function mapSandboxGitCredentialBinding(
+  row: typeof schema.sandboxGitCredentialBindings.$inferSelect,
+): SandboxGitCredentialBinding {
+  return {
+    ...row,
+    provider: row.provider as GitCredentialProvider,
+    repositoryRefs: normalizedGitCredentialRepositoryRefs(row.repositoryRefs),
+  };
+}
+
+export async function listSandboxGitCredentialBindings(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<SandboxGitCredentialBinding[]> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select()
+      .from(schema.sandboxGitCredentialBindings)
+      .where(
+        and(
+          eq(schema.sandboxGitCredentialBindings.workspaceId, workspaceId),
+          eq(schema.sandboxGitCredentialBindings.sessionId, sessionId),
+        ),
+      )
+      .orderBy(asc(schema.sandboxGitCredentialBindings.provider));
+    return rows.map(mapSandboxGitCredentialBinding);
+  });
+}
+
+/**
+ * Validate or replace one secret-free binding under its row lock. Identical
+ * validation updates the timestamp without rotating the generation; any
+ * authorization identity/source/status change advances the fence exactly once.
+ */
+export async function upsertSandboxGitCredentialBinding(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    provider: GitCredentialProvider;
+    source: SandboxGitCredentialBindingSource;
+    repositoryRefs: readonly GitCredentialRepositoryRef[];
+    status?: SandboxGitCredentialBindingStatus;
+    reasonCode?: string | null;
+    validatedAt?: Date;
+  },
+): Promise<SandboxGitCredentialBinding> {
+  const repositoryRefs = normalizedGitCredentialRepositoryRefs(input.repositoryRefs);
+  const status = input.status ?? "active";
+  const reasonCode = checkedGitCredentialBindingReason(input.reasonCode);
+  const validatedAt = input.validatedAt ?? new Date();
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      await scopedDb
+        .insert(schema.sandboxGitCredentialBindings)
+        .values({
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          provider: input.provider,
+          source: input.source,
+          status,
+          repositoryRefs,
+          generation: 1,
+          reasonCode,
+          lastValidatedAt: validatedAt,
+        })
+        .onConflictDoNothing({
+          target: [
+            schema.sandboxGitCredentialBindings.workspaceId,
+            schema.sandboxGitCredentialBindings.sessionId,
+            schema.sandboxGitCredentialBindings.provider,
+          ],
+        });
+      const [current] = await scopedDb
+        .select()
+        .from(schema.sandboxGitCredentialBindings)
+        .where(
+          and(
+            eq(schema.sandboxGitCredentialBindings.workspaceId, input.workspaceId),
+            eq(schema.sandboxGitCredentialBindings.sessionId, input.sessionId),
+            eq(schema.sandboxGitCredentialBindings.provider, input.provider),
+          ),
+        )
+        .for("update")
+        .limit(1);
+      if (!current) throw new Error("Failed to lock sandbox Git credential binding");
+      const changed =
+        current.source !== input.source ||
+        current.status !== status ||
+        current.reasonCode !== reasonCode ||
+        !isDeepStrictEqual(
+          normalizedGitCredentialRepositoryRefs(current.repositoryRefs),
+          repositoryRefs,
+        );
+      const [row] = await scopedDb
+        .update(schema.sandboxGitCredentialBindings)
+        .set({
+          source: input.source,
+          status,
+          repositoryRefs,
+          reasonCode,
+          lastValidatedAt: validatedAt,
+          generation: changed ? current.generation + 1 : current.generation,
+          updatedAt: new Date(),
+        })
+        .where(eq(schema.sandboxGitCredentialBindings.id, current.id))
+        .returning();
+      if (!row) throw new Error("Failed to update sandbox Git credential binding");
+      return mapSandboxGitCredentialBinding(row);
+    },
+  );
+}
+
+export async function markSandboxGitCredentialBindingStatus(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    provider: GitCredentialProvider;
+    status: Exclude<SandboxGitCredentialBindingStatus, "active">;
+    reasonCode: string;
+    /** Optional sandbox invalidation performed while the binding row is locked. */
+    mutateSandbox?: () => Promise<void>;
+  },
+): Promise<SandboxGitCredentialBinding | null> {
+  const [row] = await markSandboxGitCredentialBindingsStatus(db, {
+    ...input,
+    providers: [input.provider],
+  });
+  return row ?? null;
+}
+
+/**
+ * Revoke or deactivate a provider set under one deterministic lock set. The
+ * sandbox mutation runs while every matching row is locked, so a concurrent
+ * final write either completes first and is then invalidated, or observes the
+ * committed replacement generation/status and cannot write.
+ */
+export async function markSandboxGitCredentialBindingsStatus(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    providers: readonly GitCredentialProvider[];
+    status: Exclude<SandboxGitCredentialBindingStatus, "active">;
+    reasonCode: string;
+    /** Optional one-shot sandbox invalidation while all provider rows are locked. */
+    mutateSandbox?: () => Promise<void>;
+  },
+): Promise<SandboxGitCredentialBinding[]> {
+  const providers = [...new Set(input.providers)].sort();
+  if (providers.length === 0) return [];
+  const reasonCode = checkedGitCredentialBindingReason(input.reasonCode);
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const current = await scopedDb
+        .select()
+        .from(schema.sandboxGitCredentialBindings)
+        .where(
+          and(
+            eq(schema.sandboxGitCredentialBindings.workspaceId, input.workspaceId),
+            eq(schema.sandboxGitCredentialBindings.sessionId, input.sessionId),
+            inArray(schema.sandboxGitCredentialBindings.provider, providers),
+          ),
+        )
+        .orderBy(asc(schema.sandboxGitCredentialBindings.provider))
+        .for("update");
+      if (current.length === 0) return [];
+      await input.mutateSandbox?.();
+      const rows: SandboxGitCredentialBinding[] = [];
+      for (const binding of current) {
+        const changed = binding.status !== input.status || binding.reasonCode !== reasonCode;
+        const [row] = await scopedDb
+          .update(schema.sandboxGitCredentialBindings)
+          .set({
+            status: input.status,
+            reasonCode,
+            generation: changed ? binding.generation + 1 : binding.generation,
+            updatedAt: new Date(),
+          })
+          .where(eq(schema.sandboxGitCredentialBindings.id, binding.id))
+          .returning();
+        if (!row) throw new Error("Failed to update sandbox Git credential binding status");
+        rows.push(mapSandboxGitCredentialBinding(row));
+      }
+      return rows;
+    },
+  );
+}
+
+export type SandboxGitCredentialMutationResult =
+  | { applied: true }
+  | { applied: false; reason: "missing" | "not_active" | "stale_generation" };
+
+/**
+ * Final sandbox mutation fence. Token minting may happen before this call, but
+ * no file write can occur unless every provider row is still active at the
+ * exact generation while all rows are locked in deterministic provider order.
+ */
+export async function withActiveSandboxGitCredentialBindings(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    expectedGenerations: Readonly<Partial<Record<GitCredentialProvider, number>>>;
+  },
+  mutateSandbox: () => Promise<void>,
+): Promise<SandboxGitCredentialMutationResult> {
+  const providers = (Object.keys(input.expectedGenerations) as GitCredentialProvider[]).sort();
+  if (providers.length === 0) return { applied: false, reason: "missing" };
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await scopedDb
+        .select()
+        .from(schema.sandboxGitCredentialBindings)
+        .where(
+          and(
+            eq(schema.sandboxGitCredentialBindings.workspaceId, input.workspaceId),
+            eq(schema.sandboxGitCredentialBindings.sessionId, input.sessionId),
+            inArray(schema.sandboxGitCredentialBindings.provider, providers),
+          ),
+        )
+        .orderBy(asc(schema.sandboxGitCredentialBindings.provider))
+        .for("update");
+      if (rows.length !== providers.length) return { applied: false, reason: "missing" };
+      if (rows.some((row) => row.status !== "active")) {
+        return { applied: false, reason: "not_active" };
+      }
+      if (rows.some((row) => row.generation !== input.expectedGenerations[row.provider])) {
+        return { applied: false, reason: "stale_generation" };
+      }
+      await mutateSandbox();
+      return { applied: true };
+    },
+  );
 }
 
 // ============================================================================

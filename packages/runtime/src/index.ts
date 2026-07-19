@@ -17,6 +17,7 @@ import {
   prefixedMcpToolName as sharedPrefixedMcpToolName,
   signDelegatedAccessToken,
   type GitCredentialProvider,
+  type GitCredentialRepositoryRef,
   type McpServerConnectionRef,
   type Permission,
   type ReasoningEffort,
@@ -5074,14 +5075,14 @@ function gitTokenSeedExportPrefix(seeds: GitTokenSeeds): string {
   return lines.join("\n");
 }
 
-function repositoryCredentialProvider(
-  resource: Extract<ResourceRef, { kind: "repository" }>,
-): GitCredentialProvider {
+function repositoryCredentialProvider(resource: {
+  provider?: GitCredentialProvider | undefined;
+}): GitCredentialProvider {
   return resource.provider ?? "github";
 }
 
 function gitAskpassHostProviderCaseLines(
-  resources: Extract<ResourceRef, { kind: "repository" }>[],
+  resources: readonly { uri: string; provider?: GitCredentialProvider | undefined }[],
 ): string[] {
   const hosts = new Map<string, GitCredentialProvider>();
   for (const resource of resources) {
@@ -5143,7 +5144,7 @@ function gitCredentialTokenWriterCommandLines(): string[] {
 }
 
 function gitCredentialHelperCommandLines(
-  resources: Extract<ResourceRef, { kind: "repository" }>[] = [],
+  resources: readonly { uri: string; provider?: GitCredentialProvider | undefined }[] = [],
 ): string[] {
   const hostProviderCases = gitAskpassHostProviderCaseLines(resources);
   return [
@@ -5252,7 +5253,38 @@ function gitCredentialHelperCommandLines(
     '  chmod 0755 "$wrapper.tmp.$$"',
     '  mv -f "$wrapper.tmp.$$" "$wrapper"',
     "done",
+    // Resource-less recovery happens after the agent manifest was built, so an
+    // older warm box may not carry GIT_ASKPASS in its process environment. A
+    // managed-box global config provides the same stable file pointer for Git;
+    // provider CLI wrappers already ride the stable PATH pointer on every box.
+    'if command -v git >/dev/null 2>&1; then git config --global core.askPass "$git_askpass"; fi',
   ];
+}
+
+/** Install stable git/CLI helpers and optionally seed provider token files. */
+export function gitCredentialHelperInstallCommand(
+  repositoryRefs: readonly GitCredentialRepositoryRef[],
+  seeds: GitTokenSeeds = {},
+): string {
+  const seedPrefix = gitTokenSeedExportPrefix(seeds);
+  return [
+    seedPrefix,
+    "set -eu",
+    'export HOME="${HOME:-/workspace}"',
+    ...gitCredentialHelperCommandLines(repositoryRefs),
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+export async function installGitCredentialHelpersAndTokens(
+  session: GitCredentialTokenWriterSession,
+  repositoryRefs: readonly GitCredentialRepositoryRef[],
+  seeds: GitTokenSeeds = {},
+  options: { runAs?: string } = {},
+): Promise<void> {
+  const command = gitCredentialHelperInstallCommand(repositoryRefs, seeds);
+  await runGitCredentialMutation(session, command, "Git credential helper installation", options);
 }
 
 /**
@@ -5285,6 +5317,47 @@ export async function refreshGitProviderTokenFiles(
   if (!command) {
     return;
   }
+  await runGitCredentialMutation(session, command, "Git credential refresh", options);
+}
+
+export function gitProviderTokenInvalidationCommand(
+  providers: readonly GitCredentialProvider[],
+): string {
+  const selected = [...new Set(providers)].filter((provider) =>
+    GIT_CREDENTIAL_PROVIDERS.includes(provider),
+  );
+  if (selected.length === 0) return "";
+  const removals = selected.flatMap((provider) => {
+    if (provider === "github") {
+      return [
+        'rm -f -- "${OPENGENI_GIT_TOKEN_FILE:-$HOME/.opengeni/git-token}"',
+        'rm -f -- "${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}/github-token"',
+      ];
+    }
+    return [
+      `rm -f -- "\${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}/${provider}-token"`,
+    ];
+  });
+  return ["set -eu", 'export HOME="${HOME:-/workspace}"', ...removals].join("\n");
+}
+
+/** Atomically unlink only OpenGeni-owned provider token files. */
+export async function invalidateGitProviderTokenFiles(
+  session: GitCredentialTokenWriterSession,
+  providers: readonly GitCredentialProvider[],
+  options: { runAs?: string } = {},
+): Promise<void> {
+  const command = gitProviderTokenInvalidationCommand(providers);
+  if (!command) return;
+  await runGitCredentialMutation(session, command, "Git credential invalidation", options);
+}
+
+async function runGitCredentialMutation(
+  session: GitCredentialTokenWriterSession,
+  command: string,
+  label: string,
+  options: { runAs?: string },
+): Promise<void> {
   const args = {
     cmd: command,
     workdir: "/workspace",
@@ -5293,9 +5366,9 @@ export async function refreshGitProviderTokenFiles(
     maxOutputTokens: 4_000,
   };
   if (session.exec) {
-    assertSandboxCommandSucceeded(await session.exec(args), "Git credential refresh");
+    assertSandboxCommandSucceeded(await session.exec(args), label);
   } else if (session.execCommand) {
-    assertSandboxCommandSucceeded(await session.execCommand(args), "Git credential refresh");
+    assertSandboxCommandSucceeded(await session.execCommand(args), label);
   } else {
     throw new Error("Sandbox session does not support command execution");
   }

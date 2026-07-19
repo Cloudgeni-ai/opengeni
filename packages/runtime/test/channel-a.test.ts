@@ -577,6 +577,67 @@ describe("P4.4 SandboxChannelAService — Git (real local box)", () => {
     });
   });
 
+  test("repository identity discovery sanitizes credential-bearing origins in-box", async () => {
+    const { session } = await makeBox();
+    const svc = new SandboxChannelAService({ session });
+    const seeded = await svc.terminalExec({
+      command: [
+        "mkdir -p repos/acme/github repos/acme/gitlab repos/acme/azure",
+        "git -C repos/acme/github init -q",
+        "git -C repos/acme/github remote add origin 'https://user:super-secret@github.com/Acme/Private.git?token=also-secret#fragment'",
+        "git -C repos/acme/gitlab init -q",
+        "git -C repos/acme/gitlab remote add origin 'git@gitlab.example.com:Acme/Private.git'",
+        "git -C repos/acme/azure init -q",
+        "git -C repos/acme/azure remote add origin 'git@ssh.dev.azure.com:v3/Org/Project/Repo'",
+      ].join(" && "),
+      cwd: "",
+      timeoutMs: 20_000,
+      emitStream: false,
+    });
+    expect(seeded.exitCode).toBe(0);
+
+    const result = await svc.detectGitRepositoryIdentities();
+    expect(result).toEqual({
+      repositories: [
+        { provider: "azure_devops", canonical: "dev.azure.com/Org/Project/_git/Repo" },
+        { provider: "github", canonical: "github.com/Acme/Private" },
+        { provider: "gitlab", canonical: "gitlab.example.com/Acme/Private" },
+      ],
+      complete: true,
+      degradedReason: null,
+    });
+    expect(JSON.stringify(result)).not.toContain("super-secret");
+    expect(JSON.stringify(result)).not.toContain("also-secret");
+    expect(JSON.stringify(result)).not.toContain("user:");
+  });
+
+  test("repository identity discovery refuses an incomplete root snapshot", async () => {
+    let calls = 0;
+    const svc = new SandboxChannelAService({
+      session: {
+        exec: async () => {
+          calls += 1;
+          return {
+            stdout: [
+              "./repos/a/one/.git",
+              "__OPENGENI_REPOSITORY_DISCOVERY_TRUNCATED__",
+              "__OPENGENI_REPOSITORY_DISCOVERY_STATUS__:0",
+            ].join("\n"),
+            stderr: "",
+            exitCode: 0,
+          };
+        },
+      },
+    });
+
+    expect(await svc.detectGitRepositoryIdentities()).toEqual({
+      repositories: [],
+      complete: false,
+      degradedReason: "result_limit_exceeded",
+    });
+    expect(calls).toBe(1);
+  });
+
   test("git log returns the commit chain", async () => {
     const { svc } = await makeRepoWithStagedChange();
     await svc.terminalExec({

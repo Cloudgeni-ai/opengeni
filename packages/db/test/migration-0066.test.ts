@@ -20,7 +20,22 @@ describe("OPE-14 migration ordering", () => {
     );
 
     const sql = await readFile(join(migrationsDir, filename), "utf8");
+    expect(sql.startsWith("-- deployment-mode: rolling\n")).toBe(true);
     expect(sql).toContain('"rig_changes_workspace_idempotency_idx"');
     expect(sql).toContain('"rig_default_variable_sets_authorized"');
+
+    const enrollmentSql = await readFile(
+      join(migrationsDir, "0065_enrollment_credential_generation.sql"),
+      "utf8",
+    );
+    expect(enrollmentSql.startsWith("-- deployment-mode: rolling\n")).toBe(true);
+    const bindingSql = await readFile(
+      join(migrationsDir, "0067_sandbox_git_credential_bindings.sql"),
+      "utf8",
+    );
+    expect(bindingSql.startsWith("-- deployment-mode: rolling\n")).toBe(true);
+    expect(bindingSql).toContain('"sandbox_git_credential_bindings"');
+    expect(bindingSql).toContain("FORCE ROW LEVEL SECURITY");
+    expect(bindingSql).toContain("current_schema()");
   });
 });
