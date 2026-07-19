@@ -23,15 +23,108 @@ import {
   mergeToolRefs,
   OAuthStartRequest,
   OPENGENI_API_CONTRACT_REVISION,
+  TURN_EXECUTION_POLICY_METADATA_KEY,
   ResourceRef,
   SessionBusMessage,
   SessionMcpServerMetadata,
   CLEARED_RUN_STATE_BLOB,
   CLEARED_RUN_STATE_MARKER,
   isClearedRunStateBlob,
+  metadataWithTurnExecutionPolicyV1,
+  readTurnExecutionPolicyV1,
+  turnExecutionPolicyAuditMetadata,
+  TurnExecutionPolicyV1,
 } from "../src";
 
 describe("contracts", () => {
+  const turnExecutionPolicy = TurnExecutionPolicyV1.parse({
+    schemaVersion: 1,
+    productModelId: "xai/grok-4.5",
+    requestedModelId: "grok-4.5",
+    modelSource: "explicit",
+    reasoningEffort: "high",
+    reasoningSource: "explicit",
+    providerId: "xai",
+    upstreamModelId: "grok-4.5",
+    wireApi: "responses",
+    credentialSource: { kind: "deployment", mechanism: "api_key" },
+    billing: { upstreamPayer: "deployment", metering: "opengeni_credits" },
+    definitionVersion: `sha256:${"a".repeat(64)}`,
+  });
+
+  test("reads and merges a strict secret-safe turn execution policy without disturbing metadata", () => {
+    expect(readTurnExecutionPolicyV1(null)).toEqual({ kind: "absent" });
+    expect(readTurnExecutionPolicyV1({ dispatchRevision: 3 })).toEqual({ kind: "absent" });
+
+    const metadata = metadataWithTurnExecutionPolicyV1(
+      { dispatchRevision: 3, recovery: { generation: 2 } },
+      turnExecutionPolicy,
+    );
+    expect(metadata.dispatchRevision).toBe(3);
+    expect(metadata.recovery).toEqual({ generation: 2 });
+    expect(readTurnExecutionPolicyV1(metadata)).toEqual({
+      kind: "valid",
+      policy: turnExecutionPolicy,
+    });
+    expect(metadata[TURN_EXECUTION_POLICY_METADATA_KEY]).toEqual(turnExecutionPolicy);
+  });
+
+  test("treats only an absent policy key as legacy and reports malformed paths without values", () => {
+    for (const malformed of [null, undefined, { ...turnExecutionPolicy, extra: true }]) {
+      expect(() =>
+        readTurnExecutionPolicyV1({
+          [TURN_EXECUTION_POLICY_METADATA_KEY]: malformed,
+        }),
+      ).toThrow("Malformed turn execution policy metadata");
+    }
+
+    const sensitiveMarker = "do-not-reflect-this-value";
+    let message = "";
+    try {
+      readTurnExecutionPolicyV1({
+        [TURN_EXECUTION_POLICY_METADATA_KEY]: {
+          ...turnExecutionPolicy,
+          definitionVersion: sensitiveMarker,
+        },
+      });
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    expect(message).toContain("policy.definitionVersion");
+    expect(message).not.toContain(sensitiveMarker);
+  });
+
+  test("enforces requested-model/source consistency and emits explicit audit identity", () => {
+    expect(() =>
+      TurnExecutionPolicyV1.parse({
+        ...turnExecutionPolicy,
+        requestedModelId: null,
+      }),
+    ).toThrow();
+    expect(() =>
+      TurnExecutionPolicyV1.parse({
+        ...turnExecutionPolicy,
+        modelSource: "session",
+      }),
+    ).toThrow();
+
+    expect(turnExecutionPolicyAuditMetadata(turnExecutionPolicy, crypto.randomUUID())).toMatchObject(
+      {
+        requestedModelId: "grok-4.5",
+        effectiveModelId: "xai/grok-4.5",
+        modelSource: "explicit",
+        effectiveReasoningEffort: "high",
+        reasoningSource: "explicit",
+        providerId: "xai",
+        credentialSourceKind: "deployment",
+        credentialSourceMechanism: "api_key",
+        billingOwner: "deployment",
+        billingMetering: "opengeni_credits",
+        definitionVersion: turnExecutionPolicy.definitionVersion,
+      },
+    );
+  });
+
   test("accepts create session defaults", () => {
     const payload = CreateSessionRequest.parse({ initialMessage: "inspect repo" });
     expect(payload.resources).toEqual([]);

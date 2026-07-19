@@ -13,7 +13,9 @@ import {
   policyProviderIdForModel,
   resolveModelProvider,
   resolveProviderApiKey,
+  resolveTurnExecutionPolicyV1,
   selectModelPricing,
+  assertTurnExecutionPolicyMatchesConfigV1,
 } from "../src";
 
 // A reusable Fireworks/GLM-5.2 registry JSON mirroring the doc's host example.
@@ -820,6 +822,163 @@ describe("normalized model definitions", () => {
     for (const variant of variants) {
       expect(variant).not.toBe(baseline);
     }
+  });
+});
+
+describe("turn execution policy V1", () => {
+  test("canonicalizes an explicit alias while freezing provider, deployment, credential, and billing identity", () => {
+    const settings = withEnv(
+      {
+        OPENGENI_OPENAI_API_KEY: "sk-test",
+        OPENGENI_MODEL_PROVIDERS_JSON: grok45Registry(),
+      },
+      () => getSettings(),
+    );
+    const policy = resolveTurnExecutionPolicyV1(settings, {
+      modelId: "xai/grok-4.5",
+      requestedModelId: "grok-4.5",
+      modelSource: "explicit",
+      reasoningEffort: "high",
+      reasoningSource: "explicit",
+    });
+
+    expect(policy).toMatchObject({
+      schemaVersion: 1,
+      productModelId: "xai/grok-4.5",
+      requestedModelId: "grok-4.5",
+      modelSource: "explicit",
+      reasoningEffort: "high",
+      reasoningSource: "explicit",
+      providerId: "xai",
+      upstreamModelId: "grok-4.5",
+      wireApi: "responses",
+      credentialSource: { kind: "deployment", mechanism: "api_key" },
+      billing: { upstreamPayer: "deployment", metering: "opengeni_credits" },
+    });
+    expect(
+      assertTurnExecutionPolicyMatchesConfigV1(settings, policy, {
+        modelId: "xai/grok-4.5",
+        reasoningEffort: "high",
+      }).model.id,
+    ).toBe("xai/grok-4.5");
+  });
+
+  test("fails closed on turn mismatch or any executable provider-definition drift", () => {
+    const settings = withEnv(
+      {
+        OPENGENI_OPENAI_API_KEY: "sk-test",
+        OPENGENI_MODEL_PROVIDERS_JSON: grok45Registry(),
+      },
+      () => getSettings(),
+    );
+    const policy = resolveTurnExecutionPolicyV1(settings, {
+      modelId: "xai/grok-4.5",
+      requestedModelId: null,
+      modelSource: "session",
+      reasoningEffort: "high",
+      reasoningSource: "session",
+    });
+
+    expect(() =>
+      assertTurnExecutionPolicyMatchesConfigV1(settings, policy, {
+        modelId: "gpt-5.6-sol",
+        reasoningEffort: "high",
+      }),
+    ).toThrow("accepted turn model/reasoning");
+    expect(() =>
+      assertTurnExecutionPolicyMatchesConfigV1(settings, policy, {
+        modelId: policy.productModelId,
+        reasoningEffort: "medium",
+      }),
+    ).toThrow("accepted turn model/reasoning");
+
+    const definitionDrifts = [
+      { ...policy, providerId: "other" },
+      { ...policy, upstreamModelId: "other-upstream" },
+      { ...policy, wireApi: "chat" as const },
+      {
+        ...policy,
+        credentialSource: { kind: "workspace_connection" as const, mechanism: "api_key" as const },
+      },
+      {
+        ...policy,
+        billing: { upstreamPayer: "workspace" as const, metering: "external" as const },
+      },
+      { ...policy, definitionVersion: `sha256:${"f".repeat(64)}` },
+    ];
+    for (const drift of definitionDrifts) {
+      expect(() =>
+        assertTurnExecutionPolicyMatchesConfigV1(settings, drift, {
+          modelId: policy.productModelId,
+          reasoningEffort: policy.reasoningEffort,
+        }),
+      ).toThrow("current provider definition");
+    }
+  });
+
+  test("does not bind secret rotation but rejects public executable metadata drift", () => {
+    const settings = (apiKey: string, publicVersion: string) =>
+      withEnv(
+        {
+          OPENGENI_OPENAI_API_KEY: "sk-test",
+          OPENGENI_MODEL_PROVIDERS_JSON: JSON.stringify([
+            {
+              id: "acme",
+              api: "responses",
+              baseUrl: "https://api.acme.test/v1",
+              apiKey,
+              defaultHeaders: { "x-api-key": apiKey, "x-public-version": publicVersion },
+              publicDefaultHeaderNames: ["x-public-version"],
+              models: [{ id: "acme/model", upstreamModelId: "upstream-model" }],
+            },
+          ]),
+        },
+        () => getSettings(),
+      );
+    const acceptedSettings = settings("first-secret", "v1");
+    const policy = resolveTurnExecutionPolicyV1(acceptedSettings, {
+      modelId: "acme/model",
+      requestedModelId: null,
+      modelSource: "session",
+      reasoningEffort: "low",
+      reasoningSource: "session",
+    });
+
+    expect(() =>
+      assertTurnExecutionPolicyMatchesConfigV1(settings("rotated-secret", "v1"), policy, {
+        modelId: "acme/model",
+        reasoningEffort: "low",
+      }),
+    ).not.toThrow();
+    expect(() =>
+      assertTurnExecutionPolicyMatchesConfigV1(settings("rotated-secret", "v2"), policy, {
+        modelId: "acme/model",
+        reasoningEffort: "low",
+      }),
+    ).toThrow("current provider definition");
+  });
+
+  test("attributes connected Codex subscription turns explicitly as externally billed", () => {
+    const settings = withEnv(
+      {
+        OPENGENI_OPENAI_API_KEY: "sk-test",
+        OPENGENI_CODEX_SUBSCRIPTION_ENABLED: "true",
+      },
+      () => getSettings(),
+    );
+    const policy = resolveTurnExecutionPolicyV1(settings, {
+      modelId: "codex/gpt-5.6-sol",
+      requestedModelId: null,
+      modelSource: "session",
+      reasoningEffort: "xhigh",
+      reasoningSource: "session",
+    });
+    expect(policy).toMatchObject({
+      productModelId: "codex/gpt-5.6-sol",
+      providerId: "codex-subscription",
+      credentialSource: { kind: "connected_subscription", provider: "codex" },
+      billing: { upstreamPayer: "connected_subscription", metering: "external" },
+    });
   });
 });
 
