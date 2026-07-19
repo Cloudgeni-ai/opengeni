@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  isDatabasePersistenceFailure,
   nestedPostgresSqlState,
   runIdempotentPersistenceTransaction,
   safeDatabaseErrorFacts,
@@ -7,6 +8,18 @@ import {
 } from "../src";
 
 describe("session event persistence failure truth", () => {
+  test("recognizes only database-shaped failures without SQLSTATE", () => {
+    expect(
+      isDatabasePersistenceFailure({
+        query: "insert into session_events values ($1)",
+        params: ["private-token"],
+      }),
+    ).toBe(true);
+    expect(isDatabasePersistenceFailure({ driverError: { name: "PostgresError" } })).toBe(true);
+    expect(isDatabasePersistenceFailure({ cause: { table_name: "session_events" } })).toBe(true);
+    expect(isDatabasePersistenceFailure(new Error("expected domain conflict"))).toBe(false);
+  });
+
   test("finds nested SQLSTATE and retains only allowlisted catalog facts", () => {
     const error = Object.assign(new Error("Failed query: insert into session_events"), {
       query: "insert into session_events values ($1)",
@@ -136,5 +149,92 @@ describe("session event persistence failure truth", () => {
     expect(observable).not.toContain("private-token");
     expect(observable).not.toContain("insert into");
     expect(observable).not.toContain("values ($1)");
+  });
+
+  test("rethrows a domain error unchanged and never retries it", async () => {
+    class ExpectedDomainError extends Error {
+      readonly code = "EXPECTED_DOMAIN_CONFLICT";
+    }
+
+    const original = new ExpectedDomainError("preserve this domain error");
+    let attempts = 0;
+    let retries = 0;
+    const caught = await runIdempotentPersistenceTransaction(
+      {
+        stage: "session_commands.agent_message",
+        eventTypes: ["system.update.pending"],
+        onRetry: () => {
+          retries += 1;
+        },
+      },
+      async () => {
+        attempts += 1;
+        throw original;
+      },
+    ).catch((error) => error);
+
+    expect(attempts).toBe(1);
+    expect(retries).toBe(0);
+    expect(caught).toBe(original);
+    expect(caught).toBeInstanceOf(ExpectedDomainError);
+    expect(caught).toMatchObject({
+      code: "EXPECTED_DOMAIN_CONFLICT",
+      message: "preserve this domain error",
+    });
+  });
+
+  test("sanitizes a terminal database SQLSTATE without retrying it", async () => {
+    let attempts = 0;
+    let retries = 0;
+    const caught = await runIdempotentPersistenceTransaction(
+      {
+        stage: "session_commands.agent_message",
+        eventTypes: ["system.update.pending"],
+        correlationId: "terminal-database-correlation",
+        onRetry: () => {
+          retries += 1;
+        },
+      },
+      async () => {
+        attempts += 1;
+        throw Object.assign(new Error("private duplicate value"), {
+          query: "insert into session_command_receipts values ($1)",
+          params: ["private-token"],
+          cause: {
+            code: "23505",
+            severity: "ERROR",
+            table_name: "session_command_receipts",
+            constraint_name: "session_command_receipts_operation_uq",
+          },
+        });
+      },
+    ).catch((error) => error);
+
+    expect(attempts).toBe(1);
+    expect(retries).toBe(0);
+    expect(caught).toBeInstanceOf(SessionEventPersistenceError);
+    expect((caught as SessionEventPersistenceError).details).toEqual({
+      code: "db_failure",
+      sqlState: "23505",
+      stage: "session_commands.agent_message",
+      eventTypes: ["system.update.pending"],
+      correlationId: "terminal-database-correlation",
+      attempts: 1,
+      retryOutcome: "not_retryable",
+      database: {
+        severity: "ERROR",
+        table: "session_command_receipts",
+        constraint: "session_command_receipts_operation_uq",
+      },
+    });
+    expect((caught as Error & { cause?: unknown }).cause).toBeUndefined();
+    const observable = JSON.stringify({
+      message: (caught as Error).message,
+      stack: (caught as Error).stack,
+      details: (caught as SessionEventPersistenceError).details,
+      cause: (caught as Error & { cause?: unknown }).cause,
+    });
+    expect(observable).not.toContain("private-token");
+    expect(observable).not.toContain("insert into");
   });
 });

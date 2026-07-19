@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { sendAgentSessionMessage } from "@opengeni/core";
+import { sendAgentSessionMessage, steerAgentSession } from "@opengeni/core";
 import { appendAndPublishEvents } from "@opengeni/events";
 import {
   acquireSharedTestDatabase,
@@ -9,16 +9,22 @@ import {
 import postgres from "postgres";
 import {
   addSessionSystemUpdate,
+  AgentCommandAuthorityError,
   appendSessionEventToSandboxGroup,
   appendSessionEvents,
   appendSessionEventsAndUpdateSession,
   appendSessionEventsForTurnAttempt,
   appendSessionEventsWithLockedSessionUpdate,
   applySessionTurnSettlement,
+  canonicalSessionCommandHash,
   createDb,
   getOrCreateSessionSystemUpdateOutbox,
+  mutateSessionControlInTransaction,
+  QueueCommandConflictError,
   recoverSessionDispatch,
   sendAgentMessageInTransaction,
+  SessionCommandIdempotencyError,
+  SessionControlInvariantError,
   SessionEventPersistenceError,
   settleSessionIdleWithParentOutbox,
   updateSessionGoal,
@@ -271,8 +277,42 @@ async function sendPublishedAgentMessage(
   operationKey: string,
   bus: MemoryEventBus,
   onWake: () => void,
+  callerExecutionGeneration = 1,
 ): Promise<unknown> {
   return await sendAgentSessionMessage(
+    {
+      db,
+      bus,
+      workflowClient: {
+        wakeSessionWorkflow: async () => {
+          onWake();
+        },
+      },
+    },
+    {
+      accountId: actor.accountId,
+      workspaceId: actor.workspaceId,
+      callerSessionId: actor.sessionId,
+      callerTurnId: actor.turnId,
+      callerAttemptId: actor.attemptId,
+      callerExecutionGeneration,
+    },
+    {
+      targetSessionId: target.sessionId,
+      text: `OPE-63 published pair-lock message ${operationKey}`,
+      idempotencyKey: operationKey,
+    },
+  );
+}
+
+async function steerPublishedAgentSession(
+  actor: RunningFixture,
+  target: Pick<RunningFixture, "sessionId">,
+  operationKey: string,
+  bus: MemoryEventBus,
+  onWake: () => void,
+): Promise<unknown> {
+  return await steerAgentSession(
     {
       db,
       bus,
@@ -292,10 +332,76 @@ async function sendPublishedAgentMessage(
     },
     {
       targetSessionId: target.sessionId,
-      text: `OPE-63 published pair-lock message ${operationKey}`,
+      instruction: `OPE-63 published steer ${operationKey}`,
       idempotencyKey: operationKey,
     },
   );
+}
+
+type AgentCommandEffectSnapshot = {
+  receipts: number;
+  updates: number;
+  events: number;
+  auditEvents: number;
+  wakeRevision: number;
+  lastSequence: number;
+  queueVersion: number;
+  status: string;
+  activeTurnId: string | null;
+};
+
+async function agentCommandEffectSnapshot(
+  fixture: RunningFixture,
+  targetSessionId: string,
+): Promise<AgentCommandEffectSnapshot> {
+  const [snapshot] = await admin<AgentCommandEffectSnapshot[]>`
+    select
+      (select count(*)::int from session_command_receipts
+       where workspace_id = ${fixture.workspaceId}
+         and actor_attempt_id = ${fixture.attemptId}) as receipts,
+      (select count(*)::int from session_system_updates
+       where workspace_id = ${fixture.workspaceId}
+         and session_id = ${targetSessionId}) as updates,
+      (select count(*)::int from session_events
+       where workspace_id = ${fixture.workspaceId}
+         and session_id = ${targetSessionId}) as events,
+      (select count(*)::int from audit_events
+       where workspace_id = ${fixture.workspaceId}
+         and subject_id = ${`attempt:${fixture.attemptId}`}
+         and action in ('session.agent_message', 'session.agent_steer')) as "auditEvents",
+      coalesce((select wake_revision::int from session_workflow_wake_outbox
+                where workspace_id = ${fixture.workspaceId}
+                  and session_id = ${targetSessionId}), 0) as "wakeRevision",
+      session.last_sequence as "lastSequence",
+      session.queue_version as "queueVersion",
+      session.status,
+      session.active_turn_id as "activeTurnId"
+    from sessions session
+    where session.workspace_id = ${fixture.workspaceId}
+      and session.id = ${targetSessionId}
+  `;
+  if (!snapshot) throw new Error(`Missing Agent command target ${targetSessionId}`);
+  return snapshot;
+}
+
+async function rejectAgentCommandWithoutEffects(input: {
+  actor: RunningFixture;
+  targetSessionId: string;
+  bus: MemoryEventBus;
+  wakeCount: () => number;
+  invoke: () => Promise<unknown>;
+}): Promise<unknown> {
+  const before = await agentCommandEffectSnapshot(input.actor, input.targetSessionId);
+  const publishedBefore = input.bus.published.length;
+  const controlPublishedBefore = input.bus.publishedWorkspaceControl.length;
+  const wakesBefore = input.wakeCount();
+  const error = await input.invoke().catch((caught) => caught);
+
+  expect(await agentCommandEffectSnapshot(input.actor, input.targetSessionId)).toEqual(before);
+  expect(input.bus.published).toHaveLength(publishedBefore);
+  expect(input.bus.publishedWorkspaceControl).toHaveLength(controlPublishedBefore);
+  expect(input.wakeCount()).toBe(wakesBefore);
+  return error;
 }
 
 async function waitFor(
@@ -1049,7 +1155,11 @@ describe("OPE-63 canonical session-event lock order", () => {
       const target = await seedIdleChild(workspace, ids.childSessionId, ids.parentSessionId);
       const operationKey = crypto.randomUUID();
       const bus = new MemoryEventBus();
+      let inferenceCalls = 0;
+      let toolEffects = 0;
       let wakes = 0;
+      inferenceCalls += 1;
+      toolEffects += 1;
       await admin`select setval('ope63_fault_attempt_seq', 1, false)`;
       await admin`
         insert into ope63_command_faults (action, sql_state)
@@ -1065,6 +1175,8 @@ describe("OPE-63 canonical session-event lock order", () => {
       }
 
       expect(delivered).toMatchObject({ replay: false });
+      expect(inferenceCalls).toBe(1);
+      expect(toolEffects).toBe(1);
       expect(wakes).toBe(1);
       expect(bus.published).toHaveLength(1);
       expect(bus.published[0]).toMatchObject([{ type: "system.update.pending", sequence: 1 }]);
@@ -1089,6 +1201,213 @@ describe("OPE-63 canonical session-event lock order", () => {
       `;
       expect(persisted).toEqual({ receipts: 1, updates: 1, events: 1 });
       await assertCommittedSequence(target, 1);
+    }
+  }, 60_000);
+
+  test("preserves Agent command domain conflicts without persistence or external effects", async () => {
+    {
+      const workspace = await freshWorkspace();
+      const actor = await seedRunningSession(workspace);
+      const target = await seedIdleChild(workspace, crypto.randomUUID(), actor.sessionId);
+      const bus = new MemoryEventBus();
+      let wakes = 0;
+      const error = await rejectAgentCommandWithoutEffects({
+        actor,
+        targetSessionId: target.sessionId,
+        bus,
+        wakeCount: () => wakes,
+        invoke: async () =>
+          await sendPublishedAgentMessage(
+            actor,
+            target,
+            crypto.randomUUID(),
+            bus,
+            () => {
+              wakes += 1;
+            },
+            2,
+          ),
+      });
+      expect(error).toBeInstanceOf(AgentCommandAuthorityError);
+      expect(error).toMatchObject({ code: "CALLER_STALE" });
+    }
+
+    {
+      const workspace = await freshWorkspace();
+      const actor = await seedRunningSession(workspace);
+      const target = await seedIdleChild(workspace, crypto.randomUUID(), actor.sessionId);
+      await withWorkspaceRls(
+        db,
+        workspace.workspaceId,
+        async (scopedDb) =>
+          await scopedDb.transaction(
+            async (tx) =>
+              await mutateSessionControlInTransaction(tx as unknown as Database, {
+                accountId: workspace.accountId,
+                workspaceId: workspace.workspaceId,
+                sessionId: actor.sessionId,
+                actor: { type: "human", subjectId: "ope63-domain-conflict" },
+                operationKey: crypto.randomUUID(),
+                action: "pause",
+              }),
+          ),
+      );
+      const bus = new MemoryEventBus();
+      let wakes = 0;
+      const error = await rejectAgentCommandWithoutEffects({
+        actor,
+        targetSessionId: target.sessionId,
+        bus,
+        wakeCount: () => wakes,
+        invoke: async () =>
+          await sendPublishedAgentMessage(actor, target, crypto.randomUUID(), bus, () => {
+            wakes += 1;
+          }),
+      });
+      expect(error).toBeInstanceOf(AgentCommandAuthorityError);
+      expect(error).toMatchObject({ code: "CALLER_INTERRUPTED" });
+    }
+
+    {
+      const actor = await seedRunningSession();
+      const bus = new MemoryEventBus();
+      let wakes = 0;
+      const error = await rejectAgentCommandWithoutEffects({
+        actor,
+        targetSessionId: actor.sessionId,
+        bus,
+        wakeCount: () => wakes,
+        invoke: async () =>
+          await steerPublishedAgentSession(actor, actor, crypto.randomUUID(), bus, () => {
+            wakes += 1;
+          }),
+      });
+      expect(error).toBeInstanceOf(AgentCommandAuthorityError);
+      expect(error).toMatchObject({ code: "SELF_STEER" });
+    }
+
+    {
+      const workspace = await freshWorkspace();
+      const actor = await seedRunningSession(workspace);
+      const target = await seedIdleChild(workspace, crypto.randomUUID(), actor.sessionId);
+      const operationKey = crypto.randomUUID();
+      const bus = new MemoryEventBus();
+      let wakes = 0;
+      await sendPublishedAgentMessage(actor, target, operationKey, bus, () => {
+        wakes += 1;
+      });
+      const error = await rejectAgentCommandWithoutEffects({
+        actor,
+        targetSessionId: target.sessionId,
+        bus,
+        wakeCount: () => wakes,
+        invoke: async () =>
+          await sendAgentSessionMessage(
+            {
+              db,
+              bus,
+              workflowClient: {
+                wakeSessionWorkflow: async () => {
+                  wakes += 1;
+                },
+              },
+            },
+            {
+              accountId: actor.accountId,
+              workspaceId: actor.workspaceId,
+              callerSessionId: actor.sessionId,
+              callerTurnId: actor.turnId,
+              callerAttemptId: actor.attemptId,
+              callerExecutionGeneration: 1,
+            },
+            {
+              targetSessionId: target.sessionId,
+              text: "different input for the same operation key",
+              idempotencyKey: operationKey,
+            },
+          ),
+      });
+      expect(error).toBeInstanceOf(SessionCommandIdempotencyError);
+      expect(error).toMatchObject({ code: "IDEMPOTENCY_KEY_REUSED" });
+    }
+
+    {
+      const workspace = await freshWorkspace();
+      const actor = await seedRunningSession(workspace);
+      const target = await seedIdleChild(workspace, crypto.randomUUID(), actor.sessionId);
+      await admin`
+        update sessions
+        set status = 'cancelled'
+        where workspace_id = ${workspace.workspaceId}
+          and id = ${target.sessionId}
+      `;
+      const bus = new MemoryEventBus();
+      let wakes = 0;
+      const error = await rejectAgentCommandWithoutEffects({
+        actor,
+        targetSessionId: target.sessionId,
+        bus,
+        wakeCount: () => wakes,
+        invoke: async () =>
+          await sendPublishedAgentMessage(actor, target, crypto.randomUUID(), bus, () => {
+            wakes += 1;
+          }),
+      });
+      expect(error).toBeInstanceOf(QueueCommandConflictError);
+      expect(error).toMatchObject({ code: "QUEUE_PROMPT_STARTED" });
+    }
+
+    {
+      const workspace = await freshWorkspace();
+      const actor = await seedRunningSession(workspace);
+      const target = await seedIdleChild(workspace, crypto.randomUUID(), actor.sessionId);
+      const operationKey = crypto.randomUUID();
+      const text = "malformed replay fixture";
+      await admin`
+        insert into session_command_receipts (
+          account_id, workspace_id, actor_type, actor_attempt_id, action,
+          target_session_id, operation_key, canonical_request_hash
+        ) values (
+          ${workspace.accountId}, ${workspace.workspaceId}, 'agent_attempt',
+          ${actor.attemptId}, 'agent.message', ${target.sessionId}, ${operationKey},
+          ${canonicalSessionCommandHash({ text })}
+        )
+      `;
+      const bus = new MemoryEventBus();
+      let wakes = 0;
+      const error = await rejectAgentCommandWithoutEffects({
+        actor,
+        targetSessionId: target.sessionId,
+        bus,
+        wakeCount: () => wakes,
+        invoke: async () =>
+          await sendAgentSessionMessage(
+            {
+              db,
+              bus,
+              workflowClient: {
+                wakeSessionWorkflow: async () => {
+                  wakes += 1;
+                },
+              },
+            },
+            {
+              accountId: actor.accountId,
+              workspaceId: actor.workspaceId,
+              callerSessionId: actor.sessionId,
+              callerTurnId: actor.turnId,
+              callerAttemptId: actor.attemptId,
+              callerExecutionGeneration: 1,
+            },
+            {
+              targetSessionId: target.sessionId,
+              text,
+              idempotencyKey: operationKey,
+            },
+          ),
+      });
+      expect(error).toBeInstanceOf(SessionControlInvariantError);
+      expect(error).toMatchObject({ code: "SESSION_CONTROL_INVARIANT" });
     }
   }, 60_000);
 

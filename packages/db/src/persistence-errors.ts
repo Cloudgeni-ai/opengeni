@@ -27,6 +27,16 @@ export type PersistenceFailureDetails = {
 
 const SQLSTATE_KEYS = ["sqlState", "sqlstate", "code"] as const;
 const NESTED_ERROR_KEYS = ["cause", "original", "driverError", "error", "errors"] as const;
+const DATABASE_ERROR_NAMES = new Set(["DatabaseError", "DrizzleQueryError", "PostgresError"]);
+const DATABASE_DIAGNOSTIC_KEYS = [
+  "severity",
+  "schema_name",
+  "table_name",
+  "column_name",
+  "data_type_name",
+  "constraint_name",
+  "routine",
+] as const;
 const SAFE_FACT_KEYS = [
   ["severity", "severity"],
   ["schema_name", "schema"],
@@ -84,6 +94,43 @@ export function databaseFailureCode(sqlState: string | null): DatabaseFailureCod
 
 export function isRetryablePersistenceSqlState(sqlState: string | null): boolean {
   return sqlState === "40P01" || sqlState === "40001";
+}
+
+/**
+ * Distinguish database/ORM failures from expected domain exceptions when a
+ * driver omitted SQLSTATE. This checks shape only and never retains query text,
+ * bound parameters, or a raw driver cause.
+ */
+export function isDatabasePersistenceFailure(error: unknown): boolean {
+  if (nestedPostgresSqlState(error) !== null) return true;
+
+  const queue: unknown[] = [error];
+  const seen = new Set<unknown>();
+  while (queue.length > 0 && seen.size < 64) {
+    const current = queue.shift();
+    if (!isRecord(current) || seen.has(current)) continue;
+    seen.add(current);
+
+    if (typeof current.name === "string" && DATABASE_ERROR_NAMES.has(current.name)) {
+      return true;
+    }
+    if (
+      typeof current.query === "string" &&
+      (Object.hasOwn(current, "params") || Object.hasOwn(current, "parameters"))
+    ) {
+      return true;
+    }
+    if (DATABASE_DIAGNOSTIC_KEYS.some((key) => Object.hasOwn(current, key))) {
+      return true;
+    }
+
+    for (const key of NESTED_ERROR_KEYS) {
+      const nested = current[key];
+      if (Array.isArray(nested)) queue.push(...nested);
+      else if (nested !== undefined) queue.push(nested);
+    }
+  }
+  return false;
 }
 
 /** Extract only PostgreSQL diagnostic identifiers; never query text/parameters. */
@@ -174,6 +221,7 @@ export async function runIdempotentPersistenceTransaction<T>(
         });
         continue;
       }
+      if (!isDatabasePersistenceFailure(error)) throw error;
       throw new SessionEventPersistenceError({
         code: databaseFailureCode(sqlState),
         sqlState,
