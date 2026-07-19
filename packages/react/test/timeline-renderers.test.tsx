@@ -178,6 +178,41 @@ describe("FleetDecisionRow", () => {
 
     await r.unmount();
   });
+
+  test("renders manager priority as standard-work pacing rather than manager admission", async () => {
+    resetTimelineEvents();
+    const payload = fleetDecisionEventPayload();
+    payload.comparison = "different_outcome";
+    const replay = payload.replay as { decision: Record<string, unknown> };
+    replay.decision = {
+      ...replay.decision,
+      outcome: "paced",
+      selectedCandidateKey: null,
+      reason: "admission_paced",
+      admission: {
+        outcome: "pace",
+        reason: "manager_priority",
+        borrowedIdleCapacity: false,
+      },
+      borrowedOverlayCapacity: false,
+      strandedEligibleCount: 0,
+      scores: [],
+    };
+    const r = await renderComponent(
+      <MessageTimeline events={[timelineEvent("codex.fleet.decision", payload)]} />,
+    );
+    await flush();
+    const disclosure = r.container.querySelector('[role="button"]') as HTMLElement | null;
+    await act(async () => {
+      disclosure?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+
+    const text = r.container.textContent ?? "";
+    expect(text).toContain("Standard work was paced for queued manager demand");
+    expect(text).not.toContain("Manager-priority work was admitted");
+    await r.unmount();
+  });
 });
 
 describe("MessageTimeline — settled turn folding", () => {

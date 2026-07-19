@@ -249,15 +249,93 @@ credentials (critical) or one eligible credential (warning). Operators should
 correlate those alerts with `codex.credential.selected`,
 `codex.account.switched`, and `turn.recovery.requested`/`turn.failed` events.
 
+### Adaptive-fleet shadow and deterministic replay
+
+OPE-32 adds a second, deliberately more private decision-observability path. It
+is independently default-off behind
+`OPENGENI_CODEX_FLEET_POLICY_SHADOW_ENABLED=false` and runs **after** OPE-21 has
+authoritatively selected or reused a lease. Shadow v1 cannot filter candidates,
+change the selected credential, move a fenced turn, pace live work, alter a
+capacity waiter, or trigger failover. Disabling the switch produces no shadow
+payload or event and requires no schema rollback.
+
+When enabled, `publishCodexFleetShadowDecisionV1` builds one bounded
+`codex.fleet.decision` session event and appends it through the exact current
+turn-attempt fence. Ordinary build/size/append faults return a bounded,
+secret-safe failure classification and the turn continues on OPE-21's existing
+lease. `TurnAttemptFencedError` and Temporal cancellation are authoritative
+lifecycle signals and are rethrown; swallowing either could let a superseded
+activity continue mutating after the observer returned.
+
+The durable replay record is designed for offline shadow simulation:
+
+- At most 32 candidates and 32 KiB of UTF-8 JSON are retained. Candidate keys
+  are event-local `c00`-style aliases assigned by HMAC-SHA-256 ordering with a
+  fresh per-event seed; the seed and raw credential ids are never persisted.
+  Unlike `codex.credential.selected`, these aliases are intentionally not stable
+  account audit identities.
+- Canonical policy, normalized input **including its truncation count**, and
+  recorded decision each carry lowercase SHA-256 fingerprints. The strict
+  reader rejects unknown envelope/decision fields, lossy normalization,
+  malformed outcomes/scores, weak digests, and inconsistent admission or
+  selection shapes before deterministic reevaluation.
+- Quota windows are observations, not entitlement authority. Missing, partial,
+  or stale windows lose confidence and cannot masquerade as pristine quota;
+  only complete non-stale windows can enforce a new-placement ceiling.
+  Workspace-local observed burn and confidence-labeled inferred unexplained
+  burn are separate fields. Unexplained/external burn is never relabeled as
+  provider or tenant truth. Until typed producers exist, both remain explicitly
+  unknown in the worker snapshot.
+- Cache affinity uses `unknown | healthy | collapsed` state with minimum token
+  support, freshness, collapse/recovery dwell, and a higher recovery threshold.
+  A single low sample cannot collapse affinity. The worker currently records
+  cache input as unknown rather than deriving account truth from aggregate
+  OPE-31 metrics.
+
+The pure evaluator models later rollout phases without activating them. Default
+policy keeps admission pacing, manager priority, the emergency fuse, and named
+overlays independently disabled. Normal policy is adaptive and
+work-conserving: pressure/runway, active leases, uncertainty, measured cache
+affinity, and switch hysteresis rank **new** placements; it has no static hard
+per-account slots and performs no preemption. Standard work borrows idle
+capacity when no manager backlog exists. Manager priority may pace only new
+standard work while queued manager demand consumes available capacity, with a
+starvation bound. The emergency fuse also applies only to new work.
+
+Named `prefer` overlays apply a bounded score benefit and always allow healthy
+outside capacity to be borrowed. Explicit `isolate` is the only non-borrowing
+mode: it is opt-in, reversible, reports the count of otherwise-eligible stranded
+candidates, and never changes an in-flight fenced turn. These evaluator
+semantics are not authorization or OPE-21 lease/wait/failover state; a future
+live integration must use OPE-21's accepted-turn scope/filter seams and OPE-24's
+read-only quota/freshness observations rather than mutating either owner's
+state.
+
+New Prometheus counters use fixed enum labels only: decision series are bounded
+to 288 and error series to 6, with no workspace/account/tenant dimension. The
+workspace-RLS durable event is exposed through the SDK's typed event mirror;
+React projects only fixed enums, bounded numbers, and event-local aliases, drops
+malformed/identity-shaped payloads, and labels the UI as shadow-only. Production
+acceptance must preserve the measured prompt-cache baseline and compare
+aggregate shadow outcomes before any independent live-policy switch is enabled;
+the presence of shadow records alone is not evidence of adaptive benefit.
+
 ## Verification
 
 - Pure unit/property coverage:
   `apps/worker/test/codex-rotation.test.ts`,
   `apps/worker/test/codex-usage-limit.test.ts`, and
-  `packages/codex/test/fetch.test.ts`.
+  `packages/codex/test/fetch.test.ts`. OPE-32 replay/policy and worker privacy,
+  lifecycle, payload, and metric bounds are covered by
+  `packages/contracts/test/codex-fleet-policy.test.ts` and
+  `apps/worker/test/codex-fleet-shadow.test.ts`.
 - Real Postgres concurrency/RLS/failure injection:
   `packages/db/test/codex-credential-leases.test.ts` and
-  `packages/db/test/codex-capacity-waiters.test.ts`.
+  `packages/db/test/codex-capacity-waiters.test.ts`; OPE-32 event ordering,
+  multi-replica attempt fencing, replay, and FORCE RLS are covered by
+  `packages/db/test/codex-fleet-shadow-events.test.ts`.
+- Browser desktop/mobile overflow, keyboard, secret-safety, and WCAG-AA
+  acceptance: `test/e2e/fleet-policy.browser.e2e.ts`.
 - Real Temporal signal/timer/restart/continue-as-new coverage:
   `test/integration/temporal-workflow.integration.ts`.
 - Production release proof must additionally show concurrent live turns selecting

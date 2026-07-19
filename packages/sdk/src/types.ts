@@ -666,6 +666,7 @@ export type SessionStatusChangedPayload = { status: SessionStatus };
 // consumed by UI/manager tooling; the durable replay record also contains the
 // complete normalized policy/input needed for offline deterministic replay.
 export type CodexFleetConfidence = "unknown" | "low" | "medium" | "high";
+export type CodexFleetCacheState = "unknown" | "healthy" | "collapsed";
 export type CodexFleetShadowComparison =
   | "match"
   | "different_candidate"
@@ -683,10 +684,13 @@ export type CodexFleetDecisionScore = {
     | null;
   quotaPressure: number;
   leasePressure: number;
+  observedBurnPressure: number;
   inferredBurnPressure: number;
   runwayPressure: number;
   uncertaintyPressure: number;
   cacheAffinityBenefit: number;
+  cacheState: CodexFleetCacheState;
+  overlayPreferenceBenefit: number;
   total: number;
   confidence: CodexFleetConfidence;
 };

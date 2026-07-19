@@ -1539,7 +1539,9 @@ function fleetDecisionSemanticsAreConsistent(input: {
             input.shadowReason,
           );
   const pacedAdmissionReason =
-    input.admissionReason === "capacity_saturated" || input.admissionReason === "emergency_fuse";
+    input.admissionReason === "manager_priority" ||
+    input.admissionReason === "capacity_saturated" ||
+    input.admissionReason === "emergency_fuse";
   return (
     actualConsistent &&
     shadowConsistent &&

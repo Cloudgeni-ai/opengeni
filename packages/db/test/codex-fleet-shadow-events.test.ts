@@ -71,9 +71,15 @@ function fleetReplay(observedAtMs: number): CodexFleetReplayRecordV1 {
           confidence: "high",
         },
         cache: {
+          state: "unknown",
           hitRatio: null,
           sampledTokens: null,
           checkedAgeMs: null,
+          thresholdObservedForMs: null,
+          confidence: "unknown",
+        },
+        observedBurn: {
+          percentPerHour: null,
           confidence: "unknown",
         },
         inferredUnexplainedBurn: {
@@ -95,9 +101,15 @@ function fleetReplay(observedAtMs: number): CodexFleetReplayRecordV1 {
           confidence: "unknown",
         },
         cache: {
+          state: "unknown",
           hitRatio: null,
           sampledTokens: null,
           checkedAgeMs: null,
+          thresholdObservedForMs: null,
+          confidence: "unknown",
+        },
+        observedBurn: {
+          percentPerHour: null,
           confidence: "unknown",
         },
         inferredUnexplainedBurn: {

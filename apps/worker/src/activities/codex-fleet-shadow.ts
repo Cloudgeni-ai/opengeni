@@ -6,6 +6,9 @@ import {
   type CodexFleetReplayRecordV1,
 } from "@opengeni/contracts";
 import type { CodexLeaseAccountStatus } from "@opengeni/db";
+import { CancelledFailure } from "@temporalio/activity";
+import { createHmac } from "node:crypto";
+import { TurnAttemptFencedError } from "./turn-attempt-fenced";
 
 export const CODEX_FLEET_SHADOW_MAX_PAYLOAD_BYTES = 32_768;
 
@@ -38,6 +41,8 @@ export type CodexFleetShadowBuildInputV1 = {
   fencedInFlight: boolean;
   nearExhaustionPct: number;
   now: Date;
+  /** Per-event entropy used only to unlink account aliases; never persisted. */
+  aliasSeed: string;
 };
 
 export type CodexFleetShadowPublicationResultV1 =
@@ -54,6 +59,26 @@ export type CodexFleetShadowPublicationResultV1 =
       errorName: string;
       payloadBytes: number | null;
     };
+
+export const CODEX_FLEET_SHADOW_DECISION_MAX_METRIC_SERIES = 3 * 3 * 4 * 4 * 2;
+export const CODEX_FLEET_SHADOW_ERROR_MAX_METRIC_SERIES = 3 * 2;
+
+/** Fixed low-cardinality labels; workspace/account/tenant identity is structurally absent. */
+export function codexFleetShadowDecisionMetricLabelsV1(payload: CodexFleetShadowPayloadV1) {
+  return {
+    actual_outcome: payload.actual.outcome,
+    shadow_outcome: payload.replay.decision.outcome,
+    comparison: payload.comparison,
+    confidence: payload.replay.decision.confidence,
+    truncated: payload.replay.truncatedCandidateCount > 0 ? "true" : "false",
+  } as const;
+}
+
+export function codexFleetShadowErrorMetricLabelsV1(
+  result: Extract<CodexFleetShadowPublicationResultV1, { outcome: "failed" }>,
+) {
+  return { stage: result.stage, reason: result.reason } as const;
+}
 
 /**
  * Default-off, bounded, fail-open runtime seam for the shadow record.
@@ -91,6 +116,9 @@ export async function publishCodexFleetShadowDecisionV1(input: {
     await input.publish([{ type: "codex.fleet.decision", payload }]);
     return { outcome: "published", payload, payloadBytes };
   } catch (error) {
+    // These are authoritative activity lifecycle signals, not shadow failures.
+    // Swallowing either would allow a superseded attempt to continue mutating.
+    if (error instanceof TurnAttemptFencedError || error instanceof CancelledFailure) throw error;
     return {
       outcome: "failed",
       stage,
@@ -104,10 +132,16 @@ export async function publishCodexFleetShadowDecisionV1(input: {
 export function buildCodexFleetShadowPayloadV1(
   input: CodexFleetShadowBuildInputV1,
 ): CodexFleetShadowPayloadV1 {
-  // OPE-21 returns candidates in stable created_at/id order. Alias only by that
-  // event-local ordinal: no raw id or stable cross-event account tag is persisted.
+  // Randomized keyed ordering makes c00/c01 unlinkable across events while the
+  // supplied event seed keeps this one replay/payload build deterministic.
+  const eventAccounts = [...input.accounts].sort(
+    (left, right) =>
+      aliasSortKey(input.aliasSeed, left.id).localeCompare(
+        aliasSortKey(input.aliasSeed, right.id),
+      ) || left.id.localeCompare(right.id),
+  );
   const aliases = new Map(
-    input.accounts.map((account, index) => [account.id, candidateAlias(index)] as const),
+    eventAccounts.map((account, index) => [account.id, candidateAlias(index)] as const),
   );
   const actualCandidateKey = input.actualCredentialId
     ? (aliases.get(input.actualCredentialId) ?? null)
@@ -133,7 +167,7 @@ export function buildCodexFleetShadowPayloadV1(
       queuedManagerCount: 0,
       emergencyFuseActive: false,
     },
-    candidates: input.accounts.map((account, index) => ({
+    candidates: eventAccounts.map((account, index) => ({
       key: candidateAlias(index),
       status: normalizeStatus(account.status),
       allocatorEnabled: account.allocatorEnabled,
@@ -149,7 +183,7 @@ export function buildCodexFleetShadowPayloadV1(
           resetRemainingMs: remainingMs(account.secondaryResetAt, input.now),
         },
         checkedAgeMs: ageMs(account.usageCheckedAt, input.now),
-        confidence: account.usageCheckedAt ? "high" : "unknown",
+        confidence: quotaConfidence(account),
       },
       // Current production cache evidence is aggregate metric + opaque log data,
       // not allocator state. Preserve that gap as unknown instead of fabricating 0.
@@ -158,7 +192,11 @@ export function buildCodexFleetShadowPayloadV1(
         sampledTokens: null,
         checkedAgeMs: null,
         confidence: "unknown",
+        state: "unknown",
+        thresholdObservedForMs: null,
       },
+      // OPE-32 has no typed workspace-local burn feed at this boundary yet.
+      observedBurn: { percentPerHour: null, confidence: "unknown" },
       // OPE-24/provider accounting has not supplied a typed burn observation yet.
       // Unknown inference is explicit and contributes no fabricated tenant truth.
       inferredUnexplainedBurn: { percentPerHour: null, confidence: "unknown" },
@@ -212,6 +250,23 @@ function normalizeStatus(status: string): CodexFleetCandidateStatus {
 
 function candidateAlias(index: number): string {
   return `c${index.toString(36).padStart(2, "0")}`;
+}
+
+function aliasSortKey(seed: string, credentialId: string): string {
+  return createHmac("sha256", seed).update(credentialId).digest("hex");
+}
+
+function quotaConfidence(account: CodexLeaseAccountStatus): "unknown" | "low" | "medium" | "high" {
+  if (!account.usageCheckedAt) return "unknown";
+  const windows = [
+    [account.primaryUsedPercent, account.primaryResetAt],
+    [account.secondaryUsedPercent, account.secondaryResetAt],
+  ] as const;
+  const complete = windows.filter(([used, reset]) => used !== null && reset !== null).length;
+  const partial = windows.some(([used, reset]) => (used === null) !== (reset === null));
+  if (complete === 0) return "unknown";
+  if (partial) return "low";
+  return complete === windows.length ? "high" : "medium";
 }
 
 function remainingMs(value: Date | null, now: Date): number | null {

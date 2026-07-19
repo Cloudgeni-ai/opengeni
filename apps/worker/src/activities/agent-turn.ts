@@ -134,7 +134,11 @@ import {
   type CodexRotationStrategy,
   type RotationDecision,
 } from "./codex-rotation";
-import { publishCodexFleetShadowDecisionV1 } from "./codex-fleet-shadow";
+import {
+  codexFleetShadowDecisionMetricLabelsV1,
+  codexFleetShadowErrorMetricLabelsV1,
+  publishCodexFleetShadowDecisionV1,
+} from "./codex-fleet-shadow";
 import type { CodexAccountStatus } from "@opengeni/db";
 import { buildCodexTokenResolver } from "./codex-auth";
 import {
@@ -2259,6 +2263,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             fencedInFlight,
             nearExhaustionPct: settings.codexRotationNearExhaustionPct,
             now: new Date(),
+            aliasSeed: randomUUID(),
           },
           publish,
         });
@@ -2267,14 +2272,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           observability.incrementCounter({
             name: "opengeni_codex_fleet_shadow_decisions_total",
             help: "OPE-32 shadow decisions by bounded actual/shadow outcome and comparison.",
-            labels: {
-              workspace_key: codexWorkspaceKey,
-              actual_outcome: shadowPayload.actual.outcome,
-              shadow_outcome: shadowPayload.replay.decision.outcome,
-              comparison: shadowPayload.comparison,
-              confidence: shadowPayload.replay.decision.confidence,
-              truncated: shadowPayload.replay.truncatedCandidateCount > 0 ? "true" : "false",
-            },
+            labels: codexFleetShadowDecisionMetricLabelsV1(shadowPayload),
           });
           observability.info("Codex adaptive fleet shadow decision", {
             workspaceId: input.workspaceId,
@@ -2295,11 +2293,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           observability.incrementCounter({
             name: "opengeni_codex_fleet_shadow_errors_total",
             help: "OPE-32 shadow decision build/publication failures.",
-            labels: {
-              workspace_key: codexWorkspaceKey,
-              stage: shadowResult.stage,
-              reason: shadowResult.reason,
-            },
+            labels: codexFleetShadowErrorMetricLabelsV1(shadowResult),
           });
           observability.warn("Codex adaptive fleet shadow decision failed open", {
             workspaceId: input.workspaceId,

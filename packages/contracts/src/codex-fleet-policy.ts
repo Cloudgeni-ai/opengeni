@@ -13,6 +13,9 @@
  * before any independent kill switch is allowed to affect a live allocation.
  */
 
+import { sha256 } from "@noble/hashes/sha256";
+import { bytesToHex } from "@noble/hashes/utils";
+
 export const CODEX_FLEET_POLICY_SCHEMA_VERSION = 1 as const;
 export const CODEX_FLEET_POLICY_VERSION = "adaptive-shadow-v1" as const;
 export const CODEX_FLEET_POLICY_MAX_CANDIDATES = 32;
@@ -24,6 +27,7 @@ const SCORE_SCALE = 100;
 
 export type CodexFleetConfidence = "unknown" | "low" | "medium" | "high";
 export type CodexFleetCandidateStatus = "active" | "needs_relogin" | "error" | "unknown";
+export type CodexFleetCacheState = "unknown" | "healthy" | "collapsed";
 export type CodexFleetPriority = "standard" | "manager";
 export type CodexFleetPlacementKind = "new" | "fenced_in_flight";
 export type CodexFleetOverlayMode = "none" | "prefer" | "isolate";
@@ -58,6 +62,15 @@ export type CodexFleetCandidateV1 = {
     hitRatio: number | null;
     sampledTokens: number | null;
     checkedAgeMs: number | null;
+    confidence: CodexFleetConfidence;
+    /** Previously latched state; the evaluator applies dwell and recovery thresholds. */
+    state: CodexFleetCacheState;
+    /** Duration of the current continuous below/above-threshold observation. */
+    thresholdObservedForMs: number | null;
+  };
+  /** Workspace-local observed burn, separate from unexplained/external inference. */
+  observedBurn: {
+    percentPerHour: number | null;
     confidence: CodexFleetConfidence;
   };
   /**
@@ -101,11 +114,16 @@ export type CodexFleetPolicyConfigV1 = {
   placementUsageCeilingPercent: number;
   cacheFreshForMs: number;
   cacheCollapseThreshold: number;
+  cacheCollapseRecoveryThreshold: number;
+  cacheMinimumSampledTokens: number;
+  cacheCollapseDwellMs: number;
+  cacheRecoveryDwellMs: number;
   activeLeaseScore: number;
   unknownQuotaScore: number;
   lowQuotaConfidenceScore: number;
   mediumQuotaConfidenceScore: number;
   inferredBurnScorePerPercentHour: number;
+  observedBurnScorePerPercentHour: number;
   minimumRunwayHours: number;
   runwayScorePerMissingHour: number;
   healthyCacheAffinityBenefit: number;
@@ -117,6 +135,7 @@ export type CodexFleetPolicyConfigV1 = {
   managerStandardStarvationMs: number;
   emergencyFuseEnabled: boolean;
   overlaysEnabled: boolean;
+  overlayPreferenceScore: number;
 };
 
 /**
@@ -131,11 +150,16 @@ export const DEFAULT_CODEX_FLEET_POLICY_V1: CodexFleetPolicyConfigV1 = Object.fr
   placementUsageCeilingPercent: 90,
   cacheFreshForMs: 30 * 60_000,
   cacheCollapseThreshold: 0.4,
+  cacheCollapseRecoveryThreshold: 0.65,
+  cacheMinimumSampledTokens: 4_096,
+  cacheCollapseDwellMs: 5 * 60_000,
+  cacheRecoveryDwellMs: 10 * 60_000,
   activeLeaseScore: 8 * SCORE_SCALE,
   unknownQuotaScore: 16 * SCORE_SCALE,
   lowQuotaConfidenceScore: 10 * SCORE_SCALE,
   mediumQuotaConfidenceScore: 4 * SCORE_SCALE,
   inferredBurnScorePerPercentHour: 0.2 * SCORE_SCALE,
+  observedBurnScorePerPercentHour: 0.1 * SCORE_SCALE,
   minimumRunwayHours: 2,
   runwayScorePerMissingHour: 8 * SCORE_SCALE,
   healthyCacheAffinityBenefit: 32 * SCORE_SCALE,
@@ -147,6 +171,7 @@ export const DEFAULT_CODEX_FLEET_POLICY_V1: CodexFleetPolicyConfigV1 = Object.fr
   managerStandardStarvationMs: 2 * 60_000,
   emergencyFuseEnabled: false,
   overlaysEnabled: false,
+  overlayPreferenceScore: 12 * SCORE_SCALE,
 });
 
 export type CodexFleetScoreV1 = {
@@ -161,10 +186,13 @@ export type CodexFleetScoreV1 = {
     | null;
   quotaPressure: number;
   leasePressure: number;
+  observedBurnPressure: number;
   inferredBurnPressure: number;
   runwayPressure: number;
   uncertaintyPressure: number;
   cacheAffinityBenefit: number;
+  cacheState: CodexFleetCacheState;
+  overlayPreferenceBenefit: number;
   total: number;
   confidence: CodexFleetConfidence;
 };
@@ -222,6 +250,7 @@ export type CodexFleetReplayVerdictV1 = {
   policyFingerprintMatches: boolean;
   inputFingerprintMatches: boolean;
   decisionFingerprintMatches: boolean;
+  recordedDecisionFingerprintMatches: boolean;
   decision: CodexFleetDecisionV1;
 };
 
@@ -245,20 +274,25 @@ export function createCodexFleetReplayRecordV1(
     input: normalized.input,
     truncatedCandidateCount: normalized.truncatedCandidateCount,
     policyFingerprint: fingerprint(normalizedPolicy),
-    inputFingerprint: fingerprint(normalized.input),
+    inputFingerprint: fingerprintReplayInput(normalized.input, normalized.truncatedCandidateCount),
     decision,
     decisionFingerprint: fingerprint(decision),
   };
 }
 
-export function replayCodexFleetDecisionV1(
-  record: CodexFleetReplayRecordV1,
-): CodexFleetReplayVerdictV1 {
+export function replayCodexFleetDecisionV1(value: unknown): CodexFleetReplayVerdictV1 {
+  const record = readCodexFleetReplayRecordV1(value);
   const policyFingerprintMatches = fingerprint(record.policy) === record.policyFingerprint;
-  const inputFingerprintMatches = fingerprint(record.input) === record.inputFingerprint;
+  const inputFingerprintMatches =
+    fingerprintReplayInput(record.input, record.truncatedCandidateCount) ===
+    record.inputFingerprint;
   const decision = evaluateCodexFleetDecisionV1(record.input, record.policy);
   const replayedDecisionFingerprint = fingerprint(decision);
-  const decisionFingerprintMatches = replayedDecisionFingerprint === record.decisionFingerprint;
+  const recordedDecisionFingerprintMatches =
+    fingerprint(record.decision) === record.decisionFingerprint;
+  const decisionFingerprintMatches =
+    recordedDecisionFingerprintMatches &&
+    replayedDecisionFingerprint === record.decisionFingerprint;
   return {
     matches:
       policyFingerprintMatches &&
@@ -268,7 +302,65 @@ export function replayCodexFleetDecisionV1(
     policyFingerprintMatches,
     inputFingerprintMatches,
     decisionFingerprintMatches,
+    recordedDecisionFingerprintMatches,
     decision,
+  };
+}
+
+/**
+ * Strict reader for durable/offline replay. Unknown fields, lossy normalization,
+ * malformed decisions, and non-SHA-256 digests are rejected before comparison.
+ */
+export function readCodexFleetReplayRecordV1(value: unknown): CodexFleetReplayRecordV1 {
+  const record = strictRecord(value, [
+    "schemaVersion",
+    "policyVersion",
+    "mode",
+    "policy",
+    "input",
+    "truncatedCandidateCount",
+    "policyFingerprint",
+    "inputFingerprint",
+    "decision",
+    "decisionFingerprint",
+  ]);
+  if (
+    record.schemaVersion !== CODEX_FLEET_POLICY_SCHEMA_VERSION ||
+    record.policyVersion !== CODEX_FLEET_POLICY_VERSION ||
+    record.mode !== "shadow"
+  ) {
+    throw new Error("Unsupported Codex fleet replay envelope");
+  }
+
+  const policy = normalizePolicy(record.policy as CodexFleetPolicyConfigV1);
+  if (canonicalJson(policy) !== canonicalJson(record.policy)) {
+    throw new Error("Codex fleet replay policy is not in canonical bounded form");
+  }
+  const normalizedInput = normalizeInput(
+    record.input as CodexFleetDecisionInputV1,
+    policy.maxCandidates,
+  );
+  if (
+    normalizedInput.truncatedCandidateCount !== 0 ||
+    canonicalJson(normalizedInput.input) !== canonicalJson(record.input)
+  ) {
+    throw new Error("Codex fleet replay input is not in canonical bounded form");
+  }
+
+  return {
+    schemaVersion: CODEX_FLEET_POLICY_SCHEMA_VERSION,
+    policyVersion: CODEX_FLEET_POLICY_VERSION,
+    mode: "shadow",
+    policy,
+    input: normalizedInput.input,
+    truncatedCandidateCount: strictInteger(record.truncatedCandidateCount, 0, MAX_COUNT),
+    policyFingerprint: strictSha256(record.policyFingerprint),
+    inputFingerprint: strictSha256(record.inputFingerprint),
+    decision: readCodexFleetDecisionV1(
+      record.decision,
+      new Set(normalizedInput.input.candidates.map((candidate) => candidate.key)),
+    ),
+    decisionFingerprint: strictSha256(record.decisionFingerprint),
   };
 }
 
@@ -312,7 +404,13 @@ export function evaluateCodexFleetDecisionV1(
   const overlay = selectOverlayScope(input, policy, baseEligibleKeys);
   const scopedScores = input.candidates
     .map((candidate) =>
-      scoreCandidate(candidate, input, policy, overlay.rejectedByIsolation.has(candidate.key)),
+      scoreCandidate(
+        candidate,
+        input,
+        policy,
+        overlay.rejectedByIsolation.has(candidate.key),
+        overlay.preferredMembers.has(candidate.key),
+      ),
     )
     .sort((a, b) => a.candidateKey.localeCompare(b.candidateKey));
   const eligible = scopedScores
@@ -350,7 +448,11 @@ export function evaluateCodexFleetDecisionV1(
     selectedCandidateKey: selected.candidateKey,
     reason,
     admission,
-    borrowedOverlayCapacity: overlay.borrowed,
+    borrowedOverlayCapacity:
+      policy.overlaysEnabled &&
+      input.request.overlayMode === "prefer" &&
+      input.request.overlayKey !== null &&
+      !overlay.preferredMembers.has(selected.candidateKey),
     strandedEligibleCount: overlay.strandedEligibleCount,
     confidence: aggregateConfidence(eligible),
     scores: scopedScores,
@@ -408,6 +510,7 @@ function scoreCandidate(
   input: CodexFleetDecisionInputV1,
   policy: CodexFleetPolicyConfigV1,
   rejectedByIsolation: boolean,
+  preferredOverlayMember = false,
 ): CodexFleetScoreV1 {
   const confidence = candidateConfidence(candidate, policy);
   const bindingUsed = bindingUsedPercent(candidate);
@@ -433,42 +536,55 @@ function scoreCandidate(
     ((bindingUsed ?? 50) * confidenceFactor + 50 * (1 - confidenceFactor)) * SCORE_SCALE,
   );
   const leasePressure = candidate.activeLeaseCount * policy.activeLeaseScore;
+  const observedBurnConfidence = confidenceWeight(candidate.observedBurn.confidence);
+  const observedBurn = candidate.observedBurn.percentPerHour ?? 0;
+  const observedBurnPressure = Math.round(
+    observedBurn * policy.observedBurnScorePerPercentHour * observedBurnConfidence,
+  );
   const burnConfidence = confidenceWeight(candidate.inferredUnexplainedBurn.confidence);
   const inferredBurn = candidate.inferredUnexplainedBurn.percentPerHour ?? 0;
   const inferredBurnPressure = Math.round(
     inferredBurn * policy.inferredBurnScorePerPercentHour * burnConfidence,
   );
   const remaining = Math.max(0, 100 - (bindingUsed ?? 50));
-  const runwayHours = inferredBurn > 0 ? remaining / inferredBurn : Number.POSITIVE_INFINITY;
+  const confidenceWeightedBurn =
+    observedBurn * observedBurnConfidence + inferredBurn * burnConfidence;
+  const runwayHours =
+    confidenceWeightedBurn > 0 ? remaining / confidenceWeightedBurn : Number.POSITIVE_INFINITY;
   const runwayPressure = Number.isFinite(runwayHours)
     ? Math.round(
-        Math.max(0, policy.minimumRunwayHours - runwayHours) *
-          policy.runwayScorePerMissingHour *
-          burnConfidence,
+        Math.max(0, policy.minimumRunwayHours - runwayHours) * policy.runwayScorePerMissingHour,
       )
     : 0;
   const uncertaintyPressure = quotaUncertaintyScore(confidence, policy);
+  const cacheState = effectiveCodexFleetCacheStateV1(candidate.cache, policy);
   const cacheAffinityBenefit =
     candidate.key === input.request.currentCandidateKey
-      ? cacheAffinityBenefitFor(candidate, policy)
+      ? cacheAffinityBenefitFor(cacheState, policy)
       : 0;
+  const overlayPreferenceBenefit = preferredOverlayMember ? policy.overlayPreferenceScore : 0;
   return {
     candidateKey: candidate.key,
     eligible: rejectionReason === null,
     rejectionReason,
     quotaPressure,
     leasePressure,
+    observedBurnPressure,
     inferredBurnPressure,
     runwayPressure,
     uncertaintyPressure,
     cacheAffinityBenefit,
+    cacheState,
+    overlayPreferenceBenefit,
     total:
       quotaPressure +
       leasePressure +
+      observedBurnPressure +
       inferredBurnPressure +
       runwayPressure +
       uncertaintyPressure -
-      cacheAffinityBenefit,
+      cacheAffinityBenefit -
+      overlayPreferenceBenefit,
     confidence,
   };
 }
@@ -479,7 +595,7 @@ function selectOverlayScope(
   baseEligibleKeys: Set<string>,
 ): {
   rejectedByIsolation: Set<string>;
-  borrowed: boolean;
+  preferredMembers: Set<string>;
   isolatedEmpty: boolean;
   strandedEligibleCount: number;
 } {
@@ -490,7 +606,7 @@ function selectOverlayScope(
   ) {
     return {
       rejectedByIsolation: new Set(),
-      borrowed: false,
+      preferredMembers: new Set(),
       isolatedEmpty: false,
       strandedEligibleCount: 0,
     };
@@ -508,16 +624,16 @@ function selectOverlayScope(
     if (members.size === 0) {
       return {
         rejectedByIsolation: new Set(),
-        borrowed: baseEligibleKeys.size > 0,
+        preferredMembers: members,
         isolatedEmpty: false,
         strandedEligibleCount: 0,
       };
     }
     return {
-      rejectedByIsolation: new Set(
-        [...baseEligibleKeys].filter((candidateKey) => !members.has(candidateKey)),
-      ),
-      borrowed: false,
+      // Preference is a bounded score benefit, never a hard partition. Healthy
+      // authorized outsiders remain eligible and borrowable.
+      rejectedByIsolation: new Set(),
+      preferredMembers: members,
       isolatedEmpty: false,
       strandedEligibleCount: 0,
     };
@@ -525,7 +641,7 @@ function selectOverlayScope(
   const outside = [...baseEligibleKeys].filter((candidateKey) => !members.has(candidateKey));
   return {
     rejectedByIsolation: new Set(outside),
-    borrowed: false,
+    preferredMembers: members,
     isolatedEmpty: members.size === 0,
     strandedEligibleCount: outside.length,
   };
@@ -537,32 +653,78 @@ function candidateConfidence(
 ): CodexFleetConfidence {
   const age = candidate.quota.checkedAgeMs;
   if (age === null || age > policy.quotaStaleAfterMs) return "unknown";
+  const windows = [candidate.quota.primary, candidate.quota.secondary];
+  const completeWindowCount = windows.filter(
+    (window) => window.usedPercent !== null && window.resetRemainingMs !== null,
+  ).length;
+  const hasPartialWindow = windows.some(
+    (window) => (window.usedPercent === null) !== (window.resetRemainingMs === null),
+  );
+  if (completeWindowCount === 0) return "unknown";
+  const completenessCeiling: CodexFleetConfidence = hasPartialWindow
+    ? "low"
+    : completeWindowCount === windows.length
+      ? "high"
+      : "medium";
+  const completeConfidence = lowerConfidence(candidate.quota.confidence, completenessCeiling);
   if (age > policy.quotaFreshForMs) {
-    return lowerConfidence(candidate.quota.confidence, "low");
+    return lowerConfidence(completeConfidence, "low");
   }
-  return candidate.quota.confidence;
+  return completeConfidence;
 }
 
-function cacheAffinityBenefitFor(
-  candidate: CodexFleetCandidateV1,
+export function effectiveCodexFleetCacheStateV1(
+  cache: CodexFleetCandidateV1["cache"],
   policy: CodexFleetPolicyConfigV1,
-): number {
-  const { hitRatio, checkedAgeMs, confidence } = candidate.cache;
+): CodexFleetCacheState {
+  const { hitRatio, sampledTokens, checkedAgeMs, confidence, state, thresholdObservedForMs } =
+    cache;
   if (
     hitRatio === null ||
+    sampledTokens === null ||
+    sampledTokens < policy.cacheMinimumSampledTokens ||
     checkedAgeMs === null ||
     checkedAgeMs > policy.cacheFreshForMs ||
     confidenceWeight(confidence) < confidenceWeight("medium")
   ) {
-    return policy.unknownCacheAffinityBenefit;
+    return "unknown";
   }
-  return hitRatio < policy.cacheCollapseThreshold
-    ? policy.collapsedCacheAffinityBenefit
-    : policy.healthyCacheAffinityBenefit;
+  const observedForMs = thresholdObservedForMs ?? 0;
+  if (state === "healthy") {
+    return hitRatio < policy.cacheCollapseThreshold && observedForMs >= policy.cacheCollapseDwellMs
+      ? "collapsed"
+      : "healthy";
+  }
+  if (state === "collapsed") {
+    return hitRatio >= policy.cacheCollapseRecoveryThreshold &&
+      observedForMs >= policy.cacheRecoveryDwellMs
+      ? "healthy"
+      : "collapsed";
+  }
+  if (hitRatio < policy.cacheCollapseThreshold && observedForMs >= policy.cacheCollapseDwellMs) {
+    return "collapsed";
+  }
+  if (
+    hitRatio >= policy.cacheCollapseRecoveryThreshold &&
+    observedForMs >= policy.cacheRecoveryDwellMs
+  ) {
+    return "healthy";
+  }
+  return "unknown";
+}
+
+function cacheAffinityBenefitFor(
+  state: CodexFleetCacheState,
+  policy: CodexFleetPolicyConfigV1,
+): number {
+  if (state === "healthy") return policy.healthyCacheAffinityBenefit;
+  if (state === "collapsed") return policy.collapsedCacheAffinityBenefit;
+  return policy.unknownCacheAffinityBenefit;
 }
 
 function bindingUsedPercent(candidate: CodexFleetCandidateV1): number | null {
   const windows = [candidate.quota.primary, candidate.quota.secondary]
+    .filter((window) => window.usedPercent !== null && window.resetRemainingMs !== null)
     .map((window) => (window.resetRemainingMs === 0 ? 0 : window.usedPercent))
     .filter((used): used is number => used !== null);
   return windows.length > 0 ? Math.max(...windows) : null;
@@ -683,6 +845,16 @@ function normalizeCandidate(candidate: CodexFleetCandidateV1): CodexFleetCandida
       sampledTokens: normalizeNullableInteger(candidate.cache.sampledTokens, 0, MAX_COUNT),
       checkedAgeMs: normalizeNullableInteger(candidate.cache.checkedAgeMs, 0, MAX_DURATION_MS),
       confidence: normalizeConfidence(candidate.cache.confidence),
+      state: normalizeCacheState(candidate.cache.state),
+      thresholdObservedForMs: normalizeNullableInteger(
+        candidate.cache.thresholdObservedForMs,
+        0,
+        MAX_DURATION_MS,
+      ),
+    },
+    observedBurn: {
+      percentPerHour: normalizeNullableNumber(candidate.observedBurn.percentPerHour, 0, 100, 3),
+      confidence: normalizeConfidence(candidate.observedBurn.confidence),
     },
     inferredUnexplainedBurn: {
       percentPerHour: normalizeNullableNumber(
@@ -708,19 +880,35 @@ function normalizeQuotaWindow(window: CodexFleetQuotaWindowV1): CodexFleetQuotaW
 
 function normalizePolicy(policy: CodexFleetPolicyConfigV1): CodexFleetPolicyConfigV1 {
   const quotaFreshForMs = normalizeInteger(policy.quotaFreshForMs, 1, MAX_DURATION_MS);
+  const cacheCollapseThreshold = normalizeNumber(policy.cacheCollapseThreshold, 0, 1, 4);
   return {
     maxCandidates: normalizeInteger(policy.maxCandidates, 1, CODEX_FLEET_POLICY_MAX_CANDIDATES),
     quotaFreshForMs,
     quotaStaleAfterMs: normalizeInteger(policy.quotaStaleAfterMs, quotaFreshForMs, MAX_DURATION_MS),
     placementUsageCeilingPercent: normalizeNumber(policy.placementUsageCeilingPercent, 1, 100, 3),
     cacheFreshForMs: normalizeInteger(policy.cacheFreshForMs, 1, MAX_DURATION_MS),
-    cacheCollapseThreshold: normalizeNumber(policy.cacheCollapseThreshold, 0, 1, 4),
+    cacheCollapseThreshold,
+    cacheCollapseRecoveryThreshold: normalizeNumber(
+      policy.cacheCollapseRecoveryThreshold,
+      cacheCollapseThreshold,
+      1,
+      4,
+    ),
+    cacheMinimumSampledTokens: normalizeInteger(policy.cacheMinimumSampledTokens, 1, MAX_COUNT),
+    cacheCollapseDwellMs: normalizeInteger(policy.cacheCollapseDwellMs, 1, MAX_DURATION_MS),
+    cacheRecoveryDwellMs: normalizeInteger(policy.cacheRecoveryDwellMs, 1, MAX_DURATION_MS),
     activeLeaseScore: normalizeNumber(policy.activeLeaseScore, 0, MAX_COUNT, 3),
     unknownQuotaScore: normalizeNumber(policy.unknownQuotaScore, 0, MAX_COUNT, 3),
     lowQuotaConfidenceScore: normalizeNumber(policy.lowQuotaConfidenceScore, 0, MAX_COUNT, 3),
     mediumQuotaConfidenceScore: normalizeNumber(policy.mediumQuotaConfidenceScore, 0, MAX_COUNT, 3),
     inferredBurnScorePerPercentHour: normalizeNumber(
       policy.inferredBurnScorePerPercentHour,
+      0,
+      MAX_COUNT,
+      3,
+    ),
+    observedBurnScorePerPercentHour: normalizeNumber(
+      policy.observedBurnScorePerPercentHour,
       0,
       MAX_COUNT,
       3,
@@ -755,11 +943,16 @@ function normalizePolicy(policy: CodexFleetPolicyConfigV1): CodexFleetPolicyConf
     ),
     emergencyFuseEnabled: policy.emergencyFuseEnabled === true,
     overlaysEnabled: policy.overlaysEnabled === true,
+    overlayPreferenceScore: normalizeNumber(policy.overlayPreferenceScore, 0, MAX_COUNT, 3),
   };
 }
 
 function normalizeConfidence(value: CodexFleetConfidence): CodexFleetConfidence {
   return value === "high" || value === "medium" || value === "low" ? value : "unknown";
+}
+
+function normalizeCacheState(value: CodexFleetCacheState): CodexFleetCacheState {
+  return value === "healthy" || value === "collapsed" ? value : "unknown";
 }
 
 function confidenceWeight(confidence: CodexFleetConfidence): number {
@@ -811,23 +1004,261 @@ function normalizeInteger(value: number, min: number, max: number): number {
   return Math.round(normalizeNumber(value, min, max, 0));
 }
 
-function fingerprint(value: unknown): string {
-  const serialized = canonicalJson(value);
-  return `${fnv1a32(serialized, 0x811c9dc5).toString(16).padStart(8, "0")}${fnv1a32(
-    serialized,
-    0x9e3779b9,
-  )
-    .toString(16)
-    .padStart(8, "0")}`;
+function readCodexFleetDecisionV1(
+  value: unknown,
+  candidateKeys: ReadonlySet<string>,
+): CodexFleetDecisionV1 {
+  const decision = strictRecord(value, [
+    "outcome",
+    "selectedCandidateKey",
+    "reason",
+    "admission",
+    "borrowedOverlayCapacity",
+    "strandedEligibleCount",
+    "confidence",
+    "scores",
+  ]);
+  const outcome = strictEnum(decision.outcome, ["selected", "paced", "none"] as const);
+  const selectedCandidateKey = strictOptionalKey(decision.selectedCandidateKey);
+  const reason = strictEnum(decision.reason, [
+    "fenced_in_flight",
+    "fenced_candidate_missing",
+    "admission_paced",
+    "no_eligible_candidate",
+    "overlay_isolated_empty",
+    "best_score",
+    "affinity_best",
+    "hysteresis_hold",
+  ] as const);
+  const admissionRecord = strictRecord(decision.admission, [
+    "outcome",
+    "reason",
+    "borrowedIdleCapacity",
+  ]);
+  const admission: CodexFleetAdmissionDecisionV1 = {
+    outcome: strictEnum(admissionRecord.outcome, ["admit", "pace"] as const),
+    reason: strictEnum(admissionRecord.reason, [
+      "fenced_in_flight",
+      "pacing_disabled",
+      "capacity_unknown",
+      "capacity_available",
+      "work_conserving_borrow",
+      "manager_priority",
+      "standard_starvation_bound",
+      "capacity_saturated",
+      "emergency_fuse",
+    ] as const),
+    borrowedIdleCapacity: strictBoolean(admissionRecord.borrowedIdleCapacity),
+  };
+  if (!Array.isArray(decision.scores) || decision.scores.length > candidateKeys.size) {
+    throw new Error("Codex fleet replay decision scores are not a bounded array");
+  }
+  const scores = decision.scores.map(readCodexFleetScoreV1);
+  if (
+    new Set(scores.map((score) => score.candidateKey)).size !== scores.length ||
+    scores.some((score) => !candidateKeys.has(score.candidateKey))
+  ) {
+    throw new Error("Codex fleet replay decision has invalid candidate scores");
+  }
+  const borrowedOverlayCapacity = strictBoolean(decision.borrowedOverlayCapacity);
+  const strandedEligibleCount = strictInteger(decision.strandedEligibleCount, 0, MAX_COUNT);
+
+  const selectedReasons = [
+    "fenced_in_flight",
+    "best_score",
+    "affinity_best",
+    "hysteresis_hold",
+  ] as const;
+  const noneReasons = [
+    "fenced_candidate_missing",
+    "no_eligible_candidate",
+    "overlay_isolated_empty",
+  ] as const;
+  const paceReasons = ["manager_priority", "capacity_saturated", "emergency_fuse"] as const;
+  const consistent =
+    outcome === "selected"
+      ? selectedCandidateKey !== null &&
+        admission.outcome === "admit" &&
+        selectedReasons.includes(reason as (typeof selectedReasons)[number]) &&
+        scores.some((score) => score.candidateKey === selectedCandidateKey)
+      : outcome === "paced"
+        ? selectedCandidateKey === null &&
+          reason === "admission_paced" &&
+          admission.outcome === "pace" &&
+          paceReasons.includes(admission.reason as (typeof paceReasons)[number])
+        : selectedCandidateKey === null &&
+          admission.outcome === "admit" &&
+          noneReasons.includes(reason as (typeof noneReasons)[number]);
+  if (
+    !consistent ||
+    strandedEligibleCount > candidateKeys.size ||
+    admission.borrowedIdleCapacity !== (admission.reason === "work_conserving_borrow") ||
+    (borrowedOverlayCapacity && (outcome !== "selected" || strandedEligibleCount !== 0))
+  ) {
+    throw new Error("Codex fleet replay decision is internally inconsistent");
+  }
+
+  return {
+    outcome,
+    selectedCandidateKey,
+    reason,
+    admission,
+    borrowedOverlayCapacity,
+    strandedEligibleCount,
+    confidence: strictConfidence(decision.confidence),
+    scores,
+  };
 }
 
-function fnv1a32(input: string, seed: number): number {
-  let hash = seed >>> 0;
-  for (let index = 0; index < input.length; index += 1) {
-    hash ^= input.charCodeAt(index);
-    hash = Math.imul(hash, 0x01000193);
+function readCodexFleetScoreV1(value: unknown): CodexFleetScoreV1 {
+  const score = strictRecord(value, [
+    "candidateKey",
+    "eligible",
+    "rejectionReason",
+    "quotaPressure",
+    "leasePressure",
+    "observedBurnPressure",
+    "inferredBurnPressure",
+    "runwayPressure",
+    "uncertaintyPressure",
+    "cacheAffinityBenefit",
+    "cacheState",
+    "overlayPreferenceBenefit",
+    "total",
+    "confidence",
+  ]);
+  const parsed: CodexFleetScoreV1 = {
+    candidateKey: normalizeKey(strictString(score.candidateKey)),
+    eligible: strictBoolean(score.eligible),
+    rejectionReason:
+      score.rejectionReason === null
+        ? null
+        : strictEnum(score.rejectionReason, [
+            "allocator_disabled",
+            "unavailable",
+            "cooling",
+            "quota_ceiling",
+            "overlay_isolation",
+          ] as const),
+    quotaPressure: strictFiniteNumber(score.quotaPressure, 0, Number.MAX_SAFE_INTEGER),
+    leasePressure: strictFiniteNumber(score.leasePressure, 0, Number.MAX_SAFE_INTEGER),
+    observedBurnPressure: strictFiniteNumber(
+      score.observedBurnPressure,
+      0,
+      Number.MAX_SAFE_INTEGER,
+    ),
+    inferredBurnPressure: strictFiniteNumber(
+      score.inferredBurnPressure,
+      0,
+      Number.MAX_SAFE_INTEGER,
+    ),
+    runwayPressure: strictFiniteNumber(score.runwayPressure, 0, Number.MAX_SAFE_INTEGER),
+    uncertaintyPressure: strictFiniteNumber(score.uncertaintyPressure, 0, Number.MAX_SAFE_INTEGER),
+    cacheAffinityBenefit: strictFiniteNumber(
+      score.cacheAffinityBenefit,
+      0,
+      Number.MAX_SAFE_INTEGER,
+    ),
+    cacheState: strictEnum(score.cacheState, ["unknown", "healthy", "collapsed"] as const),
+    overlayPreferenceBenefit: strictFiniteNumber(
+      score.overlayPreferenceBenefit,
+      0,
+      Number.MAX_SAFE_INTEGER,
+    ),
+    total: strictFiniteNumber(score.total, -Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER),
+    confidence: strictConfidence(score.confidence),
+  };
+  const expectedTotal =
+    parsed.quotaPressure +
+    parsed.leasePressure +
+    parsed.observedBurnPressure +
+    parsed.inferredBurnPressure +
+    parsed.runwayPressure +
+    parsed.uncertaintyPressure -
+    parsed.cacheAffinityBenefit -
+    parsed.overlayPreferenceBenefit;
+  if (parsed.eligible !== (parsed.rejectionReason === null) || parsed.total !== expectedTotal) {
+    throw new Error("Codex fleet replay score is internally inconsistent");
   }
-  return hash >>> 0;
+  return parsed;
+}
+
+function strictRecord(value: unknown, expectedKeys: readonly string[]): Record<string, unknown> {
+  if (
+    value === null ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    ![Object.prototype, null].includes(Object.getPrototypeOf(value))
+  ) {
+    throw new Error("Codex fleet replay value must be a plain object");
+  }
+  const record = value as Record<string, unknown>;
+  const actualKeys = Object.keys(record).sort();
+  const canonicalExpected = [...expectedKeys].sort();
+  if (canonicalJson(actualKeys) !== canonicalJson(canonicalExpected)) {
+    throw new Error("Codex fleet replay object has missing or unknown fields");
+  }
+  return record;
+}
+
+function strictEnum<const T extends readonly string[]>(value: unknown, values: T): T[number] {
+  if (typeof value !== "string" || !values.includes(value)) {
+    throw new Error("Codex fleet replay enum value is invalid");
+  }
+  return value as T[number];
+}
+
+function strictConfidence(value: unknown): CodexFleetConfidence {
+  return strictEnum(value, ["unknown", "low", "medium", "high"] as const);
+}
+
+function strictString(value: unknown): string {
+  if (typeof value !== "string") throw new Error("Codex fleet replay value must be a string");
+  return value;
+}
+
+function strictOptionalKey(value: unknown): string | null {
+  return value === null ? null : normalizeKey(strictString(value));
+}
+
+function strictBoolean(value: unknown): boolean {
+  if (typeof value !== "boolean") throw new Error("Codex fleet replay value must be boolean");
+  return value;
+}
+
+function strictFiniteNumber(value: unknown, min: number, max: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < min || value > max) {
+    throw new Error("Codex fleet replay numeric value is invalid");
+  }
+  return value;
+}
+
+function strictInteger(value: unknown, min: number, max: number): number {
+  const number = strictFiniteNumber(value, min, max);
+  if (!Number.isInteger(number)) throw new Error("Codex fleet replay value must be an integer");
+  return number;
+}
+
+function strictSha256(value: unknown): string {
+  if (typeof value !== "string" || !/^[a-f0-9]{64}$/.test(value)) {
+    throw new Error("Codex fleet replay fingerprint must be lowercase SHA-256");
+  }
+  return value;
+}
+
+function fingerprint(value: unknown): string {
+  const serialized = canonicalJson(value);
+  return bytesToHex(sha256(new TextEncoder().encode(serialized)));
+}
+
+function fingerprintReplayInput(
+  input: CodexFleetDecisionInputV1,
+  truncatedCandidateCount: number,
+): string {
+  // Truncation affects actual-vs-shadow comparability and the UI explanation,
+  // so it is part of the replay input's integrity boundary rather than mutable
+  // envelope metadata.
+  return fingerprint({ input, truncatedCandidateCount });
 }
 
 function canonicalJson(value: unknown): string {

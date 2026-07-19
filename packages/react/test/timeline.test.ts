@@ -199,6 +199,36 @@ describe("buildTimeline", () => {
     expect(projected).not.toContain("must-not-reach-the-view");
   });
 
+  test("accepts manager priority as a paced standard-work admission reason", () => {
+    reset();
+    const payload = fleetDecisionPayload();
+    payload.comparison = "different_outcome";
+    const replay = payload.replay as { decision: Record<string, unknown> };
+    replay.decision = {
+      ...replay.decision,
+      outcome: "paced",
+      selectedCandidateKey: null,
+      reason: "admission_paced",
+      admission: {
+        outcome: "pace",
+        reason: "manager_priority",
+        borrowedIdleCapacity: false,
+      },
+      borrowedOverlayCapacity: false,
+      strandedEligibleCount: 0,
+      scores: [],
+    };
+
+    const [item] = buildTimeline([event("codex.fleet.decision", payload)]);
+    expect(item).toMatchObject({
+      kind: "fleet-decision",
+      shadowOutcome: "paced",
+      shadowReason: "admission_paced",
+      admissionOutcome: "pace",
+      admissionReason: "manager_priority",
+    });
+  });
+
   test("caps score rows at 32 without reading an extra secret-shaped row", () => {
     reset();
     const payload = fleetDecisionPayload();

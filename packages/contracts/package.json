@@ -33,6 +33,7 @@
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },
   "dependencies": {
+    "@noble/hashes": "^1.8.0",
     "zod": "^4.2.1"
   },
   "devDependencies": {

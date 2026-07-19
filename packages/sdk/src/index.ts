@@ -98,6 +98,7 @@ export type {
   CodexConnectStart,
   CodexConnectPoll,
   CodexFleetConfidence,
+  CodexFleetCacheState,
   CodexFleetDecisionEventPayload,
   CodexFleetDecisionScore,
   CodexFleetShadowComparison,
