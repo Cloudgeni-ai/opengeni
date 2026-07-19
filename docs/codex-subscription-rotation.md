@@ -119,8 +119,11 @@ If no healthy candidate exists for an active goal, `armCodexCapacityWait`
 atomically marks the blocked turn failed once, releases its credential lease,
 idles the session with reason `codex_capacity`, writes the audit events, and
 creates or advances one `codex_capacity_waiters` row. The common lock order is
-workspace rotation row → session → goal → blocked turn → live credential lease
-(when reactive) → waiter. A reactive arm must still own the exact
+workspace rotation row → `workspace_inference_controls FOR SHARE` → actual
+workspace `FOR KEY SHARE` → session → exact turn → exact attempt → goal → live
+credential lease (when reactive) → waiter. Arming re-evaluates effective control
+under that shared control lock and becomes an event-free stale no-op if Pause or
+an unsettled control interruption won. A reactive arm must still own the exact
 holder/generation and worker-redispatch fence. The row records goal/control
 generation, accepted `policyHash`, the earliest authoritative reset (when known),
 bounded-refresh state, and `wakeRevision`/`observedWakeRevision`; it stores no
@@ -151,11 +154,13 @@ is authoritative. The workflow snapshots its wake counters before dispatching a
 turn, so a signal delivered after waiter commit but before the activity result
 returns causes immediate reconciliation instead of being baselined away. It
 reconstructs pending timers on worker/Temporal restart and `continueAsNew`.
-`reconcileCodexCapacityWait` atomically rechecks human queue, effective Pause,
-goal, policy, blocked-turn identity, and duplicate-work fences before recording
-the typed capacity-resume update; ordinary attempt claim repeats admission before
-provider/model/tool/billing work starts. Reset/boost entitlement redemption is
-never automatic.
+`reconcileCodexCapacityWait` takes the same shared control/workspace prefix and
+atomically rechecks human queue, effective Pause or unsettled control, goal,
+policy, blocked-turn identity, and duplicate-work fences before recording the
+typed capacity-resume update. If Pause committed first, the waiter is superseded
+without a continuation; if reconciliation committed first, a later Pause still
+fences ordinary attempt claim before provider/model/tool/billing work starts.
+Reset/boost entitlement redemption is never automatic.
 
 Only a **definitive credential/account refusal** can move the same durable turn to
 another credential:

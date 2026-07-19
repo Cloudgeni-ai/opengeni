@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import postgres from "postgres";
 
 const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../drizzle");
-const migrationName = "0065_session_event_payload_bounds.sql";
+const migrationName = "0067_session_event_payload_bounds.sql";
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
 type GuardedRow = {

@@ -12,7 +12,7 @@ import postgres from "postgres";
 import { createDb, listWorkspaceControlEvents } from "../src";
 
 const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../drizzle");
-const migrationName = "0066_workspace_control_event_bounds.sql";
+const migrationName = "0068_workspace_control_event_bounds.sql";
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const encoder = new TextEncoder();
 

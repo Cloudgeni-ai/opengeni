@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { boundWorkspaceControlEvent, workspaceControlUtf8Bytes } from "@opengeni/contracts";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import type { Database } from "./index";
 import * as schema from "./schema";
 
@@ -100,7 +100,7 @@ export function serializeEffectiveSessionControl(control: EffectiveSessionContro
   };
 }
 
-type WorkspaceControlRow = {
+export type WorkspaceControlRow = {
   workspaceId: string;
   accountId: string;
   revision: number | string;
@@ -177,17 +177,18 @@ export async function assertAgentCommandAuthorityInTransaction(
     action: "pause" | "resume" | "steer" | "message";
   },
 ): Promise<void> {
-  const lockedSessions = await db
-    .select({ id: schema.sessions.id })
-    .from(schema.sessions)
-    .where(
-      and(
-        eq(schema.sessions.workspaceId, input.workspaceId),
-        sql`${schema.sessions.id} in (${input.actor.sessionId}::uuid, ${input.targetSessionId}::uuid)`,
-      ),
-    )
-    .orderBy(schema.sessions.id)
-    .for("update");
+  // Every command caller establishes the control/workspace prefix first.
+  // Reusing the event-write helper here keeps cross-session actor authority on
+  // the same UUID-ordered session -> exact turn -> exact attempt suffix.
+  const authorityLocks = await lockSessionEventWriteRows(db, {
+    workspaceId: input.workspaceId,
+    controlLock: "already_locked",
+    workspaceLock: "already_locked",
+    sessionIds: [input.actor.sessionId, input.targetSessionId],
+    turnIds: [input.actor.turnId],
+    attemptIds: [input.actor.attemptId],
+  });
+  const lockedSessions = authorityLocks.sessions;
   if (!lockedSessions.some((row) => row.id === input.actor.sessionId)) {
     throw new AgentCommandAuthorityError("CALLER_STALE", "The calling session no longer exists");
   }
@@ -228,7 +229,6 @@ export async function assertAgentCommandAuthorityInTransaction(
       on session.workspace_id = attempt.workspace_id and session.id = attempt.session_id
     where attempt.workspace_id = ${input.workspaceId}
       and attempt.id = ${input.actor.attemptId}
-    for update of attempt, turn
   `);
   const caller = rows[0];
   if (
@@ -356,6 +356,120 @@ export async function lockWorkspaceInferenceControl(
     );
   }
   return row;
+}
+
+export type SessionEventWriteLockInput = {
+  workspaceId: string;
+  /**
+   * Control-aware writes take this lock first. Callers that already hold the
+   * workspace control row (for example a Pause mutation under FOR UPDATE) say
+   * `already_locked`; ordinary audit/title appends use `none`.
+   */
+  controlLock?: WorkspaceControlLockMode | "already_locked" | "none";
+  /** Used only when a staged caller already established the workspace prefix. */
+  workspaceLock?: "key_share" | "already_locked";
+  sessionIds?: string[];
+  turnIds?: string[];
+  attemptIds?: string[];
+};
+
+export type SessionEventWriteLocks = {
+  control: WorkspaceControlRow | null;
+  workspace: typeof schema.workspaces.$inferSelect | null;
+  sessions: Array<typeof schema.sessions.$inferSelect>;
+  turns: Array<typeof schema.sessionTurns.$inferSelect>;
+  attempts: Array<typeof schema.sessionTurnAttempts.$inferSelect>;
+};
+
+/**
+ * Establish the one canonical lock prefix for every `session_events` writer:
+ *
+ *   workspace_inference_controls (when control-aware)
+ *     -> actual workspaces row FOR KEY SHARE
+ *     -> session rows FOR UPDATE, UUID ordered
+ *     -> exact turn rows FOR UPDATE, UUID ordered
+ *     -> exact attempt rows FOR UPDATE, UUID ordered
+ *
+ * `FOR KEY SHARE` is deliberate. Event inserts need the workspace key to remain
+ * stable for their FK, but they do not mutate the workspace. The old generic
+ * `FOR UPDATE` lock serialized unrelated sessions and inverted the activity
+ * path's session -> implicit workspace-FK edge.
+ *
+ * Complex lifecycle transactions may acquire allocator/control locks before
+ * this helper and may discover exact turn IDs only after locking the session.
+ * They use the explicit `already_locked` stages, while retaining the same
+ * monotonic table order. New event writers should prefer one complete call.
+ */
+export async function lockSessionEventWriteRows(
+  db: Database,
+  input: SessionEventWriteLockInput,
+): Promise<SessionEventWriteLocks> {
+  const controlLock = input.controlLock ?? "none";
+  const control =
+    controlLock === "share" || controlLock === "update"
+      ? await lockWorkspaceInferenceControl(db, input.workspaceId, controlLock)
+      : null;
+
+  let workspace: typeof schema.workspaces.$inferSelect | null = null;
+  if ((input.workspaceLock ?? "key_share") === "key_share") {
+    const [lockedWorkspace] = await db
+      .select()
+      .from(schema.workspaces)
+      .where(eq(schema.workspaces.id, input.workspaceId))
+      .for("key share")
+      .limit(1);
+    workspace = lockedWorkspace ?? null;
+  }
+
+  const sessionIds = [...new Set(input.sessionIds ?? [])].sort();
+  const sessions =
+    sessionIds.length > 0
+      ? await db
+          .select()
+          .from(schema.sessions)
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, input.workspaceId),
+              inArray(schema.sessions.id, sessionIds),
+            ),
+          )
+          .orderBy(schema.sessions.id)
+          .for("update")
+      : [];
+
+  const turnIds = [...new Set(input.turnIds ?? [])].sort();
+  const turns =
+    turnIds.length > 0
+      ? await db
+          .select()
+          .from(schema.sessionTurns)
+          .where(
+            and(
+              eq(schema.sessionTurns.workspaceId, input.workspaceId),
+              inArray(schema.sessionTurns.id, turnIds),
+            ),
+          )
+          .orderBy(schema.sessionTurns.id)
+          .for("update")
+      : [];
+
+  const attemptIds = [...new Set(input.attemptIds ?? [])].sort();
+  const attempts =
+    attemptIds.length > 0
+      ? await db
+          .select()
+          .from(schema.sessionTurnAttempts)
+          .where(
+            and(
+              eq(schema.sessionTurnAttempts.workspaceId, input.workspaceId),
+              inArray(schema.sessionTurnAttempts.id, attemptIds),
+            ),
+          )
+          .orderBy(schema.sessionTurnAttempts.id)
+          .for("update")
+      : [];
+
+  return { control, workspace, sessions, turns, attempts };
 }
 
 export async function registerSessionTurnAttemptClaim(
@@ -854,13 +968,24 @@ export async function evaluateSessionControls(
   db: Database,
   workspaceId: string,
   sessionIds: string[],
-  options: { lock?: WorkspaceControlLockMode } = {},
+  options: {
+    lock?: WorkspaceControlLockMode;
+    /** Reuse a control row already locked before workspace/session/turn rows. */
+    workspaceControl?: WorkspaceControlRow | undefined;
+  } = {},
 ): Promise<Map<string, EffectiveSessionControl>> {
   const uniqueIds = [...new Set(sessionIds)];
   if (uniqueIds.length === 0) {
     return new Map();
   }
-  const workspace = await lockWorkspaceInferenceControl(db, workspaceId, options.lock ?? "share");
+  if (options.workspaceControl && options.workspaceControl.workspaceId !== workspaceId) {
+    throw new SessionControlInvariantError(
+      `Locked workspace control ${options.workspaceControl.workspaceId} does not match ${workspaceId}`,
+    );
+  }
+  const workspace =
+    options.workspaceControl ??
+    (await lockWorkspaceInferenceControl(db, workspaceId, options.lock ?? "share"));
   const stopping = await unsettledAttemptCounts(db, workspaceId, uniqueIds);
   const result = new Map<string, EffectiveSessionControl>();
   if (uniqueIds.length <= TARGET_PATH_PROJECTION_LIMIT) {
@@ -1124,7 +1249,10 @@ export async function evaluateSessionControl(
   db: Database,
   workspaceId: string,
   sessionId: string,
-  options: { lock?: WorkspaceControlLockMode } = {},
+  options: {
+    lock?: WorkspaceControlLockMode;
+    workspaceControl?: WorkspaceControlRow | undefined;
+  } = {},
 ): Promise<EffectiveSessionControl> {
   return (await evaluateSessionControls(db, workspaceId, [sessionId], options)).get(sessionId)!;
 }
@@ -1568,6 +1696,16 @@ export async function mutateSessionControlInTransaction(
   },
 ): Promise<SessionControlMutationResult> {
   const workspace = await lockWorkspaceInferenceControl(db, input.workspaceId, "update");
+  await lockSessionEventWriteRows(db, {
+    workspaceId: input.workspaceId,
+    controlLock: "already_locked",
+    sessionIds:
+      input.actor.type === "agent_attempt"
+        ? [input.actor.sessionId, input.sessionId]
+        : [input.sessionId],
+    turnIds: input.actor.type === "agent_attempt" ? [input.actor.turnId] : [],
+    attemptIds: input.actor.type === "agent_attempt" ? [input.actor.attemptId] : [],
+  });
   const hash = canonicalSessionCommandHash({
     action: input.action,
     reason: input.reason ?? null,
@@ -1597,7 +1735,7 @@ export async function mutateSessionControlInTransaction(
     return {
       receipt: reserved.receipt,
       control: await evaluateSessionControl(db, input.workspaceId, input.sessionId, {
-        lock: "share",
+        workspaceControl: workspace,
       }),
       sessionControlEventId,
       workspaceControlEventId,
@@ -1615,7 +1753,7 @@ export async function mutateSessionControlInTransaction(
     });
   }
   const before = await evaluateSessionControl(db, input.workspaceId, input.sessionId, {
-    lock: "share",
+    workspaceControl: workspace,
   });
   if (input.expectedControlEtag && input.expectedControlEtag !== before.controlEtag) {
     throw new SessionControlConflictError();

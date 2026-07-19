@@ -6,9 +6,9 @@ import { fileURLToPath } from "node:url";
 import postgres from "postgres";
 
 const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../drizzle");
-const payloadBoundsMigration = "0065_session_event_payload_bounds.sql";
-const controlBoundsMigration = "0066_workspace_control_event_bounds.sql";
-const backfillMigration = "0067_session_event_history_backfill.sql";
+const payloadBoundsMigration = "0067_session_event_payload_bounds.sql";
+const controlBoundsMigration = "0068_workspace_control_event_bounds.sql";
+const backfillMigration = "0069_session_event_history_backfill.sql";
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
 let blank: BlankTestDatabase | null = null;

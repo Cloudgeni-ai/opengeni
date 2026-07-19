@@ -119,6 +119,10 @@ import postgres from "postgres";
 import { decryptEnvironmentValue } from "./environment-crypto";
 import { sanitizeEventPayload, sanitizeModelPayload } from "./event-payload-sanitizer";
 import {
+  runIdempotentPersistenceTransaction,
+  type IdempotentPersistenceTransactionOptions,
+} from "./persistence-errors";
+import {
   closePendingSessionToolCallsInTransaction,
   historyCallId,
   historyItemType,
@@ -129,6 +133,7 @@ import {
   evaluateSessionControl,
   evaluateSessionControls,
   evaluateSessionDiscoveryControls,
+  lockSessionEventWriteRows,
   lockWorkspaceInferenceControl,
   registerInternalUpdateWakeInTransaction,
   SESSION_DISCOVERY_CONTROL_TITLE_MAX_CHARS,
@@ -137,6 +142,7 @@ import {
   type SessionDiscoveryControl,
   SessionControlInvariantError,
   type SessionTurnAttemptOutcome,
+  type WorkspaceControlRow,
 } from "./session-control";
 import * as schema from "./schema";
 import {
@@ -170,6 +176,7 @@ export {
   sanitizeEventString,
   sanitizeModelPayload,
 } from "./event-payload-sanitizer";
+export * from "./persistence-errors";
 export { sanitizeMemoryText } from "./memory-domain";
 // Re-exported so external consumers can `import { migrate } from "@opengeni/db"`.
 // The `@opengeni/db/migrate` subpath stays available too (internal callers + the
@@ -427,6 +434,28 @@ export async function withWorkspaceRls<T>(
   fn: (db: Database) => Promise<T>,
 ): Promise<T> {
   return await withRlsContext(db, await rlsContextForWorkspace(db, workspaceId), fn);
+}
+
+async function retryWorkspacePersistence<T>(
+  db: Database,
+  workspaceId: string,
+  options: IdempotentPersistenceTransactionOptions,
+  fn: (db: Database) => Promise<T>,
+): Promise<T> {
+  return await runIdempotentPersistenceTransaction(options, async () => {
+    return await withWorkspaceRls(db, workspaceId, fn);
+  });
+}
+
+async function retryRlsPersistence<T>(
+  db: Database,
+  context: RlsContext,
+  options: IdempotentPersistenceTransactionOptions,
+  fn: (db: Database) => Promise<T>,
+): Promise<T> {
+  return await runIdempotentPersistenceTransaction(options, async () => {
+    return await withRlsContext(db, context, fn);
+  });
 }
 
 /**
@@ -8431,11 +8460,13 @@ function nextCodexCapacityCheckAt(
 
 /**
  * Atomically settle one all-unavailable turn and arm exactly one durable wait.
- * Lock order is allocator rotation row -> session -> goal -> blocked turn ->
- * live lease (when a reactive failure owns one) -> waiter. The failed turn,
- * idle/capacity-paused session, durable events, lease release, and waiter
- * generation commit together; a crash cannot leave only half of the boundary
- * visible.
+ * Lock order is allocator rotation row -> workspace control -> actual workspace
+ * -> session -> exact turn -> exact attempt -> goal -> live lease (when a
+ * reactive failure owns one) -> waiter. The control share lock and effective
+ * control recheck prevent a capacity boundary from closing an attempt after a
+ * committed Pause. The failed turn, idle/capacity-paused session, durable
+ * events, lease release, and waiter generation commit together; a crash cannot
+ * leave only half of the boundary visible.
  */
 export async function armCodexCapacityWait(
   db: Database,
@@ -8470,18 +8501,21 @@ export async function armCodexCapacityWait(
         if (!rotation || rotation.accountId !== input.accountId) {
           return { action: "stale", waiter: null, events: [] } as const;
         }
-        const [session] = await tx
-          .select()
-          .from(schema.sessions)
-          .where(
-            and(
-              eq(schema.sessions.accountId, input.accountId),
-              eq(schema.sessions.workspaceId, input.workspaceId),
-              eq(schema.sessions.id, input.sessionId),
-            ),
-          )
-          .for("update")
-          .limit(1);
+        const locks = await lockSessionEventWriteRows(tx, {
+          workspaceId: input.workspaceId,
+          controlLock: "share",
+          sessionIds: [input.sessionId],
+          turnIds: [input.turnId],
+          attemptIds: [input.attemptId],
+        });
+        const session = locks.sessions[0];
+        const turn = locks.turns[0];
+        const attempt = locks.attempts[0];
+        const effectiveControl = session
+          ? await evaluateSessionControl(tx, input.workspaceId, input.sessionId, {
+              workspaceControl: locks.control ?? undefined,
+            })
+          : null;
         const [goal] = await tx
           .select()
           .from(schema.sessionGoals)
@@ -8490,18 +8524,6 @@ export async function armCodexCapacityWait(
               eq(schema.sessionGoals.workspaceId, input.workspaceId),
               eq(schema.sessionGoals.id, input.goalId),
               eq(schema.sessionGoals.sessionId, input.sessionId),
-            ),
-          )
-          .for("update")
-          .limit(1);
-        const [turn] = await tx
-          .select()
-          .from(schema.sessionTurns)
-          .where(
-            and(
-              eq(schema.sessionTurns.workspaceId, input.workspaceId),
-              eq(schema.sessionTurns.id, input.turnId),
-              eq(schema.sessionTurns.sessionId, input.sessionId),
             ),
           )
           .for("update")
@@ -8529,6 +8551,20 @@ export async function armCodexCapacityWait(
           .for("update")
           .limit(1);
 
+        const exactRowsMatch =
+          session?.accountId === input.accountId &&
+          turn?.accountId === input.accountId &&
+          turn?.sessionId === input.sessionId &&
+          attempt?.accountId === input.accountId &&
+          attempt?.sessionId === input.sessionId &&
+          attempt?.turnId === input.turnId;
+        if (!exactRowsMatch) {
+          return {
+            action: "stale",
+            waiter: existing ? mapCodexCapacityWaiter(existing) : null,
+            events: [],
+          } as const;
+        }
         if (
           existing?.status === "waiting" &&
           existing.blockedTurnId === input.turnId &&
@@ -8550,9 +8586,9 @@ export async function armCodexCapacityWait(
             Number(lease.generation) === input.leaseFence.generation &&
             currentRedispatches === (input.expectedRedispatches ?? currentRedispatches));
         if (
-          !session ||
           !goal ||
-          !turn ||
+          effectiveControl?.state !== "active" ||
+          effectiveControl.settlement !== null ||
           session.activeTurnId !== input.turnId ||
           session.status !== "running" ||
           goal.status !== "active" ||
@@ -8976,6 +9012,10 @@ export async function reconcileCodexCapacityWait<
         if (!rotation || rotation.accountId !== input.accountId) {
           return { action: "stale", waiter: null, events: [] } as const;
         }
+        const prefix = await lockSessionEventWriteRows(tx, {
+          workspaceId: input.workspaceId,
+          controlLock: "share",
+        });
         const [waiterRead] = await tx
           .select()
           .from(schema.codexCapacityWaiters)
@@ -8994,18 +9034,20 @@ export async function reconcileCodexCapacityWait<
             events: [],
           } as const;
         }
-        const [session] = await tx
-          .select()
-          .from(schema.sessions)
-          .where(
-            and(
-              eq(schema.sessions.accountId, input.accountId),
-              eq(schema.sessions.workspaceId, input.workspaceId),
-              eq(schema.sessions.id, input.sessionId),
-            ),
-          )
-          .for("update")
-          .limit(1);
+        const locks = await lockSessionEventWriteRows(tx, {
+          workspaceId: input.workspaceId,
+          controlLock: "already_locked",
+          workspaceLock: "already_locked",
+          sessionIds: [input.sessionId],
+          turnIds: [waiterRead.blockedTurnId],
+        });
+        const session = locks.sessions[0];
+        const blockedTurn = locks.turns[0];
+        const effectiveControl = session
+          ? await evaluateSessionControl(tx, input.workspaceId, input.sessionId, {
+              workspaceControl: prefix.control ?? undefined,
+            })
+          : null;
         const [goal] = await tx
           .select()
           .from(schema.sessionGoals)
@@ -9014,18 +9056,6 @@ export async function reconcileCodexCapacityWait<
               eq(schema.sessionGoals.workspaceId, input.workspaceId),
               eq(schema.sessionGoals.id, waiterRead.goalId),
               eq(schema.sessionGoals.sessionId, input.sessionId),
-            ),
-          )
-          .for("update")
-          .limit(1);
-        const [blockedTurn] = await tx
-          .select()
-          .from(schema.sessionTurns)
-          .where(
-            and(
-              eq(schema.sessionTurns.workspaceId, input.workspaceId),
-              eq(schema.sessionTurns.id, waiterRead.blockedTurnId),
-              eq(schema.sessionTurns.sessionId, input.sessionId),
             ),
           )
           .for("update")
@@ -9041,6 +9071,13 @@ export async function reconcileCodexCapacityWait<
           !goal ||
           !blockedTurn ||
           !waiter ||
+          session.accountId !== input.accountId ||
+          blockedTurn.accountId !== input.accountId ||
+          blockedTurn.sessionId !== input.sessionId ||
+          waiter.accountId !== input.accountId ||
+          waiter.workspaceId !== input.workspaceId ||
+          waiter.sessionId !== input.sessionId ||
+          waiter.blockedTurnId !== blockedTurn.id ||
           waiter.generation !== input.generation ||
           waiter.status !== "waiting"
         ) {
@@ -9075,7 +9112,9 @@ export async function reconcileCodexCapacityWait<
           .limit(1);
         const currentPolicyHash = codexCapacityPolicyHashFromTurnMetadata(blockedTurn.metadata);
         let supersedeReason: string | null = null;
-        if (goal.status !== "active" || goal.version !== waiter.goalVersion) {
+        if (effectiveControl?.state !== "active" || effectiveControl.settlement !== null) {
+          supersedeReason = "control_changed";
+        } else if (goal.status !== "active" || goal.version !== waiter.goalVersion) {
           supersedeReason = "goal_changed";
         } else if (currentPolicyHash !== waiter.policyHash) {
           supersedeReason = "credential_policy_changed";
@@ -12035,7 +12074,7 @@ type SessionEventProjectionRow = {
  * Read one direction-aware session-event page without transferring legacy raw
  * payloads or malformed free-form envelope strings out of PostgreSQL.
  *
- * Migration 0065 deliberately leaves historical rows untouched. This query
+ * Migration 0067 deliberately leaves historical rows untouched. This query
  * invokes its immutable payload projector in SQL and mirrors the rolling
  * envelope guard in SQL, then accumulates small batches under one RLS
  * transaction. `bytes` is the exact UTF-8 size of `JSON.stringify(events)`;
@@ -12576,6 +12615,7 @@ type TurnAttemptFenceResult =
       workspace: typeof schema.workspaces.$inferSelect;
       session: typeof schema.sessions.$inferSelect;
       turn: typeof schema.sessionTurns.$inferSelect;
+      attempt: typeof schema.sessionTurnAttempts.$inferSelect;
     }
   | {
       allowed: false;
@@ -12583,10 +12623,12 @@ type TurnAttemptFenceResult =
       workspace: typeof schema.workspaces.$inferSelect | null;
       session: typeof schema.sessions.$inferSelect | null;
       turn: typeof schema.sessionTurns.$inferSelect | null;
+      attempt: typeof schema.sessionTurnAttempts.$inferSelect | null;
     };
 
 /**
- * Lock order for every activity write fence: workspace -> session -> turn.
+ * Lock order for every activity write fence: workspace control -> actual
+ * workspace -> session -> exact turn -> exact attempt.
  *
  * Activity writes only need a shared workspace admission lock: concurrent
  * sessions may write independently, while an exclusive workspace Pause/Resume
@@ -12605,43 +12647,24 @@ async function lockTurnAttemptWriteFenceTx(
     attemptId: string;
   },
 ): Promise<TurnAttemptFenceResult> {
-  const effectiveControl = await evaluateSessionControl(tx, input.workspaceId, input.sessionId, {
-    lock: "share",
+  const locks = await lockSessionEventWriteRows(tx, {
+    workspaceId: input.workspaceId,
+    controlLock: "share",
+    sessionIds: [input.sessionId],
+    turnIds: [input.turnId],
+    attemptIds: [input.attemptId],
   });
-  const [workspace] = await tx
-    .select()
-    .from(schema.workspaces)
-    .where(eq(schema.workspaces.id, input.workspaceId))
-    .limit(1);
-  const [session] = await tx
-    .select()
-    .from(schema.sessions)
-    .where(
-      and(
-        eq(schema.sessions.workspaceId, input.workspaceId),
-        eq(schema.sessions.id, input.sessionId),
-      ),
-    )
-    .for("update")
-    .limit(1);
-  const [turn] = await tx
-    .select()
-    .from(schema.sessionTurns)
-    .where(
-      and(
-        eq(schema.sessionTurns.workspaceId, input.workspaceId),
-        eq(schema.sessionTurns.sessionId, input.sessionId),
-        eq(schema.sessionTurns.id, input.turnId),
-      ),
-    )
-    .for("update")
-    .limit(1);
-  const base = {
-    workspace: workspace ?? null,
-    session: session ?? null,
-    turn: turn ?? null,
-  };
-  if (!workspace || !session || !turn) return { allowed: false, reason: "not_found", ...base };
+  const workspace = locks.workspace;
+  const session = locks.sessions.find((row) => row.id === input.sessionId) ?? null;
+  const turn = locks.turns.find((row) => row.id === input.turnId) ?? null;
+  const attempt = locks.attempts.find((row) => row.id === input.attemptId) ?? null;
+  const base = { workspace, session, turn, attempt };
+  if (!workspace || !session || !turn || !attempt) {
+    return { allowed: false, reason: "not_found", ...base };
+  }
+  const effectiveControl = await evaluateSessionControl(tx, input.workspaceId, input.sessionId, {
+    workspaceControl: locks.control ?? undefined,
+  });
   if (effectiveControl.state === "paused") {
     return {
       allowed: false,
@@ -12659,6 +12682,17 @@ async function lockTurnAttemptWriteFenceTx(
     return { allowed: false, reason: "generation_changed", ...base };
   }
   if (turn.activeAttemptId !== input.attemptId) {
+    return { allowed: false, reason: "attempt_changed", ...base };
+  }
+  if (
+    turn.accountId !== session.accountId ||
+    turn.sessionId !== input.sessionId ||
+    attempt.accountId !== session.accountId ||
+    attempt.sessionId !== input.sessionId ||
+    attempt.turnId !== input.turnId ||
+    attempt.executionGeneration !== input.executionGeneration ||
+    !["claimed", "running"].includes(attempt.state)
+  ) {
     return { allowed: false, reason: "attempt_changed", ...base };
   }
   const [interruption] = await tx
@@ -12679,7 +12713,7 @@ async function lockTurnAttemptWriteFenceTx(
   if (!["running", "requires_action"].includes(turn.status)) {
     return { allowed: false, reason: "turn_terminal", ...base };
   }
-  return { allowed: true, workspace, session, turn };
+  return { allowed: true, workspace, session, turn, attempt };
 }
 
 /**
@@ -15975,70 +16009,17 @@ async function commitWorkspaceCaptureRevision(
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
-        // Match the canonical control/lifecycle lock order. A shared inference-
-        // control lock makes acceptance of Pause/Steer and this commit mutually
-        // ordered: either this revision commits first, or the control transaction
-        // commits its exact attempt interruption first and the checks below reject
-        // the late capture. Never rely on an in-process AbortSignal for that race.
-        const [workspaceControl] = await tx
-          .select({ workspaceId: schema.workspaceInferenceControls.workspaceId })
-          .from(schema.workspaceInferenceControls)
-          .where(eq(schema.workspaceInferenceControls.workspaceId, input.workspaceId))
-          .for("share")
-          .limit(1);
-        if (!workspaceControl) {
-          throw new Error(`Workspace control not found: ${input.workspaceId}`);
-        }
-        await tx
-          .select({ id: schema.workspaces.id })
-          .from(schema.workspaces)
-          .where(eq(schema.workspaces.id, input.workspaceId))
-          .for("update")
-          .limit(1);
-        const [session] = await tx
-          .select()
-          .from(schema.sessions)
-          .where(
-            and(
-              eq(schema.sessions.workspaceId, input.workspaceId),
-              eq(schema.sessions.id, input.sessionId),
-            ),
-          )
-          .for("update")
-          .limit(1);
+        const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
+          workspaceId: input.workspaceId,
+          controlLock: "share",
+          sessionIds: [input.sessionId],
+          turnIds: [input.turnId],
+          attemptIds: [input.attemptId],
+        });
+        const session = locks.sessions[0];
         if (!session) throw new Error(`Session not found: ${input.sessionId}`);
-
-        const [turn] = await tx
-          .select({
-            accountId: schema.sessionTurns.accountId,
-            executionGeneration: schema.sessionTurns.executionGeneration,
-            status: schema.sessionTurns.status,
-          })
-          .from(schema.sessionTurns)
-          .where(
-            and(
-              eq(schema.sessionTurns.workspaceId, input.workspaceId),
-              eq(schema.sessionTurns.sessionId, input.sessionId),
-              eq(schema.sessionTurns.id, input.turnId),
-            ),
-          )
-          .for("update")
-          .limit(1);
-        const [attempt] = turn
-          ? await tx
-              .select()
-              .from(schema.sessionTurnAttempts)
-              .where(
-                and(
-                  eq(schema.sessionTurnAttempts.workspaceId, input.workspaceId),
-                  eq(schema.sessionTurnAttempts.sessionId, input.sessionId),
-                  eq(schema.sessionTurnAttempts.turnId, input.turnId),
-                  eq(schema.sessionTurnAttempts.id, input.attemptId),
-                ),
-              )
-              .for("update")
-              .limit(1)
-          : [];
+        const turn = locks.turns.find((row) => row.id === input.turnId);
+        const attempt = locks.attempts.find((row) => row.id === input.attemptId);
         const [interruption] = attempt
           ? await tx
               .select({ id: schema.sessionAttemptInterruptions.id })
@@ -16055,6 +16036,9 @@ async function commitWorkspaceCaptureRevision(
         if (
           !turn ||
           !attempt ||
+          turn.sessionId !== input.sessionId ||
+          attempt.sessionId !== input.sessionId ||
+          attempt.turnId !== input.turnId ||
           turn.accountId !== input.accountId ||
           attempt.accountId !== input.accountId ||
           attempt.executionGeneration !== turn.executionGeneration ||
@@ -18489,20 +18473,11 @@ export async function clearSessionGoal(
     workspaceId,
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
-        await tx
-          .select({ id: schema.workspaces.id })
-          .from(schema.workspaces)
-          .where(eq(schema.workspaces.id, workspaceId))
-          .for("update")
-          .limit(1);
-        const [session] = await tx
-          .select()
-          .from(schema.sessions)
-          .where(
-            and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)),
-          )
-          .for("update")
-          .limit(1);
+        const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
+          workspaceId,
+          sessionIds: [sessionId],
+        });
+        const session = locks.sessions[0];
         if (!session) {
           throw new Error(`Session not found: ${sessionId}`);
         }
@@ -19257,30 +19232,19 @@ export async function initializeSessionStartAtomically(
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
+        const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
+          workspaceId: input.workspaceId,
+          controlLock: "share",
+          sessionIds: [input.sessionId],
+        });
+        const session = locks.sessions[0];
+        if (!locks.workspace || !session) throw new Error(`Session not found: ${input.sessionId}`);
         const effectiveControl = await evaluateSessionControl(
           tx as unknown as Database,
           input.workspaceId,
           input.sessionId,
-          { lock: "share" },
+          { workspaceControl: locks.control ?? undefined },
         );
-        const [workspace] = await tx
-          .select()
-          .from(schema.workspaces)
-          .where(eq(schema.workspaces.id, input.workspaceId))
-          .for("update")
-          .limit(1);
-        const [session] = await tx
-          .select()
-          .from(schema.sessions)
-          .where(
-            and(
-              eq(schema.sessions.workspaceId, input.workspaceId),
-              eq(schema.sessions.id, input.sessionId),
-            ),
-          )
-          .for("update")
-          .limit(1);
-        if (!workspace || !session) throw new Error(`Session not found: ${input.sessionId}`);
 
         const temporalWorkflowId = session.temporalWorkflowId ?? `session-${session.id}`;
         if (session.status === "cancelled") {
@@ -19443,6 +19407,11 @@ export async function initializeSessionStartAtomically(
           if (!turn) throw new Error("Failed to create initial session turn");
           insertedTurn = true;
         }
+        await lockSessionEventWriteRows(tx as unknown as Database, {
+          workspaceId: input.workspaceId,
+          workspaceLock: "already_locked",
+          turnIds: [turn.id],
+        });
 
         const [queuedEvent] = await tx
           .select({ id: schema.sessionEvents.id })
@@ -19651,6 +19620,7 @@ export async function claimSessionWorkForAttempt(
           lastSequence: number;
           triggerEventId: string | null;
           updates: Array<typeof schema.sessionSystemUpdates.$inferSelect>;
+          event: typeof schema.sessionEvents.$inferInsert | null;
         }> => {
           const [agentSteer] = await tx
             .select()
@@ -19707,6 +19677,7 @@ export async function claimSessionWorkForAttempt(
               lastSequence: nextSequence - 1,
               triggerEventId: null,
               updates: [],
+              event: null,
             };
           }
           const deliverable: typeof updates = [];
@@ -19768,6 +19739,7 @@ export async function claimSessionWorkForAttempt(
               lastSequence: nextSequence - 1,
               triggerEventId: null,
               updates: [],
+              event: null,
             };
           }
           await tx
@@ -19788,7 +19760,7 @@ export async function claimSessionWorkForAttempt(
               ),
             );
           const eventId = triggerEventId ?? crypto.randomUUID();
-          await tx.insert(schema.sessionEvents).values({
+          const event: typeof schema.sessionEvents.$inferInsert = {
             id: eventId,
             accountId,
             workspaceId,
@@ -19805,12 +19777,13 @@ export async function claimSessionWorkForAttempt(
               classifications: [...new Set(deliverable.map((update) => update.classification))],
             }),
             occurredAt,
-          });
+          };
           return {
             count: deliverable.length,
             lastSequence: nextSequence,
             triggerEventId: eventId,
             updates: deliverable,
+            event,
           };
         };
 
@@ -19823,20 +19796,18 @@ export async function claimSessionWorkForAttempt(
           workspaceId,
           "share",
         );
+        const prefix = await lockSessionEventWriteRows(tx as unknown as Database, {
+          workspaceId,
+          controlLock: "already_locked",
+          sessionIds: [sessionId],
+        });
         const effectiveControl = await evaluateSessionControl(
           tx as unknown as Database,
           workspaceId,
           sessionId,
-          { lock: "share" },
+          { workspaceControl },
         );
-        const [session] = await tx
-          .select()
-          .from(schema.sessions)
-          .where(
-            and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)),
-          )
-          .for("update")
-          .limit(1);
+        const session = prefix.sessions[0];
         if (!session) return { action: "unclaimed", reason: "no-work" };
         if (effectiveControl.state !== "active") {
           return { action: "unclaimed", reason: "gate-closed" };
@@ -19885,7 +19856,7 @@ export async function claimSessionWorkForAttempt(
             verifiedControlRevision: Number(workspaceControl.revision),
           });
         if (session.activeTurnId !== null) {
-          const [activeTurn] = await tx
+          const [activeTurnPreview] = await tx
             .select()
             .from(schema.sessionTurns)
             .where(
@@ -19895,8 +19866,33 @@ export async function claimSessionWorkForAttempt(
                 eq(schema.sessionTurns.id, session.activeTurnId),
               ),
             )
-            .for("update")
             .limit(1);
+          const activeLocks = await lockSessionEventWriteRows(tx as unknown as Database, {
+            workspaceId,
+            workspaceLock: "already_locked",
+            turnIds: [session.activeTurnId],
+            attemptIds: activeTurnPreview?.activeAttemptId
+              ? [activeTurnPreview.activeAttemptId]
+              : [],
+          });
+          const activeTurn = activeLocks.turns[0];
+          if (
+            !activeTurn ||
+            activeTurn.sessionId !== sessionId ||
+            activeTurn.accountId !== session.accountId ||
+            (activeTurn.activeAttemptId !== null &&
+              !activeLocks.attempts.some(
+                (attempt) =>
+                  attempt.id === activeTurn.activeAttemptId &&
+                  attempt.sessionId === sessionId &&
+                  attempt.turnId === activeTurn.id &&
+                  attempt.accountId === session.accountId,
+              ))
+          ) {
+            throw new Error(
+              `Session ${sessionId} points to invalid active turn ownership ${session.activeTurnId}`,
+            );
+          }
           const parsedDispatch = readTurnDispatchMetadata(activeTurn?.metadata);
           if (parsedDispatch.kind === "malformed") {
             throw new Error(`Malformed turn dispatch metadata: ${parsedDispatch.reason}`);
@@ -20047,8 +20043,11 @@ export async function claimSessionWorkForAttempt(
         // until settlement closes that owner; otherwise the live-session
         // uniqueness fence would surface as an opaque database error and, more
         // importantly, two attempts could contend for the same session state.
-        const [detachedLiveAttempt] = await tx
-          .select({ id: schema.sessionTurnAttempts.id })
+        const [detachedLiveAttemptPreview] = await tx
+          .select({
+            id: schema.sessionTurnAttempts.id,
+            turnId: schema.sessionTurnAttempts.turnId,
+          })
           .from(schema.sessionTurnAttempts)
           .where(
             and(
@@ -20057,9 +20056,31 @@ export async function claimSessionWorkForAttempt(
               inArray(schema.sessionTurnAttempts.state, ["claimed", "running"]),
             ),
           )
-          .for("update")
           .limit(1);
-        if (detachedLiveAttempt) {
+        const detachedLocks = detachedLiveAttemptPreview
+          ? await lockSessionEventWriteRows(tx as unknown as Database, {
+              workspaceId,
+              workspaceLock: "already_locked",
+              turnIds: [detachedLiveAttemptPreview.turnId],
+              attemptIds: [detachedLiveAttemptPreview.id],
+            })
+          : null;
+        const detachedLiveAttempt = detachedLocks?.attempts[0];
+        const detachedTurn = detachedLocks?.turns[0];
+        if (detachedLiveAttemptPreview) {
+          if (
+            !detachedLiveAttempt ||
+            !detachedTurn ||
+            detachedLiveAttempt.accountId !== session.accountId ||
+            detachedLiveAttempt.sessionId !== sessionId ||
+            detachedLiveAttempt.turnId !== detachedTurn.id ||
+            detachedTurn.accountId !== session.accountId ||
+            detachedTurn.sessionId !== sessionId
+          ) {
+            throw new Error(
+              `Detached live attempt ${detachedLiveAttemptPreview.id} lost ownership`,
+            );
+          }
           return { action: "unclaimed", reason: "control-pending" };
         }
 
@@ -20096,9 +20117,32 @@ export async function claimSessionWorkForAttempt(
               where workspace_id = ${workspaceId} and session_id = ${sessionId}
                 and status = 'queued' and source in ('user', 'api')
               order by position asc, created_at asc, id asc
-              for update skip locked limit 1`,
+              limit 1`,
             );
-        const queuedTurn = rows[0];
+        const queuedTurnPreview = rows[0];
+        const queuedLocks = queuedTurnPreview
+          ? await lockSessionEventWriteRows(tx as unknown as Database, {
+              workspaceId,
+              workspaceLock: "already_locked",
+              turnIds: [queuedTurnPreview.id],
+            })
+          : null;
+        const queuedTurnRow = queuedLocks?.turns[0];
+        if (
+          queuedTurnRow &&
+          (queuedTurnRow.sessionId !== sessionId || queuedTurnRow.accountId !== session.accountId)
+        ) {
+          throw new Error(
+            `Queued turn ${queuedTurnRow.id} does not belong to session ${sessionId}`,
+          );
+        }
+        const queuedTurn = queuedTurnRow
+          ? {
+              id: queuedTurnRow.id,
+              trigger_event_id: queuedTurnRow.triggerEventId,
+              metadata: queuedTurnRow.metadata,
+            }
+          : undefined;
         const id = queuedTurn?.id;
         if (!id) {
           // Manual compaction is a first-class maintenance execution, never
@@ -20177,6 +20221,7 @@ export async function claimSessionWorkForAttempt(
               })
               .returning();
             if (!compactionTurn) throw new Error("Failed to create context compaction execution");
+            await registerAttempt(compactionTurn);
             const [requestedEvent] = await tx
               .insert(schema.sessionEvents)
               .values({
@@ -20211,7 +20256,6 @@ export async function claimSessionWorkForAttempt(
                   eq(schema.sessions.id, sessionId),
                 ),
               );
-            await registerAttempt(compactionTurn);
             return { action: "claimed", turn: mapSessionTurn(compactionTurn) };
           }
 
@@ -20346,6 +20390,9 @@ export async function claimSessionWorkForAttempt(
             })
             .returning();
           if (!internalTurn) throw new Error("Failed to create internal update inference");
+          await registerAttempt(internalTurn);
+          if (!delivered.event) throw new Error("Delivered update batch has no durable event");
+          await tx.insert(schema.sessionEvents).values(delivered.event);
           if (goalUpdate && typeof goalUpdate.payload.goalId === "string") {
             await tx
               .update(schema.sessionGoals)
@@ -20370,7 +20417,6 @@ export async function claimSessionWorkForAttempt(
             .where(
               and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)),
             );
-          await registerAttempt(internalTurn);
           return { action: "claimed", turn: mapSessionTurn(internalTurn) };
         }
         const predecessorAttemptId = queuedSteerReplacementAttemptId(queuedTurn.metadata);
@@ -20431,6 +20477,7 @@ export async function claimSessionWorkForAttempt(
         if (!row) {
           throw new Error(`Session turn not found: ${id}`);
         }
+        await registerAttempt(row);
         const [{ historyPosition } = { historyPosition: 0 }] = await tx
           .select({
             historyPosition: sql<number>`coalesce(max(${schema.sessionHistoryItems.position}), -1) + 1`,
@@ -20462,6 +20509,9 @@ export async function claimSessionWorkForAttempt(
           session.lastSequence + 1,
           now,
         );
+        if (delivered.event) {
+          await tx.insert(schema.sessionEvents).values(delivered.event);
+        }
         await tx
           .update(schema.sessions)
           .set({
@@ -20474,7 +20524,6 @@ export async function claimSessionWorkForAttempt(
           .where(
             and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)),
           );
-        await registerAttempt(row);
         return { action: "claimed", turn: mapSessionTurn(row) };
       }),
   );
@@ -20493,9 +20542,10 @@ export type SessionAttemptInterruptionSettlement = {
  * boundary: after this transaction it has no inference, user-visible output,
  * or workspace-persistence authority. Fenced/idempotent cleanup and telemetry
  * may still finish. This may race the workflow's logical settlement transaction
- * in either order; both use the same session-first lock order and require the
- * durable interruption. Temporal separately waits for the activity promise to
- * terminate before the workflow dispatches its replacement.
+ * in either order; both use the canonical control -> workspace -> session ->
+ * exact turn -> exact attempt lock order and require the durable interruption.
+ * Temporal separately waits for the activity promise to terminate before the
+ * workflow dispatches its replacement.
  */
 export async function markSessionAttemptQuiesced(
   db: Database,
@@ -20511,31 +20561,52 @@ export async function markSessionAttemptQuiesced(
   },
 ): Promise<SessionEvent[]> {
   return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
-    await lockWorkspaceInferenceControl(scopedDb, input.workspaceId, "share");
-    const [session] = await scopedDb
-      .select()
-      .from(schema.sessions)
-      .where(
-        and(
-          eq(schema.sessions.workspaceId, input.workspaceId),
-          eq(schema.sessions.id, input.sessionId),
-        ),
-      )
-      .for("update")
-      .limit(1);
-    const [attempt] = await scopedDb
-      .select()
+    await lockSessionEventWriteRows(scopedDb, {
+      workspaceId: input.workspaceId,
+      controlLock: "share",
+      sessionIds: [],
+    });
+    // The attempt's turn identity is immutable. Read it only to discover the
+    // exact suffix, then lock and revalidate every ownership edge below.
+    const [attemptPreview] = await scopedDb
+      .select({ turnId: schema.sessionTurnAttempts.turnId })
       .from(schema.sessionTurnAttempts)
       .where(
         and(
           eq(schema.sessionTurnAttempts.workspaceId, input.workspaceId),
-          eq(schema.sessionTurnAttempts.sessionId, input.sessionId),
           eq(schema.sessionTurnAttempts.id, input.attemptId),
-          eq(schema.sessionTurnAttempts.temporalWorkflowId, input.temporalWorkflowId),
         ),
       )
-      .for("update")
       .limit(1);
+    const locks = await lockSessionEventWriteRows(scopedDb, {
+      workspaceId: input.workspaceId,
+      controlLock: "already_locked",
+      workspaceLock: "already_locked",
+      sessionIds: [input.sessionId],
+      turnIds: attemptPreview ? [attemptPreview.turnId] : [],
+      attemptIds: attemptPreview ? [input.attemptId] : [],
+    });
+    const session = locks.sessions[0];
+    const turn = locks.turns[0];
+    const attempt = locks.attempts[0];
+    // Revalidate immutable ownership only. Control settlement may already have
+    // advanced the session/turn workflow identity or turn generation while the
+    // exact predecessor attempt is still acknowledging physical quiescence.
+    if (
+      !session ||
+      !turn ||
+      !attempt ||
+      turn.accountId !== session.accountId ||
+      turn.sessionId !== session.id ||
+      attempt.accountId !== session.accountId ||
+      attempt.sessionId !== session.id ||
+      attempt.turnId !== turn.id ||
+      attempt.temporalWorkflowId !== input.temporalWorkflowId
+    ) {
+      throw new SessionControlInvariantError(
+        `Attempt ${input.attemptId} cannot acknowledge quiescence without its session ownership`,
+      );
+    }
     const [interruption] = attempt
       ? await scopedDb
           .select({
@@ -20553,11 +20624,6 @@ export async function markSessionAttemptQuiesced(
           .orderBy(asc(schema.sessionAttemptInterruptions.requestedAt))
           .limit(1)
       : [];
-    if (!session || !attempt) {
-      throw new SessionControlInvariantError(
-        `Attempt ${input.attemptId} cannot acknowledge quiescence without its session ownership`,
-      );
-    }
     if (!interruption) {
       if (input.allowUninterrupted) return [];
       throw new SessionControlInvariantError(
@@ -20669,21 +20735,66 @@ export async function settleSessionAttemptInterruptions(
 ): Promise<SessionAttemptInterruptionSettlement> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
     scopedDb.transaction(async (tx) => {
-      await lockWorkspaceInferenceControl(tx as unknown as Database, workspaceId, "share");
+      const prefix = await lockSessionEventWriteRows(tx as unknown as Database, {
+        workspaceId,
+        controlLock: "share",
+        sessionIds: [sessionId],
+      });
+      const session = prefix.sessions[0];
+      if (!session) throw new Error(`Session not found: ${sessionId}`);
       const effectiveControl = await evaluateSessionControl(
         tx as unknown as Database,
         workspaceId,
         sessionId,
-        { lock: "share" },
+        { workspaceControl: prefix.control ?? undefined },
       );
-      const [session] = await tx
-        .select()
-        .from(schema.sessions)
-        .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
-        .for("update")
+      const interruptionPreview = await tx
+        .select({ id: schema.sessionAttemptInterruptions.id })
+        .from(schema.sessionAttemptInterruptions)
+        .where(
+          and(
+            eq(schema.sessionAttemptInterruptions.workspaceId, workspaceId),
+            eq(schema.sessionAttemptInterruptions.sessionId, sessionId),
+            eq(schema.sessionAttemptInterruptions.attemptId, attemptId),
+            inArray(schema.sessionAttemptInterruptions.state, [
+              "pending",
+              "delivered",
+              "acknowledged",
+            ]),
+          ),
+        )
         .limit(1);
-      if (!session) throw new Error(`Session not found: ${sessionId}`);
-
+      if (interruptionPreview.length === 0) {
+        return {
+          action: "stale",
+          events: [],
+          attemptId,
+          turnId: null,
+          outcome: null,
+        };
+      }
+      const [attemptPreview] = await tx
+        .select()
+        .from(schema.sessionTurnAttempts)
+        .where(
+          and(
+            eq(schema.sessionTurnAttempts.workspaceId, workspaceId),
+            eq(schema.sessionTurnAttempts.id, attemptId),
+          ),
+        )
+        .limit(1);
+      if (!attemptPreview) {
+        throw new Error(`Interruption points to missing attempt: ${attemptId}`);
+      }
+      const exact = await lockSessionEventWriteRows(tx as unknown as Database, {
+        workspaceId,
+        workspaceLock: "already_locked",
+        turnIds: [attemptPreview.turnId],
+        attemptIds: [attemptId],
+      });
+      const attempt = exact.attempts[0];
+      const turn = exact.turns[0];
+      if (!attempt) throw new Error(`Interruption points to missing attempt: ${attemptId}`);
       const interruptions = await tx
         .select()
         .from(schema.sessionAttemptInterruptions)
@@ -20713,21 +20824,6 @@ export async function settleSessionAttemptInterruptions(
           outcome: null,
         };
       }
-
-      const [attempt] = await tx
-        .select()
-        .from(schema.sessionTurnAttempts)
-        .where(
-          and(
-            eq(schema.sessionTurnAttempts.workspaceId, workspaceId),
-            eq(schema.sessionTurnAttempts.id, attemptId),
-          ),
-        )
-        .for("update")
-        .limit(1);
-      if (!attempt) {
-        throw new Error(`Interruption points to missing attempt: ${attemptId}`);
-      }
       const now = new Date();
       if (attempt.state === "closed") {
         await tx
@@ -20748,22 +20844,13 @@ export async function settleSessionAttemptInterruptions(
         };
       }
 
-      const [turn] = await tx
-        .select()
-        .from(schema.sessionTurns)
-        .where(
-          and(
-            eq(schema.sessionTurns.workspaceId, workspaceId),
-            eq(schema.sessionTurns.sessionId, sessionId),
-            eq(schema.sessionTurns.id, attempt.turnId),
-          ),
-        )
-        .for("update")
-        .limit(1);
       if (
         !turn ||
         attempt.accountId !== session.accountId ||
         attempt.sessionId !== sessionId ||
+        attempt.turnId !== turn.id ||
+        turn.accountId !== session.accountId ||
+        turn.sessionId !== sessionId ||
         attempt.executionGeneration !== turn.executionGeneration ||
         turn.activeAttemptId !== attemptId
       ) {
@@ -21119,6 +21206,84 @@ export async function peekSessionWork(
 }
 
 /**
+ * Child lifecycle transactions discover immutable parentage only after taking
+ * the control/workspace prefix. They must then lock child and parent together,
+ * UUID ordered, before exact turn/attempt rows or an outbox FK insert. This is
+ * a staged use of the one canonical event-write helper, not a second lock order.
+ */
+async function lockChildLifecycleOutboxWriteRowsTx(
+  tx: Database,
+  workspaceId: string,
+  input: { sessionId: string; turnId?: string; attemptId?: string },
+) {
+  const prefix = await lockSessionEventWriteRows(tx, {
+    workspaceId,
+    controlLock: "share",
+    sessionIds: [],
+  });
+  const [preview] = await tx
+    .select({ id: schema.sessions.id, parentSessionId: schema.sessions.parentSessionId })
+    .from(schema.sessions)
+    .where(
+      and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, input.sessionId)),
+    )
+    .limit(1);
+  if (!preview) throw new Error(`Session not found: ${input.sessionId}`);
+
+  const sessionLocks = await lockSessionEventWriteRows(tx, {
+    workspaceId,
+    controlLock: "already_locked",
+    workspaceLock: "already_locked",
+    sessionIds: [input.sessionId, ...(preview.parentSessionId ? [preview.parentSessionId] : [])],
+  });
+  const session = sessionLocks.sessions.find((row) => row.id === input.sessionId);
+  if (!session) throw new Error(`Session not found: ${input.sessionId}`);
+  if (session.parentSessionId !== preview.parentSessionId) {
+    throw new SessionControlInvariantError(
+      `Session ${input.sessionId} parent changed while establishing lifecycle locks`,
+    );
+  }
+  if (
+    session.parentSessionId &&
+    !sessionLocks.sessions.some((row) => row.id === session.parentSessionId)
+  ) {
+    throw new SessionControlInvariantError(
+      `Parent session ${session.parentSessionId} was not locked with child ${input.sessionId}`,
+    );
+  }
+
+  let turnId = input.turnId ?? null;
+  if (!turnId && input.attemptId) {
+    const [attemptPreview] = await tx
+      .select({ turnId: schema.sessionTurnAttempts.turnId })
+      .from(schema.sessionTurnAttempts)
+      .where(
+        and(
+          eq(schema.sessionTurnAttempts.workspaceId, workspaceId),
+          eq(schema.sessionTurnAttempts.id, input.attemptId),
+        ),
+      )
+      .limit(1);
+    turnId = attemptPreview?.turnId ?? null;
+  }
+  const exactLocks = await lockSessionEventWriteRows(tx, {
+    workspaceId,
+    controlLock: "already_locked",
+    workspaceLock: "already_locked",
+    turnIds: turnId ? [turnId] : [],
+    attemptIds: turnId && input.attemptId ? [input.attemptId] : [],
+  });
+  return {
+    control: prefix.control,
+    workspace: prefix.workspace,
+    sessions: sessionLocks.sessions,
+    turns: exactLocks.turns,
+    attempts: exactLocks.attempts,
+    session,
+  };
+}
+
+/**
  * Commit the workflow's terminal-for-now idle decision and its parent delivery
  * source in one transaction. A crash after commit leaves a pending outbox row for
  * the global reconciler; a normal caller immediately enriches/delivers the same
@@ -21137,28 +21302,30 @@ export async function settleSessionIdleWithParentOutbox(
     }
   | { action: "stale"; episodeKey: null; events: [] }
 > {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+  const persistence = {
+    stage: "session_lifecycle_outbox.settle_idle",
+    eventTypes: ["child_terminal_result", "session.status.changed"],
+    maxAttempts: 3,
+  };
+  return await retryWorkspacePersistence(db, workspaceId, persistence, async (scopedDb) => {
     return await scopedDb.transaction(async (tx) => {
+      const locks = await lockChildLifecycleOutboxWriteRowsTx(
+        tx as unknown as Database,
+        workspaceId,
+        { sessionId },
+      );
+      const session = locks.session;
       const effectiveControl = await evaluateSessionControl(
         tx as unknown as Database,
         workspaceId,
         sessionId,
-        { lock: "share" },
+        { workspaceControl: locks.control ?? undefined },
       );
-      const [workspace] = await tx
-        .select()
-        .from(schema.workspaces)
-        .where(eq(schema.workspaces.id, workspaceId))
-        .for("update")
-        .limit(1);
-      const [session] = await tx
-        .select()
-        .from(schema.sessions)
-        .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
-        .for("update")
-        .limit(1);
-      if (!session) throw new Error(`Session not found: ${sessionId}`);
-      if (!workspace || effectiveControl.state !== "active" || session.activeTurnId !== null) {
+      if (
+        !locks.workspace ||
+        effectiveControl.state !== "active" ||
+        session.activeTurnId !== null
+      ) {
         return { action: "stale", episodeKey: null, events: [] } as const;
       }
       const [queued] = await tx
@@ -21540,46 +21707,49 @@ export async function applySessionTurnSettlement(
   input: ApplySessionTurnSettlementInput,
 ): Promise<ApplySessionTurnSettlementResult> {
   const fromStatuses = input.fromStatuses ?? ["running", "requires_action"];
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+  const eventTypes = [
+    ...input.events.map((event) => event.type),
+    ...(input.recording?.action === "available"
+      ? ["recording.available"]
+      : input.recording?.action === "failed"
+        ? ["recording.failed"]
+        : []),
+    ...(input.compactionRequestFailure ? ["session.context.compaction.skipped"] : []),
+    ...(input.turnStatus === "failed" ? ["child_terminal_result"] : []),
+  ];
+  const persistence = {
+    stage: "session_lifecycle_outbox.settle_turn",
+    eventTypes,
+    maxAttempts: 3,
+  };
+  return await retryWorkspacePersistence(db, workspaceId, persistence, async (scopedDb) => {
     return await scopedDb.transaction(async (tx) => {
+      const locks =
+        input.turnStatus === "failed"
+          ? await lockChildLifecycleOutboxWriteRowsTx(tx as unknown as Database, workspaceId, {
+              sessionId: input.sessionId,
+              turnId: input.turnId,
+              attemptId: input.attemptId,
+            })
+          : await lockSessionEventWriteRows(tx as unknown as Database, {
+              workspaceId,
+              controlLock: "share",
+              sessionIds: [input.sessionId],
+              turnIds: [input.turnId],
+              attemptIds: [input.attemptId],
+            });
+      const session = locks.sessions.find((row) => row.id === input.sessionId);
+      const turn = locks.turns.find((row) => row.id === input.turnId);
+      const attempt = locks.attempts.find((row) => row.id === input.attemptId);
+      if (!session) {
+        throw new Error(`Session not found: ${input.sessionId}`);
+      }
       const effectiveControl = await evaluateSessionControl(
         tx as unknown as Database,
         workspaceId,
         input.sessionId,
-        { lock: "share" },
+        { workspaceControl: locks.control ?? undefined },
       );
-      const [workspace] = await tx
-        .select()
-        .from(schema.workspaces)
-        .where(eq(schema.workspaces.id, workspaceId))
-        .for("update")
-        .limit(1);
-      const [session] = await tx
-        .select()
-        .from(schema.sessions)
-        .where(
-          and(
-            eq(schema.sessions.workspaceId, workspaceId),
-            eq(schema.sessions.id, input.sessionId),
-          ),
-        )
-        .for("update")
-        .limit(1);
-      if (!session) {
-        throw new Error(`Session not found: ${input.sessionId}`);
-      }
-      const [turn] = await tx
-        .select()
-        .from(schema.sessionTurns)
-        .where(
-          and(
-            eq(schema.sessionTurns.workspaceId, workspaceId),
-            eq(schema.sessionTurns.sessionId, input.sessionId),
-            eq(schema.sessionTurns.id, input.turnId),
-          ),
-        )
-        .for("update")
-        .limit(1);
       const turnStatus = (turn?.status as SessionTurnStatus | undefined) ?? null;
       const [pendingInterruption] = turn
         ? await tx
@@ -21601,7 +21771,14 @@ export async function applySessionTurnSettlement(
         : [];
       if (
         !turn ||
-        !workspace ||
+        !attempt ||
+        !locks.workspace ||
+        turn.accountId !== session.accountId ||
+        turn.sessionId !== input.sessionId ||
+        attempt.accountId !== session.accountId ||
+        attempt.sessionId !== input.sessionId ||
+        attempt.turnId !== input.turnId ||
+        attempt.executionGeneration !== turn.executionGeneration ||
         effectiveControl.state !== "active" ||
         pendingInterruption !== undefined ||
         session.activeTurnId !== input.turnId ||
@@ -21931,54 +22108,35 @@ export async function settleCodexCredentialLeaseLoss(
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
+        const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
+          workspaceId: input.workspaceId,
+          controlLock: "share",
+          sessionIds: [input.sessionId],
+          turnIds: [input.turnId],
+          attemptIds: [input.attemptId],
+        });
+        const session = locks.sessions[0];
+        const turn = locks.turns[0];
+        const attempt = locks.attempts[0];
         const effectiveControl = await evaluateSessionControl(
           tx as unknown as Database,
           input.workspaceId,
           input.sessionId,
-          { lock: "share" },
+          { workspaceControl: locks.control ?? undefined },
         );
-        const [workspace] = await tx
-          .select()
-          .from(schema.workspaces)
-          .where(eq(schema.workspaces.id, input.workspaceId))
-          .for("update")
-          .limit(1);
-        const [session] = await tx
-          .select()
-          .from(schema.sessions)
-          .where(
-            and(
-              eq(schema.sessions.accountId, input.accountId),
-              eq(schema.sessions.workspaceId, input.workspaceId),
-              eq(schema.sessions.id, input.sessionId),
-            ),
-          )
-          .for("update")
-          .limit(1);
-        const [turn] = await tx
-          .select({
-            sessionId: schema.sessionTurns.sessionId,
-            status: schema.sessionTurns.status,
-            metadata: schema.sessionTurns.metadata,
-            activeAttemptId: schema.sessionTurns.activeAttemptId,
-            executionGeneration: schema.sessionTurns.executionGeneration,
-          })
-          .from(schema.sessionTurns)
-          .where(
-            and(
-              eq(schema.sessionTurns.accountId, input.accountId),
-              eq(schema.sessionTurns.workspaceId, input.workspaceId),
-              eq(schema.sessionTurns.id, input.turnId),
-              eq(schema.sessionTurns.sessionId, input.sessionId),
-            ),
-          )
-          .for("update")
-          .limit(1);
         const currentRedispatches = Number(turn?.metadata?.workerDeathRedispatches ?? 0);
         if (
-          !workspace ||
+          !locks.workspace ||
           !session ||
           !turn ||
+          !attempt ||
+          session.accountId !== input.accountId ||
+          turn.accountId !== input.accountId ||
+          turn.sessionId !== input.sessionId ||
+          attempt.accountId !== input.accountId ||
+          attempt.sessionId !== input.sessionId ||
+          attempt.turnId !== input.turnId ||
+          attempt.executionGeneration !== turn.executionGeneration ||
           effectiveControl.state !== "active" ||
           session.activeTurnId !== input.turnId ||
           !["running", "requires_action"].includes(turn.status) ||
@@ -22195,55 +22353,36 @@ export async function settleCodexCredentialFailover(
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
+        const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
+          workspaceId: input.workspaceId,
+          controlLock: "share",
+          sessionIds: [input.sessionId],
+          turnIds: [input.turnId],
+          attemptIds: [input.attemptId],
+        });
+        const session = locks.sessions[0];
+        const turn = locks.turns[0];
+        const attempt = locks.attempts[0];
         const effectiveControl = await evaluateSessionControl(
           tx as unknown as Database,
           input.workspaceId,
           input.sessionId,
-          { lock: "share" },
+          { workspaceControl: locks.control ?? undefined },
         );
-        const [workspace] = await tx
-          .select()
-          .from(schema.workspaces)
-          .where(eq(schema.workspaces.id, input.workspaceId))
-          .for("update")
-          .limit(1);
-        const [session] = await tx
-          .select()
-          .from(schema.sessions)
-          .where(
-            and(
-              eq(schema.sessions.accountId, input.accountId),
-              eq(schema.sessions.workspaceId, input.workspaceId),
-              eq(schema.sessions.id, input.sessionId),
-            ),
-          )
-          .for("update")
-          .limit(1);
-        const [turn] = await tx
-          .select({
-            sessionId: schema.sessionTurns.sessionId,
-            status: schema.sessionTurns.status,
-            metadata: schema.sessionTurns.metadata,
-            activeAttemptId: schema.sessionTurns.activeAttemptId,
-            executionGeneration: schema.sessionTurns.executionGeneration,
-          })
-          .from(schema.sessionTurns)
-          .where(
-            and(
-              eq(schema.sessionTurns.accountId, input.accountId),
-              eq(schema.sessionTurns.workspaceId, input.workspaceId),
-              eq(schema.sessionTurns.id, input.turnId),
-              eq(schema.sessionTurns.sessionId, input.sessionId),
-            ),
-          )
-          .for("update")
-          .limit(1);
         const currentFailovers = Number(turn?.metadata?.codexCredentialFailovers ?? 0);
         const currentRedispatches = Number(turn?.metadata?.workerDeathRedispatches ?? 0);
         if (
-          !workspace ||
+          !locks.workspace ||
           !session ||
           !turn ||
+          !attempt ||
+          session.accountId !== input.accountId ||
+          turn.accountId !== input.accountId ||
+          turn.sessionId !== input.sessionId ||
+          attempt.accountId !== input.accountId ||
+          attempt.sessionId !== input.sessionId ||
+          attempt.turnId !== input.turnId ||
+          attempt.executionGeneration !== turn.executionGeneration ||
           effectiveControl.state !== "active" ||
           session.activeTurnId !== input.turnId ||
           !["running", "requires_action"].includes(turn.status) ||
@@ -22426,49 +22565,36 @@ export async function requestSessionTurnRecovery(
   const fromStatuses = input.fromStatuses ?? ["running", "requires_action"];
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     return await scopedDb.transaction(async (tx) => {
+      const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
+        workspaceId,
+        controlLock: "share",
+        sessionIds: [input.sessionId],
+        turnIds: [input.turnId],
+        attemptIds: [input.attemptId],
+      });
+      const session = locks.sessions[0];
+      const turn = locks.turns[0];
+      const attempt = locks.attempts[0];
+      if (!session) {
+        throw new Error(`Session not found: ${input.sessionId}`);
+      }
       const effectiveControl = await evaluateSessionControl(
         tx as unknown as Database,
         workspaceId,
         input.sessionId,
-        { lock: "share" },
+        { workspaceControl: locks.control ?? undefined },
       );
-      const [workspace] = await tx
-        .select()
-        .from(schema.workspaces)
-        .where(eq(schema.workspaces.id, workspaceId))
-        .for("update")
-        .limit(1);
-      const [session] = await tx
-        .select()
-        .from(schema.sessions)
-        .where(
-          and(
-            eq(schema.sessions.workspaceId, workspaceId),
-            eq(schema.sessions.id, input.sessionId),
-          ),
-        )
-        .for("update")
-        .limit(1);
-      if (!session) {
-        throw new Error(`Session not found: ${input.sessionId}`);
-      }
-
-      const [turn] = await tx
-        .select()
-        .from(schema.sessionTurns)
-        .where(
-          and(
-            eq(schema.sessionTurns.workspaceId, workspaceId),
-            eq(schema.sessionTurns.sessionId, input.sessionId),
-            eq(schema.sessionTurns.id, input.turnId),
-          ),
-        )
-        .for("update")
-        .limit(1);
       const turnStatus = (turn?.status as SessionTurnStatus | undefined) ?? null;
       if (
-        !workspace ||
+        !locks.workspace ||
         !turn ||
+        !attempt ||
+        turn.accountId !== session.accountId ||
+        turn.sessionId !== input.sessionId ||
+        attempt.accountId !== session.accountId ||
+        attempt.sessionId !== input.sessionId ||
+        attempt.turnId !== input.turnId ||
+        attempt.executionGeneration !== turn.executionGeneration ||
         effectiveControl.state !== "active" ||
         session.activeTurnId !== input.turnId ||
         !fromStatuses.includes(turnStatus as SessionTurnStatus) ||
@@ -22635,47 +22761,32 @@ export async function recoverSessionDispatch(
   workspaceId: string,
   input: RecoverSessionDispatchInput,
 ): Promise<RecoverSessionDispatchResult> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+  const persistence = {
+    stage: "session_lifecycle_outbox.recover_dispatch",
+    eventTypes: [
+      "child_terminal_result",
+      "session.status.changed",
+      "turn.failed",
+      "turn.recovery.requested",
+    ],
+    maxAttempts: 3,
+  };
+  return await retryWorkspacePersistence(db, workspaceId, persistence, async (scopedDb) => {
     return await scopedDb.transaction(async (tx) => {
+      const locks = await lockChildLifecycleOutboxWriteRowsTx(
+        tx as unknown as Database,
+        workspaceId,
+        { sessionId: input.sessionId, attemptId: input.attemptId },
+      );
+      const session = locks.session;
       const effectiveControl = await evaluateSessionControl(
         tx as unknown as Database,
         workspaceId,
         input.sessionId,
-        { lock: "share" },
+        { workspaceControl: locks.control ?? undefined },
       );
-      const [workspace] = await tx
-        .select()
-        .from(schema.workspaces)
-        .where(eq(schema.workspaces.id, workspaceId))
-        .for("update")
-        .limit(1);
-      const [session] = await tx
-        .select()
-        .from(schema.sessions)
-        .where(
-          and(
-            eq(schema.sessions.workspaceId, workspaceId),
-            eq(schema.sessions.id, input.sessionId),
-          ),
-        )
-        .for("update")
-        .limit(1);
-      if (!session) {
-        throw new Error(`Session not found: ${input.sessionId}`);
-      }
-      const [turn] = await tx
-        .select()
-        .from(schema.sessionTurns)
-        .where(
-          and(
-            eq(schema.sessionTurns.workspaceId, workspaceId),
-            eq(schema.sessionTurns.sessionId, input.sessionId),
-            eq(schema.sessionTurns.activeAttemptId, input.attemptId),
-          ),
-        )
-        .for("update")
-        .limit(1);
-      if (!turn) {
+      const attempt = locks.attempts.find((row) => row.id === input.attemptId);
+      if (!attempt) {
         return input.timeoutType === "SCHEDULE_TO_START"
           ? { action: "unclaimed", events: [] }
           : {
@@ -22685,10 +22796,18 @@ export async function recoverSessionDispatch(
               activeTurnId: session.activeTurnId,
             };
       }
+      const turn = locks.turns.find((row) => row.id === attempt.turnId);
       const turnStatus = (turn?.status as SessionTurnStatus | undefined) ?? null;
       const parsedMetadata = readTurnDispatchMetadata(turn?.metadata);
       if (
-        !workspace ||
+        !locks.workspace ||
+        !turn ||
+        turn.accountId !== session.accountId ||
+        turn.sessionId !== input.sessionId ||
+        attempt.accountId !== session.accountId ||
+        attempt.sessionId !== input.sessionId ||
+        attempt.turnId !== turn.id ||
+        attempt.executionGeneration !== turn.executionGeneration ||
         parsedMetadata.kind === "malformed" ||
         parsedMetadata.attempt === null ||
         effectiveControl.state !== "active" ||
@@ -23534,59 +23653,71 @@ export async function getOrCreateSessionSystemUpdateOutbox(
   db: Database,
   input: Omit<SessionSystemUpdateOutboxDelivery, "id" | "status">,
 ): Promise<SessionSystemUpdateOutboxDelivery> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      const [row] = await scopedDb
-        .insert(schema.sessionSystemUpdateOutbox)
-        .values({
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          sourceSessionId: input.sourceSessionId,
-          targetSessionId: input.targetSessionId,
-          dedupeKey: input.dedupeKey,
+  const persistence = {
+    stage: "session_lifecycle_outbox.get_or_create",
+    eventTypes: ["child_terminal_result"],
+    maxAttempts: 3,
+  };
+  const context = { accountId: input.accountId, workspaceId: input.workspaceId };
+  return await retryRlsPersistence(db, context, persistence, async (scopedDb) => {
+    const locks = await lockSessionEventWriteRows(scopedDb, {
+      workspaceId: input.workspaceId,
+      sessionIds: [input.sourceSessionId, input.targetSessionId],
+    });
+    const expectedSessionIds = new Set([input.sourceSessionId, input.targetSessionId]);
+    if (locks.sessions.length !== expectedSessionIds.size) {
+      throw new SessionControlInvariantError(
+        "System-update outbox source and target sessions must exist in the same workspace",
+      );
+    }
+    const [row] = await scopedDb
+      .insert(schema.sessionSystemUpdateOutbox)
+      .values({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sourceSessionId: input.sourceSessionId,
+        targetSessionId: input.targetSessionId,
+        dedupeKey: input.dedupeKey,
+        kind: input.kind,
+        classification: input.classification,
+        sourceId: input.sourceId,
+        summary: input.summary,
+        payload: input.payload,
+        lineage: input.lineage,
+      })
+      .onConflictDoUpdate({
+        target: [
+          schema.sessionSystemUpdateOutbox.workspaceId,
+          schema.sessionSystemUpdateOutbox.dedupeKey,
+        ],
+        set: {
           kind: input.kind,
           classification: input.classification,
           sourceId: input.sourceId,
           summary: input.summary,
           payload: input.payload,
           lineage: input.lineage,
-        })
-        .onConflictDoUpdate({
-          target: [
-            schema.sessionSystemUpdateOutbox.workspaceId,
-            schema.sessionSystemUpdateOutbox.dedupeKey,
-          ],
-          set: {
-            kind: input.kind,
-            classification: input.classification,
-            sourceId: input.sourceId,
-            summary: input.summary,
-            payload: input.payload,
-            lineage: input.lineage,
-            updatedAt: new Date(),
-          },
-        })
-        .returning();
-      if (!row) throw new Error("Failed to persist system-update outbox row");
-      return {
-        id: row.id,
-        status: row.status as "pending" | "delivered",
-        accountId: row.accountId,
-        workspaceId: row.workspaceId,
-        sourceSessionId: row.sourceSessionId,
-        targetSessionId: row.targetSessionId,
-        dedupeKey: row.dedupeKey,
-        kind: "child_terminal_result",
-        classification: row.classification as SystemUpdateClassification,
-        sourceId: row.sourceId,
-        summary: row.summary,
-        payload: parseChildTerminalResultPayload(row.payload),
-        lineage: row.lineage,
-      };
-    },
-  );
+          updatedAt: new Date(),
+        },
+      })
+      .returning();
+    if (!row) throw new Error("Failed to persist system-update outbox row");
+    return {
+      id: row.id,
+      status: row.status as "pending" | "delivered",
+      accountId: row.accountId,
+      workspaceId: row.workspaceId,
+      sourceSessionId: row.sourceSessionId,
+      targetSessionId: row.targetSessionId,
+      dedupeKey: row.dedupeKey,
+      kind: "child_terminal_result",
+      classification: row.classification as SystemUpdateClassification,
+      sourceId: row.sourceId,
+      summary: row.summary,
+      payload: parseChildTerminalResultPayload(row.payload),
+      lineage: row.lineage,
+    };
+  });
 }
 
 export async function markSessionSystemUpdateOutboxFailed(
@@ -23760,30 +23891,19 @@ export async function addSessionSystemUpdateWithSourceMutation(
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
+        const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
+          workspaceId: input.workspaceId,
+          controlLock: "share",
+          sessionIds: [input.sessionId],
+        });
+        const session = locks.sessions[0];
+        if (!session) throw new Error(`Session not found: ${input.sessionId}`);
         const effectiveControl = await evaluateSessionControl(
           tx as unknown as Database,
           input.workspaceId,
           input.sessionId,
-          { lock: "share" },
+          { workspaceControl: locks.control ?? undefined },
         );
-        const [session] = await tx
-          .select()
-          .from(schema.sessions)
-          .where(
-            and(
-              eq(schema.sessions.workspaceId, input.workspaceId),
-              eq(schema.sessions.id, input.sessionId),
-            ),
-          )
-          .for("update")
-          .limit(1);
-        // The session row is the sequence and wake owner. Taking an unrelated
-        // exclusive lock on its workspace here creates an inverse lock edge
-        // with an active turn that already owns the session and is inserting a
-        // workspace-scoped event (the FK check then waits on the workspace).
-        // The session FK already proves workspace existence, so serialize only
-        // on the actual mutable owner.
-        if (!session) throw new Error(`Session not found: ${input.sessionId}`);
         if (session.status === "cancelled") {
           await mutateSource(tx as unknown as Database, null);
           return { added: false, reason: "session_cancelled" } as const;
@@ -23977,63 +24097,58 @@ export async function appendSessionEvents(
   if (inputs.length === 0) {
     return [];
   }
-  return await withWorkspaceRls(
-    db,
-    workspaceId,
-    async (scopedDb) =>
-      await scopedDb.transaction(async (tx) => {
-        // Generic API/system event appends participate in the same lock order
-        // as durable queue controls. Without this workspace lock an append can
-        // hold the session row and then request a workspace FK key-share while
-        // a concurrent stop/steer holds workspace FOR UPDATE and waits on the
-        // session — a real PostgreSQL deadlock whose caller may treat the live
-        // fanout as best-effort and accidentally hide a lost terminal event.
-        await tx
-          .select({ id: schema.workspaces.id })
-          .from(schema.workspaces)
-          .where(eq(schema.workspaces.id, workspaceId))
-          .for("update")
-          .limit(1);
-        const [row] = await tx
-          .select()
-          .from(schema.sessions)
-          .where(
-            and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)),
-          )
-          .for("update")
-          .limit(1);
-        if (!row) {
-          throw new Error(`Session not found: ${sessionId}`);
-        }
-        let sequence = row.lastSequence;
-        const values = inputs.map((input) => ({
-          accountId: row.accountId,
-          workspaceId: row.workspaceId,
-          sessionId,
-          sequence: ++sequence,
-          type: input.type,
-          payload: sanitizeEventPayload(input.payload ?? {}),
-          clientEventId: input.clientEventId ?? null,
-          turnId: input.turnId ?? null,
-          turnGeneration: input.turnGeneration ?? null,
-          turnAttemptId: input.turnAttemptId ?? null,
-          turnAssociation: input.turnAssociation ?? (input.turnId ? "current" : null),
-          duplicateOfEventId: input.duplicateOfEventId ?? null,
-          duplicateReason: input.duplicateReason ?? null,
-          producerId: input.producerId ?? null,
-          producerSeq: input.producerSeq ?? null,
-          occurredAt: input.occurredAt ?? new Date(),
-        }));
-        const inserted = await tx.insert(schema.sessionEvents).values(values).returning();
-        await tx
-          .update(schema.sessions)
-          .set({ lastSequence: sequence, updatedAt: new Date() })
-          .where(
-            and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)),
-          );
-        return inserted.map(mapEvent);
-      }),
-  );
+  const persistence = {
+    stage: "session_events.append_generic",
+    eventTypes: inputs.map((input) => input.type),
+    maxAttempts: 3,
+  };
+  return await retryWorkspacePersistence(db, workspaceId, persistence, async (scopedDb) => {
+    return await scopedDb.transaction(async (tx) => {
+      const turnIds = inputs
+        .map((input) => input.turnId)
+        .filter((id): id is string => typeof id === "string");
+      const attemptIds = inputs
+        .map((input) => input.turnAttemptId)
+        .filter((id): id is string => typeof id === "string");
+      const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
+        workspaceId,
+        sessionIds: [sessionId],
+        turnIds,
+        attemptIds,
+      });
+      const row = locks.sessions[0];
+      if (!row) {
+        throw new Error(`Session not found: ${sessionId}`);
+      }
+      let sequence = row.lastSequence;
+      const values = inputs.map((input) => ({
+        accountId: row.accountId,
+        workspaceId: row.workspaceId,
+        sessionId,
+        sequence: ++sequence,
+        type: input.type,
+        payload: sanitizeEventPayload(input.payload ?? {}),
+        clientEventId: input.clientEventId ?? null,
+        turnId: input.turnId ?? null,
+        turnGeneration: input.turnGeneration ?? null,
+        turnAttemptId: input.turnAttemptId ?? null,
+        turnAssociation: input.turnAssociation ?? (input.turnId ? "current" : null),
+        duplicateOfEventId: input.duplicateOfEventId ?? null,
+        duplicateReason: input.duplicateReason ?? null,
+        producerId: input.producerId ?? null,
+        producerSeq: input.producerSeq ?? null,
+        occurredAt: input.occurredAt ?? new Date(),
+      }));
+      const inserted = await tx.insert(schema.sessionEvents).values(values).returning();
+      await tx
+        .update(schema.sessions)
+        .set({ lastSequence: sequence, updatedAt: new Date() })
+        .where(
+          and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)),
+        );
+      return inserted.map(mapEvent);
+    });
+  });
 }
 
 export type AcceptSessionApprovalDecisionResult =
@@ -24065,23 +24180,11 @@ export async function acceptSessionApprovalDecision(
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
-        await tx
-          .select({ id: schema.workspaces.id })
-          .from(schema.workspaces)
-          .where(eq(schema.workspaces.id, input.workspaceId))
-          .for("update")
-          .limit(1);
-        const [session] = await tx
-          .select()
-          .from(schema.sessions)
-          .where(
-            and(
-              eq(schema.sessions.workspaceId, input.workspaceId),
-              eq(schema.sessions.id, input.sessionId),
-            ),
-          )
-          .for("update")
-          .limit(1);
+        const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
+          workspaceId: input.workspaceId,
+          sessionIds: [input.sessionId],
+        });
+        const session = locks.sessions[0];
         if (!session) throw new Error(`Session not found: ${input.sessionId}`);
         if (input.clientEventId) {
           const [existing] = await tx
@@ -24117,7 +24220,7 @@ export async function acceptSessionApprovalDecision(
             } as const;
           }
         }
-        const [turn] = session.activeTurnId
+        const [turnPreview] = session.activeTurnId
           ? await tx
               .select()
               .from(schema.sessionTurns)
@@ -24128,9 +24231,20 @@ export async function acceptSessionApprovalDecision(
                   eq(schema.sessionTurns.id, session.activeTurnId),
                 ),
               )
-              .for("update")
               .limit(1)
           : [];
+        const turn = turnPreview
+          ? (
+              await lockSessionEventWriteRows(tx as unknown as Database, {
+                workspaceId: input.workspaceId,
+                workspaceLock: "already_locked",
+                turnIds: [turnPreview.id],
+              })
+            ).turns[0]
+          : undefined;
+        if (turnPreview && !turn) {
+          throw new Error(`Active turn disappeared: ${turnPreview.id}`);
+        }
         if (session.status !== "requires_action" || turn?.status !== "requires_action") {
           return {
             action: "conflict",
@@ -24227,133 +24341,140 @@ export async function appendSessionEventsForTurnAttempt(
   inputs: AppendEventInput[],
 ): Promise<{ events: SessionEvent[]; accepted: boolean }> {
   if (inputs.length === 0) return { events: [], accepted: true };
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    return await scopedDb.transaction(async (tx) => {
-      const fence = await lockTurnAttemptWriteFenceTx(tx, {
-        workspaceId,
-        sessionId,
-        turnId,
-        executionGeneration,
-        attemptId,
-      });
-      const session = fence.session;
-      if (!session) throw new Error(`Session not found: ${sessionId}`);
-      let sequence = session.lastSequence;
-      const now = new Date();
-      const usageSourceKey = (input: AppendEventInput): string | null => {
-        if (
-          input.type !== "agent.model.usage" ||
-          !input.payload ||
-          typeof input.payload !== "object"
-        ) {
-          return null;
-        }
-        const value = (input.payload as Record<string, unknown>).sourceKey;
-        return typeof value === "string" && value.length > 0 ? value : null;
-      };
-      const incomingUsageKeys = [
-        ...new Set(inputs.map(usageSourceKey).filter((value): value is string => value !== null)),
-      ];
-      const existingUsageRows =
-        fence.allowed && incomingUsageKeys.length > 0
-          ? await tx
-              .select({
-                id: schema.sessionEvents.id,
-                payload: schema.sessionEvents.payload,
-              })
-              .from(schema.sessionEvents)
-              .where(
-                and(
-                  eq(schema.sessionEvents.workspaceId, workspaceId),
-                  eq(schema.sessionEvents.sessionId, sessionId),
-                  eq(schema.sessionEvents.turnId, turnId),
-                  eq(schema.sessionEvents.type, "agent.model.usage"),
-                  eq(schema.sessionEvents.turnAssociation, "current"),
-                  inArray(
-                    sql<string>`${schema.sessionEvents.payload} ->> 'sourceKey'`,
-                    incomingUsageKeys,
+  const eventTypes = [...new Set(inputs.map((input) => input.type))].sort();
+  return await runIdempotentPersistenceTransaction(
+    {
+      stage: "session_events.append_for_turn_attempt",
+      eventTypes,
+      maxAttempts: 3,
+    },
+    async () =>
+      await withWorkspaceRls(db, workspaceId, async (tx) => {
+        const fence = await lockTurnAttemptWriteFenceTx(tx, {
+          workspaceId,
+          sessionId,
+          turnId,
+          executionGeneration,
+          attemptId,
+        });
+        const session = fence.session;
+        if (!session) throw new Error(`Session not found: ${sessionId}`);
+        let sequence = session.lastSequence;
+        const now = new Date();
+        const usageSourceKey = (input: AppendEventInput): string | null => {
+          if (
+            input.type !== "agent.model.usage" ||
+            !input.payload ||
+            typeof input.payload !== "object"
+          ) {
+            return null;
+          }
+          const value = (input.payload as Record<string, unknown>).sourceKey;
+          return typeof value === "string" && value.length > 0 ? value : null;
+        };
+        const incomingUsageKeys = [
+          ...new Set(inputs.map(usageSourceKey).filter((value): value is string => value !== null)),
+        ];
+        const existingUsageRows =
+          fence.allowed && incomingUsageKeys.length > 0
+            ? await tx
+                .select({
+                  id: schema.sessionEvents.id,
+                  payload: schema.sessionEvents.payload,
+                })
+                .from(schema.sessionEvents)
+                .where(
+                  and(
+                    eq(schema.sessionEvents.workspaceId, workspaceId),
+                    eq(schema.sessionEvents.sessionId, sessionId),
+                    eq(schema.sessionEvents.turnId, turnId),
+                    eq(schema.sessionEvents.type, "agent.model.usage"),
+                    eq(schema.sessionEvents.turnAssociation, "current"),
+                    inArray(
+                      sql<string>`${schema.sessionEvents.payload} ->> 'sourceKey'`,
+                      incomingUsageKeys,
+                    ),
                   ),
-                ),
-              )
-          : [];
-      const canonicalUsageIds = new Map<string, string>();
-      for (const row of existingUsageRows) {
-        const value =
-          row.payload && typeof row.payload === "object"
-            ? (row.payload as Record<string, unknown>).sourceKey
-            : null;
-        if (typeof value === "string" && value.length > 0) {
-          canonicalUsageIds.set(value, row.id);
+                )
+            : [];
+        const canonicalUsageIds = new Map<string, string>();
+        for (const row of existingUsageRows) {
+          const value =
+            row.payload && typeof row.payload === "object"
+              ? (row.payload as Record<string, unknown>).sourceKey
+              : null;
+          if (typeof value === "string" && value.length > 0) {
+            canonicalUsageIds.set(value, row.id);
+          }
         }
-      }
-      const values = inputs.map((input) => {
-        const id = crypto.randomUUID();
-        if (!fence.allowed) {
+        const values = inputs.map((input) => {
+          const id = crypto.randomUUID();
+          if (!fence.allowed) {
+            return {
+              id,
+              accountId: session.accountId,
+              workspaceId,
+              sessionId,
+              sequence: ++sequence,
+              type: "turn.event.rejected_late",
+              payload: sanitizeEventPayload({
+                rejectedType: input.type,
+                rejectedPayload: input.payload ?? {},
+                reason: fence.reason,
+                expectedExecutionGeneration: executionGeneration,
+                rejectedAttemptId: attemptId,
+                currentExecutionGeneration: fence.turn?.executionGeneration ?? null,
+                currentAttemptId: fence.turn?.activeAttemptId ?? null,
+                currentTurnStatus: fence.turn?.status ?? null,
+                currentActiveTurnId: session.activeTurnId,
+              }),
+              clientEventId: input.clientEventId ?? null,
+              turnId,
+              turnGeneration: executionGeneration,
+              turnAttemptId: attemptId,
+              turnAssociation: "late_rejected" as const,
+              duplicateOfEventId: null,
+              duplicateReason: null,
+              producerId: input.producerId ?? null,
+              producerSeq: input.producerSeq ?? null,
+              occurredAt: input.occurredAt ?? now,
+            };
+          }
+          const sourceKey = usageSourceKey(input);
+          const duplicateOfEventId = sourceKey ? (canonicalUsageIds.get(sourceKey) ?? null) : null;
+          if (sourceKey && !duplicateOfEventId) {
+            canonicalUsageIds.set(sourceKey, id);
+          }
           return {
             id,
             accountId: session.accountId,
             workspaceId,
             sessionId,
             sequence: ++sequence,
-            type: "turn.event.rejected_late",
-            payload: sanitizeEventPayload({
-              rejectedType: input.type,
-              rejectedPayload: input.payload ?? {},
-              reason: fence.reason,
-              expectedExecutionGeneration: executionGeneration,
-              rejectedAttemptId: attemptId,
-              currentExecutionGeneration: fence.turn?.executionGeneration ?? null,
-              currentAttemptId: fence.turn?.activeAttemptId ?? null,
-              currentTurnStatus: fence.turn?.status ?? null,
-              currentActiveTurnId: session.activeTurnId,
-            }),
+            type: input.type,
+            payload: sanitizeEventPayload(input.payload ?? {}),
             clientEventId: input.clientEventId ?? null,
             turnId,
             turnGeneration: executionGeneration,
             turnAttemptId: attemptId,
-            turnAssociation: "late_rejected" as const,
-            duplicateOfEventId: null,
-            duplicateReason: null,
+            turnAssociation: duplicateOfEventId ? ("duplicate" as const) : ("current" as const),
+            duplicateOfEventId,
+            duplicateReason: duplicateOfEventId ? "duplicate_provider_response_usage" : null,
             producerId: input.producerId ?? null,
             producerSeq: input.producerSeq ?? null,
             occurredAt: input.occurredAt ?? now,
           };
-        }
-        const sourceKey = usageSourceKey(input);
-        const duplicateOfEventId = sourceKey ? (canonicalUsageIds.get(sourceKey) ?? null) : null;
-        if (sourceKey && !duplicateOfEventId) {
-          canonicalUsageIds.set(sourceKey, id);
-        }
-        return {
-          id,
-          accountId: session.accountId,
-          workspaceId,
-          sessionId,
-          sequence: ++sequence,
-          type: input.type,
-          payload: sanitizeEventPayload(input.payload ?? {}),
-          clientEventId: input.clientEventId ?? null,
-          turnId,
-          turnGeneration: executionGeneration,
-          turnAttemptId: attemptId,
-          turnAssociation: duplicateOfEventId ? ("duplicate" as const) : ("current" as const),
-          duplicateOfEventId,
-          duplicateReason: duplicateOfEventId ? "duplicate_provider_response_usage" : null,
-          producerId: input.producerId ?? null,
-          producerSeq: input.producerSeq ?? null,
-          occurredAt: input.occurredAt ?? now,
-        };
-      });
-      const inserted = await tx.insert(schema.sessionEvents).values(values).returning();
-      await tx
-        .update(schema.sessions)
-        .set({ lastSequence: sequence, updatedAt: now })
-        .where(
-          and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)),
-        );
-      return { events: inserted.map(mapEvent), accepted: fence.allowed };
-    });
-  });
+        });
+        const inserted = await tx.insert(schema.sessionEvents).values(values).returning();
+        await tx
+          .update(schema.sessions)
+          .set({ lastSequence: sequence, updatedAt: now })
+          .where(
+            and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)),
+          );
+        return { events: inserted.map(mapEvent), accepted: fence.allowed };
+      }),
+  );
 }
 
 export async function appendSessionEventToSandboxGroup(
@@ -24367,8 +24488,11 @@ export async function appendSessionEventToSandboxGroup(
     workspaceId,
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
-        const rows = await tx
-          .select()
+        await lockSessionEventWriteRows(tx as unknown as Database, {
+          workspaceId,
+        });
+        const sessionIds = await tx
+          .select({ id: schema.sessions.id })
           .from(schema.sessions)
           .where(
             and(
@@ -24376,8 +24500,17 @@ export async function appendSessionEventToSandboxGroup(
               eq(schema.sessions.sandboxGroupId, sandboxGroupId),
             ),
           )
-          .orderBy(asc(schema.sessions.createdAt))
-          .for("update");
+          .orderBy(asc(schema.sessions.id));
+        const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
+          workspaceId,
+          workspaceLock: "already_locked",
+          sessionIds: sessionIds.map((row) => row.id),
+          turnIds: input.turnId ? [input.turnId] : [],
+          attemptIds: input.turnAttemptId ? [input.turnAttemptId] : [],
+        });
+        const rows = locks.sessions
+          .filter((row) => row.sandboxGroupId === sandboxGroupId)
+          .sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime());
         if (rows.length === 0) {
           return [];
         }
@@ -24397,7 +24530,8 @@ export async function appendSessionEventToSandboxGroup(
           occurredAt,
         }));
         const inserted = await tx.insert(schema.sessionEvents).values(values).returning();
-        await tx
+        const lockedSessionIds = rows.map((row) => row.id);
+        const updated = await tx
           .update(schema.sessions)
           .set({
             lastSequence: sql`${schema.sessions.lastSequence} + 1`,
@@ -24406,9 +24540,13 @@ export async function appendSessionEventToSandboxGroup(
           .where(
             and(
               eq(schema.sessions.workspaceId, workspaceId),
-              eq(schema.sessions.sandboxGroupId, sandboxGroupId),
+              inArray(schema.sessions.id, lockedSessionIds),
             ),
-          );
+          )
+          .returning({ id: schema.sessions.id });
+        if (updated.length !== lockedSessionIds.length) {
+          throw new Error("Sandbox-group event sequence update did not match locked sessions");
+        }
         return inserted.map(mapEvent);
       }),
   );
@@ -24436,14 +24574,19 @@ export async function appendSessionEventsAndUpdateSession(
     workspaceId,
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
-        const [row] = await tx
-          .select()
-          .from(schema.sessions)
-          .where(
-            and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)),
-          )
-          .for("update")
-          .limit(1);
+        const turnIds = inputs
+          .map((input) => input.turnId)
+          .filter((id): id is string => typeof id === "string");
+        const attemptIds = inputs
+          .map((input) => input.turnAttemptId)
+          .filter((id): id is string => typeof id === "string");
+        const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
+          workspaceId,
+          sessionIds: [sessionId],
+          turnIds,
+          attemptIds,
+        });
+        const row = locks.sessions[0];
         if (!row) {
           throw new Error(`Session not found: ${sessionId}`);
         }
@@ -24517,19 +24660,22 @@ export async function appendSessionEventsWithLockedSessionUpdate(
     workspaceId,
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
-        await lockWorkspaceInferenceControl(tx as unknown as Database, workspaceId, "share");
-        const [sessionRow] = await tx
-          .select()
-          .from(schema.sessions)
-          .where(
-            and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)),
-          )
-          .for("update")
-          .limit(1);
+        const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
+          workspaceId,
+          controlLock: "share",
+          sessionIds: [sessionId],
+        });
+        const sessionRow = locks.sessions[0];
         if (!sessionRow) {
           throw new Error(`Session not found: ${sessionId}`);
         }
-        const mappedSession = await mapSessionWithControl(tx as unknown as Database, sessionRow);
+        const mappedSession = await mapSessionWithControl(
+          tx as unknown as Database,
+          sessionRow,
+          [],
+          undefined,
+          locks.control ?? undefined,
+        );
         const built = await build(mappedSession, {
           updateSessionMcpServerCredentials: async (updates) =>
             await updateSessionMcpServerCredentialsInTransaction(tx, {
@@ -24555,6 +24701,16 @@ export async function appendSessionEventsWithLockedSessionUpdate(
         if (built.events.length === 0) {
           return [];
         }
+        await lockSessionEventWriteRows(tx as unknown as Database, {
+          workspaceId,
+          workspaceLock: "already_locked",
+          turnIds: built.events
+            .map((input) => input.turnId)
+            .filter((id): id is string => typeof id === "string"),
+          attemptIds: built.events
+            .map((input) => input.turnAttemptId)
+            .filter((id): id is string => typeof id === "string"),
+        });
         let sequence = sessionRow.lastSequence;
         const now = new Date();
         const values = built.events.map((input) => ({
@@ -24601,9 +24757,10 @@ async function sessionControlProjections(
   db: Database,
   workspaceId: string,
   sessionIds: string[],
+  workspaceControl?: WorkspaceControlRow,
 ): Promise<Map<string, Session["effectiveControl"]>> {
   const controls = await evaluateSessionControls(db, workspaceId, sessionIds, {
-    lock: "share",
+    ...(workspaceControl ? { workspaceControl } : { lock: "share" as const }),
   });
   return new Map(
     [...controls].map(([sessionId, control]) => [
@@ -24618,8 +24775,9 @@ async function mapSessionWithControl(
   row: typeof schema.sessions.$inferSelect,
   mcpServers: SessionMcpServerMetadata[] = [],
   pin: Pick<Session, "pinned" | "pinnedAt" | "pinVersion"> = mapSessionPin(null),
+  workspaceControl?: WorkspaceControlRow,
 ): Promise<Session> {
-  const controls = await sessionControlProjections(db, row.workspaceId, [row.id]);
+  const controls = await sessionControlProjections(db, row.workspaceId, [row.id], workspaceControl);
   const control = controls.get(row.id);
   if (!control) throw new Error(`Effective control missing for session ${row.id}`);
   return mapSession(row, control, mcpServers, pin);
