@@ -9,6 +9,7 @@ import {
 } from "../../contracts/src/session-archive";
 import {
   assertSessionArchiveManifestChecksum,
+  sessionArchiveCoverageChecksum,
   sessionArchiveManifestChecksum,
   sessionArchiveRootChecksum,
 } from "../src/session-archive-manifest";
@@ -184,5 +185,57 @@ describe("session archive manifest", () => {
         retryable: false,
       }).retryable,
     ).toBe(false);
+  });
+
+  test("binds sorted exact post-commit receipt coverage", () => {
+    const sealId = "00000000-0000-4000-8000-000000000099";
+    const members = [
+      {
+        sessionId: childA,
+        parentSessionId: rootA,
+        depth: 1,
+        beforeArchiveRevision: "12",
+        afterArchiveRevision: "13",
+        beforeArchived: true,
+        afterArchived: true,
+      },
+      {
+        sessionId: rootA,
+        parentSessionId: null,
+        depth: 0,
+        beforeArchiveRevision: "0",
+        afterArchiveRevision: "1",
+        beforeArchived: false,
+        afterArchived: true,
+      },
+    ];
+    const checksum = sessionArchiveCoverageChecksum({
+      workspaceId,
+      action: "archive",
+      rootSessionId: rootA,
+      sealId,
+      members,
+    });
+    expect(checksum).toBe(
+      "sha256:fe0e8e7b377216aadd8f0ae77b128e9f467d2a6a61b4ac74310dfe0365895750",
+    );
+    expect(
+      sessionArchiveCoverageChecksum({
+        workspaceId: workspaceId.toUpperCase(),
+        action: "archive",
+        rootSessionId: rootA.toUpperCase(),
+        sealId: sealId.toUpperCase(),
+        members: members.toReversed(),
+      }),
+    ).toBe(checksum);
+    expect(() =>
+      sessionArchiveCoverageChecksum({
+        workspaceId,
+        action: "archive",
+        rootSessionId: rootA,
+        sealId,
+        members: [members[0], members[0]],
+      }),
+    ).toThrow(`Duplicate session archive coverage member ${childA}`);
   });
 });

@@ -1,8 +1,10 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import {
   canonicalizeSessionArchiveManifest,
+  SessionArchiveReceiptMember,
   stringifySessionArchiveManifest,
   type CanonicalSessionArchiveManifest,
+  type SessionArchiveAction,
   type SessionArchiveManifestRoot,
 } from "@opengeni/contracts/session-archive";
 
@@ -14,6 +16,55 @@ function sha256(value: string): SessionArchiveChecksum {
 
 export function sessionArchiveManifestChecksum(input: unknown): SessionArchiveChecksum {
   return sha256(stringifySessionArchiveManifest(input));
+}
+
+export function sessionArchiveCoverageChecksum(input: {
+  workspaceId: string;
+  action: SessionArchiveAction;
+  rootSessionId: string;
+  sealId: string;
+  members: unknown[];
+}): SessionArchiveChecksum {
+  const workspaceId = input.workspaceId.toLowerCase();
+  const rootSessionId = input.rootSessionId.toLowerCase();
+  const sealId = input.sealId.toLowerCase();
+  const members = input.members
+    .map((member) => {
+      const parsed = SessionArchiveReceiptMember.parse(member);
+      return {
+        sessionId: parsed.sessionId.toLowerCase(),
+        parentSessionId: parsed.parentSessionId?.toLowerCase() ?? null,
+        depth: parsed.depth,
+        beforeArchiveRevision: parsed.beforeArchiveRevision,
+        afterArchiveRevision: parsed.afterArchiveRevision,
+        beforeArchived: parsed.beforeArchived,
+        afterArchived: parsed.afterArchived,
+      };
+    })
+    .sort((left, right) => left.sessionId.localeCompare(right.sessionId));
+  const seen = new Set<string>();
+  for (const member of members) {
+    if (seen.has(member.sessionId)) {
+      throw new Error(`Duplicate session archive coverage member ${member.sessionId}`);
+    }
+    seen.add(member.sessionId);
+  }
+  const root = members.find((member) => member.sessionId === rootSessionId);
+  if (!root || root.depth !== 0) {
+    throw new Error(`Session archive coverage must contain root ${rootSessionId} at depth 0`);
+  }
+  return sha256(
+    JSON.stringify({
+      format: "opengeni.session-archive-coverage",
+      version: 1,
+      workspaceId,
+      action: input.action,
+      rootSessionId,
+      sealId,
+      memberCount: members.length,
+      members,
+    }),
+  );
 }
 
 /**
