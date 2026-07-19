@@ -305,6 +305,7 @@ describe("OPE-15 responsive knowledge surfaces (real API + PostgreSQL)", () => {
     const manage = page.getByRole("button", {
       name: `Show variables for ${longVariableSetName}`,
     });
+    expect((await manage.textContent())?.trim()).toBe("Show");
     await manage.focus();
     await page.keyboard.press("Enter");
     const expandedManage = page.getByRole("button", {

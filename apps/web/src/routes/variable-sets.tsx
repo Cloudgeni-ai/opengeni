@@ -412,7 +412,7 @@ function VariableSetCard(props: {
                     className="h-8 pointer-coarse:min-h-10"
                     aria-label={`${expanded ? "Hide" : "Show"} variables for ${variableSet.name}`}
                   >
-                    {expanded ? "Hide" : "Manage"}
+                    {expanded ? "Hide" : "Show"}
                     <ChevronDownIcon
                       className={`size-3.5 transition-transform ${expanded ? "rotate-180" : ""}`}
                     />
