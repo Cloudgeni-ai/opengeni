@@ -326,6 +326,67 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
     }
   });
 
+  test("(2c-race) an in-flight epoch move cannot turn acceptance-unknown into a replay", async () => {
+    const ptr = mutablePointer();
+    let oldCalls = 0;
+    let newCalls = 0;
+    let markStarted!: () => void;
+    let releaseOld!: () => void;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const oldReleased = new Promise<void>((resolve) => {
+      releaseOld = resolve;
+    });
+    const oldBackend: RoutableBackendSession = {
+      async exec() {
+        oldCalls += 1;
+        markStarted();
+        await oldReleased;
+        throw Object.assign(new Error("old backend outcome is acceptance-unknown"), {
+          code: "UNAVAILABLE",
+        });
+      },
+    };
+    const newBackend: RoutableBackendSession = {
+      async exec() {
+        newCalls += 1;
+        return { stdout: "new", exitCode: 0 };
+      },
+    };
+    let resolves = 0;
+    const proxy = new RoutingSandboxSession({
+      readPointer: ptr.read,
+      resolveActiveBackend: async (pointer) => {
+        resolves += 1;
+        return pointer.activeSandboxId === null
+          ? { session: oldBackend, sandboxId: null, kind: "old-modal" }
+          : { session: newBackend, sandboxId: pointer.activeSandboxId, kind: "new-modal" };
+      },
+    });
+
+    const pending = proxy.exec({ cmd: "invoke-once" }).catch((caught) => caught);
+    await started;
+    expect(ptr.swap("replacement")).toEqual({
+      activeSandboxId: "replacement",
+      activeEpoch: 1,
+    });
+    releaseOld();
+
+    const error = await pending;
+    expect(error).toBeInstanceOf(SandboxMutationAcceptanceUnknownError);
+    expect((error as SandboxMutationAcceptanceUnknownError).checkpoint).toEqual({
+      op: "exec",
+      backend: "old-modal",
+      activeEpoch: 0,
+      acceptance: "unknown",
+      transportCode: "UNAVAILABLE",
+    });
+    expect(oldCalls).toBe(1);
+    expect(newCalls).toBe(0);
+    expect(resolves).toBe(1);
+  });
+
   test("(2d) a message-only mutation fence cannot authorize replay", async () => {
     let calls = 0;
     const backend: RoutableBackendSession = {
