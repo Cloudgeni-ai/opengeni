@@ -268,15 +268,19 @@ function establishedSandbox(client: unknown, session: unknown): EstablishedSandb
 function localSession() {
   return {
     exec: async (args: Record<string, unknown>) => {
-      const process = Bun.spawn([LOCAL_BASH, "-lc", String(args.cmd)], {
-        cwd: String(args.workdir ?? "/workspace"),
+      const virtualWorkdir = String(args.workdir ?? "/workspace");
+      const subprocess = Bun.spawn([LOCAL_BASH, "-lc", String(args.cmd)], {
+        // The provider contract addresses its checkout as /workspace. The
+        // host-side harness may run from a GitHub checkout with no such path,
+        // so map only that virtual root to the actual repository checkout.
+        cwd: virtualWorkdir === "/workspace" ? process.cwd() : virtualWorkdir,
         stdout: "pipe",
         stderr: "pipe",
       });
       const [exitCode, stdout, stderr] = await Promise.all([
-        process.exited,
-        new Response(process.stdout).text(),
-        new Response(process.stderr).text(),
+        subprocess.exited,
+        new Response(subprocess.stdout).text(),
+        new Response(subprocess.stderr).text(),
       ]);
       return { exitCode, output: [stdout, stderr].filter(Boolean).join("\n") };
     },
