@@ -32,6 +32,8 @@ export type UseComposerOptions = ClientOverride &
 export type ComposerState = {
   value: string;
   setValue: (value: string) => void;
+  /** Read the current draft synchronously before a destructive replacement. */
+  hasDraftContent: () => boolean;
   /** Append the draft behind prompts already visible in the queue. */
   send: (text?: string) => Promise<boolean>;
   /** Supersede current direction with the draft. */
@@ -81,7 +83,9 @@ export function useComposer(
   const [draftConflict, setDraftConflict] = useState<Error | null>(null);
   const [restoredResources, setRestoredResources] = useState<ResourceRef[]>([]);
   const pendingClientEventId = useRef<string | null>(null);
+  const valueRef = useRef("");
   const draftRef = useRef<ComposerDraft | null>(null);
+  const restoredResourcesRef = useRef<ResourceRef[]>([]);
   const localEditRevision = useRef(0);
   const targetGeneration = useRef(0);
   const lastSavedSignature = useRef<string | null>(null);
@@ -104,7 +108,9 @@ export function useComposer(
       targetGeneration.current += 1;
       pendingClientEventId.current = null;
       localEditRevision.current = 0;
+      valueRef.current = "";
       draftRef.current = null;
+      restoredResourcesRef.current = [];
       lastSavedSignature.current = null;
       setValue("");
       setError(null);
@@ -116,7 +122,9 @@ export function useComposer(
 
   const applyDraft = useCallback(
     (next: ComposerDraft): void => {
+      valueRef.current = next.text;
       draftRef.current = next;
+      restoredResourcesRef.current = next.resources;
       lastSavedSignature.current = draftSignature(draftPayload(next));
       localEditRevision.current += 1;
       pendingClientEventId.current = null;
@@ -142,6 +150,8 @@ export function useComposer(
         setDraft(fetched);
         setDraftConflict(null);
         if (replaceLocal || localAtStart === localEditRevision.current) {
+          valueRef.current = fetched.text;
+          restoredResourcesRef.current = fetched.resources;
           lastSavedSignature.current = draftSignature(draftPayload(fetched));
           setValue(fetched.text);
           setRestoredResources(fetched.resources);
@@ -303,6 +313,7 @@ export function useComposer(
             updatedAt: null,
           };
           draftRef.current = cleared;
+          restoredResourcesRef.current = [];
           setDraft(cleared);
           setRestoredResources([]);
           lastSavedSignature.current = draftSignature(draftPayload(cleared));
@@ -310,7 +321,10 @@ export function useComposer(
         if (explicit === undefined) {
           // Clear only the draft that was sent: edits made while the request
           // was in flight were never delivered and must survive.
-          setValue((current) => (current === draftAtSend ? "" : current));
+          if (valueRef.current === draftAtSend) {
+            valueRef.current = "";
+            setValue("");
+          }
         }
         onSent?.(sendText);
         return true;
@@ -430,12 +444,29 @@ export function useComposer(
   const updateValue = useCallback((next: string) => {
     pendingClientEventId.current = null;
     localEditRevision.current += 1;
+    valueRef.current = next;
     setValue(next);
   }, []);
 
   const removeRestoredResource = useCallback((index: number) => {
     localEditRevision.current += 1;
-    setRestoredResources((current) => current.filter((_, candidate) => candidate !== index));
+    const next = restoredResourcesRef.current.filter((_, candidate) => candidate !== index);
+    restoredResourcesRef.current = next;
+    setRestoredResources(next);
+  }, []);
+
+  const hasDraftContent = useCallback((): boolean => {
+    const current = draftRef.current;
+    const extras = resolveSendExtras(sendExtrasRef.current);
+    const toolsProvidedByHost = Object.prototype.hasOwnProperty.call(extras, "tools");
+    const tools = toolsProvidedByHost ? (extras.tools ?? []) : (current?.tools ?? []);
+    return (
+      valueRef.current.length > 0 ||
+      restoredResourcesRef.current.length > 0 ||
+      (extras.resources?.length ?? 0) > 0 ||
+      tools.length > 0 ||
+      (current?.sourceTurnId !== null && current?.sourceTurnId !== undefined)
+    );
   }, []);
 
   const resolveDraftConflict = useCallback(
@@ -458,6 +489,7 @@ export function useComposer(
   return {
     value,
     setValue: updateValue,
+    hasDraftContent,
     send,
     steer,
     sending,

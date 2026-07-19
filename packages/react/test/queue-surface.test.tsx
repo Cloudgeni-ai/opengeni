@@ -1,7 +1,11 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { act, type ReactNode, useState } from "react";
 
-import { createQueueSurfaceForTest, QueueSurface } from "../src/components/queue-surface";
+import {
+  createQueueSurfaceForTest,
+  QueueSurface,
+  requestQueueDraftEdit,
+} from "../src/components/queue-surface";
 import { queueComposerCheckoutEnabled } from "../src/components/queue-surface-implementation";
 import type { ComposerState } from "../src/hooks/use-composer";
 import type { UseTurnQueueResult } from "../src/hooks/use-turn-queue";
@@ -459,6 +463,17 @@ describe("QueueSurface", () => {
         .querySelector('[data-testid="queue-surface"] [data-queue-handle]')
         ?.contains(document.activeElement),
     ).toBe(false);
+  });
+
+  test("requests confirmation without checkout when current draft state is newer than the render", () => {
+    const actions: string[] = [];
+    requestQueueDraftEdit(
+      composer({ value: "", hasDraftContent: () => true }),
+      () => actions.push("confirm replacement"),
+      () => actions.push("checkout queued prompt"),
+    );
+
+    expect(actions).toEqual(["confirm replacement"]);
   });
 
   test("bounds hostile prompt previews and discloses the exact source only on demand", async () => {
