@@ -102,7 +102,7 @@ describe("buildModelInstance — chat vs responses Model selection per provider 
 });
 
 describe("buildProviderClient", () => {
-  test("a registry provider gets a client pointed at its base URL with its key/headers, cached by id", () => {
+  test("a registry provider disables blind retries and keeps its URL/key/headers, cached by id", () => {
     const settings = multiProviderSettings();
     const provider = configuredProviders(settings).find(
       (candidate) => candidate.id === "fireworks",
@@ -111,7 +111,8 @@ describe("buildProviderClient", () => {
     const client = buildProviderClient(provider, settings);
     expect(client.baseURL).toBe("https://api.fireworks.ai/inference/v1");
     expect(client.apiKey).toBe("fw-test-key");
-    expect(client.maxRetries).toBe(settings.openaiMaxRetries);
+    expect(settings.openaiMaxRetries).toBeGreaterThan(0);
+    expect(client.maxRetries).toBe(0);
     // One client per provider id (module-level cache).
     expect(buildProviderClient(provider, settings)).toBe(client);
   });
