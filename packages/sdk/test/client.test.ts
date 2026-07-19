@@ -295,6 +295,7 @@ describe("OpenGeniClient", () => {
       cursor: "opaque-cursor",
       search: "  pinned work  ",
     });
+    await client.listSessionPage(WORKSPACE_ID, { pinsOnly: true });
     await client.getSessionLineage(WORKSPACE_ID, SESSION_ID);
     expect(requests[0]!.url).toBe(
       `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions?limit=5&parentSessionId=null`,
@@ -306,6 +307,9 @@ describe("OpenGeniClient", () => {
       `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions?view=page&limit=7&cursor=opaque-cursor&search=pinned+work`,
     );
     expect(requests[3]!.url).toBe(
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions?view=page&pinsOnly=true`,
+    );
+    expect(requests[4]!.url).toBe(
       `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/lineage`,
     );
   });
@@ -332,6 +336,9 @@ describe("OpenGeniClient", () => {
     await expect(
       client.listSessions(WORKSPACE_ID, { search: "unsupported-on-legacy" }),
     ).rejects.toThrow("does not support session search");
+    await expect(client.listSessionPage(WORKSPACE_ID, { pinsOnly: true })).rejects.toThrow(
+      "does not support pins-only session lists",
+    );
   });
 
   test("listSessionPage types only an expired snapshot cursor as recoverable", async () => {

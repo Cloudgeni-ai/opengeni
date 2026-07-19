@@ -64,6 +64,7 @@ import {
   SessionListAccessError,
   SessionListCursorError,
   SessionListCursorExpiredError,
+  SessionListSnapshotLimitError,
   decodeSessionListCursor,
   revokeViewer,
   setSessionGoalStatus,
@@ -138,8 +139,10 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       page = await listSessionsForSubject(db, workspaceId, {
         subjectId: grant.subjectId,
         limit: boundedLimit(query.limit),
+        materializeSnapshot: pageView,
         ...(query.cursor ? { cursor: query.cursor } : {}),
         ...(query.search ? { search: query.search } : {}),
+        ...(query.pinsOnly ? { pinsOnly: true } : {}),
         ...(query.parentSessionId !== undefined ? { parentSessionId: query.parentSessionId } : {}),
       });
     } catch (error) {
@@ -155,6 +158,10 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       }
       if (error instanceof SessionListCursorError) {
         throw new HTTPException(400, { message: error.message });
+      }
+      if (error instanceof SessionListSnapshotLimitError) {
+        c.header("Retry-After", "5");
+        throw new HTTPException(429, { message: error.message });
       }
       throw error;
     }
@@ -1598,6 +1605,7 @@ function sessionListQuery(
   parentSessionId: string | null | undefined;
   cursor: ReturnType<typeof decodeSessionListCursor> | undefined;
   search: string | undefined;
+  pinsOnly: boolean;
 } {
   const parentSessionId = query.parentSessionId;
   // "null" = roots only; a uuid = children of that session; anything else is
@@ -1621,6 +1629,18 @@ function sessionListQuery(
   if (search && search.length > 200) {
     throw new HTTPException(400, { message: "search must be at most 200 characters" });
   }
+  if (query.pinsOnly !== undefined && query.pinsOnly !== "true") {
+    throw new HTTPException(400, { message: 'pinsOnly must be the literal "true"' });
+  }
+  const pinsOnly = query.pinsOnly === "true";
+  if (pinsOnly && !allowCursor) {
+    throw new HTTPException(400, { message: 'pinsOnly requires view="page"' });
+  }
+  if (pinsOnly && (rawCursor || parentSessionId !== undefined || search)) {
+    throw new HTTPException(400, {
+      message: "pinsOnly cannot be combined with cursor, parentSessionId, or search",
+    });
+  }
   return {
     limit: query.limit,
     parentSessionId:
@@ -1631,6 +1651,7 @@ function sessionListQuery(
           : parentSessionId,
     cursor,
     search: search || undefined,
+    pinsOnly,
   };
 }
 

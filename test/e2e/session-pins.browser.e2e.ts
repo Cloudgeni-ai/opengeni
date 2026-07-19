@@ -632,7 +632,13 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
 
       await setSessionPinThroughApi(page, apiBaseUrl, workspaceId, manager, true);
       await Bun.sleep(10);
-      await setSessionPinThroughApi(page, apiBaseUrl, workspaceId, descendant, true);
+      const pinnedDescendant = await setSessionPinThroughApi(
+        page,
+        apiBaseUrl,
+        workspaceId,
+        descendant,
+        true,
+      );
       await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions/${manager.id}`);
 
       const pinnedList = page.getByRole("list", { name: "Pinned sessions" });
@@ -676,6 +682,20 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         await managerChildren.locator(`button[data-session-row="${descendant.id}"]`).count(),
       ).toBe(0);
 
+      // Load the pinned descendant into the intermediary's lazy child cache.
+      // Pin ownership still prunes it from that branch, but a later remote
+      // unpin must reconcile this cached positive projection rather than leave
+      // a permanent stale top-level shortcut.
+      const intermediaryChildPage = page.waitForResponse((response) => {
+        const url = new URL(response.url());
+        return (
+          successfulSessionPageResponse(response, workspaceId) &&
+          url.searchParams.get("parentSessionId") === intermediary.id
+        );
+      });
+      await managerChildren.getByRole("button", { name: "Expand spawned sessions" }).click();
+      await intermediaryChildPage;
+
       // The descendant shortcut owns its unpinned leaf. Its nested list is
       // explicit to assistive technology, and keyboard order includes every
       // expanded descendant once before advancing to the next pin root.
@@ -701,19 +721,37 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       expect(new Set(visiblePinIds).size).toBe(visiblePinIds.length);
       await expectNoAxeViolations(page, ["[data-ope26-session-list]"]);
 
-      // After unpinning, the descendant may truthfully remain nested under its
-      // pinned manager. Assert only that it is no longer an explicit top-level
-      // pin root—the section as a whole must not be required to lose the row.
-      await descendantRow.click();
-      await page.getByRole("button", { name: "Unpin session" }).waitFor();
-      await page.getByRole("button", { name: "Unpin session" }).click();
-      await page.getByRole("button", { name: "Pin session" }).waitFor();
+      // Unpin from a different device/API context while the manager—not the
+      // descendant—is the active route. Focus reconciliation refreshes the
+      // complete pins-only page, then point-reads the absent cached pin revision.
+      await setSessionPinThroughApi(page, apiBaseUrl, workspaceId, pinnedDescendant, false);
+      const pinsOnlyRefresh = page.waitForResponse((response) => {
+        const url = new URL(response.url());
+        return (
+          successfulSessionPageResponse(response, workspaceId) &&
+          url.searchParams.get("pinsOnly") === "true"
+        );
+      });
+      const descendantPointRead = page.waitForResponse((response) => {
+        const url = new URL(response.url());
+        return (
+          response.ok() &&
+          response.request().method() === "GET" &&
+          url.pathname === `/v1/workspaces/${workspaceId}/sessions/${descendant.id}`
+        );
+      });
+      await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+      await Promise.all([pinsOnlyRefresh, descendantPointRead]);
       const topLevelPinnedDescendant = page.locator(
         `[role="list"][aria-label="Pinned sessions"] > [role="listitem"] > div > button[data-session-row="${descendant.id}"]`,
       );
       await waitFor(async () => (await topLevelPinnedDescendant.count()) === 0, {
         timeoutMs: 10_000,
       });
+      const intermediaryChildren = managerChildren.getByRole("list", {
+        name: "Spawned sessions from Lazy hierarchy intermediary",
+      });
+      await intermediaryChildren.locator(`button[data-session-row="${descendant.id}"]`).waitFor();
       expect(ordinaryChild.id).toBeTruthy();
     } finally {
       await context.close();

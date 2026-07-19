@@ -4,7 +4,11 @@
 // dot + single-line truncated title + relative time (visible at rest). The
 // active session (from the URL) is highlighted with an accent bar.
 import { useSessionLineage, useWorkspaceSessions } from "@opengeni/react";
-import { OpenGeniSessionListCursorError, type SessionListResponse } from "@opengeni/sdk";
+import {
+  OpenGeniApiError,
+  OpenGeniSessionListCursorError,
+  type SessionListResponse,
+} from "@opengeni/sdk";
 import { useRouterState } from "@tanstack/react-router";
 import {
   ChevronRightIcon,
@@ -118,6 +122,7 @@ export function SessionList() {
   // the actual tree.
   const globalPinPage = useWorkspaceSessions({
     limit: 1,
+    pinsOnly: true,
     pollIntervalMs: 15_000,
   });
   const { sessions, nextCursor, loading, error, refresh } = rootPage;
@@ -224,10 +229,92 @@ export function SessionList() {
     const source = new Map(serverSessions.map((session) => [session.id, session]));
     for (const [id, override] of pinOverrides) {
       const current = source.get(id);
-      source.set(id, current ? mergeSessionForRail(current, override.session) : override.session);
+      source.set(
+        id,
+        current
+          ? (applySessionPinProjection(current, override.session) ?? current)
+          : override.session,
+      );
     }
     return [...source.values()];
   }, [pinOverrides, serverSessions]);
+
+  // A complete pins-only page makes presence authoritative, but absence does
+  // not carry the version of a remotely unpinned relation. Loaded child pages
+  // can outlive many root/global polls, so point-read only their stale positive
+  // pins and merge the exact revision back into every cached parent page.
+  const staleChildPinProbes = useRef(new Map<string, string>());
+  useEffect(() => {
+    if (globalPinsLoading || globalPinsError) return;
+    const pinnedIds = new Set(globalPinned.map((session) => session.id));
+    const stalePins = loadedChildren.filter(
+      (session) => session.pinned && !pinnedIds.has(session.id),
+    );
+    const staleKeys = new Set(
+      stalePins.map((session) => `${session.id}:${session.pinVersion ?? 0}`),
+    );
+    for (const [sessionId, key] of staleChildPinProbes.current) {
+      if (!staleKeys.has(key)) staleChildPinProbes.current.delete(sessionId);
+    }
+    const childEpoch = childLoadEpoch.current;
+    for (const stale of stalePins) {
+      const key = `${stale.id}:${stale.pinVersion ?? 0}`;
+      if (staleChildPinProbes.current.get(stale.id) === key) continue;
+      staleChildPinProbes.current.set(stale.id, key);
+      void context.client
+        .getSession(rail.workspaceId, stale.id)
+        .then((authoritative) => {
+          if (
+            childLoadEpoch.current !== childEpoch ||
+            staleChildPinProbes.current.get(stale.id) !== key
+          ) {
+            return;
+          }
+          setChildPages((current) => {
+            let changed = false;
+            const next = new Map(current);
+            for (const [parentId, page] of current) {
+              const projectedSessions = page.sessions.map((session) => {
+                if (session.id !== stale.id) return session;
+                const projected = applySessionPinProjection(session, authoritative) ?? session;
+                if (projected !== session) changed = true;
+                return projected;
+              });
+              if (projectedSessions.some((session, index) => session !== page.sessions[index])) {
+                next.set(parentId, { ...page, sessions: projectedSessions });
+              }
+            }
+            return changed ? next : current;
+          });
+        })
+        .catch((requestError: unknown) => {
+          if (requestError instanceof OpenGeniApiError && requestError.status === 404) {
+            setChildPages((current) => {
+              let changed = false;
+              const next = new Map(current);
+              for (const [parentId, page] of current) {
+                const retainedSessions = page.sessions.filter((session) => session.id !== stale.id);
+                if (retainedSessions.length !== page.sessions.length) {
+                  changed = true;
+                  next.set(parentId, { ...page, sessions: retainedSessions });
+                }
+              }
+              return changed ? next : current;
+            });
+          }
+          if (staleChildPinProbes.current.get(stale.id) === key) {
+            staleChildPinProbes.current.delete(stale.id);
+          }
+        });
+    }
+  }, [
+    context.client,
+    globalPinned,
+    globalPinsError,
+    globalPinsLoading,
+    loadedChildren,
+    rail.workspaceId,
+  ]);
   const openSessionId = context.session?.id;
   const openSessionWorkspaceId = context.session?.workspaceId;
   const openSessionPinned = Boolean(context.session?.pinned);

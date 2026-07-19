@@ -8,6 +8,8 @@ export type UseWorkspaceSessionsOptions = ClientOverride & {
   parentSessionId?: string | null | undefined;
   cursor?: string | undefined;
   search?: string | undefined;
+  /** Return only the complete personal pinned projection. */
+  pinsOnly?: boolean | undefined;
   /** Refresh interval (ms) for fleet/manager views. Off by default. */
   pollIntervalMs?: number | undefined;
   enabled?: boolean | undefined;
@@ -36,8 +38,16 @@ export function useWorkspaceSessions(
   const parentSessionId = options.parentSessionId;
   const cursor = options.cursor;
   const search = options.search;
+  const pinsOnly = options.pinsOnly;
   const enabled = options.enabled ?? true;
-  const queryKey = JSON.stringify({ workspaceId, limit, parentSessionId, cursor, search });
+  const queryKey = JSON.stringify({
+    workspaceId,
+    limit,
+    parentSessionId,
+    cursor,
+    search,
+    pinsOnly,
+  });
   const previousQueryKey = useRef(queryKey);
   const queryKeyTransition = previousQueryKey.current !== queryKey;
   useEffect(() => {
@@ -51,9 +61,10 @@ export function useWorkspaceSessions(
         ...(parentSessionId !== undefined ? { parentSessionId } : {}),
         ...(cursor !== undefined ? { cursor } : {}),
         ...(search !== undefined ? { search } : {}),
+        ...(pinsOnly ? { pinsOnly: true } : {}),
       }),
     }),
-    [client, workspaceId, limit, parentSessionId, cursor, search, queryKey],
+    [client, workspaceId, limit, parentSessionId, cursor, search, pinsOnly, queryKey],
   );
   const state = usePolledValue(load, {
     pollIntervalMs: options.pollIntervalMs,

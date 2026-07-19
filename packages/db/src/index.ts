@@ -98,6 +98,7 @@ import {
   ilike,
   isNull,
   lt,
+  lte,
   ne,
   or,
   sql,
@@ -10723,6 +10724,10 @@ export type ListSessionsForSubjectOptions = ListSessionsOptions & {
   subjectId: string;
   cursor?: SessionListCursor | undefined;
   search?: string | undefined;
+  /** Return only the complete personal pin projection; never scan/snapshot ordinary rows. */
+  pinsOnly?: boolean | undefined;
+  /** Materialize a continuation snapshot. Disable for legacy one-page array reads. */
+  materializeSnapshot?: boolean | undefined;
 };
 
 export class SessionPinVersionConflictError extends Error {
@@ -10750,6 +10755,13 @@ export class SessionListAccessError extends Error {
   constructor(message = "workspace access denied") {
     super(message);
     this.name = "SessionListAccessError";
+  }
+}
+
+export class SessionListSnapshotLimitError extends Error {
+  constructor(message = "session list snapshot capacity exceeded") {
+    super(message);
+    this.name = "SessionListSnapshotLimitError";
   }
 }
 
@@ -10935,6 +10947,9 @@ function sessionFilters(
 }
 
 const SESSION_LIST_SNAPSHOT_TTL_MS = 10 * 60 * 1000;
+const SESSION_LIST_SNAPSHOT_REUSE_MS = 5_000;
+export const SESSION_LIST_SNAPSHOT_MAX_IDS = 5_000;
+export const SESSION_LIST_SNAPSHOT_MAX_ACTIVE_PER_SUBJECT = 32;
 const SESSION_LIST_SERIALIZATION_MAX_ATTEMPTS = 3;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -10949,6 +10964,20 @@ function sessionParentFilter(parentSessionId: string | null | undefined): string
 function sessionSearchFilter(search: string | undefined): string | null {
   const trimmed = search?.trim();
   return trimmed ? trimmed : null;
+}
+
+function sessionListSnapshotLockKey(workspaceId: string, subjectId: string): string {
+  return `session-list-snapshot:${workspaceId}:${subjectId}`;
+}
+
+async function lockSessionListSnapshotCreation(
+  db: Database,
+  workspaceId: string,
+  subjectId: string,
+): Promise<void> {
+  await db.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(${sessionListSnapshotLockKey(workspaceId, subjectId)}, 0))`,
+  );
 }
 
 /** Opaque, URL-safe cursor encoding for a server-owned activity snapshot. */
@@ -11067,9 +11096,18 @@ export async function listSessionsForSubject(
         const searchFilter = sessionSearchFilter(options.search);
         const now = new Date();
 
+        if (options.pinsOnly && options.cursor) {
+          throw new SessionListCursorError("pins-only session lists do not accept a cursor");
+        }
+
         let pageIds: string[];
         let nextCursor: string | null = null;
-        if (options.cursor) {
+        if (options.pinsOnly) {
+          // The rail polls the complete personal pin section independently from
+          // its root page. Do not turn that cheap projection into an O(N)
+          // ordinary-session scan or a throwaway continuation snapshot.
+          pageIds = [];
+        } else if (options.cursor) {
           const cursor = options.cursor;
           if (cursor.parentSessionFilter !== parentFilter || cursor.search !== searchFilter) {
             throw new SessionListCursorError("session list cursor does not match its filters");
@@ -11105,7 +11143,7 @@ export async function listSessionsForSubject(
               search: snapshot.search ?? null,
             });
           }
-        } else {
+        } else if (options.materializeSnapshot === false) {
           const ordinaryIdRows = await tx
             .select({ id: schema.sessions.id })
             .from(schema.sessions)
@@ -11123,32 +11161,118 @@ export async function listSessionsForSubject(
                 or(isNull(schema.sessionPins.id), eq(schema.sessionPins.pinned, false)),
               ),
             )
-            .orderBy(desc(schema.sessions.updatedAt), desc(schema.sessions.id));
-          const ordinaryIds = ordinaryIdRows.map((row) => row.id);
+            .orderBy(desc(schema.sessions.updatedAt), desc(schema.sessions.id))
+            .limit(limit);
+          pageIds = ordinaryIdRows.map((row) => row.id);
+        } else {
+          // Coalesce concurrent first-page requests for this subject before the
+          // expensive ordered-ID read. A short reuse window preserves live-list
+          // behavior while bounding authenticated request amplification. The
+          // separate lock domain does not serialize pin writes or other members.
+          await lockSessionListSnapshotCreation(tx, workspaceId, options.subjectId);
+          await tx
+            .delete(schema.sessionListSnapshots)
+            .where(
+              and(
+                eq(schema.sessionListSnapshots.workspaceId, workspaceId),
+                eq(schema.sessionListSnapshots.subjectId, options.subjectId),
+                lte(schema.sessionListSnapshots.expiresAt, now),
+              ),
+            );
+          const snapshotSearchFilter = searchFilter
+            ? eq(schema.sessionListSnapshots.search, searchFilter)
+            : isNull(schema.sessionListSnapshots.search);
+          const [reusableSnapshot] = await tx
+            .select()
+            .from(schema.sessionListSnapshots)
+            .where(
+              and(
+                eq(schema.sessionListSnapshots.workspaceId, workspaceId),
+                eq(schema.sessionListSnapshots.subjectId, options.subjectId),
+                eq(schema.sessionListSnapshots.parentSessionFilter, parentFilter),
+                snapshotSearchFilter,
+                gt(
+                  schema.sessionListSnapshots.createdAt,
+                  new Date(now.getTime() - SESSION_LIST_SNAPSHOT_REUSE_MS),
+                ),
+              ),
+            )
+            .orderBy(
+              desc(schema.sessionListSnapshots.createdAt),
+              desc(schema.sessionListSnapshots.id),
+            )
+            .limit(1);
+
+          let ordinaryIds = reusableSnapshot?.ordinarySessionIds;
+          if (!ordinaryIds) {
+            const ordinaryIdRows = await tx
+              .select({ id: schema.sessions.id })
+              .from(schema.sessions)
+              .leftJoin(
+                schema.sessionPins,
+                and(
+                  eq(schema.sessionPins.workspaceId, workspaceId),
+                  eq(schema.sessionPins.subjectId, options.subjectId),
+                  eq(schema.sessionPins.sessionId, schema.sessions.id),
+                ),
+              )
+              .where(
+                and(
+                  ...filters,
+                  or(isNull(schema.sessionPins.id), eq(schema.sessionPins.pinned, false)),
+                ),
+              )
+              .orderBy(desc(schema.sessions.updatedAt), desc(schema.sessions.id))
+              .limit(SESSION_LIST_SNAPSHOT_MAX_IDS + 1);
+            if (ordinaryIdRows.length > SESSION_LIST_SNAPSHOT_MAX_IDS) {
+              throw new SessionListSnapshotLimitError(
+                `session list exceeds the ${SESSION_LIST_SNAPSHOT_MAX_IDS}-row stable pagination limit`,
+              );
+            }
+            ordinaryIds = ordinaryIdRows.map((row) => row.id);
+          }
           pageIds = ordinaryIds.slice(0, limit);
           if (ordinaryIds.length > limit) {
-            const [workspace] = await tx
-              .select({ accountId: schema.workspaces.accountId })
-              .from(schema.workspaces)
-              .where(eq(schema.workspaces.id, workspaceId))
-              .limit(1);
-            if (!workspace) {
-              throw new Error("session list workspace disappeared while creating a snapshot");
-            }
-            const [snapshot] = await tx
-              .insert(schema.sessionListSnapshots)
-              .values({
-                accountId: workspace.accountId,
-                workspaceId,
-                subjectId: options.subjectId,
-                parentSessionFilter: parentFilter,
-                search: searchFilter,
-                ordinarySessionIds: ordinaryIds,
-                expiresAt: new Date(now.getTime() + SESSION_LIST_SNAPSHOT_TTL_MS),
-              })
-              .returning();
+            let snapshot = reusableSnapshot;
             if (!snapshot) {
-              throw new Error("session list snapshot was not created");
+              const activeSnapshots = await tx
+                .select({ id: schema.sessionListSnapshots.id })
+                .from(schema.sessionListSnapshots)
+                .where(
+                  and(
+                    eq(schema.sessionListSnapshots.workspaceId, workspaceId),
+                    eq(schema.sessionListSnapshots.subjectId, options.subjectId),
+                  ),
+                )
+                .limit(SESSION_LIST_SNAPSHOT_MAX_ACTIVE_PER_SUBJECT);
+              if (activeSnapshots.length >= SESSION_LIST_SNAPSHOT_MAX_ACTIVE_PER_SUBJECT) {
+                throw new SessionListSnapshotLimitError(
+                  "too many active session list snapshots; retry after an existing cursor expires",
+                );
+              }
+              const [workspace] = await tx
+                .select({ accountId: schema.workspaces.accountId })
+                .from(schema.workspaces)
+                .where(eq(schema.workspaces.id, workspaceId))
+                .limit(1);
+              if (!workspace) {
+                throw new Error("session list workspace disappeared while creating a snapshot");
+              }
+              [snapshot] = await tx
+                .insert(schema.sessionListSnapshots)
+                .values({
+                  accountId: workspace.accountId,
+                  workspaceId,
+                  subjectId: options.subjectId,
+                  parentSessionFilter: parentFilter,
+                  search: searchFilter,
+                  ordinarySessionIds: ordinaryIds,
+                  expiresAt: new Date(now.getTime() + SESSION_LIST_SNAPSHOT_TTL_MS),
+                })
+                .returning();
+              if (!snapshot) {
+                throw new Error("session list snapshot was not created");
+              }
             }
             nextCursor = encodeSessionListCursor({
               snapshotId: snapshot.id,

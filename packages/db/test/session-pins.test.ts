@@ -14,6 +14,9 @@ import {
   SessionListAccessError,
   SessionListCursorError,
   SessionListCursorExpiredError,
+  SessionListSnapshotLimitError,
+  SESSION_LIST_SNAPSHOT_MAX_ACTIVE_PER_SUBJECT,
+  SESSION_LIST_SNAPSHOT_MAX_IDS,
   SessionPinAccessError,
   SessionPinVersionConflictError,
   setSessionPin,
@@ -89,27 +92,6 @@ async function waitForAdvisoryWait(
     await Bun.sleep(10);
   }
   throw new Error(`timed out waiting for advisory lock ${classId}/${objectId}`);
-}
-
-async function waitForAdvisoryWaitCount(
-  connection: postgres.Sql,
-  classId: number,
-  objectId: number,
-  minimum: number,
-): Promise<void> {
-  const deadline = Date.now() + 5_000;
-  while (Date.now() < deadline) {
-    const [row] = await connection<{ waiting: number }[]>`
-      select count(*)::int as waiting
-      from pg_locks
-      where locktype = 'advisory'
-        and classid = ${classId}
-        and objid = ${objectId}
-        and not granted`;
-    if ((row?.waiting ?? 0) >= minimum) return;
-    await Bun.sleep(10);
-  }
-  throw new Error(`timed out waiting for ${minimum} advisory locks on ${classId}/${objectId}`);
 }
 
 async function waitForDatabaseQueryWait(
@@ -478,6 +460,37 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
           select id from session_list_snapshots where subject_id = 'user:one'`),
     );
     expect(sameWorkspaceOtherSubject).toEqual([]);
+  }, 60_000);
+
+  test("returns a complete pins-only projection without scanning or snapshotting ordinary rows", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const subjectId = "user:pins-only";
+    await grantMember(workspace, subjectId);
+    const pinned = await session({ ...workspace, message: "pins-only target" });
+    await session({ ...workspace, message: "pins-only ordinary first" });
+    await session({ ...workspace, message: "pins-only ordinary second" });
+    await setSessionPin(db, {
+      workspaceId: workspace.workspaceId,
+      subjectId,
+      sessionId: pinned.id,
+      pinned: true,
+    });
+
+    const page = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId,
+      limit: 1,
+      pinsOnly: true,
+    });
+    expect(page.pinned.map((row) => row.id)).toEqual([pinned.id]);
+    expect(page.sessions).toEqual([]);
+    expect(page.nextCursor).toBeNull();
+    const [count] = await admin<{ count: number }[]>`
+      select count(*)::int as count
+      from session_list_snapshots
+      where workspace_id = ${workspace.workspaceId}
+        and subject_id = ${subjectId}`;
+    expect(count?.count).toBe(0);
   }, 60_000);
 
   test("lists for non-member api_key subjects — workspace-scoped keys have no membership row", async () => {
@@ -1128,74 +1141,99 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     expect(page.sessions.map((row) => row.id)).toEqual([target.id]);
   });
 
-  test("allows concurrent list readers through the shared personal-state fence", async () => {
-    if (!available || !shared) return;
+  test("coalesces concurrent first pages to one bounded subject snapshot", async () => {
+    if (!available) return;
     const workspace = await freshWorkspace();
     const subjectId = "user:concurrent-list-readers";
     await grantMember(workspace, subjectId);
-    await session({ ...workspace, message: "concurrent list first" });
-    await session({ ...workspace, message: "concurrent list second" });
+    await admin`
+      insert into sessions (
+        id, account_id, workspace_id, initial_message, model, sandbox_backend, sandbox_group_id
+      )
+      select generated.id, ${workspace.accountId}, ${workspace.workspaceId},
+        'bounded concurrent session ' || generated.ordinality,
+        'test-model', 'none', generated.id
+      from (
+        select gen_random_uuid() as id, ordinality
+        from generate_series(1, 128) with ordinality
+      ) generated`;
 
-    const barrier = postgres(shared.adminUrl, { max: 1 });
-    const firstClient = createDb(shared.appUrl, { max: 1 });
-    const secondClient = createDb(shared.appUrl, { max: 1 });
-    const barrierClass = 81326032;
-    const snapshotLock = 1;
-    const triggerFunction = "ope26_test_concurrent_list_barrier";
-    const triggerName = "ope26_test_concurrent_list_snapshot_barrier";
-    let firstListing: Promise<Awaited<ReturnType<typeof listSessionsForSubject>>> | null = null;
-    let secondListing: Promise<Awaited<ReturnType<typeof listSessionsForSubject>>> | null = null;
-    try {
-      await barrier.unsafe(`
-        create function ${triggerFunction}() returns trigger
-        language plpgsql as $$
-        begin
-          perform pg_advisory_xact_lock(${barrierClass}, ${snapshotLock});
-          return new;
-        end
-        $$;
-        create trigger ${triggerName}
-          before insert on session_list_snapshots
-          for each row when (
-            new.workspace_id = '${workspace.workspaceId}'::uuid
-            and new.subject_id = '${subjectId}'
-          ) execute function ${triggerFunction}();
-      `);
-      await barrier`select pg_advisory_lock(${barrierClass}, ${snapshotLock})`;
+    const pages = await Promise.all(
+      Array.from({ length: 16 }, () =>
+        listSessionsForSubject(db, workspace.workspaceId, {
+          subjectId,
+          limit: 1,
+        }),
+      ),
+    );
+    const cursors = pages.map((page) => decodeSessionListCursor(page.nextCursor!));
+    expect(cursors.every((cursor) => cursor !== null)).toBe(true);
+    expect(new Set(cursors.map((cursor) => cursor!.snapshotId)).size).toBe(1);
+    expect(new Set(pages.map((page) => page.sessions[0]?.id)).size).toBe(1);
+    const [count] = await admin<{ count: number; maxIds: number }[]>`
+      select count(*)::int as count,
+        coalesce(max(cardinality(ordinary_session_ids)), 0)::int as "maxIds"
+      from session_list_snapshots
+      where workspace_id = ${workspace.workspaceId}
+        and subject_id = ${subjectId}`;
+    expect(count).toEqual({ count: 1, maxIds: 128 });
+  }, 60_000);
 
-      firstListing = listSessionsForSubject(firstClient.db, workspace.workspaceId, {
-        subjectId,
+  test("rejects oversized and over-quota subject snapshots before unbounded storage", async () => {
+    if (!available) return;
+    const oversized = await freshWorkspace();
+    const oversizedSubject = "user:oversized-list";
+    await grantMember(oversized, oversizedSubject);
+    await admin`
+      insert into sessions (
+        id, account_id, workspace_id, initial_message, model, sandbox_backend, sandbox_group_id
+      )
+      select generated.id, ${oversized.accountId}, ${oversized.workspaceId},
+        'oversized session ' || generated.ordinality,
+        'test-model', 'none', generated.id
+      from (
+        select gen_random_uuid() as id, ordinality
+        from generate_series(1, ${SESSION_LIST_SNAPSHOT_MAX_IDS + 1}) with ordinality
+      ) generated`;
+    await expect(
+      listSessionsForSubject(db, oversized.workspaceId, {
+        subjectId: oversizedSubject,
         limit: 1,
-      });
-      await waitForAdvisoryWaitCount(barrier, barrierClass, snapshotLock, 1);
+      }),
+    ).rejects.toBeInstanceOf(SessionListSnapshotLimitError);
+    const [oversizedCount] = await admin<{ count: number }[]>`
+      select count(*)::int as count from session_list_snapshots
+      where workspace_id = ${oversized.workspaceId} and subject_id = ${oversizedSubject}`;
+    expect(oversizedCount?.count).toBe(0);
 
-      secondListing = listSessionsForSubject(secondClient.db, workspace.workspaceId, {
-        subjectId,
+    const quota = await freshWorkspace();
+    const quotaSubject = "user:snapshot-quota";
+    await grantMember(quota, quotaSubject);
+    const first = await session({ ...quota, message: "snapshot quota first" });
+    const second = await session({
+      ...quota,
+      message: "snapshot quota second",
+    });
+    await admin`
+      insert into session_list_snapshots (
+        account_id, workspace_id, subject_id, parent_session_filter,
+        search, ordinary_session_ids, expires_at, created_at
+      )
+      select ${quota.accountId}, ${quota.workspaceId}, ${quotaSubject}, 'all',
+        'occupied-' || series, array[${first.id}::uuid, ${second.id}::uuid],
+        now() + interval '10 minutes', now() - interval '1 minute'
+      from generate_series(1, ${SESSION_LIST_SNAPSHOT_MAX_ACTIVE_PER_SUBJECT}) series`;
+    await expect(
+      listSessionsForSubject(db, quota.workspaceId, {
+        subjectId: quotaSubject,
+        search: "snapshot quota",
         limit: 1,
-      });
-      // Both transactions must pass the compatible personal-state fence and
-      // reach the snapshot barrier. A membership row lock made the second reader
-      // wait on the first reader's tuple instead, then abort with 40001.
-      await waitForAdvisoryWaitCount(barrier, barrierClass, snapshotLock, 2);
-
-      await barrier`select pg_advisory_unlock(${barrierClass}, ${snapshotLock})`;
-      const [first, second] = await Promise.all([firstListing, secondListing]);
-      expect(first.nextCursor).toBeTruthy();
-      expect(second.nextCursor).toBeTruthy();
-      expect(first.sessions.map((row) => row.id)).toEqual(second.sessions.map((row) => row.id));
-    } finally {
-      await barrier`select pg_advisory_unlock_all()`.catch(() => undefined);
-      await barrier
-        .unsafe(`
-        drop trigger if exists ${triggerName} on session_list_snapshots;
-        drop function if exists ${triggerFunction}();
-      `)
-        .catch(() => undefined);
-      await barrier.end().catch(() => undefined);
-      await Promise.allSettled([firstListing, secondListing].filter(Boolean));
-      await firstClient.close().catch(() => undefined);
-      await secondClient.close().catch(() => undefined);
-    }
+      }),
+    ).rejects.toBeInstanceOf(SessionListSnapshotLimitError);
+    const [quotaCount] = await admin<{ count: number }[]>`
+      select count(*)::int as count from session_list_snapshots
+      where workspace_id = ${quota.workspaceId} and subject_id = ${quotaSubject}`;
+    expect(quotaCount?.count).toBe(SESSION_LIST_SNAPSHOT_MAX_ACTIVE_PER_SUBJECT);
   }, 60_000);
 
   test("rejects a stale pin mutation after removal wins the personal-state fence", async () => {

@@ -75,6 +75,32 @@ function queueSnapshot(
 }
 
 describe("useWorkspaceSessions", () => {
+  test("forwards pins-only mode without changing the historical visible-row projection", async () => {
+    const pinned = { id: "pin-only", pinned: true } as never;
+    let observedPinsOnly = false;
+    const client = fakeClient({
+      listSessionPage: async (_workspaceId, options) => {
+        observedPinsOnly = options?.pinsOnly === true;
+        return { pinned: [pinned], sessions: [], nextCursor: null };
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useWorkspaceSessions({
+          client,
+          workspaceId: WORKSPACE_ID,
+          pinsOnly: true,
+        }),
+      undefined,
+    );
+    await flush();
+
+    expect(observedPinsOnly).toBe(true);
+    expect(hook.result.current.sessions).toEqual([pinned]);
+    expect(hook.result.current.pinned).toEqual([pinned]);
+    await hook.unmount();
+  });
+
   test("keeps pinned rows in the historical sessions result while exposing the section", async () => {
     const pinned = { id: "pinned", pinned: true } as never;
     const ordinary = { id: "ordinary", pinned: false } as never;

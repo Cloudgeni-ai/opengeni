@@ -268,6 +268,22 @@ describe("API component integration", () => {
       pinned: true,
       pinVersion: 1,
     });
+    const pinsOnlyResponse = await app.request(
+      workspacePath(workspaceId, "/sessions?view=page&pinsOnly=true&limit=1"),
+    );
+    expect(pinsOnlyResponse.status).toBe(200);
+    expect(await pinsOnlyResponse.json()).toMatchObject({
+      pinned: [{ id: pinnedTarget.id }],
+      sessions: [],
+      nextCursor: null,
+    });
+    const snapshotsBeforeStablePage = await dbClient.db.execute<{
+      count: number;
+    }>(dbSql`
+      select count(*)::int as count
+      from session_list_snapshots
+      where workspace_id = ${workspaceId}`);
+    expect(snapshotsBeforeStablePage).toEqual([{ count: 0 }]);
 
     const firstPageResponse = await app.request(
       workspacePath(workspaceId, "/sessions?view=page&limit=1"),

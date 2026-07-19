@@ -304,6 +304,8 @@ export class OpenGeniClient {
       parentSessionId?: string | null;
       cursor?: string;
       search?: string;
+      /** Return only the complete personal pinned projection. */
+      pinsOnly?: boolean;
     } = {},
   ): Promise<SessionListResponse> {
     let response: SessionListResponse | Session[];
@@ -317,6 +319,7 @@ export class OpenGeniClient {
           ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
           ...(options.cursor !== undefined ? { cursor: options.cursor } : {}),
           ...(options.search?.trim() ? { search: options.search.trim() } : {}),
+          ...(options.pinsOnly ? { pinsOnly: "true" } : {}),
           ...(Object.prototype.hasOwnProperty.call(options, "parentSessionId") &&
           options.parentSessionId !== undefined
             ? {
@@ -345,6 +348,9 @@ export class OpenGeniClient {
       // the old endpoint's bounded first page).
       if (options.search?.trim()) {
         throw new Error("The connected OpenGeni API does not support session search");
+      }
+      if (options.pinsOnly) {
+        throw new Error("The connected OpenGeni API does not support pins-only session lists");
       }
       return { pinned: [], sessions: response, nextCursor: null };
     }
