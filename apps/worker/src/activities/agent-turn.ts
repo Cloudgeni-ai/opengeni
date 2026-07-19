@@ -318,6 +318,49 @@ export function isWorkerShutdownCancellation(error: unknown): boolean {
   return error instanceof CancelledFailure && error.message === "WORKER_SHUTDOWN";
 }
 
+/**
+ * Extract only bounded, low-cardinality driver identity from a nested failure.
+ * Drizzle wraps PostgreSQL errors and puts the useful SQLSTATE on `cause.code`;
+ * the outer message may contain SQL and parameters, so it is deliberately not
+ * copied into span attributes here. Cycles and arbitrary provider data stop at
+ * a fixed depth.
+ */
+export function boundedTurnFailureTelemetry(error: unknown): {
+  "opengeni.error_driver_code"?: string;
+  "opengeni.error_cause_type"?: string;
+} {
+  const seen = new WeakSet<object>();
+  let current = error;
+  let causeType: string | undefined;
+  let driverCode: string | undefined;
+  for (let depth = 0; depth < 4 && current && typeof current === "object"; depth += 1) {
+    if (seen.has(current)) break;
+    seen.add(current);
+    const record = current as Record<string, unknown>;
+    if (depth > 0 && causeType === undefined) {
+      const rawType =
+        typeof record.name === "string"
+          ? record.name
+          : typeof record.type === "string"
+            ? record.type
+            : undefined;
+      if (rawType && /^[A-Za-z0-9_.:-]{1,64}$/.test(rawType)) causeType = rawType;
+    }
+    if (driverCode === undefined) {
+      const rawCode =
+        typeof record.code === "string" || typeof record.code === "number"
+          ? String(record.code)
+          : undefined;
+      if (rawCode && /^[A-Za-z0-9_.:-]{1,64}$/.test(rawCode)) driverCode = rawCode;
+    }
+    current = record.cause ?? record.error;
+  }
+  return {
+    ...(driverCode ? { "opengeni.error_driver_code": driverCode } : {}),
+    ...(causeType ? { "opengeni.error_cause_type": causeType } : {}),
+  };
+}
+
 function compactionFailureReason(reason: string): string {
   return reason.startsWith("compaction summarization failed:")
     ? reason
@@ -1204,6 +1247,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     let activityStatus: RunAgentTurnResult["status"] | "unknown" = "unknown";
     let turnMetricOutcome: TurnOutcome | null = null;
     let activityError: unknown;
+    let activityFailureProvenance:
+      | "persistence_boundary"
+      | "worker_shutdown"
+      | "attempt_fenced"
+      | "activity_cancelled"
+      | undefined;
     let turnId: string | undefined;
     let triggerEventId: string | undefined;
     const claimedResult = (
@@ -4827,6 +4876,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       if (error instanceof TurnPersistenceBoundaryError && recoveryTurnId) {
         activityStatus = "persistence_pending";
         activityError = error.persistenceCause;
+        activityFailureProvenance = "persistence_boundary";
         turnMetricOutcome = "recovering";
         return claimedResult({
           status: "persistence_pending",
@@ -4865,6 +4915,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         }
       }
       if (isWorkerShutdownCancellation(error) && recoveryTurnId) {
+        activityFailureProvenance = "worker_shutdown";
         try {
           await flushRuntimeBatcher();
           await reconcileConversationTruth();
@@ -4900,6 +4951,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // The database transition is atomic. If it could not commit, surface
           // the failure so Temporal can retry on a healthy worker; never mutate
           // the turn through a second cancellation path.
+          activityError = recoveryError;
           console.error("worker-shutdown recovery checkpoint failed", recoveryError);
           throw recoveryError;
         }
@@ -4907,6 +4959,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       if (error instanceof TurnAttemptFencedError) {
         activityStatus = "cancelled";
         activityError = error;
+        activityFailureProvenance = "attempt_fenced";
         await flushRuntimeBatcher();
         // Ownership already moved to a newer attempt or an authoritative
         // control transaction. Surface a transport cancellation instead of a
@@ -4920,6 +4973,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       if (error instanceof CancelledFailure) {
         activityStatus = "cancelled";
         activityError = error;
+        activityFailureProvenance = isWorkerShutdownCancellation(error)
+          ? "worker_shutdown"
+          : "activity_cancelled";
         await flushRuntimeBatcher();
         // The workflow owns cancellation settlement: Pause/Steer controls use
         // settleSessionControl, and heartbeat timeouts use worker-death
@@ -5715,6 +5771,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           "opengeni.rig_version_id": rigVersionId,
           "opengeni.codex_credential_id": effectiveCodexCredentialId ?? "",
           "opengeni.duration_ms": Math.round(durationSeconds * 1000),
+          "opengeni.failure_provenance": activityFailureProvenance,
+          ...boundedTurnFailureTelemetry(activityError),
         },
         error: activityError,
       });

@@ -141,6 +141,12 @@ A present but malformed heartbeat obligation fails closed and cannot fall back
 to generic worker-death redispatch. PostgreSQL is the authority; NATS fanout is
 retried/best-effort delivery and never changes whether recovery is safe.
 
+The turn activity span retains bounded failure provenance (`persistence_boundary`,
+`worker_shutdown`, `attempt_fenced`, or `activity_cancelled`) and, when a database
+wrapper exposes it, the nested driver cause type and SQLSTATE/code. It never
+promotes SQL text, parameters, or arbitrary provider messages into those stable
+attributes.
+
 Claim, interruption, and event-writing settlement share one lock order:
 workspace, then session, then exact turn, then exact attempt. Event inserts also touch the workspace through
 their foreign keys, so acquiring it later would reintroduce a claim/preemption

@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { Client, Connection } from "@temporalio/client";
+import { Client, Connection, WorkflowFailedError } from "@temporalio/client";
 import { NativeConnection, Worker } from "@temporalio/worker";
 import { startTestServices, type TestServices, waitFor } from "@opengeni/testing";
 import { currentActivityContext } from "../../apps/worker/src/activities/streaming";
@@ -543,9 +543,19 @@ describe("Temporal workflow integration", () => {
           workflowId: `wf-${crypto.randomUUID()}`,
           args: [{ ...scope, sessionId: crypto.randomUUID(), initialEventId: "event-1" }],
         });
-        await expect(handle.result()).rejects.toThrow(
-          "Worker heartbeat carried an invalid persistence handoff",
-        );
+        let workflowFailure: unknown;
+        try {
+          await handle.result();
+        } catch (error) {
+          workflowFailure = error;
+        }
+        expect(workflowFailure).toBeInstanceOf(WorkflowFailedError);
+        expect((workflowFailure as WorkflowFailedError).cause).toMatchObject({
+          message:
+            "Worker heartbeat carried an invalid persistence handoff; automatic turn replay refused",
+          type: "InvalidTurnPersistenceHandoff",
+          nonRetryable: true,
+        });
         expect(runs).toHaveLength(1);
         expect(persistenceRetries).toHaveLength(0);
         expect(genericRecoveries).toHaveLength(0);

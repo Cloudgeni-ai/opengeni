@@ -16,6 +16,7 @@ import { testSettings } from "@opengeni/testing";
 import {
   acceptsPromptCacheKeyForTurn,
   agentRunFailurePayload,
+  boundedTurnFailureTelemetry,
   classifyContextWindowOverflowError,
   classifyMcpTransportTimeoutError,
   codexCredentialLeaseDeadlineExpired,
@@ -1016,6 +1017,29 @@ describe("worker shutdown preemption", () => {
     expect(isWorkerShutdownCancellation(new CancelledFailure("TIMED_OUT"))).toBe(false);
     expect(isWorkerShutdownCancellation(new Error("WORKER_SHUTDOWN"))).toBe(false);
     expect(isWorkerShutdownCancellation(undefined)).toBe(false);
+  });
+
+  test("keeps only bounded nested driver identity in failure telemetry", () => {
+    const driver: Record<string, unknown> = { name: "PostgresError", code: "57P01" };
+    const wrapped: Record<string, unknown> = {
+      name: "DrizzleQueryError",
+      message: "query and parameters must not become attributes",
+      cause: driver,
+    };
+    driver.cause = wrapped;
+
+    expect(boundedTurnFailureTelemetry(wrapped)).toEqual({
+      "opengeni.error_driver_code": "57P01",
+      "opengeni.error_cause_type": "PostgresError",
+    });
+    expect(
+      boundedTurnFailureTelemetry({
+        cause: {
+          name: "x".repeat(1_000),
+          code: "unsafe code with spaces and arbitrary provider text",
+        },
+      }),
+    ).toEqual({});
   });
 });
 
