@@ -23,6 +23,10 @@
     "./sandbox": {
       "types": "./src/sandbox/index.ts",
       "default": "./src/sandbox/index.ts"
+    },
+    "./mcp-network": {
+      "types": "./src/mcp-network.ts",
+      "default": "./src/mcp-network.ts"
     }
   },
   "publishConfig": {
@@ -42,6 +46,7 @@
     "@opengeni/codex": "workspace:*",
     "@opengeni/config": "workspace:*",
     "@opengeni/contracts": "workspace:*",
+    "@opengeni/network": "workspace:*",
     "modal": "0.7.6",
     "openai": "6.47.0"
   },

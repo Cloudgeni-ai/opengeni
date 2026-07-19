@@ -31,6 +31,7 @@ import {
   UpdateSessionRequest,
   ViewerHeartbeatRequest,
   type SandboxBackend,
+  type LineageNode,
   type Session,
   type TerminalPtyExitedPayload,
   type TerminalPtyOutputDeltaPayload,
@@ -112,6 +113,9 @@ import {
   steerHumanQueuePrompt,
   updateSessionTitle,
   workflowIdForSession,
+  sessionWithEffectiveToolPolicy,
+  workspaceSessionToolPolicyDefaultServerIds,
+  workspaceSessionToolPolicyServerIds,
 } from "@opengeni/core";
 import { assertSessionExists, boundedLimit } from "../http/common";
 import { sseSessionStream } from "../http/sse";
@@ -124,7 +128,7 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:create");
     const session = await createSessionForRequest(deps, grant, workspaceId, await c.req.json());
-    return c.json(session, 202);
+    return c.json(await withEffectivePolicy(deps, workspaceId, session), 202);
   });
 
   app.get("/v1/workspaces/:workspaceId/sessions", async (c) => {
@@ -150,15 +154,26 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       }
       throw error;
     }
+    const policy = await loadEffectivePolicyContext(deps, workspaceId);
+    const decorate = (session: Session): Session =>
+      sessionWithEffectiveToolPolicy(
+        session,
+        policy.workspaceServerIds,
+        policy.workspaceDefaultServerIds,
+      );
     if (pageView) {
-      return c.json(page);
+      return c.json({
+        ...page,
+        pinned: page.pinned.map(decorate),
+        sessions: page.sessions.map(decorate),
+      });
     }
     // Same-major compatibility: listSessions() has historically returned an
     // array. Preserve that wire shape while adding personal pin metadata/order;
     // cursor consumers opt into the additive page view. A query flag rather
     // than a /sessions/page path is deliberate: an older API safely ignores it
     // and returns its historical array instead of treating "page" as a UUID.
-    return c.json([...page.pinned, ...page.sessions]);
+    return c.json([...page.pinned, ...page.sessions].map(decorate));
   });
 
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId", async (c) => {
@@ -172,7 +187,7 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!session) {
       throw new HTTPException(404, { message: "session not found" });
     }
-    return c.json(session);
+    return c.json(await withEffectivePolicy(deps, workspaceId, session));
   });
 
   // Personal pin only: this is organization state for the authenticated member,
@@ -199,7 +214,7 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       if (!session) {
         throw new HTTPException(404, { message: "session not found" });
       }
-      return c.json(session);
+      return c.json(await withEffectivePolicy(deps, workspaceId, session));
     } catch (error) {
       if (error instanceof SessionPinAccessError) {
         throw new HTTPException(403, { message: error.message });
@@ -217,7 +232,19 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/lineage", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "sessions:read");
-    return c.json(await readSessionLineage(db, workspaceId, c.req.param("sessionId")));
+    const lineage = await readSessionLineage(db, workspaceId, c.req.param("sessionId"));
+    const policy = await loadEffectivePolicyContext(deps, workspaceId);
+    return c.json({
+      ...lineage,
+      ancestors: lineage.ancestors.map((session) =>
+        sessionWithEffectiveToolPolicy(
+          session,
+          policy.workspaceServerIds,
+          policy.workspaceDefaultServerIds,
+        ),
+      ),
+      children: mapLineageNodes(lineage.children, policy),
+    });
   });
 
   // Pin (or unpin) the session's Codex account. body { target: "auto" | "<id>" }:
@@ -287,7 +314,7 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!session) {
       throw new HTTPException(404, { message: "session not found" });
     }
-    return c.json(session);
+    return c.json(await withEffectivePolicy(deps, workspaceId, session));
   });
 
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/goal", async (c) => {
@@ -1674,4 +1701,45 @@ function commandConflictResponse(c: Context, error: unknown): Response {
     return c.json({ code: error.code, message: error.message }, 409);
   }
   throw error;
+}
+
+type EffectivePolicyContext = {
+  workspaceServerIds: string[];
+  workspaceDefaultServerIds: string[];
+};
+
+async function loadEffectivePolicyContext(
+  deps: ApiRouteDeps,
+  workspaceId: string,
+): Promise<EffectivePolicyContext> {
+  const [workspaceServerIds, workspaceDefaultServerIds] = await Promise.all([
+    workspaceSessionToolPolicyServerIds(deps.db, workspaceId, deps.settings),
+    workspaceSessionToolPolicyDefaultServerIds(deps.db, workspaceId, deps.settings),
+  ]);
+  return { workspaceServerIds, workspaceDefaultServerIds };
+}
+
+async function withEffectivePolicy(
+  deps: ApiRouteDeps,
+  workspaceId: string,
+  session: Session,
+): Promise<Session> {
+  const policy = await loadEffectivePolicyContext(deps, workspaceId);
+  return sessionWithEffectiveToolPolicy(
+    session,
+    policy.workspaceServerIds,
+    policy.workspaceDefaultServerIds,
+  );
+}
+
+function mapLineageNodes(nodes: LineageNode[], policy: EffectivePolicyContext): LineageNode[] {
+  return nodes.map((node) => ({
+    ...node,
+    session: sessionWithEffectiveToolPolicy(
+      node.session as Session,
+      policy.workspaceServerIds,
+      policy.workspaceDefaultServerIds,
+    ),
+    children: mapLineageNodes(node.children, policy),
+  }));
 }

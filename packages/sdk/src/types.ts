@@ -239,6 +239,35 @@ export type ResourceRef = RepositoryResourceRef | FileResourceRef;
 export type ToolRef = {
   kind: "mcp";
   id: string;
+  optional?: boolean | undefined;
+};
+
+export type SessionToolPolicy = {
+  mode: "workspace_default" | "explicit" | "inherited" | "legacy";
+  inheritedFromSessionId: string | null;
+};
+
+export type SessionEffectiveToolPolicy = {
+  mode: SessionToolPolicy["mode"];
+  inheritedFromSessionId: string | null;
+  selectedIds: string[];
+  effectiveIds: string[];
+  mandatoryIds: string[];
+  lazyRouter: {
+    state: "required" | "disabled";
+    deferredIds: string[];
+  };
+  configuredIds: string[];
+  droppedIds: string[];
+  counts: {
+    selected: number;
+    effective: number;
+    mandatory: number;
+    deferred: number;
+    configured: number;
+    dropped: number;
+  };
+  idsTruncated: boolean;
 };
 
 export type GoalSpec = {
@@ -376,6 +405,8 @@ export type Session = {
   instructions: string | null;
   resources: ResourceRef[];
   tools: ToolRef[];
+  toolPolicy?: SessionToolPolicy | undefined;
+  effectiveToolPolicy?: SessionEffectiveToolPolicy | undefined;
   metadata: Record<string, unknown>;
   model: string;
   sandboxBackend: SandboxBackend;
@@ -484,6 +515,7 @@ export type SessionTurn = {
   prompt: string;
   resources: ResourceRef[];
   tools: ToolRef[];
+  toolsProvided?: boolean | undefined;
   model: string;
   reasoningEffort: ReasoningEffort;
   sandboxBackend: SandboxBackend;

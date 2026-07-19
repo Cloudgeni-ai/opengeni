@@ -18,7 +18,7 @@ Most agent products give you some of these; OpenGeni's premise is that organizat
 
 - **Self-host everything, Apache-2.0 all the way down.** The control plane, sessions API, web app, and deployment artifacts (Helm chart, reference Terraform for Azure/AWS/GCP) are open source. The durable record is a Postgres database you operate.
 - **Durable, replayable sessions as an API.** Every event lands in a Postgres event log; live streams over SSE backfill from it, so a browser reload, a new client, or an audit replays the same history.
-- **Your hardware as a first-class target.** Connected Machines run sessions on computers you enroll, with dial-out-only networking, no platform-minted credentials on your machines, loud consent-based enrollment, and one-click revocation. Off by default until an operator enables it.
+- **Your hardware as a first-class target.** Connected Machines run sessions on computers you enroll, with dial-out-only networking, no platform-minted git or model credentials on your machines, loud consent-based enrollment, and one-click revocation. When Toolspace is enabled, its narrow exact-attempt bearer is the sole deliberate platform-token exception. Connected Machines remain off by default until an operator enables them.
 - **Governance built in, not bolted on.** Human approvals gate tool use, credentials are brokered per session, and agent memory is a reviewed resource — agents *propose* memories, and a human or your API approves them before they become retrieval context.
 
 ## What It Does
@@ -27,7 +27,7 @@ Most agent products give you some of these; OpenGeni's premise is that organizat
 - Streams live session events over SSE while storing the replayable event log in Postgres.
 - Coordinates long-running work with Temporal signals for follow-ups, approvals, and interrupts.
 - Runs each session on a chosen compute target: a managed sandbox (Docker, Modal, local, cloud provider, or none) or a **Connected Machine** you enroll — with a per-session working folder on that machine.
-- Establishes a machine-targeted turn directly on the enrolled machine, using the machine's own git credentials — no cloud box is created and no OpenGeni-minted token is pushed to it.
+- Establishes a machine-targeted turn directly on the enrolled machine, using the machine's own git credentials — no cloud box is created and no platform git/model token is pushed to it; optional Toolspace uses a separate exact-attempt bearer.
 - Keeps sessions working until the job is actually done: a session can carry a **goal** with success criteria, and stopping becomes an explicit act (`goal_complete` with evidence, `goal_pause` with a rationale, or a human interrupt) with no-progress and budget guards. See [docs/goals.md](docs/goals.md).
 - Attaches repositories, uploaded files, and document-search tools to sessions.
 - Provides a workspace knowledge layer: document upload, indexing, hybrid/vector/keyword search with pgvector, and **reviewed agent memories** with a human/API approval gate.

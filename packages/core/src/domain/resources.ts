@@ -11,7 +11,7 @@ import {
 import { listGitHubInstallationIdsForWorkspace, requireFile, type Database } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
 
-export function validateToolRefs(tools: ToolRef[], settings: Settings): ToolRef[] {
+export function validateToolRefs(tools: ToolRef[], settings: McpSettings): ToolRef[] {
   const mcpServerIds = new Set(settings.mcpServers.map((server) => server.id));
   const out: ToolRef[] = [];
   for (const tool of tools) {
@@ -66,6 +66,37 @@ export function withDefaultEnabledCapabilityMcpTools(
   runtimeSettings: McpSettings,
 ): ToolRef[] {
   return mergeToolRefs(tools, enabledCapabilityMcpToolRefs(settings, runtimeSettings));
+}
+
+/** Drop stored refs that are no longer present in the current runtime registry. */
+export function availableToolRefs(tools: ToolRef[], settings: McpSettings): ToolRef[] {
+  const available = new Set(settings.mcpServers.map((server) => server.id));
+  return tools.filter((tool) => available.has(tool.id));
+}
+
+/** A child or fixed-policy follow-up may narrow its allow-list, never widen it. */
+export function assertToolRefsSubset(
+  requested: ToolRef[],
+  allowed: ToolRef[],
+  message = "requested tools exceed the session tool policy",
+): void {
+  const allowedIds = new Set(allowed.map((tool) => `${tool.kind}:${tool.id}`));
+  const widened = requested.find((tool) => !allowedIds.has(`${tool.kind}:${tool.id}`));
+  if (widened) {
+    throw new HTTPException(403, { message: `${message}: ${widened.id}` });
+  }
+}
+
+/** Validate runtime availability and then enforce the durable policy fence. */
+export function validateToolRefsForSessionPolicy(input: {
+  requested: ToolRef[];
+  settings: McpSettings;
+  allowedTools: ToolRef[];
+  message: string;
+}): ToolRef[] {
+  const validated = validateToolRefs(input.requested, input.settings);
+  assertToolRefsSubset(validated, input.allowedTools, input.message);
+  return validated;
 }
 
 export function normalizeResources(resources: ResourceRef[]): ResourceRef[] {

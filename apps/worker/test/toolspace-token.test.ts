@@ -6,6 +6,16 @@ import { sandboxEnvironmentForRun } from "../src/activities/environment";
 const accountId = "11111111-1111-4111-8111-111111111111";
 const workspaceId = "22222222-2222-4222-8222-222222222222";
 const sessionId = "33333333-3333-4333-8333-333333333333";
+const turnId = "44444444-4444-4444-8444-444444444444";
+const attemptId = "55555555-5555-4555-8555-555555555555";
+
+const toolspaceScope = {
+  scope: { accountId, workspaceId },
+  sessionId,
+  turnId,
+  attemptId,
+  executionGeneration: 3,
+} as const;
 
 describe("toolspace token mint and sandbox delivery pointers", () => {
   test("feature off leaves the sandbox env byte-identical: no token, file path, or URL", async () => {
@@ -18,11 +28,7 @@ describe("toolspace token mint and sandbox delivery pointers", () => {
       }),
       [],
       {},
-      {
-        scope: { accountId, workspaceId },
-        sessionId,
-        runId: "run-1",
-      },
+      toolspaceScope,
     );
 
     expect(result.toolspaceToken).toBeUndefined();
@@ -37,16 +43,7 @@ describe("toolspace token mint and sandbox delivery pointers", () => {
       toolspaceEnabled: true,
       apiPort: 8000,
     });
-    const result = await sandboxEnvironmentForRun(
-      settings,
-      [],
-      {},
-      {
-        scope: { accountId, workspaceId },
-        sessionId,
-        runId: "run-1",
-      },
-    );
+    const result = await sandboxEnvironmentForRun(settings, [], {}, toolspaceScope);
 
     expect(result.toolspaceToken).toMatch(/^ogd_/);
     expect(result.environment.OPENGENI_TOOLSPACE_TOKEN_FILE).toBe(
@@ -64,11 +61,16 @@ describe("toolspace token mint and sandbox delivery pointers", () => {
     expect(payload).toMatchObject({
       accountId,
       workspaceId,
-      subjectId: "sandbox:run-1",
+      subjectId: `sandbox:${turnId}`,
       subjectLabel: "sandbox toolspace",
       permissions: ["toolspace:call"],
       sessionId,
+      turnId,
+      attemptId,
+      executionGeneration: 3,
     });
+    expect(payload!.exp).toBeGreaterThan(Math.floor(Date.now() / 1000) + 59 * 60);
+    expect(payload!.exp).toBeLessThanOrEqual(Math.floor(Date.now() / 1000) + 60 * 60);
   });
 
   test("connected-machine (selfhosted) turns mint the token too — there is no skip path", async () => {
@@ -84,16 +86,7 @@ describe("toolspace token mint and sandbox delivery pointers", () => {
       toolspaceEnabled: true,
       apiPort: 8000,
     });
-    const result = await sandboxEnvironmentForRun(
-      settings,
-      [],
-      {},
-      {
-        scope: { accountId, workspaceId },
-        sessionId,
-        runId: "run-1",
-      },
-    );
+    const result = await sandboxEnvironmentForRun(settings, [], {}, toolspaceScope);
 
     expect(result.toolspaceToken).toMatch(/^ogd_/);
     expect(result.environment.OPENGENI_TOOLSPACE_TOKEN_FILE).toBe(
@@ -115,20 +108,24 @@ describe("toolspace token mint and sandbox delivery pointers", () => {
       apiPort: 8000,
       opengeniMcpUrl: "https://app.opengeni.example/v1/workspaces/{workspaceId}/mcp",
     });
-    const result = await sandboxEnvironmentForRun(
-      settings,
-      [],
-      {},
-      {
-        scope: { accountId, workspaceId },
-        sessionId,
-        runId: "run-1",
-      },
-    );
+    const result = await sandboxEnvironmentForRun(settings, [], {}, toolspaceScope);
 
     expect(result.environment.OPENGENI_TOOLSPACE_URL).toBe(
       `https://app.opengeni.example/v1/workspaces/${workspaceId}/mcp`,
     );
     expect(result.environment.OPENGENI_TOOLSPACE_URL).not.toContain("127.0.0.1");
+  });
+
+  test("omitting any attempt fence claim fails closed without minting", async () => {
+    const settings = testSettings({
+      delegationSecret: "toolspace-secret",
+      toolspaceEnabled: true,
+    });
+    for (const missing of ["turnId", "attemptId", "executionGeneration"] as const) {
+      const options: Parameters<typeof sandboxEnvironmentForRun>[3] = { ...toolspaceScope };
+      delete options[missing];
+      const result = await sandboxEnvironmentForRun(settings, [], {}, options);
+      expect(result.toolspaceToken).toBeUndefined();
+    }
   });
 });

@@ -24,6 +24,7 @@ const projects = [
   "packages/db",
   "packages/events",
   "packages/github",
+  "packages/network",
   "packages/storage",
   "packages/documents",
   "packages/observability",

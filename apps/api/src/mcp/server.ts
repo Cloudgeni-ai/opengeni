@@ -6,6 +6,7 @@ import {
   type GitHubRepository,
   type Permission,
   type ResourceRef,
+  type Session,
   UpdateScheduledTaskRequest,
 } from "@opengeni/contracts";
 import {
@@ -91,6 +92,9 @@ import {
   sendAgentSessionMessage,
   steerAgentSession,
   updateSessionTitle,
+  sessionWithEffectiveToolPolicy,
+  workspaceSessionToolPolicyDefaultServerIds,
+  workspaceSessionToolPolicyServerIds,
   type AgentSessionCommandContext,
 } from "@opengeni/core";
 import {
@@ -1289,7 +1293,7 @@ function registerWorkspaceOrchestrationTools(
         }
         const queue = await getSessionQueueSnapshot(deps.db, grant.workspaceId, sessionId);
         return json({
-          ...capSessionDetail(session),
+          ...capSessionDetail(await withMcpEffectivePolicy(deps, grant.workspaceId, session)),
           effectiveControl: queue?.effectiveControl ?? null,
         });
       },
@@ -1405,7 +1409,14 @@ function registerWorkspaceOrchestrationTools(
           // arbitrary session's wake channel without sessions:control on it.
         },
       },
-      async (args) => json(await createSessionForRequest(deps, grant, grant.workspaceId, args)),
+      async (args) =>
+        json(
+          await withMcpEffectivePolicy(
+            deps,
+            grant.workspaceId,
+            await createSessionForRequest(deps, grant, grant.workspaceId, args),
+          ),
+        ),
     );
   }
 
@@ -2066,4 +2077,16 @@ function parseMcpDate(raw: string, label: string): Date {
     throw new Error(`${label} must be an ISO date-time`);
   }
   return date;
+}
+
+async function withMcpEffectivePolicy(
+  deps: ApiRouteDeps,
+  workspaceId: string,
+  session: Session,
+): Promise<Session> {
+  const [workspaceServerIds, workspaceDefaultServerIds] = await Promise.all([
+    workspaceSessionToolPolicyServerIds(deps.db, workspaceId, deps.settings),
+    workspaceSessionToolPolicyDefaultServerIds(deps.db, workspaceId, deps.settings),
+  ]);
+  return sessionWithEffectiveToolPolicy(session, workspaceServerIds, workspaceDefaultServerIds);
 }
