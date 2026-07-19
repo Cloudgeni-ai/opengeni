@@ -157,13 +157,25 @@ use an indexed `archived = false` predicate by default. Explicit views are:
 List cursors and subject snapshots bind their archive view; a cursor cannot be
 replayed in another view. Exact lookup defaults to live and requires an explicit
 archived/all view to reveal an archived row. Exact authorized evidence APIs may
-then retrieve full lineage, events, messages, turns, goals, files, attachments,
-usage/provenance, reviews, sandbox recovery metadata, and archive receipts.
-Archiving does not rewrite or remove any of those records.
+then retrieve all retained lineage, events, messages, turns, goals, files,
+attachments, usage/provenance, reviews, sandbox recovery metadata, and archive
+receipts. Archiving does not rewrite, further truncate, or remove any of those
+durable records. It cannot reconstruct generic tool output that was omitted or
+truncated before archival: durable event payloads keep their existing
+secret-redaction, lossiness, and byte-bound contracts, while separately retained
+files and artifacts keep their existing access-controlled retrieval paths.
 
 Compact discovery remains bounded by construction. Adding archive state must not
 pull full evidence into list queries. Query plans and memory are acceptance
-artifacts for both live and archived views.
+artifacts for both live and archived views. The model-facing compact list keeps
+keyset pagination and server-side filtering, reads at most 101 base rows for a
+100-row page, projects at most 100 roots, and remains within its 128 KiB encoded
+response budget. It must not hydrate wide session objects or filter archived
+rows client-side. The agent-side archived escape hatch is an authorized exact
+lookup with an explicit archived/all view; it is not an unbounded archived-tree
+mode on compact discovery. Human desktop/mobile archived browsing extends the
+separately paginated and virtualized human list query without reusing full
+session objects in the compact MCP projection.
 
 ## 6. Manifest and receipt protocol
 
