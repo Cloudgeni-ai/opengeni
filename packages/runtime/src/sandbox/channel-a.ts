@@ -112,6 +112,15 @@ export class ChannelAValidationError extends Error {
     this.name = "ChannelAValidationError";
   }
 }
+/** A structurally valid Channel-A request could not be completed because the
+ * sandbox/provider control plane was temporarily unavailable. Callers may retry
+ * this class; it must never be presented as a bad user path. */
+export class ChannelAUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ChannelAUnavailableError";
+  }
+}
 export class ChannelAConflictError extends Error {
   constructor(message: string) {
     super(message);
@@ -361,16 +370,15 @@ export class SandboxChannelAService {
       "producer_status=${PIPESTATUS[0]};",
       `if [ "$producer_status" -ne 0 ] && [ "$producer_status" -ne 141 ]; then printf '%s\\0' ${shellQuote(FS_LIST_TRUNCATED_MARKER)}; fi`,
     ].join(" ");
-    const { stdout, exitCode, sessionId } = await this.runInConfinedDirectory(root, {
-      cmd: `bash -lc ${shellQuote(findCommand)}`,
+    const { stdout, exitCode } = await this.runInConfinedDirectory(root, {
+      cmd: internalBashCommand(findCommand),
       yieldTimeMs: 10_000,
       maxOutputTokens: Math.ceil(FS_LIST_MAX_OUTPUT_BYTES / 4) + 1_024,
     });
-    if (sessionId !== undefined) {
-      throw new ChannelAValidationError("filesystem listing exceeded its 10 second deadline");
-    }
     if (exitCode !== 0) {
-      throw new ChannelAValidationError(`filesystem listing failed with exit code ${exitCode}`);
+      throw new ChannelAUnavailableError(
+        "Workspace files are temporarily unavailable. Retry the file list.",
+      );
     }
 
     const entries = stdout.split(NUL).filter((s) => s.length > 0);
@@ -447,8 +455,18 @@ export class SandboxChannelAService {
       if (isWorkspaceEscapeError(error)) {
         throw new ChannelAValidationError(`path resolves outside workspace: ${path}`);
       }
-      throw new ChannelANotFoundError(
-        `file not found: ${path} (${error instanceof Error ? error.message : String(error)})`,
+      if (isDefinitePathNotFoundError(error)) {
+        throw new ChannelANotFoundError(`file not found: ${path}`);
+      }
+      // A native provider read can fail while exec on the same live box remains
+      // healthy. The descriptor path below is equally confined and binary-safe,
+      // so use it as a single recovery path. Unknown provider failures must never
+      // be downgraded into a false 404.
+      if (this.session.exec || this.session.execCommand) {
+        return await this.fsReadViaExec(path, req);
+      }
+      throw new ChannelAUnavailableError(
+        "Workspace files are temporarily unavailable. Retry the file read.",
       );
     }
     const bytes = typeof raw === "string" ? Buffer.from(raw, "utf8") : Buffer.from(raw);
@@ -469,7 +487,7 @@ export class SandboxChannelAService {
       `test -d "$target" || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
       `printf '__OPENGENI_FS_CONFINED_OK__'`,
     ].join("; ");
-    const result = await this.run({ cmd: `bash -lc ${shellQuote(script)}` });
+    const result = await this.run({ cmd: internalBashCommand(script) });
     this.assertConfinementResult(result, path || ".", "directory");
   }
 
@@ -498,16 +516,21 @@ export class SandboxChannelAService {
       requireParent,
       `printf '__OPENGENI_FS_CONFINED_OK__'`,
     ].join("; ");
-    const result = await this.run({ cmd: `bash -lc ${shellQuote(script)}` });
+    const result = await this.run({ cmd: internalBashCommand(script) });
     this.assertConfinementResult(result, path, "mutation");
   }
 
   private assertConfinementResult(
-    result: { stdout: string; exitCode: number | null },
+    result: { stdout: string; exitCode: number | null; sessionId?: number },
     path: string,
     kind: "directory" | "mutation",
   ): void {
-    if (result.stdout === "__OPENGENI_FS_CONFINED_OK__") return;
+    if (result.sessionId !== undefined) {
+      throw new ChannelAUnavailableError(
+        "Workspace files are temporarily unavailable. Retry the operation.",
+      );
+    }
+    if (result.stdout.includes("__OPENGENI_FS_CONFINED_OK__")) return;
     if (result.stdout.includes("__OPENGENI_FS_ESCAPE__") || result.exitCode === 67) {
       throw new ChannelAValidationError(`path resolves outside workspace: ${path}`);
     }
@@ -517,7 +540,9 @@ export class SandboxChannelAService {
     if (result.stdout.includes("__OPENGENI_FS_NOT_FOUND__") || result.exitCode === 66) {
       throw new ChannelANotFoundError(`${kind} path not found: ${path}`);
     }
-    throw new ChannelAValidationError(`unable to validate workspace ${kind} path: ${path}`);
+    throw new ChannelAUnavailableError(
+      "Workspace files are temporarily unavailable. Retry the operation.",
+    );
   }
 
   /** Binary-safe fallback for sessions without native reads. The file is opened
@@ -535,10 +560,24 @@ export class SandboxChannelAService {
       `printf '__OPENGENI_FS_READ_OK__\\n'`,
       `head -c ${req.maxBytes} <&3 | base64 | tr -d '\\n'`,
     ].join("; ");
-    const { stdout, exitCode } = await this.run({
-      cmd: `bash -lc ${shellQuote(script)}`,
-      maxOutputTokens: Math.ceil((req.maxBytes * 4) / 3) + 1_024,
-    });
+    let result: Awaited<ReturnType<SandboxChannelAService["run"]>>;
+    try {
+      result = await this.run({
+        cmd: internalBashCommand(script),
+        maxOutputTokens: Math.ceil((req.maxBytes * 4) / 3) + 1_024,
+      });
+    } catch (error) {
+      if (error instanceof ChannelAUnsupportedError) throw error;
+      throw new ChannelAUnavailableError(
+        "Workspace files are temporarily unavailable. Retry the file read.",
+      );
+    }
+    const { stdout, exitCode, sessionId } = result;
+    if (sessionId !== undefined) {
+      throw new ChannelAUnavailableError(
+        "Workspace files are temporarily unavailable. Retry the file read.",
+      );
+    }
     if (stdout.includes("__OPENGENI_FS_ESCAPE__") || exitCode === 67) {
       throw new ChannelAValidationError(`path resolves outside workspace: ${path}`);
     }
@@ -546,10 +585,16 @@ export class SandboxChannelAService {
       throw new ChannelANotFoundError(`file not found: ${path}`);
     }
     const prefix = "__OPENGENI_FS_READ_OK__\n";
-    if (!stdout.startsWith(prefix) || (exitCode !== null && exitCode !== 0)) {
-      throw new ChannelAValidationError(`failed to read workspace file: ${path}`);
+    const successIndex = stdout.indexOf(prefix);
+    if (successIndex < 0 || (exitCode !== null && exitCode !== 0)) {
+      throw new ChannelAUnavailableError(
+        "Workspace files are temporarily unavailable. Retry the file read.",
+      );
     }
-    const bytes = Buffer.from(stdout.slice(prefix.length).replace(/\n/g, ""), "base64");
+    const bytes = Buffer.from(
+      stdout.slice(successIndex + prefix.length).replace(/\n/g, ""),
+      "base64",
+    );
     return this.shapeRead(path, bytes, req);
   }
 
@@ -1048,7 +1093,7 @@ export class SandboxChannelAService {
         'exit "$status"',
       ].join("\n");
       const { stdout } = await this.run({
-        cmd: `bash -lc ${shellQuote(command)}`,
+        cmd: internalBashCommand(command),
         workdir: this.workspaceRoot || undefined,
         yieldTimeMs: 20_000,
         // At most 256 Unix paths (PATH_MAX each) plus the status trailer. This
@@ -1375,26 +1420,47 @@ export class SandboxChannelAService {
       `printf '__OPENGENI_FS_CONFINED_OK__\\n'`,
       args.cmd,
     ].join("; ");
-    const result = await this.run({
-      ...args,
-      cmd: `bash -lc ${shellQuote(script)}`,
-      workdir: undefined,
-    });
     const successPrefix = "__OPENGENI_FS_CONFINED_OK__\n";
-    if (result.stdout.startsWith(successPrefix)) {
-      return { ...result, stdout: result.stdout.slice(successPrefix.length) };
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      let result: Awaited<ReturnType<SandboxChannelAService["run"]>>;
+      try {
+        result = await this.run({
+          ...args,
+          cmd: internalBashCommand(script),
+          workdir: undefined,
+        });
+      } catch (error) {
+        if (error instanceof ChannelAUnsupportedError) throw error;
+        if (attempt === 0) continue;
+        throw new ChannelAUnavailableError(
+          "Workspace files are temporarily unavailable. Retry the operation.",
+        );
+      }
+      if (result.sessionId !== undefined) {
+        throw new ChannelAUnavailableError(
+          "Workspace files are temporarily unavailable. Retry after the current file operation finishes.",
+        );
+      }
+      const successIndex = result.stdout.indexOf(successPrefix);
+      if (successIndex >= 0) {
+        return { ...result, stdout: result.stdout.slice(successIndex + successPrefix.length) };
+      }
+      if (result.stdout.includes("__OPENGENI_FS_ESCAPE__") || result.exitCode === 67) {
+        throw new ChannelAValidationError(`path resolves outside workspace: ${safe || "."}`);
+      }
+      if (result.stdout.includes("__OPENGENI_FS_SYMLINK__") || result.exitCode === 68) {
+        throw new ChannelAValidationError(`directory path must not be a symbolic link: ${safe}`);
+      }
+      if (result.stdout.includes("__OPENGENI_FS_NOT_FOUND__") || result.exitCode === 66) {
+        throw new ChannelANotFoundError(`directory path not found: ${safe || "."}`);
+      }
+      // Every operation using this helper is read-only. A completed result with
+      // no trusted marker can be retried once, but is never downgraded into a
+      // user-input error.
+      if (attempt === 0) continue;
     }
-    if (result.stdout === "__OPENGENI_FS_ESCAPE__" || result.exitCode === 67) {
-      throw new ChannelAValidationError(`path resolves outside workspace: ${safe || "."}`);
-    }
-    if (result.stdout === "__OPENGENI_FS_SYMLINK__" || result.exitCode === 68) {
-      throw new ChannelAValidationError(`directory path must not be a symbolic link: ${safe}`);
-    }
-    if (result.stdout === "__OPENGENI_FS_NOT_FOUND__" || result.exitCode === 66) {
-      throw new ChannelANotFoundError(`directory path not found: ${safe || "."}`);
-    }
-    throw new ChannelAValidationError(
-      `unable to validate workspace directory path: ${safe || "."}`,
+    throw new ChannelAUnavailableError(
+      "Workspace files are temporarily unavailable. Retry the operation.",
     );
   }
 
@@ -1482,6 +1548,20 @@ function isWorkspaceEscapeError(error: unknown): boolean {
     lower.includes("escapes the workspace") ||
     lower.includes("outside workspace") ||
     (lower.includes("remote validation") && lower.includes("escape"))
+  );
+}
+
+/** Classify only provider errors that carry an explicit path-miss fact. Generic
+ * 404s and "not found" text are unsafe here because they can describe the box or
+ * session disappearing rather than the requested file. */
+function isDefinitePathNotFoundError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const candidate = error as { code?: unknown; errno?: unknown; osNotFound?: unknown };
+  return (
+    candidate.osNotFound === true ||
+    candidate.code === "ENOENT" ||
+    candidate.errno === "ENOENT" ||
+    candidate.errno === -2
   );
 }
 
@@ -1574,6 +1654,12 @@ export function assertSafeRelPath(p: string): string {
 
 function shellQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+/** Run control-plane-generated Bash without user/provider startup files. The
+ * marker protocol is private control data; profile output must not corrupt it. */
+function internalBashCommand(script: string): string {
+  return `env -u BASH_ENV bash --noprofile --norc -c ${shellQuote(script)}`;
 }
 
 function assertSafePruneDirectoryName(name: string): string {

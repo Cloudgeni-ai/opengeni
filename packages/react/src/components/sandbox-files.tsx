@@ -161,7 +161,9 @@ export function SandboxFiles({
   const captureFileUnavailable =
     fileView.error instanceof CapturedFileUnavailableError ? fileView.error : null;
   const waitingForSelectedFile =
-    liveRequestedPath === viewPath && !liveWorkspaceReady && captureFileUnavailable !== null;
+    liveRequestedPath === viewPath &&
+    (!liveWorkspaceReady || files.loading) &&
+    captureFileUnavailable !== null;
 
   if (!fileSystemAvailable) {
     return (
@@ -302,10 +304,11 @@ export function SandboxFiles({
                     <WakeButton
                       onClick={() => {
                         setLiveRequestedPath(viewPath);
-                        onWakeWorkspace();
+                        if (liveWorkspaceReady) void files.refresh();
+                        else onWakeWorkspace();
                       }}
                     >
-                      Open live file
+                      {liveWorkspaceReady ? "Retry live file" : "Open live file"}
                     </WakeButton>
                   ) : null}
                 </Notice>

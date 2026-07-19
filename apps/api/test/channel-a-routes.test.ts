@@ -2,6 +2,9 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { HTTPException } from "hono/http-exception";
+import { ChannelAUnavailableError } from "@opengeni/runtime/sandbox";
+import { mapChannelAError } from "../src/sandbox/channel-a";
 
 // P4.4 route-discipline guards for the 13 Channel-A structured-service routes (a
 // complement to the real-box runtime test + the docker e2e). The invariants the
@@ -131,8 +134,9 @@ describe("P4.4 Channel-A route discipline", () => {
     expect(gate.slice(0, 400)).toContain("sandboxOwnershipEnabled");
   });
 
-  test("the channel-a seam maps the typed service errors to explicit HTTP status (400/404/409)", () => {
-    // backend:none -> 409 before touching the box; ChannelA*Error -> 400/404/409.
+  test("the channel-a seam maps typed service errors to explicit HTTP status", () => {
+    // backend:none -> 409; bad paths stay 400/404 while transient control-plane
+    // failures are retryable 503s and never blame valid user input.
     expect(channelASeam).toContain('session.sandboxBackend === "none"');
     expect(channelASeam).toContain("HTTPException(409");
     // Wrap-tolerant: the formatter may break the guard onto its own line, so
@@ -140,6 +144,16 @@ describe("P4.4 Channel-A route discipline", () => {
     expect(channelASeam).toMatch(/ChannelAValidationError\)\s+return new HTTPException\(400/);
     expect(channelASeam).toMatch(/ChannelANotFoundError\)\s+return new HTTPException\(404/);
     expect(channelASeam).toMatch(/ChannelAConflictError\)\s+return new HTTPException\(409/);
+    expect(channelASeam).toMatch(/ChannelAUnavailableError\)\s+return new HTTPException\(503/);
+
+    const mapped = mapChannelAError(
+      new ChannelAUnavailableError("Workspace files are temporarily unavailable. Retry."),
+    );
+    expect(mapped).toBeInstanceOf(HTTPException);
+    expect((mapped as HTTPException).status).toBe(503);
+    expect((mapped as HTTPException).message).toBe(
+      "Workspace files are temporarily unavailable. Retry.",
+    );
   });
 
   test("the seam never signals Temporal / routes through a worker (API-direct only)", () => {

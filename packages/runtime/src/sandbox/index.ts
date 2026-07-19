@@ -164,6 +164,7 @@ export {
 export {
   SandboxChannelAService,
   ChannelAValidationError,
+  ChannelAUnavailableError,
   ChannelAConflictError,
   ChannelANotFoundError,
   ChannelAUnsupportedError,
