@@ -57,7 +57,7 @@ describe("recordModelCacheTokens — prompt-cache efficiency", () => {
     expect(metrics).not.toMatch(/opengeni_model_cached_tokens_total/);
   });
 
-  test("absent/null cached tokens (providers that don't report it) does not throw and counts nothing", async () => {
+  test("absent/null cached tokens remains unknown and does not fabricate a zero ratio", async () => {
     const observability = worker();
     expect(() =>
       recordModelCacheTokens(observability, "openai", {
@@ -74,9 +74,28 @@ describe("recordModelCacheTokens — prompt-cache efficiency", () => {
 
     const metrics = await observability.prometheusMetrics();
     expect(metrics).not.toMatch(/opengeni_model_cached_tokens_total/);
-    // The null-cached/prompt=1000 call still recorded a 0 ratio; the all-absent call did not.
+    expect(metrics).not.toMatch(/opengeni_model_cache_hit_ratio/);
+  });
+
+  test("counts provider-reported cache writes without inventing absent writes", async () => {
+    const observability = worker();
+    recordModelCacheTokens(observability, "openai", {
+      cachedTokens: 0,
+      cacheWriteTokens: 256,
+      promptTokens: 1024,
+    });
+    recordModelCacheTokens(observability, "codex-subscription", {
+      cachedTokens: 0,
+      cacheWriteTokens: null,
+      promptTokens: 1024,
+    });
+
+    const metrics = await observability.prometheusMetrics();
     expect(metrics).toMatch(
-      /opengeni_model_cache_hit_ratio_count\{[^}]*provider="openai"[^}]*\} 1\b/,
+      /opengeni_model_cache_write_tokens_total\{[^}]*provider="openai"[^}]*\} 256\b/,
+    );
+    expect(metrics).not.toMatch(
+      /opengeni_model_cache_write_tokens_total\{[^}]*provider="codex-subscription"/,
     );
   });
 
@@ -107,12 +126,14 @@ describe("recordModelCacheTokens — prompt-cache efficiency", () => {
     expect(() =>
       recordModelCacheTokens(observability, "openai", {
         cachedTokens: Number.NaN,
+        cacheWriteTokens: Number.NEGATIVE_INFINITY,
         promptTokens: -5,
       }),
     ).not.toThrow();
 
     const metrics = await observability.prometheusMetrics();
     expect(metrics).not.toMatch(/opengeni_model_cached_tokens_total/);
+    expect(metrics).not.toMatch(/opengeni_model_cache_write_tokens_total/);
     expect(metrics).not.toMatch(/opengeni_model_cache_hit_ratio/);
   });
 });

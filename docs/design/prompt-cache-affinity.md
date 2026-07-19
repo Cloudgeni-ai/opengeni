@@ -100,9 +100,11 @@ Cache behavior is not inferable from the code; it must be observed per call.
 aliases `cached_tokens` / `cachedInputTokens` / `cached_input_tokens` and emits it on the
 persisted `agent.model.usage` event (input tokens, cached tokens, provider, model,
 sourceKey). The cached ratio for a call is `cached_tokens / input_tokens`, where
-`input_tokens` is the total input (cached is a subset of it). Any claim about caching —
-"this change helped", "the prefix is stable", "the account is warm" — must be backed by
-that number, not by reading the request construction.
+`input_tokens` is the total input (cached is a subset of it). A provider-reported
+`cached_tokens: 0` is a known real 0%; absent/null cache telemetry is unknown and must
+not be projected as zero. Any claim about caching — "this change helped", "the prefix
+is stable", "the account is warm" — must be backed by reported usage, not by reading
+the request construction.
 
 ## The canonical regression: "mutable state rendered into the stable prefix"
 
@@ -228,3 +230,97 @@ latter was blocked at audit time). Treat the cache-regime win from load-spreadin
 - `apps/worker/src/activities/codex-rotation.ts` — account rotation / affinity
 - `apps/worker/src/observability-metrics.ts` — model token metrics
 - `scripts/recompute-codex-cache-baseline.mjs` — reproduces the baseline table above
+
+## 2026-07-19 evidence refresh — sticky routing accepted; telemetry boundary extended
+
+This section is additive. It preserves the historical audit tables above while recording
+the production result and primary-source contract that became available afterward.
+
+### Accepted production slice
+
+The fleet gap above was traced to backend shard routing, not a rewrite of the cacheable
+prefix. PR #386 made the stable OpenGeni session id the Codex HTTP `session_id` sticky
+routing header on every request while retaining the existing body `prompt_cache_key`.
+Its squash-landed main commit is `58c78c6d65940f2b3efbea162f383dc68225299a`
+(historical PR head `be1143efb783fc6b072b0ca6474caa57592d6049`, tree
+`102072eb6ce1e2a7f835155fcfdb21ac79f2b10c`). Production then sustained **95–99%
+token-weighted cache reads**, exceeding the approximately **94%** pinned Codex CLI
+reference used for that acceptance window. This sticky-routing behavior is accepted and
+must not regress; it does not, by itself, close the broader OPE-31 observability and
+provider-contract scope.
+
+### Immutable Codex and provider-documentation pins
+
+The latest stable public Codex release observed for this refresh was `rust-v0.144.6`:
+
+- annotated tag object `1e66aaa95b5ab39d3ef3057cd50bdecd576a8356` (no
+  cryptographic signature);
+- peeled commit `5d1fbf26c43abc65a203928b2e31561cb039e06d`;
+- tree `8c4eca19b7b2acce60c9701d93859a7c4d66d64a`;
+- commit date `2026-07-18T09:05:05-04:00`.
+
+The public Codex `main` observed during the same research was
+`678157acaa819d5510adfe359abb5d0392cfe461`; it is informational, not the release pin.
+Pinned source carries `prompt_cache_key`, treats instructions, tools, reasoning,
+`include`, service tier, the cache key, and text controls as request-reuse-sensitive,
+and tests that follow-up input extends the prior prefix while instructions, tool order,
+and cache key remain constant. Codex `TokenUsage` still exposes cached-input tokens but
+not cache-write tokens. OpenGeni must therefore preserve cache-write telemetry when a
+provider reports it without manufacturing writes for the Codex subscription backend.
+
+Canonical OpenAI pages were fetched at `2026-07-19T22:39:22Z`:
+
+| Document | SHA-256 | ETag | Last-Modified |
+| --- | --- | --- | --- |
+| [Prompt caching](https://developers.openai.com/api/docs/guides/prompt-caching/) | `5c80eb271afcac94b337cc3607e13bf588badf4fca5935bda09b2ca184caf2d1` | `"0a1eb15d86d3fdc5d6b3d337208119e9"` | `Sun, 19 Jul 2026 21:43:49 GMT` |
+| [Responses create](https://developers.openai.com/api/reference/resources/responses/methods/create/) | `014be6fa0348e89aea395e44894e597348a2eabd64c1d10afa104f5b3c8398d1` | `"c4dc02b0e088bef4c2120fb2c85a1c33"` | `Sun, 19 Jul 2026 21:43:52 GMT` |
+
+### GPT-5.6 usage and request controls
+
+OpenAI documents GPT-5.6 cache writes at
+`usage.input_tokens_details.cache_write_tokens`; cache reads remain `cached_tokens`.
+GPT-5.6 cache writes are billed at **1.25× the uncached input rate**. The runtime
+normalizes documented `cache_write_tokens` plus the SDK-style `cacheWriteTokens` alias
+into nullable `cacheWriteTokens` on `agent.model.usage`. The same contract applies to
+reads, writes, and reasoning detail fields: prefer a reported positive value across
+detail entries; if every report is zero, preserve zero; if the field is absent or
+invalid, preserve null.
+
+For GPT-5.6+, OpenAI also documents:
+
+- `prompt_cache_key` for more reliable matching;
+- content-block `prompt_cache_breakpoint: { mode: "explicit" }` controls plus
+  request-wide `prompt_cache_options`;
+- a currently documented `30m` explicit-cache TTL, at most four breakpoints per
+  request, and matching against up to the latest 80 conversation breakpoints;
+- deprecated `prompt_cache_retention` for GPT-5.6+ (retained for earlier models);
+- mutually exclusive `previous_response_id` and `conversation` stateful paths; and
+- `reasoning.encrypted_content` for stateless `store: false` reasoning continuity.
+
+These are separate mechanisms: provider-managed prefix caching is not Responses
+conversation chaining, local deterministic render caching, or answer/output memoization.
+OpenGeni's Codex subscription path remains stateless resend with encrypted-reasoning
+replay; it does not use `previous_response_id` or `conversation`.
+
+### Capability and accounting boundary
+
+Do **not** send `prompt_cache_breakpoint`, `prompt_cache_options`, or retention controls
+through the Codex subscription backend merely because the public OpenAI API documents
+them. The Codex normalizer is a strict allowlist, and no backend entitlement/capability
+proof currently authorizes those fields; unsupported fields may fail the request with a
+400. They remain disabled until an exact Codex-backend contract and controlled staging
+probe prove support.
+
+Likewise, recording reported cache-write tokens does not settle billing. Current model
+pricing distinguishes uncached input, cached input, and output but has no model-specific
+cache-write rate. Do not silently bill reported writes as ordinary input and do not
+coerce absent writes to zero. Pricing support must land through the provider/model
+contract owner with the documented GPT-5.6 1.25× rate and exact provider applicability.
+
+Worker Prometheus cache labels remain provider-only. A reported cached zero contributes
+a real 0% hit-ratio observation; absent/null cached telemetry contributes no ratio.
+Reported positive cache writes may advance
+`opengeni_model_cache_write_tokens_total{provider}`; absent/null writes do not create a
+phantom zero. Wiring the normalized write field into the shared agent-turn activity must
+be coordinated with its active lifecycle/rotation owners rather than raced in a
+telemetry-only change.

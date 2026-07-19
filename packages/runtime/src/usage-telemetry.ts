@@ -4,6 +4,7 @@ export type ModelCallUsageTelemetry = {
   inputTokens: number | null;
   outputTokens: number | null;
   cachedTokens: number | null;
+  cacheWriteTokens: number | null;
   reasoningTokens: number | null;
 };
 
@@ -26,6 +27,12 @@ export function modelCallUsageTelemetry(
           "cached_tokens",
           "cachedInputTokens",
           "cached_input_tokens",
+        ])
+      : null,
+    cacheWriteTokens: usage
+      ? firstPositiveDetailNumber(usage.inputTokensDetails, [
+          "cache_write_tokens",
+          "cacheWriteTokens",
         ])
       : null,
     reasoningTokens: usage

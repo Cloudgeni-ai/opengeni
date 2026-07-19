@@ -598,21 +598,29 @@ const MODEL_CACHE_HIT_RATIO_BUCKETS = [
  *   - `opengeni_model_cached_tokens_total{provider}` — cumulative prompt tokens the
  *     provider served from cache. Advanced only when >0, so a provider that never
  *     reports cached tokens contributes nothing rather than phantom zero-increments.
+ *   - `opengeni_model_cache_write_tokens_total{provider}` — cumulative tokens a
+ *     reporting provider wrote into its prompt cache. Absent telemetry contributes
+ *     nothing; in particular, Codex subscription usage does not currently expose it.
  *   - `opengeni_model_cache_hit_ratio{provider}` — cached/prompt for the call,
- *     observed whenever prompt tokens are known (>0). A call whose provider does NOT
- *     report cached_tokens records a real 0 here — "we saw a call and the cache did
- *     nothing" is exactly the signal the alert watches, so it must not be swallowed.
- * Absent/zero/non-finite `cachedTokens` (providers that don't report it) is safe: no
- * counter increment, ratio 0. A call with no prompt tokens has no ratio (skipped).
+ *     observed only when prompt tokens are known (>0) AND cached tokens are reported.
+ *     A reported cached-token zero records a real 0%; absent/null telemetry remains
+ *     unknown and must not fabricate a low-cache signal.
+ * Absent/non-finite/negative token telemetry is ignored. A call with no prompt tokens
+ * has no ratio (skipped).
  */
 export function recordModelCacheTokens(
   observability: Observability,
   provider: string,
-  input: { cachedTokens: number | null | undefined; promptTokens: number | null | undefined },
+  input: {
+    cachedTokens: number | null | undefined;
+    cacheWriteTokens?: number | null | undefined;
+    promptTokens: number | null | undefined;
+  },
 ): void {
-  const cached = nonNegativeTokenCount(input.cachedTokens);
-  const prompt = nonNegativeTokenCount(input.promptTokens);
-  if (cached > 0) {
+  const cached = reportedNonNegativeTokenCount(input.cachedTokens);
+  const cacheWrite = reportedNonNegativeTokenCount(input.cacheWriteTokens);
+  const prompt = reportedNonNegativeTokenCount(input.promptTokens);
+  if (cached !== null && cached > 0) {
     observability.incrementCounter({
       name: "opengeni_model_cached_tokens_total",
       help: "Total prompt tokens served from the provider's prompt cache, by provider.",
@@ -620,7 +628,15 @@ export function recordModelCacheTokens(
       amount: cached,
     });
   }
-  if (prompt > 0) {
+  if (cacheWrite !== null && cacheWrite > 0) {
+    observability.incrementCounter({
+      name: "opengeni_model_cache_write_tokens_total",
+      help: "Total prompt tokens written to the provider's prompt cache, by provider.",
+      labels: { provider },
+      amount: cacheWrite,
+    });
+  }
+  if (cached !== null && prompt !== null && prompt > 0) {
     observability.observeHistogram({
       name: "opengeni_model_cache_hit_ratio",
       help: "Per-call prompt-cache hit ratio (cached/prompt tokens) by provider.",
@@ -631,6 +647,12 @@ export function recordModelCacheTokens(
       value: Math.min(1, cached / prompt),
     });
   }
+}
+
+function reportedNonNegativeTokenCount(value: number | null | undefined): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? nonNegativeTokenCount(value)
+    : null;
 }
 
 function nonNegativeTokenCount(value: number | null | undefined): number {

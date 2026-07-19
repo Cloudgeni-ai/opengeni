@@ -201,25 +201,27 @@ describe("runtime event normalization", () => {
       modelCallUsageTelemetry({
         inputTokens: 100,
         outputTokens: 20,
-        inputTokensDetails: { cached_tokens: 80 },
+        inputTokensDetails: { cached_tokens: 80, cache_write_tokens: 12 },
         outputTokensDetails: { reasoning_tokens: 7 },
       }),
     ).toEqual({
       inputTokens: 100,
       outputTokens: 20,
       cachedTokens: 80,
+      cacheWriteTokens: 12,
       reasoningTokens: 7,
     });
     expect(
       modelCallUsageTelemetry({
         inputTokens: 50,
         outputTokens: 10,
-        inputTokensDetails: { cached_input_tokens: 30 },
+        inputTokensDetails: { cached_input_tokens: 30, cacheWriteTokens: 9 },
       }),
     ).toEqual({
       inputTokens: 50,
       outputTokens: 10,
       cachedTokens: 30,
+      cacheWriteTokens: 9,
       reasoningTokens: null,
     });
     // A wire `cached_tokens: 0` is REAL data (the provider cached nothing) and
@@ -237,12 +239,38 @@ describe("runtime event normalization", () => {
       inputTokens: 50,
       outputTokens: 10,
       cachedTokens: 0,
+      cacheWriteTokens: null,
       reasoningTokens: 0,
     });
     expect(modelCallUsageTelemetry({ inputTokens: 50, outputTokens: 10 })).toEqual({
       inputTokens: 50,
       outputTokens: 10,
       cachedTokens: null,
+      cacheWriteTokens: null,
+      reasoningTokens: null,
+    });
+    // Providers can emit detail arrays with zero placeholders next to the real
+    // value. Prefer a reported positive, but preserve an all-zero write as a
+    // known real zero rather than telemetry absence.
+    expect(
+      modelCallUsageTelemetry({
+        inputTokensDetails: [
+          { cached_tokens: 0, cache_write_tokens: 0 },
+          { cached_tokens: 24, cacheWriteTokens: 6 },
+        ],
+      }),
+    ).toEqual({
+      inputTokens: null,
+      outputTokens: null,
+      cachedTokens: 24,
+      cacheWriteTokens: 6,
+      reasoningTokens: null,
+    });
+    expect(modelCallUsageTelemetry({ inputTokensDetails: { cache_write_tokens: 0 } })).toEqual({
+      inputTokens: null,
+      outputTokens: null,
+      cachedTokens: null,
+      cacheWriteTokens: 0,
       reasoningTokens: null,
     });
   });
