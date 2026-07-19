@@ -724,6 +724,24 @@ describe("workspace-capture — manifest & event serialization", () => {
         reason: "workspace_capture_size_limit_exceeded",
       }),
     ).not.toThrow();
+    expect(() =>
+      WorkspaceRevisionDegradedPayload.parse({
+        revision: 9,
+        turnId: "t7",
+        capturedAt: new Date().toISOString(),
+        leaseEpoch: 13,
+        reason: "workspace_capture_storage_unavailable",
+      }),
+    ).not.toThrow();
+    expect(() =>
+      WorkspaceRevisionDegradedPayload.parse({
+        revision: 10,
+        turnId: "t8",
+        capturedAt: new Date().toISOString(),
+        leaseEpoch: 14,
+        reason: "workspace_tree_unreadable",
+      }),
+    ).not.toThrow();
   });
 });
 
@@ -804,7 +822,7 @@ describe("workspace-capture — B7 static safety guard", () => {
   });
 
   test("the empty-turn fingerprint is computed only from byte-stabilized files", () => {
-    const proof = source.indexOf("const finalized = await stabilizeWorkspaceCaptureFiles");
+    const proof = source.indexOf("finalized = await stabilizeWorkspaceCaptureFiles");
     const fingerprint = source.indexOf("const fingerprint = changeFingerprint");
     expect(proof).toBeGreaterThan(-1);
     expect(fingerprint).toBeGreaterThan(proof);

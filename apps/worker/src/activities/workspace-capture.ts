@@ -16,7 +16,8 @@
 //     Only the reaper terminates. We drop references, nothing more.
 //   • The whole capture is time-capped (60s) and best-effort: an authority-proof
 //     failure commits a degraded marker while the exact attempt, accepted control
-//     revision, and live lease epoch still own the box; other failures only log
+//     revision, and live lease epoch still own the box. Failures before a revision
+//     can be allocated, or failures of that fenced marker write itself, only log
 //     "workspace capture failed — turn outcome unaffected". Nothing escapes.
 //   • Every DB write is fenced on that exact attempt, accepted control requests,
 //     and lease epoch — cancelled/replaced work or a superseded lease writes zero
@@ -391,26 +392,47 @@ async function runCapture(
   // remain identical. Content-addressed blob PUTs are idempotent, so correctness
   // takes precedence over avoiding that bounded proof on a persistently dirty
   // but unchanged workspace.
-  const finalized = await stabilizeWorkspaceCaptureFiles({
-    observe: async () => await observeCaptureRepositories(svc, repoRoots, signal),
-    readFile: async (path) =>
-      await svc.fsRead({
-        path,
-        encoding: "base64",
-        maxBytes: PER_FILE_CONTENT_GUARD_BYTES,
-      }),
-    putBlob: async (key, bytes) => {
-      await storage.putObject({
-        key,
-        contentType: "application/octet-stream",
-        body: bytes,
-      });
-    },
-    workspaceId: input.workspaceId,
-    sessionId: input.sessionId,
-    signal,
-    ...(input.maxCaptureBytes === undefined ? {} : { maxTotalBytes: input.maxCaptureBytes }),
-  });
+  let finalized: StableWorkspaceCaptureFilesResult;
+  try {
+    finalized = await stabilizeWorkspaceCaptureFiles({
+      observe: async () => await observeCaptureRepositories(svc, repoRoots, signal),
+      readFile: async (path) =>
+        await svc.fsRead({
+          path,
+          encoding: "base64",
+          maxBytes: PER_FILE_CONTENT_GUARD_BYTES,
+        }),
+      putBlob: async (key, bytes) => {
+        try {
+          await storage.putObject({
+            key,
+            contentType: "application/octet-stream",
+            body: bytes,
+          });
+        } catch (error) {
+          throw new CaptureStorageError("after_image", error);
+        }
+      },
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      signal,
+      ...(input.maxCaptureBytes === undefined ? {} : { maxTotalBytes: input.maxCaptureBytes }),
+    });
+  } catch (error) {
+    if (!(error instanceof CaptureStorageError)) throw error;
+    await commitCaptureBoundaryFailure({
+      input,
+      revision,
+      signal,
+      reason: "workspace_capture_storage_unavailable",
+      failureStage: error.stage,
+      warning: "workspace capture degraded — object storage unavailable",
+      result: "degraded_storage_unavailable",
+      error,
+      startedAt,
+    });
+    return;
+  }
   if (finalized.kind === "unstable") {
     const capturedAt = new Date();
     const reason = finalized.reason;
@@ -511,7 +533,24 @@ async function runCapture(
   }
 
   // ── 3. tree index (one bounded listing; residue dirs pruned at source) ─────
-  const tree = await buildTreeIndex(svc, startedAt, signal);
+  let tree: Awaited<ReturnType<typeof buildTreeIndex>>;
+  try {
+    tree = await buildTreeIndex(svc, startedAt, signal);
+  } catch (error) {
+    if (signal.aborted || error instanceof BoxExitingError) throw error;
+    await commitCaptureBoundaryFailure({
+      input,
+      revision,
+      signal,
+      reason: "workspace_tree_unreadable",
+      failureStage: "tree_index",
+      warning: "workspace capture degraded — tree unavailable",
+      result: "degraded_tree_unreadable",
+      error,
+      startedAt,
+    });
+    return;
+  }
   throwIfCaptureAborted(signal);
 
   // ── 4. serialize the exact uploaded after-images ──────────────────────────
@@ -554,15 +593,38 @@ async function runCapture(
       entryCount: tree.entryCount,
     }),
   );
-  await storage.putObject({ key: treeKey, contentType: "application/json", body: treeBytes });
-  throwIfCaptureAborted(signal);
-  stats.durationMs = Date.now() - startedAt;
-  const manifestBytes = utf8(JSON.stringify(manifest));
-  await storage.putObject({
-    key: manifestKey,
-    contentType: "application/json",
-    body: manifestBytes,
-  });
+  let storageFailureStage: Extract<CaptureStorageFailureStage, "tree" | "manifest"> = "tree";
+  let manifestBytes: Uint8Array;
+  try {
+    await storage.putObject({ key: treeKey, contentType: "application/json", body: treeBytes });
+    throwIfCaptureAborted(signal);
+    stats.durationMs = Date.now() - startedAt;
+    manifestBytes = utf8(JSON.stringify(manifest));
+    storageFailureStage = "manifest";
+    await storage.putObject({
+      key: manifestKey,
+      contentType: "application/json",
+      body: manifestBytes,
+    });
+  } catch (error) {
+    if (signal.aborted) throw error;
+    await commitCaptureBoundaryFailure({
+      input,
+      revision,
+      signal,
+      reason: "workspace_capture_storage_unavailable",
+      failureStage: storageFailureStage,
+      warning: "workspace capture degraded — object storage unavailable",
+      result: "degraded_storage_unavailable",
+      error,
+      startedAt,
+    });
+    // These keys are unique to this turn and no available row references them.
+    // Content-addressed after-image blobs may still be shared with an older
+    // revision, so they deliberately remain for ordinary capture GC.
+    await safeDelete(storage, [manifestKey, treeKey], observability, signal);
+    return;
+  }
   throwIfCaptureAborted(signal);
   const sizeBytes = totalBytes + treeBytes.byteLength + manifestBytes.byteLength;
 
@@ -667,6 +729,62 @@ function captureDegradedReason(
     case "command_failed":
     default:
       return "repository_discovery_command_failed";
+  }
+}
+
+async function commitCaptureBoundaryFailure(args: {
+  input: CaptureWorkspaceRevisionInput;
+  revision: number;
+  signal: AbortSignal;
+  reason: Extract<
+    WorkspaceCaptureDegradedReason,
+    "workspace_capture_storage_unavailable" | "workspace_tree_unreadable"
+  >;
+  failureStage: string;
+  warning: string;
+  result: string;
+  error: unknown;
+  startedAt: number;
+}): Promise<void> {
+  throwIfCaptureAborted(args.signal);
+  const capturedAt = new Date();
+  const inserted = await insertFailedWorkspaceCapture(args.input.db, {
+    accountId: args.input.accountId,
+    workspaceId: args.input.workspaceId,
+    sessionId: args.input.sessionId,
+    turnId: args.input.turnId,
+    attemptId: args.input.attemptId,
+    sandboxGroupId: args.input.sandboxGroupId,
+    expectedEpoch: args.input.leaseEpoch,
+    revision: args.revision,
+    stats: {
+      degradedReason: args.reason,
+      failureStage: args.failureStage,
+      durationMs: Date.now() - args.startedAt,
+    },
+    capturedAt,
+  });
+  throwIfCaptureAborted(args.signal);
+  if (!inserted) {
+    args.input.observability.incrementCounter({
+      name: "opengeni_workspace_capture_total",
+      labels: { result: "superseded" },
+    });
+    return;
+  }
+  args.input.observability.warn(args.warning, {
+    "opengeni.session_id": args.input.sessionId,
+    "opengeni.turn_id": args.input.turnId,
+    "workspace_capture.degraded_reason": args.reason,
+    "workspace_capture.failure_stage": args.failureStage,
+    "error.message": args.error instanceof Error ? args.error.message : String(args.error),
+  });
+  args.input.observability.incrementCounter({
+    name: "opengeni_workspace_capture_total",
+    labels: { result: args.result },
+  });
+  if (args.input.publish) {
+    await args.input.publish(inserted.events).catch(() => undefined);
   }
 }
 
@@ -826,6 +944,18 @@ class CaptureAuthorityError extends Error {
   ) {
     super(message, { cause });
     this.name = "CaptureAuthorityError";
+  }
+}
+
+type CaptureStorageFailureStage = "after_image" | "tree" | "manifest";
+
+class CaptureStorageError extends Error {
+  constructor(
+    readonly stage: CaptureStorageFailureStage,
+    cause: unknown,
+  ) {
+    super(`workspace capture object storage failed during ${stage}`, { cause });
+    this.name = "CaptureStorageError";
   }
 }
 

@@ -67,6 +67,10 @@ function captureDegradedMessage(reason: string): string {
       return "A repository could not be read completely during capture. Live files remain authoritative.";
     case "workspace_capture_size_limit_exceeded":
       return "The workspace change exceeded the safe capture size. Live files remain authoritative.";
+    case "workspace_capture_storage_unavailable":
+      return "Workspace capture storage was temporarily unavailable. Live files remain authoritative.";
+    case "workspace_tree_unreadable":
+      return "The workspace file tree could not be read during capture. Live files remain authoritative.";
     default:
       return "Workspace capture is incomplete because repository discovery failed. Live files remain authoritative.";
   }

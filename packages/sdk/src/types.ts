@@ -931,7 +931,9 @@ export type WorkspaceCaptureDegradedReason =
   | "workspace_changed_during_capture"
   | "workspace_file_unreadable"
   | "workspace_repository_unreadable"
-  | "workspace_capture_size_limit_exceeded";
+  | "workspace_capture_size_limit_exceeded"
+  | "workspace_capture_storage_unavailable"
+  | "workspace_tree_unreadable";
 export type WorkspaceCaptureStats = {
   repoCount: number;
   fileCount: number;
