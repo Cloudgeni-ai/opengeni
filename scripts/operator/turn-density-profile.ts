@@ -408,7 +408,7 @@ export function profileConfigFromEnv(
       1_000,
       MAX_SETTLE_DELAY_MS,
     ),
-    timeoutMs: boundedPositiveInteger(env, "OPENGENI_DENSITY_TIMEOUT_MS", 120_000, MAX_TIMEOUT_MS),
+    timeoutMs: boundedPositiveInteger(env, "OPENGENI_DENSITY_TIMEOUT_MS", 300_000, MAX_TIMEOUT_MS),
     targetMiBPerTurn,
     hardLimitMiBPerTurn,
     syntheticWorkBytes: boundedPositiveInteger(
@@ -1571,7 +1571,7 @@ function canonicalWorkload() {
       baselineSamples: 5,
       settledSamples: 5,
       settleDelayMs: 1_000,
-      timeoutMs: 120_000,
+      timeoutMs: 300_000,
     },
     measurementIsolation: MEASUREMENT_ISOLATION,
     syntheticMix: {

@@ -59,6 +59,7 @@ inputs are configurable:
 | `OPENGENI_DENSITY_HISTORY_ROW_PAYLOAD_BYTES` | `4096` | Target UTF-8 text payload for each bounded history row; accepted range is 512–16384 |
 | `OPENGENI_DENSITY_PLATEAU_SECONDS` | `15` | Time held at the model gate |
 | `OPENGENI_DENSITY_PLATEAU_SAMPLE_INTERVAL_MS` | `500` | RSS sample interval during the plateau |
+| `OPENGENI_DENSITY_TIMEOUT_MS` | `300000` | Absolute per-wave and cleanup deadline |
 | `OPENGENI_DENSITY_TARGET_MIB_PER_TURN` | `50` | Advisory target threshold |
 | `OPENGENI_DENSITY_HARD_LIMIT_MIB_PER_TURN` | `100` | Failing hard threshold |
 | `OPENGENI_DENSITY_ARTIFACT_PATH` | unset | Optional pretty-printed JSON artifact path |

@@ -59,6 +59,7 @@ describe("turn density profile release-gate helpers", () => {
     expect(config.waves).toBe(2);
     expect(config.activeHistoryBytes).toBe(300_000);
     expect(config.compactionTailBytes).toBe(120_000);
+    expect(config.timeoutMs).toBe(300_000);
     expect(config.artifactPath).toBe("artifacts/density.json");
     expect(SYNTHETIC_SCENARIOS.map((_, index) => scenarioForTurn(index))).toEqual(
       SYNTHETIC_SCENARIOS,
@@ -195,6 +196,9 @@ describe("turn density profile release-gate helpers", () => {
     ).toThrow("must be between 100 and 60000");
     expect(() => profileConfigFromEnv({ OPENGENI_DENSITY_SYNTHETIC_FAN_OUT: "1025" })).toThrow(
       "must be at most 1024",
+    );
+    expect(() => profileConfigFromEnv({ OPENGENI_DENSITY_TIMEOUT_MS: "1800001" })).toThrow(
+      "must be at most 1800000",
     );
     expect(() =>
       profileConfigFromEnv({
