@@ -198,7 +198,7 @@ export function EnrollmentConsent({
           data-deny
           disabled={busy}
           onClick={() => onDeny?.()}
-          className="flex-1 rounded-og-sm border border-og-border px-3 py-2 text-og-sm font-medium text-og-fg-muted transition-colors hover:border-og-border-strong hover:text-og-fg disabled:opacity-50 pointer-coarse:min-h-10"
+          className="flex-1 rounded-og-sm border border-og-border px-3 py-2 text-og-sm font-medium text-og-fg-muted transition-colors hover:border-og-border-strong hover:text-og-fg disabled:opacity-50 pointer-coarse:min-h-11"
         >
           Cancel
         </button>
@@ -207,7 +207,7 @@ export function EnrollmentConsent({
           data-approve
           disabled={busy}
           onClick={() => onApprove?.(allowScreenControl)}
-          className="flex-1 rounded-og-sm bg-og-status-failed px-3 py-2 text-og-sm font-semibold text-og-accent-fg transition-colors hover:opacity-90 disabled:opacity-50 pointer-coarse:min-h-10"
+          className="flex-1 rounded-og-sm bg-og-status-failed px-3 py-2 text-og-sm font-semibold text-og-accent-fg transition-colors hover:opacity-90 disabled:opacity-50 pointer-coarse:min-h-11"
         >
           {busy ? "Connecting…" : "Grant full access"}
         </button>

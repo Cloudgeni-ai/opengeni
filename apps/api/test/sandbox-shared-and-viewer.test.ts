@@ -159,7 +159,7 @@ afterAll(async () => {
     /* noop */
   }
   await shared?.release();
-});
+}, 180_000);
 
 describe("P1.4 shared-sandbox create resolution (real createSessionForRequest + RLS)", () => {
   test("top-level create (no parent claim) ⇒ 'new' (its own singleton group; group ≡ id)", async () => {

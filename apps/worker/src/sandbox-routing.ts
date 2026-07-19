@@ -171,11 +171,7 @@ type HomeRouteResolutionIds = HomeRouteLeaseIdentity & {
   sessionId: string;
 };
 
-type HomeRouteRecovery =
-  | "pending"
-  | "degraded"
-  | "unrecoverable"
-  | "superseded";
+type HomeRouteRecovery = "pending" | "degraded" | "unrecoverable" | "superseded";
 
 /**
  * Translate the durable lease/recovery state into the typed disposition the
@@ -266,8 +262,7 @@ async function resolveCurrentHomeBackend(
     lease.instanceId === null ||
     lease.recovery.provider.instanceId !== lease.instanceId ||
     lease.recovery.workspace.status !== "ready" ||
-    (lease.recovery.restore.status !== "not_required" &&
-      lease.recovery.restore.status !== "ready")
+    (lease.recovery.restore.status !== "not_required" && lease.recovery.restore.status !== "ready")
   ) {
     throw homeRouteRecoveryError(lease, fallbackEpoch);
   }
@@ -332,9 +327,7 @@ async function resolveCurrentHomeBackend(
     throw new RoutingBackendRecoveryRequiredError(
       "resolve_home_backend",
       marked.lease?.leaseEpoch ?? lease.leaseEpoch,
-      marked.status === "stale"
-        ? "superseded"
-        : homeRouteRecoveryDisposition(marked.lease),
+      marked.status === "stale" ? "superseded" : homeRouteRecoveryDisposition(marked.lease),
     );
   }
 

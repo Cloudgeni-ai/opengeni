@@ -290,13 +290,17 @@ async function ensureTemplateBuilt(): Promise<void> {
  */
 async function ensureContainerAndAcquire(): Promise<boolean> {
   return withLock(async () => {
-    if (!(await containerRunning())) {
+    const startedContainer = !(await containerRunning());
+    if (startedContainer) {
       // Clear any stale refcount left over from a previous crashed run.
       await writeRefcount(0);
       // Remove a stopped leftover of the same name, then start fresh. NOT --rm:
       // the container must survive across the many test-file processes that
       // share it; the last file out removes it explicitly.
-      await dockerOk(["rm", "-f", CONTAINER]);
+      // The postgres image declares an anonymous data volume. Remove it with
+      // the container or every test-file lifecycle leaks a full migrated
+      // cluster into the shared Docker filesystem.
+      await dockerOk(["rm", "-f", "-v", CONTAINER]);
       // ONE container is shared by every DB/API/worker integration test FILE in
       // the parallel `bun test` run. Each file opens its own connection pool (the
       // createDb pool + a superuser admin pool), so dozens of files together can
@@ -324,25 +328,28 @@ async function ensureContainerAndAcquire(): Promise<boolean> {
       if (!started) {
         return false; // docker unavailable
       }
+    }
+    try {
+      await waitForReady(`${ADMIN_BASE_URL}/postgres`);
+      // A killed test process can leave Docker's independently-running
+      // container alive after `docker run` but before cluster bootstrap. Repair
+      // the cluster-global role on EVERY acquisition, not only the fresh-start
+      // branch; otherwise the running container looks healthy while every
+      // FORCE-RLS clone fails with `role opengeni_app does not exist`.
+      const admin = postgres(`${ADMIN_BASE_URL}/postgres`, { max: 1 });
       try {
-        await waitForReady(`${ADMIN_BASE_URL}/postgres`);
-        // Provision the cluster-global login role once (per-database GRANTs are
-        // applied later, per file, after that file's migrations run).
-        const admin = postgres(`${ADMIN_BASE_URL}/postgres`, { max: 1 });
-        try {
-          await admin.unsafe(`
-            DO $$ BEGIN
-              IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='opengeni_app') THEN
-                CREATE ROLE opengeni_app LOGIN PASSWORD '${APP_PASSWORD}';
-              END IF;
-            END $$;`);
-        } finally {
-          await admin.end().catch(() => undefined);
-        }
-      } catch (err) {
-        await dockerOk(["rm", "-f", CONTAINER]);
-        throw err;
+        await admin.unsafe(`
+          DO $$ BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='opengeni_app') THEN
+              CREATE ROLE opengeni_app LOGIN PASSWORD '${APP_PASSWORD}';
+            END IF;
+          END $$;`);
+      } finally {
+        await admin.end().catch(() => undefined);
       }
+    } catch (err) {
+      if (startedContainer) await dockerOk(["rm", "-f", "-v", CONTAINER]);
+      throw err;
     }
     // Build the once-per-container migrated template (idempotent; self-heals a
     // crashed partial). Inside the lock so exactly one process pays the
@@ -358,7 +365,7 @@ async function releaseContainer(): Promise<void> {
     const next = (await readRefcount()) - 1;
     if (next <= 0) {
       await writeRefcount(0);
-      await dockerOk(["rm", "-f", CONTAINER]);
+      await dockerOk(["rm", "-f", "-v", CONTAINER]);
       await rm(STATE_DIR, { recursive: true, force: true }).catch(() => undefined);
     } else {
       await writeRefcount(next);

@@ -46,6 +46,7 @@ import {
   ChannelAConflictError,
   ChannelANotFoundError,
   ChannelAUnsupportedError,
+  ChannelAUnavailableError,
   ChannelAValidationError,
   type ChannelASession,
   type EstablishedSandboxSession,
@@ -306,6 +307,8 @@ export async function withChannelA<T>(
  *  already-HTTPException unchanged. */
 export function mapChannelAError(error: unknown): unknown {
   if (error instanceof HTTPException) return error;
+  if (error instanceof ChannelAUnavailableError)
+    return new HTTPException(503, { message: error.message });
   if (error instanceof ChannelAValidationError)
     return new HTTPException(400, { message: error.message });
   if (error instanceof ChannelANotFoundError)

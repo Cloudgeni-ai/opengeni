@@ -192,12 +192,13 @@ export {
 export {
   SandboxChannelAService,
   ChannelAValidationError,
+  ChannelAUnavailableError,
   ChannelAConflictError,
   ChannelANotFoundError,
   ChannelAUnsupportedError,
   stripExecBanner,
   parseExecBannerSessionId,
-  isWorkspaceEscapeError,
+  parseExecBannerExitCode,
   isExecSessionLostBanner,
   assertSafeRelPath,
   parsePorcelainV2,
@@ -1344,7 +1345,7 @@ export function requirePersistableReplacementSandboxEnvelope(
   envelope: Record<string, unknown> | null,
   backend: string,
 ): Record<string, unknown> {
-  if (!hasPersistableSandboxProviderIdentity(envelope)) {
+  if (!envelope || !hasPersistableSandboxProviderIdentity(envelope)) {
     throw new SandboxReplacementProviderStateError(backend);
   }
   return envelope;

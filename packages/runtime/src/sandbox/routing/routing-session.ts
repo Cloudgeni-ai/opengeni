@@ -58,6 +58,7 @@ export interface RoutableBackendSession {
   exec?(args: unknown): Promise<unknown>;
   execCommand?(args: unknown): Promise<string>;
   writeStdin?(args: unknown): Promise<string>;
+  cancelExecCommand?(opId: string): Promise<boolean>;
   readFile?(args: unknown): Promise<string | Uint8Array>;
   writeFile?(args: unknown): Promise<unknown>;
   createEditor?(runAs?: string): unknown;
@@ -475,6 +476,13 @@ export class RoutingSandboxSession implements RoutableBackendSession {
         throw new RoutingUnsupportedError("writeStdin", this.cached?.kind ?? "unknown");
       }
       return s.writeStdin(args);
+    });
+  }
+
+  async cancelExecCommand(opId: string): Promise<boolean> {
+    return await this.dispatch("cancelExecCommand", async (session) => {
+      if (!session.cancelExecCommand) return false;
+      return await session.cancelExecCommand(opId);
     });
   }
 

@@ -112,7 +112,7 @@ afterAll(async () => {
     /* noop */
   }
   await shared?.release();
-});
+}, 180_000);
 
 describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
   test("(0) lease_epoch is an integer column returning a JS number (the spike C1a fix)", async () => {

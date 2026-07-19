@@ -106,9 +106,12 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
   }, 180_000);
 
   afterAll(async () => {
-    await browser?.close().catch(() => undefined);
-    await web?.stop().catch(() => undefined);
-    api?.stop(true);
+    await Promise.allSettled([browser?.close(), web?.stop()]);
+    // Closing the browser stops new polling first; then drain requests that
+    // already entered the API before closing its database pool. Force-stopping
+    // the listener and immediately ending the pool races those handlers and
+    // turns clean teardown into CONNECTION_ENDED noise (or an unhandled error).
+    await api?.stop(false);
     await dbClient?.close().catch(() => undefined);
     await shared?.release();
   }, 60_000);
@@ -1138,7 +1141,11 @@ async function expectNoAxeViolations(page: Page, includes: string[]): Promise<vo
     results.violations.map((violation) => ({
       id: violation.id,
       impact: violation.impact,
-      nodes: violation.nodes.map((node) => node.target),
+      nodes: violation.nodes.map((node) => ({
+        target: node.target,
+        failureSummary: node.failureSummary,
+        checks: node.any.map((check) => ({ message: check.message, data: check.data })),
+      })),
     })),
   ).toEqual([]);
 }

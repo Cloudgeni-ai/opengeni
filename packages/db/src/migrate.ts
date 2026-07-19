@@ -32,10 +32,14 @@ async function executeMigrationFile(
   file: string,
   sqlText: string,
 ): Promise<void> {
-  const [firstLine = "", ...remainingLines] = sqlText.replaceAll("\r\n", "\n").split("\n");
-  const directive = concurrentIndexDirective.exec(firstLine.trim());
+  const lines = sqlText.replaceAll("\r\n", "\n").split("\n");
+  const firstLine = lines[0]?.trim() ?? "";
+  const deploymentPrefixed = /^-- deployment-mode: (?:rolling|maintenance)$/.test(firstLine);
+  const directiveIndex = deploymentPrefixed ? 1 : 0;
+  const directiveLine = lines[directiveIndex]?.trim() ?? "";
+  const directive = concurrentIndexDirective.exec(directiveLine);
   if (!directive) {
-    if (firstLine.trim().startsWith("-- opengeni:")) {
+    if (directiveLine.startsWith("-- opengeni:")) {
       throw new Error(`Unsupported OpenGeni migration directive in ${file}`);
     }
     await sql.unsafe(sqlText);
@@ -43,7 +47,10 @@ async function executeMigrationFile(
   }
 
   const lockTimeout = directive[1]!;
-  const statement = remainingLines.join("\n").trim();
+  const statement = lines
+    .slice(directiveIndex + 1)
+    .join("\n")
+    .trim();
   const withoutTrailingSemicolon = statement.endsWith(";")
     ? statement.slice(0, -1).trimEnd()
     : statement;

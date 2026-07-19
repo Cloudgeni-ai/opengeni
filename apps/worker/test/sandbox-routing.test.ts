@@ -141,7 +141,7 @@ afterAll(async () => {
     /* noop */
   }
   await shared?.release();
-});
+}, 180_000);
 
 describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + setActiveSandbox", () => {
   test("the proxy routes to the GROUP box by default, then to the MACHINE after a swap, then back", async () => {

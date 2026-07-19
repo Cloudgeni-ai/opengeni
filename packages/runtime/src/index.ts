@@ -140,10 +140,19 @@ import {
   setSelfhostedApplyDiff,
 } from "./sandbox";
 import { runWithToolCallCorrelation } from "./sandbox/op-correlation";
+import {
+  createTurnToolCancellationController,
+  TurnSandboxCommandCancelledError,
+  wrapCapabilityToolsForTurnCancellation,
+  type TurnSandboxCommandArgs,
+  type TurnSandboxCommandSession,
+  type TurnToolCancellationFence,
+} from "./sandbox/turn-tool-cancellation";
 import { computerUse, type ComputerToolMode } from "./sandbox-computer";
 import type { RuntimeMetricsHooks } from "./metrics";
 
 export type { RuntimeMetricsHooks } from "./metrics";
+export type { TurnToolCancellationFence } from "./sandbox/turn-tool-cancellation";
 
 // P4.3 computer-use surface (the agent's :0 driver). Re-exported from the barrel
 // so callers (the worker, live proofs) reach SandboxComputer/ComputerUseCapability
@@ -207,6 +216,7 @@ export {
   findCompactionNeededError,
   isCompactionSummary,
   latestCompactionReplacementFingerprint,
+  prepareCompactionPromptInput,
   isUserMessage,
   estimateTokens,
   estimateItemTokens,
@@ -225,7 +235,11 @@ export {
   isEphemeralInternalContext,
   USER_MESSAGE_TRUNCATION_MARKER,
 } from "./context-compaction";
-export type { CompactionDecision, CompactionItem } from "./context-compaction";
+export type {
+  CompactionDecision,
+  CompactionItem,
+  PreparedCompactionPromptInput,
+} from "./context-compaction";
 export { modelCallUsageTelemetry } from "./usage-telemetry";
 export type { ModelCallUsageTelemetry } from "./usage-telemetry";
 
@@ -1205,6 +1219,18 @@ export type BuildAgentOptions = {
   // skills in the sandbox skill index (mounted under .agents/) so
   // skills/<name> references resolve like any other indexed skill.
   packSkills?: PackSkill[];
+  /**
+   * Internal per-attempt cancellation boundary. The worker supplies Temporal's
+   * signal so an in-flight shell process is interrupted immediately instead of
+   * holding Steer/Pause behind its requested yield or natural exit.
+   */
+  turnCancellationSignal?: AbortSignal;
+  /**
+   * Receives the physical sandbox-tool fence at agent construction time. A
+   * cancelled/fenced worker attempt must await it before publishing its durable
+   * attempt-quiesced receipt.
+   */
+  onToolCancellationFence?: (fence: TurnToolCancellationFence) => void;
 };
 
 export type PackSkillFile = {
@@ -1591,6 +1617,12 @@ export function buildOpenGeniAgent(
         ? { computerToolMode: options.computerToolMode }
         : {}),
       ...(options.onComputerUseReady ? { onComputerUseReady: options.onComputerUseReady } : {}),
+      ...(options.turnCancellationSignal
+        ? { turnCancellationSignal: options.turnCancellationSignal }
+        : {}),
+      ...(options.onToolCancellationFence
+        ? { onToolCancellationFence: options.onToolCancellationFence }
+        : {}),
     }),
   });
   if (options.genesisTitleHint) {
@@ -1889,8 +1921,15 @@ export function buildAgentCapabilities(
     // imageFunctionResults path (driven by structuredToolTransport) is unchanged.
     computerToolMode?: ComputerToolMode;
     onComputerUseReady?: (session: SandboxSessionLike) => Promise<void>;
+    turnCancellationSignal?: AbortSignal;
+    onToolCancellationFence?: (fence: TurnToolCancellationFence) => void;
   } = {},
 ): ReturnType<typeof Capabilities.default> {
+  const toolCancellation =
+    options.turnCancellationSignal || options.onToolCancellationFence
+      ? createTurnToolCancellationController(options.turnCancellationSignal)
+      : null;
+  if (toolCancellation) options.onToolCancellationFence?.(toolCancellation);
   // The `filesystem()` capability picks hosted-vs-function tool variants from the
   // bound model instance (supportsApplyPatchTransport / structured tool output).
   // When the caller declares the backend does NOT support that structured/hosted
@@ -1909,7 +1948,7 @@ export function buildAgentCapabilities(
   }
   const caps: ReturnType<typeof Capabilities.default> = [
     filesystemCapability,
-    shell({ configureTools: withExecOpCorrelation }),
+    shell({ ...(toolCancellation ? {} : { configureTools: withExecOpCorrelation }) }),
   ];
   caps.push(skills({ lazyFrom: lazySkillSourceWithPackSkills(packSkills) }));
   // P4.3 computer-use: the agent drives the SAME :0 humans watch (xdotool/XTEST +
@@ -1962,6 +2001,14 @@ export function buildAgentCapabilities(
       neutralizeStructuredToolTransport(computerCapability);
     }
     caps.push(computerCapability as unknown as ReturnType<typeof Capabilities.default>[number]);
+  }
+  if (toolCancellation) {
+    for (const capability of caps) {
+      wrapCapabilityToolsForTurnCancellation(
+        capability as unknown as { tools(): Tool<unknown>[] },
+        toolCancellation,
+      );
+    }
   }
   return caps;
 }
@@ -3048,6 +3095,13 @@ export type RunAgentStreamOptions = {
     // after establish, so runAgentStream must not run it eagerly here.
     deferredSetup?: boolean;
   };
+  /**
+   * The attempt's authoritative physical sandbox-operation fence. Platform
+   * lifecycle commands use its command runner too, so Steer/Pause can interrupt
+   * repository clone, rig setup, file materialization, and credential seeding
+   * before the attempt-quiesced receipt opens queue admission.
+   */
+  turnToolCancellationFence?: TurnToolCancellationFence;
   // A per-turn model-input filter chained AFTER the provider-item-id strip.
   // Used by the genesis-title injection to prepend a hidden, NON-PERSISTED
   // directive: a callModelInputFilter mutates only `modelData.input` for each
@@ -3340,6 +3394,13 @@ export async function runAgentStream(
           ? { fileDownloadsMaterialized: true }
           : {}),
         ...(overrides.onRuntimeEvent ? { onRuntimeEvent: overrides.onRuntimeEvent } : {}),
+        ...(overrides.turnToolCancellationFence
+          ? {
+              commandRunner: overrides.turnToolCancellationFence.runSandboxCommand.bind(
+                overrides.turnToolCancellationFence,
+              ),
+            }
+          : {}),
       });
       await overrides.onGitCredentialSessionReady?.(setupSession);
     }
@@ -3350,6 +3411,13 @@ export async function runAgentStream(
         ? withSandboxFileDownloads(ownedClient as SandboxClient, fileDownloads, {
             ...(overrides.onRuntimeEvent ? { onRuntimeEvent: overrides.onRuntimeEvent } : {}),
             ...(runAs ? { runAs } : {}),
+            ...(overrides.turnToolCancellationFence
+              ? {
+                  commandRunner: overrides.turnToolCancellationFence.runSandboxCommand.bind(
+                    overrides.turnToolCancellationFence,
+                  ),
+                }
+              : {}),
           })
         : (ownedClient as SandboxClient);
     // TOKEN-BROKER (B1): the per-turn git token seed, forwarded OFF-MANIFEST so the
@@ -3892,6 +3960,7 @@ export async function runOwnedSandboxSetup(
     onRuntimeEvent?: SandboxLifecycleHookContext["onRuntimeEvent"];
     gitTokenSeedsOverride?: GitTokenSeeds;
     gitTokenSeedOverride?: string;
+    commandRunner?: SandboxLifecycleCommandRunner;
   },
 ): Promise<void> {
   const { settings, environment } = opts;
@@ -3937,6 +4006,7 @@ export async function runOwnedSandboxSetup(
     ...(Object.keys(ownedGitTokenSeeds).length > 0 ? { gitTokenSeeds: ownedGitTokenSeeds } : {}),
     ...(ownedToolspaceTokenSeed ? { toolspaceTokenSeed: ownedToolspaceTokenSeed } : {}),
     ...(ownedRigSetup ? { rigSetup: ownedRigSetup } : {}),
+    ...(opts.commandRunner ? { commandRunner: opts.commandRunner } : {}),
   };
   // OWNED-PATH HOOKS: run the beforeAgentStart hooks directly against the provided
   // box, once per turn, BEFORE the run starts (repository-clone hook seeds the B1
@@ -3956,6 +4026,7 @@ export async function runOwnedSandboxSetup(
       const materialized = await materializeSandboxFileDownloads(setupSession, fileDownloads, {
         ...(opts.onRuntimeEvent ? { onRuntimeEvent: opts.onRuntimeEvent } : {}),
         ...(runAs ? { runAs } : {}),
+        ...(opts.commandRunner ? { commandRunner: opts.commandRunner } : {}),
       });
       if (opts.preparedInput) {
         appendSandboxFileDownloadFailureNote(opts.preparedInput, materialized.failures);
@@ -3989,7 +4060,7 @@ function mergePathGrants(
 export function withSandboxFileDownloads(
   client: SandboxClient,
   downloads: SandboxFileDownload[],
-  context: Pick<SandboxLifecycleHookContext, "onRuntimeEvent" | "runAs"> = {},
+  context: Pick<SandboxLifecycleHookContext, "onRuntimeEvent" | "runAs" | "commandRunner"> = {},
 ): SandboxClient {
   const normalizedDownloads = normalizeSandboxFileDownloads(downloads);
   if (normalizedDownloads.length === 0) {
@@ -4055,7 +4126,7 @@ export function withSandboxFileDownloads(
 export async function materializeSandboxFileDownloads(
   session: SandboxSessionLike,
   downloads: SandboxFileDownload[],
-  context: Pick<SandboxLifecycleHookContext, "onRuntimeEvent" | "runAs"> = {},
+  context: Pick<SandboxLifecycleHookContext, "onRuntimeEvent" | "runAs" | "commandRunner"> = {},
 ): Promise<SandboxFileDownloadMaterializationResult> {
   const normalizedDownloads = normalizeSandboxFileDownloads(downloads);
   if (normalizedDownloads.length === 0) {
@@ -4093,27 +4164,24 @@ export async function materializeSandboxFileDownloads(
     }
     let result: unknown;
     try {
-      result = session.exec
-        ? await session.exec({
-            cmd: sandboxFileDownloadCommand(download, targetPath),
-            workdir: "/workspace",
-            ...(context.runAs ? { runAs: context.runAs } : {}),
-            yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
-            maxOutputTokens: 20_000,
-          })
-        : await session.execCommand!({
-            cmd: sandboxFileDownloadCommand(download, targetPath),
-            workdir: "/workspace",
-            ...(context.runAs ? { runAs: context.runAs } : {}),
-            yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
-            maxOutputTokens: 20_000,
-          });
+      result = await runSandboxLifecycleCommand(
+        session,
+        {
+          cmd: sandboxFileDownloadCommand(download, targetPath),
+          workdir: "/workspace",
+          ...(context.runAs ? { runAs: context.runAs } : {}),
+          yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
+          maxOutputTokens: 20_000,
+        },
+        context.commandRunner,
+      );
       assertSandboxCommandSucceeded(result, `Sandbox file resource download ${download.fileId}`);
       await context.onRuntimeEvent?.({
         type: "sandbox.operation.completed",
         payload: { name: "file-resource-download", ...payload },
       });
     } catch (error) {
+      if (error instanceof TurnSandboxCommandCancelledError) throw error;
       const failure = sandboxFileDownloadFailure(download, targetPath, error, result);
       failures.push(failure);
       await context.onRuntimeEvent?.({
@@ -4753,6 +4821,11 @@ function shellQuote(value: string): string {
 
 export type SandboxLifecycleHookPhase = "beforeAgentStart";
 
+export type SandboxLifecycleCommandRunner = (
+  session: TurnSandboxCommandSession,
+  args: TurnSandboxCommandArgs,
+) => Promise<unknown>;
+
 export type SandboxLifecycleHookContext = {
   environment: Record<string, string>;
   onRuntimeEvent?: (event: NormalizedRuntimeEvent) => Promise<void> | void;
@@ -4768,7 +4841,21 @@ export type SandboxLifecycleHookContext = {
   // M3: the rig setup descriptor for the rig-setup hook (the script + marker
   // version id + the rig's own timeout). Present only on a rig-bound turn.
   rigSetup?: RigSetupDescriptor;
+  commandRunner?: SandboxLifecycleCommandRunner;
 };
+
+async function runSandboxLifecycleCommand(
+  session: SandboxSessionLike,
+  args: TurnSandboxCommandArgs,
+  commandRunner?: SandboxLifecycleCommandRunner,
+): Promise<unknown> {
+  if (commandRunner) {
+    return await commandRunner(session as TurnSandboxCommandSession, args);
+  }
+  if (session.exec) return await session.exec(args);
+  if (session.execCommand) return await session.execCommand(args);
+  throw new Error("Sandbox session does not support command execution");
+}
 
 // M3: everything the rig-setup hook needs to run the frozen rig version's setup
 // script exactly once per box. `versionId` keys the idempotence marker
@@ -5279,7 +5366,7 @@ export function gitProviderTokenRefreshCommand(seeds: GitTokenSeeds): string {
 export async function refreshGitProviderTokenFiles(
   session: GitCredentialTokenWriterSession,
   seeds: GitTokenSeeds,
-  options: { runAs?: string } = {},
+  options: { runAs?: string; commandRunner?: SandboxLifecycleCommandRunner } = {},
 ): Promise<void> {
   const command = gitProviderTokenRefreshCommand(seeds);
   if (!command) {
@@ -5292,13 +5379,10 @@ export async function refreshGitProviderTokenFiles(
     yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
     maxOutputTokens: 4_000,
   };
-  if (session.exec) {
-    assertSandboxCommandSucceeded(await session.exec(args), "Git credential refresh");
-  } else if (session.execCommand) {
-    assertSandboxCommandSucceeded(await session.execCommand(args), "Git credential refresh");
-  } else {
-    throw new Error("Sandbox session does not support command execution");
-  }
+  assertSandboxCommandSucceeded(
+    await runSandboxLifecycleCommand(session, args, options.commandRunner),
+    "Git credential refresh",
+  );
 }
 
 export function repositoryCloneCommand(
@@ -5436,27 +5520,18 @@ export async function runToolspaceTokenSeedHook(
     return;
   }
   const command = `export OPENGENI_TOOLSPACE_TOKEN_SEED=${shellQuote(context.toolspaceTokenSeed)}\n${toolspaceTokenSeedCommand()}`;
-  if (session.exec) {
-    const result = await session.exec({
+  const result = await runSandboxLifecycleCommand(
+    session,
+    {
       cmd: command,
       workdir: "/workspace",
       ...(context.runAs ? { runAs: context.runAs } : {}),
       yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
       maxOutputTokens: 4_000,
-    });
-    assertSandboxCommandSucceeded(result, "Toolspace token seed hook");
-  } else if (session.execCommand) {
-    const result = await session.execCommand({
-      cmd: command,
-      workdir: "/workspace",
-      ...(context.runAs ? { runAs: context.runAs } : {}),
-      yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
-      maxOutputTokens: 4_000,
-    });
-    assertSandboxCommandSucceeded(result, "Toolspace token seed hook");
-  } else {
-    throw new Error("Sandbox session does not support command execution");
-  }
+    },
+    context.commandRunner,
+  );
+  assertSandboxCommandSucceeded(result, "Toolspace token seed hook");
 }
 
 // Bounds the setup output tail carried on a rig.setup failure event/error so a
@@ -5565,13 +5640,7 @@ export async function runRigSetupHook(
   };
   let result: unknown;
   try {
-    if (session.exec) {
-      result = await session.exec(execArgs);
-    } else if (session.execCommand) {
-      result = await session.execCommand(execArgs);
-    } else {
-      throw new Error("Sandbox session does not support command execution");
-    }
+    result = await runSandboxLifecycleCommand(session, execArgs, context.commandRunner);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     await context.onRuntimeEvent?.({
@@ -5654,27 +5723,18 @@ export async function runRepositoryCloneHook(
     const command = seedPrefix
       ? `${seedPrefix}\n${repositoryCloneCommand(resources)}`
       : repositoryCloneCommand(resources);
-    if (session.exec) {
-      const result = await session.exec({
+    const result = await runSandboxLifecycleCommand(
+      session,
+      {
         cmd: command,
         workdir: "/workspace",
         ...(context.runAs ? { runAs: context.runAs } : {}),
         yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
         maxOutputTokens: 20_000,
-      });
-      assertSandboxCommandSucceeded(result, "Repository clone hook");
-    } else if (session.execCommand) {
-      const result = await session.execCommand({
-        cmd: command,
-        workdir: "/workspace",
-        ...(context.runAs ? { runAs: context.runAs } : {}),
-        yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
-        maxOutputTokens: 20_000,
-      });
-      assertSandboxCommandSucceeded(result, "Repository clone hook");
-    } else {
-      throw new Error("Sandbox session does not support command execution");
-    }
+      },
+      context.commandRunner,
+    );
+    assertSandboxCommandSucceeded(result, "Repository clone hook");
     await context.onRuntimeEvent?.({
       type: "sandbox.operation.completed",
       payload,
@@ -5800,27 +5860,18 @@ export async function runAzureCliLoginHook(
     payload,
   });
   try {
-    if (session.exec) {
-      const result = await session.exec({
+    const result = await runSandboxLifecycleCommand(
+      session,
+      {
         cmd: azureCliLoginCommand(),
         workdir: "/workspace",
         ...(context.runAs ? { runAs: context.runAs } : {}),
         yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
         maxOutputTokens: 20_000,
-      });
-      assertSandboxCommandSucceeded(result, "Azure CLI login hook");
-    } else if (session.execCommand) {
-      const result = await session.execCommand({
-        cmd: azureCliLoginCommand(),
-        workdir: "/workspace",
-        ...(context.runAs ? { runAs: context.runAs } : {}),
-        yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
-        maxOutputTokens: 20_000,
-      });
-      assertSandboxCommandSucceeded(result, "Azure CLI login hook");
-    } else {
-      throw new Error("Sandbox session does not support command execution");
-    }
+      },
+      context.commandRunner,
+    );
+    assertSandboxCommandSucceeded(result, "Azure CLI login hook");
     await context.onRuntimeEvent?.({
       type: "sandbox.operation.completed",
       payload,

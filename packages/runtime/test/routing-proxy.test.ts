@@ -367,15 +367,18 @@ describe("makeActiveBackendResolver — heterogeneous default/modal/selfhosted d
   test("null pointer after a home repair uses the current durable backend, not the stale default handle", async () => {
     const original = new FakeBackend("group-before-repair");
     const replacement = new FakeBackend("group-after-repair");
-    let reboundCalls = 0;
+    const resolvedPointers: ActivePointer[] = [];
     const resolve = makeActiveBackendResolver({
       workspaceId: WS,
       defaultBackend: original,
       defaultKind: "modal",
       resolveDefaultBackend: async (pointer) => {
-        reboundCalls += 1;
-        expect(pointer).toEqual({ activeSandboxId: null, activeEpoch: 1 });
-        return { session: replacement, sandboxId: null, kind: "modal" };
+        resolvedPointers.push(pointer);
+        return {
+          session: pointer.activeEpoch === 0 ? original : replacement,
+          sandboxId: null,
+          kind: "modal",
+        };
       },
       getSandbox: async () => null,
       controlRpcFactory: () => new MockAgentResponder(),
@@ -395,7 +398,10 @@ describe("makeActiveBackendResolver — heterogeneous default/modal/selfhosted d
     expect(result.stdout).toBe("group-after-repair");
     expect(original.calls).toEqual(["before"]);
     expect(replacement.calls).toEqual(["after"]);
-    expect(reboundCalls).toBe(1);
+    expect(resolvedPointers).toEqual([
+      { activeSandboxId: null, activeEpoch: 0 },
+      { activeSandboxId: null, activeEpoch: 1 },
+    ]);
   });
 
   test("selfhosted target -> a SelfhostedSession bound to the enrollment agentId, fenced under active_epoch", async () => {
