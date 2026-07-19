@@ -299,8 +299,11 @@ describe("fail-closed change impact", () => {
     const cacheKey = packageSteps.find((step) => step.uses === "actions/cache@v4")?.with?.key;
     expect(cacheKey).toBeString();
     expect(String(cacheKey).endsWith(exactHead)).toBe(true);
-    const sourceSha = ci.jobs?.images?.steps?.find((step) => step.uses === "docker/bake-action@v6")
-      ?.env?.SOURCE_SHA;
+    const imageBuild = ci.jobs?.images?.steps?.find(
+      (step) => step.uses === "docker/bake-action@v6",
+    );
+    expect(imageBuild?.with?.source).toBe(".");
+    const sourceSha = imageBuild?.env?.SOURCE_SHA;
     expect(sourceSha).toBe(exactHead);
   });
 

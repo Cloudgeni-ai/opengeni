@@ -514,6 +514,7 @@ jobs:
       - name: Build API, worker, and web from one shared graph
         uses: docker/bake-action@v6
         with:
+          source: .
           files: docker/docker-bake.hcl
           targets: workload-images
           set: |
