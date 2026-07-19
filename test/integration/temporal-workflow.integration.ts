@@ -909,11 +909,17 @@ describe("Temporal workflow integration", () => {
       const queuedTurns = [first];
       const controls: unknown[] = [];
       let runs = 0;
-      let terminateFirst = false;
       const admission = createTurnAdmission(queuedTurns, async () => {
         runs += 1;
         if (runs === 1) {
-          await waitFor(() => terminateFirst);
+          const context = currentActivityContext();
+          if (!context) {
+            throw new Error("quiescence failure fixture has no Temporal activity context");
+          }
+          while (!context.cancellationSignal.aborted) {
+            context.heartbeat({ phase: "quiescence-failure-fixture" });
+            await Bun.sleep(10);
+          }
           throw new Error("physical cancellation was not confirmed");
         }
         return { status: "idle" };
@@ -924,7 +930,6 @@ describe("Temporal workflow integration", () => {
         failSessionAttempt: async () => undefined,
         settleSessionInterruptions: async (input: unknown) => {
           controls.push(input);
-          terminateFirst = true;
           return { action: "continue" as const };
         },
       });
@@ -947,7 +952,6 @@ describe("Temporal workflow integration", () => {
           { ...scope, sessionId, attemptId: expect.any(String), workflowId },
         ]);
       } finally {
-        terminateFirst = true;
         worker.shutdown();
         await run;
       }
