@@ -296,7 +296,7 @@ describe("fail-closed change impact", () => {
 
     const ci = parsed.get(".github/workflows/ci.yml")!;
     const packageSteps = ci.jobs?.packages?.steps ?? [];
-    const cacheKey = packageSteps.find((step) => step.uses === "actions/cache@v4")?.with?.key;
+    const cacheKey = packageSteps.find((step) => step.uses === "actions/cache@v6.1.0")?.with?.key;
     expect(cacheKey).toBeString();
     expect(String(cacheKey).endsWith(exactHead)).toBe(true);
     const imageBuild = ci.jobs?.images?.steps?.find(
