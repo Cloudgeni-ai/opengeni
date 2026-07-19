@@ -142,6 +142,65 @@ describe("OpenGeniClient", () => {
     );
   });
 
+  test("listEventPage round-trips monitoring filters and exact page headers", async () => {
+    const event = makeEvent(42, "turn.completed", { result: "authoritative" });
+    const body = JSON.stringify([event]);
+    const { client, requests } = makeClient(
+      () =>
+        new Response(body, {
+          headers: {
+            "Content-Type": "application/json",
+            "X-OpenGeni-Event-Mode": "forensic",
+            "X-OpenGeni-Event-Direction": "after",
+            "X-OpenGeni-Payload-Mode": "full",
+            "X-OpenGeni-Page-Bytes": "321",
+            "X-OpenGeni-Page-Max-Bytes": "1048576",
+            "X-OpenGeni-Page-Truncated": "true",
+            "X-OpenGeni-Has-More": "true",
+            "X-OpenGeni-Truncated-By": "bytes",
+            "X-OpenGeni-Covered-First": "42",
+            "X-OpenGeni-Covered-Last": "42",
+            "X-OpenGeni-Next-After": "42",
+            "X-OpenGeni-Forensic-Exact": "true",
+          },
+        }),
+    );
+
+    const page = await client.listEventPage(WORKSPACE_ID, SESSION_ID, {
+      after: 12,
+      before: 99,
+      limit: 3,
+      compact: true,
+      mode: "forensic",
+      direction: "after",
+      payloadMode: "full",
+      includeTypes: ["turn.completed", "turn.failed"],
+      excludeTypes: ["turn.failed"],
+      includeClasses: ["terminal", "checkpoint"],
+      excludeClasses: ["failure"],
+      latest: "terminal",
+    });
+
+    expect(page).toEqual({
+      events: [event],
+      mode: "forensic",
+      payloadMode: "full",
+      direction: "after",
+      bytes: 321,
+      maxBytes: 1_048_576,
+      truncated: true,
+      hasMore: true,
+      truncatedBy: "bytes",
+      coveredSequence: { first: 42, last: 42 },
+      nextAfter: 42,
+      nextBefore: null,
+      forensicExact: true,
+    });
+    expect(requests[0]!.url).toBe(
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/events?after=12&before=99&limit=3&compact=1&mode=forensic&direction=after&payloadMode=full&includeTypes=turn.completed%2Cturn.failed&excludeTypes=turn.failed&includeClasses=terminal%2Ccheckpoint&excludeClasses=failure&latest=terminal`,
+    );
+  });
+
   test("sendMessage wraps text in a user.message control event", async () => {
     const accepted = makeEvent(4, "user.message", { text: "do the thing" });
     const { client, requests } = makeClient(() => jsonResponse(accepted, 202));
