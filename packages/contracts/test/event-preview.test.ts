@@ -155,6 +155,23 @@ describe("bounded session event payloads", () => {
     ).toBeTrue();
   });
 
+  test("charges omitted object properties against the global measurement budget", () => {
+    const payload: Record<string, unknown> = { id: "broad-omitted-output" };
+    for (let field = 0; field < 10_000; field += 1) {
+      payload[`omitted-${field}`] =
+        field % 3 === 0 ? undefined : field % 3 === 1 ? () => null : Symbol("omitted");
+    }
+
+    const bounded = boundSessionEventPayload(payload);
+    expect(sessionEventPayloadTruncation(bounded)).toMatchObject({
+      reason: "payload_measurement_bounded",
+      originalBytes: null,
+      omittedBytes: null,
+      estimatedOriginalTokens: null,
+    });
+    expect(sessionEventJsonBytes(bounded)).toBeLessThanOrEqual(SESSION_EVENT_PAYLOAD_MAX_BYTES);
+  });
+
   test("measures JSON string escapes exactly without materializing the full payload JSON", () => {
     const output = `${'"\\\n'.repeat(500_000)}TAIL`;
     const payload = { id: "escaped-output", output };
@@ -239,6 +256,38 @@ describe("bounded session event payloads", () => {
     expect(accessorCalls).toBe(0);
     expect(sessionEventPayloadTruncation(bounded)?.reason).toBe("payload_measurement_bounded");
     expect(JSON.stringify(bounded)).toContain("accessor value omitted");
+    expect(JSON.stringify(bounded)).not.toContain("must-not-run");
+  });
+
+  test("does not invoke array accessors or Date serializer overrides while previewing", () => {
+    let serializerCalls = 0;
+    let accessorCalls = 0;
+    const array = ["placeholder"];
+    Object.defineProperty(array, "0", {
+      enumerable: true,
+      get() {
+        accessorCalls += 1;
+        return "must-not-run";
+      },
+    });
+    const date = new Date("2026-07-19T03:00:00.000Z");
+    Object.defineProperty(date, "toJSON", {
+      enumerable: true,
+      value() {
+        serializerCalls += 1;
+        return "must-not-run";
+      },
+    });
+
+    const bounded = boundSessionEventPayload({ id: "poison-values", array, date });
+    expect(accessorCalls).toBe(0);
+    expect(serializerCalls).toBe(0);
+    expect(sessionEventPayloadTruncation(bounded)).toMatchObject({
+      reason: "payload_measurement_bounded",
+      originalBytes: null,
+    });
+    expect(JSON.stringify(bounded)).toContain("array accessor value omitted");
+    expect(JSON.stringify(bounded)).toContain("Date value with custom serialization omitted");
     expect(JSON.stringify(bounded)).not.toContain("must-not-run");
   });
 

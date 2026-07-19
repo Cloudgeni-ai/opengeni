@@ -14,6 +14,7 @@ import {
   workspaceControlEventNatsPayload,
 } from "../src/index";
 import {
+  boundSessionEvent,
   sessionEventJsonBytes,
   sessionEventPayloadTruncation,
   type SessionEvent,
@@ -151,6 +152,145 @@ describe("SSE formatting", () => {
 });
 
 describe("session event transport envelopes", () => {
+  test("never invokes serializers or accessors while bounding adversarial complete events", () => {
+    let serializerCalls = 0;
+    let accessorCalls = 0;
+    const custom = {
+      visible: "kept",
+      toJSON() {
+        serializerCalls += 1;
+        return "must-not-run";
+      },
+    };
+    Object.defineProperty(custom, "dangerous", {
+      enumerable: true,
+      get() {
+        accessorCalls += 1;
+        return "must-not-run";
+      },
+    });
+    const customDate = new Date("2026-07-19T03:00:00.000Z");
+    Object.defineProperty(customDate, "toJSON", {
+      enumerable: true,
+      value() {
+        serializerCalls += 1;
+        return "must-not-run";
+      },
+    });
+    const arrayWithAccessor = ["placeholder"];
+    Object.defineProperty(arrayWithAccessor, "0", {
+      enumerable: true,
+      get() {
+        accessorCalls += 1;
+        return "must-not-run";
+      },
+    });
+    const payload: Record<string, unknown> = {
+      id: "poison-output",
+      custom,
+      customDate,
+      arrayWithAccessor,
+      visible: `HEAD-${"x".repeat(200_000)}-TAIL`,
+    };
+    for (let index = 0; index < 10_000; index += 1) {
+      payload[`omitted-${index}`] = index % 3 === 0 ? undefined : () => Symbol("omitted");
+    }
+    const poison = event(81, payload);
+
+    const direct = boundSessionEvent(poison);
+    const batches = sessionEventBatchesByBytes(WORKSPACE_ID, SESSION_ID, [poison]);
+    const frame = formatSessionEventSse(poison);
+    const page = boundSessionEventHttpPage([poison], { direction: "after" });
+
+    expect(serializerCalls).toBe(0);
+    expect(accessorCalls).toBe(0);
+    expect(sessionEventPayloadTruncation(direct.payload)).toMatchObject({
+      truncated: true,
+      reason: "payload_measurement_bounded",
+      originalBytes: null,
+      omittedBytes: null,
+      fullEvidence: { available: false, reason: "not_retained" },
+    });
+    expect(JSON.stringify(direct)).not.toContain("must-not-run");
+    expect(encodedBatchBytes(batches.flat())).toBeLessThanOrEqual(
+      SESSION_EVENT_NATS_MESSAGE_MAX_BYTES,
+    );
+    expect(new TextEncoder().encode(frame).byteLength).toBeLessThanOrEqual(
+      SESSION_EVENT_SSE_FRAME_MAX_BYTES,
+    );
+    expect(page.bytes).toBeLessThanOrEqual(SESSION_EVENT_HTTP_PAGE_MAX_BYTES);
+    expect(page.events).toHaveLength(1);
+  });
+
+  test("makes event-level custom serialization loss explicit without invoking it", () => {
+    let serializerCalls = 0;
+    const poison = event(82, { output: "small" }) as SessionEvent & {
+      toJSON?: () => unknown;
+    };
+    poison.toJSON = () => {
+      serializerCalls += 1;
+      return { output: "must-not-run" };
+    };
+
+    const direct = boundSessionEvent(poison);
+    const batches = sessionEventBatchesByBytes(WORKSPACE_ID, SESSION_ID, [poison]);
+    const frame = formatSessionEventSse(poison);
+    const page = boundSessionEventHttpPage([poison], { direction: "after" });
+
+    expect(serializerCalls).toBe(0);
+    for (const projected of [direct, batches[0]![0]!, page.events[0]!]) {
+      expect(projected.payload).toMatchObject({
+        originalEventBytes: null,
+        envelopeProjection: {
+          truncated: true,
+          fields: expect.arrayContaining([
+            expect.objectContaining({ field: "toJSON", originalBytes: null }),
+          ]),
+        },
+        fullEvidence: { available: false, reason: "not_retained" },
+      });
+    }
+    expect(new TextEncoder().encode(frame).byteLength).toBeLessThanOrEqual(
+      SESSION_EVENT_SSE_FRAME_MAX_BYTES,
+    );
+    expect(frame).not.toContain("must-not-run");
+  });
+
+  test("normalizes a top-level payload accessor with unknown source bytes on every surface", () => {
+    let accessorCalls = 0;
+    const poison = event(83, { output: "placeholder" });
+    Object.defineProperty(poison, "payload", {
+      enumerable: true,
+      get() {
+        accessorCalls += 1;
+        return { output: "must-not-run" };
+      },
+    });
+
+    const direct = boundSessionEvent(poison);
+    const batches = sessionEventBatchesByBytes(WORKSPACE_ID, SESSION_ID, [poison]);
+    const frame = formatSessionEventSse(poison);
+    const page = boundSessionEventHttpPage([poison], { direction: "after" });
+
+    expect(accessorCalls).toBe(0);
+    for (const projected of [direct, batches[0]![0]!, page.events[0]!]) {
+      expect(projected.payload).toMatchObject({
+        originalEventBytes: null,
+        envelopeProjection: {
+          truncated: true,
+          fields: expect.arrayContaining([
+            expect.objectContaining({ field: "payload", originalBytes: null }),
+          ]),
+        },
+        fullEvidence: { available: false, reason: "not_retained" },
+      });
+    }
+    expect(new TextEncoder().encode(frame).byteLength).toBeLessThanOrEqual(
+      SESSION_EVENT_SSE_FRAME_MAX_BYTES,
+    );
+    expect(frame).not.toContain("must-not-run");
+  });
+
   test("chunks parallel NATS batches by exact encoded bytes without reordering", () => {
     const events = Array.from({ length: 100 }, (_, index) =>
       event(index + 1, {

@@ -792,7 +792,10 @@ export function formatSessionEventSse(event: SessionEvent): string {
       payload: boundSessionEventPayload(
         {
           preview: "[legacy event envelope omitted at SSE frame boundary]",
-          originalPayloadBytes: sessionEventJsonBytes(event.payload),
+          // The complete event has already crossed the non-invoking bounded
+          // projection above. Do not re-read an untrusted source accessor merely
+          // to populate optional diagnostic accounting in this last-resort path.
+          originalPayloadBytes: null,
         },
         { surface: "sse_legacy_guard", maxBytes: 4096 },
       ),

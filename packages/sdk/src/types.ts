@@ -431,6 +431,8 @@ export type Session = {
         attentionDescendants: number;
         pausedDescendants: number;
         failedDescendants: number;
+        /** Counts are lower bounds rather than exact totals when true. */
+        truncated: boolean;
       }
     | undefined;
   createdAt: string;

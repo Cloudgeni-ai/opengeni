@@ -1,6 +1,7 @@
 import { z } from "zod";
 import {
   boundSessionEventPayload,
+  measureSessionEventJson,
   sessionEventJsonBytes,
   type SessionEventBoundarySurface,
 } from "./event-preview";
@@ -9,6 +10,7 @@ export {
   SESSION_EVENT_PAYLOAD_MAX_BYTES,
   approximateSessionEventTokens,
   boundSessionEventPayload,
+  measureSessionEventJson,
   sessionEventJsonBytes,
   sessionEventMediaPreview,
   sessionEventMediaPreviewFromDataUrl,
@@ -16,6 +18,7 @@ export {
   type BoundSessionEventPayloadOptions,
   type SessionEventBoundarySurface,
   type SessionEventMediaPreview,
+  type SessionEventJsonMeasurement,
   type SessionEventPayloadTruncation,
 } from "./event-preview";
 
@@ -3519,6 +3522,8 @@ export const Session = z.object({
       attentionDescendants: z.number().int().nonnegative(),
       pausedDescendants: z.number().int().nonnegative(),
       failedDescendants: z.number().int().nonnegative(),
+      /** Counts are lower bounds rather than exact totals when true. */
+      truncated: z.boolean().default(false),
     })
     .optional(),
   createdAt: z.string(),
@@ -4485,57 +4490,126 @@ export function boundSessionEvent(
 ): SessionEvent {
   const surface = options.surface ?? "durable_audit";
   const maxBytes = Math.max(8 * 1024, options.maxBytes ?? SESSION_EVENT_ENVELOPE_MAX_BYTES);
-  const originalBytes = sessionEventJsonBytes(event);
+  // Never stringify the untrusted complete event. Measurement has one global
+  // work budget and never invokes accessors/custom toJSON; serialization is
+  // permitted only after the compact projection below has been constructed.
+  const originalBytes = measureSessionEventJson(event).bytes;
+  const source = sessionEventOwnDataFields(event);
+  const id = canonicalSessionEventUuid(source.id, SESSION_EVENT_ZERO_UUID);
+  const workspaceId = canonicalSessionEventUuid(source.workspaceId, SESSION_EVENT_ZERO_UUID);
+  const sessionId = canonicalSessionEventUuid(source.sessionId, SESSION_EVENT_ZERO_UUID);
+  const sequence =
+    source.sequence.readable &&
+    typeof source.sequence.value === "number" &&
+    Number.isSafeInteger(source.sequence.value) &&
+    source.sequence.value > 0
+      ? source.sequence.value
+      : 1;
+  const occurredAt =
+    source.occurredAt.readable &&
+    typeof source.occurredAt.value === "string" &&
+    sessionEventUtf8Bytes(source.occurredAt.value) <= 256
+      ? source.occurredAt.value
+      : "1970-01-01T00:00:00.000Z";
+  const rawType = source.type.readable ? source.type.value : undefined;
   const typeIsSafe =
-    sessionEventUtf8Bytes(event.type) <= SESSION_EVENT_TYPE_MAX_BYTES &&
-    !event.type.includes("\n") &&
-    !event.type.includes("\r");
+    typeof rawType === "string" &&
+    sessionEventUtf8Bytes(rawType) <= SESSION_EVENT_TYPE_MAX_BYTES &&
+    !rawType.includes("\n") &&
+    !rawType.includes("\r");
+  const rawClientEventId = source.clientEventId.readable ? source.clientEventId.value : undefined;
   const clientEventId = boundOptionalSessionEventText(
-    event.clientEventId,
+    typeof rawClientEventId === "string" || rawClientEventId === null
+      ? rawClientEventId
+      : undefined,
     SESSION_EVENT_CLIENT_EVENT_ID_MAX_BYTES,
   );
+  const rawTurnAssociation = source.turnAssociation.readable
+    ? source.turnAssociation.value
+    : undefined;
   const turnAssociation =
-    event.turnAssociation === null ||
-    event.turnAssociation === undefined ||
-    event.turnAssociation === "current" ||
-    event.turnAssociation === "late_rejected" ||
-    event.turnAssociation === "duplicate"
-      ? event.turnAssociation
+    rawTurnAssociation === null ||
+    rawTurnAssociation === undefined ||
+    rawTurnAssociation === "current" ||
+    rawTurnAssociation === "late_rejected" ||
+    rawTurnAssociation === "duplicate"
+      ? rawTurnAssociation
       : null;
+  const rawDuplicateReason = source.duplicateReason.readable
+    ? source.duplicateReason.value
+    : undefined;
   const duplicateReason = boundOptionalSessionEventText(
-    event.duplicateReason,
+    typeof rawDuplicateReason === "string" || rawDuplicateReason === null
+      ? rawDuplicateReason
+      : undefined,
     SESSION_EVENT_DUPLICATE_REASON_MAX_BYTES,
   );
+  const turnId = canonicalOptionalSessionEventUuid(source.turnId);
+  const turnGeneration = canonicalSessionEventGeneration(source.turnGeneration);
+  const turnAttemptId = canonicalOptionalSessionEventUuid(source.turnAttemptId);
+  const duplicateOfEventId = canonicalOptionalSessionEventUuid(source.duplicateOfEventId);
   const envelopeFields = [
+    sessionEventCustomSerializerProjection(event),
     !typeIsSafe
-      ? sessionEventEnvelopeFieldProjection("type", event.type, "session.event.envelope_omitted")
+      ? sessionEventEnvelopeFieldProjection(
+          "type",
+          rawType,
+          "session.event.envelope_omitted",
+          source.type.readable,
+        )
       : null,
-    event.clientEventId !== clientEventId
-      ? sessionEventEnvelopeFieldProjection("clientEventId", event.clientEventId, clientEventId)
+    !source.clientEventId.readable || rawClientEventId !== clientEventId
+      ? sessionEventEnvelopeFieldProjection(
+          "clientEventId",
+          rawClientEventId,
+          clientEventId,
+          source.clientEventId.readable,
+        )
       : null,
-    event.turnAssociation !== turnAssociation
+    !source.turnAssociation.readable || rawTurnAssociation !== turnAssociation
       ? sessionEventEnvelopeFieldProjection(
           "turnAssociation",
-          event.turnAssociation,
+          rawTurnAssociation,
           turnAssociation,
+          source.turnAssociation.readable,
         )
       : null,
-    event.duplicateReason !== duplicateReason
+    !source.duplicateReason.readable || rawDuplicateReason !== duplicateReason
       ? sessionEventEnvelopeFieldProjection(
           "duplicateReason",
-          event.duplicateReason,
+          rawDuplicateReason,
           duplicateReason,
+          source.duplicateReason.readable,
         )
       : null,
+    ...sessionEventCanonicalFieldProjections(source, {
+      id,
+      workspaceId,
+      sessionId,
+      sequence,
+      occurredAt,
+    }),
+    ...sessionEventOptionalFieldProjections(source, {
+      turnId,
+      turnGeneration,
+      turnAttemptId,
+      duplicateOfEventId,
+    }),
+    !source.payload.readable
+      ? sessionEventEnvelopeFieldProjection("payload", undefined, null, false)
+      : null,
   ].filter((field) => field !== null);
+  const rawPayload = source.payload.readable
+    ? source.payload.value
+    : "[event payload accessor omitted at bounded projection boundary]";
   const payload =
     envelopeFields.length === 0
-      ? boundSessionEventPayload(event.payload, { surface })
+      ? boundSessionEventPayload(rawPayload, { surface })
       : boundSessionEventPayload(
           {
             preview: "[legacy event envelope normalized at bounded projection boundary]",
             originalEventBytes: originalBytes,
-            originalType: boundSessionEventText(event.type, 256),
+            originalType: typeof rawType === "string" ? boundSessionEventText(rawType, 256) : null,
             envelopeProjection: {
               truncated: true,
               surface,
@@ -4546,38 +4620,50 @@ export function boundSessionEvent(
           { surface, maxBytes: 8 * 1024 },
         );
   const bounded: SessionEvent = {
-    ...event,
-    type: typeIsSafe ? event.type : "session.event.envelope_omitted",
+    id,
+    workspaceId,
+    sessionId,
+    sequence,
+    type: typeIsSafe ? (rawType as SessionEvent["type"]) : "session.event.envelope_omitted",
     payload,
-    clientEventId,
-    turnAssociation,
-    duplicateReason,
+    occurredAt,
+    ...(sessionEventShouldEmitOptionalField(source.clientEventId) ? { clientEventId } : {}),
+    ...(sessionEventShouldEmitOptionalField(source.turnId) ? { turnId } : {}),
+    ...(sessionEventShouldEmitOptionalField(source.turnGeneration) ? { turnGeneration } : {}),
+    ...(sessionEventShouldEmitOptionalField(source.turnAttemptId) ? { turnAttemptId } : {}),
+    ...(sessionEventShouldEmitOptionalField(source.turnAssociation) ? { turnAssociation } : {}),
+    ...(sessionEventShouldEmitOptionalField(source.duplicateOfEventId)
+      ? { duplicateOfEventId }
+      : {}),
+    ...(sessionEventShouldEmitOptionalField(source.duplicateReason) ? { duplicateReason } : {}),
   };
   if (sessionEventJsonBytes(bounded) <= maxBytes) return bounded;
 
   const fallback: SessionEvent = {
-    id: event.id,
-    workspaceId: event.workspaceId,
-    sessionId: event.sessionId,
-    sequence: event.sequence,
+    id,
+    workspaceId,
+    sessionId,
+    sequence,
     type: "session.event.envelope_omitted",
     payload: boundSessionEventPayload(
       {
         preview: "[legacy event envelope omitted at bounded projection boundary]",
         originalEventBytes: originalBytes,
-        originalType: boundSessionEventText(event.type, 256),
+        originalType: typeof rawType === "string" ? boundSessionEventText(rawType, 256) : null,
         fullEvidence: { available: false, reason: "not_retained" },
       },
       { surface, maxBytes: 4 * 1024 },
     ),
-    occurredAt: event.occurredAt,
-    clientEventId: bounded.clientEventId ?? null,
-    turnId: event.turnId ?? null,
-    turnGeneration: event.turnGeneration ?? null,
-    turnAttemptId: event.turnAttemptId ?? null,
-    turnAssociation: bounded.turnAssociation ?? null,
-    duplicateOfEventId: event.duplicateOfEventId ?? null,
-    duplicateReason: bounded.duplicateReason ?? null,
+    occurredAt,
+    ...(sessionEventShouldEmitOptionalField(source.clientEventId) ? { clientEventId } : {}),
+    ...(sessionEventShouldEmitOptionalField(source.turnId) ? { turnId } : {}),
+    ...(sessionEventShouldEmitOptionalField(source.turnGeneration) ? { turnGeneration } : {}),
+    ...(sessionEventShouldEmitOptionalField(source.turnAttemptId) ? { turnAttemptId } : {}),
+    ...(sessionEventShouldEmitOptionalField(source.turnAssociation) ? { turnAssociation } : {}),
+    ...(sessionEventShouldEmitOptionalField(source.duplicateOfEventId)
+      ? { duplicateOfEventId }
+      : {}),
+    ...(sessionEventShouldEmitOptionalField(source.duplicateReason) ? { duplicateReason } : {}),
   };
   const deliveredBytes = sessionEventJsonBytes(fallback);
   if (deliveredBytes > maxBytes) {
@@ -4590,14 +4676,165 @@ export function boundSessionEvent(
 
 function sessionEventEnvelopeFieldProjection(
   field: string,
-  original: string | null | undefined,
-  delivered: string | null | undefined,
-): { field: string; originalBytes: number; deliveredBytes: number } {
+  original: unknown,
+  delivered: unknown,
+  originalReadable = true,
+): { field: string; originalBytes: number | null; deliveredBytes: number } {
   return {
     field,
-    originalBytes: typeof original === "string" ? sessionEventUtf8Bytes(original) : 0,
-    deliveredBytes: typeof delivered === "string" ? sessionEventUtf8Bytes(delivered) : 0,
+    originalBytes: originalReadable
+      ? typeof original === "string"
+        ? sessionEventUtf8Bytes(original)
+        : typeof original === "number" || typeof original === "boolean"
+          ? sessionEventJsonBytes(original)
+          : original === null || original === undefined
+            ? 0
+            : null
+      : null,
+    deliveredBytes:
+      typeof delivered === "string"
+        ? sessionEventUtf8Bytes(delivered)
+        : typeof delivered === "number" || typeof delivered === "boolean"
+          ? sessionEventJsonBytes(delivered)
+          : 0,
   };
+}
+
+function sessionEventCustomSerializerProjection(
+  event: SessionEvent,
+): { field: string; originalBytes: null; deliveredBytes: 0 } | null {
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(event, "toJSON");
+    if (!descriptor || ("value" in descriptor && typeof descriptor.value !== "function")) {
+      return null;
+    }
+    return { field: "toJSON", originalBytes: null, deliveredBytes: 0 };
+  } catch {
+    return { field: "toJSON", originalBytes: null, deliveredBytes: 0 };
+  }
+}
+
+const SESSION_EVENT_ZERO_UUID = "00000000-0000-4000-8000-000000000000";
+const SESSION_EVENT_UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+type SessionEventOwnField = { readable: true; value: unknown } | { readable: false };
+type SessionEventOwnDataFields = Record<keyof SessionEvent, SessionEventOwnField>;
+
+function sessionEventOwnDataFields(event: SessionEvent): SessionEventOwnDataFields {
+  const keys = [
+    "id",
+    "workspaceId",
+    "sessionId",
+    "sequence",
+    "type",
+    "payload",
+    "occurredAt",
+    "clientEventId",
+    "turnId",
+    "turnGeneration",
+    "turnAttemptId",
+    "turnAssociation",
+    "duplicateOfEventId",
+    "duplicateReason",
+  ] as const satisfies readonly (keyof SessionEvent)[];
+  return Object.fromEntries(
+    keys.map((key) => {
+      try {
+        const descriptor = Object.getOwnPropertyDescriptor(event, key);
+        if (!descriptor) return [key, { readable: true, value: undefined }];
+        return [
+          key,
+          "value" in descriptor ? { readable: true, value: descriptor.value } : { readable: false },
+        ];
+      } catch {
+        return [key, { readable: false }];
+      }
+    }),
+  ) as SessionEventOwnDataFields;
+}
+
+function canonicalSessionEventUuid(field: SessionEventOwnField, fallback: string): string {
+  return field.readable &&
+    typeof field.value === "string" &&
+    SESSION_EVENT_UUID_PATTERN.test(field.value)
+    ? field.value
+    : fallback;
+}
+
+function canonicalOptionalSessionEventUuid(field: SessionEventOwnField): string | null {
+  return field.readable &&
+    typeof field.value === "string" &&
+    SESSION_EVENT_UUID_PATTERN.test(field.value)
+    ? field.value
+    : null;
+}
+
+function canonicalSessionEventGeneration(field: SessionEventOwnField): number | null {
+  return field.readable &&
+    typeof field.value === "number" &&
+    Number.isSafeInteger(field.value) &&
+    field.value >= 0
+    ? field.value
+    : null;
+}
+
+function sessionEventShouldEmitOptionalField(field: SessionEventOwnField): boolean {
+  return !field.readable || field.value !== undefined;
+}
+
+function sessionEventCanonicalFieldProjections(
+  source: SessionEventOwnDataFields,
+  delivered: {
+    id: string;
+    workspaceId: string;
+    sessionId: string;
+    sequence: number;
+    occurredAt: string;
+  },
+): Array<{ field: string; originalBytes: number | null; deliveredBytes: number }> {
+  return (["id", "workspaceId", "sessionId", "sequence", "occurredAt"] as const).flatMap(
+    (field) => {
+      const original = source[field].readable ? source[field].value : undefined;
+      return source[field].readable && original === delivered[field]
+        ? []
+        : [
+            sessionEventEnvelopeFieldProjection(
+              field,
+              original,
+              delivered[field],
+              source[field].readable,
+            ),
+          ];
+    },
+  );
+}
+
+function sessionEventOptionalFieldProjections(
+  source: SessionEventOwnDataFields,
+  delivered: {
+    turnId: string | null;
+    turnGeneration: number | null;
+    turnAttemptId: string | null;
+    duplicateOfEventId: string | null;
+  },
+): Array<{ field: string; originalBytes: number | null; deliveredBytes: number }> {
+  return (["turnId", "turnGeneration", "turnAttemptId", "duplicateOfEventId"] as const).flatMap(
+    (field) => {
+      const original = source[field].readable ? source[field].value : undefined;
+      const canonicalOriginal = original ?? null;
+      return source[field].readable && canonicalOriginal === delivered[field]
+        ? []
+        : [
+            sessionEventEnvelopeFieldProjection(
+              field,
+              original,
+              delivered[field],
+              source[field].readable,
+            ),
+          ];
+    },
+  );
 }
 
 function boundOptionalSessionEventText<T extends string | null | undefined>(

@@ -10892,13 +10892,17 @@ type SessionTreeStatsRow = {
   attentionDescendants: number | string;
   pausedDescendants: number | string;
   failedDescendants: number | string;
+  truncated: boolean;
 };
 
+const SESSION_TREE_STATS_MAX_DESCENDANTS = 1_000;
+const SESSION_TREE_STATS_MAX_DEPTH = 32;
+
 /**
- * Return complete descendant aggregates for the bounded set of rows being
- * painted in the session rail. Parent links are immutable, so one recursive
- * read inside the list transaction gives the client stable, authoritative
- * expand affordances without loading the workspace's entire session table.
+ * Return bounded descendant aggregates for the bounded set of rows being
+ * painted in the session rail. Each selected root receives an independent
+ * fixed node/depth budget. `truncated=true` makes every count an explicit lower
+ * bound when a deep, wide, overlapping, or cyclic graph reaches that budget.
  */
 async function sessionTreeStatsForSessions(
   db: Database,
@@ -10909,51 +10913,82 @@ async function sessionTreeStatsForSessions(
   const rows = await rawRows<SessionTreeStatsRow>(
     db,
     sql`
-      with recursive descendants(root_id, id, status, depth, path) as (
-        select
-          root.id,
-          root.id,
-          root.status,
-          0,
-          array[root.id]
-        from ${schema.sessions} root
-        where root.workspace_id = ${workspaceId}
-          and ${inArray(sql`root.id`, rootIds)}
-
-        union all
-
-        select
-          descendants.root_id,
-          child.id,
-          child.status,
-          descendants.depth + 1,
-          descendants.path || child.id
-        from ${schema.sessions} child
-        join descendants on child.parent_session_id = descendants.id
-        where child.workspace_id = ${workspaceId}
-          and not child.id = any(descendants.path)
-      )
       select
-        root_id as "rootId",
-        count(*) filter (where depth = 1)::int as "directChildren",
-        count(*) filter (where depth > 0)::int as "totalDescendants",
-        count(*) filter (
-          where depth > 0 and status in ('running', 'recovering')
-        )::int as "runningDescendants",
-        count(*) filter (
-          where depth > 0 and status in ('queued', 'waiting_capacity')
-        )::int as "queuedDescendants",
-        count(*) filter (
-          where depth > 0 and status = 'requires_action'
-        )::int as "attentionDescendants",
-        count(*) filter (
-          where depth > 0 and status = 'paused'
-        )::int as "pausedDescendants",
-        count(*) filter (
-          where depth > 0 and status = 'failed'
-        )::int as "failedDescendants"
-      from descendants
-      group by root_id
+        root.id as "rootId",
+        stats."directChildren",
+        stats."totalDescendants",
+        stats."runningDescendants",
+        stats."queuedDescendants",
+        stats."attentionDescendants",
+        stats."pausedDescendants",
+        stats."failedDescendants",
+        stats.truncated
+      from ${schema.sessions} root
+      cross join lateral (
+        with recursive descendants(id, status, depth) as (
+          select root.id, root.status, 0
+
+          union all
+
+          select child.id, child.status, descendants.depth + 1
+          from descendants
+          join ${schema.sessions} child on child.parent_session_id = descendants.id
+          where child.workspace_id = ${workspaceId}
+            and descendants.depth < ${SESSION_TREE_STATS_MAX_DEPTH}
+        ), bounded as materialized (
+          -- PostgreSQL evaluates the recursive producer only as far as this
+          -- unsorted LIMIT is consumed. One extra descendant is lookahead.
+          select id, status, depth
+          from descendants
+          limit ${SESSION_TREE_STATS_MAX_DESCENDANTS + 2}
+        ), numbered as (
+          select id, status, depth, row_number() over () as ordinal
+          from bounded
+        )
+        select
+          count(*) filter (
+            where ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1} and depth = 1
+          )::int as "directChildren",
+          count(*) filter (
+            where ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1} and depth > 0
+          )::int as "totalDescendants",
+          count(*) filter (
+            where ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
+              and depth > 0 and status in ('running', 'recovering')
+          )::int as "runningDescendants",
+          count(*) filter (
+            where ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
+              and depth > 0 and status in ('queued', 'waiting_capacity')
+          )::int as "queuedDescendants",
+          count(*) filter (
+            where ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
+              and depth > 0 and status = 'requires_action'
+          )::int as "attentionDescendants",
+          count(*) filter (
+            where ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
+              and depth > 0 and status = 'paused'
+          )::int as "pausedDescendants",
+          count(*) filter (
+            where ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
+              and depth > 0 and status = 'failed'
+          )::int as "failedDescendants",
+          coalesce(bool_or(
+            ordinal > ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
+            or (
+              ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
+              and depth = ${SESSION_TREE_STATS_MAX_DEPTH}
+              and exists (
+                select 1
+                from ${schema.sessions} deeper
+                where deeper.workspace_id = ${workspaceId}
+                  and deeper.parent_session_id = numbered.id
+              )
+            )
+          ), false) as truncated
+        from numbered
+      ) stats
+      where root.workspace_id = ${workspaceId}
+        and ${inArray(sql`root.id`, rootIds)}
     `,
   );
   return new Map(
@@ -10967,6 +11002,7 @@ async function sessionTreeStatsForSessions(
         attentionDescendants: Number(row.attentionDescendants),
         pausedDescendants: Number(row.pausedDescendants),
         failedDescendants: Number(row.failedDescendants),
+        truncated: row.truncated,
       },
     ]),
   );
@@ -11293,6 +11329,7 @@ export async function listSessionsForSubject(
               attentionDescendants: 0,
               pausedDescendants: 0,
               failedDescendants: 0,
+              truncated: false,
             },
           };
         };
@@ -11711,6 +11748,7 @@ export async function listSessionDiscoverySummaries(
           attentionDescendants: 0,
           pausedDescendants: 0,
           failedDescendants: 0,
+          truncated: false,
         },
         latestMessage: latest
           ? {

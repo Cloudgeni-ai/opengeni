@@ -760,6 +760,14 @@ export class OpenGeniClient {
   async listWorkspaceControlEvents(
     workspaceId: string,
     options: { after?: number; limit?: number } = {},
+  ): Promise<WorkspaceControlEvent[]> {
+    return (await this.listWorkspaceControlEventPage(workspaceId, options)).events;
+  }
+
+  /** Count/byte-bounded page plus an explicit continuation cursor. */
+  async listWorkspaceControlEventPage(
+    workspaceId: string,
+    options: { after?: number; limit?: number } = {},
   ): Promise<WorkspaceControlEventPage> {
     const response = await this.fetchImpl(
       this.url(`/v1/workspaces/${workspaceId}/control-events`, {

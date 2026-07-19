@@ -19,3 +19,5 @@ paginated projection. Bound each SSE connection to one complete size-capped fram
 terminate stalled readers, and surface bounded-cardinality delivery-pressure metrics.
 Bound workspace-control reason/actor invalidations at ingress, storage, NATS, SSE,
 REST, and the typed SDK boundary with explicit non-retention accounting.
+Preserve the SDK's array-returning workspace-control list method while adding a
+separate continuation-aware page method.

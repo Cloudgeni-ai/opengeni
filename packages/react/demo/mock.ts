@@ -988,6 +988,10 @@ export class MockOpenGeniClient implements SessionClientLike {
   }
 
   async listWorkspaceControlEvents() {
+    return [];
+  }
+
+  async listWorkspaceControlEventPage() {
     return { events: [], bytes: 2, truncated: false, nextAfter: null };
   }
 

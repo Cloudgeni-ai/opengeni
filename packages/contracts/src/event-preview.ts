@@ -89,6 +89,13 @@ export type BoundSessionEventPayloadOptions = {
   maxBytes?: number;
 };
 
+export type SessionEventJsonMeasurement =
+  | { bytes: number; reason: null }
+  | {
+      bytes: null;
+      reason: "payload_not_serializable" | "payload_measurement_bounded";
+    };
+
 export type SessionEventMediaPreview = {
   type: "media_preview";
   mediaType: string;
@@ -110,6 +117,16 @@ type PreviewState = {
 /** UTF-8 bytes used by the JSON wire/storage representation. */
 export function sessionEventJsonBytes(value: unknown): number {
   return encoder.encode(stringifyForBoundary(value)).byteLength;
+}
+
+/**
+ * Inspect a prospective event value without invoking accessors, custom
+ * serializers, or allocating its complete JSON representation. A null byte
+ * count is explicit: the traversal stopped at the global work/depth boundary
+ * or found serialization behavior that must first be normalized.
+ */
+export function measureSessionEventJson(value: unknown): SessionEventJsonMeasurement {
+  return measureJsonBytes(value);
 }
 
 /** The same deliberately coarse bytes/4 token estimate used by Codex parity code. */
@@ -295,8 +312,8 @@ function previewValue(value: unknown, state: PreviewState, path: string, depth: 
   if (Array.isArray(value)) {
     const keep = Math.max(2, state.arrayEntries);
     if (value.length <= keep) {
-      return value.map((entry, index) =>
-        previewValue(entry, state, `${path}[${index}]`, depth + 1),
+      return Array.from({ length: value.length }, (_, index) =>
+        previewArrayEntry(value, index, state, path, depth),
       );
     }
     state.changed = true;
@@ -305,19 +322,22 @@ function previewValue(value: unknown, state: PreviewState, path: string, depth: 
     const omitted = value.length - head - tail;
     recordDetail(state, { path, kind: "array", omittedEntries: omitted });
     return [
-      ...value
-        .slice(0, head)
-        .map((entry, index) => previewValue(entry, state, `${path}[${index}]`, depth + 1)),
+      ...Array.from({ length: head }, (_, index) =>
+        previewArrayEntry(value, index, state, path, depth),
+      ),
       { omittedEntries: omitted, preview: "[middle array entries omitted]" },
-      ...value
-        .slice(value.length - tail)
-        .map((entry, index) =>
-          previewValue(entry, state, `${path}[${value.length - tail + index}]`, depth + 1),
-        ),
+      ...Array.from({ length: tail }, (_, index) =>
+        previewArrayEntry(value, value.length - tail + index, state, path, depth),
+      ),
     ];
   }
 
   if (value instanceof Date) {
+    if (!hasCanonicalDateSerialization(value)) {
+      state.changed = true;
+      recordDetail(state, { path, kind: "unserializable" });
+      return "[Date value with custom serialization omitted at audit boundary]";
+    }
     try {
       const epoch = Date.prototype.getTime.call(value);
       return Number.isFinite(epoch) ? Date.prototype.toISOString.call(value) : null;
@@ -356,6 +376,34 @@ function previewValue(value: unknown, state: PreviewState, path: string, depth: 
     out.omittedFields = "additional fields omitted; exact count not measured";
   }
   return out;
+}
+
+function previewArrayEntry(
+  value: unknown[],
+  index: number,
+  state: PreviewState,
+  path: string,
+  depth: number,
+): unknown {
+  let descriptor: PropertyDescriptor | undefined;
+  try {
+    descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+  } catch {
+    state.changed = true;
+    recordDetail(state, { path: `${path}[${index}]`, kind: "unserializable" });
+    return "[array element omitted at audit serialization boundary]";
+  }
+  if (descriptor && !("value" in descriptor)) {
+    state.changed = true;
+    recordDetail(state, { path: `${path}[${index}]`, kind: "unserializable" });
+    return "[array accessor value omitted at audit serialization boundary]";
+  }
+  return previewValue(
+    descriptor && "value" in descriptor ? descriptor.value : undefined,
+    state,
+    `${path}[${index}]`,
+    depth + 1,
+  );
 }
 
 function selectObjectEntries(
@@ -634,12 +682,7 @@ function utf8Bytes(value: string): number {
  * source size is unknown; callers expose that truth instead of measuring a
  * placeholder or claiming a lower bound is exact.
  */
-type JsonMeasurement =
-  | { bytes: number; reason: null }
-  | {
-      bytes: null;
-      reason: "payload_not_serializable" | "payload_measurement_bounded";
-    };
+type JsonMeasurement = SessionEventJsonMeasurement;
 
 function measureJsonBytes(value: unknown): JsonMeasurement {
   const state: JsonMeasurementState = {
@@ -693,6 +736,9 @@ function measureJsonValue(
     return failJsonMeasurement(state, "payload_not_serializable");
   }
   if (value instanceof Date) {
+    if (!hasCanonicalDateSerialization(value)) {
+      return failJsonMeasurement(state, "payload_measurement_bounded");
+    }
     try {
       const epoch = Date.prototype.getTime.call(value);
       return Number.isFinite(epoch) ? jsonStringBytes(Date.prototype.toISOString.call(value)) : 4;
@@ -750,6 +796,10 @@ function measureJsonValue(
         if (state.remainingNodes <= 0) {
           return failJsonMeasurement(state, "payload_measurement_bounded");
         }
+        // A property consumes traversal work even when JSON.stringify would
+        // omit its value. Without this decrement a broad object containing
+        // only undefined/functions/symbols bypasses the global node budget.
+        state.remainingNodes -= 1;
         const descriptor = Object.getOwnPropertyDescriptor(value, key);
         if (!descriptor || !("value" in descriptor)) {
           return failJsonMeasurement(state, "payload_measurement_bounded");
@@ -774,6 +824,17 @@ function measureJsonValue(
     return bytes;
   } finally {
     state.seen.delete(value);
+  }
+}
+
+function hasCanonicalDateSerialization(value: Date): boolean {
+  try {
+    if (Object.getPrototypeOf(value) !== Date.prototype) return false;
+    // JSON.stringify performs an ordinary property lookup for toJSON. Any own
+    // shadow (data or accessor) changes that behavior and must not be invoked.
+    return Object.getOwnPropertyDescriptor(value, "toJSON") === undefined;
+  } catch {
+    return false;
   }
 }
 

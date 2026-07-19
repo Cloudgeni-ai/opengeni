@@ -259,6 +259,7 @@ describe("rail session grouping", () => {
         attentionDescendants: 0,
         pausedDescendants: 3,
         failedDescendants: 0,
+        truncated: false,
       },
     });
     const forest = buildRailForest([manager], NOW);

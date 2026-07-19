@@ -308,6 +308,7 @@ export function SessionList() {
               attentionDescendants: Math.max(0, stats.attentionDescendants - removed.attention),
               pausedDescendants: Math.max(0, stats.pausedDescendants - removed.paused),
               failedDescendants: Math.max(0, stats.failedDescendants - removed.failed),
+              truncated: stats.truncated,
             },
           }
         : node.session;
@@ -1338,11 +1339,12 @@ function sessionDescendantLabel(session: Session): string | null {
   const stats = session.treeStats;
   if (!stats || stats.totalDescendants === 0) return null;
   const live = stats.runningDescendants + stats.queuedDescendants;
+  const total = `${stats.totalDescendants}${stats.truncated ? "+" : ""}`;
   if (stats.attentionDescendants > 0) {
-    return `${stats.attentionDescendants} need you · ${stats.totalDescendants} total`;
+    return `${stats.attentionDescendants} need you · ${total} total`;
   }
-  if (live > 0) return `${live} active · ${stats.totalDescendants} total`;
-  return `${stats.totalDescendants} session${stats.totalDescendants === 1 ? "" : "s"}`;
+  if (live > 0) return `${live} active · ${total} total`;
+  return `${total} session${stats.totalDescendants === 1 && !stats.truncated ? "" : "s"}`;
 }
 
 /** The active-session accent bar shared by the row's display and edit modes. */

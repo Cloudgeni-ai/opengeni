@@ -285,6 +285,9 @@ describe("OpenGeniClient", () => {
 
     await expect(
       client.listWorkspaceControlEvents(WORKSPACE_ID, { after: 3, limit: 1 }),
+    ).resolves.toEqual([event]);
+    await expect(
+      client.listWorkspaceControlEventPage(WORKSPACE_ID, { after: 3, limit: 1 }),
     ).resolves.toEqual({
       events: [event],
       bytes: new TextEncoder().encode(body).byteLength,
@@ -294,6 +297,7 @@ describe("OpenGeniClient", () => {
     expect(requests[0]!.url).toBe(
       `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/control-events?after=3&limit=1`,
     );
+    expect(requests[1]!.url).toBe(requests[0]!.url);
   });
 
   test("streamEvents consumes the SSE endpoint end to end through fetch", async () => {
