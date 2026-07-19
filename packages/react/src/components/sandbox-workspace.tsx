@@ -285,7 +285,8 @@ export function useSandboxWorkspaceTabs(
 
   // The cold-paint data source: the latest turn-end capture, fetched with a single
   // api round-trip on mount (no machine). Feeds the Files tree + the Changes/Git
-  // diff when the box is not warm; a warm box always wins (live path unchanged).
+  // diff immediately; a warm box reconciles live without discarding the capture
+  // when that provider read is temporarily unavailable.
   const captureState = useWorkspaceCapture(sessionId, { events });
   const captureAvailable = captureState.available;
   const liveWorkspaceExpected = liveness === "warm" || liveness === "draining";
@@ -510,7 +511,9 @@ export function useSandboxWorkspaceTabs(
           git={git}
           stagedGit={stagedGit}
           fileSystemAvailable={fileSystemOn || captureAvailable}
-          editable={filesEditable}
+          editable={
+            filesEditable && files.source === "live" && files.error === null && !files.loading
+          }
           workspaceResting={
             !liveWorkspaceExpected &&
             liveness !== undefined &&
@@ -918,13 +921,44 @@ function ChangesTabBody({
 
   if (diff.length > 0) {
     return (
-      <WorkbenchChanges
-        diff={diff}
-        source={git.source}
-        capturedAt={git.capturedAt}
-        captureRevision={captureRevision}
-        {...(onOpenFile ? { onOpenFile } : {})}
-      />
+      <div className="flex h-full min-h-0 flex-col">
+        {git.error ? (
+          <div
+            role="status"
+            aria-live="polite"
+            data-opengeni-changes-degraded
+            className="flex shrink-0 items-center gap-2 border-b border-og-status-running/30 bg-og-status-running/10 px-2 py-1.5 text-og-xs text-og-fg-muted"
+          >
+            <TriangleAlertIcon className="size-3.5 shrink-0 text-og-status-running" aria-hidden />
+            <span className="min-w-0 flex-1">
+              {git.source === "capture"
+                ? "Live changes are temporarily unavailable. Showing the latest captured revision."
+                : "Live refresh failed. Showing the last loaded changes."}
+            </span>
+            <button
+              type="button"
+              onClick={() => void git.refresh()}
+              disabled={git.loading}
+              className="inline-flex min-h-7 shrink-0 items-center gap-1 rounded-og-sm border border-og-border bg-og-surface-1 px-2 font-medium text-og-fg transition-colors hover:border-og-border-strong focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-og-accent disabled:cursor-not-allowed disabled:opacity-50 pointer-coarse:min-h-11"
+            >
+              <RefreshCwIcon
+                className={cn("size-3", git.loading && "animate-spin motion-reduce:animate-none")}
+                aria-hidden
+              />
+              Retry
+            </button>
+          </div>
+        ) : null}
+        <div className="min-h-0 flex-1">
+          <WorkbenchChanges
+            diff={diff}
+            source={git.source}
+            capturedAt={git.capturedAt}
+            captureRevision={captureRevision}
+            {...(onOpenFile ? { onOpenFile } : {})}
+          />
+        </div>
+      </div>
     );
   }
 
