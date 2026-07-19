@@ -80,9 +80,14 @@ They require one convergent contract, not one guessed recovery operation:
   their prior turn, rejected late events, and reached `queued` with
   `active_turn_id=NULL`, queue head/tail `0/1`, active control, and an
   unassigned Steer direction. Resume/wake signals did not admit replacement
-  work. OPE-16 additionally accumulated newer Steer directions after the first
-  settlement, proving that an immutable single `replacementUpdateId` can
-  orphan the newest instruction.
+  work. OPE-13 correction leaf `02f8cef1-6c96-4987-bf00-4cb03b871bb0`
+  reached the same `queued`, null-active-turn, queue `0/1`, active-control
+  projection after superseding turn `e6d22129-70c9-44d5-a309-07a93fe231c4`;
+  its late event was rejected at sequence 1491, two internal updates remained
+  pending, Resume at sequence 1496 admitted nothing, and its sandbox was later
+  reaped at sequence 1497. OPE-16 additionally accumulated newer Steer
+  directions after the first settlement, proving that an immutable single
+  `replacementUpdateId` can orphan the newest instruction.
 - **Post-tool stall contrast:** session
   `ec2049d9-32c7-490c-8760-5b3300035fc0` completed model usage at event 28540
   and an `apply_patch` at event 28541, then stalled before its next canonical
