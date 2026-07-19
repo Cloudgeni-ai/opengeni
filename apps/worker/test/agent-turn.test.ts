@@ -7,11 +7,16 @@ import {
   SandboxImageConflictError,
   SandboxLeaseSupersededError,
 } from "@opengeni/db";
-import { sanitizeHistoryItemsForModel } from "@opengeni/runtime";
+import {
+  CompactionProviderResponseError,
+  EmptyCompactionSummaryError,
+  sanitizeHistoryItemsForModel,
+} from "@opengeni/runtime";
 import { testSettings } from "@opengeni/testing";
 import {
   acceptsPromptCacheKeyForTurn,
   agentRunFailurePayload,
+  assertPhysicalToolQuiescenceForCancellation,
   classifyContextWindowOverflowError,
   classifyMcpTransportTimeoutError,
   codexCredentialLeaseDeadlineExpired,
@@ -30,7 +35,13 @@ import {
   PROVIDER_BACKPRESSURE_DELAY_MS,
   providerRecoveryResult,
   resolveActiveSandboxBackend,
+  shouldRecoverCompactionProviderFailure,
   shouldStartOnTurnRecording,
+  shouldRunTurnEndWorkspacePersistence,
+  turnOperationCancellationFailure,
+  waitForTurnOperation,
+  waitForTurnFinalizerStep,
+  TurnOperationCancelledError,
 } from "../src/activities/agent-turn";
 import { sandboxLeaseHolderIdForAttempt } from "../src/sandbox-resume";
 import { settingsWithPackSandboxImage } from "../src/activities/packs";
@@ -99,7 +110,7 @@ describe("conversation-truth reconcile (orphaned tool output guard)", () => {
     expect(unsafe).not.toEqual([user, callA, callB, resultB, resultA]);
 
     // The live worker's durable receipt gate deliberately skips the partial B
-    // snapshot (`allResultsRecorded === false`) and reconciles only after both
+    // snapshot (the response batch is not settled) and reconciles only after both
     // raw results exist, when the SDK history is stable again.
     const persisted = persistAcrossReconciles([[user], [user, callA, callB, resultB, resultA]]);
     expect(persisted).toEqual([user, callA, callB, resultB, resultA]);
@@ -1000,6 +1011,98 @@ describe("lazy sandbox provisioner single-flight", () => {
       true,
     );
   });
+
+  test("Steer/Pause cancels a pending provision immediately and disposes its late lease", async () => {
+    const controller = new AbortController();
+    let resolveEstablish!: (value: { lease: string }) => void;
+    const establish = new Promise<{ lease: string }>((resolve) => {
+      resolveEstablish = resolve;
+    });
+    let completed = 0;
+    let failed = 0;
+    let disposed = 0;
+    let resolveDisposed!: () => void;
+    const disposal = new Promise<void>((resolve) => {
+      resolveDisposed = resolve;
+    });
+    const provisioner = createTurnSandboxProvisioner(() => establish, {
+      signal: controller.signal,
+      onCompleted: () => {
+        completed += 1;
+      },
+      onFailed: () => {
+        failed += 1;
+      },
+      disposeResult: () => {
+        disposed += 1;
+        resolveDisposed();
+      },
+    });
+
+    const pending = provisioner.get();
+    await Bun.sleep(0);
+    const cancelledAt = performance.now();
+    controller.abort(new Error("STEER"));
+
+    await expect(pending).rejects.toBeInstanceOf(TurnOperationCancelledError);
+    expect(performance.now() - cancelledAt).toBeLessThan(100);
+    expect(await provisioner.waitForSettled(30_000)).toBeNull();
+    expect(completed).toBe(0);
+    expect(failed).toBe(0);
+
+    resolveEstablish({ lease: "late" });
+    await disposal;
+    expect(disposed).toBe(1);
+  });
+
+  test("eager provisioning returns at the cancellation boundary and disposes its late lease", async () => {
+    const controller = new AbortController();
+    let resolveEstablish!: (value: { release: () => void }) => void;
+    const establish = new Promise<{ release: () => void }>((resolve) => {
+      resolveEstablish = resolve;
+    });
+    let releases = 0;
+    const pending = waitForTurnOperation(establish, controller.signal, async (late) =>
+      late.release(),
+    );
+
+    const temporalCancellation = new CancelledFailure("CANCELLED");
+    const cancelledAt = performance.now();
+    controller.abort(temporalCancellation);
+
+    const wrapped = await pending.catch((error: unknown) => error);
+    expect(wrapped).toBeInstanceOf(TurnOperationCancelledError);
+    expect(turnOperationCancellationFailure(wrapped)).toBe(temporalCancellation);
+    expect(performance.now() - cancelledAt).toBeLessThan(100);
+
+    resolveEstablish({ release: () => (releases += 1) });
+    await Bun.sleep(0);
+    expect(releases).toBe(1);
+  });
+
+  test("a non-Temporal provisioning abort still becomes an activity cancellation", () => {
+    const wrapped = new TurnOperationCancelledError(new Error("STEER"));
+    const cancellation = turnOperationCancellationFailure(wrapped);
+
+    expect(cancellation).toBeInstanceOf(CancelledFailure);
+    expect(cancellation?.message).toBe("TURN_SANDBOX_PROVISION_CANCELLED");
+    expect(turnOperationCancellationFailure(new Error("provider failed"))).toBeNull();
+  });
+
+  test("a committed control outranks a same-checkpoint provider failure", async () => {
+    const controller = new AbortController();
+    const temporalCancellation = new CancelledFailure("CANCELLED");
+    controller.abort(temporalCancellation);
+
+    const error = await waitForTurnOperation(
+      Promise.reject(new Error("provider connection reset")),
+      controller.signal,
+      undefined,
+    ).catch((failure: unknown) => failure);
+
+    expect(error).toBeInstanceOf(TurnOperationCancelledError);
+    expect(turnOperationCancellationFailure(error)).toBe(temporalCancellation);
+  });
 });
 
 describe("worker shutdown preemption", () => {
@@ -1011,6 +1114,67 @@ describe("worker shutdown preemption", () => {
     expect(isWorkerShutdownCancellation(new CancelledFailure("TIMED_OUT"))).toBe(false);
     expect(isWorkerShutdownCancellation(new Error("WORKER_SHUTDOWN"))).toBe(false);
     expect(isWorkerShutdownCancellation(undefined)).toBe(false);
+  });
+
+  test("skips slow workspace housekeeping for every physical cancellation boundary", () => {
+    expect(
+      shouldRunTurnEndWorkspacePersistence({
+        activityStatus: "cancelled",
+        cancellationRequested: false,
+      }),
+    ).toBe(false);
+    expect(
+      shouldRunTurnEndWorkspacePersistence({
+        activityStatus: "recovering",
+        cancellationRequested: true,
+      }),
+    ).toBe(false);
+    expect(
+      shouldRunTurnEndWorkspacePersistence({
+        activityStatus: "idle",
+        cancellationRequested: false,
+      }),
+    ).toBe(true);
+  });
+
+  test("turns an unconfirmed physical tool fence into a hard failure", () => {
+    const fenceFailure = new Error("remote process identity could not be verified");
+    expect(() =>
+      assertPhysicalToolQuiescenceForCancellation({
+        acknowledgeQuiescence: true,
+        physicalToolQuiescenceConfirmed: false,
+        failure: fenceFailure,
+      }),
+    ).toThrow(fenceFailure);
+    expect(() =>
+      assertPhysicalToolQuiescenceForCancellation({
+        acknowledgeQuiescence: true,
+        physicalToolQuiescenceConfirmed: true,
+        failure: fenceFailure,
+      }),
+    ).not.toThrow();
+    expect(() =>
+      assertPhysicalToolQuiescenceForCancellation({
+        acknowledgeQuiescence: false,
+        physicalToolQuiescenceConfirmed: false,
+        failure: fenceFailure,
+      }),
+    ).not.toThrow();
+  });
+
+  test("a cancelled activity never waits for a hung idempotent finalizer step", async () => {
+    const controller = new AbortController();
+    let rejectLate: ((error: Error) => void) | undefined;
+    const hung = new Promise<never>((_resolve, reject) => {
+      rejectLate = reject;
+    });
+    const startedAt = performance.now();
+    const waiting = waitForTurnFinalizerStep(hung, controller.signal);
+    controller.abort(new Error("STEER"));
+    await expect(waiting).resolves.toBeUndefined();
+    expect(performance.now() - startedAt).toBeLessThan(100);
+    rejectLate?.(new Error("late cleanup failure"));
+    await Bun.sleep(0);
   });
 });
 
@@ -1233,6 +1397,31 @@ describe("transient provider error classifier", () => {
     expect(payload.retryable).toBeUndefined();
     expect(payload.code).toBeUndefined();
     expect(payload.error).toBe("Invalid 'input': expected a string");
+  });
+
+  test("only transient provider compaction failures use same-turn recovery", () => {
+    expect(
+      shouldRecoverCompactionProviderFailure(
+        new CompactionProviderResponseError({ httpStatus: 503, code: "server_error" }),
+      ),
+    ).toBe(true);
+    expect(
+      shouldRecoverCompactionProviderFailure(
+        new CompactionProviderResponseError({
+          httpStatus: 429,
+          code: "rate_limit_exceeded",
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      shouldRecoverCompactionProviderFailure(
+        new CompactionProviderResponseError({
+          httpStatus: 400,
+          code: "context_length_exceeded",
+        }),
+      ),
+    ).toBe(false);
+    expect(shouldRecoverCompactionProviderFailure(new EmptyCompactionSummaryError())).toBe(false);
   });
 
   test("a 503 recovers the same turn after backpressure pacing, independent of goal state", () => {

@@ -6,20 +6,26 @@ import {
   FolderPlusIcon,
   PencilIcon,
   RefreshCwIcon,
+  TriangleAlertIcon,
   Trash2Icon,
 } from "lucide-react";
 import {
   type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
   type ReactNode,
   useCallback,
   useEffect,
+  useId,
   useLayoutEffect,
   useMemo,
   useRef,
   useState,
 } from "react";
+import { AlertDialog } from "radix-ui";
 import { VList, type VListHandle } from "virtua";
 import { cn } from "../lib/cn";
+import { type PortalTokenStyle, usePortalTokenStyle } from "../lib/use-portal-token-style";
+import { useUnicodeFallbackFonts } from "../lib/use-unicode-fonts";
 import type { FileTreeNode, UseSandboxFilesResult } from "../hooks/use-sandbox-files";
 
 export type FileBrowserProps = {
@@ -45,7 +51,8 @@ export type FileBrowserProps = {
   editable?: boolean | undefined;
   /**
    * Confirm a (recursive) delete before it runs. Return `false` to cancel.
-   * Defaults to `window.confirm`. Pass a no-op returning `true` to skip.
+   * The default is an accessible, non-blocking confirmation dialog. Supply this
+   * callback to delegate confirmation to a host-owned dialog.
    */
   confirmDelete?: ((node: FileTreeNode) => boolean | Promise<boolean>) | undefined;
   className?: string | undefined;
@@ -144,10 +151,18 @@ export function FileBrowser({
   const [draftRename, setDraftRename] = useState<DraftRename | null>(null);
   const [dragOver, setDragOver] = useState<string | null>(null);
   const [menu, setMenu] = useState<ContextMenuState | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<FileTreeNode | null>(null);
   const [busy, setBusy] = useState(false);
   const [coarsePointer, setCoarsePointer] = useState(false);
+  const treeId = useId();
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const deleteReturnFocusRef = useRef<HTMLElement | null>(null);
   const vlistRef = useRef<VListHandle>(null);
+  const portalTokenStyle = usePortalTokenStyle(containerRef);
+  const getTreeElement = useCallback(
+    () => (typeof document === "undefined" ? null : document.getElementById(treeId)),
+    [treeId],
+  );
 
   useBrowserLayoutEffect(() => {
     if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;
@@ -248,6 +263,11 @@ export function FileBrowser({
     walk(result.tree, 0);
     return items;
   }, [result.tree, expanded, draftCreate, loadingPaths, result.expandingPaths, cold]);
+  const unicodeFontPaths = useMemo(
+    () => renderItems.flatMap((item) => (item.type === "node" ? [item.node.path] : [])),
+    [renderItems],
+  );
+  useUnicodeFallbackFonts(unicodeFontPaths);
 
   // The visible NODE rows in order — drives keyboard up/down navigation.
   const flatRows = useMemo(
@@ -257,23 +277,34 @@ export function FileBrowser({
       ),
     [renderItems],
   );
+  const rowIndexByPath = useMemo(
+    () => new Map(flatRows.map((row, index) => [row.node.path, index] as const)),
+    [flatRows],
+  );
+  const treePositionByPath = useMemo(() => {
+    const positions = new Map<string, { position: number; setSize: number }>();
+    const visit = (nodes: FileTreeNode[]) => {
+      nodes.forEach((node, index) => {
+        positions.set(node.path, { position: index + 1, setSize: nodes.length });
+        if (node.children) visit(node.children);
+      });
+    };
+    visit(result.tree);
+    return positions;
+  }, [result.tree]);
+  const cursorIndex = cursor ? (rowIndexByPath.get(cursor) ?? -1) : -1;
+  const activeDescendantId = cursorIndex >= 0 ? `${treeId}-item-${cursorIndex}` : undefined;
 
-  const supportsMutation = editable;
+  // A capture is immutable review data even if a stale capability document still
+  // says the machine is writable. Mutations become available only after a live
+  // reconciliation has actually succeeded.
+  const supportsMutation =
+    editable && result.source === "live" && result.error === null && !result.loading;
 
-  const runDelete = useCallback(
+  const performDelete = useCallback(
     async (node: FileTreeNode) => {
       if (!supportsMutation) return;
       const recursive = node.kind === "dir";
-      const confirmFn =
-        confirmDelete ??
-        ((n: FileTreeNode) =>
-          typeof window !== "undefined" && typeof window.confirm === "function"
-            ? window.confirm(
-                `Delete ${n.kind === "dir" ? "folder" : "file"} "${n.name}"${recursive ? " and its contents" : ""}?`,
-              )
-            : true);
-      const ok = await confirmFn(node);
-      if (!ok) return;
       setBusy(true);
       try {
         await result.deleteEntry(node.path, recursive);
@@ -283,7 +314,40 @@ export function FileBrowser({
         setBusy(false);
       }
     },
-    [supportsMutation, confirmDelete, result],
+    [supportsMutation, result],
+  );
+
+  const runDelete = useCallback(
+    async (node: FileTreeNode, returnFocus?: HTMLElement) => {
+      if (!supportsMutation) return;
+      setMenu(null);
+      if (!confirmDelete) {
+        deleteReturnFocusRef.current =
+          returnFocus ??
+          (typeof document !== "undefined" && document.activeElement instanceof HTMLElement
+            ? document.activeElement
+            : null);
+        setPendingDelete(node);
+        return;
+      }
+      if (await confirmDelete(node)) await performDelete(node);
+    },
+    [supportsMutation, confirmDelete, performDelete],
+  );
+
+  const closePendingDelete = useCallback(
+    (restoreTrigger: boolean) => {
+      const returnTarget = restoreTrigger ? deleteReturnFocusRef.current : getTreeElement();
+      deleteReturnFocusRef.current = null;
+      setPendingDelete(null);
+      if (typeof window !== "undefined") {
+        window.requestAnimationFrame(() => {
+          const target = returnTarget?.isConnected ? returnTarget : getTreeElement();
+          target?.focus();
+        });
+      }
+    },
+    [getTreeElement],
   );
 
   const commitCreate = useCallback(
@@ -410,6 +474,28 @@ export function FileBrowser({
         case "ArrowUp":
           move(idx < 0 ? 0 : idx - 1);
           break;
+        case "Home":
+          move(0);
+          break;
+        case "End":
+          move(flatRows.length - 1);
+          break;
+        case "PageDown": {
+          const pageSize = Math.max(
+            1,
+            Math.floor((containerRef.current?.clientHeight || 280) / (coarsePointer ? 44 : 28)) - 1,
+          );
+          move((idx < 0 ? 0 : idx) + pageSize);
+          break;
+        }
+        case "PageUp": {
+          const pageSize = Math.max(
+            1,
+            Math.floor((containerRef.current?.clientHeight || 280) / (coarsePointer ? 44 : 28)) - 1,
+          );
+          move((idx < 0 ? 0 : idx) - pageSize);
+          break;
+        }
         case "ArrowRight":
           if (cur?.node.kind === "dir") {
             if (!expanded.has(cur.node.path)) open(cur.node.path);
@@ -439,6 +525,22 @@ export function FileBrowser({
             e.preventDefault();
           }
           break;
+        case "ContextMenu":
+        case "F10":
+          if (cur && supportsMutation && (e.key === "ContextMenu" || e.shiftKey)) {
+            const rowIndex = rowIndexByPath.get(cur.node.path) ?? 0;
+            const row = document.getElementById(`${treeId}-item-${rowIndex}`);
+            const rect = row?.getBoundingClientRect();
+            setMenu({
+              node: cur.node,
+              x: rect ? rect.left + Math.min(32, rect.width / 2) : 8,
+              y: rect ? rect.bottom : 8,
+            });
+            e.preventDefault();
+          } else if (e.key === "F10") {
+            break;
+          }
+          break;
         case "F2":
           if (cur) {
             startRename(cur.node);
@@ -466,6 +568,9 @@ export function FileBrowser({
       startRename,
       runDelete,
       supportsMutation,
+      coarsePointer,
+      rowIndexByPath,
+      treeId,
     ],
   );
 
@@ -484,8 +589,12 @@ export function FileBrowser({
   }, [menu]);
 
   const showErrorEmpty = result.error && result.tree.length === 0 && !draftCreate;
+  const showDegradedTree = result.error && result.tree.length > 0;
   const showEmpty = !result.loading && result.tree.length === 0 && !draftCreate;
-  const showToolbar = supportsMutation || Boolean(result.error) || result.loading;
+  // Retry lives next to the state it explains (the degraded/empty notice), so do
+  // not render a second toolbar retry for the same failure.
+  const showToolbar = supportsMutation || result.loading;
+  const usesVirtualTree = !showErrorEmpty && !showEmpty;
 
   // Render a SINGLE node row (no recursion — children are separate flat items the
   // virtualizer renders). Returns the row element; the caller assigns the key.
@@ -501,10 +610,15 @@ export function FileBrowser({
     const isRenaming = draftRename?.path === node.path;
     const isDropTarget = dragOver === (isDir ? node.path : parentOf(node.path));
     const dropDir = isDir ? node.path : parentOf(node.path);
+    const treePosition = treePositionByPath.get(node.path);
 
     return (
       <div
+        id={`${treeId}-item-${rowIndexByPath.get(node.path) ?? 0}`}
         role="treeitem"
+        aria-level={depth + 1}
+        aria-posinset={treePosition?.position}
+        aria-setsize={treePosition?.setSize}
         aria-expanded={isDir ? isOpen : undefined}
         aria-selected={isCursor || undefined}
         aria-busy={isLoading || undefined}
@@ -547,6 +661,7 @@ export function FileBrowser({
         ) : (
           <button
             type="button"
+            tabIndex={-1}
             draggable={supportsMutation || undefined}
             onDragStart={
               supportsMutation
@@ -676,7 +791,11 @@ export function FileBrowser({
   return (
     <div className={cn("flex min-h-0 min-w-0 flex-col", className)}>
       {showToolbar && (
-        <div className="flex shrink-0 flex-wrap items-center gap-0.5 border-b border-og-border px-1 py-1">
+        <div
+          role="toolbar"
+          aria-label="File actions"
+          className="flex shrink-0 flex-wrap items-center gap-0.5 border-b border-og-border px-1 py-1"
+        >
           {supportsMutation ? (
             <>
               <ToolbarButton label="New file" onClick={() => startCreate("file")} disabled={busy}>
@@ -697,9 +816,9 @@ export function FileBrowser({
               </ToolbarButton>
               <ToolbarButton
                 label="Delete"
-                onClick={() => {
+                onClick={(event) => {
                   const node = cursor ? findNode(result.tree, cursor) : undefined;
-                  if (node) void runDelete(node);
+                  if (node) void runDelete(node, event.currentTarget);
                 }}
                 disabled={busy || !cursor}
               >
@@ -718,13 +837,50 @@ export function FileBrowser({
         </div>
       )}
 
+      {showDegradedTree ? (
+        <div
+          role="status"
+          aria-live="polite"
+          data-opengeni-files-degraded
+          className="flex shrink-0 items-center gap-2 border-b border-og-status-running/30 bg-og-status-running/10 px-2 py-1.5 text-og-xs text-og-fg-muted"
+        >
+          <TriangleAlertIcon className="size-3.5 shrink-0 text-og-status-running" aria-hidden />
+          <span className="min-w-0 flex-1">
+            {result.source === "capture"
+              ? "Live files are temporarily unavailable. Showing the latest captured revision."
+              : "Live refresh failed. Showing the last loaded files."}
+          </span>
+          <button
+            type="button"
+            onClick={() => void result.refresh()}
+            disabled={result.loading}
+            className="inline-flex min-h-7 shrink-0 items-center gap-1 rounded-og-sm border border-og-border bg-og-surface-1 px-2 font-medium text-og-fg transition-colors hover:border-og-border-strong focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-og-accent disabled:cursor-not-allowed disabled:opacity-50 pointer-coarse:min-h-11"
+          >
+            <RefreshCwIcon
+              className={cn("size-3", result.loading && "animate-spin motion-reduce:animate-none")}
+              aria-hidden
+            />
+            Retry
+          </button>
+        </div>
+      ) : null}
+
       {/* The tree itself. The root is a drop target so a node can be moved to "". */}
       {/* biome-ignore lint/a11y/noNoninteractiveTabindex: the tree owns keyboard nav */}
       <div
         ref={containerRef}
-        role="tree"
-        tabIndex={0}
-        aria-multiselectable={false}
+        id={usesVirtualTree ? undefined : treeId}
+        role={usesVirtualTree ? undefined : "tree"}
+        aria-label={usesVirtualTree ? undefined : "Workspace files"}
+        aria-activedescendant={usesVirtualTree ? undefined : activeDescendantId}
+        tabIndex={usesVirtualTree ? undefined : 0}
+        aria-multiselectable={usesVirtualTree ? undefined : false}
+        onFocus={(event) => {
+          if ((event.target as HTMLElement).id === treeId && cursorIndex < 0) {
+            const first = flatRows[0];
+            if (first) setActive(first.node.path);
+          }
+        }}
         onKeyDown={onKeyDown}
         onDragOver={
           supportsMutation
@@ -745,7 +901,7 @@ export function FileBrowser({
             : undefined
         }
         className={cn(
-          "flex min-h-0 min-w-0 flex-1 flex-col p-1 outline-none",
+          "flex min-h-0 min-w-0 flex-1 flex-col p-1 outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-og-accent",
           dragOver === "" && "ring-1 ring-inset ring-og-accent",
         )}
         data-opengeni-file-tree
@@ -760,7 +916,7 @@ export function FileBrowser({
               type="button"
               onClick={() => void result.refresh()}
               disabled={result.loading}
-              className="inline-flex items-center gap-1.5 rounded-og-sm border border-og-border px-2 py-1 text-og-xs font-medium text-og-fg-muted transition-colors hover:border-og-border-strong hover:text-og-fg disabled:cursor-not-allowed disabled:opacity-50 pointer-coarse:min-h-10"
+              className="inline-flex items-center gap-1.5 rounded-og-sm border border-og-border px-2 py-1 text-og-xs font-medium text-og-fg-muted transition-colors hover:border-og-border-strong hover:text-og-fg disabled:cursor-not-allowed disabled:opacity-50 pointer-coarse:min-h-11"
             >
               <RefreshCwIcon
                 className={cn("size-3.5", result.loading && "animate-spin")}
@@ -779,7 +935,13 @@ export function FileBrowser({
           // expanded subtree + synthetic (create/skeleton/residue) rows.
           <VList
             ref={vlistRef}
-            className="min-h-0 flex-1"
+            id={treeId}
+            role="tree"
+            aria-label="Workspace files"
+            aria-activedescendant={activeDescendantId}
+            aria-multiselectable={false}
+            tabIndex={0}
+            className="min-h-0 flex-1 outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-og-accent"
             itemSize={coarsePointer ? 44 : 28}
             ssrCount={Math.min(32, renderItems.length)}
           >
@@ -801,9 +963,151 @@ export function FileBrowser({
           onDelete={() => menu.node && void runDelete(menu.node)}
           onNewFile={() => startCreate("file")}
           onNewFolder={() => startCreate("dir")}
+          onClose={() => {
+            setMenu(null);
+            window.requestAnimationFrame(() => getTreeElement()?.focus());
+          }}
         />
       )}
+      {pendingDelete ? (
+        <DeleteDialog
+          node={pendingDelete}
+          busy={busy}
+          portalTokenStyle={portalTokenStyle}
+          onCancel={() => closePendingDelete(true)}
+          onConfirm={() => {
+            const node = pendingDelete;
+            closePendingDelete(false);
+            void performDelete(node);
+          }}
+        />
+      ) : null}
     </div>
+  );
+}
+
+function DeleteDialog({
+  node,
+  busy,
+  portalTokenStyle,
+  onCancel,
+  onConfirm,
+}: {
+  node: FileTreeNode;
+  busy: boolean;
+  portalTokenStyle: PortalTokenStyle;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const cancelRef = useRef<HTMLButtonElement | null>(null);
+  const [open, setOpen] = useState(true);
+  const closeIntentRef = useRef<"cancel" | "confirm">("cancel");
+  const settledRef = useRef(false);
+  const settleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const settle = () => {
+    if (settledRef.current) return;
+    settledRef.current = true;
+    if (closeIntentRef.current === "confirm") {
+      onConfirm();
+    } else {
+      onCancel();
+    }
+  };
+
+  const scheduleSettle = () => {
+    if (settleTimerRef.current !== null) return;
+    settleTimerRef.current = setTimeout(() => {
+      settleTimerRef.current = null;
+      settle();
+    }, 0);
+  };
+
+  useEffect(
+    () => () => {
+      if (settleTimerRef.current !== null) clearTimeout(settleTimerRef.current);
+    },
+    [],
+  );
+
+  return (
+    <AlertDialog.Root
+      open={open}
+      onOpenChange={(nextOpen) => {
+        if (!nextOpen && !busy) {
+          setOpen(false);
+          scheduleSettle();
+        }
+      }}
+    >
+      <AlertDialog.Portal container={typeof document === "undefined" ? null : document.body}>
+        <AlertDialog.Overlay className="fixed inset-0 z-[100] bg-black/45 backdrop-blur-[2px]" />
+        <AlertDialog.Content
+          className="og-root fixed left-1/2 top-1/2 z-[101] max-h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] max-w-sm -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-og-lg border border-og-border-strong bg-og-surface-1 p-4 text-og-fg shadow-2xl outline-none"
+          style={portalTokenStyle}
+          onOpenAutoFocus={(event) => {
+            event.preventDefault();
+            cancelRef.current?.focus();
+          }}
+          onCloseAutoFocus={(event) => {
+            event.preventDefault();
+            scheduleSettle();
+          }}
+          onEscapeKeyDown={(event) => {
+            event.stopPropagation();
+            if (busy) {
+              event.preventDefault();
+            } else {
+              closeIntentRef.current = "cancel";
+            }
+          }}
+        >
+          <div className="flex items-start gap-3">
+            <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-og-status-failed/12 text-og-status-failed">
+              <Trash2Icon className="size-4" aria-hidden />
+            </span>
+            <div className="min-w-0">
+              <AlertDialog.Title className="text-og-sm font-semibold">
+                Delete {node.kind === "dir" ? "folder" : "file"}?
+              </AlertDialog.Title>
+              <AlertDialog.Description className="mt-1 text-og-sm leading-relaxed text-og-fg-muted">
+                <span className="break-all font-og-mono text-og-fg">{node.path}</span>
+                {node.kind === "dir"
+                  ? " and everything inside it will be permanently removed."
+                  : " will be permanently removed."}
+              </AlertDialog.Description>
+            </div>
+          </div>
+          <div className="mt-4 flex justify-end gap-2">
+            <AlertDialog.Cancel asChild>
+              <button
+                ref={cancelRef}
+                type="button"
+                onClick={() => {
+                  closeIntentRef.current = "cancel";
+                }}
+                disabled={busy}
+                className="min-h-9 rounded-og-md border border-og-border px-3 text-og-sm font-medium text-og-fg hover:bg-og-surface-2 disabled:opacity-50 pointer-coarse:min-h-11"
+              >
+                Cancel
+              </button>
+            </AlertDialog.Cancel>
+            <AlertDialog.Action asChild>
+              <button
+                type="button"
+                onClick={() => {
+                  closeIntentRef.current = "confirm";
+                }}
+                disabled={busy}
+                className="min-h-9 rounded-og-md bg-og-status-failed px-3 text-og-sm font-semibold text-white shadow-sm hover:brightness-110 disabled:opacity-50 pointer-coarse:min-h-11"
+              >
+                Delete permanently
+              </button>
+            </AlertDialog.Action>
+          </div>
+        </AlertDialog.Content>
+      </AlertDialog.Portal>
+    </AlertDialog.Root>
   );
 }
 
@@ -814,7 +1118,7 @@ function ToolbarButton({
   children,
 }: {
   label: string;
-  onClick: () => void;
+  onClick: (event: ReactMouseEvent<HTMLButtonElement>) => void;
   disabled?: boolean;
   children: ReactNode;
 }) {
@@ -920,6 +1224,7 @@ function ContextMenu({
   onDelete,
   onNewFile,
   onNewFolder,
+  onClose,
 }: {
   node: FileTreeNode;
   x: number;
@@ -928,23 +1233,53 @@ function ContextMenu({
   onDelete: () => void;
   onNewFile: () => void;
   onNewFolder: () => void;
+  onClose: () => void;
 }) {
   const isDir = node.kind === "dir";
+  const menuRef = useRef<HTMLDivElement | null>(null);
   // Keep the menu on-screen when opened near the viewport edge.
   const vw = typeof window !== "undefined" ? window.innerWidth : 9999;
   const vh = typeof window !== "undefined" ? window.innerHeight : 9999;
-  const left = Math.min(x, vw - 180);
-  const top = Math.min(y, vh - 160);
+  const left = Math.max(4, Math.min(x, vw - 180));
+  const top = Math.max(4, Math.min(y, vh - 160));
+
+  useEffect(() => {
+    menuRef.current?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus();
+  }, []);
+
+  const onKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    const items = Array.from(
+      menuRef.current?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ?? [],
+    );
+    if (items.length === 0) return;
+    const current = items.findIndex((item) => item === document.activeElement);
+    let next: number | null = null;
+    if (event.key === "ArrowDown") next = (current + 1 + items.length) % items.length;
+    else if (event.key === "ArrowUp") next = (current - 1 + items.length) % items.length;
+    else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = items.length - 1;
+    else if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      onClose();
+      return;
+    }
+    if (next === null) return;
+    event.preventDefault();
+    event.stopPropagation();
+    items[next]?.focus();
+  };
 
   const item = (label: string, icon: ReactNode, onClick: () => void, danger?: boolean) => (
     <button
       type="button"
+      role="menuitem"
       onClick={(e) => {
         e.stopPropagation();
         onClick();
       }}
       className={cn(
-        "flex w-full items-center gap-2 px-2.5 py-1 text-left text-og-sm pointer-coarse:min-h-10",
+        "flex w-full items-center gap-2 px-2.5 py-1 text-left text-og-sm pointer-coarse:min-h-11",
         "hover:bg-og-surface-2",
         danger ? "text-og-status-failed" : "text-og-fg",
       )}
@@ -956,7 +1291,10 @@ function ContextMenu({
 
   return (
     <div
+      ref={menuRef}
       role="menu"
+      aria-label={`Actions for ${node.name}`}
+      onKeyDown={onKeyDown}
       onClick={(e) => e.stopPropagation()}
       style={{ left, top }}
       className={cn(
@@ -969,7 +1307,7 @@ function ContextMenu({
         <>
           {item("New file", <FilePlusIcon className="size-3.5" />, onNewFile)}
           {item("New folder", <FolderPlusIcon className="size-3.5" />, onNewFolder)}
-          <div className="my-1 h-px bg-og-border" />
+          <div role="separator" className="my-1 h-px bg-og-border" />
         </>
       )}
       {item("Rename", <PencilIcon className="size-3.5" />, onRename)}

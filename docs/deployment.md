@@ -169,18 +169,19 @@ Merging a changesets Version PR only commits package versions and changelogs; it
 does not publish packages or release images. Public release is an explicit
 dispatch of `.github/workflows/release.yml` from a ref pinned to the exact
 accepted source SHA. The dispatch fails closed unless it receives retained
-verification evidence for that exact source, the sanitized acceptance bundle
-SHA-256, and an explicit confirmation that there are zero known defects,
-skipped checks, or unverified acceptance rows. Publication unblocks separately
-built package consumers; production deployment and acceptance follow it as the
-release-completion gate. Staging and a fixed soak delay are not prerequisites.
-The dispatch also requires the exact expected package set (for example,
+staging, production, and 72-hour production-canary evidence URLs, the sanitized
+acceptance bundle's direct HTTPS URL and SHA-256, and an explicit confirmation
+that there are zero known defects, skipped/late cycles, or unverified acceptance
+rows. It also
+requires the exact expected package set (for example,
 `@opengeni/react@0.15.0`). The selected
 dispatch ref, `source_sha`, checked-out commit, and a commit reachable from
 `main` must all identify the same revision.
 
-The dispatch re-runs the package typecheck, builds, SDK parity test, and publish
-closure guard. Before touching npm it rejects any unlisted unpublished package,
+The dispatch downloads the exact acceptance JSON, verifies its digest, and
+validates every machine-readable contract row before re-running the package
+typecheck, builds, SDK parity test, and publish closure guard. Before touching
+npm it rejects any unlisted unpublished package,
 rejects local version drift or an occupied version from another git source, and
 retains a pre-publication plan. Afterward it requires every expected registry
 entry to bind the accepted source through `gitHead` and a SHA-512 integrity

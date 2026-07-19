@@ -741,6 +741,18 @@ export class SelfhostedSession {
     return result.output;
   }
 
+  /**
+   * Physical turn-cancellation seam used by the runtime tool fence. Only the
+   * op-stream transport has a process-tree cancellation protocol; a legacy
+   * runner returns false and the caller remains fail-closed until its exec
+   * deadline rather than claiming the machine is quiescent.
+   */
+  async cancelExecCommand(opId: string): Promise<boolean> {
+    if (!this.opStreamClient) return false;
+    await this.opStreamClient.cancel(opId);
+    return true;
+  }
+
   /** SDK shell capability never calls this (gated on `supportsPty()` which is
    *  false), but the surface advertises it. Selfhosted exec has no interactive PTY
    *  session over the structured RPC, so a stdin write is unsupported. */

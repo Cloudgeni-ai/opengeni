@@ -38,7 +38,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await blank?.release();
-});
+}, 180_000);
 
 describe("migration 0019 (session_stream_acknowledgments)", () => {
   test("applies the full chain, has the table + unique index + RLS, and the re-ack upsert ORs consent bits monotonically", async () => {

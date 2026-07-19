@@ -183,7 +183,9 @@ export function ChatComposer({
   // normal text drag/drop). `dragging` drives the drop overlay.
   const [dragging, setDragging] = useState(false);
   const dragCarriesFiles = (event: { dataTransfer: DataTransfer | null }): boolean =>
-    event.dataTransfer != null && [...event.dataTransfer.types].includes("Files");
+    event.dataTransfer !== null &&
+    event.dataTransfer !== undefined &&
+    [...event.dataTransfer.types].includes("Files");
   const handleDragOver = useCallback(
     (event: DragEvent<HTMLDivElement>) => {
       if (!attachments || !dragCarriesFiles(event)) {
@@ -904,7 +906,7 @@ function ConfirmBar({
         <button
           type="button"
           onClick={onCancel}
-          className="rounded-og-md border border-og-border bg-og-surface-2 px-2.5 py-1 text-og-sm text-og-fg-muted hover:bg-og-surface-3 pointer-coarse:min-h-10"
+          className="rounded-og-md border border-og-border bg-og-surface-2 px-2.5 py-1 text-og-sm text-og-fg-muted hover:bg-og-surface-3 pointer-coarse:min-h-11"
         >
           Cancel
         </button>
@@ -912,7 +914,7 @@ function ConfirmBar({
           ref={confirmRef}
           type="button"
           onClick={onConfirm}
-          className="rounded-og-md border border-og-status-failed/50 bg-og-status-failed/15 px-2.5 py-1 text-og-sm text-og-status-failed hover:bg-og-status-failed/25 pointer-coarse:min-h-10"
+          className="rounded-og-md border border-og-status-failed/50 bg-og-status-failed/15 px-2.5 py-1 text-og-sm text-og-status-failed hover:bg-og-status-failed/25 pointer-coarse:min-h-11"
         >
           Run /{command.name}
         </button>

@@ -2,6 +2,7 @@ export { OpenGeniClient } from "./client";
 export type {
   FetchLike,
   OpenGeniClientOptions,
+  OpenGeniRequestOptions,
   SendMessageInput,
   SteerMessageResult,
 } from "./client";

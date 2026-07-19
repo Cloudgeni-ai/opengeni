@@ -191,6 +191,11 @@ export type OpenGeniClientOptions = {
   fetch?: FetchLike;
 };
 
+/** Per-request cancellation for identity-scoped, side-effect-free reads. */
+export type OpenGeniRequestOptions = {
+  signal?: AbortSignal | undefined;
+};
+
 export type SendMessageInput = {
   text: string;
   resources?: ResourceRef[];
@@ -391,7 +396,7 @@ export class OpenGeniClient {
    */
   async listMachines(
     workspaceId: string,
-    options: { sessionId?: string } = {},
+    options: { sessionId?: string; signal?: AbortSignal } = {},
   ): Promise<MachinesResponse> {
     return await this.requestJson<MachinesResponse>(
       "GET",
@@ -400,6 +405,7 @@ export class OpenGeniClient {
       {
         ...(options.sessionId !== undefined ? { sessionId: options.sessionId } : {}),
       },
+      { signal: options.signal },
     );
   }
 
@@ -941,11 +947,14 @@ export class OpenGeniClient {
     workspaceId: string,
     sessionId: string,
     request: FsListRequest = {},
+    options: OpenGeniRequestOptions = {},
   ): Promise<FsListResponse> {
     return await this.requestJson<FsListResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/fs/list`,
       request,
+      {},
+      options,
     );
   }
 
@@ -954,11 +963,14 @@ export class OpenGeniClient {
     workspaceId: string,
     sessionId: string,
     request: FsReadRequest,
+    options: OpenGeniRequestOptions = {},
   ): Promise<FsReadResponse> {
     return await this.requestJson<FsReadResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/fs/read`,
       request,
+      {},
+      options,
     );
   }
 
@@ -1019,11 +1031,14 @@ export class OpenGeniClient {
     workspaceId: string,
     sessionId: string,
     request: GitStatusRequest = {},
+    options: OpenGeniRequestOptions = {},
   ): Promise<GitStatusResponse> {
     return await this.requestJson<GitStatusResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/git/status`,
       request,
+      {},
+      options,
     );
   }
 
@@ -1032,11 +1047,14 @@ export class OpenGeniClient {
     workspaceId: string,
     sessionId: string,
     request: GitDiffRequest = {},
+    options: OpenGeniRequestOptions = {},
   ): Promise<GitDiffResponse> {
     return await this.requestJson<GitDiffResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/git/diff`,
       request,
+      {},
+      options,
     );
   }
 
@@ -1073,10 +1091,14 @@ export class OpenGeniClient {
   async getWorkspaceCapture(
     workspaceId: string,
     sessionId: string,
+    options: OpenGeniRequestOptions = {},
   ): Promise<GetWorkspaceCaptureResponse> {
     return await this.requestJson<GetWorkspaceCaptureResponse>(
       "GET",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/workspace/capture`,
+      undefined,
+      {},
+      options,
     );
   }
 
@@ -1088,6 +1110,7 @@ export class OpenGeniClient {
     sessionId: string,
     path: string,
     revision?: number,
+    options: OpenGeniRequestOptions = {},
   ): Promise<GetWorkspaceCaptureFileResponse> {
     const query: Record<string, string> = { path };
     if (revision !== undefined) query.revision = String(revision);
@@ -1096,6 +1119,7 @@ export class OpenGeniClient {
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/workspace/capture/file`,
       undefined,
       query,
+      options,
     );
   }
 
@@ -1180,10 +1204,14 @@ export class OpenGeniClient {
   async getStreamCapabilities(
     workspaceId: string,
     sessionId: string,
+    options: OpenGeniRequestOptions = {},
   ): Promise<SessionCapabilities> {
     return await this.requestJson<SessionCapabilities>(
       "GET",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/stream-capabilities`,
+      undefined,
+      {},
+      options,
     );
   }
 
@@ -2341,6 +2369,7 @@ export class OpenGeniClient {
     path: string,
     body?: unknown,
     query: Record<string, string> = {},
+    options: OpenGeniRequestOptions = {},
   ): Promise<T> {
     const response = await this.fetchImpl(this.url(path, query), {
       method,
@@ -2350,6 +2379,7 @@ export class OpenGeniClient {
         ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
       },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+      ...(options.signal ? { signal: options.signal } : {}),
     });
     assertApiContractResponse(response);
     if (!response.ok) {

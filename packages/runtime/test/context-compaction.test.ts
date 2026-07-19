@@ -4,6 +4,7 @@ import {
   COMPACTION_PROMPT,
   COMPACTION_SUMMARY_MARKER,
   CompactionNeededError,
+  CompactionProviderResponseError,
   EmptyCompactionSummaryError,
   DEFAULT_COMPACTION_THRESHOLD_RATIO,
   MAX_COMPACTION_THRESHOLD_RATIO,
@@ -23,6 +24,7 @@ import {
   isCompactionSummary,
   isEphemeralInternalContext,
   isUserMessage,
+  prepareCompactionPromptInput,
   renderCompactionPromptInputForChat,
   type CompactionItem,
 } from "../src/context-compaction";
@@ -391,6 +393,68 @@ describe("codex-parity rebuild", () => {
   });
 });
 
+describe("bounded checkpoint input", () => {
+  test("rewrites oldest aggregate tool output while preserving recent detail", () => {
+    const oldOutput = "x".repeat(80_000);
+    const recentOutput = "recent result";
+    const prepared = prepareCompactionPromptInput(
+      [
+        user("old request"),
+        call("old-call"),
+        result("old-call", oldOutput),
+        user("recent request"),
+        call("recent-call"),
+        result("recent-call", recentOutput),
+      ],
+      4_000,
+    );
+
+    expect(prepared.estimatedInputTokens).toBeLessThanOrEqual(4_000);
+    expect(prepared.rewrittenToolOutputs).toBe(1);
+    expect(prepared.droppedHistoryItems).toBe(0);
+    expect(String(prepared.input[2]!.output)).toContain("tokens truncated");
+    expect(prepared.input[5]!.output).toBe(recentOutput);
+    expect(prepared.input.at(-1)).toMatchObject({
+      type: "message",
+      role: "user",
+      content: COMPACTION_PROMPT,
+    });
+  });
+
+  test("drops whole oldest user-delimited units without orphaning protocol items", () => {
+    const recent = [user("recent request"), call("recent-call"), result("recent-call", "ok")];
+    const prepared = prepareCompactionPromptInput(
+      [
+        user("x".repeat(40_000)),
+        { type: "reasoning", id: "reasoning-old" },
+        call("old-call"),
+        result("old-call", "old result"),
+        ...recent,
+      ],
+      1_000,
+    );
+    const history = prepared.input.slice(0, -1);
+
+    expect(prepared.estimatedInputTokens).toBeLessThanOrEqual(1_000);
+    expect(prepared.droppedHistoryItems).toBe(4);
+    expect(history).toEqual(recent);
+    expect(sanitizeHistoryItemsForModel(history)).toEqual(history);
+  });
+
+  test("never mutates the raw history used to build the durable replacement", () => {
+    const rawResult = result("call-1", "z".repeat(80_000));
+    const raw = [user("request"), call("call-1"), rawResult];
+    prepareCompactionPromptInput(raw, 1_000);
+
+    expect(raw[2]).toBe(rawResult);
+    expect(rawResult.output).toBe("z".repeat(80_000));
+    expect(buildCompactionReplacementHistory(raw, "summary")).toMatchObject([
+      user("request"),
+      expect.objectContaining({ [COMPACTION_SUMMARY_MARKER]: true }),
+    ]);
+  });
+});
+
 describe("provider-proof compaction transcript", () => {
   test("uses the SDK Responses adapter to preserve structured history on the wire", async () => {
     let seenInput: unknown;
@@ -489,8 +553,7 @@ describe("provider-proof compaction transcript", () => {
       responses: {
         create: async () => ({
           id: "resp_empty",
-          status: "incomplete",
-          incomplete_details: { reason: "max_output_tokens" },
+          status: "completed",
           usage: { input_tokens: 321, output_tokens: 0, total_tokens: 321 },
           output: [{ type: "reasoning", content: [] }],
         }),
@@ -511,14 +574,91 @@ describe("provider-proof compaction transcript", () => {
       expect(error).toBeInstanceOf(EmptyCompactionSummaryError);
       expect((error as EmptyCompactionSummaryError).diagnostics).toMatchObject({
         responseId: "resp_empty",
-        status: "incomplete",
-        incompleteReason: "max_output_tokens",
+        status: "completed",
+        incompleteReason: null,
         extractedTextLength: 0,
       });
       expect(JSON.stringify((error as EmptyCompactionSummaryError).diagnostics)).not.toContain(
         "deploy it",
       );
     }
+  });
+
+  test("classifies a thrown provider failure without persisting its message or model input", async () => {
+    const providerError = Object.assign(
+      new Error("provider echoed deploy it and other sensitive request content"),
+      {
+        status: 502,
+        code: "server_error",
+        type: "server_error",
+        error: { code: "server_error", message: "nested sensitive provider text" },
+        headers: new Headers({ "x-request-id": "req_compaction_failed" }),
+      },
+    );
+    const fakeClient = {
+      responses: {
+        create: async () => {
+          throw providerError;
+        },
+      },
+    };
+    try {
+      await summarizeForCompaction(
+        testSettings({ openaiProvider: "azure" }),
+        buildCompactionPromptInput([user("deploy it")]),
+        {
+          client: fakeClient as any,
+          api: "responses",
+          model: "scripted-model",
+        },
+      );
+      throw new Error("expected provider compaction failure");
+    } catch (error) {
+      expect(error).toBeInstanceOf(CompactionProviderResponseError);
+      expect((error as CompactionProviderResponseError).diagnostics).toEqual({
+        errorName: "Error",
+        httpStatus: 502,
+        responseStatus: null,
+        responseId: null,
+        code: "server_error",
+        type: "server_error",
+        requestId: "req_compaction_failed",
+      });
+      expect(JSON.stringify(error)).not.toContain("deploy it");
+      expect(JSON.stringify(error)).not.toContain("nested sensitive provider text");
+      expect((error as Error).message).not.toContain("sensitive request content");
+    }
+  });
+
+  test("classifies a failed Responses object even when a custom client returns HTTP-200 data", async () => {
+    const fakeClient = {
+      responses: {
+        create: async () => ({
+          id: "resp_failed",
+          status: "failed",
+          error: { code: "server_error", message: "must not persist this provider text" },
+          output: [],
+        }),
+      },
+    };
+    await expect(
+      summarizeForCompaction(
+        testSettings({ openaiProvider: "azure" }),
+        buildCompactionPromptInput([user("deploy it")]),
+        {
+          client: fakeClient as any,
+          api: "responses",
+          model: "scripted-model",
+        },
+      ),
+    ).rejects.toMatchObject({
+      name: "CompactionProviderResponseError",
+      diagnostics: {
+        responseStatus: "failed",
+        responseId: "resp_failed",
+        code: "server_error",
+      },
+    });
   });
 
   test("renders the full checkpoint input without silently dropping old records", () => {

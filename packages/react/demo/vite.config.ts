@@ -6,6 +6,11 @@ import { defineConfig } from "vite";
 export default defineConfig({
   plugins: [viteReact(), tailwindcss()],
   build: {
+    // The harness deliberately exposes the full lazy language/theme catalog.
+    // Keep the warning boundary aligned with the production app's enforced
+    // 800 kB raw lazy-chunk budget; the largest generated chunk remains below
+    // that limit and production additionally gates every asset by gzip size.
+    chunkSizeWarningLimit: 800,
     rollupOptions: {
       // Pages: the full component harness (index.html), the timeline tool-call
       // renderer harness (timeline.html), and the Machines / enrollment UI

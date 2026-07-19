@@ -18,6 +18,7 @@ import {
 } from "@opengeni/sdk";
 import { DesktopViewer } from "../src/components/desktop-viewer";
 import { SandboxTerminal } from "../src/components/sandbox-terminal";
+import { WorkspaceDock } from "../src/components/workspace-dock";
 
 describe("SSR safety (no DOM / no window)", () => {
   test("SandboxTerminal renders to a string on the server (placeholder, no xterm import)", () => {
@@ -57,6 +58,21 @@ describe("SSR safety (no DOM / no window)", () => {
     };
     const html = renderToString(<DesktopViewer capability={cap} />);
     expect(html).toContain("data-opengeni-desktop");
+  });
+
+  test("WorkspaceDock renders without an ambient localStorage during SSR", () => {
+    expect(typeof window).toBe("undefined");
+    expect(typeof localStorage).toBe("undefined");
+
+    const html = renderToString(
+      <WorkspaceDock
+        primary={<main>Server-rendered primary pane</main>}
+        tabs={[{ id: "files", label: "Files", content: <div>Captured files</div> }]}
+        collapsed
+      />,
+    );
+
+    expect(html).toContain("Server-rendered primary pane");
   });
 });
 

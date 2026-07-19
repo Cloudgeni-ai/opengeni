@@ -5,6 +5,7 @@ import type {
   FsWriteResponse,
   GitChangedPayload,
   GitFileStatusCode,
+  OpenGeniRequestOptions,
   SessionEvent,
   WorkspaceCaptureManifest,
 } from "@opengeni/sdk";
@@ -13,6 +14,50 @@ import { useOpenGeni, type ClientOverride } from "../provider";
 
 /** The git-status overlay a file row may carry (tints modified files in the tree). */
 export type FileTreeStatus = "added" | "modified" | "deleted" | "renamed" | "untracked";
+
+export type CapturedFileUnavailableReason = "not-captured" | "too-large" | "content-missing";
+
+/** A cold capture can index a path without retaining its contents. Components
+ *  use this typed result to offer an explicit wake action instead of silently
+ *  turning passive review into a live sandbox read. */
+export class CapturedFileUnavailableError extends Error {
+  readonly code = "captured_file_unavailable";
+
+  constructor(
+    readonly path: string,
+    readonly reason: CapturedFileUnavailableReason,
+  ) {
+    super(
+      reason === "too-large"
+        ? `${path} exceeds the captured preview limit.`
+        : reason === "content-missing"
+          ? `${path} is no longer available in this capture.`
+          : `${path} was not changed in this captured turn.`,
+    );
+    this.name = "CapturedFileUnavailableError";
+  }
+}
+
+export class FileWriteConflictError extends Error {
+  readonly code = "file_write_conflict";
+
+  constructor(
+    readonly path: string,
+    readonly expectedContent: string,
+    readonly liveContent: string,
+  ) {
+    super(`${path} changed on the machine. Reload it or explicitly overwrite the live version.`);
+    this.name = "FileWriteConflictError";
+  }
+}
+
+export type SandboxWriteFileOptions = {
+  /** Exact text loaded into the editor. The live file is re-read before write;
+   *  divergence fails closed with FileWriteConflictError. */
+  expectedContent?: string | undefined;
+  /** Deliberately bypass the expected-content guard after a visible conflict. */
+  force?: boolean | undefined;
+};
 
 /** A node in the Pierre file tree. `children === undefined` ⇒ an unexpanded dir
  *  (lazy treeMode); `children: []` ⇒ an expanded-but-empty dir. */
@@ -43,11 +88,10 @@ export type UseSandboxFilesOptions = ClientOverride & {
    *  (with no `fs.changed` event) never re-lists. Passing liveness re-lists when
    *  the box first becomes warm, so the tree populates as soon as the box is up. */
   liveness?: string | undefined;
-  /** The latest turn-end workspace capture (from `useWorkspaceCapture`). When the
-   *  box is NOT warm, the tree paints INSTANTLY from this capture's tree index (the
-   *  <200ms cold first paint) instead of blocking on a Channel-A list. A warm box
-   *  always wins (live path unchanged). On the cold→warm transition the live list
-   *  is merged in place — no remount, no flash (dossier §10.4 / §12-A1/D1). */
+  /** The latest turn-end workspace capture (from `useWorkspaceCapture`). The tree
+   *  paints immediately from this durable index, then a warm box reconciles live
+   *  in place. If that live read fails, the capture remains a truthful read-only
+   *  fallback instead of turning into an empty error surface. */
   capture?: WorkspaceCaptureManifest | null | undefined;
   /** Called when an OPTIMISTIC mutation is reverted because its background
    *  Channel-A op failed (e.g. a 409 rename collision). The host wires this to a
@@ -64,11 +108,15 @@ export type UseSandboxFilesResult = {
    *  spinner on these nodes so a 2-3s Channel-A list never looks frozen. */
   expandingPaths: Set<string>;
   /** Read a file for the preview pane (text or base64-for-binary, size-capped). */
-  readFile: (path: string) => Promise<FsReadResponse>;
+  readFile: (path: string, options?: OpenGeniRequestOptions) => Promise<FsReadResponse>;
   /** Write a file (overwrite, last-writer-wins) — the editor save path.
    *  Optimistic: a brand-new file is spliced into the tree immediately and the
    *  Channel-A write runs in the background; on failure the splice is reverted. */
-  writeFile: (path: string, content: string) => Promise<FsWriteResponse>;
+  writeFile: (
+    path: string,
+    content: string,
+    options?: SandboxWriteFileOptions,
+  ) => Promise<FsWriteResponse>;
   /** Create a new empty file (refuses to clobber an existing path: overwrite=false). */
   createFile: (path: string) => Promise<void>;
   /** Create a directory (recursive by default). */
@@ -111,7 +159,7 @@ function sortNodes(nodes: FileTreeNode[]): FileTreeNode[] {
   });
 }
 
-function fsNodeToTree(node: FsTreeNode): FileTreeNode {
+function fsNodeToTree(node: FsTreeNode, captureComplete = false): FileTreeNode {
   const kind = node.type === "dir" ? "dir" : "file";
   // Lazy-tree contract: a depth-bounded `fsList` returns each directory at the
   // depth boundary with `children: []` (the dir is listed, but its grandchildren
@@ -123,7 +171,11 @@ function fsNodeToTree(node: FsTreeNode): FileTreeNode {
   // children spliced in by `replaceChildren` (bypassing this mapper), so a
   // genuinely-empty dir correctly ends up as `[]` AFTER expansion.
   const mappedChildren =
-    node.children && node.children.length > 0 ? node.children.map(fsNodeToTree) : undefined;
+    node.children && node.children.length > 0
+      ? node.children.map((child) => fsNodeToTree(child, captureComplete))
+      : captureComplete && kind === "dir"
+        ? []
+        : undefined;
   return {
     path: node.path,
     name: node.name,
@@ -291,6 +343,40 @@ function repathNode(node: FileTreeNode, fromPrefix: string, toPrefix: string): F
   return next;
 }
 
+function decodeBase64Bytes(value: string): Uint8Array {
+  const binary = atob(value);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes;
+}
+
+function decodeBase64Text(value: string): string {
+  return new TextDecoder().decode(decodeBase64Bytes(value));
+}
+
+function encodeBase64Bytes(bytes: Uint8Array): string {
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  }
+  return btoa(binary);
+}
+
+async function assertCapturedHash(bytes: Uint8Array, expected: string | null): Promise<void> {
+  if (!expected) throw new Error("Captured file is missing its integrity hash.");
+  if (!globalThis.crypto?.subtle) {
+    throw new Error("Captured file integrity verification is unavailable in this browser.");
+  }
+  const buffer = new ArrayBuffer(bytes.byteLength);
+  new Uint8Array(buffer).set(bytes);
+  const digest = new Uint8Array(await globalThis.crypto.subtle.digest("SHA-256", buffer));
+  const actual = [...digest].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  if (actual !== expected) throw new Error("Captured file content failed its integrity check.");
+}
+
 /**
  * Project the FileSystem service into a lazy-loaded Pierre tree. The initial
  * list pulls one level (depth 1); `expand(path)` lists a directory's immediate
@@ -305,6 +391,9 @@ export function useSandboxFiles(
   const { client, workspaceId } = useOpenGeni(options);
   const enabled = (options.enabled ?? true) && Boolean(sessionId);
   const rootPath = options.rootPath ?? "";
+  const capture = options.capture ?? null;
+  const isLive = options.liveness === "warm" || options.liveness === "draining";
+  const identityKey = `${workspaceId}\u0000${sessionId ?? ""}\u0000${rootPath}`;
 
   const [tree, setTree] = useState<FileTreeNode[]>([]);
   // A ref mirror of the current tree — lets the optimistic path snapshot the
@@ -315,12 +404,16 @@ export function useSandboxFiles(
   const [loading, setLoading] = useState(false);
   const [expandingPaths, setExpandingPaths] = useState<Set<string>>(new Set());
   const [error, setError] = useState<Error | null>(null);
+  const [stateIdentity, setStateIdentity] = useState(identityKey);
   // Which source the tree currently reflects — "capture" (cold paint) or "live".
   const [source, setSource] = useState<"live" | "capture" | null>(null);
+  const sourceRef = useRef<"live" | "capture" | null>(null);
   const statusRef = useRef<Map<string, FileTreeStatus>>(new Map());
   // Async reads, event cursors, and debounced work are scoped to the hook's
   // workspace/session/root identity. These refs are reset/fenced at that boundary.
   const refreshGenerationRef = useRef(0);
+  const refreshAbortRef = useRef<AbortController | null>(null);
+  const identityAbortRef = useRef(new AbortController());
   const identityGenerationRef = useRef(0);
   const lastSeqRef = useRef(0);
   const pendingParentsRef = useRef<Set<string>>(new Set());
@@ -372,6 +465,9 @@ export function useSandboxFiles(
 
   const refresh = useCallback(async () => {
     if (!sessionId) return;
+    refreshAbortRef.current?.abort();
+    const refreshAbort = new AbortController();
+    refreshAbortRef.current = refreshAbort;
     const generation = (refreshGenerationRef.current += 1);
     setLoading(true);
     setError(null);
@@ -379,7 +475,12 @@ export function useSandboxFiles(
       // Pull the git-status overlay first (best-effort — a non-repo box just
       // returns isRepo:false), then the tree, so the first paint is tinted.
       try {
-        const status = await client.gitStatus(workspaceId, sessionId, { path: rootPath });
+        const status = await client.gitStatus(
+          workspaceId,
+          sessionId,
+          { path: rootPath },
+          { signal: refreshAbort.signal },
+        );
         if (refreshGenerationRef.current !== generation) return;
         const overlay = new Map<string, FileTreeStatus>();
         for (const file of status.files) {
@@ -392,9 +493,14 @@ export function useSandboxFiles(
         if (refreshGenerationRef.current !== generation) return;
         statusRef.current = new Map();
       }
-      const listed = await client.fsList(workspaceId, sessionId, { path: rootPath, depth: 1 });
+      const listed = await client.fsList(
+        workspaceId,
+        sessionId,
+        { path: rootPath, depth: 1 },
+        { signal: refreshAbort.signal },
+      );
       if (refreshGenerationRef.current !== generation) return;
-      const children = (listed.root.children ?? []).map(fsNodeToTree);
+      const children = (listed.root.children ?? []).map((node) => fsNodeToTree(node));
       // Merge rather than replace so an explicit refresh / cold→warm re-list folds
       // in new entries WITHOUT collapsing the dirs the user already expanded (and,
       // via the identity-preserving merge, WITHOUT remounting unchanged rows — the
@@ -403,12 +509,14 @@ export function useSandboxFiles(
         applyStatus(prev.length === 0 ? children : mergeRootChildren(prev, children)),
       );
       // Live data is now serving — flip the source off the capture snapshot.
+      sourceRef.current = "live";
       setSource("live");
     } catch (cause) {
       if (refreshGenerationRef.current !== generation) return;
       setError(cause instanceof Error ? cause : new Error(String(cause)));
     } finally {
       if (refreshGenerationRef.current === generation) setLoading(false);
+      if (refreshAbortRef.current === refreshAbort) refreshAbortRef.current = null;
     }
   }, [client, workspaceId, sessionId, rootPath, applyStatus]);
 
@@ -416,7 +524,7 @@ export function useSandboxFiles(
   // zero Channel-A calls. The tree index is workspace-relative (`treeIndex`); the
   // tint overlay comes from the capture's changed `files`. Uses the SAME merge as
   // the live reconcile so a re-seed (a newer capture arriving cold) patches deltas
-  // in place instead of remounting the tree (§12-D1). Never runs while warm.
+  // in place instead of remounting the tree (§12-D1).
   const seedFromCapture = useCallback(
     (manifest: WorkspaceCaptureManifest) => {
       const overlay = new Map<string, FileTreeStatus>();
@@ -426,10 +534,14 @@ export function useSandboxFiles(
         if (mapped) overlay.set(file.path, mapped);
       }
       statusRef.current = overlay;
-      const children = (manifest.treeIndex.children ?? []).map(fsNodeToTree);
+      // The capture tree is a complete bounded index. Preserve an explicit empty
+      // `children: []` as an actually empty directory; the live depth-1 mapper
+      // intentionally treats that shape as an unexpanded boundary.
+      const children = (manifest.treeIndex.children ?? []).map((node) => fsNodeToTree(node, true));
       setTree((prev) =>
         applyStatus(prev.length === 0 ? children : mergeRootChildren(prev, children)),
       );
+      sourceRef.current = "capture";
       setSource("capture");
       setError(null);
     },
@@ -439,7 +551,12 @@ export function useSandboxFiles(
   const expand = useCallback(
     async (path: string) => {
       if (!sessionId) return;
+      // Capture browsing is a durable server-side read surface. Never turn a
+      // folder click into a Channel-A list while cold; truncated residue already
+      // renders a truthful "contents on machine" row.
+      if (source === "capture" && capture) return;
       const identityGeneration = identityGenerationRef.current;
+      const identitySignal = identityAbortRef.current.signal;
       // Mark this node as expanding so the FileBrowser can render a spinner while
       // the (often 2-3s) Channel-A fs/list is in flight — the tree never looks
       // frozen on a click.
@@ -449,9 +566,14 @@ export function useSandboxFiles(
         return next;
       });
       try {
-        const listed = await client.fsList(workspaceId, sessionId, { path, depth: 1 });
+        const listed = await client.fsList(
+          workspaceId,
+          sessionId,
+          { path, depth: 1 },
+          { signal: identitySignal },
+        );
         if (identityGenerationRef.current !== identityGeneration) return;
-        const children = (listed.root.children ?? []).map(fsNodeToTree);
+        const children = (listed.root.children ?? []).map((node) => fsNodeToTree(node));
         setTree((prev) => applyStatus(replaceChildren(prev, path, children)));
       } catch (cause) {
         if (identityGenerationRef.current !== identityGeneration) return;
@@ -467,15 +589,102 @@ export function useSandboxFiles(
         }
       }
     },
-    [client, workspaceId, sessionId, applyStatus],
+    [client, workspaceId, sessionId, capture, source, applyStatus],
   );
 
   const readFile = useCallback(
-    async (path: string) => {
+    async (path: string, requestOptions: OpenGeniRequestOptions = {}) => {
       if (!sessionId) throw new Error("no session");
-      return await client.fsRead(workspaceId, sessionId, { path });
+      const identitySignal = identityAbortRef.current.signal;
+      const signal = requestOptions.signal
+        ? AbortSignal.any([identitySignal, requestOptions.signal])
+        : identitySignal;
+      const captured = capture?.files.find((file) => file.path === path && !file.deleted);
+      if (source === "capture" && capture) {
+        if (!captured) {
+          throw new CapturedFileUnavailableError(path, "not-captured");
+        }
+        // A passive review of a turn-touched file must stay entirely server-side:
+        // mint/read its captured after-image, verify the content hash, and never
+        // wake the sandbox. A URL may expire between mint and GET, so retry once
+        // through the authenticated API to obtain a fresh scoped URL.
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          const result = await client.getWorkspaceCaptureFile(
+            workspaceId,
+            sessionId,
+            path,
+            capture.revision,
+            { signal },
+          );
+          if (result.path !== path || result.revision !== capture.revision) {
+            throw new Error(
+              "Captured file identity did not match the requested workspace revision.",
+            );
+          }
+          if (
+            result.hash !== captured.hash ||
+            result.sizeBytes !== captured.sizeBytes ||
+            result.isBinary !== captured.isBinary ||
+            result.tooLarge !== captured.tooLarge
+          ) {
+            throw new Error("Captured file metadata did not match its manifest.");
+          }
+          if (result.tooLarge) {
+            throw new CapturedFileUnavailableError(path, "too-large");
+          }
+
+          let bytes: Uint8Array;
+          let encoding: "utf8" | "base64";
+          let content: string;
+          if (result.content !== null && result.encoding !== null) {
+            encoding = result.encoding;
+            content = result.content;
+            bytes =
+              encoding === "base64"
+                ? decodeBase64Bytes(content)
+                : new TextEncoder().encode(content);
+          } else if (result.contentUrl) {
+            const response = await fetch(result.contentUrl.url, {
+              credentials: "omit",
+              cache: "no-store",
+              referrerPolicy: "no-referrer",
+              signal: AbortSignal.any([signal, AbortSignal.timeout(30_000)]),
+            }).catch(() => null);
+            if (!response?.ok) {
+              if (
+                attempt === 0 &&
+                (response === null || response.status === 401 || response.status === 403)
+              ) {
+                continue;
+              }
+              throw new Error("Captured file download failed.");
+            }
+            bytes = new Uint8Array(await response.arrayBuffer());
+            encoding = result.isBinary ? "base64" : "utf8";
+            content = result.isBinary ? encodeBase64Bytes(bytes) : new TextDecoder().decode(bytes);
+          } else {
+            throw new CapturedFileUnavailableError(path, "content-missing");
+          }
+
+          if (bytes.byteLength !== result.sizeBytes) {
+            throw new Error("Captured file size did not match its manifest.");
+          }
+          await assertCapturedHash(bytes, result.hash);
+          return {
+            path,
+            encoding,
+            content,
+            sizeBytes: result.sizeBytes,
+            truncated: false,
+            isBinary: result.isBinary,
+            revision: result.revision,
+          };
+        }
+        throw new Error("Captured file download failed after refreshing its URL.");
+      }
+      return await client.fsRead(workspaceId, sessionId, { path }, { signal });
     },
-    [client, workspaceId, sessionId],
+    [client, workspaceId, sessionId, capture, source],
   );
 
   // TARGETED reconcile of a single directory — re-list ONE parent at depth 1 and
@@ -489,13 +698,19 @@ export function useSandboxFiles(
     async (path: string) => {
       if (!sessionId) return;
       const identityGeneration = identityGenerationRef.current;
+      const identitySignal = identityAbortRef.current.signal;
       // Skip parents that aren't currently loaded/expanded in the tree (nothing
       // visible to update; they re-list fresh on the next expand).
       if (!parentIsLoaded(treeRef.current, path)) return;
       try {
-        const listed = await client.fsList(workspaceId, sessionId, { path, depth: 1 });
+        const listed = await client.fsList(
+          workspaceId,
+          sessionId,
+          { path, depth: 1 },
+          { signal: identitySignal },
+        );
         if (identityGenerationRef.current !== identityGeneration) return;
-        const children = (listed.root.children ?? []).map(fsNodeToTree);
+        const children = (listed.root.children ?? []).map((node) => fsNodeToTree(node));
         if (path === "") setTree((prev) => applyStatus(mergeRootChildren(prev, children)));
         else
           setTree((prev) => {
@@ -530,6 +745,7 @@ export function useSandboxFiles(
       const identityGeneration = identityGenerationRef.current;
       // Snapshot the pre-op tree from the ref (StrictMode-safe — see treeRef).
       const snapshot = treeRef.current;
+      setError(null);
       setTree(applyStatus(apply(snapshot)));
       try {
         const res = await op();
@@ -552,6 +768,11 @@ export function useSandboxFiles(
         if (identityGenerationRef.current !== identityGeneration) throw err;
         // Revert the optimistic edit to the exact pre-op tree.
         setTree(applyStatus(snapshot));
+        // An expected-content conflict belongs to the editor's explicit
+        // Reload/Overwrite decision surface. Treating it as a broken file tree
+        // would also raise a duplicate host toast and leave a stale global error
+        // after the user successfully resolves the conflict.
+        if (err instanceof FileWriteConflictError) throw err;
         setError(err);
         onMutationError?.(err, opName);
         throw err;
@@ -561,8 +782,14 @@ export function useSandboxFiles(
   );
 
   const writeFile = useCallback(
-    async (path: string, content: string): Promise<FsWriteResponse> => {
+    async (
+      path: string,
+      content: string,
+      writeOptions: SandboxWriteFileOptions = {},
+    ): Promise<FsWriteResponse> => {
       if (!sessionId) throw new Error("no session");
+      const identityGeneration = identityGenerationRef.current;
+      const identitySignal = identityAbortRef.current.signal;
       const parent = parentOf(path);
       // Splice a new file node in immediately ONLY when the path doesn't already
       // exist in a loaded parent (an editor SAVE to an existing file mutates no
@@ -572,7 +799,32 @@ export function useSandboxFiles(
       return await runOptimistic(
         "write",
         (nodes) => (exists ? nodes : insertNode(nodes, parent, node)),
-        () => client.fsWrite(workspaceId, sessionId, { path, content, overwrite: true }),
+        async () => {
+          if (!writeOptions.force && writeOptions.expectedContent !== undefined) {
+            const live = await client.fsRead(
+              workspaceId,
+              sessionId,
+              { path },
+              { signal: identitySignal },
+            );
+            if (identityGenerationRef.current !== identityGeneration) {
+              throw new Error("File save cancelled because the workspace changed.");
+            }
+            const liveContent =
+              live.encoding === "base64" ? decodeBase64Text(live.content) : live.content;
+            if (live.truncated || live.isBinary || liveContent !== writeOptions.expectedContent) {
+              throw new FileWriteConflictError(path, writeOptions.expectedContent, liveContent);
+            }
+          }
+          if (identityGenerationRef.current !== identityGeneration) {
+            throw new Error("File save cancelled because the workspace changed.");
+          }
+          return await client.fsWrite(workspaceId, sessionId, {
+            path,
+            content,
+            overwrite: true,
+          });
+        },
         exists ? [] : [parent],
       );
     },
@@ -651,29 +903,29 @@ export function useSandboxFiles(
   );
 
   // Initial paint + reset on identity change. Source selection (dossier §10.4):
-  //   • warm/draining box → the LIVE list (unchanged behavior).
-  //   • cold/offline box WITH a capture → paint instantly from the capture index
-  //     (no Channel-A; the box warms in the background and the warm effect below
-  //     reconciles live in place).
+  //   • any box WITH a capture → paint instantly from the durable capture index;
+  //     a warm/draining box then reconciles live in place.
+  //   • if that live reconciliation fails, keep the capture visible and read-only.
   //   • cold box with NO capture → best-effort live list (status quo — never worse).
-  const capture = options.capture ?? null;
-  const isLive = options.liveness === "warm" || options.liveness === "draining";
   // Key the seed on the capture's REVISION (a primitive), not the manifest object
   // — a consumer passing a fresh object each render (or a new revision) must not
   // spin the effect. The latest manifest is read from a ref at run time.
   const captureRef = useRef<WorkspaceCaptureManifest | null>(capture);
   captureRef.current = capture;
   const captureRevision = capture?.revision ?? null;
-  const identityKey = `${workspaceId}\u0000${sessionId ?? ""}\u0000${rootPath}`;
   const previousIdentityRef = useRef(identityKey);
   useEffect(() => {
     // Any source-selection change supersedes an older root refresh. A true data
     // identity change additionally fences all other async tree work and resets
     // event/debounce state before the event-folding effect runs.
+    refreshAbortRef.current?.abort();
+    refreshAbortRef.current = null;
     refreshGenerationRef.current += 1;
     const identityChanged = previousIdentityRef.current !== identityKey;
     previousIdentityRef.current = identityKey;
     if (identityChanged || !enabled) {
+      identityAbortRef.current.abort();
+      identityAbortRef.current = new AbortController();
       identityGenerationRef.current += 1;
       lastSeqRef.current = 0;
       pendingParentsRef.current = new Set();
@@ -686,7 +938,9 @@ export function useSandboxFiles(
       statusRef.current = new Map();
       treeRef.current = [];
       setTree([]);
+      setStateIdentity(identityKey);
       setExpandingPaths(new Set());
+      sourceRef.current = null;
       setSource(null);
       setLoading(false);
       setError(null);
@@ -694,14 +948,16 @@ export function useSandboxFiles(
     if (!enabled) {
       return;
     }
-    if (isLive) {
-      void refresh();
-    } else if (captureRevision !== null && captureRef.current) {
-      seedFromCapture(captureRef.current);
-    } else {
+    const currentCapture = captureRevision !== null ? captureRef.current : null;
+    if (currentCapture && (identityChanged || !isLive || sourceRef.current !== "live")) {
+      seedFromCapture(currentCapture);
+    }
+    if (isLive || !currentCapture) {
       void refresh();
     }
     return () => {
+      refreshAbortRef.current?.abort();
+      refreshAbortRef.current = null;
       refreshGenerationRef.current += 1;
     };
   }, [enabled, isLive, captureRevision, identityKey, refresh, seedFromCapture]);
@@ -712,8 +968,14 @@ export function useSandboxFiles(
   const refreshGitOverlay = useCallback(async () => {
     if (!sessionId) return;
     const identityGeneration = identityGenerationRef.current;
+    const identitySignal = identityAbortRef.current.signal;
     try {
-      const status = await client.gitStatus(workspaceId, sessionId, { path: rootPath });
+      const status = await client.gitStatus(
+        workspaceId,
+        sessionId,
+        { path: rootPath },
+        { signal: identitySignal },
+      );
       if (identityGenerationRef.current !== identityGeneration) return;
       const overlay = new Map<string, FileTreeStatus>();
       for (const file of status.files) {
@@ -802,33 +1064,19 @@ export function useSandboxFiles(
 
   useEffect(
     () => () => {
+      refreshAbortRef.current?.abort();
+      identityAbortRef.current.abort();
       identityGenerationRef.current += 1;
       if (debounceRef.current) clearTimeout(debounceRef.current);
     },
     [],
   );
 
-  // Re-list when the box first becomes warm. The FileSystem capability is
-  // advertised on a cold box too, so the mount-time `refresh()` can run before
-  // the box is up (empty/errored result); without an `fs.changed` event the tree
-  // would stay empty forever. A cold->warm transition re-lists once the box is
-  // actually serving — the real fix for the "No files" the deployed app showed.
-  const wasLiveRef = useRef(false);
-  const liveness = options.liveness;
-  useEffect(() => {
-    const live = liveness === "warm" || liveness === "draining";
-    if (enabled && live && !wasLiveRef.current) {
-      wasLiveRef.current = true;
-      void refresh();
-    } else if (!live) {
-      wasLiveRef.current = false;
-    }
-  }, [enabled, liveness, refresh]);
-
+  const identityMatches = enabled && stateIdentity === identityKey;
   return {
-    tree,
+    tree: identityMatches ? tree : [],
     expand,
-    expandingPaths,
+    expandingPaths: identityMatches ? expandingPaths : new Set<string>(),
     readFile,
     writeFile,
     createFile,
@@ -836,9 +1084,9 @@ export function useSandboxFiles(
     deleteEntry,
     moveEntry,
     refresh,
-    source,
-    capturedAt: source === "capture" ? (capture?.capturedAt ?? null) : null,
-    loading,
-    error,
+    source: identityMatches ? source : null,
+    capturedAt: identityMatches && source === "capture" ? (capture?.capturedAt ?? null) : null,
+    loading: identityMatches && loading,
+    error: identityMatches ? error : null,
   };
 }

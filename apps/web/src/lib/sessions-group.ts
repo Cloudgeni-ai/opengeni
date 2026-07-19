@@ -159,6 +159,19 @@ export type SessionTreeNode = {
   hasActiveDescendant: boolean;
 };
 
+/**
+ * Merge two projections of the same session for the rail. Detail/SSE data is
+ * fresher for lifecycle fields, but detail reads intentionally omit treeStats.
+ * An omitted list-only field must not make the selected row forget its loaded
+ * hierarchy summary (and therefore lose its disclosure control).
+ */
+export function mergeSessionForRail(current: Session, incoming: Session): Session {
+  if (incoming.treeStats !== undefined || current.treeStats === undefined) {
+    return incoming;
+  }
+  return { ...incoming, treeStats: current.treeStats };
+}
+
 export type SessionForest = {
   running: SessionTreeNode[];
   grouped: {

@@ -154,7 +154,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await client?.close().catch(() => undefined);
   await shared?.release();
-});
+}, 180_000);
 
 describe("session pins (real PostgreSQL + FORCE RLS)", () => {
   test("lists server-authoritative descendant summaries for roots and lazy child pages", async () => {
