@@ -1,6 +1,7 @@
--- deployment-mode: rolling
--- OPE-29: additive typed scopes, labels, provenance, relationships, and
--- reversible maintenance plans for hierarchical role-aware memory.
+-- deployment-mode: maintenance
+-- OPE-29: drain-only typed scopes, labels, provenance, relationships, and
+-- reversible maintenance plans for hierarchical role-aware memory. Old
+-- workers must not overlap this migration because they ignore typed selectors.
 
 SET lock_timeout = '5s';
 SET statement_timeout = '10min';
@@ -37,9 +38,9 @@ UPDATE "knowledge_memories"
 SET "scope_type" = CASE WHEN "scope" = 'workspace' THEN 'workspace' ELSE 'legacy' END
 WHERE "scope_type" IS NULL;
 
--- During a rolling deploy, old writers still only populate `scope`. The trigger
--- derives a safe typed value for their inserts and scope-only updates; a new
--- writer that changes both fields keeps its explicit typed scope.
+-- The trigger preserves a safe typed value for legacy/manual inserts and
+-- scope-only updates after the maintenance cutover. It is not an overlap shim:
+-- old workers must already be drained before typed rows can be written.
 CREATE OR REPLACE FUNCTION opengeni_private.derive_memory_scope_type()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -85,7 +86,7 @@ BEGIN
         OR ("scope_type" = 'role'
           AND "scope_subject_id" IS NULL
           AND "scope_role_key" IS NOT NULL
-          AND length(btrim("scope_role_key")) > 0
+          AND "scope_role_key" ~ '^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$'
           AND "scope_session_id" IS NULL)
         OR ("scope_type" = 'session'
           AND "scope_subject_id" IS NULL AND "scope_role_key" IS NULL
@@ -159,7 +160,7 @@ CREATE INDEX IF NOT EXISTS "knowledge_memories_labels_idx"
 -- Exact dedup is scope-local. The V1 workspace-only index would incorrectly
 -- merge equal text belonging to different users, roles, or sessions.
 DROP INDEX IF EXISTS "knowledge_memories_workspace_visible_text_hash_uq";
-CREATE UNIQUE INDEX "knowledge_memories_scope_visible_text_hash_uq"
+CREATE UNIQUE INDEX IF NOT EXISTS "knowledge_memories_scope_visible_text_hash_uq"
   ON "knowledge_memories" (
     "workspace_id", "scope_type", "scope_subject_id", "scope_role_key", "scope_session_id", "text_hash"
   ) NULLS NOT DISTINCT
@@ -225,6 +226,10 @@ CREATE TABLE IF NOT EXISTS "knowledge_memory_operations" (
   "status" text NOT NULL DEFAULT 'previewed',
   "actor_subject_id" text NOT NULL,
   "actor_session_id" uuid,
+  "applied_by_subject_id" text,
+  "applied_by_session_id" uuid,
+  "reverted_by_subject_id" text,
+  "reverted_by_session_id" uuid,
   "plan_hash" text NOT NULL,
   "plan" jsonb NOT NULL DEFAULT '{}'::jsonb,
   "inverse_plan" jsonb,
@@ -237,15 +242,75 @@ CREATE TABLE IF NOT EXISTS "knowledge_memory_operations" (
   CONSTRAINT "knowledge_memory_operations_actor_session_fk"
     FOREIGN KEY ("workspace_id", "actor_session_id")
     REFERENCES "sessions"("workspace_id", "id") ON DELETE SET NULL ("actor_session_id"),
+  CONSTRAINT "knowledge_memory_operations_applied_session_fk"
+    FOREIGN KEY ("workspace_id", "applied_by_session_id")
+    REFERENCES "sessions"("workspace_id", "id") ON DELETE SET NULL ("applied_by_session_id"),
+  CONSTRAINT "knowledge_memory_operations_reverted_session_fk"
+    FOREIGN KEY ("workspace_id", "reverted_by_session_id")
+    REFERENCES "sessions"("workspace_id", "id") ON DELETE SET NULL ("reverted_by_session_id"),
   CONSTRAINT "knowledge_memory_operations_type_check"
     CHECK ("operation_type" IN ('retention', 'reconcile')),
   CONSTRAINT "knowledge_memory_operations_status_check"
     CHECK ("status" IN ('previewed', 'applied', 'reverted')),
   CONSTRAINT "knowledge_memory_operations_subject_nonempty"
     CHECK (length(btrim("actor_subject_id")) > 0),
+  CONSTRAINT "knowledge_memory_operations_action_subjects_nonempty"
+    CHECK (
+      ("applied_by_subject_id" IS NULL OR length(btrim("applied_by_subject_id")) > 0)
+      AND ("reverted_by_subject_id" IS NULL OR length(btrim("reverted_by_subject_id")) > 0)
+    ),
   CONSTRAINT "knowledge_memory_operations_plan_hash_check"
     CHECK ("plan_hash" ~ '^[a-f0-9]{64}$')
 );
+
+-- Retry recovery: if all SQL succeeded but the schema_migrations marker did
+-- not, CREATE TABLE IF NOT EXISTS does not evolve the already-created table.
+-- Add every post-preview attribution column idempotently before installing the
+-- matching constraints.
+ALTER TABLE "knowledge_memory_operations"
+  ADD COLUMN IF NOT EXISTS "applied_by_subject_id" text;
+ALTER TABLE "knowledge_memory_operations"
+  ADD COLUMN IF NOT EXISTS "applied_by_session_id" uuid;
+ALTER TABLE "knowledge_memory_operations"
+  ADD COLUMN IF NOT EXISTS "reverted_by_subject_id" text;
+ALTER TABLE "knowledge_memory_operations"
+  ADD COLUMN IF NOT EXISTS "reverted_by_session_id" uuid;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'knowledge_memory_operations_applied_session_fk'
+      AND conrelid = 'knowledge_memory_operations'::regclass
+  ) THEN
+    ALTER TABLE "knowledge_memory_operations"
+      ADD CONSTRAINT "knowledge_memory_operations_applied_session_fk"
+      FOREIGN KEY ("workspace_id", "applied_by_session_id")
+      REFERENCES "sessions"("workspace_id", "id") ON DELETE SET NULL ("applied_by_session_id");
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'knowledge_memory_operations_reverted_session_fk'
+      AND conrelid = 'knowledge_memory_operations'::regclass
+  ) THEN
+    ALTER TABLE "knowledge_memory_operations"
+      ADD CONSTRAINT "knowledge_memory_operations_reverted_session_fk"
+      FOREIGN KEY ("workspace_id", "reverted_by_session_id")
+      REFERENCES "sessions"("workspace_id", "id") ON DELETE SET NULL ("reverted_by_session_id");
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'knowledge_memory_operations_action_subjects_nonempty'
+      AND conrelid = 'knowledge_memory_operations'::regclass
+  ) THEN
+    ALTER TABLE "knowledge_memory_operations"
+      ADD CONSTRAINT "knowledge_memory_operations_action_subjects_nonempty"
+      CHECK (
+        ("applied_by_subject_id" IS NULL OR length(btrim("applied_by_subject_id")) > 0)
+        AND ("reverted_by_subject_id" IS NULL OR length(btrim("reverted_by_subject_id")) > 0)
+      );
+  END IF;
+END $$;
 
 CREATE INDEX IF NOT EXISTS "knowledge_memory_operations_actor_created_idx"
   ON "knowledge_memory_operations" ("workspace_id", "actor_subject_id", "created_at" DESC);

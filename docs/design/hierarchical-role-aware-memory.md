@@ -61,7 +61,7 @@ the audited SHA. These values are a point-in-time observation, not a live SLO.
 
 Implemented on the focused branch after the audited baseline:
 
-- rolling migration `0065_hierarchical_role_aware_memory.sql` adds trusted session
+- maintenance/drain-only migration `0065_hierarchical_role_aware_memory.sql` adds trusted session
   creator provenance, typed scopes, bounded labels, relationships, reversible
   maintenance operations, and text-free deletion/private-export audit tables;
   all five memory tables are FORCE RLS;
@@ -329,7 +329,20 @@ Required database evidence uses a non-owner app role and at least:
 
 ## Migration and rollout
 
-The implementation uses additive rolling migration `0065` after `0064`:
+The implementation uses maintenance/drain-only migration `0065` after `0064`.
+Although its storage changes are additive, it is not safe for mixed worker
+versions: an old worker ignores typed applicability and can over-read role-,
+session-, or ephemeral-scoped rows written by a new worker during overlap.
+
+The cutover sequence is therefore:
+
+1. stop new session/turn admission;
+2. drain and terminate every old worker and in-flight session execution;
+3. apply `0065` with no old application process reading memory;
+4. start only compatible API and worker versions;
+5. verify health and reopen admission.
+
+Within that fenced cutover, `0065`:
 
 1. add nullable session creator provenance and typed memory columns with safe
    defaults;
@@ -337,14 +350,15 @@ The implementation uses additive rolling migration `0065` after `0064`:
 3. add checks/indexes/composite FKs;
 4. create relationship and audit/operation tables with FORCE RLS;
 5. replace the memory policy with workspace + subject semantics;
-6. deploy tolerant readers/writers; then enable typed writes;
+6. start compatible readers/writers and enable typed writes;
 7. keep the workspace `memoryEnabled` gate and V1 fallbacks.
 
-The first migration line is `-- deployment-mode: rolling`. No applied migration is
-rewritten. Rollback disables typed writes/injection and returns to V1 workspace-only
-selection; additive columns/tables can remain until a maintenance migration removes
-them. Unknown fields remain safe for older clients under the same-major additive
-contract policy.
+The first migration line is `-- deployment-mode: maintenance`. No released/applied
+migration is rewritten. Rollback keeps admission closed, drains the incompatible
+runtime, disables typed writes/injection, and returns to V1 workspace-only selection;
+additive columns/tables can remain until a later maintenance migration removes them.
+Unknown fields remain safe for older clients under the same-major additive contract
+policy, but that wire compatibility does not make mixed memory readers safe.
 
 ## Verification contract
 

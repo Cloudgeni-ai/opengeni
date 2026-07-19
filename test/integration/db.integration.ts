@@ -959,6 +959,28 @@ describe("DB integration", () => {
     ] as Permission[]);
   });
 
+  test("migration 0065 recovers after SQL success without a schema marker", async () => {
+    const migrationName = "0065_hierarchical_role_aware_memory.sql";
+    await dbClient.db.execute(
+      dbSql`DELETE FROM "schema_migrations" WHERE "name" = ${migrationName}`,
+    );
+
+    // Reproduce a connection/process failure after the SQL file completed but
+    // before migrate() inserted its separate schema_migrations marker.
+    await services.migrate();
+
+    const [evidence] = await dbClient.db.execute<{
+      markerCount: number;
+      indexName: string | null;
+    }>(dbSql`
+      select
+        (select count(*)::int from schema_migrations where name = ${migrationName}) as "markerCount",
+        to_regclass('knowledge_memories_scope_visible_text_hash_uq')::text as "indexName"
+    `);
+    expect(Number(evidence?.markerCount ?? 0)).toBe(1);
+    expect(evidence?.indexName).toBe("knowledge_memories_scope_visible_text_hash_uq");
+  }, 180_000);
+
   test("RLS policies isolate session goal rows for a non-owner app role", async () => {
     const appRoleUrl = await createRlsAppRole(dbClient.db, services.databaseUrl);
     const appDbClient = createDb(appRoleUrl);
@@ -1114,7 +1136,7 @@ describe("DB integration", () => {
       await createKnowledgeMemory(dbClient.db, {
         accountId: grantB.accountId,
         workspaceId: grantB.workspaceId,
-        status: "approved",
+        status: "proposed",
         kind: "decision",
         text: "Workspace B private decision",
       });
@@ -1353,12 +1375,16 @@ describe("DB integration", () => {
 
   test("exact-duplicate save dedupes against approved curated memory", async () => {
     const grant = await testGrant(dbClient.db);
-    const curated = await createKnowledgeMemory(dbClient.db, {
+    const proposed = await createKnowledgeMemory(dbClient.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
-      status: "approved",
+      status: "proposed",
       kind: "semantic",
       text: "Production deploys require a release manager approval.",
+    });
+    const curated = await updateKnowledgeMemory(dbClient.db, grant.workspaceId, proposed.id, {
+      status: "approved",
+      reviewedBy: "test reviewer",
     });
     const saved = await saveWorkspaceMemory(
       dbClient.db,
@@ -1372,6 +1398,20 @@ describe("DB integration", () => {
     expect(saved.deduped).toBe(true);
     expect(saved.dedupeReason).toBe("exact");
     expect(saved.memory.id).toBe(curated.id);
+  });
+
+  test("direct curated creation rejects reviewed terminal statuses", async () => {
+    const grant = await testGrant(dbClient.db);
+    for (const status of ["approved", "rejected"] as const) {
+      await expect(
+        createKnowledgeMemory(dbClient.db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          status: status as never,
+          text: `Direct ${status} creation must not bypass review.`,
+        }),
+      ).rejects.toThrow(/only supports proposed status/i);
+    }
   });
 
   test("AC-3: near-duplicate (cosine >= threshold) save is a NOOP", async () => {
@@ -2101,8 +2141,8 @@ describe("DB integration", () => {
         initialMessage: "hierarchical memory context",
         resources: [],
         metadata: {
-          role: "Release Manager",
-          memoryLabels: ["ope-29", "Deploy"],
+          role: "Release.Ops",
+          memoryLabels: ["ope.29", "Deploy"],
         },
         model: "scripted-model",
         sandboxBackend: "none",
@@ -2153,7 +2193,7 @@ describe("DB integration", () => {
       );
       const role = await save("OPE29 scope marker role", {
         type: "role",
-        roleKey: "release-manager",
+        roleKey: "release.ops",
       });
       const wrongRole = await save("OPE29 scope marker wrong role", {
         type: "role",
@@ -2178,9 +2218,9 @@ describe("DB integration", () => {
       const context = await getSessionMemoryContext(appDbClient.db, grant.workspaceId, session.id);
       expect(context).toMatchObject({
         access: accessA,
-        roleKey: "release-manager",
+        roleKey: "release.ops",
         sessionId: session.id,
-        memoryLabels: ["deploy", "ope-29"],
+        memoryLabels: ["deploy", "ope.29"],
       });
       const hits = await searchWorkspaceMemories(appDbClient.db, grant.workspaceId, {
         query: "OPE29 scope marker",
@@ -2575,6 +2615,22 @@ describe("DB integration", () => {
     try {
       const grant = await testGrant(dbClient.db);
       const access = { subjectId: grant.subjectId };
+      const applySubjectId = `test:maintenance-apply:${crypto.randomUUID()}`;
+      const revertSubjectId = `test:maintenance-revert:${crypto.randomUUID()}`;
+      const makeActorSession = async (subjectId: string, action: string) =>
+        await createSession(dbClient.db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          initialMessage: `${action} memory maintenance`,
+          resources: [],
+          metadata: {},
+          model: "scripted-model",
+          sandboxBackend: "none",
+          createdBySubjectId: subjectId,
+        });
+      const previewSession = await makeActorSession(grant.subjectId, "preview");
+      const applySession = await makeActorSession(applySubjectId, "apply");
+      const revertSession = await makeActorSession(revertSubjectId, "revert");
       const first = await saveWorkspaceMemory(appDbClient.db, {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
@@ -2597,6 +2653,7 @@ describe("DB integration", () => {
         type: "retention",
         expiredBefore: new Date("2026-02-01T00:00:00.000Z"),
         now: new Date("2026-03-01T00:00:00.000Z"),
+        actorSessionId: previewSession.id,
         access,
       });
       expect(preview.candidateMemoryIds).toEqual([first.memory.id, second.memory.id].sort());
@@ -2622,7 +2679,7 @@ describe("DB integration", () => {
           preview.id,
           preview.planHash,
           access,
-          new Date("2026-03-02T00:00:00.000Z"),
+          { now: new Date("2026-03-02T00:00:00.000Z") },
         ),
       ).rejects.toThrow(/precondition changed/i);
       expect(
@@ -2642,6 +2699,7 @@ describe("DB integration", () => {
         type: "retention",
         expiredBefore: new Date("2026-02-01T00:00:00.000Z"),
         now: new Date("2026-03-03T00:00:00.000Z"),
+        actorSessionId: previewSession.id,
         access,
       });
       const applied = await applyMemoryMaintenance(
@@ -2649,10 +2707,21 @@ describe("DB integration", () => {
         grant.workspaceId,
         retry.id,
         retry.planHash,
-        access,
-        new Date("2026-03-04T00:00:00.000Z"),
+        { subjectId: applySubjectId, privateAdmin: true },
+        {
+          actorSessionId: applySession.id,
+          now: new Date("2026-03-04T00:00:00.000Z"),
+        },
       );
-      expect(applied.status).toBe("applied");
+      expect(applied).toMatchObject({
+        status: "applied",
+        previewActorSubjectId: grant.subjectId,
+        previewActorSessionId: previewSession.id,
+        appliedBySubjectId: applySubjectId,
+        appliedBySessionId: applySession.id,
+        revertedBySubjectId: null,
+        revertedBySessionId: null,
+      });
       expect(
         await getKnowledgeMemory(appDbClient.db, grant.workspaceId, first.memory.id, access),
       ).toMatchObject({
@@ -2663,10 +2732,21 @@ describe("DB integration", () => {
         grant.workspaceId,
         retry.id,
         retry.planHash,
-        access,
-        new Date("2026-03-05T00:00:00.000Z"),
+        { subjectId: revertSubjectId, privateAdmin: true },
+        {
+          actorSessionId: revertSession.id,
+          now: new Date("2026-03-05T00:00:00.000Z"),
+        },
       );
-      expect(reverted.status).toBe("reverted");
+      expect(reverted).toMatchObject({
+        status: "reverted",
+        previewActorSubjectId: grant.subjectId,
+        previewActorSessionId: previewSession.id,
+        appliedBySubjectId: applySubjectId,
+        appliedBySessionId: applySession.id,
+        revertedBySubjectId: revertSubjectId,
+        revertedBySessionId: revertSession.id,
+      });
       expect(
         await getKnowledgeMemory(appDbClient.db, grant.workspaceId, first.memory.id, access),
       ).toMatchObject({

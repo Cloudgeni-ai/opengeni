@@ -10,6 +10,7 @@ import {
   claimSessionWorkForAttempt,
   isSessionCompactionRequested,
   createDb,
+  createKnowledgeMemory,
   createSession,
   createWorkspaceEnvironment,
   dbSql,
@@ -37,6 +38,7 @@ import {
   recordUsageEvent,
   requireFile,
   requireSession,
+  saveWorkspaceMemory,
   setSessionGoalStatus,
   sumUsageQuantity,
   updateScheduledTask,
@@ -4608,6 +4610,18 @@ describe("API component integration", () => {
     expect(proposed.kind).toBe("decision");
     expect(proposed.workspaceId).toBe(workspaceId);
 
+    for (const reviewedStatus of ["approved", "rejected"] as const) {
+      const directReviewed = await app.request(workspacePath(workspaceId, "/knowledge/memories"), {
+        method: "POST",
+        body: JSON.stringify({
+          status: reviewedStatus,
+          text: `Must pass through proposed before ${reviewedStatus}.`,
+        }),
+        headers: { "content-type": "application/json" },
+      });
+      expect(directReviewed.status).toBe(400);
+    }
+
     const approvedSearchBefore = await app.request(
       workspacePath(workspaceId, "/knowledge/memories?status=approved&query=Azure"),
     );
@@ -4690,9 +4704,29 @@ describe("API component integration", () => {
     const subjectA = `user:memory-a:${crypto.randomUUID()}`;
     const subjectB = `user:memory-b:${crypto.randomUUID()}`;
     const forgedSessionId = crypto.randomUUID();
+    const trustedSession = await createSession(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "trusted REST hierarchical memory context",
+      resources: [],
+      metadata: { role: "Release.Ops", memoryLabels: ["release.ops"] },
+      model: "scripted-model",
+      sandboxBackend: "none",
+      createdBySubjectId: subjectA,
+    });
     const tokenA = await signDelegatedBearer(delegationSecret, grant, {
       subjectId: subjectA,
       permissions: ["documents:search", "documents:manage"],
+    });
+    const sessionTokenA = await signDelegatedBearer(delegationSecret, grant, {
+      subjectId: subjectA,
+      permissions: ["documents:search", "documents:manage"],
+      sessionId: trustedSession.id,
+    });
+    const missingSessionTokenA = await signDelegatedBearer(delegationSecret, grant, {
+      subjectId: subjectA,
+      permissions: ["documents:search", "documents:manage"],
+      sessionId: forgedSessionId,
     });
     const tokenB = await signDelegatedBearer(delegationSecret, grant, {
       subjectId: subjectB,
@@ -4757,14 +4791,136 @@ describe("API component integration", () => {
       from knowledge_memories
       where id = ${created.id}::uuid
     `);
-    expect(stored).toEqual({ scopeSubjectId: subjectA, createdBySessionId: null });
+    expect(stored).toEqual({
+      scopeSubjectId: subjectA,
+      createdBySessionId: null,
+    });
+
+    const unsignedRoleWrite = await app.request(
+      workspacePath(grant.workspaceId, "/knowledge/memories"),
+      {
+        method: "POST",
+        headers: jsonHeaders(tokenA),
+        body: JSON.stringify({
+          text: "Unsigned role selector must fail closed.",
+          scopeSpec: { type: "role", roleKey: "forged.role" },
+        }),
+      },
+    );
+    expect(unsignedRoleWrite.status).toBe(403);
+    const missingSessionWrite = await app.request(
+      workspacePath(grant.workspaceId, "/knowledge/memories"),
+      {
+        method: "POST",
+        headers: jsonHeaders(missingSessionTokenA),
+        body: JSON.stringify({
+          text: "Unknown signed session selector must fail closed.",
+          scopeSpec: { type: "session", sessionId: trustedSession.id },
+        }),
+      },
+    );
+    expect(missingSessionWrite.status).toBe(403);
+
+    const createTrustedScope = async (
+      scopeSpec:
+        | { type: "role"; roleKey: string }
+        | { type: "session"; sessionId: string }
+        | { type: "ephemeral"; sessionId: string },
+    ) => {
+      const response = await app.request(workspacePath(grant.workspaceId, "/knowledge/memories"), {
+        method: "POST",
+        headers: jsonHeaders(sessionTokenA),
+        body: JSON.stringify({
+          text: `Trusted REST ${scopeSpec.type} selector ${crypto.randomUUID()}.`,
+          scopeSpec,
+          ...(scopeSpec.type === "ephemeral"
+            ? { validUntil: new Date(Date.now() + 60_000).toISOString() }
+            : {}),
+        }),
+      });
+      expect(response.status).toBe(201);
+      return (await response.json()) as {
+        id: string;
+        scopeSpec: { type: string; roleKey?: string; sessionId?: string };
+      };
+    };
+    const roleScoped = await createTrustedScope({
+      type: "role",
+      roleKey: "forged.role",
+    });
+    expect(roleScoped.scopeSpec).toEqual({
+      type: "role",
+      roleKey: "release.ops",
+    });
+    const sessionScoped = await createTrustedScope({
+      type: "session",
+      sessionId: forgedSessionId,
+    });
+    expect(sessionScoped.scopeSpec).toEqual({
+      type: "session",
+      sessionId: trustedSession.id,
+    });
+    const ephemeralScoped = await createTrustedScope({
+      type: "ephemeral",
+      sessionId: forgedSessionId,
+    });
+    expect(ephemeralScoped.scopeSpec).toEqual({
+      type: "ephemeral",
+      sessionId: trustedSession.id,
+    });
+
+    const trustedScopedSearch = await app.request(
+      workspacePath(grant.workspaceId, "/knowledge/memories/search"),
+      {
+        method: "POST",
+        headers: jsonHeaders(sessionTokenA),
+        body: JSON.stringify({
+          query: "Trusted REST selector",
+          mode: "keyword",
+          scopeTypes: ["role", "session", "ephemeral"],
+          roleKey: "forged.role",
+          sessionId: forgedSessionId,
+        }),
+      },
+    );
+    expect(trustedScopedSearch.status).toBe(200);
+    const trustedScopedIds = (
+      (await trustedScopedSearch.json()) as {
+        results: Array<{ memory: { id: string } }>;
+      }
+    ).results.map((result) => result.memory.id);
+    expect(trustedScopedIds).toEqual(
+      expect.arrayContaining([roleScoped.id, sessionScoped.id, ephemeralScoped.id]),
+    );
+
+    const patchedScope = await app.request(
+      workspacePath(grant.workspaceId, `/knowledge/memories/${roleScoped.id}`),
+      {
+        method: "PATCH",
+        headers: jsonHeaders(sessionTokenA),
+        body: JSON.stringify({
+          scopeSpec: { type: "session", sessionId: forgedSessionId },
+        }),
+      },
+    );
+    expect(patchedScope.status).toBe(200);
+    expect(
+      (
+        (await patchedScope.json()) as {
+          scopeSpec: { type: string; sessionId?: string };
+        }
+      ).scopeSpec,
+    ).toEqual({ type: "session", sessionId: trustedSession.id });
 
     const reviewResponse = await app.request(
       workspacePath(grant.workspaceId, `/knowledge/memories/${created.id}`),
       {
         method: "PATCH",
         headers: jsonHeaders(tokenA),
-        body: JSON.stringify({ status: "approved", reviewedBy: "forged-reviewer" }),
+        body: JSON.stringify({
+          status: "approved",
+          reviewedBy: "forged-reviewer",
+        }),
       },
     );
     expect(reviewResponse.status).toBe(200);
@@ -4772,7 +4928,18 @@ describe("API component integration", () => {
       subjectA,
     );
 
-    const listA = await app.request(
+    // Exercise the read/export/delete lane through a non-owner role. The suite's
+    // shared owner connection intentionally bypasses RLS and therefore cannot
+    // prove private user-memory visibility boundaries.
+    const rlsDbClient = createDb(await createRlsAppRole(dbClient.db, services.databaseUrl));
+    const rlsApp = createApp({
+      settings: { ...settings, productAccessMode: "configured" },
+      db: rlsDbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+      documentServices: createDocumentServices(settings),
+    });
+    const listA = await rlsApp.request(
       workspacePath(
         grant.workspaceId,
         "/knowledge/memories?scopeType=user&labels=private&includeExpired=false",
@@ -4783,7 +4950,7 @@ describe("API component integration", () => {
     expect(((await listA.json()) as Array<{ id: string }>).map((memory) => memory.id)).toContain(
       created.id,
     );
-    const listB = await app.request(
+    const listB = await rlsApp.request(
       workspacePath(grant.workspaceId, "/knowledge/memories?scopeType=user"),
       { headers: { authorization: tokenB } },
     );
@@ -4791,12 +4958,12 @@ describe("API component integration", () => {
     expect(
       ((await listB.json()) as Array<{ id: string }>).map((memory) => memory.id),
     ).not.toContain(created.id);
-    const getB = await app.request(
+    const getB = await rlsApp.request(
       workspacePath(grant.workspaceId, `/knowledge/memories/${created.id}`),
       { headers: { authorization: tokenB } },
     );
     expect(getB.status).toBe(404);
-    const searchB = await app.request(
+    const searchB = await rlsApp.request(
       workspacePath(grant.workspaceId, "/knowledge/memories/search"),
       {
         method: "POST",
@@ -4816,7 +4983,7 @@ describe("API component integration", () => {
         }
       ).results.map((result) => result.memory.id),
     ).not.toContain(created.id);
-    const exportB = await app.request(
+    const exportB = await rlsApp.request(
       workspacePath(grant.workspaceId, "/knowledge/memories/export"),
       { headers: { authorization: tokenB } },
     );
@@ -4827,12 +4994,12 @@ describe("API component integration", () => {
       ),
     ).not.toContain(created.id);
 
-    const deniedPrivate = await app.request(
+    const deniedPrivate = await rlsApp.request(
       workspacePath(grant.workspaceId, "/knowledge/memories/export?includePrivate=true"),
       { headers: { authorization: tokenA } },
     );
     expect(deniedPrivate.status).toBe(403);
-    const privateExport = await app.request(
+    const privateExport = await rlsApp.request(
       workspacePath(grant.workspaceId, "/knowledge/memories/export?includePrivate=true"),
       { headers: { authorization: adminToken } },
     );
@@ -4855,7 +5022,7 @@ describe("API component integration", () => {
     expect(exportAudit?.includedPrivate).toBe(true);
     expect(Number(exportAudit?.memoryCount ?? 0)).toBeGreaterThan(0);
 
-    const deniedMaintenance = await app.request(
+    const deniedMaintenance = await rlsApp.request(
       workspacePath(grant.workspaceId, "/knowledge/memories/maintenance/preview"),
       {
         method: "POST",
@@ -4868,11 +5035,128 @@ describe("API component integration", () => {
     );
     expect(deniedMaintenance.status).toBe(403);
 
-    const deleted = await app.request(
+    const deleted = await rlsApp.request(
       workspacePath(grant.workspaceId, `/knowledge/memories/${created.id}`),
       { method: "DELETE", headers: { authorization: tokenA } },
     );
     expect(deleted.status).toBe(200);
+    await rlsDbClient.close();
+  });
+
+  test("attributes maintenance preview, apply, and revert to each signed admin actor", async () => {
+    const delegationSecret = "test-memory-maintenance-delegation-secret";
+    const settings = testSettings({
+      databaseUrl: services.databaseUrl,
+      delegationSecret,
+    });
+    const app = createApp({
+      settings: { ...settings, productAccessMode: "configured" },
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+      documentServices: createDocumentServices(settings),
+    });
+    const grant = await bootstrapMcpGrant(dbClient.db);
+    const subjects = {
+      preview: `admin:memory-preview:${crypto.randomUUID()}`,
+      apply: `admin:memory-apply:${crypto.randomUUID()}`,
+      revert: `admin:memory-revert:${crypto.randomUUID()}`,
+    };
+    const sessions = Object.fromEntries(
+      await Promise.all(
+        Object.entries(subjects).map(async ([action, subjectId]) => [
+          action,
+          await createSession(dbClient.db, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            initialMessage: `${action} REST memory maintenance`,
+            resources: [],
+            metadata: {},
+            model: "scripted-model",
+            sandboxBackend: "none",
+            createdBySubjectId: subjectId,
+          }),
+        ]),
+      ),
+    ) as Record<keyof typeof subjects, { id: string }>;
+    const tokens = Object.fromEntries(
+      await Promise.all(
+        Object.entries(subjects).map(async ([action, subjectId]) => [
+          action,
+          await signDelegatedBearer(delegationSecret, grant, {
+            subjectId,
+            permissions: ["workspace:admin"],
+            sessionId: sessions[action as keyof typeof sessions].id,
+          }),
+        ]),
+      ),
+    ) as Record<keyof typeof subjects, string>;
+    const candidate = await createKnowledgeMemory(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      status: "proposed",
+      text: "Cross-admin maintenance attribution candidate.",
+    });
+    const headers = (authorization: string) => ({
+      authorization,
+      "content-type": "application/json",
+    });
+
+    const previewResponse = await app.request(
+      workspacePath(grant.workspaceId, "/knowledge/memories/maintenance/preview"),
+      {
+        method: "POST",
+        headers: headers(tokens.preview),
+        body: JSON.stringify({ type: "reconcile", memoryIds: [candidate.id] }),
+      },
+    );
+    expect(previewResponse.status).toBe(201);
+    const preview = (await previewResponse.json()) as {
+      id: string;
+      planHash: string;
+      previewActorSubjectId: string;
+      previewActorSessionId: string | null;
+    };
+    expect(preview).toMatchObject({
+      previewActorSubjectId: subjects.preview,
+      previewActorSessionId: sessions.preview.id,
+    });
+
+    const applyResponse = await app.request(
+      workspacePath(grant.workspaceId, `/knowledge/memories/maintenance/${preview.id}/apply`),
+      {
+        method: "POST",
+        headers: headers(tokens.apply),
+        body: JSON.stringify({ planHash: preview.planHash }),
+      },
+    );
+    expect(applyResponse.status).toBe(200);
+    expect(await applyResponse.json()).toMatchObject({
+      previewActorSubjectId: subjects.preview,
+      previewActorSessionId: sessions.preview.id,
+      appliedBySubjectId: subjects.apply,
+      appliedBySessionId: sessions.apply.id,
+      revertedBySubjectId: null,
+      revertedBySessionId: null,
+    });
+
+    const revertResponse = await app.request(
+      workspacePath(grant.workspaceId, `/knowledge/memories/maintenance/${preview.id}/revert`),
+      {
+        method: "POST",
+        headers: headers(tokens.revert),
+        body: JSON.stringify({ planHash: preview.planHash }),
+      },
+    );
+    expect(revertResponse.status).toBe(200);
+    expect(await revertResponse.json()).toMatchObject({
+      previewActorSubjectId: subjects.preview,
+      previewActorSessionId: sessions.preview.id,
+      appliedBySubjectId: subjects.apply,
+      appliedBySessionId: sessions.apply.id,
+      revertedBySubjectId: subjects.revert,
+      revertedBySessionId: sessions.revert.id,
+    });
   });
 
   test("serves relationship, export, delete, and reversible maintenance memory routes", async () => {
@@ -5810,7 +6094,10 @@ describe("API component integration", () => {
         workspaceId,
         initialMessage: "workspace memory MCP session",
         resources: [],
-        metadata: { role: "Release Manager", memoryLabels: ["deploy", "release"] },
+        metadata: {
+          role: "Release Manager",
+          memoryLabels: ["deploy", "release"],
+        },
         model: "scripted-model",
         sandboxBackend: "none",
         createdBySubjectId: memoryOwnerSubject,
@@ -5845,14 +6132,34 @@ describe("API component integration", () => {
         sessionId: session.id,
         subjectId: "test:mcp-memory-enabled",
       });
-      const memoryTools = (await prepared.mcpServers[0]!.listTools())
-        .map((tool) => tool.name)
-        .sort();
+      const listedMemoryTools = await prepared.mcpServers[0]!.listTools();
+      const memoryTools = listedMemoryTools.map((tool) => tool.name).sort();
       expect(memoryTools).toEqual([
         "opengeni__memory_correct",
         "opengeni__memory_save",
         "opengeni__memory_search",
       ]);
+      const memorySearchTool = listedMemoryTools.find(
+        (tool) => tool.name === "opengeni__memory_search",
+      );
+      expect(JSON.stringify(memorySearchTool?.inputSchema ?? {})).not.toContain("include_expired");
+
+      const referenceTime = Date.now();
+      const expired = await saveWorkspaceMemory(dbClient.db, {
+        accountId,
+        workspaceId,
+        text: "Retired MCP expiry sentinel must remain audit-only.",
+        validFrom: new Date(referenceTime - 120_000),
+        validUntil: new Date(referenceTime - 60_000),
+        access: { subjectId: memoryOwnerSubject },
+      });
+      const forgedExpiredSearch = mcpText(
+        await prepared.mcpServers[0]!.callTool("opengeni__memory_search", {
+          query: "Retired MCP expiry sentinel",
+          include_expired: true,
+        }),
+      );
+      expect(forgedExpiredSearch).not.toContain(expired.memory.id);
 
       const saved = JSON.parse(
         mcpText(
@@ -5906,16 +6213,26 @@ describe("API component integration", () => {
       };
       expect(privateSaved.memory.scopeSpec).toEqual({ type: "user" });
       expect(privateSaved.memory.labels).toEqual(["release"]);
-      expect(
-        await getKnowledgeMemory(dbClient.db, workspaceId, privateSaved.memory.id, {
-          subjectId: memoryOwnerSubject,
-        }),
-      ).toMatchObject({ id: privateSaved.memory.id, scopeSpec: { type: "user" } });
-      expect(
-        await getKnowledgeMemory(dbClient.db, workspaceId, privateSaved.memory.id, {
-          subjectId: "worker:first-party-mcp",
-        }),
-      ).toBeNull();
+      const privateRlsDbClient = createDb(
+        await createRlsAppRole(dbClient.db, services.databaseUrl),
+      );
+      try {
+        expect(
+          await getKnowledgeMemory(privateRlsDbClient.db, workspaceId, privateSaved.memory.id, {
+            subjectId: memoryOwnerSubject,
+          }),
+        ).toMatchObject({
+          id: privateSaved.memory.id,
+          scopeSpec: { type: "user" },
+        });
+        expect(
+          await getKnowledgeMemory(privateRlsDbClient.db, workspaceId, privateSaved.memory.id, {
+            subjectId: "worker:first-party-mcp",
+          }),
+        ).toBeNull();
+      } finally {
+        await privateRlsDbClient.close();
+      }
 
       const roleSaved = JSON.parse(
         mcpText(
@@ -5970,15 +6287,28 @@ describe("API component integration", () => {
       const saveEvents = (await listSessionEvents(dbClient.db, workspaceId, session.id)).filter(
         (event) => event.type === "memory.saved",
       );
-      expect(saveEvents).toHaveLength(1);
-      expect(saveEvents[0]?.payload).toMatchObject({
+      expect(saveEvents).toHaveLength(4);
+      expect(saveEvents.map((event) => (event.payload as { memoryId?: string }).memoryId)).toEqual(
+        expect.arrayContaining([
+          saved.memory.id,
+          privateSaved.memory.id,
+          roleSaved.memory.id,
+          ephemeralSaved.memory.id,
+        ]),
+      );
+      const workspaceSaveEvent = saveEvents.find(
+        (event) => (event.payload as { memoryId?: string }).memoryId === saved.memory.id,
+      );
+      expect(workspaceSaveEvent?.payload).toMatchObject({
         memoryId: saved.memory.id,
         kind: "procedural",
         preview: "Staging deploys from main only, via opengeni-ops.",
       });
-      expect(
-        ((saveEvents[0]?.payload as { preview?: string } | undefined)?.preview ?? "").length,
-      ).toBeLessThanOrEqual(120);
+      for (const event of saveEvents) {
+        expect(
+          ((event.payload as { preview?: string } | undefined)?.preview ?? "").length,
+        ).toBeLessThanOrEqual(120);
+      }
 
       const search = JSON.parse(
         mcpText(
@@ -8558,6 +8888,27 @@ async function bootstrapMcpGrant(db: ReturnType<typeof createDb>["db"]) {
     throw new Error("MCP bootstrap did not create a workspace grant");
   }
   return grant;
+}
+
+async function createRlsAppRole(
+  db: ReturnType<typeof createDb>["db"],
+  ownerUrl: string,
+): Promise<string> {
+  const role = `opengeni_rls_${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`;
+  const password = `pw_${crypto.randomUUID().replace(/-/g, "")}`;
+  await db.execute(dbSql.raw(`CREATE ROLE "${role}" LOGIN PASSWORD '${password}'`));
+  await db.execute(dbSql.raw(`GRANT USAGE ON SCHEMA public TO "${role}"`));
+  await db.execute(dbSql.raw(`GRANT USAGE ON SCHEMA opengeni_private TO "${role}"`));
+  await db.execute(
+    dbSql.raw(`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO "${role}"`),
+  );
+  await db.execute(
+    dbSql.raw(`GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA opengeni_private TO "${role}"`),
+  );
+  const url = new URL(ownerUrl);
+  url.username = role;
+  url.password = password;
+  return url.toString();
 }
 
 type TestWorkspaceGrant = AccessContext["workspaceGrants"][number];

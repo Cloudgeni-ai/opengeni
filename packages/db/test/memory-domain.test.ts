@@ -62,12 +62,13 @@ describe("hierarchical labels and role keys", () => {
   test("normalizes labels to bounded, sorted, unique slugs", () => {
     expect(
       normalizeMemoryLabels([" Deploy ", "OPS_team", "task one", "deploy", "bad.label"]),
-    ).toEqual(["deploy", "ops_team", "task-one"]);
+    ).toEqual(["bad.label", "deploy", "ops_team", "task-one"]);
     expect(normalizeMemoryLabel("x".repeat(MEMORY_LABEL_MAX_CHARS))).toHaveLength(
       MEMORY_LABEL_MAX_CHARS,
     );
     expect(normalizeMemoryLabel("x".repeat(MEMORY_LABEL_MAX_CHARS + 1))).toBeNull();
-    expect(normalizeMemoryLabel("unsafe.label")).toBeNull();
+    expect(normalizeMemoryLabel("ops.v2")).toBe("ops.v2");
+    expect(normalizeMemoryLabel("unsafe/label")).toBeNull();
   });
 
   test("bounds label count and normalizes role keys with the same fail-closed alphabet", () => {
@@ -77,6 +78,7 @@ describe("hierarchical labels and role keys", () => {
     expect(labels).toHaveLength(MEMORY_LABEL_MAX_COUNT);
     expect(labels.every((label) => label.length <= MEMORY_LABEL_MAX_CHARS)).toBe(true);
     expect(normalizeMemoryRoleKey("  Incident Commander ")).toBe("incident-commander");
+    expect(normalizeMemoryRoleKey(" Release.Ops ")).toBe("release.ops");
     expect(normalizeMemoryRoleKey("role/ops")).toBeNull();
     expect(normalizeMemoryRoleKey("r".repeat(MEMORY_ROLE_KEY_MAX_CHARS + 1))).toBeNull();
     expect(normalizeMemoryRoleKey(null)).toBeNull();
@@ -122,6 +124,12 @@ describe("hierarchical scope applicability", () => {
         { roleKey: context.roleKey, sessionId },
       ),
     ).toBe(false);
+    expect(
+      isMemoryScopeApplicable(
+        { scopeType: "role", scopeRoleKey: "ops.v2" },
+        { roleKey: "OPS.V2", sessionId },
+      ),
+    ).toBe(true);
   });
 
   test("uses the caller's one reference time for validity and ephemeral expiry", () => {

@@ -62,7 +62,10 @@ export const MEMORY_RETRIEVAL_WEIGHTS = {
   provenance: 0.04,
 } as const;
 
-const MEMORY_LABEL_PATTERN = /^[a-z0-9]+(?:[-_][a-z0-9]+)*$/;
+// Canonical selector grammar shared with the public contracts, MCP schemas,
+// storage adapter, and migration constraints. Dots are valid hierarchy hints
+// (for example `ops.v2`); slashes remain invalid and therefore fail closed.
+const MEMORY_LABEL_PATTERN = /^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$/;
 const MEMORY_SCOPE_STANDING_PRIORITY = {
   ephemeral: 4,
   session: 4,

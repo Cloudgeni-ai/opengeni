@@ -898,11 +898,10 @@ function registerMemoryTools(
         kind: MemoryKindSchema.optional(),
         scope_types: z4.array(MemoryScopeTypeSchema).max(5).optional(),
         labels: z4.array(MemoryLabelSchema).max(16).optional(),
-        include_expired: z4.boolean().optional(),
         limit: z4.number().int().positive().max(20).optional(),
       },
     },
-    async ({ query, kind, scope_types, labels, include_expired, limit }) => {
+    async ({ query, kind, scope_types, labels, limit }) => {
       const context = await trustedMemoryContext(deps, grant.workspaceId, sessionId);
       return json({
         results: await searchWorkspaceMemories(
@@ -913,7 +912,6 @@ function registerMemoryTools(
             ...(kind ? { kind } : {}),
             ...(scope_types ? { scopeTypes: scope_types } : {}),
             ...(labels ? { labels } : {}),
-            ...(include_expired !== undefined ? { includeExpired: include_expired } : {}),
             ...(limit ? { limit } : {}),
             context,
           },

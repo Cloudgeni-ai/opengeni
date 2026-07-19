@@ -28,6 +28,7 @@ import {
   deleteMemoryRelationship,
   deleteWorkspaceMemory,
   exportWorkspaceMemories,
+  getSessionMemoryContext,
   getKnowledgeMemory,
   listKnowledgeMemories,
   listMemoryRelationships,
@@ -60,10 +61,12 @@ function trustedMemoryActorSessionId(grant: AccessGrant): string | null {
   return typeof grant.metadata?.sessionId === "string" ? grant.metadata.sessionId : null;
 }
 
-function bindWritableMemoryScope(
+async function bindWritableMemoryScope(
+  db: ApiRouteDeps["db"],
+  workspaceId: string,
   scope: WritableMemoryScopeSpec | undefined,
   grant: AccessGrant,
-): Parameters<typeof saveWorkspaceMemory>[1]["scopeSpec"] | undefined {
+): Promise<Parameters<typeof saveWorkspaceMemory>[1]["scopeSpec"] | undefined> {
   if (!scope) return undefined;
   switch (scope.type) {
     case "workspace":
@@ -72,8 +75,29 @@ function bindWritableMemoryScope(
       return { type: "user", subjectId: grant.subjectId };
     case "role":
     case "session":
-    case "ephemeral":
-      return scope;
+    case "ephemeral": {
+      const signedSessionId = trustedMemoryActorSessionId(grant);
+      if (!signedSessionId) {
+        throw new HTTPException(403, {
+          message: `${scope.type}-scoped memory requires a trusted signed session`,
+        });
+      }
+      const context = await getSessionMemoryContext(db, workspaceId, signedSessionId);
+      if (!context?.sessionId) {
+        throw new HTTPException(403, {
+          message: "trusted signed memory session was not found in this workspace",
+        });
+      }
+      if (scope.type === "role") {
+        if (!context.roleKey) {
+          throw new HTTPException(403, {
+            message: "role-scoped memory requires a persisted session role",
+          });
+        }
+        return { type: "role", roleKey: context.roleKey };
+      }
+      return { type: scope.type, sessionId: context.sessionId };
+    }
   }
 }
 
@@ -467,6 +491,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
               c.req.param("operationId"),
               parsed.data.planHash,
               memoryAccess(grant, true),
+              { actorSessionId: trustedMemoryActorSessionId(grant) },
             ),
           ),
         );
@@ -494,6 +519,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
               c.req.param("operationId"),
               parsed.data.planHash,
               memoryAccess(grant, true),
+              { actorSessionId: trustedMemoryActorSessionId(grant) },
             ),
           ),
         );
@@ -527,10 +553,22 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!parsed.success) {
       throw new HTTPException(400, { message: "invalid workspace memory search request" });
     }
+    const signedSessionId = trustedMemoryActorSessionId(grant);
+    const signedContext = signedSessionId
+      ? await getSessionMemoryContext(db, workspaceId, signedSessionId)
+      : null;
+    if (signedSessionId && !signedContext) {
+      throw new HTTPException(403, {
+        message: "trusted signed memory session was not found in this workspace",
+      });
+    }
     const results = await searchWorkspaceMemories(
       db,
       workspaceId,
-      { ...parsed.data, context: { access: memoryAccess(grant) } },
+      {
+        ...parsed.data,
+        context: signedContext ?? { access: memoryAccess(grant) },
+      },
       getDocumentServices().embedder,
     );
     return c.json(
@@ -551,12 +589,12 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw new HTTPException(400, { message: "invalid knowledge memory request" });
     }
     const payload = parsedBody.data;
-    const scopeSpec = bindWritableMemoryScope(payload.scopeSpec, grant);
+    const scopeSpec = await bindWritableMemoryScope(db, workspaceId, payload.scopeSpec, grant);
     const access = memoryAccess(grant);
     const actorSessionId = trustedMemoryActorSessionId(grant);
     // status `active` (the default) is a memory write → route through the single
-    // gate (sanitize + embed + dedup). Explicit proposed/approved/rejected keeps
-    // the legacy curated create.
+    // gate (sanitize + embed + dedup). Explicit proposed enters the curated
+    // review lane; approved/rejected are update-only reviewed states.
     if (payload.status === "active") {
       try {
         const result = await saveWorkspaceMemory(
@@ -639,7 +677,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
               status: payload.status,
               kind: payload.kind,
               scope: payload.scope,
-              scopeSpec: bindWritableMemoryScope(payload.scopeSpec, grant),
+              scopeSpec: await bindWritableMemoryScope(db, workspaceId, payload.scopeSpec, grant),
               labels: payload.labels,
               text: payload.text,
               sourceRefs: payload.sourceRefs,

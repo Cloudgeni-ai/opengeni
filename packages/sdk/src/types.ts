@@ -2176,7 +2176,7 @@ export type KnowledgeMemory = {
 };
 
 export type CreateKnowledgeMemoryRequest = {
-  status?: KnowledgeMemoryStatus | undefined;
+  status?: "active" | "proposed" | undefined;
   kind?: KnowledgeMemoryKind | undefined;
   scope?: string | undefined;
   scopeSpec?: WritableMemoryScopeSpec | undefined;
@@ -2185,6 +2185,8 @@ export type CreateKnowledgeMemoryRequest = {
   sourceRefs?: KnowledgeSourceRef[] | undefined;
   confidence?: number | undefined;
   metadata?: Record<string, unknown> | undefined;
+  /** @deprecated Ignored. Creator session is derived server-side. */
+  createdBySessionId?: string | undefined;
   pinned?: boolean | undefined;
   replacesId?: string | undefined;
   validFrom?: string | undefined;
@@ -2201,6 +2203,8 @@ export type UpdateKnowledgeMemoryRequest = {
   sourceRefs?: KnowledgeSourceRef[] | undefined;
   confidence?: number | undefined;
   metadata?: Record<string, unknown> | undefined;
+  /** @deprecated Ignored. Reviewer identity is derived server-side. */
+  reviewedBy?: string | undefined;
   pinned?: boolean | undefined;
   validFrom?: string | undefined;
   validUntil?: string | null | undefined;
@@ -2325,6 +2329,12 @@ export type MemoryMaintenanceOperation = {
   planHash: string;
   candidateMemoryIds: string[];
   reasonCodes: string[];
+  previewActorSubjectId: string;
+  previewActorSessionId: string | null;
+  appliedBySubjectId: string | null;
+  appliedBySessionId: string | null;
+  revertedBySubjectId: string | null;
+  revertedBySessionId: string | null;
   createdAt: string;
   appliedAt: string | null;
   revertedAt: string | null;

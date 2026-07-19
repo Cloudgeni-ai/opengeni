@@ -1672,13 +1672,16 @@ export const KnowledgeMemory = z.object({
 export type KnowledgeMemory = z.infer<typeof KnowledgeMemory>;
 
 // Default status is `active`: a create through this request lands an
-// agent-visible memory via the one write gate (saveWorkspaceMemory). Passing an
-// explicit `proposed`/`approved`/`rejected` status routes to the legacy curated
-// create instead (the docs-MCP memory_propose lane). pinned/replacesId apply to
-// the active (memory) path.
+// agent-visible memory via the one write gate (saveWorkspaceMemory). Explicit
+// `proposed` enters the curated review lane. Reviewed terminal statuses are
+// reachable only through the proposed -> approved/rejected update transition;
+// accepting them here would bypass that gate. pinned/replacesId apply to the
+// active (memory) path.
+export const CreateKnowledgeMemoryStatus = z.enum(["active", "proposed"]);
+export type CreateKnowledgeMemoryStatus = z.infer<typeof CreateKnowledgeMemoryStatus>;
 export const CreateKnowledgeMemoryRequest = z
   .object({
-    status: KnowledgeMemoryStatus.default("active"),
+    status: CreateKnowledgeMemoryStatus.default("active"),
     kind: KnowledgeMemoryKind.default("semantic"),
     scope: z.string().min(1).default("workspace"),
     scopeSpec: WritableMemoryScopeSpec.optional(),
@@ -1832,6 +1835,12 @@ export const MemoryMaintenanceOperation = z.object({
   planHash: z.string().regex(/^[a-f0-9]{64}$/),
   candidateMemoryIds: z.array(z.string().uuid()),
   reasonCodes: z.array(z.string().min(1)),
+  previewActorSubjectId: z.string().min(1),
+  previewActorSessionId: z.string().uuid().nullable(),
+  appliedBySubjectId: z.string().min(1).nullable(),
+  appliedBySessionId: z.string().uuid().nullable(),
+  revertedBySubjectId: z.string().min(1).nullable(),
+  revertedBySessionId: z.string().uuid().nullable(),
   createdAt: z.string(),
   appliedAt: z.string().nullable(),
   revertedAt: z.string().nullable(),

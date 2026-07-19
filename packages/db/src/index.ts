@@ -1888,7 +1888,7 @@ export type KnowledgeMemoryScopeInput =
 export type CreateKnowledgeMemoryInput = {
   accountId: string;
   workspaceId: string;
-  status?: KnowledgeMemoryStatus | undefined;
+  status?: "proposed" | undefined;
   kind?: KnowledgeMemoryKind | undefined;
   scope?: string | undefined;
   scopeSpec?: KnowledgeMemoryScopeInput | undefined;
@@ -3938,6 +3938,13 @@ function normalizeMemoryLabelsForStorage(values: readonly string[] | undefined):
   return normalized;
 }
 
+function memoryLabelArraySql(values: readonly string[]): SQL {
+  return sql`ARRAY[${sql.join(
+    values.map((value) => sql`${value}`),
+    sql`, `,
+  )}]::text[]`;
+}
+
 type StoredMemoryScope = {
   scope: string;
   scopeType: MemoryScopeType;
@@ -4092,6 +4099,14 @@ export async function createKnowledgeMemory(
   db: Database,
   input: CreateKnowledgeMemoryInput,
 ): Promise<KnowledgeMemory> {
+  if (
+    (input.status as KnowledgeMemoryStatus | undefined) !== undefined &&
+    input.status !== "proposed"
+  ) {
+    throw new Error(
+      "Direct curated memory creation only supports proposed status; use the active write gate or a proposed review transition.",
+    );
+  }
   const text = requireDbString(input.text, "knowledge memory text");
   const scope = storedMemoryScope(input.scopeSpec, cleanDbString(input.scope) ?? "workspace");
   const labels = normalizeMemoryLabelsForStorage(input.labels);
@@ -4412,7 +4427,7 @@ export async function listKnowledgeMemories(
     }
     const labels = normalizeMemoryLabelsForStorage(options.labels);
     if (labels.length > 0) {
-      conditions.push(sql`${schema.knowledgeMemories.labels} && ${labels}::text[]`);
+      conditions.push(sql`${schema.knowledgeMemories.labels} && ${memoryLabelArraySql(labels)}`);
     }
     const scope = cleanDbString(options.scope);
     if (scope) {
@@ -5655,7 +5670,7 @@ export async function resolveWorkspaceMemoryBlock(
       or(
         sql`cardinality(${schema.knowledgeMemories.labels}) = 0`,
         memoryLabels.length > 0
-          ? sql`${schema.knowledgeMemories.labels} && ${memoryLabels}::text[]`
+          ? sql`${schema.knowledgeMemories.labels} && ${memoryLabelArraySql(memoryLabels)}`
           : sql`false`,
       ),
     )!,
@@ -6336,8 +6351,10 @@ export async function applyMemoryMaintenance(
   operationId: string,
   planHash: string,
   access: MemoryAccessContext,
-  now = new Date(),
+  options: { actorSessionId?: string | null; now?: Date } = {},
 ): Promise<MemoryMaintenanceOperation> {
+  const actorSubjectId = requireDbString(access.subjectId ?? "", "memory maintenance apply actor");
+  const now = options.now ?? new Date();
   return await withWorkspaceMemoryRls(db, workspaceId, access, async (scopedDb) => {
     const [operation] = await scopedDb
       .select()
@@ -6401,7 +6418,13 @@ export async function applyMemoryMaintenance(
     };
     const [applied] = await scopedDb
       .update(schema.knowledgeMemoryOperations)
-      .set({ status: "applied", inversePlan, appliedAt: now })
+      .set({
+        status: "applied",
+        inversePlan,
+        appliedBySubjectId: actorSubjectId,
+        appliedBySessionId: options.actorSessionId ?? null,
+        appliedAt: now,
+      })
       .where(
         and(
           eq(schema.knowledgeMemoryOperations.id, operation.id),
@@ -6422,8 +6445,10 @@ export async function revertMemoryMaintenance(
   operationId: string,
   planHash: string,
   access: MemoryAccessContext,
-  now = new Date(),
+  options: { actorSessionId?: string | null; now?: Date } = {},
 ): Promise<MemoryMaintenanceOperation> {
+  const actorSubjectId = requireDbString(access.subjectId ?? "", "memory maintenance revert actor");
+  const now = options.now ?? new Date();
   return await withWorkspaceMemoryRls(db, workspaceId, access, async (scopedDb) => {
     const [operation] = await scopedDb
       .select()
@@ -6466,7 +6491,12 @@ export async function revertMemoryMaintenance(
     }
     const [reverted] = await scopedDb
       .update(schema.knowledgeMemoryOperations)
-      .set({ status: "reverted", revertedAt: now })
+      .set({
+        status: "reverted",
+        revertedBySubjectId: actorSubjectId,
+        revertedBySessionId: options.actorSessionId ?? null,
+        revertedAt: now,
+      })
       .where(
         and(
           eq(schema.knowledgeMemoryOperations.id, operation.id),
@@ -25347,6 +25377,12 @@ function mapMemoryMaintenanceOperation(
     planHash: row.planHash,
     candidateMemoryIds: [...new Set(plan.changes.map((change) => change.memoryId))].sort(),
     reasonCodes: [...new Set(plan.changes.map((change) => change.reasonCode))].sort(),
+    previewActorSubjectId: row.actorSubjectId,
+    previewActorSessionId: row.actorSessionId,
+    appliedBySubjectId: row.appliedBySubjectId,
+    appliedBySessionId: row.appliedBySessionId,
+    revertedBySubjectId: row.revertedBySubjectId,
+    revertedBySessionId: row.revertedBySessionId,
     createdAt: row.createdAt.toISOString(),
     appliedAt: row.appliedAt?.toISOString() ?? null,
     revertedAt: row.revertedAt?.toISOString() ?? null,

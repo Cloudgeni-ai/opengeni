@@ -366,16 +366,28 @@ describe("SDK / contracts parity", () => {
       scopeSpec: { type: "role", roleKey: "terraform-reviewer" },
       labels: ["terraform", "review"],
       validUntil: "2026-08-01T00:00:00.000Z",
+      createdBySessionId: "deprecated-and-ignored",
     };
     const update: UpdateKnowledgeMemoryRequest = {
       pinned: false,
       status: "archived",
       scopeSpec: { type: "workspace" },
       labels: ["review"],
+      reviewedBy: "deprecated-and-ignored",
     };
     const settings: UpdateWorkspaceSettingsRequest = { memoryEnabled: true };
     expect(ContractCreateKnowledgeMemoryRequest.safeParse(create).success).toBe(true);
     expect(ContractUpdateKnowledgeMemoryRequest.safeParse(update).success).toBe(true);
+    expect(ContractCreateKnowledgeMemoryRequest.parse(create)).not.toHaveProperty(
+      "createdBySessionId",
+    );
+    expect(ContractUpdateKnowledgeMemoryRequest.parse(update)).not.toHaveProperty("reviewedBy");
+    expect(
+      ContractCreateKnowledgeMemoryRequest.safeParse({ text: "x", status: "approved" }).success,
+    ).toBe(false);
+    expect(
+      ContractCreateKnowledgeMemoryRequest.safeParse({ text: "x", status: "rejected" }).success,
+    ).toBe(false);
     expect(ContractUpdateWorkspaceSettingsRequest.safeParse(settings).success).toBe(true);
     // Default create status is `active` (memory lane through the write gate).
     expect(ContractCreateKnowledgeMemoryRequest.parse({ text: "x" }).status).toBe("active");
