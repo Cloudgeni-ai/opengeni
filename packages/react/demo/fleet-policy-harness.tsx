@@ -1,10 +1,20 @@
 import type { SessionEvent } from "@opengeni/sdk";
 import { createRoot } from "react-dom/client";
 import { MessageTimeline } from "../src/index";
+import { createFleetPolicyCanonicalProof } from "./fleet-policy-canonical-proof";
 import "./styles.css";
 
 const params = new URLSearchParams(window.location.search);
 const theme = params.get("theme") === "light" ? "light" : "dark";
+
+declare global {
+  interface Window {
+    __OPE32_CANONICAL_PROOF__?: ReturnType<typeof createFleetPolicyCanonicalProof>;
+  }
+}
+
+window.__OPE32_CANONICAL_PROOF__ = createFleetPolicyCanonicalProof();
+document.documentElement.dataset.ope32CanonicalProofReady = "true";
 
 const events: SessionEvent[] = [
   {

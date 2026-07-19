@@ -269,7 +269,7 @@ activity continue mutating after the observer returned.
 
 The durable replay record is designed for offline shadow simulation:
 
-- At most 32 candidates and 32 KiB of UTF-8 JSON are retained. Candidate keys
+- At most 32 candidates and 34 KiB of UTF-8 JSON are retained. Candidate keys
   are event-local `c00`-style aliases assigned by HMAC-SHA-256 ordering with a
   fresh per-event seed; the seed and raw credential ids are never persisted.
   Unlike `codex.credential.selected`, these aliases are intentionally not stable
@@ -283,9 +283,13 @@ The durable replay record is designed for offline shadow simulation:
   or stale windows lose confidence and cannot masquerade as pristine quota;
   only complete non-stale windows can enforce a new-placement ceiling.
   Workspace-local observed burn and confidence-labeled inferred unexplained
-  burn are separate fields. Unexplained/external burn is never relabeled as
-  provider or tenant truth. Until typed producers exist, both remain explicitly
-  unknown in the worker snapshot.
+  burn are separate per-window percentage rates. For each complete, fresh quota
+  window, runway pressure compares confidence-bounded exhaustion time with that
+  window's own reset horizon and conservatively uses the highest bounded risk;
+  an already-reset window is risk-free. Missing or stale reset/burn evidence is
+  uncertainty, not fabricated usage. Unexplained/external burn is never
+  relabeled as provider or tenant truth. Until typed producers exist, both
+  per-window rates remain explicitly unknown in the worker snapshot.
 - Cache affinity uses `unknown | healthy | collapsed` state with minimum token
   support, freshness, collapse/recovery dwell, and a higher recovery threshold.
   A single low sample cannot collapse affinity. The worker currently records

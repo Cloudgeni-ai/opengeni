@@ -25,6 +25,18 @@ const MAX_DURATION_MS = 31 * 24 * 60 * 60_000;
 const MAX_COUNT = 1_000_000;
 const SCORE_SCALE = 100;
 
+/**
+ * Replay-integrity ordering for bounded ASCII-safe fleet keys and aliases.
+ *
+ * Locale-aware collation is intentionally forbidden here because its result
+ * can depend on locale and ICU data. Relational string comparison uses
+ * ECMAScript UTF-16 code-unit ordering and is therefore identical in Bun,
+ * Node, and browsers.
+ */
+export function compareCodexFleetCanonicalStringsV1(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
 export type CodexFleetConfidence = "unknown" | "low" | "medium" | "high";
 export type CodexFleetCandidateStatus = "active" | "needs_relogin" | "error" | "unknown";
 export type CodexFleetCacheState = "unknown" | "healthy" | "collapsed";
@@ -70,7 +82,8 @@ export type CodexFleetCandidateV1 = {
   };
   /** Workspace-local observed burn, separate from unexplained/external inference. */
   observedBurn: {
-    percentPerHour: number | null;
+    primaryPercentPerHour: number | null;
+    secondaryPercentPerHour: number | null;
     confidence: CodexFleetConfidence;
   };
   /**
@@ -78,7 +91,8 @@ export type CodexFleetCandidateV1 = {
    * load-bearing: consumers must never relabel it as provider or tenant truth.
    */
   inferredUnexplainedBurn: {
-    percentPerHour: number | null;
+    primaryPercentPerHour: number | null;
+    secondaryPercentPerHour: number | null;
     confidence: CodexFleetConfidence;
   };
   /** Opaque named-policy keys. Ignored unless overlaysEnabled is independently true. */
@@ -124,8 +138,9 @@ export type CodexFleetPolicyConfigV1 = {
   mediumQuotaConfidenceScore: number;
   inferredBurnScorePerPercentHour: number;
   observedBurnScorePerPercentHour: number;
-  minimumRunwayHours: number;
-  runwayScorePerMissingHour: number;
+  /** Maximum exhaustion-before-reset gap that contributes placement pressure. */
+  runwayRiskCapHours: number;
+  runwayScorePerAtRiskHour: number;
   healthyCacheAffinityBenefit: number;
   unknownCacheAffinityBenefit: number;
   collapsedCacheAffinityBenefit: number;
@@ -160,8 +175,8 @@ export const DEFAULT_CODEX_FLEET_POLICY_V1: CodexFleetPolicyConfigV1 = Object.fr
   mediumQuotaConfidenceScore: 4 * SCORE_SCALE,
   inferredBurnScorePerPercentHour: 0.2 * SCORE_SCALE,
   observedBurnScorePerPercentHour: 0.1 * SCORE_SCALE,
-  minimumRunwayHours: 2,
-  runwayScorePerMissingHour: 8 * SCORE_SCALE,
+  runwayRiskCapHours: 2,
+  runwayScorePerAtRiskHour: 8 * SCORE_SCALE,
   healthyCacheAffinityBenefit: 32 * SCORE_SCALE,
   unknownCacheAffinityBenefit: 24 * SCORE_SCALE,
   collapsedCacheAffinityBenefit: 6 * SCORE_SCALE,
@@ -308,6 +323,15 @@ export function replayCodexFleetDecisionV1(value: unknown): CodexFleetReplayVerd
 }
 
 /**
+ * Canonical replay bytes for already-bounded, identity-free fleet values.
+ * This is exported so offline tools can prove the exact bytes across runtimes;
+ * it performs no redaction and must not be used with raw account metadata.
+ */
+export function canonicalCodexFleetReplayJsonV1(value: CodexFleetReplayRecordV1): string {
+  return canonicalJson(value);
+}
+
+/**
  * Strict reader for durable/offline replay. Unknown fields, lossy normalization,
  * malformed decisions, and non-SHA-256 digests are rejected before comparison.
  */
@@ -412,10 +436,13 @@ export function evaluateCodexFleetDecisionV1(
         overlay.preferredMembers.has(candidate.key),
       ),
     )
-    .sort((a, b) => a.candidateKey.localeCompare(b.candidateKey));
+    .sort((a, b) => compareCodexFleetCanonicalStringsV1(a.candidateKey, b.candidateKey));
   const eligible = scopedScores
     .filter((candidate) => candidate.eligible)
-    .sort((a, b) => a.total - b.total || a.candidateKey.localeCompare(b.candidateKey));
+    .sort(
+      (a, b) =>
+        a.total - b.total || compareCodexFleetCanonicalStringsV1(a.candidateKey, b.candidateKey),
+    );
 
   if (eligible.length === 0) {
     return {
@@ -464,21 +491,41 @@ function evaluateAdmission(
   policy: CodexFleetPolicyConfigV1,
 ): CodexFleetAdmissionDecisionV1 {
   if (input.request.placement === "fenced_in_flight") {
-    return { outcome: "admit", reason: "fenced_in_flight", borrowedIdleCapacity: false };
+    return {
+      outcome: "admit",
+      reason: "fenced_in_flight",
+      borrowedIdleCapacity: false,
+    };
   }
   if (policy.emergencyFuseEnabled && input.admission.emergencyFuseActive) {
-    return { outcome: "pace", reason: "emergency_fuse", borrowedIdleCapacity: false };
+    return {
+      outcome: "pace",
+      reason: "emergency_fuse",
+      borrowedIdleCapacity: false,
+    };
   }
   if (!policy.admissionPacingEnabled) {
-    return { outcome: "admit", reason: "pacing_disabled", borrowedIdleCapacity: false };
+    return {
+      outcome: "admit",
+      reason: "pacing_disabled",
+      borrowedIdleCapacity: false,
+    };
   }
   if (input.admission.dynamicCapacityUnits === null) {
     // Observability-first fail-open: unknown soft capacity never invents a hard slot.
-    return { outcome: "admit", reason: "capacity_unknown", borrowedIdleCapacity: false };
+    return {
+      outcome: "admit",
+      reason: "capacity_unknown",
+      borrowedIdleCapacity: false,
+    };
   }
   const available = Math.max(0, input.admission.dynamicCapacityUnits - input.admission.inUseUnits);
   if (available === 0) {
-    return { outcome: "pace", reason: "capacity_saturated", borrowedIdleCapacity: false };
+    return {
+      outcome: "pace",
+      reason: "capacity_saturated",
+      borrowedIdleCapacity: false,
+    };
   }
   if (
     policy.managerPriorityEnabled &&
@@ -493,7 +540,11 @@ function evaluateAdmission(
         borrowedIdleCapacity: false,
       };
     }
-    return { outcome: "pace", reason: "manager_priority", borrowedIdleCapacity: false };
+    return {
+      outcome: "pace",
+      reason: "manager_priority",
+      borrowedIdleCapacity: false,
+    };
   }
   if (input.request.priority === "standard" && input.admission.queuedManagerCount === 0) {
     return {
@@ -502,7 +553,11 @@ function evaluateAdmission(
       borrowedIdleCapacity: true,
     };
   }
-  return { outcome: "admit", reason: "capacity_available", borrowedIdleCapacity: false };
+  return {
+    outcome: "admit",
+    reason: "capacity_available",
+    borrowedIdleCapacity: false,
+  };
 }
 
 function scoreCandidate(
@@ -537,25 +592,16 @@ function scoreCandidate(
   );
   const leasePressure = candidate.activeLeaseCount * policy.activeLeaseScore;
   const observedBurnConfidence = confidenceWeight(candidate.observedBurn.confidence);
-  const observedBurn = candidate.observedBurn.percentPerHour ?? 0;
+  const observedBurn = maximumWindowBurn(candidate.observedBurn);
   const observedBurnPressure = Math.round(
     observedBurn * policy.observedBurnScorePerPercentHour * observedBurnConfidence,
   );
   const burnConfidence = confidenceWeight(candidate.inferredUnexplainedBurn.confidence);
-  const inferredBurn = candidate.inferredUnexplainedBurn.percentPerHour ?? 0;
+  const inferredBurn = maximumWindowBurn(candidate.inferredUnexplainedBurn);
   const inferredBurnPressure = Math.round(
     inferredBurn * policy.inferredBurnScorePerPercentHour * burnConfidence,
   );
-  const remaining = Math.max(0, 100 - (bindingUsed ?? 50));
-  const confidenceWeightedBurn =
-    observedBurn * observedBurnConfidence + inferredBurn * burnConfidence;
-  const runwayHours =
-    confidenceWeightedBurn > 0 ? remaining / confidenceWeightedBurn : Number.POSITIVE_INFINITY;
-  const runwayPressure = Number.isFinite(runwayHours)
-    ? Math.round(
-        Math.max(0, policy.minimumRunwayHours - runwayHours) * policy.runwayScorePerMissingHour,
-      )
-    : 0;
+  const runwayPressure = runwayRiskPressure(candidate, confidence, policy);
   const uncertaintyPressure = quotaUncertaintyScore(confidence, policy);
   const cacheState = effectiveCodexFleetCacheStateV1(candidate.cache, policy);
   const cacheAffinityBenefit =
@@ -587,6 +633,70 @@ function scoreCandidate(
       overlayPreferenceBenefit,
     confidence,
   };
+}
+
+type CodexFleetBurnSnapshotV1 = CodexFleetCandidateV1["observedBurn"];
+type CodexFleetWindowKey = "primary" | "secondary";
+
+function maximumWindowBurn(burn: CodexFleetBurnSnapshotV1): number {
+  return Math.max(burn.primaryPercentPerHour ?? 0, burn.secondaryPercentPerHour ?? 0);
+}
+
+function windowBurn(burn: CodexFleetBurnSnapshotV1, window: CodexFleetWindowKey): number {
+  return window === "primary"
+    ? (burn.primaryPercentPerHour ?? 0)
+    : (burn.secondaryPercentPerHour ?? 0);
+}
+
+/**
+ * Score only a confidence-bounded exhaustion risk that occurs before the
+ * corresponding provider reset. Each quota window has its own percentage burn
+ * denominator and reset horizon; the highest-risk complete window binds.
+ * Missing/stale observations contribute uncertainty elsewhere, never invented
+ * burn. A zero reset horizon means that reported window has already reset.
+ */
+function runwayRiskPressure(
+  candidate: CodexFleetCandidateV1,
+  quotaConfidence: CodexFleetConfidence,
+  policy: CodexFleetPolicyConfigV1,
+): number {
+  if (quotaConfidence === "unknown") return 0;
+  const windows: Array<[CodexFleetWindowKey, CodexFleetQuotaWindowV1]> = [
+    ["primary", candidate.quota.primary],
+    ["secondary", candidate.quota.secondary],
+  ];
+  let maximumPressure = 0;
+  for (const [windowKey, window] of windows) {
+    if (
+      window.usedPercent === null ||
+      window.resetRemainingMs === null ||
+      window.resetRemainingMs === 0
+    ) {
+      continue;
+    }
+    const observedConfidence = confidenceWeight(
+      lowerConfidence(candidate.observedBurn.confidence, quotaConfidence),
+    );
+    const inferredConfidence = confidenceWeight(
+      lowerConfidence(candidate.inferredUnexplainedBurn.confidence, quotaConfidence),
+    );
+    const confidenceBoundedBurn =
+      windowBurn(candidate.observedBurn, windowKey) * observedConfidence +
+      windowBurn(candidate.inferredUnexplainedBurn, windowKey) * inferredConfidence;
+    if (confidenceBoundedBurn <= 0) continue;
+
+    const exhaustionRunwayHours = Math.max(0, 100 - window.usedPercent) / confidenceBoundedBurn;
+    const resetHorizonHours = window.resetRemainingMs / 60 / 60_000;
+    const atRiskHours = Math.min(
+      policy.runwayRiskCapHours,
+      Math.max(0, resetHorizonHours - exhaustionRunwayHours),
+    );
+    maximumPressure = Math.max(
+      maximumPressure,
+      Math.round(atRiskHours * policy.runwayScorePerAtRiskHour),
+    );
+  }
+  return maximumPressure;
 }
 
 function selectOverlayScope(
@@ -770,7 +880,7 @@ function normalizeInput(input: CodexFleetDecisionInputV1, maxCandidates: number)
   const currentCandidateKey = normalizeOptionalKey(input.request.currentCandidateKey);
   const candidates = input.candidates
     .map(normalizeCandidate)
-    .sort((a, b) => a.key.localeCompare(b.key));
+    .sort((a, b) => compareCodexFleetCanonicalStringsV1(a.key, b.key));
   for (let index = 1; index < candidates.length; index += 1) {
     if (candidates[index - 1]!.key === candidates[index]!.key) {
       throw new Error(`Duplicate Codex fleet candidate key: ${candidates[index]!.key}`);
@@ -785,7 +895,7 @@ function normalizeInput(input: CodexFleetDecisionInputV1, maxCandidates: number)
     bounded = [
       ...bounded.slice(0, Math.max(0, maxCandidates - 1)),
       candidates.find((candidate) => candidate.key === currentCandidateKey)!,
-    ].sort((a, b) => a.key.localeCompare(b.key));
+    ].sort((a, b) => compareCodexFleetCanonicalStringsV1(a.key, b.key));
   }
   return {
     input: {
@@ -853,12 +963,29 @@ function normalizeCandidate(candidate: CodexFleetCandidateV1): CodexFleetCandida
       ),
     },
     observedBurn: {
-      percentPerHour: normalizeNullableNumber(candidate.observedBurn.percentPerHour, 0, 100, 3),
+      primaryPercentPerHour: normalizeNullableNumber(
+        candidate.observedBurn.primaryPercentPerHour,
+        0,
+        100,
+        3,
+      ),
+      secondaryPercentPerHour: normalizeNullableNumber(
+        candidate.observedBurn.secondaryPercentPerHour,
+        0,
+        100,
+        3,
+      ),
       confidence: normalizeConfidence(candidate.observedBurn.confidence),
     },
     inferredUnexplainedBurn: {
-      percentPerHour: normalizeNullableNumber(
-        candidate.inferredUnexplainedBurn.percentPerHour,
+      primaryPercentPerHour: normalizeNullableNumber(
+        candidate.inferredUnexplainedBurn.primaryPercentPerHour,
+        0,
+        100,
+        3,
+      ),
+      secondaryPercentPerHour: normalizeNullableNumber(
+        candidate.inferredUnexplainedBurn.secondaryPercentPerHour,
         0,
         100,
         3,
@@ -866,7 +993,7 @@ function normalizeCandidate(candidate: CodexFleetCandidateV1): CodexFleetCandida
       confidence: normalizeConfidence(candidate.inferredUnexplainedBurn.confidence),
     },
     overlayKeys: [...new Set(candidate.overlayKeys.map(normalizeKey))]
-      .sort()
+      .sort(compareCodexFleetCanonicalStringsV1)
       .slice(0, CODEX_FLEET_POLICY_MAX_OVERLAYS_PER_CANDIDATE),
   };
 }
@@ -913,8 +1040,8 @@ function normalizePolicy(policy: CodexFleetPolicyConfigV1): CodexFleetPolicyConf
       MAX_COUNT,
       3,
     ),
-    minimumRunwayHours: normalizeNumber(policy.minimumRunwayHours, 0, 24 * 31, 3),
-    runwayScorePerMissingHour: normalizeNumber(policy.runwayScorePerMissingHour, 0, MAX_COUNT, 3),
+    runwayRiskCapHours: normalizeNumber(policy.runwayRiskCapHours, 0, 24 * 31, 3),
+    runwayScorePerAtRiskHour: normalizeNumber(policy.runwayScorePerAtRiskHour, 0, MAX_COUNT, 3),
     healthyCacheAffinityBenefit: normalizeNumber(
       policy.healthyCacheAffinityBenefit,
       0,
@@ -1193,8 +1320,8 @@ function strictRecord(value: unknown, expectedKeys: readonly string[]): Record<s
     throw new Error("Codex fleet replay value must be a plain object");
   }
   const record = value as Record<string, unknown>;
-  const actualKeys = Object.keys(record).sort();
-  const canonicalExpected = [...expectedKeys].sort();
+  const actualKeys = Object.keys(record).sort(compareCodexFleetCanonicalStringsV1);
+  const canonicalExpected = [...expectedKeys].sort(compareCodexFleetCanonicalStringsV1);
   if (canonicalJson(actualKeys) !== canonicalJson(canonicalExpected)) {
     throw new Error("Codex fleet replay object has missing or unknown fields");
   }
@@ -1270,7 +1397,7 @@ function sortJson(value: unknown): unknown {
   if (value && typeof value === "object") {
     return Object.fromEntries(
       Object.entries(value as Record<string, unknown>)
-        .sort(([left], [right]) => left.localeCompare(right))
+        .sort(([left], [right]) => compareCodexFleetCanonicalStringsV1(left, right))
         .map(([key, child]) => [key, sortJson(child)]),
     );
   }

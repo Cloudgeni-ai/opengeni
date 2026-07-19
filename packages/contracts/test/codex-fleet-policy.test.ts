@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test";
 import {
   CODEX_FLEET_POLICY_MAX_CANDIDATES,
   DEFAULT_CODEX_FLEET_POLICY_V1,
+  canonicalCodexFleetReplayJsonV1,
+  compareCodexFleetCanonicalStringsV1,
   createCodexFleetReplayRecordV1,
   effectiveCodexFleetCacheStateV1,
   evaluateCodexFleetDecisionV1,
@@ -33,7 +35,10 @@ function candidate(
     cooldownRemainingMs: patch.cooldownRemainingMs ?? null,
     activeLeaseCount: patch.activeLeaseCount ?? 0,
     quota: {
-      primary: patch.quota?.primary ?? { usedPercent: 10, resetRemainingMs: 60 * 60_000 },
+      primary: patch.quota?.primary ?? {
+        usedPercent: 10,
+        resetRemainingMs: 60 * 60_000,
+      },
       secondary: patch.quota?.secondary ?? {
         usedPercent: 0,
         resetRemainingMs: 7 * 24 * 60 * 60_000,
@@ -50,11 +55,13 @@ function candidate(
       thresholdObservedForMs: patch.cache?.thresholdObservedForMs ?? null,
     },
     observedBurn: {
-      percentPerHour: patch.observedBurn?.percentPerHour ?? null,
+      primaryPercentPerHour: patch.observedBurn?.primaryPercentPerHour ?? null,
+      secondaryPercentPerHour: patch.observedBurn?.secondaryPercentPerHour ?? null,
       confidence: patch.observedBurn?.confidence ?? "unknown",
     },
     inferredUnexplainedBurn: {
-      percentPerHour: patch.inferredUnexplainedBurn?.percentPerHour ?? null,
+      primaryPercentPerHour: patch.inferredUnexplainedBurn?.primaryPercentPerHour ?? null,
+      secondaryPercentPerHour: patch.inferredUnexplainedBurn?.secondaryPercentPerHour ?? null,
       confidence: patch.inferredUnexplainedBurn?.confidence ?? "unknown",
     },
     overlayKeys: patch.overlayKeys ?? [],
@@ -96,10 +103,10 @@ describe("Codex fleet deterministic replay", () => {
   test("matches the hardcoded canonical SHA-256 replay vector", () => {
     const record = createCodexFleetReplayRecordV1(input([candidate("c00")]));
     expect(record.policyFingerprint).toBe(
-      "37242772c8d081162e91d0af531f8fffd6c4a939c3f29d0eb0197f5cbc7d33dc",
+      "ef5c55664832c9b11ed359f6b72b0d787bbdcd976dbb84ec51f637403b218d75",
     );
     expect(record.inputFingerprint).toBe(
-      "985f1492cc6f02f92e35c688c28fc9d6ec1f070d2502832d6508c85a1eeddfa7",
+      "aca086d650f0086a9b62471f576cad0e245307e2790ef838930a48919b8bc455",
     );
     expect(record.decisionFingerprint).toBe(
       "60eee29cb3d8485dbf3b44a6e2755c11901937e625790d0e0995c5038883b0e1",
@@ -126,6 +133,119 @@ describe("Codex fleet deterministic replay", () => {
       recordedDecisionFingerprintMatches: true,
       decision: left.decision,
     });
+  });
+
+  test("uses explicit code-unit ordering for mixed case, punctuation, prefixes, and ties", () => {
+    const scrambled = ["aa", "a_", "a:", "a0", "a.", "a-", "a", "A"];
+    expect([...scrambled].sort(compareCodexFleetCanonicalStringsV1)).toEqual([
+      "A",
+      "a",
+      "a-",
+      "a.",
+      "a0",
+      "a:",
+      "a_",
+      "aa",
+    ]);
+    expect(compareCodexFleetCanonicalStringsV1("a", "aa")).toBe(-1);
+    expect(compareCodexFleetCanonicalStringsV1("aa", "a")).toBe(1);
+    expect(compareCodexFleetCanonicalStringsV1("a", "a")).toBe(0);
+
+    const tied = createCodexFleetReplayRecordV1(input(scrambled.map((key) => candidate(key))));
+    expect(tied.input.candidates.map((item) => item.key)).toEqual([
+      "A",
+      "a",
+      "a-",
+      "a.",
+      "a0",
+      "a:",
+      "a_",
+      "aa",
+    ]);
+    expect(tied.decision.selectedCandidateKey).toBe("A");
+  });
+
+  test("orders the exact truncation boundary and retained affinity candidate canonically", () => {
+    const scrambled = ["aa", "a_", "a:", "a0", "a.", "a-", "a", "A"];
+    const boundedPolicy = policy({ maxCandidates: 4 });
+    const bounded = createCodexFleetReplayRecordV1(
+      input(scrambled.map((key) => candidate(key))),
+      boundedPolicy,
+    );
+    expect(bounded.input.candidates.map((item) => item.key)).toEqual(["A", "a", "a-", "a."]);
+    expect(bounded.truncatedCandidateCount).toBe(4);
+    expect(bounded.decision.selectedCandidateKey).toBe("A");
+
+    const retained = createCodexFleetReplayRecordV1(
+      input(
+        scrambled.map((key) => candidate(key)),
+        {
+          request: { currentCandidateKey: "aa" },
+        },
+      ),
+      boundedPolicy,
+    );
+    expect(retained.input.candidates.map((item) => item.key)).toEqual(["A", "a", "a-", "aa"]);
+    expect(retained.truncatedCandidateCount).toBe(4);
+    expect(retained.decision.selectedCandidateKey).toBe("aa");
+  });
+
+  test("produces identical normalized input, selection, canonical bytes, and fingerprints in Node", async () => {
+    const scrambled = ["aa", "a_", "a:", "a0", "a.", "a-", "a", "A"];
+    const sourceInput = input(
+      scrambled.map((key) => candidate(key)),
+      {
+        request: { currentCandidateKey: "aa" },
+      },
+    );
+    const sourcePolicy = policy({ maxCandidates: 4 });
+    const bunRecord = createCodexFleetReplayRecordV1(sourceInput, sourcePolicy);
+    const expected = {
+      input: bunRecord.input,
+      selectedCandidateKey: bunRecord.decision.selectedCandidateKey,
+      canonicalJson: canonicalCodexFleetReplayJsonV1(bunRecord),
+      policyFingerprint: bunRecord.policyFingerprint,
+      inputFingerprint: bunRecord.inputFingerprint,
+      decisionFingerprint: bunRecord.decisionFingerprint,
+    };
+    const moduleUrl = new URL("../src/codex-fleet-policy.ts", import.meta.url).href;
+    const nodeExecutable = Bun.which("node");
+    if (!nodeExecutable) throw new Error("Node is required for the cross-runtime fleet proof");
+    const child = Bun.spawn(
+      [
+        nodeExecutable,
+        "--input-type=module",
+        "-e",
+        `
+          const chunks = [];
+          for await (const chunk of process.stdin) chunks.push(chunk);
+          const payload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+          const fleet = await import(${JSON.stringify(moduleUrl)});
+          const record = fleet.createCodexFleetReplayRecordV1(payload.input, payload.policy);
+          process.stdout.write(JSON.stringify({
+            input: record.input,
+            selectedCandidateKey: record.decision.selectedCandidateKey,
+            canonicalJson: fleet.canonicalCodexFleetReplayJsonV1(record),
+            policyFingerprint: record.policyFingerprint,
+            inputFingerprint: record.inputFingerprint,
+            decisionFingerprint: record.decisionFingerprint,
+          }));
+        `,
+      ],
+      {
+        stdin: new Blob([JSON.stringify({ input: sourceInput, policy: sourcePolicy })]),
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+    const [exitCode, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    expect(stderr).toBe("");
+    expect(exitCode).toBe(0);
+    expect(JSON.parse(stdout)).toEqual(expected);
   });
 
   test("detects input tampering and rejects an inconsistent recorded decision", () => {
@@ -155,7 +275,10 @@ describe("Codex fleet deterministic replay", () => {
     expect(readCodexFleetReplayRecordV1(record)).toEqual(record);
 
     expect(() =>
-      readCodexFleetReplayRecordV1({ ...record, privateCredentialId: "must-not-pass" }),
+      readCodexFleetReplayRecordV1({
+        ...record,
+        privateCredentialId: "must-not-pass",
+      }),
     ).toThrow("missing or unknown fields");
     expect(() => readCodexFleetReplayRecordV1({ ...record, inputFingerprint: "deadbeef" })).toThrow(
       "lowercase SHA-256",
@@ -222,7 +345,9 @@ describe("Codex fleet quota, burn, cache, and hysteresis", () => {
   test("missing or stale quota is explicit uncertainty, not pristine quota or a hard exclusion", () => {
     const decision = createCodexFleetReplayRecordV1(
       input([
-        candidate("fresh", { quota: { primary: { usedPercent: 65, resetRemainingMs: 60_000 } } }),
+        candidate("fresh", {
+          quota: { primary: { usedPercent: 65, resetRemainingMs: 60_000 } },
+        }),
         candidate("missing", {
           quota: {
             primary: { usedPercent: null, resetRemainingMs: null },
@@ -272,22 +397,39 @@ describe("Codex fleet quota, burn, cache, and hysteresis", () => {
 
   test("fresh authoritative ceiling blocks a new placement while an elapsed reset clears it", () => {
     const blocked = createCodexFleetReplayRecordV1(
-      input([candidate("c00", { quota: { primary: { usedPercent: 95, resetRemainingMs: 1 } } })]),
+      input([
+        candidate("c00", {
+          quota: { primary: { usedPercent: 95, resetRemainingMs: 1 } },
+        }),
+      ]),
     ).decision;
     expect(blocked.outcome).toBe("none");
-    expect(blocked.scores[0]).toMatchObject({ eligible: false, rejectionReason: "quota_ceiling" });
+    expect(blocked.scores[0]).toMatchObject({
+      eligible: false,
+      rejectionReason: "quota_ceiling",
+    });
 
     const reset = createCodexFleetReplayRecordV1(
-      input([candidate("c00", { quota: { primary: { usedPercent: 95, resetRemainingMs: 0 } } })]),
+      input([
+        candidate("c00", {
+          quota: { primary: { usedPercent: 95, resetRemainingMs: 0 } },
+        }),
+      ]),
     ).decision;
-    expect(reset).toMatchObject({ outcome: "selected", selectedCandidateKey: "c00" });
+    expect(reset).toMatchObject({
+      outcome: "selected",
+      selectedCandidateKey: "c00",
+    });
   });
 
   test("confidence-labeled unexplained burn changes pressure without becoming hard truth", () => {
     const base = [
       candidate("burn", {
         quota: { primary: { usedPercent: 10, resetRemainingMs: 60_000 } },
-        inferredUnexplainedBurn: { percentPerHour: 80, confidence: "low" },
+        inferredUnexplainedBurn: {
+          primaryPercentPerHour: 80,
+          confidence: "low",
+        },
       }),
       candidate("steady", {
         quota: { primary: { usedPercent: 20, resetRemainingMs: 60_000 } },
@@ -298,7 +440,10 @@ describe("Codex fleet quota, burn, cache, and hysteresis", () => {
       input([
         candidate("burn", {
           quota: { primary: { usedPercent: 10, resetRemainingMs: 60_000 } },
-          inferredUnexplainedBurn: { percentPerHour: 80, confidence: "high" },
+          inferredUnexplainedBurn: {
+            primaryPercentPerHour: 80,
+            confidence: "high",
+          },
         }),
         base[1]!,
       ]),
@@ -318,9 +463,14 @@ describe("Codex fleet quota, burn, cache, and hysteresis", () => {
     const decision = createCodexFleetReplayRecordV1(
       input([
         candidate("local-burn", {
-          observedBurn: { percentPerHour: 80, confidence: "high" },
+          quota: {
+            primary: { usedPercent: 10, resetRemainingMs: 8 * 60 * 60_000 },
+          },
+          observedBurn: { primaryPercentPerHour: 80, confidence: "high" },
         }),
-        candidate("steady", { quota: { primary: { usedPercent: 15, resetRemainingMs: 60_000 } } }),
+        candidate("steady", {
+          quota: { primary: { usedPercent: 15, resetRemainingMs: 60_000 } },
+        }),
       ]),
     ).decision;
     const burn = decision.scores.find((score) => score.candidateKey === "local-burn")!;
@@ -328,6 +478,151 @@ describe("Codex fleet quota, burn, cache, and hysteresis", () => {
     expect(burn.inferredBurnPressure).toBe(0);
     expect(burn.runwayPressure).toBeGreaterThan(0);
     expect(decision.selectedCandidateKey).toBe("steady");
+  });
+
+  test("compares each burn rate with its own reset horizon and uses the highest-risk window", () => {
+    const nearReset = createCodexFleetReplayRecordV1(
+      input([
+        candidate("risk", {
+          quota: {
+            primary: { usedPercent: 50, resetRemainingMs: 30 * 60_000 },
+            secondary: { usedPercent: 20, resetRemainingMs: 60 * 60_000 },
+          },
+          observedBurn: { primaryPercentPerHour: 50, confidence: "high" },
+        }),
+      ]),
+    );
+    const distantReset = createCodexFleetReplayRecordV1(
+      input([
+        candidate("risk", {
+          quota: {
+            primary: { usedPercent: 50, resetRemainingMs: 10 * 60 * 60_000 },
+            secondary: { usedPercent: 20, resetRemainingMs: 60 * 60_000 },
+          },
+          observedBurn: { primaryPercentPerHour: 50, confidence: "high" },
+        }),
+      ]),
+    );
+    expect(nearReset.decision.scores[0]!.runwayPressure).toBe(0);
+    expect(distantReset.decision.scores[0]!.runwayPressure).toBe(
+      DEFAULT_CODEX_FLEET_POLICY_V1.runwayRiskCapHours *
+        DEFAULT_CODEX_FLEET_POLICY_V1.runwayScorePerAtRiskHour,
+    );
+    expect(distantReset.inputFingerprint).not.toBe(nearReset.inputFingerprint);
+    expect(distantReset.decisionFingerprint).not.toBe(nearReset.decisionFingerprint);
+
+    const primaryBinding = createCodexFleetReplayRecordV1(
+      input([
+        candidate("risk", {
+          quota: {
+            primary: { usedPercent: 80, resetRemainingMs: 60 * 60_000 },
+            secondary: { usedPercent: 20, resetRemainingMs: 10 * 60 * 60_000 },
+          },
+          observedBurn: { primaryPercentPerHour: 100, confidence: "high" },
+        }),
+      ]),
+    ).decision.scores[0]!;
+    const secondaryBinding = createCodexFleetReplayRecordV1(
+      input([
+        candidate("risk", {
+          quota: {
+            primary: { usedPercent: 80, resetRemainingMs: 60 * 60_000 },
+            secondary: { usedPercent: 20, resetRemainingMs: 10 * 60 * 60_000 },
+          },
+          observedBurn: {
+            primaryPercentPerHour: 100,
+            secondaryPercentPerHour: 20,
+            confidence: "high",
+          },
+        }),
+      ]),
+    ).decision.scores[0]!;
+    expect(primaryBinding.runwayPressure).toBe(640);
+    expect(secondaryBinding.runwayPressure).toBe(1_600);
+  });
+
+  test("missing or stale reset/burn evidence stays uncertainty instead of fabricated runway", () => {
+    const records = {
+      missingReset: createCodexFleetReplayRecordV1(
+        input([
+          candidate("risk", {
+            quota: {
+              primary: { usedPercent: 80, resetRemainingMs: null },
+              secondary: { usedPercent: null, resetRemainingMs: null },
+            },
+            observedBurn: { primaryPercentPerHour: 100, confidence: "high" },
+          }),
+        ]),
+      ),
+      staleReset: createCodexFleetReplayRecordV1(
+        input([
+          candidate("risk", {
+            quota: {
+              primary: { usedPercent: 80, resetRemainingMs: 10 * 60 * 60_000 },
+              checkedAgeMs: 2 * 60 * 60_000,
+            },
+            observedBurn: { primaryPercentPerHour: 100, confidence: "high" },
+          }),
+        ]),
+      ),
+      missingBurn: createCodexFleetReplayRecordV1(
+        input([
+          candidate("risk", {
+            quota: {
+              primary: { usedPercent: 80, resetRemainingMs: 10 * 60 * 60_000 },
+            },
+            observedBurn: { confidence: "high" },
+          }),
+        ]),
+      ),
+      staleBurn: createCodexFleetReplayRecordV1(
+        input([
+          candidate("risk", {
+            quota: {
+              primary: { usedPercent: 80, resetRemainingMs: 10 * 60 * 60_000 },
+            },
+            observedBurn: { primaryPercentPerHour: 100, confidence: "unknown" },
+          }),
+        ]),
+      ),
+    };
+    for (const record of Object.values(records)) {
+      expect(record.decision.scores[0]!.runwayPressure).toBe(0);
+    }
+    expect(records.missingReset.decision.scores[0]!.confidence).toBe("unknown");
+    expect(records.missingReset.decision.scores[0]!.uncertaintyPressure).toBeGreaterThan(0);
+    expect(records.staleReset.decision.scores[0]!.confidence).toBe("unknown");
+    expect(records.staleBurn.decision.scores[0]!.observedBurnPressure).toBe(0);
+  });
+
+  test("a zero reset is risk-free and confidence bounds exhaustion pressure", () => {
+    const reset = createCodexFleetReplayRecordV1(
+      input([
+        candidate("risk", {
+          quota: { primary: { usedPercent: 99, resetRemainingMs: 0 } },
+          observedBurn: { primaryPercentPerHour: 100, confidence: "high" },
+        }),
+      ]),
+    ).decision;
+    expect(reset).toMatchObject({
+      outcome: "selected",
+      selectedCandidateKey: "risk",
+    });
+    expect(reset.scores[0]!.runwayPressure).toBe(0);
+
+    const withConfidence = (confidence: "low" | "high") =>
+      createCodexFleetReplayRecordV1(
+        input([
+          candidate("risk", {
+            quota: {
+              primary: { usedPercent: 90, resetRemainingMs: 2 * 60 * 60_000 },
+            },
+            observedBurn: { primaryPercentPerHour: 20, confidence },
+          }),
+        ]),
+      ).decision.scores[0]!;
+    expect(withConfidence("high").runwayPressure).toBe(1_200);
+    expect(withConfidence("low").runwayPressure).toBe(0);
   });
 
   test("cache collapse and recovery require support, dwell, and separate thresholds", () => {
@@ -426,8 +721,14 @@ describe("Codex fleet quota, burn, cache, and hysteresis", () => {
       ),
     ).decision;
 
-    expect(healthy).toMatchObject({ selectedCandidateKey: "current", reason: "affinity_best" });
-    expect(collapsed).toMatchObject({ selectedCandidateKey: "cool", reason: "best_score" });
+    expect(healthy).toMatchObject({
+      selectedCandidateKey: "current",
+      reason: "affinity_best",
+    });
+    expect(collapsed).toMatchObject({
+      selectedCandidateKey: "cool",
+      reason: "best_score",
+    });
   });
 
   test("hysteresis holds small score improvements but permits a material runway advantage", () => {
@@ -465,8 +766,14 @@ describe("Codex fleet quota, burn, cache, and hysteresis", () => {
       ),
     ).decision;
 
-    expect(held).toMatchObject({ selectedCandidateKey: "current", reason: "hysteresis_hold" });
-    expect(moved).toMatchObject({ selectedCandidateKey: "challenger", reason: "best_score" });
+    expect(held).toMatchObject({
+      selectedCandidateKey: "current",
+      reason: "hysteresis_hold",
+    });
+    expect(moved).toMatchObject({
+      selectedCandidateKey: "challenger",
+      reason: "best_score",
+    });
   });
 
   test("active lease pressure spreads concurrent new placements without static slots", () => {
@@ -478,12 +785,19 @@ describe("Codex fleet quota, burn, cache, and hysteresis", () => {
 });
 
 describe("Codex fleet admission, manager priority, borrowing, isolation, and fuse", () => {
-  const admissionPolicy = policy({ admissionPacingEnabled: true, managerPriorityEnabled: true });
+  const admissionPolicy = policy({
+    admissionPacingEnabled: true,
+    managerPriorityEnabled: true,
+  });
 
   test("standard work borrows every idle unit when no manager demand exists", () => {
     const decision = createCodexFleetReplayRecordV1(
       input([candidate("c00")], {
-        admission: { dynamicCapacityUnits: 2, inUseUnits: 1, queuedManagerCount: 0 },
+        admission: {
+          dynamicCapacityUnits: 2,
+          inUseUnits: 1,
+          queuedManagerCount: 0,
+        },
       }),
       admissionPolicy,
     ).decision;
@@ -498,19 +812,30 @@ describe("Codex fleet admission, manager priority, borrowing, isolation, and fus
   test("manager priority paces standard work only while manager demand consumes all free units", () => {
     const standard = createCodexFleetReplayRecordV1(
       input([candidate("c00")], {
-        admission: { dynamicCapacityUnits: 2, inUseUnits: 1, queuedManagerCount: 1 },
+        admission: {
+          dynamicCapacityUnits: 2,
+          inUseUnits: 1,
+          queuedManagerCount: 1,
+        },
       }),
       admissionPolicy,
     ).decision;
     const manager = createCodexFleetReplayRecordV1(
       input([candidate("c00")], {
         request: { priority: "manager" },
-        admission: { dynamicCapacityUnits: 2, inUseUnits: 1, queuedManagerCount: 1 },
+        admission: {
+          dynamicCapacityUnits: 2,
+          inUseUnits: 1,
+          queuedManagerCount: 1,
+        },
       }),
       admissionPolicy,
     ).decision;
 
-    expect(standard).toMatchObject({ outcome: "paced", reason: "admission_paced" });
+    expect(standard).toMatchObject({
+      outcome: "paced",
+      reason: "admission_paced",
+    });
     expect(standard.admission.reason).toBe("manager_priority");
     expect(manager).toMatchObject({ outcome: "selected" });
   });
@@ -519,7 +844,11 @@ describe("Codex fleet admission, manager priority, borrowing, isolation, and fus
     const decision = createCodexFleetReplayRecordV1(
       input([candidate("c00")], {
         request: { waitAgeMs: admissionPolicy.managerStandardStarvationMs },
-        admission: { dynamicCapacityUnits: 2, inUseUnits: 1, queuedManagerCount: 10 },
+        admission: {
+          dynamicCapacityUnits: 2,
+          inUseUnits: 1,
+          queuedManagerCount: 10,
+        },
       }),
       admissionPolicy,
     ).decision;
@@ -532,7 +861,10 @@ describe("Codex fleet admission, manager priority, borrowing, isolation, and fus
       input([candidate("c00")]),
       admissionPolicy,
     ).decision;
-    expect(decision.admission).toMatchObject({ outcome: "admit", reason: "capacity_unknown" });
+    expect(decision.admission).toMatchObject({
+      outcome: "admit",
+      reason: "capacity_unknown",
+    });
   });
 
   test("emergency fuse paces only new work and never moves a fenced turn", () => {
@@ -574,7 +906,10 @@ describe("Codex fleet admission, manager priority, borrowing, isolation, and fus
       overlayPolicy,
     ).decision;
 
-    expect(preferred).toMatchObject({ outcome: "selected", borrowedOverlayCapacity: true });
+    expect(preferred).toMatchObject({
+      outcome: "selected",
+      borrowedOverlayCapacity: true,
+    });
     expect(isolated).toMatchObject({
       outcome: "none",
       reason: "overlay_isolated_empty",
@@ -587,7 +922,10 @@ describe("Codex fleet admission, manager priority, borrowing, isolation, and fus
     const decision = createCodexFleetReplayRecordV1(
       input(
         [
-          candidate("member", { activeLeaseCount: 4, overlayKeys: ["named-a"] }),
+          candidate("member", {
+            activeLeaseCount: 4,
+            overlayKeys: ["named-a"],
+          }),
           candidate("outsider"),
         ],
         { request: { overlayKey: "named-a", overlayMode: "prefer" } },
@@ -620,7 +958,11 @@ describe("Codex fleet admission, manager priority, borrowing, isolation, and fus
     );
     const disabled = evaluateCodexFleetDecisionV1(
       input(candidates, {
-        request: { currentCandidateKey: "current", overlayKey: "named-a", overlayMode: "isolate" },
+        request: {
+          currentCandidateKey: "current",
+          overlayKey: "named-a",
+          overlayMode: "isolate",
+        },
       }),
       policy({ overlaysEnabled: false }),
     );

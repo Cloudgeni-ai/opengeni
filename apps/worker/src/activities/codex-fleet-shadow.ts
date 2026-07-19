@@ -1,5 +1,6 @@
 import {
   DEFAULT_CODEX_FLEET_POLICY_V1,
+  compareCodexFleetCanonicalStringsV1,
   createCodexFleetReplayRecordV1,
   type CodexFleetCandidateStatus,
   type CodexFleetDecisionInputV1,
@@ -10,7 +11,7 @@ import { CancelledFailure } from "@temporalio/activity";
 import { createHmac } from "node:crypto";
 import { TurnAttemptFencedError } from "./turn-attempt-fenced";
 
-export const CODEX_FLEET_SHADOW_MAX_PAYLOAD_BYTES = 32_768;
+export const CODEX_FLEET_SHADOW_MAX_PAYLOAD_BYTES = 34 * 1_024;
 
 export type CodexFleetActualDecisionV1 = {
   outcome: "selected" | "waiting" | "none";
@@ -92,7 +93,10 @@ export async function publishCodexFleetShadowDecisionV1(input: {
   enabled: boolean;
   decision: CodexFleetShadowBuildInputV1;
   publish: (
-    events: Array<{ type: "codex.fleet.decision"; payload: CodexFleetShadowPayloadV1 }>,
+    events: Array<{
+      type: "codex.fleet.decision";
+      payload: CodexFleetShadowPayloadV1;
+    }>,
   ) => Promise<unknown>;
 }): Promise<CodexFleetShadowPublicationResultV1> {
   if (!input.enabled) return { outcome: "disabled" };
@@ -136,9 +140,10 @@ export function buildCodexFleetShadowPayloadV1(
   // supplied event seed keeps this one replay/payload build deterministic.
   const eventAccounts = [...input.accounts].sort(
     (left, right) =>
-      aliasSortKey(input.aliasSeed, left.id).localeCompare(
+      compareCodexFleetCanonicalStringsV1(
+        aliasSortKey(input.aliasSeed, left.id),
         aliasSortKey(input.aliasSeed, right.id),
-      ) || left.id.localeCompare(right.id),
+      ) || compareCodexFleetCanonicalStringsV1(left.id, right.id),
   );
   const aliases = new Map(
     eventAccounts.map((account, index) => [account.id, candidateAlias(index)] as const),
@@ -196,10 +201,18 @@ export function buildCodexFleetShadowPayloadV1(
         thresholdObservedForMs: null,
       },
       // OPE-32 has no typed workspace-local burn feed at this boundary yet.
-      observedBurn: { percentPerHour: null, confidence: "unknown" },
+      observedBurn: {
+        primaryPercentPerHour: null,
+        secondaryPercentPerHour: null,
+        confidence: "unknown",
+      },
       // OPE-24/provider accounting has not supplied a typed burn observation yet.
       // Unknown inference is explicit and contributes no fabricated tenant truth.
-      inferredUnexplainedBurn: { percentPerHour: null, confidence: "unknown" },
+      inferredUnexplainedBurn: {
+        primaryPercentPerHour: null,
+        secondaryPercentPerHour: null,
+        confidence: "unknown",
+      },
       overlayKeys: [],
     })),
   };

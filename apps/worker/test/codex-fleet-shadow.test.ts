@@ -65,7 +65,11 @@ describe("Codex fleet shadow payload", () => {
     const second = buildCodexFleetShadowPayloadV1(args);
 
     expect(second).toEqual(first);
-    expect(first.actual).toEqual({ outcome: "selected", candidateKey: "c00", reason: "active" });
+    expect(first.actual).toEqual({
+      outcome: "selected",
+      candidateKey: "c00",
+      reason: "active",
+    });
     expect(first.comparison).toBe("match");
     expect(replayCodexFleetDecisionV1(first.replay).matches).toBe(true);
     expect(JSON.stringify(first)).not.toContain("cred-secret");
@@ -164,12 +168,23 @@ describe("Codex fleet shadow payload", () => {
     });
     const snapshot = payload.replay.input.candidates[0]!;
 
-    expect(snapshot.quota).toMatchObject({ checkedAgeMs: 2 * 60 * 60_000, confidence: "high" });
+    expect(snapshot.quota).toMatchObject({
+      checkedAgeMs: 2 * 60 * 60_000,
+      confidence: "high",
+    });
     expect(payload.replay.decision.scores[0]!.confidence).toBe("unknown");
-    expect(snapshot.cache).toMatchObject({ hitRatio: null, confidence: "unknown" });
-    expect(snapshot.observedBurn).toEqual({ percentPerHour: null, confidence: "unknown" });
+    expect(snapshot.cache).toMatchObject({
+      hitRatio: null,
+      confidence: "unknown",
+    });
+    expect(snapshot.observedBurn).toEqual({
+      primaryPercentPerHour: null,
+      secondaryPercentPerHour: null,
+      confidence: "unknown",
+    });
     expect(snapshot.inferredUnexplainedBurn).toEqual({
-      percentPerHour: null,
+      primaryPercentPerHour: null,
+      secondaryPercentPerHour: null,
       confidence: "unknown",
     });
   });

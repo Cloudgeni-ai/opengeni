@@ -3,6 +3,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { chromium, type Browser } from "playwright";
 import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
+import { createFleetPolicyCanonicalProof } from "../../packages/react/demo/fleet-policy-canonical-proof";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const evidenceDirectory = "/tmp/ope32-browser-evidence";
@@ -56,10 +57,17 @@ describe("OPE-32 fleet policy browser acceptance", () => {
 
   test("desktop and mobile remain bounded, keyboard-operable, secret-safe, and WCAG AA clean", async () => {
     const cases = [
-      { name: "desktop", width: 1440, height: 900, mobile: false, theme: "dark" },
+      {
+        name: "desktop",
+        width: 1440,
+        height: 900,
+        mobile: false,
+        theme: "dark",
+      },
       { name: "mobile", width: 320, height: 740, mobile: true, theme: "light" },
     ] as const;
     const failures: unknown[] = [];
+    const bunCanonicalProof = createFleetPolicyCanonicalProof();
 
     for (const fixture of cases) {
       const context = await browser.newContext({
@@ -80,7 +88,24 @@ describe("OPE-32 fleet policy browser acceptance", () => {
       const response = await page.goto(`${baseUrl}/fleet-policy.html?theme=${fixture.theme}`, {
         waitUntil: "networkidle",
       });
-      const disclosure = page.getByRole("button", { name: /Fleet policy shadow/ });
+      await page.locator('html[data-ope32-canonical-proof-ready="true"]').waitFor();
+      const browserCanonicalProof = await page.evaluate(
+        () =>
+          (
+            window as Window & {
+              __OPE32_CANONICAL_PROOF__?: ReturnType<typeof createFleetPolicyCanonicalProof>;
+            }
+          ).__OPE32_CANONICAL_PROOF__,
+      );
+      expect(browserCanonicalProof).toEqual(bunCanonicalProof);
+      expect(browserCanonicalProof).toMatchObject({
+        candidateKeys: ["A", "a", "a-", "aa"],
+        selectedCandidateKey: "aa",
+        truncatedCandidateCount: 4,
+      });
+      const disclosure = page.getByRole("button", {
+        name: /Fleet policy shadow/,
+      });
       await disclosure.waitFor();
       expect(await disclosure.getAttribute("aria-expanded")).toBe("false");
 

@@ -79,11 +79,13 @@ function fleetReplay(observedAtMs: number): CodexFleetReplayRecordV1 {
           confidence: "unknown",
         },
         observedBurn: {
-          percentPerHour: null,
+          primaryPercentPerHour: null,
+          secondaryPercentPerHour: null,
           confidence: "unknown",
         },
         inferredUnexplainedBurn: {
-          percentPerHour: null,
+          primaryPercentPerHour: null,
+          secondaryPercentPerHour: null,
           confidence: "unknown",
         },
         overlayKeys: [],
@@ -109,11 +111,13 @@ function fleetReplay(observedAtMs: number): CodexFleetReplayRecordV1 {
           confidence: "unknown",
         },
         observedBurn: {
-          percentPerHour: null,
+          primaryPercentPerHour: null,
+          secondaryPercentPerHour: null,
           confidence: "unknown",
         },
         inferredUnexplainedBurn: {
-          percentPerHour: null,
+          primaryPercentPerHour: null,
+          secondaryPercentPerHour: null,
           confidence: "unknown",
         },
         overlayKeys: [],
