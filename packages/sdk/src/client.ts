@@ -508,10 +508,10 @@ export class OpenGeniClient {
   // --- Events: replay, send, stream ----------------------------------------
 
   /**
-   * Replay durable events by sequence, ascending. `before` is exclusive and
-   * returns the newest matching window. With `compact`, consecutive delta runs
-   * may be coalesced; `payload.coalescedUntil` carries the run's last sequence
-   * for resume cursors.
+   * Return the events from one bounded page. With no cursor, this uses the safe
+   * semantic monitoring tail; pass explicit forensic options and a cursor for
+   * retained audit replay. Use `listEventPage` when projection, coverage, or
+   * resume-cursor facts are required.
    */
   async listEvents(
     workspaceId: string,

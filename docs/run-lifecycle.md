@@ -238,8 +238,24 @@ wrong one is the classic mistake.
    payload is capped at 64 KiB with explicit surface/byte/token/non-retention
    metadata. Large text keeps deterministic head/tail facts; inline media is a
    compact `media_preview` and its bytes are not retained by this generic path.
-   It is correct for human progress/audit previews and must never be fed back to
-   the model or advertised as a full-output evidence store.
+   It is correct for human progress/audit previews and must never be used to
+   reconstruct the target session's model conversation or advertised as a
+   full-output evidence store. A manager can inspect an independently bounded
+   cross-session monitoring projection as ordinary tool output; that does not
+   turn audit events into conversation truth.
+
+Cross-session monitoring is tail-first and selected in PostgreSQL. With no
+cursor, REST/SDK/MCP monitoring omits raw message, reasoning, command-output,
+and PTY deltas, uses `summary` payloads, and returns exact covered-sequence and
+continuation facts. Type filters and the `control`, `terminal`, `failure`,
+`checkpoint`, `tool_receipt`, and `provider_account` semantic classes share one
+union-then-subtract algebra; explicit exclusions win, while an explicit include
+can opt a type back in from the monitoring defaults. `latest` performs a typed
+newest lookup rather than replaying intermediates. Explicit forensic REST/SDK
+pages can return the exact retained audit projection, but remain count/byte
+bounded and cannot recover source bytes that the audit boundary omitted. The
+MCP result is separately capped to 64 KiB of exact pretty-printed JSON and never
+advances a cursor over an event it did not return.
 
 Those durable stores are still not the realtime or browser representation.
 NATS chunks bounded encoded messages; each session/workspace-control SSE body
