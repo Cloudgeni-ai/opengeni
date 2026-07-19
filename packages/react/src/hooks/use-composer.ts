@@ -250,12 +250,13 @@ export function useComposer(
   const dispatch = useCallback(
     async (delivery: "send" | "steer", explicit?: string): Promise<boolean> => {
       const draftAtSend = value;
-      const text = (explicit ?? draftAtSend).trim();
+      const rawText = explicit ?? draftAtSend;
+      const hasText = rawText.trim().length > 0;
       // Resolve the extras once: a file-only message (empty text + ≥1 ready
       // resource) is legitimate, so we must not bail on empty text alone.
       const extras = resolveSendExtras(sendExtrasRef.current);
       const hasResources = restoredResources.length > 0 || (extras.resources?.length ?? 0) > 0;
-      if ((!text && !hasResources) || !sessionId || sending) {
+      if ((!hasText && !hasResources) || !sessionId || sending) {
         return false;
       }
       // Reuse the clientEventId across retries of the same draft so a
@@ -264,12 +265,15 @@ export function useComposer(
       setSending(true);
       setError(null);
       try {
-        const payload = currentDraftPayload();
+        // Trimming is only an emptiness check. A non-blank prompt must be sent
+        // byte-for-byte as the user wrote it, because expectedDraftRevision
+        // binds the submission to that exact durable draft. File-only messages
+        // use the same non-blank placeholder in both the saved draft and the
+        // submitted prompt so the content fence cannot reject its own client.
+        const sendText = hasText ? rawText : FILE_ONLY_MESSAGE_TEXT;
+        const currentPayload = currentDraftPayload();
+        const payload = currentPayload ? { ...currentPayload, text: sendText } : null;
         if (payload && !(await persistPayload(payload))) return false;
-        // The wire contract requires non-empty text (z.string().min(1)) and the
-        // worker rejects whitespace-only text; a file-only message therefore
-        // carries a minimal default so the attachments still get delivered.
-        const sendText = text || FILE_ONLY_MESSAGE_TEXT;
         const input = composeSendInput(sendText, pendingClientEventId.current, extras, {
           ...(options.effectiveControl?.controlEtag
             ? { controlEtag: options.effectiveControl.controlEtag }

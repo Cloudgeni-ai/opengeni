@@ -125,6 +125,13 @@ export type SettleSessionInterruptionsInput = {
   sessionId: string;
   attemptId: string;
   workflowId: string;
+  /**
+   * The established Temporal activity wire serves both halves of one control
+   * transition. Omitted/"logical" is replay-compatible logical settlement;
+   * "attempt_quiesced" is emitted after WAIT_CANCELLATION_COMPLETED as an
+   * idempotent recovery fallback for workers predating the in-activity receipt.
+   */
+  phase?: "logical" | "attempt_quiesced";
 };
 
 export type FailSessionAttemptInput = {

@@ -24,6 +24,7 @@ import {
   fakeFileDiff,
 } from "./sandbox-fixtures";
 import { OpenGeniProvider } from "../src/provider";
+import type { MachinesResponse } from "../src/types/machines";
 import {
   useSandboxWorkspaceTabs,
   type UseSandboxWorkspaceTabsOptions,
@@ -129,22 +130,20 @@ function fakeManifest(fileCount: number): WorkspaceCaptureManifest {
         diff,
       },
     ],
-    files:
-      fileCount > 0
-        ? [
-            {
-              path: "app.py",
-              status: "modified",
-              hash: "h1",
-              baseHash: null,
-              contentRef: "blob/h1",
-              sizeBytes: 10,
-              isBinary: false,
-              tooLarge: false,
-              deleted: false,
-            },
-          ]
-        : [],
+    files: Array.from({ length: fileCount }, (_, index) => {
+      const path = index === 0 ? "app.py" : `file-${index}.py`;
+      return {
+        path,
+        status: "modified" as const,
+        hash: `h${index + 1}`,
+        baseHash: null,
+        contentRef: `blob/h${index + 1}`,
+        sizeBytes: 10,
+        isBinary: false,
+        tooLarge: false,
+        deleted: false,
+      };
+    }),
     stats: {
       repoCount: 1,
       fileCount,
@@ -176,7 +175,11 @@ function captureAvailable(manifest: WorkspaceCaptureManifest): GetWorkspaceCaptu
 
 /** A cold-lease client whose Files/Git surfaces seed from the given capture (no
  *  live calls) and whose viewer attach is spied. */
-function coldClient(overrides: Partial<Parameters<typeof fakeClient>[0]> = {}) {
+function coldClient(
+  overrides: Partial<Parameters<typeof fakeClient>[0]> & {
+    listMachines?: () => Promise<MachinesResponse>;
+  } = {},
+) {
   const spy = { attachCalls: 0 };
   const client = fakeClient({
     getStreamCapabilities: async () => fakeColdCapabilities(),
@@ -199,6 +202,55 @@ function coldClient(overrides: Partial<Parameters<typeof fakeClient>[0]> = {}) {
 // ── Refinement 1: prewarm gated to intent ────────────────────────────────────
 
 describe("workbench prewarm gating (Refinement 1)", () => {
+  test("cold capability negotiation cannot race a pending capture into Channel-A reads", async () => {
+    let resolveCapture: (value: GetWorkspaceCaptureResponse) => void = () => {};
+    const capturePromise = new Promise<GetWorkspaceCaptureResponse>((resolve) => {
+      resolveCapture = resolve;
+    });
+    const reads = { fsList: 0, gitStatus: 0, gitDiff: 0 };
+    const { client } = coldClient({
+      getWorkspaceCapture: () => capturePromise,
+      fsList: async () => {
+        reads.fsList += 1;
+        throw new Error("cold pending capture must not list the live filesystem");
+      },
+      gitStatus: async () => {
+        reads.gitStatus += 1;
+        throw new Error("cold pending capture must not query live Git status");
+      },
+      gitDiff: async () => {
+        reads.gitDiff += 1;
+        throw new Error("cold pending capture must not query a live Git diff");
+      },
+    });
+    const hook = await renderTabsHook(client, { sessionId: SESSION_ID, events: [] });
+
+    // Capabilities have resolved cold, but the independent capture request is
+    // deliberately still in flight. Neither working-tree nor staged hooks may
+    // translate that transient null capture into a live read.
+    await flush(60);
+    expect(reads).toEqual({ fsList: 0, gitStatus: 0, gitDiff: 0 });
+    expect(hook.result.current.defaultTab).toBeNull();
+
+    await act(async () => {
+      resolveCapture(captureAvailable(fakeManifest(1)));
+    });
+    await flush(60);
+    expect(reads).toEqual({ fsList: 0, gitStatus: 0, gitDiff: 0 });
+    expect(hook.result.current.defaultTab).toBe(WORKBENCH_TAB_CHANGES);
+    const changes = hook.result.current.tabs.find((tab) => tab.id === WORKBENCH_TAB_CHANGES);
+    const files = hook.result.current.tabs.find((tab) => tab.id === WORKBENCH_TAB_FILES);
+    expect(changes).toBeDefined();
+    expect(files).toBeDefined();
+    expect(
+      (changes!.content as ReactElement<{ git: { source: string | null } }>).props.git.source,
+    ).toBe("capture");
+    expect(
+      (files!.content as ReactElement<{ files: { source: string | null } }>).props.files.source,
+    ).toBe("capture");
+    await hook.unmount();
+  });
+
   test("a cold dock mount browsing capture-served surfaces warms NO box", async () => {
     const { client, spy } = coldClient();
     const hook = await renderTabsHook(client, { sessionId: SESSION_ID, events: [] });
@@ -212,12 +264,106 @@ describe("workbench prewarm gating (Refinement 1)", () => {
     await hook.unmount();
   });
 
-  test("the FIRST edit keystroke warms the box (wake-on-edit intent)", async () => {
+  test("a cold workspace without a capture stays passive behind an explicit wake gate", async () => {
+    const reads = { fsList: 0, gitStatus: 0, gitDiff: 0 };
+    const { client, spy } = coldClient({
+      getWorkspaceCapture: async () => ({ available: false }),
+      fsList: async () => {
+        reads.fsList += 1;
+        throw new Error("resting workspace must not list files before explicit wake");
+      },
+      gitStatus: async () => {
+        reads.gitStatus += 1;
+        throw new Error("resting workspace must not query Git before explicit wake");
+      },
+      gitDiff: async () => {
+        reads.gitDiff += 1;
+        throw new Error("resting workspace must not diff before explicit wake");
+      },
+    });
+    const rendered = await renderComponent(
+      withProvider(
+        client,
+        <SandboxWorkspace
+          sessionId={SESSION_ID}
+          events={[]}
+          primary={<div>chat</div>}
+          autoSaveId="og.test.prewarm.no-capture"
+        />,
+      ),
+    );
+    await flush(60);
+    expect(reads).toEqual({ fsList: 0, gitStatus: 0, gitDiff: 0 });
+    expect(spy.attachCalls).toBe(0);
+    expect(rendered.container.textContent).toContain("Workspace is resting");
+    const wake = Array.from(rendered.container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("Open live workspace"),
+    );
+    expect(wake).toBeDefined();
+    await act(async () => {
+      wake!.click();
+    });
+    await flush(60);
+    expect(spy.attachCalls).toBe(1);
+    await rendered.unmount();
+  });
+
+  test("a reconnecting workspace shows one truthful waking state without a duplicate wake action", async () => {
+    const { client, spy } = coldClient({
+      getWorkspaceCapture: async () => ({ available: false }),
+      listMachines: async () => ({
+        activeSandboxId: "modal-box",
+        activeEpoch: 1,
+        machines: [
+          {
+            sandboxId: "modal-box",
+            enrollmentId: null,
+            name: "Cloud sandbox",
+            kind: "modal",
+            state: "reconnecting",
+            active: true,
+            isSessionGroup: true,
+            os: "linux",
+            arch: "x86_64",
+            hasDisplay: true,
+            allowScreenControl: false,
+            sharedSessionCount: 1,
+            lastSeenAt: null,
+            metrics: null,
+          },
+        ],
+      }),
+    });
+    const rendered = await renderComponent(
+      withProvider(
+        client,
+        <SandboxWorkspace
+          sessionId={SESSION_ID}
+          events={[]}
+          primary={<div>chat</div>}
+          autoSaveId="og.test.prewarm.reconnecting"
+        />,
+      ),
+    );
+    await flush(60);
+
+    expect(spy.attachCalls).toBe(0);
+    expect(rendered.container.textContent).toContain("Waking workspace");
+    expect(rendered.container.textContent).not.toContain("Workspace is resting");
+    expect(rendered.container.textContent).not.toContain("Open live workspace");
+    expect(
+      rendered.container.querySelector('button[aria-label="Machine: Waking…"]'),
+    ).not.toBeNull();
+    await rendered.unmount();
+  });
+
+  test("an explicit Files live intent warms the box exactly once", async () => {
     const { client, spy } = coldClient();
     const hook = await renderTabsHook(client, { sessionId: SESSION_ID, events: [] });
     await flush(60);
     expect(spy.attachCalls).toBe(0);
-    // Reach the Files tab's onEditIntent (the editor's first-keystroke signal).
+    // Reach the Files tab's idempotent live-intent callback. The packaged UI
+    // invokes the same intent from its explicit wake gates.
     const filesTab = hook.result.current.tabs.find((t) => t.id === WORKBENCH_TAB_FILES);
     expect(filesTab).toBeDefined();
     const onEditIntent = (filesTab!.content as ReactElement<{ onEditIntent: () => void }>).props
@@ -227,7 +373,7 @@ describe("workbench prewarm gating (Refinement 1)", () => {
       onEditIntent();
     });
     await flush(60);
-    // The edit intent flipped attachFiles → the box warmed via a viewer attach.
+    // The intent flipped attachFiles → the box warmed via a viewer attach.
     expect(spy.attachCalls).toBe(1);
     await hook.unmount();
   });

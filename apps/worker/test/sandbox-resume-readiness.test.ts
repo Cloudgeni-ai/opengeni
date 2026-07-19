@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import type { EstablishedSandboxSession } from "@opengeni/runtime";
-import { SandboxWarmingTimeoutError, waitForSandboxExecReadiness } from "../src/sandbox-resume";
+import {
+  SandboxWarmingTimeoutError,
+  waitForSandboxExecReadiness,
+  waitForWarmSnapshot,
+} from "../src/sandbox-resume";
 
 function established(
   backendId: string,
@@ -47,5 +51,21 @@ describe("sandbox exec readiness", () => {
       10,
     );
     expect(called).toBe(false);
+  });
+});
+
+describe("workspace snapshot cancellation", () => {
+  test("Steer/Pause preempts an in-flight snapshot wait instead of paying its timeout", async () => {
+    const controller = new AbortController();
+    const startedAt = performance.now();
+    const waiting = waitForWarmSnapshot(
+      new Promise<never>(() => undefined),
+      60_000,
+      controller.signal,
+    );
+    controller.abort(new Error("STEER"));
+
+    await expect(waiting).resolves.toBe(false);
+    expect(performance.now() - startedAt).toBeLessThan(100);
   });
 });

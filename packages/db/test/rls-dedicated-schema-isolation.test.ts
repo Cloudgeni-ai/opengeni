@@ -32,8 +32,10 @@ import { provisionRoles } from "../src/provision-roles";
 //
 // Throwaway pgvector pg17, non-default port, torn down in afterAll.
 
-const CONTAINER = "ogverify-pg-rls-dedicated";
-const PORT = 55481;
+// Fixed Docker listeners stay above Linux's default ephemeral client-port range;
+// the container name binds the listener contract across worktrees.
+const PORT = 61441;
+const CONTAINER = `ogverify-pg-rls-dedicated-${PORT}`;
 const PASSWORD = "x";
 const APP_PASSWORD = "apppw";
 const SCHEMA = "tenantx";
@@ -48,7 +50,7 @@ function docker(args: string[]): string {
 
 function removeContainer(): void {
   try {
-    docker(["rm", "-f", CONTAINER]);
+    docker(["rm", "-f", "-v", CONTAINER]);
   } catch {
     // already gone
   }

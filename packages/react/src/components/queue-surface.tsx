@@ -196,7 +196,8 @@ export function QueueSurface({ queue, composer, readOnly = false }: QueueSurface
     [composer, edit, readOnly],
   );
 
-  if (count === 0 && !queue.error && !queue.mutationError) return null;
+  if (count === 0 && !queue.stoppingPreviousAttempt && !queue.error && !queue.mutationError)
+    return null;
 
   return (
     <div
@@ -204,6 +205,31 @@ export function QueueSurface({ queue, composer, readOnly = false }: QueueSurface
       data-testid="queue-surface"
     >
       <div className="overflow-hidden rounded-lg border border-border bg-surface/80 shadow-sm">
+        {queue.stoppingPreviousAttempt ? (
+          <div
+            role="status"
+            aria-live="polite"
+            className="flex min-h-11 items-center gap-2.5 border-b border-status-waiting/20 bg-status-waiting/[0.07] px-3 py-2 text-xs text-fg"
+            data-testid="stopping-previous-attempt"
+          >
+            <Loader2Icon
+              aria-hidden="true"
+              className="size-3.5 shrink-0 animate-spin text-status-waiting motion-reduce:animate-none"
+            />
+            <span className="min-w-0">
+              <span className="font-medium">
+                {queue.effectiveControl?.state === "paused"
+                  ? "Stopping current attempt…"
+                  : "Stopping previous attempt…"}
+              </span>{" "}
+              <span className="text-fg-muted">
+                {queue.effectiveControl?.state === "paused"
+                  ? "Queued work stays saved until you resume."
+                  : "Queued work is saved and starts automatically."}
+              </span>
+            </span>
+          </div>
+        ) : null}
         <button
           type="button"
           className="flex w-full min-w-0 items-center gap-2 px-3 py-2 text-left outline-none transition-colors hover:bg-surface-2/60 focus-visible:bg-surface-2/60 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/40 pointer-coarse:min-h-11"
