@@ -5,7 +5,7 @@
 
 # ADR: human identity, login accounts, organizations, and workspace tenancy
 
-Status: **corrective revision after the second exact-head blocked review; not approved for implementation**
+Status: **corrective revision after the third exact-head blocked review; not approved for implementation**
 
 Issue: OPE-10
 
@@ -64,6 +64,23 @@ Human identity/login recovery is a deployment-scoped security ceremony independe
 every organization membership. Organization recovery changes only one organization's
 governance rows and grants for an already authenticated human. Neither authority can be
 silently substituted for the other.
+
+The two deployment authority planes—identity recovery and exceptional organization-
+governance custody—have independent offline trust roots, custodian enrollments,
+factors, eligibility, quorums, revisions, degraded states, and lost-quorum
+reconstitution. Tenant roles and ordinary support are outside both roots.
+
+Personal-to-team conversion is a fenced change of one organization's kind that keeps
+its id, workspaces, resources, and tenant ownership. **Organization merge is not
+supported by this decision**: every API, SDK, CLI, host, migration, and UI request to
+combine two organizations fails closed as `organization_merge_unsupported` until a
+separate exact-head-reviewed design exists.
+
+A proved post-apply finding that merge joined two different people uses a separate
+identity-separation/reconstitution operation. It never rewinds history or lets one
+authority decide tenant, billing, and private-state outcomes. External effects use a
+durable capability-fenced delivery state machine; an ambiguous receipt blocks ordinary
+merge finalization rather than permitting a blind republish or a silent success.
 
 ## 3. Canonical vocabulary
 
@@ -468,6 +485,62 @@ a separate privacy/recovery operation that first transfers or deletes personal a
 resolves every organization role, revokes all login sessions and personal credentials,
 and preserves minimally necessary pseudonymous audit/billing records under policy.
 
+### 9.7 Personal-to-team conversion
+
+Personal-to-team conversion changes exactly one existing personal organization into a
+team organization without moving or renumbering it. The operation records a unique
+`(organization_id, idempotency_key)`, expected organization kind/governance revision,
+personal owner human/security revision and fresh step-up proof, proposed owner and
+recovery-steward custody, factor/custody revisions, billing/entitlement revision and
+decision, notice set, cooling deadline, barrier generation, and audit/outbox ids.
+Only one nonterminal conversion, delete, transfer, kind change, or identity-merge
+prerequisite may hold the organization barrier.
+
+| Current state | Event and precondition | Next state | Durable effect |
+| --- | --- | --- | --- |
+| absent | current personal owner passes operation-bound step-up | `review` | Fence inputs; build revision-bound custody, collaborator, billing, and effect manifest |
+| `review` | active human owner and recovery steward accept, factors are usable, billing decision is explicit, and notices are deliverable | `cooling_off` | Install conversion barrier; notify owner, workspace collaborators, billing owner, and security contacts; start policy minimum cooling |
+| `review` | custody, billing, proof, policy, or notice prerequisite cannot be met | `blocked` | Preserve personal kind and all ids/resources; expose exact prerequisite |
+| `review` or `cooling_off` | proved owner cancels before cutover | `aborted` | Consume generation, remove barrier, preserve personal kind and billing policy |
+| `blocked` | new idempotent revision-bound review resolves every prerequisite | `review` | Rebuild the whole manifest; no partial approval is inherited |
+| `cooling_off` | dispute or owner/custody/billing/organization revision changes | `aborted` | Fence callbacks and remove barrier; no kind or billing change |
+| `cooling_off` | deadline passes and every proof, factor, notice, decision, and revision revalidates | `ready` | Require final owner step-up and exact-generation worker claim |
+| `ready` | exact generation locks organization, custody, billing owner, and barrier rows | `applying` | Deny conflicting kind/custody/billing/delete/transfer/merge-prerequisite mutations |
+| `ready` | any input is stale | `aborted` | Remove barrier; require a new generation and cooling period |
+| `applying` | kind flip, team custody activation, billing decision, revisions, outbox, and audit commit atomically | `converted` | Same organization/workspace/resource ids become team-owned; conversion is now irreversible |
+| `applying` | crash or transaction abort before commit | `ready` | No partial conversion is visible; retry exact generation after revalidation |
+
+The team post-state has at least one active proved human owner and one active proved
+human organization recovery steward before `kind = team` becomes visible. One human may
+hold both capabilities only under the existing single-human break-glass policy with a
+distinct organization factor. Deployment custodians, invitations, agents, service
+principals, API keys, and workspace-only collaborators never satisfy either capability.
+Existing workspace collaborators keep exactly their workspace grants; conversion does
+not infer an organization membership or capability from collaboration.
+
+Workspace rows, resources, URLs, tenant pairs, service credentials, jobs, and ordinary
+data writes remain under the same organization/workspace authority throughout. The
+barrier fences kind, custody, billing, deletion, transfer, and identity-merge
+prerequisite changes, not ordinary resource writes. Personal allowances, credits, and
+billing policy enter `conversion_hold` during cooling. The current billing authority
+must select exactly one reviewed outcome—terminate personal allowance, transfer an
+eligible balance/entitlement to the same organization as team-owned, or initialize a
+new team policy. Posted ledger, payment, tax, entitlement-consumption, and anti-abuse
+facts remain immutable; unsupported transfer stays `blocked` rather than being guessed.
+
+Every notice and confirmation says the ids and resources remain, collaborators gain no
+organization capability, billing follows the selected outcome, and the kind flip is
+irreversible. An identity merge that names this conversion as a duplicate-personal-org
+prerequisite cannot enter merge `cooling_off` until conversion is terminal
+`converted`; `blocked` or `aborted` conversion leaves the merge blocked. A later
+personal organization is created only through normal uniqueness-checked creation, not
+by undoing this operation.
+
+This protocol does not combine two organizations. Organization merge, organization-
+to-organization resource consolidation, and an implicit workspace move are
+unsupported and fail closed as `organization_merge_unsupported`; adding them requires
+a separate ADR, threat model, migration plan, UX contract, and independent review.
+
 ## 10. Audit and invalidation contract
 
 Security-relevant actions append sanitized audit events with:
@@ -502,6 +575,9 @@ append authority, scope, integrity chain, retention, and lawful-erasure behavior
   to the authenticated actor; tenant APIs do not expose other members' login bindings.
 - Mutations support idempotency and typed error envelopes. Invitation lookup and
   inaccessible deep links avoid resource enumeration.
+- Personal-to-team conversion exposes the exact durable state and revision-bound
+  manifest from section 9.7. No endpoint accepts a second organization id as a merge
+  target; such requests return `organization_merge_unsupported` without moving data.
 
 ### 11.2 SDK and CLI
 
@@ -513,6 +589,10 @@ append authority, scope, integrity chain, retention, and lawful-erasure behavior
   and require explicit organization/workspace selection when ambiguous.
 - `--organization`/`organizationId` is an administrative selector; `--workspace` remains
   the resource selector and must belong to that organization.
+- SDK/CLI conversion methods target one personal organization and surface every
+  durable state. They provide no organization-merge helper, and a host/server reporting
+  `organization_merge_unsupported` is a terminal capability result, not a fallback to
+  client-side resource moves.
 
 ### 11.3 Embedded and white-label hosts
 
@@ -529,6 +609,10 @@ provider. Hosts may supply provider-neutral ports for:
 Host ports return typed ids and assurance metadata. They do not bypass OpenGeni's
 workspace grant or RLS boundary. Brand strings, routes, icons, and email copy are host
 configuration, never hard-coded tenancy semantics.
+
+An embedded host may render the personal-to-team protocol but cannot implement an
+organization merge behind OpenGeni's API. A request or capability advertisement for
+organization merge must remain absent or return `organization_merge_unsupported`.
 
 ## 12. Deep links and navigation
 
@@ -579,6 +663,13 @@ per-account revocation unreliable.
 Rejected: credentials cannot receive recovery notices, prove a person is present, or
 perform accountable governance.
 
+### Merge organizations as part of identity merge
+
+Rejected: identity equality does not prove that two independent tenant, billing,
+custody, retention, integration, or contractual authorities may be combined. This ADR
+defines only in-place personal-to-team conversion. Organization merge remains
+unsupported and fail-closed until separately designed and reviewed.
+
 ## 14. Implementation approval criteria
 
 Schema/API work may begin only after an exact-head independent review approves this ADR
@@ -589,6 +680,13 @@ and the companion threat model. Later implementation is acceptable only when it 
 - persisted organization membership plus explicit workspace grants;
 - human-only owner and organization-recovery custody for every active team organization;
 - deployment-scoped human/login recovery independent from organization governance;
+- independent deployment authority-plane roots, custodian lifecycle/reconstitution,
+  and fail-closed degraded or unavailable modes;
+- revision-fenced wrongful-merge identity separation with no invented tenant grants;
+- atomic personal-to-team conversion with explicit billing/custody outcomes and no
+  organization-merge fallback;
+- durable external-delivery reconciliation that never blindly republishes and blocks
+  merge finalization on unresolved effects;
 - single-use invitations and step-up for sensitive roles;
 - synchronous grant invalidation plus bounded stream/token invalidation;
 - typed billing ownership independent of login/model credentials;
@@ -596,14 +694,17 @@ and the companion threat model. Later implementation is acceptable only when it 
 - real PostgreSQL composite-FK and FORCE-RLS cross-tenant isolation; and
 - the responsive, accessible, draft-safe switching contract.
 
-## 15. Login linking, identity merge, and recovery protocols
+## 15. Login linking, identity merge, separation, and recovery protocols
 
-Four operations are distinct and never share a permissive fallback:
+Five operations are distinct and never share a permissive fallback:
 
 - **Link login account** attaches one not-yet-owned authentication binding to one
   existing human identity. It never combines two existing human identities.
 - **Merge identities** makes two existing human identities resolve to one canonical
   human after every authority and asset conflict is settled.
+- **Separate/reconstitute identities** contains and repairs a wrongful merge that joined
+  different people, restoring independent authentication only after closed deployment
+  proof and scoped owner decisions under section 15.7.
 - **Recover human identity/login** restores a deployment-wide authentication path under
   section 15.4. Its authority is independent of every organization.
 - **Recover organization governance** changes membership/ownership inside exactly one
@@ -661,13 +762,17 @@ operation may mention either human.
 | `applying` | alias/generation flip, revisions, session revocation, outbox, and audit commit | `applied_observation` | Canonical resolution starts; 30-day dispute/containment window starts |
 | `applying` | crash/serialization failure | `staging` | Cutover did not commit; revalidate the staged generation |
 | `applied_observation` | dispute submitted before deadline | `contained` | Increment security revision, revoke sessions/credentials, deny sensitive human mutations |
-| `contained` | investigation rejects dispute | `applied_observation` or `finalized` | Append reason; issue only fresh sessions; never run an inverse ledger |
-| `contained` | investigation upholds or cannot safely dismiss dispute | `repair_review` | Build section 15.6 provenance manifest and keep fail-closed containment |
+| `contained` | investigation proves the sources were the same person and rejects dispute | `applied_observation` or, only after the deadline and section 15.8 gate, `finalized` | Append reason; issue only fresh sessions after proof; never run an inverse ledger |
+| `contained` | investigation proves or cannot exclude that the sources were different people | `contained`; child separation `evidence_pending` | Start the distinct section 15.7 operation under a new generation; the originating merge remains contained historical evidence and neither person authenticates through the merged resolver |
+| `contained` | dispute is upheld but the sources are still proved to be the same person | `repair_review` | Build section 15.6 provenance manifest and keep fail-closed containment |
 | `repair_review` | scoped authorities approve a complete forward plan | `repairing` | Fence plan generation; expired/incomplete approvals do nothing |
 | `repairing` | bounded idempotent repair batches finish without an irreversible/unresolved exception | `repaired` | Append complete outcome report; issue no implicit grant or restored credential |
 | `repairing` | bounded idempotent repair batches finish with declared irreversible/unresolved exceptions | `repaired_with_exceptions` | Append complete exception/outcome report; issue no implicit grant or restored credential |
 | `repairing` | crash/serialization failure | `repairing` | Retry exact checkpoint; already committed effects are not inverted |
-| `applied_observation` | 30 days pass with no dispute | `finalized` | Alias remains; source/write lineage stays retained under policy |
+| `applied_observation` | 30 days pass with no dispute and every external intent is terminal-acceptable under section 15.8 | `finalized` | Alias remains; source/write lineage stays retained under policy |
+| `applied_observation` | 30 days pass while any external intent is not terminal-acceptable under section 15.8 | `finalization_blocked` | Keep lineage and reconciliation active; timeout is never treated as delivery success |
+| `finalization_blocked` | every intent becomes receipt-confirmed, failed-confirmed, or compensated | `finalized` | Append delivery outcome digest; retain lineage under policy |
+| `finalization_blocked` | scoped authorities durably approve an unresolved irreversible exception | `repaired_with_exceptions` | Append signed exception/outcome report; never relabel unknown delivery as success |
 
 Merge proof is fresh control of at least one usable, non-recovery login account on each
 source, with step-up bound to the merge id. A missing proof is never replaced by an
@@ -693,6 +798,14 @@ and session-generation rows in deterministic order; it verifies the full staged 
 before flipping canonical resolution. This replaces the unbounded promise to lock every
 object in one transaction.
 
+A personal-to-team conversion named by the conflict manifest is a separate section 9.7
+operation. Merge remains in `conflict_review` or `blocked` until that operation is
+terminal `converted`; `ready`, `applying`, `blocked`, or `aborted` never satisfies the
+prerequisite. The merge mutation barrier and conversion barrier have one deterministic
+lock order and cannot both be claimed by different generations. Combining the two
+organizations themselves is not a conflict resolution: organization merge is
+unsupported and returns `organization_merge_unsupported`.
+
 ### 15.3 Deterministic merge conflict resolution
 
 The preview is a server-generated, revision-bound manifest. Every row is resolved or
@@ -700,7 +813,7 @@ the merge remains `blocked`.
 
 | Conflict | Required decision; no silent default |
 | --- | --- |
-| Two active personal organizations | Keep exactly one as personal. Any other conversion to team or delayed export/deletion is a separate prerequisite that must reach its terminal state before merge cooling. Conversion, finalized deletion, external side effects, and destroyed facts are labeled irreversible; cancel is always available. No workspace moves implicitly and no later merge repair promises to undo them. |
+| Two active personal organizations | Keep exactly one as personal. Any other section 9.7 conversion must reach `converted`, or delayed export/deletion must reach its declared terminal state, before merge cooling. Conversion, finalized deletion, external side effects, and destroyed facts are labeled irreversible; cancel is always available. Organization merge fails closed, no workspace moves implicitly, and no later merge repair promises to undo them. |
 | Duplicate organization memberships | Preserve a contribution per source and compute one explicit canonical grant. Block if organization policy forbids combined duties. Sensitive capabilities require that organization's normal approval; merge cannot invent them. Every active team organization must retain a human owner and recovery steward after cutover. |
 | Pending invitations | Retarget only after inviter authority and target proof are rechecked; exact duplicates are cancelled with audit. Accepted/expired records remain immutable. |
 | Recovery authority | Human/login recovery authority remains deployment-scoped and is never unioned from organizations. Re-evaluate each organization's owner/recovery-steward invariant independently; a source being absorbed or a compromised path cannot approve. |
@@ -732,12 +845,90 @@ human-private state, and active memberships may span many unrelated organization
 authority is stored outside organization membership and cannot be granted by an
 organization owner, admin, recovery steward, invitation, billing role, or tenant API.
 
-The deployment enrolls identity-recovery custodians as distinct human operator
-identities with hardware-backed/offline factors and a dedicated capability. Custodian
-actions use a separate no-content role, incident id, short approval lifetime, and
-operator/actor-global audit. A custodian receives no tenant discovery or workspace
-content access and cannot approve their own recovery or an operation in which they are a
-source/target.
+#### 15.4.1 Deployment authority-plane root of trust and custodian lifecycle
+
+There are two separate deployment authority-plane instances:
+
+1. `identity_recovery`, whose custodians may satisfy only the closed human/login
+   recovery paths in section 15.4.2; and
+2. `organization_governance_custody`, whose custodians may satisfy only the exceptional
+   locked-organization path in section 15.5.
+
+Each plane is rooted in a precommitted offline deployment authority controlled through
+operator/deployment ceremony, not by a tenant, ordinary support, a runtime app role, or
+the custodians themselves. Each stores its own root public-key/factor digest, policy
+version, configured quorum and eligibility age, status/revision, notice destinations,
+and last verified ceremony. Root secret material remains offline. The two digests,
+factors, enrollments, approvals, and database capabilities are independent even if the
+same proved person is eligible for both roles; possession or quorum in one plane never
+counts in the other.
+
+The shared plane-state vocabulary has plane-specific rows and generations:
+
+| Current state | Event and precondition | Next state | Security behavior |
+| --- | --- | --- | --- |
+| `unconfigured` | operator chooses an explicit mode and commits root/policy digest | `enrollment_pending` or `disabled_unavailable` | No custodian recovery operation is accepted |
+| `enrollment_pending` | separately proved custodians/factors satisfy configured viable quorum and eligibility policy | `enabled` | Activate exact eligible set under a new plane revision |
+| `enrollment_pending` | operator records the path intentionally unavailable | `disabled_unavailable` | Preserve reason; UI/API cannot advertise that recovery path |
+| `enabled` | ordinary removal/rotation would leave post-state below viable quorum | `enabled` | Deny mutation unless one atomic replacement preserves quorum |
+| `enabled` | compromise immediately revokes a custodian/factor and drops viable quorum | `degraded` | Commit revocation and revision first; all custodian-dependent recovery fails closed |
+| `degraded` | eligible atomic replacement restores configured quorum without root reconstitution | `enabled` | Activate replacement before predecessor is finally revoked |
+| `degraded` | offline root authorizes lost-quorum incident and long-cooling rebuild | `reconstituting` | Freeze all recovery approvals/operations in this plane; notify deployment security contacts |
+| `reconstituting` | cooling completes and offline-root signatures, independent incident basis, factors, eligibility, notices, and revision revalidate | `enabled` | Atomically activate new eligible set, rotate plane generation, and revoke superseded set |
+| `reconstituting` | incident is cancelled or proposed set/evidence becomes stale while the offline root remains valid | `degraded` | Discard the inactive proposed set; keep recovery denied and require a new reconstitution generation |
+| `degraded` or `reconstituting` | offline deployment root is unavailable, invalid, or disputed | `disabled_unavailable` | Keep plane unavailable; never let runtime actors or remaining custodians self-expand authority |
+| `disabled_unavailable` | a later offline-root ceremony creates a new reviewed generation | `enrollment_pending` | No recovery operation is enabled until enrollment again proves viability |
+
+`degraded`, `reconstituting`, and `disabled_unavailable` reject new claims and prevent
+pending claims from applying. A compromise revocation never waits for a replacement or
+cooling period. Lost-quorum reconstitution requires offline-root proof, a separately
+approved incident/legal basis, notices through precommitted channels, and at least a
+seven-day cooling period; policy may lengthen but not shorten it. The root cannot
+authorize a target recovery while rebuilding the custodian plane. If the root cannot
+be used, unavailability is the safety result—not a lower quorum, tenant vote, support
+override, or first-operator bootstrap.
+
+Every custodian is a distinct proved human operator identity with a dedicated
+hardware-backed/offline factor and no-content capability. Its plane-local lifecycle is:
+
+| Current state | Event and precondition | Next state | Durable effect |
+| --- | --- | --- | --- |
+| `absent` | offline root and separate enrollment operator approve exact human/factor/plane | `enrollment_pending` | Store proof/factor digest, approvers, plane revision, nonce, and notice; grant nothing |
+| `enrollment_pending` | custodian proves factor and accepts duties | `cooling_off` | Start policy cooling; self-enrollment and cross-plane factor reuse are denied |
+| `enrollment_pending` | proof/acceptance fails, expires, is disputed, or enrollment is withdrawn | `revoked` | Consume nonce and generation; no capability or approval becomes usable |
+| `cooling_off` | deadline and enrollment/root/human/factor revisions revalidate | `active_ineligible` | Activate no-content capability but do not count toward quorum |
+| `cooling_off` | dispute or root/plane/human/factor revision change | `revoked` | Consume enrollment generation; a later attempt repeats enrollment and cooling |
+| `active_ineligible` | minimum eligibility age passes without dispute/compromise | `active` | Count only under the current plane revision |
+| `active` or `active_ineligible` | old and new factor proof start a rotation | `factor_rotation_pending` | Old factor remains current; pending factor cannot approve |
+| `factor_rotation_pending` | cooling and both proofs/revisions revalidate | `active_ineligible` | Atomically replace factor, bump custodian revision, and restart eligibility age |
+| `factor_rotation_pending` | rotation is cancelled/expires or new-factor proof fails while the old factor remains uncompromised/current | prior `active` or `active_ineligible` state | Discard pending factor, bump operation revision, and retain only the old factor's prior eligibility |
+| `active` or `active_ineligible` | planned removal begins and post-state/replacement is viable | `revocation_pending` | Stop new approvals; retain current approvals only until their short expiry |
+| `revocation_pending` | eligible replacement is active or remaining post-state meets quorum | `revoked` | Revoke factor/capability and bump plane revision |
+| `revocation_pending` | planned removal is cancelled and current factor/human/plane revisions revalidate | prior `active` or `active_ineligible` state | Bump operation revision; restore no approval that expired while removal was pending |
+| any non-revoked state | compromise or factor loss is confirmed | `revoked` | Revoke immediately; invalidate approvals and move plane to `degraded` when quorum is lost |
+
+Enrollment, activation, rotation, revocation, and replacement require distinct operator
+and offline-root duties as configured; a custodian cannot approve their own lifecycle
+mutation. Every transition is fenced by expected plane, root-policy, custodian, human,
+and factor revisions. Replacement is one composite generation that makes the eligible
+replacement active before revoking the predecessor; two independent mutations cannot
+temporarily pass a stale quorum check. Approval eligibility is evaluated both when an
+approval is recorded and when a recovery applies.
+
+For `organization_governance_custody`, fewer than three distinct eligible custodians
+means the exceptional unlock path is explicitly unavailable; it is never advertised as
+“contact support.” For `identity_recovery`, each configured self/locked-out/factorless
+path records whether its factor and two-/three-custodian quorum is viable or explicitly
+unavailable. A plane may remain enabled for a viable stronger or self-recovery path
+while another path is recorded unavailable, but no request may silently fall across
+paths.
+
+Custodian actions use separate no-content roles, incident ids, short approval lifetimes,
+and operator/deployment audit. A custodian receives no tenant discovery or workspace
+content access and cannot approve their own recovery or an operation in which they are
+a source/target.
+
+#### 15.4.2 Human/login recovery operation
 
 The recovery operation has a unique idempotency key, target security revision, exact
 requested effects, evidence/approval ids, authority path, cooling deadline, notice set,
@@ -767,6 +958,14 @@ Approved authority paths are closed and versioned:
    it, three distinct custodians using separately held factors, an independently approved
    incident/legal basis, and minimum seven-day cooling. Otherwise it fails closed and no
    login is attached.
+
+Any path that counts custodians requires the `identity_recovery` authority plane to be
+`enabled`, the exact path to be recorded viable, and every approval to come from an
+`active` eligible custodian under the same current plane revision. A transition to
+`degraded`, `reconstituting`, or `disabled_unavailable`, or any root/policy/custodian
+revision change, disputes the operation and prevents apply. Self recovery remains
+available only when its own target-held factor path is configured viable; it never
+borrows an unavailable custodian path.
 
 Quorum counts distinct proved humans and distinct factor roots. A target, compromised or
 newly enrolled custodian, organization administrator, service credential, or ordinary
@@ -826,8 +1025,12 @@ recovery.
 An exceptional deployment-custody path never makes a custodian an owner and never grants
 content. It first moves the organization to `governance_locked`, requires three distinct
 separately enrolled deployment organization-governance custodians with separate
-factors, seven-day cooling and notices, and may only appoint a globally active, freshly
-proved human as owner and recovery steward. This capability is independent from
+factors who are `active` under an `enabled` current plane revision, seven-day cooling
+and notices, and may only appoint a globally active, freshly proved human as owner and
+recovery steward. If that authority plane is unconfigured, enrollment-pending,
+degraded, reconstituting, disabled/unavailable, below three eligible custodians, or
+changes revision during the ceremony, the operation blocks or aborts fail-closed and
+the organization remains `governance_locked`. This capability is independent from
 deployment identity-recovery custody; holding either one never grants the other. The
 same transaction then restores `active`. A personal organization cannot use this path
 to replace its personal owner; it must recover the existing human globally or use the
@@ -856,8 +1059,9 @@ delay, proof, quorum, and revision checks; a blocked callback never resumes.
 For 30 days after merge cutover, every write authorized by the canonical human or using
 an owner mapping changed by the merge must append `merge_write_provenance` in the same
 database transaction as the write intent. External work records the intent before
-publish and appends a receipt afterward. A write that cannot durably link its provenance
-fails closed; there is no best-effort observation path.
+publish and follows the capability-fenced delivery states in section 15.8; a missing
+receipt is not evidence of failure or success. A write that cannot durably link its
+provenance fails closed; there is no best-effort observation path.
 
 Each record contains merge id/generation and monotonic sequence; object type/stable id;
 owner plane and before/after owner ids; exact organization/workspace when applicable;
@@ -878,7 +1082,7 @@ source contribution, every post-apply write, and any later repair effect.
 | Billing/entitlement/provider posting | Posted ledger and provider facts remain. An authorized billing owner may append a compensating transfer/credit; no automatic refund, balance duplication, or anti-abuse reset. |
 | Login credential, API key, session, delegated token | Revoke and reissue after proof. Old secret material is never restored, split, or copied. Organization service credentials remain with their tenant unless that tenant revokes them. |
 | Audit/security evidence | Never rewrite or split prior events. Append alias, containment, decision, repair, and exception links to the immutable chains. |
-| Webhook, notification, job, or other external effect | Cannot be recalled. Record receipt and apply an idempotent compensating action only when the owning subsystem and tenant authority support one. |
+| Webhook, notification, job, or other external effect | Cannot be assumed recalled or delivered. Follow section 15.8; apply a separately keyed compensation only when the owning subsystem and scoped tenant/billing authority support one. Unknown delivery remains visible and blocks ordinary finalization. |
 | Personal-organization conversion/finalized deletion | This was an acknowledged prerequisite and remains irreversible. At most restore an available export into a new, separately authorized tenant; never claim original ids/data were losslessly recovered. |
 
 A dispute first commits containment: increment the human security revision, revoke all
@@ -903,10 +1107,176 @@ transferred, revoked, quarantined, compensated, and irreversible categories and 
 remaining support/export options. There is no state named “reversed.”
 
 If no dispute arrives, the observation window expires after 30 days and the merge
-finalizes. The special containment entry point expires, but retained provenance follows
-a declared audit/security retention schedule and later incidents use normal
-identity-recovery and forward-repair procedures. Finalization or timeout never destroys
-lineage needed to explain committed facts.
+finalizes only after section 15.8 proves every external intent receipt-confirmed,
+definitively failed, compensated, or durably approved as an unresolved irreversible
+exception. Otherwise it enters `finalization_blocked`; time cannot convert unknown
+delivery into success or failure. An approved unresolved exception forces
+`repaired_with_exceptions` and a signed report. The special containment entry point
+expires only after a permitted terminal outcome, while retained provenance follows a
+declared audit/security retention schedule and later incidents use normal identity-
+recovery and forward-repair procedures. Finalization or timeout never destroys lineage
+needed to explain committed facts.
+
+### 15.7 Wrongful-merge identity separation and reconstitution
+
+This operation exists only after containment finds that a merge joined, or cannot
+safely exclude having joined, two different people. It is not merge cancellation,
+ordinary unlink, identity recovery, or tenant governance recovery. The merged resolver
+stays fail-closed from the initial containment commit: every source/canonical login,
+slot, session, personal credential, delegated token, cache, and stream is revoked, and
+no login may resolve both claimants to one active human while review continues.
+
+The operation stores a unique idempotency key; merge id/generation; retained source,
+canonical, and any replacement human ids; all starting human/login/security/alias/
+private-owner/tenant-governance/billing revisions; claimant proof and deployment
+authority ids; login disposition; personal-organization constraints; per-plane owner
+decisions; notices, dispute and cooling deadlines; barrier/staging manifest digest;
+revocation/outbox ids; and a separation fencing generation. Only one nonterminal
+link/merge/recovery/separation operation may mention either claimant or resolver.
+
+Authority is closed and deployment-scoped. Each person must give fresh operation-bound
+proof tied to a pre-merge login, independently enrolled offline factor, or a completed
+section 15.4 recovery path that is cryptographically/administratively tied to that
+person's retained lineage. In addition, the configured identity-separation path must
+receive its current quorum of distinct `active` deployment identity-recovery custodians
+under one `enabled` plane revision—at least two when both claimants retain factors and
+three plus independent incident/legal approval if either is factorless. Claimant proofs
+are mandatory but count only as claimant proofs: neither claimant/merge source/target,
+nor an organization owner/steward/quorum, governance custodian, billing authority,
+support session, invitation, or email equality can substitute for a required deployment
+custodian or scoped owner approval. If this authority or proof cannot be established,
+containment remains; the system never guesses which person owns a binding.
+
+| Current state | Event and precondition | Next state | Security behavior |
+| --- | --- | --- | --- |
+| absent | contained merge opens different-person incident under exact merge generation | `evidence_pending` | Snapshot revisions/lineage; notify both claimants and deployment security; merged resolver remains denied |
+| `evidence_pending` | both claimant proofs and deployment quorum validate | `separation_review` | Build revision-bound alias/login/private/tenant/billing/effect manifest |
+| `evidence_pending` | proof/authority expires, conflicts, or cannot be established | `contained_unresolved` | Consume operation generation; keep both claimants and every merged resolver path contained |
+| `separation_review` | all deployment, login, private, tenant, billing, and irreversible decisions are complete | `cooling_off` | Install separation barrier; minimum seven-day cooling; send full non-secret notice set |
+| `separation_review` | any required scoped decision is absent or ambiguous | `blocked` | Change no resolver or owner generation; keep containment |
+| `blocked` | complete revised decisions and all starting revisions still match | `separation_review` | Rebuild and reapprove the entire manifest |
+| `cooling_off` | dispute, notice failure required by policy, authority-plane change, or referenced revision change | `contained_unresolved` | Fence callbacks/workers; keep containment; a retry uses a new generation |
+| `cooling_off` | deadline passes and every proof/authority/decision/revision revalidates | `ready` | Require final fresh claimant/custodian proofs |
+| `ready` | exact generation claims alias, human, login, owner, tenant-summary, and session rows | `staging` | Freeze identity/login/private-owner/merge/transfer/delete/conversion prerequisites |
+| `ready` | any final input is stale | `contained_unresolved` | Discard inactive staging; keep merged resolver denied |
+| `staging` | next stable-key at-most-500-row/250-ms batch commits | `staging` | Record checkpoint/digest; no staged resolver or owner row authorizes |
+| `staging` | complete digest and all barrier revisions match | `applying` | Enter short atomic generation cutover |
+| `staging` | crash, timeout, or stale digest | `staging` or `contained_unresolved` | Retry exact checkpoint or discard inactive generation; no partial separation is visible |
+| `applying` | resolver/login/human/owner generations, revocations, outbox, and audit commit with no quarantine/exception | `separated` | Two independently resolving human identities exist; neither receives an implicit tenant grant |
+| `applying` | same atomic cutover commits with ambiguous private/external rows quarantined | `separated_with_quarantine` | Authentication is separated; named rows remain unavailable pending scoped decision |
+| `applying` | same atomic cutover commits with irreversible deleted/converted/posted/external exceptions | `separated_with_irreversible_exceptions` | Authentication is separated; signed report records every exception and any quarantine |
+| `applying` | crash or serialization failure before commit | `staging` | Revalidate exact digest; visible state remains contained and unsplit |
+
+`separated`, `separated_with_quarantine`,
+`separated_with_irreversible_exceptions`, and `contained_unresolved` are terminal for
+that operation generation. `blocked` remains nonterminal but contained. A later attempt
+from `contained_unresolved` uses a new idempotency key, repeats proof/notices/cooling,
+and cannot inherit stale decisions.
+
+Alias cutover never deletes history. The retained absorbed/source human id is
+reactivated for one proved claimant whenever its id and integrity lineage remain
+usable; a new human id is created only if the retained id is corrupt, legally erased,
+or otherwise structurally unusable, and it receives an immutable `replacement_of`
+edge. The old absorbed→canonical alias becomes a non-authorizing historical tombstone.
+Two current resolver records then map independently to the reconstituted humans under
+the new generation. Human and login statuses and their security generations change in
+the cutover; stale aliases or old generations always deny.
+
+Every login binding is freshly proved for one claimant and atomically reassigned, or is
+quarantined with no authentication use. Provider callback, display label, and email
+cannot decide. Before either person reauthenticates, cutover again revokes all source
+and canonical browser/native slots, provider auth sessions, refresh families, personal
+credentials and keys, offline/cache wrapping records, user-bound delegated tokens,
+push registrations, and streams; only a later fresh proof creates a new-generation
+slot. Tenant-owned service credentials remain tenant-owned.
+
+Personal-organization uniqueness is recomputed per reconstituted human. An extant
+personal organization and uniquely proved owner lineage may transfer to that claimant,
+but a personal organization irreversibly converted to team or terminally deleted is
+never recreated or changed back. A person may therefore finish with no personal
+organization and use normal creation later if uniqueness/policy allow. Organization
+merge remains unsupported.
+
+Deployment identity authority decides only human, resolver, and login outcomes. Each
+organization's current authorized human governance approves only its own memberships,
+roles, owner/recovery-steward post-state, and human-bound tenant credentials; absence of
+tenant approval leaves the prior contribution revoked/quarantined and never invents a
+grant. Billing owners approve only compensating ledger/entitlement effects. Uniquely
+lineage-attributable private state may transfer to the freshly proved claimant when any
+tenant scope still authorizes it. Joint, conflicting, or ambiguous private state is
+quarantined from both people; secrets are never copied or inferred. Tenant-owned data
+never moves merely because the actor identity separates.
+
+Notices are sent at incident open, proof, decision, cooling, cutover, and terminal
+outcome to every safe pre-merge/current path and scoped security contact. A dispute
+fences the worker and leaves containment. Barrier lock order matches merge and section
+9.7 conversion; ordinary tenant data writes may continue under tenant authority, but
+identity, login, private-owner, governance-assignment, billing-compensation, and
+prerequisite mutations named by the manifest are fenced. External effects follow
+section 15.8; unknown delivery cannot be republished and becomes quarantine or an
+explicit irreversible exception without delaying the safety-critical resolver split.
+
+### 15.8 External delivery reconciliation
+
+Every merge-observation, repair, separation, conversion-prerequisite, notification,
+webhook, provider, or other external effect uses one durable delivery record linked to
+its owning operation/provenance row. A compensation is a new child effect with its own
+delivery record and an append-only relation to the original; it never overwrites the
+original state, receipt, failure, or ambiguity evidence. Before any publish attempt,
+`prepared` stores a stable effect/idempotency key, canonical request digest,
+destination/owner scope, provider capability snapshot and version, whether idempotent
+publish and status query are supported, compensation capability, attempt limit, and
+authority revisions. A retry may never alter key, digest, destination, scope, or
+capability snapshot.
+
+| Current state | Event and precondition | Next state | Durable behavior |
+| --- | --- | --- | --- |
+| `prepared` | exact worker atomically claims the one permitted publish under current owner/provider revisions | `publish_claimed` | Commit claim/attempt before network I/O; no other worker may publish |
+| `publish_claimed` | provider returns a verified acceptance/result receipt | `receipt_confirmed` | Append provider receipt digest/id and observed time; never republish |
+| `publish_claimed` | provider definitively proves rejection before accepting the effect | `failed_confirmed` | Append failure proof; no effect compensation is assumed necessary |
+| `publish_claimed` | process/network crashes or response is ambiguous after claim | `delivery_unknown` | Record ambiguity boundary; never infer success/failure or blindly republish |
+| `delivery_unknown` | provider supports status query and bounded reconciler claims current generation | `reconciling` | Query by exact provider effect/idempotency key; do not send effect payload |
+| `reconciling` | status query proves accepted/result | `receipt_confirmed` | Append queried receipt/proof |
+| `reconciling` | status query proves definitive pre-accept failure | `failed_confirmed` | Append provider status proof |
+| `reconciling` | status remains unknown/transient | `delivery_unknown` | Schedule bounded exponential backoff with jitter and an absolute review deadline |
+| `delivery_unknown` | provider is idempotent but non-queryable and policy authorizes exact-key retry | `publish_claimed` | Reuse identical key/digest under a new fenced attempt number; capability/version change blocks retry |
+| original `delivery_unknown` or `receipt_confirmed` | owning subsystem plus scoped tenant/billing authority approve a separate compensating effect | original unchanged; relation `compensation_pending`, child `prepared` | Store a new child key/digest/capability snapshot and append-only relation before any child publish |
+| relation `compensation_pending` | child follows the same claim-before-I/O machine and reaches `receipt_confirmed` | relation `compensated`; child remains `receipt_confirmed` | Append aggregate compensation outcome while preserving both delivery histories; no inverse-history claim |
+| relation `compensation_pending` | child is `publish_claimed`, `delivery_unknown`, `reconciling`, or `failed_confirmed` | `compensation_pending` | Preserve original and child evidence; unknown child reconciles normally and a definitively failed child does not classify the original as compensated |
+| `delivery_unknown` | scoped authorities approve an unresolved, non-compensatable fact after investigation | `irreversible_exception_approved` | Store signed incident, approvers, expiry/current revisions, and user-visible exception; never label delivery success |
+
+An original effect is terminal-acceptable for merge finalization only when it is
+`receipt_confirmed`, `failed_confirmed`, or `irreversible_exception_approved`, or its
+linked compensation relation is `compensated`. `prepared` is safely claimable, but any
+original or child `publish_claimed`, `delivery_unknown`, or `reconciling`, and any
+`compensation_pending` relation, blocks ordinary finalization. A definitive local
+failure counts as `failed_confirmed` only when evidence proves that exact effect could
+not have been accepted; a failed compensation child does not resolve an unknown
+original.
+
+Provider idempotency is mandatory when supported, and every retry reuses the exact key
+and digest. After an ambiguous crash, status query is preferred and must run before an
+idempotent retry when available. For a provider that is neither queryable nor
+idempotent, the committed claim is at-most-once: exactly one publish attempt is allowed;
+a missing receipt remains `delivery_unknown` until compensation or explicitly approved
+irreversible exception. It is never automatically retried. A capability/version change
+after `prepared` requires reviewed reconciliation and cannot silently reinterpret the
+old record.
+
+Compensation and exception authority is scoped. The owning subsystem proves technical
+support, the exact tenant authority approves tenant effects, and the billing authority
+approves ledger/payment effects; deployment identity authority cannot decide those
+planes. Approvals expire on referenced revision changes. Reconciliation is bounded in
+rate and duration but not converted to success by timeout. The 30-day merge deadline
+therefore selects `finalization_blocked` while any record is unresolved; a durable
+irreversible exception permits only `repaired_with_exceptions` with a signed report.
+
+Crash tests stop immediately before/after intent commit, publish claim, network send,
+provider acceptance, receipt append, status query/result append, compensation claim,
+and compensation receipt. Duplicate/reordered workers, provider timeout, response loss,
+capability-version change, and database failure must prove at most one non-idempotent
+publish, exact-key idempotent retry only, no blind republish, and a truthful terminal or
+blocked state.
 
 ## 16. Complete tenant and actor data-plane authority
 
@@ -917,9 +1287,11 @@ Every persistent or derived datum declares exactly one canonical authority plane
 | --- | --- | --- | --- |
 | Workspace database rows | `(organization_id, workspace_id)` | Composite FK plus FORCE RLS `USING`/`WITH CHECK` under transaction-local verified context | Revision invalidation; two-tenant CRUD with equal-shaped ids |
 | Organization governance rows | `organization_id` plus actor/target ids | Organization RLS or narrow security-definer function after capability check; no null/global tenant visibility | Membership/status revision; cross-org list/mutate denial |
-| Human/login/session/identity-recovery rows | human, login account, session-set, or deployment recovery operation id as declared; never organization-derived | No direct app-role table access. A narrow function derives human/login from an opaque authenticated slot/session capability and current revision. Deployment recovery functions require independently enrolled custodian capabilities and cannot accept an organization role as authority | Login/human revision; actor A cannot enumerate actor B; organization-A steward cannot invoke global recovery or affect B/personal state |
-| Organization recovery rows | exact `organization_id`, governance revision, target active human, and scoped operation generation | Organization mutation function derives authority from active human steward membership or separate deployment organization-governance-custody capability; its SQL surface cannot address human/login tables or another organization | Org-only revision/invalidation; cross-org and global-human before/after equality tests |
-| Merge barrier/manifest/write lineage | merge operation/generation, exact object owner plane/id and tenant pair, actor source lineage | Owner/governance writes check active barrier; observation-window writes append provenance transactionally; external effects require durable intent/receipt | Missing provenance denies; containment/repair cannot rewrite tenant, billing, credential, delete, or audit facts |
+| Human/login/session/identity-recovery rows | human, login account, session-set, or deployment recovery operation id as declared; never organization-derived | No direct app-role table access. A narrow function derives human/login from an opaque authenticated slot/session capability and current revision. Deployment recovery functions require the enabled identity-plane generation and independently active custodian capabilities; they cannot accept an organization role as authority | Login/human/plane revision; actor A cannot enumerate actor B; organization-A steward cannot invoke global recovery or affect B/personal state; degraded/lost-quorum paths deny |
+| Organization recovery rows | exact `organization_id`, governance revision, target active human, and scoped operation generation | Organization mutation function derives authority from active human steward membership or separate enabled deployment organization-governance-custody plane/capability; its SQL surface cannot address human/login tables or another organization | Org/plane revision and org-only invalidation; cross-org/global-human equality and degraded-plane denial tests |
+| Merge/separation barrier, resolver generation, manifest, and write lineage | operation/generation, source/canonical/reconstituted human ids, exact object owner plane/id and tenant pair, actor source lineage | Owner/governance writes check active barrier; resolver reads accept only current non-tombstoned generation; observation writes append provenance transactionally | Missing provenance denies; containment never resolves two people to one active human; separation cannot invent tenant/billing grants or rewrite audit facts |
+| Personal-to-team conversion | exact organization id, kind/governance/billing revisions, owner proof, custody and barrier generation | Narrow conversion function locks one organization and activates human team custody plus selected billing outcome atomically; ordinary workspace writes retain unchanged tenant pair | Delete/transfer/merge-prerequisite races serialize; collaborator grants stay workspace-only; organization merge request denies |
+| External delivery records | stable effect key/digest, provider capability version, exact owning subsystem and tenant/billing scope | Claim commits before publish; query/idempotent retry uses exact key; non-queryable/non-idempotent delivery is at-most-once; scoped functions alone approve compensation/exception | Crash cannot blind-republish; unknown remains visible and blocks ordinary merge finalization |
 | Object data and signed uploads | owner tuple plus immutable `(organization_id, workspace_id)` prefix | Server constructs key and signed capability after grant check; object key/scope from callback is ignored | Revoke signer, expire URL, reap owner prefix; cross-prefix GET/PUT/copy denial |
 | NATS/events/streams | exact tenant pair and optional actor/revision | Broker JWT publish/subscribe allow-list minted server-side; API rechecks grant before subscribe and payload dispatch | Revoke JWT/consumer and close ≤5 s; cross-tenant wildcard publish/subscribe denial |
 | Search/index/vector data | tenant pair on document and index partition | Service capability fixes namespace; authorization prefilter plus result-time grant check. ACL tags are defense in depth only | Delete/tombstone index entries; query with forged/missing ACL tag returns nothing |
@@ -975,6 +1347,11 @@ write with source/actor/tenant lineage. Forward repair may transfer only uniquel
 human-private ownership. Tenant-owned rows stay with their organization/workspace;
 ambiguous private state is quarantined rather than copied or guessed.
 
+Wrongful-merge separation follows section 15.7: a uniquely attributable row may move
+to one freshly proved reconstituted human under a new owner generation, while joint or
+ambiguous rows stay quarantined from both. The historical merge alias and old owner
+mapping remain immutable lineage, not an authorization fallback.
+
 ## 18. Append-only, scoped, tamper-evident audit
 
 Audit events are written through a narrow `append_audit_event` database function owned
@@ -989,8 +1366,9 @@ roles are separate from both app and audit writer.
 Each event has one scope kind:
 
 - `actor` — visible only to the affected human through a sanitized self-history;
-- `deployment_identity` — human/login recovery, identity merge, and the deployment
-  component of organization-governance-custody evidence visible only to the affected
+- `deployment_identity` — human/login recovery, identity merge/separation, deployment
+  authority-plane/custodian lifecycle, and the deployment component of organization-
+  governance-custody evidence visible only to the affected
   human through a sanitized view and to the dedicated deployment security role; never
   to an organization merely because the human is its member (the named organization
   also receives its separately scoped governance event);
@@ -1136,6 +1514,22 @@ unauthenticated remote endpoint. If authentication is absent and the API listens
 non-loopback TCP interface, startup fails closed; an OS-local socket may be allowed only
 with peer-credential verification.
 
+The operator must also choose an explicit independent mode for each section 15.4.1
+deployment authority plane during secure configuration: provision an offline root and
+enter `enrollment_pending`, or record `disabled_unavailable` with a reason and recovery
+warning. A tenant bootstrap secret, first human, personal owner, ordinary support
+identity, or one plane's root can never become the other plane's trust root. Root public
+digests/policy revisions are committed before custodian enrollment; raw root material
+stays offline and is not derived from the installation/bootstrap secret.
+
+Canonical enablement proves every advertised path viable under its exact current root,
+policy, eligibility age, and quorum, or records that path unavailable. In particular,
+fewer than three configured eligible organization-governance custodians makes
+exceptional locked-team unlock unavailable, and the UX/API must say so. A self-hosted
+operator may intentionally run without either deployment-custodian path, but cannot be
+shown a support/recovery promise for it; target-held self-recovery and organization-
+scoped break-glass remain only if independently configured and viable.
+
 Bootstrap claim requires either an authenticated configured human issuer/subject or a
 loopback/OS-bound local-human proof plus the secret. Its durable transition is:
 
@@ -1170,6 +1564,12 @@ authority. Losing both login and offline identity factor follows section 15.4's
 factorless deployment path when explicitly enabled, otherwise fails closed; it never
 creates a second personal organization.
 
+Bootstrap does not enroll the first human as a deployment identity-recovery or
+organization-governance custodian. Either role follows its plane-local offline-root,
+factor, cooling, eligibility-age, and separation-of-duty ceremony after bootstrap. If
+one person is later enrolled independently in both, their factors, revisions,
+approvals, and authority remain non-interchangeable.
+
 A `single_user_simplified` capability is presentation policy, not a weaker data model.
 It is available only when collaboration is disabled and exactly one active human, one
 login slot, one personal organization, and one workspace exist. The shell may show only
@@ -1183,4 +1583,6 @@ disables simplified capability, exposes normal governance UI, and only then perm
 invitations/additional humans. It does not migrate or weaken existing data. Tests cover
 first-claim races, crash after every write boundary, restart idempotency, stolen/expired
 secret, remote-listener refusal, unknown/non-human subject rejection, recovery-secret
-rotation, and simplified-to-collaborative transition with unchanged ids and isolation.
+rotation, each authority-plane mode and root/custodian lifecycle, fewer-than-three
+governance-custodian unavailability, lost-root fail-closed behavior, and simplified-to-
+collaborative transition with unchanged ids and isolation.

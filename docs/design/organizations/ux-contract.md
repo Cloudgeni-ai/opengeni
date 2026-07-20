@@ -5,7 +5,7 @@
 
 # Account → organization → workspace UX contract
 
-Status: **corrective revision after the second exact-head blocked review; implementation remains gated**
+Status: **corrective revision after the third exact-head blocked review; implementation remains gated**
 
 Scope: web console behavior plus requirements for embedded hosts and CLI parity.
 
@@ -246,6 +246,45 @@ delay/notices/approvals, requires the proposed owner/steward to prove their own 
 and reactivates only after both human capabilities are present. It never says that an
 invitation, agent, API key, or sign-in recovery can unlock governance.
 
+### 7.1 Personal-to-team conversion and unsupported organization merge
+
+The Danger zone offers **Convert personal organization to team** only for the current
+personal owner and one named organization. The wizard is server-state-driven and shows:
+
+1. unchanged organization/workspace/resource ids, URLs, and tenant ownership;
+2. proposed active human owner and organization recovery steward, their proof/factor
+   readiness, and the single-human break-glass warning when the same person holds both;
+3. workspace collaborators who remain workspace-only and gain no organization role;
+4. the billing authority's required explicit choice—terminate personal allowance,
+   transfer an eligible balance/entitlement to this same organization, or initialize a
+   new team policy—with posted ledger/payment/anti-abuse facts labeled immutable;
+5. owner, collaborator, billing, and security notice destinations in masked/safe form;
+6. the minimum cooling deadline, barrier conflicts, and irreversible kind cutover.
+
+Progress maps exactly to **Review**, **Cooling off**, **Ready**, **Applying**,
+**Converted**, **Blocked**, and **Aborted**. `Blocked` names the missing custody, factor,
+billing, notice, or revision prerequisite and offers only safe correction/review;
+`Aborted` confirms personal kind and billing stayed unchanged. Refresh and retry use the
+same idempotent operation. While applying, the UI never shows team controls until the
+atomic server cutover returns `Converted`; ordinary workspace content may continue
+under its unchanged tenant.
+
+The final confirmation says conversion cannot be undone, but it does not claim data was
+moved or a second organization was combined. An identity-merge prerequisite links to
+this separate wizard and remains blocked until `Converted`; it cannot start cooling on
+`Ready` or `Applying`.
+
+There is no organization-merge picker, drop target, or “combine organizations” action.
+Any deep link, API capability, embedded-host action, or stale client attempt to name a
+second organization renders the terminal safe result:
+
+> Organization merge is not supported. No organizations, workspaces, resources,
+> memberships, or billing records were changed.
+
+The UI never offers client-side copy/reparent as an automatic fallback. Export, create,
+invite, and separately authorized manual workflows may be explained without implying
+equivalent ids, custody, history, or deletion.
+
 ## 8. Loading, empty, and error states
 
 ### Account
@@ -266,6 +305,10 @@ invitation, agent, API key, or sign-in recovery can unlock governance.
   owner/steward and factor enrollment completes;
 - governance locked: neutral locked canvas, no stale People/content controls, and only
   authorized custody-recovery guidance;
+- governance locked with deployment custody unavailable: state explicitly that the
+  exceptional path is not configured/viable; do not promise support unlock;
+- conversion review/cooling/applying: retain personal/team labels exactly from durable
+  state and never expose a partial team post-state;
 - deletion pending: prominent status, blocked-create explanation, cancel if authorized.
 
 ### Workspace
@@ -288,6 +331,13 @@ invitation, agent, API key, or sign-in recovery can unlock governance.
 - Screen readers receive concise live announcements for actor switch, workspace switch,
   revocation, invitation result, draft save, and upload cancellation. Do not announce
   every progress tick.
+- Conversion, separation, authority-plane, and delivery reconciliation use textual
+  durable-state headings, semantic progress/status markup, absolute deadline plus
+  relative time, and one live announcement per state transition; color/spinner alone
+  never conveys blocked, degraded, quarantined, unknown, or unavailable.
+- Long cooling/reconciliation flows survive refresh and return focus to the state
+  heading; approval/factor tables have meaningful row/column headers and do not expose
+  one claimant's private proof details to another assistive-technology tree.
 - Nested levels use correct menu/listbox/dialog semantics; do not create invalid nested
   interactive controls.
 - Respect reduced motion; no essential state depends on animation.
@@ -315,6 +365,9 @@ invitation, agent, API key, or sign-in recovery can unlock governance.
   selection/RLS.
 - Components accept capability/policy data rather than assuming hosted billing, email,
   or Better Auth.
+- Hosts may render one-organization personal-to-team conversion but must omit
+  organization merge or surface `organization_merge_unsupported`; they cannot emulate
+  it by copying/reparenting resources.
 - The compact switcher can render standalone inside an embedded host and emits a
   cancellable preflight request before state change.
 
@@ -327,6 +380,8 @@ invitation, agent, API key, or sign-in recovery can unlock governance.
   mode; it never silently chooses by matching label.
 - Deep-link/device flow preserves intended organization/workspace only in signed state.
 - Credentials live in OS credential storage with file-permission fallback warnings.
+- CLI conversion names one organization, shows durable state, and requires explicit
+  billing/custody inputs; any second-organization/merge argument fails without writes.
 
 ## 12. Browser verification matrix
 
@@ -337,14 +392,16 @@ The implementation is not candidate-ready without real-browser evidence for:
 | Width/input | 320 px mobile, 768 px tablet, 1024/1440 desktop; touch and pointer |
 | Theme | light, dark, high contrast where supported |
 | Account | one, multiple, add, re-auth, sign out one, sign out all |
-| Organization | personal, team, empty active team, none, many, governance pending/locked, deletion pending/finalized |
+| Organization | personal, team, empty active team, none, many, governance pending/locked, conversion review/cooling/applying/converted/blocked/aborted, organization-merge unsupported, deletion pending/finalized |
 | Workspace | none, one, many, paused, inaccessible, revoked mid-view |
 | Invite | valid, wrong account, sensitive-role step-up, expired, replayed, accepted |
 | Navigation blockers | local draft, saving draft, draft conflict, uploading, failed upload, in-flight mutation |
 | Network | normal, slow, offline/retry, late old-epoch response |
 | Accessibility | keyboard-only, screen-reader announcements, 200% zoom, reduced motion |
 | Native/device | add/switch slot, per-account/device/all-device logout, offline expiry, lost device, callback failure, push isolation |
-| Identity security | link; irreversible merge prerequisites; bounded staging/apply; dispute/containment/forward repair; duplicate personal organizations; deployment identity recovery; organization-A governance recovery with organization-B/personal noninterference |
+| Identity security | link; irreversible merge prerequisites; bounded staging/apply; dispute/containment/forward repair; different-person separation proof/staging and all four terminals; duplicate personal organizations; deployment identity recovery; organization-A governance recovery with organization-B/personal noninterference |
+| Deployment authority | both independent plane cards; every plane/custodian state; enrollment/eligibility/rotation/removal/replacement/compromise; degraded/lost-quorum/root-unavailable; fewer-than-three governance-custodian path unavailable |
+| External delivery | receipt-confirmed, failed-confirmed, delivery-unknown, reconciling, exact-key retry eligible/ineligible, compensation, irreversible exception, finalization blocked |
 | Human custody | last owner/steward leave/remove/demote; transfer; suspension to governance locked; deletion finalization; merge cutover; invitations/non-humans never count |
 | Local mode | first-owner bootstrap, simplified one-of-each shell, collaboration enablement |
 
@@ -361,17 +418,25 @@ durable issue history.
 - Old-tenant network results never render after epoch switch.
 - Draft/upload guards are exercised, not mocked away.
 - Empty/loading/error/revoked/invite states are intentionally designed.
+- Conversion never grants collaborators, changes tenant ids, or suggests organization
+  merge; unsupported attempts show a no-change result.
+- Wrongful-merge separation never offers shared temporary sign-in, and every terminal
+  state truthfully distinguishes quarantine, irreversible exceptions, and containment.
+- Recovery UI never promises unavailable custodian/root paths, and delivery-unknown UI
+  never presents blind retry or implied success/failure.
 - Keyboard, screen-reader, mobile, and both themes pass with useful evidence.
 - No brand, hosted billing provider, Better Auth, or Codex-specific assumption is baked
   into the reusable contract.
 
-## 14. Login linking, identity merge, and recovery UX
+## 14. Login linking, identity merge/separation, and recovery UX
 
-The UI never labels identity merge as merely “link account.” The product exposes four
+The UI never labels identity merge as merely “link account.” The product exposes five
 distinct actions with distinct consequences in account or organization settings:
 
 - **Add sign-in method** for an unowned login binding;
 - **Merge two existing identities** when both bindings already own identities;
+- **Separate identities after a wrongful merge** only from a contained different-person
+  incident and under closed deployment proof;
 - **Recover sign-in or human identity** when a deployment-wide authentication path or
   global human status is unavailable or compromised; and
 - **Recover organization governance** inside exactly one named organization.
@@ -386,6 +451,8 @@ explicit decision for:
 - which personal organization remains personal and whether each other one is converted
   to team, exported/deleted first, or the merge is cancelled, with conversion/finalized
   deletion labeled an irreversible prerequisite that must complete before cooling;
+  conversion links to section 7.1 and satisfies the prerequisite only at **Converted**;
+  organization merge is shown as unsupported, never as an alternative;
 - the exact source contributions and proposed canonical organization/workspace grants,
   with each active team's owner/steward post-state and separation-of-duty block;
 - pending invitation duplicates;
@@ -406,9 +473,9 @@ that audit identities and irreversible facts are not rewritten.
 Progress maps one-to-one to durable states: **Evidence pending**, **Conflict review /
 blocked**, **Cooling off**, **Aborted**, **Ready**, **Staging**, **Applying**,
 **Applied—observation window**, **Contained**, **Repair review**, **Repairing**,
-**Repaired with/without exceptions**, and **Finalized**. Staging may show bounded
-progress and a safe cancel/retry result, but staged rows are not presented as active
-access. There is no
+**Finalization blocked**, **Repaired with/without exceptions**, and **Finalized**.
+Staging may show bounded progress and a safe cancel/retry result, but staged rows are
+not presented as active access. There is no
 **Reversible** or **Reversed** state and no promise that merge can restore destroyed
 facts. Refresh/retry reads the same durable operation; it never starts another merge.
 
@@ -423,6 +490,72 @@ transferred, revoked, quarantined, compensated, or irreversible. Approval expiry
 14 days is visible and does not release containment. The signed completion report names
 remaining exceptions and available export/support options without exposing the other
 identity's private content.
+
+### Separate identities after a wrongful merge
+
+This surface appears only after merge containment determines that two different people
+were, or may have been, joined. Until a terminal separation cutover, the header says
+**Identity contained—sign-in disabled** and explains that every source/canonical slot,
+session, personal credential, delegated token, cache, and stream is revoked. It never
+offers “use the canonical account for now,” because both people must not resolve to one
+active identity.
+
+The revision-bound review separately shows, without exposing one claimant's secrets to
+the other:
+
+- fresh proof status for each claimant and the independent deployment identity-
+  separation quorum/incident basis;
+- whether the retained source human id can be reactivated or a replacement with
+  immutable lineage is required;
+- every login as **proved for claimant A**, **proved for claimant B**, or
+  **quarantined**—never inferred from email/label;
+- each personal organization as retained, unavailable because previously converted/
+  deleted, or unresolved, with no promise of recreation;
+- per-organization membership/role/custody decisions awaiting that organization's own
+  authority, explicitly stating that deployment identity authority cannot grant them;
+- unique private rows proposed for transfer and joint/ambiguous rows proposed for
+  quarantine; and
+- posted/deleted/audit/external facts that are irreversible or still delivery-unknown.
+
+Progress maps exactly to **Evidence pending**, **Separation review**, **Blocked**,
+**Cooling off**, **Ready**, **Staging**, **Applying**, **Separated**,
+**Separated with quarantine**, **Separated with irreversible exceptions**, or
+**Contained unresolved**. Cooling shows at least seven days, notices, disputes, and
+current plane/revision status. Staged rows are labeled inactive. Refresh/retry resumes
+the same generation; a stale proof/callback cannot reopen sign-in.
+
+After any `Separated*` outcome, the UI requires each person to authenticate again and
+does not revive an old slot or credential. A signed completion report lists only that
+viewer's resolver/login outcomes plus scope-safe retained/transferred/revoked/
+quarantined/irreversible categories. **Contained unresolved** says no safe proof/
+authority was available and neither claimant can sign in through the merged resolver;
+it offers a new full incident attempt only when prerequisites change, not a weaker
+tenant/support override.
+
+### External delivery and merge finalization
+
+External-effect rows use truthful labels: **Prepared**, **Publishing claimed**,
+**Receipt confirmed**, **Failed before acceptance**, **Delivery unknown**,
+**Reconciling**, **Compensation pending**, **Compensated**, or **Irreversible exception
+approved**. `Delivery unknown` says the provider may have accepted the effect. It shows
+last checked time, provider query/idempotency capability in safe terms, next bounded
+reconciliation step, owning scope, and support/authority action without showing payload,
+secret, destination credential, raw receipt, or provider key.
+
+There is no generic **Retry** after ambiguity. A button appears only when the server says
+exact-key idempotent retry is permissible, and its confirmation says the exact stored
+request is reused; query is preferred when available. A non-queryable/non-idempotent
+effect says **Automatic retry unavailable—duplicate effect risk**. Compensation and
+unresolved-exception actions appear only to the exact owning subsystem plus tenant or
+billing authority and clearly create a separately claimed child effect/report rather
+than editing history. Its status is shown beside the preserved original delivery state;
+a failed or unknown compensation never makes the original look compensated.
+
+At the 30-day deadline, unresolved effects render **Finalization blocked**, not
+Finalized or Failed. The page names affected categories and continues reconciliation.
+If scoped authorities approve an unresolved irreversible exception, the terminal label
+is **Repaired with exceptions** with a signed report; the UI never relabels an unknown
+receipt as delivered.
 
 ### Recover sign-in or human identity
 
@@ -441,6 +574,12 @@ seven-day minimum delay, masked notice destinations, incident/legal approval whe
 required, expiry/dispute state, and final fresh-proof requirement. Organization owners,
 organization recovery stewards, invitations, service credentials, and ordinary support
 sessions are never displayed as eligible global approvers.
+
+The selected identity authority path also shows its plane state and current
+availability. `Degraded`, `Reconstituting`, or `Disabled—offline root unavailable`
+blocks submit/apply and states that tenant administrators and support cannot lower the
+quorum. If the self-recovery path remains independently viable, it is presented as a
+different closed path, never an automatic fallback.
 
 Before apply, the confirmation explicitly says every browser/native slot, auth session,
 personal credential, offline cache, user-bound delegated token, and live stream for the
@@ -467,6 +606,41 @@ custodians, requires a delayed audited ceremony, and requires the proposed human
 prove their own usable login. Successful completion re-fetches only the named
 organization's custody and grants; all other organization/personal summaries remain
 unchanged. Any scope or revision mismatch fails closed rather than broadening recovery.
+
+If the governance-custody plane is not `Enabled` with at least three eligible
+custodians, this surface says **Exceptional governance recovery unavailable** and names
+the safe configured/unconfigured/degraded/reconstituting/offline-root-lost state. It
+does not show a support CTA that implies unlock authority. Ordinary steward or
+organization-factor recovery remains separately shown only when actually viable.
+
+### Deployment authority-plane administration
+
+Deployment security settings render two separate cards: **Identity recovery authority**
+and **Exceptional organization-governance custody**. Each card shows its own root digest
+fingerprint (never secret material), policy/revision, path/quorum configuration, state,
+viability, notice status, and last verified ceremony. Shared human names do not visually
+join the cards, and the UI explicitly says enrollment/factors/approval in one plane has
+no authority in the other.
+
+Plane status labels are **Unconfigured**, **Enrollment pending**, **Enabled**,
+**Degraded**, **Reconstituting**, and **Disabled—unavailable**. Custodian rows expose
+**Enrollment pending**, **Cooling off**, **Active—not yet eligible**, **Active**,
+**Factor rotation pending**, **Revocation pending**, and **Revoked**, with eligible-at/
+approval-expiry times. No tenant/content discovery link is present.
+
+Enrollment, activation, planned removal, factor rotation, replacement, compromise
+revocation, and lost-quorum reconstitution are distinct step-up wizards that show
+offline-root/operator separation, exact current revisions, cooling/eligibility,
+notices, and post-state quorum. Ordinary removal is disabled if it loses quorum unless
+an atomic replacement is ready. **Revoke compromised custodian now** remains available
+and warns that the plane may become degraded and all dependent recovery will stop.
+
+Lost-quorum reconstitution shows the precommitted offline-root requirement,
+independent incident basis, at least seven-day cooling, complete recovery freeze, and
+new eligible set. If the offline root is unavailable, only **Disable as unavailable**
+and audited operator guidance remain; there is no lower-quorum, tenant-vote, support,
+or first-admin option. Fewer than three governance custodians displays **Exceptional
+organization unlock unavailable** and product copy elsewhere must match.
 
 ## 15. Native/device session UX
 
@@ -516,6 +690,20 @@ Concurrent claim, reused secret, unknown/non-human subject, or remote-listener r
 uses a generic safe error and operator instructions. Restart by the same proved human
 returns the exact existing setup rather than duplicating it.
 
+Secure deployment setup separately asks the operator to configure each deployment
+authority plane with an offline root and pending enrollment, or mark it
+**Disabled—recovery unavailable**. The first human, bootstrap secret, personal owner,
+ordinary support, and the other plane are never offered as root substitutes. Root
+fingerprints and policy revision are acknowledged without displaying/storing root
+secret material. Bootstrap completion does not auto-enroll the first human as either
+custodian.
+
+Before the shell advertises any recovery path, a summary shows it as **Viable** or
+**Unavailable** under the current factor/custodian quorum. Fewer than three eligible
+governance custodians means exceptional team unlock is unavailable; setup may continue
+only after the operator acknowledges that exact limitation. A plane sharing a human
+with the other still presents separate enrollment, factor, cooling, and revision.
+
 `single_user_simplified` mode may activate only from the server capability when
 collaboration is disabled and exactly one active human, login slot, personal
 organization, and workspace exist. In that mode:
@@ -536,6 +724,7 @@ invitations/additional humans. Workspace/organization ids, URLs, drafts, keys, a
 resources remain unchanged; there is no “upgrade migration” that loosens RLS.
 
 Acceptance evidence covers first-claim race/restart, separate identity/organization
-recovery-factor enrollment, simplified desktop/mobile/keyboard/screen-reader shell,
-destructive scope labels, and the collaboration transition with the same tenant ids and
-no stale simplified cache.
+recovery-factor enrollment, both plane-mode choices and root fingerprints, every
+custodian lifecycle state, degraded/lost-root/fewer-than-three unavailability,
+simplified desktop/mobile/keyboard/screen-reader shell, destructive scope labels, and
+the collaboration transition with the same tenant ids and no stale simplified cache.

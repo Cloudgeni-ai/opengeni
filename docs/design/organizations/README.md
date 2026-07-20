@@ -5,7 +5,7 @@
 
 # Organizations and identity design packet
 
-Status: **corrective revision after a second exact-head BLOCK/REQUEST CHANGES; implementation remains blocked pending fresh independent approval**
+Status: **corrective revision after a third exact-head BLOCK/REQUEST CHANGES; implementation remains blocked pending fresh independent approval**
 
 Issue: OPE-10
 
@@ -37,6 +37,14 @@ Review must explicitly cover:
 
 - identity linking plus the separation/noninterference of deployment identity recovery,
   organization recovery, and deployment organization-governance custody;
+- wrongful-merge identity separation/reconstitution, including login/alias generations,
+  complete revocation, private-state quarantine, and tenant-grant non-invention;
+- independent deployment trust roots and full custodian lifecycle/lost-quorum behavior
+  for identity recovery and exceptional organization-governance custody;
+- personal-to-team conversion races, billing/custody cutover, and the fail-closed
+  deferral of organization merge; and
+- external-effect delivery ambiguity, provider capability fencing, no-blind-republish,
+  reconciliation/compensation, and merge-finalization blocking;
 - bounded merge staging/cutover, every post-apply write's provenance, containment,
   forward-only repair, and irreversible prerequisites/effects;
 - multi-account cookie and token isolation;
@@ -60,9 +68,13 @@ The second exact-head review, durable comment
 `2528c3e1-2a52-44ef-b61a-6e2f61823284`, reviewed immutable commit
 `4d8ce9ec2b66b3a386eb9c1fa350d1bcb88a0121` / tree
 `b4f466b0417c0aefd99f34b904b103173fd7d6b6` and also returned BLOCK/REQUEST CHANGES.
-That reviewed head remains blocked evidence. This correction addresses both reviews but
-is not self-approved. The Main Orchestrator must commission one fresh independent
-review pinned to the new immutable head after it is frozen.
+The third exact-head review, durable comment
+`f768af37-a401-4b62-bcab-bd6aace011be`, reviewed immutable commit
+`6a6fd2b7e5a4b606e03d920d106aeaf393a0d6a8` / tree
+`19af363fc0682c89de1d1ef7a339749b012e3d22` and also returned BLOCK/REQUEST CHANGES.
+Those reviewed heads remain blocked evidence. This correction addresses all three
+reviews but is not self-approved. The Main Orchestrator must commission one fresh
+independent review pinned to the new immutable head after it is frozen.
 
 ## Blocked-review finding resolution index
 
@@ -85,6 +97,15 @@ review pinned to the new immutable head after it is frozen.
 | S1. Deployment-wide recovery authority was derivable from one organization | ADR §§3, 15.4–15.5, and 16 separate deployment identity-recovery custodians/operations from active human organization recovery stewards/operations, with closed proof/quorum, delay, notice, audit, revocation, fail-closed, and organization-A/organization-B/personal noninterference. Threat model T14 and the invalidation/test matrices adversarially verify both directions. Migration §§3.9–3.10 and 4.5 require distinct persistence, database capabilities, and explicit enrollment. UX §§7 and 14 present two non-interchangeable recovery surfaces and warn when restored sign-in may make independently active grants usable. |
 | S1. Thirty-day lossless merge reversal was not closed over later writes or irreversible prerequisites | ADR §§15.2–15.3 and 15.6 define a mutation barrier, at-most-500-row/250-ms invisible staging, short generation cutover, `applied_observation`/containment/repair states, transactional provenance for every affected post-apply write, scoped 14-day repair approvals, deterministic per-plane forward outcomes, and explicit irreversible facts. Threat model T17, migration §3.11 and §§14–15, and UX §14 cover concurrent writes, missing-provenance denial, repair exceptions, and user-visible retained/transferred/revoked/quarantined/compensated/irreversible outcomes. The 30 days are a dispute/containment window, never a reversal promise. |
 | S2. An empty active team could lose its last accountable human | ADR §§4.6, 5.2, 9, and 15.2–15.5 guarantee at least one active human owner and one active human organization recovery steward regardless of resource count; invitations, non-humans, deployment identity-recovery custodians, and deployment organization-governance custodians never count. Last-capability mutations transfer atomically or fail, deletion retains custody through `deletion_pending`, suspension selects `governance_locked`, and merge activates canonical custody before deactivation. Threat model T7, migration §§3.3 and 4.5, and UX §§7–8 and 14 define serialized enforcement, delayed deployment custody, explicit deletion/transfer paths, and empty-team/race evidence. |
+
+## Third exact-head review resolution index
+
+| Finding | Coherent correction across the packet |
+| --- | --- |
+| S1. Wrongful identity merge had no way to restore two authenticated people | ADR §§15.2, 15.6, and 15.7 define a separate revision-fenced identity-separation/reconstitution operation: closed deployment proof, historical alias tombstones, retained-id preference, proved login reassignment/quarantine, full source/canonical revocation, per-tenant grant decisions, unique-private transfer, ambiguous-private quarantine, bounded staging, and atomic generation cutover. Threat model T24, migration §3.12, and UX §14 require contained fail-closed outcomes and exact `separated*` evidence rather than an inverse merge. |
+| S1. Deployment custodian trust roots and lost-quorum lifecycle were undefined | ADR §15.4.1 defines two independent deployment authority planes, each with its own offline root, plane and custodian state machines, eligibility age, factor rotation, revocation/replacement, degraded behavior, and long-cooling lost-quorum reconstitution. Migration §§3.9–3.10 and 4.5 persist and gate both planes; threat model T25 and UX §§14 and 16 make unavailable/degraded recovery explicit. |
+| S2. Personal-to-team conversion and organization-merge deferral were not normative | ADR §9.7 defines the fenced `review → cooling_off → ready → applying → converted` protocol, custody and billing prerequisites, notices, crash behavior, and immutable ids. Organization merge is explicitly unsupported/fail-closed in ADR §§9.7 and 11, migration §§5–6, threat model T26, and UX §7.1; identity merge cannot cool until conversion is `converted`. |
+| S2. External intent/receipt crashes could duplicate or lose effects | ADR §§15.2, 15.6, and 15.8 define provider-capability snapshots, stable effect keys/digests, idempotent/query reconciliation, at-most-once non-queryable delivery, `delivery_unknown`, scoped compensation/exception authority, and a fail-closed finalization gate. Migration §3.14 persists the state machine; threat model T27 and UX §14 expose unknown/finalization-blocked states and require crash-boundary evidence. |
 
 ## Ownership boundary
 
