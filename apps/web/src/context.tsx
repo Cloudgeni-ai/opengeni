@@ -39,6 +39,11 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { sameSessionForContext } from "@/lib/session-context";
 import {
+  buildCreateSessionRequest,
+  prepareCreateSessionAttempt,
+  type PendingCreateAttempt,
+} from "@/lib/session-create";
+import {
   applySessionPinProjection,
   notifySessionPinChanged,
   reconcileFailedSessionPin,
@@ -167,6 +172,7 @@ export type AppContextValue = {
       targetSandboxId?: string | null;
       workingDir?: string | null;
       omitWorkspaceResources?: boolean;
+      expectedNewSessionDraftRevision?: number;
     },
   ) => Promise<Session | null>;
   resetSessionView: () => void;
@@ -253,7 +259,7 @@ export function RootRouteComponent() {
   // session server-side; cleared only once a create succeeds so the next real
   // submit gets a fresh, independent key. Distinct from the per-call
   // clientEventId (a fresh UUID every send).
-  const pendingCreateKey = useRef<string | null>(null);
+  const pendingCreateAttempt = useRef<PendingCreateAttempt | null>(null);
   const [busy, setBusy] = useState(false);
   const [repoBusy, setRepoBusy] = useState(false);
   const [githubAppBusy, setGithubAppBusy] = useState(false);
@@ -707,54 +713,44 @@ export function RootRouteComponent() {
       targetSandboxId?: string | null;
       workingDir?: string | null;
       omitWorkspaceResources?: boolean;
+      expectedNewSessionDraftRevision?: number;
     },
   ): Promise<Session | null> {
     setBusy(true);
-    // Reuse the in-flight key if one survives a prior failed/double-fired
-    // attempt; otherwise mint a fresh stable key for this logical create.
-    const idempotencyKey = pendingCreateKey.current ?? crypto.randomUUID();
-    pendingCreateKey.current = idempotencyKey;
     try {
       const selectedTools = buildTools(submission.tools, [...selectedCapabilityToolIds]);
-      const created = await client.createSession(workspaceId, {
-        initialMessage: submission.text,
-        // Workspace repo selection is excluded when the create targets a
-        // connected machine (D3: the machine uses its own checkout & git auth);
-        // uploaded file attachments (submission.resources) still flow through.
-        resources: [
-          ...(options?.omitWorkspaceResources ? [] : currentResources),
-          ...(submission.resources ?? []),
-        ],
-        tools: selectedTools,
-        model: submission.model ?? model,
-        reasoningEffort: submission.reasoningEffort ?? reasoningEffort,
-        clientEventId: crypto.randomUUID(),
-        idempotencyKey,
-        ...(submission.sandboxBackend ? { sandboxBackend: submission.sandboxBackend } : {}),
-        ...(submission.variableSetId ? { variableSetId: submission.variableSetId } : {}),
-        ...(submission.rigId ? { rigId: submission.rigId } : {}),
-        ...(submission.goal ? { goal: submission.goal } : {}),
-        ...(submission.firstPartyMcpPermissions
-          ? { firstPartyMcpPermissions: submission.firstPartyMcpPermissions }
-          : {}),
-        // Seed the active-sandbox pointer at create (race-free) when a machine was
-        // picked. The contract accepts `targetSandboxId`; the SDK's request type
-        // doesn't yet surface it, so cast the field through.
-        ...(options?.targetSandboxId
-          ? ({ targetSandboxId: options.targetSandboxId } as { targetSandboxId: string })
-          : {}),
-        // The targeted machine's per-session working directory — a top-level create
-        // field (only valid alongside targetSandboxId; the backend 422s it solo).
-        ...(options?.workingDir ? { workingDir: options.workingDir } : {}),
+      const freshIdempotencyKey = crypto.randomUUID();
+      const attempt = prepareCreateSessionAttempt({
+        pending: pendingCreateAttempt.current,
+        client,
+        workspaceId,
+        freshIdempotencyKey,
+        request: buildCreateSessionRequest({
+          currentResources,
+          submission,
+          omitWorkspaceResources: options?.omitWorkspaceResources,
+          selectedTools,
+          defaultModel: model,
+          defaultReasoningEffort: reasoningEffort,
+          clientEventId: crypto.randomUUID(),
+          idempotencyKey: freshIdempotencyKey,
+          targetSandboxId: options?.targetSandboxId,
+          workingDir: options?.workingDir,
+          expectedNewSessionDraftRevision: options?.expectedNewSessionDraftRevision,
+        }),
       });
-      // Success: release the key so the next distinct submit is independent.
-      pendingCreateKey.current = null;
+      pendingCreateAttempt.current = attempt.pending;
+      const created = await client.createSession(workspaceId, attempt.request);
+      // Do not clear a newer concurrent attempt that replaced this one.
+      if (pendingCreateAttempt.current?.idempotencyKey === attempt.pending.idempotencyKey) {
+        pendingCreateAttempt.current = null;
+      }
       setSession(created);
       setConnectionState("idle");
       return created;
     } catch (error) {
-      // Keep the key on failure so a manual retry reuses it and dedups against
-      // a create that may have actually landed server-side.
+      // Keep the attempt on failure. An exact retry dedups against a create that
+      // may have landed server-side; an edited request acquires a fresh key.
       toast.error("Failed to start session", {
         description: error instanceof Error ? error.message : String(error),
       });

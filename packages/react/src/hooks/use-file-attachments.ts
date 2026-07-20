@@ -39,6 +39,8 @@ export type UseFileAttachmentsResult = {
   addFiles: (files: Iterable<File>) => void;
   /** Clipboard path — applies `pasteFilter` (default `image/*`) then uploads. */
   addFromPaste: (event: { clipboardData: DataTransfer | null }) => void;
+  /** Restore already-ready server assets without recreating browser-local bytes. */
+  restoreReadyFiles: (files: Iterable<FileAsset>) => void;
   /**
    * Re-run the upload for a `failed` attachment, in place (same id, same
    * source file). No-op for an id that isn't a known failed upload.
@@ -83,6 +85,10 @@ export function useFileAttachments(
           data: file,
         })
         .then((asset) => {
+          // Retry bytes are useful only until durable finalization succeeds.
+          // Drop the source File immediately; restored/ready attachments must
+          // never retain browser-local byte authority.
+          sources.current.delete(id);
           setAttachments((current) =>
             current.map((attachment) =>
               attachment.id === id
@@ -171,6 +177,60 @@ export function useFileAttachments(
     [addFiles, pasteFilter],
   );
 
+  const restoreReadyFiles = useCallback(
+    (files: Iterable<FileAsset>) => {
+      const incoming = new Map<string, FileAsset>();
+      for (const file of files) {
+        if (file.status === "ready" && file.workspaceId === workspaceId) {
+          incoming.set(file.id, file);
+        }
+      }
+      setAttachments((current) => {
+        const unresolved = current.filter((attachment) => attachment.status !== "ready");
+        const existingReady = new Map(
+          current.flatMap((attachment) =>
+            attachment.status === "ready" && attachment.file
+              ? ([[attachment.file.id, attachment]] as const)
+              : [],
+          ),
+        );
+        const restored = [...incoming.values()].map((file): FileAttachment => {
+          const existing = existingReady.get(file.id);
+          return existing
+            ? {
+                ...existing,
+                name: file.filename,
+                contentType: file.contentType,
+                sizeBytes: file.sizeBytes,
+                status: "ready",
+                file,
+                error: undefined,
+              }
+            : {
+                id: `restored:${file.id}`,
+                name: file.filename,
+                contentType: file.contentType,
+                sizeBytes: file.sizeBytes,
+                status: "ready",
+                file,
+                // No source File and no object URL: server metadata is the
+                // only authority restored across page/device boundaries.
+              };
+        });
+        for (const [fileId, attachment] of existingReady) {
+          if (!incoming.has(fileId) && attachment.previewUrl) {
+            URL.revokeObjectURL(attachment.previewUrl);
+          }
+        }
+        // A server restoration is authoritative for finalized assets, but an
+        // upload that has not finalized still belongs to the local actor. Keep
+        // those unresolved entries while replacing the ready set exactly.
+        return [...unresolved, ...restored];
+      });
+    },
+    [workspaceId],
+  );
+
   const remove = useCallback((id: string) => {
     sources.current.delete(id);
     setAttachments((current) => {
@@ -204,6 +264,7 @@ export function useFileAttachments(
     uploading: attachments.some((attachment) => attachment.status === "uploading"),
     addFiles,
     addFromPaste,
+    restoreReadyFiles,
     retry,
     remove,
     clear,

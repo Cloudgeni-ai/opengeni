@@ -38,7 +38,7 @@ import {
   ShieldIcon,
   SlidersHorizontalIcon,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { ConsoleComposer, useDraftAttachments } from "@/components/Composer";
 import { PermissionGroupPicker } from "@/components/permission-picker";
@@ -59,18 +59,32 @@ import {
   emptySessionDraft,
   isSessionDraftComputeReady,
   managedBackendOptions,
+  newSessionDraftOptionsFromSessionDraft,
   selfhostedCapabilityChips,
+  sessionDraftFromNewSessionDraftOptions,
   submissionFromSessionDraft,
   type ConnectedMachineTarget,
   type ManagedSandboxTarget,
   type SessionDraft,
 } from "@/lib/session-create";
+import { buildTools } from "@/lib/session-tools";
+import { useNewSessionDraft, type NewSessionDraftEditable } from "@/lib/use-new-session-draft";
 import { cn } from "@/lib/utils";
 import type { SandboxBackend, Session } from "@/types";
 
 const BACKEND_OPTIONS = managedBackendOptions();
 
 export function SessionsIndexRoute({ workspaceId }: { workspaceId: string }) {
+  const { accessKeyVersion } = useAppContext();
+  return (
+    <SessionsIndexRouteContent
+      key={`${workspaceId}:${accessKeyVersion}`}
+      workspaceId={workspaceId}
+    />
+  );
+}
+
+function SessionsIndexRouteContent({ workspaceId }: { workspaceId: string }) {
   const context = useAppContext();
   const navigate = useNavigate();
   const attachments = useDraftAttachments(workspaceId);
@@ -78,12 +92,53 @@ export function SessionsIndexRoute({ workspaceId }: { workspaceId: string }) {
   const [message, setMessage] = useState("");
   const [optionsOpen, setOptionsOpen] = useState(false);
   const [draft, setDraft] = useState<SessionDraft>(() => emptySessionDraft());
+  const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
     resetSessionView();
   }, [resetSessionView, workspaceId]);
 
   const computeReady = isSessionDraftComputeReady(draft);
+  const persistedValue = useMemo(
+    () => ({
+      text: message,
+      resources: attachments.readyResources,
+      tools: buildTools(undefined, [...context.selectedCapabilityToolIds]),
+      model: context.model,
+      reasoningEffort: context.reasoningEffort,
+      options: newSessionDraftOptionsFromSessionDraft(draft),
+    }),
+    [
+      attachments.readyResources,
+      context.model,
+      context.reasoningEffort,
+      context.selectedCapabilityToolIds,
+      draft,
+      message,
+    ],
+  );
+  const applyRemoteDraft = useCallback(
+    (remote: NewSessionDraftEditable) => {
+      setMessage(remote.text);
+      setDraft(sessionDraftFromNewSessionDraftOptions(remote.options));
+      context.setModel(remote.model);
+      context.setReasoningEffort(remote.reasoningEffort);
+      const selected = new Set(remote.tools.map((tool) => tool.id));
+      // `files` is the hidden download helper automatically paired with the
+      // visible Document Search selection, not a standalone picker choice.
+      if (selected.has("docs")) selected.delete("files");
+      context.setSelectedCapabilityToolIds(selected);
+    },
+    [context],
+  );
+  const newSessionDraft = useNewSessionDraft({
+    workspaceId,
+    client: context.client,
+    value: persistedValue,
+    onApplyRemote: applyRemoteDraft,
+    restoreReadyFiles: attachments.restoreReadyFiles,
+  });
+  const busy = context.busy || submitting;
 
   // The session does not exist yet, so this surface cannot use `useComposer`
   // (that hook sends to a session). It still renders the package ChatComposer
@@ -91,13 +146,15 @@ export function SessionsIndexRoute({ workspaceId }: { workspaceId: string }) {
   const createComposer: ComposerState = {
     value: message,
     setValue: setMessage,
-    sending: context.busy,
+    sending: busy,
     // Mirrors useComposer's gate: a ready attachment with no typed draft is a
     // sendable file-only message (the API requires non-empty text, so send()
     // substitutes FILE_ONLY_MESSAGE_TEXT).
     canSend:
       (message.trim().length > 0 || attachments.readyResources.length > 0) &&
-      !context.busy &&
+      !busy &&
+      !newSessionDraft.loading &&
+      !newSessionDraft.conflict &&
       !attachments.uploading &&
       computeReady,
     pause: async () => {},
@@ -106,52 +163,80 @@ export function SessionsIndexRoute({ workspaceId }: { workspaceId: string }) {
     resumeScope: async () => {},
     resuming: false,
     draft: null,
-    draftRevision: 0,
-    draftLoading: false,
-    draftSaving: false,
-    draftConflict: null,
+    draftRevision: newSessionDraft.revision,
+    draftLoading: newSessionDraft.loading,
+    draftSaving: newSessionDraft.saving,
+    draftConflict: newSessionDraft.conflict,
     applyDraft: () => {},
-    reloadDraft: async () => {},
-    resolveDraftConflict: async () => {},
+    reloadDraft: newSessionDraft.reload,
+    resolveDraftConflict: newSessionDraft.resolveConflict,
     restoredResources: [],
     removeRestoredResource: () => {},
-    error: null,
-    clearError: () => {},
+    error: newSessionDraft.error,
+    clearError: newSessionDraft.clearError,
     send: async () => {
       const text =
         message.trim() || (attachments.readyResources.length > 0 ? FILE_ONLY_MESSAGE_TEXT : "");
-      if (!text || context.busy || attachments.uploading || !computeReady) {
+      if (
+        !text ||
+        busy ||
+        newSessionDraft.loading ||
+        newSessionDraft.conflict ||
+        attachments.uploading ||
+        !computeReady
+      ) {
         return false;
       }
-      const submission = submissionFromSessionDraft(draft);
-      const created = await context.startSession(
-        workspaceId,
-        {
-          text,
-          resources: attachments.readyResources,
-          ...submission.extras,
-        },
-        {
-          targetSandboxId: submission.options.targetSandboxId,
-          workingDir: submission.options.workingDir,
-          omitWorkspaceResources: submission.omitWorkspaceResources,
-        },
-      );
-      if (!created) {
-        return false;
+      setSubmitting(true);
+      try {
+        const flushed = await newSessionDraft.flush();
+        if (!flushed) return false;
+        const submission = submissionFromSessionDraft(draft);
+        const created = await context.startSession(
+          workspaceId,
+          {
+            text,
+            resources: persistedValue.resources,
+            tools: persistedValue.tools,
+            model: persistedValue.model,
+            reasoningEffort: persistedValue.reasoningEffort,
+            ...submission.extras,
+          },
+          {
+            targetSandboxId: submission.options.targetSandboxId,
+            workingDir: submission.options.workingDir,
+            omitWorkspaceResources: submission.omitWorkspaceResources,
+            expectedNewSessionDraftRevision: flushed.revision,
+          },
+        );
+        if (!created) return false;
+        // A programmatic edit (or another committed local change) made while
+        // create was in flight was not submitted and must not be cleared or
+        // abandoned when this route unmounts. Persist it before navigation;
+        // if the accepted revision was consumed first, the resulting OCC
+        // conflict remains visible here for an explicit keep-mine/use-remote
+        // choice instead of silently losing the newer value.
+        if (newSessionDraft.isCurrentSignature(flushed.signature)) {
+          setMessage("");
+          setDraft(emptySessionDraft());
+          attachments.clear();
+        } else {
+          const preserved = await newSessionDraft.flush();
+          if (!preserved || !newSessionDraft.isCurrentSignature(preserved.signature)) return false;
+        }
+        await navigate({
+          to: "/workspaces/$workspaceId/sessions/$sessionId",
+          params: { workspaceId, sessionId: created.id },
+        });
+        return true;
+      } finally {
+        setSubmitting(false);
       }
-      setMessage("");
-      attachments.clear();
-      await navigate({
-        to: "/workspaces/$workspaceId/sessions/$sessionId",
-        params: { workspaceId, sessionId: created.id },
-      });
-      return true;
     },
     steer: async () => {
       const text =
         message.trim() || (attachments.readyResources.length > 0 ? FILE_ONLY_MESSAGE_TEXT : "");
-      if (!text || context.busy || attachments.uploading || !computeReady) return false;
+      if (!text || busy || attachments.uploading || !computeReady) return false;
       return await createComposer.send();
     },
   };
@@ -172,16 +257,22 @@ export function SessionsIndexRoute({ workspaceId }: { workspaceId: string }) {
             composer={createComposer}
             attachments={attachments}
             autoFocus
+            disabled={newSessionDraft.loading}
             fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
             placeholder="Describe a task for the agent…"
-            controls={<SessionControlStrip workspaceId={workspaceId} />}
+            controls={
+              <SessionControlStrip
+                workspaceId={workspaceId}
+                disabled={busy || newSessionDraft.loading}
+              />
+            }
           />
 
           <ComputeTargetControl
             workspaceId={workspaceId}
             draft={draft}
             onChange={setDraft}
-            disabled={context.busy}
+            disabled={busy || newSessionDraft.loading}
           />
 
           <OptionalSessionOptions
@@ -189,7 +280,7 @@ export function SessionsIndexRoute({ workspaceId }: { workspaceId: string }) {
             onOpenChange={setOptionsOpen}
             draft={draft}
             onChange={setDraft}
-            disabled={context.busy}
+            disabled={busy || newSessionDraft.loading}
           />
         </div>
 
@@ -290,7 +381,13 @@ function RecentSessionRow({ workspaceId, session }: { workspaceId: string; sessi
 // The composer's inline strip: compute-INDEPENDENT controls only (model + tools).
 // Repository context now lives in the compute-dependent band below (it only makes
 // sense once a managed sandbox is the target), not as an always-visible pill.
-function SessionControlStrip({ workspaceId }: { workspaceId: string }) {
+function SessionControlStrip({
+  workspaceId,
+  disabled,
+}: {
+  workspaceId: string;
+  disabled: boolean;
+}) {
   const context = useAppContext();
   const codexModels = useCodexModels(workspaceId);
   return (
@@ -299,7 +396,7 @@ function SessionControlStrip({ workspaceId }: { workspaceId: string }) {
         config={context.clientConfig}
         model={context.model}
         effort={context.reasoningEffort}
-        disabled={context.busy}
+        disabled={disabled}
         extraModels={codexModels}
         onModelChange={context.setModel}
         onEffortChange={context.setReasoningEffort}
@@ -307,7 +404,7 @@ function SessionControlStrip({ workspaceId }: { workspaceId: string }) {
       <EnabledMcpToolPicker
         servers={context.toolMcpServers}
         selectedIds={context.selectedCapabilityToolIds}
-        disabled={context.busy}
+        disabled={disabled}
         onChange={context.setSelectedCapabilityToolIds}
       />
     </div>

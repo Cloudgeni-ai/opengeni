@@ -197,6 +197,104 @@ describe("useFileAttachments", () => {
     await hook.unmount();
   });
 
+  test("drops retry source bytes once an upload finalizes", async () => {
+    let calls = 0;
+    const client = fakeClient({
+      uploadFile: async () => {
+        calls += 1;
+        return fakeAsset();
+      },
+    });
+    const hook = await renderHook(
+      () => useFileAttachments({ client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+
+    await flushing(() => hook.result.current.addFiles([imageFile()]));
+    await flush();
+    await flushing(() => hook.result.current.retry(hook.result.current.attachments[0]!.id));
+    await flush();
+    expect(calls).toBe(1);
+    await hook.unmount();
+  });
+
+  test("restores only same-workspace ready assets without previews or duplicate ids", async () => {
+    let resolveUpload!: (asset: FileAsset) => void;
+    const client = fakeClient({
+      uploadFile: () =>
+        new Promise<FileAsset>((resolve) => {
+          resolveUpload = resolve;
+        }),
+    });
+    const hook = await renderHook(
+      () => useFileAttachments({ client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flushing(() => hook.result.current.addFiles([imageFile("still-uploading.png")]));
+    const ready = fakeAsset({ id: "restored-ready", filename: "restored.png" });
+
+    await flushing(() =>
+      hook.result.current.restoreReadyFiles([
+        ready,
+        { ...ready },
+        fakeAsset({ id: "not-ready", status: "failed" }),
+        fakeAsset({ id: "foreign", workspaceId: "other-workspace" }),
+      ]),
+    );
+
+    expect(hook.result.current.attachments).toHaveLength(2);
+    expect(hook.result.current.attachments[0]).toMatchObject({
+      name: "still-uploading.png",
+      status: "uploading",
+    });
+    expect(hook.result.current.attachments[1]).toEqual({
+      id: "restored:restored-ready",
+      name: "restored.png",
+      contentType: ready.contentType,
+      sizeBytes: ready.sizeBytes,
+      status: "ready",
+      file: ready,
+    });
+    expect(hook.result.current.attachments[1]?.previewUrl).toBeUndefined();
+    expect(hook.result.current.uploading).toBe(true);
+    expect(hook.result.current.readyResources).toEqual([
+      { kind: "file", fileId: "restored-ready" },
+    ]);
+
+    await flushing(() => resolveUpload(fakeAsset({ id: "local-ready" })));
+    await hook.unmount();
+  });
+
+  test("a later server restoration replaces the ready set but preserves unresolved uploads", async () => {
+    let resolveUpload!: (asset: FileAsset) => void;
+    const client = fakeClient({
+      uploadFile: () =>
+        new Promise<FileAsset>((resolve) => {
+          resolveUpload = resolve;
+        }),
+    });
+    const hook = await renderHook(
+      () => useFileAttachments({ client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flushing(() => hook.result.current.addFiles([imageFile("pending.png")]));
+    const first = fakeAsset({ id: "first-ready", filename: "first.txt" });
+    const second = fakeAsset({ id: "second-ready", filename: "second.txt" });
+    await flushing(() => hook.result.current.restoreReadyFiles([first]));
+    await flushing(() => hook.result.current.restoreReadyFiles([second]));
+    expect(hook.result.current.attachments.map((attachment) => attachment.status)).toEqual([
+      "uploading",
+      "ready",
+    ]);
+    expect(hook.result.current.readyResources).toEqual([{ kind: "file", fileId: "second-ready" }]);
+
+    await flushing(() => hook.result.current.restoreReadyFiles([]));
+    expect(hook.result.current.attachments).toHaveLength(1);
+    expect(hook.result.current.attachments[0]?.status).toBe("uploading");
+    await flushing(() => resolveUpload(fakeAsset({ id: "local-ready" })));
+    await hook.unmount();
+  });
+
   test("a rejected upload flips status->failed, sets error, and is excluded from readyResources", async () => {
     const client = fakeClient({
       uploadFile: async () => {

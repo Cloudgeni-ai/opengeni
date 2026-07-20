@@ -64,6 +64,7 @@ function makeAttachments(
     uploading: false,
     addFiles: () => {},
     addFromPaste: () => {},
+    restoreReadyFiles: () => {},
     retry: () => {},
     remove: () => {},
     clear: () => {},
