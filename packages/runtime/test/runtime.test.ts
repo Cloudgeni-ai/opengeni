@@ -3976,16 +3976,21 @@ describe("pack skills in the sandbox skill index", () => {
   });
 
   test("an explicit curated library selection is materialized and indexed", () => {
-    const entry = listSkillLibraryEntries().find((candidate) => candidate.id === "azure-verified-modules");
+    const entry = listSkillLibraryEntries().find(
+      (candidate) => candidate.id === "azure-verified-modules",
+    );
     expect(entry).toBeDefined();
     const loaded = loadSkillLibrarySkill("azure-verified-modules", entry?.version);
-    const source = lazySkillSourceWithPackSkills([], [
-      {
-        name: loaded.skill.name,
-        description: loaded.skill.description,
-        files: loaded.skill.files.map((file) => ({ path: file.path, content: file.content })),
-      },
-    ]);
+    const source = lazySkillSourceWithPackSkills(
+      [],
+      [
+        {
+          name: loaded.skill.name,
+          description: loaded.skill.description,
+          files: loaded.skill.files.map((file) => ({ path: file.path, content: file.content })),
+        },
+      ],
+    );
     const sourceDir = source.source as { type: string; children: Record<string, any> };
     expect(sourceDir.children[loaded.skill.name].type).toBe("dir");
     expect(sourceDir.children[loaded.skill.name].children["SKILL.md"].content).toContain(
