@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { act } from "react";
+import { act, type ReactNode } from "react";
 
-import { QueueSurface } from "../src/components/queue-surface";
+import { createQueueSurfaceForTest, QueueSurface } from "../src/components/queue-surface";
 import type { ComposerState } from "../src/hooks/use-composer";
 import type { UseTurnQueueResult } from "../src/hooks/use-turn-queue";
 import { fakeTurn } from "./fake-client";
-import { registerDom, renderComponent, type RenderedComponent } from "./render-hook";
+import { flush, registerDom, renderComponent, type RenderedComponent } from "./render-hook";
 import {
   QUEUE_BOUNDARY_CLUSTERS,
   QUEUE_VISIBILITY_PROBE_KINDS,
@@ -83,6 +83,37 @@ function queue(overrides: Partial<UseTurnQueueResult> = {}): UseTurnQueueResult 
   };
 }
 
+function controlledQueueSurface() {
+  let loadCount = 0;
+  let releaseGate!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    releaseGate = resolve;
+  });
+  let implementationPromise:
+    | Promise<typeof import("../src/components/queue-surface-implementation")>
+    | undefined;
+  const ControlledQueueSurface = createQueueSurfaceForTest(() => {
+    loadCount += 1;
+    implementationPromise ??= (async () => {
+      await gate;
+      return await import("../src/components/queue-surface-implementation");
+    })();
+    return implementationPromise;
+  });
+
+  return {
+    ControlledQueueSurface,
+    loadCount: () => loadCount,
+    release: async () => {
+      if (!implementationPromise) {
+        throw new Error("QueueSurface implementation was not requested");
+      }
+      releaseGate();
+      await implementationPromise;
+    },
+  };
+}
+
 async function click(target: Element | null): Promise<void> {
   expect(target).not.toBeNull();
   await act(async () => {
@@ -91,11 +122,31 @@ async function click(target: Element | null): Promise<void> {
   });
 }
 
+async function waitForLoadedQueueSurface(rendered: RenderedComponent): Promise<void> {
+  const deadline = performance.now() + 5_000;
+  while (
+    rendered.container.querySelector('[data-testid="queue-surface-loading"]') &&
+    performance.now() < deadline
+  ) {
+    await flush(10);
+  }
+
+  if (rendered.container.querySelector('[data-testid="queue-surface-loading"]')) {
+    throw new Error("QueueSurface implementation did not load within 5 seconds");
+  }
+}
+
+async function renderLoadedQueueSurface(node: ReactNode): Promise<RenderedComponent> {
+  const rendered = await renderComponent(node);
+  await waitForLoadedQueueSurface(rendered);
+  return rendered;
+}
+
 async function renderedPromptSummary(
   prompt: string,
   maxCharacters: QueueBoundaryMaximum,
 ): Promise<{ accessibleSummary: string; summary: string; visualSummary: string }> {
-  mounted = await renderComponent(
+  mounted = await renderLoadedQueueSurface(
     <QueueSurface
       queue={queue({
         queue: [
@@ -155,6 +206,118 @@ function isWellFormedUnicode(value: string): boolean {
 }
 
 describe("QueueSurface", () => {
+  test("does not load or render queue UI for an ordinary empty session", async () => {
+    const { ControlledQueueSurface, loadCount } = controlledQueueSurface();
+    mounted = await renderComponent(
+      <ControlledQueueSurface queue={queue({ queue: [] })} composer={composer()} />,
+    );
+
+    expect(mounted.container.childElementCount).toBe(0);
+    expect(mounted.container.querySelector('[data-testid="queue-surface-loading"]')).toBeNull();
+    expect(loadCount()).toBe(0);
+  });
+
+  test("exposes an accessible, layout-stable shell while the queue implementation loads", async () => {
+    const { ControlledQueueSurface, loadCount, release } = controlledQueueSurface();
+    mounted = await renderComponent(
+      <ControlledQueueSurface queue={queue()} composer={composer()} />,
+    );
+
+    const fallback = mounted.container.querySelector('[data-testid="queue-surface-loading"]');
+    expect(loadCount()).toBe(1);
+    expect(fallback?.getAttribute("role")).toBe("status");
+    expect(fallback?.getAttribute("aria-live")).toBe("polite");
+    expect(fallback?.textContent).toContain("Loading 2 queued prompts…");
+    expect(
+      fallback?.firstElementChild?.firstElementChild?.classList.contains(
+        "pointer-coarse:min-h-[44px]",
+      ),
+    ).toBe(true);
+
+    await act(release);
+    expect(mounted.container.querySelector('[data-testid="queue-surface-loading"]')).toBeNull();
+    expect(mounted.container.querySelector('[data-testid="queue-surface"]')).not.toBeNull();
+    expect(loadCount()).toBe(1);
+  });
+
+  test("renders an empty stopping state synchronously without a zero-count loading announcement", async () => {
+    const { ControlledQueueSurface, loadCount } = controlledQueueSurface();
+    mounted = await renderComponent(
+      <ControlledQueueSurface
+        queue={queue({ queue: [], stoppingPreviousAttempt: true })}
+        composer={composer()}
+      />,
+    );
+
+    const status = mounted.container.querySelector('[data-testid="stopping-previous-attempt"]');
+    expect(status?.getAttribute("role")).toBe("status");
+    expect(status?.getAttribute("aria-live")).toBe("polite");
+    expect(status?.textContent).toBe(
+      "Stopping previous attempt… Queued work is saved and starts automatically.",
+    );
+    expect(mounted.container.textContent).not.toContain("Loading 0 queued prompts…");
+    expect(mounted.container.querySelector('[data-testid="queue-surface-loading"]')).toBeNull();
+    expect(mounted.container.querySelector("button[aria-expanded]")).toBeNull();
+    expect(loadCount()).toBe(0);
+  });
+
+  test("renders and retries an empty queue load error without requesting the lazy implementation", async () => {
+    const calls: string[] = [];
+    const failure = new Error("Queue load failed before any prompts were returned");
+    const { ControlledQueueSurface, loadCount } = controlledQueueSurface();
+    mounted = await renderComponent(
+      <ControlledQueueSurface
+        queue={queue({
+          queue: [],
+          error: failure,
+          clearMutationError: () => calls.push("clear"),
+          refresh: async () => {
+            calls.push("refresh");
+          },
+        })}
+        composer={composer()}
+      />,
+    );
+
+    expect(mounted.container.querySelector('[role="alert"]')).not.toBeNull();
+    expect(
+      mounted.container.querySelector('[data-testid="queue-error-message"]')?.textContent,
+    ).toBe(failure.message);
+    expect(mounted.container.textContent).not.toContain("Loading 0 queued prompts…");
+    expect(mounted.container.querySelector('[data-testid="queue-surface-loading"]')).toBeNull();
+    expect(loadCount()).toBe(0);
+
+    await click(
+      mounted.container.querySelector('button[aria-label="Dismiss queue error and retry"]'),
+    );
+    expect(calls).toEqual(["clear", "refresh"]);
+    expect(loadCount()).toBe(0);
+  });
+
+  test("renders an empty mutation error synchronously with authoritative error precedence", async () => {
+    const queueFailure = new Error("Stale queue load failure");
+    const mutationFailure = new Error("Latest queue mutation failed");
+    const { ControlledQueueSurface, loadCount } = controlledQueueSurface();
+    mounted = await renderComponent(
+      <ControlledQueueSurface
+        queue={queue({
+          queue: [],
+          error: queueFailure,
+          mutationError: mutationFailure,
+        })}
+        composer={composer()}
+      />,
+    );
+
+    const message = mounted.container.querySelector('[data-testid="queue-error-message"]');
+    expect(mounted.container.querySelector('[role="alert"]')).not.toBeNull();
+    expect(message?.textContent).toBe(mutationFailure.message);
+    expect(message?.textContent).not.toContain(queueFailure.message);
+    expect(mounted.container.textContent).not.toContain("Loading 0 queued prompts…");
+    expect(mounted.container.querySelector('[data-testid="queue-surface-loading"]')).toBeNull();
+    expect(loadCount()).toBe(0);
+  });
+
   test("is the one compact queue and exposes visible row Steer and Delete actions", async () => {
     const calls: string[] = [];
     const state = queue({
@@ -167,7 +330,7 @@ describe("QueueSurface", () => {
         return true;
       },
     });
-    mounted = await renderComponent(<QueueSurface queue={state} composer={composer()} />);
+    mounted = await renderLoadedQueueSurface(<QueueSurface queue={state} composer={composer()} />);
 
     expect(mounted.container.textContent).toContain("2 queued prompts");
     expect(mounted.container.querySelector('[aria-label="Queued prompts"]')).toBeNull();
@@ -184,7 +347,7 @@ describe("QueueSurface", () => {
   });
 
   test("renders the same authoritative queue without mutation affordances for read-only consumers", async () => {
-    mounted = await renderComponent(<QueueSurface queue={queue()} readOnly />);
+    mounted = await renderLoadedQueueSurface(<QueueSurface queue={queue()} readOnly />);
 
     expect(mounted.container.textContent).toContain("Read-only");
     await click(mounted.container.querySelector('button[aria-expanded="false"]'));
@@ -215,7 +378,7 @@ describe("QueueSurface", () => {
         }),
       ],
     });
-    mounted = await renderComponent(<QueueSurface queue={state} composer={composer()} />);
+    mounted = await renderLoadedQueueSurface(<QueueSurface queue={state} composer={composer()} />);
 
     const collapsed = mounted.container.querySelector('[data-testid="queue-collapsed-preview"]');
     const collapsedToggle = mounted.container.querySelector('button[aria-expanded="false"]');
@@ -304,7 +467,7 @@ describe("QueueSurface", () => {
         }),
       ],
     });
-    mounted = await renderComponent(<QueueSurface queue={state} composer={composer()} />);
+    mounted = await renderLoadedQueueSurface(<QueueSurface queue={state} composer={composer()} />);
 
     const collapsed = mounted.container.querySelector('[data-testid="queue-collapsed-preview"]');
     expect(collapsed?.textContent).toContain("�");
@@ -407,7 +570,7 @@ describe("QueueSurface", () => {
       expect(summaries[0]).toBe(summaries[1]);
     }
 
-    mounted = await renderComponent(
+    mounted = await renderLoadedQueueSurface(
       <QueueSurface
         queue={queue({
           queue: [
@@ -472,7 +635,7 @@ describe("QueueSurface", () => {
     }
 
     const prompts = nonPaintingKinds.map(queueVisibilityProbePrompt);
-    mounted = await renderComponent(
+    mounted = await renderLoadedQueueSurface(
       <QueueSurface
         queue={queue({
           queue: prompts.map((prompt, index) =>
@@ -539,7 +702,7 @@ describe("QueueSurface", () => {
     expect(new Set(items.map((turn) => Array.from(turn.prompt).slice(0, 500).join(""))).size).toBe(
       1,
     );
-    mounted = await renderComponent(
+    mounted = await renderLoadedQueueSurface(
       <QueueSurface queue={queue({ queue: items })} composer={composer()} />,
     );
 
@@ -586,7 +749,7 @@ describe("QueueSurface", () => {
       `Mutation failed\nhttps://queue.invalid/${"unbroken".repeat(10_000)}\nRetry safely`,
     );
     const calls: string[] = [];
-    mounted = await renderComponent(
+    mounted = await renderLoadedQueueSurface(
       <QueueSurface
         queue={queue({
           error: queueFailure,
@@ -629,7 +792,7 @@ describe("QueueSurface", () => {
 
   test("renders queue load errors losslessly when there is no mutation error", async () => {
     const failure = new Error(`Load failed: ${"Q".repeat(20_000)}`);
-    mounted = await renderComponent(
+    mounted = await renderLoadedQueueSurface(
       <QueueSurface queue={queue({ error: failure })} composer={composer()} />,
     );
 
@@ -639,7 +802,7 @@ describe("QueueSurface", () => {
   });
 
   test("explains the durable Steer shutdown fence instead of looking stuck in an ordinary queue", async () => {
-    mounted = await renderComponent(
+    mounted = await renderLoadedQueueSurface(
       <QueueSurface queue={queue({ stoppingPreviousAttempt: true })} composer={composer()} />,
     );
 
@@ -660,7 +823,7 @@ describe("QueueSurface", () => {
       changedAt: null,
       revision: 1,
     };
-    mounted = await renderComponent(
+    mounted = await renderLoadedQueueSurface(
       <QueueSurface
         queue={queue({
           effectiveControl: {
