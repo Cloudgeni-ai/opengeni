@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   CONTRACT,
+  AmbiguousCreationError,
   ManualInterventionError,
   REVIEWED_PREDECESSOR_BLOBS,
   SOURCE_PREDECESSOR_CHAIN,
@@ -16,9 +17,10 @@ import {
 const repositoryRoot = join(import.meta.dir, "..");
 const workflowPath = join(repositoryRoot, CONTRACT.workflowPath);
 const helperPath = join(repositoryRoot, CONTRACT.helperPath);
+const testPath = join(repositoryRoot, CONTRACT.testPath);
 const baseSha = "b".repeat(40);
 const finalCandidateSha = "c".repeat(40);
-const fifthCandidateSha = "4".repeat(40);
+const sixthCandidateSha = "4".repeat(40);
 const headSha = "e".repeat(40);
 const temporaryTreeSha = "f".repeat(40);
 const readmeBlobSha = "1".repeat(40);
@@ -52,6 +54,7 @@ function context(overrides: Record<string, string> = {}): Record<string, string>
 
 type PullRequest = Record<string, any>;
 type CreatedMismatch = "author" | "base" | "body" | "files" | "head";
+type SourceBytes = string | Uint8Array;
 
 type FixtureOptions = {
   baseFirstParent?: string;
@@ -73,13 +76,25 @@ type FixtureOptions = {
   headTree?: string;
   historicalV1?: boolean;
   initialConflict?: boolean;
+  insertEquivalentDuringPagination?: boolean;
   moveHeadAfterCreatedTerminalList?: boolean;
   moveHeadAfterPost?: boolean;
+  mutateCreatedOnTerminalDetail?: boolean;
   postCompetingEquivalent?: boolean;
+  postOutcome?: "malformed-after-create" | "network-after-create" | "network-without-create";
   predecessorBlobOverrides?: Record<string, string>;
   predecessorParent?: string;
   predecessorTree?: string;
+  sourceByteOverrides?: Partial<Record<(typeof TEMPORARY_PATHS)[number], SourceBytes>>;
 };
+
+function asBytes(value: SourceBytes): Buffer {
+  return typeof value === "string" ? Buffer.from(value, "utf8") : Buffer.from(value);
+}
+
+function gitBlobSha(bytes: Uint8Array): string {
+  return createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex");
+}
 
 function fixture(options: FixtureOptions = {}) {
   let postCount = 0;
@@ -95,7 +110,23 @@ function fixture(options: FixtureOptions = {}) {
   let createdTerminalRefMovementInjected = false;
   let headRefReadsAfterPost = 0;
   let pullListCallsAfterTerminalMovementArm = 0;
+  let pullListRequestCount = 0;
+  let pullListRequestsAfterPost = 0;
+  let createdDetailReads = 0;
+  let paginationEquivalentInjected = false;
   const patchedNumbers: number[] = [];
+
+  const sourceBytes = Object.fromEntries(
+    TEMPORARY_PATHS.map((path) => [
+      path,
+      options.sourceByteOverrides?.[path] === undefined
+        ? readFileSync(join(repositoryRoot, path))
+        : asBytes(options.sourceByteOverrides[path]),
+    ]),
+  ) as Record<(typeof TEMPORARY_PATHS)[number], Buffer>;
+  const sourceBlobBytes = new Map(
+    TEMPORARY_PATHS.map((path) => [gitBlobSha(sourceBytes[path]), sourceBytes[path]]),
+  );
 
   const originalTree = {
     sha: CONTRACT.originalTreeSha,
@@ -120,11 +151,11 @@ function fixture(options: FixtureOptions = {}) {
     truncated: false,
     tree: [
       ...originalTree.tree,
-      ...TEMPORARY_PATHS.map((path, index) => ({
+      ...TEMPORARY_PATHS.map((path) => ({
         path,
         mode: "100644",
         type: "blob",
-        sha: String(index + 5).repeat(40),
+        sha: gitBlobSha(sourceBytes[path]),
       })),
     ],
   };
@@ -155,6 +186,17 @@ function fixture(options: FixtureOptions = {}) {
   }
 
   const pulls: PullRequest[] = [bootstrapPullRequest()];
+  if (options.insertEquivalentDuringPagination) {
+    for (let index = 0; index < 99; index += 1) {
+      pulls.push({
+        number: 1000 + index,
+        title: `unrelated pull request ${index}`,
+        body: "",
+        state: "closed",
+        head: { ref: `unrelated-${index}`, sha: String(index % 10).repeat(40) },
+      });
+    }
+  }
   if (options.historicalV1) {
     pulls.push({
       number: 8,
@@ -225,7 +267,14 @@ function fixture(options: FixtureOptions = {}) {
 
   function detail(number: number): PullRequest {
     if (number === CONTRACT.bootstrapPullRequestNumber) return bootstrapPullRequest();
-    if (number === 1) return createdDetail();
+    if (number === 1) {
+      createdDetailReads += 1;
+      const value = createdDetail();
+      if (options.mutateCreatedOnTerminalDetail && createdDetailReads >= 2) {
+        value.body = `${value.body}\nmutated after global listing`;
+      }
+      return value;
+    }
     const found = pulls.find((pull) => pull.number === number);
     if (found) return found;
     throw new Error(`missing fixture pull request #${number}`);
@@ -325,6 +374,18 @@ function fixture(options: FixtureOptions = {}) {
         });
       }
     }
+    if (method === "GET" && url.pathname.startsWith(`${prefix}/git/blobs/`)) {
+      const sha = url.pathname.slice(`${prefix}/git/blobs/`.length);
+      const bytes = sourceBlobBytes.get(sha);
+      if (bytes) {
+        return Response.json({
+          sha,
+          size: bytes.length,
+          encoding: "base64",
+          content: bytes.toString("base64"),
+        });
+      }
+    }
     if (method === "GET" && url.pathname === `${prefix}/git/trees/${CONTRACT.originalTreeSha}`) {
       return Response.json(originalTree);
     }
@@ -338,15 +399,48 @@ function fixture(options: FixtureOptions = {}) {
       return Response.json(temporaryTree);
     }
     if (method === "GET" && url.pathname === `${prefix}/pulls` && url.searchParams.has("state")) {
-      const response = Response.json(pulls);
+      pullListRequestCount += 1;
+      if (postCount > 0) pullListRequestsAfterPost += 1;
+      const page = Number(url.searchParams.get("page"));
+      const perPage = Number(url.searchParams.get("per_page"));
+      expect(url.searchParams.get("sort")).toBe("created");
+      expect(url.searchParams.get("direction")).toBe("asc");
+      expect(perPage).toBe(100);
+      const start = (page - 1) * perPage;
+      const response = Response.json(pulls.slice(start, start + perPage));
+      if (options.insertEquivalentDuringPagination && page === 1 && !paginationEquivalentInjected) {
+        paginationEquivalentInjected = true;
+        pulls.push({
+          number: 9999,
+          title: CONTRACT.title,
+          body: `<!-- ${CONTRACT.marker} -->`,
+          state: "open",
+          draft: true,
+          user: { login: "somebody-else", type: "User" },
+          base: {
+            ref: CONTRACT.defaultBranch,
+            sha: baseSha,
+            repo: { full_name: CONTRACT.repository },
+          },
+          head: {
+            ref: CONTRACT.headBranch,
+            sha: currentHeadSha,
+            repo: { full_name: CONTRACT.repository },
+          },
+          maintainer_can_modify: false,
+          commits: 1,
+          changed_files: TEMPORARY_PATHS.length,
+        });
+      }
       if (existingTerminalRefMovementArmed) {
         pullListCallsAfterTerminalMovementArm += 1;
-        if (pullListCallsAfterTerminalMovementArm === 2) currentHeadSha = movedHeadSha;
+        if (pullListCallsAfterTerminalMovementArm === 4) currentHeadSha = movedHeadSha;
       }
       if (
         options.moveHeadAfterCreatedTerminalList &&
         postCount > 0 &&
-        !createdTerminalRefMovementInjected
+        !createdTerminalRefMovementInjected &&
+        pullListRequestsAfterPost === 4
       ) {
         createdTerminalRefMovementInjected = true;
         currentHeadSha = movedHeadSha;
@@ -356,6 +450,9 @@ function fixture(options: FixtureOptions = {}) {
     if (method === "POST" && url.pathname === `${prefix}/pulls`) {
       postCount += 1;
       postedBody = JSON.parse(String(init?.body));
+      if (options.postOutcome === "network-without-create") {
+        throw new Error("simulated network failure before server-side creation");
+      }
       if (options.moveHeadAfterPost) currentHeadSha = movedHeadSha;
       pulls.push({ number: 1, title: postedBody?.title, body: postedBody?.body });
       if (options.postCompetingEquivalent) {
@@ -365,6 +462,12 @@ function fixture(options: FixtureOptions = {}) {
           body: `<!-- ${CONTRACT.marker} -->`,
           head: { ref: CONTRACT.headBranch, sha: currentHeadSha },
         });
+      }
+      if (options.postOutcome === "network-after-create") {
+        throw new Error("simulated response loss after server-side creation");
+      }
+      if (options.postOutcome === "malformed-after-create") {
+        return Response.json({}, { status: 201 });
       }
       return Response.json({ number: 1 }, { status: 201 });
     }
@@ -421,6 +524,9 @@ function fixture(options: FixtureOptions = {}) {
     },
     get requestCount() {
       return requestCount;
+    },
+    get pullListRequestCount() {
+      return pullListRequestCount;
     },
     get headRefReadsAfterPost() {
       return headRefReadsAfterPost;
@@ -501,6 +607,91 @@ describe("temporary OPE-25 admission bootstrap", () => {
     expect(api.mutationCount).toBe(0);
   });
 
+  test.each([
+    [
+      "fixed helper preserved while workflow and test bytes change",
+      {
+        [CONTRACT.workflowPath]: Buffer.concat([
+          readFileSync(workflowPath),
+          Buffer.from("\n# alternate workflow\n"),
+        ]),
+        [CONTRACT.testPath]: Buffer.concat([
+          readFileSync(testPath),
+          Buffer.from("\n// alternate test\n"),
+        ]),
+      },
+      /API-observed bootstrap workflow bytes changed/,
+    ],
+    [
+      "workflow-only byte change",
+      {
+        [CONTRACT.workflowPath]: Buffer.concat([
+          readFileSync(workflowPath),
+          Buffer.from("\n# alternate workflow\n"),
+        ]),
+      },
+      /API-observed bootstrap workflow bytes changed/,
+    ],
+    [
+      "helper-only byte change",
+      {
+        [CONTRACT.helperPath]: Buffer.concat([
+          readFileSync(helperPath),
+          Buffer.from("\n// alternate helper\n"),
+        ]),
+      },
+      /helper bytes differ from the fixed running verifier/,
+    ],
+    [
+      "test-only byte change",
+      {
+        [CONTRACT.testPath]: Buffer.concat([
+          readFileSync(testPath),
+          Buffer.from("\n// alternate test\n"),
+        ]),
+      },
+      /bootstrap test bytes changed/,
+    ],
+    [
+      "workflow CRLF ambiguity",
+      {
+        [CONTRACT.workflowPath]: readFileSync(workflowPath, "utf8").replaceAll("\n", "\r\n"),
+      },
+      /digest field is not unique and canonical/,
+    ],
+    [
+      "workflow invalid UTF-8 ambiguity",
+      {
+        [CONTRACT.workflowPath]: Buffer.concat([readFileSync(workflowPath), Buffer.from([0xff])]),
+      },
+      /is not exact UTF-8/,
+    ],
+    [
+      "workflow duplicate digest-field canonicalization ambiguity",
+      {
+        [CONTRACT.workflowPath]: Buffer.concat([
+          readFileSync(workflowPath),
+          Buffer.from(`\n      BOOTSTRAP_HELPER_SHA256: ${"0".repeat(64)}\n`),
+        ]),
+      },
+      /digest field is not unique and canonical/,
+    ],
+  ] as const)("rejects API-observed source identity: %s", async (_name, overrides, message) => {
+    const api = fixture({ sourceByteOverrides: overrides });
+    await expect(inspectSourceIdentity(api.api, baseSha)).rejects.toThrow(message);
+    expect(api.mutationCount).toBe(0);
+  });
+
+  test("detects an equivalent appended while ascending pagination is in flight", async () => {
+    const api = fixture({ insertEquivalentDuringPagination: true });
+    await expect(
+      runBootstrap({ env: context(), fetchImpl: api.fetchImpl, logger }),
+    ).rejects.toThrow("bootstrap pull-request title or body changed");
+    expect(api.pullListRequestCount).toBeGreaterThanOrEqual(4);
+    expect(api.postCount).toBe(0);
+    expect(api.patchCount).toBe(0);
+  });
+
   test("fails without mutation when a competitor appears after existing PR detail", async () => {
     const api = fixture();
     await runBootstrap({ env: context(), fetchImpl: api.fetchImpl, logger });
@@ -548,20 +739,20 @@ describe("temporary OPE-25 admission bootstrap", () => {
 
   test.each([
     [
-      "stale three-commit source count",
+      "stale four-commit source count",
       {
         baseSecondParent: CONTRACT.reviewedPredecessorSha,
-        bootstrapCommitCount: 3,
+        bootstrapCommitCount: 4,
         bootstrapHeadSha: CONTRACT.reviewedPredecessorSha,
       },
       "bootstrap source pull-request commit count changed",
     ],
     [
-      "fifth source commit",
+      "sixth source commit",
       {
-        baseSecondParent: fifthCandidateSha,
-        bootstrapCommitCount: 5,
-        bootstrapHeadSha: fifthCandidateSha,
+        baseSecondParent: sixthCandidateSha,
+        bootstrapCommitCount: 6,
+        bootstrapHeadSha: sixthCandidateSha,
         finalParent: finalCandidateSha,
       },
       "bootstrap source pull-request commit count changed",
@@ -569,17 +760,17 @@ describe("temporary OPE-25 admission bootstrap", () => {
     [
       "alternate final-candidate parent SHA",
       { finalParent: "9".repeat(40) },
-      "final candidate is not the sole fourth commit on the reviewed predecessor",
+      "final candidate is not the sole fifth commit on the reviewed predecessor",
     ],
     [
       "alternate predecessor parent SHA",
       { predecessorParent: "9".repeat(40) },
-      "source predecessor commit 3 parent changed",
+      "source predecessor commit 4 parent changed",
     ],
     [
       "alternate predecessor tree",
       { predecessorTree: "8".repeat(40) },
-      "source predecessor commit 3 tree changed",
+      "source predecessor commit 4 tree changed",
     ],
     [
       "alternate predecessor helper blob",
@@ -719,22 +910,80 @@ describe("temporary OPE-25 admission bootstrap", () => {
     expect(api.createdState).toBe("closed");
   });
 
-  test("closes only the created PR when a competing equivalent appears after POST", async () => {
+  test("fails closed without cleanup when multiple PRs appear after POST", async () => {
     const api = fixture({ postCompetingEquivalent: true });
+    try {
+      await runBootstrap({ env: context(), fetchImpl: api.fetchImpl, logger });
+      throw new Error("expected runBootstrap to fail");
+    } catch (error) {
+      expect(error).toBeInstanceOf(AmbiguousCreationError);
+      expect(String(error)).toContain("contains 2 newly observed pull requests");
+      expect(String(error)).toContain("Do not retry the POST or rerun");
+    }
+    expect(api.postCount).toBe(1);
+    expect(api.patchCount).toBe(0);
+    expect(api.patchedNumbers).toEqual([]);
+  });
+
+  test.each(["network-after-create", "malformed-after-create"] as const)(
+    "reconciles an ambiguous %s POST without retrying",
+    async (postOutcome) => {
+      const api = fixture({ postOutcome });
+      await expect(
+        runBootstrap({ env: context(), fetchImpl: api.fetchImpl, logger }),
+      ).resolves.toMatchObject({
+        action: "created",
+        number: 1,
+        reconciledAmbiguousPost: true,
+      });
+      expect(api.postCount).toBe(1);
+      expect(api.patchCount).toBe(0);
+      expect(api.createdState).toBe("open");
+    },
+  );
+
+  test("closes the sole identifiable malformed PR after an ambiguous POST", async () => {
+    const api = fixture({ postOutcome: "network-after-create", createdMismatch: "author" });
     await expect(
       runBootstrap({ env: context(), fetchImpl: api.fetchImpl, logger }),
-    ).rejects.toThrow(/failed verification and was closed.*not globally unique/);
+    ).rejects.toThrow(/failed verification and was closed.*not provider-authored/);
+    expect(api.postCount).toBe(1);
     expect(api.patchCount).toBe(1);
     expect(api.patchedNumbers).toEqual([1]);
     expect(api.createdState).toBe("closed");
   });
 
-  test("returns created only after stable refs pass both post-POST readbacks", async () => {
+  test("requires manual intervention when an ambiguous POST has no visible creation", async () => {
+    const api = fixture({ postOutcome: "network-without-create" });
+    try {
+      await runBootstrap({ env: context(), fetchImpl: api.fetchImpl, logger });
+      throw new Error("expected runBootstrap to fail");
+    } catch (error) {
+      expect(error).toBeInstanceOf(AmbiguousCreationError);
+      expect(String(error)).toContain("contains 0 newly observed pull requests");
+      expect(String(error)).toContain("Do not retry the POST or rerun");
+    }
+    expect(api.postCount).toBe(1);
+    expect(api.patchCount).toBe(0);
+  });
+
+  test("closes a created PR whose metadata mutates after terminal global uniqueness", async () => {
+    const api = fixture({ mutateCreatedOnTerminalDetail: true });
+    await expect(
+      runBootstrap({ env: context(), fetchImpl: api.fetchImpl, logger }),
+    ).rejects.toThrow(/failed verification and was closed.*title or body changed/);
+    expect(api.postCount).toBe(1);
+    expect(api.patchCount).toBe(1);
+    expect(api.patchedNumbers).toEqual([1]);
+    expect(api.createdState).toBe("closed");
+  });
+
+  test("returns created only after stable refs and terminal metadata readbacks", async () => {
     const api = fixture();
     await expect(
       runBootstrap({ env: context(), fetchImpl: api.fetchImpl, logger }),
     ).resolves.toMatchObject({ action: "created", number: 1, headSha });
-    expect(api.headRefReadsAfterPost).toBe(2);
+    expect(api.headRefReadsAfterPost).toBe(3);
     expect(api.postCount).toBe(1);
     expect(api.patchCount).toBe(0);
     expect(api.mutationCount).toBe(1);
@@ -790,6 +1039,7 @@ describe("temporary OPE-25 admission bootstrap", () => {
     expect(workflow).not.toMatch(/^\s+uses:/m);
     expect(workflow).not.toContain("secrets.");
     expect(workflow).not.toContain("--location");
+    expect(workflow).toContain("fixed-verifier trust anchor");
     expect(workflow).toContain(`BOOTSTRAP_HELPER_SHA256: ${helperSha256}`);
     expect(workflow).toContain(`ref=$GITHUB_SHA`);
     expect(workflow).toContain('node "$helper"');
@@ -801,5 +1051,6 @@ describe("temporary OPE-25 admission bootstrap", () => {
     );
     expect(helperText).toContain("pulls/${CONTRACT.bootstrapPullRequestNumber}");
     expect(helperText).toContain("OPE25_BOOTSTRAP_MANUAL_INTERVENTION");
+    expect(helperText).toContain("this is not universal self-authentication");
   });
 });

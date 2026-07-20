@@ -3,8 +3,10 @@ name: OPE-25 Admission Bootstrap (Temporary)
 # This inputless, single-purpose workflow is temporary source governance, not a
 # release workflow. It may only open one exact bot-authored draft PR whose head
 # removes this workflow, its helper, and its test and restores the authorized
-# pre-bootstrap tree byte-for-byte. The helper reads GitHub metadata only; it
-# never checks out or executes content from the prepared governance head.
+# pre-bootstrap tree byte-for-byte. Independently reviewed, provider-read, and
+# SHA-fenced workflow/helper bytes are the fixed-verifier trust anchor. The
+# helper reads GitHub metadata and source blobs only; it never checks out or
+# executes content from the prepared governance head.
 on:
   workflow_dispatch: {}
 
@@ -24,7 +26,7 @@ jobs:
     env:
       GITHUB_TOKEN: ${{ github.token }}
       OPENGENI_BOOTSTRAP_ACTION: open_exact_governance_pr
-      BOOTSTRAP_HELPER_SHA256: 9331b6bf4f404e41334963d5e8dd6a5fdf96bf64a643a10a01733de678861471
+      BOOTSTRAP_HELPER_SHA256: f50a94d07cd3bddc1ec0e8ddf2d19b37029af317b68a73da97b6787debcf6174
     steps:
       - name: Fetch and execute the exact base-owned bootstrap helper
         shell: bash

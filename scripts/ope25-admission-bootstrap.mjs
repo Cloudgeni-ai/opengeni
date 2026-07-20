@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -14,9 +16,9 @@ export const CONTRACT = Object.freeze({
   bootstrapPullRequestNumber: 506,
   bootstrapHeadBranch: "feat/ope25-admission-bootstrap",
   bootstrapTitle: "chore: add exact OPE-25 admission bootstrap",
-  bootstrapCommitCount: 4,
-  reviewedPredecessorSha: "d778b49a1aac5e9e2998f5c9e2b1d88d2bb1ac28",
-  reviewedPredecessorTreeSha: "3d69fba60dc77c13cebe2d159503d0eabb3585d1",
+  bootstrapCommitCount: 5,
+  reviewedPredecessorSha: "2533a78996c074818ab9a213b711b5b864841813",
+  reviewedPredecessorTreeSha: "29165e658e734cfbcc70f18058cc68f80878ddde",
   headBranch: "ope25-admission-governance-v2",
   workflowPath: ".github/workflows/ope25-admission-bootstrap.yml",
   helperPath: "scripts/ope25-admission-bootstrap.mjs",
@@ -37,16 +39,21 @@ export const SOURCE_PREDECESSOR_CHAIN = Object.freeze([
     parentSha: "fb3b151fdc5f188af001004e11e03fdb2ba290a6",
   }),
   Object.freeze({
+    sha: "d778b49a1aac5e9e2998f5c9e2b1d88d2bb1ac28",
+    treeSha: "3d69fba60dc77c13cebe2d159503d0eabb3585d1",
+    parentSha: "3c8eb5a29d1ea69d97b25482c5637754bf77b0c7",
+  }),
+  Object.freeze({
     sha: CONTRACT.reviewedPredecessorSha,
     treeSha: CONTRACT.reviewedPredecessorTreeSha,
-    parentSha: "3c8eb5a29d1ea69d97b25482c5637754bf77b0c7",
+    parentSha: "d778b49a1aac5e9e2998f5c9e2b1d88d2bb1ac28",
   }),
 ]);
 
 export const REVIEWED_PREDECESSOR_BLOBS = Object.freeze({
-  [CONTRACT.workflowPath]: "330b655a154a408bb4aa8229c7d544e8fb99338e",
-  [CONTRACT.helperPath]: "33305b775f2eed87264e54bc132f0d7dd7587005",
-  [CONTRACT.testPath]: "f9b461d3d7694c81de105b4670e81c541cd650aa",
+  [CONTRACT.workflowPath]: "c09d5e56018ee788c6bfdf1fe0cd2e8a48bbdd4f",
+  [CONTRACT.helperPath]: "cc1d949f1c5f057befea0075b44f10f34a45f412",
+  [CONTRACT.testPath]: "2168a6c55cc5a77efe74e6ae4be261a82fce3c10",
 });
 
 export const TEMPORARY_PATHS = Object.freeze(
@@ -54,6 +61,13 @@ export const TEMPORARY_PATHS = Object.freeze(
 );
 
 const shaPattern = /^[0-9a-f]{40}$/;
+const CANONICAL_WORKFLOW_SHA256 =
+  "ed08126b8a29eca5d7dd9f6a52cfa5b1091cc3e67d3a6a962c33e7c9fbd31f91";
+const EXPECTED_TEST_SHA256 = "17dcd104bf24e39efa48216b0d07ba22c31b3a9a8c0d6d8301c8d1e636fc29ee";
+const HELPER_DIGEST_SENTINEL = "0".repeat(64);
+const MAX_PULL_REQUEST_PAGES = 30;
+const PULL_REQUESTS_PER_PAGE = 100;
+const STABLE_LIST_ATTEMPTS = 3;
 
 function compareCodeUnits(left, right) {
   return left < right ? -1 : left > right ? 1 : 0;
@@ -84,12 +98,39 @@ export class ManualInterventionError extends Error {
   }
 }
 
+export class AmbiguousCreationError extends Error {
+  constructor(postError, observation) {
+    super(
+      `OPE25_BOOTSTRAP_MANUAL_INTERVENTION: pull-request POST outcome is ambiguous ` +
+        `(${errorMessage(postError)}); ${observation}. Do not retry the POST or rerun marker ` +
+        `${CONTRACT.marker}; inspect provider state and resolve manually.`,
+      { cause: postError },
+    );
+    this.name = "AmbiguousCreationError";
+    this.code = "OPE25_BOOTSTRAP_MANUAL_INTERVENTION";
+    this.postError = postError;
+    this.observation = observation;
+  }
+}
+
 function assertSha(value, label) {
   invariant(
     typeof value === "string" && shaPattern.test(value),
     `${label} is not a lowercase Git SHA`,
   );
   return value;
+}
+
+function sha256(bytes) {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+function gitBlobSha(bytes) {
+  return createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex");
+}
+
+function runningHelperBytes() {
+  return readFileSync(fileURLToPath(import.meta.url));
 }
 
 function expectedContext(env) {
@@ -285,6 +326,85 @@ function assertFinalCandidateDelta(predecessorValue, candidateValue, candidateTr
       `final candidate did not replace the reviewed predecessor blob: ${path}`,
     );
   }
+  return candidate;
+}
+
+async function readExactGitBlob(api, sha, label) {
+  const value = await api(`/repos/${CONTRACT.repository}/git/blobs/${sha}`);
+  invariant(value?.sha === sha, `${label} API blob identity changed`);
+  invariant(value?.encoding === "base64", `${label} API blob encoding changed`);
+  invariant(
+    Number.isSafeInteger(value?.size) && value.size >= 0,
+    `${label} API blob size is invalid`,
+  );
+  invariant(typeof value?.content === "string", `${label} API blob content is missing`);
+  invariant(!value.content.includes("\r"), `${label} API base64 transport is non-canonical`);
+  const encoded = value.content.replaceAll("\n", "");
+  invariant(
+    /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encoded),
+    `${label} API base64 transport is invalid`,
+  );
+  const bytes = Buffer.from(encoded, "base64");
+  invariant(bytes.toString("base64") === encoded, `${label} API base64 transport is ambiguous`);
+  invariant(bytes.length === value.size, `${label} API blob size changed`);
+  invariant(gitBlobSha(bytes) === sha, `${label} API blob bytes differ from its Git identity`);
+  return bytes;
+}
+
+function decodeExactUtf8(bytes, label) {
+  try {
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    invariant(Buffer.from(text, "utf8").equals(bytes), `${label} UTF-8 encoding is ambiguous`);
+    return text;
+  } catch (error) {
+    throw new Error(`${label} is not exact UTF-8: ${errorMessage(error)}`, { cause: error });
+  }
+}
+
+async function assertExactCandidateSource(api, candidate) {
+  // Authorized boundary: independently reviewed, provider-read, SHA-fenced workflow/helper
+  // bytes are fixed before exact-B dispatch. This running helper is therefore the external
+  // verifier anchor for API-observed source bytes; this is not universal self-authentication.
+  const entries = Object.fromEntries(
+    TEMPORARY_PATHS.map((path) => {
+      const entry = candidate.get(path);
+      invariant(entry?.type === "blob", `final candidate source is not a blob: ${path}`);
+      return [path, entry];
+    }),
+  );
+  const [workflowBytes, observedHelperBytes, testBytes] = await Promise.all([
+    readExactGitBlob(api, entries[CONTRACT.workflowPath].sha, "API-observed bootstrap workflow"),
+    readExactGitBlob(api, entries[CONTRACT.helperPath].sha, "API-observed bootstrap helper"),
+    readExactGitBlob(api, entries[CONTRACT.testPath].sha, "API-observed bootstrap test"),
+  ]);
+
+  const fixedHelperBytes = runningHelperBytes();
+  invariant(
+    observedHelperBytes.equals(fixedHelperBytes),
+    "API-observed helper bytes differ from the fixed running verifier",
+  );
+
+  const fixedHelperSha256 = sha256(fixedHelperBytes);
+  const workflow = decodeExactUtf8(workflowBytes, "API-observed bootstrap workflow");
+  const helperDigestLine = /^(      BOOTSTRAP_HELPER_SHA256: )([0-9a-f]{64})\n/gm;
+  const matches = [...workflow.matchAll(helperDigestLine)];
+  invariant(
+    matches.length === 1,
+    "API-observed bootstrap workflow helper digest field is not unique and canonical",
+  );
+  invariant(
+    matches[0][2] === fixedHelperSha256,
+    "API-observed bootstrap workflow does not pin the fixed running verifier",
+  );
+  const canonicalWorkflow = workflow.replace(helperDigestLine, `$1${HELPER_DIGEST_SENTINEL}\n`);
+  invariant(
+    sha256(canonicalWorkflow) === CANONICAL_WORKFLOW_SHA256,
+    "API-observed bootstrap workflow bytes changed",
+  );
+  invariant(
+    sha256(testBytes) === EXPECTED_TEST_SHA256,
+    "API-observed bootstrap test bytes changed",
+  );
 }
 
 function assertBootstrapPullRequest(value, baseSha, candidateHeadSha) {
@@ -400,7 +520,7 @@ export async function inspectSourceIdentity(api, baseSha) {
   invariant(
     candidateCommit.parents.length === 1 &&
       candidateCommit.parents[0] === CONTRACT.reviewedPredecessorSha,
-    "final candidate is not the sole fourth commit on the reviewed predecessor",
+    "final candidate is not the sole fifth commit on the reviewed predecessor",
   );
   invariant(
     candidateCommit.treeSha === baseCommit.treeSha,
@@ -417,7 +537,8 @@ export async function inspectSourceIdentity(api, baseSha) {
   assertTemporaryBaseTree(originalTree, predecessorTree, CONTRACT.reviewedPredecessorTreeSha);
   assertReviewedPredecessorTree(predecessorTree);
   assertTemporaryBaseTree(originalTree, temporaryTree, baseCommit.treeSha);
-  assertFinalCandidateDelta(predecessorTree, temporaryTree, baseCommit.treeSha);
+  const candidate = assertFinalCandidateDelta(predecessorTree, temporaryTree, baseCommit.treeSha);
+  await assertExactCandidateSource(api, candidate);
 
   const headRef = await api(`/repos/${CONTRACT.repository}/git/ref/heads/${CONTRACT.headBranch}`);
   const headSha = assertRef(headRef, `refs/heads/${CONTRACT.headBranch}`, "governance head");
@@ -453,17 +574,54 @@ function canonicalPullRequestBody(identity) {
   ].join("\n");
 }
 
-async function listAllPullRequests(api) {
+async function listAllPullRequestsOnce(api) {
   const out = [];
-  for (let page = 1; page <= 30; page += 1) {
+  const numbers = new Set();
+  for (let page = 1; page <= MAX_PULL_REQUEST_PAGES; page += 1) {
     const value = await api(
-      `/repos/${CONTRACT.repository}/pulls?state=all&sort=created&direction=desc&per_page=100&page=${page}`,
+      `/repos/${CONTRACT.repository}/pulls?state=all&sort=created&direction=asc&` +
+        `per_page=${PULL_REQUESTS_PER_PAGE}&page=${page}`,
     );
     invariant(Array.isArray(value), "pull-request listing is invalid");
-    out.push(...value);
-    if (value.length < 100) return out;
+    for (const pull of value) {
+      invariant(
+        Number.isSafeInteger(pull?.number) && pull.number > 0,
+        "pull-request listing contains an invalid number",
+      );
+      invariant(!numbers.has(pull.number), "pull-request listing contains a duplicate number");
+      numbers.add(pull.number);
+      out.push(pull);
+    }
+    if (value.length < PULL_REQUESTS_PER_PAGE) return out;
   }
   throw new Error("pull-request listing exceeded 3000 records");
+}
+
+function pullRequestListFingerprint(pulls) {
+  return JSON.stringify(
+    pulls.map((pull) => ({
+      number: pull.number,
+      state: pull?.state ?? null,
+      title: pull?.title ?? null,
+      body: pull?.body ?? null,
+      headRef: pull?.head?.ref ?? null,
+      headSha: pull?.head?.sha ?? null,
+    })),
+  );
+}
+
+async function listAllPullRequests(api) {
+  // The fail-closed observation contract is two identical, completed projections in immutable
+  // ascending creation order. This catches insertions during pagination; no finite REST read
+  // sequence can prove that provider state will remain unchanged after its terminal read.
+  let previousFingerprint;
+  for (let attempt = 1; attempt <= STABLE_LIST_ATTEMPTS; attempt += 1) {
+    const pulls = await listAllPullRequestsOnce(api);
+    const fingerprint = pullRequestListFingerprint(pulls);
+    if (fingerprint === previousFingerprint) return pulls;
+    previousFingerprint = fingerprint;
+  }
+  throw new Error("pull-request listing did not reach two identical ascending snapshots");
 }
 
 function equivalentPullRequests(pulls) {
@@ -581,6 +739,23 @@ async function verifyCreatedPullRequest(api, number, identity, expectedBody) {
     "created bootstrap pull request is not globally unique",
   );
   await assertRefsUnchanged(api, identity);
+  const terminalPull = await api(`/repos/${CONTRACT.repository}/pulls/${number}`);
+  await assertCanonicalPullRequest(api, terminalPull, identity, expectedBody);
+  await assertRefsUnchanged(api, identity);
+}
+
+async function failCreatedPullRequest(api, number, verificationError) {
+  try {
+    await closeAndProveCreatedPullRequest(api, number);
+  } catch (cleanupError) {
+    throw new ManualInterventionError(number, verificationError, cleanupError);
+  }
+  throw new Error(
+    `Created bootstrap PR #${number} failed verification and was closed. ` +
+      `Marker ${CONTRACT.marker} is terminal and must not be retried. Original failure: ` +
+      errorMessage(verificationError),
+    { cause: verificationError },
+  );
 }
 
 export async function runBootstrap(options = {}) {
@@ -591,7 +766,8 @@ export async function runBootstrap(options = {}) {
   const identity = await inspectSourceIdentity(api, baseSha);
   const expectedBody = canonicalPullRequestBody(identity);
 
-  const initialMatches = equivalentPullRequests(await listAllPullRequests(api));
+  const initialPulls = await listAllPullRequests(api);
+  const initialMatches = equivalentPullRequests(initialPulls);
   if (initialMatches.length > 0) {
     invariant(initialMatches.length === 1, "multiple equivalent bootstrap pull requests exist");
     const existing = await api(`/repos/${CONTRACT.repository}/pulls/${initialMatches[0].number}`);
@@ -608,51 +784,85 @@ export async function runBootstrap(options = {}) {
       "existing bootstrap pull request is not globally unique",
     );
     await assertRefsUnchanged(api, identity);
+    const terminalExisting = await api(`/repos/${CONTRACT.repository}/pulls/${existing.number}`);
+    await assertCanonicalPullRequest(api, terminalExisting, identity, expectedBody);
+    await assertRefsUnchanged(api, identity);
     logger.log(`Canonical bootstrap PR #${existing.number} already exists; no mutation performed.`);
     return { action: "existing", number: existing.number, ...identity };
   }
 
   await assertRefsUnchanged(api, identity);
+  const preCreationPulls = await listAllPullRequests(api);
   invariant(
-    equivalentPullRequests(await listAllPullRequests(api)).length === 0,
+    equivalentPullRequests(preCreationPulls).length === 0,
     "an equivalent pull request appeared before creation",
   );
   await assertRefsUnchanged(api, identity);
 
-  const created = await api(`/repos/${CONTRACT.repository}/pulls`, {
-    method: "POST",
-    body: {
-      title: CONTRACT.title,
-      body: expectedBody,
-      head: `${CONTRACT.owner}:${CONTRACT.headBranch}`,
-      base: CONTRACT.defaultBranch,
-      draft: true,
-      maintainer_can_modify: false,
-    },
-  });
-  invariant(
-    Number.isSafeInteger(created?.number) && created.number > 0,
-    "GitHub did not return the created pull-request number",
-  );
+  let created;
+  let postError;
   try {
-    await verifyCreatedPullRequest(api, created.number, identity, expectedBody);
-  } catch (verificationError) {
-    try {
-      await closeAndProveCreatedPullRequest(api, created.number);
-    } catch (cleanupError) {
-      throw new ManualInterventionError(created.number, verificationError, cleanupError);
-    }
-    throw new Error(
-      `Created bootstrap PR #${created.number} failed verification and was closed. ` +
-        `Marker ${CONTRACT.marker} is terminal and must not be retried. Original failure: ` +
-        errorMessage(verificationError),
-      { cause: verificationError },
+    const response = await api(`/repos/${CONTRACT.repository}/pulls`, {
+      method: "POST",
+      body: {
+        title: CONTRACT.title,
+        body: expectedBody,
+        head: `${CONTRACT.owner}:${CONTRACT.headBranch}`,
+        base: CONTRACT.defaultBranch,
+        draft: true,
+        maintainer_can_modify: false,
+      },
+    });
+    invariant(
+      Number.isSafeInteger(response?.number) && response.number > 0,
+      "GitHub did not return the created pull-request number",
+    );
+    created = response;
+  } catch (error) {
+    postError = error;
+  }
+
+  let postCreationPulls;
+  try {
+    postCreationPulls = await listAllPullRequests(api);
+  } catch (listError) {
+    throw new AmbiguousCreationError(
+      postError ?? new Error("POST returned but provider reconciliation failed"),
+      `the post-POST inventory failed (${errorMessage(listError)})`,
     );
   }
+  const previousNumbers = new Set(preCreationPulls.map((pull) => pull.number));
+  const newPulls = postCreationPulls.filter((pull) => !previousNumbers.has(pull.number));
+  const newEquivalentPulls = equivalentPullRequests(newPulls);
+  if (newPulls.length !== 1 || newEquivalentPulls.length !== 1) {
+    throw new AmbiguousCreationError(
+      postError ?? new Error("POST returned without a unique inventory delta"),
+      `the stable post-POST inventory contains ${newPulls.length} newly observed pull requests ` +
+        `and ${newEquivalentPulls.length} match an exact creation discriminator`,
+    );
+  }
+  const createdNumber = newEquivalentPulls[0].number;
+  if (created && created.number !== createdNumber) {
+    throw new AmbiguousCreationError(
+      new Error(`POST returned PR #${created.number}`),
+      `the sole newly observed pull request is #${createdNumber}`,
+    );
+  }
+
+  try {
+    await verifyCreatedPullRequest(api, createdNumber, identity, expectedBody);
+  } catch (verificationError) {
+    await failCreatedPullRequest(api, createdNumber, verificationError);
+  }
   logger.log(
-    `Created canonical draft bootstrap PR #${created.number} at exact head ${identity.headSha}.`,
+    `Created canonical draft bootstrap PR #${createdNumber} at exact head ${identity.headSha}.`,
   );
-  return { action: "created", number: created.number, ...identity };
+  return {
+    action: "created",
+    number: createdNumber,
+    reconciledAmbiguousPost: postError !== undefined,
+    ...identity,
+  };
 }
 
 const invokedPath = process.argv[1] ? resolve(process.argv[1]) : "";
