@@ -16,6 +16,9 @@
 //       the marker line.
 
 import { describe, expect, test } from "bun:test";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   DEFAULT_DESKTOP_GEOMETRY,
   DisplayStackError,
@@ -106,6 +109,10 @@ describe("P4.1 ensureDisplayStack — command sequence + flock-idempotency (fake
     const cmd = box.calls[0]!;
     // flock-wrapped (the idempotency mechanism), runs the canonical script.
     expect(cmd).toContain("flock");
+    // The supervisor retains the lock while the launcher runs, but --close keeps
+    // detached display processes from inheriting it permanently.
+    expect(cmd).toContain("flock --close");
+    expect(cmd).not.toContain("exec 8>");
     expect(cmd).toContain("opengeni-desktop-up");
     // the geometry + port env the script reads.
     expect(cmd).toContain(`DESKTOP_W=${DEFAULT_DESKTOP_GEOMETRY.width}`);
@@ -210,6 +217,38 @@ describe("P4.1 ensureDisplayStack — command sequence + flock-idempotency (fake
     expect(box.launches).toBe(1);
   });
 
+  test("(3b) two concurrent cold callers serialize to exactly one launch", async () => {
+    let launches = 0;
+    let launch: Promise<void> | undefined;
+    let up = false;
+    const session = {
+      exec: async () => {
+        if (!up) {
+          if (!launch) {
+            launches += 1;
+            launch = Bun.sleep(25).then(() => {
+              up = true;
+            });
+          }
+          await launch;
+        }
+        return {
+          output: `OPENGENI_DESKTOP_UP port=${STREAM_PORT} geometry=1280x800 dpi=96`,
+          exitCode: 0,
+        };
+      },
+    };
+
+    const [viewer, computer] = await Promise.all([
+      ensureDisplayStack(session),
+      ensureDisplayStack(session),
+    ]);
+
+    expect(viewer.marker).toContain("OPENGENI_DESKTOP_UP");
+    expect(computer.marker).toContain("OPENGENI_DESKTOP_UP");
+    expect(launches).toBe(1);
+  });
+
   test("(4a) a stage failure (exit 12) throws a typed DisplayStackError naming the stage", async () => {
     const box = makeFakeBox({ failStage: 12 });
     let thrown: unknown;
@@ -281,5 +320,184 @@ describe("P4.1 ensureDisplayStack — command sequence + flock-idempotency (fake
       expect(e).toBeInstanceOf(DisplayStackError);
       expect((e as DisplayStackError).stage).toBe("websockify");
     }
+  });
+
+  test("(7) yielded execCommand is polled to process completion instead of misreported as failure", async () => {
+    const telemetry: Array<{ stage: string; status: string; providerSessionId?: number }> = [];
+    let polls = 0;
+    const session = {
+      execCommand: async ({ cmd }: { cmd: string }) => {
+        expect(cmd).toContain("timeout --signal=TERM");
+        expect(cmd).not.toContain("timeout --foreground");
+        return [
+          "Chunk ID: abc123",
+          "Wall time: 0.0100 seconds",
+          "Process running with session ID 7",
+          "Output:",
+          "OPENGENI_DISPLAY_STAGE stage=script_entry elapsed_ms=1 classification=cold",
+        ].join("\n");
+      },
+      writeStdin: async ({ sessionId, chars }: { sessionId: number; chars: string }) => {
+        expect(sessionId).toBe(7);
+        expect(chars).toBe("");
+        polls += 1;
+        return [
+          "Chunk ID: def456",
+          "Wall time: 0.0100 seconds",
+          "Process exited with code 0",
+          "Output:",
+          "OPENGENI_DISPLAY_STAGE stage=paint_ready elapsed_ms=22 classification=cold",
+          `OPENGENI_DESKTOP_UP port=${STREAM_PORT} geometry=1280x800 dpi=96`,
+        ].join("\n");
+      },
+    };
+
+    const result = await ensureDisplayStack(session, {
+      timeoutMs: 1_000,
+      telemetryContext: { callerKind: "viewer", sandboxId: "sb-test", leaseEpoch: 9 },
+      onTelemetry: (event) => telemetry.push(event),
+    });
+
+    expect(result.marker).toContain("OPENGENI_DESKTOP_UP");
+    expect(polls).toBe(1);
+    expect(telemetry).toContainEqual(
+      expect.objectContaining({
+        stage: "provider_yield",
+        status: "waiting",
+        providerSessionId: 7,
+      }),
+    );
+    expect(telemetry).toContainEqual(
+      expect.objectContaining({ stage: "paint_ready", status: "completed" }),
+    );
+  });
+
+  test("(8) provider wait has a real wall deadline and the in-box owner is independently bounded", async () => {
+    let command = "";
+    const session = {
+      execCommand: async ({ cmd }: { cmd: string }) => {
+        command = cmd;
+        return [
+          "Chunk ID: abc123",
+          "Wall time: 0.0100 seconds",
+          "Process running with session ID 11",
+          "Output:",
+          "",
+        ].join("\n");
+      },
+      writeStdin: async () => await new Promise<string>(() => undefined),
+    };
+
+    const started = Date.now();
+    let thrown: unknown;
+    try {
+      await ensureDisplayStack(session, { timeoutMs: 120, onTelemetry: () => undefined });
+    } catch (error) {
+      thrown = error;
+    }
+    const elapsed = Date.now() - started;
+
+    expect(thrown).toBeInstanceOf(DisplayStackError);
+    expect((thrown as DisplayStackError).stage).toBe("timeout");
+    expect(elapsed).toBeGreaterThanOrEqual(80);
+    expect(elapsed).toBeLessThan(500);
+    expect(command).toContain("timeout --signal=TERM");
+    expect(command).not.toContain("timeout --foreground");
+    expect(command).toContain("OPENGENI_DISPLAY_TIMEOUT");
+  });
+
+  test("(8b) the in-box deadline kills a waiting flock tree before it can launch later", async () => {
+    const root = await mkdtemp(join(tmpdir(), "display-stack-timeout-"));
+    const bin = join(root, "bin");
+    const lock = join(root, "outer.lock");
+    const launches = join(root, "launches");
+    const realFlock = Bun.which("flock");
+    expect(realFlock).not.toBeNull();
+    await Bun.$`mkdir -p ${bin}`;
+    await Promise.all([
+      writeFile(join(bin, "nc"), "#!/usr/bin/env bash\nexit 1\n", { mode: 0o755 }),
+      writeFile(
+        join(bin, "flock"),
+        `#!/usr/bin/env bash\nargs=()\nfor arg in "$@"; do\n  if [ "$arg" = /tmp/opengeni-desktop/up.outer.lock ]; then arg="$DISPLAY_STACK_TEST_LOCK"; fi\n  args+=("$arg")\ndone\nexec "${realFlock}" "\${args[@]}"\n`,
+        { mode: 0o755 },
+      ),
+      writeFile(
+        join(bin, "opengeni-desktop-up"),
+        '#!/usr/bin/env bash\necho launched >>"$DISPLAY_STACK_TEST_LAUNCHES"\nsleep 5\n',
+        { mode: 0o755 },
+      ),
+      writeFile(join(bin, "scrot"), "#!/usr/bin/env bash\nexit 1\n", { mode: 0o755 }),
+    ]);
+    const holder = Bun.spawn([realFlock!, lock, "-c", "sleep 0.6"]);
+
+    try {
+      await Bun.sleep(50);
+      const session = {
+        exec: async ({ cmd }: { cmd: string }) => {
+          const child = Bun.spawn(["bash", "-c", cmd], {
+            env: {
+              ...process.env,
+              PATH: `${bin}:${process.env.PATH ?? ""}`,
+              DISPLAY_STACK_TEST_LOCK: lock,
+              DISPLAY_STACK_TEST_LAUNCHES: launches,
+            },
+            stdout: "pipe",
+            stderr: "pipe",
+          });
+          const [stdout, stderr, exitCode] = await Promise.all([
+            new Response(child.stdout).text(),
+            new Response(child.stderr).text(),
+            child.exited,
+          ]);
+          return { output: `${stdout}\n${stderr}`, exitCode };
+        },
+      };
+
+      let thrown: unknown;
+      try {
+        await ensureDisplayStack(session, { port: 16_082, timeoutMs: 250 });
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toBeInstanceOf(DisplayStackError);
+      expect((thrown as DisplayStackError).stage).toBe("timeout");
+
+      await holder.exited;
+      await Bun.sleep(300);
+      const probe = Bun.spawn([realFlock!, "-n", lock, "-c", "true"]);
+      expect(await probe.exited).toBe(0);
+      expect(await Bun.file(launches).exists()).toBe(false);
+    } finally {
+      holder.kill();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("(8c) a kill-after escalation retains typed timeout attribution", async () => {
+    const session = {
+      exec: async () => ({
+        output: "OPENGENI_DISPLAY_TIMEOUT elapsed_ms=1000",
+        exitCode: 137,
+      }),
+    };
+
+    let thrown: unknown;
+    try {
+      await ensureDisplayStack(session, { timeoutMs: 2_000 });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(DisplayStackError);
+    expect((thrown as DisplayStackError).exitCode).toBe(137);
+    expect((thrown as DisplayStackError).stage).toBe("timeout");
+  });
+
+  test("(9) the canonical launcher supervises its inner lock without inherited FDs", async () => {
+    const launcher = await Bun.file(
+      new URL("../../../docker/desktop/opengeni-desktop-up.sh", import.meta.url),
+    ).text();
+    expect(launcher).toContain('exec flock --close "$RUN/up.lock"');
+    expect(launcher).not.toContain('exec 9>"$RUN/up.lock"');
   });
 });
