@@ -1134,9 +1134,12 @@ describe("queue surface browser acceptance", () => {
             assertBoundedQueueError(expanded, direction === "ltr");
             expect(expanded.message.verticalOverflow).toBeGreaterThan(0);
 
-            await page
-              .getByRole("button", { name: "More actions for queued prompt 1", exact: true })
-              .click();
+            const moreActionsName = "More actions for queued prompt 1";
+            const moreActions = page.getByRole("button", {
+              name: moreActionsName,
+              exact: true,
+            });
+            await moreActions.click();
             const menu = await measurePortalMenu(page, 1);
             expect(menu.itemCount).toBe(5);
             expect(menu.insideViewport).toBe(true);
@@ -1151,6 +1154,13 @@ describe("queue surface browser acceptance", () => {
               animations: "disabled",
             });
             await page.keyboard.press("Escape");
+            await page.waitForFunction(
+              (name) => document.activeElement?.getAttribute("aria-label") === name,
+              moreActionsName,
+            );
+            expect(
+              await moreActions.evaluate((element) => document.activeElement === element),
+            ).toBe(true);
 
             await message.focus();
             expect(await message.evaluate((element) => document.activeElement === element)).toBe(
