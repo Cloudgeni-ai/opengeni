@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { Client, Connection } from "@temporalio/client";
 import { NativeConnection, Worker } from "@temporalio/worker";
+import postgres from "postgres";
 import type { AccessGrant, SessionEvent } from "@opengeni/contracts";
 import { controlHumanSessionWorkstream, postUserMessageTurn } from "@opengeni/core";
 import {
@@ -9,6 +10,7 @@ import {
   claimSessionWorkForAttempt,
   createDb,
   createSession,
+  getSessionHistoryItems,
   getSession,
   getSessionQueueSnapshot,
   listOutstandingSessionSystemUpdates,
@@ -38,13 +40,14 @@ import { submitTestHumanPrompt } from "./helpers/session-control";
 type RequiredServices = Pick<
   TestServices,
   "databaseUrl" | "natsUrl" | "temporalHost" | "migrate" | "down"
->;
+> & { databaseAdminUrl: string };
 
 const integrationTimeoutMs = 180_000;
 const workerDeathTimeoutMs = 300_000;
 
 describe("durable queue control integration (real Postgres/NATS/Temporal)", () => {
   let services: RequiredServices;
+  let admin: postgres.Sql;
   let dbClient: ReturnType<typeof createDb>;
   let bus: EventBus;
   let connection: Connection;
@@ -53,6 +56,7 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
   beforeAll(async () => {
     services = await requiredServices();
     await services.migrate();
+    admin = postgres(services.databaseAdminUrl, { max: 2 });
     dbClient = createDb(services.databaseUrl);
     bus = await createNatsEventBus(services.natsUrl);
     connection = await Connection.connect({ address: services.temporalHost });
@@ -64,6 +68,7 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
     await nativeConnection?.close();
     await bus?.close();
     await dbClient?.close();
+    await admin?.end().catch(() => undefined);
     await services?.down();
   }, 60_000);
 
@@ -284,6 +289,178 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
         unsubscribe();
         worker.shutdown();
         await workerRun;
+      }
+    },
+    integrationTimeoutMs,
+  );
+
+  test(
+    "an exhausted activity receipt recovers through one exact Temporal proof without replay",
+    async () => {
+      const grant = await testGrant(dbClient.db, "quiescence-receipt-exhaustion");
+      const session = await createDurableSession(
+        dbClient.db,
+        grant,
+        "quiescence receipt recovery session",
+      );
+      const initialText = `receipt exhaustion initial ${crypto.randomUUID()}`;
+      const steerText = `receipt exhaustion replacement ${crypto.randomUUID()}`;
+      const initial = await submitTestHumanPrompt(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        subjectId: grant.subjectId,
+        text: initialText,
+        resources: [],
+        tools: [],
+        operationKey: `receipt-exhaustion-initial-${crypto.randomUUID()}`,
+        delivery: "send",
+        reasoningEffortFallback: "low",
+      });
+      const taskQueue = `durable-quiescence-recovery-${crypto.randomUUID()}`;
+      const model = new ScriptedModel([
+        {
+          id: "receipt-exhaustion-original",
+          chunks: Array.from({ length: 10_000 }, () => "old-output "),
+          delayMs: 10,
+        },
+        {
+          id: "receipt-exhaustion-replacement",
+          outputText: "replacement completed after durable receipt recovery",
+        },
+      ]);
+      const settings = testSettings({
+        databaseUrl: services.databaseUrl,
+        natsUrl: services.natsUrl,
+        temporalHost: services.temporalHost,
+        temporalTaskQueue: taskQueue,
+      });
+      const temporal = new Client({ connection });
+      const workflowClient = sessionWorkflowClient(temporal, taskQueue);
+      const realActivities = createActivityTestHarness({
+        settings,
+        db: dbClient.db,
+        bus,
+        runtime: createProductionAgentRuntime({ model }),
+        wakeSessionWorkflow: workflowClient.wakeSessionWorkflow,
+        signalSessionAttemptQuiesced: workflowClient.signalSessionAttemptQuiesced,
+      });
+      let recoveryActivityExecutions = 0;
+      const activities = {
+        ...realActivities,
+        persistSessionAttemptQuiescence: async (
+          input: Parameters<typeof realActivities.persistSessionAttemptQuiescence>[0],
+        ) => {
+          recoveryActivityExecutions += 1;
+          return await realActivities.persistSessionAttemptQuiescence(input);
+        },
+      };
+      // Three failures exhaust the dying runAgentTurn helper. Three more
+      // exhaust the first DB-only control-activity execution. Temporal then
+      // retries that exact idempotent activity, whose seventh UPDATE commits.
+      const fault = await installQuiescenceReceiptFault(admin, session.id, 6);
+      let worker: Awaited<ReturnType<typeof integrationWorker>> | undefined;
+      let workerRun: Promise<void> | undefined;
+
+      try {
+        worker = await integrationWorker(nativeConnection, taskQueue, activities);
+        workerRun = worker.run();
+        const handle = await temporal.workflow.start("sessionWorkflow", {
+          taskQueue,
+          workflowId: initial.turn.temporalWorkflowId,
+          args: [
+            {
+              accountId: grant.accountId,
+              workspaceId: grant.workspaceId,
+              sessionId: session.id,
+            },
+          ],
+        });
+
+        await waitFor(() => model.calls === 1);
+        const beforeSteer = await getSessionQueueSnapshot(
+          dbClient.db,
+          grant.workspaceId,
+          session.id,
+        );
+        const urgent = await postUserMessageTurn({
+          db: dbClient.db,
+          bus,
+          workflowClient,
+          settings,
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId: session.id,
+          text: steerText,
+          resources: [],
+          tools: [],
+          clientEventId: `receipt-exhaustion-steer-${crypto.randomUUID()}`,
+          delivery: "steer",
+          controlEtag: beforeSteer!.effectiveControl.controlEtag,
+        });
+
+        await handle.result();
+
+        expect(recoveryActivityExecutions).toBe(2);
+        expect(await fault.attempts()).toBe(7);
+        expect(model.calls).toBe(2);
+        const turns = await listSessionTurns(dbClient.db, grant.workspaceId, session.id);
+        expect(turns).toHaveLength(2);
+        expect(turns.find((turn) => turn.id === initial.turn.id)?.status).toBe("superseded");
+        expect(turns.find((turn) => turn.id === urgent.turn.id)?.status).toBe("completed");
+
+        const events = await listSessionEvents(
+          dbClient.db,
+          grant.workspaceId,
+          session.id,
+          0,
+          2_000,
+        );
+        const quiesced = events.filter(
+          (event) =>
+            event.type === "session.queue.changed" &&
+            event.turnId === initial.turn.id &&
+            event.payload.operation === "attempt_quiesced",
+        );
+        const started = events.filter((event) => event.type === "turn.started");
+        expect(quiesced).toHaveLength(1);
+        expect(started.map((event) => event.turnId)).toEqual([initial.turn.id, urgent.turn.id]);
+        expect(started[1]!.sequence).toBeGreaterThan(quiesced[0]!.sequence);
+        expect(
+          events.filter(
+            (event) =>
+              event.type === "agent.message.delta" &&
+              event.turnId === initial.turn.id &&
+              event.sequence > quiesced[0]!.sequence,
+          ),
+        ).toHaveLength(0);
+        expect(events.filter((event) => event.type.startsWith("tool."))).toHaveLength(0);
+
+        const history = JSON.stringify(
+          await getSessionHistoryItems(dbClient.db, grant.workspaceId, session.id),
+        );
+        const replacementRequest = JSON.stringify(model.requests[1]?.input ?? null);
+        expect(countOccurrences(history, initialText)).toBe(1);
+        expect(countOccurrences(history, steerText)).toBe(1);
+        expect(countOccurrences(replacementRequest, initialText)).toBe(1);
+        expect(countOccurrences(replacementRequest, steerText)).toBe(1);
+        expect(
+          await getSessionQueueSnapshot(dbClient.db, grant.workspaceId, session.id),
+        ).toMatchObject({
+          stoppingPreviousAttempt: false,
+          items: [],
+        });
+        expect(await getSession(dbClient.db, grant.workspaceId, session.id)).toMatchObject({
+          status: "idle",
+          activeTurnId: null,
+        });
+      } finally {
+        try {
+          worker?.shutdown();
+          await workerRun;
+        } finally {
+          await fault.drop();
+        }
       }
     },
     integrationTimeoutMs,
@@ -691,6 +868,7 @@ async function requiredServices(): Promise<RequiredServices> {
     const migrationUrl = process.env.OPENGENI_TEST_DATABASE_ADMIN_URL ?? databaseUrl;
     return {
       databaseUrl,
+      databaseAdminUrl: migrationUrl,
       natsUrl,
       temporalHost,
       migrate: async () => {
@@ -699,7 +877,8 @@ async function requiredServices(): Promise<RequiredServices> {
       down: async () => undefined,
     };
   }
-  return await startTestServices({ temporal: true });
+  const started = await startTestServices({ temporal: true });
+  return { ...started, databaseAdminUrl: started.databaseUrl };
 }
 
 async function testGrant(
@@ -808,7 +987,91 @@ function sessionWorkflowClient(temporal: Client, taskQueue: string) {
         signalArgs: [input.eventId],
       });
     },
+    signalSessionAttemptQuiesced: async (proof: {
+      accountId: string;
+      workspaceId: string;
+      sessionId: string;
+      attemptId: string;
+      workflowId: string;
+      workflowRunId: string;
+      activityId: string;
+    }) => {
+      await temporal.workflow.signalWithStart("sessionWorkflow", {
+        taskQueue,
+        workflowId: proof.workflowId,
+        workflowIdReusePolicy: "ALLOW_DUPLICATE",
+        args: [
+          {
+            accountId: proof.accountId,
+            workspaceId: proof.workspaceId,
+            sessionId: proof.sessionId,
+          },
+        ],
+        signal: "sessionAttemptQuiesced",
+        signalArgs: [proof],
+      });
+    },
   };
+}
+
+async function installQuiescenceReceiptFault(
+  admin: postgres.Sql,
+  sessionId: string,
+  failures: number,
+): Promise<{ attempts: () => Promise<number>; drop: () => Promise<void> }> {
+  const suffix = crypto.randomUUID().replaceAll("-", "").slice(0, 16);
+  const sequence = `ope75_quiescence_fault_seq_${suffix}`;
+  const triggerFunction = `ope75_quiescence_fault_fn_${suffix}`;
+  const trigger = `ope75_quiescence_fault_tr_${suffix}`;
+  await admin.unsafe(`
+    create sequence public.${sequence};
+    create function public.${triggerFunction}()
+    returns trigger
+    language plpgsql
+    security definer
+    set search_path = pg_catalog, public
+    as $function$
+    declare
+      fault_attempt bigint;
+    begin
+      if new.session_id = '${sessionId}'::uuid
+         and old.quiesced_at is null
+         and new.quiesced_at is not null then
+        fault_attempt := nextval('public.${sequence}');
+        if fault_attempt <= ${failures} then
+          raise exception using
+            errcode = '40001',
+            message = 'OPE-75 injected quiescence receipt serialization failure';
+        end if;
+      end if;
+      return new;
+    end
+    $function$;
+    create trigger ${trigger}
+    before update of quiesced_at on public.session_turn_attempts
+    for each row execute function public.${triggerFunction}();
+  `);
+  return {
+    attempts: async () => {
+      const [row] = await admin.unsafe<Array<{ last_value: string | number }>>(
+        `select last_value from public.${sequence}`,
+      );
+      return Number(row?.last_value ?? 0);
+    },
+    drop: async () => {
+      await admin
+        .unsafe(`
+          drop trigger if exists ${trigger} on public.session_turn_attempts;
+          drop function if exists public.${triggerFunction}();
+          drop sequence if exists public.${sequence};
+        `)
+        .catch(() => undefined);
+    },
+  };
+}
+
+function countOccurrences(haystack: string, needle: string): number {
+  return haystack.split(needle).length - 1;
 }
 
 async function integrationWorker(

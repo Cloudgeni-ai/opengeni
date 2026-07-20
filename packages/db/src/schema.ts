@@ -1207,9 +1207,9 @@ export const sessionTurnAttempts = pgTable(
     closedAt: timestamp("closed_at", { withTimezone: true }),
     // The cancelled activity writes this after losing inference, user-visible
     // output, and workspace-persistence authority. Fenced/idempotent cleanup
-    // and telemetry may still finish; Temporal independently waits for physical
-    // activity termination. Queue clients use this durable receipt to
-    // distinguish cancellation cleanup from ordinary worker-capacity queueing.
+    // and telemetry may still finish. Temporal activity cancellation or
+    // terminalization is transport state only; queue admission and clients use
+    // this durable receipt as the physical-quiescence authority.
     quiescedAt: timestamp("quiesced_at", { withTimezone: true }),
   },
   (table) => ({
@@ -1238,6 +1238,12 @@ export const sessionTurnAttempts = pgTable(
     liveSession: uniqueIndex("session_turn_attempts_live_session_uq")
       .on(table.workspaceId, table.sessionId)
       .where(sql`${table.state} in ('claimed', 'running')`),
+    latestSessionAttempt: index("session_turn_attempts_latest_session_idx").on(
+      table.workspaceId,
+      table.sessionId,
+      table.startedAt.desc(),
+      table.id.desc(),
+    ),
     dispatch: uniqueIndex("session_turn_attempts_dispatch_uq").on(
       table.workspaceId,
       table.temporalWorkflowRunId,

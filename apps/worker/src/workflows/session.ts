@@ -113,17 +113,15 @@ function workerDeathFailure(
 }
 
 /**
- * WAIT_CANCELLATION_COMPLETED normally reports a cancelled activity to workflow
- * code as an ActivityFailure whose typed cause is the cancellation. A control's
- * database fence can, however, reach runAgentTurn immediately before Temporal's
- * cancellation request. The activity still crosses its mandatory physical tool
- * fence and throws TURN_ATTEMPT_FENCED, but @temporalio/worker 1.20 serializes
- * that pre-request CancelledFailure as an ApplicationFailure with the stable
- * `CancelledFailure` type. Accept only that exact agent-turn protocol shape in
- * addition to the normal wrapper; never accept a timeout, arbitrary nested
- * cause, or a differently messaged application failure as physical-stop proof.
+ * Classify only the exact turn-fence cancellation protocol used to arbitrate a
+ * database control commit that reaches the activity just before its Temporal
+ * signal reaches this workflow. This shape is never physical-quiescence proof:
+ * only the activity's durable post-tool-fence receipt can open replacement
+ * admission. @temporalio/worker 1.20 serializes the pre-request
+ * CancelledFailure as an ApplicationFailure with the stable `CancelledFailure`
+ * type, so accept that exact wire shape in addition to normal cancellation.
  */
-export function isConfirmedTurnActivityCancellation(error: unknown): boolean {
+export function isTurnActivityFenceCancellation(error: unknown): boolean {
   if (isCancellation(error)) return true;
   if (!(error instanceof ActivityFailure)) return false;
   if (error.cause !== undefined && isCancellation(error.cause)) return true;
@@ -140,6 +138,8 @@ export const queueChanged = defineSignal("queueChanged");
 export const approvalDecision = defineSignal<[string]>("approvalDecision");
 export const sessionControl = defineSignal("sessionControl");
 export const codexCapacityChanged = defineSignal<[number]>("codexCapacityChanged");
+export const sessionAttemptQuiesced =
+  defineSignal<[activities.SessionAttemptQuiescenceProof]>("sessionAttemptQuiesced");
 
 export type SessionWorkflowInput = {
   accountId: string;
@@ -157,13 +157,19 @@ export type SessionWorkflowInput = {
 };
 
 export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void> {
-  const turnActivity = turnActivityForTaskQueue(workflowInfo().taskQueue);
+  // Existing histories recorded the v1 WAIT_CANCELLATION_COMPLETED command
+  // order and workflow-side idempotent fallback. Keep that exact replay path;
+  // every new run records v2 and uses the activity-owned receipt contract.
+  const receiptGatedCancellation = patched("session-attempt-quiescence-v2");
+  const turnActivity = turnActivityForTaskQueue(workflowInfo().taskQueue, receiptGatedCancellation);
   let approvalWakeups = 0;
   let interruptionWakeups = 0;
   let wakeups = 0;
   let capacityWakeups = 0;
   let signalVersion = 0;
   let nonControlSignalVersion = 0;
+  const pendingQuiescenceProofs = new Map<string, activities.SessionAttemptQuiescenceProof>();
+  const persistedQuiescenceProofs = new Set<string>();
   // Turns dispatched on THIS run (reset to 0 by continueAsNew). The backstop
   // for the history-overflow guard below; bounded growth is what makes a
   // weeks-long session survivable.
@@ -194,6 +200,38 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
     nonControlSignalVersion += 1;
     capacityWakeups += 1;
   });
+  setHandler(sessionAttemptQuiesced, (proof) => {
+    // Temporal signals are untrusted transport payloads. Accept only the exact
+    // workflow/session scope; the DB control activity additionally validates
+    // the persisted attempt's account, run id, and activity id under lock.
+    if (
+      !isSessionAttemptQuiescenceProof(proof) ||
+      proof.accountId !== input.accountId ||
+      proof.workspaceId !== input.workspaceId ||
+      proof.sessionId !== input.sessionId ||
+      proof.workflowId !== workflowInfo().workflowId
+    ) {
+      return;
+    }
+    const key = sessionAttemptQuiescenceProofKey(proof);
+    if (persistedQuiescenceProofs.has(key) || pendingQuiescenceProofs.has(key)) return;
+    pendingQuiescenceProofs.set(key, proof);
+    signalVersion += 1;
+  });
+
+  async function persistPendingQuiescenceProofs(): Promise<void> {
+    while (pendingQuiescenceProofs.size > 0) {
+      const entry = pendingQuiescenceProofs.entries().next().value;
+      if (!entry) return;
+      const [key, proof] = entry;
+      // This DB-only activity uses an unbounded Temporal retry policy. The
+      // workflow cannot peek, close, or continue-as-new until the exact
+      // physical proof commits its idempotent receipt and wake transaction.
+      await activity.persistSessionAttemptQuiescence(proof);
+      pendingQuiescenceProofs.delete(key);
+      persistedQuiescenceProofs.add(key);
+    }
+  }
 
   async function waitForCodexCapacity(
     initial: activities.CodexCapacityWaitRef,
@@ -254,6 +292,11 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
         // The waiter/outbox is durable in Postgres. A fresh workflow run reads
         // it before goal continuation, reconstructs its timer, and turns any
         // unobserved wake revision into an immediate evaluation.
+        // A quiescence proof is the one signal that is not merely a replaceable
+        // wake hint. It may have arrived while the reconciliation activity was
+        // running, so commit it before crossing this nested continue-as-new
+        // boundary.
+        await persistPendingQuiescenceProofs();
         await continueAsNew<typeof sessionWorkflow>({
           accountId: input.accountId,
           workspaceId: input.workspaceId,
@@ -269,18 +312,25 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
   }
 
   while (true) {
+    // A proof signal can signalWithStart a fresh run or arrive at any prior
+    // close/continue-as-new boundary. Persist it before every ordinary workflow
+    // decision so no accepted physical fact can be dropped with run history.
+    await persistPendingQuiescenceProofs();
     // History-overflow guard. The top of the loop is the only safe
     // continueAsNew boundary: no turn is mid-flight (every path that reaches a
     // new iteration settled or recovered its turn first). Every interruption
-    // is already durable in Postgres, so all Temporal signals are replaceable
-    // wake hints and none must be carried into the next workflow run. A
+    // is already durable in Postgres, so ordinary Temporal signals are
+    // replaceable wake hints and none must be carried into the next workflow
+    // run. A
     // buffered userMessage/queueChanged signal only
     // bumps `wakeups`, and its turn was written to Postgres BEFORE the signal
     // was sent, so the fresh run observes it on its first durable work peek
     // — losing the counter strands nothing. The queue living in Postgres is the
     // safety net: continueAsNew carries only the self-contained
     // SessionWorkflowInput (no initialEventId — the new run claims from the
-    // queue, it does not replay a seed event).
+    // queue, it does not replay a seed event). Quiescence-proof signals are the
+    // exception: persistPendingQuiescenceProofs() immediately above commits
+    // every accepted proof before this boundary.
     //
     // Approval signals are wakeups, never conversation truth. A genuinely
     // accepted decision is already persisted on the turn and is rediscovered
@@ -322,12 +372,31 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
         workflowId,
       });
       if (settlement.action === "paused") {
+        if (pendingQuiescenceProofs.size > 0) {
+          continue;
+        }
         if (nonControlSignalVersion !== closeNonControlSignalVersion) {
           continue;
         }
         return;
       }
       continue;
+    }
+    if (peek.kind === "cancellation-wait") {
+      // Logical settlement is complete, but the exact predecessor activity has
+      // not yet durably proved sandbox/tool quiescence. Wait only briefly for
+      // its transactional queueChanged wake. If provider/tool cancellation is
+      // genuinely slow, close this workflow run rather than consuming a turn
+      // slot or churning control activities; the outbox uses signalWithStart to
+      // restart this exact workflow after the receipt commits.
+      const seenSignalVersion = signalVersion;
+      const woke = await condition(() => signalVersion !== seenSignalVersion, "5s");
+      if (woke) continue;
+      // Close only against the same signal snapshot. A proof signal accepted
+      // at the timer/completion boundary must loop through the DB-only receipt
+      // activity rather than disappearing with this workflow run.
+      if (signalVersion !== seenSignalVersion || pendingQuiescenceProofs.size > 0) continue;
+      return;
     }
     if (peek.kind === "capacity-wait") {
       await waitForCodexCapacity(peek.ref);
@@ -450,7 +519,7 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
     // control still follows the failure/cancellation path below.
     if (
       racedOutcome.kind === "failure" &&
-      isConfirmedTurnActivityCancellation(racedOutcome.error) &&
+      isTurnActivityFenceCancellation(racedOutcome.error) &&
       interruptionWakeups === interruptionBaseline
     ) {
       await condition(() => interruptionWakeups !== interruptionBaseline, "250ms");
@@ -459,7 +528,37 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       interruptionWakeups !== interruptionBaseline ? ({ kind: "control" } as const) : racedOutcome;
 
     if (outcome.kind === "control") {
-      scope.cancel();
+      if (!receiptGatedCancellation) {
+        // Replay-only v1 command order. New histories always take the v2 path
+        // below. The current runAgentTurn still owns and writes the truthful
+        // hard-fence receipt; this call remains an idempotent history command.
+        scope.cancel();
+        const settlement = await activity.settleSessionInterruptions({
+          accountId,
+          workspaceId,
+          sessionId,
+          attemptId,
+          workflowId: workflowInfo().workflowId,
+        });
+        const termination = await turn.then(
+          () => ({ kind: "completed" as const }),
+          (error: unknown) => ({ kind: "failed" as const, error }),
+        );
+        const physicalStopConfirmed =
+          termination.kind === "completed" || isTurnActivityFenceCancellation(termination.error);
+        if (patched("session-attempt-quiescence-v1") && physicalStopConfirmed) {
+          await activity.settleSessionInterruptions({
+            accountId,
+            workspaceId,
+            sessionId,
+            attemptId,
+            workflowId: workflowInfo().workflowId,
+            phase: "attempt_quiesced",
+          });
+        }
+        if (!physicalStopConfirmed) throw termination.error;
+        return settlement.action !== "paused";
+      }
       const settlement = await activity.settleSessionInterruptions({
         accountId,
         workspaceId,
@@ -467,40 +566,12 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
         attemptId,
         workflowId: workflowInfo().workflowId,
       });
-      // Keep the workflow alive until the cancelled activity has actually
-      // stopped. Temporal delivers activity cancellation through a heartbeat;
-      // returning while the activity promise is still detached lets the
-      // workflow complete first, after which the worker can keep streaming for
-      // the activity's entire start-to-close window. Postgres settlement above
-      // is intentionally first: it fences every late write immediately while
-      // the physical activity winds down. The control outcome is authoritative,
-      // so a concurrent activity completion or cancellation failure is ignored
-      // only after Temporal has durably observed that terminal activity state.
-      const termination = await turn.then(
-        () => ({ kind: "completed" as const }),
-        (error: unknown) => ({ kind: "failed" as const, error }),
-      );
-      // This is a new durable command in a long-lived workflow. The patch marker
-      // keeps histories that already crossed this point replay-safe. New workers
-      // record quiescence from inside the dying activity; this post-termination
-      // call is its idempotent recovery fallback. A fulfilled activity or a
-      // Temporal cancellation proves the worker crossed its mandatory physical
-      // tool fence. A timeout/worker-loss failure proves no such thing: a remote
-      // command may still be alive, so fail closed with the queue blocked rather
-      // than manufacture a false quiescence receipt.
-      const physicalStopConfirmed =
-        termination.kind === "completed" || isConfirmedTurnActivityCancellation(termination.error);
-      if (patched("session-attempt-quiescence-v1") && physicalStopConfirmed) {
-        await activity.settleSessionInterruptions({
-          accountId,
-          workspaceId,
-          sessionId,
-          attemptId,
-          workflowId: workflowInfo().workflowId,
-          phase: "attempt_quiesced",
-        });
-      }
-      if (!physicalStopConfirmed) throw termination.error;
+      // The transaction above is the authority fence: every late model/tool/UI
+      // write is rejected from this point onward. Request cancellation only
+      // after it commits, then stop observing the Temporal activity promise.
+      // TRY_CANCEL allows this workflow to move to cancellation-wait without
+      // confusing Temporal completion/cancellation with local process safety.
+      scope.cancel();
       return settlement.action !== "paused";
     }
 
@@ -588,4 +659,24 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
     }
     return true;
   }
+}
+
+function isSessionAttemptQuiescenceProof(
+  value: unknown,
+): value is activities.SessionAttemptQuiescenceProof {
+  if (!value || typeof value !== "object") return false;
+  const proof = value as Record<string, unknown>;
+  return [
+    "accountId",
+    "workspaceId",
+    "sessionId",
+    "attemptId",
+    "workflowId",
+    "workflowRunId",
+    "activityId",
+  ].every((field) => typeof proof[field] === "string" && proof[field].length > 0);
+}
+
+function sessionAttemptQuiescenceProofKey(proof: activities.SessionAttemptQuiescenceProof): string {
+  return `${proof.attemptId}:${proof.workflowRunId}:${proof.activityId}`;
 }

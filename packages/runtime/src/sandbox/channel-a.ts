@@ -1435,21 +1435,20 @@ function isDefinitePathNotFoundError(error: unknown): boolean {
 
 // Detect the Modal "the exec-session you're writing to no longer exists" banner.
 // writeStdin reports a vanished session as a non-throwing string of the shape
-// `write_stdin failed: session not found: <N>` (it does NOT raise). We treat that
-// as a lost PTY (the box rolled over / was re-created since the open) so the
-// caller surfaces a clean reconnect instead of writing the raw failure into
-// xterm. Matched loosely (`session not found`) with the id when present so a
-// future wording tweak still classifies it; the command's own output cannot spoof
-// it because the SDK emits this as the whole writeStdin return, not user output.
+// `write_stdin failed: session not found: <N>` (it does NOT raise). This is a
+// hard cancellation-fence fact, so classify only the complete known banner (or
+// its bare provider fact) carrying the exact tracked numeric id. ID-less,
+// malformed, mismatched, or embellished/ambiguous text must remain fail-closed.
 export function isExecSessionLostBanner(out: string, execSessionId: number): boolean {
-  if (!out) return false;
-  const lower = out.toLowerCase();
-  if (!lower.includes("session not found")) return false;
-  // When the id is present require it to match ours; when absent, the generic
-  // "session not found" still classifies (it is never legitimate stdout here).
-  return (
-    lower.includes(`session not found: ${execSessionId}`) || !/session not found:\s*\d+/.test(lower)
-  );
+  if (!out || !Number.isSafeInteger(execSessionId) || execSessionId < 0) return false;
+  const match = out.match(/^(?:write_stdin failed: )?session not found: (\d+)$/);
+  // JavaScript's `$` also matches immediately before one final line terminator.
+  // Requiring the regex match to consume the entire string keeps even that
+  // otherwise-special case fail-closed.
+  if (!match || match[0] !== out) return false;
+  // String equality is intentional: parseInt would normalize malformed facts
+  // such as `01` and can round an out-of-range integer into another identity.
+  return match[1] === String(execSessionId);
 }
 
 // Recover the numeric exec-session id the SDK embeds in a formatExecResponse

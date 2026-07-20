@@ -36,6 +36,21 @@ export type SignalCodexCapacityWorkflow = (input: {
   wakeRevision: number;
 }) => Promise<void>;
 
+/** Exact activity-owned proof that the hard sandbox/tool fence physically
+ * drained. This is delivery evidence only: the workflow still validates the
+ * persisted attempt dispatch and commits the authoritative Postgres receipt. */
+export type SessionAttemptQuiescenceProof = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  attemptId: string;
+  workflowId: string;
+  workflowRunId: string;
+  activityId: string;
+};
+
+export type SignalSessionAttemptQuiesced = (input: SessionAttemptQuiescenceProof) => Promise<void>;
+
 export type ActivityServices = {
   settings: Settings;
   db: Database;
@@ -45,6 +60,9 @@ export type ActivityServices = {
   documentServices: DocumentServices;
   observability: Observability;
   wakeSessionWorkflow: WakeSessionWorkflowSignal | null;
+  /** Durable signalWithStart fallback used only after the activity's direct
+   * physical-quiescence receipt write exhausts its bounded DB retries. */
+  signalSessionAttemptQuiesced: SignalSessionAttemptQuiesced | null;
   /** Revision-carrying capacity nudge; generic outbox repair is also sufficient. */
   signalCodexCapacityWorkflow?: SignalCodexCapacityWorkflow | null;
   // §7.5 P3 — host-entitlements port, the WORKER half of the same seam the API
@@ -124,13 +142,14 @@ export type SettleSessionInterruptionsInput = {
   attemptId: string;
   workflowId: string;
   /**
-   * The established Temporal activity wire serves both halves of one control
-   * transition. Omitted/"logical" is replay-compatible logical settlement;
-   * "attempt_quiesced" is emitted after WAIT_CANCELLATION_COMPLETED as an
-   * idempotent recovery fallback for workers predating the in-activity receipt.
+   * Replay-only compatibility for session workflow histories created before
+   * the receipt-gated cancellation v2 patch. New histories never send this
+   * phase; the exact activity writes the authoritative receipt itself.
    */
   phase?: "logical" | "attempt_quiesced";
 };
+
+export type PersistSessionAttemptQuiescenceInput = SessionAttemptQuiescenceProof;
 
 export type FailSessionAttemptInput = {
   accountId: string;

@@ -20906,24 +20906,36 @@ export type SessionAttemptInterruptionSettlement = {
  * may still finish. This may race the workflow's logical settlement transaction
  * in either order; both use the canonical control -> workspace -> session ->
  * exact turn -> exact attempt lock order and require the durable interruption.
- * Temporal separately waits for the activity promise to terminate before the
- * workflow dispatches its replacement.
+ * Temporal activity cancellation/terminalization is transport state only. The
+ * workflow admits a replacement from this durable receipt, never from the
+ * activity promise.
  */
 export async function markSessionAttemptQuiesced(
   db: Database,
   input: {
+    accountId?: string;
     workspaceId: string;
     sessionId: string;
     attemptId: string;
     temporalWorkflowId: string;
+    /** When supplied, both values bind an activity-owned recovery proof to the
+     * exact persisted Temporal dispatch. Legacy v1 replay callers omit them. */
+    temporalWorkflowRunId?: string;
+    temporalActivityId?: string;
     /** The dying activity also reaches this boundary for non-control ownership
-     * fences. It may no-op when no Pause/Steer interruption exists; the workflow
-     * control fallback deliberately omits this and therefore remains strict. */
+     * fences. It may no-op when no Pause/Steer interruption exists; replacement
+     * admission remains strict because only a durable interruption needs this
+     * receipt. */
     allowUninterrupted?: boolean;
   },
 ): Promise<SessionEvent[]> {
-  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
-    await lockSessionEventWriteRows(scopedDb, {
+  const persistence = {
+    stage: "session_attempts.mark_quiesced",
+    eventTypes: ["session.queue.changed"],
+    maxAttempts: 3,
+  };
+  return await retryWorkspacePersistence(db, input.workspaceId, persistence, async (scopedDb) => {
+    const prefix = await lockSessionEventWriteRows(scopedDb, {
       workspaceId: input.workspaceId,
       controlLock: "share",
       sessionIds: [],
@@ -20961,9 +20973,15 @@ export async function markSessionAttemptQuiesced(
       turn.accountId !== session.accountId ||
       turn.sessionId !== session.id ||
       attempt.accountId !== session.accountId ||
+      (input.accountId !== undefined && attempt.accountId !== input.accountId) ||
       attempt.sessionId !== session.id ||
       attempt.turnId !== turn.id ||
-      attempt.temporalWorkflowId !== input.temporalWorkflowId
+      attempt.temporalWorkflowId !== input.temporalWorkflowId ||
+      (input.temporalWorkflowRunId !== undefined &&
+        attempt.temporalWorkflowRunId !== input.temporalWorkflowRunId) ||
+      (input.temporalActivityId !== undefined &&
+        attempt.temporalActivityId !== input.temporalActivityId) ||
+      (input.temporalWorkflowRunId === undefined) !== (input.temporalActivityId === undefined)
     ) {
       throw new SessionControlInvariantError(
         `Attempt ${input.attemptId} cannot acknowledge quiescence without its session ownership`,
@@ -21079,6 +21097,21 @@ export async function markSessionAttemptQuiesced(
           eq(schema.sessions.id, input.sessionId),
         ),
       );
+    const effectiveControl = await evaluateSessionControl(
+      scopedDb,
+      input.workspaceId,
+      input.sessionId,
+      { workspaceControl: prefix.control ?? undefined },
+    );
+    if (effectiveControl.state === "active") {
+      await enqueueSessionWorkflowWakeInTransaction(scopedDb, {
+        accountId: session.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        temporalWorkflowId: input.temporalWorkflowId,
+        reason: "attempt_quiesced",
+      });
+    }
     return [mapEvent(event)];
   });
 }
@@ -21385,7 +21418,55 @@ export type SessionWorkPeek =
       };
     }
   | { kind: "interruption-pending"; attemptId: string }
+  | { kind: "cancellation-wait"; attemptId: string }
   | { kind: "idle" };
+
+async function latestSessionAttemptInterruption(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<{
+  attemptId: string;
+  quiescedAt: Date | null;
+  interruptionState: string;
+} | null> {
+  const [latestAttempt] = await db
+    .select({
+      attemptId: schema.sessionTurnAttempts.id,
+      quiescedAt: schema.sessionTurnAttempts.quiescedAt,
+    })
+    .from(schema.sessionTurnAttempts)
+    .where(
+      and(
+        eq(schema.sessionTurnAttempts.workspaceId, workspaceId),
+        eq(schema.sessionTurnAttempts.sessionId, sessionId),
+      ),
+    )
+    .orderBy(desc(schema.sessionTurnAttempts.startedAt), desc(schema.sessionTurnAttempts.id))
+    .limit(1);
+  if (!latestAttempt) return null;
+  const [interruption] = await db
+    .select({ state: schema.sessionAttemptInterruptions.state })
+    .from(schema.sessionAttemptInterruptions)
+    .where(
+      and(
+        eq(schema.sessionAttemptInterruptions.workspaceId, workspaceId),
+        eq(schema.sessionAttemptInterruptions.sessionId, sessionId),
+        eq(schema.sessionAttemptInterruptions.attemptId, latestAttempt.attemptId),
+      ),
+    )
+    .orderBy(
+      desc(schema.sessionAttemptInterruptions.requestedAt),
+      desc(schema.sessionAttemptInterruptions.id),
+    )
+    .limit(1);
+  return interruption
+    ? {
+        ...latestAttempt,
+        interruptionState: interruption.state,
+      }
+    : null;
+}
 
 /** Read durable session state without reserving a turn-worker slot or mutating it. */
 export async function peekSessionWork(
@@ -21429,6 +21510,19 @@ export async function peekSessionWork(
       };
     }
     if (effectiveControl.state !== "active") return { kind: "idle" };
+
+    const latestInterruption = await latestSessionAttemptInterruption(
+      scopedDb,
+      workspaceId,
+      sessionId,
+    );
+    if (
+      latestInterruption &&
+      latestInterruption.quiescedAt === null &&
+      ["settled", "rejected_stale"].includes(latestInterruption.interruptionState)
+    ) {
+      return { kind: "cancellation-wait", attemptId: latestInterruption.attemptId };
+    }
 
     const [capacityWait] = await scopedDb
       .select()
@@ -23526,80 +23620,16 @@ export async function getSessionQueueSnapshot(
         ),
       )
       .orderBy(asc(schema.sessionTurns.position), asc(schema.sessionTurns.createdAt));
-    const quiescenceCandidates = [
-      ...new Set(
-        rows.flatMap((row) => {
-          const attemptId = queuedSteerReplacementAttemptId(row.metadata);
-          return attemptId ? [attemptId] : [];
-        }),
-      ),
-    ];
-    const quiescenceAttempts =
-      quiescenceCandidates.length === 0
-        ? []
-        : await scopedDb
-            .select({
-              id: schema.sessionTurnAttempts.id,
-              quiescedAt: schema.sessionTurnAttempts.quiescedAt,
-            })
-            .from(schema.sessionTurnAttempts)
-            .where(
-              and(
-                eq(schema.sessionTurnAttempts.workspaceId, workspaceId),
-                eq(schema.sessionTurnAttempts.sessionId, sessionId),
-                inArray(schema.sessionTurnAttempts.id, quiescenceCandidates),
-              ),
-            );
-    const foundQuiescenceAttempts = new Set(quiescenceAttempts.map((attempt) => attempt.id));
-    const missingQuiescenceAttempt = quiescenceCandidates.find(
-      (attemptId) => !foundQuiescenceAttempts.has(attemptId),
+    const latestInterruption = await latestSessionAttemptInterruption(
+      scopedDb,
+      workspaceId,
+      sessionId,
     );
-    if (missingQuiescenceAttempt) {
-      throw new SessionControlInvariantError(
-        `Queued Steer points to missing predecessor attempt ${missingQuiescenceAttempt}`,
-      );
-    }
-    const nonQuiescedAttemptIds = new Set(
-      quiescenceAttempts
-        .filter((attempt) => attempt.quiescedAt === null)
-        .map((attempt) => attempt.id),
-    );
-    const [sessionWideUnquiescedInterruption] = await scopedDb
-      .select({ attemptId: schema.sessionAttemptInterruptions.attemptId })
-      .from(schema.sessionAttemptInterruptions)
-      .innerJoin(
-        schema.sessionTurnAttempts,
-        and(
-          eq(
-            schema.sessionTurnAttempts.workspaceId,
-            schema.sessionAttemptInterruptions.workspaceId,
-          ),
-          eq(schema.sessionTurnAttempts.id, schema.sessionAttemptInterruptions.attemptId),
-        ),
-      )
-      .where(
-        and(
-          eq(schema.sessionAttemptInterruptions.workspaceId, workspaceId),
-          eq(schema.sessionAttemptInterruptions.sessionId, sessionId),
-          isNull(schema.sessionTurnAttempts.quiescedAt),
-        ),
-      )
-      .orderBy(desc(schema.sessionAttemptInterruptions.requestedAt))
-      .limit(1);
     return {
       version: session.queueVersion,
       effectiveControl: serializeEffectiveSessionControl(effectiveControl),
       stoppingPreviousAttempt:
-        rows.length > 0 &&
-        (sessionWideUnquiescedInterruption !== undefined ||
-          rows.some((row) => {
-            const metadata = row.metadata as Record<string, unknown>;
-            return (
-              metadata.delivery === "steer" &&
-              typeof metadata.replacedAttemptId === "string" &&
-              nonQuiescedAttemptIds.has(metadata.replacedAttemptId)
-            );
-          })),
+        latestInterruption !== null && latestInterruption.quiescedAt === null,
       items: rows.map(mapSessionTurn),
     };
   });
