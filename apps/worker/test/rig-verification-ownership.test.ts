@@ -2,12 +2,20 @@ import { describe, expect, test } from "bun:test";
 import { testSettings } from "@opengeni/testing";
 import type { Database, SandboxEphemeralOwner } from "@opengeni/db";
 import type { Observability } from "@opengeni/observability";
-import type { EstablishedSandboxSession } from "@opengeni/runtime";
 import {
+  createTurnToolCancellationController,
+  type EstablishedSandboxSession,
+} from "@opengeni/runtime";
+import type { Context } from "@temporalio/activity";
+import {
+  createRigVerificationActivityLifecycle,
+  RigVerificationActivityDeadlineError,
   RIG_VERIFICATION_OWNER_TTL_MS,
   RIG_VERIFICATION_OWNERS_DISABLED_MESSAGE,
   runWithOwnedRigVerificationSandbox,
+  type RigVerificationActivityLifecycle,
   type RigVerificationOwnershipDependencies,
+  type RigVerificationSandboxRunContext,
 } from "../src/activities/rig-verification";
 
 const EXECUTION_ID = "11111111-1111-4111-8111-111111111111";
@@ -61,6 +69,8 @@ function harness(
     registerCommitsThenError?: Error;
     replacementInstanceId?: string;
     ownersEnabled?: boolean;
+    establishWaitBeforeCreate?: Promise<void>;
+    deactivateNeverSettles?: boolean;
   } = {},
 ) {
   const events: string[] = [];
@@ -81,6 +91,8 @@ function harness(
     randomUUID: () => EXECUTION_ID,
     now: () => NOW_MS,
     establish: async (_settings, _envelope, establishOptions) => {
+      events.push("establish:start");
+      await options.establishWaitBeforeCreate;
       const first = established("sb-first");
       await establishOptions.onSandboxCreated?.(first);
       if (options.replacementInstanceId) {
@@ -109,6 +121,7 @@ function harness(
     deactivate: async (_db, input) => {
       events.push(`deactivate:${input.instanceId}`);
       deactivated.push(input);
+      if (options.deactivateNeverSettles) await new Promise<never>(() => undefined);
       if (options.deactivateError) throw options.deactivateError;
       if (options.deactivateResult !== undefined) {
         if (options.deactivateResult && activeOwnerInstanceId === input.instanceId) {
@@ -127,9 +140,16 @@ function harness(
       terminated.push(target);
       if (options.terminateError) throw options.terminateError;
     },
+    createCancellationController: createTurnToolCancellationController,
   };
 
-  const run = <T>(callback: (sandbox: EstablishedSandboxSession) => Promise<T>) =>
+  const run = <T>(
+    callback: (
+      sandbox: EstablishedSandboxSession,
+      context: RigVerificationSandboxRunContext,
+    ) => Promise<T>,
+    lifecycle?: RigVerificationActivityLifecycle,
+  ) =>
     runWithOwnedRigVerificationSandbox(
       {
         settings: {
@@ -141,6 +161,7 @@ function harness(
         accountId: ACCOUNT_ID,
         workspaceId: WORKSPACE_ID,
         sessionIdPrefix: "rig-verification-test",
+        ...(lifecycle ? { lifecycle } : {}),
       },
       callback,
       dependencies,
@@ -180,6 +201,7 @@ describe("rig verification ephemeral ownership lifecycle", () => {
 
     expect(result).toBe("passed");
     expect(state.events).toEqual([
+      "establish:start",
       "register:sb-first",
       "tag:sb-first",
       "establish:return",
@@ -234,25 +256,149 @@ describe("rig verification ephemeral ownership lifecycle", () => {
     ]);
   });
 
-  for (const failure of [
-    { name: "setup failure", errorName: "Error", message: "setup failed" },
-    { name: "cancellation", errorName: "CancelledFailure", message: "cancelled" },
-    { name: "timeout", errorName: "TimeoutFailure", message: "activity timed out" },
-  ]) {
-    test(`${failure.name} still deactivates ownership and terminates the provider`, async () => {
-      const thrown = new Error(failure.message);
-      thrown.name = failure.errorName;
-      const state = harness();
+  test("setup failure still deactivates ownership and terminates the provider", async () => {
+    const thrown = new Error("setup failed");
+    const state = harness();
 
-      await expect(
-        state.run(async () => {
-          throw thrown;
-        }),
-      ).rejects.toBe(thrown);
-      expect(state.deactivated.map((input) => input.instanceId)).toEqual(["sb-first"]);
-      expect(state.terminated.map((sandbox) => sandbox?.instanceId)).toEqual(["sb-first"]);
+    await expect(
+      state.run(async () => {
+        throw thrown;
+      }),
+    ).rejects.toBe(thrown);
+    expect(state.deactivated.map((input) => input.instanceId)).toEqual(["sb-first"]);
+    expect(state.terminated.map((sandbox) => sandbox?.instanceId)).toEqual(["sb-first"]);
+  });
+
+  test("activity cancellation drains an in-flight command before provider termination", async () => {
+    const state = harness();
+    const abort = new AbortController();
+    const lifecycle: RigVerificationActivityLifecycle = {
+      signal: abort.signal,
+      cleanupDeadlineAtMs: Date.now() + 5_000,
+      dispose: () => undefined,
+    };
+    let finishCommand!: (value: unknown) => void;
+    let commandStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      commandStarted = resolve;
     });
-  }
+    const commandResult = new Promise<unknown>((resolve) => {
+      finishCommand = resolve;
+    });
+    const session = {
+      supportsPty: () => false,
+      exec: async () => {
+        state.events.push("command:start");
+        commandStarted();
+        return await commandResult;
+      },
+      cancelExecCommand: async () => {
+        state.events.push("command:cancel");
+        finishCommand({ exitCode: 130, output: "cancelled" });
+        return true;
+      },
+    };
+
+    const operation = state.run(
+      async (_sandbox, context) =>
+        await context.commandRunner(session, { cmd: "sleep 60", yieldTimeMs: 60_000 }),
+      lifecycle,
+    );
+    await started;
+    const cancellation = new Error("real activity abort");
+    abort.abort(cancellation);
+
+    await expect(operation).rejects.toBe(cancellation);
+    expect(state.events.indexOf("command:cancel")).toBeGreaterThan(-1);
+    expect(state.events.indexOf("terminate:sb-first")).toBeGreaterThan(
+      state.events.indexOf("command:cancel"),
+    );
+  });
+
+  test("activity-local deadline aborts work and cleans before start-to-close", async () => {
+    const heartbeats: unknown[] = [];
+    const temporalCancellation = new AbortController();
+    const startedAt = Date.now();
+    const lifecycle = createRigVerificationActivityLifecycle({
+      info: {
+        startToCloseTimeoutMs: 400,
+        heartbeatTimeoutMs: 150,
+      },
+      cancellationSignal: temporalCancellation.signal,
+      heartbeat: (details: unknown) => heartbeats.push(details),
+    } as unknown as Context);
+    const state = harness();
+
+    try {
+      await expect(
+        state.run(
+          async (_sandbox, context) =>
+            await new Promise<never>((_resolve, reject) => {
+              const rejectOnAbort = () => reject(context.signal.reason);
+              if (context.signal.aborted) rejectOnAbort();
+              else context.signal.addEventListener("abort", rejectOnAbort, { once: true });
+            }),
+          lifecycle,
+        ),
+      ).rejects.toBeInstanceOf(RigVerificationActivityDeadlineError);
+    } finally {
+      lifecycle.dispose();
+    }
+
+    expect(Date.now() - startedAt).toBeLessThan(400);
+    expect(heartbeats.length).toBeGreaterThan(0);
+    expect(state.deactivated.map((input) => input.instanceId)).toEqual(["sb-first"]);
+    expect(state.terminated.map((sandbox) => sandbox?.instanceId)).toEqual(["sb-first"]);
+  });
+
+  test("a create callback returning after outer abort independently cleans its exact instance", async () => {
+    let releaseCreate!: () => void;
+    const createGate = new Promise<void>((resolve) => {
+      releaseCreate = resolve;
+    });
+    const state = harness({ establishWaitBeforeCreate: createGate });
+    const abort = new AbortController();
+    const lifecycle: RigVerificationActivityLifecycle = {
+      signal: abort.signal,
+      cleanupDeadlineAtMs: Date.now() + 25,
+      dispose: () => undefined,
+    };
+    const operation = state.run(async () => true, lifecycle);
+    while (!state.events.includes("establish:start")) await Bun.sleep(1);
+    const cancellation = new Error("cancel before provider create returns");
+    abort.abort(cancellation);
+    await expect(operation).rejects.toBe(cancellation);
+
+    releaseCreate();
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      if (
+        state.deactivated.some((input) => input.instanceId === "sb-first") &&
+        state.terminated.some((sandbox) => sandbox?.instanceId === "sb-first")
+      ) {
+        break;
+      }
+      await Bun.sleep(2);
+    }
+    expect(state.deactivated.map((input) => input.instanceId)).toContain("sb-first");
+    expect(state.terminated.map((sandbox) => sandbox?.instanceId)).toContain("sb-first");
+  });
+
+  test("cleanup timeout is observable and cannot suppress sibling provider termination", async () => {
+    const state = harness({ deactivateNeverSettles: true });
+    const lifecycle: RigVerificationActivityLifecycle = {
+      signal: new AbortController().signal,
+      cleanupDeadlineAtMs: Date.now() + 30,
+      dispose: () => undefined,
+    };
+
+    await expect(state.run(async () => true, lifecycle)).resolves.toBe(true);
+    expect(state.deactivated).toHaveLength(1);
+    expect(state.terminated.map((sandbox) => sandbox?.instanceId)).toEqual(["sb-first"]);
+    expect(state.warnings).toContainEqual({
+      message: "rig verifier: ownership cleanup timed out",
+      context: expect.objectContaining({ operation: "deactivate_and_terminate" }),
+    });
+  });
 
   test("establishment failure after create still cleans the registered exact instance", async () => {
     const establishError = new Error("manifest setup failed");

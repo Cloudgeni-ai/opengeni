@@ -115,6 +115,20 @@ The worker replicas share one Temporal control task queue. Any compatible worker
 Provider tags remain best-effort diagnostics throughout. Missing or copied tags never establish ownership. The initial unified database projection is only a sweep classifier, not destruction authority: registration can commit after that snapshot, so the reaper performs a second exact current-instance lookup immediately before terminating each candidate. Lookup failure or an inconsistent result preserves the candidate for a later pass. The common two-minute create/registration grace covers fresh stale-tagged boxes as well as unattributed boxes, while older wrong-instance, expired, stale, and unattributed boxes remain eligible for cleanup.
 The runtime app role has tenant-scoped `SELECT` on the owner registry but no direct table mutation privilege. Register/rebind and exact deactivation run only through pinned `SECURITY DEFINER` functions that verify the transaction's account/workspace scope; role provisioning reapplies this protected-table exception after every ordinary schema-wide DML grant.
 
+### Cancellation, deadline, and delayed-cleanup bounds
+
+The production Temporal activity has a 15-minute start-to-close timeout, a 10-second heartbeat timeout, one attempt, and `WAIT_CANCELLATION_COMPLETED`. It heartbeats immediately and then at one-third of the server heartbeat window, continuing through cancellation/deadline cleanup until the activity settles. Temporal cancellation and an activity-local 13-minute work deadline feed one abort signal into the same process-group/remote-op cancellation controller used by turn setup. Rig setup, a `setup_append` command, and every check execute through that controller. Command quiescence is awaited before provider termination, and the remaining two-minute server window is reserved for exact owner deactivation and throwaway-provider termination.
+
+Cleanup operations all start independently, retain rejection handlers, and wait at most 60 seconds and never past the activity's reserved cleanup boundary. A sibling database failure or hang cannot suppress provider termination, and a provider failure or hang cannot suppress exact deactivation. A provider create that returns after outer cancellation enters its create callback, registers/deactivates the exact instance, starts provider termination, and fails establishment closed. The activity reports cancellation or its named local-deadline failure only after this bounded immediate cleanup path; the workflow cannot close early while the activity keeps mutating the verifier box.
+
+This immediate contract does **not** claim that JavaScript `finally` runs after process death or the server's hard start-to-close timeout. If the worker dies, registration never returns, a provider create never returns to its callback, or a cleanup RPC remains unresolved past the reserve, cleanup is delayed and observable rather than falsely reported complete:
+
+- a registered verifier owner expires 20 minutes after registration and becomes collectible on the next global reaper sweep;
+- a create that exists at the provider but never reached durable registration is protected only by the common two-minute fresh-create grace and becomes collectible on the next provider-orphan sweep;
+- a timed-out cleanup emits a warning naming the unresolved phase while every sibling cleanup already remains in flight with an attached rejection handler.
+
+Those TTL/grace-plus-reaper bounds are crash/hang backstops, never the normal cancellation path.
+
 ### Partial rollout, rollback, and downgrade
 
 - **Phase-B worker rollback to Phase A:** first disable the flag and pause dispatch. Phase-A reapers still recognize active Phase-B owner rows, so already-created exact instances remain protected while they finish, deactivate, or expire. Phase-A workers must not receive new verifier work during the rollback because their verifier path is legacy/unowned.

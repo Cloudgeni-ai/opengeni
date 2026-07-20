@@ -94,6 +94,11 @@ jobs:
           OPENGENI_REQUIRE_REAL_DB: "1"
         run: bun run test:unit
 
+      - name: OPE-14 real Temporal verifier cancellation gate
+        run: >-
+          bun test --timeout 300000
+          ./apps/worker/test/rig-verification-temporal.integration.ts
+
       - name: React warning-free test gate
         run: bun run test:react:clean
 
