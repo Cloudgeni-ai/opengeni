@@ -34,8 +34,10 @@ export type {
   ReconcileCodexCapacityWaitResult,
   RecoverDispatchInput,
   RecoverDispatchResult,
+  PersistSessionAttemptQuiescenceInput,
   RunAgentTurnInput,
   RunAgentTurnResult,
+  SessionAttemptQuiescenceProof,
 } from "./activities/types";
 
 function createActivityServices(
@@ -97,6 +99,7 @@ function createActivityServices(
         documentServices: dependencies.documentServices ?? createDocumentServices(settings),
         observability,
         wakeSessionWorkflow: dependencies.wakeSessionWorkflow ?? null,
+        signalSessionAttemptQuiesced: dependencies.signalSessionAttemptQuiesced ?? null,
         signalCodexCapacityWorkflow: dependencies.signalCodexCapacityWorkflow ?? null,
         // §7.5 P3 — host-entitlements port. No constructed default: standalone
         // has no host meter, so unset → null → `ensureRunAllowed` reads the
@@ -154,6 +157,8 @@ export const runAgentTurn = defaultTurnActivities.runAgentTurn;
 export const indexDocument = defaultControlActivities.indexDocument;
 export const failSessionAttempt = defaultControlActivities.failSessionAttempt;
 export const settleSessionInterruptions = defaultControlActivities.settleSessionInterruptions;
+export const persistSessionAttemptQuiescence =
+  defaultControlActivities.persistSessionAttemptQuiescence;
 export const recoverDispatch = defaultControlActivities.recoverDispatch;
 export const peekSessionWork = defaultControlActivities.peekSessionWork;
 export const markSessionIdle = defaultControlActivities.markSessionIdle;

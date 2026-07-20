@@ -20913,10 +20913,15 @@ export type SessionAttemptInterruptionSettlement = {
 export async function markSessionAttemptQuiesced(
   db: Database,
   input: {
+    accountId?: string;
     workspaceId: string;
     sessionId: string;
     attemptId: string;
     temporalWorkflowId: string;
+    /** When supplied, both values bind an activity-owned recovery proof to the
+     * exact persisted Temporal dispatch. Legacy v1 replay callers omit them. */
+    temporalWorkflowRunId?: string;
+    temporalActivityId?: string;
     /** The dying activity also reaches this boundary for non-control ownership
      * fences. It may no-op when no Pause/Steer interruption exists; replacement
      * admission remains strict because only a durable interruption needs this
@@ -20968,9 +20973,15 @@ export async function markSessionAttemptQuiesced(
       turn.accountId !== session.accountId ||
       turn.sessionId !== session.id ||
       attempt.accountId !== session.accountId ||
+      (input.accountId !== undefined && attempt.accountId !== input.accountId) ||
       attempt.sessionId !== session.id ||
       attempt.turnId !== turn.id ||
-      attempt.temporalWorkflowId !== input.temporalWorkflowId
+      attempt.temporalWorkflowId !== input.temporalWorkflowId ||
+      (input.temporalWorkflowRunId !== undefined &&
+        attempt.temporalWorkflowRunId !== input.temporalWorkflowRunId) ||
+      (input.temporalActivityId !== undefined &&
+        attempt.temporalActivityId !== input.temporalActivityId) ||
+      (input.temporalWorkflowRunId === undefined) !== (input.temporalActivityId === undefined)
     ) {
       throw new SessionControlInvariantError(
         `Attempt ${input.attemptId} cannot acknowledge quiescence without its session ownership`,

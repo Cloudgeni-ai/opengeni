@@ -24,6 +24,7 @@ import {
   acceptsPromptCacheKeyForTurn,
   agentRunFailurePayload,
   assertPhysicalToolQuiescenceForCancellation,
+  assertSessionAttemptQuiescenceRecoveryDurable,
   classifyContextWindowOverflowError,
   classifyMcpTransportTimeoutError,
   codexCredentialLeaseDeadlineExpired,
@@ -39,6 +40,7 @@ import {
   recordCompletedModelCallBeforeOwnershipFences,
   modelUsageSourceKey,
   pointerReconcileReason,
+  persistOrSignalSessionAttemptQuiescence,
   PROVIDER_BACKPRESSURE_DELAY_MS,
   providerRecoveryResult,
   resolveActiveSandboxBackend,
@@ -1250,6 +1252,121 @@ describe("worker shutdown preemption", () => {
         failure: fenceFailure,
       }),
     ).not.toThrow();
+  });
+
+  test("requires a durable receipt or exact proof after the physical fence", () => {
+    const persistenceFailure = new Error("receipt and proof delivery failed");
+    expect(() =>
+      assertSessionAttemptQuiescenceRecoveryDurable({
+        acknowledgeQuiescence: true,
+        physicalToolQuiescenceConfirmed: true,
+        receiptOrProofDurable: false,
+        failure: persistenceFailure,
+      }),
+    ).toThrow(persistenceFailure);
+    expect(() =>
+      assertSessionAttemptQuiescenceRecoveryDurable({
+        acknowledgeQuiescence: true,
+        physicalToolQuiescenceConfirmed: true,
+        receiptOrProofDurable: true,
+        failure: persistenceFailure,
+      }),
+    ).not.toThrow();
+  });
+
+  test("retries one immutable quiescence proof after receipt exhaustion", async () => {
+    const proof = {
+      accountId: "account-1",
+      workspaceId: "workspace-1",
+      sessionId: "session-1",
+      attemptId: "attempt-1",
+      workflowId: "workflow-1",
+      workflowRunId: "run-1",
+      activityId: "activity-1",
+    };
+    const signals: Array<typeof proof> = [];
+    const sleeps: number[] = [];
+    const heartbeats: Array<{ attempt: number; delayMs: number }> = [];
+    let signalAttempts = 0;
+    expect(
+      await persistOrSignalSessionAttemptQuiescence({
+        proof,
+        persistReceipt: async () => {
+          throw new Error("three DB attempts exhausted");
+        },
+        publishEvents: async () => {
+          throw new Error("unreachable publish");
+        },
+        signalProof: async (delivered) => {
+          signals.push(delivered);
+          signalAttempts += 1;
+          if (signalAttempts < 3) throw new Error("Temporal unavailable");
+        },
+        sleep: async (ms) => {
+          sleeps.push(ms);
+        },
+        heartbeat: (attempt, delayMs) => {
+          heartbeats.push({ attempt, delayMs });
+        },
+      }),
+    ).toBe("signal");
+    expect(signals).toEqual([proof, proof, proof]);
+    expect(sleeps).toEqual([250, 500]);
+    expect(heartbeats).toEqual([
+      { attempt: 1, delayMs: 250 },
+      { attempt: 2, delayMs: 500 },
+    ]);
+  });
+
+  test("a live-fanout failure cannot masquerade as receipt loss", async () => {
+    let signalCalls = 0;
+    let publishFailures = 0;
+    expect(
+      await persistOrSignalSessionAttemptQuiescence({
+        proof: {
+          accountId: "account-1",
+          workspaceId: "workspace-1",
+          sessionId: "session-1",
+          attemptId: "attempt-1",
+          workflowId: "workflow-1",
+          workflowRunId: "run-1",
+          activityId: "activity-1",
+        },
+        persistReceipt: async () => [],
+        publishEvents: async () => {
+          throw new Error("NATS unavailable");
+        },
+        signalProof: async () => {
+          signalCalls += 1;
+        },
+        onPublishFailure: () => {
+          publishFailures += 1;
+        },
+      }),
+    ).toBe("receipt");
+    expect(signalCalls).toBe(0);
+    expect(publishFailures).toBe(1);
+  });
+
+  test("receipt exhaustion fails closed when the proof signaler is missing", async () => {
+    await expect(
+      persistOrSignalSessionAttemptQuiescence({
+        proof: {
+          accountId: "account-1",
+          workspaceId: "workspace-1",
+          sessionId: "session-1",
+          attemptId: "attempt-1",
+          workflowId: "workflow-1",
+          workflowRunId: "run-1",
+          activityId: "activity-1",
+        },
+        persistReceipt: async () => {
+          throw new Error("DB unavailable");
+        },
+        publishEvents: async () => undefined,
+        signalProof: null,
+      }),
+    ).rejects.toThrow(/signaler is unavailable/);
   });
 
   test("a cancelled activity never waits for a hung idempotent finalizer step", async () => {

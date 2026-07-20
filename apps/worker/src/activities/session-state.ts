@@ -19,6 +19,7 @@ import type {
   FailSessionAttemptInput,
   SettleSessionInterruptionsInput,
   MarkSessionIdleInput,
+  PersistSessionAttemptQuiescenceInput,
   RecoverDispatchInput,
   RecoverDispatchResult,
 } from "./types";
@@ -147,6 +148,38 @@ export function createSessionStateActivities(
     return { action: applied.action };
   }
 
+  /** Persist an exact activity-owned physical-quiescence proof through the
+   * workflow control-activity retry policy. The DB transaction remains the
+   * sole receipt/wake authority; duplicate signals and activity retries reuse
+   * its attempt-scoped idempotency key. */
+  async function persistSessionAttemptQuiescence(
+    input: PersistSessionAttemptQuiescenceInput,
+  ): Promise<void> {
+    const { db, bus, observability } = await services();
+    const events = await markSessionAttemptQuiescedFn(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      attemptId: input.attemptId,
+      temporalWorkflowId: input.workflowId,
+      temporalWorkflowRunId: input.workflowRunId,
+      temporalActivityId: input.activityId,
+      allowUninterrupted: true,
+    });
+    try {
+      await publishDurableSessionEventsFn(bus, input.workspaceId, input.sessionId, events);
+    } catch (error) {
+      // The receipt and exact workflow wake already committed atomically in
+      // Postgres. NATS is best-effort live fanout and must not keep this
+      // control activity retrying or delay receipt-gated admission.
+      observability.error("session-attempt quiescence event fanout failed", {
+        "opengeni.session_id": input.sessionId,
+        "opengeni.attempt_id": input.attemptId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
   /**
    * Recover the same current inference when its worker dies without completing
    * a graceful checkpoint (heartbeat timeout, SIGKILL, OOM, or node loss).
@@ -224,6 +257,7 @@ export function createSessionStateActivities(
   return {
     failSessionAttempt,
     settleSessionInterruptions,
+    persistSessionAttemptQuiescence,
     recoverDispatch,
     peekSessionWork,
     markSessionIdle,

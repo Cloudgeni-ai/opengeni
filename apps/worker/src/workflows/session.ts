@@ -138,6 +138,8 @@ export const queueChanged = defineSignal("queueChanged");
 export const approvalDecision = defineSignal<[string]>("approvalDecision");
 export const sessionControl = defineSignal("sessionControl");
 export const codexCapacityChanged = defineSignal<[number]>("codexCapacityChanged");
+export const sessionAttemptQuiesced =
+  defineSignal<[activities.SessionAttemptQuiescenceProof]>("sessionAttemptQuiesced");
 
 export type SessionWorkflowInput = {
   accountId: string;
@@ -166,6 +168,8 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
   let capacityWakeups = 0;
   let signalVersion = 0;
   let nonControlSignalVersion = 0;
+  const pendingQuiescenceProofs = new Map<string, activities.SessionAttemptQuiescenceProof>();
+  const persistedQuiescenceProofs = new Set<string>();
   // Turns dispatched on THIS run (reset to 0 by continueAsNew). The backstop
   // for the history-overflow guard below; bounded growth is what makes a
   // weeks-long session survivable.
@@ -196,6 +200,38 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
     nonControlSignalVersion += 1;
     capacityWakeups += 1;
   });
+  setHandler(sessionAttemptQuiesced, (proof) => {
+    // Temporal signals are untrusted transport payloads. Accept only the exact
+    // workflow/session scope; the DB control activity additionally validates
+    // the persisted attempt's account, run id, and activity id under lock.
+    if (
+      !isSessionAttemptQuiescenceProof(proof) ||
+      proof.accountId !== input.accountId ||
+      proof.workspaceId !== input.workspaceId ||
+      proof.sessionId !== input.sessionId ||
+      proof.workflowId !== workflowInfo().workflowId
+    ) {
+      return;
+    }
+    const key = sessionAttemptQuiescenceProofKey(proof);
+    if (persistedQuiescenceProofs.has(key) || pendingQuiescenceProofs.has(key)) return;
+    pendingQuiescenceProofs.set(key, proof);
+    signalVersion += 1;
+  });
+
+  async function persistPendingQuiescenceProofs(): Promise<void> {
+    while (pendingQuiescenceProofs.size > 0) {
+      const entry = pendingQuiescenceProofs.entries().next().value;
+      if (!entry) return;
+      const [key, proof] = entry;
+      // This DB-only activity uses an unbounded Temporal retry policy. The
+      // workflow cannot peek, close, or continue-as-new until the exact
+      // physical proof commits its idempotent receipt and wake transaction.
+      await activity.persistSessionAttemptQuiescence(proof);
+      pendingQuiescenceProofs.delete(key);
+      persistedQuiescenceProofs.add(key);
+    }
+  }
 
   async function waitForCodexCapacity(
     initial: activities.CodexCapacityWaitRef,
@@ -256,6 +292,11 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
         // The waiter/outbox is durable in Postgres. A fresh workflow run reads
         // it before goal continuation, reconstructs its timer, and turns any
         // unobserved wake revision into an immediate evaluation.
+        // A quiescence proof is the one signal that is not merely a replaceable
+        // wake hint. It may have arrived while the reconciliation activity was
+        // running, so commit it before crossing this nested continue-as-new
+        // boundary.
+        await persistPendingQuiescenceProofs();
         await continueAsNew<typeof sessionWorkflow>({
           accountId: input.accountId,
           workspaceId: input.workspaceId,
@@ -271,18 +312,25 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
   }
 
   while (true) {
+    // A proof signal can signalWithStart a fresh run or arrive at any prior
+    // close/continue-as-new boundary. Persist it before every ordinary workflow
+    // decision so no accepted physical fact can be dropped with run history.
+    await persistPendingQuiescenceProofs();
     // History-overflow guard. The top of the loop is the only safe
     // continueAsNew boundary: no turn is mid-flight (every path that reaches a
     // new iteration settled or recovered its turn first). Every interruption
-    // is already durable in Postgres, so all Temporal signals are replaceable
-    // wake hints and none must be carried into the next workflow run. A
+    // is already durable in Postgres, so ordinary Temporal signals are
+    // replaceable wake hints and none must be carried into the next workflow
+    // run. A
     // buffered userMessage/queueChanged signal only
     // bumps `wakeups`, and its turn was written to Postgres BEFORE the signal
     // was sent, so the fresh run observes it on its first durable work peek
     // — losing the counter strands nothing. The queue living in Postgres is the
     // safety net: continueAsNew carries only the self-contained
     // SessionWorkflowInput (no initialEventId — the new run claims from the
-    // queue, it does not replay a seed event).
+    // queue, it does not replay a seed event). Quiescence-proof signals are the
+    // exception: persistPendingQuiescenceProofs() immediately above commits
+    // every accepted proof before this boundary.
     //
     // Approval signals are wakeups, never conversation truth. A genuinely
     // accepted decision is already persisted on the turn and is rediscovered
@@ -324,6 +372,9 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
         workflowId,
       });
       if (settlement.action === "paused") {
+        if (pendingQuiescenceProofs.size > 0) {
+          continue;
+        }
         if (nonControlSignalVersion !== closeNonControlSignalVersion) {
           continue;
         }
@@ -341,6 +392,10 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       const seenSignalVersion = signalVersion;
       const woke = await condition(() => signalVersion !== seenSignalVersion, "5s");
       if (woke) continue;
+      // Close only against the same signal snapshot. A proof signal accepted
+      // at the timer/completion boundary must loop through the DB-only receipt
+      // activity rather than disappearing with this workflow run.
+      if (signalVersion !== seenSignalVersion || pendingQuiescenceProofs.size > 0) continue;
       return;
     }
     if (peek.kind === "capacity-wait") {
@@ -604,4 +659,24 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
     }
     return true;
   }
+}
+
+function isSessionAttemptQuiescenceProof(
+  value: unknown,
+): value is activities.SessionAttemptQuiescenceProof {
+  if (!value || typeof value !== "object") return false;
+  const proof = value as Record<string, unknown>;
+  return [
+    "accountId",
+    "workspaceId",
+    "sessionId",
+    "attemptId",
+    "workflowId",
+    "workflowRunId",
+    "activityId",
+  ].every((field) => typeof proof[field] === "string" && proof[field].length > 0);
+}
+
+function sessionAttemptQuiescenceProofKey(proof: activities.SessionAttemptQuiescenceProof): string {
+  return `${proof.attemptId}:${proof.workflowRunId}:${proof.activityId}`;
 }

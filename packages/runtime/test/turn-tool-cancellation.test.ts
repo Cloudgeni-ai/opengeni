@@ -215,10 +215,10 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     expect(finalizerWrites).toBe(1);
   });
 
-  test("mismatched and ambiguous write failures cannot falsely open the PTY fence", async () => {
+  test("ID-less, malformed, mismatched, and ambiguous writes cannot open either PTY fence", async () => {
     const abort = new AbortController();
     const controller = createTurnToolCancellationController(abort.signal);
-    let response: "mismatched" | "ambiguous" | "matching" = "mismatched";
+    let response: "idless" | "malformed" | "mismatched" | "ambiguous" | "matching" = "idless";
     let writes = 0;
     const exec = functionTool("exec_command", async (_context, rawInput) => {
       const cmd = String((JSON.parse(rawInput) as { cmd?: unknown }).cmd);
@@ -227,6 +227,8 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     });
     const write = functionTool("write_stdin", async () => {
       writes += 1;
+      if (response === "idless") return "write_stdin failed: session not found";
+      if (response === "malformed") return "write_stdin failed: session not found: unknown";
       if (response === "mismatched") return "write_stdin failed: session not found: 91";
       if (response === "ambiguous") throw new Error("provider temporarily unavailable");
       return "write_stdin failed: session not found: 19";
@@ -237,9 +239,18 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     await wrappedExec!.invoke(runContext, JSON.stringify({ cmd: "sleep 60" }));
     expect(
       await wrappedWrite!.invoke(runContext, JSON.stringify({ session_id: 19, chars: "" })),
-    ).toBe("write_stdin failed: session not found: 91");
+    ).toBe("write_stdin failed: session not found");
+    // The ordinary model-facing write must retain the tracker on an ID-less
+    // response. Cancellation's rawWrite sees the same response and must also
+    // keep the physical fence closed.
     abort.abort(new Error("steered"));
     const quiescence = controller.waitForQuiescence();
+    await Bun.sleep(125);
+    expect(await pendingAfterMicrotasks(quiescence)).toBe(true);
+    response = "malformed";
+    await Bun.sleep(125);
+    expect(await pendingAfterMicrotasks(quiescence)).toBe(true);
+    response = "mismatched";
     await Bun.sleep(125);
     expect(await pendingAfterMicrotasks(quiescence)).toBe(true);
     response = "ambiguous";
@@ -247,7 +258,7 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     expect(await pendingAfterMicrotasks(quiescence)).toBe(true);
     response = "matching";
     await quiescence;
-    expect(writes).toBeGreaterThanOrEqual(3);
+    expect(writes).toBeGreaterThanOrEqual(5);
   });
 
   test("cancels a connected-machine op by its durable tool-call id before waiting for output", async () => {

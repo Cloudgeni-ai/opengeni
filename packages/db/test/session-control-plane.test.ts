@@ -192,13 +192,14 @@ async function claimTestSessionWork(
   options: {
     attemptId?: string;
     dispatchId?: string;
+    workflowRunId?: string;
     trigger?: Parameters<typeof claimSessionWorkForAttempt>[2]["trigger"];
   } = {},
 ) {
   const result = await claimSessionWorkForAttempt(db, workspaceId, {
     sessionId,
     workflowId,
-    workflowRunId: crypto.randomUUID(),
+    workflowRunId: options.workflowRunId ?? crypto.randomUUID(),
     attemptId: options.attemptId ?? crypto.randomUUID(),
     dispatchId: options.dispatchId ?? `dispatch-${crypto.randomUUID()}`,
     trigger: options.trigger ?? { kind: "next" },
@@ -2751,6 +2752,72 @@ describe("clean session control plane", () => {
     expect(await isSessionCompactionRequested(client.db, grant.workspaceId!, session.id)).toBe(
       true,
     );
+  });
+
+  test("activity-owned quiescence proof requires the exact persisted Temporal dispatch", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "run the predecessor");
+    const attemptId = crypto.randomUUID();
+    const workflowId = `session-${session.id}`;
+    const workflowRunId = crypto.randomUUID();
+    const dispatchId = `dispatch-${crypto.randomUUID()}`;
+    const predecessor = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      workflowId,
+      { attemptId, workflowRunId, dispatchId },
+    );
+    expect(predecessor).not.toBeNull();
+    await send(grant, session.id, "replace it", "steer");
+
+    await expect(
+      markSessionAttemptQuiesced(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        attemptId,
+        temporalWorkflowId: workflowId,
+        temporalWorkflowRunId: workflowRunId,
+        temporalActivityId: `${dispatchId}-wrong`,
+        allowUninterrupted: true,
+      }),
+    ).rejects.toThrow(/without its session ownership/);
+    expect(
+      (await getSessionQueueSnapshot(client.db, grant.workspaceId!, session.id))
+        ?.stoppingPreviousAttempt,
+    ).toBe(true);
+
+    const events = await markSessionAttemptQuiesced(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      attemptId,
+      temporalWorkflowId: workflowId,
+      temporalWorkflowRunId: workflowRunId,
+      temporalActivityId: dispatchId,
+      allowUninterrupted: true,
+    });
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: "session.queue.changed",
+        turnId: predecessor!.id,
+        turnAttemptId: attemptId,
+        payload: expect.objectContaining({ operation: "attempt_quiesced", attemptId }),
+      }),
+    ]);
+    expect(
+      await markSessionAttemptQuiesced(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        attemptId,
+        temporalWorkflowId: workflowId,
+        temporalWorkflowRunId: workflowRunId,
+        temporalActivityId: dispatchId,
+        allowUninterrupted: true,
+      }),
+    ).toEqual(events);
   });
 
   test("worker death recovers the same compaction execution without entering the queue", async () => {

@@ -36,6 +36,21 @@ export type SignalCodexCapacityWorkflow = (input: {
   wakeRevision: number;
 }) => Promise<void>;
 
+/** Exact activity-owned proof that the hard sandbox/tool fence physically
+ * drained. This is delivery evidence only: the workflow still validates the
+ * persisted attempt dispatch and commits the authoritative Postgres receipt. */
+export type SessionAttemptQuiescenceProof = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  attemptId: string;
+  workflowId: string;
+  workflowRunId: string;
+  activityId: string;
+};
+
+export type SignalSessionAttemptQuiesced = (input: SessionAttemptQuiescenceProof) => Promise<void>;
+
 export type ActivityServices = {
   settings: Settings;
   db: Database;
@@ -45,6 +60,9 @@ export type ActivityServices = {
   documentServices: DocumentServices;
   observability: Observability;
   wakeSessionWorkflow: WakeSessionWorkflowSignal | null;
+  /** Durable signalWithStart fallback used only after the activity's direct
+   * physical-quiescence receipt write exhausts its bounded DB retries. */
+  signalSessionAttemptQuiesced: SignalSessionAttemptQuiesced | null;
   /** Revision-carrying capacity nudge; generic outbox repair is also sufficient. */
   signalCodexCapacityWorkflow?: SignalCodexCapacityWorkflow | null;
   // §7.5 P3 — host-entitlements port, the WORKER half of the same seam the API
@@ -130,6 +148,8 @@ export type SettleSessionInterruptionsInput = {
    */
   phase?: "logical" | "attempt_quiesced";
 };
+
+export type PersistSessionAttemptQuiescenceInput = SessionAttemptQuiescenceProof;
 
 export type FailSessionAttemptInput = {
   accountId: string;

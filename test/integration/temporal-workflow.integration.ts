@@ -736,6 +736,83 @@ describe("Temporal workflow integration", () => {
   );
 
   test(
+    "an exact quiescence proof survives signalWithStart and DB activity retry exhaustion",
+    async () => {
+      const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+      const scope = workflowScope();
+      const sessionId = crypto.randomUUID();
+      const workflowId = `wf-${crypto.randomUUID()}`;
+      const replacement = queuedTurn("replacement-event");
+      const proof = {
+        ...scope,
+        sessionId,
+        attemptId: crypto.randomUUID(),
+        workflowId,
+        workflowRunId: crypto.randomUUID(),
+        activityId: "old-activity-42",
+      };
+      let waitingForReceipt = true;
+      let receiptAttempts = 0;
+      let replacementRuns = 0;
+      const persistedProofs: Array<typeof proof> = [];
+      const worker = await testWorker(nativeConnection, taskQueue, {
+        peekSessionWork: async () => {
+          if (waitingForReceipt) {
+            return { kind: "cancellation-wait", attemptId: proof.attemptId } as const;
+          }
+          return replacementRuns === 0
+            ? ({ kind: "runnable" } as const)
+            : ({ kind: "idle" } as const);
+        },
+        persistSessionAttemptQuiescence: async (input: typeof proof) => {
+          persistedProofs.push(input);
+          receiptAttempts += 1;
+          // Fail multiple real Temporal activity attempts. The workflow's
+          // unbounded control-activity retry must retain the signal-owned proof
+          // and may not peek/admit replacement work until this succeeds.
+          if (receiptAttempts < 3) throw new Error("receipt database unavailable");
+          waitingForReceipt = false;
+        },
+        runAgentTurn: async (input: { attemptId: string }) => {
+          replacementRuns += 1;
+          return {
+            status: "idle" as const,
+            turnId: replacement.id,
+            attemptId: input.attemptId,
+          };
+        },
+        markSessionIdle: async () => undefined,
+        failSessionAttempt: async () => undefined,
+        settleSessionInterruptions: async () => ({ action: "continue" as const }),
+      });
+      const run = worker.run();
+      try {
+        const client = new Client({ connection });
+        const handle = await client.workflow.signalWithStart("sessionWorkflow", {
+          taskQueue,
+          workflowId,
+          workflowIdReusePolicy: "ALLOW_DUPLICATE",
+          args: [{ ...scope, sessionId }],
+          signal: "sessionAttemptQuiesced",
+          signalArgs: [proof],
+        });
+        // A duplicate transport signal in the same run is coalesced; the
+        // control activity's own retries still execute until the DB succeeds.
+        await handle.signal("sessionAttemptQuiesced", proof);
+        await handle.result();
+
+        expect(receiptAttempts).toBe(3);
+        expect(persistedProofs).toEqual([proof, proof, proof]);
+        expect(replacementRuns).toBe(1);
+      } finally {
+        worker.shutdown();
+        await run;
+      }
+    },
+    temporalWorkflowTestTimeoutMs,
+  );
+
+  test(
     "Steer while awaiting approval supersedes the blocked turn and continues queued work",
     async () => {
       const taskQueue = `workflow-test-${crypto.randomUUID()}`;

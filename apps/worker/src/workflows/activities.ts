@@ -9,6 +9,7 @@ type WorkflowControlActivities = Pick<
   | "getCodexCapacityWait"
   | "markSessionIdle"
   | "peekSessionWork"
+  | "persistSessionAttemptQuiescence"
   | "reconcileCodexCapacityWait"
   | "recoverDispatch"
   | "settleSessionInterruptions"

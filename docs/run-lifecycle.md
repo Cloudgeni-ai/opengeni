@@ -186,21 +186,43 @@ receipt, its `session.queue.changed` event, the session queue/sequence update,
 and the exact `session_workflow_wake_outbox` revision commit in one retryable,
 idempotent transaction. Provider completion and batch flushes that ignore
 cancellation are detached with rejection handlers; all later housekeeping is
-attempt-fenced and detachable. If receipt persistence exhausts its retries,
-cleanup can still release local ownership but admission remains fail-closed:
-no Temporal terminal state can reconstruct or substitute for physical proof.
+attempt-fenced and detachable.
+
+The direct receipt remains the preferred path. If its three Postgres attempts
+exhaust, `runAgentTurn` does not suppress the failure or infer a receipt from
+Temporal terminal state. It instead retries delivery of one immutable physical
+proof through `signalWithStart`, using a 250 ms-to-5 s bounded delivery backoff.
+The proof binds the exact account, workspace, session, attempt, workflow id,
+workflow run id, and activity id; retrying changes none of those fields and
+retries only Temporal delivery, never DB eligibility or workflow state. A
+missing signaler or an activity exit without either a committed receipt or an
+accepted proof fails hard.
+
+The workflow deduplicates an accepted proof and, before every ordinary peek,
+close, or `continueAsNew` boundary, passes it to a DB-only control activity.
+That activity has bounded executions with unbounded Temporal retry and calls
+the same idempotent receipt transaction. Under the canonical control →
+workspace → session → turn → attempt locks, the transaction additionally
+matches the proof's exact account/workflow-run/activity dispatch before it may
+set `quiesced_at`, append the queue event, advance session sequence/version, and
+enqueue the exact wake revision. The signal is durable recovery evidence, not
+admission authority. NATS publish happens only after the transaction and is
+best-effort live fanout; a NATS failure cannot trigger proof recovery or undo a
+committed receipt.
 
 While a settled interruption lacks that receipt, `peekSessionWork` returns a
 durable `cancellation-wait` and every claim path remains `control-pending`. The
 workflow waits up to five seconds for a wake and may then close without running
-another activity. Once the receipt commits, its coalescing outbox wake uses
+another turn activity; a proof accepted at that timeout boundary is persisted
+before close. Once the receipt commits, its coalescing outbox wake uses
 `signalWithStart` on the same stable workflow id, which restarts the exact
-session and admits the replacement once. This path needs no quiescence scanner,
-synthetic user message, or duplicate visible queue row. Queue telemetry follows
-the latest session attempt only: `stoppingPreviousAttempt` can truthfully be
-`true` with an empty human/API queue (internal Agent Steer), ignores replacement
-metadata corruption/withdrawal, and is not contaminated by an older attempt
-after a newer one exists.
+session and admits the replacement once. This event-driven path needs no
+quiescence scanner, inferred timeout, polling loop, synthetic user message,
+prompt/history/effect replay, or duplicate visible queue row. Queue telemetry
+follows the latest session attempt only: `stoppingPreviousAttempt` can
+truthfully be `true` with an empty human/API queue (internal Agent Steer),
+ignores replacement metadata corruption/withdrawal, and is not contaminated by
+an older attempt after a newer one exists.
 
 Sandbox lease warming is bounded for the same reason: it is a capacity/setup
 symptom, not legitimate agent work. A turn that attaches while another worker is

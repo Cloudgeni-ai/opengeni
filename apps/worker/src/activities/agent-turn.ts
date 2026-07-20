@@ -185,7 +185,12 @@ import {
   nextStreamEvent,
   startActivityHeartbeat,
 } from "./streaming";
-import type { ActivityServices, RunAgentTurnInput, RunAgentTurnResult } from "./types";
+import type {
+  ActivityServices,
+  RunAgentTurnInput,
+  RunAgentTurnResult,
+  SessionAttemptQuiescenceProof,
+} from "./types";
 import {
   resumeBoxForTurn,
   acquireSelfhostedLeaseForTurn,
@@ -336,6 +341,88 @@ export function assertPhysicalToolQuiescenceForCancellation(input: {
   throw new Error("Physical sandbox-tool quiescence could not be confirmed", {
     cause: input.failure,
   });
+}
+
+/** A physically drained attempt must leave one durable recovery producer. The
+ * direct Postgres receipt is preferred; after its bounded retries exhaust, an
+ * exact Temporal proof signal is sufficient because the workflow persists it
+ * through an independently retrying DB-only control activity. */
+export function assertSessionAttemptQuiescenceRecoveryDurable(input: {
+  acknowledgeQuiescence: boolean;
+  physicalToolQuiescenceConfirmed: boolean;
+  receiptOrProofDurable: boolean;
+  failure: unknown;
+}): void {
+  if (
+    !input.acknowledgeQuiescence ||
+    !input.physicalToolQuiescenceConfirmed ||
+    input.receiptOrProofDurable
+  ) {
+    return;
+  }
+  if (input.failure instanceof Error) throw input.failure;
+  throw new Error("Physical quiescence had no durable receipt or recovery proof", {
+    cause: input.failure,
+  });
+}
+
+const QUIESCENCE_PROOF_SIGNAL_INITIAL_RETRY_MS = 250;
+const QUIESCENCE_PROOF_SIGNAL_MAX_RETRY_MS = 5_000;
+
+/** Persist the authoritative receipt or durably hand the exact physical proof
+ * to Temporal. This retries signal delivery, not DB eligibility or workflow
+ * state. The proof object never changes between attempts. */
+export async function persistOrSignalSessionAttemptQuiescence(input: {
+  proof: SessionAttemptQuiescenceProof;
+  persistReceipt: () => Promise<SessionEvent[]>;
+  publishEvents: (events: SessionEvent[]) => Promise<unknown>;
+  signalProof: ActivityServices["signalSessionAttemptQuiesced"];
+  sleep?: (ms: number) => Promise<void>;
+  heartbeat?: (attempt: number, delayMs: number) => void;
+  onReceiptFailure?: (error: unknown) => void;
+  onPublishFailure?: (error: unknown) => void;
+  onSignalFailure?: (error: unknown, attempt: number, delayMs: number) => void;
+}): Promise<"receipt" | "signal"> {
+  let events: SessionEvent[];
+  try {
+    events = await input.persistReceipt();
+  } catch (receiptError) {
+    input.onReceiptFailure?.(receiptError);
+    if (!input.signalProof) {
+      throw new Error("Session-attempt quiescence proof signaler is unavailable", {
+        cause: receiptError,
+      });
+    }
+    const delay = input.sleep ?? sleep;
+    let retryMs = QUIESCENCE_PROOF_SIGNAL_INITIAL_RETRY_MS;
+    let attempt = 1;
+    for (;;) {
+      try {
+        await input.signalProof(input.proof);
+        return "signal";
+      } catch (signalError) {
+        input.onSignalFailure?.(signalError, attempt, retryMs);
+        try {
+          input.heartbeat?.(attempt, retryMs);
+        } catch {
+          // Heartbeat telemetry is not proof delivery and cannot replace or
+          // interrupt the exact signal retry loop.
+        }
+        await delay(retryMs);
+        retryMs = Math.min(retryMs * 2, QUIESCENCE_PROOF_SIGNAL_MAX_RETRY_MS);
+        attempt += 1;
+      }
+    }
+  }
+
+  try {
+    await input.publishEvents(events);
+  } catch (publishError) {
+    // Postgres already committed quiesced_at, the queue event, and the wake.
+    // NATS is live fanout only; never misclassify its failure as receipt loss.
+    input.onPublishFailure?.(publishError);
+  }
+  return "receipt";
 }
 
 /**
@@ -1336,6 +1423,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       objectStorage,
       observability,
       wakeSessionWorkflow,
+      signalSessionAttemptQuiesced,
       signalCodexCapacityWorkflow,
       entitlements,
       connectionCredentials,
@@ -5738,6 +5826,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       const finalizationStarted = performance.now();
       let finalizationError: unknown;
       let physicalToolQuiescenceConfirmed = !acknowledgeQuiescence;
+      let quiescenceReceiptOrProofDurable = !acknowledgeQuiescence;
       const finalizerSignal = turnFinalizerCancellationSignal(cancellationSignal, activityStatus);
       try {
         const toolCancellationFence = toolCancellationFenceRef.current;
@@ -5765,25 +5854,67 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // and before lease, cache, recording, or provider cleanup. Its
           // transaction also enqueues the exact workflow wake that will admit
           // the replacement; Temporal activity terminalization does neither.
-          try {
-            const events = await markSessionAttemptQuiesced(db, {
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-              attemptId: input.attemptId,
-              temporalWorkflowId: input.workflowId,
-              allowUninterrupted: true,
+          const proof: SessionAttemptQuiescenceProof = {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            attemptId: input.attemptId,
+            workflowId: input.workflowId,
+            workflowRunId: input.workflowRunId,
+            activityId: dispatchId,
+          };
+          const recoveryMode = await persistOrSignalSessionAttemptQuiescence({
+            proof,
+            persistReceipt: async () =>
+              await markSessionAttemptQuiesced(db, {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                attemptId: input.attemptId,
+                temporalWorkflowId: input.workflowId,
+                temporalWorkflowRunId: input.workflowRunId,
+                temporalActivityId: dispatchId,
+                allowUninterrupted: true,
+              }),
+            publishEvents: async (events) => {
+              await waitForTurnFinalizerStep(
+                publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, events),
+                finalizerSignal,
+              );
+            },
+            signalProof: signalSessionAttemptQuiesced,
+            heartbeat: (attempt, retryMs) => {
+              activityContext?.heartbeat({
+                phase: "quiescence-proof-delivery",
+                sessionId: input.sessionId,
+                attemptId: input.attemptId,
+                deliveryAttempt: attempt,
+                retryMs,
+                at: new Date().toISOString(),
+              });
+            },
+            onReceiptFailure: (error) => {
+              console.error("agent turn quiescence receipt exhausted; signalling proof", error);
+            },
+            onPublishFailure: (error) => {
+              console.error("agent turn quiescence event fanout failed", error);
+            },
+            onSignalFailure: (error, attempt, retryMs) => {
+              console.error("agent turn quiescence proof signal failed; retrying", {
+                error,
+                attempt,
+                retryMs,
+              });
+            },
+          });
+          quiescenceReceiptOrProofDurable = true;
+          if (recoveryMode === "signal") {
+            observability.info("agent turn quiescence proof handed to workflow recovery", {
+              "opengeni.session_id": input.sessionId,
+              "opengeni.attempt_id": input.attemptId,
+              "opengeni.workflow_run_id": input.workflowRunId,
+              "opengeni.activity_id": dispatchId,
             });
-            await waitForTurnFinalizerStep(
-              publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, events),
-              finalizerSignal,
-            );
-          } catch (error) {
-            // The receipt transaction is retried and idempotent. Exhaustion is
-            // fail-closed: no replacement can claim without quiesced_at. Keep
-            // releasing timers/leases and detaching housekeeping so one DB
-            // outage does not also leak worker-local ownership indefinitely.
-            finalizationError ??= error;
-            console.error("agent turn quiescence receipt failed", error);
           }
         }
         gitCredentialRenewalClosed = true;
@@ -6087,6 +6218,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         assertPhysicalToolQuiescenceForCancellation({
           acknowledgeQuiescence,
           physicalToolQuiescenceConfirmed,
+          failure: finalizationError,
+        });
+        assertSessionAttemptQuiescenceRecoveryDurable({
+          acknowledgeQuiescence,
+          physicalToolQuiescenceConfirmed,
+          receiptOrProofDurable: quiescenceReceiptOrProofDurable,
           failure: finalizationError,
         });
       }
