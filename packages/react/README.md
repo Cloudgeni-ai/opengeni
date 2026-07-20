@@ -25,6 +25,27 @@ animation. Override the tokens to rebrand everything.
 
 ## Install & styles
 
+Hosts that render their own UI should import the session-only surface:
+
+```tsx
+import {
+  useComposer,
+  useSessionControl,
+  useSessionEvents,
+  useTurnQueue,
+} from "@opengeni/react/session";
+```
+
+That subpath contains session hooks, approval helpers, and the pure timeline
+projection only. It does not load the styled composer, timeline, workbench,
+CSS, or their optional editor/terminal peers. Pass `{ client, workspaceId }` to
+each hook when the host intentionally does not mount `OpenGeniProvider`. The
+exported `SessionClientLike` is deliberately narrow: a tenant-safe proxy needs
+only session events, composer draft/send, queue, pause/resume, and approval
+operations. Workspace-level Resume is an optional authority.
+
+The styled root surface uses Tailwind v4 and the package CSS entries:
+
 The package ships TypeScript source plus two CSS entries. In your Tailwind v4
 entry CSS:
 
@@ -185,7 +206,8 @@ state remains application-owned; durable draft and session state remain in
   `steerTurn`, and `removeTurn`. Mutations carry observed revisions and conflicts
   refetch server truth. Live-updates on `turn.*` and `session.queue.*` events — pass the
   `events` log from `useSessionEvents` to reuse its stream, or let it tail the
-  session itself.
+  session itself. Providerless self-streams reconcile authoritative queue/draft
+  state after the SSE connection opens, closing the initial-read handoff race.
 - `useGoal(sessionId, { events })` — goal state + autonomy counters
   (`autoContinuations`, `noProgressStreak`) with `pause(rationale?)` /
   `resume()`. Goal-less sessions yield `goal: null`. Live-updates on `goal.*`

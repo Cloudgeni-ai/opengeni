@@ -264,6 +264,8 @@ export type SessionMcpServerInput = {
   allowedTools?: string[] | undefined;
   timeoutMs?: number | undefined;
   cacheToolsList?: boolean | undefined;
+  /** Require human approval for every tool, or only the listed unprefixed tool names. */
+  requireApproval?: boolean | string[] | undefined;
   headers?: Record<string, string> | undefined;
 };
 

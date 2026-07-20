@@ -6,6 +6,16 @@ The contract is simple: **all ports unset means standalone**. The defaults in `a
 
 ## Consumption Shapes
 
+**Host-rendered product UI.** A host that keeps its own visual shell can consume
+`@opengeni/react/session`. The subpath exposes the session event, composer,
+queue and control hooks plus pure timeline projection, without importing the
+styled workbench graph. Pass a proxy implementing the subpath's narrow
+`SessionClientLike` plus host-safe workspace/session aliases through each
+hook's `{ client, workspaceId }` override when workspace-global provider
+behavior is not appropriate. The proxy does not need billing, rigs, files,
+terminal, workbench, or workspace-administration methods; workspace-level
+Resume is optional.
+
 **V1: mount the router.** Import `createApp(deps)` from `@opengeni/api-router/app` (`apps/api/src/app.ts`) and mount the returned Hono app under the host's route prefix. The dependency bag is `AppDependencies` from `@opengeni/core` (`packages/core/src/dependencies.ts`): `settings`, `db`, `bus`, and `workflowClient` are required; `documentIndexer`, `documentServices`, `observability`, `managedAuth`, `sandboxClient`, and `resumeBoxById` are optional host bindings. The routes remain `/v1/...` inside the mounted app. If the mount prefix makes the worker's loopback MCP URL wrong, set `OPENGENI_MCP_URL` / `settings.opengeniMcpUrl`; `firstPartyMcpBaseUrl` in `packages/config/src/index.ts` is the canonical rule.
 
 **V2: call core directly.** Import from `@opengeni/core` and call domain helpers without HTTP. The main session surface is:

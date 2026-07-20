@@ -1,6 +1,6 @@
 import type { SessionEvent } from "@opengeni/sdk";
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { SessionClientLike } from "../client";
+import type { EmbeddedSessionClientLike } from "../client";
 
 export type AsyncListState<T> = {
   data: T | null;
@@ -196,6 +196,8 @@ export type SessionEventFeedOptions = {
    */
   events?: SessionEvent[] | undefined;
   enabled?: boolean | undefined;
+  /** Refresh authoritative non-event state after the live stream is open. */
+  beforeLive?: (() => void | Promise<void>) | undefined;
 };
 
 /**
@@ -204,7 +206,7 @@ export type SessionEventFeedOptions = {
  * `events` log or tails the stream directly (reconnect handled by the SDK).
  */
 export function useSessionEventTrigger(
-  client: SessionClientLike,
+  client: EmbeddedSessionClientLike,
   workspaceId: string,
   sessionId: string | null | undefined,
   match: (event: SessionEvent) => boolean,
@@ -218,6 +220,8 @@ export function useSessionEventTrigger(
   matchRef.current = match;
   const onEventRef = useRef(onEvent);
   onEventRef.current = onEvent;
+  const beforeLiveRef = useRef(options.beforeLive);
+  beforeLiveRef.current = options.beforeLive;
   const consumedRef = useRef(0);
   const feedKeyRef = useRef<string | null>(null);
 
@@ -260,6 +264,7 @@ export function useSessionEventTrigger(
         const stream = client.streamEvents(workspaceId, sessionId, {
           after: session.lastSequence,
           signal: controller.signal,
+          beforeLive: async () => await beforeLiveRef.current?.(),
         });
         for await (const event of stream) {
           if (matchRef.current(event)) {

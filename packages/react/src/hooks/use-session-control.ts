@@ -1,9 +1,9 @@
 import type { SessionControlResponse, SessionEvent } from "@opengeni/sdk";
 import { useCallback } from "react";
-import { useOpenGeni, type ClientOverride } from "../provider";
+import { useEmbeddedSession, type EmbeddedSessionClientOverride } from "../provider";
 import { useMutationRunner } from "./internal";
 
-export type UseSessionControlOptions = ClientOverride;
+export type UseSessionControlOptions = EmbeddedSessionClientOverride;
 
 export type UseSessionControlResult = {
   pause: (reason?: string) => Promise<SessionControlResponse | null>;
@@ -28,7 +28,7 @@ export function useSessionControl(
   sessionId: string | null | undefined,
   options: UseSessionControlOptions = {},
 ): UseSessionControlResult {
-  const { client, workspaceId } = useOpenGeni(options);
+  const { client, workspaceId } = useEmbeddedSession(options);
   const {
     run: runControl,
     mutating: controlling,
