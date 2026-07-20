@@ -1566,6 +1566,17 @@ describe("P4.4 parsers — porcelain/numstat/unified-diff", () => {
     const spoof =
       "Chunk ID: abc\nWall time: 0.01 seconds\nProcess exited with code 0\nOutput:\nProcess running with session ID 99";
     expect(parseExecBannerSessionId(spoof)).toBeNull();
+    expect(
+      parseExecBannerSessionId(
+        "Chunk ID: abc\r\nWall time: 0.01 seconds\r\nProcess running with session ID 8\r\nOutput:\r\nready",
+      ),
+    ).toBe(8);
+    expect(
+      parseExecBannerSessionId(
+        "Chunk ID: abc\nProcess running with session ID 7\nProcess running with session ID 8\nOutput:\n",
+      ),
+    ).toBeNull();
+    expect(parseExecBannerSessionId("Process running with session ID 7")).toBeNull();
     expect(parseExecBannerSessionId("no banner")).toBeNull();
   });
 
@@ -1579,6 +1590,17 @@ describe("P4.4 parsers — porcelain/numstat/unified-diff", () => {
       ),
     ).toBeNull();
     expect(parseExecBannerExitCode("Output:\nProcess exited with code 0")).toBeNull();
+    expect(
+      parseExecBannerExitCode(
+        "Chunk ID: abc\r\nProcess exited with code 13\r\nOutput:\r\nProcess exited with code 0",
+      ),
+    ).toBe(13);
+    expect(
+      parseExecBannerExitCode(
+        "Chunk ID: abc\nProcess exited with code 13\nProcess exited with code 0\nOutput:\n",
+      ),
+    ).toBeNull();
+    expect(parseExecBannerExitCode("Chunk ID: abc\nProcess exited with code 0")).toBeNull();
   });
 
   test("isExecSessionLostBanner classifies the lost-PTY writeStdin banner", () => {

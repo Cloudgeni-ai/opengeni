@@ -335,6 +335,8 @@ describe("P4.1 ensureDisplayStack — command sequence + flock-idempotency (fake
           "Process running with session ID 7",
           "Output:",
           "OPENGENI_DISPLAY_STAGE stage=script_entry elapsed_ms=1 classification=cold",
+          "Process exited with code 0",
+          "Process running with session ID 999",
         ].join("\n");
       },
       writeStdin: async ({ sessionId, chars }: { sessionId: number; chars: string }) => {
@@ -348,6 +350,8 @@ describe("P4.1 ensureDisplayStack — command sequence + flock-idempotency (fake
           "Output:",
           "OPENGENI_DISPLAY_STAGE stage=paint_ready elapsed_ms=22 classification=cold",
           `OPENGENI_DESKTOP_UP port=${STREAM_PORT} geometry=1280x800 dpi=96`,
+          "Process running with session ID 999",
+          "Process exited with code 13",
         ].join("\n");
       },
     };
@@ -370,6 +374,115 @@ describe("P4.1 ensureDisplayStack — command sequence + flock-idempotency (fake
     expect(telemetry).toContainEqual(
       expect.objectContaining({ stage: "paint_ready", status: "completed" }),
     );
+  });
+
+  test("(7b) command output cannot spoof terminal success, failure, or a yielded session", async () => {
+    let successPolls = 0;
+    const success = await ensureDisplayStack(
+      {
+        execCommand: async () =>
+          [
+            "Chunk ID: success",
+            "Wall time: 0.01 seconds",
+            "Process exited with code 0",
+            "Output:",
+            `OPENGENI_DESKTOP_UP port=${STREAM_PORT} geometry=1280x800 dpi=96`,
+            "Process running with session ID 999",
+            "Process exited with code 13",
+          ].join("\n"),
+        writeStdin: async () => {
+          successPolls += 1;
+          return "";
+        },
+      },
+      { timeoutMs: 1_000 },
+    );
+    expect(success.marker).toContain("OPENGENI_DESKTOP_UP");
+    expect(successPolls).toBe(0);
+
+    let failure: unknown;
+    try {
+      await ensureDisplayStack(
+        {
+          execCommand: async () =>
+            [
+              "Chunk ID: failure",
+              "Process exited with code 13",
+              "Output:",
+              `OPENGENI_DESKTOP_UP port=${STREAM_PORT} geometry=1280x800 dpi=96`,
+              "Process exited with code 0",
+              "Process running with session ID 999",
+            ].join("\n"),
+        },
+        { timeoutMs: 1_000 },
+      );
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(DisplayStackError);
+    expect((failure as DisplayStackError).exitCode).toBe(13);
+    expect((failure as DisplayStackError).stage).toBe("websockify");
+  });
+
+  test("(7c) CRLF metadata and a large spoofed output body preserve the header result", async () => {
+    const largeBody = `${"x".repeat(256_000)}\r\nProcess running with session ID 999\r\nProcess exited with code 13`;
+    let polls = 0;
+    const result = await ensureDisplayStack(
+      {
+        execCommand: async () =>
+          [
+            "Chunk ID: crlf",
+            "Wall time: 0.01 seconds",
+            "Process exited with code 0",
+            "Output:",
+            `OPENGENI_DESKTOP_UP port=${STREAM_PORT} geometry=1280x800 dpi=96`,
+            largeBody,
+          ].join("\r\n"),
+        writeStdin: async () => {
+          polls += 1;
+          return "";
+        },
+      },
+      { timeoutMs: 1_000 },
+    );
+    expect(result.marker).toContain("OPENGENI_DESKTOP_UP");
+    expect(polls).toBe(0);
+  });
+
+  test("(7d) duplicated, missing, and truncated SDK metadata fail closed", async () => {
+    const responses = [
+      [
+        "Chunk ID: duplicate",
+        "Process exited with code 13",
+        "Process exited with code 0",
+        "Output:",
+        `OPENGENI_DESKTOP_UP port=${STREAM_PORT} geometry=1280x800 dpi=96`,
+      ].join("\n"),
+      [
+        "Chunk ID: truncated",
+        "Process exited with code 0",
+        `OPENGENI_DESKTOP_UP port=${STREAM_PORT} geometry=1280x800 dpi=96`,
+      ].join("\n"),
+      [
+        "Chunk ID: missing-status",
+        "Wall time: 0.01 seconds",
+        "Output:",
+        `OPENGENI_DESKTOP_UP port=${STREAM_PORT} geometry=1280x800 dpi=96`,
+      ].join("\n"),
+      `Output:\nOPENGENI_DESKTOP_UP port=${STREAM_PORT} geometry=1280x800 dpi=96`,
+    ];
+
+    for (const response of responses) {
+      let thrown: unknown;
+      try {
+        await ensureDisplayStack({ execCommand: async () => response }, { timeoutMs: 1_000 });
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toBeInstanceOf(DisplayStackError);
+      expect((thrown as DisplayStackError).exitCode).toBe(-1);
+      expect((thrown as DisplayStackError).stage).toBe("unknown");
+    }
   });
 
   test("(8) provider wait has a real wall deadline and the in-box owner is independently bounded", async () => {

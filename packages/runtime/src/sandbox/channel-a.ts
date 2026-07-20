@@ -58,6 +58,9 @@ import type {
   TerminalExecRequest,
   TerminalExecResponse,
 } from "@opengeni/contracts";
+import { parseExecBannerExitCode, parseExecBannerSessionId } from "./exec-banner";
+
+export { parseExecBannerExitCode, parseExecBannerSessionId } from "./exec-banner";
 
 // ── The minimal session surface Channel A consumes (a structural subset of the
 // SDK's SandboxSession, all optional — capability-probed before use). ─────────
@@ -1448,34 +1451,6 @@ export function isExecSessionLostBanner(out: string, execSessionId: number): boo
   // String equality is intentional: parseInt would normalize malformed facts
   // such as `01` and can round an out-of-range integer into another identity.
   return match[1] === String(execSessionId);
-}
-
-// Recover the numeric exec-session id the SDK embeds in a formatExecResponse
-// banner for a STILL-RUNNING process (`Process running with session ID <N>`).
-// A finished command emits `Process exited with code <N>` instead (no session
-// id) — that yields null. Only the banner region (before the `Output:` marker)
-// is scanned so a session-id-looking line in the command's own output can't
-// spoof it. This is what makes the interactive PTY work on backends whose only
-// exec surface is execCommand (Modal): without it ptyOpen reports execSessionId
-// = null and every pty/write 409s ("interactive terminal unsupported").
-export function parseExecBannerSessionId(raw: string): number | null {
-  const outputIdx = raw.indexOf("\nOutput:\n");
-  const banner = outputIdx >= 0 ? raw.slice(0, outputIdx) : raw.startsWith("Output:\n") ? "" : raw;
-  const match = banner.match(/Process running with session ID (\d+)/);
-  if (!match) return null;
-  const n = Number.parseInt(match[1]!, 10);
-  return Number.isFinite(n) ? n : null;
-}
-
-/** Recover a completed execCommand fallback's exit status from its banner.
- * Only the banner region is inspected, so command output cannot spoof success. */
-export function parseExecBannerExitCode(raw: string): number | null {
-  const outputIdx = raw.indexOf("\nOutput:\n");
-  const banner = outputIdx >= 0 ? raw.slice(0, outputIdx) : raw.startsWith("Output:\n") ? "" : raw;
-  const match = banner.match(/Process exited with code (-?\d+)/);
-  if (!match) return null;
-  const exitCode = Number.parseInt(match[1]!, 10);
-  return Number.isSafeInteger(exitCode) ? exitCode : null;
 }
 
 function sniffBinary(bytes: Buffer): boolean {

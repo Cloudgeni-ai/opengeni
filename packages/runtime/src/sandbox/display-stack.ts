@@ -18,6 +18,7 @@
 // gVisor harness (V2 PASSED live on Modal: XTEST input read-back under runsc).
 
 import { DESKTOP_STREAM_PORT } from "@opengeni/contracts";
+import { parseExecResponseBanner } from "./exec-banner";
 
 // Re-export under the canonical name the module spec uses (STREAM_PORT) while
 // keeping DESKTOP_STREAM_PORT as the single source of truth (contracts).
@@ -323,17 +324,19 @@ function execResultOutput(result: ExecResultLike | string): string {
 
 function execResultExitCode(result: ExecResultLike | string): number | null {
   if (typeof result === "string") {
-    const matches = [...result.matchAll(/Process exited with code (-?\d+)/gu)];
-    const value = matches.at(-1)?.[1];
-    return value === undefined ? null : Number(value);
+    const banner = parseExecResponseBanner(result);
+    if (banner.kind === "exited") return banner.exitCode;
+    // A malformed/truncated SDK response must not fall through to command-body
+    // marker inference, because its real terminal status is unknowable.
+    return banner.kind === "invalid" ? -1 : null;
   }
   return typeof result.exitCode === "number" ? result.exitCode : null;
 }
 
 function execResultSessionId(result: ExecResultLike | string): number | null {
   if (typeof result === "string") {
-    const match = /Process running with session ID (\d+)/u.exec(result);
-    return match ? Number(match[1]) : null;
+    const banner = parseExecResponseBanner(result);
+    return banner.kind === "running" ? banner.sessionId : null;
   }
   const value = result.sessionId ?? result.session_id;
   return typeof value === "number" ? value : null;
