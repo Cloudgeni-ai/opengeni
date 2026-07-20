@@ -11,12 +11,23 @@ export const CONTRACT = Object.freeze({
   dispatcherId: "55702375",
   originalMainSha: "d64797027ef578190f563783c4908e6ac2fa353e",
   originalTreeSha: "6882878011386dc9c0a1de147c2c4a308284a7e2",
-  headBranch: "ope25-admission-governance",
+  bootstrapPullRequestNumber: 506,
+  bootstrapHeadBranch: "feat/ope25-admission-bootstrap",
+  bootstrapTitle: "chore: add exact OPE-25 admission bootstrap",
+  reviewedCandidateSha: "fb3b151fdc5f188af001004e11e03fdb2ba290a6",
+  reviewedCandidateTreeSha: "808290ab3174a7b22bc5d6f7bb06c0d2bf6a2a2e",
+  headBranch: "ope25-admission-governance-v2",
   workflowPath: ".github/workflows/ope25-admission-bootstrap.yml",
   helperPath: "scripts/ope25-admission-bootstrap.mjs",
   testPath: "scripts/ope25-admission-bootstrap.test.ts",
-  marker: "ope25-admission-governance-pr:v1",
-  title: "chore: restore exact OPE-25 admission tree",
+  marker: "ope25-admission-governance-pr:v2",
+  title: "chore: restore exact OPE-25 admission tree (v2)",
+});
+
+export const REVIEWED_CANDIDATE_BLOBS = Object.freeze({
+  [CONTRACT.workflowPath]: "71ccf0091ac1562ffc81f2f4fdfcaacb699ea418",
+  [CONTRACT.helperPath]: "921567a843c133fee47f6f3e521c9cc369c5dc37",
+  [CONTRACT.testPath]: "449943810df5f3b0095ff0c298e35390bcc459bd",
 });
 
 export const TEMPORARY_PATHS = Object.freeze(
@@ -31,6 +42,27 @@ function compareCodeUnits(left, right) {
 
 function invariant(condition, message) {
   if (!condition) throw new Error(message);
+}
+
+function errorMessage(error) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+export class ManualInterventionError extends Error {
+  constructor(number, verificationError, cleanupError) {
+    super(
+      `OPE25_BOOTSTRAP_MANUAL_INTERVENTION: created PR #${number} failed verification (` +
+        `${errorMessage(verificationError)}) and automatic closure/readback failed (` +
+        `${errorMessage(cleanupError)}). Close only PR #${number} manually and do not rerun ` +
+        `marker ${CONTRACT.marker}.`,
+      { cause: cleanupError },
+    );
+    this.name = "ManualInterventionError";
+    this.code = "OPE25_BOOTSTRAP_MANUAL_INTERVENTION";
+    this.pullRequestNumber = number;
+    this.verificationError = verificationError;
+    this.cleanupError = cleanupError;
+  }
 }
 
 function assertSha(value, label) {
@@ -192,6 +224,67 @@ export function assertTemporaryBaseTree(originalValue, temporaryValue, temporary
   }
 }
 
+function assertReviewedCandidateTree(value) {
+  const reviewed = canonicalLeafMap(
+    value,
+    CONTRACT.reviewedCandidateTreeSha,
+    "reviewed candidate tree",
+  );
+  for (const path of TEMPORARY_PATHS) {
+    const entry = reviewed.get(path);
+    invariant(
+      entry?.mode === "100644" &&
+        entry.type === "blob" &&
+        entry.sha === REVIEWED_CANDIDATE_BLOBS[path],
+      `reviewed candidate blob changed: ${path}`,
+    );
+  }
+}
+
+function assertBootstrapPullRequest(value, baseSha, candidateHeadSha) {
+  invariant(
+    value?.number === CONTRACT.bootstrapPullRequestNumber,
+    "bootstrap source pull-request number changed",
+  );
+  invariant(
+    value?.state === "closed" && value?.merged === true,
+    "bootstrap source pull request is not merged",
+  );
+  invariant(
+    typeof value?.merged_at === "string" && value.merged_at.length > 0,
+    "bootstrap source merge timestamp is missing",
+  );
+  invariant(value?.merge_commit_sha === baseSha, "bootstrap source merge SHA differs from B");
+  invariant(
+    value?.title === CONTRACT.bootstrapTitle,
+    "bootstrap source pull-request title changed",
+  );
+  invariant(
+    value?.user?.login === CONTRACT.dispatcherLogin && value.user.type === "User",
+    "bootstrap source pull-request author changed",
+  );
+  invariant(
+    value?.merged_by?.login === CONTRACT.dispatcherLogin && value.merged_by.type === "User",
+    "bootstrap source pull-request merger changed",
+  );
+  invariant(
+    value?.base?.ref === CONTRACT.defaultBranch &&
+      value.base.sha === CONTRACT.originalMainSha &&
+      value.base.repo?.full_name === CONTRACT.repository,
+    "bootstrap source pull-request base changed",
+  );
+  invariant(
+    value?.head?.ref === CONTRACT.bootstrapHeadBranch &&
+      value.head.sha === candidateHeadSha &&
+      value.head.repo?.full_name === CONTRACT.repository,
+    "bootstrap source pull-request head changed",
+  );
+  invariant(
+    value?.commits === 2 && value?.changed_files === TEMPORARY_PATHS.length,
+    "bootstrap source pull-request commit or file count changed",
+  );
+}
+
 async function inspectSourceIdentity(api, baseSha) {
   const repository = await api(`/repos/${CONTRACT.repository}`);
   assertRepository(repository);
@@ -213,10 +306,14 @@ async function inspectSourceIdentity(api, baseSha) {
   );
   const candidateHeadSha = baseCommit.parents[1];
 
-  const [originalCommitValue, candidateCommitValue] = await Promise.all([
-    api(`/repos/${CONTRACT.repository}/git/commits/${CONTRACT.originalMainSha}`),
-    api(`/repos/${CONTRACT.repository}/git/commits/${candidateHeadSha}`),
-  ]);
+  const [bootstrapPullRequest, originalCommitValue, reviewedCommitValue, candidateCommitValue] =
+    await Promise.all([
+      api(`/repos/${CONTRACT.repository}/pulls/${CONTRACT.bootstrapPullRequestNumber}`),
+      api(`/repos/${CONTRACT.repository}/git/commits/${CONTRACT.originalMainSha}`),
+      api(`/repos/${CONTRACT.repository}/git/commits/${CONTRACT.reviewedCandidateSha}`),
+      api(`/repos/${CONTRACT.repository}/git/commits/${candidateHeadSha}`),
+    ]);
+  assertBootstrapPullRequest(bootstrapPullRequest, baseSha, candidateHeadSha);
   const originalCommit = assertCommit(
     originalCommitValue,
     CONTRACT.originalMainSha,
@@ -226,24 +323,41 @@ async function inspectSourceIdentity(api, baseSha) {
     originalCommit.treeSha === CONTRACT.originalTreeSha,
     "authorized original commit tree changed",
   );
+  const reviewedCommit = assertCommit(
+    reviewedCommitValue,
+    CONTRACT.reviewedCandidateSha,
+    "reviewed candidate commit",
+  );
+  invariant(
+    reviewedCommit.parents.length === 1 && reviewedCommit.parents[0] === CONTRACT.originalMainSha,
+    "reviewed candidate is not one commit on the authorized main",
+  );
+  invariant(
+    reviewedCommit.treeSha === CONTRACT.reviewedCandidateTreeSha,
+    "reviewed candidate commit tree changed",
+  );
   const candidateCommit = assertCommit(
     candidateCommitValue,
     candidateHeadSha,
-    "temporary candidate commit",
+    "corrected candidate commit",
   );
   invariant(
-    candidateCommit.parents.length === 1 && candidateCommit.parents[0] === CONTRACT.originalMainSha,
-    "temporary candidate is not one commit on the authorized main",
+    candidateCommit.parents.length === 1 &&
+      candidateCommit.parents[0] === CONTRACT.reviewedCandidateSha,
+    "corrected candidate is not one fix commit on the reviewed candidate",
   );
   invariant(
     candidateCommit.treeSha === baseCommit.treeSha,
-    "temporary merge tree differs from the reviewed candidate tree",
+    "temporary merge tree differs from the corrected candidate tree",
   );
 
-  const [originalTree, temporaryTree] = await Promise.all([
+  const [originalTree, reviewedTree, temporaryTree] = await Promise.all([
     api(`/repos/${CONTRACT.repository}/git/trees/${CONTRACT.originalTreeSha}?recursive=1`),
+    api(`/repos/${CONTRACT.repository}/git/trees/${CONTRACT.reviewedCandidateTreeSha}?recursive=1`),
     api(`/repos/${CONTRACT.repository}/git/trees/${baseCommit.treeSha}?recursive=1`),
   ]);
+  assertTemporaryBaseTree(originalTree, reviewedTree, CONTRACT.reviewedCandidateTreeSha);
+  assertReviewedCandidateTree(reviewedTree);
   assertTemporaryBaseTree(originalTree, temporaryTree, baseCommit.treeSha);
 
   const headRef = await api(`/repos/${CONTRACT.repository}/git/ref/heads/${CONTRACT.headBranch}`);
@@ -274,7 +388,7 @@ function canonicalPullRequestBody(identity) {
     "",
     "`H` has sole parent `B` and restores `T` exactly. Do not update, rebase, squash, retarget, or reuse this PR. The eventual merge must be a two-parent merge commit with first parent `B`, second parent `H`, and tree `T`.",
     "",
-    "GitHub suppresses recursive `pull_request` workflows for PRs created with `GITHUB_TOKEN`. After this workflow succeeds, an explicitly authorized human must close and reopen this same draft PR using a human token. The `reopened` provider event is covered by `.github/workflows/ci.yml`'s existing `pull_request` trigger and does not change `H` or bot authorship. Before any review, verify the PR author is still `github-actions[bot]`, the head is still `H`, and the exact-H `Typecheck and unit tests`, `Deployment artifacts`, and `Workload image builds` jobs are terminal-successful.",
+    "GitHub may hold workflows triggered by a `GITHUB_TOKEN`-created PR for repository approval instead of running them automatically. Do not rely on that initial event. After this workflow succeeds, an explicitly authorized human must close and reopen this same draft PR using a human token as the deterministic fallback. The natural `reopened` provider event is covered by `.github/workflows/ci.yml`'s existing `pull_request` trigger and does not change `H` or bot authorship. Before any review, verify the PR author is still `github-actions[bot]`, the head is still `H`, and the exact-H `Typecheck and unit tests`, `Deployment artifacts`, and `Workload image builds` jobs are terminal-successful.",
     "",
     "Independent Sol/xhigh review and canonical-v2 provider approval remain mandatory. This PR is not release authorization.",
   ].join("\n");
@@ -383,6 +497,32 @@ async function assertRefsUnchanged(api, identity) {
   );
 }
 
+async function closeAndProveCreatedPullRequest(api, number) {
+  const path = `/repos/${CONTRACT.repository}/pulls/${number}`;
+  const patched = await api(path, { method: "PATCH", body: { state: "closed" } });
+  invariant(
+    patched?.number === number && patched?.state === "closed",
+    "cleanup PATCH did not close the created pull request",
+  );
+  const readback = await api(path);
+  invariant(readback?.number === number, "cleanup readback returned a different pull request");
+  invariant(
+    readback?.state === "closed" && readback?.merged === false,
+    "cleanup readback did not prove the created pull request closed and unmerged",
+  );
+}
+
+async function verifyCreatedPullRequest(api, number, identity, expectedBody) {
+  const pull = await api(`/repos/${CONTRACT.repository}/pulls/${number}`);
+  await assertCanonicalPullRequest(api, pull, identity, expectedBody);
+  await assertRefsUnchanged(api, identity);
+  const finalMatches = equivalentPullRequests(await listAllPullRequests(api));
+  invariant(
+    finalMatches.length === 1 && finalMatches[0]?.number === number,
+    "created bootstrap pull request is not globally unique",
+  );
+}
+
 export async function runBootstrap(options = {}) {
   const env = options.env ?? process.env;
   const logger = options.logger ?? console;
@@ -395,6 +535,11 @@ export async function runBootstrap(options = {}) {
   if (initialMatches.length > 0) {
     invariant(initialMatches.length === 1, "multiple equivalent bootstrap pull requests exist");
     const existing = await api(`/repos/${CONTRACT.repository}/pulls/${initialMatches[0].number}`);
+    invariant(
+      existing?.state === "open",
+      `equivalent bootstrap PR #${existing?.number ?? "unknown"} is closed; marker ` +
+        `${CONTRACT.marker} is terminal and must not be retried`,
+    );
     await assertCanonicalPullRequest(api, existing, identity, expectedBody);
     await assertRefsUnchanged(api, identity);
     logger.log(`Canonical bootstrap PR #${existing.number} already exists; no mutation performed.`);
@@ -423,15 +568,21 @@ export async function runBootstrap(options = {}) {
     Number.isSafeInteger(created?.number) && created.number > 0,
     "GitHub did not return the created pull-request number",
   );
-
-  const pull = await api(`/repos/${CONTRACT.repository}/pulls/${created.number}`);
-  await assertCanonicalPullRequest(api, pull, identity, expectedBody);
-  await assertRefsUnchanged(api, identity);
-  const finalMatches = equivalentPullRequests(await listAllPullRequests(api));
-  invariant(
-    finalMatches.length === 1 && finalMatches[0]?.number === created.number,
-    "created bootstrap pull request is not globally unique",
-  );
+  try {
+    await verifyCreatedPullRequest(api, created.number, identity, expectedBody);
+  } catch (verificationError) {
+    try {
+      await closeAndProveCreatedPullRequest(api, created.number);
+    } catch (cleanupError) {
+      throw new ManualInterventionError(created.number, verificationError, cleanupError);
+    }
+    throw new Error(
+      `Created bootstrap PR #${created.number} failed verification and was closed. ` +
+        `Marker ${CONTRACT.marker} is terminal and must not be retried. Original failure: ` +
+        errorMessage(verificationError),
+      { cause: verificationError },
+    );
+  }
   logger.log(
     `Created canonical draft bootstrap PR #${created.number} at exact head ${identity.headSha}.`,
   );

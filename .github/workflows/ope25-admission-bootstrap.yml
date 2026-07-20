@@ -24,7 +24,7 @@ jobs:
     env:
       GITHUB_TOKEN: ${{ github.token }}
       OPENGENI_BOOTSTRAP_ACTION: open_exact_governance_pr
-      BOOTSTRAP_HELPER_SHA256: 887677f1bdb6bc3c16e4fe3b375e45bf794654c03f5ebf1f385588ed82636d59
+      BOOTSTRAP_HELPER_SHA256: 826c445002f3f5e33bb8a285dcd12de7bab032f51271312ecbcfca14f3072890
     steps:
       - name: Fetch and execute the exact base-owned bootstrap helper
         shell: bash
