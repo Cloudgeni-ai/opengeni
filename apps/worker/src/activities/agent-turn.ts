@@ -1192,6 +1192,19 @@ export function computerToolModeForTurn(
   return "hosted";
 }
 
+/**
+ * Decide whether this turn's provider accepts typed file/image content in a
+ * user message. The legacy built-in client and registry Responses clients use
+ * the Agents SDK Responses converter, which supports `input_image` and
+ * `input_file`. Chat-completions providers retain the sandbox-path projection
+ * until that transport declares and proves an equivalent capability.
+ */
+export function modelAcceptsTypedAttachmentContentForTurn(
+  resolvedModel: { provider: { api: ModelProviderApi } } | null,
+): boolean {
+  return resolvedModel === null || resolvedModel.provider.api === "responses";
+}
+
 export type TurnSandboxProvisioner<T> = {
   get(): Promise<T>;
   hasStarted(): boolean;
@@ -4644,6 +4657,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             recovering: turn.executionGeneration > 1,
             ...(unavailableSandboxFilesNote ? { unavailableSandboxFilesNote } : {}),
             ...(runCredentialsNote ? { runCredentialsNote } : {}),
+            ...(modelAcceptsTypedAttachmentContentForTurn(resolvedModel) && objectStorage
+              ? {
+                  readFileBytesForModel: (file) => objectStorage.getFileBytes(file),
+                }
+              : {}),
           },
         );
         runInput = prepared.input;
