@@ -183,7 +183,7 @@ export async function enableCapability(input: {
   // Credential-header storage is written exclusively by this flow; strip the
   // reserved keys from caller-provided config so the stored shape stays
   // trustworthy and no plaintext credentials sneak in through config.headers.
-  const installationConfig: Record<string, unknown> = { ...input.payload.config };
+  let installationConfig: Record<string, unknown> = { ...input.payload.config };
   delete installationConfig.headers;
   delete installationConfig.headersEncrypted;
   delete installationConfig.headerNames;
