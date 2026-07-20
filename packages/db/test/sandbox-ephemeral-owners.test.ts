@@ -5,6 +5,7 @@ import {
   acquireLease,
   createDb,
   deactivateSandboxEphemeralOwner,
+  findLiveModalSandboxInstanceAttribution,
   listLiveModalSandboxInstanceAttributions,
   registerSandboxEphemeralOwner,
   type Database,
@@ -319,6 +320,18 @@ describe("sandbox ephemeral ownership (real PostgreSQL + FORCE RLS)", () => {
       liveness: null,
       expiresAt: verifier.expiresAt,
     });
+    await expect(findLiveModalSandboxInstanceAttribution(db, instanceId)).resolves.toEqual({
+      ownerKind: "rig_verification",
+      ownerId: executionId,
+      workspaceId: workspace.workspaceId,
+      instanceId,
+      sandboxGroupId: null,
+      liveness: null,
+      expiresAt: verifier.expiresAt,
+    });
+    await expect(
+      findLiveModalSandboxInstanceAttribution(db, `modal-missing-${executionId}`),
+    ).resolves.toBeNull();
   });
 
   test("workspace RLS hides foreign ownership and rejects a colliding foreign execution", async () => {
@@ -416,6 +429,9 @@ describe("sandbox ephemeral ownership (real PostgreSQL + FORCE RLS)", () => {
         (row) => row.ownerKind === "rig_verification" && row.ownerId === executionId,
       ),
     ).toBe(false);
+    await expect(
+      findLiveModalSandboxInstanceAttribution(db, currentInstanceId),
+    ).resolves.toBeNull();
   });
 
   test("process death is bounded by expiry without explicit deactivation", async () => {

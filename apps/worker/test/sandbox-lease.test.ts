@@ -41,12 +41,14 @@ import {
   persistDrainSnapshot,
   persistWarmSnapshot,
   recordWarmingSandboxCreated,
+  registerSandboxEphemeralOwner,
   touchLeaseHolder,
   withWorkspaceRls,
   type Database,
   type DbClient,
 } from "@opengeni/db";
 import { createObservability } from "@opengeni/observability";
+import { sweepModalOrphanSandboxes } from "@opengeni/runtime";
 import {
   acquireSharedTestDatabase,
   type SharedTestDatabase,
@@ -54,6 +56,7 @@ import {
 } from "@opengeni/testing";
 import {
   createSandboxLeaseActivities,
+  type SweepModalSandboxesFn,
   type SweepModalOrphansFn,
   type TerminateBoxFn,
 } from "../src/activities/sandbox-lease";
@@ -923,6 +926,111 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
 
     expect(result.modalOrphansTerminated).toBe(2);
     expect(capturedGroups).toContain(ids.groupId);
+  }, 60_000);
+
+  test("(1e) Modal orphan sweep revalidates ownership registered after its DB snapshot before terminating", async () => {
+    if (!available) return;
+    const modalSettings = testSettings({
+      ...REAPER_SETTINGS,
+      sandboxBackend: "modal",
+      modalTokenId: "tok-id",
+      modalTokenSecret: "tok-secret",
+      modalAppName: "opengeni-test-app",
+    });
+    const workspace = await freshWorkspace();
+    const executionId = crypto.randomUUID();
+    const instanceId = `sb-late-verifier-${executionId}`;
+    const wrongInstanceId = `sb-wrong-verifier-${executionId}`;
+    const createdAtMs = Date.now();
+    const events: string[] = [];
+    const terminated: string[] = [];
+    let listed = false;
+
+    const sweepModalSandboxes: SweepModalSandboxesFn = async (
+      settings,
+      initialAttributions,
+      options,
+    ) => {
+      // Production has already captured its global DB projection. This exact
+      // verifier does not exist in it yet.
+      expect(initialAttributions.some((entry) => entry.instanceId === instanceId)).toBe(false);
+      events.push("initial-db-snapshot");
+
+      // The verifier durably registers and tags after that snapshot but before
+      // the provider list returns it — the review's destructive interleaving.
+      await registerSandboxEphemeralOwner(db, {
+        executionId,
+        ...workspace,
+        kind: "rig_verification",
+        backend: "modal",
+        instanceId,
+        expiresAt: new Date(createdAtMs + 10 * 60_000),
+      });
+      events.push("durable-registration-and-tagging");
+
+      const tags = [
+        { tagName: "opengeni", tagValue: "true" },
+        { tagName: "opengeni_owner_kind", tagValue: "rig_verification" },
+        { tagName: "opengeni_owner_id", tagValue: executionId },
+        { tagName: "opengeni_workspace_id", tagValue: workspace.workspaceId },
+      ];
+      const modalClient = {
+        apps: { fromName: async () => ({ appId: "app-1" }) },
+        cpClient: {
+          sandboxList: async () => {
+            events.push("provider-enumeration");
+            if (listed) return { sandboxes: [] };
+            listed = true;
+            return {
+              sandboxes: [
+                // The newly registered box is only ~1s old, exactly matching
+                // the required fresh-create race shape.
+                { id: instanceId, createdAt: createdAtMs / 1000, tags },
+                // A copied attribution on an old wrong instance remains stale
+                // and must still be terminated after exact revalidation.
+                { id: wrongInstanceId, createdAt: (createdAtMs - 180_000) / 1000, tags },
+              ],
+            };
+          },
+        },
+        sandboxes: {
+          fromId: async (id: string) => ({
+            terminate: async () => terminated.push(id),
+            setTags: async () => {},
+          }),
+        },
+        close: () => {},
+      };
+      const revalidate = options?.revalidateLiveAttribution;
+      expect(revalidate).toBeDefined();
+      return await sweepModalOrphanSandboxes(settings, initialAttributions, {
+        ...options,
+        client: modalClient as never,
+        now: new Date(createdAtMs + 1_000),
+        revalidateLiveAttribution: async (candidateId) => {
+          events.push(`exact-revalidation:${candidateId}`);
+          return await revalidate!(candidateId);
+        },
+      });
+    };
+
+    const { reapSandboxLeases } = createSandboxLeaseActivities(reaperServices(modalSettings), {
+      sweepModalSandboxes,
+    });
+    const result = await reapSandboxLeases();
+
+    expect(terminated).toEqual([wrongInstanceId]);
+    expect(result.modalOrphansTerminated).toBe(1);
+    expect(events.slice(0, 3)).toEqual([
+      "initial-db-snapshot",
+      "durable-registration-and-tagging",
+      "provider-enumeration",
+    ]);
+    expect(events).toContain(`exact-revalidation:${instanceId}`);
+    expect(events).toContain(`exact-revalidation:${wrongInstanceId}`);
+    expect(events.indexOf(`exact-revalidation:${instanceId}`)).toBeGreaterThan(
+      events.indexOf("provider-enumeration"),
+    );
   }, 60_000);
 
   test("(2) provider stop() fires ONLY at refcount=0 past grace — never under a held turn/viewer or during the grace", async () => {

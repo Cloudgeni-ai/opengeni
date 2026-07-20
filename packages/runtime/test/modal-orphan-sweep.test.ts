@@ -58,6 +58,39 @@ function fakeModalClient(sandboxes: FakeSandboxInfo[]) {
   return { client, terminated, retagged };
 }
 
+function fakePagedModalClient(
+  pages: FakeSandboxInfo[][],
+  options: { terminateFailures?: Set<string> } = {},
+) {
+  const terminated: string[] = [];
+  const listCursors: Array<number | undefined> = [];
+  let page = 0;
+  const client = {
+    apps: {
+      fromName: async () => ({ appId: "app-1" }),
+    },
+    cpClient: {
+      sandboxList: async (input: { beforeTimestamp?: number }) => {
+        listCursors.push(input.beforeTimestamp);
+        return { sandboxes: pages[page++] ?? [] };
+      },
+    },
+    sandboxes: {
+      fromId: async (id: string) => ({
+        terminate: async () => {
+          if (options.terminateFailures?.has(id)) {
+            throw new Error(`terminate failed: ${id}`);
+          }
+          terminated.push(id);
+        },
+        setTags: async () => {},
+      }),
+    },
+    close: () => {},
+  };
+  return { client, terminated, listCursors };
+}
+
 function attributionTags(input: { leaseId: string; workspaceId: string; sandboxGroupId: string }) {
   return [
     { tagName: "opengeni", tagValue: "true" },
@@ -179,6 +212,140 @@ describe("sweepModalOrphanSandboxes live-instance guard", () => {
       "stale_attribution",
       "unattributed",
     ]);
+  });
+
+  test("revalidates an old candidate after enumeration and protects newly visible exact ownership", async () => {
+    const createdAtMs = Date.parse("2026-07-19T12:00:00.000Z");
+    const owner: LiveModalSandboxEphemeralOwnerAttribution = {
+      ownerKind: "rig_verification",
+      ownerId: "11111111-1111-4111-8111-111111111111",
+      workspaceId: "22222222-2222-4222-8222-222222222222",
+      instanceId: "sb-late-owner",
+      expiresAt: new Date(createdAtMs + 20 * 60_000),
+    };
+    const { client, terminated } = fakeModalClient([
+      {
+        id: owner.instanceId,
+        createdAt: createdAtMs / 1000,
+        tags: verifierTags({ ownerId: owner.ownerId, workspaceId: owner.workspaceId }),
+      },
+    ]);
+    const revalidated: string[] = [];
+    const result = await sweepModalOrphanSandboxes(testSettings(MODAL_SETTINGS), [], {
+      client: client as never,
+      now: new Date(createdAtMs + 180_000),
+      revalidateLiveAttribution: async (instanceId) => {
+        revalidated.push(instanceId);
+        return owner;
+      },
+    });
+
+    expect(revalidated).toEqual([owner.instanceId]);
+    expect(terminated).toEqual([]);
+    expect(result).toMatchObject({
+      examined: 1,
+      terminated: [],
+      skipped: 1,
+      revalidationFailures: 0,
+    });
+  });
+
+  test("fails closed when authoritative exact-instance revalidation throws", async () => {
+    const { client, terminated } = fakeModalClient([
+      {
+        id: "sb-revalidation-failed",
+        createdAt: 1_000,
+        tags: verifierTags({ ownerId: "owner-gone", workspaceId: "ws-gone" }),
+      },
+    ]);
+    const result = await sweepModalOrphanSandboxes(testSettings(MODAL_SETTINGS), [], {
+      client: client as never,
+      now: new Date(10_000_000),
+      revalidateLiveAttribution: async () => {
+        throw new Error("database unavailable");
+      },
+    });
+
+    expect(terminated).toEqual([]);
+    expect(result.skipped).toBe(1);
+    expect(result.revalidationFailures).toBe(1);
+  });
+
+  test("fails closed when exact-instance revalidation returns a mismatched instance", async () => {
+    const { client, terminated } = fakeModalClient([
+      {
+        id: "sb-revalidation-mismatch",
+        createdAt: 1_000,
+        tags: verifierTags({ ownerId: "owner-mismatch", workspaceId: "ws-mismatch" }),
+      },
+    ]);
+    const result = await sweepModalOrphanSandboxes(testSettings(MODAL_SETTINGS), [], {
+      client: client as never,
+      now: new Date(10_000_000),
+      revalidateLiveAttribution: async () => ({
+        ownerKind: "rig_verification",
+        ownerId: "owner-other",
+        workspaceId: "ws-other",
+        instanceId: "sb-other",
+        expiresAt: new Date(20_000_000),
+      }),
+    });
+
+    expect(terminated).toEqual([]);
+    expect(result.skipped).toBe(1);
+    expect(result.revalidationFailures).toBe(1);
+  });
+
+  test("isolates provider termination failure and continues with later candidates", async () => {
+    const { client, terminated } = fakePagedModalClient(
+      [
+        [
+          { id: "sb-fails", createdAt: 1_000, tags: [] },
+          { id: "sb-succeeds", createdAt: 999, tags: [] },
+        ],
+        [],
+      ],
+      { terminateFailures: new Set(["sb-fails"]) },
+    );
+    const revalidated: string[] = [];
+    const result = await sweepModalOrphanSandboxes(testSettings(MODAL_SETTINGS), [], {
+      client: client as never,
+      now: new Date(10_000_000),
+      revalidateLiveAttribution: async (instanceId) => {
+        revalidated.push(instanceId);
+        return null;
+      },
+    });
+
+    expect(terminated).toEqual(["sb-succeeds"]);
+    expect(revalidated).toEqual(["sb-fails", "sb-succeeds"]);
+    expect(result.terminated.map((entry) => entry.sandboxId)).toEqual(["sb-succeeds"]);
+    expect(result.skipped).toBe(1);
+  });
+
+  test("processes multi-page listings with equal timestamps once and advances the cursor", async () => {
+    const { client, terminated, listCursors } = fakePagedModalClient([
+      [
+        { id: "sb-equal-a", createdAt: 1_000, tags: [] },
+        { id: "sb-equal-b", createdAt: 1_000, tags: [] },
+      ],
+      [{ id: "sb-older", createdAt: 999, tags: [] }],
+      [],
+    ]);
+    const revalidated: string[] = [];
+    const result = await sweepModalOrphanSandboxes(testSettings(MODAL_SETTINGS), [], {
+      client: client as never,
+      now: new Date(10_000_000),
+      revalidateLiveAttribution: async (instanceId) => {
+        revalidated.push(instanceId);
+        return null;
+      },
+    });
+
+    expect(terminated).toEqual(["sb-equal-a", "sb-equal-b", "sb-older"]);
+    expect(revalidated).toEqual(["sb-equal-a", "sb-equal-b", "sb-older"]);
+    expect(result.examined).toBe(3);
+    expect(listCursors).toEqual([undefined, 1_000, 999]);
   });
 
   test("a failed re-tag never fails the sweep and the box is still spared", async () => {
@@ -357,7 +524,7 @@ describe("sweepModalOrphanSandboxes rig-verification ownership", () => {
     expect(expired.terminated[0]?.reason).toBe("stale_attribution");
   });
 
-  test("omitted ownership permits immediate cleanup of stale verifier attribution", async () => {
+  test("fresh stale verifier attribution receives create/registration grace", async () => {
     const { client, terminated } = fakeModalClient([
       {
         id: "sb-verifier",
@@ -368,6 +535,24 @@ describe("sweepModalOrphanSandboxes rig-verification ownership", () => {
     const result = await sweepModalOrphanSandboxes(testSettings(MODAL_SETTINGS), [], {
       client: client as never,
       now: new Date(createdAtMs + 30_000),
+    });
+
+    expect(terminated).toEqual([]);
+    expect(result.terminated).toEqual([]);
+    expect(result.skipped).toBe(1);
+  });
+
+  test("omitted ownership permits cleanup of stale verifier attribution after grace", async () => {
+    const { client, terminated } = fakeModalClient([
+      {
+        id: "sb-verifier",
+        createdAt: createdAtMs / 1000,
+        tags: verifierTags({ ownerId, workspaceId }),
+      },
+    ]);
+    const result = await sweepModalOrphanSandboxes(testSettings(MODAL_SETTINGS), [], {
+      client: client as never,
+      now: new Date(createdAtMs + 180_000),
     });
 
     expect(terminated).toEqual(["sb-verifier"]);
