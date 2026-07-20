@@ -78,10 +78,15 @@ type FixtureOptions = {
 function fixture(options: FixtureOptions = {}) {
   let postCount = 0;
   let patchCount = 0;
+  let mutationCount = 0;
   let requestCount = 0;
   let postedBody: Record<string, any> | undefined;
   let createdState = "open";
   let currentHeadSha = headSha;
+  let existingCompetitorAfterDetailArmed = false;
+  let existingCompetitorInjected = false;
+  let existingTerminalRefMovementArmed = false;
+  let pullListCallsAfterTerminalMovementArm = 0;
   const patchedNumbers: number[] = [];
 
   const originalTree = {
@@ -228,6 +233,7 @@ function fixture(options: FixtureOptions = {}) {
     expect(init?.redirect).toBe("error");
     expect(new Headers(init?.headers).get("authorization")).toBe("Bearer test-token");
     const method = init?.method ?? "GET";
+    if (method !== "GET") mutationCount += 1;
     const prefix = `/repos/${CONTRACT.repository}`;
 
     if (method === "GET" && url.pathname === prefix) {
@@ -306,7 +312,12 @@ function fixture(options: FixtureOptions = {}) {
       return Response.json(temporaryTree);
     }
     if (method === "GET" && url.pathname === `${prefix}/pulls` && url.searchParams.has("state")) {
-      return Response.json(pulls);
+      const response = Response.json(pulls);
+      if (existingTerminalRefMovementArmed) {
+        pullListCallsAfterTerminalMovementArm += 1;
+        if (pullListCallsAfterTerminalMovementArm === 2) currentHeadSha = movedHeadSha;
+      }
+      return response;
     }
     if (method === "POST" && url.pathname === `${prefix}/pulls`) {
       postCount += 1;
@@ -324,7 +335,20 @@ function fixture(options: FixtureOptions = {}) {
       return Response.json({ number: 1 }, { status: 201 });
     }
     const pullMatch = new RegExp(`^${prefix}/pulls/([1-9][0-9]*)$`).exec(url.pathname);
-    if (method === "GET" && pullMatch) return Response.json(detail(Number(pullMatch[1])));
+    if (method === "GET" && pullMatch) {
+      const number = Number(pullMatch[1]);
+      const response = Response.json(detail(number));
+      if (number === 1 && existingCompetitorAfterDetailArmed && !existingCompetitorInjected) {
+        existingCompetitorInjected = true;
+        pulls.push({
+          number: 2,
+          title: CONTRACT.title,
+          body: `<!-- ${CONTRACT.marker} -->`,
+          head: { ref: CONTRACT.headBranch, sha: currentHeadSha },
+        });
+      }
+      return response;
+    }
     if (method === "PATCH" && pullMatch) {
       const number = Number(pullMatch[1]);
       patchCount += 1;
@@ -358,6 +382,9 @@ function fixture(options: FixtureOptions = {}) {
     get patchCount() {
       return patchCount;
     },
+    get mutationCount() {
+      return mutationCount;
+    },
     get requestCount() {
       return requestCount;
     },
@@ -366,6 +393,13 @@ function fixture(options: FixtureOptions = {}) {
     },
     get createdState() {
       return createdState;
+    },
+    armExistingCompetitorAfterDetail() {
+      existingCompetitorAfterDetailArmed = true;
+    },
+    armExistingTerminalRefMovement() {
+      existingTerminalRefMovementArmed = true;
+      pullListCallsAfterTerminalMovementArm = 0;
     },
     patchedNumbers,
     originalTree,
@@ -408,6 +442,38 @@ describe("temporary OPE-25 admission bootstrap", () => {
     expect(existing).toMatchObject({ action: "existing", number: 1, baseSha, headSha });
     expect(api.postCount).toBe(1);
     expect(api.patchCount).toBe(0);
+  });
+
+  test("fails without mutation when a competitor appears after existing PR detail", async () => {
+    const api = fixture();
+    await runBootstrap({ env: context(), fetchImpl: api.fetchImpl, logger });
+    const postCount = api.postCount;
+    const patchCount = api.patchCount;
+    const mutationCount = api.mutationCount;
+    api.armExistingCompetitorAfterDetail();
+
+    await expect(
+      runBootstrap({ env: context(), fetchImpl: api.fetchImpl, logger }),
+    ).rejects.toThrow("existing bootstrap pull request is not globally unique");
+    expect(api.postCount).toBe(postCount);
+    expect(api.patchCount).toBe(patchCount);
+    expect(api.mutationCount).toBe(mutationCount);
+  });
+
+  test("fails without mutation when refs move after existing PR terminal uniqueness", async () => {
+    const api = fixture();
+    await runBootstrap({ env: context(), fetchImpl: api.fetchImpl, logger });
+    const postCount = api.postCount;
+    const patchCount = api.patchCount;
+    const mutationCount = api.mutationCount;
+    api.armExistingTerminalRefMovement();
+
+    await expect(
+      runBootstrap({ env: context(), fetchImpl: api.fetchImpl, logger }),
+    ).rejects.toThrow("governance head drifted during bootstrap");
+    expect(api.postCount).toBe(postCount);
+    expect(api.patchCount).toBe(patchCount);
+    expect(api.mutationCount).toBe(mutationCount);
   });
 
   test("rejects caller context drift before any API request", async () => {

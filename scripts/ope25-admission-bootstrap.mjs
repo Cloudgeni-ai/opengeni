@@ -542,6 +542,12 @@ export async function runBootstrap(options = {}) {
     );
     await assertCanonicalPullRequest(api, existing, identity, expectedBody);
     await assertRefsUnchanged(api, identity);
+    const finalMatches = equivalentPullRequests(await listAllPullRequests(api));
+    invariant(
+      finalMatches.length === 1 && finalMatches[0]?.number === existing.number,
+      "existing bootstrap pull request is not globally unique",
+    );
+    await assertRefsUnchanged(api, identity);
     logger.log(`Canonical bootstrap PR #${existing.number} already exists; no mutation performed.`);
     return { action: "existing", number: existing.number, ...identity };
   }
