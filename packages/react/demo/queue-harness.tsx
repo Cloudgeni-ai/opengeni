@@ -5,10 +5,12 @@ import { QueueSurface, type ComposerState, type UseTurnQueueResult } from "../sr
 import {
   QUEUE_BOUNDARY_CLUSTERS,
   queueBoundaryPrompt,
+  queueFallbackPrompt,
   queueHarnessPrompt,
   type QueueBoundaryCluster,
   type QueueBoundaryEdge,
   type QueueBoundaryMaximum,
+  type QueueFallbackKind,
 } from "./queue-fixtures";
 import "../../../apps/web/src/styles.css";
 import "./queue-harness.css";
@@ -28,6 +30,7 @@ const readOnly = params.get("readOnly") === "1";
 const boundaryMaximum = parseBoundaryMaximum(params.get("boundaryMax"));
 const boundaryEdge = parseBoundaryEdge(params.get("boundaryEdge"));
 const boundaryCluster = parseBoundaryCluster(params.get("boundaryCluster"));
+const fallbackKind = parseFallbackKind(params.get("fallback"));
 
 if (theme === "light") {
   document.documentElement.dataset.ogTheme = "light";
@@ -40,7 +43,9 @@ function makeTurn(index: number): SessionTurn {
   const prompt =
     index === 0 && boundaryMaximum && boundaryEdge && boundaryCluster
       ? queueBoundaryPrompt(boundaryMaximum, boundaryEdge, boundaryCluster)
-      : queueHarnessPrompt(index);
+      : index === 0 && fallbackKind
+        ? queueFallbackPrompt(fallbackKind)
+        : queueHarnessPrompt(index);
   return {
     id: `${String(index + 1).padStart(8, "0")}-1111-4111-8111-${suffix}`,
     workspaceId: "11111111-1111-4111-8111-111111111111",
@@ -85,9 +90,14 @@ function parseBoundaryCluster(value: string | null): QueueBoundaryCluster | null
     : null;
 }
 
-const composer: ComposerState = {
+function parseFallbackKind(value: string | null): QueueFallbackKind | null {
+  return value === "whitespace" || value === "combining" || value === "zwj" ? value : null;
+}
+
+const composer: ComposerState & { hasDraftContent: () => boolean } = {
   value: "",
   setValue: () => {},
+  hasDraftContent: () => false,
   send: async () => true,
   steer: async () => true,
   sending: false,

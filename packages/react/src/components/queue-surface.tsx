@@ -65,7 +65,8 @@ export function QueueSurface({ queue, composer, readOnly = false }: QueueSurface
   } | null>(null);
   const count = queue.queue.length;
   const collapsedPreview = useMemo(
-    () => queuePromptPreview(queue.queue[0]?.prompt ?? "", QUEUE_COLLAPSED_PREVIEW_CHARACTERS),
+    () =>
+      queuePromptPreview(queue.queue[0]?.prompt ?? "", QUEUE_COLLAPSED_PREVIEW_CHARACTERS).summary,
     [queue.queue],
   );
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }));
@@ -366,10 +367,12 @@ export function QueueSurface({ queue, composer, readOnly = false }: QueueSurface
                     className="line-clamp-3 break-all whitespace-pre-wrap [unicode-bidi:plaintext]"
                     dir="auto"
                   >
-                    {queuePromptPreview(
-                      queue.queue.find((turn) => turn.id === draggedTurnId)?.prompt ?? "",
-                      QUEUE_ROW_PREVIEW_CHARACTERS,
-                    )}
+                    {
+                      queuePromptPreview(
+                        queue.queue.find((turn) => turn.id === draggedTurnId)?.prompt ?? "",
+                        QUEUE_ROW_PREVIEW_CHARACTERS,
+                      ).summary
+                    }
                   </p>
                 </div>
               ) : null}
@@ -412,6 +415,8 @@ export function QueueSurface({ queue, composer, readOnly = false }: QueueSurface
 const QUEUE_ROW_PREVIEW_CHARACTERS = 360;
 const QUEUE_COLLAPSED_PREVIEW_CHARACTERS = 180;
 const QUEUE_PREVIEW_GRAPHEME_CONTEXT_CHARACTERS = 32;
+const QUEUE_PREVIEW_REFERENCE_SAMPLE_CHARACTERS = 32;
+const QUEUE_VISIBLE_END_IDENTITY_CHARACTERS = 18;
 const QUEUE_PREVIEW_SEPARATOR = " … ";
 const queuePreviewSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 
@@ -419,6 +424,13 @@ type BoundedPromptSample = {
   value: string;
   characters: number;
   truncated: boolean;
+};
+
+type QueuePromptPreview = {
+  summary: string;
+  visibleStart: string;
+  visibleIdentity: string | null;
+  visibleIdentityLabel: "End" | "Safe boundary" | null;
 };
 
 /**
@@ -429,10 +441,18 @@ type BoundedPromptSample = {
  * than fragmented, and malformed UTF-16 is replaced only in the summary. The
  * durable prompt remains exact and no operation scans or copies it in full.
  */
-function queuePromptPreview(prompt: string, maxCharacters: number): string {
+function queuePromptPreview(prompt: string, maxCharacters: number): QueuePromptPreview {
   const wholePromptProbe = samplePromptStart(prompt, maxCharacters + 1);
   if (!wholePromptProbe.truncated && wholePromptProbe.characters <= maxCharacters) {
-    return replaceLoneSurrogates(wholePromptProbe.value);
+    const summary = replaceLoneSurrogates(wholePromptProbe.value);
+    return hasVisiblePromptContent(summary)
+      ? {
+          summary,
+          visibleStart: summary,
+          visibleIdentity: null,
+          visibleIdentityLabel: null,
+        }
+      : fallbackPromptPreview(prompt.length, wholePromptProbe.value, wholePromptProbe.value);
   }
 
   const suffixCharacters = Math.min(Math.floor(maxCharacters / 3), 120);
@@ -471,7 +491,82 @@ function queuePromptPreview(prompt: string, maxCharacters: number): string {
 
   const prefix = takeWholeGraphemesFromStart(prefixSegments, prefixCharacters);
   const suffix = takeWholeGraphemesFromEnd(suffixSegments, suffixCharacters);
-  return `${prefix}${QUEUE_PREVIEW_SEPARATOR}${suffix}`;
+  const reference = boundedPromptSampleReference(
+    prompt.length,
+    prefixSample.value,
+    suffixSample.value,
+  );
+
+  if (!hasVisiblePromptContent(prefix) && !hasVisiblePromptContent(suffix)) {
+    return fallbackPromptPreview(prompt.length, prefixSample.value, suffixSample.value);
+  }
+
+  const safeSuffix = hasVisiblePromptContent(suffix)
+    ? suffix
+    : promptPreviewFallbackLabel(reference);
+  const summary = `${prefix}${QUEUE_PREVIEW_SEPARATOR}${safeSuffix}`;
+  if (!hasVisiblePromptContent(prefix)) {
+    return {
+      summary,
+      visibleStart: safeSuffix,
+      visibleIdentity: null,
+      visibleIdentityLabel: null,
+    };
+  }
+
+  const endIdentity = takeWholeGraphemesFromEnd(
+    suffixSegments,
+    QUEUE_VISIBLE_END_IDENTITY_CHARACTERS,
+  );
+  return {
+    summary,
+    visibleStart: prefix,
+    visibleIdentity: hasVisiblePromptContent(endIdentity) ? endIdentity : `ref ${reference}`,
+    visibleIdentityLabel: hasVisiblePromptContent(endIdentity) ? "End" : "Safe boundary",
+  };
+}
+
+function fallbackPromptPreview(
+  promptLength: number,
+  startSample: string,
+  endSample: string,
+): QueuePromptPreview {
+  const summary = promptPreviewFallbackLabel(
+    boundedPromptSampleReference(promptLength, startSample, endSample),
+  );
+  return {
+    summary,
+    visibleStart: summary,
+    visibleIdentity: null,
+    visibleIdentityLabel: null,
+  };
+}
+
+function promptPreviewFallbackLabel(reference: string): string {
+  return `Content omitted at safe boundary · ref ${reference}`;
+}
+
+function boundedPromptSampleReference(
+  promptLength: number,
+  startSample: string,
+  endSample: string,
+): string {
+  const head = samplePromptStart(startSample, QUEUE_PREVIEW_REFERENCE_SAMPLE_CHARACTERS).value;
+  const tail = samplePromptEnd(endSample, QUEUE_PREVIEW_REFERENCE_SAMPLE_CHARACTERS).value;
+  let hash = 0x811c9dc5;
+  for (const value of [String(promptLength), head, tail]) {
+    for (let index = 0; index < value.length; index += 1) {
+      hash ^= value.charCodeAt(index);
+      hash = Math.imul(hash, 0x01000193);
+    }
+    hash ^= 0xffff;
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0").toUpperCase();
+}
+
+function hasVisiblePromptContent(value: string): boolean {
+  return value.trim().length > 0;
 }
 
 function samplePromptStart(prompt: string, maxCharacters: number): BoundedPromptSample {
@@ -559,6 +654,7 @@ function takeWholeGraphemesFromEnd(segments: string[], maxCharacters: number): s
     characters += segmentCharacters;
   }
   while (selected[0]?.trim().length === 0) selected.shift();
+  while (selected.at(-1)?.trim().length === 0) selected.pop();
   return selected.join("");
 }
 
@@ -596,15 +692,40 @@ function QueuePrompt({
 
   return (
     <div className="min-w-0 max-w-full">
-      <p
-        aria-label={`Queued prompt ${index + 1} summary: ${preview}`}
-        className="line-clamp-1 max-w-full overflow-hidden whitespace-pre-wrap break-all text-xs leading-5 text-fg [unicode-bidi:plaintext] sm:line-clamp-3"
+      <div
+        aria-label={`Queued prompt ${index + 1} summary: ${preview.summary}`}
+        className="max-w-full overflow-hidden text-xs leading-5 text-fg"
         data-testid={`queue-prompt-preview-${index + 1}`}
         dir="auto"
         role="note"
       >
-        <span aria-hidden="true">{preview}</span>
-      </p>
+        <span aria-hidden="true" className="flex min-w-0 max-w-full items-baseline gap-2 sm:block">
+          <span
+            className="line-clamp-1 min-w-0 flex-1 whitespace-pre-wrap break-all [unicode-bidi:plaintext] sm:line-clamp-2"
+            data-testid={`queue-prompt-start-${index + 1}`}
+            dir="auto"
+          >
+            {preview.visibleStart}
+          </span>
+          {preview.visibleIdentity && preview.visibleIdentityLabel ? (
+            <span
+              className="flex min-w-0 max-w-[70%] shrink-0 items-center gap-1 text-2xs leading-4 text-fg-muted sm:mt-0.5 sm:max-w-full"
+              data-testid={`queue-prompt-identity-row-${index + 1}`}
+            >
+              <span className="shrink-0 font-medium text-fg-subtle">
+                {preview.visibleIdentityLabel}
+              </span>
+              <span
+                className="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap font-mono [unicode-bidi:plaintext]"
+                data-testid={`queue-prompt-identity-${index + 1}`}
+                dir="auto"
+              >
+                {preview.visibleIdentity}
+              </span>
+            </span>
+          ) : null}
+        </span>
+      </div>
       <button
         type="button"
         aria-controls={fullContentId}
@@ -802,37 +923,38 @@ function SortableQueueRow({
               align="end"
               sideOffset={4}
               className="z-50 w-48 rounded-md border border-border bg-surface p-1 text-xs text-fg shadow-lg"
+              data-testid={`queue-actions-menu-${index + 1}`}
             >
               <DropdownMenu.Item
-                className="flex cursor-default items-center gap-2 rounded-sm px-2 py-1.5 outline-none focus:bg-surface-2"
+                className="flex cursor-default items-center gap-2 rounded-sm px-2 py-1.5 outline-none focus:bg-surface-2 pointer-coarse:min-h-11"
                 onSelect={onEdit}
               >
                 <PencilIcon className="size-3.5" /> Edit in composer
               </DropdownMenu.Item>
               <DropdownMenu.Separator className="my-1 h-px bg-border" />
               <DropdownMenu.Item
-                className="flex cursor-default items-center gap-2 rounded-sm px-2 py-1.5 outline-none focus:bg-surface-2 data-[disabled]:opacity-50"
+                className="flex cursor-default items-center gap-2 rounded-sm px-2 py-1.5 outline-none focus:bg-surface-2 data-[disabled]:opacity-50 pointer-coarse:min-h-11"
                 disabled={index === 0}
                 onSelect={() => onMove(0)}
               >
                 <ArrowUpToLineIcon className="size-3.5" /> Move to top
               </DropdownMenu.Item>
               <DropdownMenu.Item
-                className="flex cursor-default items-center gap-2 rounded-sm px-2 py-1.5 outline-none focus:bg-surface-2 data-[disabled]:opacity-50"
+                className="flex cursor-default items-center gap-2 rounded-sm px-2 py-1.5 outline-none focus:bg-surface-2 data-[disabled]:opacity-50 pointer-coarse:min-h-11"
                 disabled={index === 0}
                 onSelect={() => onMove(index - 1)}
               >
                 Move up
               </DropdownMenu.Item>
               <DropdownMenu.Item
-                className="flex cursor-default items-center gap-2 rounded-sm px-2 py-1.5 outline-none focus:bg-surface-2 data-[disabled]:opacity-50"
+                className="flex cursor-default items-center gap-2 rounded-sm px-2 py-1.5 outline-none focus:bg-surface-2 data-[disabled]:opacity-50 pointer-coarse:min-h-11"
                 disabled={index === count - 1}
                 onSelect={() => onMove(index + 1)}
               >
                 Move down
               </DropdownMenu.Item>
               <DropdownMenu.Item
-                className="flex cursor-default items-center gap-2 rounded-sm px-2 py-1.5 outline-none focus:bg-surface-2 data-[disabled]:opacity-50"
+                className="flex cursor-default items-center gap-2 rounded-sm px-2 py-1.5 outline-none focus:bg-surface-2 data-[disabled]:opacity-50 pointer-coarse:min-h-11"
                 disabled={index === count - 1}
                 onSelect={() => onMove(count - 1)}
               >

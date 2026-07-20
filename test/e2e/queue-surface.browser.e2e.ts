@@ -8,11 +8,14 @@ import {
   OMITTED_QUEUE_SOURCE_MARKER,
   queueBoundaryPrompt,
   queueBoundarySummary,
+  queueFallbackPrompt,
   queueHarnessPrompt,
   queuePromptFingerprint,
+  queuePromptVisibleIdentity,
   type QueueBoundaryCluster,
   type QueueBoundaryEdge,
   type QueueBoundaryMaximum,
+  type QueueFallbackKind,
 } from "../../packages/react/demo/queue-fixtures";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
@@ -40,12 +43,32 @@ type BrowserMeasurement = {
   backgroundLightness: number | null;
   colorScheme: string;
   focusOrder: FocusMeasurement[];
+  identityGeometry: QueueIdentityGeometry[];
+  portalMenuGeometry: PortalMenuGeometry;
 };
 
 type FocusMeasurement = {
   name: string;
   centerX: number;
   centerY: number;
+};
+
+type QueueIdentityGeometry = {
+  text: string;
+  elementWidth: number;
+  textWidth: number;
+  intersectionWidth: number;
+  intersectionHeight: number;
+  fullyVisible: boolean;
+  insideRow: boolean;
+  insideViewport: boolean;
+};
+
+type PortalMenuGeometry = {
+  itemCount: number;
+  itemHeights: number[];
+  itemWidths: number[];
+  insideViewport: boolean;
 };
 
 type BrowserAccessibilityEvidence = {
@@ -229,6 +252,21 @@ describe("queue surface browser acceptance", () => {
           );
         }
 
+        const identityGeometry = await queueIdentityGeometry(page, 2);
+        expect(identityGeometry).toHaveLength(2);
+        expect(new Set(identityGeometry.map((identity) => identity.text)).size).toBe(2);
+        for (let index = 0; index < identityGeometry.length; index += 1) {
+          const identity = identityGeometry[index];
+          expect(identity?.text).toBe(queuePromptVisibleIdentity(index));
+          expect(identity?.elementWidth ?? 0).toBeGreaterThan(0);
+          expect(identity?.textWidth ?? 0).toBeGreaterThan(0);
+          expect(identity?.intersectionWidth ?? 0).toBeGreaterThan(0);
+          expect(identity?.intersectionHeight ?? 0).toBeGreaterThan(0);
+          expect(identity?.fullyVisible).toBe(true);
+          expect(identity?.insideRow).toBe(true);
+          expect(identity?.insideViewport).toBe(true);
+        }
+
         const focusOrder = await sequentialQueueFocusOrder(page);
         expect(focusOrder.map((item) => item.name)).toEqual([
           "Reorder queued prompt 1",
@@ -245,6 +283,24 @@ describe("queue surface browser acceptance", () => {
             expect(height).toBeGreaterThanOrEqual(43);
           }
         }
+
+        await page
+          .getByRole("button", { name: "More actions for queued prompt 1", exact: true })
+          .click();
+        const portalMenuGeometry = await measurePortalMenu(page, 1);
+        expect(portalMenuGeometry.itemCount).toBe(5);
+        expect(portalMenuGeometry.insideViewport).toBe(true);
+        expect(portalMenuGeometry.itemWidths.every((width) => width > 0)).toBe(true);
+        if (viewport.width <= 768) {
+          expect(portalMenuGeometry.itemHeights.every((height) => height >= 43)).toBe(true);
+        }
+        if (viewport.width === 320 && theme === "light") {
+          await page.screenshot({
+            path: `${evidenceDir}/after-320-light-menu.png`,
+            animations: "disabled",
+          });
+        }
+        await page.keyboard.press("Escape");
         await capture(page, viewport.width, theme, "expanded");
 
         const disclosure = page.getByRole("button", {
@@ -303,6 +359,8 @@ describe("queue surface browser acceptance", () => {
           backgroundLightness: collapsed.backgroundLightness,
           colorScheme: collapsed.colorScheme,
           focusOrder,
+          identityGeometry,
+          portalMenuGeometry,
         });
         await context.close();
       }
@@ -350,6 +408,31 @@ describe("queue surface browser acceptance", () => {
     ).toBe(queueHarnessPrompt(0));
     expect((await pageMetrics(readOnlyPage)).documentOverflow).toBeLessThanOrEqual(1);
     await readOnlyContext.close();
+  }, 30_000);
+
+  test("portaled actions retain a 44px coarse-pointer target at every acceptance width", async () => {
+    for (const viewport of viewports) {
+      const context = await browser.newContext({ viewport, hasTouch: true });
+      try {
+        const page = await context.newPage();
+        const diagnostics = observePageFailures(page);
+        await page.goto(`${baseUrl}/queue.html?count=2&theme=light`, {
+          waitUntil: "networkidle",
+        });
+        await page.getByRole("button", { name: "2 queued prompts", exact: true }).click();
+        await page
+          .getByRole("button", { name: "More actions for queued prompt 1", exact: true })
+          .click();
+        const geometry = await measurePortalMenu(page, 1);
+        expect(geometry.itemCount).toBe(5);
+        expect(geometry.itemHeights.every((height) => height >= 43)).toBe(true);
+        expect(geometry.itemWidths.every((width) => width > 0)).toBe(true);
+        expect(geometry.insideViewport).toBe(true);
+        expect(diagnostics).toEqual([]);
+      } finally {
+        await context.close();
+      }
+    }
   }, 30_000);
 
   test("Chrome exposes one useful bounded summary per duplicate-prefix prompt", async () => {
@@ -466,6 +549,78 @@ describe("queue surface browser acceptance", () => {
     }
   }, 30_000);
 
+  test("Chrome exposes bounded fallback references and exact source disclosure", async () => {
+    const fallbackKinds = [
+      "whitespace",
+      "combining",
+      "zwj",
+    ] as const satisfies readonly QueueFallbackKind[];
+    const context = await browser.newContext({
+      viewport: { width: 320, height: 800 },
+      hasTouch: true,
+      isMobile: true,
+    });
+    try {
+      const page = await context.newPage();
+      const diagnostics = observePageFailures(page);
+      for (const fallback of fallbackKinds) {
+        await page.goto(`${baseUrl}/queue.html?count=1&theme=light&fallback=${fallback}`, {
+          waitUntil: "networkidle",
+        });
+        const collapsedSummary =
+          (await page.getByTestId("queue-collapsed-preview").textContent()) ?? "";
+        expect(collapsedSummary).toMatch(/^Content omitted at safe boundary · ref [0-9A-F]{8}$/);
+        expect(Array.from(collapsedSummary).length).toBeLessThanOrEqual(180);
+        expect(isWellFormedUnicode(collapsedSummary)).toBe(true);
+        const collapsedTree = await chromeAccessibilityTree(page);
+        const collapsedControl = collapsedTree.find(
+          (node) => !node.ignored && node.role === "button" && node.name === "1 queued prompt",
+        );
+        expect(collapsedControl?.description).toBe(collapsedSummary);
+
+        await page.getByRole("button", { name: "1 queued prompt", exact: true }).click();
+        const preview = page.getByTestId("queue-prompt-preview-1");
+        const expandedSummary = ((await preview.getAttribute("aria-label")) ?? "").replace(
+          /^Queued prompt 1 summary: /,
+          "",
+        );
+        expect(expandedSummary).toBe(collapsedSummary);
+        expect(await page.getByTestId("queue-prompt-start-1").textContent()).toBe(collapsedSummary);
+        expect(await page.getByTestId("queue-prompt-identity-1").count()).toBe(0);
+        const expandedTree = await chromeAccessibilityTree(page);
+        const summaryNode = queueSummaryNodes(expandedTree)[0];
+        expect(summaryNode?.name).toBe(`Queued prompt 1 summary: ${collapsedSummary}`);
+        expect(unignoredDescendants(expandedTree, summaryNode?.nodeId ?? "")).toHaveLength(0);
+
+        if (fallback === "zwj") {
+          await page.screenshot({
+            path: `${evidenceDir}/after-320-light-safe-boundary.png`,
+            animations: "disabled",
+          });
+        }
+
+        await page
+          .getByRole("button", {
+            name: "Show full content for queued prompt 1",
+            exact: true,
+          })
+          .click();
+        expect(
+          await page
+            .getByRole("region", {
+              name: "Full content for queued prompt 1",
+              exact: true,
+            })
+            .textContent(),
+        ).toBe(queueFallbackPrompt(fallback));
+        expect((await pageMetrics(page)).documentOverflow).toBeLessThanOrEqual(1);
+      }
+      expect(diagnostics).toEqual([]);
+    } finally {
+      await context.close();
+    }
+  }, 30_000);
+
   test("Chrome exposes whole graphemes at every head and tail preview boundary", async () => {
     const boundaryViewports = [
       { width: 320, height: 800 },
@@ -505,7 +660,10 @@ describe("queue surface browser acceptance", () => {
                 await page.getByRole("button", { name: "1 queued prompt", exact: true }).click();
               } else {
                 await page.getByRole("button", { name: "1 queued prompt", exact: true }).click();
-                summary = (await page.getByTestId("queue-prompt-preview-1").textContent()) ?? "";
+                summary = (
+                  (await page.getByTestId("queue-prompt-preview-1").getAttribute("aria-label")) ??
+                  ""
+                ).replace(/^Queued prompt 1 summary: /, "");
                 const tree = await chromeAccessibilityTree(page);
                 const summaryNode = queueSummaryNodes(tree)[0];
                 chromeAccessibleSummary = (summaryNode?.name ?? "").replace(
@@ -704,6 +862,76 @@ function assertCoherentFocusGeometry(order: FocusMeasurement[], viewportWidth: n
     expect(order[index]?.centerX ?? 0).toBeGreaterThan(order[index - 1]?.centerX ?? Infinity);
   }
   expect(order[5]?.centerY ?? 0).toBeGreaterThan(order[4]?.centerY ?? Infinity);
+}
+
+async function queueIdentityGeometry(page: Page, count: number): Promise<QueueIdentityGeometry[]> {
+  return page.evaluate((expectedCount) => {
+    const intersect = (first: DOMRect, second: DOMRect) => ({
+      width: Math.max(0, Math.min(first.right, second.right) - Math.max(first.left, second.left)),
+      height: Math.max(0, Math.min(first.bottom, second.bottom) - Math.max(first.top, second.top)),
+    });
+    return Array.from(
+      document.querySelectorAll<HTMLElement>('[data-testid^="queue-prompt-identity-"]'),
+    )
+      .filter((element) => !element.dataset.testid?.includes("-row-"))
+      .slice(0, expectedCount)
+      .map((element) => {
+        const elementBounds = element.getBoundingClientRect();
+        const range = document.createRange();
+        range.selectNodeContents(element);
+        const textBounds = range.getBoundingClientRect();
+        const rowBounds = element
+          .closest<HTMLElement>("[data-queue-turn-id]")
+          ?.getBoundingClientRect();
+        const intersection = intersect(elementBounds, textBounds);
+        const styles = getComputedStyle(element);
+        return {
+          text: element.textContent ?? "",
+          elementWidth: elementBounds.width,
+          textWidth: textBounds.width,
+          intersectionWidth: intersection.width,
+          intersectionHeight: intersection.height,
+          fullyVisible:
+            styles.display !== "none" &&
+            styles.visibility !== "hidden" &&
+            Number(styles.opacity) > 0 &&
+            textBounds.left >= elementBounds.left - 0.5 &&
+            textBounds.right <= elementBounds.right + 0.5 &&
+            textBounds.top >= elementBounds.top - 0.5 &&
+            textBounds.bottom <= elementBounds.bottom + 0.5,
+          insideRow:
+            rowBounds !== undefined &&
+            textBounds.left >= rowBounds.left - 0.5 &&
+            textBounds.right <= rowBounds.right + 0.5 &&
+            textBounds.top >= rowBounds.top - 0.5 &&
+            textBounds.bottom <= rowBounds.bottom + 0.5,
+          insideViewport:
+            textBounds.left >= -0.5 &&
+            textBounds.right <= window.innerWidth + 0.5 &&
+            textBounds.top >= -0.5 &&
+            textBounds.bottom <= window.innerHeight + 0.5,
+        };
+      });
+  }, count);
+}
+
+async function measurePortalMenu(page: Page, index: number): Promise<PortalMenuGeometry> {
+  const menu = page.getByTestId(`queue-actions-menu-${index}`);
+  await menu.waitFor();
+  return menu.evaluate((element) => {
+    const menuBounds = element.getBoundingClientRect();
+    const items = Array.from(element.querySelectorAll<HTMLElement>('[role="menuitem"]'));
+    return {
+      itemCount: items.length,
+      itemHeights: items.map((item) => item.getBoundingClientRect().height),
+      itemWidths: items.map((item) => item.getBoundingClientRect().width),
+      insideViewport:
+        menuBounds.left >= -0.5 &&
+        menuBounds.right <= window.innerWidth + 0.5 &&
+        menuBounds.top >= -0.5 &&
+        menuBounds.bottom <= window.innerHeight + 0.5,
+    };
+  });
 }
 
 async function refreshQueue(page: Page): Promise<void> {

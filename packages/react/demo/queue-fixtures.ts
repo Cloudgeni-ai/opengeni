@@ -11,6 +11,7 @@ export const QUEUE_BOUNDARY_CLUSTERS = {
 export type QueueBoundaryCluster = keyof typeof QUEUE_BOUNDARY_CLUSTERS;
 export type QueueBoundaryEdge = "head" | "tail";
 export type QueueBoundaryMaximum = 180 | 360;
+export type QueueFallbackKind = "whitespace" | "combining" | "zwj";
 
 export const HOSTILE_QUEUE_PROMPT = [
   "# Production migration follow-up 👩🏽‍💻",
@@ -37,6 +38,21 @@ export function queuePromptFingerprint(index: number): string {
 
 export function queueHarnessPrompt(index: number): string {
   return `${HOSTILE_QUEUE_PROMPT}\n${queuePromptFingerprint(index)}`;
+}
+
+export function queuePromptVisibleIdentity(index: number): string {
+  return Array.from(queuePromptFingerprint(index)).slice(-18).join("");
+}
+
+export function queueFallbackPrompt(kind: QueueFallbackKind): string {
+  switch (kind) {
+    case "whitespace":
+      return " ".repeat(2_000);
+    case "combining":
+      return `e${"\u0301".repeat(10_000)}`;
+    case "zwj":
+      return `👩${"\u200d👩".repeat(1_000)}`;
+  }
 }
 
 /** A prompt whose named grapheme crosses the old code-point-only preview cut. */
