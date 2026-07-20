@@ -5,7 +5,7 @@
 
 # Organizations and identity migration and compatibility plan
 
-Status: **revised proposal after blocked review; no DDL may land before approval**
+Status: **corrective revision after the second exact-head blocked review; no DDL may land before approval**
 
 Companions: [`tenancy-identity-adr.md`](tenancy-identity-adr.md),
 [`threat-model.md`](threat-model.md)
@@ -29,6 +29,15 @@ Companions: [`tenancy-identity-adr.md`](tenancy-identity-adr.md),
    access than before the deployment.
 10. Destructive cleanup is a later, separately reviewed program—not part of OPE-10's
     initial rollout.
+11. Human/login recovery authority is deployment-scoped and stored outside organization
+    membership. Organization governance recovery is scoped to exactly one organization
+    and has no database capability over human/login state.
+12. No legacy row is considered ready for canonical governance merely because a role,
+    email, login, or workspace membership exists. Required human custody and recovery
+    enrollment are explicit enablement gates.
+13. Identity merge uses bounded invisible staging and a short generation cutover.
+    Post-apply disputes contain and repair forward from retained per-object provenance;
+    there is no data-migration rollback or lossless merge reversal.
 
 ## 2. Existing compatibility spine
 
@@ -87,8 +96,29 @@ Required constraints include:
 - one active membership per human/organization;
 - at most one active personal organization per human;
 - exactly one active personal owner for an active personal organization (enforced by a
-  combination of constraint and serialized transaction); and
+  combination of constraint and serialized transaction);
+- for every active team organization, at least one active human owner and one active
+  human organization recovery steward, including when it has no workspaces or other
+  resources; and
 - unique composite keys needed by workspace-membership foreign keys.
+
+The organization governance row stores a monotonic governance revision and one of
+`governance_pending`, `active`, `governance_locked`, `deletion_pending`, or `deleted`.
+An invitation, API key, service principal, agent, external unknown principal,
+deployment identity-recovery custodian, or deployment organization-governance
+custodian never counts as a human owner or organization recovery steward. An
+organization recovery steward is an explicit active-human membership capability; it is
+not inferred from a legacy admin role.
+
+Direct app-role membership or organization-status DML is denied after canonical
+enablement. Narrow serialized functions lock the governance row and affected
+memberships, compute the post-state, write both canonical and legacy projections,
+increment revisions, append audit/outbox, and reject an active team post-state without
+both required human capabilities. Last-owner/steward transfer is one atomic operation.
+Deletion retains custody through `deletion_pending`; the terminal transition to
+`deleted` deactivates the last memberships in the same transaction. Emergency
+suspension that would orphan governance atomically selects `governance_locked`, not an
+active state without accountable human custody.
 
 ### 3.4 Workspace membership compatibility
 
@@ -147,6 +177,108 @@ Add monotonic security/authorization revisions to the smallest appropriate gover
 membership, and login rows. A durable outbox carries invalidation after the committing
 transaction; publishing before commit is forbidden.
 
+### 3.9 Deployment identity-recovery persistence and privilege
+
+Human recovery factors are owned by a human identity, stored as verifier metadata or
+encrypted references, and versioned independently from login accounts and organization
+memberships. Factor secrets never enter audit, tenant projections, or organization
+tables.
+
+Deployment identity-recovery custodians are separately enrolled human operator
+identities with a dedicated no-content capability, factor root, status/revision, and
+eligibility timestamps. Enrollment does not create an organization membership and
+confers no tenant discovery, workspace access, or ordinary support wildcard. The
+custodian role cannot be synthesized from organization owner/admin/recovery standing.
+
+`identity_recovery_operations` and immutable approval/evidence rows store the target
+human security revision, requested global effects, authority path, factor/custodian
+identities, notice set, affected-grant digest, deadlines, idempotency key, generation,
+state, revocation outbox references, and sanitized deployment-audit outcome. Only
+schema-qualified identity-recovery functions held by the dedicated deployment
+capability can mutate these rows or human/login/session state. They accept no
+organization-derived authority and deny self-approval, stale/new custodian enrollment,
+insufficient distinct factors, expired approval, missing notice, or revision mismatch.
+
+Apply fences the target first, then atomically increments global security revisions and
+revokes every affected login slot, auth session, personal credential, offline cache,
+user-bound delegated token, and stream before a newly proved path is usable. It never
+changes an organization membership, organization role, workspace grant, billing owner,
+or personal-workspace owner. Tests compare seeded organization A, organization B, and
+personal state before and after both allowed and denied ceremonies.
+
+### 3.10 Organization governance recovery persistence and privilege
+
+Organization recovery operations store exactly one organization id and governance
+revision, requested membership/custody effects, eligible active human recovery
+stewards, approvals/notices/deadline, incident, idempotency key, generation, state, and
+organization-scoped audit/outbox references. The operation cannot name or mutate a
+login binding, global human status, human-private owner, another organization, or a
+personal workspace outside its named organization.
+
+Ordinary organization recovery is authorized only by the organization's explicit
+active human recovery stewards under its closed quorum/delay policy. If immediate human
+suspension places an organization in `governance_locked`, separately authorized
+deployment governance custody—not a deployment identity-recovery custodian merely by
+virtue of that role—may use a delayed, noticed, audited ceremony to appoint a proved
+human owner/steward. The new human must independently prove a usable login; the ceremony
+cannot recover sign-in. Reactivation and appointment commit atomically only when the
+active-team invariant is satisfied.
+
+Deployment organization-governance custodians have their own enrollment, status/
+revision, separately held factor roots, no-content database capability, and deployment/
+organization audit trail. They are not organization memberships. Their three-human
+exceptional quorum cannot attach a login or alter global human status, and enrollment
+as a deployment identity-recovery custodian never implies eligibility here or vice
+versa.
+
+Organization-recovery functions run under an organization-scoped capability whose SQL
+surface cannot address human/login/recovery-factor tables. Deployment identity-recovery
+functions cannot call organization-recovery functions as an implicit side effect.
+Cross-scope equality checks prove that either operation leaves all prohibited rows and
+revisions unchanged.
+
+### 3.11 Identity-merge barrier, staging, provenance, and repair
+
+Identity merge persistence separates:
+
+- one merge operation and fencing generation with source security revisions, proofs,
+  decisions, notices, deadlines, and irreversible-prerequisite acknowledgments;
+- a mutation barrier covering source-human owner, organization-governance, billing, and
+  human-private-owner changes;
+- bounded staged rows, checkpoints, a revision-bound manifest digest, and categorized
+  apply effects that remain authorization-invisible until cutover;
+- source-contribution rows and canonical derived rows so authorization never computes a
+  dynamic union from two humans;
+- observation-window write provenance keyed by object owner plane/id and merge
+  generation/sequence; and
+- dispute containment, forward-repair plans/approvals/checkpoints/outcomes, and explicit
+  irreversible-effect records.
+
+Staging orders stable keys and commits at most 500 rows or 250 ms per transaction. The
+short cutover locks only the two human security rows, barrier/generation, affected
+governance summary revisions, and session generations; it validates the complete
+staged digest, activates canonical custody before source contributions become inactive,
+flips canonical resolution, revokes source sessions/credentials, and appends outbox and
+audit atomically. A crash before commit returns to staged validation with no visible
+partial merge.
+
+During the 30-day applied-observation period, every affected write must transactionally
+append merge generation/sequence, owner plane and before/after owner, tenant pair,
+actor/login/source lineage or service actor, before/after revision, idempotency/outbox/
+external-intent references, digest or tombstone, and conflict/reversibility class. A
+later external receipt appends to that exact intent/sequence. A write path that cannot
+persist its required provenance is denied. Billing postings,
+entitlement changes, credential revocations/creation, deletes, audit facts, external
+effects, and personal-organization prerequisites retain their own subsystem authority
+and an explicit irreversible or compensatable classification.
+
+A timely dispute first commits containment and revocation, then builds a paginated
+provenance manifest. Scoped authorities approve only their own plane's deterministic
+forward-repair outcomes. Approvals expire after 14 days or any referenced revision
+change without releasing containment. Repair commits bounded idempotent batches and a
+final per-category report of retained, transferred, revoked, quarantined, compensated,
+and irreversible effects. There is no inverse ledger or state named `reversed`.
+
 ## 4. Backfill classification
 
 Backfill reads stable ids and explicit external sources only. It never merges by email.
@@ -163,6 +295,11 @@ For each `managed_accounts` row whose external source identifies one Better Auth
 5. Create an active owner organization membership.
 6. Link every `user:<id>` workspace membership to that identity, including memberships
    in other organizations.
+
+This deterministic personal-owner mapping does not enroll an organization recovery
+steward, human offline recovery factor, or deployment identity-recovery custodian. The
+personal organization remains in the legacy/dark governance phase until its required
+human recovery path is explicitly enrolled and verified.
 
 Missing referenced users, duplicate external mappings, or one user mapped to multiple
 personal organizations are quarantined for operator resolution. They are not guessed or
@@ -183,6 +320,15 @@ Existing role strings do not automatically become owner/admin organization roles
 the personal account's exact legacy owner mapping backfills owner. All other elevation
 requires an explicit reviewed rule or human operation.
 
+An existing row that will become a team organization remains `governance_pending` until
+an authenticated ceremony appoints at least one active human owner and one active human
+organization recovery steward and records required steward factors. A single proved
+human may hold both capabilities only if deployment policy allows it, but both
+capabilities remain explicit. Legacy role text, verified email, invitation, agent/API
+key, billing contact, support operator, deployment identity-recovery custodian, or
+deployment organization-governance custodian never supplies either team-governance
+capability automatically.
+
 ### 4.3 Legacy billing
 
 For each legacy billing customer, ledger, usage, and entitlement scope:
@@ -202,6 +348,27 @@ For each legacy billing customer, ledger, usage, and entitlement scope:
   app code remains under FORCE RLS.
 - A second complete pass must produce zero new rows before feature enablement.
 
+### 4.5 Recovery and governance enrollment gate
+
+Backfill creates no approval, quorum, proof, or recovery factor. Before an organization
+can become canonical `active`, the enablement transaction must prove:
+
+- its kind and governance status are resolved and its governance revision is current;
+- a personal organization has its exact proved personal owner and required human
+  recovery path;
+- a team organization has at least one active proved human owner and one active proved
+  human organization recovery steward, even if it has no resources;
+- all steward/factor enrollments were completed through noticed, step-up ceremonies,
+  not data inference;
+- no incompatible binary lease, quarantine, role ambiguity, or canonical/legacy grant
+  mismatch remains; and
+- identity-recovery custodians, if deployment policy enables them, were separately
+  enrolled under deployment authority and are not counted in tenant custody.
+
+If these checks are incomplete, legacy authorization may continue only in the
+pre-canonical phase; v2 governance and recovery endpoints remain unavailable. The
+system does not silently mark an unresolved team active or strand it without custody.
+
 ## 5. Constraint rollout
 
 1. Create tables/nullable columns/indexes and RLS policies.
@@ -213,9 +380,15 @@ For each legacy billing customer, ledger, usage, and entitlement scope:
 6. Enable shadow reads and compare canonical versus legacy access contexts.
 7. Drain incompatible binaries, install the versioned database capability/fences, and
    prove there is no old writer or reader lease before any tenant changes authority.
-8. Enable canonical reads for an allow-listed cohort. Canonical/legacy disagreement is
+8. Install and test distinct database capabilities for ordinary canonical governance,
+   exact-organization recovery, deployment organization-governance custody, deployment
+   identity recovery, append-only audit, merge staging, observation provenance, and
+   contained forward repair. No role may inherit a broader plane merely for
+   convenience.
+9. Complete the section 4.5 enrollment gate and enable canonical reads for an
+   allow-listed cohort. Canonical/legacy disagreement is
    denial plus quarantine, never a fallback grant.
-9. Enable multi-account/invitation UI after auth and revocation tests pass.
+10. Enable multi-account/invitation UI after auth and revocation tests pass.
 
 No `NOT NULL`, column drop, table rename, legacy-write removal, or policy relaxation is
 part of the initial feature rollout.
@@ -275,6 +448,12 @@ before membership rows, so an old/new writer race has one serial order: a legacy
 before cutover is reconciled before enablement; after cutover it fails and cannot
 reauthorize a revoked human.
 
+The same direct-DML denial applies to canonical organization membership, owner/steward
+capabilities, governance status, recovery operation, merge barrier/staging/provenance,
+and repair rows. Each narrow function has one declared authority plane and deterministic
+lock order. No generic administrator function may accept a caller-selected scope and
+then mutate both deployment-human and organization-governance state.
+
 New web against old API remains in legacy single-account mode. Old web/SDK against new
 API continues to receive additive legacy fields, but its server is still v2 authority.
 New API with an incompatible old worker cannot enable identity-dependent jobs; workers
@@ -306,14 +485,20 @@ the last v2-compatible binary.
   mismatch, balance mismatch, or RLS-policy failure.
 - Keep canonical governance impossible to enable while any incompatible binary lease
   exists; exercise old/new mutation races continuously.
+- Keep v2 governance unavailable for rows that lack explicit owner/steward/factor
+  enrollment; never “fix” the gate by deriving authority from legacy role/email data.
 
 ### Gate 3: read enablement
 
 - Drain incompatible binaries, rotate/provision the v2 database capability, and prove
   the legacy app role cannot read or mutate a canonical tenant.
 - Atomically switch an internal tenant governance row from `reconciled` to `canonical`
-  only after parity and zero-quarantine checks under the same lock.
+  and organization governance from `governance_pending` to `active` only after parity,
+  zero-quarantine, and section 4.5 human-custody checks under the same lock.
 - Verify revocation deadlines, old-client behavior, and no cross-tenant query/metric.
+- Verify organization-A governance recovery leaves global human, organization-B, and
+  personal state byte-for-byte/revision-for-revision unchanged, and deployment identity
+  recovery leaves all organization governance rows unchanged.
 - Gradually widen; feature flag rollback changes reads/UI only, never schema.
 
 ### Gate 4: multi-account/invitations
@@ -342,6 +527,13 @@ the last v2-compatible binary.
 - Re-run reconciliation after returning to a compatible binary.
 - If invalidation delivery is impaired, fail closed for new requests by reading current
   revision from Postgres and terminate persistent channels rather than trusting cache.
+- A merge dispute rolls no schema or data migration backward. It enters durable
+  containment and executes only an approved, provenance-backed forward-repair plan;
+  missing lineage or expired approval keeps the operation contained.
+- A `governance_locked` team remains unavailable for governance-sensitive mutations
+  until the delayed deployment organization-governance-custody ceremony appoints
+  proved human custody. Incident response must not reactivate it with an invitation,
+  agent, or login recovery alone.
 
 This is “rollback-free forward compatibility”: recovery rolls binaries/features back,
 not data definitions.
@@ -368,7 +560,13 @@ not data definitions.
 - Crash between every backfill checkpoint/write and prove retry convergence.
 - Race old writer/new writer/backfill on the same user and membership.
 - Race invitation acceptance/cancel/resend and owner leave/demote/transfer.
-- Prove one safe outcome and durable audit/idempotency evidence.
+- Race last-owner and last-steward leave/remove/demote in an empty active team, identity
+  suspension, terminal deletion, identity-merge cutover, and organization recovery.
+- Crash before/after every merge staging batch, digest validation, generation flip,
+  observation write/provenance append, containment, repair approval, and repair batch.
+- Prove one safe outcome and durable audit/idempotency evidence: active custody,
+  `governance_locked`, terminal `deleted`, unchanged staging, or contained forward
+  repair—never active missing-human custody or a visible partial merge.
 
 ### FORCE-RLS
 
@@ -377,6 +575,10 @@ not data definitions.
 - Test wrong composite pairs, absent GUCs, stale pooled connections, and dedicated
   schemas.
 - Assert existing protected-table coverage does not decrease.
+- Deny organization-A recovery against human/login and organization-B/personal rows;
+  deny deployment identity recovery against organization-governance rows.
+- Deny an affected observation-window write when its provenance append is absent,
+  stale, wrongly scoped, or fails in the same transaction.
 
 ## 11. Evidence required for candidate handoff
 
@@ -481,7 +683,9 @@ Each transaction targets 250 ms, has `lock_timeout = '1s'`, `statement_timeout =
 and `idle_in_transaction_session_timeout = '5s'`. It locks only selected rows with
 `FOR UPDATE SKIP LOCKED`, writes canonical row + legacy projection + checkpoint in the
 same transaction, and commits before fetching the next batch. A deterministic source
-key and effect ledger make replay after crash idempotent.
+key and categorized effect record make replay after crash idempotent. Identity-merge
+staging uses the separately fenced manifest/provenance contract in section 3.11 rather
+than treating generic backfill records as merge-repair evidence.
 
 The controller pauses new batches when any default gate persists:
 
@@ -517,7 +721,30 @@ In addition to section 10, the implementation must prove:
 - clean install and production-shaped upgrade produce the same constraints/indexes/
   policies/grants despite different row histories;
 - crash before/after every DDL unit, concurrent-index phase, batch write, checkpoint,
-  identity merge effect, audit append, and tenant authority flip converges forward;
+  identity merge stage/cutover/provenance/containment/repair effect, audit append, and
+  tenant authority flip converges forward;
+- organization-A recovery cannot reactivate login/global-human state or mutate
+  organization-B/personal state, while deployment identity recovery cannot mutate any
+  organization governance; include failed quorum, stale factor, notice failure, and
+  revision-race cases;
+- deployment organization-governance custody cannot attach a login, change global
+  human status, read content, or satisfy active-team custody itself; its distinct
+  three-human/delay ceremony may only appoint a freshly proved human under the locked
+  organization revision;
+- an empty active team cannot lose its last active human owner or recovery steward under
+  leave/remove/demote/suspend/delete/merge/recovery races; invitations, agents, API
+  keys, service principals, and either kind of deployment custodian never count;
+- large identity merge staging remains authorization-invisible, bounded to 500 rows or
+  250 ms per transaction, and finishes with a short digest-validated generation cutover
+  that activates canonical custody before source deactivation;
+- concurrent post-apply writes from both source identities, affected organizations, and
+  service actors append complete ordered provenance or fail; test memberships,
+  invitations, private objects, billing/entitlements, credential creation/revocation,
+  audit, deletes/tombstones, and external receipts;
+- dispute containment revokes and fences before review, missing provenance denies,
+  repair approval expires after 14 days without releasing containment, and reports
+  distinguish retained/transferred/revoked/quarantined/compensated/irreversible effects
+  including personal-organization conversion/deletion and external facts;
 - a legacy writer racing canonical grant/revoke before cutover is reconciled, while the
   same write after cutover is database-denied and cannot restore access;
 - old reader, old worker, or stale job claimant lacks the v2 database capability and

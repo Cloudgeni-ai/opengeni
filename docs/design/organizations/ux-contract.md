@@ -5,7 +5,7 @@
 
 # Account → organization → workspace UX contract
 
-Status: **revised proposal after blocked review; implementation remains gated**
+Status: **corrective revision after the second exact-head blocked review; implementation remains gated**
 
 Scope: web console behavior plus requirements for embedded hosts and CLI parity.
 
@@ -218,12 +218,33 @@ Workspace settings owns workspace resource membership and API/service credential
 Organization People may summarize workspace access but does not imply organization roles
 grant content access.
 
-Role UI distinguishes base role from Billing and Recovery capabilities. It shows why an
-action is disabled (for example, “last human owner”), never counts an API key as a
-person, and requires explicit confirmation/step-up for owner or recovery changes.
+Role UI distinguishes base role, **Organization owner**, **Organization recovery
+steward**, and Billing capabilities. Owner and recovery steward appear as separate
+human-custody counts even when one person holds both. Invitations, API keys, agents,
+service principals, and either kind of deployment custodian never appear in either
+count. The UI shows why an action is disabled (for example, “This is the last active
+human recovery steward”), and requires explicit confirmation/step-up for owner or
+steward changes.
 
 Leave, remove, transfer, export, and delete explain scope and post-state. Destructive
 buttons are never adjacent indistinguishable icon-only controls.
+
+An active team organization with zero workspaces/resources still shows and enforces its
+human owner and recovery-steward custody. A last owner/steward cannot leave, be removed,
+or be demoted until an already active proved human accepts atomic transfer, or an
+authorized owner starts explicit organization deletion. Deletion UI explains that
+custody remains through **Deletion pending** and ends only when terminal deletion
+commits; cancelling deletion preserves the same custody.
+
+**Governance locked** is a distinct non-active safety state, not an empty organization.
+It hides governance and membership mutation actions and explains that accountable human
+custody was suspended. Existing workspace content remains available only through
+independently active workspace grants and deployment policy. Organization settings
+offers only status, safe export/support guidance, or the authorized deployment
+organization-governance-custody ceremony. That ceremony names the organization, shows
+delay/notices/approvals, requires the proposed owner/steward to prove their own sign-in,
+and reactivates only after both human capabilities are present. It never says that an
+invitation, agent, API key, or sign-in recovery can unlock governance.
 
 ## 8. Loading, empty, and error states
 
@@ -241,6 +262,10 @@ buttons are never adjacent indistinguishable icon-only controls.
   deployment policy;
 - loading: fixed-size skeleton that does not flash prior tenant labels;
 - partial failure: safe summaries with retry, no stale membership actions;
+- governance pending: canonical organization actions unavailable until explicit human
+  owner/steward and factor enrollment completes;
+- governance locked: neutral locked canvas, no stale People/content controls, and only
+  authorized custody-recovery guidance;
 - deletion pending: prominent status, blocked-create explanation, cancel if authorized.
 
 ### Workspace
@@ -312,14 +337,15 @@ The implementation is not candidate-ready without real-browser evidence for:
 | Width/input | 320 px mobile, 768 px tablet, 1024/1440 desktop; touch and pointer |
 | Theme | light, dark, high contrast where supported |
 | Account | one, multiple, add, re-auth, sign out one, sign out all |
-| Organization | personal, team, none, many, deletion pending |
+| Organization | personal, team, empty active team, none, many, governance pending/locked, deletion pending/finalized |
 | Workspace | none, one, many, paused, inaccessible, revoked mid-view |
 | Invite | valid, wrong account, sensitive-role step-up, expired, replayed, accepted |
 | Navigation blockers | local draft, saving draft, draft conflict, uploading, failed upload, in-flight mutation |
 | Network | normal, slow, offline/retry, late old-epoch response |
 | Accessibility | keyboard-only, screen-reader announcements, 200% zoom, reduced motion |
 | Native/device | add/switch slot, per-account/device/all-device logout, offline expiry, lost device, callback failure, push isolation |
-| Identity security | link, merge conflicts, recovery cooling/dispute, duplicate personal organizations, reversal |
+| Identity security | link; irreversible merge prerequisites; bounded staging/apply; dispute/containment/forward repair; duplicate personal organizations; deployment identity recovery; organization-A governance recovery with organization-B/personal noninterference |
+| Human custody | last owner/steward leave/remove/demote; transfer; suspension to governance locked; deletion finalization; merge cutover; invitations/non-humans never count |
 | Local mode | first-owner bootstrap, simplified one-of-each shell, collaboration enablement |
 
 Evidence must include the defect/baseline and verified result, be scrubbed of identities,
@@ -341,12 +367,14 @@ durable issue history.
 
 ## 14. Login linking, identity merge, and recovery UX
 
-The UI never labels identity merge as merely “link account.” Account management exposes
-three distinct actions with distinct consequences:
+The UI never labels identity merge as merely “link account.” The product exposes four
+distinct actions with distinct consequences in account or organization settings:
 
 - **Add sign-in method** for an unowned login binding;
-- **Merge two existing identities** when both bindings already own identities; and
-- **Recover access** when a usable path is unavailable or compromised.
+- **Merge two existing identities** when both bindings already own identities;
+- **Recover sign-in or human identity** when a deployment-wide authentication path or
+  global human status is unavailable or compromised; and
+- **Recover organization governance** inside exactly one named organization.
 
 Linking shows target human/account summary, issuer, callback origin, ten-minute proof
 expiry, and a cancel action. A provider callback that discovers another owner stops at
@@ -356,34 +384,89 @@ The merge wizard renders the server's revision-bound conflict manifest. It requi
 explicit decision for:
 
 - which personal organization remains personal and whether each other one is converted
-  to team, exported/deleted first, or the merge is cancelled;
-- the exact union of organization/workspace roles and any separation-of-duty block;
+  to team, exported/deleted first, or the merge is cancelled, with conversion/finalized
+  deletion labeled an irreversible prerequisite that must complete before cooling;
+- the exact source contributions and proposed canonical organization/workspace grants,
+  with each active team's owner/steward post-state and separation-of-duty block;
 - pending invitation duplicates;
-- recovery-quorum changes;
+- deployment identity-recovery effects (which are never unioned from organizations) and
+  each organization's separate owner/recovery-steward outcome;
 - personal billing/entitlement hold and billing-owner decision; and
 - counts and owner categories for drafts, pins, uploads, connections, and keys without
   exposing their secret content.
 
-No preselected destructive answer is allowed. The review screen names both identities,
-the canonical survivor, affected organizations, sessions that will be signed out, the
-24-hour or recovery 72-hour cooling deadline, notification destinations in masked form,
-30-day dispute/reversal deadline, and the fact that audit identities are not rewritten.
-Final confirmation requires step-up. Progress states map one-to-one to the ADR state
-machine: evidence pending, conflict blocked, cooling off, disputed/aborted, ready,
-applying, reversible, reversed, and finalized. Refresh/retry reads the durable operation;
-it never starts another merge.
+No preselected destructive answer is allowed. Every irreversible prerequisite and known
+external/posted effect requires a separate explicit acknowledgment; cancel remains
+available until cutover. The review screen names both identities, the canonical
+survivor, affected organizations, sessions and personal credentials that will be
+revoked, the 24-hour or post-recovery 72-hour cooling deadline, notification
+destinations in masked form, the **30-day dispute and containment window**, and the fact
+that audit identities and irreversible facts are not rewritten.
+
+Progress maps one-to-one to durable states: **Evidence pending**, **Conflict review /
+blocked**, **Cooling off**, **Aborted**, **Ready**, **Staging**, **Applying**,
+**Applied—observation window**, **Contained**, **Repair review**, **Repairing**,
+**Repaired with/without exceptions**, and **Finalized**. Staging may show bounded
+progress and a safe cancel/retry result, but staged rows are not presented as active
+access. There is no
+**Reversible** or **Reversed** state and no promise that merge can restore destroyed
+facts. Refresh/retry reads the same durable operation; it never starts another merge.
 
 Every notified identity receives a safe **Dispute this change** path during cooling and
-the reversible window. Dispute signs out sensitive sessions, fences the operation, and
-shows recovery/support instructions without revealing the other identity's private
-data. A failed notice is visible to authorized initiators and blocks readiness when
-policy requires reachability.
+the applied-observation window. A post-apply dispute first shows **Contained**: affected
+human sessions/credentials are revoked, sensitive identity/governance/billing/private
+owner changes are fenced, and existing objects are neither silently moved nor deleted.
+The subsequent review lists per-category lineage and proposed forward outcomes for
+memberships, invitations, private assets, billing/entitlements, credentials, deletes,
+audit, external effects, and personal organizations. Each row ends as retained,
+transferred, revoked, quarantined, compensated, or irreversible. Approval expiry after
+14 days is visible and does not release containment. The signed completion report names
+remaining exceptions and available export/support options without exposing the other
+identity's private content.
 
-Recovery UI lists only the narrowly requested effects (for example revoke compromised
-login, attach a newly proved method, rotate offline factor). It never bundles ownership
-transfer, workspace-content access, organization membership, or identity merge. It
-shows eligible/received approvals, cooling deadline, notices, dispute state, and an
-incident/reason field. Approver labels never imply that recovery admins can read content.
+### Recover sign-in or human identity
+
+This deployment-level surface cannot be launched from an organization role control. It
+states:
+
+> This recovery affects this human identity across this deployment. Existing active
+> organization and personal-workspace grants are not changed, but they may become usable
+> again after sign-in is restored.
+
+It lists only the requested global effects, such as revoke a compromised login, attach
+a newly proved unowned method, rotate a human recovery factor, or restore the same
+human's global status. It shows the selected closed authority path, distinct proved
+factors, eligible/received deployment identity-recovery custodians, 24-hour/72-hour/
+seven-day minimum delay, masked notice destinations, incident/legal approval where
+required, expiry/dispute state, and final fresh-proof requirement. Organization owners,
+organization recovery stewards, invitations, service credentials, and ordinary support
+sessions are never displayed as eligible global approvers.
+
+Before apply, the confirmation explicitly says every browser/native slot, auth session,
+personal credential, offline cache, user-bound delegated token, and live stream for the
+human will be revoked before the new path is usable. It also says organization-owned
+service credentials and organization governance are unchanged. Failure to meet factor,
+custodian, notice, delay, or current-revision requirements produces a fail-closed result
+with no login attached; it never offers a weaker organization-scoped fallback.
+
+### Recover organization governance
+
+This organization-settings surface names exactly one organization in its heading,
+confirmation, notices, and durable status. Its scope warning states:
+
+> This can change human ownership or recovery stewardship only in **{organization}**.
+> It cannot recover sign-in, change global human status, or affect another organization
+> or personal workspace.
+
+The ordinary flow shows eligible active human organization recovery stewards,
+organization-scoped approvals/delay, requested membership/custody effects, governance
+revision, notices, and incident/reason. A deployment-custody flow appears only for
+`governance_locked`; it names separately enrolled **deployment organization-governance
+custodians**, is visually and textually distinct from deployment identity-recovery
+custodians, requires a delayed audited ceremony, and requires the proposed human to
+prove their own usable login. Successful completion re-fetches only the named
+organization's custody and grants; all other organization/personal summaries remain
+unchanged. Any scope or revision mismatch fails closed rather than broadening recovery.
 
 ## 15. Native/device session UX
 
@@ -425,7 +508,10 @@ push token, secure-store unavailable, and two-account/two-tenant cases.
 Before bootstrap completes, the shell shows a local/operator claim screen only on an
 allowed listener. It asks for the one-time operator-delivered bootstrap secret and the
 configured/OS-bound human proof; it never offers “continue as first user.” It explains
-that one personal organization/workspace and an offline recovery factor will be created.
+that one personal organization/workspace and a human identity-recovery factor will be
+created. It separately explains that the same human cannot exercise single-person
+organization stewardship or enable collaboration until a distinct organization
+break-glass factor is enrolled and acknowledged.
 Concurrent claim, reused secret, unknown/non-human subject, or remote-listener refusal
 uses a generic safe error and operator instructions. Restart by the same proved human
 returns the exact existing setup rather than duplicating it.
@@ -443,11 +529,13 @@ organization, and workspace exist. In that mode:
 
 The UI must not infer simplified mode from list length alone. It renders normal
 collaborative controls immediately when the signed server capability disappears.
-**Enable collaboration** is a step-up security flow that verifies the offline recovery
-path, explains roles/invitations/content boundaries, disables simplified mode, and only
-then enables invitations/additional humans. Workspace/organization ids, URLs, drafts,
-keys, and resources remain unchanged; there is no “upgrade migration” that loosens RLS.
+**Enable collaboration** is a step-up security flow that verifies both the human
+identity-recovery factor and the distinct organization break-glass factor, explains
+roles/invitations/content boundaries, disables simplified mode, and only then enables
+invitations/additional humans. Workspace/organization ids, URLs, drafts, keys, and
+resources remain unchanged; there is no “upgrade migration” that loosens RLS.
 
-Acceptance evidence covers first-claim race/restart, offline recovery enrollment,
-simplified desktop/mobile/keyboard/screen-reader shell, destructive scope labels, and
-the collaboration transition with the same tenant ids and no stale simplified cache.
+Acceptance evidence covers first-claim race/restart, separate identity/organization
+recovery-factor enrollment, simplified desktop/mobile/keyboard/screen-reader shell,
+destructive scope labels, and the collaboration transition with the same tenant ids and
+no stale simplified cache.

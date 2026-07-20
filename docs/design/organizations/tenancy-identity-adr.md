@@ -5,7 +5,7 @@
 
 # ADR: human identity, login accounts, organizations, and workspace tenancy
 
-Status: **proposed revision after blocked review; not approved for implementation**
+Status: **corrective revision after the second exact-head blocked review; not approved for implementation**
 
 Issue: OPE-10
 
@@ -43,8 +43,9 @@ Adopt five distinct domain concepts:
 1. **Human identity** — the stable internal person/actor record.
 2. **Login account** — one authentication issuer/provider subject binding owned by a
    human identity.
-3. **Organization** — the administrative, membership, recovery, and default billing
-   container.
+3. **Organization** — the administrative, membership, organization-governance recovery,
+   and default billing container. It is never the authority for deployment-wide human
+   identity or login recovery.
 4. **Workspace** — the resource tenancy and FORCE-RLS boundary inside exactly one
    organization.
 5. **Entitlement owner** — an explicit typed owner (`organization`, `workspace`, or
@@ -59,6 +60,11 @@ or duplicate organization spine is not required to make the domain honest.
 The workspace remains the operational authorization and data-isolation boundary. An
 organization membership does not implicitly grant access to every workspace's content.
 
+Human identity/login recovery is a deployment-scoped security ceremony independent of
+every organization membership. Organization recovery changes only one organization's
+governance rows and grants for an already authenticated human. Neither authority can be
+silently substituted for the other.
+
 ## 3. Canonical vocabulary
 
 | Concept | Meaning | Must never mean |
@@ -68,6 +74,9 @@ organization membership does not implicitly grant access to every workspace's co
 | Browser login slot | Revocable association between one browser session and one login account | A tenant grant |
 | Organization | Administrative and membership container; physical id is the legacy `managed_accounts.id` | Authentication identity or resource isolation by itself |
 | Organization membership | A human's standing and organization-level capabilities | Automatic read access to every workspace |
+| Organization recovery steward | Active human membership authorized to recover governance inside exactly one organization | Human/login recovery authority or access to another organization/personal workspace |
+| Deployment identity-recovery custodian | Separately enrolled deployment-level human authority for exceptional human/login recovery | Organization role, tenant content grant, support wildcard, or ordinary operator session |
+| Deployment organization-governance custodian | Separately enrolled deployment authority that may restore proved human custody to a `governance_locked` team | Identity/login recovery authority, organization membership, content grant, or active-team owner/steward substitute |
 | Workspace | Resource tenant within one organization; canonical RLS boundary | Human identity or billing credential |
 | Workspace membership | Explicit human access to workspace resources | Login-session liveness or API-key validity |
 | Service principal / API key | Non-human credential with its own attenuated grants | Human membership, owner, recovery contact, or last-human-admin substitute |
@@ -171,8 +180,9 @@ Required invariants:
   exact organization/workspace GUC transaction.
 - Route code calls the canonical access-grant boundary before reading a resource.
 - Organization administration may expose workspace metadata without exposing workspace
-  contents. Content access always requires a workspace grant or a separately audited
-  recovery path.
+  contents. Content access always requires a workspace grant or a separately
+  authorized, time-bounded break-glass content grant. Organization governance recovery
+  itself never grants content access.
 
 Moving a workspace between organizations is out of scope for normal CRUD. A future move
 is a dedicated migration ceremony that rekeys every child atomically/offline and proves
@@ -192,16 +202,27 @@ Human base roles are:
 Two sensitive roles are composable capability sets rather than higher base roles:
 
 - **billing admin** — billing read/manage and entitlement administration; and
-- **recovery admin** — approved account/organization recovery actions.
+- **organization recovery steward** — approved recovery of membership, ownership, and
+  grants inside this organization only.
 
 An owner may receive all capabilities by policy, but implementations still persist and
-check the capabilities so self-hosted deployments can separate duties. Recovery does not
-implicitly grant workspace-content access. Billing does not imply recovery or member
-management.
+check the capabilities so self-hosted deployments can separate duties. Organization
+recovery does not implicitly grant workspace-content access, cannot attach/unlink a
+login account, cannot change a human's deployment status or private-owner mappings, and
+cannot mutate another organization or personal workspace. Billing does not imply
+recovery or member management.
 
-Only an active human membership can count toward last-owner, last-administrator, or
-recovery quorum. API keys, delegated worker tokens, service principals, and unknown
-external subjects never satisfy a human-governance invariant.
+Deployment identity-recovery custodians are not organization memberships. Their
+enrollment, factor custody, quorum, and audit scope are defined in section 15.4. Granting
+or revoking an organization role can never create or remove that deployment authority.
+Deployment organization-governance custodians are also separately enrolled under the
+section 15.5 no-content capability. The two deployment custodian capabilities are
+independent; holding one never grants the other.
+
+Only an active human membership can count toward last-owner, last-administrator, or the
+organization's recovery-steward invariant. Pending invitations never count. API keys,
+delegated worker tokens, automated agents, service principals, and unknown external
+subjects never satisfy a human-governance invariant.
 
 ### 4.7 Workspace membership
 
@@ -225,33 +246,59 @@ Rules:
 
 ### 5.1 Capability outline
 
-| Operation | Owner | Admin | Member | Billing admin | Recovery admin |
+| Operation | Owner | Admin | Member | Billing admin | Org recovery steward |
 | --- | --- | --- | --- | --- | --- |
 | Read organization metadata | yes | yes | yes | only as needed | only as needed |
 | Create workspace | policy default yes | delegated | no by default | no | no |
 | Read workspace content | explicit workspace grant | explicit workspace grant | explicit workspace grant | no | no |
 | Invite ordinary member | yes | delegated | no | no | no |
-| Grant owner/recovery role | step-up + policy | no | no | no | recovery policy only |
+| Grant owner/org-recovery role | step-up + policy | no | no | no | org policy only |
 | Manage billing | policy default | no by default | no | yes | no |
-| Transfer ownership | yes, step-up | no | no | no | recovery ceremony only |
-| Delete organization | yes, step-up + delay | no | no | no | recovery ceremony only |
+| Transfer ownership | yes, step-up | no | no | no | organization ceremony only |
+| Delete organization | yes, step-up + delay | no | no | no | organization ceremony only |
 
 Deployments may attenuate defaults but may not let a lower role grant authority it does
 not hold.
 
 ### 5.2 Last-human-governance invariant
 
-Every active team organization with resources, billing state, active invitations, or a
-nonterminal deletion must retain:
+Every active team organization, including one with zero workspaces, no billing state,
+and no invitations, must retain:
 
 - at least one active human owner; and
-- at least one active human with recovery authority, which may be the same person only
-  when deployment policy permits single-person recovery.
+- at least one active human organization recovery steward, which may be the same person
+  only when deployment policy permits single-person governance and a separately
+  enrolled organization break-glass factor exists.
 
 The invariant is enforced under a transaction lock for remove, leave, demote, suspend,
-unlink-last-login, transfer, and delete operations. “Count then update” without locking
-is forbidden. A deferred constraint alone is insufficient because identity/login status
-also participates.
+unlink-last-login, transfer, delete, identity merge, and recovery operations. “Count then
+update” without locking is forbidden. A deferred constraint alone is insufficient
+because identity/login status also participates. Invitations and non-human principals
+are excluded before the post-state is evaluated.
+
+A last owner or recovery steward cannot leave, be removed, be demoted, or be absorbed by
+an identity operation while the organization remains `active`. The safe choices are:
+
+1. atomically transfer the required human role to another already active, authenticated
+   human member;
+2. cancel the mutation; or
+3. run explicit organization deletion, retaining owner and recovery custody throughout
+   `deletion_pending` and deactivating the final memberships only in the same fenced
+   transaction that makes the organization terminal `deleted`.
+
+If an identity must be suspended immediately for compromise and it is the last human
+owner/steward, the same transaction moves the organization from `active` to
+`governance_locked`, revokes the identity's access, and creates a deployment-custody
+incident. `governance_locked` denies new grants, ownership changes, billing/credential
+mutations, and resource creation. Deployment organization-governance custodians do not
+count as owners; their only organization action is the delayed, audited section 15.5
+ceremony to appoint a proved human owner/steward before returning the organization to
+`active`.
+
+Identity merge cutover creates the canonical human's derived owner/steward memberships
+before deactivating source contributions in the same generation flip. No merge,
+recovery, suspension, or deletion worker may expose an active intermediate state with
+zero accountable humans.
 
 Workspace-level administration likewise requires at least one active human able to
 administer a non-personal workspace, unless the organization has an explicitly audited
@@ -317,7 +364,8 @@ Acceptance rules:
 1. Authenticate or add a login account without destroying existing login slots.
 2. Verify the invitation secret, expiry, status, organization status, and target claim
    using non-enumerating responses.
-3. Require step-up authentication for owner, billing-admin, or recovery-admin grants.
+3. Require step-up authentication for owner, billing-admin, or organization-recovery-
+   steward grants.
 4. Lock invitation and membership rows.
 5. Bind or resolve the human identity explicitly; never merge identities by email.
 6. Create/update organization and workspace memberships atomically.
@@ -360,6 +408,8 @@ ledger and entitlement semantics. OPE-10 only requires:
 - A member may leave an organization after a step-up check when policy requires it.
 - An owner/admin/recovery holder may leave only if the locked post-change state preserves
   every last-human-governance invariant.
+- Empty organization is not an exception: the last owner/steward must transfer custody
+  or complete explicit deletion; leave never means implicit abandonment.
 - Leaving removes organization and workspace human grants atomically, increments the
   authorization revision, and triggers invalidation. It does not delete shared data.
 - A personal owner cannot leave their personal organization.
@@ -375,10 +425,15 @@ ledger and entitlement semantics. OPE-10 only requires:
 
 ### 9.3 Transfer ownership
 
-The recipient must be an active human member with a verified login/recovery path.
+The recipient must be an active human member with a freshly proved usable login.
 Transfer locks both memberships and the organization, requires step-up authentication,
 updates roles/capabilities and recovery state atomically, and records old/new owners.
 The former owner remains with an explicit selected role; no implicit access is retained.
+The post-state must still contain an active human owner and organization recovery
+steward; an invitation, service principal, deployment identity-recovery custodian, or
+deployment organization-governance custodian cannot be the recipient membership.
+Neither custodian capability counts toward active-team custody merely because it is
+deployment authority.
 
 ### 9.4 Export
 
@@ -400,6 +455,11 @@ idempotent job and writes a tombstone/audit record that cannot restore access.
 
 Immediate FK cascade from an organization settings click is forbidden. A failed final
 delete remains resumable and does not expose partially deleted data to another tenant.
+Owner and recovery-steward memberships remain active and accountable while deletion is
+nonterminal. Finalization first fences every job/grant/credential and then changes the
+organization to `deleted` and deactivates those memberships atomically. An empty team
+organization follows this same explicit path; last-owner leave never substitutes for
+deletion.
 
 ### 9.6 Human identity or login-account deletion
 
@@ -527,7 +587,8 @@ and the companion threat model. Later implementation is acceptable only when it 
 - no automatic email identity linking;
 - multiple isolated login slots and per-slot sign-out;
 - persisted organization membership plus explicit workspace grants;
-- human-only last-owner/recovery concurrency enforcement;
+- human-only owner and organization-recovery custody for every active team organization;
+- deployment-scoped human/login recovery independent from organization governance;
 - single-use invitations and step-up for sensitive roles;
 - synchronous grant invalidation plus bounded stream/token invalidation;
 - typed billing ownership independent of login/model credentials;
@@ -537,17 +598,21 @@ and the companion threat model. Later implementation is acceptable only when it 
 
 ## 15. Login linking, identity merge, and recovery protocols
 
-“Link” and “merge” are different operations and never share a permissive fallback:
+Four operations are distinct and never share a permissive fallback:
 
 - **Link login account** attaches one not-yet-owned authentication binding to one
   existing human identity. It never combines two existing human identities.
 - **Merge identities** makes two existing human identities resolve to one canonical
   human after every authority and asset conflict is settled.
-- **Recover identity** restores a usable login/recovery path to one identity. Recovery
-  does not merge another identity, transfer tenant grants, or read workspace content.
+- **Recover human identity/login** restores a deployment-wide authentication path under
+  section 15.4. Its authority is independent of every organization.
+- **Recover organization governance** changes membership/ownership inside exactly one
+  organization under section 15.5. It cannot attach a login, change human status, or
+  activate another tenant or personal workspace.
 
 A login binding already owned by a different human returns `identity_merge_required`.
-Neither email equality nor a successful provider callback changes that result.
+Neither email equality, organization authority, nor a successful provider callback
+changes that result.
 
 ### 15.1 Link-account transition table
 
@@ -568,47 +633,65 @@ expected target human security revision.
 “Recent step-up” means an adapter assurance accepted by deployment policy and completed
 within ten minutes for this exact operation. Callback proof is single-use and expires
 after ten minutes. A retry with the same idempotency key returns the stored state;
-reusing a key with different inputs fails.
+reusing a key with different inputs fails. An organization owner or recovery steward
+cannot substitute organization approval for the target human's proof.
 
 ### 15.2 Identity-merge transition table
 
 The merge operation records ordered source ids, proposed canonical id, both starting
-security revisions, evidence ids, conflict decisions, approvers, and a fencing
-generation. Only one nonterminal operation may mention either human.
+security revisions, evidence ids, conflict decisions, irreversible-boundary
+acknowledgments, approvers, and a fencing generation. Only one nonterminal identity
+operation may mention either human.
 
 | Current state | Event and precondition | Next state | Security behavior |
 | --- | --- | --- | --- |
 | absent | proposer proves one source | `evidence_pending` | Notify all verified paths on both identities |
-| `evidence_pending` | fresh proof of one usable login on each source | `conflict_review` | Standard two-sided merge; both identities remain separate |
-| `evidence_pending` | approved recovery quorum replaces one missing proof | `cooling_off` | Freeze link/unlink/recovery-role changes; notify and wait 72 hours |
-| `conflict_review` | complete deterministic conflict plan | `cooling_off` | Freeze identity/role/billing/private-owner mutations; wait 24 hours |
-| `conflict_review` | unresolved conflict or policy separation-of-duty violation | `blocked` | No authority or owner change |
-| `blocked` | authorized conflict decisions complete and source revisions unchanged | `conflict_review` | Rebuild and reapprove the complete manifest |
-| `cooling_off` | dispute, approver loss, proof revocation, revision change | `aborted` | Unfreeze; preserve evidence and reason |
-| `cooling_off` | deadline passes and every proof/revision is current | `ready` | Require final step-up by the proposer/approved recoverer |
-| `ready` | worker claims exact generation | `applying` | Lock both humans and all affected owner/governance rows in UUID order |
-| `ready` | proof/revision/approval revalidation fails | `aborted` | Consume generation; unfreeze; require a new operation |
-| `applying` | effect ledger, alias, revisions, notifications, audit commit | `applied_reversible` | Canonical resolution starts; source contributions remain recoverable |
-| `applying` | crash/serialization failure | `ready` | No partial effects; retry exact generation |
-| `applied_reversible` | upheld dispute within 30 days | `reversing` | Deny new sensitive mutations until reversal completes |
-| `reversing` | inverse effect ledger commits | `reversed` | Restore source resolution and bump every affected revision |
-| `reversing` | crash/serialization failure | `reversing` | Retry the same fenced inverse ledger; no partial inverse |
-| `applied_reversible` | 30 days pass with no dispute | `finalized` | Alias remains; later physical cleanup is a separately reviewed job |
+| `evidence_pending` | fresh proof of one usable login on each source | `conflict_review` | Both identities remain separate; build revision-bound manifest |
+| `evidence_pending` | unavailable source completes section 15.4 recovery and then gives fresh proof | `conflict_review` | Organization recovery is never accepted as source proof; use 72-hour cooling below |
+| `conflict_review` | every conflict and irreversible prerequisite is resolved | `cooling_off` | Install merge mutation barrier; wait 24 hours, or 72 hours after identity recovery |
+| `conflict_review` | unresolved conflict or separation-of-duty violation | `blocked` | No alias, authority, owner, or tenant change |
+| `blocked` | authorized decisions complete and source revisions unchanged | `conflict_review` | Rebuild and reapprove the complete manifest |
+| `cooling_off` | dispute, proof revocation, barrier violation, or revision change | `aborted` | Remove barrier; preserve evidence and reason |
+| `cooling_off` | deadline passes and proofs/revisions/notices remain current | `ready` | Require final step-up; freeze owner/governance/billing/private-owner mutations |
+| `ready` | worker claims exact generation | `staging` | Materialize inactive derived rows and effect manifest in bounded batches |
+| `ready` | proof/revision/approval revalidation fails | `aborted` | Consume generation; remove barrier; require a new operation |
+| `staging` | next at-most-500-row/250-ms batch commits | `staging` | Record checkpoint/digest; staged rows remain invisible to authorization |
+| `staging` | full manifest staged and source/barrier revisions match | `applying` | Enter short cutover; no unbounded all-object transaction |
+| `staging` | crash, timeout, or stale manifest | `staging` or `aborted` | Retry exact checkpoint or discard staged generation; no visible partial merge |
+| `applying` | alias/generation flip, revisions, session revocation, outbox, and audit commit | `applied_observation` | Canonical resolution starts; 30-day dispute/containment window starts |
+| `applying` | crash/serialization failure | `staging` | Cutover did not commit; revalidate the staged generation |
+| `applied_observation` | dispute submitted before deadline | `contained` | Increment security revision, revoke sessions/credentials, deny sensitive human mutations |
+| `contained` | investigation rejects dispute | `applied_observation` or `finalized` | Append reason; issue only fresh sessions; never run an inverse ledger |
+| `contained` | investigation upholds or cannot safely dismiss dispute | `repair_review` | Build section 15.6 provenance manifest and keep fail-closed containment |
+| `repair_review` | scoped authorities approve a complete forward plan | `repairing` | Fence plan generation; expired/incomplete approvals do nothing |
+| `repairing` | bounded idempotent repair batches finish without an irreversible/unresolved exception | `repaired` | Append complete outcome report; issue no implicit grant or restored credential |
+| `repairing` | bounded idempotent repair batches finish with declared irreversible/unresolved exceptions | `repaired_with_exceptions` | Append complete exception/outcome report; issue no implicit grant or restored credential |
+| `repairing` | crash/serialization failure | `repairing` | Retry exact checkpoint; already committed effects are not inverted |
+| `applied_observation` | 30 days pass with no dispute | `finalized` | Alias remains; source/write lineage stays retained under policy |
 
-Standard proof is fresh control of at least one usable, non-recovery login account on
-each source, with step-up bound to the merge id. Team recovery in place of one proof
-requires two recovery-capable active humans who are distinct from the unavailable
-identity and from each other. A deployment that explicitly permits one-person recovery
-requires that person's fresh login proof plus a separately enrolled offline recovery
-factor. Personal/single-user recovery requires two independent factors and the 72-hour
-cooling period. A compromised, suspended, newly added during this operation, or
-operation-target identity cannot approve its own recovery.
+Merge proof is fresh control of at least one usable, non-recovery login account on each
+source, with step-up bound to the merge id. A missing proof is never replaced by an
+organization role or organization recovery-steward quorum. The unavailable human must first
+complete deployment-scoped identity recovery under section 15.4 and then prove the
+recovered path; a merge involving that path receives the 72-hour cooling period. A
+compromised, suspended, newly added during this operation, or operation-target identity
+cannot approve its own recovery or bypass proof.
 
-Every proposal, proof, conflict decision, approval, dispute, abort, apply, reverse, and
-finalize sends a non-secret notice to all pre-existing verified paths. Delivery failure
-does not silently remove the cooling period; it blocks transition to `ready` when policy
-requires a reachable notice path. A dispute consumes the operation generation so a
-stale worker or callback cannot resume it.
+Every proposal, proof, conflict decision, prerequisite completion, dispute, containment,
+repair decision, apply, and finalize sends a non-secret notice to all pre-existing
+verified paths. Delivery failure does not shorten cooling. It blocks readiness when
+policy requires a reachable notice path. A dispute consumes the current worker claim so
+a stale callback cannot continue applying.
+
+The merge mutation barrier is checked by every owner, organization-governance, billing,
+and private-owner mutation involving either source. Ordinary workspace data may
+continue under its unchanged tenant owner during cooling/staging. The staging worker
+orders stable keys, commits at most 500 rows or 250 ms per batch, stores a manifest
+hash/checkpoint, and never exposes staged rows. The short cutover locks only the two
+human security rows, merge barrier/generation, affected governance summary revisions,
+and session-generation rows in deterministic order; it verifies the full staged digest
+before flipping canonical resolution. This replaces the unbounded promise to lock every
+object in one transaction.
 
 ### 15.3 Deterministic merge conflict resolution
 
@@ -617,53 +700,213 @@ the merge remains `blocked`.
 
 | Conflict | Required decision; no silent default |
 | --- | --- |
-| Two active personal organizations | Keep exactly one as personal. Convert every other selected organization to team under its existing tenant id, or complete its delayed export/deletion first. Cancel is always available. No workspace is moved implicitly. |
-| Duplicate organization memberships | Preserve a provenance contribution per source and compute the explicit union of existing effective grants. Block if organization policy forbids the combined separation of duties. Sensitive capabilities require that organization's normal approval; merge itself cannot invent them. |
+| Two active personal organizations | Keep exactly one as personal. Any other conversion to team or delayed export/deletion is a separate prerequisite that must reach its terminal state before merge cooling. Conversion, finalized deletion, external side effects, and destroyed facts are labeled irreversible; cancel is always available. No workspace moves implicitly and no later merge repair promises to undo them. |
+| Duplicate organization memberships | Preserve a contribution per source and compute one explicit canonical grant. Block if organization policy forbids combined duties. Sensitive capabilities require that organization's normal approval; merge cannot invent them. Every active team organization must retain a human owner and recovery steward after cutover. |
 | Pending invitations | Retarget only after inviter authority and target proof are rechecked; exact duplicates are cancelled with audit. Accepted/expired records remain immutable. |
-| Recovery authority | Re-evaluate quorum after the proposed union. A source being absorbed and a compromised recovery path cannot approve. Any reduction or new concentration requires the normal recovery-policy approval. |
-| Personal entitlement/billing state | Place both personal owner records in `merge_hold`. The billing owner explicitly chooses one surviving allowance or an approved ledger transfer. No balances, credits, or anti-abuse limits are summed automatically. Organization/workspace billing is unchanged. |
-| Drafts, pins, uploads, connections, personal keys | Retain source provenance and remap through the owner effect ledger described in section 17. Same-object collisions receive distinct stable ids; secrets are never copied into the manifest. |
-| Existing audit identity | Never rewrite it. Append canonical/alias references while old events retain their original actor id and integrity chain. |
-| Active sessions and tokens | Revoke all source slots, auth sessions, and user-bound delegated tokens at apply. Reauthentication creates fresh canonical slots only. |
+| Recovery authority | Human/login recovery authority remains deployment-scoped and is never unioned from organizations. Re-evaluate each organization's owner/recovery-steward invariant independently; a source being absorbed or a compromised path cannot approve. |
+| Personal entitlement/billing state | Place both personal owner records in `merge_hold`. The billing owner explicitly chooses one surviving allowance or an approved ledger transfer. Posted charges, credits, anti-abuse facts, and external provider effects are never summed or reversed automatically. Organization/workspace billing is unchanged. |
+| Drafts, pins, uploads, connections, personal keys | Retain source and object lineage and stage mappings through the owner effect manifest. Same-object collisions receive distinct stable ids; deletes and secret material are never reconstructed from the manifest. |
+| Existing audit identity | Never rewrite it. Append canonical/alias and repair references while old events retain original actor ids and integrity chains. |
+| Active sessions and credentials | Revoke all source slots, auth sessions, personal keys, refresh families, and user-bound delegated tokens at cutover. Reauthentication creates fresh canonical credentials; repair never restores old credentials. |
 
-Applying a merge creates an alias from absorbed to canonical human and records every
-derived membership/owner effect. For each shared organization it creates or updates one
-canonical active membership with the approved effective authority, then marks the two
-source memberships `merge_source_inactive` while retaining their exact contributions.
-Private-owner mappings follow the same active-derived/source-inactive pattern. It does
-not delete the absorbed human or a source contribution. Authorization reads only the
-canonical active row at the operation generation; it never unions rows dynamically.
-Reversal disables the alias/derived rows and restores source contributions from the
-ledger. After finalization, the alias remains permanent so stale subject references
-cannot be reassigned. Physical compaction must preserve audit and is outside the first
-rollout.
+Applying a merge creates an alias from absorbed to canonical human and activates only the
+staged generation. For each shared organization it activates one canonical membership
+with the approved authority, then marks source contributions inactive while retaining
+their exact provenance. Private-owner mappings follow the same derived/source lineage.
+The generation flip preserves every active team's human owner/recovery-steward invariant.
+Authorization reads only the active canonical generation; it never dynamically unions
+source rows.
 
-### 15.4 Recovery state machine
+There is no automatic or lossless post-apply reversal. Personal-organization conversion
+or deletion, hard deletes, audit facts, billing/provider postings, notifications, and
+external jobs may be irreversible. A dispute after apply uses containment and the
+forward-only, per-object repair contract in section 15.6. The absorbed identity, source
+contributions, manifest, and provenance are not physically compacted merely because the
+30-day window expires; later retention/compaction must preserve audit and declared
+lineage.
+
+### 15.4 Deployment-wide human identity and login recovery
+
+Human/login recovery is deployment-scoped because one human, its login bindings,
+human-private state, and active memberships may span many unrelated organizations. Its
+authority is stored outside organization membership and cannot be granted by an
+organization owner, admin, recovery steward, invitation, billing role, or tenant API.
+
+The deployment enrolls identity-recovery custodians as distinct human operator
+identities with hardware-backed/offline factors and a dedicated capability. Custodian
+actions use a separate no-content role, incident id, short approval lifetime, and
+operator/actor-global audit. A custodian receives no tenant discovery or workspace
+content access and cannot approve their own recovery or an operation in which they are a
+source/target.
 
 The recovery operation has a unique idempotency key, target security revision, exact
-requested effects, evidence/approval ids, cooling deadline, and fencing generation.
+requested effects, evidence/approval ids, authority path, cooling deadline, notice set,
+and fencing generation.
 
 | Current state | Event and precondition | Next state | Durable effect |
 | --- | --- | --- | --- |
-| absent | valid non-enumerating recovery request | `requested` | Record target handle hash, requested effects, reason/incident, expiry |
+| absent | non-enumerating deployment recovery request | `requested` | Store target-handle hash, requested effects, incident, expiry; no tenant scope |
 | `requested` | target resolves and requester begins proof | `evidence_pending` | Notify all pre-existing verified paths; bind one-time evidence nonces |
-| `requested` | target absent, rate limit, cancel, or expiry | `expired` or `aborted` | Consume handle/nonces; reveal no identity existence |
-| `evidence_pending` | required independent factors/quorum pass | `cooling_off` | Record eligible approvers/evidence; freeze login/recovery mutation; wait 72 hours |
-| `evidence_pending` | failed/replayed evidence, disqualified approver, expiry | `aborted` | Consume generation; preserve sanitized failure audit |
-| `cooling_off` | dispute or any target/approver/evidence revision change | `disputed` | Revoke operation nonces and fence every worker/callback |
-| `cooling_off` | deadline passes and all evidence/notices revalidate | `ready` | Require final fresh proof from requester/approved recoverer |
-| `ready` | worker claims exact generation and locks target/login rows | `applying` | No external side effect is published before transaction commit |
-| `ready` | revalidation fails or operation expires | `aborted` | Unfreeze target; consume generation |
-| `applying` | requested effects + revisions + audit commit | `applied` | Revoke old sessions; expose only the newly proved path |
-| `applying` | transaction abort/crash | `ready` | Retry exact generation from unchanged rows |
+| `requested` | target absent, rate limit, cancel, or expiry | `expired` or `aborted` | Consume handles/nonces; reveal no identity existence |
+| `evidence_pending` | one approved deployment authority path completes | `cooling_off` | Record factors/custodians, affected-grant digest, notices, and freeze login/recovery mutations |
+| `evidence_pending` | failed/replayed factor, ineligible custodian, or expiry | `aborted` | Consume generation; append sanitized deployment audit |
+| `cooling_off` | dispute or target/custodian/evidence revision change | `disputed` | Fence callbacks/workers and revoke operation nonces |
+| `cooling_off` | deadline passes and evidence/notices revalidate | `ready` | Require final fresh requester/custodian proof |
+| `ready` | exact generation claims target/login/session rows | `applying` | Set recovery fence and deny all target-human requests before side effects |
+| `ready` | revalidation fails or operation expires | `aborted` | Remove operation freeze; consume generation |
+| `applying` | requested effects, global revision, revocations, outbox, and audit commit | `applied` | Revoke old paths and expose only newly proved authentication material |
+| `applying` | transaction abort/crash | `ready` | Retry exact generation from unchanged visible state |
+
+Approved authority paths are closed and versioned:
+
+1. **Self recovery:** fresh control of one pre-existing phishing-resistant login/recovery
+   method plus a distinct pre-enrolled offline target factor; minimum 24-hour cooling.
+2. **Locked-out recovery:** one pre-enrolled offline target factor plus two distinct
+   active deployment identity-recovery custodians; minimum 72-hour cooling.
+3. **Factorless exceptional recovery:** only when deployment policy explicitly enables
+   it, three distinct custodians using separately held factors, an independently approved
+   incident/legal basis, and minimum seven-day cooling. Otherwise it fails closed and no
+   login is attached.
+
+Quorum counts distinct proved humans and distinct factor roots. A target, compromised or
+newly enrolled custodian, organization administrator, service credential, or ordinary
+support session never counts. Policy may require more approvers or longer delays but
+cannot replace deployment authority with an organization quorum.
+
+Allowed effects are only: revoke compromised login accounts and every dependent slot/
+session/token family; attach a newly proved unowned login; rotate target recovery
+material; or restore the deployment status of the same human. Apply increments the
+human/login security revisions, revokes all browser/native slots, authentication
+sessions, personal credentials, offline caches, and user-bound delegated tokens, and
+closes streams before a fresh slot can authorize. Organization-owned service credentials
+remain organization-owned. The durable revocation outbox is committed with the deny
+revision; delivery lag never restores access.
+
+Recovery does not add, remove, reactivate, or rewrite any organization/workspace
+membership, organization role, billing owner, personal workspace, or tenant-owned
+resource. Restoring the global human status may make that human's independently active
+existing grants usable again, but only this deployment-scoped ceremony can do so.
+Organization-A governance recovery cannot invoke it, cannot mutate the target's global
+status, and cannot expose organization-B or personal state. Notifications go to every
+pre-existing verified path and, by policy, non-secret security contacts in affected
+organizations without disclosing other memberships. Audit records the deployment scope,
+authority path, quorum/factors, affected-grant digest, revocations, notices, and outcome;
+it never records secret factor material.
 
 `aborted`, `disputed`, `expired`, and `applied` are terminal. A new attempt uses a new
-idempotency key and generation. Recovery uses the same approver-disqualification and
-notification rules as merge. The only allowed effects are: revoke compromised login
-accounts/sessions, attach a newly proved unowned login account, rotate offline recovery
-material, or restore a suspended identity after policy approval. Organization ownership
-transfer is a separate locked operation; identity merge is a separate merge operation.
-Recovery content access is never implied.
+idempotency key/generation. Organization ownership transfer and identity merge remain
+separate operations.
+
+### 15.5 Organization-scoped governance recovery
+
+Organization governance recovery exists only to restore accountable custody inside one
+organization. The operation stores exactly one `organization_id`, its governance
+revision, requested membership/grant effects, eligible active human stewards, approvals,
+notices, deadline, incident, and generation. Its database capability cannot address
+human/login tables or another organization.
+
+| Current state | Event and precondition | Next state | Durable effect |
+| --- | --- | --- | --- |
+| absent | authorized request names one organization and effects | `requested` | Record org revision and non-content incident; notify org security contacts |
+| `requested` | globally active target human proves login and org quorum/factor completes | `cooling_off` | Freeze this org's owner/steward mutations; minimum 72-hour cooling |
+| `requested` | target globally suspended/unproved, quorum absent, or inputs stale | `blocked` | Require section 15.4 first or deployment-custody path; change nothing |
+| `cooling_off` | dispute, approver loss, org/target revision change | `aborted` | Fence callbacks and remove org mutation freeze |
+| `cooling_off` | deadline and notices revalidate | `ready` | Require final step-up by proved actor/approvers |
+| `ready` | exact generation locks org governance and memberships | `applying` | Recompute post-state including owner/steward invariant |
+| `applying` | one-org membership/grant/revision/audit commit | `applied` | Invalidate only this organization's grants and routes |
+| `applying` | crash/serialization failure | `ready` | Retry from unchanged visible state |
+
+Normal quorum is two distinct active human organization recovery stewards who are not
+the target of the change. A deployment may allow one proved owner/steward plus a
+separately enrolled organization break-glass factor for a single-human organization.
+That factor is organization-scoped and cannot recover a login. If the only human cannot
+authenticate, deployment identity recovery must complete before ordinary organization
+recovery.
+
+An exceptional deployment-custody path never makes a custodian an owner and never grants
+content. It first moves the organization to `governance_locked`, requires three distinct
+separately enrolled deployment organization-governance custodians with separate
+factors, seven-day cooling and notices, and may only appoint a globally active, freshly
+proved human as owner and recovery steward. This capability is independent from
+deployment identity-recovery custody; holding either one never grants the other. The
+same transaction then restores `active`. A personal organization cannot use this path
+to replace its personal owner; it must recover the existing human globally or use the
+separate delayed personal-organization/identity deletion procedure.
+
+Allowed organization effects are scoped membership activation/deactivation, owner or
+recovery-steward transfer, and revocation of human-bound grants/credentials in this
+organization. The operation cannot link/unlink login accounts, change human status,
+remap human-private owners, alter another membership, or touch unrelated personal
+workspaces. It increments only the organization's and changed memberships' revisions,
+revokes only affected tenant routes/streams/tokens, and appends organization-scoped audit
+plus operator audit for break-glass use.
+
+Tests must seed one human across organizations A and B plus a personal workspace and
+prove every organization-A recovery transition leaves the target human/login revision,
+B membership/grants, personal-owner rows, B/personal sessions, billing, credentials,
+and content byte-for-byte and authorization-equivalent unchanged.
+
+`blocked`, `aborted`, and `applied` are terminal for one organization-recovery
+generation. After global identity recovery, custody enrollment, or another prerequisite
+changes, a caller must create a new idempotency key/generation and re-run all notices,
+delay, proof, quorum, and revision checks; a blocked callback never resumes.
+
+### 15.6 Post-apply write lineage, containment, and forward-only repair
+
+For 30 days after merge cutover, every write authorized by the canonical human or using
+an owner mapping changed by the merge must append `merge_write_provenance` in the same
+database transaction as the write intent. External work records the intent before
+publish and appends a receipt afterward. A write that cannot durably link its provenance
+fails closed; there is no best-effort observation path.
+
+Each record contains merge id/generation and monotonic sequence; object type/stable id;
+owner plane and before/after owner ids; exact organization/workspace when applicable;
+actor human/login/slot and pre-merge source lineage, or the organization/service
+principal that acted; authorization/security revisions; request/idempotency/outbox and
+external-receipt ids; operation kind; before/after digests or tombstone (never secret
+content); and one conflict/reversibility class. Per-object lineage links the apply-time
+source contribution, every post-apply write, and any later repair effect.
+
+| Class/effect | Deterministic containment and repair outcome |
+| --- | --- |
+| Shared organization/workspace data | Remains owned by that tenant. It is never split merely because the human actor is repaired; tenant authorities decide later human grants. |
+| Membership, role, owner, recovery-steward change | Freeze on containment. Each affected organization's current authority approves one forward assignment; committed revocations are preserved and authority is never duplicated by default. |
+| Invitation | Accepted/expired/cancelled facts stay immutable. A needed grant uses a new invitation after repair; no token or consumed invitation is revived. |
+| Source-attributable private draft/pin/upload/preference | May transfer to a reconstituted proved human when lineage is unique and tenant scope still authorizes it. Stable ids remain; collisions are explicit. |
+| Joint/ambiguous private state | Quarantine from both humans until an explicit owner decision; never copy secrets or guess from email/login label. |
+| Delete or destructive edit | Restore only from an existing policy-valid tombstone/version. Hard-deleted or overwritten facts are reported irreversible, not reconstructed. |
+| Billing/entitlement/provider posting | Posted ledger and provider facts remain. An authorized billing owner may append a compensating transfer/credit; no automatic refund, balance duplication, or anti-abuse reset. |
+| Login credential, API key, session, delegated token | Revoke and reissue after proof. Old secret material is never restored, split, or copied. Organization service credentials remain with their tenant unless that tenant revokes them. |
+| Audit/security evidence | Never rewrite or split prior events. Append alias, containment, decision, repair, and exception links to the immutable chains. |
+| Webhook, notification, job, or other external effect | Cannot be recalled. Record receipt and apply an idempotent compensating action only when the owning subsystem and tenant authority support one. |
+| Personal-organization conversion/finalized deletion | This was an acknowledged prerequisite and remains irreversible. At most restore an available export into a new, separately authorized tenant; never claim original ids/data were losslessly recovered. |
+
+A dispute first commits containment: increment the human security revision, revoke all
+canonical human sessions/personal credentials, seal private-owner mutations, and deny
+new identity/merge/governance/billing actions by that human. Organization-autonomous
+jobs may continue only under their own tenant authority. Containment does not delete,
+move, or duplicate an object.
+
+`repair_review` materializes a paginated manifest from the apply-effect manifest plus every
+provenance record. It shows each affected human and scoped authority: proposed owner,
+retained tenant, revocation, quarantine, compensating effect, and irreversible fact.
+Every organization approves only its own membership/governance outcomes; billing owners
+approve ledger compensation; the deployment identity authority approves new human/login
+resolution; private owners approve uniquely attributable private transfers after proof.
+A single global approver cannot decide all planes.
+
+Repair-plan approvals expire after 14 days or any referenced revision change and must be
+regenerated. Expiry never releases containment. Bounded idempotent batches use stable
+keys/checkpoints and append an outcome for every manifest row. Completion is `repaired`
+or `repaired_with_exceptions`; the user-visible signed report names retained,
+transferred, revoked, quarantined, compensated, and irreversible categories and the
+remaining support/export options. There is no state named “reversed.”
+
+If no dispute arrives, the observation window expires after 30 days and the merge
+finalizes. The special containment entry point expires, but retained provenance follows
+a declared audit/security retention schedule and later incidents use normal
+identity-recovery and forward-repair procedures. Finalization or timeout never destroys
+lineage needed to explain committed facts.
 
 ## 16. Complete tenant and actor data-plane authority
 
@@ -674,7 +917,9 @@ Every persistent or derived datum declares exactly one canonical authority plane
 | --- | --- | --- | --- |
 | Workspace database rows | `(organization_id, workspace_id)` | Composite FK plus FORCE RLS `USING`/`WITH CHECK` under transaction-local verified context | Revision invalidation; two-tenant CRUD with equal-shaped ids |
 | Organization governance rows | `organization_id` plus actor/target ids | Organization RLS or narrow security-definer function after capability check; no null/global tenant visibility | Membership/status revision; cross-org list/mutate denial |
-| Human/login/session/recovery rows | human, login account, or session-set id as declared | No direct app-role table access. A narrow function derives human/login from an opaque authenticated slot/session capability and current revision; caller cannot supply human id. Recovery/operator functions are separately granted | Login/human revision; actor A cannot enumerate actor B even in same org |
+| Human/login/session/identity-recovery rows | human, login account, session-set, or deployment recovery operation id as declared; never organization-derived | No direct app-role table access. A narrow function derives human/login from an opaque authenticated slot/session capability and current revision. Deployment recovery functions require independently enrolled custodian capabilities and cannot accept an organization role as authority | Login/human revision; actor A cannot enumerate actor B; organization-A steward cannot invoke global recovery or affect B/personal state |
+| Organization recovery rows | exact `organization_id`, governance revision, target active human, and scoped operation generation | Organization mutation function derives authority from active human steward membership or separate deployment organization-governance-custody capability; its SQL surface cannot address human/login tables or another organization | Org-only revision/invalidation; cross-org and global-human before/after equality tests |
+| Merge barrier/manifest/write lineage | merge operation/generation, exact object owner plane/id and tenant pair, actor source lineage | Owner/governance writes check active barrier; observation-window writes append provenance transactionally; external effects require durable intent/receipt | Missing provenance denies; containment/repair cannot rewrite tenant, billing, credential, delete, or audit facts |
 | Object data and signed uploads | owner tuple plus immutable `(organization_id, workspace_id)` prefix | Server constructs key and signed capability after grant check; object key/scope from callback is ignored | Revoke signer, expire URL, reap owner prefix; cross-prefix GET/PUT/copy denial |
 | NATS/events/streams | exact tenant pair and optional actor/revision | Broker JWT publish/subscribe allow-list minted server-side; API rechecks grant before subscribe and payload dispatch | Revoke JWT/consumer and close ≤5 s; cross-tenant wildcard publish/subscribe denial |
 | Search/index/vector data | tenant pair on document and index partition | Service capability fixes namespace; authorization prefilter plus result-time grant check. ACL tags are defense in depth only | Delete/tombstone index entries; query with forged/missing ACL tag returns nothing |
@@ -724,6 +969,12 @@ assigned by email. A same-human switch may fetch human-owned state from the serv
 the new epoch, but cannot reuse the previous slot's memory cache, upload handle,
 decrypted connection, or in-flight response.
 
+Identity merge does not erase these source-owner mappings. The apply manifest links each
+source row to one derived generation, and section 15.6 records every observation-window
+write with source/actor/tenant lineage. Forward repair may transfer only uniquely proved
+human-private ownership. Tenant-owned rows stay with their organization/workspace;
+ambiguous private state is quarantined rather than copied or guessed.
+
 ## 18. Append-only, scoped, tamper-evident audit
 
 Audit events are written through a narrow `append_audit_event` database function owned
@@ -738,6 +989,11 @@ roles are separate from both app and audit writer.
 Each event has one scope kind:
 
 - `actor` — visible only to the affected human through a sanitized self-history;
+- `deployment_identity` — human/login recovery, identity merge, and the deployment
+  component of organization-governance-custody evidence visible only to the affected
+  human through a sanitized view and to the dedicated deployment security role; never
+  to an organization merely because the human is its member (the named organization
+  also receives its separately scoped governance event);
 - `organization` — visible to authorized organization auditors;
 - `workspace` — exact organization/workspace pair and authorized workspace auditor;
 - `operator` — platform incident/privileged activity, never tenant-visible by a null
@@ -889,33 +1145,38 @@ loopback/OS-bound local-human proof plus the secret. Its durable transition is:
 | `unclaimed` | different concurrent claimant loses row lock | `unclaimed` | Deny generically and audit; winner alone commits |
 | `recovery_ack_pending` | same human, secret, and idempotency key retry | `recovery_ack_pending` | Return exact ids and the same decryptable one-time envelope; create nothing |
 | `recovery_ack_pending` | proved display/storage of recovery factor | `complete` | Verify factor, destroy delivery envelope/bootstrap verifier, append audit |
-| `recovery_ack_pending` | different claimant/input or expired claim session | unchanged/blocked | Deny; only explicit operator recovery may rotate the pending factor |
+| `recovery_ack_pending` | different claimant/input or expired claim session | unchanged/blocked | Deny; only section 15.4 deployment identity recovery may rotate the pending factor |
 | `complete` | any bootstrap retry | `complete` | Return already-configured state only after normal authentication; never reveal factor |
 
 The claim transaction creates: human identity, login/external binding, personal
-organization, primary workspace, owner organization/workspace memberships, recovery
-capability, offline recovery-factor hash, bootstrap operation, and append-only audit
-event. The raw factor exists only in an envelope encrypted from the bootstrap secret,
+organization, primary workspace, owner organization/workspace memberships,
+organization recovery-steward capability, offline identity-recovery factor hash,
+bootstrap operation, and append-only audit event. The raw factor exists only in an
+envelope encrypted from the bootstrap secret,
 installation id, and proved-human context; it is never logged or stored plaintext.
 High-risk governance and collaboration remain disabled until acknowledgment. A unique
 installation key and idempotency key make crash/retry by the same proved human converge
 to the exact existing ids and envelope. A concurrent/different claimant, unknown
 principal, or non-human principal is denied and audited. After acknowledgment, the
-secret/verifier cannot be regenerated without an explicit operator recovery procedure
-that proves installation control and preserves the existing tenant ids.
+secret/verifier cannot be regenerated without the section 15.4 deployment identity
+recovery procedure proving installation/target authority and preserving existing tenant
+ids.
 
-Single-user policy may let owner and recovery authority be the same human only with a
-separately enrolled offline recovery factor. Service principals and an unclassified
-`local`/`unknown` subject never become owner or recovery authority. Losing both login
-and offline recovery factor follows the operator recovery state machine; it does not
-create a second personal organization.
+Single-user policy may let owner and organization recovery steward be the same human
+only with a separately enrolled organization break-glass factor, while human/login
+recovery uses a distinct offline identity factor. Service principals and an
+unclassified `local`/`unknown` subject become neither owner nor either recovery
+authority. Losing both login and offline identity factor follows section 15.4's
+factorless deployment path when explicitly enabled, otherwise fails closed; it never
+creates a second personal organization.
 
 A `single_user_simplified` capability is presentation policy, not a weaker data model.
 It is available only when collaboration is disabled and exactly one active human, one
 login slot, one personal organization, and one workspace exist. The shell may show only
 the workspace label and put account/organization details in accessible settings; it may
 hide invite/people/switch actions. All tenant ids, composite keys, FORCE RLS, audit,
-revisions, owner/recovery checks, and typed credentials remain active.
+revisions, owner/steward checks, deployment identity-recovery separation, and typed
+credentials remain active.
 
 Enabling collaboration is a step-up, audited transition that verifies recovery,
 disables simplified capability, exposes normal governance UI, and only then permits

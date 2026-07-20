@@ -5,15 +5,16 @@
 
 # Organizations and identity threat model
 
-Status: **revised proposal after blocked review; independent approval required**
+Status: **corrective revision after the second exact-head blocked review; independent approval required**
 
 Companion decision: [`tenancy-identity-adr.md`](tenancy-identity-adr.md)
 
 ## 1. Scope and security objective
 
 This model covers human identities, login accounts, browser login slots,
-organizations, workspace memberships, invitations, recovery, switching, billing-owner
-selection, audit, and authorization invalidation.
+organizations, workspace memberships, invitations, deployment-wide identity recovery,
+organization-scoped governance recovery, switching, billing-owner selection, audit, and
+authorization invalidation.
 
 It does not redesign model-provider credentials, Codex allocation, capability policy,
 attachment storage, or runtime DB-role provisioning. Those systems are in scope only at
@@ -29,7 +30,9 @@ Primary objective:
 ## 2. Assets
 
 - Authentication sessions, password/reset state, upstream identity-provider tokens.
-- Human-to-login-account bindings and recovery authority.
+- Human-to-login-account bindings, human-enrolled recovery factors, and independently
+  scoped deployment identity-recovery authority.
+- Organization owner/recovery-steward custody and organization break-glass factors.
 - Organization membership, roles, invitations, and billing-owner selection.
 - Workspace resources, sessions, drafts, uploads, secrets, provider connections, and
   usage/billing records.
@@ -69,7 +72,7 @@ Assume:
 - stale processes retain prior access contexts, streams, or delegated tokens;
 - a database row contains mismatched organization/workspace ids due to a programming
   error; and
-- support/operator mistakes occur during transfer, deletion, export, or recovery.
+- support/operator mistakes occur during transfer, deletion, export, or recovery;
 - recovery factors or approvers are compromised and attempt an identity merge;
 - a lost native device remains offline or receives a push for the wrong tenant; and
 - an incompatible old binary races canonical membership revocation.
@@ -89,8 +92,9 @@ remain operationally restricted and auditable.
    organization/workspace pair under FORCE RLS.
 5. **No ambient cross-account grants.** A selected browser slot, actor epoch, and access
    context change together.
-6. **Only humans govern humans.** Non-human credentials never satisfy owner/admin or
-   recovery quorum.
+6. **Only humans govern humans.** Non-human credentials never satisfy owner/admin,
+   organization-recovery stewardship, the deployment identity-recovery approval
+   threshold, or the deployment organization-governance-custody threshold.
 7. **Sensitive changes are locked and atomic.** Last-owner, transfer, invitation
    acceptance, and revocation cannot use an unlocked check-then-write sequence.
 8. **Secrets are not observability.** Tokens, invitation secrets, cookies, reset links,
@@ -107,6 +111,15 @@ remain operationally restricted and auditable.
     expose actor/operator-global history through a null tenant predicate.
 13. **Federation is absent until reviewed.** Domain/group claims grant nothing and no
     enterprise support is advertised by this revision.
+14. **Human/login recovery is deployment-scoped.** No organization role, recovery
+    steward, invitation, or tenant quorum can attach a login or change global human
+    status; organization recovery changes one organization's governance only.
+15. **Every active team organization has accountable humans.** Zero resources is not an
+    exception: at least one active human owner and recovery steward remain until a
+    fenced terminal deletion, and invitations/non-humans never count.
+16. **Merge apply is not losslessly reversible.** Observation-window writes retain
+    per-object lineage; disputes contain and repair forward without rewriting billing,
+    credential, delete, external, personal-organization, or audit facts.
 
 ## 6. Threats and required controls
 
@@ -119,7 +132,8 @@ and becomes linked to a victim's human identity.
 
 - Unique login binding is `(issuer, provider subject)`, never email.
 - Email is a verified claim used only for invitation matching/display.
-- Linking requires proof of both active login accounts or a recovery-admin ceremony.
+- Linking requires proof of both active login accounts or a deployment identity-recovery
+  ceremony.
 - Linking, unlinking, merge, and recovery require step-up authentication, idempotency,
   security notification, and audit.
 - A merge preview enumerates affected organizations/roles without exposing secrets.
@@ -208,22 +222,40 @@ forwards it to another identity, races cancel/accept, or edits the requested rol
 - Sensitive roles require step-up and may require second approval by policy.
 - Resend rotates the secret; revoke invalidates all outstanding delivery links.
 
-### T7. Concurrent leave/demote/remove creates an ownerless organization
+### T7. Concurrent leave/demote/remove removes accountable human custody
 
-**Attack:** Two owners remove/demote each other concurrently; an API key is counted as
-the remaining administrator.
+**Attack:** Two owners remove/demote each other concurrently; the last owner leaves an
+empty team organization; a suspension or identity merge removes the only accountable
+human; or an invitation, API key, agent, deployment identity-recovery custodian, or
+deployment organization-governance custodian is counted as the remaining owner or
+recovery steward.
 
 **Controls:**
 
-- Lock the organization governance row and affected memberships in a deterministic
-  order.
-- Evaluate the post-change set of active human identities, including usable recovery
-  paths, inside the transaction.
-- Non-human principals are excluded by type, not name prefix alone.
-- Database constraints/indexes enforce personal-owner uniqueness where possible; a
-  serialized domain transaction enforces cross-table liveness.
-- Concurrency tests run simultaneous leave/demote/remove/transfer operations and prove
-  one safe winner or safe conflict.
+- Lock the organization governance row, governance revision, and affected memberships
+  in a deterministic order for leave/remove/demote/transfer/suspend/delete/merge and
+  organization-recovery mutations.
+- Evaluate the post-change set inside the transaction. Every `active` team organization
+  has at least one active human owner and one active human recovery steward even when it
+  has zero workspaces, billing, invitations, or resources.
+- Invitations and non-human principals are excluded by type. Both kinds of deployment
+  custodian are separate no-content authorities, not memberships, and never satisfy an
+  active-organization count.
+- Last-owner/steward leave or removal is rejected unless an already active proved human
+  receives custody atomically. Explicit deletion retains custody until the terminal
+  `deleted` transition deactivates the last memberships in the same transaction.
+- Immediate identity suspension moves an otherwise orphaned organization to
+  `governance_locked` atomically; a delayed deployment organization-governance-custody
+  ceremony appoints a proved human before reactivation.
+- Merge generation flip activates canonical owner/steward rows before source rows become
+  inactive. Database constraints/indexes enforce personal-owner uniqueness where
+  possible; narrow serialized domain functions enforce cross-table liveness.
+
+**Tests:** Race zero-resource last-owner leave/remove, two-owner cross-removal,
+owner-versus-steward demotion, identity suspension, identity merge cutover,
+organization recovery, transfer, and deletion finalization. Prove one safe winner,
+`governance_locked`, terminal deletion, or safe conflict—never an active state without
+both required human capabilities.
 
 ### T8. Revoked member retains cached, streaming, token, or tab access
 
@@ -329,17 +361,41 @@ file to the prior workspace, or later attaches an old workspace file to a new me
 
 ### T14. Recovery bypasses least privilege
 
-**Attack:** A recovery admin reads workspace content, installs a login account, or
-transfers ownership without notice.
+**Attack:** Organization-A recovery stewards attach a login or restore a deployment-wide
+human and thereby reactivate that human's organization-B/personal grants; an ordinary
+support/operator session acts as a global recovery custodian; or global recovery
+preserves compromised sessions and credentials.
 
 **Controls:**
 
-- Recovery capability is separate from workspace read and billing.
-- Recovery operations are narrowly enumerated, step-up authenticated, rate limited,
-  require reason/incident id, and notify existing verified contacts.
+- Deployment identity recovery and organization governance recovery use separate
+  tables, capabilities, state machines, database functions, audit scopes, and quorums.
+- Human/login recovery accepts only closed authority paths: target-enrolled independent
+  factors, or two/three distinct deployment identity-recovery custodians with the ADR's
+  72-hour/seven-day delays. Organization roles, organization-governance custodians,
+  invitations, tenant quorums, and non-human credentials never count.
+- Organization recovery requires a globally active proved human and can mutate only one
+  organization's membership/grants. Its SQL capability cannot address human/login rows,
+  private-owner mappings, another organization, or a personal workspace.
+- Global recovery increments the target security revision and revokes all browser/native
+  slots, auth sessions, personal credentials, offline caches, delegated user tokens, and
+  streams before exposing a newly proved path. Tenant service credentials remain with
+  their tenant.
+- Both operations are narrowly enumerated, step-up authenticated, rate limited, carry an
+  incident/reason, notify existing paths/scoped security contacts, and append their
+  distinct actor/deployment/organization audit events.
 - Break-glass content access, if a deployment supports it, is a separate time-limited
   grant with prominent audit/notification and cannot be implicit.
 - Recovery never creates an email-based identity merge.
+
+**Tests:** Give one human active grants in organizations A/B plus a personal workspace.
+Traverse every A-governance recovery transition and assert the global human/login
+revision and all B/personal memberships, owner rows, sessions, credentials, billing,
+and content remain byte-for-byte and authorization-equivalent unchanged. Then exercise
+each global authority path and prove quorum, delay, notice, revision, and complete
+session/credential revocation while every A/B/personal governance row and revision stays
+unchanged. Fresh authorization may make independently active grants usable again, but
+recovery creates or reactivates no grant.
 
 ### T15. Export or deletion crosses tenants or erases evidence
 
@@ -376,30 +432,47 @@ uses a table-owner connection, or treats host ACL tags as authorization.
 ### T17. Merge or recovery converts compromise into durable authority
 
 **Attack:** A compromised account links a victim login, a recovery approver replays an
-old ceremony, two personal organizations collapse silently, or a crashed merge worker
-partially moves grants/private assets and later repeats them.
+old ceremony, two personal organizations collapse silently, a merge apply transaction
+is unbounded, or post-apply writes are lost/duplicated/misattributed by a claimed
+reversal.
 
 **Controls:**
 
 - Link, merge, and recovery use the separate state machines in ADR section 15.
 - Every transition checks operation generation, both starting human revisions, proof
   expiry, approver eligibility, and a unique idempotency key under lock.
-- Existing-human merge requires fresh proof from both sources, or the stricter recovery
-  quorum plus 72-hour cooling; ordinary proven merge still cools for 24 hours.
+- Existing-human merge requires fresh proof from both sources. An unavailable source
+  first completes deployment identity recovery and then proves the new path; no
+  organization quorum replaces proof. Ordinary merge cools 24 hours and a recovered
+  path cools 72 hours.
 - All pre-existing verified paths are notified at proposal, conflict decision, apply,
-  dispute, reverse, and finalize. A dispute fences every stale callback/worker.
-- Duplicate personal organizations require explicit keep/convert/delete decisions;
+  dispute, containment, repair, and finalize. A dispute fences every stale callback and
+  worker.
+- Duplicate personal organizations require explicit keep/convert/delete prerequisites.
+  Conversion/final deletion and destroyed/external facts are visibly irreversible;
   billing/personal entitlements enter hold and never sum automatically.
-- Apply is one transaction with an effect ledger and reversible alias. Sessions/tokens
-  are revoked; audit identities and source contributions are not rewritten.
-- A compromised/suspended/newly-added approver, target identity, or absorbed identity
-  cannot satisfy recovery quorum.
+- A merge barrier freezes ownership/governance/billing/private-owner mutations. Inactive
+  derived rows stage in at-most-500-row/250-ms batches; a short digest/revision-checked
+  generation flip activates them and revokes sessions/tokens without locking every
+  object in one transaction.
+- During the 30-day observation window every affected write records per-object owner,
+  tenant, actor/source lineage, revisions, operation/idempotency, digest/tombstone, and
+  external intent/receipt. Missing provenance denies the write.
+- A dispute contains the human, revokes credentials, and builds a forward-only repair
+  manifest. Tenant data stays tenant-owned; scoped authorities decide memberships,
+  private ownership, and compensating billing/external actions. Credentials are
+  reissued, deletes restore only from extant tombstones, and audit is append-only.
+- Repair approvals expire without releasing containment. Completion reports retained,
+  transferred, revoked, quarantined, compensated, and irreversible facts; no lossless
+  reversal or inverse ledger is promised.
 
 **Tests:** Traverse every transition/event pair, including duplicate/reordered callback,
-expired proof, revision change, lost approver, dispute at the deadline, crash at every
-effect, deterministic retry, reversal, and finalization. Generate every conflict-table
-combination and prove no implicit owner, role, billing, recovery, private-data, or
-personal-organization outcome.
+expired proof, revision/barrier change, dispute at the deadline, crash at every staging,
+cutover, provenance, containment, and repair boundary, deterministic retry, approval
+expiry, and finalization. Generate concurrent post-apply writes from both source-login
+lineages and organization/service actors for every conflict class. Prove no implicit
+owner, role, billing, recovery, credential, private-data, delete, external-effect, or
+personal-organization outcome and no unbounded cutover transaction.
 
 ### T18. A non-database plane crosses tenants
 
@@ -437,8 +510,9 @@ head, or deletion silently erases identity-security evidence.
 - The app can execute only the dedicated append function; it has no table/sequence/
   partition mutation ownership. Append-deny trigger and deployment grant assertions are
   defense in depth.
-- Scope is explicit (`actor`, `organization`, `workspace`, `operator`, or public
-  integrity checkpoint). Null tenant is never a visibility wildcard.
+- Scope is explicit (`actor`, `deployment_identity`, `organization`, `workspace`,
+  `operator`, or public integrity checkpoint). Null tenant is never a visibility
+  wildcard.
 - Per-scope locked sequence/hash chains and externally signed retention-locked heads
   detect rewrite, truncation, removal, and reordering beyond the normal DB role boundary.
 - Security mutation and audit append commit together. Rollback leaves neither effect.
@@ -506,8 +580,9 @@ human during merge/backfill.
   rechecks pair and revision.
 - Legacy subject augmentation requires one unambiguous login-to-human binding and keeps
   source provenance/stable ids. Ambiguity is quarantine, never email-based assignment.
-- Merge uses a reversible owner effect ledger; duplicate ids are retained under stable
-  disambiguated ids rather than dropped or overwritten.
+- Merge retains immutable source mappings, staged owner lineage, and every post-apply
+  provenance record; duplicate ids remain stable/disambiguated and ambiguous repair is
+  quarantined rather than dropped, overwritten, or automatically reversed.
 
 ### T23. Federation claims or first caller seize governance
 
@@ -525,8 +600,10 @@ instance becomes owner.
   or loopback/OS proof, never first-request wins.
 - An unauthenticated listener outside allowed loopback/private operator policy refuses
   startup. Unknown and non-human subjects cannot own or recover.
-- Bootstrap is one locked idempotent transaction with stable installation ids and an
-  offline factor; collaboration enablement preserves all normal tenant/RLS semantics.
+- Bootstrap is one locked idempotent transaction with stable installation ids and a
+  human identity-recovery factor. A distinct organization break-glass factor is enrolled
+  before single-person stewardship/collaboration enables; all normal tenant/RLS
+  semantics remain active.
 
 ## 7. Session and credential invalidation matrix
 
@@ -537,6 +614,9 @@ instance becomes owner.
 | Remove org membership | retained | retained | org revision invalidated | ≤5 s close | rejected at next boundary | unchanged unless personal/policy-bound | continues under workspace authority |
 | Remove workspace membership | retained | retained | workspace revision invalidated | ≤5 s close | rejected at next boundary | unchanged unless personal/policy-bound | continues unless separately paused/cancelled |
 | Password reset/compromise | all affected-account slots revoked | all affected-account sessions revoked | affected actor cleared | affected closed | affected rejected | personal keys revoked by policy | organization workload unchanged |
+| Deployment identity recovery | every target-human slot revoked; only newly proved slot may be issued | every target-login session revoked | all actor caches denied by new human/login revision, then active grants freshly resolve | all target-human streams closed | all target-human tokens rejected | tenant service keys unchanged; personal keys revoked | tenant-autonomous workload unchanged |
+| Organization-A governance recovery | unchanged | unchanged | A revision invalidated; B/personal revisions byte-equal | A streams close as grants change; B/personal unchanged | only A-scoped token affected | only explicitly A human-bound key affected | A policy only; B/personal unchanged |
+| Merge dispute containment | every canonical-human slot revoked | every source/canonical session revoked | canonical human denied pending forward repair | all human streams closed | all human-bound tokens rejected | personal keys revoked; tenant keys unchanged | tenant-autonomous workload follows tenant authority |
 | Delete organization finalizes | affected route access removed | identity login may remain | organization invalidated | closed | rejected | org keys revoked | must already be stopped/transferred |
 
 Native/device invalidation uses the same rows plus these host effects:
@@ -572,16 +652,20 @@ Passing DB RLS tests does not waive any row in this matrix.
 At minimum record successful and failed high-risk attempts for:
 
 - login account add/link/unlink, slot switch, per-account/all-account sign-out;
-- identity merge/recovery and step-up challenge result;
-- identity merge evidence/conflict/cooling/dispute/reverse/finalize and recovery approver
-  eligibility decisions;
+- deployment identity-recovery request/factor/custodian eligibility/cooling/dispute/
+  apply and complete revocation outcome;
+- organization governance-recovery request/steward/custody eligibility/cooling/apply and
+  cross-organization noninterference result;
+- identity merge evidence/conflict/prerequisite/barrier/staging/cutover/observation/
+  containment/repair/finalize, including every provenance and irreversible-effect
+  classification;
 - organization create/convert/rename/status/delete/cancel-delete;
 - invite create/resend/cancel/expire/accept/reject;
 - membership add/remove/leave, role/capability change, ownership transfer;
 - billing/entitlement-owner change;
 - personal/service credential create/revoke;
-- export request/claim/complete/download/expire; and
-- authorization invalidation delivery failure/retry.
+- export request/claim/complete/download/expire;
+- authorization invalidation delivery failure/retry;
 - audit retention/legal-hold/crypto-erasure/hard-erasure certificate and integrity-head
   sign/export/verification failure;
 - native installation/slot/token-family/push registration create/revoke/replay; and
@@ -598,12 +682,18 @@ separate security-session history provides equivalent evidence. Sensitive mutati
 - Delegation subset and non-delegable owner/recovery capabilities.
 - Invitation expiry, target mismatch, replay, resend rotation, idempotent same-identity
   retry, and concurrent acceptance.
-- Personal/team lifecycle and last-human-owner/recovery post-state calculation.
+- Personal/team lifecycle and last-active-human-owner/recovery-steward post-state
+  calculation.
 - Legacy `accountId`/new `organizationId` equality and mismatch rejection.
 - Cookie/slot selection, per-account sign-out, CSRF/origin, callback state, open-redirect
   rejection, and stale identity-epoch response discard.
-- Every link/merge/recovery transition, proof/quorum/cooling/revision rule, conflict
-  resolution, crash retry, dispute, reversal, and source-contribution preservation.
+- Every link/merge/deployment-recovery/organization-recovery transition,
+  proof/quorum/cooling/revision/noninterference rule, conflict resolution, barrier and
+  bounded staging retry, post-apply write classification, containment, forward repair,
+  approval expiry, irreversible exception, and source-contribution preservation.
+- Empty active team last-owner/steward leave/remove/suspend/merge/recovery/delete races;
+  invitations, agents, service principals, API keys, and either kind of deployment
+  custodian never satisfy the active human invariant.
 - Issuer/subject/email/slug normalization fixtures and tombstone generation/reuse.
 - Bootstrap first-claim race/restart/recovery and federation claim rejection.
 
@@ -618,8 +708,15 @@ equal-shaped rows. Run as the real non-owner app role with FORCE RLS:
 - pooled transaction context does not leak between sequential tenants;
 - organization-only tables remain invisible under another organization;
 - concurrent owner demote/remove/leave/transfer preserves human governance;
+- zero-resource active team organizations retain owner/steward custody; suspension moves
+  safely to `governance_locked`, and terminal delete deactivates custody atomically;
+- organization-A recovery cannot call global identity functions or alter seeded
+  organization-B/personal rows/revisions, while deployment recovery enforces independent
+  custodian/factor quorum and complete revocation;
+- merge staging/cutover and observation-window provenance remain bounded/idempotent;
+  missing lineage denies and forward repair preserves immutable/irreversible facts;
 - revocation and invitation consumption serialize correctly; and
-- forward migration/backfill is idempotent on legacy, partial, duplicate, and empty data.
+- forward migration/backfill is idempotent on legacy, partial, duplicate, and empty data;
 - the app role cannot update/delete/truncate audit history, actor/operator scope cannot
   leak, hash segments verify, and mutation rollback leaves no orphan audit event;
 - legacy/new grant and revoke races obey phase authority; old roles cannot read or write
@@ -647,6 +744,15 @@ keyboard-only, screen reader, light/dark, slow network, two tabs, and reduced mo
 - add/switch/sign-out-one/sign-out-all;
 - cross-account deep link, inaccessible/revoked link, invite accept/expired/replayed;
 - dirty draft, draft-save conflict, in-progress/failed upload, and switch cancellation;
+- identity merge irreversible-prerequisite acknowledgments, staging, applied-observation,
+  dispute containment, approval expiry, per-category forward-repair outcomes, and
+  irreversible exceptions without any reversal promise;
+- deployment identity recovery with global-scope/revocation/reactivated-grant warning,
+  and organization-A governance recovery with an exact-org scope warning and unchanged
+  organization-B/personal presentation;
+- empty active team last-owner/steward disabled actions, atomic transfer, deletion
+  pending/finalized, suspension to `governance_locked`, and delayed deployment
+  organization-governance custody;
 - old stream closes and no stale old-tenant response renders after switch; and
 - focus restoration, announcements, target size, contrast, and safe mobile sheet.
 
@@ -665,6 +771,10 @@ Scrub screenshots/recordings before attaching them to the issue.
   with correct implementation.
 - Organization deletion cannot promise immediate physical erasure from backups; policy
   must disclose backup retention and restoration handling.
+- Identity merge cannot promise lossless post-apply reversal. Personal-organization
+  conversion/deletion, hard deletes, billing/provider postings, audit facts, and external
+  effects may be irreversible; containment and explicit forward repair are the
+  supported security response.
 
 Any implementation that weakens an invariant to address a residual risk requires a new
 ADR and independent security review.
