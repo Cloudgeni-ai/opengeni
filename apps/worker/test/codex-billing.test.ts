@@ -240,4 +240,101 @@ describe("worker recordModelUsageAndDebitCredits — codex usage recording", () 
       debitSpy.mockRestore();
     }
   });
+
+  test("inconsistent reported totals cannot suppress token rows, cost, or debit metadata", async () => {
+    const settings = testSettings({
+      billingMode: "stripe",
+      usageLimitsMode: "managed",
+      modelPricingJson: JSON.stringify({
+        "scripted-model": {
+          inputMicrosPerMillionTokens: 1_000_000,
+          outputMicrosPerMillionTokens: 1_000_000,
+        },
+      }),
+    });
+    const recorded: Array<{ eventType: string; quantity: number; sourceResourceId: string }> = [];
+    const recordSpy = spyOn(opengeniDb, "recordUsageEvent").mockImplementation(
+      async (_db, input) => {
+        recorded.push({
+          eventType: input.eventType,
+          quantity: input.quantity,
+          sourceResourceId: input.sourceResourceId,
+        });
+      },
+    );
+    const debitInputs: Array<Record<string, any>> = [];
+    const debitSpy = spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockImplementation(
+      async (_db, input) => {
+        debitInputs.push(input);
+        return {
+          balance: {
+            accountId: ACCOUNT,
+            balanceMicros: 1_000_000,
+            currency: "usd",
+            updatedAt: new Date().toISOString(),
+          },
+          debitedMicros: input.requestedAmountMicros,
+        };
+      },
+    );
+    try {
+      const cases = [
+        {
+          sourceKey: "zero-total",
+          usage: { inputTokens: 100, outputTokens: 20, totalTokens: 0 },
+          expectedTotal: 120,
+        },
+        {
+          sourceKey: "low-total",
+          usage: { inputTokens: 100, outputTokens: 20, totalTokens: 3 },
+          expectedTotal: 120,
+        },
+        {
+          sourceKey: "request-authority",
+          usage: {
+            inputTokens: 1,
+            outputTokens: 2,
+            totalTokens: 3,
+            requestUsageEntries: [
+              { inputTokens: 100, outputTokens: 10, totalTokens: 110 },
+              { inputTokens: 200, outputTokens: 40, totalTokens: 240 },
+            ],
+          },
+          expectedTotal: 350,
+        },
+      ];
+      for (const value of cases) {
+        await recordModelUsageAndDebitCredits(settings, db, {
+          accountId: ACCOUNT,
+          workspaceId: WORKSPACE,
+          sessionId: "sess-1",
+          turnId: "turn-inconsistent",
+          model: "scripted-model",
+          isCodexTurn: false,
+          usage: value.usage,
+          sourceKey: value.sourceKey,
+        });
+      }
+
+      for (const value of cases) {
+        expect(recorded).toContainEqual({
+          eventType: "model.tokens",
+          quantity: value.expectedTotal,
+          sourceResourceId: `turn-inconsistent:${value.sourceKey}`,
+        });
+      }
+      expect(debitInputs).toHaveLength(cases.length);
+      expect(debitInputs.map((input) => input.metadata.totalTokens)).toEqual(
+        cases.map((value) => value.expectedTotal),
+      );
+      expect(debitInputs[2]?.metadata).toMatchObject({
+        inputTokens: 300,
+        outputTokens: 50,
+        totalTokens: 350,
+      });
+    } finally {
+      recordSpy.mockRestore();
+      debitSpy.mockRestore();
+    }
+  });
 });

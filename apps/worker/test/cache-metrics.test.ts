@@ -222,6 +222,20 @@ describe("recordModelCacheTokens — prompt-cache efficiency", () => {
     expect(rule).toContain("OpenGeniCodexPromptCacheTelemetryMissing");
     expect(rule).toContain("opengeni_model_cache_read_telemetry_total");
     expect(rule).toContain('provider="codex-subscription",status="missing"');
+    // If a provider/SDK omits the ENTIRE usage object, no availability sample
+    // exists. Successful call traffic must remain an independent denominator so
+    // that compatibility failure cannot make the alert disappear.
+    expect(rule).toContain(
+      'opengeni_model_calls_total{provider="codex-subscription",outcome="completed"}',
+    );
+    expect(rule).toMatch(
+      /opengeni_model_cache_read_telemetry_total\{provider="codex-subscription"\}[\s\S]*<[\s\S]*opengeni_model_calls_total\{provider="codex-subscription",outcome="completed"\}/,
+    );
+    const alertBlock = rule.match(
+      /- alert: OpenGeniCodexPromptCacheTelemetryMissing[\s\S]*?for: 15m/,
+    )?.[0];
+    expect(alertBlock).toBeDefined();
+    expect(alertBlock?.match(/and on\(\)/g)).toHaveLength(1);
   });
 });
 

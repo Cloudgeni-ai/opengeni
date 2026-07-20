@@ -73,31 +73,62 @@ export function normalizeModelCallUsage(
   }
 
   const requestEntries = requestUsageEntries(usage.requestUsageEntries, rejectedFields);
-  const inputTokens = topLevelOrRequestTokenCount(
-    usage.inputTokens,
-    "inputTokens",
-    requestEntries,
-    ["inputTokens", "input_tokens"],
-    rejectedFields,
-  );
-  const outputTokens = topLevelOrRequestTokenCount(
+  const topLevelInputTokens = reportedTokenCount(usage.inputTokens, "inputTokens", rejectedFields);
+  const topLevelOutputTokens = reportedTokenCount(
     usage.outputTokens,
     "outputTokens",
-    requestEntries,
-    ["outputTokens", "output_tokens"],
     rejectedFields,
   );
-  const reportedTotalTokens = reportedTokenCount(usage.totalTokens, "totalTokens", rejectedFields);
-  const totalTokens =
-    reportedTotalTokens ??
-    topLevelOrRequestTokenCount(
-      undefined,
-      "totalTokens",
-      requestEntries,
-      ["totalTokens", "total_tokens"],
-      rejectedFields,
-    ) ??
-    boundedTokenSum([inputTokens, outputTokens], "totalTokens.aggregate", rejectedFields);
+  const topLevelTotalTokens = reportedTokenCount(usage.totalTokens, "totalTokens", rejectedFields);
+  const requestInputTokens = completeRequestTokenAggregate(
+    requestEntries,
+    ["inputTokens", "input_tokens"],
+    "inputTokens.requestUsageEntries",
+    rejectedFields,
+  );
+  const requestOutputTokens = completeRequestTokenAggregate(
+    requestEntries,
+    ["outputTokens", "output_tokens"],
+    "outputTokens.requestUsageEntries",
+    rejectedFields,
+  );
+  let requestTotalTokens = completeRequestTokenAggregate(
+    requestEntries,
+    ["totalTokens", "total_tokens"],
+    "totalTokens.requestUsageEntries",
+    rejectedFields,
+  );
+  if (rejectInconsistentRequestTotals(requestEntries, rejectedFields)) {
+    requestTotalTokens = { ...requestTotalTokens, status: "invalid", value: null };
+  }
+
+  // Complete per-request aggregates are the installed SDK's request-level
+  // truth. A conflicting top-level field is diagnostic only; it must never
+  // override the request sum with a smaller billable/context value. Invalid
+  // complete request aggregates fail closed rather than falling back to a
+  // potentially undercounting top-level number.
+  const inputTokens = canonicalTokenDimension({
+    topLevel: topLevelInputTokens,
+    topLevelReported: isReported(usage.inputTokens),
+    topLevelPath: "inputTokens",
+    requestAggregate: requestInputTokens,
+    rejectedFields,
+  });
+  const outputTokens = canonicalTokenDimension({
+    topLevel: topLevelOutputTokens,
+    topLevelReported: isReported(usage.outputTokens),
+    topLevelPath: "outputTokens",
+    requestAggregate: requestOutputTokens,
+    rejectedFields,
+  });
+  const totalTokens = canonicalTotalTokens({
+    inputTokens,
+    outputTokens,
+    topLevel: topLevelTotalTokens,
+    topLevelReported: isReported(usage.totalTokens),
+    requestAggregate: requestTotalTokens,
+    rejectedFields,
+  });
 
   const inputDetailSource = preferredDetailSource(
     usage.inputTokensDetails,
@@ -171,40 +202,172 @@ function requestUsageEntries(
   return entries;
 }
 
-function topLevelOrRequestTokenCount(
-  value: unknown,
-  field: string,
+type RequestTokenAggregate = {
+  status: "absent" | "incomplete" | "invalid" | "complete";
+  value: number | null;
+};
+
+function completeRequestTokenAggregate(
   requestEntries: RequestUsageEntry[],
   requestKeys: string[],
+  aggregatePath: string,
   rejectedFields: Set<string>,
-): number | null {
-  if (value !== undefined && value !== null) {
-    return reportedTokenCount(value, field, rejectedFields);
-  }
+): RequestTokenAggregate {
   if (requestEntries.length === 0) {
-    return null;
+    return { status: "absent", value: null };
   }
   const values: Array<number | null> = [];
-  let sawReportedValue = false;
-  let sawMissingValue = false;
+  let incomplete = false;
+  let invalid = false;
   for (const [index, entry] of requestEntries.entries()) {
     const selected = firstPresentEntry(entry as Record<string, unknown>, requestKeys);
-    if (!selected) {
-      sawMissingValue = true;
+    if (!selected || selected.value === null) {
+      incomplete = true;
       continue;
     }
-    sawReportedValue = true;
-    values.push(
-      reportedTokenCount(
-        selected.value,
-        `requestUsageEntries[${index}].${selected.key}`,
-        rejectedFields,
-      ),
+    const parsed = reportedTokenCount(
+      selected.value,
+      `requestUsageEntries[${index}].${selected.key}`,
+      rejectedFields,
     );
+    if (parsed === null) invalid = true;
+    values.push(parsed);
   }
-  return sawReportedValue && !sawMissingValue
-    ? boundedTokenSum(values, `${field}.requestUsageEntries`, rejectedFields)
-    : null;
+  if (invalid) {
+    return { status: "invalid", value: null };
+  }
+  if (incomplete) {
+    return { status: "incomplete", value: null };
+  }
+  const value = boundedTokenSum(values, aggregatePath, rejectedFields);
+  return value === null ? { status: "invalid", value: null } : { status: "complete", value };
+}
+
+function canonicalTokenDimension(input: {
+  topLevel: number | null;
+  topLevelReported: boolean;
+  topLevelPath: string;
+  requestAggregate: RequestTokenAggregate;
+  rejectedFields: Set<string>;
+}): number | null {
+  if (input.requestAggregate.status === "complete") {
+    if (
+      input.topLevelReported &&
+      input.topLevel !== null &&
+      input.topLevel !== input.requestAggregate.value
+    ) {
+      rejectField(input.rejectedFields, input.topLevelPath);
+    }
+    return input.requestAggregate.value;
+  }
+  if (input.requestAggregate.status === "invalid") {
+    if (input.topLevelReported) {
+      rejectField(input.rejectedFields, input.topLevelPath);
+    }
+    return null;
+  }
+  return input.topLevel;
+}
+
+function canonicalTotalTokens(input: {
+  inputTokens: number | null;
+  outputTokens: number | null;
+  topLevel: number | null;
+  topLevelReported: boolean;
+  requestAggregate: RequestTokenAggregate;
+  rejectedFields: Set<string>;
+}): number | null {
+  if (input.inputTokens !== null && input.outputTokens !== null) {
+    const derived = boundedTokenSum(
+      [input.inputTokens, input.outputTokens],
+      "totalTokens.aggregate",
+      input.rejectedFields,
+    );
+    if (derived === null) {
+      // Both canonical components are known and exceed the supported aggregate
+      // ceiling. Any bounded reported total necessarily undercounts them.
+      if (input.topLevelReported) rejectField(input.rejectedFields, "totalTokens");
+      if (input.requestAggregate.status === "complete") {
+        rejectField(input.rejectedFields, "totalTokens.requestUsageEntries");
+      }
+      return null;
+    }
+    if (input.topLevelReported && input.topLevel !== null && input.topLevel !== derived) {
+      rejectField(input.rejectedFields, "totalTokens");
+    }
+    if (input.requestAggregate.status === "complete" && input.requestAggregate.value !== derived) {
+      rejectField(input.rejectedFields, "totalTokens.requestUsageEntries");
+    }
+    return derived;
+  }
+
+  if (input.requestAggregate.status === "complete") {
+    const requestTotal = input.requestAggregate.value;
+    if (
+      requestTotal === null ||
+      !totalCoversKnownComponents(requestTotal, input.inputTokens, input.outputTokens)
+    ) {
+      rejectField(input.rejectedFields, "totalTokens.requestUsageEntries");
+      if (input.topLevelReported) rejectField(input.rejectedFields, "totalTokens");
+      return null;
+    }
+    if (input.topLevelReported && input.topLevel !== null && input.topLevel !== requestTotal) {
+      rejectField(input.rejectedFields, "totalTokens");
+    }
+    return requestTotal;
+  }
+  if (input.requestAggregate.status === "invalid") {
+    if (input.topLevelReported) rejectField(input.rejectedFields, "totalTokens");
+    return null;
+  }
+  if (
+    input.topLevel !== null &&
+    !totalCoversKnownComponents(input.topLevel, input.inputTokens, input.outputTokens)
+  ) {
+    rejectField(input.rejectedFields, "totalTokens");
+    return null;
+  }
+  return input.topLevel;
+}
+
+function totalCoversKnownComponents(
+  total: number,
+  inputTokens: number | null,
+  outputTokens: number | null,
+): boolean {
+  return (
+    (inputTokens === null || total >= inputTokens) &&
+    (outputTokens === null || total >= outputTokens)
+  );
+}
+
+function rejectInconsistentRequestTotals(
+  requestEntries: RequestUsageEntry[],
+  rejectedFields: Set<string>,
+): boolean {
+  let inconsistent = false;
+  for (const [index, entry] of requestEntries.entries()) {
+    const record = entry as Record<string, unknown>;
+    const selectedInput = firstPresentEntry(record, ["inputTokens", "input_tokens"]);
+    const selectedOutput = firstPresentEntry(record, ["outputTokens", "output_tokens"]);
+    const selectedTotal = firstPresentEntry(record, ["totalTokens", "total_tokens"]);
+    if (!selectedInput || !selectedOutput || !selectedTotal) continue;
+    const inputTokens = modelUsageTokenCountOrNull(selectedInput.value);
+    const outputTokens = modelUsageTokenCountOrNull(selectedOutput.value);
+    const totalTokens = modelUsageTokenCountOrNull(selectedTotal.value);
+    if (inputTokens === null || outputTokens === null || totalTokens === null) continue;
+    const derived =
+      inputTokens <= MAX_MODEL_USAGE_TOKEN_COUNT - outputTokens ? inputTokens + outputTokens : null;
+    if (derived === null || totalTokens !== derived) {
+      rejectField(rejectedFields, `requestUsageEntries[${index}].${selectedTotal.key}`);
+      inconsistent = true;
+    }
+  }
+  return inconsistent;
+}
+
+function isReported(value: unknown): boolean {
+  return value !== undefined && value !== null;
 }
 
 function preferredDetailSource(

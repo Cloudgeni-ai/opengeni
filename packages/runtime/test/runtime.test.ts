@@ -413,6 +413,92 @@ describe("runtime event normalization", () => {
     expect(partialDetails.rejectedFields).toEqual(["inputTokensDetails[1]"]);
   });
 
+  test("derives canonical totals and rejects low, high, and conflicting aggregate totals", () => {
+    for (const reportedTotal of [0, 3, 119, 121, 999_999]) {
+      const normalized = normalizeModelCallUsage({
+        inputTokens: 100,
+        outputTokens: 20,
+        totalTokens: reportedTotal,
+      });
+      expect(normalized.totalTokens).toBe(120);
+      expect(normalized.rejectedFields).toContain("totalTokens");
+    }
+
+    const conflictingAggregate = normalizeModelCallUsage({
+      inputTokens: 1,
+      outputTokens: 2,
+      totalTokens: 3,
+      requestUsageEntries: [
+        { inputTokens: 100, outputTokens: 10, totalTokens: 110 },
+        { input_tokens: 200, output_tokens: 40, total_tokens: 240 },
+      ],
+    });
+    expect(conflictingAggregate).toMatchObject({
+      telemetry: { inputTokens: 300, outputTokens: 50 },
+      totalTokens: 350,
+    });
+    expect(conflictingAggregate.rejectedFields).toEqual(
+      expect.arrayContaining(["inputTokens", "outputTokens", "totalTokens"]),
+    );
+
+    const conflictingRequestTotals = normalizeModelCallUsage({
+      inputTokens: 300,
+      outputTokens: 50,
+      totalTokens: 350,
+      requestUsageEntries: [
+        { inputTokens: 100, outputTokens: 10, totalTokens: 0 },
+        { inputTokens: 200, outputTokens: 40, totalTokens: 3 },
+      ],
+    });
+    expect(conflictingRequestTotals.totalTokens).toBe(350);
+    expect(conflictingRequestTotals.rejectedFields).toEqual(
+      expect.arrayContaining([
+        "requestUsageEntries[0].totalTokens",
+        "requestUsageEntries[1].totalTokens",
+      ]),
+    );
+  });
+
+  test("keeps canonical-total arithmetic bounded at cumulative overflow boundaries", () => {
+    expect(
+      normalizeModelCallUsage({
+        inputTokens: 999_999_999,
+        outputTokens: 1,
+        totalTokens: 0,
+      }),
+    ).toMatchObject({ totalTokens: 1_000_000_000 });
+
+    const derivedOverflow = normalizeModelCallUsage({
+      inputTokens: 1_000_000_000,
+      outputTokens: 1,
+      totalTokens: 1,
+    });
+    expect(derivedOverflow.totalTokens).toBeNull();
+    expect(derivedOverflow.rejectedFields).toEqual(
+      expect.arrayContaining(["totalTokens.aggregate", "totalTokens"]),
+    );
+
+    const requestOverflow = normalizeModelCallUsage({
+      inputTokens: 1,
+      outputTokens: 0,
+      totalTokens: 1,
+      requestUsageEntries: [
+        { inputTokens: 600_000_000, outputTokens: 0, totalTokens: 600_000_000 },
+        { inputTokens: 400_000_001, outputTokens: 0, totalTokens: 400_000_001 },
+      ],
+    });
+    expect(requestOverflow.telemetry.inputTokens).toBeNull();
+    expect(requestOverflow.totalTokens).toBeNull();
+    expect(requestOverflow.rejectedFields).toEqual(
+      expect.arrayContaining([
+        "inputTokens.requestUsageEntries",
+        "totalTokens.requestUsageEntries",
+        "inputTokens",
+        "totalTokens",
+      ]),
+    );
+  });
+
   test("ignores duplicate raw Responses text delta mirror events", () => {
     const events = normalizeSdkEvent({
       type: "raw_model_stream_event",

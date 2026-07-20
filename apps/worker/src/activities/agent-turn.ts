@@ -586,6 +586,256 @@ type TurnEventPublisher = (
   immediate?: boolean,
 ) => Promise<{ events: SessionEvent[]; accepted: boolean }>;
 
+export type ModelResponseUsageEventState = {
+  responseUsageCount: number;
+  providerContextRevision: number;
+  lastProviderContextTokensObserved: number | null;
+  claimedSourceKeys: Set<string>;
+};
+
+export type CompactionModelUsageEventState = {
+  usageCount: number;
+  claimedSourceKeys: Set<string>;
+};
+
+export function createModelResponseUsageEventState(
+  claimedSourceKeys: Set<string> = new Set<string>(),
+): ModelResponseUsageEventState {
+  return {
+    responseUsageCount: 0,
+    providerContextRevision: 0,
+    lastProviderContextTokensObserved: null,
+    claimedSourceKeys,
+  };
+}
+
+export function createCompactionModelUsageEventState(
+  claimedSourceKeys: Set<string> = new Set<string>(),
+): CompactionModelUsageEventState {
+  return { usageCount: 0, claimedSourceKeys };
+}
+
+export function modelResponseUsageContextSignal(
+  state: ModelResponseUsageEventState,
+): { revision: number; totalTokens: number } | null {
+  return state.lastProviderContextTokensObserved === null
+    ? null
+    : {
+        revision: state.providerContextRevision,
+        totalTokens: state.lastProviderContextTokensObserved,
+      };
+}
+
+/**
+ * Process one SDK stream event through the exact production usage path.
+ *
+ * The pinned Responses SDK mirrors one provider terminal response as both a
+ * normalized `response_done` and a raw `model/response.completed` event. Claim
+ * the stable response/source key before lease renewal or any usage side effect,
+ * and advance the positional ordinal only for a newly claimed response. The
+ * durable `agent.model.usage` source-key fence remains the cross-restart
+ * authority: a replay may retry the idempotent billing write, but it cannot
+ * advance process-local metrics, provider context, or attempt-owned signals.
+ */
+export async function processModelResponseUsageEvent(input: {
+  event: Parameters<typeof modelResponseUsageFromSdkEvent>[0];
+  state: ModelResponseUsageEventState;
+  dispatchId: string | null;
+  settings: Settings;
+  db: ActivityServices["db"];
+  observability: ActivityServices["observability"];
+  publish: TurnEventPublisher | null;
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  turnId: string;
+  provider: string;
+  providerApi: ModelProviderApi;
+  model: string;
+  metricProvider: string;
+  isCodexTurn: boolean;
+  servingCredentialId: string | null;
+  priorSessionCredentialId: string | null;
+  emittedSourceKeys: Set<string>;
+  renewLease: () => Promise<void>;
+  leaseLost: () => boolean;
+  leaseLostMessage: string;
+  setLastInputTokens: (tokens: number) => Promise<void>;
+}): Promise<
+  | { status: "not_usage" }
+  | { status: "duplicate"; sourceKey: string }
+  | { status: "processed"; sourceKey: string; authoritative: boolean }
+> {
+  const responseUsage = modelResponseUsageFromSdkEvent(input.event);
+  if (!responseUsage) {
+    return { status: "not_usage" };
+  }
+
+  const responseOrdinal = input.state.responseUsageCount + 1;
+  const sourceKey = modelUsageSourceKey({
+    responseId: responseUsage.responseId,
+    dispatchId: input.dispatchId,
+    positionalKey: `response-${responseOrdinal}`,
+  });
+  if (input.state.claimedSourceKeys.has(sourceKey)) {
+    return { status: "duplicate", sourceKey };
+  }
+  input.state.claimedSourceKeys.add(sourceKey);
+  input.state.responseUsageCount = responseOrdinal;
+
+  const normalizedUsage = normalizeModelCallUsage(responseUsage.usage);
+  const accountContext = modelCallAccountContext({
+    servingCredentialId: input.servingCredentialId,
+    priorSessionCredentialId: input.priorSessionCredentialId,
+    isFirstCallOfTurn: responseOrdinal === 1,
+  });
+  let authoritative = false;
+  await recordCompletedModelCallBeforeOwnershipFences({
+    renewLease: input.renewLease,
+    leaseLost: input.leaseLost,
+    leaseLostMessage: input.leaseLostMessage,
+    recordUsage: async () => {
+      await recordModelUsageAndDebitCredits(input.settings, input.db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId: input.turnId,
+        model: input.model,
+        isCodexTurn: input.isCodexTurn,
+        usage: responseUsage.usage,
+        normalizedUsage,
+        sourceKey,
+        observability: input.observability,
+      });
+      authoritative = await emitModelCallUsage({
+        observability: input.observability,
+        publish: input.publish,
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId: input.turnId,
+        provider: input.provider,
+        providerApi: input.providerApi,
+        model: input.model,
+        sourceKey,
+        usage: responseUsage,
+        normalizedUsage,
+        servingAccountHash: accountContext.servingAccountHash,
+        accountChangedFromPrevCall: accountContext.accountChangedFromPrevCall,
+        emittedSourceKeys: input.emittedSourceKeys,
+      });
+      const observedInput = normalizedUsage.telemetry.inputTokens;
+      if (authoritative && observedInput !== null && observedInput > 0) {
+        recordModelInputTokens(input.observability, input.metricProvider, observedInput);
+      }
+    },
+    recordAttemptSignals: async () => {
+      if (!authoritative) return;
+      const observedTotal = normalizedUsage.totalTokens;
+      if (observedTotal !== null) {
+        input.state.lastProviderContextTokensObserved = observedTotal;
+        input.state.providerContextRevision += 1;
+      }
+      const observedInput = normalizedUsage.telemetry.inputTokens;
+      if (observedInput !== null && observedInput > 0) {
+        await input.setLastInputTokens(observedInput);
+      }
+    },
+  });
+  return { status: "processed", sourceKey, authoritative };
+}
+
+/**
+ * Apply the same source-key authority ordering to the compaction summarizer's
+ * usage callback. The summarizer can retry or mirror a terminal response just
+ * like the main stream, so claim before lease renewal, billing, durable usage,
+ * logging, or cache metrics. Durable source-key idempotency remains the
+ * cross-process authority after a worker restart.
+ */
+export async function processCompactionModelUsageEvent(input: {
+  usage: ModelResponseUsage;
+  state: CompactionModelUsageEventState;
+  dispatchId: string | null;
+  settings: Settings;
+  db: ActivityServices["db"];
+  observability: ActivityServices["observability"];
+  publish: TurnEventPublisher | null;
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  turnId: string;
+  provider: string;
+  providerApi: ModelProviderApi;
+  model: string;
+  isCodexTurn: boolean;
+  servingCredentialId: string | null;
+  priorSessionCredentialId: string | null;
+  emittedSourceKeys: Set<string>;
+  renewLease: () => Promise<void>;
+  leaseLost: () => boolean;
+  leaseLostMessage: string;
+}): Promise<
+  | { status: "duplicate"; sourceKey: string }
+  | { status: "processed"; sourceKey: string; authoritative: boolean }
+> {
+  const usageOrdinal = input.state.usageCount + 1;
+  const sourceKey = modelUsageSourceKey({
+    responseId: input.usage.responseId,
+    dispatchId: input.dispatchId,
+    positionalKey: `compaction-${usageOrdinal}`,
+  });
+  if (input.state.claimedSourceKeys.has(sourceKey)) {
+    return { status: "duplicate", sourceKey };
+  }
+  input.state.claimedSourceKeys.add(sourceKey);
+  input.state.usageCount = usageOrdinal;
+
+  const accountContext = modelCallAccountContext({
+    servingCredentialId: input.servingCredentialId,
+    priorSessionCredentialId: input.priorSessionCredentialId,
+    isFirstCallOfTurn: usageOrdinal === 1,
+  });
+  const normalizedUsage = normalizeModelCallUsage(input.usage.usage);
+  let authoritative = false;
+  await recordCompletedModelCallBeforeOwnershipFences({
+    renewLease: input.renewLease,
+    leaseLost: input.leaseLost,
+    leaseLostMessage: input.leaseLostMessage,
+    recordUsage: async () => {
+      await recordModelUsageAndDebitCredits(input.settings, input.db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId: input.turnId,
+        model: input.model,
+        isCodexTurn: input.isCodexTurn,
+        usage: input.usage.usage,
+        normalizedUsage,
+        sourceKey,
+        observability: input.observability,
+      });
+      authoritative = await emitModelCallUsage({
+        observability: input.observability,
+        publish: input.publish,
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId: input.turnId,
+        provider: input.provider,
+        providerApi: input.providerApi,
+        model: input.model,
+        sourceKey,
+        usage: input.usage,
+        normalizedUsage,
+        servingAccountHash: accountContext.servingAccountHash,
+        accountChangedFromPrevCall: accountContext.accountChangedFromPrevCall,
+        emittedSourceKeys: input.emittedSourceKeys,
+      });
+    },
+  });
+  return { status: "processed", sourceKey, authoritative };
+}
+
 export async function emitModelCallUsage(input: {
   observability: ActivityServices["observability"];
   publish: TurnEventPublisher | null;
@@ -605,15 +855,15 @@ export async function emitModelCallUsage(input: {
   servingAccountHash?: string;
   accountChangedFromPrevCall?: boolean;
   emittedSourceKeys?: Set<string>;
-}): Promise<void> {
+}): Promise<boolean> {
   const usage =
     input.usage && typeof input.usage === "object" && "usage" in input.usage
       ? (input.usage as { usage?: unknown }).usage
       : null;
   if (!usage || typeof usage !== "object") {
-    return;
+    return false;
   }
-  if (input.emittedSourceKeys?.has(input.sourceKey)) return;
+  if (input.emittedSourceKeys?.has(input.sourceKey)) return false;
   const normalizedUsage =
     input.normalizedUsage ?? normalizeModelCallUsage(usage as ModelCallUsageInput);
   const telemetry = normalizedUsage.telemetry;
@@ -645,7 +895,7 @@ export async function emitModelCallUsage(input: {
       typeof event.payload === "object" &&
       (event.payload as Record<string, unknown>).sourceKey === input.sourceKey,
   );
-  if (!authoritative) return;
+  if (!authoritative) return false;
   try {
     input.observability.info("model call usage", {
       accountId: input.accountId,
@@ -685,6 +935,7 @@ export async function emitModelCallUsage(input: {
   } catch {
     // Durable event + billing already committed; metrics are best-effort only.
   }
+  return true;
 }
 
 /**
@@ -2074,6 +2325,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // one exactly like production.
       codexLeaseHolderId = dispatchId;
       const modelUsageDispatchId = activityContext?.info.activityId ?? dispatchId;
+      const claimedModelUsageSourceKeys = new Set<string>();
       const emittedModelUsageSourceKeys = new Set<string>();
       publish = async (
         events: Array<Omit<AppendEventInput, "producerId" | "producerSeq" | "turnId">>,
@@ -2921,55 +3173,32 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       const promptCacheKey = acceptsPromptCacheKeyForTurn(resolvedModel)
         ? input.sessionId
         : undefined;
-      let compactionUsageCount = 0;
+      const compactionUsageState = createCompactionModelUsageEventState(
+        claimedModelUsageSourceKeys,
+      );
       const recordCompactionUsage = async (usage: ModelResponseUsage) => {
-        await recordCompletedModelCallBeforeOwnershipFences({
+        await processCompactionModelUsageEvent({
+          usage,
+          state: compactionUsageState,
+          dispatchId: modelUsageDispatchId,
+          settings,
+          db,
+          observability,
+          publish,
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: turn.id,
+          provider: resolvedModel?.provider.id ?? settings.openaiProvider,
+          providerApi: resolvedModel?.provider.api ?? "responses",
+          model: resolvedModel?.configured.id ?? turn.model,
+          isCodexTurn,
+          servingCredentialId: effectiveCodexCredentialId,
+          priorSessionCredentialId: priorSessionCodexCredentialId,
+          emittedSourceKeys: emittedModelUsageSourceKeys,
           renewLease: () => renewCodexLease("model_usage"),
           leaseLost: () => codexLeaseLost,
           leaseLostMessage: "Codex credential lease expired during context compaction",
-          recordUsage: async () => {
-            compactionUsageCount += 1;
-            const sourceKey = modelUsageSourceKey({
-              responseId: usage.responseId,
-              dispatchId: modelUsageDispatchId,
-              positionalKey: `compaction-${compactionUsageCount}`,
-            });
-            const responseAccountCtx = modelCallAccountContext({
-              servingCredentialId: effectiveCodexCredentialId,
-              priorSessionCredentialId: priorSessionCodexCredentialId,
-              isFirstCallOfTurn: compactionUsageCount === 1,
-            });
-            const normalizedUsage = normalizeModelCallUsage(usage.usage);
-            await recordModelUsageAndDebitCredits(settings, db, {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-              turnId: turn.id,
-              model: resolvedModel?.configured.id ?? turn.model,
-              isCodexTurn,
-              usage: usage.usage,
-              normalizedUsage,
-              sourceKey,
-              observability,
-            });
-            await emitModelCallUsage({
-              observability,
-              publish,
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-              turnId: turn.id,
-              provider: resolvedModel?.provider.id ?? settings.openaiProvider,
-              providerApi: resolvedModel?.provider.api ?? "responses",
-              model: resolvedModel?.configured.id ?? turn.model,
-              sourceKey,
-              usage,
-              normalizedUsage,
-              servingAccountHash: responseAccountCtx.servingAccountHash,
-              accountChangedFromPrevCall: responseAccountCtx.accountChangedFromPrevCall,
-              emittedSourceKeys: emittedModelUsageSourceKeys,
-            });
-          },
         });
       };
       const compactionSummarizerFor = (systemInstructions?: string) =>
@@ -4227,7 +4456,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         }
         stream = undefined;
         batcher = null;
-        let responseUsageCount = 0;
+        const modelResponseUsageState = createModelResponseUsageEventState(
+          claimedModelUsageSourceKeys,
+        );
         // The SDK emits every processed call item for one model response before
         // it emits any result for that response. Keep that response-local batch
         // in memory so an orphan from an older response cannot pin later stable
@@ -4237,8 +4468,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         let currentToolBatchCompletedCallIds = new Set<string>();
         // Actual input tokens of the most recent model response this turn; the
         // pre-read trigger for the NEXT turn. Persisted at every turn-end path.
-        let lastProviderContextTokensObserved: number | null = null;
-        let providerContextRevision = 0;
         throwIfWorkerShuttingDown();
         throwIfTurnCancelled();
         const ownedEstablished = resolvedSandbox?.established ?? lazyOwnedSandbox;
@@ -4283,13 +4512,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   },
                 }
               : {}),
-            contextCompactionSignal: () =>
-              lastProviderContextTokensObserved === null
-                ? null
-                : {
-                    revision: providerContextRevision,
-                    totalTokens: lastProviderContextTokensObserved,
-                  },
+            contextCompactionSignal: () => modelResponseUsageContextSignal(modelResponseUsageState),
             contextCompactionRequested: () =>
               isSessionCompactionRequested(db, input.workspaceId, input.sessionId),
             ...(toolCancellationFenceRef.current
@@ -4328,73 +4551,32 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             }
             let stableToolCallIdsToClear: string[] | null = null;
             let completedCurrentToolBatch = false;
-            const responseUsage = modelResponseUsageFromSdkEvent(next.value);
-            if (responseUsage) {
-              const normalizedResponseUsage = normalizeModelCallUsage(responseUsage.usage);
-              await recordCompletedModelCallBeforeOwnershipFences({
-                renewLease: () => renewCodexLease("model_usage"),
-                leaseLost: () => codexLeaseLost,
-                leaseLostMessage: "Codex credential lease expired during the active turn",
-                recordUsage: async () => {
-                  responseUsageCount += 1;
-                  const responseSourceKey = modelUsageSourceKey({
-                    responseId: responseUsage.responseId,
-                    dispatchId: modelUsageDispatchId,
-                    positionalKey: `response-${responseUsageCount}`,
-                  });
-                  // Within a turn the serving credential is fixed, so a switch can only
-                  // surface on the turn's FIRST model call (vs the session's prior).
-                  const responseAccountCtx = modelCallAccountContext({
-                    servingCredentialId: effectiveCodexCredentialId,
-                    priorSessionCredentialId: priorSessionCodexCredentialId,
-                    isFirstCallOfTurn: responseUsageCount === 1,
-                  });
-                  await recordModelUsageAndDebitCredits(settings, db, {
-                    accountId: input.accountId,
-                    workspaceId: input.workspaceId,
-                    sessionId: input.sessionId,
-                    turnId: activeTurnId,
-                    model: turn.model,
-                    isCodexTurn,
-                    usage: responseUsage.usage,
-                    normalizedUsage: normalizedResponseUsage,
-                    sourceKey: responseSourceKey,
-                    observability,
-                  });
-                  await emitModelCallUsage({
-                    observability,
-                    publish,
-                    accountId: input.accountId,
-                    workspaceId: input.workspaceId,
-                    sessionId: input.sessionId,
-                    turnId: activeTurnId,
-                    provider: resolvedModel?.provider.id ?? settings.openaiProvider,
-                    providerApi: resolvedModel?.provider.api ?? "responses",
-                    model: turn.model,
-                    sourceKey: responseSourceKey,
-                    usage: responseUsage,
-                    normalizedUsage: normalizedResponseUsage,
-                    servingAccountHash: responseAccountCtx.servingAccountHash,
-                    accountChangedFromPrevCall: responseAccountCtx.accountChangedFromPrevCall,
-                    emittedSourceKeys: emittedModelUsageSourceKeys,
-                  });
-                  const observed = normalizedResponseUsage.telemetry.inputTokens;
-                  if (observed !== null && observed > 0) {
-                    recordModelInputTokens(observability, streamProvider, observed);
-                  }
-                  const observedTotal = normalizedResponseUsage.totalTokens;
-                  if (observedTotal !== null) {
-                    lastProviderContextTokensObserved = observedTotal;
-                    providerContextRevision += 1;
-                  }
-                },
-                recordAttemptSignals: async () => {
-                  const observed = normalizedResponseUsage.telemetry.inputTokens;
-                  if (observed !== null && observed > 0) {
-                    await setLastInputTokensFenced(observed);
-                  }
-                },
-              });
+            const responseUsageResult = await processModelResponseUsageEvent({
+              event: next.value,
+              state: modelResponseUsageState,
+              dispatchId: modelUsageDispatchId,
+              settings,
+              db,
+              observability,
+              publish,
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              turnId: activeTurnId,
+              provider: resolvedModel?.provider.id ?? settings.openaiProvider,
+              providerApi: resolvedModel?.provider.api ?? "responses",
+              model: turn.model,
+              metricProvider: streamProvider,
+              isCodexTurn,
+              servingCredentialId: effectiveCodexCredentialId,
+              priorSessionCredentialId: priorSessionCodexCredentialId,
+              emittedSourceKeys: emittedModelUsageSourceKeys,
+              renewLease: () => renewCodexLease("model_usage"),
+              leaseLost: () => codexLeaseLost,
+              leaseLostMessage: "Codex credential lease expired during the active turn",
+              setLastInputTokens: setLastInputTokensFenced,
+            });
+            if (responseUsageResult.status === "processed") {
               currentToolBatchCallIds = new Set<string>();
               currentToolBatchCompletedCallIds = new Set<string>();
               await reconcileConversationTruth();
@@ -4526,70 +4708,76 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         }
         await batcher.flush();
         await stream.completed.catch(() => undefined);
-        if (responseUsageCount === 0) {
+        if (modelResponseUsageState.responseUsageCount === 0) {
           const aggregateUsage = stream.state.usage;
           const normalizedAggregateUsage = normalizeModelCallUsage(aggregateUsage);
           const aggregateInput = normalizedAggregateUsage.telemetry.inputTokens;
-          if (aggregateInput !== null && aggregateInput > 0) {
-            recordModelInputTokens(observability, streamProvider, aggregateInput);
-          }
-          if (normalizedAggregateUsage.totalTokens !== null) {
-            lastProviderContextTokensObserved = normalizedAggregateUsage.totalTokens;
-            providerContextRevision += 1;
-          }
           const aggregateSourceKey = modelUsageSourceKey({
             responseId: null,
             dispatchId: modelUsageDispatchId,
             positionalKey: "aggregate",
           });
-          // The single aggregate frame is this turn's only model-usage record, so
-          // it is the first (account-switch surfaces here just like a first response).
-          const aggregateAccountCtx = modelCallAccountContext({
-            servingCredentialId: effectiveCodexCredentialId,
-            priorSessionCredentialId: priorSessionCodexCredentialId,
-            isFirstCallOfTurn: true,
-          });
-          await recordCompletedModelCallBeforeOwnershipFences({
-            renewLease: () => renewCodexLease("model_usage"),
-            leaseLost: () => codexLeaseLost,
-            leaseLostMessage: "Codex credential lease expired during the active turn",
-            recordUsage: async () => {
-              await recordModelUsageAndDebitCredits(settings, db, {
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                sessionId: input.sessionId,
-                turnId: activeTurnId,
-                model: turn.model,
-                isCodexTurn,
-                usage: aggregateUsage,
-                normalizedUsage: normalizedAggregateUsage,
-                sourceKey: aggregateSourceKey,
-                observability,
-              });
-              await emitModelCallUsage({
-                observability,
-                publish,
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                sessionId: input.sessionId,
-                turnId: activeTurnId,
-                provider: resolvedModel?.provider.id ?? settings.openaiProvider,
-                providerApi: resolvedModel?.provider.api ?? "responses",
-                model: turn.model,
-                sourceKey: aggregateSourceKey,
-                usage: { usage: aggregateUsage },
-                normalizedUsage: normalizedAggregateUsage,
-                servingAccountHash: aggregateAccountCtx.servingAccountHash,
-                accountChangedFromPrevCall: aggregateAccountCtx.accountChangedFromPrevCall,
-                emittedSourceKeys: emittedModelUsageSourceKeys,
-              });
-            },
-            recordAttemptSignals: async () => {
-              if (aggregateInput !== null && aggregateInput > 0) {
-                await setLastInputTokensFenced(aggregateInput);
-              }
-            },
-          });
+          if (!claimedModelUsageSourceKeys.has(aggregateSourceKey)) {
+            claimedModelUsageSourceKeys.add(aggregateSourceKey);
+            // The single aggregate frame is this turn's only model-usage record, so
+            // it is the first (account-switch surfaces here just like a first response).
+            const aggregateAccountCtx = modelCallAccountContext({
+              servingCredentialId: effectiveCodexCredentialId,
+              priorSessionCredentialId: priorSessionCodexCredentialId,
+              isFirstCallOfTurn: true,
+            });
+            let aggregateAuthoritative = false;
+            await recordCompletedModelCallBeforeOwnershipFences({
+              renewLease: () => renewCodexLease("model_usage"),
+              leaseLost: () => codexLeaseLost,
+              leaseLostMessage: "Codex credential lease expired during the active turn",
+              recordUsage: async () => {
+                await recordModelUsageAndDebitCredits(settings, db, {
+                  accountId: input.accountId,
+                  workspaceId: input.workspaceId,
+                  sessionId: input.sessionId,
+                  turnId: activeTurnId,
+                  model: turn.model,
+                  isCodexTurn,
+                  usage: aggregateUsage,
+                  normalizedUsage: normalizedAggregateUsage,
+                  sourceKey: aggregateSourceKey,
+                  observability,
+                });
+                aggregateAuthoritative = await emitModelCallUsage({
+                  observability,
+                  publish,
+                  accountId: input.accountId,
+                  workspaceId: input.workspaceId,
+                  sessionId: input.sessionId,
+                  turnId: activeTurnId,
+                  provider: resolvedModel?.provider.id ?? settings.openaiProvider,
+                  providerApi: resolvedModel?.provider.api ?? "responses",
+                  model: turn.model,
+                  sourceKey: aggregateSourceKey,
+                  usage: { usage: aggregateUsage },
+                  normalizedUsage: normalizedAggregateUsage,
+                  servingAccountHash: aggregateAccountCtx.servingAccountHash,
+                  accountChangedFromPrevCall: aggregateAccountCtx.accountChangedFromPrevCall,
+                  emittedSourceKeys: emittedModelUsageSourceKeys,
+                });
+                if (aggregateAuthoritative && aggregateInput !== null && aggregateInput > 0) {
+                  recordModelInputTokens(observability, streamProvider, aggregateInput);
+                }
+              },
+              recordAttemptSignals: async () => {
+                if (!aggregateAuthoritative) return;
+                if (normalizedAggregateUsage.totalTokens !== null) {
+                  modelResponseUsageState.lastProviderContextTokensObserved =
+                    normalizedAggregateUsage.totalTokens;
+                  modelResponseUsageState.providerContextRevision += 1;
+                }
+                if (aggregateInput !== null && aggregateInput > 0) {
+                  await setLastInputTokensFenced(aggregateInput);
+                }
+              },
+            });
+          }
         }
         if (stream.interruptions.length > 0) {
           await reconcileConversationTruth();

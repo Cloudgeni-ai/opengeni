@@ -327,12 +327,22 @@ Reported positive cache writes may advance
 `opengeni_model_cache_write_tokens_total{provider}`; absent/null writes do not create a
 phantom zero. The shared agent-turn activity computes one normalized frame for each raw
 response and for the SDK aggregate fallback, then reuses it for durable telemetry,
-billing, context signals, diagnostics, and cache metrics. Cache counters advance only
-after the source-keyed durable usage event is authoritative, so retries and duplicate
-provider responses do not double count. The bounded
+billing, context signals, diagnostics, and cache metrics. It claims the stable provider
+response/source key before lease renewal or any response-scoped side effect. This is
+required because the pinned Agents SDK emits one terminal Responses result twice: first
+as normalized `response_done`, then as the raw `model/response.completed` mirror. Only
+the source-keyed durable usage event can authorize cache counters, input histograms,
+provider-context revision, or the fenced last-input signal, so mirrored callbacks,
+retries, compaction callbacks, and worker restarts do not double count or bind stale
+usage to a newer request.
+
+Canonical token totals are derived from canonical input plus output whenever both are
+known. Complete SDK request-entry aggregates override conflicting top-level fields;
+inconsistent per-request or top-level totals are rejected as bounded diagnostics rather
+than allowed to suppress billing or context pressure, and overflow fails closed. The bounded
 `opengeni_model_cache_read_telemetry_total{provider,status="reported|missing"}` series
 keeps missing fields observable without coercing unknown telemetry to zero; the
 `OpenGeniCodexPromptCacheTelemetryMissing` rule alerts when Codex calls are flowing while
-that field is absent. Per-call counters accept only bounded nonnegative safe integers,
-and process-local cumulative guards refuse increments before numeric precision can
-degrade.
+that field is absent, including successful-call traffic for which the provider/SDK omits
+the entire usage object. Per-call counters accept only bounded nonnegative safe integers,
+and process-local cumulative guards refuse increments before numeric precision can degrade.
