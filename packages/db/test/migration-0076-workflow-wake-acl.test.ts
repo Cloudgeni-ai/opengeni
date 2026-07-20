@@ -18,11 +18,11 @@ async function applyFile(sql: postgres.Sql, file: string): Promise<void> {
 }
 
 beforeAll(async () => {
-  blank = await acquireBlankTestDatabase("migration-0067-workflow-wake-acl");
+  blank = await acquireBlankTestDatabase("migration-0076-workflow-wake-acl");
   if (!blank) {
     if (requireRealDatabase) {
       throw new Error(
-        "[migration-0067-workflow-wake-acl] OPENGENI_REQUIRE_REAL_DB=1 but the real PostgreSQL harness is unavailable",
+        "[migration-0076-workflow-wake-acl] OPENGENI_REQUIRE_REAL_DB=1 but the real PostgreSQL harness is unavailable",
       );
     }
     available = false;
@@ -33,7 +33,7 @@ afterAll(async () => {
   await blank?.release();
 }, 180_000);
 
-describe("migration 0067 (workflow-wake claimer ACL)", () => {
+describe("migration 0076 (workflow-wake claimer ACL)", () => {
   test("a clean chain grants only the exact function to a pre-existing restricted runtime role", async () => {
     if (!available || !blank) return;
     const admin = postgres(blank.databaseUrl, { max: 1 });
@@ -50,9 +50,9 @@ describe("migration 0067 (workflow-wake claimer ACL)", () => {
       expect(role).toEqual({ rolsuper: false, rolbypassrls: false, membershipCount: 0 });
 
       const files = (await readdir(migrationsDir))
-        .filter((file) => file.endsWith(".sql") && file <= "0067_session_workflow_wake_acl.sql")
+        .filter((file) => file.endsWith(".sql") && file <= "0076_session_workflow_wake_acl.sql")
         .sort();
-      expect(files.at(-1)).toBe("0067_session_workflow_wake_acl.sql");
+      expect(files.at(-1)).toBe("0076_session_workflow_wake_acl.sql");
 
       for (const file of files) {
         await applyFile(admin, file);
@@ -104,7 +104,19 @@ describe("migration 0067 (workflow-wake claimer ACL)", () => {
           "SELECT * FROM opengeni_private.claim_session_workflow_wakes(1)",
         );
         expect(claimed).toHaveLength(0);
-        await expect(admin.unsafe(`SELECT ${unrelatedFunction}`)).rejects.toThrow(
+
+        // postgres.js returns a lazy PendingQuery thenable rather than a native
+        // Promise. Bun's `.rejects` matcher does not assimilate it and waits
+        // forever without dispatching the query, so await it explicitly and
+        // assert the captured PostgreSQL error.
+        let denied: unknown;
+        try {
+          await admin.unsafe(`SELECT ${unrelatedFunction}`);
+        } catch (error) {
+          denied = error;
+        }
+        expect(denied).toBeInstanceOf(Error);
+        expect((denied as Error).message).toMatch(
           /permission denied for function ope75_unrelated_acl_probe/,
         );
       } finally {
