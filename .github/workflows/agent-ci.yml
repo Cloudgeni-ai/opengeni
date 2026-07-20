@@ -1,5 +1,7 @@
 name: Agent CI
 
+# Temporary diff-attribute canary; never merged.
+
 # PR gate for the Rust agent workspace (agent/**), purely additive to the bun CI.
 # The FULL OS matrix here IS the cross-platform proof: a macOS/Windows compile or
 # test break is caught per-PR, not at tag time — and since these legs cannot run on
