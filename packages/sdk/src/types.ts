@@ -1350,6 +1350,9 @@ export type CreateSessionRequest = {
   // double-submit/retry of the same logical create collapse to one session.
   // Distinct from the per-call clientEventId.
   idempotencyKey?: string | undefined;
+  // Exact actor-private pre-session draft revision represented by this create.
+  // The server consumes only this revision after durable initialization.
+  expectedNewSessionDraftRevision?: number | undefined;
   firstPartyMcpPermissions?: string[] | undefined;
   mcpServers?: SessionMcpServerInput[] | undefined;
   // Shared-sandbox placement (mirror of `@opengeni/contracts` CreateSessionRequest.sandbox,
@@ -1862,6 +1865,27 @@ export type ComposerDraft = {
   updatedAt: string | null;
 };
 
+export type NewSessionDraftOptions = {
+  sandboxBackend?: SandboxBackend | undefined;
+  targetSandboxId?: string | undefined;
+  workingDir?: string | undefined;
+  variableSetId?: string | undefined;
+  rigId?: string | undefined;
+  goal?: GoalSpec | undefined;
+  firstPartyMcpPermissions?: Permission[] | undefined;
+};
+
+export type NewSessionDraft = {
+  revision: number;
+  text: string;
+  resources: ResourceRef[];
+  tools: ToolRef[];
+  model: string;
+  reasoningEffort: ReasoningEffort;
+  options: NewSessionDraftOptions;
+  updatedAt: string | null;
+};
+
 export type SessionQueueSnapshot = {
   version: number;
   effectiveControl: EffectiveSessionControl;
@@ -1989,6 +2013,10 @@ export type SaveComposerDraftRequest = Omit<
   ComposerDraft,
   "revision" | "sourceTurnId" | "sourceTurnVersion" | "updatedAt"
 > & { expectedRevision: number };
+
+export type SaveNewSessionDraftRequest = Omit<NewSessionDraft, "revision" | "updatedAt"> & {
+  expectedRevision: number;
+};
 
 // --- Scheduled tasks: requests + runs ----------------------------------------
 

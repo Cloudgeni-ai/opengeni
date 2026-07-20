@@ -489,6 +489,9 @@ export async function createAndStartSession(input: {
   // `workingDir` (optional) is the path/cwd base the chosen machine runs under,
   // seeded alongside the pointer through the epoch-fenced CAS.
   seedTargetSandbox?: { sandboxId: string; settings: Settings; workingDir?: string | null } | null;
+  // Exact actor-private pre-session draft represented by this create. The
+  // initializer consumes it only after the first durable runnable unit commits.
+  consumeNewSessionDraft?: { subjectId: string; expectedRevision: number } | null;
 }): Promise<CreateSessionResponse> {
   const sessionMetadata = {
     ...input.metadata,
@@ -602,6 +605,7 @@ async function finishStartSession(
       settings: Settings;
       workingDir?: string | null;
     } | null;
+    consumeNewSessionDraft?: { subjectId: string; expectedRevision: number } | null;
   },
   session: Session,
 ): Promise<CreateSessionResponse> {
@@ -660,6 +664,7 @@ async function finishStartSession(
             : {}),
         }
       : null,
+    consumeNewSessionDraft: input.consumeNewSessionDraft ?? null,
   });
   await publishDurableSessionEvents(input.bus, session.workspaceId, session.id, started.events);
   if (started.workflowWakeRevision !== null) {
@@ -1355,6 +1360,13 @@ export async function createSessionForRequest(
       seedTargetSandbox: payload.targetSandboxId
         ? { sandboxId: payload.targetSandboxId, settings, workingDir: payload.workingDir ?? null }
         : null,
+      consumeNewSessionDraft:
+        payload.expectedNewSessionDraftRevision !== undefined
+          ? {
+              subjectId: grant.subjectId,
+              expectedRevision: payload.expectedNewSessionDraftRevision,
+            }
+          : null,
     });
   } catch (error) {
     if (error instanceof AgentCommandAuthorityError) {

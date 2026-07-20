@@ -1531,6 +1531,43 @@ export const composerDrafts = pgTable(
   }),
 );
 
+// Private pre-session composer truth. It is separate from composerDrafts so
+// the established-session table keeps its mandatory session foreign key.
+export const newSessionDrafts = pgTable(
+  "new_session_drafts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    subjectId: text("subject_id").notNull(),
+    revision: bigint("revision", { mode: "number" }).notNull().default(1),
+    text: text("text").notNull().default(""),
+    resources: jsonb("resources").$type<unknown[]>().notNull().default([]),
+    tools: jsonb("tools").$type<unknown[]>().notNull().default([]),
+    model: text("model").notNull(),
+    reasoningEffort: text("reasoning_effort").notNull(),
+    sessionOptions: jsonb("session_options").$type<Record<string, unknown>>().notNull().default({}),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "new_session_drafts_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    subjectWorkspace: uniqueIndex("new_session_drafts_subject_workspace_uq").on(
+      table.workspaceId,
+      table.subjectId,
+    ),
+    subjectValid: check(
+      "new_session_drafts_subject_check",
+      sql`length(btrim(${table.subjectId})) > 0`,
+    ),
+    revisionValid: check("new_session_drafts_revision_check", sql`${table.revision} >= 1`),
+  }),
+);
+
 export const sessionSystemUpdates = pgTable(
   "session_system_updates",
   {

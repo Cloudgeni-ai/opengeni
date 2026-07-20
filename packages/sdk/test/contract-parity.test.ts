@@ -26,6 +26,8 @@ import {
   MachinesResponse as ContractMachinesResponse,
   MetricSample as ContractMetricSample,
   MachineMetricsSeriesResponse as ContractMachineMetricsSeriesResponse,
+  NewSessionDraft as ContractNewSessionDraft,
+  SaveNewSessionDraftRequest as ContractSaveNewSessionDraftRequest,
   SandboxBackend as ContractSandboxBackend,
   SandboxOs as ContractSandboxOs,
   Session as ContractSessionSchema,
@@ -86,7 +88,10 @@ import type {
   MachinesResponse,
   MetricSample,
   MachineMetricsSeriesResponse,
+  NewSessionDraft,
+  NewSessionDraftOptions,
   ReasoningEffort,
+  SaveNewSessionDraftRequest,
   SandboxBackend,
   SandboxOs,
   ScheduledTask,
@@ -220,6 +225,34 @@ describe("SDK / contracts parity", () => {
     ];
     expect(checks.every((fn) => typeof fn === "function")).toBe(true);
     expect(ContractSessionMcpServerInput.parse(sdkMcpServer)).toEqual(sdkMcpServer);
+  });
+
+  test("new-session draft response and save shapes stay in SDK/contracts parity", () => {
+    const acceptDraft = (value: z.infer<typeof ContractNewSessionDraft>): NewSessionDraft => value;
+    // Like CreateSessionRequest, the dependency-free SDK deliberately accepts
+    // forward-compatible permission strings and leaves their runtime check to
+    // the server contract.
+    const acceptSave = (
+      value: Omit<SaveNewSessionDraftRequest, "options"> & {
+        options: Omit<NewSessionDraftOptions, "firstPartyMcpPermissions">;
+      },
+    ): z.input<typeof ContractSaveNewSessionDraftRequest> => value;
+    expect([acceptDraft, acceptSave].every((fn) => typeof fn === "function")).toBe(true);
+
+    const save: SaveNewSessionDraftRequest = {
+      expectedRevision: 4,
+      text: "recover this",
+      resources: [],
+      tools: [],
+      model: "gpt-5.6-sol",
+      reasoningEffort: "high",
+      options: {
+        sandboxBackend: "modal",
+        goal: { text: "finish", maxAutoContinuations: 8 },
+        firstPartyMcpPermissions: ["workspace:read", "sessions:read"],
+      },
+    };
+    expect(ContractSaveNewSessionDraftRequest.safeParse(save).success).toBe(true);
   });
 
   test("scheduled task literals and shapes match the contracts", () => {

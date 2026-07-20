@@ -2977,6 +2977,45 @@ export const SaveComposerDraftRequest = ComposerDraft.pick({
 }).extend({ expectedRevision: z.number().int().nonnegative() });
 export type SaveComposerDraftRequest = z.infer<typeof SaveComposerDraftRequest>;
 
+/**
+ * Create-only options saved with an actor's private pre-session draft. This is
+ * deliberately narrower than CreateSessionRequest: idempotency/event keys and
+ * credential-bearing MCP server inputs are per-attempt data, never draft state.
+ */
+export const NewSessionDraftOptions = z.object({
+  sandboxBackend: SandboxBackend.optional(),
+  targetSandboxId: z.string().uuid().optional(),
+  workingDir: z.string().min(1).optional(),
+  variableSetId: z.string().uuid().optional(),
+  rigId: z.string().uuid().optional(),
+  goal: GoalSpec.optional(),
+  firstPartyMcpPermissions: z.array(Permission).optional(),
+});
+export type NewSessionDraftOptions = z.infer<typeof NewSessionDraftOptions>;
+
+/** Actor-private, server-authoritative composer state before a session exists. */
+export const NewSessionDraft = z.object({
+  revision: z.number().int().nonnegative(),
+  text: z.string(),
+  resources: z.array(ResourceRef),
+  tools: z.array(ToolRef),
+  model: z.string().min(1),
+  reasoningEffort: ReasoningEffort,
+  options: NewSessionDraftOptions,
+  updatedAt: z.string().nullable(),
+});
+export type NewSessionDraft = z.infer<typeof NewSessionDraft>;
+
+export const SaveNewSessionDraftRequest = NewSessionDraft.pick({
+  text: true,
+  resources: true,
+  tools: true,
+  model: true,
+  reasoningEffort: true,
+  options: true,
+}).extend({ expectedRevision: z.number().int().nonnegative() });
+export type SaveNewSessionDraftRequest = z.infer<typeof SaveNewSessionDraftRequest>;
+
 export const WORKSPACE_CONTROL_REASON_MAX_BYTES = 8 * 1024;
 export const WORKSPACE_CONTROL_ACTOR_MAX_BYTES = 1024;
 export const WORKSPACE_CONTROL_EVENT_MAX_BYTES = 16 * 1024;
@@ -6096,6 +6135,11 @@ export const CreateSessionRequest = withVariableSetIdAlias({
   // creation of a brand-new session. Absent means no create-dedup (each call
   // is an independent create).
   idempotencyKey: z.string().min(1).max(200).optional(),
+  // The exact actor-private pre-session draft revision represented by this
+  // create. The durable initializer consumes only this revision. A newer draft
+  // written by a sibling tab survives, while every failed pre-initialization
+  // create leaves the submitted draft intact.
+  expectedNewSessionDraftRevision: z.number().int().nonnegative().optional(),
   // Permissions the session's first-party MCP token should carry. A top-level
   // omission uses the deployment's worker default; a child omission inherits
   // the creating session's effective grant. An explicit set is capped at

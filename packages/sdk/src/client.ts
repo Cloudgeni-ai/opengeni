@@ -102,7 +102,9 @@ import type {
   DeleteSessionQueueItemRequest,
   EditSessionQueueItemRequest,
   MoveSessionQueueItemRequest,
+  NewSessionDraft,
   SaveComposerDraftRequest,
+  SaveNewSessionDraftRequest,
   SteerSessionQueueItemRequest,
   SessionControlResponse,
   WorkspaceInferenceControlResponse,
@@ -249,6 +251,24 @@ export class OpenGeniClient {
     return await this.requestJson<CreateSessionResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/sessions`,
+      request,
+    );
+  }
+
+  async getNewSessionDraft(workspaceId: string): Promise<NewSessionDraft> {
+    return await this.requestJson<NewSessionDraft>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/new-session-draft`,
+    );
+  }
+
+  async saveNewSessionDraft(
+    workspaceId: string,
+    request: SaveNewSessionDraftRequest,
+  ): Promise<NewSessionDraft> {
+    return await this.requestJson<NewSessionDraft>(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/new-session-draft`,
       request,
     );
   }
