@@ -6,12 +6,14 @@ import {
   QUEUE_BOUNDARY_CLUSTERS,
   queueBoundaryPrompt,
   queueFallbackPrompt,
+  queueHarnessError,
   queueHarnessPrompt,
   queueVisibilityProbePrompt,
   type QueueBoundaryCluster,
   type QueueBoundaryEdge,
   type QueueBoundaryMaximum,
   type QueueFallbackKind,
+  type QueueHarnessErrorShape,
   type QueueVisibilityProbeKind,
 } from "./queue-fixtures";
 import "../../../apps/web/src/styles.css";
@@ -34,6 +36,9 @@ const boundaryEdge = parseBoundaryEdge(params.get("boundaryEdge"));
 const boundaryCluster = parseBoundaryCluster(params.get("boundaryCluster"));
 const fallbackKind = parseFallbackKind(params.get("fallback"));
 const visibilityProbeKind = parseVisibilityProbeKind(params.get("visibility"));
+const errorSource = parseErrorSource(params.get("error"));
+const errorShape = parseErrorShape(params.get("errorShape"));
+const initialErrorMessage = errorSource ? queueHarnessError(errorShape) : null;
 
 if (theme === "light") {
   document.documentElement.dataset.ogTheme = "light";
@@ -114,6 +119,16 @@ function parseVisibilityProbeKind(value: string | null): QueueVisibilityProbeKin
   }
 }
 
+type QueueHarnessErrorSource = "queue" | "mutation";
+
+function parseErrorSource(value: string | null): QueueHarnessErrorSource | null {
+  return value === "queue" || value === "mutation" ? value : null;
+}
+
+function parseErrorShape(value: string | null): QueueHarnessErrorShape {
+  return value === "multiline" ? "multiline" : "unbroken";
+}
+
 const composer: ComposerState & { hasDraftContent: () => boolean } = {
   value: "",
   setValue: () => {},
@@ -146,6 +161,14 @@ function QueueHarness() {
     Array.from({ length: initialCount }, (_, index) => makeTurn(index)),
   );
   const [loading, setLoading] = useState(params.get("loading") === "1");
+  const [queueError, setQueueError] = useState<Error | null>(() =>
+    errorSource === "queue" && initialErrorMessage ? new Error(initialErrorMessage) : null,
+  );
+  const [mutationError, setMutationError] = useState<Error | null>(() =>
+    errorSource === "mutation" && initialErrorMessage ? new Error(initialErrorMessage) : null,
+  );
+  const [refreshCount, setRefreshCount] = useState(0);
+  const [clearMutationErrorCount, setClearMutationErrorCount] = useState(0);
 
   useEffect(() => {
     window.__OPE9_PROMPT__ = turns[0]?.prompt ?? "";
@@ -165,8 +188,11 @@ function QueueHarness() {
       effectiveControl: null,
       stoppingPreviousAttempt: false,
       loading,
-      error: null,
-      refresh: async () => {},
+      error: queueError,
+      refresh: async () => {
+        setRefreshCount((current) => current + 1);
+        setQueueError(null);
+      },
       moveTurn: async () => true,
       editTurn: async () => null,
       steerTurn: async () => true,
@@ -174,10 +200,13 @@ function QueueHarness() {
       pendingByTurn: {},
       mutationFor: () => null,
       mutating: false,
-      mutationError: null,
-      clearMutationError: () => {},
+      mutationError,
+      clearMutationError: () => {
+        setClearMutationErrorCount((current) => current + 1);
+        setMutationError(null);
+      },
     }),
-    [loading, turns],
+    [loading, mutationError, queueError, turns],
   );
 
   return (
@@ -186,6 +215,8 @@ function QueueHarness() {
       data-og-theme={theme === "light" ? "light" : undefined}
       data-queue-harness
       data-theme={theme}
+      data-refresh-count={refreshCount}
+      data-clear-mutation-error-count={clearMutationErrorCount}
     >
       <section
         className="flex w-full max-w-5xl flex-col overflow-hidden rounded-xl border border-border bg-surface shadow-lg max-sm:h-dvh max-sm:rounded-none max-sm:border-0"

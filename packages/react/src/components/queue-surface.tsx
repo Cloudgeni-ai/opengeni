@@ -387,9 +387,16 @@ export function QueueSurface({ queue, composer, readOnly = false }: QueueSurface
           <div className="border-t border-border p-2">
             <div
               role="alert"
-              className="flex items-center gap-2 rounded-md bg-status-failed/10 px-2 py-1.5 text-xs text-status-failed"
+              className="flex min-w-0 max-w-full flex-wrap items-start gap-2 rounded-md bg-status-failed/10 px-2 py-1.5 text-xs text-status-failed"
             >
-              <span className="min-w-0 flex-1">
+              <span
+                role="region"
+                aria-label="Queue error details"
+                tabIndex={0}
+                className="max-h-[min(5rem,20dvh)] min-w-0 max-w-full flex-[1_1_5rem] overflow-auto overscroll-contain whitespace-pre-wrap rounded-sm outline-none [overflow-wrap:anywhere] [unicode-bidi:plaintext] focus-visible:ring-2 focus-visible:ring-ring/40"
+                data-testid="queue-error-message"
+                dir="auto"
+              >
                 {(queue.mutationError ?? queue.error)?.message}
               </span>
               <button
@@ -400,7 +407,7 @@ export function QueueSurface({ queue, composer, readOnly = false }: QueueSurface
                 }}
                 aria-label="Dismiss queue error and retry"
                 title="Retry loading the queue"
-                className="inline-flex size-7 items-center justify-center rounded-md outline-none transition-colors hover:bg-surface-3 focus-visible:ring-2 focus-visible:ring-ring/40 pointer-coarse:size-[44px]"
+                className="ms-auto inline-flex size-7 shrink-0 items-center justify-center self-start rounded-md outline-none transition-colors hover:bg-surface-3 focus-visible:ring-2 focus-visible:ring-ring/40 motion-reduce:transition-none pointer-coarse:size-[44px]"
               >
                 <RotateCwIcon className="size-3.5" />
               </button>

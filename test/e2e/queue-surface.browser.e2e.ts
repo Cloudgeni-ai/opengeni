@@ -10,6 +10,7 @@ import {
   queueBoundaryPrompt,
   queueBoundarySummary,
   queueFallbackPrompt,
+  queueHarnessError,
   queueHarnessPrompt,
   queuePromptFingerprint,
   queuePromptVisibleIdentity,
@@ -18,6 +19,7 @@ import {
   type QueueBoundaryEdge,
   type QueueBoundaryMaximum,
   type QueueFallbackKind,
+  type QueueHarnessErrorShape,
   type QueueVisibilityProbeKind,
 } from "../../packages/react/demo/queue-fixtures";
 
@@ -171,6 +173,61 @@ type TextResizeReflowEvidence = {
   exactDisclosure: boolean;
 };
 
+type QueueErrorSource = "queue" | "mutation";
+
+type QueueErrorBoxGeometry = {
+  left: number;
+  right: number;
+  top: number;
+  bottom: number;
+  width: number;
+  height: number;
+  clientWidth: number;
+  scrollWidth: number;
+  clientHeight: number;
+  scrollHeight: number;
+  horizontalOverflow: number;
+  verticalOverflow: number;
+  insideViewport: boolean;
+};
+
+type QueueErrorGeometry = {
+  alert: QueueErrorBoxGeometry;
+  message: QueueErrorBoxGeometry;
+  retry: QueueErrorBoxGeometry;
+  surface: QueueErrorBoxGeometry;
+  documentOverflow: number;
+  messageTextInside: boolean;
+  messageInsideAlert: boolean;
+  retryInsideAlert: boolean;
+  messageRetryOverlap: boolean;
+  messageOverflowWrap: string;
+  messageWhiteSpace: string;
+  messageOverflowX: string;
+  messageOverflowY: string;
+  messageDirection: string;
+  alertDirection: string;
+};
+
+type QueueErrorEvidence = {
+  viewport: { width: 320; height: 800 };
+  rootFontSize: "32px";
+  theme: (typeof themes)[number];
+  source: QueueErrorSource;
+  shape: QueueHarnessErrorShape;
+  direction: "ltr" | "rtl";
+  collapsed: QueueErrorGeometry;
+  expanded: QueueErrorGeometry;
+  menu: PortalMenuGeometry;
+  menuOpen: QueueErrorGeometry;
+  keyboardScrollTop: number;
+  axAlertPresent: boolean;
+  axRegionPresent: boolean;
+  axExactMessagePresent: boolean;
+  refreshCount: number;
+  clearMutationErrorCount: number;
+};
+
 describe("queue surface browser acceptance", () => {
   let browser: Browser;
   let demo: StartedProcess;
@@ -179,6 +236,7 @@ describe("queue surface browser acceptance", () => {
   const graphemeBoundaryEvidence: GraphemeBoundaryEvidence[] = [];
   const visibilityEvidence: QueueVisibilityEvidence[] = [];
   const textResizeReflowEvidence: TextResizeReflowEvidence[] = [];
+  const queueErrorEvidence: QueueErrorEvidence[] = [];
   let accessibilityEvidence: BrowserAccessibilityEvidence | null = null;
 
   beforeAll(async () => {
@@ -250,6 +308,10 @@ describe("queue surface browser acceptance", () => {
     await writeFile(
       `${evidenceDir}/text-resize-reflow.json`,
       `${JSON.stringify({ cases: textResizeReflowEvidence }, null, 2)}\n`,
+    );
+    await writeFile(
+      `${evidenceDir}/queue-errors.json`,
+      `${JSON.stringify({ cases: queueErrorEvidence }, null, 2)}\n`,
     );
     await Promise.allSettled([demo?.stop(), browser?.close()]);
   }, 60_000);
@@ -997,6 +1059,156 @@ describe("queue surface browser acceptance", () => {
     }
   }, 60_000);
 
+  test("hostile queue errors stay lossless and bounded at 320px and 200% text", async () => {
+    const viewport = { width: 320, height: 800 } as const;
+    const sources = ["queue", "mutation"] as const satisfies readonly QueueErrorSource[];
+    const shapes = ["unbroken", "multiline"] as const satisfies readonly QueueHarnessErrorShape[];
+
+    for (const theme of themes) {
+      for (const source of sources) {
+        for (const shape of shapes) {
+          const direction = shape === "multiline" ? "rtl" : "ltr";
+          const context = await browser.newContext({
+            viewport,
+            hasTouch: true,
+            isMobile: true,
+            reducedMotion: "reduce",
+          });
+          try {
+            const page = await context.newPage();
+            const diagnostics = observePageFailures(page);
+            const search = new URLSearchParams({
+              count: "1",
+              error: source,
+              errorShape: shape,
+              theme,
+            });
+            await page.goto(`${baseUrl}/queue.html?${search}`, { waitUntil: "networkidle" });
+            await page.addStyleTag({ content: ":root { font-size: 32px !important; }" });
+            await page.evaluate((value) => {
+              document.documentElement.dir = value;
+            }, direction);
+            await page.evaluate(() => document.fonts.ready);
+
+            const exactMessage = queueHarnessError(shape);
+            const message = page.getByRole("region", {
+              name: "Queue error details",
+              exact: true,
+            });
+            const retry = page.getByRole("button", {
+              name: "Dismiss queue error and retry",
+              exact: true,
+            });
+            await message.waitFor();
+            expect(await message.textContent()).toBe(exactMessage);
+
+            const collapsed = await queueErrorGeometry(page);
+            assertBoundedQueueError(collapsed, direction === "ltr");
+            expect(collapsed.message.verticalOverflow).toBeGreaterThan(0);
+            expect(collapsed.message.height).toBeLessThanOrEqual(161);
+            expect(collapsed.retry.width).toBeGreaterThanOrEqual(43);
+            expect(collapsed.retry.height).toBeGreaterThanOrEqual(43);
+            expect(collapsed.messageDirection).toBe("ltr");
+            expect(collapsed.alertDirection).toBe(direction);
+
+            const tree = await chromeAccessibilityTree(page);
+            const axAlertPresent = tree.some((node) => !node.ignored && node.role === "alert");
+            const axRegionPresent = tree.some(
+              (node) =>
+                !node.ignored && node.role === "region" && node.name === "Queue error details",
+            );
+            const axExactMessagePresent = tree.some(
+              (node) => !node.ignored && node.name === exactMessage,
+            );
+            expect(axAlertPresent).toBe(true);
+            expect(axRegionPresent).toBe(true);
+            expect(axExactMessagePresent).toBe(true);
+            await page.screenshot({
+              path: `${evidenceDir}/after-320-${theme}-${source}-${shape}-error-collapsed.png`,
+              animations: "disabled",
+            });
+
+            await page.getByRole("button", { name: "1 queued prompt", exact: true }).click();
+            await message.scrollIntoViewIfNeeded();
+            const expanded = await queueErrorGeometry(page);
+            assertBoundedQueueError(expanded, direction === "ltr");
+            expect(expanded.message.verticalOverflow).toBeGreaterThan(0);
+
+            await page
+              .getByRole("button", { name: "More actions for queued prompt 1", exact: true })
+              .click();
+            const menu = await measurePortalMenu(page, 1);
+            expect(menu.itemCount).toBe(5);
+            expect(menu.insideViewport).toBe(true);
+            expect(menu.itemWidths.every((width) => width > 0 && width <= viewport.width)).toBe(
+              true,
+            );
+            expect(menu.itemHeights.every((height) => height >= 43)).toBe(true);
+            const menuOpen = await queueErrorGeometry(page);
+            assertBoundedQueueError(menuOpen, direction === "ltr");
+            await page.screenshot({
+              path: `${evidenceDir}/after-320-${theme}-${source}-${shape}-error-menu.png`,
+              animations: "disabled",
+            });
+            await page.keyboard.press("Escape");
+
+            await message.focus();
+            expect(await message.evaluate((element) => document.activeElement === element)).toBe(
+              true,
+            );
+            await message.evaluate((element) => {
+              element.scrollTop = 0;
+            });
+            await page.keyboard.press("PageDown");
+            await page.waitForTimeout(50);
+            const keyboardScrollTop = await message.evaluate((element) => element.scrollTop);
+            expect(keyboardScrollTop).toBeGreaterThan(0);
+            await page.keyboard.press("Tab");
+            expect(await retry.evaluate((element) => document.activeElement === element)).toBe(
+              true,
+            );
+            await page.keyboard.press("Enter");
+            await page.getByRole("alert").waitFor({ state: "detached" });
+            const retryCounts = await page.locator("[data-queue-harness]").evaluate((element) => ({
+              refresh: Number((element as HTMLElement).dataset.refreshCount),
+              clearMutationError: Number((element as HTMLElement).dataset.clearMutationErrorCount),
+            }));
+            expect(retryCounts).toEqual({ refresh: 1, clearMutationError: 1 });
+            expect((await pageMetrics(page)).documentOverflow).toBeLessThanOrEqual(1);
+
+            if (source === "queue" && shape === "multiline") {
+              const report = await new AxeBuilder({ page })
+                .withTags(["wcag2a", "wcag2aa"])
+                .analyze();
+              expect(report.violations).toEqual([]);
+            }
+            expect(diagnostics).toEqual([]);
+            queueErrorEvidence.push({
+              viewport,
+              rootFontSize: "32px",
+              theme,
+              source,
+              shape,
+              direction,
+              collapsed,
+              expanded,
+              menu,
+              menuOpen,
+              keyboardScrollTop,
+              axAlertPresent,
+              axRegionPresent,
+              axExactMessagePresent,
+              refreshCount: retryCounts.refresh,
+              clearMutationErrorCount: retryCounts.clearMutationError,
+            });
+          } finally {
+            await context.close();
+          }
+        }
+      }
+    }
+  }, 90_000);
+
   test("Chrome exposes whole graphemes at every head and tail preview boundary", async () => {
     const boundaryViewports = [
       { width: 320, height: 800 },
@@ -1402,6 +1614,106 @@ async function measurePortalMenu(page: Page, index: number): Promise<PortalMenuG
         menuBounds.bottom <= window.innerHeight + 0.5,
     };
   });
+}
+
+async function queueErrorGeometry(page: Page): Promise<QueueErrorGeometry> {
+  return page.evaluate(() => {
+    const alert = document.querySelector<HTMLElement>('[role="alert"]');
+    const message = document.querySelector<HTMLElement>('[data-testid="queue-error-message"]');
+    const retry = document.querySelector<HTMLElement>(
+      'button[aria-label="Dismiss queue error and retry"]',
+    );
+    const surface = document.querySelector<HTMLElement>('[data-testid="queue-surface"]');
+    if (!alert || !message || !retry || !surface) {
+      throw new Error("Queue error geometry requires the alert, message, retry, and surface");
+    }
+
+    const box = (element: HTMLElement): QueueErrorBoxGeometry => {
+      const bounds = element.getBoundingClientRect();
+      return {
+        left: bounds.left,
+        right: bounds.right,
+        top: bounds.top,
+        bottom: bounds.bottom,
+        width: bounds.width,
+        height: bounds.height,
+        clientWidth: element.clientWidth,
+        scrollWidth: element.scrollWidth,
+        clientHeight: element.clientHeight,
+        scrollHeight: element.scrollHeight,
+        horizontalOverflow: Math.max(0, element.scrollWidth - element.clientWidth),
+        verticalOverflow: Math.max(0, element.scrollHeight - element.clientHeight),
+        insideViewport:
+          bounds.left >= -0.5 &&
+          bounds.right <= window.innerWidth + 0.5 &&
+          bounds.top >= -0.5 &&
+          bounds.bottom <= window.innerHeight + 0.5,
+      };
+    };
+    const inside = (inner: DOMRect, outer: DOMRect) =>
+      inner.left >= outer.left - 0.5 &&
+      inner.right <= outer.right + 0.5 &&
+      inner.top >= outer.top - 0.5 &&
+      inner.bottom <= outer.bottom + 0.5;
+    const alertBounds = alert.getBoundingClientRect();
+    const messageBounds = message.getBoundingClientRect();
+    const retryBounds = retry.getBoundingClientRect();
+    const range = document.createRange();
+    range.selectNodeContents(message);
+    const textBounds = range.getBoundingClientRect();
+    const messageStyles = getComputedStyle(message);
+
+    return {
+      alert: box(alert),
+      message: box(message),
+      retry: box(retry),
+      surface: box(surface),
+      documentOverflow: Math.max(0, document.documentElement.scrollWidth - window.innerWidth),
+      messageTextInside:
+        textBounds.left >= messageBounds.left - 0.5 &&
+        textBounds.right <= messageBounds.right + 0.5,
+      messageInsideAlert: inside(messageBounds, alertBounds),
+      retryInsideAlert: inside(retryBounds, alertBounds),
+      messageRetryOverlap:
+        Math.max(
+          0,
+          Math.min(messageBounds.right, retryBounds.right) -
+            Math.max(messageBounds.left, retryBounds.left),
+        ) > 0.5 &&
+        Math.max(
+          0,
+          Math.min(messageBounds.bottom, retryBounds.bottom) -
+            Math.max(messageBounds.top, retryBounds.top),
+        ) > 0.5,
+      messageOverflowWrap: messageStyles.overflowWrap,
+      messageWhiteSpace: messageStyles.whiteSpace,
+      messageOverflowX: messageStyles.overflowX,
+      messageOverflowY: messageStyles.overflowY,
+      messageDirection: messageStyles.direction,
+      alertDirection: getComputedStyle(alert).direction,
+    };
+  });
+}
+
+function assertBoundedQueueError(
+  geometry: QueueErrorGeometry,
+  requireAggregateTextBounds: boolean,
+): void {
+  expect(geometry.documentOverflow).toBeLessThanOrEqual(1);
+  expect(geometry.alert.horizontalOverflow).toBeLessThanOrEqual(1);
+  expect(geometry.message.horizontalOverflow).toBeLessThanOrEqual(1);
+  expect(geometry.surface.horizontalOverflow).toBeLessThanOrEqual(1);
+  expect(geometry.alert.insideViewport).toBe(true);
+  expect(geometry.message.insideViewport).toBe(true);
+  expect(geometry.retry.insideViewport).toBe(true);
+  if (requireAggregateTextBounds) expect(geometry.messageTextInside).toBe(true);
+  expect(geometry.messageInsideAlert).toBe(true);
+  expect(geometry.retryInsideAlert).toBe(true);
+  expect(geometry.messageRetryOverlap).toBe(false);
+  expect(geometry.messageOverflowWrap).toBe("anywhere");
+  expect(geometry.messageWhiteSpace).toBe("pre-wrap");
+  expect(geometry.messageOverflowX).toBe("auto");
+  expect(geometry.messageOverflowY).toBe("auto");
 }
 
 async function refreshQueue(page: Page): Promise<void> {

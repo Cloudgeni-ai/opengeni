@@ -580,6 +580,64 @@ describe("QueueSurface", () => {
     expect(visibleIdentities.size).toBe(100);
   });
 
+  test("keeps exact hostile queue errors in a bounded keyboard scroller beside retry", async () => {
+    const queueFailure = new Error("queue failed");
+    const mutationFailure = new Error(
+      `Mutation failed\nhttps://queue.invalid/${"unbroken".repeat(10_000)}\nRetry safely`,
+    );
+    const calls: string[] = [];
+    mounted = await renderComponent(
+      <QueueSurface
+        queue={queue({
+          error: queueFailure,
+          mutationError: mutationFailure,
+          clearMutationError: () => calls.push("clear"),
+          refresh: async () => {
+            calls.push("refresh");
+          },
+        })}
+        composer={composer()}
+      />,
+    );
+
+    const alert = mounted.container.querySelector('[role="alert"]');
+    const message = mounted.container.querySelector('[data-testid="queue-error-message"]');
+    const retry = mounted.container.querySelector(
+      'button[aria-label="Dismiss queue error and retry"]',
+    );
+    expect(alert?.classList.contains("min-w-0")).toBe(true);
+    expect(alert?.classList.contains("max-w-full")).toBe(true);
+    expect(alert?.classList.contains("flex-wrap")).toBe(true);
+    expect(message?.textContent).toBe(mutationFailure.message);
+    expect(message?.textContent).not.toContain(queueFailure.message);
+    expect(message?.getAttribute("role")).toBe("region");
+    expect(message?.getAttribute("aria-label")).toBe("Queue error details");
+    expect(message?.getAttribute("tabindex")).toBe("0");
+    expect(message?.getAttribute("dir")).toBe("auto");
+    expect(message?.classList.contains("max-h-[min(5rem,20dvh)]")).toBe(true);
+    expect(message?.classList.contains("flex-[1_1_5rem]")).toBe(true);
+    expect(message?.classList.contains("overflow-auto")).toBe(true);
+    expect(message?.classList.contains("whitespace-pre-wrap")).toBe(true);
+    expect(message?.classList.contains("[overflow-wrap:anywhere]")).toBe(true);
+    expect(message?.classList.contains("[unicode-bidi:plaintext]")).toBe(true);
+    expect(retry?.classList.contains("shrink-0")).toBe(true);
+    expect(retry?.classList.contains("self-start")).toBe(true);
+
+    await click(retry);
+    expect(calls).toEqual(["clear", "refresh"]);
+  });
+
+  test("renders queue load errors losslessly when there is no mutation error", async () => {
+    const failure = new Error(`Load failed: ${"Q".repeat(20_000)}`);
+    mounted = await renderComponent(
+      <QueueSurface queue={queue({ error: failure })} composer={composer()} />,
+    );
+
+    expect(
+      mounted.container.querySelector('[data-testid="queue-error-message"]')?.textContent,
+    ).toBe(failure.message);
+  });
+
   test("explains the durable Steer shutdown fence instead of looking stuck in an ordinary queue", async () => {
     mounted = await renderComponent(
       <QueueSurface queue={queue({ stoppingPreviousAttempt: true })} composer={composer()} />,

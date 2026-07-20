@@ -12,6 +12,7 @@ export type QueueBoundaryCluster = keyof typeof QUEUE_BOUNDARY_CLUSTERS;
 export type QueueBoundaryEdge = "head" | "tail";
 export type QueueBoundaryMaximum = 180 | 360;
 export type QueueFallbackKind = "whitespace" | "combining" | "zwj";
+export type QueueHarnessErrorShape = "unbroken" | "multiline";
 export const QUEUE_VISIBILITY_PROBE_KINDS = [
   "short-zwj",
   "variation-selector",
@@ -48,6 +49,21 @@ export function queuePromptFingerprint(index: number): string {
 
 export function queueHarnessPrompt(index: number): string {
   return `${HOSTILE_QUEUE_PROMPT}\n${queuePromptFingerprint(index)}`;
+}
+
+export function queueHarnessError(shape: QueueHarnessErrorShape): string {
+  if (shape === "multiline") {
+    return [
+      "Queue provider returned a multiline diagnostic.",
+      ...Array.from(
+        { length: 48 },
+        (_, index) =>
+          `Diagnostic ${String(index + 1).padStart(2, "0")}: https://queue.invalid/${"segment".repeat(80)}?request=fixture-${String(index + 1).padStart(2, "0")}`,
+      ),
+      "Recovery code: RETRY_SAFE",
+    ].join("\n");
+  }
+  return `QUEUE_ERROR_${"X".repeat(65_536)}_RECOVERY_CODE`;
 }
 
 export function queuePromptVisibleIdentity(index: number): string {
