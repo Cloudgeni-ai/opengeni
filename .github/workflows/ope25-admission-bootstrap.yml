@@ -1,0 +1,56 @@
+name: OPE-25 Admission Bootstrap (Temporary)
+
+# This inputless, single-purpose workflow is temporary source governance, not a
+# release workflow. It may only open one exact bot-authored draft PR whose head
+# removes this workflow, its helper, and its test and restores the authorized
+# pre-bootstrap tree byte-for-byte. Independently reviewed, provider-read, and
+# SHA-fenced workflow/helper bytes are the fixed-verifier trust anchor. The
+# helper reads GitHub metadata and source blobs only; it never checks out or
+# executes content from the prepared governance head.
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: ope25-admission-bootstrap-single-use
+  cancel-in-progress: false
+
+jobs:
+  open-governance-pr:
+    name: Open exact bot-authored governance PR
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      OPENGENI_BOOTSTRAP_ACTION: open_exact_governance_pr
+      BOOTSTRAP_HELPER_SHA256: f50a94d07cd3bddc1ec0e8ddf2d19b37029af317b68a73da97b6787debcf6174
+    steps:
+      - name: Fetch and execute the exact base-owned bootstrap helper
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_SERVER_URL" == "https://github.com" ]]
+          [[ "$GITHUB_API_URL" == "https://api.github.com" ]]
+          [[ "$GITHUB_REPOSITORY" == "Cloudgeni-ai/opengeni" ]]
+          [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]
+          [[ "$GITHUB_REF" == "refs/heads/main" ]]
+          [[ "$GITHUB_REF_NAME" == "main" ]]
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]
+          [[ "$GITHUB_ACTOR" == "jorgensandhaug" ]]
+          [[ "$GITHUB_ACTOR_ID" == "55702375" ]]
+          [[ "$GITHUB_TRIGGERING_ACTOR" == "jorgensandhaug" ]]
+
+          helper="$RUNNER_TEMP/ope25-admission-bootstrap.mjs"
+          curl --fail --silent --show-error --proto '=https' --tlsv1.2 \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github.raw+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/Cloudgeni-ai/opengeni/contents/scripts/ope25-admission-bootstrap.mjs?ref=$GITHUB_SHA" \
+            --output "$helper"
+          actual_sha256="$(sha256sum "$helper" | awk '{print $1}')"
+          [[ "$actual_sha256" == "$BOOTSTRAP_HELPER_SHA256" ]]
+          node "$helper"
