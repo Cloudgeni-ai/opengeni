@@ -6,16 +6,19 @@ import { chromium, type Browser, type Page } from "playwright";
 import { freePort, runCommand, startProcess, type StartedProcess } from "@opengeni/testing";
 import {
   OMITTED_QUEUE_SOURCE_MARKER,
+  QUEUE_VISIBILITY_PROBE_KINDS,
   queueBoundaryPrompt,
   queueBoundarySummary,
   queueFallbackPrompt,
   queueHarnessPrompt,
   queuePromptFingerprint,
   queuePromptVisibleIdentity,
+  queueVisibilityProbePrompt,
   type QueueBoundaryCluster,
   type QueueBoundaryEdge,
   type QueueBoundaryMaximum,
   type QueueFallbackKind,
+  type QueueVisibilityProbeKind,
 } from "../../packages/react/demo/queue-fixtures";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
@@ -107,12 +110,41 @@ type GraphemeBoundaryEvidence = {
   exactDisclosure: boolean;
 };
 
+type TextPaintGeometry = {
+  text: string;
+  elementWidth: number;
+  textWidth: number;
+  textHeight: number;
+  intersectionWidth: number;
+  intersectionHeight: number;
+  fullyVisible: boolean;
+  insideRow: boolean | null;
+  insideViewport: boolean;
+};
+
+type QueueVisibilityEvidence = {
+  viewport: (typeof viewports)[number];
+  theme: (typeof themes)[number];
+  kind: QueueVisibilityProbeKind;
+  usedFallback: boolean;
+  collapsedSummary: string;
+  collapsedVisual: string;
+  collapsedGeometry: TextPaintGeometry;
+  expandedSummary: string;
+  expandedVisual: string;
+  expandedGeometry: TextPaintGeometry;
+  collapsedAccessibleDescription: string;
+  expandedAccessibleName: string;
+  exactDisclosure: boolean;
+};
+
 describe("queue surface browser acceptance", () => {
   let browser: Browser;
   let demo: StartedProcess;
   let baseUrl: string;
   const measurements: BrowserMeasurement[] = [];
   const graphemeBoundaryEvidence: GraphemeBoundaryEvidence[] = [];
+  const visibilityEvidence: QueueVisibilityEvidence[] = [];
   let accessibilityEvidence: BrowserAccessibilityEvidence | null = null;
 
   beforeAll(async () => {
@@ -176,6 +208,10 @@ describe("queue surface browser acceptance", () => {
     await writeFile(
       `${evidenceDir}/grapheme-boundaries.json`,
       `${JSON.stringify({ cases: graphemeBoundaryEvidence }, null, 2)}\n`,
+    );
+    await writeFile(
+      `${evidenceDir}/painted-fallbacks.json`,
+      `${JSON.stringify({ cases: visibilityEvidence }, null, 2)}\n`,
     );
     await Promise.allSettled([demo?.stop(), browser?.close()]);
   }, 60_000);
@@ -567,16 +603,18 @@ describe("queue surface browser acceptance", () => {
         await page.goto(`${baseUrl}/queue.html?count=1&theme=light&fallback=${fallback}`, {
           waitUntil: "networkidle",
         });
-        const collapsedSummary =
+        const collapsedVisual =
           (await page.getByTestId("queue-collapsed-preview").textContent()) ?? "";
-        expect(collapsedSummary).toMatch(/^Content omitted at safe boundary · ref [0-9A-F]{8}$/);
-        expect(Array.from(collapsedSummary).length).toBeLessThanOrEqual(180);
-        expect(isWellFormedUnicode(collapsedSummary)).toBe(true);
+        expect(collapsedVisual).toMatch(/^Omitted · [0-9A-F]{8}$/);
+        expect(Array.from(collapsedVisual).length).toBeLessThanOrEqual(180);
+        expect(isWellFormedUnicode(collapsedVisual)).toBe(true);
         const collapsedTree = await chromeAccessibilityTree(page);
         const collapsedControl = collapsedTree.find(
           (node) => !node.ignored && node.role === "button" && node.name === "1 queued prompt",
         );
-        expect(collapsedControl?.description).toBe(collapsedSummary);
+        const collapsedSummary = collapsedControl?.description ?? "";
+        expect(collapsedSummary).toMatch(/^Content omitted at safe boundary · ref [0-9A-F]{8}$/);
+        expect(collapsedSummary.endsWith(collapsedVisual.replace("Omitted · ", ""))).toBe(true);
 
         await page.getByRole("button", { name: "1 queued prompt", exact: true }).click();
         const preview = page.getByTestId("queue-prompt-preview-1");
@@ -585,7 +623,7 @@ describe("queue surface browser acceptance", () => {
           "",
         );
         expect(expandedSummary).toBe(collapsedSummary);
-        expect(await page.getByTestId("queue-prompt-start-1").textContent()).toBe(collapsedSummary);
+        expect(await page.getByTestId("queue-prompt-start-1").textContent()).toBe(collapsedVisual);
         expect(await page.getByTestId("queue-prompt-identity-1").count()).toBe(0);
         const expandedTree = await chromeAccessibilityTree(page);
         const summaryNode = queueSummaryNodes(expandedTree)[0];
@@ -613,6 +651,7 @@ describe("queue surface browser acceptance", () => {
             })
             .textContent(),
         ).toBe(queueFallbackPrompt(fallback));
+        await page.evaluate(() => document.fonts.ready);
         expect((await pageMetrics(page)).documentOverflow).toBeLessThanOrEqual(1);
       }
       expect(diagnostics).toEqual([]);
@@ -620,6 +659,144 @@ describe("queue surface browser acceptance", () => {
       await context.close();
     }
   }, 30_000);
+
+  test("styled Chrome paints bounded identities for non-rendering prompt code points", async () => {
+    for (const viewport of viewports) {
+      const context = await browser.newContext({
+        viewport,
+        hasTouch: viewport.width <= 768,
+        isMobile: viewport.width <= 375,
+      });
+      try {
+        const page = await context.newPage();
+        const diagnostics = observePageFailures(page);
+        for (const theme of themes) {
+          for (const kind of QUEUE_VISIBILITY_PROBE_KINDS) {
+            const exactPrompt = queueVisibilityProbePrompt(kind);
+            const usedFallback = kind !== "mixed-visible";
+            await page.goto(`${baseUrl}/queue.html?count=1&theme=${theme}&visibility=${kind}`, {
+              waitUntil: "networkidle",
+            });
+
+            const collapsedVisual =
+              (await page.getByTestId("queue-collapsed-preview").textContent()) ?? "";
+            const collapsedTree = await chromeAccessibilityTree(page);
+            const collapsedControl = collapsedTree.find(
+              (node) => !node.ignored && node.role === "button" && node.name === "1 queued prompt",
+            );
+            const collapsedSummary = collapsedControl?.description ?? "";
+            if (usedFallback) {
+              expect(collapsedSummary).toMatch(
+                /^Content omitted at safe boundary · ref [0-9A-F]{8}$/,
+              );
+              expect(collapsedSummary).not.toContain(exactPrompt);
+              expect(collapsedVisual).toMatch(/^Omitted · [0-9A-F]{8}$/);
+              expect(collapsedSummary.endsWith(collapsedVisual.replace("Omitted · ", ""))).toBe(
+                true,
+              );
+            } else {
+              expect(collapsedSummary).toBe(exactPrompt);
+              expect(collapsedSummary).toContain("Visible identity 😀");
+              expect(collapsedVisual).toBe(exactPrompt);
+            }
+            expect(Array.from(collapsedSummary).length).toBeLessThanOrEqual(180);
+            expect(isWellFormedUnicode(collapsedSummary)).toBe(true);
+            const collapsedGeometry = await textPaintGeometry(page, "queue-collapsed-preview");
+            expect(collapsedGeometry.textWidth).toBeGreaterThan(0);
+            expect(collapsedGeometry.intersectionWidth).toBeGreaterThan(0);
+            expect(collapsedGeometry.intersectionHeight).toBeGreaterThan(0);
+            expect(collapsedGeometry.fullyVisible).toBe(true);
+            expect(collapsedGeometry.insideViewport).toBe(true);
+
+            if (usedFallback) {
+              expect(collapsedControl?.description).toBe(collapsedSummary);
+            } else {
+              expect(collapsedControl?.description).toContain("Visible identity 😀");
+            }
+            expect(await page.locator('[data-testid^="queue-prompt-full-"]').count()).toBe(0);
+
+            const captureFallbackScreenshots =
+              viewport.width === 320 && theme === "light" && kind === "short-zwj";
+            if (captureFallbackScreenshots) {
+              await page.screenshot({
+                path: `${evidenceDir}/after-320-light-default-ignorable-fallback-collapsed.png`,
+                animations: "disabled",
+              });
+            }
+
+            await page.getByRole("button", { name: "1 queued prompt", exact: true }).click();
+            const preview = page.getByTestId("queue-prompt-preview-1");
+            const expandedSummary = ((await preview.getAttribute("aria-label")) ?? "").replace(
+              /^Queued prompt 1 summary: /,
+              "",
+            );
+            expect(expandedSummary).toBe(collapsedSummary);
+            const expandedStart =
+              (await page.getByTestId("queue-prompt-start-1").textContent()) ?? "";
+            expect(expandedStart).toBe(collapsedVisual);
+            const expandedGeometry = await textPaintGeometry(page, "queue-prompt-start-1");
+            expect(expandedGeometry.textWidth).toBeGreaterThan(0);
+            expect(expandedGeometry.intersectionWidth).toBeGreaterThan(0);
+            expect(expandedGeometry.intersectionHeight).toBeGreaterThan(0);
+            expect(expandedGeometry.fullyVisible).toBe(true);
+            expect(expandedGeometry.insideRow).toBe(true);
+            expect(expandedGeometry.insideViewport).toBe(true);
+
+            const expandedTree = await chromeAccessibilityTree(page);
+            const summaryNode = queueSummaryNodes(expandedTree)[0];
+            if (usedFallback) {
+              expect(summaryNode?.name).toBe(`Queued prompt 1 summary: ${collapsedSummary}`);
+            } else {
+              expect(summaryNode?.name).toContain("Visible identity 😀");
+            }
+            expect(unignoredDescendants(expandedTree, summaryNode?.nodeId ?? "")).toHaveLength(0);
+
+            if (captureFallbackScreenshots) {
+              await page.screenshot({
+                path: `${evidenceDir}/after-320-light-default-ignorable-fallback-expanded.png`,
+                animations: "disabled",
+              });
+            }
+
+            await page
+              .getByRole("button", {
+                name: "Show full content for queued prompt 1",
+                exact: true,
+              })
+              .click();
+            const disclosedPrompt =
+              (await page
+                .getByRole("region", {
+                  name: "Full content for queued prompt 1",
+                  exact: true,
+                })
+                .textContent()) ?? "";
+            expect(disclosedPrompt).toBe(exactPrompt);
+            expect((await pageMetrics(page)).documentOverflow).toBeLessThanOrEqual(1);
+
+            visibilityEvidence.push({
+              viewport,
+              theme,
+              kind,
+              usedFallback,
+              collapsedSummary,
+              collapsedVisual,
+              collapsedGeometry,
+              expandedSummary,
+              expandedVisual: expandedStart,
+              expandedGeometry,
+              collapsedAccessibleDescription: collapsedControl?.description ?? "",
+              expandedAccessibleName: summaryNode?.name ?? "",
+              exactDisclosure: disclosedPrompt === exactPrompt,
+            });
+          }
+        }
+        expect(diagnostics).toEqual([]);
+      } finally {
+        await context.close();
+      }
+    }
+  }, 180_000);
 
   test("Chrome exposes whole graphemes at every head and tail preview boundary", async () => {
     const boundaryViewports = [
@@ -913,6 +1090,53 @@ async function queueIdentityGeometry(page: Page, count: number): Promise<QueueId
         };
       });
   }, count);
+}
+
+async function textPaintGeometry(page: Page, testId: string): Promise<TextPaintGeometry> {
+  return page.getByTestId(testId).evaluate((element) => {
+    const bounds = element.getBoundingClientRect();
+    const range = document.createRange();
+    range.selectNodeContents(element);
+    const textBounds = range.getBoundingClientRect();
+    const rowBounds = element.closest<HTMLElement>("[data-queue-turn-id]")?.getBoundingClientRect();
+    const intersectionWidth = Math.max(
+      0,
+      Math.min(bounds.right, textBounds.right) - Math.max(bounds.left, textBounds.left),
+    );
+    const intersectionHeight = Math.max(
+      0,
+      Math.min(bounds.bottom, textBounds.bottom) - Math.max(bounds.top, textBounds.top),
+    );
+    const styles = getComputedStyle(element);
+    return {
+      text: element.textContent ?? "",
+      elementWidth: bounds.width,
+      textWidth: textBounds.width,
+      textHeight: textBounds.height,
+      intersectionWidth,
+      intersectionHeight,
+      fullyVisible:
+        styles.display !== "none" &&
+        styles.visibility !== "hidden" &&
+        Number(styles.opacity) > 0 &&
+        textBounds.left >= bounds.left - 0.5 &&
+        textBounds.right <= bounds.right + 0.5 &&
+        textBounds.top >= bounds.top - 0.5 &&
+        textBounds.bottom <= bounds.bottom + 0.5,
+      insideRow:
+        rowBounds === undefined
+          ? null
+          : textBounds.left >= rowBounds.left - 0.5 &&
+            textBounds.right <= rowBounds.right + 0.5 &&
+            textBounds.top >= rowBounds.top - 0.5 &&
+            textBounds.bottom <= rowBounds.bottom + 0.5,
+      insideViewport:
+        textBounds.left >= -0.5 &&
+        textBounds.right <= window.innerWidth + 0.5 &&
+        textBounds.top >= -0.5 &&
+        textBounds.bottom <= window.innerHeight + 0.5,
+    };
+  });
 }
 
 async function measurePortalMenu(page: Page, index: number): Promise<PortalMenuGeometry> {

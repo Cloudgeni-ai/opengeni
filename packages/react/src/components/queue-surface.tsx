@@ -65,8 +65,7 @@ export function QueueSurface({ queue, composer, readOnly = false }: QueueSurface
   } | null>(null);
   const count = queue.queue.length;
   const collapsedPreview = useMemo(
-    () =>
-      queuePromptPreview(queue.queue[0]?.prompt ?? "", QUEUE_COLLAPSED_PREVIEW_CHARACTERS).summary,
+    () => queuePromptPreview(queue.queue[0]?.prompt ?? "", QUEUE_COLLAPSED_PREVIEW_CHARACTERS),
     [queue.queue],
   );
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }));
@@ -245,7 +244,7 @@ export function QueueSurface({ queue, composer, readOnly = false }: QueueSurface
           type="button"
           className="flex w-full min-w-0 items-center gap-2 px-3 py-2 text-left outline-none transition-colors hover:bg-surface-2/60 focus-visible:bg-surface-2/60 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/40 pointer-coarse:min-h-11"
           onClick={() => setOpen((value) => !value)}
-          aria-description={!open && count > 0 ? collapsedPreview : undefined}
+          aria-description={!open && count > 0 ? collapsedPreview.summary : undefined}
           aria-expanded={open}
           aria-label={`${count} queued prompt${count === 1 ? "" : "s"}${readOnly ? " Read-only" : ""}`}
         >
@@ -264,11 +263,15 @@ export function QueueSurface({ queue, composer, readOnly = false }: QueueSurface
           {!open && count > 0 ? (
             <span
               aria-hidden="true"
-              className="min-w-0 flex-1 truncate text-xs text-fg-muted"
+              className={`min-w-0 flex-1 truncate text-fg-muted ${
+                collapsedPreview.collapsedVisual === collapsedPreview.summary
+                  ? "text-xs"
+                  : "text-[10px]"
+              }`}
               data-testid="queue-collapsed-preview"
               dir="auto"
             >
-              {collapsedPreview}
+              {collapsedPreview.collapsedVisual}
             </span>
           ) : null}
           {queue.loading ? <Loader2Icon className="ml-auto size-3.5 animate-spin" /> : null}
@@ -419,6 +422,8 @@ const QUEUE_PREVIEW_REFERENCE_SAMPLE_CHARACTERS = 32;
 const QUEUE_VISIBLE_END_IDENTITY_CHARACTERS = 18;
 const QUEUE_PREVIEW_SEPARATOR = " … ";
 const queuePreviewSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+const queuePromptNonRenderingCodePoint =
+  /[\p{White_Space}\p{Control}\p{Default_Ignorable_Code_Point}]/u;
 
 type BoundedPromptSample = {
   value: string;
@@ -428,6 +433,7 @@ type BoundedPromptSample = {
 
 type QueuePromptPreview = {
   summary: string;
+  collapsedVisual: string;
   visibleStart: string;
   visibleIdentity: string | null;
   visibleIdentityLabel: "End" | "Safe boundary" | null;
@@ -448,6 +454,7 @@ function queuePromptPreview(prompt: string, maxCharacters: number): QueuePromptP
     return hasVisiblePromptContent(summary)
       ? {
           summary,
+          collapsedVisual: summary,
           visibleStart: summary,
           visibleIdentity: null,
           visibleIdentityLabel: null,
@@ -508,6 +515,7 @@ function queuePromptPreview(prompt: string, maxCharacters: number): QueuePromptP
   if (!hasVisiblePromptContent(prefix)) {
     return {
       summary,
+      collapsedVisual: summary,
       visibleStart: safeSuffix,
       visibleIdentity: null,
       visibleIdentityLabel: null,
@@ -520,6 +528,7 @@ function queuePromptPreview(prompt: string, maxCharacters: number): QueuePromptP
   );
   return {
     summary,
+    collapsedVisual: summary,
     visibleStart: prefix,
     visibleIdentity: hasVisiblePromptContent(endIdentity) ? endIdentity : `ref ${reference}`,
     visibleIdentityLabel: hasVisiblePromptContent(endIdentity) ? "End" : "Safe boundary",
@@ -531,12 +540,15 @@ function fallbackPromptPreview(
   startSample: string,
   endSample: string,
 ): QueuePromptPreview {
-  const summary = promptPreviewFallbackLabel(
-    boundedPromptSampleReference(promptLength, startSample, endSample),
-  );
+  const reference = boundedPromptSampleReference(promptLength, startSample, endSample);
+  const summary = promptPreviewFallbackLabel(reference);
   return {
     summary,
-    visibleStart: summary,
+    collapsedVisual: `Omitted · ${reference}`,
+    // The complete fallback remains the canonical accessible summary. Narrow
+    // collapsed/row layouts paint the bounded reference in a compact truthful
+    // form so ellipsis cannot hide the only identifying portion.
+    visibleStart: `Omitted · ${reference}`,
     visibleIdentity: null,
     visibleIdentityLabel: null,
   };
@@ -566,7 +578,13 @@ function boundedPromptSampleReference(
 }
 
 function hasVisiblePromptContent(value: string): boolean {
-  return value.trim().length > 0;
+  // Callers pass only the already-bounded whole/head/tail preview samples.
+  // Default-ignorables and controls can survive trim() while painting no row
+  // identity at all (for example ZWJ, VS16, bidi controls, and tag characters).
+  for (const character of value) {
+    if (!queuePromptNonRenderingCodePoint.test(character)) return true;
+  }
+  return false;
 }
 
 function samplePromptStart(prompt: string, maxCharacters: number): BoundedPromptSample {

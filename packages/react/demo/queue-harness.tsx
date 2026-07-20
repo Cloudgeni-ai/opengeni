@@ -7,10 +7,12 @@ import {
   queueBoundaryPrompt,
   queueFallbackPrompt,
   queueHarnessPrompt,
+  queueVisibilityProbePrompt,
   type QueueBoundaryCluster,
   type QueueBoundaryEdge,
   type QueueBoundaryMaximum,
   type QueueFallbackKind,
+  type QueueVisibilityProbeKind,
 } from "./queue-fixtures";
 import "../../../apps/web/src/styles.css";
 import "./queue-harness.css";
@@ -31,6 +33,7 @@ const boundaryMaximum = parseBoundaryMaximum(params.get("boundaryMax"));
 const boundaryEdge = parseBoundaryEdge(params.get("boundaryEdge"));
 const boundaryCluster = parseBoundaryCluster(params.get("boundaryCluster"));
 const fallbackKind = parseFallbackKind(params.get("fallback"));
+const visibilityProbeKind = parseVisibilityProbeKind(params.get("visibility"));
 
 if (theme === "light") {
   document.documentElement.dataset.ogTheme = "light";
@@ -45,7 +48,9 @@ function makeTurn(index: number): SessionTurn {
       ? queueBoundaryPrompt(boundaryMaximum, boundaryEdge, boundaryCluster)
       : index === 0 && fallbackKind
         ? queueFallbackPrompt(fallbackKind)
-        : queueHarnessPrompt(index);
+        : index === 0 && visibilityProbeKind
+          ? queueVisibilityProbePrompt(visibilityProbeKind)
+          : queueHarnessPrompt(index);
   return {
     id: `${String(index + 1).padStart(8, "0")}-1111-4111-8111-${suffix}`,
     workspaceId: "11111111-1111-4111-8111-111111111111",
@@ -92,6 +97,21 @@ function parseBoundaryCluster(value: string | null): QueueBoundaryCluster | null
 
 function parseFallbackKind(value: string | null): QueueFallbackKind | null {
   return value === "whitespace" || value === "combining" || value === "zwj" ? value : null;
+}
+
+function parseVisibilityProbeKind(value: string | null): QueueVisibilityProbeKind | null {
+  switch (value) {
+    case "short-zwj":
+    case "variation-selector":
+    case "word-joiner":
+    case "bidi-controls":
+    case "tag-characters":
+    case "controls":
+    case "mixed-visible":
+      return value;
+    default:
+      return null;
+  }
 }
 
 const composer: ComposerState & { hasDraftContent: () => boolean } = {

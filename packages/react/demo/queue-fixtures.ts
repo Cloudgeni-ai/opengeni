@@ -12,6 +12,16 @@ export type QueueBoundaryCluster = keyof typeof QUEUE_BOUNDARY_CLUSTERS;
 export type QueueBoundaryEdge = "head" | "tail";
 export type QueueBoundaryMaximum = 180 | 360;
 export type QueueFallbackKind = "whitespace" | "combining" | "zwj";
+export const QUEUE_VISIBILITY_PROBE_KINDS = [
+  "short-zwj",
+  "variation-selector",
+  "word-joiner",
+  "bidi-controls",
+  "tag-characters",
+  "controls",
+  "mixed-visible",
+] as const;
+export type QueueVisibilityProbeKind = (typeof QUEUE_VISIBILITY_PROBE_KINDS)[number];
 
 export const HOSTILE_QUEUE_PROMPT = [
   "# Production migration follow-up 👩🏽‍💻",
@@ -52,6 +62,25 @@ export function queueFallbackPrompt(kind: QueueFallbackKind): string {
       return `e${"\u0301".repeat(10_000)}`;
     case "zwj":
       return `👩${"\u200d👩".repeat(1_000)}`;
+  }
+}
+
+export function queueVisibilityProbePrompt(kind: QueueVisibilityProbeKind): string {
+  switch (kind) {
+    case "short-zwj":
+      return "\u200d".repeat(8);
+    case "variation-selector":
+      return "\ufe0f".repeat(8);
+    case "word-joiner":
+      return "\u2060".repeat(8);
+    case "bidi-controls":
+      return "\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069";
+    case "tag-characters":
+      return String.fromCodePoint(0xe0061, 0xe0062, 0xe0063, 0xe007f);
+    case "controls":
+      return "\u0000\u0001\u0007\u0008\u000e\u001f\u007f\u0085";
+    case "mixed-visible":
+      return "\u200d\u2060Visible identity 😀\ufe0f\u2069";
   }
 }
 

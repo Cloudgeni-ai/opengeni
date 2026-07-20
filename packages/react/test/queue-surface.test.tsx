@@ -8,8 +8,10 @@ import { fakeTurn } from "./fake-client";
 import { registerDom, renderComponent, type RenderedComponent } from "./render-hook";
 import {
   QUEUE_BOUNDARY_CLUSTERS,
+  QUEUE_VISIBILITY_PROBE_KINDS,
   queueBoundaryPrompt,
   queueBoundarySummary,
+  queueVisibilityProbePrompt,
   type QueueBoundaryMaximum,
 } from "../demo/queue-fixtures";
 
@@ -92,7 +94,7 @@ async function click(target: Element | null): Promise<void> {
 async function renderedPromptSummary(
   prompt: string,
   maxCharacters: QueueBoundaryMaximum,
-): Promise<{ accessibleSummary: string; summary: string }> {
+): Promise<{ accessibleSummary: string; summary: string; visualSummary: string }> {
   mounted = await renderComponent(
     <QueueSurface
       queue={queue({
@@ -123,13 +125,14 @@ async function renderedPromptSummary(
       "",
     );
   }
-  const summary = maxCharacters === 180 ? (summaryElement?.textContent ?? "") : accessibleSummary;
+  const visualSummary = summaryElement?.textContent ?? "";
+  const summary = accessibleSummary;
 
   const current = mounted;
   mounted = null;
   await current.unmount();
   document.body.replaceChildren();
-  return { accessibleSummary, summary };
+  return { accessibleSummary, summary, visualSummary };
 }
 
 function isWellFormedUnicode(value: string): boolean {
@@ -349,6 +352,7 @@ describe("QueueSurface", () => {
         `${"a".repeat(237)}${"x".repeat(500_000)}${regionalIndicator.repeat(
           100,
         )}${"z".repeat(100)}`,
+        "\u200d".repeat(500_000),
       ];
       const summaries: string[] = [];
       for (const prompt of prompts) {
@@ -360,6 +364,7 @@ describe("QueueSurface", () => {
       }
       expect(summaries[2]).toBe(`${"a".repeat(237)} … ${"z".repeat(100)}`);
       expect(summaries[2]).not.toContain(regionalIndicator);
+      expect(summaries[3]).toMatch(/^Content omitted at safe boundary · ref [0-9A-F]{8}$/);
 
       for (const maxCharacters of [180, 360] as const) {
         const suffixCharacters = maxCharacters / 3;
@@ -417,13 +422,110 @@ describe("QueueSurface", () => {
     );
     await click(mounted.container.querySelector('button[aria-expanded="false"]'));
     const preview = mounted.container.querySelector('[data-testid="queue-prompt-preview-1"]');
-    expect(preview?.textContent).toMatch(/^Content omitted at safe boundary · ref [0-9A-F]{8}$/);
+    const namedSummary = (preview?.getAttribute("aria-label") ?? "").replace(
+      /^Queued prompt 1 summary: /,
+      "",
+    );
+    expect(namedSummary).toMatch(/^Content omitted at safe boundary · ref [0-9A-F]{8}$/);
+    expect(preview?.textContent).toMatch(/^Omitted · [0-9A-F]{8}$/);
+    expect(namedSummary.endsWith(preview?.textContent?.replace("Omitted · ", "") ?? "")).toBe(true);
     await click(
       mounted.container.querySelector('button[aria-label="Show full content for queued prompt 1"]'),
     );
     expect(
       mounted.container.querySelector('[data-testid="queue-prompt-full-1"]')?.textContent,
     ).toBe(oversizedZwjCluster);
+  });
+
+  test("falls back for short non-painting prompts while retaining mixed visible content", async () => {
+    const nonPaintingKinds = QUEUE_VISIBILITY_PROBE_KINDS.filter(
+      (kind) => kind !== "mixed-visible",
+    );
+    const fallbackSummaries = new Set<string>();
+
+    for (const kind of nonPaintingKinds) {
+      const prompt = queueVisibilityProbePrompt(kind);
+      const summaries: string[] = [];
+      for (const maxCharacters of [180, 360] as const) {
+        const { accessibleSummary, summary } = await renderedPromptSummary(prompt, maxCharacters);
+        expect(summary).toMatch(/^Content omitted at safe boundary · ref [0-9A-F]{8}$/);
+        expect(Array.from(summary).length).toBeLessThanOrEqual(maxCharacters);
+        expect(isWellFormedUnicode(summary)).toBe(true);
+        expect(accessibleSummary).toBe(summary);
+        summaries.push(summary);
+      }
+      expect(summaries[0]).toBe(summaries[1]);
+      fallbackSummaries.add(summaries[0] ?? "");
+    }
+    expect(fallbackSummaries.size).toBe(nonPaintingKinds.length);
+
+    const mixedPrompt = queueVisibilityProbePrompt("mixed-visible");
+    for (const maxCharacters of [180, 360] as const) {
+      const { accessibleSummary, summary } = await renderedPromptSummary(
+        mixedPrompt,
+        maxCharacters,
+      );
+      expect(summary).toBe(mixedPrompt);
+      expect(summary).toContain("Visible identity 😀");
+      expect(summary).not.toContain("Content omitted at safe boundary");
+      expect(accessibleSummary).toBe(summary);
+    }
+
+    const prompts = nonPaintingKinds.map(queueVisibilityProbePrompt);
+    mounted = await renderComponent(
+      <QueueSurface
+        queue={queue({
+          queue: prompts.map((prompt, index) =>
+            fakeTurn({
+              id: `${String(index + 1).padStart(8, "0")}-3333-4333-8333-333333333333`,
+              prompt,
+            }),
+          ),
+        })}
+        composer={composer()}
+      />,
+    );
+    const collapsedToggle = mounted.container.querySelector(
+      'button[aria-label="6 queued prompts"]',
+    );
+    const collapsedVisual = mounted.container.querySelector(
+      '[data-testid="queue-collapsed-preview"]',
+    );
+    expect(collapsedToggle?.getAttribute("aria-description")).toMatch(
+      /^Content omitted at safe boundary · ref [0-9A-F]{8}$/,
+    );
+    expect(collapsedVisual?.textContent).toMatch(/^Omitted · [0-9A-F]{8}$/);
+    expect(
+      collapsedToggle
+        ?.getAttribute("aria-description")
+        ?.endsWith(collapsedVisual?.textContent?.replace("Omitted · ", "") ?? ""),
+    ).toBe(true);
+    await click(mounted.container.querySelector('button[aria-expanded="false"]'));
+    for (const [index, prompt] of prompts.entries()) {
+      const ordinal = index + 1;
+      const preview = mounted.container.querySelector(
+        `[data-testid="queue-prompt-preview-${ordinal}"]`,
+      );
+      expect(preview?.getAttribute("aria-label")).toMatch(
+        new RegExp(`^Queued prompt ${ordinal} summary: Content omitted at safe boundary · ref `),
+      );
+      expect(preview?.textContent).toMatch(/^Omitted · [0-9A-F]{8}$/);
+      expect(
+        preview
+          ?.getAttribute("aria-label")
+          ?.endsWith(preview?.textContent?.replace("Omitted · ", "") ?? ""),
+      ).toBe(true);
+      expect(preview?.textContent).not.toContain(prompt);
+      await click(
+        mounted.container.querySelector(
+          `button[aria-label="Show full content for queued prompt ${ordinal}"]`,
+        ),
+      );
+      expect(
+        mounted.container.querySelector(`[data-testid="queue-prompt-full-${ordinal}"]`)
+          ?.textContent,
+      ).toBe(prompt);
+    }
   });
 
   test("keeps a 100-row queue inside one bounded scroll region", async () => {
