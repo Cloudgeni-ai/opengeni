@@ -647,12 +647,15 @@ export async function createAndStartSession(input: {
     }
     const { session: keyed, created } = keyedResult;
     if (!created) {
-      return await finishStartSession(
-        keyed.temporalWorkflowId ? { ...input, seedTargetSandbox: null } : input,
-        keyed,
-      );
+      return {
+        session: await finishStartSession(
+          keyed.temporalWorkflowId ? { ...input, seedTargetSandbox: null } : input,
+          keyed,
+        ),
+        replay: true,
+      };
     }
-    return await finishStartSession(input, keyed);
+    return { session: await finishStartSession(input, keyed), replay: false };
   }
   let session: Session;
   try {
@@ -1109,7 +1112,7 @@ export async function postUserMessageTurn(input: {
       error,
     );
   }
-  return { accepted, turn };
+  return { accepted, turn, replay: result.replay };
 }
 
 /**
@@ -1121,12 +1124,12 @@ export async function postUserMessageTurn(input: {
  * trusted immediate parent, while explicit arrays (including []) win. A
  * top-level create with omitted tools applies workspace-default capability MCPs.
  */
-export async function createSessionForRequest(
+export async function createSessionForRequestWithOutcome(
   deps: ApiRouteDeps,
   grant: AccessGrant,
   workspaceId: string,
   rawPayload: unknown,
-): Promise<Session> {
+): Promise<CreateSessionOutcome> {
   const { settings, db, bus, workflowClient, objectStorage } = deps;
   const payload = CreateSessionRequest.parse(rawPayload);
   if (hasReservedOpenGeniSlackBotSessionMetadata(payload.metadata)) {
@@ -1731,7 +1734,7 @@ export async function createSessionForRequest(
  * enqueue, and usage recording. `toolsProvided: false` durably preserves an
  * Tool selection is durable session state and never rides a follow-up prompt.
  */
-export async function acceptSessionUserMessage(
+export async function acceptSessionUserMessageWithOutcome(
   deps: AcceptSessionUserMessageDependencies,
   grant: AccessGrant,
   workspaceId: string,
@@ -1750,7 +1753,7 @@ export async function acceptSessionUserMessage(
     controlEtag?: string | null;
     expectedDraftRevision?: number | null;
   },
-): Promise<{ accepted: SessionEvent; turn: SessionTurn }> {
+): Promise<{ accepted: SessionEvent; turn: SessionTurn; replay: boolean }> {
   const { settings, db, bus, workflowClient, objectStorage } = deps;
   await requireSessionAuthorization(deps, grant, {
     sessionId,
@@ -1878,6 +1881,24 @@ export async function acceptSessionUserMessage(
     origin: turn.source,
     idempotencyKey: `agent_run.created:${workspaceId}:${turn.id}`,
   });
+  return { accepted, turn, replay };
+}
+
+/** Backward-compatible entity-returning path used by existing REST callers. */
+export async function acceptSessionUserMessage(
+  deps: Parameters<typeof acceptSessionUserMessageWithOutcome>[0],
+  grant: Parameters<typeof acceptSessionUserMessageWithOutcome>[1],
+  workspaceId: Parameters<typeof acceptSessionUserMessageWithOutcome>[2],
+  sessionId: Parameters<typeof acceptSessionUserMessageWithOutcome>[3],
+  input: Parameters<typeof acceptSessionUserMessageWithOutcome>[4],
+): Promise<{ accepted: SessionEvent; turn: SessionTurn }> {
+  const { accepted, turn } = await acceptSessionUserMessageWithOutcome(
+    deps,
+    grant,
+    workspaceId,
+    sessionId,
+    input,
+  );
   return { accepted, turn };
 }
 
