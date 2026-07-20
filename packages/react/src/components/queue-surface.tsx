@@ -242,7 +242,7 @@ export function QueueSurface({ queue, composer, readOnly = false }: QueueSurface
         ) : null}
         <button
           type="button"
-          className="flex w-full min-w-0 items-center gap-2 px-3 py-2 text-left outline-none transition-colors hover:bg-surface-2/60 focus-visible:bg-surface-2/60 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/40 pointer-coarse:min-h-11"
+          className="flex w-full min-w-0 flex-wrap items-center gap-2 px-3 py-2 text-left outline-none transition-colors hover:bg-surface-2/60 focus-visible:bg-surface-2/60 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/40 pointer-coarse:min-h-[44px]"
           onClick={() => setOpen((value) => !value)}
           aria-description={!open && count > 0 ? collapsedPreview.summary : undefined}
           aria-expanded={open}
@@ -263,10 +263,10 @@ export function QueueSurface({ queue, composer, readOnly = false }: QueueSurface
           {!open && count > 0 ? (
             <span
               aria-hidden="true"
-              className={`min-w-0 flex-1 truncate text-fg-muted ${
+              className={`max-w-full truncate text-fg-muted ${
                 collapsedPreview.collapsedVisual === collapsedPreview.summary
-                  ? "text-xs"
-                  : "text-[10px]"
+                  ? "min-w-0 flex-1 text-xs"
+                  : "shrink-0 text-[10px]"
               }`}
               data-testid="queue-collapsed-preview"
               dir="auto"
@@ -400,7 +400,7 @@ export function QueueSurface({ queue, composer, readOnly = false }: QueueSurface
                 }}
                 aria-label="Dismiss queue error and retry"
                 title="Retry loading the queue"
-                className="inline-flex size-7 items-center justify-center rounded-md outline-none transition-colors hover:bg-surface-3 focus-visible:ring-2 focus-visible:ring-ring/40 pointer-coarse:size-11"
+                className="inline-flex size-7 items-center justify-center rounded-md outline-none transition-colors hover:bg-surface-3 focus-visible:ring-2 focus-visible:ring-ring/40 pointer-coarse:size-[44px]"
               >
                 <RotateCwIcon className="size-3.5" />
               </button>
@@ -437,6 +437,7 @@ type QueuePromptPreview = {
   visibleStart: string;
   visibleIdentity: string | null;
   visibleIdentityLabel: "End" | "Safe boundary" | null;
+  isFallback: boolean;
 };
 
 /**
@@ -458,6 +459,7 @@ function queuePromptPreview(prompt: string, maxCharacters: number): QueuePromptP
           visibleStart: summary,
           visibleIdentity: null,
           visibleIdentityLabel: null,
+          isFallback: false,
         }
       : fallbackPromptPreview(prompt.length, wholePromptProbe.value, wholePromptProbe.value);
   }
@@ -519,6 +521,7 @@ function queuePromptPreview(prompt: string, maxCharacters: number): QueuePromptP
       visibleStart: safeSuffix,
       visibleIdentity: null,
       visibleIdentityLabel: null,
+      isFallback: false,
     };
   }
 
@@ -532,6 +535,7 @@ function queuePromptPreview(prompt: string, maxCharacters: number): QueuePromptP
     visibleStart: prefix,
     visibleIdentity: hasVisiblePromptContent(endIdentity) ? endIdentity : `ref ${reference}`,
     visibleIdentityLabel: hasVisiblePromptContent(endIdentity) ? "End" : "Safe boundary",
+    isFallback: false,
   };
 }
 
@@ -551,6 +555,7 @@ function fallbackPromptPreview(
     visibleStart: `Omitted · ${reference}`,
     visibleIdentity: null,
     visibleIdentityLabel: null,
+    isFallback: true,
   };
 }
 
@@ -709,7 +714,7 @@ function QueuePrompt({
   const preview = useMemo(() => queuePromptPreview(prompt, QUEUE_ROW_PREVIEW_CHARACTERS), [prompt]);
 
   return (
-    <div className="min-w-0 max-w-full">
+    <div className="w-full min-w-0 max-w-full">
       <div
         aria-label={`Queued prompt ${index + 1} summary: ${preview.summary}`}
         className="max-w-full overflow-hidden text-xs leading-5 text-fg"
@@ -719,7 +724,7 @@ function QueuePrompt({
       >
         <span aria-hidden="true" className="flex min-w-0 max-w-full items-baseline gap-2 sm:block">
           <span
-            className="line-clamp-1 min-w-0 flex-1 whitespace-pre-wrap break-all [unicode-bidi:plaintext] sm:line-clamp-2"
+            className={`${preview.isFallback ? "" : "line-clamp-1 sm:line-clamp-2"} min-w-0 flex-1 whitespace-pre-wrap break-all [unicode-bidi:plaintext]`}
             data-testid={`queue-prompt-start-${index + 1}`}
             dir="auto"
           >
@@ -749,7 +754,8 @@ function QueuePrompt({
         aria-controls={fullContentId}
         aria-expanded={expanded}
         aria-label={`${expanded ? "Hide" : "Show"} full content for queued prompt ${index + 1}`}
-        className="mt-1 inline-flex min-h-7 items-center gap-1 rounded-md text-2xs font-medium text-fg-muted outline-none transition-colors hover:text-fg focus-visible:ring-2 focus-visible:ring-ring/40 pointer-coarse:min-h-11"
+        className="mt-1 inline-flex min-h-7 min-w-0 max-w-full items-center gap-1 whitespace-normal rounded-md text-left text-2xs font-medium text-fg-muted outline-none transition-colors hover:text-fg focus-visible:ring-2 focus-visible:ring-ring/40 pointer-coarse:min-h-[44px]"
+        data-testid={`queue-prompt-disclosure-${index + 1}`}
         onClick={() => {
           const next = !expanded;
           setExpanded(next);
@@ -767,7 +773,7 @@ function QueuePrompt({
           id={fullContentId}
           role="region"
           aria-label={`Full content for queued prompt ${index + 1}`}
-          className="mt-1.5 max-h-64 max-w-full overflow-auto overscroll-contain rounded-md border border-border bg-surface-2/60 p-2 whitespace-pre-wrap break-all font-mono text-xs leading-5 text-fg [unicode-bidi:plaintext]"
+          className="mt-1.5 max-h-64 w-full min-w-0 max-w-full overflow-auto overscroll-contain rounded-md border border-border bg-surface-2/60 p-2 whitespace-pre-wrap break-all font-mono text-xs leading-5 text-fg [unicode-bidi:plaintext]"
           data-testid={`queue-prompt-full-${index + 1}`}
           dir="auto"
           tabIndex={0}
@@ -857,7 +863,7 @@ function SortableQueueRow({
       }}
       className={`bg-surface ${sortable.isDragging || keyboardDragging ? "relative z-10 shadow-lg ring-1 ring-brand/40" : ""}`}
     >
-      <div className="grid min-w-0 grid-cols-[auto_auto_minmax(0,1fr)_auto_auto_auto] items-start gap-x-1.5 px-2 py-1.5 sm:gap-x-2 sm:px-3 sm:py-2">
+      <div className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-start gap-x-1.5 px-2 py-1.5 sm:grid-cols-[auto_auto_minmax(0,1fr)_auto] sm:gap-x-2 sm:px-3 sm:py-2">
         <button
           data-queue-handle
           ref={sortable.setActivatorNodeRef}
@@ -866,7 +872,7 @@ function SortableQueueRow({
           {...sortable.listeners}
           onKeyDown={onHandleKeyDown}
           disabled={pending !== null}
-          className="col-start-1 row-start-1 mt-0.5 inline-flex size-7 shrink-0 touch-none items-center justify-center rounded-md text-fg-subtle hover:bg-surface-2 hover:text-fg focus-visible:ring-2 focus-visible:ring-ring/40 pointer-coarse:size-11"
+          className="col-start-1 row-start-1 mt-0.5 inline-flex size-7 shrink-0 touch-none items-center justify-center rounded-md text-fg-subtle hover:bg-surface-2 hover:text-fg focus-visible:ring-2 focus-visible:ring-ring/40 pointer-coarse:size-[44px]"
           aria-label={`Reorder queued prompt ${index + 1}`}
           title="Drag to reorder. Press Space, arrows, then Space to drop."
         >
@@ -892,95 +898,97 @@ function SortableQueueRow({
             <span className="shrink-0">{turn.reasoningEffort}</span>
           </div>
         </div>
-        <button
-          type="button"
-          disabled={pending !== null}
-          onClick={onSteer}
-          aria-label={`Steer queued prompt ${index + 1}`}
-          title="Make this the next direction"
-          className="col-start-4 row-start-3 inline-flex h-7 shrink-0 items-center justify-center gap-1 rounded-md px-2 text-xs font-medium outline-none transition-colors hover:bg-surface-2 focus-visible:ring-2 focus-visible:ring-ring/40 disabled:pointer-events-none disabled:opacity-50 sm:row-start-1 pointer-coarse:min-h-11"
-        >
-          {pending === "steer" ? (
-            <Loader2Icon className="size-3.5 animate-spin" />
-          ) : (
-            <ZapIcon className="size-3.5" />
-          )}
-          <span className="hidden sm:inline">Steer</span>
-        </button>
-        <button
-          type="button"
-          disabled={pending !== null}
-          onClick={onDelete}
-          aria-label={`Delete queued prompt ${index + 1}`}
-          title="Delete this queued prompt"
-          className="col-start-5 row-start-3 inline-flex size-7 shrink-0 items-center justify-center rounded-md outline-none transition-colors hover:bg-surface-2 hover:text-status-failed focus-visible:ring-2 focus-visible:ring-ring/40 disabled:pointer-events-none disabled:opacity-50 sm:row-start-1 pointer-coarse:size-11"
-        >
-          {pending === "delete" ? (
-            <Loader2Icon className="size-3.5 animate-spin" />
-          ) : (
-            <Trash2Icon className="size-3.5" />
-          )}
-        </button>
-        <DropdownMenu.Root>
-          <DropdownMenu.Trigger asChild>
-            <button
-              type="button"
-              disabled={pending !== null}
-              aria-label={`More actions for queued prompt ${index + 1}`}
-              className="col-start-6 row-start-3 inline-flex size-7 shrink-0 items-center justify-center rounded-md outline-none transition-colors hover:bg-surface-2 focus-visible:ring-2 focus-visible:ring-ring/40 disabled:pointer-events-none disabled:opacity-50 sm:row-start-1 pointer-coarse:size-11"
-            >
-              {pending && pending !== "steer" && pending !== "delete" ? (
-                <Loader2Icon className="size-3.5 animate-spin" />
-              ) : (
-                <EllipsisIcon className="size-3.5" />
-              )}
-            </button>
-          </DropdownMenu.Trigger>
-          <DropdownMenu.Portal>
-            <DropdownMenu.Content
-              align="end"
-              sideOffset={4}
-              className="z-50 w-48 rounded-md border border-border bg-surface p-1 text-xs text-fg shadow-lg"
-              data-testid={`queue-actions-menu-${index + 1}`}
-            >
-              <DropdownMenu.Item
-                className="flex cursor-default items-center gap-2 rounded-sm px-2 py-1.5 outline-none focus:bg-surface-2 pointer-coarse:min-h-11"
-                onSelect={onEdit}
+        <div className="col-span-full row-start-3 flex min-w-0 items-start justify-end gap-1.5 sm:col-span-1 sm:col-start-4 sm:row-start-1 sm:gap-2">
+          <button
+            type="button"
+            disabled={pending !== null}
+            onClick={onSteer}
+            aria-label={`Steer queued prompt ${index + 1}`}
+            title="Make this the next direction"
+            className="inline-flex h-7 shrink-0 items-center justify-center gap-1 rounded-md px-2 text-xs font-medium outline-none transition-colors hover:bg-surface-2 focus-visible:ring-2 focus-visible:ring-ring/40 disabled:pointer-events-none disabled:opacity-50 pointer-coarse:min-h-[44px] pointer-coarse:min-w-[44px]"
+          >
+            {pending === "steer" ? (
+              <Loader2Icon className="size-3.5 animate-spin" />
+            ) : (
+              <ZapIcon className="size-3.5" />
+            )}
+            <span className="hidden sm:inline">Steer</span>
+          </button>
+          <button
+            type="button"
+            disabled={pending !== null}
+            onClick={onDelete}
+            aria-label={`Delete queued prompt ${index + 1}`}
+            title="Delete this queued prompt"
+            className="inline-flex size-7 shrink-0 items-center justify-center rounded-md outline-none transition-colors hover:bg-surface-2 hover:text-status-failed focus-visible:ring-2 focus-visible:ring-ring/40 disabled:pointer-events-none disabled:opacity-50 pointer-coarse:size-[44px]"
+          >
+            {pending === "delete" ? (
+              <Loader2Icon className="size-3.5 animate-spin" />
+            ) : (
+              <Trash2Icon className="size-3.5" />
+            )}
+          </button>
+          <DropdownMenu.Root>
+            <DropdownMenu.Trigger asChild>
+              <button
+                type="button"
+                disabled={pending !== null}
+                aria-label={`More actions for queued prompt ${index + 1}`}
+                className="inline-flex size-7 shrink-0 items-center justify-center rounded-md outline-none transition-colors hover:bg-surface-2 focus-visible:ring-2 focus-visible:ring-ring/40 disabled:pointer-events-none disabled:opacity-50 pointer-coarse:size-[44px]"
               >
-                <PencilIcon className="size-3.5" /> Edit in composer
-              </DropdownMenu.Item>
-              <DropdownMenu.Separator className="my-1 h-px bg-border" />
-              <DropdownMenu.Item
-                className="flex cursor-default items-center gap-2 rounded-sm px-2 py-1.5 outline-none focus:bg-surface-2 data-[disabled]:opacity-50 pointer-coarse:min-h-11"
-                disabled={index === 0}
-                onSelect={() => onMove(0)}
+                {pending && pending !== "steer" && pending !== "delete" ? (
+                  <Loader2Icon className="size-3.5 animate-spin" />
+                ) : (
+                  <EllipsisIcon className="size-3.5" />
+                )}
+              </button>
+            </DropdownMenu.Trigger>
+            <DropdownMenu.Portal>
+              <DropdownMenu.Content
+                align="end"
+                sideOffset={4}
+                className="z-50 w-48 max-w-[calc(100vw-16px)] rounded-md border border-border bg-surface p-1 text-xs text-fg shadow-lg"
+                data-testid={`queue-actions-menu-${index + 1}`}
               >
-                <ArrowUpToLineIcon className="size-3.5" /> Move to top
-              </DropdownMenu.Item>
-              <DropdownMenu.Item
-                className="flex cursor-default items-center gap-2 rounded-sm px-2 py-1.5 outline-none focus:bg-surface-2 data-[disabled]:opacity-50 pointer-coarse:min-h-11"
-                disabled={index === 0}
-                onSelect={() => onMove(index - 1)}
-              >
-                Move up
-              </DropdownMenu.Item>
-              <DropdownMenu.Item
-                className="flex cursor-default items-center gap-2 rounded-sm px-2 py-1.5 outline-none focus:bg-surface-2 data-[disabled]:opacity-50 pointer-coarse:min-h-11"
-                disabled={index === count - 1}
-                onSelect={() => onMove(index + 1)}
-              >
-                Move down
-              </DropdownMenu.Item>
-              <DropdownMenu.Item
-                className="flex cursor-default items-center gap-2 rounded-sm px-2 py-1.5 outline-none focus:bg-surface-2 data-[disabled]:opacity-50 pointer-coarse:min-h-11"
-                disabled={index === count - 1}
-                onSelect={() => onMove(count - 1)}
-              >
-                <ArrowDownToLineIcon className="size-3.5" /> Move to bottom
-              </DropdownMenu.Item>
-            </DropdownMenu.Content>
-          </DropdownMenu.Portal>
-        </DropdownMenu.Root>
+                <DropdownMenu.Item
+                  className="flex min-w-0 cursor-default items-center gap-2 whitespace-normal break-words rounded-sm px-2 py-1.5 outline-none focus:bg-surface-2 pointer-coarse:min-h-[44px]"
+                  onSelect={onEdit}
+                >
+                  <PencilIcon className="size-3.5" /> Edit in composer
+                </DropdownMenu.Item>
+                <DropdownMenu.Separator className="my-1 h-px bg-border" />
+                <DropdownMenu.Item
+                  className="flex min-w-0 cursor-default items-center gap-2 whitespace-normal break-words rounded-sm px-2 py-1.5 outline-none focus:bg-surface-2 data-[disabled]:opacity-50 pointer-coarse:min-h-[44px]"
+                  disabled={index === 0}
+                  onSelect={() => onMove(0)}
+                >
+                  <ArrowUpToLineIcon className="size-3.5" /> Move to top
+                </DropdownMenu.Item>
+                <DropdownMenu.Item
+                  className="flex min-w-0 cursor-default items-center gap-2 whitespace-normal break-words rounded-sm px-2 py-1.5 outline-none focus:bg-surface-2 data-[disabled]:opacity-50 pointer-coarse:min-h-[44px]"
+                  disabled={index === 0}
+                  onSelect={() => onMove(index - 1)}
+                >
+                  Move up
+                </DropdownMenu.Item>
+                <DropdownMenu.Item
+                  className="flex min-w-0 cursor-default items-center gap-2 whitespace-normal break-words rounded-sm px-2 py-1.5 outline-none focus:bg-surface-2 data-[disabled]:opacity-50 pointer-coarse:min-h-[44px]"
+                  disabled={index === count - 1}
+                  onSelect={() => onMove(index + 1)}
+                >
+                  Move down
+                </DropdownMenu.Item>
+                <DropdownMenu.Item
+                  className="flex min-w-0 cursor-default items-center gap-2 whitespace-normal break-words rounded-sm px-2 py-1.5 outline-none focus:bg-surface-2 data-[disabled]:opacity-50 pointer-coarse:min-h-[44px]"
+                  disabled={index === count - 1}
+                  onSelect={() => onMove(count - 1)}
+                >
+                  <ArrowDownToLineIcon className="size-3.5" /> Move to bottom
+                </DropdownMenu.Item>
+              </DropdownMenu.Content>
+            </DropdownMenu.Portal>
+          </DropdownMenu.Root>
+        </div>
       </div>
       {confirmingReplace ? (
         <div className="mx-3 mb-2 rounded-md border border-status-waiting/30 bg-status-waiting/10 p-2 text-xs text-fg">

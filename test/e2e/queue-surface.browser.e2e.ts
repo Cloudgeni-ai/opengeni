@@ -2,7 +2,7 @@ import AxeBuilder from "@axe-core/playwright";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
-import { chromium, type Browser, type Page } from "playwright";
+import { chromium, type Browser, type Locator, type Page } from "playwright";
 import { freePort, runCommand, startProcess, type StartedProcess } from "@opengeni/testing";
 import {
   OMITTED_QUEUE_SOURCE_MARKER,
@@ -138,6 +138,39 @@ type QueueVisibilityEvidence = {
   exactDisclosure: boolean;
 };
 
+type ReflowGeometry = {
+  text: string;
+  left: number;
+  right: number;
+  width: number;
+  height: number;
+  scrollWidth: number;
+  clientWidth: number;
+  horizontalOverflow: number;
+  visible: boolean;
+  textInside: boolean;
+  insideViewport: boolean;
+  insideRow: boolean | null;
+  insideList: boolean | null;
+};
+
+type TextResizeReflowEvidence = {
+  viewport: { width: 320; height: 800 };
+  rootFontSize: "32px";
+  theme: (typeof themes)[number];
+  collapsed: TextPaintGeometry;
+  surfaceCollapsed: ReflowGeometry;
+  listExpanded: ReflowGeometry;
+  rowExpanded: ReflowGeometry;
+  expanded: TextPaintGeometry;
+  disclosureControl: ReflowGeometry;
+  controls: ReflowGeometry[];
+  menu: PortalMenuGeometry;
+  full: ReflowGeometry;
+  hideDisclosureControl: ReflowGeometry;
+  exactDisclosure: boolean;
+};
+
 describe("queue surface browser acceptance", () => {
   let browser: Browser;
   let demo: StartedProcess;
@@ -145,6 +178,7 @@ describe("queue surface browser acceptance", () => {
   const measurements: BrowserMeasurement[] = [];
   const graphemeBoundaryEvidence: GraphemeBoundaryEvidence[] = [];
   const visibilityEvidence: QueueVisibilityEvidence[] = [];
+  const textResizeReflowEvidence: TextResizeReflowEvidence[] = [];
   let accessibilityEvidence: BrowserAccessibilityEvidence | null = null;
 
   beforeAll(async () => {
@@ -212,6 +246,10 @@ describe("queue surface browser acceptance", () => {
     await writeFile(
       `${evidenceDir}/painted-fallbacks.json`,
       `${JSON.stringify({ cases: visibilityEvidence }, null, 2)}\n`,
+    );
+    await writeFile(
+      `${evidenceDir}/text-resize-reflow.json`,
+      `${JSON.stringify({ cases: textResizeReflowEvidence }, null, 2)}\n`,
     );
     await Promise.allSettled([demo?.stop(), browser?.close()]);
   }, 60_000);
@@ -798,6 +836,167 @@ describe("queue surface browser acceptance", () => {
     }
   }, 180_000);
 
+  test("320px mobile queue reflows at 200% root text in both themes", async () => {
+    const viewport = { width: 320, height: 800 } as const;
+    const context = await browser.newContext({ viewport, hasTouch: true, isMobile: true });
+    try {
+      const page = await context.newPage();
+      const diagnostics = observePageFailures(page);
+      for (const theme of themes) {
+        await page.goto(`${baseUrl}/queue.html?count=1&theme=${theme}&visibility=short-zwj`, {
+          waitUntil: "networkidle",
+        });
+        await page.addStyleTag({ content: ":root { font-size: 32px !important; }" });
+        await page.evaluate(() => document.fonts.ready);
+
+        const collapsed = await textPaintGeometry(page, "queue-collapsed-preview");
+        expect(collapsed.text).toMatch(/^Omitted · [0-9A-F]{8}$/);
+        expect(collapsed.elementWidth).toBeGreaterThan(0);
+        expect(collapsed.textWidth).toBeGreaterThan(0);
+        expect(collapsed.intersectionWidth).toBeGreaterThan(0);
+        expect(collapsed.intersectionHeight).toBeGreaterThan(0);
+        expect(collapsed.fullyVisible).toBe(true);
+        expect(collapsed.insideViewport).toBe(true);
+        const surfaceCollapsed = await reflowGeometry(page.getByTestId("queue-surface"));
+        expect(surfaceCollapsed.horizontalOverflow).toBeLessThanOrEqual(1);
+        expect(surfaceCollapsed.insideViewport).toBe(true);
+        expect((await pageMetrics(page)).documentOverflow).toBeLessThanOrEqual(1);
+        const collapsedTree = await chromeAccessibilityTree(page);
+        const collapsedControl = collapsedTree.find(
+          (node) => !node.ignored && node.role === "button" && node.name === "1 queued prompt",
+        );
+        expect(collapsedControl?.description).toMatch(
+          /^Content omitted at safe boundary · ref [0-9A-F]{8}$/,
+        );
+        await page.screenshot({
+          path: `${evidenceDir}/after-320-${theme}-text-resize-collapsed.png`,
+          animations: "disabled",
+        });
+
+        await page.getByRole("button", { name: "1 queued prompt", exact: true }).click();
+        const expanded = await textPaintGeometry(page, "queue-prompt-start-1");
+        expect(expanded.text).toBe(collapsed.text);
+        expect(expanded.elementWidth).toBeGreaterThan(0);
+        expect(expanded.textWidth).toBeGreaterThan(0);
+        expect(expanded.intersectionWidth).toBeGreaterThan(0);
+        expect(expanded.fullyVisible).toBe(true);
+        expect(expanded.insideRow).toBe(true);
+        expect(expanded.insideViewport).toBe(true);
+
+        const listExpanded = await reflowGeometry(page.getByTestId("queue-list"));
+        const rowExpanded = await reflowGeometry(page.locator("[data-queue-turn-id]").first());
+        expect(listExpanded.horizontalOverflow).toBeLessThanOrEqual(1);
+        expect(rowExpanded.horizontalOverflow).toBeLessThanOrEqual(1);
+        expect(listExpanded.insideViewport).toBe(true);
+        expect(rowExpanded.insideViewport).toBe(true);
+
+        const disclosure = page.getByRole("button", {
+          name: "Show full content for queued prompt 1",
+          exact: true,
+        });
+        await disclosure.scrollIntoViewIfNeeded();
+        const disclosureControl = await reflowGeometry(disclosure);
+        expect(disclosureControl.width).toBeGreaterThan(0);
+        expect(disclosureControl.textInside).toBe(true);
+        expect(disclosureControl.insideRow).toBe(true);
+        expect(disclosureControl.insideViewport).toBe(true);
+
+        const controlLocators = [
+          page.getByRole("button", { name: "Reorder queued prompt 1", exact: true }),
+          page.getByRole("button", { name: "Steer queued prompt 1", exact: true }),
+          page.getByRole("button", { name: "Delete queued prompt 1", exact: true }),
+          page.getByRole("button", { name: "More actions for queued prompt 1", exact: true }),
+        ];
+        const controls: ReflowGeometry[] = [];
+        for (const control of controlLocators) {
+          await control.scrollIntoViewIfNeeded();
+          const geometry = await reflowGeometry(control);
+          expect(geometry.width).toBeGreaterThanOrEqual(43);
+          expect(geometry.height).toBeGreaterThanOrEqual(43);
+          expect(geometry.insideRow).toBe(true);
+          expect(geometry.insideViewport).toBe(true);
+          controls.push(geometry);
+        }
+
+        await page
+          .getByRole("button", { name: "More actions for queued prompt 1", exact: true })
+          .click();
+        const menu = await measurePortalMenu(page, 1);
+        expect(menu.itemCount).toBe(5);
+        expect(menu.insideViewport).toBe(true);
+        expect(menu.itemWidths.every((width) => width > 0 && width <= viewport.width)).toBe(true);
+        expect(menu.itemHeights.every((height) => height >= 43)).toBe(true);
+        await page.screenshot({
+          path: `${evidenceDir}/after-320-${theme}-text-resize-menu.png`,
+          animations: "disabled",
+        });
+        await page.keyboard.press("Escape");
+        await page.screenshot({
+          path: `${evidenceDir}/after-320-${theme}-text-resize-expanded.png`,
+          animations: "disabled",
+        });
+
+        await disclosure.scrollIntoViewIfNeeded();
+        await disclosure.click();
+        const fullLocator = page.getByRole("region", {
+          name: "Full content for queued prompt 1",
+          exact: true,
+        });
+        await fullLocator.scrollIntoViewIfNeeded();
+        const full = await reflowGeometry(fullLocator);
+        const exactPrompt = queueVisibilityProbePrompt("short-zwj");
+        expect(await fullLocator.textContent()).toBe(exactPrompt);
+        expect(full.width).toBeGreaterThan(0);
+        expect(full.horizontalOverflow).toBeLessThanOrEqual(1);
+        expect(full.insideRow).toBe(true);
+        expect(full.insideViewport).toBe(true);
+        const hideDisclosure = page.getByRole("button", {
+          name: "Hide full content for queued prompt 1",
+          exact: true,
+        });
+        await hideDisclosure.scrollIntoViewIfNeeded();
+        const hideDisclosureControl = await reflowGeometry(hideDisclosure);
+        expect(hideDisclosureControl.textInside).toBe(true);
+        expect(hideDisclosureControl.insideRow).toBe(true);
+        expect(hideDisclosureControl.insideViewport).toBe(true);
+        expect((await pageMetrics(page)).documentOverflow).toBeLessThanOrEqual(1);
+        const disclosedTree = await chromeAccessibilityTree(page);
+        expect(
+          disclosedTree.some(
+            (node) =>
+              !node.ignored &&
+              node.role === "region" &&
+              node.name === "Full content for queued prompt 1",
+          ),
+        ).toBe(true);
+        await page.screenshot({
+          path: `${evidenceDir}/after-320-${theme}-text-resize-disclosed.png`,
+          animations: "disabled",
+        });
+
+        textResizeReflowEvidence.push({
+          viewport,
+          rootFontSize: "32px",
+          theme,
+          collapsed,
+          surfaceCollapsed,
+          listExpanded,
+          rowExpanded,
+          expanded,
+          disclosureControl,
+          controls,
+          menu,
+          full,
+          hideDisclosureControl,
+          exactDisclosure: (await fullLocator.textContent()) === exactPrompt,
+        });
+      }
+      expect(diagnostics).toEqual([]);
+    } finally {
+      await context.close();
+    }
+  }, 60_000);
+
   test("Chrome exposes whole graphemes at every head and tail preview boundary", async () => {
     const boundaryViewports = [
       { width: 320, height: 800 },
@@ -1135,6 +1334,53 @@ async function textPaintGeometry(page: Page, testId: string): Promise<TextPaintG
         textBounds.right <= window.innerWidth + 0.5 &&
         textBounds.top >= -0.5 &&
         textBounds.bottom <= window.innerHeight + 0.5,
+    };
+  });
+}
+
+async function reflowGeometry(locator: Locator): Promise<ReflowGeometry> {
+  return locator.evaluate((element) => {
+    const bounds = element.getBoundingClientRect();
+    const textRects: DOMRect[] = [];
+    const textWalker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+    while (textWalker.nextNode()) {
+      const range = document.createRange();
+      range.selectNodeContents(textWalker.currentNode);
+      const textBounds = range.getBoundingClientRect();
+      if (textBounds.width > 0 || textBounds.height > 0) textRects.push(textBounds);
+    }
+    const rowBounds = element.closest<HTMLElement>("[data-queue-turn-id]")?.getBoundingClientRect();
+    const listBounds = element
+      .closest<HTMLElement>('[data-testid="queue-list"]')
+      ?.getBoundingClientRect();
+    const styles = getComputedStyle(element);
+    const inside = (inner: DOMRect, outer: DOMRect) =>
+      inner.left >= outer.left - 0.5 &&
+      inner.right <= outer.right + 0.5 &&
+      inner.top >= outer.top - 0.5 &&
+      inner.bottom <= outer.bottom + 0.5;
+    return {
+      text: element.textContent ?? "",
+      left: bounds.left,
+      right: bounds.right,
+      width: bounds.width,
+      height: bounds.height,
+      scrollWidth: element.scrollWidth,
+      clientWidth: element.clientWidth,
+      horizontalOverflow: Math.max(0, element.scrollWidth - element.clientWidth),
+      visible:
+        styles.display !== "none" && styles.visibility !== "hidden" && Number(styles.opacity) > 0,
+      textInside: textRects.every(
+        (textBounds) =>
+          textBounds.left >= bounds.left - 0.5 && textBounds.right <= bounds.right + 0.5,
+      ),
+      insideViewport:
+        bounds.left >= -0.5 &&
+        bounds.right <= window.innerWidth + 0.5 &&
+        bounds.top >= -0.5 &&
+        bounds.bottom <= window.innerHeight + 0.5,
+      insideRow: rowBounds ? inside(bounds, rowBounds) : null,
+      insideList: listBounds ? inside(bounds, listBounds) : null,
     };
   });
 }
