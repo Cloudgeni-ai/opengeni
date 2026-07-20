@@ -14,8 +14,9 @@ export const CONTRACT = Object.freeze({
   bootstrapPullRequestNumber: 506,
   bootstrapHeadBranch: "feat/ope25-admission-bootstrap",
   bootstrapTitle: "chore: add exact OPE-25 admission bootstrap",
-  reviewedCandidateSha: "fb3b151fdc5f188af001004e11e03fdb2ba290a6",
-  reviewedCandidateTreeSha: "808290ab3174a7b22bc5d6f7bb06c0d2bf6a2a2e",
+  bootstrapCommitCount: 4,
+  reviewedPredecessorSha: "d778b49a1aac5e9e2998f5c9e2b1d88d2bb1ac28",
+  reviewedPredecessorTreeSha: "3d69fba60dc77c13cebe2d159503d0eabb3585d1",
   headBranch: "ope25-admission-governance-v2",
   workflowPath: ".github/workflows/ope25-admission-bootstrap.yml",
   helperPath: "scripts/ope25-admission-bootstrap.mjs",
@@ -24,10 +25,28 @@ export const CONTRACT = Object.freeze({
   title: "chore: restore exact OPE-25 admission tree (v2)",
 });
 
-export const REVIEWED_CANDIDATE_BLOBS = Object.freeze({
-  [CONTRACT.workflowPath]: "71ccf0091ac1562ffc81f2f4fdfcaacb699ea418",
-  [CONTRACT.helperPath]: "921567a843c133fee47f6f3e521c9cc369c5dc37",
-  [CONTRACT.testPath]: "449943810df5f3b0095ff0c298e35390bcc459bd",
+export const SOURCE_PREDECESSOR_CHAIN = Object.freeze([
+  Object.freeze({
+    sha: "fb3b151fdc5f188af001004e11e03fdb2ba290a6",
+    treeSha: "808290ab3174a7b22bc5d6f7bb06c0d2bf6a2a2e",
+    parentSha: CONTRACT.originalMainSha,
+  }),
+  Object.freeze({
+    sha: "3c8eb5a29d1ea69d97b25482c5637754bf77b0c7",
+    treeSha: "2ba1ced55ec1a1a00d4474169c0420951284ffad",
+    parentSha: "fb3b151fdc5f188af001004e11e03fdb2ba290a6",
+  }),
+  Object.freeze({
+    sha: CONTRACT.reviewedPredecessorSha,
+    treeSha: CONTRACT.reviewedPredecessorTreeSha,
+    parentSha: "3c8eb5a29d1ea69d97b25482c5637754bf77b0c7",
+  }),
+]);
+
+export const REVIEWED_PREDECESSOR_BLOBS = Object.freeze({
+  [CONTRACT.workflowPath]: "330b655a154a408bb4aa8229c7d544e8fb99338e",
+  [CONTRACT.helperPath]: "33305b775f2eed87264e54bc132f0d7dd7587005",
+  [CONTRACT.testPath]: "f9b461d3d7694c81de105b4670e81c541cd650aa",
 });
 
 export const TEMPORARY_PATHS = Object.freeze(
@@ -224,19 +243,46 @@ export function assertTemporaryBaseTree(originalValue, temporaryValue, temporary
   }
 }
 
-function assertReviewedCandidateTree(value) {
-  const reviewed = canonicalLeafMap(
+function assertReviewedPredecessorTree(value) {
+  const predecessor = canonicalLeafMap(
     value,
-    CONTRACT.reviewedCandidateTreeSha,
-    "reviewed candidate tree",
+    CONTRACT.reviewedPredecessorTreeSha,
+    "reviewed predecessor tree",
   );
   for (const path of TEMPORARY_PATHS) {
-    const entry = reviewed.get(path);
+    const entry = predecessor.get(path);
     invariant(
       entry?.mode === "100644" &&
         entry.type === "blob" &&
-        entry.sha === REVIEWED_CANDIDATE_BLOBS[path],
-      `reviewed candidate blob changed: ${path}`,
+        entry.sha === REVIEWED_PREDECESSOR_BLOBS[path],
+      `reviewed predecessor blob changed: ${path}`,
+    );
+  }
+}
+
+function assertFinalCandidateDelta(predecessorValue, candidateValue, candidateTreeSha) {
+  const predecessor = canonicalLeafMap(
+    predecessorValue,
+    CONTRACT.reviewedPredecessorTreeSha,
+    "reviewed predecessor tree",
+  );
+  const candidate = canonicalLeafMap(candidateValue, candidateTreeSha, "final candidate tree");
+  const paths = [...new Set([...predecessor.keys(), ...candidate.keys()])].sort(compareCodeUnits);
+  const changed = paths.filter(
+    (path) =>
+      JSON.stringify(predecessor.get(path) ?? null) !== JSON.stringify(candidate.get(path) ?? null),
+  );
+  invariant(
+    JSON.stringify(changed) === JSON.stringify(TEMPORARY_PATHS),
+    "final correction does not change exactly the bootstrap files",
+  );
+  for (const path of TEMPORARY_PATHS) {
+    const entry = candidate.get(path);
+    invariant(
+      entry?.mode === "100644" &&
+        entry.type === "blob" &&
+        entry.sha !== REVIEWED_PREDECESSOR_BLOBS[path],
+      `final candidate did not replace the reviewed predecessor blob: ${path}`,
     );
   }
 }
@@ -280,12 +326,16 @@ function assertBootstrapPullRequest(value, baseSha, candidateHeadSha) {
     "bootstrap source pull-request head changed",
   );
   invariant(
-    value?.commits === 2 && value?.changed_files === TEMPORARY_PATHS.length,
-    "bootstrap source pull-request commit or file count changed",
+    value?.commits === CONTRACT.bootstrapCommitCount,
+    "bootstrap source pull-request commit count changed",
+  );
+  invariant(
+    value?.changed_files === TEMPORARY_PATHS.length,
+    "bootstrap source pull-request file count changed",
   );
 }
 
-async function inspectSourceIdentity(api, baseSha) {
+export async function inspectSourceIdentity(api, baseSha) {
   const repository = await api(`/repos/${CONTRACT.repository}`);
   assertRepository(repository);
 
@@ -306,11 +356,15 @@ async function inspectSourceIdentity(api, baseSha) {
   );
   const candidateHeadSha = baseCommit.parents[1];
 
-  const [bootstrapPullRequest, originalCommitValue, reviewedCommitValue, candidateCommitValue] =
+  const [bootstrapPullRequest, originalCommitValue, predecessorCommitValues, candidateCommitValue] =
     await Promise.all([
       api(`/repos/${CONTRACT.repository}/pulls/${CONTRACT.bootstrapPullRequestNumber}`),
       api(`/repos/${CONTRACT.repository}/git/commits/${CONTRACT.originalMainSha}`),
-      api(`/repos/${CONTRACT.repository}/git/commits/${CONTRACT.reviewedCandidateSha}`),
+      Promise.all(
+        SOURCE_PREDECESSOR_CHAIN.map(({ sha }) =>
+          api(`/repos/${CONTRACT.repository}/git/commits/${sha}`),
+        ),
+      ),
       api(`/repos/${CONTRACT.repository}/git/commits/${candidateHeadSha}`),
     ]);
   assertBootstrapPullRequest(bootstrapPullRequest, baseSha, candidateHeadSha);
@@ -323,19 +377,21 @@ async function inspectSourceIdentity(api, baseSha) {
     originalCommit.treeSha === CONTRACT.originalTreeSha,
     "authorized original commit tree changed",
   );
-  const reviewedCommit = assertCommit(
-    reviewedCommitValue,
-    CONTRACT.reviewedCandidateSha,
-    "reviewed candidate commit",
-  );
-  invariant(
-    reviewedCommit.parents.length === 1 && reviewedCommit.parents[0] === CONTRACT.originalMainSha,
-    "reviewed candidate is not one commit on the authorized main",
-  );
-  invariant(
-    reviewedCommit.treeSha === CONTRACT.reviewedCandidateTreeSha,
-    "reviewed candidate commit tree changed",
-  );
+  for (const [index, expected] of SOURCE_PREDECESSOR_CHAIN.entries()) {
+    const predecessorCommit = assertCommit(
+      predecessorCommitValues[index],
+      expected.sha,
+      `source predecessor commit ${index + 1}`,
+    );
+    invariant(
+      predecessorCommit.parents.length === 1 && predecessorCommit.parents[0] === expected.parentSha,
+      `source predecessor commit ${index + 1} parent changed`,
+    );
+    invariant(
+      predecessorCommit.treeSha === expected.treeSha,
+      `source predecessor commit ${index + 1} tree changed`,
+    );
+  }
   const candidateCommit = assertCommit(
     candidateCommitValue,
     candidateHeadSha,
@@ -343,22 +399,25 @@ async function inspectSourceIdentity(api, baseSha) {
   );
   invariant(
     candidateCommit.parents.length === 1 &&
-      candidateCommit.parents[0] === CONTRACT.reviewedCandidateSha,
-    "corrected candidate is not one fix commit on the reviewed candidate",
+      candidateCommit.parents[0] === CONTRACT.reviewedPredecessorSha,
+    "final candidate is not the sole fourth commit on the reviewed predecessor",
   );
   invariant(
     candidateCommit.treeSha === baseCommit.treeSha,
-    "temporary merge tree differs from the corrected candidate tree",
+    "temporary merge tree differs from the final candidate tree",
   );
 
-  const [originalTree, reviewedTree, temporaryTree] = await Promise.all([
+  const [originalTree, predecessorTree, temporaryTree] = await Promise.all([
     api(`/repos/${CONTRACT.repository}/git/trees/${CONTRACT.originalTreeSha}?recursive=1`),
-    api(`/repos/${CONTRACT.repository}/git/trees/${CONTRACT.reviewedCandidateTreeSha}?recursive=1`),
+    api(
+      `/repos/${CONTRACT.repository}/git/trees/${CONTRACT.reviewedPredecessorTreeSha}?recursive=1`,
+    ),
     api(`/repos/${CONTRACT.repository}/git/trees/${baseCommit.treeSha}?recursive=1`),
   ]);
-  assertTemporaryBaseTree(originalTree, reviewedTree, CONTRACT.reviewedCandidateTreeSha);
-  assertReviewedCandidateTree(reviewedTree);
+  assertTemporaryBaseTree(originalTree, predecessorTree, CONTRACT.reviewedPredecessorTreeSha);
+  assertReviewedPredecessorTree(predecessorTree);
   assertTemporaryBaseTree(originalTree, temporaryTree, baseCommit.treeSha);
+  assertFinalCandidateDelta(predecessorTree, temporaryTree, baseCommit.treeSha);
 
   const headRef = await api(`/repos/${CONTRACT.repository}/git/ref/heads/${CONTRACT.headBranch}`);
   const headSha = assertRef(headRef, `refs/heads/${CONTRACT.headBranch}`, "governance head");
@@ -521,6 +580,7 @@ async function verifyCreatedPullRequest(api, number, identity, expectedBody) {
     finalMatches.length === 1 && finalMatches[0]?.number === number,
     "created bootstrap pull request is not globally unique",
   );
+  await assertRefsUnchanged(api, identity);
 }
 
 export async function runBootstrap(options = {}) {

@@ -5,9 +5,11 @@ import { join } from "node:path";
 import {
   CONTRACT,
   ManualInterventionError,
-  REVIEWED_CANDIDATE_BLOBS,
+  REVIEWED_PREDECESSOR_BLOBS,
+  SOURCE_PREDECESSOR_CHAIN,
   TEMPORARY_PATHS,
   assertTemporaryBaseTree,
+  inspectSourceIdentity,
   runBootstrap,
 } from "./ope25-admission-bootstrap.mjs";
 
@@ -15,7 +17,8 @@ const repositoryRoot = join(import.meta.dir, "..");
 const workflowPath = join(repositoryRoot, CONTRACT.workflowPath);
 const helperPath = join(repositoryRoot, CONTRACT.helperPath);
 const baseSha = "b".repeat(40);
-const correctedCandidateSha = "c".repeat(40);
+const finalCandidateSha = "c".repeat(40);
+const fifthCandidateSha = "4".repeat(40);
 const headSha = "e".repeat(40);
 const temporaryTreeSha = "f".repeat(40);
 const readmeBlobSha = "1".repeat(40);
@@ -51,28 +54,31 @@ type PullRequest = Record<string, any>;
 type CreatedMismatch = "author" | "base" | "body" | "files" | "head";
 
 type FixtureOptions = {
+  baseFirstParent?: string;
   baseSecondParent?: string;
   baseTree?: string;
   bootstrapAuthor?: string;
   bootstrapBaseSha?: string;
+  bootstrapCommitCount?: number;
   bootstrapHeadRef?: string;
   bootstrapHeadRepo?: string;
   bootstrapHeadSha?: string;
   bootstrapMergeSha?: string;
   cleanupFailure?: "patch" | "readback";
   closedCurrentEquivalent?: boolean;
-  correctedParent?: string;
-  correctedTree?: string;
+  finalParent?: string;
+  finalTree?: string;
   createdMismatch?: CreatedMismatch;
   headParent?: string;
   headTree?: string;
   historicalV1?: boolean;
   initialConflict?: boolean;
+  moveHeadAfterCreatedTerminalList?: boolean;
   moveHeadAfterPost?: boolean;
   postCompetingEquivalent?: boolean;
-  reviewedBlobOverrides?: Record<string, string>;
-  reviewedParent?: string;
-  reviewedTree?: string;
+  predecessorBlobOverrides?: Record<string, string>;
+  predecessorParent?: string;
+  predecessorTree?: string;
 };
 
 function fixture(options: FixtureOptions = {}) {
@@ -86,6 +92,8 @@ function fixture(options: FixtureOptions = {}) {
   let existingCompetitorAfterDetailArmed = false;
   let existingCompetitorInjected = false;
   let existingTerminalRefMovementArmed = false;
+  let createdTerminalRefMovementInjected = false;
+  let headRefReadsAfterPost = 0;
   let pullListCallsAfterTerminalMovementArm = 0;
   const patchedNumbers: number[] = [];
 
@@ -94,8 +102,8 @@ function fixture(options: FixtureOptions = {}) {
     truncated: false,
     tree: [{ path: "README.md", mode: "100644", type: "blob", sha: readmeBlobSha }],
   };
-  const reviewedTree = {
-    sha: CONTRACT.reviewedCandidateTreeSha,
+  const predecessorTree = {
+    sha: CONTRACT.reviewedPredecessorTreeSha,
     truncated: false,
     tree: [
       ...originalTree.tree,
@@ -103,7 +111,7 @@ function fixture(options: FixtureOptions = {}) {
         path,
         mode: "100644",
         type: "blob",
-        sha: options.reviewedBlobOverrides?.[path] ?? REVIEWED_CANDIDATE_BLOBS[path],
+        sha: options.predecessorBlobOverrides?.[path] ?? REVIEWED_PREDECESSOR_BLOBS[path],
       })),
     ],
   };
@@ -138,10 +146,10 @@ function fixture(options: FixtureOptions = {}) {
       },
       head: {
         ref: options.bootstrapHeadRef ?? CONTRACT.bootstrapHeadBranch,
-        sha: options.bootstrapHeadSha ?? correctedCandidateSha,
+        sha: options.bootstrapHeadSha ?? finalCandidateSha,
         repo: { full_name: options.bootstrapHeadRepo ?? CONTRACT.repository },
       },
-      commits: 2,
+      commits: options.bootstrapCommitCount ?? CONTRACT.bootstrapCommitCount,
       changed_files: TEMPORARY_PATHS.length,
     };
   }
@@ -253,6 +261,7 @@ function fixture(options: FixtureOptions = {}) {
       });
     }
     if (method === "GET" && url.pathname === `${prefix}/git/ref/heads/${CONTRACT.headBranch}`) {
+      if (postCount > 0) headRefReadsAfterPost += 1;
       return Response.json({
         ref: `refs/heads/${CONTRACT.headBranch}`,
         object: { type: "commit", sha: currentHeadSha },
@@ -265,8 +274,8 @@ function fixture(options: FixtureOptions = {}) {
           sha,
           tree: { sha: options.baseTree ?? temporaryTreeSha },
           parents: [
-            { sha: CONTRACT.originalMainSha },
-            { sha: options.baseSecondParent ?? correctedCandidateSha },
+            { sha: options.baseFirstParent ?? CONTRACT.originalMainSha },
+            { sha: options.baseSecondParent ?? finalCandidateSha },
           ],
         });
       }
@@ -277,18 +286,35 @@ function fixture(options: FixtureOptions = {}) {
           parents: [{ sha: "0".repeat(40) }],
         });
       }
-      if (sha === CONTRACT.reviewedCandidateSha) {
+      const predecessorIndex = SOURCE_PREDECESSOR_CHAIN.findIndex(
+        (predecessor) => predecessor.sha === sha,
+      );
+      if (predecessorIndex >= 0) {
+        const expected = SOURCE_PREDECESSOR_CHAIN[predecessorIndex];
+        const isDirectPredecessor = sha === CONTRACT.reviewedPredecessorSha;
         return Response.json({
           sha,
-          tree: { sha: options.reviewedTree ?? CONTRACT.reviewedCandidateTreeSha },
-          parents: [{ sha: options.reviewedParent ?? CONTRACT.originalMainSha }],
+          tree: {
+            sha:
+              isDirectPredecessor && options.predecessorTree
+                ? options.predecessorTree
+                : expected.treeSha,
+          },
+          parents: [
+            {
+              sha:
+                isDirectPredecessor && options.predecessorParent
+                  ? options.predecessorParent
+                  : expected.parentSha,
+            },
+          ],
         });
       }
-      if (sha === correctedCandidateSha || sha === options.baseSecondParent) {
+      if (sha === finalCandidateSha || sha === options.baseSecondParent) {
         return Response.json({
           sha,
-          tree: { sha: options.correctedTree ?? temporaryTreeSha },
-          parents: [{ sha: options.correctedParent ?? CONTRACT.reviewedCandidateSha }],
+          tree: { sha: options.finalTree ?? temporaryTreeSha },
+          parents: [{ sha: options.finalParent ?? CONTRACT.reviewedPredecessorSha }],
         });
       }
       if (sha === currentHeadSha || sha === headSha || sha === movedHeadSha) {
@@ -304,9 +330,9 @@ function fixture(options: FixtureOptions = {}) {
     }
     if (
       method === "GET" &&
-      url.pathname === `${prefix}/git/trees/${CONTRACT.reviewedCandidateTreeSha}`
+      url.pathname === `${prefix}/git/trees/${CONTRACT.reviewedPredecessorTreeSha}`
     ) {
-      return Response.json(reviewedTree);
+      return Response.json(predecessorTree);
     }
     if (method === "GET" && url.pathname === `${prefix}/git/trees/${temporaryTreeSha}`) {
       return Response.json(temporaryTree);
@@ -316,6 +342,14 @@ function fixture(options: FixtureOptions = {}) {
       if (existingTerminalRefMovementArmed) {
         pullListCallsAfterTerminalMovementArm += 1;
         if (pullListCallsAfterTerminalMovementArm === 2) currentHeadSha = movedHeadSha;
+      }
+      if (
+        options.moveHeadAfterCreatedTerminalList &&
+        postCount > 0 &&
+        !createdTerminalRefMovementInjected
+      ) {
+        createdTerminalRefMovementInjected = true;
+        currentHeadSha = movedHeadSha;
       }
       return response;
     }
@@ -388,6 +422,9 @@ function fixture(options: FixtureOptions = {}) {
     get requestCount() {
       return requestCount;
     },
+    get headRefReadsAfterPost() {
+      return headRefReadsAfterPost;
+    },
     get postedBody() {
       return postedBody;
     },
@@ -403,8 +440,17 @@ function fixture(options: FixtureOptions = {}) {
     },
     patchedNumbers,
     originalTree,
-    reviewedTree,
+    predecessorTree,
     temporaryTree,
+    async api(path: string) {
+      const response = await fetchImpl(`${CONTRACT.apiUrl}${path}`, {
+        method: "GET",
+        redirect: "error",
+        headers: { Authorization: "Bearer test-token" },
+      });
+      if (!response.ok) throw new Error(`fixture API failed with HTTP ${response.status}`);
+      return response.json();
+    },
   };
 }
 
@@ -419,7 +465,7 @@ describe("temporary OPE-25 admission bootstrap", () => {
       number: 1,
       baseSha,
       headSha,
-      candidateHeadSha: correctedCandidateSha,
+      candidateHeadSha: finalCandidateSha,
     });
     expect(api.postCount).toBe(1);
     expect(api.patchCount).toBe(0);
@@ -442,6 +488,17 @@ describe("temporary OPE-25 admission bootstrap", () => {
     expect(existing).toMatchObject({ action: "existing", number: 1, baseSha, headSha });
     expect(api.postCount).toBe(1);
     expect(api.patchCount).toBe(0);
+  });
+
+  test("accepts an exact synthetic merge B with the final candidate as parent 2", async () => {
+    const api = fixture();
+    await expect(inspectSourceIdentity(api.api, baseSha)).resolves.toEqual({
+      baseSha,
+      headSha,
+      temporaryTreeSha,
+      candidateHeadSha: finalCandidateSha,
+    });
+    expect(api.mutationCount).toBe(0);
   });
 
   test("fails without mutation when a competitor appears after existing PR detail", async () => {
@@ -491,29 +548,53 @@ describe("temporary OPE-25 admission bootstrap", () => {
 
   test.each([
     [
-      "alternate corrected parent SHA",
-      { correctedParent: "9".repeat(40) },
-      "corrected candidate is not one fix commit on the reviewed candidate",
+      "stale three-commit source count",
+      {
+        baseSecondParent: CONTRACT.reviewedPredecessorSha,
+        bootstrapCommitCount: 3,
+        bootstrapHeadSha: CONTRACT.reviewedPredecessorSha,
+      },
+      "bootstrap source pull-request commit count changed",
     ],
     [
-      "alternate reviewed parent SHA",
-      { reviewedParent: "9".repeat(40) },
-      "reviewed candidate is not one commit on the authorized main",
+      "fifth source commit",
+      {
+        baseSecondParent: fifthCandidateSha,
+        bootstrapCommitCount: 5,
+        bootstrapHeadSha: fifthCandidateSha,
+        finalParent: finalCandidateSha,
+      },
+      "bootstrap source pull-request commit count changed",
     ],
     [
-      "alternate reviewed tree",
-      { reviewedTree: "8".repeat(40) },
-      "reviewed candidate commit tree changed",
+      "alternate final-candidate parent SHA",
+      { finalParent: "9".repeat(40) },
+      "final candidate is not the sole fourth commit on the reviewed predecessor",
     ],
     [
-      "alternate reviewed helper blob",
-      { reviewedBlobOverrides: { [CONTRACT.helperPath]: "6".repeat(40) } },
-      `reviewed candidate blob changed: ${CONTRACT.helperPath}`,
+      "alternate predecessor parent SHA",
+      { predecessorParent: "9".repeat(40) },
+      "source predecessor commit 3 parent changed",
     ],
     [
-      "B/corrected-candidate tree mismatch",
-      { correctedTree: "7".repeat(40) },
-      "temporary merge tree differs from the corrected candidate tree",
+      "alternate predecessor tree",
+      { predecessorTree: "8".repeat(40) },
+      "source predecessor commit 3 tree changed",
+    ],
+    [
+      "alternate predecessor helper blob",
+      { predecessorBlobOverrides: { [CONTRACT.helperPath]: "6".repeat(40) } },
+      `reviewed predecessor blob changed: ${CONTRACT.helperPath}`,
+    ],
+    [
+      "B/final-candidate tree mismatch",
+      { finalTree: "7".repeat(40) },
+      "temporary merge tree differs from the final candidate tree",
+    ],
+    [
+      "alternate B parent 1",
+      { baseFirstParent: "9".repeat(40) },
+      "temporary base does not descend directly from the authorized main",
     ],
     [
       "alternate B parent 2",
@@ -575,13 +656,13 @@ describe("temporary OPE-25 admission bootstrap", () => {
     expect(api.patchCount).toBe(0);
   });
 
-  test("requires both reviewed and corrected trees to contain only the removable path set", () => {
+  test("requires both predecessor and final trees to contain only the removable path set", () => {
     const api = fixture();
     expect(() =>
       assertTemporaryBaseTree(
         api.originalTree,
-        api.reviewedTree,
-        CONTRACT.reviewedCandidateTreeSha,
+        api.predecessorTree,
+        CONTRACT.reviewedPredecessorTreeSha,
       ),
     ).not.toThrow();
     expect(() =>
@@ -648,6 +729,31 @@ describe("temporary OPE-25 admission bootstrap", () => {
     expect(api.createdState).toBe("closed");
   });
 
+  test("returns created only after stable refs pass both post-POST readbacks", async () => {
+    const api = fixture();
+    await expect(
+      runBootstrap({ env: context(), fetchImpl: api.fetchImpl, logger }),
+    ).resolves.toMatchObject({ action: "created", number: 1, headSha });
+    expect(api.headRefReadsAfterPost).toBe(2);
+    expect(api.postCount).toBe(1);
+    expect(api.patchCount).toBe(0);
+    expect(api.mutationCount).toBe(1);
+    expect(api.createdState).toBe("open");
+  });
+
+  test("closes and proves cleanup when H moves after created terminal uniqueness", async () => {
+    const api = fixture({ moveHeadAfterCreatedTerminalList: true });
+    await expect(
+      runBootstrap({ env: context(), fetchImpl: api.fetchImpl, logger }),
+    ).rejects.toThrow(/failed verification and was closed.*governance head drifted/);
+    expect(api.headRefReadsAfterPost).toBe(2);
+    expect(api.postCount).toBe(1);
+    expect(api.patchCount).toBe(1);
+    expect(api.mutationCount).toBe(2);
+    expect(api.patchedNumbers).toEqual([1]);
+    expect(api.createdState).toBe("closed");
+  });
+
   test.each(["patch", "readback"] as const)(
     "emits explicit manual intervention when %s cleanup fails",
     async (cleanupFailure) => {
@@ -687,8 +793,9 @@ describe("temporary OPE-25 admission bootstrap", () => {
     expect(workflow).toContain(`BOOTSTRAP_HELPER_SHA256: ${helperSha256}`);
     expect(workflow).toContain(`ref=$GITHUB_SHA`);
     expect(workflow).toContain('node "$helper"');
-    expect(helperText).toContain(CONTRACT.reviewedCandidateSha);
-    expect(helperText).toContain(CONTRACT.reviewedCandidateTreeSha);
+    expect(helperText).toContain(CONTRACT.reviewedPredecessorSha);
+    expect(helperText).toContain(CONTRACT.reviewedPredecessorTreeSha);
+    expect(helperText).toContain(`bootstrapCommitCount: ${CONTRACT.bootstrapCommitCount}`);
     expect(helperText).toContain(
       `bootstrapPullRequestNumber: ${CONTRACT.bootstrapPullRequestNumber}`,
     );
