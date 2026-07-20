@@ -863,6 +863,21 @@ describe("catalog connectionRef exposure", () => {
 });
 
 describe("curated skill catalog enablement", () => {
+  function installation(config: Record<string, unknown>): CapabilityInstallation {
+    return {
+      id: "00000000-0000-0000-0000-000000000001",
+      accountId: "00000000-0000-0000-0000-0000000000a1",
+      workspaceId: "00000000-0000-0000-0000-0000000000b1",
+      capabilityId: "skill:azure-verified-modules",
+      kind: "skill",
+      status: "active",
+      config,
+      metadata: { mcpConnectivity: { status: "ok", toolCount: 1 } },
+      enabledAt: "2026-07-06T00:00:00.000Z",
+      updatedAt: "2026-07-06T00:00:00.000Z",
+    };
+  }
+
   const librarySkill = (): CapabilityCatalogItem =>
     capabilityItem({
       id: "skill:azure-verified-modules",
@@ -895,8 +910,7 @@ describe("curated skill catalog enablement", () => {
         metadata: {
           libraryId: "azure-verified-modules",
           libraryVersion: "1.0.0",
-          contentSha256:
-            "f17d1e7d909797042d71ae1ccfee04a2f5a3d96f4972db8ca005f1173cd40564",
+          contentSha256: "f17d1e7d909797042d71ae1ccfee04a2f5a3d96f4972db8ca005f1173cd40564",
           sourceCommit: "de4323afdfbc30d1387f287b55062fa8d82b62e8",
           provenance: "Vendored from hashicorp/agent-skills; reviewed OpenGeni curated entry.",
         },

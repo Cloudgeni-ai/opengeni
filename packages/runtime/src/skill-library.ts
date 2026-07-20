@@ -113,10 +113,7 @@ export function isSkillLibraryEntryId(id: string): boolean {
 }
 
 /** Resolve an exact immutable library entry by id and version. */
-export function getSkillLibraryEntry(
-  id: string,
-  version?: string,
-): SkillLibraryEntry | null {
+export function getSkillLibraryEntry(id: string, version?: string): SkillLibraryEntry | null {
   const entry = skillLibraryEntries.find(
     (candidate) => candidate.id === id && (version === undefined || candidate.version === version),
   );
@@ -186,10 +183,7 @@ function reviewedArtifactIsAvailable(entry: SkillLibraryEntry): boolean {
   if (!directory) return false;
   try {
     const skillMarkdown = readFileSync(join(directory, "SKILL.md"), "utf8");
-    return (
-      createHash("sha256").update(skillMarkdown, "utf8").digest("hex") ===
-      entry.contentSha256
-    );
+    return createHash("sha256").update(skillMarkdown, "utf8").digest("hex") === entry.contentSha256;
   } catch {
     return false;
   }
