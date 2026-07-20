@@ -40,6 +40,8 @@ Rules of thumb:
   session-bound `toolspace:call` bearer.
 
 Details: first-party tools and grants in [architecture.md](architecture.md),
+first-party mutation receipts and read/action response classes in
+[mcp-response-contracts.md](mcp-response-contracts.md),
 per-session servers in [session-mcp-servers.md](session-mcp-servers.md),
 workspace capabilities in [capabilities.md](capabilities.md), credential
 handling in [credentials.md](credentials.md), and the full Toolspace design in
