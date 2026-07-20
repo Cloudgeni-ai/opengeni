@@ -8,7 +8,6 @@ type LockContract = "canonical" | "turn_attempt_fence" | "owned_suffix";
 type ExpectedWriter = {
   inserts: number;
   contract: LockContract;
-  requiresControlShare?: boolean;
   requiresControlRevalidation?: boolean;
 };
 
@@ -18,7 +17,6 @@ const expectedWriters: Record<string, ExpectedWriter> = {
   "packages/db/src/index.ts#armCodexCapacityWait": {
     inserts: 1,
     contract: "canonical",
-    requiresControlShare: true,
     requiresControlRevalidation: true,
   },
   "packages/db/src/index.ts#supersedeCodexCapacityWaitInTransaction": {
@@ -28,7 +26,6 @@ const expectedWriters: Record<string, ExpectedWriter> = {
   "packages/db/src/index.ts#reconcileCodexCapacityWait": {
     inserts: 1,
     contract: "canonical",
-    requiresControlShare: true,
     requiresControlRevalidation: true,
   },
   "packages/db/src/index.ts#applyContextCompaction": {
@@ -146,6 +143,11 @@ const expectedWriters: Record<string, ExpectedWriter> = {
 
 const expectedOwnedSuffixCallers: Record<string, string[]> = {
   supersedeCodexCapacityWaitInTransaction: ["reconcileCodexCapacityWait"],
+  supersedeSessionCurrentDirectionInTransaction: [
+    "steerAgentSessionInTransaction",
+    "steerQueuedTurnInTransaction",
+    "submitHumanPromptInTransaction",
+  ],
   closePendingSessionToolCallsInTransaction: [
     "armCodexCapacityWait",
     "supersedeSessionCurrentDirectionInTransaction",
@@ -287,6 +289,46 @@ function functionCallsWithStringProperty(
   return found;
 }
 
+function functionCallsWithStringArgument(
+  functionNode: ts.FunctionLikeDeclaration,
+  expectedName: string,
+  argumentIndex: number,
+  argumentValue: string,
+): boolean {
+  let found = false;
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node) && callName(node) === expectedName) {
+      const argument = node.arguments[argumentIndex];
+      found = Boolean(
+        argument !== undefined && ts.isStringLiteral(argument) && argument.text === argumentValue,
+      );
+    }
+    if (!found) ts.forEachChild(node, visit);
+  };
+  ts.forEachChild(functionNode, visit);
+  return found;
+}
+
+function ownsCanonicalControlPrefix(functionNode: ts.FunctionLikeDeclaration): boolean {
+  return (
+    functionCallsWithStringProperty(
+      functionNode,
+      "lockSessionEventWriteRows",
+      "controlLock",
+      "share",
+    ) ||
+    functionCallsWithStringProperty(
+      functionNode,
+      "lockSessionEventWriteRows",
+      "controlLock",
+      "update",
+    ) ||
+    functionCallsWithStringArgument(functionNode, "lockWorkspaceInferenceControl", 2, "share") ||
+    functionCallsWithStringArgument(functionNode, "lockWorkspaceInferenceControl", 2, "update") ||
+    functionCalls(functionNode, "lockChildLifecycleOutboxWriteRowsTx")
+  );
+}
+
 function callPositions(functionNode: ts.FunctionLikeDeclaration, expectedName: string): number[] {
   const positions: number[] = [];
   const visit = (node: ts.Node): void => {
@@ -410,16 +452,7 @@ describe("session_events writer inventory", () => {
         expect(canonicalLocks.length).toBeGreaterThan(0);
         const firstLock = canonicalLocks[0];
         expect(firstLock).toBeLessThan(insertPositions(writer.functionNode)[0]!);
-        if (expected.requiresControlShare) {
-          expect(
-            functionCallsWithStringProperty(
-              writer.functionNode,
-              "lockSessionEventWriteRows",
-              "controlLock",
-              "share",
-            ),
-          ).toBe(true);
-        }
+        expect(ownsCanonicalControlPrefix(writer.functionNode)).toBe(true);
         if (expected.requiresControlRevalidation) {
           expect(functionCalls(writer.functionNode, "evaluateSessionControl")).toBe(true);
         }
@@ -453,6 +486,10 @@ describe("session_events writer inventory", () => {
           ...callPositions(callerNode, "lockChildLifecycleOutboxWriteRowsTx"),
         ].sort((left, right) => left - right);
         expect(canonicalLocks.length).toBeGreaterThan(0);
+        expect(
+          ownsCanonicalControlPrefix(callerNode) ||
+            Object.hasOwn(expectedOwnedSuffixCallers, caller),
+        ).toBe(true);
         const firstLock = canonicalLocks[0];
         const delegatedCalls = [...ownedSuffixCallers.keys()].flatMap((ownedWriter) =>
           callPositions(callerNode, ownedWriter),
@@ -480,6 +517,7 @@ describe("session_events writer inventory", () => {
         expect(functionCalls(writer.functionNode, "retryWorkspacePersistence")).toBe(true);
       } else if (expected.contract === "canonical_pair") {
         expect(functionCalls(writer.functionNode, "lockSessionEventWriteRows")).toBe(true);
+        expect(ownsCanonicalControlPrefix(writer.functionNode)).toBe(true);
         expect(functionCalls(writer.functionNode, "retryRlsPersistence")).toBe(true);
         const firstLock = callPositions(writer.functionNode, "lockSessionEventWriteRows")[0];
         expect(firstLock).toBeLessThan(callPositions(writer.functionNode, "insert")[0]!);
@@ -495,6 +533,15 @@ describe("session_events writer inventory", () => {
       const enqueue = callPositions(callerNode, "enqueueFailedChildOutboxForTurnTx")[0];
       expect(firstLock).toBeLessThan(enqueue!);
     }
+
+    const turnAttemptFence = functionDefinitions.get("lockTurnAttemptWriteFenceTx") ?? [];
+    expect(turnAttemptFence).toHaveLength(1);
+    expect(ownsCanonicalControlPrefix(turnAttemptFence[0]!.functionNode)).toBe(true);
+
+    const childLifecyclePrefix =
+      functionDefinitions.get("lockChildLifecycleOutboxWriteRowsTx") ?? [];
+    expect(childLifecyclePrefix).toHaveLength(1);
+    expect(ownsCanonicalControlPrefix(childLifecyclePrefix[0]!.functionNode)).toBe(true);
   });
 
   test("generic append and Agent commands keep external effects outside bounded retry", () => {

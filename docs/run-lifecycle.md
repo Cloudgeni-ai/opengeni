@@ -130,14 +130,14 @@ was saved but before the original event publish. Only genuinely unresolved
 execution gets one explicit `interrupted / outcome unknown` closure.
 
 Claim, interruption, and event-writing settlement share one lock order:
-`workspace_inference_controls FOR SHARE` when the write is control-aware, then
-the actual `workspaces` row `FOR KEY SHARE`, UUID-ordered sessions `FOR UPDATE`,
-UUID-ordered exact turns `FOR UPDATE`, and UUID-ordered exact attempts
-`FOR UPDATE`. Generic audit/title appends skip the control row but use the same
-workspace-key-share prefix. Event inserts also touch the workspace through their
-foreign keys, so acquiring it later would reintroduce a claim/preemption
-deadlock; key-share rather than update keeps unrelated sessions in one workspace
-concurrent. Start, requires-action, ordinary terminal, recoverable interruption,
+`workspace_inference_controls FOR SHARE` (or a caller-owned stronger control
+mutation lock), then the actual `workspaces` row `FOR KEY SHARE`, UUID-ordered
+sessions `FOR UPDATE`, UUID-ordered exact turns `FOR UPDATE`, and UUID-ordered
+exact attempts `FOR UPDATE`. Generic audit/title appends use the same full
+prefix. Event inserts also touch the workspace through their foreign keys, so
+acquiring it later would reintroduce a claim/preemption deadlock; shared control
+plus key-share workspace locking keeps unrelated sessions concurrent. Start,
+requires-action, ordinary terminal, recoverable interruption,
 supersession, and worker-death events commit
 with turn status, session status/pointer, and `lastSequence` in one transaction.
 Generic appends and operation-keyed Agent Message/Steer commands retry PostgreSQL
@@ -145,7 +145,8 @@ Generic appends and operation-keyed Agent Message/Steer commands retry PostgreSQ
 Provider inference, tools, live event publication, and workflow wakes remain after
 that boundary and are never replayed. An exhausted or non-retryable database
 failure surfaces as sanitized typed truth with SQLSTATE, stage, one correlation
-ID, and allowlisted catalog identifiers—never raw SQL text or bound parameters.
+ID, an equally sanitized typed cause, and allowlisted catalog identifiers—never
+raw SQL text, a raw driver cause, or bound parameters.
 
 After a reviewed release reaches staging, run the dry-by-default OPE-63 canary
 with `bun run canary:session-event-ordering`. Execution requires

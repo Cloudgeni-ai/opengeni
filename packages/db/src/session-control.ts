@@ -361,11 +361,11 @@ export async function lockWorkspaceInferenceControl(
 export type SessionEventWriteLockInput = {
   workspaceId: string;
   /**
-   * Control-aware writes take this lock first. Callers that already hold the
-   * workspace control row (for example a Pause mutation under FOR UPDATE) say
-   * `already_locked`; ordinary audit/title appends use `none`.
+   * Every event write takes the workspace control row first. Callers that
+   * already hold it (for example a Pause mutation under FOR UPDATE, or a
+   * staged canonical prefix) say `already_locked`.
    */
-  controlLock?: WorkspaceControlLockMode | "already_locked" | "none";
+  controlLock: WorkspaceControlLockMode | "already_locked";
   /** Used only when a staged caller already established the workspace prefix. */
   workspaceLock?: "key_share" | "already_locked";
   sessionIds?: string[];
@@ -384,7 +384,7 @@ export type SessionEventWriteLocks = {
 /**
  * Establish the one canonical lock prefix for every `session_events` writer:
  *
- *   workspace_inference_controls (when control-aware)
+ *   workspace_inference_controls FOR SHARE (or a caller-owned stronger lock)
  *     -> actual workspaces row FOR KEY SHARE
  *     -> session rows FOR UPDATE, UUID ordered
  *     -> exact turn rows FOR UPDATE, UUID ordered
@@ -404,7 +404,7 @@ export async function lockSessionEventWriteRows(
   db: Database,
   input: SessionEventWriteLockInput,
 ): Promise<SessionEventWriteLocks> {
-  const controlLock = input.controlLock ?? "none";
+  const controlLock = input.controlLock;
   const control =
     controlLock === "share" || controlLock === "update"
       ? await lockWorkspaceInferenceControl(db, input.workspaceId, controlLock)
