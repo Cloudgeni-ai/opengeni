@@ -6,6 +6,7 @@ import {
   getAllMcpTools,
   invalidateServerToolsCache,
 } from "@openai/agents";
+import { Usage } from "@openai/agents-core";
 import {
   AGENT_INSTRUCTIONS_CORE_PLACEHOLDER,
   DEFAULT_AGENT_INSTRUCTIONS,
@@ -35,6 +36,7 @@ import {
   repositoryUsesSandboxClone,
   mcpToolErrorOutput,
   modelCallUsageTelemetry,
+  normalizeModelCallUsage,
   modelResponseUsageFromSdkEvent,
   normalizeSdkEvent,
   normalizeToolOutputForEvent,
@@ -196,7 +198,7 @@ describe("runtime event normalization", () => {
     expect(normalizeSdkEvent(event)).toEqual([]);
   });
 
-  test("normalizes model-call usage telemetry fields defensively", () => {
+  test("normalizes model-call usage telemetry fields and supported aliases", () => {
     expect(
       modelCallUsageTelemetry({
         inputTokens: 100,
@@ -249,9 +251,7 @@ describe("runtime event normalization", () => {
       cacheWriteTokens: null,
       reasoningTokens: null,
     });
-    // Providers can emit detail arrays with zero placeholders next to the real
-    // value. Prefer a reported positive, but preserve an all-zero write as a
-    // known real zero rather than telemetry absence.
+    // Aggregate detail arrays represent individual requests and must be summed.
     expect(
       modelCallUsageTelemetry({
         inputTokensDetails: [
@@ -273,6 +273,144 @@ describe("runtime event normalization", () => {
       cacheWriteTokens: 0,
       reasoningTokens: null,
     });
+  });
+
+  test("sums installed SDK multi-request usage without double counting aliases", () => {
+    const aggregate = new Usage();
+    aggregate.add(
+      new Usage({
+        inputTokens: 1000,
+        outputTokens: 10,
+        totalTokens: 1010,
+        inputTokensDetails: {
+          cached_tokens: 100,
+          cache_write_tokens: 200,
+          cacheWriteTokens: 999,
+        },
+        outputTokensDetails: { reasoning_tokens: 5 },
+      }),
+    );
+    aggregate.add(
+      new Usage({
+        inputTokens: 2000,
+        outputTokens: 20,
+        totalTokens: 2020,
+        inputTokensDetails: { cached_tokens: 300, cacheWriteTokens: 400 },
+        outputTokensDetails: { reasoning_tokens: 7 },
+      }),
+    );
+
+    expect(normalizeModelCallUsage(aggregate)).toEqual({
+      telemetry: {
+        inputTokens: 3000,
+        outputTokens: 30,
+        cachedTokens: 400,
+        cacheWriteTokens: 600,
+        reasoningTokens: 12,
+      },
+      totalTokens: 3030,
+      rejectedFields: [],
+    });
+  });
+
+  test("prefers request details, falls back to aggregate arrays, and preserves unknowns", () => {
+    expect(
+      normalizeModelCallUsage({
+        inputTokensDetails: [{ cached_tokens: 900, cache_write_tokens: 900 }],
+        requestUsageEntries: [
+          {
+            inputTokensDetails: {
+              cached_tokens: 10,
+              cache_write_tokens: 20,
+              cacheWriteTokens: 999,
+            },
+          },
+          {
+            inputTokensDetails: { cached_tokens: 30, cacheWriteTokens: 40 },
+          },
+        ],
+      }).telemetry,
+    ).toMatchObject({ cachedTokens: 40, cacheWriteTokens: 60 });
+
+    expect(
+      normalizeModelCallUsage({
+        inputTokensDetails: [
+          { cached_tokens: 100, cache_write_tokens: 200 },
+          { cached_tokens: 300, cacheWriteTokens: 400 },
+        ],
+        outputTokensDetails: [{ reasoning_tokens: 5 }, { reasoningTokens: 7 }],
+      }).telemetry,
+    ).toMatchObject({ cachedTokens: 400, cacheWriteTokens: 600, reasoningTokens: 12 });
+
+    // If even one SDK request does not report a field, its aggregate total is
+    // unknown rather than an undercount of only the requests that did report.
+    expect(
+      normalizeModelCallUsage({
+        requestUsageEntries: [
+          { inputTokensDetails: { cached_tokens: 0 } },
+          { inputTokensDetails: {} },
+        ],
+      }).telemetry.cachedTokens,
+    ).toBeNull();
+    expect(
+      normalizeModelCallUsage({
+        requestUsageEntries: [{ inputTokensDetails: { cached_tokens: 10 } }, { inputTokens: 20 }],
+      }).telemetry.cachedTokens,
+    ).toBeNull();
+    expect(normalizeModelCallUsage({ inputTokensDetails: { cached_tokens: 0 } }).telemetry).toEqual(
+      {
+        inputTokens: null,
+        outputTokens: null,
+        cachedTokens: 0,
+        cacheWriteTokens: null,
+        reasoningTokens: null,
+      },
+    );
+  });
+
+  test("rejects malformed and overflowing usage with bounded field-only diagnostics", () => {
+    const malformed = normalizeModelCallUsage({
+      inputTokens: 1.5,
+      outputTokens: Number.MAX_SAFE_INTEGER,
+      totalTokens: Number.POSITIVE_INFINITY,
+      inputTokensDetails: {
+        cached_tokens: -1,
+        cache_write_tokens: 1_000_000_001,
+      },
+      outputTokensDetails: { reasoning_tokens: Number.NaN },
+    });
+    expect(malformed.telemetry).toEqual({
+      inputTokens: null,
+      outputTokens: null,
+      cachedTokens: null,
+      cacheWriteTokens: null,
+      reasoningTokens: null,
+    });
+    expect(malformed.totalTokens).toBeNull();
+    expect(malformed.rejectedFields).toEqual([
+      "inputTokens",
+      "outputTokens",
+      "totalTokens",
+      "inputTokensDetails.cached_tokens",
+      "inputTokensDetails.cache_write_tokens",
+      "outputTokensDetails.reasoning_tokens",
+    ]);
+    expect(malformed.rejectedFields.join(" ")).not.toContain("Infinity");
+
+    const overflow = normalizeModelCallUsage({
+      inputTokens: 600_000_000,
+      outputTokens: 600_000_000,
+      inputTokensDetails: [{ cached_tokens: 600_000_000 }, { cached_tokens: 600_000_000 }],
+    });
+    expect(overflow.totalTokens).toBeNull();
+    expect(overflow.telemetry.cachedTokens).toBeNull();
+    expect(overflow.rejectedFields).toEqual(["totalTokens.aggregate", "cachedTokens.aggregate"]);
+
+    const partialDetails = normalizeModelCallUsage({
+      inputTokensDetails: [{ cached_tokens: 5 }, null as never, { cached_tokens: 7 }],
+    });
+    expect(partialDetails.telemetry.cachedTokens).toBeNull();
+    expect(partialDetails.rejectedFields).toEqual(["inputTokensDetails[1]"]);
   });
 
   test("ignores duplicate raw Responses text delta mirror events", () => {

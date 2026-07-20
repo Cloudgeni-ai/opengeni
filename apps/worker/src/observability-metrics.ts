@@ -5,6 +5,7 @@ import type { EventLogger } from "@opengeni/events";
 import type { Attributes, AttributeValue, Observability } from "@opengeni/observability";
 import {
   SELFHOSTED_INFRASTRUCTURE_FAULT_CLASSES,
+  modelUsageTokenCountOrNull,
   type RuntimeMetricsHooks,
   type SelfhostedOpObservation,
   type SelfhostedOpObserver,
@@ -17,6 +18,13 @@ export type CreditBalanceGauge = { accountId: string; balanceMicros: number };
 
 const turnTrackers = new WeakMap<Observability, TurnLifecycleMetrics>();
 const creditBalanceGaugeAccounts = new WeakMap<Observability, Set<string>>();
+const modelCacheCounterTotals = new WeakMap<Observability, Map<string, number>>();
+
+// A worker process reaching one trillion tokens in one provider/cache counter is
+// already far outside an ordinary scrape lifetime. Refuse further increments
+// before floating-point precision can degrade; a restart resets both the
+// process-local Prometheus registry and this guard together.
+const MAX_MODEL_CACHE_COUNTER_TOTAL = 1_000_000_000_000;
 
 export function observabilityEventLogger(observability: Observability): EventLogger {
   return {
@@ -553,7 +561,8 @@ export function recordModelInputTokens(
   provider: string,
   inputTokens: number,
 ): void {
-  if (!(inputTokens > 0)) {
+  const normalizedInputTokens = modelUsageTokenCountOrNull(inputTokens);
+  if (normalizedInputTokens === null || normalizedInputTokens === 0) {
     return;
   }
   observability.observeHistogram({
@@ -561,7 +570,7 @@ export function recordModelInputTokens(
     help: "Observed input (context) tokens per model response, by provider.",
     buckets: MODEL_INPUT_TOKENS_BUCKETS,
     labels: { provider },
-    value: inputTokens,
+    value: normalizedInputTokens,
   });
 }
 
@@ -605,8 +614,10 @@ const MODEL_CACHE_HIT_RATIO_BUCKETS = [
  *     observed only when prompt tokens are known (>0) AND cached tokens are reported.
  *     A reported cached-token zero records a real 0%; absent/null telemetry remains
  *     unknown and must not fabricate a low-cache signal.
- * Absent/non-finite/negative token telemetry is ignored. A call with no prompt tokens
- * has no ratio (skipped).
+ *   - `opengeni_model_cache_read_telemetry_total{provider,status}` — one bounded
+ *     availability observation per authoritative call (`reported` or `missing`).
+ * Invalid, fractional, unsafe, or over-contract token telemetry is rejected. A call
+ * with no prompt tokens has no ratio (skipped).
  */
 export function recordModelCacheTokens(
   observability: Observability,
@@ -617,21 +628,30 @@ export function recordModelCacheTokens(
     promptTokens: number | null | undefined;
   },
 ): void {
-  const cached = reportedNonNegativeTokenCount(input.cachedTokens);
-  const cacheWrite = reportedNonNegativeTokenCount(input.cacheWriteTokens);
-  const prompt = reportedNonNegativeTokenCount(input.promptTokens);
+  const cached = modelUsageTokenCountOrNull(input.cachedTokens);
+  const cacheWrite = modelUsageTokenCountOrNull(input.cacheWriteTokens);
+  const prompt = modelUsageTokenCountOrNull(input.promptTokens);
+  incrementBoundedModelCacheCounter(observability, {
+    name: "opengeni_model_cache_read_telemetry_total",
+    help: "Authoritative model calls with reported or missing cache-read telemetry, by provider.",
+    provider,
+    labels: { provider, status: cached === null ? "missing" : "reported" },
+    amount: 1,
+  });
   if (cached !== null && cached > 0) {
-    observability.incrementCounter({
+    incrementBoundedModelCacheCounter(observability, {
       name: "opengeni_model_cached_tokens_total",
       help: "Total prompt tokens served from the provider's prompt cache, by provider.",
+      provider,
       labels: { provider },
       amount: cached,
     });
   }
   if (cacheWrite !== null && cacheWrite > 0) {
-    observability.incrementCounter({
+    incrementBoundedModelCacheCounter(observability, {
       name: "opengeni_model_cache_write_tokens_total",
       help: "Total prompt tokens written to the provider's prompt cache, by provider.",
+      provider,
       labels: { provider },
       amount: cacheWrite,
     });
@@ -649,14 +669,40 @@ export function recordModelCacheTokens(
   }
 }
 
-function reportedNonNegativeTokenCount(value: number | null | undefined): number | null {
-  return typeof value === "number" && Number.isFinite(value) && value >= 0
-    ? nonNegativeTokenCount(value)
-    : null;
-}
-
-function nonNegativeTokenCount(value: number | null | undefined): number {
-  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
+function incrementBoundedModelCacheCounter(
+  observability: Observability,
+  input: {
+    name: string;
+    help: string;
+    provider: string;
+    labels: Record<string, string>;
+    amount: number;
+  },
+): void {
+  const totals = modelCacheCounterTotals.get(observability) ?? new Map<string, number>();
+  if (!modelCacheCounterTotals.has(observability)) {
+    modelCacheCounterTotals.set(observability, totals);
+  }
+  const labelKey = Object.entries(input.labels)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, value]) => `${key}=${value}`)
+    .join(",");
+  const key = `${input.name}:${labelKey}`;
+  const current = totals.get(key) ?? 0;
+  if (input.amount > MAX_MODEL_CACHE_COUNTER_TOTAL - current) {
+    observability.warn("model cache metric cumulative limit reached", {
+      provider: input.provider,
+      metric: input.name,
+    });
+    return;
+  }
+  observability.incrementCounter({
+    name: input.name,
+    help: input.help,
+    labels: input.labels,
+    amount: input.amount,
+  });
+  totals.set(key, current + input.amount);
 }
 
 /**

@@ -1,7 +1,9 @@
 import { describe, expect, mock, test } from "bun:test";
 import { CancelledFailure } from "@temporalio/activity";
+import { Usage } from "@openai/agents-core";
 import { ModelItem } from "@openai/agents-core/types";
 import type { Settings } from "@opengeni/config";
+import { createObservability } from "@opengeni/observability";
 import {
   interruptedToolCallResult,
   runIdempotentPersistenceTransaction,
@@ -12,6 +14,7 @@ import {
 import {
   CompactionProviderResponseError,
   EmptyCompactionSummaryError,
+  modelResponseUsageFromResponse,
   sanitizeHistoryItemsForModel,
 } from "@opengeni/runtime";
 import { testSettings } from "@opengeni/testing";
@@ -615,7 +618,7 @@ describe("model call usage observability", () => {
           inputTokens: 1200,
           outputTokens: 100,
           totalTokens: 1300,
-          inputTokensDetails: { cached_tokens: 1024 },
+          inputTokensDetails: { cached_tokens: 1024, cache_write_tokens: 256 },
           outputTokensDetails: { reasoning_tokens: 12 },
         },
       },
@@ -629,6 +632,7 @@ describe("model call usage observability", () => {
       inputTokens: 1200,
       outputTokens: 100,
       cachedTokens: 1024,
+      cacheWriteTokens: 256,
       reasoningTokens: 12,
     });
     expect(events).toEqual([
@@ -642,6 +646,7 @@ describe("model call usage observability", () => {
           inputTokens: 1200,
           outputTokens: 100,
           cachedTokens: 1024,
+          cacheWriteTokens: 256,
           reasoningTokens: 12,
         }),
       },
@@ -700,11 +705,12 @@ describe("model call usage observability", () => {
 
   test("does not log a duplicate usage observation as authoritative", async () => {
     const infos: Array<Record<string, unknown>> = [];
+    const observability = createObservability(testSettings(), { component: "worker" });
+    observability.info = (_message: string, attributes: Record<string, unknown>) =>
+      infos.push(attributes);
+    observability.warn = mock();
     await emitModelCallUsage({
-      observability: {
-        info: (_message: string, attributes: Record<string, unknown>) => infos.push(attributes),
-        warn: mock(),
-      } as any,
+      observability,
       publish: async (batch) => ({
         accepted: true,
         events: batch.map((event) => ({
@@ -727,6 +733,203 @@ describe("model call usage observability", () => {
     });
 
     expect(infos).toEqual([]);
+    const metrics = await observability.prometheusMetrics();
+    expect(metrics).not.toMatch(/opengeni_model_cache_read_telemetry_total/);
+    expect(metrics).not.toMatch(/opengeni_model_cached_tokens_total/);
+  });
+
+  test("wires raw response cache writes through the authoritative production metric path", async () => {
+    const observability = createObservability(testSettings(), { component: "worker" });
+    const responseUsage = modelResponseUsageFromResponse({
+      id: "resp-write",
+      usage: {
+        input_tokens: 1200,
+        output_tokens: 100,
+        total_tokens: 1300,
+        input_tokens_details: { cached_tokens: 800, cache_write_tokens: 250 },
+      },
+    });
+    expect(responseUsage).not.toBeNull();
+
+    await emitModelCallUsage({
+      observability,
+      publish: async (batch) => ({
+        accepted: true,
+        events: batch.map((event) => ({
+          ...event,
+          id: crypto.randomUUID(),
+          turnAssociation: "current" as const,
+        })) as any,
+      }),
+      accountId: "acct-1",
+      workspaceId: "ws-1",
+      sessionId: "sess-1",
+      turnId: "turn-1",
+      provider: "openai",
+      providerApi: "responses",
+      model: "gpt-5.6-sol",
+      sourceKey: "resp-write",
+      usage: responseUsage,
+    });
+
+    const metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(
+      /opengeni_model_cached_tokens_total\{[^}]*provider="openai"[^}]*\} 800\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_model_cache_write_tokens_total\{[^}]*provider="openai"[^}]*\} 250\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_model_cache_read_telemetry_total\{[^}]*provider="openai"[^}]*status="reported"[^}]*\} 1\b/,
+    );
+  });
+
+  test("sums SDK aggregate retries once and dedupes an authoritative source key", async () => {
+    const observability = createObservability(testSettings(), { component: "worker" });
+    const aggregate = new Usage();
+    aggregate.add(
+      new Usage({
+        inputTokens: 1000,
+        outputTokens: 10,
+        totalTokens: 1010,
+        inputTokensDetails: { cached_tokens: 100, cache_write_tokens: 200 },
+        outputTokensDetails: { reasoning_tokens: 5 },
+      }),
+    );
+    aggregate.add(
+      new Usage({
+        inputTokens: 2000,
+        outputTokens: 20,
+        totalTokens: 2020,
+        inputTokensDetails: { cached_tokens: 300, cacheWriteTokens: 400 },
+        outputTokensDetails: { reasoning_tokens: 7 },
+      }),
+    );
+    const sourceKeys = new Set<string>();
+    const payloads: Array<Record<string, unknown>> = [];
+    let publishCount = 0;
+    const publish = async (batch: any[]) => {
+      publishCount += 1;
+      payloads.push(batch[0]?.payload as Record<string, unknown>);
+      return {
+        accepted: true,
+        events: batch.map((event) => ({
+          ...event,
+          id: crypto.randomUUID(),
+          turnAssociation: "current" as const,
+        })) as any,
+      };
+    };
+    const input = {
+      observability,
+      publish,
+      accountId: "acct-1",
+      workspaceId: "ws-1",
+      sessionId: "sess-1",
+      turnId: "turn-1",
+      provider: "codex-subscription",
+      providerApi: "responses" as const,
+      model: "codex/gpt-5.6-sol",
+      sourceKey: "aggregate-1",
+      usage: { usage: aggregate },
+      emittedSourceKeys: sourceKeys,
+    };
+
+    await emitModelCallUsage(input);
+    await emitModelCallUsage(input);
+
+    expect(publishCount).toBe(1);
+    expect(payloads[0]).toMatchObject({
+      inputTokens: 3000,
+      outputTokens: 30,
+      cachedTokens: 400,
+      cacheWriteTokens: 600,
+      reasoningTokens: 12,
+    });
+    const metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(
+      /opengeni_model_cached_tokens_total\{[^}]*provider="codex-subscription"[^}]*\} 400\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_model_cache_write_tokens_total\{[^}]*provider="codex-subscription"[^}]*\} 600\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_model_cache_read_telemetry_total\{[^}]*provider="codex-subscription"[^}]*status="reported"[^}]*\} 1\b/,
+    );
+  });
+
+  test("keeps malformed provider usage out of durable payloads and emits bounded diagnostics", async () => {
+    const observability = createObservability(testSettings(), { component: "worker" });
+    const info = mock();
+    const warn = mock();
+    observability.info = info;
+    observability.warn = warn;
+    const payloads: Array<Record<string, unknown>> = [];
+    const responseUsage = modelResponseUsageFromResponse({
+      id: "resp-malformed",
+      usage: {
+        input_tokens: 1.5,
+        output_tokens: Number.POSITIVE_INFINITY,
+        input_tokens_details: {
+          cached_tokens: Number.NaN,
+          cache_write_tokens: Number.MAX_SAFE_INTEGER,
+        },
+      },
+    });
+    expect(responseUsage).not.toBeNull();
+
+    await emitModelCallUsage({
+      observability,
+      publish: async (batch) => {
+        payloads.push(batch[0]?.payload as Record<string, unknown>);
+        return {
+          accepted: true,
+          events: batch.map((event) => ({
+            ...event,
+            id: crypto.randomUUID(),
+            turnAssociation: "current" as const,
+          })) as any,
+        };
+      },
+      accountId: "acct-1",
+      workspaceId: "ws-1",
+      sessionId: "sess-1",
+      turnId: "turn-1",
+      provider: "openai",
+      providerApi: "responses",
+      model: "gpt-5.6-sol",
+      sourceKey: "resp-malformed",
+      usage: responseUsage,
+    });
+
+    expect(payloads[0]).toMatchObject({
+      inputTokens: null,
+      outputTokens: null,
+      cachedTokens: null,
+      cacheWriteTokens: null,
+      reasoningTokens: null,
+    });
+    expect(Object.values(payloads[0] ?? {})).not.toContain(Number.POSITIVE_INFINITY);
+    expect(info).toHaveBeenCalledWith(
+      "model call usage",
+      expect.objectContaining({ cacheWriteTokens: null }),
+    );
+    expect(warn).toHaveBeenCalledWith(
+      "model call usage fields rejected",
+      expect.objectContaining({
+        rejectedFields: expect.stringContaining("inputTokensDetails.cache_write_tokens"),
+      }),
+    );
+    const rejectedFields = (warn.mock.calls[0]?.[1] as Record<string, unknown>)
+      ?.rejectedFields as string;
+    expect(rejectedFields).not.toContain("9007199254740991");
+
+    const metrics = await observability.prometheusMetrics();
+    expect(metrics).not.toMatch(/opengeni_model_cached_tokens_total/);
+    expect(metrics).not.toMatch(/opengeni_model_cache_write_tokens_total/);
+    expect(metrics).toMatch(
+      /opengeni_model_cache_read_telemetry_total\{[^}]*provider="openai"[^}]*status="missing"[^}]*\} 1\b/,
+    );
   });
 });
 

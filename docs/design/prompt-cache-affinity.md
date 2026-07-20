@@ -282,9 +282,13 @@ OpenAI documents GPT-5.6 cache writes at
 GPT-5.6 cache writes are billed at **1.25× the uncached input rate**. The runtime
 normalizes documented `cache_write_tokens` plus the SDK-style `cacheWriteTokens` alias
 into nullable `cacheWriteTokens` on `agent.model.usage`. The same contract applies to
-reads, writes, and reasoning detail fields: prefer a reported positive value across
-detail entries; if every report is zero, preserve zero; if the field is absent or
-invalid, preserve null.
+reads, writes, and reasoning detail fields: sum each request's canonical report across
+SDK multi-request/stream/retry aggregates, never add two aliases from the same request,
+and preserve a reported zero. Per-request entries are authoritative when present;
+aggregate detail arrays are the compatibility fallback. If any request omits a field,
+or a value is fractional, negative, non-finite, unsafe, above one billion tokens, or
+would overflow the aggregate ceiling, preserve null and emit bounded field-path-only
+diagnostics (never the raw value).
 
 For GPT-5.6+, OpenAI also documents:
 
@@ -321,6 +325,14 @@ Worker Prometheus cache labels remain provider-only. A reported cached zero cont
 a real 0% hit-ratio observation; absent/null cached telemetry contributes no ratio.
 Reported positive cache writes may advance
 `opengeni_model_cache_write_tokens_total{provider}`; absent/null writes do not create a
-phantom zero. Wiring the normalized write field into the shared agent-turn activity must
-be coordinated with its active lifecycle/rotation owners rather than raced in a
-telemetry-only change.
+phantom zero. The shared agent-turn activity computes one normalized frame for each raw
+response and for the SDK aggregate fallback, then reuses it for durable telemetry,
+billing, context signals, diagnostics, and cache metrics. Cache counters advance only
+after the source-keyed durable usage event is authoritative, so retries and duplicate
+provider responses do not double count. The bounded
+`opengeni_model_cache_read_telemetry_total{provider,status="reported|missing"}` series
+keeps missing fields observable without coercing unknown telemetry to zero; the
+`OpenGeniCodexPromptCacheTelemetryMissing` rule alerts when Codex calls are flowing while
+that field is absent. Per-call counters accept only bounded nonnegative safe integers,
+and process-local cumulative guards refuse increments before numeric precision can
+degrade.

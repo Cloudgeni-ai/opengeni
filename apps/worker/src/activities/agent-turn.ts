@@ -73,8 +73,8 @@ import { appendAndPublishTurnEventsFenced, publishDurableSessionEvents } from "@
 import {
   sandboxStateEntryFromRunState,
   maxTurnsExceededRunState,
-  modelCallUsageTelemetry,
   modelResponseUsageFromSdkEvent,
+  normalizeModelCallUsage,
   normalizeSdkEvent,
   sanitizeHistoryItemsForModel,
   isEphemeralInternalContext,
@@ -98,6 +98,8 @@ import {
   type OpenGeniRuntime,
   type ComputerToolMode,
   type ModelResponseUsage,
+  type ModelCallUsageInput,
+  type ModelCallUsageNormalization,
   type BuildAgentOptions,
   type TurnToolCancellationFence,
   type BackendUnresolvableCode,
@@ -552,16 +554,8 @@ export function providerContextTokens(
     | null
     | undefined,
 ): number | null {
-  const total = usage?.totalTokens;
-  if (typeof total === "number" && Number.isFinite(total) && total > 0) {
-    return total;
-  }
-  const input = usage?.inputTokens;
-  if (typeof input !== "number" || !Number.isFinite(input) || input <= 0) {
-    return null;
-  }
-  const output = usage?.outputTokens;
-  return input + (typeof output === "number" && Number.isFinite(output) && output > 0 ? output : 0);
+  const total = normalizeModelCallUsage(usage).totalTokens;
+  return total !== null && total > 0 ? total : null;
 }
 
 /**
@@ -604,6 +598,7 @@ export async function emitModelCallUsage(input: {
   model: string;
   sourceKey: string;
   usage: ModelResponseUsage | { usage?: unknown | null } | null;
+  normalizedUsage?: ModelCallUsageNormalization;
   // Prompt-cache research dimensions (log-only; NEVER on a metric label or a
   // durable event). The opaque serving-account tag and whether it changed since
   // the session's previous call — the account-switch hypothesis for cache misses.
@@ -619,7 +614,9 @@ export async function emitModelCallUsage(input: {
     return;
   }
   if (input.emittedSourceKeys?.has(input.sourceKey)) return;
-  const telemetry = modelCallUsageTelemetry(usage as Parameters<typeof modelCallUsageTelemetry>[0]);
+  const normalizedUsage =
+    input.normalizedUsage ?? normalizeModelCallUsage(usage as ModelCallUsageInput);
+  const telemetry = normalizedUsage.telemetry;
   const appended = await input.publish?.(
     [
       {
@@ -662,6 +659,7 @@ export async function emitModelCallUsage(input: {
       inputTokens: telemetry.inputTokens,
       outputTokens: telemetry.outputTokens,
       cachedTokens: telemetry.cachedTokens,
+      cacheWriteTokens: telemetry.cacheWriteTokens,
       reasoningTokens: telemetry.reasoningTokens,
       ...(input.servingAccountHash !== undefined
         ? { servingAccountHash: input.servingAccountHash }
@@ -670,9 +668,40 @@ export async function emitModelCallUsage(input: {
         ? { accountChangedFromPrevCall: input.accountChangedFromPrevCall }
         : {}),
     });
+    if (normalizedUsage.rejectedFields.length > 0) {
+      input.observability.warn("model call usage fields rejected", {
+        provider: input.provider,
+        providerApi: input.providerApi,
+        model: input.model,
+        sourceKey: input.sourceKey,
+        rejectedFields: normalizedUsage.rejectedFields.join(","),
+      });
+    }
   } catch {
     // Durable event + billing already committed; logging is best-effort only.
   }
+  try {
+    applyCodexCacheTelemetry(input.observability, input.provider, normalizedUsage);
+  } catch {
+    // Durable event + billing already committed; metrics are best-effort only.
+  }
+}
+
+/**
+ * Apply one authoritative, normalized model-call usage frame to the shared
+ * prompt-cache metrics. The durable source-key fence in `emitModelCallUsage`
+ * owns idempotency; this helper must never receive raw provider values.
+ */
+export function applyCodexCacheTelemetry(
+  observability: ActivityServices["observability"],
+  provider: string,
+  normalizedUsage: ModelCallUsageNormalization,
+): void {
+  recordModelCacheTokens(observability, provider, {
+    cachedTokens: normalizedUsage.telemetry.cachedTokens,
+    cacheWriteTokens: normalizedUsage.telemetry.cacheWriteTokens,
+    promptTokens: normalizedUsage.telemetry.inputTokens,
+  });
 }
 
 export function historyRowsToAppend(
@@ -2910,6 +2939,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               priorSessionCredentialId: priorSessionCodexCredentialId,
               isFirstCallOfTurn: compactionUsageCount === 1,
             });
+            const normalizedUsage = normalizeModelCallUsage(usage.usage);
             await recordModelUsageAndDebitCredits(settings, db, {
               accountId: input.accountId,
               workspaceId: input.workspaceId,
@@ -2918,6 +2948,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               model: resolvedModel?.configured.id ?? turn.model,
               isCodexTurn,
               usage: usage.usage,
+              normalizedUsage,
               sourceKey,
               observability,
             });
@@ -2933,6 +2964,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               model: resolvedModel?.configured.id ?? turn.model,
               sourceKey,
               usage,
+              normalizedUsage,
               servingAccountHash: responseAccountCtx.servingAccountHash,
               accountChangedFromPrevCall: responseAccountCtx.accountChangedFromPrevCall,
               emittedSourceKeys: emittedModelUsageSourceKeys,
@@ -4298,6 +4330,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             let completedCurrentToolBatch = false;
             const responseUsage = modelResponseUsageFromSdkEvent(next.value);
             if (responseUsage) {
+              const normalizedResponseUsage = normalizeModelCallUsage(responseUsage.usage);
               await recordCompletedModelCallBeforeOwnershipFences({
                 renewLease: () => renewCodexLease("model_usage"),
                 leaseLost: () => codexLeaseLost,
@@ -4324,6 +4357,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                     model: turn.model,
                     isCodexTurn,
                     usage: responseUsage.usage,
+                    normalizedUsage: normalizedResponseUsage,
                     sourceKey: responseSourceKey,
                     observability,
                   });
@@ -4339,29 +4373,24 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                     model: turn.model,
                     sourceKey: responseSourceKey,
                     usage: responseUsage,
+                    normalizedUsage: normalizedResponseUsage,
                     servingAccountHash: responseAccountCtx.servingAccountHash,
                     accountChangedFromPrevCall: responseAccountCtx.accountChangedFromPrevCall,
                     emittedSourceKeys: emittedModelUsageSourceKeys,
                   });
-                  const observed = responseUsage.usage?.inputTokens;
-                  if (typeof observed === "number" && observed > 0) {
+                  const observed = normalizedResponseUsage.telemetry.inputTokens;
+                  if (observed !== null && observed > 0) {
                     recordModelInputTokens(observability, streamProvider, observed);
                   }
-                  const observedTotal = providerContextTokens(responseUsage.usage);
+                  const observedTotal = normalizedResponseUsage.totalTokens;
                   if (observedTotal !== null) {
                     lastProviderContextTokensObserved = observedTotal;
                     providerContextRevision += 1;
                   }
-                  // Prompt-cache efficiency for this response — same usage frame as the
-                  // input-token accounting above, so the two are always consistent.
-                  recordModelCacheTokens(observability, streamProvider, {
-                    cachedTokens: modelCallUsageTelemetry(responseUsage.usage).cachedTokens,
-                    promptTokens: responseUsage.usage?.inputTokens,
-                  });
                 },
                 recordAttemptSignals: async () => {
-                  const observed = responseUsage.usage?.inputTokens;
-                  if (typeof observed === "number" && observed > 0) {
+                  const observed = normalizedResponseUsage.telemetry.inputTokens;
+                  if (observed !== null && observed > 0) {
                     await setLastInputTokensFenced(observed);
                   }
                 },
@@ -4499,20 +4528,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         await stream.completed.catch(() => undefined);
         if (responseUsageCount === 0) {
           const aggregateUsage = stream.state.usage;
-          const aggregateInput = (aggregateUsage as { inputTokens?: unknown } | undefined)
-            ?.inputTokens;
-          if (typeof aggregateInput === "number" && aggregateInput > 0) {
-            const aggregateContext = providerContextTokens(
-              aggregateUsage as {
-                inputTokens?: number;
-                outputTokens?: number;
-                totalTokens?: number;
-              },
-            );
-            if (aggregateContext !== null) {
-              lastProviderContextTokensObserved = aggregateContext;
-              providerContextRevision += 1;
-            }
+          const normalizedAggregateUsage = normalizeModelCallUsage(aggregateUsage);
+          const aggregateInput = normalizedAggregateUsage.telemetry.inputTokens;
+          if (aggregateInput !== null && aggregateInput > 0) {
+            recordModelInputTokens(observability, streamProvider, aggregateInput);
+          }
+          if (normalizedAggregateUsage.totalTokens !== null) {
+            lastProviderContextTokensObserved = normalizedAggregateUsage.totalTokens;
+            providerContextRevision += 1;
           }
           const aggregateSourceKey = modelUsageSourceKey({
             responseId: null,
@@ -4525,14 +4548,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             servingCredentialId: effectiveCodexCredentialId,
             priorSessionCredentialId: priorSessionCodexCredentialId,
             isFirstCallOfTurn: true,
-          });
-          recordModelCacheTokens(observability, streamProvider, {
-            cachedTokens: modelCallUsageTelemetry(
-              aggregateUsage as Parameters<typeof modelCallUsageTelemetry>[0],
-            ).cachedTokens,
-            promptTokens: (aggregateUsage as { inputTokens?: unknown } | undefined)?.inputTokens as
-              | number
-              | undefined,
           });
           await recordCompletedModelCallBeforeOwnershipFences({
             renewLease: () => renewCodexLease("model_usage"),
@@ -4547,6 +4562,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 model: turn.model,
                 isCodexTurn,
                 usage: aggregateUsage,
+                normalizedUsage: normalizedAggregateUsage,
                 sourceKey: aggregateSourceKey,
                 observability,
               });
@@ -4562,13 +4578,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 model: turn.model,
                 sourceKey: aggregateSourceKey,
                 usage: { usage: aggregateUsage },
+                normalizedUsage: normalizedAggregateUsage,
                 servingAccountHash: aggregateAccountCtx.servingAccountHash,
                 accountChangedFromPrevCall: aggregateAccountCtx.accountChangedFromPrevCall,
                 emittedSourceKeys: emittedModelUsageSourceKeys,
               });
             },
             recordAttemptSignals: async () => {
-              if (typeof aggregateInput === "number" && aggregateInput > 0) {
+              if (aggregateInput !== null && aggregateInput > 0) {
                 await setLastInputTokensFenced(aggregateInput);
               }
             },
@@ -6512,7 +6529,8 @@ export async function recordModelUsageAndDebitCredits(
     turnId: string;
     model: string;
     isCodexTurn: boolean;
-    usage?: ModelUsageInput | null;
+    usage?: ModelUsageInput | ModelCallUsageInput | null;
+    normalizedUsage?: ModelCallUsageNormalization;
     sourceKey: string;
     observability?: ActivityServices["observability"];
   },
@@ -6520,9 +6538,11 @@ export async function recordModelUsageAndDebitCredits(
   if (!input.usage) {
     return;
   }
-  const inputTokens = positiveInt(input.usage.inputTokens);
-  const outputTokens = positiveInt(input.usage.outputTokens);
-  const totalTokens = positiveInt(input.usage.totalTokens) || inputTokens + outputTokens;
+  const normalizedUsage = input.normalizedUsage ?? normalizeModelCallUsage(input.usage);
+  const sanitizedUsage = sanitizedModelUsageInput(normalizedUsage);
+  const inputTokens = sanitizedUsage.inputTokens ?? 0;
+  const outputTokens = sanitizedUsage.outputTokens ?? 0;
+  const totalTokens = sanitizedUsage.totalTokens ?? 0;
   // A codex-subscription turn is paid by the user's ChatGPT/Codex plan, so it
   // consumes ZERO OpenGeni credits and must never feed an OpenGeni cap. A
   // codex/<slug> model has no entry in configuredModelPricing, so the normal path
@@ -6564,7 +6584,7 @@ export async function recordModelUsageAndDebitCredits(
   if (!configuredModelPricing(settings)[input.model]) {
     throw new Error(`Missing model pricing for ${input.model}`);
   }
-  const costMicros = calculateModelUsageCostMicros(settings, input.model, input.usage);
+  const costMicros = calculateModelUsageCostMicros(settings, input.model, sanitizedUsage);
   await recordUsageEvent(db, {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
@@ -6595,18 +6615,26 @@ export async function recordModelUsageAndDebitCredits(
         // Additive: the prompt-cache slice of this call's input tokens, so the
         // per-call debit record carries cache efficiency alongside the token
         // counts. 0 when the provider did not report cached tokens.
-        cachedTokens: positiveInt(
-          modelCallUsageTelemetry(input.usage as Parameters<typeof modelCallUsageTelemetry>[0])
-            .cachedTokens,
-        ),
+        cachedTokens: normalizedUsage.telemetry.cachedTokens ?? 0,
       },
     });
     recordCreditMicros(input.observability, "usage", result.debitedMicros);
   }
 }
 
-function positiveInt(value: unknown): number {
-  return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+function sanitizedModelUsageInput(normalized: ModelCallUsageNormalization): ModelUsageInput {
+  return {
+    ...(normalized.telemetry.inputTokens !== null
+      ? { inputTokens: normalized.telemetry.inputTokens }
+      : {}),
+    ...(normalized.telemetry.outputTokens !== null
+      ? { outputTokens: normalized.telemetry.outputTokens }
+      : {}),
+    ...(normalized.totalTokens !== null ? { totalTokens: normalized.totalTokens } : {}),
+    ...(normalized.telemetry.cachedTokens !== null
+      ? { inputTokensDetails: { cached_tokens: normalized.telemetry.cachedTokens } }
+      : {}),
+  };
 }
 
 function startOfUtcMonth(): Date {

@@ -122,4 +122,122 @@ describe("worker recordModelUsageAndDebitCredits — codex usage recording", () 
       debitSpy.mockRestore();
     }
   });
+
+  test("malformed token counts cannot create token, cost, or debit quantities", async () => {
+    const recordSpy = spyOn(opengeniDb, "recordUsageEvent").mockResolvedValue(undefined);
+    const debitSpy = spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockImplementation(
+      async () => {
+        throw new Error("malformed usage must not debit credits");
+      },
+    );
+    try {
+      const malformedUsages = [
+        {
+          inputTokens: 1.5,
+          outputTokens: Number.POSITIVE_INFINITY,
+          totalTokens: Number.NaN,
+        },
+        {
+          inputTokens: Number.MAX_SAFE_INTEGER,
+          outputTokens: Number.MAX_SAFE_INTEGER,
+          totalTokens: Number.MAX_SAFE_INTEGER,
+        },
+        {
+          inputTokens: 1_000_000_001,
+          outputTokens: 1_000_000_001,
+          totalTokens: 1_000_000_001,
+          inputTokensDetails: { cached_tokens: 1_000_000_001 },
+        },
+        { inputTokens: -1, outputTokens: -2, totalTokens: -3 },
+      ];
+      for (const [index, usage] of malformedUsages.entries()) {
+        await recordModelUsageAndDebitCredits(billedSettings(), db, {
+          accountId: ACCOUNT,
+          workspaceId: WORKSPACE,
+          sessionId: "sess-1",
+          turnId: "turn-malformed",
+          model: "gpt-5.6-sol",
+          isCodexTurn: false,
+          usage,
+          sourceKey: `response-${index}`,
+        });
+      }
+
+      expect(recordSpy).not.toHaveBeenCalled();
+      expect(debitSpy).not.toHaveBeenCalled();
+    } finally {
+      recordSpy.mockRestore();
+      debitSpy.mockRestore();
+    }
+  });
+
+  test("valid SDK aggregates are billed once with one canonical cached-token total", async () => {
+    const recorded: Array<{ eventType: string; quantity: number }> = [];
+    const recordSpy = spyOn(opengeniDb, "recordUsageEvent").mockImplementation(
+      async (_db, input) => {
+        recorded.push({ eventType: input.eventType, quantity: input.quantity });
+      },
+    );
+    const debitInputs: Array<Record<string, any>> = [];
+    const debitSpy = spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockImplementation(
+      async (_db, input) => {
+        debitInputs.push(input);
+        return {
+          balance: {
+            accountId: ACCOUNT,
+            balanceMicros: 1_000_000,
+            currency: "usd",
+            updatedAt: new Date().toISOString(),
+          },
+          debitedMicros: input.requestedAmountMicros,
+        };
+      },
+    );
+    try {
+      await recordModelUsageAndDebitCredits(billedSettings(), db, {
+        accountId: ACCOUNT,
+        workspaceId: WORKSPACE,
+        sessionId: "sess-1",
+        turnId: "turn-aggregate",
+        model: "gpt-5.6-sol",
+        isCodexTurn: false,
+        usage: {
+          inputTokens: 3000,
+          outputTokens: 30,
+          totalTokens: 3030,
+          requestUsageEntries: [
+            {
+              inputTokens: 1000,
+              outputTokens: 10,
+              totalTokens: 1010,
+              inputTokensDetails: {
+                cached_tokens: 100,
+                cachedInputTokens: 999,
+              },
+            },
+            {
+              inputTokens: 2000,
+              outputTokens: 20,
+              totalTokens: 2020,
+              inputTokensDetails: { cached_tokens: 300 },
+            },
+          ],
+        },
+        sourceKey: "aggregate",
+      });
+
+      expect(recorded).toContainEqual({ eventType: "model.tokens", quantity: 3030 });
+      expect(recorded.some((record) => record.eventType === "model.cost")).toBe(true);
+      expect(debitInputs).toHaveLength(1);
+      expect(debitInputs[0]?.metadata).toMatchObject({
+        inputTokens: 3000,
+        outputTokens: 30,
+        totalTokens: 3030,
+        cachedTokens: 400,
+      });
+    } finally {
+      recordSpy.mockRestore();
+      debitSpy.mockRestore();
+    }
+  });
 });
