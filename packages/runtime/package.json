@@ -23,6 +23,10 @@
     "./sandbox": {
       "types": "./src/sandbox/index.ts",
       "default": "./src/sandbox/index.ts"
+    },
+    "./skill-library": {
+      "types": "./src/skill-library.ts",
+      "default": "./src/skill-library.ts"
     }
   },
   "publishConfig": {
