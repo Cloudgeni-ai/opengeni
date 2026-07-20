@@ -1279,7 +1279,9 @@ export class ComputerUseCapability extends Capability {
           // any computer-use-only recording. One SandboxComputer instance caches
           // this for the rest of the turn.
           prepare: async (preparedSession) => {
-            await ensureDisplayStack(preparedSession);
+            await ensureDisplayStack(preparedSession, {
+              telemetryContext: { callerKind: "computer" },
+            });
             await this.args.onReady?.(preparedSession);
           },
         });

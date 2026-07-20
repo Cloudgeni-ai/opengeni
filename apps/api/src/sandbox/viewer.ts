@@ -648,7 +648,13 @@ export async function mintDesktopStream(
     // Idempotent display stack (flock-guarded; a no-op when already up). A box
     // that genuinely can't run the stack degrades to transport:null, not a throw.
     try {
-      await ensureDisplayStack(established.session);
+      await ensureDisplayStack(established.session, {
+        telemetryContext: {
+          callerKind: "viewer",
+          ...(lease.instanceId ? { sandboxId: lease.instanceId } : {}),
+          leaseEpoch: lease.leaseEpoch,
+        },
+      });
     } catch (error) {
       if (error instanceof DisplayStackUnsupportedError) {
         return null;
