@@ -1,32 +1,41 @@
 import { Loader2Icon } from "lucide-react";
-import { lazy, Suspense } from "react";
+import { lazy, Suspense, type ComponentType } from "react";
 
 import type { QueueSurfaceProps } from "./queue-surface-implementation";
+import { EmptyQueueStateSurface } from "./queue-surface-state";
 
 export type { QueueSurfaceProps } from "./queue-surface-implementation";
 
 const loadQueueSurface = () => import("./queue-surface-implementation");
-const LazyQueueSurface = lazy(async () => ({
-  default: (await loadQueueSurface()).QueueSurface,
-}));
+type QueueSurfaceModule = { QueueSurface: ComponentType<QueueSurfaceProps> };
+type QueueSurfaceLoader = () => Promise<QueueSurfaceModule>;
 
 /** The sole human prompt queue: compact above Goal, Agents, and composer. */
-export function QueueSurface(props: QueueSurfaceProps) {
-  const { queue } = props;
-  if (
-    queue.queue.length === 0 &&
-    !queue.stoppingPreviousAttempt &&
-    !queue.error &&
-    !queue.mutationError
-  ) {
-    return null;
-  }
+export const QueueSurface = createQueueSurface(loadQueueSurface);
 
-  return (
-    <Suspense fallback={<QueueSurfaceFallback count={queue.queue.length} />}>
-      <LazyQueueSurface {...props} />
-    </Suspense>
-  );
+/** @internal Deterministic Suspense seam for the QueueSurface regression suite. */
+export function createQueueSurfaceForTest(loadImplementation: QueueSurfaceLoader) {
+  return createQueueSurface(loadImplementation);
+}
+
+function createQueueSurface(loadImplementation: QueueSurfaceLoader) {
+  const LazyQueueSurface = lazy(async () => ({
+    default: (await loadImplementation()).QueueSurface,
+  }));
+
+  return function QueueSurfaceBoundary(props: QueueSurfaceProps) {
+    const { queue } = props;
+    if (queue.queue.length === 0) {
+      if (!queue.stoppingPreviousAttempt && !queue.error && !queue.mutationError) return null;
+      return <EmptyQueueStateSurface queue={queue} />;
+    }
+
+    return (
+      <Suspense fallback={<QueueSurfaceFallback count={queue.queue.length} />}>
+        <LazyQueueSurface {...props} />
+      </Suspense>
+    );
+  };
 }
 
 function QueueSurfaceFallback({ count }: { count: number }) {

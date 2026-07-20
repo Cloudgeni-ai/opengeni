@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { act, type ReactNode } from "react";
 
-import { QueueSurface } from "../src/components/queue-surface";
+import { createQueueSurfaceForTest, QueueSurface } from "../src/components/queue-surface";
 import type { ComposerState } from "../src/hooks/use-composer";
 import type { UseTurnQueueResult } from "../src/hooks/use-turn-queue";
 import { fakeTurn } from "./fake-client";
@@ -80,6 +80,37 @@ function queue(overrides: Partial<UseTurnQueueResult> = {}): UseTurnQueueResult 
     mutationError: null,
     clearMutationError: () => {},
     ...overrides,
+  };
+}
+
+function controlledQueueSurface() {
+  let loadCount = 0;
+  let releaseGate!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    releaseGate = resolve;
+  });
+  let implementationPromise:
+    | Promise<typeof import("../src/components/queue-surface-implementation")>
+    | undefined;
+  const ControlledQueueSurface = createQueueSurfaceForTest(() => {
+    loadCount += 1;
+    implementationPromise ??= (async () => {
+      await gate;
+      return await import("../src/components/queue-surface-implementation");
+    })();
+    return implementationPromise;
+  });
+
+  return {
+    ControlledQueueSurface,
+    loadCount: () => loadCount,
+    release: async () => {
+      if (!implementationPromise) {
+        throw new Error("QueueSurface implementation was not requested");
+      }
+      releaseGate();
+      await implementationPromise;
+    },
   };
 }
 
@@ -176,18 +207,24 @@ function isWellFormedUnicode(value: string): boolean {
 
 describe("QueueSurface", () => {
   test("does not load or render queue UI for an ordinary empty session", async () => {
+    const { ControlledQueueSurface, loadCount } = controlledQueueSurface();
     mounted = await renderComponent(
-      <QueueSurface queue={queue({ queue: [] })} composer={composer()} />,
+      <ControlledQueueSurface queue={queue({ queue: [] })} composer={composer()} />,
     );
 
     expect(mounted.container.childElementCount).toBe(0);
     expect(mounted.container.querySelector('[data-testid="queue-surface-loading"]')).toBeNull();
+    expect(loadCount()).toBe(0);
   });
 
   test("exposes an accessible, layout-stable shell while the queue implementation loads", async () => {
-    mounted = await renderComponent(<QueueSurface queue={queue()} composer={composer()} />);
+    const { ControlledQueueSurface, loadCount, release } = controlledQueueSurface();
+    mounted = await renderComponent(
+      <ControlledQueueSurface queue={queue()} composer={composer()} />,
+    );
 
     const fallback = mounted.container.querySelector('[data-testid="queue-surface-loading"]');
+    expect(loadCount()).toBe(1);
     expect(fallback?.getAttribute("role")).toBe("status");
     expect(fallback?.getAttribute("aria-live")).toBe("polite");
     expect(fallback?.textContent).toContain("Loading 2 queued prompts…");
@@ -197,8 +234,88 @@ describe("QueueSurface", () => {
       ),
     ).toBe(true);
 
-    await waitForLoadedQueueSurface(mounted);
+    await act(release);
+    expect(mounted.container.querySelector('[data-testid="queue-surface-loading"]')).toBeNull();
     expect(mounted.container.querySelector('[data-testid="queue-surface"]')).not.toBeNull();
+    expect(loadCount()).toBe(1);
+  });
+
+  test("renders an empty stopping state synchronously without a zero-count loading announcement", async () => {
+    const { ControlledQueueSurface, loadCount } = controlledQueueSurface();
+    mounted = await renderComponent(
+      <ControlledQueueSurface
+        queue={queue({ queue: [], stoppingPreviousAttempt: true })}
+        composer={composer()}
+      />,
+    );
+
+    const status = mounted.container.querySelector('[data-testid="stopping-previous-attempt"]');
+    expect(status?.getAttribute("role")).toBe("status");
+    expect(status?.getAttribute("aria-live")).toBe("polite");
+    expect(status?.textContent).toBe(
+      "Stopping previous attempt… Queued work is saved and starts automatically.",
+    );
+    expect(mounted.container.textContent).not.toContain("Loading 0 queued prompts…");
+    expect(mounted.container.querySelector('[data-testid="queue-surface-loading"]')).toBeNull();
+    expect(mounted.container.querySelector("button[aria-expanded]")).toBeNull();
+    expect(loadCount()).toBe(0);
+  });
+
+  test("renders and retries an empty queue load error without requesting the lazy implementation", async () => {
+    const calls: string[] = [];
+    const failure = new Error("Queue load failed before any prompts were returned");
+    const { ControlledQueueSurface, loadCount } = controlledQueueSurface();
+    mounted = await renderComponent(
+      <ControlledQueueSurface
+        queue={queue({
+          queue: [],
+          error: failure,
+          clearMutationError: () => calls.push("clear"),
+          refresh: async () => {
+            calls.push("refresh");
+          },
+        })}
+        composer={composer()}
+      />,
+    );
+
+    expect(mounted.container.querySelector('[role="alert"]')).not.toBeNull();
+    expect(
+      mounted.container.querySelector('[data-testid="queue-error-message"]')?.textContent,
+    ).toBe(failure.message);
+    expect(mounted.container.textContent).not.toContain("Loading 0 queued prompts…");
+    expect(mounted.container.querySelector('[data-testid="queue-surface-loading"]')).toBeNull();
+    expect(loadCount()).toBe(0);
+
+    await click(
+      mounted.container.querySelector('button[aria-label="Dismiss queue error and retry"]'),
+    );
+    expect(calls).toEqual(["clear", "refresh"]);
+    expect(loadCount()).toBe(0);
+  });
+
+  test("renders an empty mutation error synchronously with authoritative error precedence", async () => {
+    const queueFailure = new Error("Stale queue load failure");
+    const mutationFailure = new Error("Latest queue mutation failed");
+    const { ControlledQueueSurface, loadCount } = controlledQueueSurface();
+    mounted = await renderComponent(
+      <ControlledQueueSurface
+        queue={queue({
+          queue: [],
+          error: queueFailure,
+          mutationError: mutationFailure,
+        })}
+        composer={composer()}
+      />,
+    );
+
+    const message = mounted.container.querySelector('[data-testid="queue-error-message"]');
+    expect(mounted.container.querySelector('[role="alert"]')).not.toBeNull();
+    expect(message?.textContent).toBe(mutationFailure.message);
+    expect(message?.textContent).not.toContain(queueFailure.message);
+    expect(mounted.container.textContent).not.toContain("Loading 0 queued prompts…");
+    expect(mounted.container.querySelector('[data-testid="queue-surface-loading"]')).toBeNull();
+    expect(loadCount()).toBe(0);
   });
 
   test("is the one compact queue and exposes visible row Steer and Delete actions", async () => {
