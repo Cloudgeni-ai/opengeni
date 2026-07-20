@@ -85,13 +85,21 @@ plus the checkpoint prompt. Aggregate tool outputs are replaced oldest-first in
 that copy; whole oldest user-delimited units are removed only if necessary. A
 provider overflow gets one smaller refit, so the path performs at most two
 provider calls rather than one failing request per history item. Other failures
-propagate without changing active history. After a fenced durable replacement,
-the same activity, turn, attempt, and sandbox rebuild model input and continue;
-compaction never creates queue or recovery work.
+propagate without changing active history. A Codex terminal SSE failure carried
+on HTTP 200 is converted to one bounded, marked, non-retried provider error; it
+cannot masquerade as an empty successful summary. After a fenced durable
+replacement, the same activity, turn, attempt, and sandbox rebuild model input
+and continue; compaction never creates queue or recovery work.
 A no-shrink result publishes a clear recovery message and leaves the session
-`idle`, so zero-progress churn cannot loop. Exhausted or impossible compaction
-fails with an error that identifies compaction summarization, not the threshold
-event; it never installs a mechanical summary.
+`idle`, so zero-progress churn cannot loop. Exhausted, empty-summary, or
+otherwise failed compaction identifies compaction summarization or the provider
+failure, never installs a mechanical summary, and preserves active history. A
+failed same-turn recovery atomically settles the exact turn, defers ordinary
+internal updates, terminalizes a delivered goal-continuation receipt, and ends
+that workflow run. Without a newer actionable work wake, the workflow cannot
+synthesize another goal continuation from unchanged history. Ordinary machine
+updates remain pending; a later human/API prompt, Steer, or explicitly requested
+Compact may create newer truth and make one new attempt.
 
 Resolved model context metadata is authoritative on every model-facing path.
 For the Codex subscription catalog this means a 272,000-token raw window, a
@@ -247,8 +255,92 @@ wrong one is the classic mistake.
    Do not use it as conversation memory.
 3. **`session_events` — the redacted human/audit timeline.** Append-only,
    per-session sequence numbers, drives replay/SSE/UI. It is **secret-redacted
-   and lossy** (reasoning items and several item types are dropped), so it is
-   correct for humans and auditing and must never be fed back to the model.
+   and lossy** (reasoning items and several item types are dropped), and each
+   payload is capped at 64 KiB with explicit surface/byte/token/non-retention
+   metadata. Large text keeps deterministic head/tail facts; inline media is a
+   compact `media_preview` and its bytes are not retained by this generic path.
+   It is correct for human progress/audit previews and must never be used to
+   reconstruct the target session's model conversation or advertised as a
+   full-output evidence store. A manager can inspect an independently bounded
+   cross-session monitoring projection as ordinary tool output; that does not
+   turn audit events into conversation truth.
+
+Cross-session monitoring is tail-first and selected in PostgreSQL. With no
+cursor, REST/SDK/MCP monitoring omits raw message, reasoning, command-output,
+and PTY deltas, uses `summary` payloads, and returns exact covered-sequence and
+continuation facts. Type filters and the `control`, `terminal`, `failure`,
+`checkpoint`, `tool_receipt`, and `provider_account` semantic classes share one
+union-then-subtract algebra; explicit exclusions win, while an explicit include
+can opt a type back in from the monitoring defaults. `latest` is instead an
+exclusive typed newest lookup: it cannot be combined with include/exclude type
+or class filters, so its requested class cannot be unioned away or subtracted.
+Explicit forensic REST/SDK
+pages can return the exact retained audit projection, but remain count/byte
+bounded and cannot recover source bytes that the audit boundary omitted. The
+MCP result is separately capped to 64 KiB of exact pretty-printed JSON and never
+advances a cursor over an event it did not return.
+
+Session discovery is a separate compact monitoring projection, not a list of
+full session rows. `sessions_list` defaults to deterministic descending
+`(created_at, id)` order and can instead use the durable descending
+`(activity_revision, updated_at, id)` activity order. `updated_at` is the
+display/keyset suffix, not the snapshot clock. Revision zero is the untouched
+legacy bucket and still traverses by exact PostgreSQL timestamp/UUID suffix.
+Both paths use opaque, versioned, snapshot-bound keyset cursors and matching
+workspace-prefixed indexes. For updated order the first-page transaction takes
+workspace inference-control `FOR SHARE`, then the workspace activity counter
+`FOR SHARE`, and reads session rows with ordinary MVCC. Control-aware semantic
+writers use workspace control → UUID-sorted session rows → counter; inserts and
+direct writers may omit the control/session prefix but never acquire those
+locks after the counter. Holding the counter fence makes every later activity
+receive a strictly greater transactional revision. The page returns that
+decimal revision as `updatedThrough`; the next incremental scan passes it as
+`updatedAfter`, so application-clock timestamps, equal timestamps, inserts,
+and repeated updates cannot create a handoff gap. The one-row counter is touched
+only for semantic monitoring activity, not raw deltas. Known targets should be
+read with exact-ID `session_get`, whose model-facing projection independently
+bounds every aggregate and the complete pretty-printed response to 64 KiB; the
+REST session detail contract remains unchanged.
+
+`sessions.updated_at` records semantic monitoring activity time, while
+`sessions.activity_revision` is its transactional monotonic ordering fact; raw
+stream volume advances neither. A batch containing only raw message, reasoning,
+sandbox-command-output, or PTY
+deltas advances `last_sequence` but does not advance `updated_at` or
+`activity_revision`. A semantic event or explicit session mutation advances
+the timestamp and transactionally allocates the workspace's next activity
+revision as applicable. This keeps
+updated-order discovery useful even while a productive session emits a large
+raw token or terminal stream; `session_events` remains the exact sequenced
+audit path for those retained previews.
+
+Those durable stores are still not the realtime or browser representation.
+NATS chunks bounded encoded messages; each session/workspace-control SSE body
+queues at most one complete frame of at most 96 KiB, retains one latest-wins
+live notification, and uses bounded-page Postgres replay/gap fill. If a second
+write sees non-positive `desiredSize` for 30 seconds, the API errors only that
+connection, releases its upstream subscription, and records a fixed-label bound
+metric; reconnect resumes from the client's last observed durable sequence.
+REST uses byte-bounded forward prefixes/backward suffixes; and
+React retains one direction-aware count+byte window. Live/default accumulation
+keeps the newest suffix. If backward paging retains an older prefix and evicts
+the live tail, the hook aborts that iterator and reconnects from the retained
+high-water mark, replaying the evicted tail before appending newer live rows.
+Its highest-ever-observed sequence and latest status are stored separately from
+that rewindable resume cursor. Historical oversized event rows remain readable
+during the rolling migration and are defensively normalized at each outbound
+boundary. Generic omitted output is unavailable unless a separate
+access-controlled artifact/file receipt explicitly retained it.
+
+Workspace-control events follow a smaller independent contract because they are
+cursor invalidations, not evidence or conversation history. Human reason input
+is limited to 8 KiB UTF-8 (and cannot contain NUL), authenticated actor ids are
+limited to 1 KiB, and the durable event is at most 16 KiB with explicit original /
+delivered / omitted byte facts for guarded historical or direct-writer values.
+The generic full value was not retained. NATS asserts a 32-KiB message, SSE uses
+the same one-frame 96-KiB connection queue, and REST pages use a separate 1-MiB
+byte envelope plus the last delivered sequence as the resume cursor. Replaying
+one guarded poison row must still advance to every later durable revision.
 
 Sandbox recovery state is persisted separately again, in
 `sandbox_session_envelopes`: the small versioned descriptor (provider handle /

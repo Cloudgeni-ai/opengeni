@@ -3,6 +3,11 @@ import { CancelledFailure } from "@temporalio/activity";
 import { ModelItem } from "@openai/agents-core/types";
 import type { Settings } from "@opengeni/config";
 import {
+  codexRequestStorage,
+  codexSubscriptionFetch,
+  type CodexRequestContext,
+} from "@opengeni/codex";
+import {
   interruptedToolCallResult,
   runIdempotentPersistenceTransaction,
   SandboxImageConflictError,
@@ -69,6 +74,88 @@ function functionResult(callId: string) {
     status: "completed",
     output: { type: "text", text: "ok" },
   };
+}
+
+async function actualCodexStreamingFailure(event: Record<string, unknown>): Promise<{
+  calls: number;
+  error: unknown;
+  forwarded: string;
+}> {
+  let calls = 0;
+  const token = {
+    accessToken: "worker-test-token",
+    chatgptAccountId: "worker-test-account",
+    isFedramp: false,
+  };
+  const context: CodexRequestContext = {
+    clientVersion: "ope64-worker-test",
+    getToken: async () => token,
+    refresh: async () => token,
+    resolveModel: (model) => model,
+  };
+  const response = await codexRequestStorage.run(context, () =>
+    codexSubscriptionFetch(async () => {
+      calls += 1;
+      return new Response(`data: ${JSON.stringify(event)}\n\n`, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
+    })("https://chatgpt.com/backend-api/responses", {
+      method: "POST",
+      body: JSON.stringify({ stream: true, model: "gpt-5.6-sol", input: [] }),
+    }),
+  );
+
+  const reader = response.body!.getReader();
+  const decoder = new TextDecoder();
+  let forwarded = "";
+  let error: unknown;
+  try {
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      forwarded += decoder.decode(chunk.value, { stream: true });
+    }
+    forwarded += decoder.decode();
+  } catch (streamError) {
+    error = streamError;
+  }
+  return { calls, error, forwarded };
+}
+
+async function actualCodexNullBodyFailure(): Promise<{ calls: number; error: unknown }> {
+  let calls = 0;
+  const token = {
+    accessToken: "worker-test-token",
+    chatgptAccountId: "worker-test-account",
+    isFedramp: false,
+  };
+  const context: CodexRequestContext = {
+    clientVersion: "ope64-worker-test",
+    getToken: async () => token,
+    refresh: async () => token,
+    resolveModel: (model) => model,
+  };
+  const response = await codexRequestStorage.run(context, () =>
+    codexSubscriptionFetch(async () => {
+      calls += 1;
+      return new Response(null, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
+    })("https://chatgpt.com/backend-api/responses", {
+      method: "POST",
+      body: JSON.stringify({ stream: true, model: "gpt-5.6-sol", input: [] }),
+    }),
+  );
+
+  let error: unknown;
+  try {
+    await response.text();
+  } catch (streamError) {
+    error = streamError;
+  }
+  return { calls, error };
 }
 
 /**
@@ -1298,6 +1385,116 @@ describe("escaped MCP transport timeout classifier", () => {
 // goal-continuation recovery instead of a terminal session.failed — the gap that
 // hard-failed a fleet of prod sessions during a provider degradation window.
 describe("transient provider error classifier", () => {
+  test("a null accepted Codex stream settles terminally without same-turn recovery", async () => {
+    const observed = await actualCodexNullBodyFailure();
+    expect(observed.calls).toBe(1);
+    expect(agentRunFailurePayload(observed.error)).toEqual({
+      error: "The Codex response stream ended without a terminal response",
+      code: "invalid_sse_terminal",
+      retryable: false,
+    });
+
+    const wrapped = new CompactionProviderResponseError(
+      { httpStatus: 502, code: "invalid_sse_terminal", type: "invalid_sse_terminal" },
+      observed.error,
+    );
+    expect(agentRunFailurePayload(wrapped)).toEqual({
+      error: "The Codex response stream ended without a terminal response",
+      code: "invalid_sse_terminal",
+      retryable: false,
+    });
+    expect(shouldRecoverCompactionProviderFailure(wrapped)).toBe(false);
+  });
+
+  test("an actual streamed Codex server failure settles as redacted same-turn recovery", async () => {
+    const observed = await actualCodexStreamingFailure({
+      type: "response.failed",
+      response: {
+        id: "resp_worker_server",
+        status: "failed",
+        error: {
+          type: "server_error",
+          code: "server_error",
+          message: "SECRET worker server provider detail",
+        },
+      },
+    });
+
+    expect(observed.calls).toBe(1);
+    expect(observed.forwarded).toBe("");
+    const payload = agentRunFailurePayload(observed.error);
+    expect(payload).toEqual({
+      error: "The Codex response failed",
+      code: "provider_unavailable",
+      retryable: true,
+    });
+    expect(JSON.stringify({ error: observed.error, payload })).not.toContain("SECRET");
+    expect(providerRecoveryResult()).toEqual({
+      status: "recovering",
+      continueDelayMs: PROVIDER_BACKPRESSURE_DELAY_MS,
+    });
+  });
+
+  test("an actual streamed Codex context failure remains redacted and nonretryable", async () => {
+    const observed = await actualCodexStreamingFailure({
+      type: "response.failed",
+      response: {
+        id: "resp_worker_context",
+        status: "failed",
+        error: {
+          type: "invalid_request_error",
+          code: "context_length_exceeded",
+          message: "SECRET worker context provider detail",
+        },
+      },
+    });
+
+    expect(observed.calls).toBe(1);
+    expect(observed.forwarded).toBe("");
+    expect(classifyContextWindowOverflowError(observed.error)?.code).toBe(
+      "context_length_exceeded",
+    );
+    const payload = agentRunFailurePayload(observed.error);
+    expect(payload).toEqual({ error: "The Codex response failed" });
+    expect(payload.retryable).toBeUndefined();
+    expect(JSON.stringify({ error: observed.error, payload })).not.toContain("SECRET");
+  });
+
+  test("actual streamed Codex rate and usage terminals keep distinct truthful settlement", async () => {
+    const rate = await actualCodexStreamingFailure({
+      type: "error",
+      code: "rate_limit_exceeded",
+      message: "SECRET worker rate provider detail",
+    });
+    expect(rate.calls).toBe(1);
+    expect(rate.forwarded).toBe("");
+    expect(agentRunFailurePayload(rate.error)).toEqual({
+      error: "Model provider rate limit hit. Try again in a minute or lower the reasoning effort.",
+      code: "provider_rate_limited",
+      retryable: true,
+      detail: "The Codex response stream reported an error",
+    });
+
+    const usage = await actualCodexStreamingFailure({
+      type: "response.failed",
+      response: {
+        id: "resp_worker_usage",
+        status: "failed",
+        error: {
+          type: "usage_limit_reached",
+          code: "usage_limit_reached",
+          message: "SECRET worker usage provider detail",
+        },
+      },
+    });
+    expect(usage.calls).toBe(1);
+    expect(usage.forwarded).toBe("");
+    const usagePayload = agentRunFailurePayload(usage.error);
+    expect(usagePayload.code).toBe("codex_usage_limit_reached");
+    expect(usagePayload.retryable).toBe(false);
+    expect(JSON.stringify({ rate, usage, usagePayload })).not.toContain("SECRET");
+  });
+
   test("classifies nested database truth without retrying provider work or exposing SQL", () => {
     const error = new SessionEventPersistenceError({
       code: "db_deadlock",

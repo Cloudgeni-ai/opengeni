@@ -71,6 +71,18 @@ export function continuationHoldMs(
 }
 
 /**
+ * A deferred activity result is terminal for this workflow run unless a new
+ * non-control wake committed while the activity was in flight. Keeping this
+ * predicate pure makes the compaction-convergence fence directly testable:
+ * repeated identical failures cannot synthesize more work from an unchanged
+ * durable state. Pause/Steer remain authoritative through the independent
+ * signal-version and interruption paths in `sessionWorkflow`.
+ */
+export function deferredResultMayContinue(entryWakeups: number, currentWakeups: number): boolean {
+  return currentWakeups !== entryWakeups;
+}
+
+/**
  * True when an agent-turn activity failure means "the worker hosting the
  * turn died or vanished" rather than "the turn itself failed": the server
  * closed the activity with a HEARTBEAT timeout (the worker was killed before
@@ -555,7 +567,7 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
     }
 
     if (outcome.result.deferredUntilWake) {
-      return wakeups !== capacityWaitEntryBaseline.wakeups;
+      return deferredResultMayContinue(capacityWaitEntryBaseline.wakeups, wakeups);
     }
 
     if (outcome.result.status === "requires_action") return true;

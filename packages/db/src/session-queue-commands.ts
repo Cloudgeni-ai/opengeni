@@ -7,6 +7,7 @@ import {
 } from "@opengeni/contracts";
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import type { Database } from "./index";
+import { sanitizeEventPayload } from "./event-payload-sanitizer";
 import { closePendingSessionToolCallsInTransaction } from "./session-tool-call-settlement";
 import {
   assertAgentCommandAuthorityInTransaction,
@@ -1259,14 +1260,14 @@ export async function submitHumanPromptInTransaction(
       sequence: ++sequence,
       type: "user.message",
       clientEventId: input.operationKey,
-      payload: {
+      payload: sanitizeEventPayload({
         text: input.text,
         ...(input.resources.length ? { resources: input.resources } : {}),
         ...(input.tools.length ? { tools: input.tools } : {}),
         ...(input.model ? { model: input.model } : {}),
         ...(input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : {}),
         delivery: input.delivery,
-      },
+      }),
       occurredAt: now,
     },
   ];

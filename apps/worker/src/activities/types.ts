@@ -227,10 +227,11 @@ type ClaimedRunAgentTurnResult = {
   // persisted in Postgres and reconstructed after workflow/worker restart.
   // The workflow must not call maybeContinueGoal while this waiter is active.
   capacityWait?: CodexCapacityWaitRef;
-  // A maintenance execution could not run (for example, every Codex account
-  // is unavailable). End this workflow run without consuming the durable
-  // request; a later prompt/control wake starts the workflow again and normal
-  // prompt claim ordering consumes the request in-turn.
+  // This execution reached a durable terminal-for-now boundary (for example,
+  // maintenance could not run or same-turn context recovery failed). End this
+  // workflow run without synthesizing another goal continuation from unchanged
+  // state. A later prompt/control/new-update wake may retry through normal claim
+  // ordering.
   deferredUntilWake?: boolean;
 };
 

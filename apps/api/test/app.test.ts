@@ -778,6 +778,35 @@ describe("API helpers", () => {
       { after: 1000, limit: 1000 },
     ]);
   });
+
+  test("rejects a full stale SSE replay page instead of looping forever", async () => {
+    const stale = Array.from(
+      { length: 100 },
+      (_, index) =>
+        ({
+          id: `stale-${index + 1}`,
+          sessionId: "session-1",
+          sequence: index + 1,
+          type: "agent.message.delta",
+          payload: { text: String(index + 1) },
+          occurredAt: "2026-05-07T00:00:00.000Z",
+        }) satisfies SessionEvent,
+    );
+    let loads = 0;
+
+    await expect(
+      replaySessionEvents(
+        async () => {
+          loads += 1;
+          return stale;
+        },
+        async () => {},
+        100,
+        100,
+      ),
+    ).rejects.toThrow("made no progress");
+    expect(loads).toBe(1);
+  });
 });
 
 describe("catalog connectionRef exposure", () => {

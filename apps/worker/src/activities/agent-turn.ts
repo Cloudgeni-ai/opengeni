@@ -4756,7 +4756,15 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             turnMetricOutcome = "failed";
             activityStatus = "idle";
             activityError = attemptError;
-            return claimedResult({ status: "idle" });
+            // The failed turn settlement already defers ordinary internal
+            // updates and makes the delivered goal-continuation receipt
+            // terminal. End this workflow run as well: returning plain idle
+            // would immediately synthesize another goal continuation against
+            // the unchanged active history and repeat the same failed
+            // compaction. A new human/API prompt, Steer, or explicitly requested
+            // Compact remains a durable explicit wake and may retry; ordinary
+            // machine updates stay pending for that actionable wake.
+            return claimedResult({ status: "idle", deferredUntilWake: true });
           }
           // Codex parity: compaction remains inside the same logical turn and
           // the same activity. Rebuild the model-visible history from the
@@ -6103,6 +6111,17 @@ export function agentRunFailurePayload(error: unknown): {
     typeof error === "object" && error !== null && "code" in error
       ? String((error as { code?: unknown }).code)
       : undefined;
+  // An accepted Codex stream with no terminal response is malformed/partial,
+  // not provider backpressure. Replaying the same accepted turn could repeat
+  // model or tool effects, so this marked transport failure must outrank the
+  // generic 5xx retry classifier (CodexStreamingTerminalError uses status 502).
+  if (isCodexTransportError(error) && code === "invalid_sse_terminal") {
+    return {
+      error: "The Codex response stream ended without a terminal response",
+      code: "invalid_sse_terminal",
+      retryable: false,
+    };
+  }
   if (isSessionEventPersistenceError(error)) {
     const { details } = error;
     const eventLabel = details.eventTypes.join(", ") || "session events";

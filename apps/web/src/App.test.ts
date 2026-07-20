@@ -260,6 +260,7 @@ describe("rail session grouping", () => {
         attentionDescendants: 0,
         pausedDescendants: 3,
         failedDescendants: 0,
+        truncated: false,
       },
     });
     const forest = buildRailForest([manager], NOW);
@@ -278,6 +279,7 @@ describe("rail session grouping", () => {
         attentionDescendants: 0,
         pausedDescendants: 0,
         failedDescendants: 0,
+        truncated: false,
       },
     });
     const selectedDetail = railSession({ id: "selected-manager", status: "running" });

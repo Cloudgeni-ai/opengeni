@@ -89,6 +89,8 @@ import type {
   SessionListResponse,
   UpdateSessionPinRequest,
   SessionEvent,
+  SessionEventListOptions,
+  SessionEventPage,
   SessionGoal,
   SessionLineageResponse,
   SessionMcpCredentialUpdateInput,
@@ -175,6 +177,13 @@ import type {
 import { OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION } from "./types";
 
 export type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+
+export type WorkspaceControlEventPage = {
+  events: WorkspaceControlEvent[];
+  bytes: number;
+  truncated: boolean;
+  nextAfter: number | null;
+};
 
 export type OpenGeniClientOptions = {
   /** Base URL of the OpenGeni API, e.g. `https://api.example.com`. */
@@ -499,27 +508,101 @@ export class OpenGeniClient {
   // --- Events: replay, send, stream ----------------------------------------
 
   /**
-   * Replay durable events by sequence, ascending. `before` is exclusive and
-   * returns the newest matching window. With `compact`, consecutive delta runs
-   * may be coalesced; `payload.coalescedUntil` carries the run's last sequence
-   * for resume cursors.
+   * Return the events from one bounded page. With no cursor, this uses the safe
+   * semantic monitoring tail; pass explicit forensic options and a cursor for
+   * retained audit replay. Use `listEventPage` when projection, coverage, or
+   * resume-cursor facts are required.
    */
   async listEvents(
     workspaceId: string,
     sessionId: string,
-    options: { after?: number; before?: number; limit?: number; compact?: boolean } = {},
+    options: SessionEventListOptions = {},
   ): Promise<SessionEvent[]> {
-    return await this.requestJson<SessionEvent[]>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/events`,
-      undefined,
-      {
+    return (await this.listEventPage(workspaceId, sessionId, options)).events;
+  }
+
+  /** Bounded durable/monitoring page plus exact projection and cursor facts. */
+  async listEventPage(
+    workspaceId: string,
+    sessionId: string,
+    options: SessionEventListOptions = {},
+  ): Promise<SessionEventPage> {
+    if (
+      options.latest &&
+      ["includeTypes", "excludeTypes", "includeClasses", "excludeClasses"].some((name) =>
+        Object.prototype.hasOwnProperty.call(options, name),
+      )
+    ) {
+      throw new TypeError("latest cannot be combined with event filters");
+    }
+    const response = await this.fetchImpl(
+      this.url(`/v1/workspaces/${workspaceId}/sessions/${sessionId}/events`, {
         ...(options.after !== undefined ? { after: String(options.after) } : {}),
         ...(options.before !== undefined ? { before: String(options.before) } : {}),
         ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
         ...(options.compact ? { compact: "1" } : {}),
+        ...(options.mode ? { mode: options.mode } : {}),
+        ...(options.direction ? { direction: options.direction } : {}),
+        ...(options.payloadMode ? { payloadMode: options.payloadMode } : {}),
+        ...(options.includeTypes?.length ? { includeTypes: options.includeTypes.join(",") } : {}),
+        ...(options.excludeTypes?.length ? { excludeTypes: options.excludeTypes.join(",") } : {}),
+        ...(options.includeClasses?.length
+          ? { includeClasses: options.includeClasses.join(",") }
+          : {}),
+        ...(options.excludeClasses?.length
+          ? { excludeClasses: options.excludeClasses.join(",") }
+          : {}),
+        ...(options.latest ? { latest: options.latest } : {}),
+      }),
+      {
+        method: "GET",
+        headers: { ...this.headers(), Accept: "application/json" },
       },
     );
+    assertApiContractResponse(response);
+    if (!response.ok) throw new OpenGeniApiError(response.status, await safeText(response));
+    const events = (await response.json()) as SessionEvent[];
+    const integerHeader = (name: string): number | null => {
+      const raw = response.headers.get(name);
+      if (raw === null) return null;
+      const value = Number(raw);
+      return Number.isSafeInteger(value) && value >= 0 ? value : null;
+    };
+    const mode =
+      response.headers.get("X-OpenGeni-Event-Mode") === "forensic" ? "forensic" : "monitoring";
+    const direction =
+      response.headers.get("X-OpenGeni-Event-Direction") === "after" ? "after" : "before";
+    const payloadHeader = response.headers.get("X-OpenGeni-Payload-Mode");
+    const payloadMode =
+      payloadHeader === "none" || payloadHeader === "full" ? payloadHeader : "summary";
+    const first = integerHeader("X-OpenGeni-Covered-First");
+    const last = integerHeader("X-OpenGeni-Covered-Last");
+    const bytes =
+      integerHeader("X-OpenGeni-Page-Bytes") ??
+      new TextEncoder().encode(JSON.stringify(events)).byteLength;
+    const maxBytes = integerHeader("X-OpenGeni-Page-Max-Bytes") ?? 1024 * 1024;
+    const truncatedByHeader = response.headers.get("X-OpenGeni-Truncated-By");
+    const truncatedBy =
+      truncatedByHeader === "count" ||
+      truncatedByHeader === "bytes" ||
+      truncatedByHeader === "http_bytes"
+        ? truncatedByHeader
+        : null;
+    return {
+      events,
+      mode,
+      payloadMode,
+      direction,
+      bytes,
+      maxBytes,
+      truncated: response.headers.get("X-OpenGeni-Page-Truncated") === "true",
+      hasMore: response.headers.get("X-OpenGeni-Has-More") === "true",
+      truncatedBy,
+      coveredSequence: first === null || last === null ? null : { first, last },
+      nextAfter: integerHeader("X-OpenGeni-Next-After"),
+      nextBefore: integerHeader("X-OpenGeni-Next-Before"),
+      forensicExact: response.headers.get("X-OpenGeni-Forensic-Exact") === "true",
+    };
   }
 
   /** POST a user/control event to the session. Returns the accepted event. */
@@ -760,15 +843,45 @@ export class OpenGeniClient {
     workspaceId: string,
     options: { after?: number; limit?: number } = {},
   ): Promise<WorkspaceControlEvent[]> {
-    return await this.requestJson<WorkspaceControlEvent[]>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/control-events`,
-      undefined,
-      {
+    return (await this.listWorkspaceControlEventPage(workspaceId, options)).events;
+  }
+
+  /** Count/byte-bounded page plus an explicit continuation cursor. */
+  async listWorkspaceControlEventPage(
+    workspaceId: string,
+    options: { after?: number; limit?: number } = {},
+  ): Promise<WorkspaceControlEventPage> {
+    const response = await this.fetchImpl(
+      this.url(`/v1/workspaces/${workspaceId}/control-events`, {
         ...(options.after !== undefined ? { after: String(options.after) } : {}),
         ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
+      }),
+      {
+        method: "GET",
+        headers: { ...this.headers(), Accept: "application/json" },
       },
     );
+    assertApiContractResponse(response);
+    if (!response.ok) {
+      throw new OpenGeniApiError(response.status, await safeText(response));
+    }
+    const events = (await response.json()) as WorkspaceControlEvent[];
+    const bytesHeader = response.headers.get("X-OpenGeni-Page-Bytes");
+    const nextHeader = response.headers.get("X-OpenGeni-Next-After");
+    const parsedBytes = bytesHeader === null ? Number.NaN : Number(bytesHeader);
+    const parsedNext = nextHeader === null ? null : Number(nextHeader);
+    return {
+      events,
+      bytes:
+        Number.isSafeInteger(parsedBytes) && parsedBytes >= 0
+          ? parsedBytes
+          : new TextEncoder().encode(JSON.stringify(events)).byteLength,
+      truncated: response.headers.get("X-OpenGeni-Page-Truncated") === "true",
+      nextAfter:
+        parsedNext !== null && Number.isSafeInteger(parsedNext) && parsedNext >= 0
+          ? parsedNext
+          : null,
+    };
   }
 
   streamWorkspaceControlEvents(

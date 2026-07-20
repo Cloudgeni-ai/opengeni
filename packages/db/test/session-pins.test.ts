@@ -11,6 +11,7 @@ import {
   listSessionsForSubject,
   removeWorkspaceMember,
   reapExpiredSessionListSnapshots,
+  sessionTreeStatsForSessions,
   SessionListAccessError,
   SessionPinAccessError,
   SessionPinVersionConflictError,
@@ -134,6 +135,13 @@ afterAll(async () => {
 }, 180_000);
 
 describe("session pins (real PostgreSQL + FORCE RLS)", () => {
+  test("rejects an unbounded tree-stat root set before issuing SQL", async () => {
+    const rootIds = Array.from({ length: 601 }, () => crypto.randomUUID());
+    await expect(
+      sessionTreeStatsForSessions({} as Database, crypto.randomUUID(), rootIds),
+    ).rejects.toThrow("Session tree stats projection exceeds 600 roots");
+  });
+
   test("lists server-authoritative descendant summaries for roots and lazy child pages", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
@@ -172,6 +180,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       attentionDescendants: 1,
       pausedDescendants: 0,
       failedDescendants: 0,
+      truncated: false,
     });
     expect(roots.sessions.some((row) => row.id === child.id)).toBe(false);
 
@@ -188,8 +197,164 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       attentionDescendants: 1,
       pausedDescendants: 0,
       failedDescendants: 0,
+      truncated: false,
     });
   });
+
+  test("bounds deep, wide, and overlapping descendant summaries with explicit lower bounds", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const subjectId = "user:bounded-tree-stats";
+    await grantMember(workspace, subjectId);
+    const deepRoot = await session({ ...workspace, message: "deep root" });
+    const wideRoot = await session({ ...workspace, message: "wide root" });
+
+    const deepIds = Array.from({ length: 40 }, () => crypto.randomUUID());
+    const deepRows = deepIds.map((id, index) => ({
+      id,
+      parentId: index === 0 ? deepRoot.id : deepIds[index - 1]!,
+      message: `deep-${index + 1}`,
+    }));
+    await admin`
+      insert into sessions (
+        id, account_id, workspace_id, status, initial_message, model,
+        sandbox_backend, sandbox_group_id, parent_session_id, temporal_workflow_id
+      )
+      select
+        node.id, ${workspace.accountId}, ${workspace.workspaceId}, 'running', node.message,
+        'test-model', 'none', node.id, node."parentId", 'tree-deep-' || node.id::text
+      from jsonb_to_recordset(${admin.json(deepRows)}::jsonb)
+        as node(id uuid, "parentId" uuid, message text)`;
+
+    await admin`
+      with nodes as (
+        select gen_random_uuid() as id, ordinal
+        from generate_series(1, 1005) as ordinal
+      )
+      insert into sessions (
+        id, account_id, workspace_id, status, initial_message, model,
+        sandbox_backend, sandbox_group_id, parent_session_id, temporal_workflow_id
+      )
+      select
+        id, ${workspace.accountId}, ${workspace.workspaceId}, 'idle',
+        'wide-' || ordinal::text, 'test-model', 'none', id, ${wideRoot.id},
+        'tree-wide-' || id::text
+      from nodes`;
+
+    for (const sessionId of [deepRoot.id, deepIds[0]!, wideRoot.id]) {
+      await setSessionPin(db, {
+        workspaceId: workspace.workspaceId,
+        subjectId,
+        sessionId,
+        pinned: true,
+      });
+    }
+
+    const page = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId,
+      limit: 1,
+    });
+    const stats = new Map(page.pinned.map((row) => [row.id, row.treeStats]));
+
+    expect(stats.get(deepRoot.id)).toEqual({
+      directChildren: 1,
+      totalDescendants: 32,
+      runningDescendants: 32,
+      queuedDescendants: 0,
+      attentionDescendants: 0,
+      pausedDescendants: 0,
+      failedDescendants: 0,
+      truncated: true,
+    });
+    expect(stats.get(deepIds[0]!)).toEqual({
+      directChildren: 1,
+      totalDescendants: 32,
+      runningDescendants: 32,
+      queuedDescendants: 0,
+      attentionDescendants: 0,
+      pausedDescendants: 0,
+      failedDescendants: 0,
+      truncated: true,
+    });
+    expect(stats.get(wideRoot.id)).toEqual({
+      directChildren: 1_000,
+      totalDescendants: 1_000,
+      runningDescendants: 0,
+      queuedDescendants: 0,
+      attentionDescendants: 0,
+      pausedDescendants: 0,
+      failedDescendants: 0,
+      truncated: true,
+    });
+  }, 180_000);
+
+  test("bounds pinned roots before descendant projection and makes omission explicit", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const subjectId = "user:bounded-pinned-roots";
+    await grantMember(workspace, subjectId);
+    await admin`
+      with nodes as (
+        select gen_random_uuid() as id, ordinal
+        from generate_series(1, 105) as ordinal
+      ), inserted as (
+        insert into sessions (
+          id, account_id, workspace_id, status, initial_message, model,
+          sandbox_backend, sandbox_group_id, temporal_workflow_id
+        )
+        select
+          id, ${workspace.accountId}, ${workspace.workspaceId}, 'idle',
+          'pinned-root-' || ordinal::text, 'test-model', 'none', id,
+          'bounded-pinned-root-' || id::text
+        from nodes
+        returning id
+      )
+      insert into session_pins (
+        account_id, workspace_id, subject_id, session_id, pinned, pinned_at
+      )
+      select
+        ${workspace.accountId}, ${workspace.workspaceId}, ${subjectId}, id, true, now()
+      from inserted`;
+
+    const page = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId,
+      limit: 1,
+    });
+    expect(page.pinned).toHaveLength(100);
+    expect(page.pinnedTruncated).toBe(true);
+    expect(page.sessions).toEqual([]);
+    expect(new Set(page.pinned.map((row) => row.id)).size).toBe(100);
+  }, 60_000);
+
+  test("does not double-count cyclic legacy parent graphs", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const root = await session({ ...workspace, message: "cycle root" });
+    const child = await session({
+      ...workspace,
+      message: "cycle child",
+      parentSessionId: root.id,
+    });
+    const grandchild = await session({
+      ...workspace,
+      message: "cycle grandchild",
+      parentSessionId: child.id,
+    });
+    await admin`update sessions set parent_session_id = ${grandchild.id} where id = ${root.id}`;
+    const stats = await withWorkspaceRls(db, workspace.workspaceId, async (scoped) =>
+      sessionTreeStatsForSessions(scoped, workspace.workspaceId, [root.id]),
+    );
+    expect(stats.get(root.id)).toEqual({
+      directChildren: 1,
+      totalDescendants: 2,
+      runningDescendants: 0,
+      queuedDescendants: 2,
+      attentionDescendants: 0,
+      pausedDescendants: 0,
+      failedDescendants: 0,
+      truncated: true,
+    });
+  }, 60_000);
 
   test("reaps expired list snapshots outside request transactions", async () => {
     if (!available) return;

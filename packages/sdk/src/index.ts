@@ -5,6 +5,7 @@ export type {
   OpenGeniRequestOptions,
   SendMessageInput,
   SteerMessageResult,
+  WorkspaceControlEventPage,
 } from "./client";
 export {
   OpenGeniApiContractMismatchError,
@@ -245,6 +246,12 @@ export type {
   ViewerHeartbeatRequest,
   ViewerHeartbeatResponse,
   SessionEvent,
+  SessionEventListOptions,
+  SessionEventPage,
+  SessionEventPayloadMode,
+  SessionEventReadDirection,
+  SessionEventReadMode,
+  SessionEventSemanticClass,
   SessionEventType,
   SessionGoal,
   SessionGoalCreatedBy,

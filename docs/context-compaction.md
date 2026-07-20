@@ -100,9 +100,14 @@ issues one failing provider call per history item.
 These reductions belong only to the explicit compaction transition and their
 rewrite/drop counts are recorded on `session.context.compacted`. The unmodified
 active history remains the source for the durable replacement and stays
-byte-for-byte active if either provider request fails. An empty response is a
-typed compaction failure with bounded, content-free diagnostics. OpenGeni never
-installs a manufactured placeholder as conversation truth.
+byte-for-byte active if either provider request fails. For Codex subscriptions,
+terminal SSE `response.failed` and `response.error` events that arrive on HTTP
+200 become one non-retried, marked provider error with a bounded projection of
+type/code/message/parameter and response identity; arbitrary nested diagnostics
+are omitted and truncation is explicit. They are never misclassified as an
+empty summary. A genuinely successful but empty response is a distinct typed
+compaction failure with bounded, content-free response diagnostics. OpenGeni
+never installs a manufactured placeholder as conversation truth.
 
 ## Durable replacement
 
@@ -154,10 +159,16 @@ and an explicit `/compact` request remains pending for that same-turn retry.
 When a terminal failure belongs to an explicit `/compact`, one attempt-fenced
 database settlement records
 `session.context.compaction.skipped(reason="summarization_failed")`, clears that
-one request, records `turn.failed`, and returns the session to idle. A worker
-crash therefore cannot clear the request without the matching terminal truth,
-and an idle maintenance execution cannot immediately recreate itself forever.
-The active history stays unchanged and the user may request a fresh retry.
+one request, records `turn.failed`, and returns the session to idle. For a
+failure during same-turn recovery, the exact turn is settled once, ordinary
+internal updates are deferred, and any delivered goal-continuation receipt is
+terminalized. A worker crash therefore cannot clear the request without the
+matching terminal truth, and an idle maintenance execution cannot immediately
+recreate itself forever. With no newer actionable work wake, the workflow ends
+instead of retrying against unchanged history. Ordinary machine updates remain
+pending; a later human/API prompt, Steer, or explicitly requested Compact can
+create newer truth and make one new attempt. The active history stays unchanged
+throughout.
 
 Codex-subscription responses are streaming on the wire even for this
 non-streaming summarizer. Terminal `response.failed`, `response.error`, `error`,

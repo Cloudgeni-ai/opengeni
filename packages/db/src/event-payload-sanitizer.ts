@@ -1,3 +1,5 @@
+import { boundSessionEventPayload } from "@opengeni/contracts";
+
 /**
  * Last line of defense against a session event crashing a whole turn.
  *
@@ -8,12 +10,10 @@
  * such a payload reaches `INSERT INTO session_events`, the driver rejects it
  * ("Failed query: insert into session_events") and the turn dies.
  *
- * `sanitizeEventPayload` deep-walks any payload value (objects, arrays, nested)
- * and, for every string, strips NUL and rewrites invalid/lone UTF-16 surrogates
- * to the Unicode replacement char (U+FFFD), so the result is always valid UTF-8
- * that jsonb can store. It is cheap and total: only strings are touched, and only
- * the two disallowed classes of code unit -- no meaningful text is lost, no
- * truncation (truncation is handled elsewhere).
+ * `sanitizeEventPayload` deep-walks any payload value (objects, arrays, nested),
+ * repairs every string, redacts sensitive fields, then applies the canonical
+ * byte-bounded human/audit preview. Conversation truth uses
+ * `sanitizeModelPayload` below and remains a separate representation.
  */
 
 const REPLACEMENT = "�";
@@ -89,11 +89,22 @@ export function sanitizeEventString(value: string): string {
  * keys are sanitized too -- they are jsonb-constrained the same as values.
  */
 export function sanitizeEventPayload<T>(payload: T): T {
+  // Bound first. The preview walker caps depth/container fan-out and replaces
+  // inline media before this sanitizer allocates a deep clone. Reversing this
+  // order lets a cyclic, deeply nested, or multi-megabyte tool result exhaust
+  // the stack/heap before the durable 64 KiB event boundary can protect it.
+  return sanitizeEventPayloadDeep(boundSessionEventPayload(payload));
+}
+
+function sanitizeEventPayloadDeep<T>(payload: T): T {
   if (typeof payload === "string") {
     return sanitizeEventString(payload) as unknown as T;
   }
   if (Array.isArray(payload)) {
-    return payload.map((item) => sanitizeEventPayload(item)) as unknown as T;
+    return payload.map((item) => sanitizeEventPayloadDeep(item)) as unknown as T;
+  }
+  if (payload instanceof Date) {
+    return safeDateIso(payload) as unknown as T;
   }
   if (payload && typeof payload === "object") {
     const entries = Object.entries(payload as Record<string, unknown>).map(
@@ -115,21 +126,48 @@ export function sanitizeEventPayload<T>(payload: T): T {
  * performs only the database-safety repair (NUL removal and UTF-16 repair).
  */
 export function sanitizeModelPayload<T>(payload: T): T {
+  return sanitizeModelPayloadDeep(payload, new WeakSet<object>(), 0);
+}
+
+const MODEL_PAYLOAD_SANITIZE_MAX_DEPTH = 64;
+const MODEL_PAYLOAD_CYCLE_MARKER = "[OpenGeni omitted cyclic model payload]";
+const MODEL_PAYLOAD_DEPTH_MARKER = "[OpenGeni omitted model payload beyond database-safety depth]";
+
+function sanitizeModelPayloadDeep<T>(payload: T, seen: WeakSet<object>, depth: number): T {
   if (typeof payload === "string") {
     return sanitizeEventString(payload) as unknown as T;
   }
-  if (Array.isArray(payload)) {
-    return payload.map((item) => sanitizeModelPayload(item)) as unknown as T;
+  if (!payload || typeof payload !== "object") return payload;
+  if (payload instanceof Date) {
+    return safeDateIso(payload) as unknown as T;
   }
-  if (payload && typeof payload === "object") {
+  if (depth >= MODEL_PAYLOAD_SANITIZE_MAX_DEPTH) {
+    return MODEL_PAYLOAD_DEPTH_MARKER as unknown as T;
+  }
+  if (seen.has(payload)) return MODEL_PAYLOAD_CYCLE_MARKER as unknown as T;
+  seen.add(payload);
+  try {
+    if (Array.isArray(payload)) {
+      return payload.map((item) => sanitizeModelPayloadDeep(item, seen, depth + 1)) as unknown as T;
+    }
     return Object.fromEntries(
       Object.entries(payload as Record<string, unknown>).map(([key, value]) => [
         sanitizeEventString(key),
-        sanitizeModelPayload(value),
+        sanitizeModelPayloadDeep(value, seen, depth + 1),
       ]),
     ) as unknown as T;
+  } finally {
+    seen.delete(payload);
   }
-  return payload;
+}
+
+function safeDateIso(value: Date): string | null {
+  try {
+    const epoch = Date.prototype.getTime.call(value);
+    return Number.isFinite(epoch) ? Date.prototype.toISOString.call(value) : null;
+  } catch {
+    return null;
+  }
 }
 
 function sanitizeSensitiveEventField(key: string, value: unknown): unknown {
@@ -142,19 +180,19 @@ function sanitizeSensitiveEventField(key: string, value: unknown): unknown {
   if (SENSITIVE_FIELD_NAMES.has(normalizeFieldName(key))) {
     return REDACTED;
   }
-  return sanitizeEventPayload(value);
+  return sanitizeEventPayloadDeep(value);
 }
 
 function sanitizeSessionMcpServerList(value: unknown): unknown {
   if (!Array.isArray(value)) {
-    return sanitizeEventPayload(value);
+    return sanitizeEventPayloadDeep(value);
   }
   return value.map((item) => {
     if (!isPlainObject(item)) {
-      return sanitizeEventPayload(item);
+      return sanitizeEventPayloadDeep(item);
     }
     const { headers, headersEncrypted, ...rest } = item;
-    const cleaned = sanitizeEventPayload(rest) as Record<string, unknown>;
+    const cleaned = sanitizeEventPayloadDeep(rest) as Record<string, unknown>;
     const headerNames = safeHeaderNames(headers) ?? safeHeaderNames(headersEncrypted);
     if (headerNames) {
       cleaned.headerNames = headerNames;
@@ -165,14 +203,14 @@ function sanitizeSessionMcpServerList(value: unknown): unknown {
 
 function sanitizeMcpCredentialUpdateList(value: unknown): unknown {
   if (!Array.isArray(value)) {
-    return sanitizeEventPayload(value);
+    return sanitizeEventPayloadDeep(value);
   }
   return value.map((item) => {
     if (!isPlainObject(item)) {
-      return sanitizeEventPayload(item);
+      return sanitizeEventPayloadDeep(item);
     }
     const { headers, headersEncrypted, ...rest } = item;
-    const cleaned = sanitizeEventPayload(rest) as Record<string, unknown>;
+    const cleaned = sanitizeEventPayloadDeep(rest) as Record<string, unknown>;
     const headerNames = safeHeaderNames(headers) ?? safeHeaderNames(headersEncrypted);
     if (headerNames) {
       cleaned.headerNames = headerNames;
