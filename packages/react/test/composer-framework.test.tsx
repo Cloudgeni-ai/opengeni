@@ -70,6 +70,7 @@ function attachments(overrides: Partial<UseFileAttachmentsResult> = {}): UseFile
     uploading: false,
     addFiles: () => {},
     addFromPaste: () => {},
+    restoreReadyFiles: () => {},
     retry: () => {},
     remove: () => {},
     clear: () => {},
