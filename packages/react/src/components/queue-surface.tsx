@@ -29,7 +29,13 @@ import {
   Trash2Icon,
   ZapIcon,
 } from "lucide-react";
-import { useCallback, useMemo, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import {
+  useCallback,
+  useId,
+  useMemo,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from "react";
 
 import { DropdownMenu } from "radix-ui";
 import type { ComposerState } from "../hooks/use-composer";
@@ -58,6 +64,10 @@ export function QueueSurface({ queue, composer, readOnly = false }: QueueSurface
     projectedIndex: number;
   } | null>(null);
   const count = queue.queue.length;
+  const collapsedPreview = useMemo(
+    () => queuePromptPreview(queue.queue[0]?.prompt ?? "", QUEUE_COLLAPSED_PREVIEW_CHARACTERS),
+    [queue.queue],
+  );
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }));
 
   const displayedQueue = useMemo(() => {
@@ -232,11 +242,14 @@ export function QueueSurface({ queue, composer, readOnly = false }: QueueSurface
         ) : null}
         <button
           type="button"
-          className="flex w-full min-w-0 items-center gap-2 px-3 py-2 text-left outline-none transition-colors hover:bg-surface-2/60 focus-visible:bg-surface-2/60 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/40 pointer-coarse:min-h-11"
+          className="flex w-full min-w-0 flex-wrap items-center gap-2 px-3 py-2 text-left outline-none transition-colors hover:bg-surface-2/60 focus-visible:bg-surface-2/60 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/40 pointer-coarse:min-h-[44px]"
           onClick={() => setOpen((value) => !value)}
+          aria-description={!open && count > 0 ? collapsedPreview.summary : undefined}
           aria-expanded={open}
+          aria-label={`${count} queued prompt${count === 1 ? "" : "s"}${readOnly ? " Read-only" : ""}`}
         >
           <ChevronDownIcon
+            aria-hidden="true"
             className={`size-3.5 shrink-0 text-fg-subtle transition-transform ${open ? "rotate-180" : ""}`}
           />
           <span className="text-xs font-medium text-fg">
@@ -248,17 +261,39 @@ export function QueueSurface({ queue, composer, readOnly = false }: QueueSurface
             </span>
           ) : null}
           {!open && count > 0 ? (
-            <span className="min-w-0 flex-1 truncate text-xs text-fg-muted">
-              {queue.queue[0]?.prompt}
+            <span
+              aria-hidden="true"
+              className={`max-w-full truncate text-fg-muted ${
+                collapsedPreview.collapsedVisual === collapsedPreview.summary
+                  ? "min-w-0 flex-1 text-xs"
+                  : "shrink-0 text-[10px]"
+              }`}
+              data-testid="queue-collapsed-preview"
+              dir="auto"
+            >
+              {collapsedPreview.collapsedVisual}
             </span>
           ) : null}
           {queue.loading ? <Loader2Icon className="ml-auto size-3.5 animate-spin" /> : null}
         </button>
 
         {open && count > 0 && readOnly ? (
-          <ol className="divide-y divide-border border-t border-border" aria-label="Queued prompts">
+          <ol
+            className="max-h-[min(30rem,60dvh)] divide-y divide-border overflow-y-auto overscroll-contain border-t border-border"
+            aria-label="Queued prompts"
+            data-testid="queue-list"
+          >
             {queue.queue.map((turn, index) => (
-              <ReadOnlyQueueRow key={turn.id} turn={turn} index={index} />
+              <ReadOnlyQueueRow
+                key={turn.id}
+                turn={turn}
+                index={index}
+                onDisclosureChange={(expanded) =>
+                  setAnnouncement(
+                    `Full content for queued prompt ${index + 1} ${expanded ? "shown" : "hidden"}.`,
+                  )
+                }
+              />
             ))}
           </ol>
         ) : null}
@@ -277,8 +312,9 @@ export function QueueSurface({ queue, composer, readOnly = false }: QueueSurface
           >
             <SortableContext items={ids} strategy={verticalListSortingStrategy}>
               <ol
-                className="divide-y divide-border border-t border-border"
+                className="max-h-[min(30rem,60dvh)] divide-y divide-border overflow-y-auto overscroll-contain border-t border-border"
                 aria-label="Queued prompts"
+                data-testid="queue-list"
               >
                 {displayedQueue.map((turn, index) => (
                   <SortableQueueRow
@@ -314,14 +350,33 @@ export function QueueSurface({ queue, composer, readOnly = false }: QueueSurface
                         if (removed) focusAfterQueueRemoval(index);
                       });
                     }}
+                    onDisclosureChange={(expanded) =>
+                      setAnnouncement(
+                        `Full content for queued prompt ${index + 1} ${expanded ? "shown" : "hidden"}.`,
+                      )
+                    }
                   />
                 ))}
               </ol>
             </SortableContext>
             <DragOverlay modifiers={[verticalOnly]}>
               {draggedTurnId ? (
-                <div className="max-w-xl rounded-md border border-brand/40 bg-surface px-3 py-2 text-xs text-fg shadow-lg">
-                  {queue.queue.find((turn) => turn.id === draggedTurnId)?.prompt}
+                <div
+                  className="max-h-20 w-[min(36rem,calc(100vw-2rem))] max-w-[calc(100vw-2rem)] overflow-hidden rounded-md border border-brand/40 bg-surface px-3 py-2 text-xs text-fg shadow-lg"
+                  data-testid="queue-drag-overlay"
+                >
+                  <p
+                    aria-hidden="true"
+                    className="line-clamp-3 break-all whitespace-pre-wrap [unicode-bidi:plaintext]"
+                    dir="auto"
+                  >
+                    {
+                      queuePromptPreview(
+                        queue.queue.find((turn) => turn.id === draggedTurnId)?.prompt ?? "",
+                        QUEUE_ROW_PREVIEW_CHARACTERS,
+                      ).summary
+                    }
+                  </p>
                 </div>
               ) : null}
             </DragOverlay>
@@ -332,9 +387,16 @@ export function QueueSurface({ queue, composer, readOnly = false }: QueueSurface
           <div className="border-t border-border p-2">
             <div
               role="alert"
-              className="flex items-center gap-2 rounded-md bg-status-failed/10 px-2 py-1.5 text-xs text-status-failed"
+              className="flex min-w-0 max-w-full flex-wrap items-start gap-2 rounded-md bg-status-failed/10 px-2 py-1.5 text-xs text-status-failed"
             >
-              <span className="min-w-0 flex-1">
+              <span
+                role="region"
+                aria-label="Queue error details"
+                tabIndex={0}
+                className="max-h-[min(5rem,20dvh)] min-w-0 max-w-full flex-[1_1_5rem] overflow-auto overscroll-contain whitespace-pre-wrap rounded-sm outline-none [overflow-wrap:anywhere] [unicode-bidi:plaintext] focus-visible:ring-2 focus-visible:ring-ring/40"
+                data-testid="queue-error-message"
+                dir="auto"
+              >
                 {(queue.mutationError ?? queue.error)?.message}
               </span>
               <button
@@ -345,7 +407,7 @@ export function QueueSurface({ queue, composer, readOnly = false }: QueueSurface
                 }}
                 aria-label="Dismiss queue error and retry"
                 title="Retry loading the queue"
-                className="inline-flex size-7 items-center justify-center rounded-md outline-none transition-colors hover:bg-surface-3 focus-visible:ring-2 focus-visible:ring-ring/40 pointer-coarse:size-11"
+                className="ms-auto inline-flex size-7 shrink-0 items-center justify-center self-start rounded-md outline-none transition-colors hover:bg-surface-3 focus-visible:ring-2 focus-visible:ring-ring/40 motion-reduce:transition-none pointer-coarse:size-[44px]"
               >
                 <RotateCwIcon className="size-3.5" />
               </button>
@@ -360,25 +422,403 @@ export function QueueSurface({ queue, composer, readOnly = false }: QueueSurface
   );
 }
 
-function ReadOnlyQueueRow({ turn, index }: { turn: SessionTurn; index: number }) {
+const QUEUE_ROW_PREVIEW_CHARACTERS = 360;
+const QUEUE_COLLAPSED_PREVIEW_CHARACTERS = 180;
+const QUEUE_PREVIEW_GRAPHEME_CONTEXT_CHARACTERS = 32;
+const QUEUE_PREVIEW_REFERENCE_SAMPLE_CHARACTERS = 32;
+const QUEUE_VISIBLE_END_IDENTITY_CHARACTERS = 18;
+const QUEUE_PREVIEW_SEPARATOR = " … ";
+const queuePreviewSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+const queuePromptNonRenderingCodePoint =
+  /[\p{White_Space}\p{Control}\p{Default_Ignorable_Code_Point}]/u;
+
+type BoundedPromptSample = {
+  value: string;
+  characters: number;
+  truncated: boolean;
+};
+
+type QueuePromptPreview = {
+  summary: string;
+  collapsedVisual: string;
+  visibleStart: string;
+  visibleIdentity: string | null;
+  visibleIdentityLabel: "End" | "Safe boundary" | null;
+  isFallback: boolean;
+};
+
+/**
+ * Build a bounded head/tail summary of an arbitrary queued prompt. Sampling
+ * both ends distinguishes prompts with equal long prefixes. Each sampled edge
+ * has a small amount of grapheme context so ordinary emoji/combining sequences
+ * can be retained whole. A cluster that exceeds that context is omitted rather
+ * than fragmented, and malformed UTF-16 is replaced only in the summary. The
+ * durable prompt remains exact and no operation scans or copies it in full.
+ */
+function queuePromptPreview(prompt: string, maxCharacters: number): QueuePromptPreview {
+  const wholePromptProbe = samplePromptStart(prompt, maxCharacters + 1);
+  if (!wholePromptProbe.truncated && wholePromptProbe.characters <= maxCharacters) {
+    const summary = replaceLoneSurrogates(wholePromptProbe.value);
+    return hasVisiblePromptContent(summary)
+      ? {
+          summary,
+          collapsedVisual: summary,
+          visibleStart: summary,
+          visibleIdentity: null,
+          visibleIdentityLabel: null,
+          isFallback: false,
+        }
+      : fallbackPromptPreview(prompt.length, wholePromptProbe.value, wholePromptProbe.value);
+  }
+
+  const suffixCharacters = Math.min(Math.floor(maxCharacters / 3), 120);
+  const prefixCharacters =
+    maxCharacters - codePointLength(QUEUE_PREVIEW_SEPARATOR) - suffixCharacters;
+  const prefixSample = samplePromptStart(
+    prompt,
+    prefixCharacters + QUEUE_PREVIEW_GRAPHEME_CONTEXT_CHARACTERS,
+  );
+  const suffixSample = samplePromptEnd(
+    prompt,
+    suffixCharacters + QUEUE_PREVIEW_GRAPHEME_CONTEXT_CHARACTERS,
+  );
+  const prefixSegments = segmentPromptSample(prefixSample.value);
+  const suffixSegments = segmentPromptSample(suffixSample.value);
+
+  // A cluster at a truncated sampling edge may continue outside the sample.
+  // Prefix sampling starts at the true source start, so only its last segment
+  // is ambiguous. Suffix sampling ends at the true source end, so its first is.
+  if (prefixSample.truncated) prefixSegments.pop();
+  if (suffixSample.truncated) {
+    let ambiguousSegment = suffixSegments.shift();
+    // A locally segmented leading fragment ending in ZWJ can join the next
+    // pictographic segment when omitted left context supplies its base. Keep
+    // backing off until that uncertainty no longer propagates to the right.
+    while (ambiguousSegment?.endsWith("\u200d") && suffixSegments.length > 0) {
+      ambiguousSegment = suffixSegments.shift();
+    }
+    // Regional Indicator pairing depends on the parity of the preceding run.
+    // If that run reaches the unknown sample boundary, omit all of its visible
+    // leading segments rather than potentially recombining halves of flags.
+    while (suffixSegments[0] && startsWithRegionalIndicator(suffixSegments[0])) {
+      suffixSegments.shift();
+    }
+  }
+
+  const prefix = takeWholeGraphemesFromStart(prefixSegments, prefixCharacters);
+  const suffix = takeWholeGraphemesFromEnd(suffixSegments, suffixCharacters);
+  const reference = boundedPromptSampleReference(
+    prompt.length,
+    prefixSample.value,
+    suffixSample.value,
+  );
+
+  if (!hasVisiblePromptContent(prefix) && !hasVisiblePromptContent(suffix)) {
+    return fallbackPromptPreview(prompt.length, prefixSample.value, suffixSample.value);
+  }
+
+  const safeSuffix = hasVisiblePromptContent(suffix)
+    ? suffix
+    : promptPreviewFallbackLabel(reference);
+  const summary = `${prefix}${QUEUE_PREVIEW_SEPARATOR}${safeSuffix}`;
+  if (!hasVisiblePromptContent(prefix)) {
+    return {
+      summary,
+      collapsedVisual: summary,
+      visibleStart: safeSuffix,
+      visibleIdentity: null,
+      visibleIdentityLabel: null,
+      isFallback: false,
+    };
+  }
+
+  const endIdentity = takeWholeGraphemesFromEnd(
+    suffixSegments,
+    QUEUE_VISIBLE_END_IDENTITY_CHARACTERS,
+  );
+  return {
+    summary,
+    collapsedVisual: summary,
+    visibleStart: prefix,
+    visibleIdentity: hasVisiblePromptContent(endIdentity) ? endIdentity : `ref ${reference}`,
+    visibleIdentityLabel: hasVisiblePromptContent(endIdentity) ? "End" : "Safe boundary",
+    isFallback: false,
+  };
+}
+
+function fallbackPromptPreview(
+  promptLength: number,
+  startSample: string,
+  endSample: string,
+): QueuePromptPreview {
+  const reference = boundedPromptSampleReference(promptLength, startSample, endSample);
+  const summary = promptPreviewFallbackLabel(reference);
+  return {
+    summary,
+    collapsedVisual: `Omitted · ${reference}`,
+    // The complete fallback remains the canonical accessible summary. Narrow
+    // collapsed/row layouts paint the bounded reference in a compact truthful
+    // form so ellipsis cannot hide the only identifying portion.
+    visibleStart: `Omitted · ${reference}`,
+    visibleIdentity: null,
+    visibleIdentityLabel: null,
+    isFallback: true,
+  };
+}
+
+function promptPreviewFallbackLabel(reference: string): string {
+  return `Content omitted at safe boundary · ref ${reference}`;
+}
+
+function boundedPromptSampleReference(
+  promptLength: number,
+  startSample: string,
+  endSample: string,
+): string {
+  const head = samplePromptStart(startSample, QUEUE_PREVIEW_REFERENCE_SAMPLE_CHARACTERS).value;
+  const tail = samplePromptEnd(endSample, QUEUE_PREVIEW_REFERENCE_SAMPLE_CHARACTERS).value;
+  let hash = 0x811c9dc5;
+  for (const value of [String(promptLength), head, tail]) {
+    for (let index = 0; index < value.length; index += 1) {
+      hash ^= value.charCodeAt(index);
+      hash = Math.imul(hash, 0x01000193);
+    }
+    hash ^= 0xffff;
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0").toUpperCase();
+}
+
+function hasVisiblePromptContent(value: string): boolean {
+  // Callers pass only the already-bounded whole/head/tail preview samples.
+  // Default-ignorables and controls can survive trim() while painting no row
+  // identity at all (for example ZWJ, VS16, bidi controls, and tag characters).
+  for (const character of value) {
+    if (!queuePromptNonRenderingCodePoint.test(character)) return true;
+  }
+  return false;
+}
+
+function samplePromptStart(prompt: string, maxCharacters: number): BoundedPromptSample {
+  let end = 0;
+  let characters = 0;
+  while (end < prompt.length && characters < maxCharacters) {
+    const first = prompt.charCodeAt(end);
+    end +=
+      isHighSurrogate(first) &&
+      end + 1 < prompt.length &&
+      isLowSurrogate(prompt.charCodeAt(end + 1))
+        ? 2
+        : 1;
+    characters += 1;
+  }
+  return { value: prompt.slice(0, end), characters, truncated: end < prompt.length };
+}
+
+function samplePromptEnd(prompt: string, maxCharacters: number): BoundedPromptSample {
+  let start = prompt.length;
+  let characters = 0;
+  while (start > 0 && characters < maxCharacters) {
+    start -= 1;
+    if (
+      isLowSurrogate(prompt.charCodeAt(start)) &&
+      start > 0 &&
+      isHighSurrogate(prompt.charCodeAt(start - 1))
+    ) {
+      start -= 1;
+    }
+    characters += 1;
+  }
+  return { value: prompt.slice(start), characters, truncated: start > 0 };
+}
+
+function segmentPromptSample(sample: string): string[] {
+  return Array.from(
+    queuePreviewSegmenter.segment(replaceLoneSurrogates(sample)),
+    ({ segment }) => segment,
+  );
+}
+
+function replaceLoneSurrogates(value: string): string {
+  let sanitized = "";
+  for (let index = 0; index < value.length; index += 1) {
+    const current = value.charCodeAt(index);
+    if (
+      isHighSurrogate(current) &&
+      index + 1 < value.length &&
+      isLowSurrogate(value.charCodeAt(index + 1))
+    ) {
+      sanitized += value.slice(index, index + 2);
+      index += 1;
+    } else if (isHighSurrogate(current) || isLowSurrogate(current)) {
+      sanitized += "�";
+    } else {
+      sanitized += value[index];
+    }
+  }
+  return sanitized;
+}
+
+function takeWholeGraphemesFromStart(segments: string[], maxCharacters: number): string {
+  const selected: string[] = [];
+  let characters = 0;
+  for (const segment of segments) {
+    const segmentCharacters = codePointLength(segment);
+    if (characters + segmentCharacters > maxCharacters) break;
+    selected.push(segment);
+    characters += segmentCharacters;
+  }
+  while (selected.at(-1)?.trim().length === 0) selected.pop();
+  return selected.join("");
+}
+
+function takeWholeGraphemesFromEnd(segments: string[], maxCharacters: number): string {
+  const selected: string[] = [];
+  let characters = 0;
+  for (let index = segments.length - 1; index >= 0; index -= 1) {
+    const segment = segments[index];
+    if (!segment) continue;
+    const segmentCharacters = codePointLength(segment);
+    if (characters + segmentCharacters > maxCharacters) break;
+    selected.unshift(segment);
+    characters += segmentCharacters;
+  }
+  while (selected[0]?.trim().length === 0) selected.shift();
+  while (selected.at(-1)?.trim().length === 0) selected.pop();
+  return selected.join("");
+}
+
+function codePointLength(value: string): number {
+  let characters = 0;
+  for (const _character of value) characters += 1;
+  return characters;
+}
+
+function startsWithRegionalIndicator(value: string): boolean {
+  const codePoint = value.codePointAt(0);
+  return codePoint !== undefined && codePoint >= 0x1f1e6 && codePoint <= 0x1f1ff;
+}
+
+function isHighSurrogate(codeUnit: number): boolean {
+  return codeUnit >= 0xd800 && codeUnit <= 0xdbff;
+}
+
+function isLowSurrogate(codeUnit: number): boolean {
+  return codeUnit >= 0xdc00 && codeUnit <= 0xdfff;
+}
+
+function QueuePrompt({
+  prompt,
+  index,
+  onDisclosureChange,
+}: {
+  prompt: string;
+  index: number;
+  onDisclosureChange: (expanded: boolean) => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const fullContentId = useId();
+  const preview = useMemo(() => queuePromptPreview(prompt, QUEUE_ROW_PREVIEW_CHARACTERS), [prompt]);
+
+  return (
+    <div className="w-full min-w-0 max-w-full">
+      <div
+        aria-label={`Queued prompt ${index + 1} summary: ${preview.summary}`}
+        className="max-w-full overflow-hidden text-xs leading-5 text-fg"
+        data-testid={`queue-prompt-preview-${index + 1}`}
+        dir="auto"
+        role="note"
+      >
+        <span aria-hidden="true" className="flex min-w-0 max-w-full items-baseline gap-2 sm:block">
+          <span
+            className={`${preview.isFallback ? "" : "line-clamp-1 sm:line-clamp-2"} min-w-0 flex-1 whitespace-pre-wrap break-all [unicode-bidi:plaintext]`}
+            data-testid={`queue-prompt-start-${index + 1}`}
+            dir="auto"
+          >
+            {preview.visibleStart}
+          </span>
+          {preview.visibleIdentity && preview.visibleIdentityLabel ? (
+            <span
+              className="flex min-w-0 max-w-[70%] shrink-0 items-center gap-1 text-2xs leading-4 text-fg-muted sm:mt-0.5 sm:max-w-full"
+              data-testid={`queue-prompt-identity-row-${index + 1}`}
+            >
+              <span className="shrink-0 font-medium text-fg-subtle">
+                {preview.visibleIdentityLabel}
+              </span>
+              <span
+                className="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap font-mono [unicode-bidi:plaintext]"
+                data-testid={`queue-prompt-identity-${index + 1}`}
+                dir="auto"
+              >
+                {preview.visibleIdentity}
+              </span>
+            </span>
+          ) : null}
+        </span>
+      </div>
+      <button
+        type="button"
+        aria-controls={fullContentId}
+        aria-expanded={expanded}
+        aria-label={`${expanded ? "Hide" : "Show"} full content for queued prompt ${index + 1}`}
+        className="mt-1 inline-flex min-h-7 min-w-0 max-w-full items-center gap-1 whitespace-normal rounded-md text-left text-2xs font-medium text-fg-muted outline-none transition-colors hover:text-fg focus-visible:ring-2 focus-visible:ring-ring/40 pointer-coarse:min-h-[44px]"
+        data-testid={`queue-prompt-disclosure-${index + 1}`}
+        onClick={() => {
+          const next = !expanded;
+          setExpanded(next);
+          onDisclosureChange(next);
+        }}
+      >
+        <ChevronDownIcon
+          aria-hidden="true"
+          className={`size-3 shrink-0 transition-transform ${expanded ? "rotate-180" : ""}`}
+        />
+        {expanded ? "Hide full prompt" : "View full prompt"}
+      </button>
+      {expanded ? (
+        <pre
+          id={fullContentId}
+          role="region"
+          aria-label={`Full content for queued prompt ${index + 1}`}
+          className="mt-1.5 max-h-64 w-full min-w-0 max-w-full overflow-auto overscroll-contain rounded-md border border-border bg-surface-2/60 p-2 whitespace-pre-wrap break-all font-mono text-xs leading-5 text-fg [unicode-bidi:plaintext]"
+          data-testid={`queue-prompt-full-${index + 1}`}
+          dir="auto"
+          tabIndex={0}
+        >
+          {prompt}
+        </pre>
+      ) : null}
+    </div>
+  );
+}
+
+function ReadOnlyQueueRow({
+  turn,
+  index,
+  onDisclosureChange,
+}: {
+  turn: SessionTurn;
+  index: number;
+  onDisclosureChange: (expanded: boolean) => void;
+}) {
   return (
     <li className="flex min-w-0 items-start gap-2 bg-surface px-3 py-2">
       <span className="mt-1 shrink-0 font-mono text-2xs text-fg-subtle">{index + 1}</span>
       <div className="min-w-0 flex-1">
-        <p className="whitespace-pre-wrap break-words text-xs leading-5 text-fg">{turn.prompt}</p>
-        <div className="mt-1 flex flex-wrap gap-x-2 gap-y-0.5 text-2xs text-fg-subtle">
+        <QueuePrompt prompt={turn.prompt} index={index} onDisclosureChange={onDisclosureChange} />
+        <div className="mt-1 flex min-w-0 items-center gap-2 overflow-hidden whitespace-nowrap text-2xs text-fg-subtle">
           {turn.resources.length > 0 ? (
-            <span>
+            <span className="shrink-0">
               {turn.resources.length} resource{turn.resources.length === 1 ? "" : "s"}
             </span>
           ) : null}
           {turn.tools.length > 0 ? (
-            <span>
+            <span className="shrink-0">
               {turn.tools.length} tool{turn.tools.length === 1 ? "" : "s"}
             </span>
           ) : null}
-          <span>{turn.model}</span>
-          <span>{turn.reasoningEffort}</span>
+          <span className="min-w-0 truncate">{turn.model}</span>
+          <span className="shrink-0">{turn.reasoningEffort}</span>
         </div>
       </div>
     </li>
@@ -399,6 +839,7 @@ function SortableQueueRow({
   onCancelReplace,
   onSteer,
   onDelete,
+  onDisclosureChange,
 }: {
   turn: SessionTurn;
   index: number;
@@ -413,6 +854,7 @@ function SortableQueueRow({
   onCancelReplace: () => void;
   onSteer: () => void;
   onDelete: () => void;
+  onDisclosureChange: (expanded: boolean) => void;
 }) {
   const sortable = useSortable({
     id: turn.id,
@@ -428,7 +870,7 @@ function SortableQueueRow({
       }}
       className={`bg-surface ${sortable.isDragging || keyboardDragging ? "relative z-10 shadow-lg ring-1 ring-brand/40" : ""}`}
     >
-      <div className="flex min-w-0 items-start gap-1.5 px-2 py-2 sm:gap-2 sm:px-3">
+      <div className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-start gap-x-1.5 px-2 py-1.5 sm:grid-cols-[auto_auto_minmax(0,1fr)_auto] sm:gap-x-2 sm:px-3 sm:py-2">
         <button
           data-queue-handle
           ref={sortable.setActivatorNodeRef}
@@ -437,118 +879,123 @@ function SortableQueueRow({
           {...sortable.listeners}
           onKeyDown={onHandleKeyDown}
           disabled={pending !== null}
-          className="mt-0.5 inline-flex size-7 shrink-0 touch-none items-center justify-center rounded-md text-fg-subtle hover:bg-surface-2 hover:text-fg focus-visible:ring-2 focus-visible:ring-ring/40 pointer-coarse:size-11"
+          className="col-start-1 row-start-1 mt-0.5 inline-flex size-7 shrink-0 touch-none items-center justify-center rounded-md text-fg-subtle hover:bg-surface-2 hover:text-fg focus-visible:ring-2 focus-visible:ring-ring/40 pointer-coarse:size-[44px]"
           aria-label={`Reorder queued prompt ${index + 1}`}
           title="Drag to reorder. Press Space, arrows, then Space to drop."
         >
           <GripVerticalIcon className="size-3.5" />
         </button>
-        <span className="mt-1 shrink-0 font-mono text-2xs text-fg-subtle">{index + 1}</span>
-        <div className="min-w-0 flex-1">
-          <p className="whitespace-pre-wrap break-words text-xs leading-5 text-fg">{turn.prompt}</p>
-          <div className="mt-1 flex flex-wrap gap-x-2 gap-y-0.5 text-2xs text-fg-subtle">
+        <span className="col-start-2 row-start-1 mt-1 shrink-0 font-mono text-2xs text-fg-subtle">
+          {index + 1}
+        </span>
+        <div className="col-span-full row-start-2 min-w-0 sm:col-span-1 sm:col-start-3 sm:row-start-1">
+          <QueuePrompt prompt={turn.prompt} index={index} onDisclosureChange={onDisclosureChange} />
+          <div className="mt-1 flex min-w-0 items-center gap-2 overflow-hidden whitespace-nowrap text-2xs text-fg-subtle">
             {turn.resources.length > 0 ? (
-              <span>
+              <span className="shrink-0">
                 {turn.resources.length} resource{turn.resources.length === 1 ? "" : "s"}
               </span>
             ) : null}
             {turn.tools.length > 0 ? (
-              <span>
+              <span className="shrink-0">
                 {turn.tools.length} tool{turn.tools.length === 1 ? "" : "s"}
               </span>
             ) : null}
-            <span>{turn.model}</span>
-            <span>{turn.reasoningEffort}</span>
+            <span className="min-w-0 truncate">{turn.model}</span>
+            <span className="shrink-0">{turn.reasoningEffort}</span>
           </div>
         </div>
-        <button
-          type="button"
-          disabled={pending !== null}
-          onClick={onSteer}
-          aria-label={`Steer queued prompt ${index + 1}`}
-          title="Make this the next direction"
-          className="inline-flex h-7 shrink-0 items-center justify-center gap-1 rounded-md px-2 text-xs font-medium outline-none transition-colors hover:bg-surface-2 focus-visible:ring-2 focus-visible:ring-ring/40 disabled:pointer-events-none disabled:opacity-50 pointer-coarse:min-h-11"
-        >
-          {pending === "steer" ? (
-            <Loader2Icon className="size-3.5 animate-spin" />
-          ) : (
-            <ZapIcon className="size-3.5" />
-          )}
-          <span className="hidden sm:inline">Steer</span>
-        </button>
-        <button
-          type="button"
-          disabled={pending !== null}
-          onClick={onDelete}
-          aria-label={`Delete queued prompt ${index + 1}`}
-          title="Delete this queued prompt"
-          className="inline-flex size-7 shrink-0 items-center justify-center rounded-md outline-none transition-colors hover:bg-surface-2 hover:text-status-failed focus-visible:ring-2 focus-visible:ring-ring/40 disabled:pointer-events-none disabled:opacity-50 pointer-coarse:size-11"
-        >
-          {pending === "delete" ? (
-            <Loader2Icon className="size-3.5 animate-spin" />
-          ) : (
-            <Trash2Icon className="size-3.5" />
-          )}
-        </button>
-        <DropdownMenu.Root>
-          <DropdownMenu.Trigger asChild>
-            <button
-              type="button"
-              disabled={pending !== null}
-              aria-label={`More actions for queued prompt ${index + 1}`}
-              className="inline-flex size-7 shrink-0 items-center justify-center rounded-md outline-none transition-colors hover:bg-surface-2 focus-visible:ring-2 focus-visible:ring-ring/40 disabled:pointer-events-none disabled:opacity-50 pointer-coarse:size-11"
-            >
-              {pending && pending !== "steer" && pending !== "delete" ? (
-                <Loader2Icon className="size-3.5 animate-spin" />
-              ) : (
-                <EllipsisIcon className="size-3.5" />
-              )}
-            </button>
-          </DropdownMenu.Trigger>
-          <DropdownMenu.Portal>
-            <DropdownMenu.Content
-              align="end"
-              sideOffset={4}
-              className="z-50 w-48 rounded-md border border-border bg-surface p-1 text-xs text-fg shadow-lg"
-            >
-              <DropdownMenu.Item
-                className="flex cursor-default items-center gap-2 rounded-sm px-2 py-1.5 outline-none focus:bg-surface-2"
-                onSelect={onEdit}
+        <div className="col-span-full row-start-3 flex min-w-0 items-start justify-end gap-1.5 sm:col-span-1 sm:col-start-4 sm:row-start-1 sm:gap-2">
+          <button
+            type="button"
+            disabled={pending !== null}
+            onClick={onSteer}
+            aria-label={`Steer queued prompt ${index + 1}`}
+            title="Make this the next direction"
+            className="inline-flex h-7 shrink-0 items-center justify-center gap-1 rounded-md px-2 text-xs font-medium outline-none transition-colors hover:bg-surface-2 focus-visible:ring-2 focus-visible:ring-ring/40 disabled:pointer-events-none disabled:opacity-50 pointer-coarse:min-h-[44px] pointer-coarse:min-w-[44px]"
+          >
+            {pending === "steer" ? (
+              <Loader2Icon className="size-3.5 animate-spin" />
+            ) : (
+              <ZapIcon className="size-3.5" />
+            )}
+            <span className="hidden sm:inline">Steer</span>
+          </button>
+          <button
+            type="button"
+            disabled={pending !== null}
+            onClick={onDelete}
+            aria-label={`Delete queued prompt ${index + 1}`}
+            title="Delete this queued prompt"
+            className="inline-flex size-7 shrink-0 items-center justify-center rounded-md outline-none transition-colors hover:bg-surface-2 hover:text-status-failed focus-visible:ring-2 focus-visible:ring-ring/40 disabled:pointer-events-none disabled:opacity-50 pointer-coarse:size-[44px]"
+          >
+            {pending === "delete" ? (
+              <Loader2Icon className="size-3.5 animate-spin" />
+            ) : (
+              <Trash2Icon className="size-3.5" />
+            )}
+          </button>
+          <DropdownMenu.Root>
+            <DropdownMenu.Trigger asChild>
+              <button
+                type="button"
+                disabled={pending !== null}
+                aria-label={`More actions for queued prompt ${index + 1}`}
+                className="inline-flex size-7 shrink-0 items-center justify-center rounded-md outline-none transition-colors hover:bg-surface-2 focus-visible:ring-2 focus-visible:ring-ring/40 disabled:pointer-events-none disabled:opacity-50 pointer-coarse:size-[44px]"
               >
-                <PencilIcon className="size-3.5" /> Edit in composer
-              </DropdownMenu.Item>
-              <DropdownMenu.Separator className="my-1 h-px bg-border" />
-              <DropdownMenu.Item
-                className="flex cursor-default items-center gap-2 rounded-sm px-2 py-1.5 outline-none focus:bg-surface-2 data-[disabled]:opacity-50"
-                disabled={index === 0}
-                onSelect={() => onMove(0)}
+                {pending && pending !== "steer" && pending !== "delete" ? (
+                  <Loader2Icon className="size-3.5 animate-spin" />
+                ) : (
+                  <EllipsisIcon className="size-3.5" />
+                )}
+              </button>
+            </DropdownMenu.Trigger>
+            <DropdownMenu.Portal>
+              <DropdownMenu.Content
+                align="end"
+                sideOffset={4}
+                className="z-50 w-48 max-w-[calc(100vw-16px)] rounded-md border border-border bg-surface p-1 text-xs text-fg shadow-lg"
+                data-testid={`queue-actions-menu-${index + 1}`}
               >
-                <ArrowUpToLineIcon className="size-3.5" /> Move to top
-              </DropdownMenu.Item>
-              <DropdownMenu.Item
-                className="flex cursor-default items-center gap-2 rounded-sm px-2 py-1.5 outline-none focus:bg-surface-2 data-[disabled]:opacity-50"
-                disabled={index === 0}
-                onSelect={() => onMove(index - 1)}
-              >
-                Move up
-              </DropdownMenu.Item>
-              <DropdownMenu.Item
-                className="flex cursor-default items-center gap-2 rounded-sm px-2 py-1.5 outline-none focus:bg-surface-2 data-[disabled]:opacity-50"
-                disabled={index === count - 1}
-                onSelect={() => onMove(index + 1)}
-              >
-                Move down
-              </DropdownMenu.Item>
-              <DropdownMenu.Item
-                className="flex cursor-default items-center gap-2 rounded-sm px-2 py-1.5 outline-none focus:bg-surface-2 data-[disabled]:opacity-50"
-                disabled={index === count - 1}
-                onSelect={() => onMove(count - 1)}
-              >
-                <ArrowDownToLineIcon className="size-3.5" /> Move to bottom
-              </DropdownMenu.Item>
-            </DropdownMenu.Content>
-          </DropdownMenu.Portal>
-        </DropdownMenu.Root>
+                <DropdownMenu.Item
+                  className="flex min-w-0 cursor-default items-center gap-2 whitespace-normal break-words rounded-sm px-2 py-1.5 outline-none focus:bg-surface-2 pointer-coarse:min-h-[44px]"
+                  onSelect={onEdit}
+                >
+                  <PencilIcon className="size-3.5" /> Edit in composer
+                </DropdownMenu.Item>
+                <DropdownMenu.Separator className="my-1 h-px bg-border" />
+                <DropdownMenu.Item
+                  className="flex min-w-0 cursor-default items-center gap-2 whitespace-normal break-words rounded-sm px-2 py-1.5 outline-none focus:bg-surface-2 data-[disabled]:opacity-50 pointer-coarse:min-h-[44px]"
+                  disabled={index === 0}
+                  onSelect={() => onMove(0)}
+                >
+                  <ArrowUpToLineIcon className="size-3.5" /> Move to top
+                </DropdownMenu.Item>
+                <DropdownMenu.Item
+                  className="flex min-w-0 cursor-default items-center gap-2 whitespace-normal break-words rounded-sm px-2 py-1.5 outline-none focus:bg-surface-2 data-[disabled]:opacity-50 pointer-coarse:min-h-[44px]"
+                  disabled={index === 0}
+                  onSelect={() => onMove(index - 1)}
+                >
+                  Move up
+                </DropdownMenu.Item>
+                <DropdownMenu.Item
+                  className="flex min-w-0 cursor-default items-center gap-2 whitespace-normal break-words rounded-sm px-2 py-1.5 outline-none focus:bg-surface-2 data-[disabled]:opacity-50 pointer-coarse:min-h-[44px]"
+                  disabled={index === count - 1}
+                  onSelect={() => onMove(index + 1)}
+                >
+                  Move down
+                </DropdownMenu.Item>
+                <DropdownMenu.Item
+                  className="flex min-w-0 cursor-default items-center gap-2 whitespace-normal break-words rounded-sm px-2 py-1.5 outline-none focus:bg-surface-2 data-[disabled]:opacity-50 pointer-coarse:min-h-[44px]"
+                  disabled={index === count - 1}
+                  onSelect={() => onMove(count - 1)}
+                >
+                  <ArrowDownToLineIcon className="size-3.5" /> Move to bottom
+                </DropdownMenu.Item>
+              </DropdownMenu.Content>
+            </DropdownMenu.Portal>
+          </DropdownMenu.Root>
+        </div>
       </div>
       {confirmingReplace ? (
         <div className="mx-3 mb-2 rounded-md border border-status-waiting/30 bg-status-waiting/10 p-2 text-xs text-fg">
