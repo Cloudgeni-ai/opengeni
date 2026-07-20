@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { lstatSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, isAbsolute, join, relative } from "node:path";
+import { TextDecoder } from "node:util";
 import { fileURLToPath } from "node:url";
 
 /**
@@ -18,6 +19,7 @@ export type SkillLibraryEntry = Readonly<{
   description: string;
   category: string;
   tags: readonly string[];
+  /** SHA-256 over the complete canonical artifact manifest, not just SKILL.md. */
   contentSha256: string;
   sourceCommit: string;
   sourceUrl: string;
@@ -40,6 +42,12 @@ export type SkillLibraryFile = Readonly<{
   content: string;
 }>;
 
+export type SkillLibraryArtifact = Readonly<{
+  files: readonly SkillLibraryFile[];
+  /** SHA-256 over the complete canonical artifact manifest, not just SKILL.md. */
+  contentSha256: string;
+}>;
+
 export type SkillLibrarySkill = Readonly<{
   name: string;
   description: string;
@@ -55,10 +63,10 @@ const skillLibraryEntries: readonly SkillLibraryEntry[] = Object.freeze([
       "Azure Verified Modules (AVM) requirements and best practices for certified Terraform modules.",
     category: "infrastructure",
     tags: Object.freeze(["skill", "infrastructure", "terraform", "azure", "opt-in"]),
-    contentSha256: "f17d1e7d909797042d71ae1ccfee04a2f5a3d96f4972db8ca005f1173cd40564",
+    contentSha256: "bbc029412fd4893c35cf2a4df6e052efa5583d57d3c26e35d62869dcf4625699",
     sourceCommit: "de4323afdfbc30d1387f287b55062fa8d82b62e8",
     sourceUrl:
-      "https://github.com/hashicorp/agent-skills/tree/de4323afdfbc30d1387f287b55062fa8d82b62e8/terraform/module-generation/skills/azure-verified-modules",
+      "https://github.com/hashicorp/agent-skills/tree/de4323afdfbc30d1387f287b55062fa8d82b62e8/terraform/code-generation/skills/azure-verified-modules",
     provenance: "Vendored from hashicorp/agent-skills; reviewed OpenGeni curated entry.",
     license: "MPL-2.0",
     documentationUrl: "https://azure.github.io/Azure-Verified-Modules/",
@@ -83,7 +91,7 @@ const skillLibraryRootCandidates = (): string[] => {
 };
 
 function skillLibraryRoot(): string | null {
-  return skillLibraryRootCandidates().find((candidate) => existsSync(candidate)) ?? null;
+  return skillLibraryRootCandidates().find((candidate) => isRealDirectory(candidate)) ?? null;
 }
 
 function entryDirectory(entry: SkillLibraryEntry): string | null {
@@ -95,7 +103,7 @@ function entryDirectory(entry: SkillLibraryEntry): string | null {
     isAbsolute(withinRoot) ||
     withinRoot === ".." ||
     withinRoot.startsWith("../") ||
-    !existsSync(join(directory, "SKILL.md"))
+    !isRealDirectory(directory)
   ) {
     return null;
   }
@@ -141,16 +149,11 @@ export function loadSkillLibrarySkill(
   if (!directory) {
     throw new Error(`Skill library entry is unavailable: ${entry.id}@${entry.version}`);
   }
-  const files = readSkillFiles(directory);
+  const artifact = verifySkillLibraryArtifact(directory, entry.contentSha256, entry);
+  const files = artifact.files;
   const skillMarkdown = files.find((file) => file.path === "SKILL.md")?.content;
   if (skillMarkdown === undefined) {
     throw new Error(`Skill library entry is missing SKILL.md: ${entry.id}@${entry.version}`);
-  }
-  const actualHash = createHash("sha256").update(skillMarkdown, "utf8").digest("hex");
-  if (actualHash !== entry.contentSha256) {
-    throw new Error(
-      `Skill library content hash mismatch for ${entry.id}@${entry.version}: expected ${entry.contentSha256}, got ${actualHash}`,
-    );
   }
   return {
     entry,
@@ -162,19 +165,82 @@ export function loadSkillLibrarySkill(
   };
 }
 
-function readSkillFiles(root: string, current = ""): SkillLibraryFile[] {
+/**
+ * Read a curated artifact and calculate its canonical whole-artifact digest.
+ *
+ * The manifest is JSON encoded as sorted `[normalizedRelativePath, base64Bytes]`
+ * tuples. Base64 preserves every byte, including bytes that would not survive
+ * a lossy UTF-8 string round-trip. Files are decoded only after the digest
+ * input has been captured because the SDK skill surface is text-based.
+ */
+export function readSkillLibraryArtifact(root: string): SkillLibraryArtifact {
+  const files = materializeSkillLibraryFiles(root);
+  const contentSha256 = skillLibraryArtifactSha256(files);
+  return Object.freeze({
+    files: Object.freeze(
+      files.map((file) =>
+        Object.freeze({
+          path: file.path,
+          content: decodeSkillLibraryFile(file.bytes, file.path),
+        }),
+      ),
+    ),
+    contentSha256,
+  });
+}
+
+/** Verify a reviewed artifact against its immutable catalog digest. */
+export function verifySkillLibraryArtifact(
+  root: string,
+  expectedSha256: string,
+  entry?: Pick<SkillLibraryEntry, "id" | "version">,
+): SkillLibraryArtifact {
+  const artifact = readSkillLibraryArtifact(root);
+  if (artifact.files.every((file) => file.path !== "SKILL.md")) {
+    throw new Error(
+      entry
+        ? `Skill library entry is missing SKILL.md: ${entry.id}@${entry.version}`
+        : "Skill library artifact is missing SKILL.md",
+    );
+  }
+  if (artifact.contentSha256 !== expectedSha256) {
+    const label = entry ? ` for ${entry.id}@${entry.version}` : "";
+    throw new Error(
+      `Skill library artifact hash mismatch${label}: expected ${expectedSha256}, got ${artifact.contentSha256}`,
+    );
+  }
+  return artifact;
+}
+
+type MaterializedSkillLibraryFile = Readonly<{
+  path: string;
+  bytes: Uint8Array;
+}>;
+
+const utf8Decoder = new TextDecoder("utf-8", { fatal: true });
+
+function materializeSkillLibraryFiles(root: string, current = ""): MaterializedSkillLibraryFile[] {
   const directory = current ? join(root, current) : root;
+  if (!isRealDirectory(directory)) {
+    throw new Error(`Skill library artifact root is not a real directory: ${directory}`);
+  }
   return readdirSync(directory, { withFileTypes: true })
-    .sort((a, b) => a.name.localeCompare(b.name))
+    .sort((a, b) => compareCanonicalPath(a.name, b.name))
     .flatMap((child) => {
-      const path = current ? `${current}/${child.name}` : child.name;
+      const childName = normalizeSkillLibraryRelativePath(child.name, true);
+      const path = current ? `${current}/${childName}` : childName;
+      normalizeSkillLibraryRelativePath(path);
+      const childPath = join(root, path);
+      if (child.isSymbolicLink()) {
+        throw new Error(`Skill library artifact contains a symbolic link: ${path}`);
+      }
       if (child.isDirectory()) {
-        return readSkillFiles(root, path);
+        return materializeSkillLibraryFiles(root, path);
       }
-      if (!child.isFile()) {
-        return [];
+      if (!child.isFile() || !isRealFile(childPath)) {
+        throw new Error(`Skill library artifact contains a non-regular file: ${path}`);
       }
-      return [{ path, content: readFileSync(join(root, path), "utf8") }];
+      return [{ path, bytes: Uint8Array.from(readFileSync(childPath)) }];
     });
 }
 
@@ -182,8 +248,75 @@ function reviewedArtifactIsAvailable(entry: SkillLibraryEntry): boolean {
   const directory = entryDirectory(entry);
   if (!directory) return false;
   try {
-    const skillMarkdown = readFileSync(join(directory, "SKILL.md"), "utf8");
-    return createHash("sha256").update(skillMarkdown, "utf8").digest("hex") === entry.contentSha256;
+    verifySkillLibraryArtifact(directory, entry.contentSha256, entry);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function skillLibraryArtifactSha256(files: readonly MaterializedSkillLibraryFile[]): string {
+  const manifest = files
+    .map((file) => {
+      const path = normalizeSkillLibraryRelativePath(file.path);
+      return [path, Buffer.from(file.bytes).toString("base64")] as const;
+    })
+    .sort((left, right) => compareCanonicalPath(left[0], right[0]));
+  const paths = new Set<string>();
+  for (const [path] of manifest) {
+    if (paths.has(path)) {
+      throw new Error(`Skill library artifact contains duplicate file path: ${path}`);
+    }
+    paths.add(path);
+  }
+  return createHash("sha256").update(JSON.stringify(manifest), "utf8").digest("hex");
+}
+
+function decodeSkillLibraryFile(bytes: Uint8Array, path: string): string {
+  try {
+    return utf8Decoder.decode(bytes);
+  } catch {
+    throw new Error(`Skill library artifact contains invalid UTF-8: ${path}`);
+  }
+}
+
+function normalizeSkillLibraryRelativePath(path: string, segment = false): string {
+  if (
+    path.length === 0 ||
+    path.includes("\\") ||
+    path.includes("\0") ||
+    path.startsWith("/") ||
+    /^[A-Za-z]:(?:\/|$)/u.test(path)
+  ) {
+    throw new Error(`Skill library artifact contains an unsafe path: ${path}`);
+  }
+  const parts = path.split("/");
+  if (parts.some((part) => part.length === 0 || part === "." || part === "..")) {
+    throw new Error(`Skill library artifact contains an unsafe path: ${path}`);
+  }
+  if (segment && parts.length !== 1) {
+    throw new Error(`Skill library artifact contains an unsafe path: ${path}`);
+  }
+  return parts.join("/");
+}
+
+function compareCanonicalPath(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function isRealDirectory(path: string): boolean {
+  try {
+    const stats = lstatSync(path);
+    return stats.isDirectory() && !stats.isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
+function isRealFile(path: string): boolean {
+  try {
+    const stats = lstatSync(path);
+    return stats.isFile() && !stats.isSymbolicLink();
   } catch {
     return false;
   }

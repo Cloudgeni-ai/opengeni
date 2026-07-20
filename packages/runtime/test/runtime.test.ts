@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE,
   RunContext,
@@ -64,6 +67,7 @@ import {
 import { Manifest } from "@openai/agents/sandbox";
 import { TurnSandboxCommandCancelledError } from "../src/sandbox/turn-tool-cancellation";
 import { CompactionNeededError } from "../src/context-compaction";
+import { readSkillLibraryArtifact, verifySkillLibraryArtifact } from "../src/skill-library";
 import { startTestMcpServer, testSettings } from "@opengeni/testing";
 import type { MCPServer } from "@openai/agents";
 import {
@@ -4174,6 +4178,71 @@ describe("pack skills in the sandbox skill index", () => {
       version: loaded.entry.version,
       contentSha256: loaded.entry.contentSha256,
       reason: "enabled workspace capability installation",
+    });
+  });
+});
+
+describe("curated skill-library artifact integrity", () => {
+  function withArtifact(run: (root: string) => void): void {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-skill-library-"));
+    try {
+      mkdirSync(join(root, "references"));
+      writeFileSync(join(root, "SKILL.md"), "# Reviewed skill\n", "utf8");
+      writeFileSync(join(root, "references", "runbook.md"), "Runbook bytes.\n", "utf8");
+      run(root);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+
+  function baseline(root: string): string {
+    return readSkillLibraryArtifact(root).contentSha256;
+  }
+
+  test("hashes and verifies every recursively materialized file", () => {
+    withArtifact((root) => {
+      const artifact = readSkillLibraryArtifact(root);
+      expect(artifact.files.map((file) => file.path)).toEqual([
+        "SKILL.md",
+        "references/runbook.md",
+      ]);
+      expect(verifySkillLibraryArtifact(root, artifact.contentSha256)).toEqual(artifact);
+    });
+  });
+
+  test("rejects an added file under an unchanged reviewed artifact", () => {
+    withArtifact((root) => {
+      const expected = baseline(root);
+      writeFileSync(join(root, "references", "injected.md"), "Unreviewed guidance.\n", "utf8");
+      expect(() => verifySkillLibraryArtifact(root, expected)).toThrow(/artifact hash mismatch/);
+    });
+  });
+
+  test("rejects a modified file under a reviewed artifact", () => {
+    withArtifact((root) => {
+      const expected = baseline(root);
+      writeFileSync(join(root, "references", "runbook.md"), "Changed guidance.\n", "utf8");
+      expect(() => verifySkillLibraryArtifact(root, expected)).toThrow(/artifact hash mismatch/);
+    });
+  });
+
+  test("rejects a deleted file under a reviewed artifact", () => {
+    withArtifact((root) => {
+      const expected = baseline(root);
+      rmSync(join(root, "references", "runbook.md"));
+      expect(() => verifySkillLibraryArtifact(root, expected)).toThrow(/artifact hash mismatch/);
+    });
+  });
+
+  test("rejects unsafe paths and symbolic links before hashing", () => {
+    withArtifact((root) => {
+      writeFileSync(join(root, "unsafe\\path.md"), "Unsafe path.\n", "utf8");
+      expect(() => readSkillLibraryArtifact(root)).toThrow(/unsafe path/);
+    });
+
+    withArtifact((root) => {
+      symlinkSync("SKILL.md", join(root, "linked.md"));
+      expect(() => readSkillLibraryArtifact(root)).toThrow(/symbolic link/);
     });
   });
 });

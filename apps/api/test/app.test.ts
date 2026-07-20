@@ -922,7 +922,7 @@ describe("curated skill catalog enablement", () => {
       metadata: {
         libraryId: "azure-verified-modules",
         version: "1.0.0",
-        contentSha256: "f17d1e7d909797042d71ae1ccfee04a2f5a3d96f4972db8ca005f1173cd40564",
+        contentSha256: "bbc029412fd4893c35cf2a4df6e052efa5583d57d3c26e35d62869dcf4625699",
         sourceCommit: "de4323afdfbc30d1387f287b55062fa8d82b62e8",
         provenance: "Vendored from hashicorp/agent-skills; reviewed OpenGeni curated entry.",
       },
@@ -944,7 +944,7 @@ describe("curated skill catalog enablement", () => {
         metadata: {
           libraryId: "azure-verified-modules",
           libraryVersion: "1.0.0",
-          contentSha256: "f17d1e7d909797042d71ae1ccfee04a2f5a3d96f4972db8ca005f1173cd40564",
+          contentSha256: "bbc029412fd4893c35cf2a4df6e052efa5583d57d3c26e35d62869dcf4625699",
           sourceCommit: "de4323afdfbc30d1387f287b55062fa8d82b62e8",
           provenance: "Vendored from hashicorp/agent-skills; reviewed OpenGeni curated entry.",
         },
