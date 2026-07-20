@@ -30,6 +30,7 @@ This map defines who each doc tier serves and where volatile facts belong.
 | Credential taxonomy | `docs/credentials.md` | `docs/embedding.md`, `docs/capabilities.md`, route comments should link instead of re-listing token types. |
 | Rigs (versioned sandbox machine definitions) | `docs/rigs.md` | `docs/architecture.md`, `docs/packs.md`, `docs/variable-sets.md`, `docs/capabilities.md` should link instead of restating verification/promotion rules. |
 | MCP surface selection | `docs/mcp-surfaces.md` | `docs/architecture.md`, `docs/capabilities.md`, `docs/session-mcp-servers.md` should link. |
+| First-party MCP response contracts | `docs/mcp-response-contracts.md` | Mutation handlers, consumer migration notes, and release notes should link instead of restating the receipt schema and tool classification. |
 | Toolspace programmatic tool access | `docs/mcp-surfaces.md`, `docs/architecture.md`; record design in `docs/design/toolspace.md` | Runtime/API/worker comments should link instead of restating security invariants. |
 | Client/server compatibility policy | `docs/architecture.md` §3.10 | `packages/sdk/README.md` links; release notes should link. |
 | Typecheck/lint/format toolchain | `docs/toolchain.md` | `CONTRIBUTING.md` links; other docs should not restate tool choice or version. |

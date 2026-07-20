@@ -257,7 +257,13 @@ function validateSessionMcpCredentialUpdates(input: {
   return encryptedUpdates;
 }
 
-export async function createAndStartSession(input: {
+export type CreateSessionOutcome = {
+  session: Session;
+  /** True when an idempotency key resolved to a previously-created session. */
+  replay: boolean;
+};
+
+export async function createAndStartSessionWithOutcome(input: {
   db: Database;
   bus: EventBus;
   workflowClient: SessionWorkflowClient;
@@ -317,7 +323,7 @@ export async function createAndStartSession(input: {
   // `workingDir` (optional) is the path/cwd base the chosen machine runs under,
   // seeded alongside the pointer through the epoch-fenced CAS.
   seedTargetSandbox?: { sandboxId: string; settings: Settings; workingDir?: string | null } | null;
-}) {
+}): Promise<CreateSessionOutcome> {
   const sessionMetadata = {
     ...input.metadata,
     model: input.model,
@@ -332,10 +338,13 @@ export async function createAndStartSession(input: {
       input.createIdempotencyKey,
     );
     if (existing) {
-      return await finishStartSession(
-        existing.temporalWorkflowId ? { ...input, seedTargetSandbox: null } : input,
-        existing,
-      );
+      return {
+        session: await finishStartSession(
+          existing.temporalWorkflowId ? { ...input, seedTargetSandbox: null } : input,
+          existing,
+        ),
+        replay: true,
+      };
     }
     // No prior session: insert under the key, racing concurrent creates. The
     // partial unique index lets exactly one insert win; a loser gets back the
@@ -364,12 +373,15 @@ export async function createAndStartSession(input: {
       mcpServers: input.mcpServers ?? [],
     });
     if (!created) {
-      return await finishStartSession(
-        keyed.temporalWorkflowId ? { ...input, seedTargetSandbox: null } : input,
-        keyed,
-      );
+      return {
+        session: await finishStartSession(
+          keyed.temporalWorkflowId ? { ...input, seedTargetSandbox: null } : input,
+          keyed,
+        ),
+        replay: true,
+      };
     }
-    return await finishStartSession(input, keyed);
+    return { session: await finishStartSession(input, keyed), replay: false };
   }
   const session = await createSession(input.db, {
     accountId: input.accountId,
@@ -390,7 +402,14 @@ export async function createAndStartSession(input: {
     ...(input.sandboxOs ? { sandboxOs: input.sandboxOs } : {}),
     mcpServers: input.mcpServers ?? [],
   });
-  return await finishStartSession(input, session);
+  return { session: await finishStartSession(input, session), replay: false };
+}
+
+/** Backward-compatible entity-returning create path used by existing callers. */
+export async function createAndStartSession(
+  input: Parameters<typeof createAndStartSessionWithOutcome>[0],
+): Promise<Session> {
+  return (await createAndStartSessionWithOutcome(input)).session;
 }
 
 /**
@@ -618,7 +637,7 @@ export async function postUserMessageTurn(input: {
   actor?: string;
   controlEtag?: string | null;
   expectedDraftRevision?: number | null;
-}): Promise<{ accepted: SessionEvent; turn: SessionTurn }> {
+}): Promise<{ accepted: SessionEvent; turn: SessionTurn; replay: boolean }> {
   const { db, bus, workflowClient, settings, accountId, workspaceId, sessionId } = input;
   const requestedModel = input.model ?? null;
   const requestedReasoningEffort = input.reasoningEffort ?? null;
@@ -711,7 +730,7 @@ export async function postUserMessageTurn(input: {
       error,
     );
   }
-  return { accepted, turn };
+  return { accepted, turn, replay: result.replay };
 }
 
 /**
@@ -721,12 +740,12 @@ export async function postUserMessageTurn(input: {
  * the unparsed request body so absent-vs-empty `tools` keeps its meaning
  * (absent applies the workspace's default capability MCP tools).
  */
-export async function createSessionForRequest(
+export async function createSessionForRequestWithOutcome(
   deps: ApiRouteDeps,
   grant: AccessGrant,
   workspaceId: string,
   rawPayload: unknown,
-): Promise<Session> {
+): Promise<CreateSessionOutcome> {
   const { settings, db, bus, workflowClient, objectStorage } = deps;
   const payload = CreateSessionRequest.parse(rawPayload);
   const capabilityRuntimeSettings = await settingsWithEnabledCapabilityMcpServers(
@@ -1074,7 +1093,7 @@ export async function createSessionForRequest(
     quantity: 1,
     model,
   });
-  const session = await createAndStartSession({
+  const { session, replay } = await createAndStartSessionWithOutcome({
     db,
     bus,
     workflowClient,
@@ -1132,7 +1151,20 @@ export async function createSessionForRequest(
     sourceResourceId: session.id,
     idempotencyKey: `agent_run.created:${workspaceId}:${session.id}`,
   });
-  return session;
+  return { session, replay };
+}
+
+/**
+ * Backward-compatible entity-returning request path for REST and core callers.
+ * First-party MCP uses the outcome variant so it can report replay truthfully.
+ */
+export async function createSessionForRequest(
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  workspaceId: string,
+  rawPayload: unknown,
+): Promise<Session> {
+  return (await createSessionForRequestWithOutcome(deps, grant, workspaceId, rawPayload)).session;
 }
 
 /**
@@ -1142,7 +1174,7 @@ export async function createSessionForRequest(
  * enqueue, and usage recording. `toolsProvided: false` applies the
  * workspace's default capability MCP tools, matching an absent `tools` key.
  */
-export async function acceptSessionUserMessage(
+export async function acceptSessionUserMessageWithOutcome(
   deps: AcceptSessionUserMessageDependencies,
   grant: AccessGrant,
   workspaceId: string,
@@ -1161,7 +1193,7 @@ export async function acceptSessionUserMessage(
     controlEtag?: string | null;
     expectedDraftRevision?: number | null;
   },
-): Promise<{ accepted: SessionEvent; turn: SessionTurn }> {
+): Promise<{ accepted: SessionEvent; turn: SessionTurn; replay: boolean }> {
   const { settings, db, bus, workflowClient, objectStorage } = deps;
   const capabilityRuntimeSettings = await settingsWithEnabledCapabilityMcpServers(
     db,
@@ -1202,7 +1234,7 @@ export async function acceptSessionUserMessage(
     session: existingSession,
     updates: input.mcpCredentialUpdates ?? [],
   });
-  const { accepted, turn } = await postUserMessageTurn({
+  const { accepted, turn, replay } = await postUserMessageTurn({
     db,
     bus,
     workflowClient,
@@ -1236,6 +1268,24 @@ export async function acceptSessionUserMessage(
     sourceResourceId: turn.id,
     idempotencyKey: `agent_run.created:${workspaceId}:${turn.id}`,
   });
+  return { accepted, turn, replay };
+}
+
+/** Backward-compatible entity-returning path used by existing REST callers. */
+export async function acceptSessionUserMessage(
+  deps: Parameters<typeof acceptSessionUserMessageWithOutcome>[0],
+  grant: Parameters<typeof acceptSessionUserMessageWithOutcome>[1],
+  workspaceId: Parameters<typeof acceptSessionUserMessageWithOutcome>[2],
+  sessionId: Parameters<typeof acceptSessionUserMessageWithOutcome>[3],
+  input: Parameters<typeof acceptSessionUserMessageWithOutcome>[4],
+): Promise<{ accepted: SessionEvent; turn: SessionTurn }> {
+  const { accepted, turn } = await acceptSessionUserMessageWithOutcome(
+    deps,
+    grant,
+    workspaceId,
+    sessionId,
+    input,
+  );
   return { accepted, turn };
 }
 

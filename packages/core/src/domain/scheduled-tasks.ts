@@ -236,6 +236,16 @@ export async function restoreScheduledTask(
   });
 }
 
+export class ScheduledTaskSyncError extends Error {
+  readonly persistenceRestored: boolean;
+
+  constructor(cause: unknown, persistenceRestored: boolean) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+    this.name = "ScheduledTaskSyncError";
+    this.persistenceRestored = persistenceRestored;
+  }
+}
+
 export async function syncCreatedScheduledTask(input: {
   db: Database;
   workflowClient: SessionWorkflowClient;
@@ -244,10 +254,13 @@ export async function syncCreatedScheduledTask(input: {
   try {
     await input.workflowClient.syncScheduledTask({ task: input.task });
   } catch (error) {
-    await deleteScheduledTask(input.db, input.task.workspaceId, input.task.id).catch(
-      () => undefined,
-    );
-    throw error;
+    let persistenceRestored = true;
+    try {
+      await deleteScheduledTask(input.db, input.task.workspaceId, input.task.id);
+    } catch {
+      persistenceRestored = false;
+    }
+    throw new ScheduledTaskSyncError(error, persistenceRestored);
   }
 }
 
@@ -260,8 +273,13 @@ export async function syncUpdatedScheduledTask(input: {
   try {
     await input.workflowClient.syncScheduledTask({ task: input.task });
   } catch (error) {
-    await restoreScheduledTask(input.db, input.previous).catch(() => undefined);
-    throw error;
+    let persistenceRestored = true;
+    try {
+      await restoreScheduledTask(input.db, input.previous);
+    } catch {
+      persistenceRestored = false;
+    }
+    throw new ScheduledTaskSyncError(error, persistenceRestored);
   }
 }
 

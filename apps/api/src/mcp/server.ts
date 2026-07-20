@@ -12,6 +12,7 @@ import {
   type GitHubRepository,
   type Permission,
   type ResourceRef,
+  type ScheduledTask,
   UpdateScheduledTaskRequest,
 } from "@opengeni/contracts";
 import {
@@ -87,15 +88,16 @@ import {
   manualScheduledTaskTriggerWorkflowId,
   scheduledTaskToolsProvided,
   scheduledTaskTriggerToken,
+  ScheduledTaskSyncError,
   syncCreatedScheduledTask,
   syncUpdatedScheduledTask,
   validatedScheduledTaskUpdate,
 } from "@opengeni/core";
 import {
-  acceptSessionUserMessage,
+  acceptSessionUserMessageWithOutcome,
   controlAgentSessionWorkstream,
-  controlHumanSessionWorkstream,
-  createSessionForRequest,
+  controlHumanSessionWorkstreamWithOutcome,
+  createSessionForRequestWithOutcome,
   sendAgentSessionMessage,
   steerAgentSession,
   updateSessionTitle,
@@ -117,6 +119,12 @@ import {
   boundRigDetailMcp,
   SESSION_EVENT_MCP_MAX_BYTES,
 } from "./session-view";
+import { mcpMutationReceipt } from "./receipts";
+import {
+  boundScheduledTaskDetailMcp,
+  boundScheduledTaskMcpPage,
+  scheduledTaskMcpSummary,
+} from "./scheduled-task-view";
 import type { ToolspaceMcpSurface } from "./toolspace";
 
 export type McpServerOptions = {
@@ -162,11 +170,21 @@ export function buildOpenGeniMcpServer(
       },
       async ({ title }) => {
         const result = await updateSessionTitle(deps, grant.workspaceId, sessionId, title, "agent");
-        return json({
-          ok: true,
-          updated: result.updated,
-          title: result.title ?? title,
-        });
+        return json(
+          mcpMutationReceipt({
+            operation: "set_session_title",
+            committed: true,
+            outcome: result.updated ? "updated" : "unchanged",
+            changed: result.updated,
+            resource: {
+              type: "session",
+              id: sessionId,
+              state: result.updated ? "title_set" : "unchanged",
+            },
+            idempotency: { status: "not_supported" },
+            nextAction: { tool: "session_get", arguments: { sessionId } },
+          }),
+        );
       },
     );
   }
@@ -397,22 +415,41 @@ export function buildOpenGeniMcpServer(
     server.registerTool(
       "scheduled_tasks_list",
       {
-        description: "List scheduled tasks.",
-        inputSchema: { limit: z4.number().int().positive().optional() },
+        description:
+          "List compact scheduled-task summaries. Prompts, goal text, resource/tool bodies, and metadata values are represented by byte/count facts; page with offset and use scheduled_tasks_get for a bounded explicit detail projection.",
+        inputSchema: {
+          limit: z4.number().int().positive().max(50).optional(),
+          offset: z4.number().int().nonnegative().max(10_000).optional(),
+        },
       },
-      async ({ limit }) =>
-        json({
-          tasks: await listScheduledTasks(deps.db, grant.workspaceId, limit ?? 100),
-        }),
+      async ({ limit: requestedLimit, offset: requestedOffset }) => {
+        const limit = requestedLimit ?? 25;
+        const offset = requestedOffset ?? 0;
+        const rows = await listScheduledTasks(deps.db, grant.workspaceId, limit + 1, offset);
+        return json(
+          boundScheduledTaskMcpPage({
+            tasks: rows.slice(0, limit),
+            limit,
+            offset,
+            sourceHasMore: rows.length > limit,
+          }),
+        );
+      },
     );
 
     server.registerTool(
       "scheduled_tasks_get",
       {
-        description: "Get one scheduled task.",
-        inputSchema: { id: z4.string().uuid() },
+        description:
+          "Get one scheduled task. The default is the same compact summary used by scheduled_tasks_list; pass includeEntity=true for a bounded projection with an 8 KiB prompt preview, bounded goal fields, resource/tool identity previews, and metadata keys without values.",
+        inputSchema: { id: z4.string().uuid(), includeEntity: z4.boolean().optional() },
       },
-      async ({ id }) => json(await requireScheduledTask(deps.db, grant.workspaceId, id)),
+      async ({ id, includeEntity }) => {
+        const task = await requireScheduledTask(deps.db, grant.workspaceId, id);
+        return json(
+          includeEntity ? boundScheduledTaskDetailMcp(task) : scheduledTaskMcpSummary(task),
+        );
+      },
     );
 
     server.registerTool(
@@ -452,12 +489,26 @@ export function buildOpenGeniMcpServer(
           payload,
           toolsProvided: scheduledTaskToolsProvided(args),
         });
-        await syncCreatedScheduledTask({
-          db: deps.db,
-          workflowClient: deps.workflowClient,
-          task,
-        });
-        return json(task);
+        try {
+          await syncCreatedScheduledTask({
+            db: deps.db,
+            workflowClient: deps.workflowClient,
+            task,
+          });
+        } catch (error) {
+          if (!(error instanceof ScheduledTaskSyncError) || error.persistenceRestored) {
+            throw error;
+          }
+          return json(
+            scheduledTaskReceipt("scheduled_tasks_create", task, "partial_failure", true, {
+              partialFailure: { stage: "schedule_sync", retryable: true },
+              warnings: [
+                "The task database record committed, but Temporal schedule synchronization failed.",
+              ],
+            }),
+          );
+        }
+        return json(scheduledTaskReceipt("scheduled_tasks_create", task, "created", true));
       },
     );
 
@@ -496,13 +547,35 @@ export function buildOpenGeniMcpServer(
           toolsProvided: scheduledTaskToolsProvided(raw),
         });
         const task = await updateScheduledTask(deps.db, grant.workspaceId, id, update);
-        await syncUpdatedScheduledTask({
-          db: deps.db,
-          workflowClient: deps.workflowClient,
-          previous: existing,
-          task,
-        });
-        return json(task);
+        const changed = scheduledTaskStateChanged(existing, task);
+        try {
+          await syncUpdatedScheduledTask({
+            db: deps.db,
+            workflowClient: deps.workflowClient,
+            previous: existing,
+            task,
+          });
+        } catch (error) {
+          if (!(error instanceof ScheduledTaskSyncError) || error.persistenceRestored) {
+            throw error;
+          }
+          return json(
+            scheduledTaskReceipt("scheduled_tasks_update", task, "partial_failure", changed, {
+              partialFailure: { stage: "schedule_sync", retryable: true },
+              warnings: [
+                "The task database update committed, but Temporal schedule synchronization failed.",
+              ],
+            }),
+          );
+        }
+        return json(
+          scheduledTaskReceipt(
+            "scheduled_tasks_update",
+            task,
+            changed ? "updated" : "unchanged",
+            changed,
+          ),
+        );
       },
     );
 
@@ -517,13 +590,35 @@ export function buildOpenGeniMcpServer(
         const task = await updateScheduledTask(deps.db, grant.workspaceId, id, {
           status: "paused",
         });
-        await syncUpdatedScheduledTask({
-          db: deps.db,
-          workflowClient: deps.workflowClient,
-          previous: existing,
-          task,
-        });
-        return json(task);
+        const changed = existing.status !== task.status;
+        try {
+          await syncUpdatedScheduledTask({
+            db: deps.db,
+            workflowClient: deps.workflowClient,
+            previous: existing,
+            task,
+          });
+        } catch (error) {
+          if (!(error instanceof ScheduledTaskSyncError) || error.persistenceRestored) {
+            throw error;
+          }
+          return json(
+            scheduledTaskReceipt("scheduled_tasks_pause", task, "partial_failure", changed, {
+              partialFailure: { stage: "schedule_sync", retryable: true },
+              warnings: [
+                "The paused state committed, but Temporal schedule synchronization failed.",
+              ],
+            }),
+          );
+        }
+        return json(
+          scheduledTaskReceipt(
+            "scheduled_tasks_pause",
+            task,
+            changed ? "updated" : "unchanged",
+            changed,
+          ),
+        );
       },
     );
 
@@ -538,13 +633,35 @@ export function buildOpenGeniMcpServer(
         const task = await updateScheduledTask(deps.db, grant.workspaceId, id, {
           status: "active",
         });
-        await syncUpdatedScheduledTask({
-          db: deps.db,
-          workflowClient: deps.workflowClient,
-          previous: existing,
-          task,
-        });
-        return json(task);
+        const changed = existing.status !== task.status;
+        try {
+          await syncUpdatedScheduledTask({
+            db: deps.db,
+            workflowClient: deps.workflowClient,
+            previous: existing,
+            task,
+          });
+        } catch (error) {
+          if (!(error instanceof ScheduledTaskSyncError) || error.persistenceRestored) {
+            throw error;
+          }
+          return json(
+            scheduledTaskReceipt("scheduled_tasks_resume", task, "partial_failure", changed, {
+              partialFailure: { stage: "schedule_sync", retryable: true },
+              warnings: [
+                "The active state committed, but Temporal schedule synchronization failed.",
+              ],
+            }),
+          );
+        }
+        return json(
+          scheduledTaskReceipt(
+            "scheduled_tasks_resume",
+            task,
+            changed ? "updated" : "unchanged",
+            changed,
+          ),
+        );
       },
     );
 
@@ -579,18 +696,36 @@ export function buildOpenGeniMcpServer(
           agentRunUsageIdempotencyKey,
           triggerWorkflowId,
         });
-        await recordWorkspaceUsage(deps, {
-          accountId: grant.accountId,
-          workspaceId: grant.workspaceId,
-          subjectId: grant.subjectId,
-          eventType: "agent_run.created",
-          quantity: 1,
-          unit: "run",
-          sourceResourceType: "scheduled_task",
-          sourceResourceId: task.id,
-          idempotencyKey: agentRunUsageIdempotencyKey,
-        });
-        return json(task);
+        try {
+          await recordWorkspaceUsage(deps, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            subjectId: grant.subjectId,
+            eventType: "agent_run.created",
+            quantity: 1,
+            unit: "run",
+            sourceResourceType: "scheduled_task",
+            sourceResourceId: task.id,
+            idempotencyKey: agentRunUsageIdempotencyKey,
+          });
+        } catch {
+          return json(
+            scheduledTaskReceipt("scheduled_tasks_trigger", task, "partial_failure", true, {
+              partialFailure: { stage: "usage_recording", retryable: true },
+              warnings: [
+                "The Temporal run trigger completed, but usage recording failed; retry with the same triggerId.",
+              ],
+              idempotencyStatus: triggerId ? "unknown" : "not_requested",
+              facts: { triggerWorkflowId },
+            }),
+          );
+        }
+        return json(
+          scheduledTaskReceipt("scheduled_tasks_trigger", task, "triggered", true, {
+            idempotencyStatus: triggerId ? "unknown" : "not_requested",
+            facts: { triggerWorkflowId },
+          }),
+        );
       },
     );
 
@@ -605,8 +740,28 @@ export function buildOpenGeniMcpServer(
         await deps.workflowClient.deleteScheduledTaskSchedule({
           temporalScheduleId: task.temporalScheduleId,
         });
-        await deleteScheduledTask(deps.db, grant.workspaceId, id);
-        return json({ ok: true });
+        try {
+          await deleteScheduledTask(deps.db, grant.workspaceId, id);
+        } catch {
+          return json(
+            scheduledTaskReceipt("scheduled_tasks_delete", task, "partial_failure", true, {
+              partialFailure: { stage: "database_delete", retryable: true },
+              warnings: [
+                "The Temporal schedule was deleted, but the task database record remains.",
+              ],
+            }),
+          );
+        }
+        return json(
+          mcpMutationReceipt({
+            operation: "scheduled_tasks_delete",
+            committed: true,
+            outcome: "deleted",
+            changed: true,
+            resource: { type: "scheduled_task", id: task.id, state: "deleted" },
+            idempotency: { status: "not_supported" },
+          }),
+        );
       },
     );
 
@@ -747,7 +902,24 @@ function registerGoalTools(
           },
         },
       ]);
-      return json(goal);
+      return json(
+        mcpMutationReceipt({
+          operation: "goal_set",
+          committed: true,
+          outcome: replaced ? "updated" : "created",
+          changed: true,
+          resource: {
+            type: "session_goal",
+            id: goal.id,
+            version: goal.version,
+            state: goal.status,
+          },
+          timestamp: goal.updatedAt,
+          idempotency: { status: "not_supported" },
+          facts: { replaced },
+          nextAction: { tool: "session_get", arguments: { sessionId } },
+        }),
+      );
     },
   );
 
@@ -788,7 +960,23 @@ function registerGoalTools(
           },
         },
       ]);
-      return json(goal);
+      return json(
+        mcpMutationReceipt({
+          operation: "goal_update",
+          committed: true,
+          outcome: "updated",
+          changed: true,
+          resource: {
+            type: "session_goal",
+            id: goal.id,
+            version: goal.version,
+            state: goal.status,
+          },
+          timestamp: goal.updatedAt,
+          idempotency: { status: "not_supported" },
+          nextAction: { tool: "session_get", arguments: { sessionId } },
+        }),
+      );
     },
   );
 
@@ -817,7 +1005,23 @@ function registerGoalTools(
           },
         ]);
       }
-      return json(goal);
+      return json(
+        mcpMutationReceipt({
+          operation: "goal_complete",
+          committed: true,
+          outcome: changed ? "updated" : "unchanged",
+          changed,
+          resource: {
+            type: "session_goal",
+            id: goal.id,
+            version: goal.version,
+            state: goal.status,
+          },
+          timestamp: goal.updatedAt,
+          idempotency: { status: "not_supported" },
+          nextAction: { tool: "session_get", arguments: { sessionId } },
+        }),
+      );
     },
   );
 
@@ -854,7 +1058,23 @@ function registerGoalTools(
           },
         ]);
       }
-      return json(goal);
+      return json(
+        mcpMutationReceipt({
+          operation: "goal_pause",
+          committed: true,
+          outcome: changed ? "updated" : "unchanged",
+          changed,
+          resource: {
+            type: "session_goal",
+            id: goal.id,
+            version: goal.version,
+            state: goal.status,
+          },
+          timestamp: goal.updatedAt,
+          idempotency: { status: "not_supported" },
+          nextAction: { tool: "session_get", arguments: { sessionId } },
+        }),
+      );
     },
   );
 }
@@ -864,6 +1084,60 @@ type JsonResult = (value: unknown) => {
 };
 
 const MemoryKindSchema = z4.enum(["preference", "semantic", "procedural", "decision", "episodic"]);
+
+function scheduledTaskMutableState(task: ScheduledTask): Record<string, unknown> {
+  return {
+    name: task.name,
+    status: task.status,
+    schedule: task.schedule,
+    runMode: task.runMode,
+    overlapPolicy: task.overlapPolicy,
+    agentConfig: task.agentConfig,
+    reusableSessionId: task.reusableSessionId,
+    variableSetId: task.variableSetId,
+    rigId: task.rigId,
+    metadata: task.metadata,
+  };
+}
+
+function scheduledTaskStateChanged(before: ScheduledTask, after: ScheduledTask): boolean {
+  return (
+    JSON.stringify(scheduledTaskMutableState(before)) !==
+    JSON.stringify(scheduledTaskMutableState(after))
+  );
+}
+
+function scheduledTaskReceipt(
+  operation: string,
+  task: ScheduledTask,
+  outcome: "created" | "updated" | "unchanged" | "triggered" | "partial_failure",
+  changed: boolean,
+  options: {
+    partialFailure?: { stage: string; retryable: boolean };
+    warnings?: string[];
+    idempotencyStatus?: "not_supported" | "not_requested" | "applied" | "replayed" | "unknown";
+    facts?: Record<string, string | number | boolean | null>;
+  } = {},
+) {
+  return mcpMutationReceipt({
+    operation,
+    committed: true,
+    outcome,
+    changed,
+    resource: {
+      type: "scheduled_task",
+      id: task.id,
+      version: task.updatedAt,
+      state: task.status,
+    },
+    timestamp: task.updatedAt,
+    idempotency: { status: options.idempotencyStatus ?? "not_supported" },
+    ...(options.partialFailure ? { partialFailure: options.partialFailure } : {}),
+    ...(options.warnings ? { warnings: options.warnings } : {}),
+    ...(options.facts ? { facts: options.facts } : {}),
+    nextAction: { tool: "scheduled_tasks_get", arguments: { id: task.id } },
+  });
+}
 
 function memoryPreview(text: string): string {
   const normalized = text.replace(/\s+/g, " ").trim();
@@ -940,7 +1214,52 @@ function registerMemoryTools(
           },
         },
       ]);
-      return json(result);
+      const changed = !result.deduped || result.updated || result.superseded !== null;
+      const outcome =
+        result.updated || result.superseded !== null
+          ? "updated"
+          : result.deduped
+            ? "unchanged"
+            : "created";
+      return json(
+        mcpMutationReceipt({
+          operation: "memory_save",
+          committed: true,
+          outcome,
+          changed,
+          resource: {
+            type: "knowledge_memory",
+            id: result.memory.id,
+            state: result.memory.status,
+          },
+          relatedResources: result.superseded
+            ? [
+                {
+                  type: "knowledge_memory",
+                  id: result.superseded.id,
+                  state: result.superseded.status,
+                },
+              ]
+            : undefined,
+          timestamp: result.memory.updatedAt,
+          idempotency: { status: "not_supported" },
+          warnings: [
+            ...(result.redactionCount > 0
+              ? [`Redacted ${result.redactionCount} sensitive value(s) before committing memory.`]
+              : []),
+            ...(!result.embedded
+              ? ["Memory committed without a vector embedding; keyword search remains available."]
+              : []),
+          ],
+          facts: {
+            deduped: result.deduped,
+            dedupeReason: result.dedupeReason,
+            updatedInPlace: result.updated,
+            redactionCount: result.redactionCount,
+            embedded: result.embedded,
+          },
+        }),
+      );
     },
   );
 
@@ -985,7 +1304,31 @@ function registerMemoryTools(
           },
         },
       ]);
-      return json(result);
+      return json(
+        mcpMutationReceipt({
+          operation: "memory_correct",
+          committed: true,
+          outcome: "updated",
+          changed: true,
+          resource: {
+            type: "knowledge_memory",
+            id: result.memory.id,
+            state: result.memory.status,
+          },
+          relatedResources: result.replacement
+            ? [
+                {
+                  type: "knowledge_memory",
+                  id: result.replacement.id,
+                  state: result.replacement.status,
+                },
+              ]
+            : undefined,
+          timestamp: (result.replacement ?? result.memory).updatedAt,
+          idempotency: { status: "not_supported" },
+          facts: { correctionAction: result.action },
+        }),
+      );
     },
   );
 }
@@ -1198,12 +1541,57 @@ function registerRigTools(
           sessionId ? { proposedBy: `session:${sessionId}` } : {},
         );
         const verifying = await beginMcpRigVerificationAttempt(deps, grant.workspaceId, change.id);
-        await deps.workflowClient.startRigVerification({
-          workspaceId: grant.workspaceId,
-          changeId: change.id,
-          workflowId: `rig-verification-change-${change.id}-attempt-${verificationAttempt(verifying)}`,
-        });
-        return json({ change: verifying, verificationStarted: true });
+        const attempt = verificationAttempt(verifying);
+        try {
+          await deps.workflowClient.startRigVerification({
+            workspaceId: grant.workspaceId,
+            changeId: change.id,
+            workflowId: `rig-verification-change-${change.id}-attempt-${attempt}`,
+          });
+        } catch {
+          return json(
+            mcpMutationReceipt({
+              operation: "rig_propose_change",
+              committed: true,
+              outcome: "partial_failure",
+              changed: true,
+              resource: {
+                type: "rig_change",
+                id: verifying.id,
+                version: verifying.updatedAt,
+                state: verifying.status,
+              },
+              relatedResources: [{ type: "rig", id: rig.id }],
+              timestamp: verifying.updatedAt,
+              idempotency: { status: "not_supported" },
+              partialFailure: { stage: "verification_workflow_start", retryable: true },
+              warnings: [
+                "The rig change and verifying transition committed, but verification workflow start failed.",
+              ],
+              facts: { verificationAttempt: attempt },
+              nextAction: { tool: "rig_get", arguments: { rigId: rig.id } },
+            }),
+          );
+        }
+        return json(
+          mcpMutationReceipt({
+            operation: "rig_propose_change",
+            committed: true,
+            outcome: "created",
+            changed: true,
+            resource: {
+              type: "rig_change",
+              id: verifying.id,
+              version: verifying.updatedAt,
+              state: verifying.status,
+            },
+            relatedResources: [{ type: "rig", id: rig.id }],
+            timestamp: verifying.updatedAt,
+            idempotency: { status: "not_supported" },
+            facts: { verificationStarted: true, verificationAttempt: attempt },
+            nextAction: { tool: "rig_get", arguments: { rigId: rig.id } },
+          }),
+        );
       },
     );
 
@@ -1226,12 +1614,57 @@ function registerRigTools(
             grant.workspaceId,
             change.id,
           );
-          await deps.workflowClient.startRigVerification({
-            workspaceId: grant.workspaceId,
-            changeId: change.id,
-            workflowId: `rig-verification-change-${change.id}-attempt-${verificationAttempt(verifying)}`,
-          });
-          return json({ ok: true, changeId: change.id });
+          const attempt = verificationAttempt(verifying);
+          try {
+            await deps.workflowClient.startRigVerification({
+              workspaceId: grant.workspaceId,
+              changeId: change.id,
+              workflowId: `rig-verification-change-${change.id}-attempt-${attempt}`,
+            });
+          } catch {
+            return json(
+              mcpMutationReceipt({
+                operation: "rig_verify",
+                committed: true,
+                outcome: "partial_failure",
+                changed: true,
+                resource: {
+                  type: "rig_change",
+                  id: verifying.id,
+                  version: verifying.updatedAt,
+                  state: verifying.status,
+                },
+                relatedResources: [{ type: "rig", id: rig.id }],
+                timestamp: verifying.updatedAt,
+                idempotency: { status: "not_supported" },
+                partialFailure: { stage: "verification_workflow_start", retryable: true },
+                warnings: [
+                  "The verifying transition committed, but verification workflow start failed.",
+                ],
+                facts: { verificationAttempt: attempt },
+                nextAction: { tool: "rig_get", arguments: { rigId: rig.id } },
+              }),
+            );
+          }
+          return json(
+            mcpMutationReceipt({
+              operation: "rig_verify",
+              committed: true,
+              outcome: "accepted",
+              changed: true,
+              resource: {
+                type: "rig_change",
+                id: verifying.id,
+                version: verifying.updatedAt,
+                state: verifying.status,
+              },
+              relatedResources: [{ type: "rig", id: rig.id }],
+              timestamp: verifying.updatedAt,
+              idempotency: { status: "not_supported" },
+              facts: { verificationStarted: true, verificationAttempt: attempt },
+              nextAction: { tool: "rig_get", arguments: { rigId: rig.id } },
+            }),
+          );
         }
         if (!rig.activeVersion) {
           throw new Error("rig has no active version");
@@ -1241,7 +1674,23 @@ function registerRigTools(
           versionId: rig.activeVersion.id,
           workflowId: `rig-verification-version-${rig.activeVersion.id}-${crypto.randomUUID()}`,
         });
-        return json({ ok: true, versionId: rig.activeVersion.id });
+        return json(
+          mcpMutationReceipt({
+            operation: "rig_verify",
+            committed: true,
+            outcome: "accepted",
+            changed: true,
+            resource: {
+              type: "rig_version",
+              id: rig.activeVersion.id,
+              version: rig.activeVersion.version,
+              state: "verification_started",
+            },
+            relatedResources: [{ type: "rig", id: rig.id }],
+            idempotency: { status: "not_supported" },
+            nextAction: { tool: "rig_get", arguments: { rigId: rig.id } },
+          }),
+        );
       },
     );
   }
@@ -1260,8 +1709,32 @@ function registerRigTools(
       async ({ rigId, changeId }) => {
         const rig = await requireRigForApi(deps.db, grant.workspaceId, rigId);
         const change = await requireRigChangeForApi(deps.db, grant.workspaceId, rig.id, changeId);
+        const promoted = await promoteVerifiedDefinitionEditChangeForApi(
+          { db: deps.db },
+          grant,
+          rig,
+          change,
+        );
         return json(
-          await promoteVerifiedDefinitionEditChangeForApi({ db: deps.db }, grant, rig, change),
+          mcpMutationReceipt({
+            operation: "rig_promote",
+            committed: true,
+            outcome: "updated",
+            changed: true,
+            resource: {
+              type: "rig_version",
+              id: promoted.version.id,
+              version: promoted.version.version,
+              state: "active",
+            },
+            relatedResources: [
+              { type: "rig_change", id: promoted.change.id, state: promoted.change.status },
+              { type: "rig", id: rig.id },
+            ],
+            timestamp: promoted.version.createdAt,
+            idempotency: { status: "not_supported" },
+            nextAction: { tool: "rig_get", arguments: { rigId: rig.id } },
+          }),
         );
       },
     );
@@ -1529,7 +2002,39 @@ function registerWorkspaceOrchestrationTools(
           // arbitrary session's wake channel without sessions:control on it.
         },
       },
-      async (args) => json(await createSessionForRequest(deps, grant, grant.workspaceId, args)),
+      async (args) => {
+        const { session, replay } = await createSessionForRequestWithOutcome(
+          deps,
+          grant,
+          grant.workspaceId,
+          args,
+        );
+        return json(
+          mcpMutationReceipt({
+            operation: "session_create",
+            committed: true,
+            outcome: replay ? "replayed" : "created",
+            changed: !replay,
+            resource: {
+              type: "session",
+              id: session.id,
+              version: session.queueVersion,
+              state: session.status,
+            },
+            idempotency: {
+              status: replay ? "replayed" : args.idempotencyKey ? "applied" : "not_requested",
+            },
+            facts: {
+              sandboxGroupId: session.sandboxGroupId,
+              parentSessionId: session.parentSessionId,
+            },
+            nextAction: {
+              tool: "session_get",
+              arguments: { sessionId: session.id },
+            },
+          }),
+        );
+      },
     );
   }
 
@@ -1558,17 +2063,30 @@ function registerWorkspaceOrchestrationTools(
             exactAgentCommandContext(grant, callerSessionId),
             { targetSessionId, text, idempotencyKey },
           );
-          return json({
-            delivered: true,
-            updateId: result.updateId,
-            delivery: "coalesced_internal_update",
-            effectiveState: result.effectiveState,
-            wakeRequested: result.wakeRevision !== null,
-            resumeRequired: result.effectiveState === "paused",
-            replay: result.replay,
-          });
+          return json(
+            mcpMutationReceipt({
+              operation: "session_send_message",
+              committed: true,
+              outcome: result.replay ? "replayed" : "accepted",
+              changed: !result.replay,
+              resource: {
+                type: "session_system_update",
+                id: result.updateId,
+                state: result.effectiveState,
+              },
+              relatedResources: [{ type: "session", id: targetSessionId }],
+              timestamp: result.receipt.createdAt.toISOString(),
+              idempotency: { status: result.replay ? "replayed" : "applied" },
+              facts: {
+                delivery: "coalesced_internal_update",
+                wakeRequested: result.wakeRevision !== null,
+                resumeRequired: result.effectiveState === "paused",
+              },
+              nextAction: { tool: "session_get", arguments: { sessionId: targetSessionId } },
+            }),
+          );
         }
-        const { accepted, turn } = await acceptSessionUserMessage(
+        const { accepted, turn, replay } = await acceptSessionUserMessageWithOutcome(
           deps,
           grant,
           grant.workspaceId,
@@ -1584,7 +2102,27 @@ function registerWorkspaceOrchestrationTools(
             ),
           },
         );
-        return json({ event: accepted, turnId: turn.id });
+        return json(
+          mcpMutationReceipt({
+            operation: "session_send_message",
+            committed: true,
+            outcome: replay ? "replayed" : "accepted",
+            changed: !replay,
+            resource: {
+              type: "session_turn",
+              id: turn.id,
+              version: turn.version,
+              state: turn.status,
+            },
+            relatedResources: [
+              { type: "session", id: targetSessionId },
+              { type: "session_event", id: accepted.id, state: accepted.type },
+            ],
+            timestamp: accepted.occurredAt,
+            idempotency: { status: replay ? "replayed" : "applied" },
+            nextAction: { tool: "session_get", arguments: { sessionId: targetSessionId } },
+          }),
+        );
       },
     );
 
@@ -1610,28 +2148,63 @@ function registerWorkspaceOrchestrationTools(
               reason: reason ?? "agent_mcp_pause",
             },
           );
-          return json({
-            receiptId: controlled.receipt.id,
-            effectiveControl: controlled.control,
-            interruptionCount: controlled.interruptionCount,
-            replay: controlled.replay,
-          });
+          return json(
+            mcpMutationReceipt({
+              operation: "session_pause",
+              committed: true,
+              outcome: controlled.replay ? "replayed" : "updated",
+              changed: !controlled.replay,
+              resource: {
+                type: "session",
+                id: sessionId,
+                version: controlled.control.controlVersion,
+                etag: controlled.control.controlEtag,
+                state: controlled.control.state,
+              },
+              relatedResources: [{ type: "session_command_receipt", id: controlled.receipt.id }],
+              timestamp: controlled.receipt.createdAt.toISOString(),
+              idempotency: { status: controlled.replay ? "replayed" : "applied" },
+              facts: { interruptionCount: controlled.interruptionCount },
+              nextAction: { tool: "session_get", arguments: { sessionId } },
+            }),
+          );
         }
+        const { response, replay } = await controlHumanSessionWorkstreamWithOutcome(
+          deps,
+          {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            sessionId,
+            subjectId: grant.subjectId,
+          },
+          {
+            action: "pause",
+            clientEventId: idempotencyKey,
+            ...(reason ? { reason } : {}),
+          },
+        );
         return json(
-          await controlHumanSessionWorkstream(
-            deps,
-            {
-              accountId: grant.accountId,
-              workspaceId: grant.workspaceId,
-              sessionId,
-              subjectId: grant.subjectId,
+          mcpMutationReceipt({
+            operation: "session_pause",
+            committed: true,
+            outcome: replay ? "replayed" : "updated",
+            changed: !replay,
+            resource: {
+              type: "session",
+              id: sessionId,
+              version: response.effectiveControl.controlVersion,
+              etag: response.effectiveControl.controlEtag,
+              state: response.effectiveControl.state,
             },
-            {
-              action: "pause",
-              clientEventId: idempotencyKey,
-              ...(reason ? { reason } : {}),
+            relatedResources: [{ type: "session_command_receipt", id: response.receipt.id }],
+            timestamp: response.receipt.createdAt,
+            idempotency: { status: replay ? "replayed" : "applied" },
+            facts: {
+              interruptionCount: response.interruptionCount,
+              wakeCount: response.wakeCount,
             },
-          ),
+            nextAction: { tool: "session_get", arguments: { sessionId } },
+          }),
         );
       },
     );
@@ -1659,28 +2232,63 @@ function registerWorkspaceOrchestrationTools(
               reason: reason ?? "agent_mcp_resume",
             },
           );
-          return json({
-            receiptId: controlled.receipt.id,
-            effectiveControl: controlled.control,
-            interruptionCount: controlled.interruptionCount,
-            replay: controlled.replay,
-          });
+          return json(
+            mcpMutationReceipt({
+              operation: "session_resume",
+              committed: true,
+              outcome: controlled.replay ? "replayed" : "updated",
+              changed: !controlled.replay,
+              resource: {
+                type: "session",
+                id: sessionId,
+                version: controlled.control.controlVersion,
+                etag: controlled.control.controlEtag,
+                state: controlled.control.state,
+              },
+              relatedResources: [{ type: "session_command_receipt", id: controlled.receipt.id }],
+              timestamp: controlled.receipt.createdAt.toISOString(),
+              idempotency: { status: controlled.replay ? "replayed" : "applied" },
+              facts: { interruptionCount: controlled.interruptionCount },
+              nextAction: { tool: "session_get", arguments: { sessionId } },
+            }),
+          );
         }
+        const { response, replay } = await controlHumanSessionWorkstreamWithOutcome(
+          deps,
+          {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            sessionId,
+            subjectId: grant.subjectId,
+          },
+          {
+            action: "resume",
+            clientEventId: idempotencyKey,
+            ...(reason ? { reason } : {}),
+          },
+        );
         return json(
-          await controlHumanSessionWorkstream(
-            deps,
-            {
-              accountId: grant.accountId,
-              workspaceId: grant.workspaceId,
-              sessionId,
-              subjectId: grant.subjectId,
+          mcpMutationReceipt({
+            operation: "session_resume",
+            committed: true,
+            outcome: replay ? "replayed" : "updated",
+            changed: !replay,
+            resource: {
+              type: "session",
+              id: sessionId,
+              version: response.effectiveControl.controlVersion,
+              etag: response.effectiveControl.controlEtag,
+              state: response.effectiveControl.state,
             },
-            {
-              action: "resume",
-              clientEventId: idempotencyKey,
-              ...(reason ? { reason } : {}),
+            relatedResources: [{ type: "session_command_receipt", id: response.receipt.id }],
+            timestamp: response.receipt.createdAt,
+            idempotency: { status: replay ? "replayed" : "applied" },
+            facts: {
+              interruptionCount: response.interruptionCount,
+              wakeCount: response.wakeCount,
             },
-          ),
+            nextAction: { tool: "session_get", arguments: { sessionId } },
+          }),
         );
       },
     );
@@ -1703,13 +2311,27 @@ function registerWorkspaceOrchestrationTools(
             exactAgentCommandContext(grant, callerSessionId),
             { targetSessionId: sessionId, instruction, idempotencyKey },
           );
-          return json({
-            updateId: result.updateId,
-            interruptionCount: result.interruptionCount,
-            stoppingPreviousAttempt: result.interruptionCount > 0,
-            effectiveState: result.effectiveState,
-            replay: result.replay,
-          });
+          return json(
+            mcpMutationReceipt({
+              operation: "session_steer",
+              committed: true,
+              outcome: result.replay ? "replayed" : "updated",
+              changed: !result.replay,
+              resource: {
+                type: "session_system_update",
+                id: result.updateId,
+                state: result.effectiveState,
+              },
+              relatedResources: [{ type: "session", id: sessionId }],
+              timestamp: result.receipt.createdAt.toISOString(),
+              idempotency: { status: result.replay ? "replayed" : "applied" },
+              facts: {
+                interruptionCount: result.interruptionCount,
+                stoppingPreviousAttempt: result.interruptionCount > 0,
+              },
+              nextAction: { tool: "session_get", arguments: { sessionId } },
+            }),
+          );
         },
       );
     }
@@ -1733,11 +2355,21 @@ function registerWorkspaceOrchestrationTools(
           title,
           "agent",
         );
-        return json({
-          ok: true,
-          updated: result.updated,
-          title: result.title ?? title,
-        });
+        return json(
+          mcpMutationReceipt({
+            operation: "set_other_session_title",
+            committed: true,
+            outcome: result.updated ? "updated" : "unchanged",
+            changed: result.updated,
+            resource: {
+              type: "session",
+              id: session_id,
+              state: result.updated ? "title_set" : "unchanged",
+            },
+            idempotency: { status: "not_supported" },
+            nextAction: { tool: "session_get", arguments: { sessionId: session_id } },
+          }),
+        );
       },
     );
   }
@@ -1767,93 +2399,114 @@ function registerVariableSetTools(
       },
     );
   };
-  const setVariableHandler = async ({
-    variableSetId,
-    variableSetName,
-    environmentId,
-    environmentName,
-    name,
-    value,
-  }: {
-    variableSetId?: string | undefined;
-    variableSetName?: string | undefined;
-    environmentId?: string | undefined;
-    environmentName?: string | undefined;
-    name: string;
-    value: string;
-  }) => {
-    const key = requireVariableSetEncryption(deps.settings);
-    const parsedName = VariableSetVariableName.safeParse(name);
-    if (!parsedName.success) {
-      throw new Error("variable set/environment variable names must match ^[A-Z][A-Z0-9_]*$");
-    }
-    assertAllowedVariableSetVariableName(parsedName.data);
-    const targetId = variableSetId ?? environmentId;
-    const targetName = variableSetName ?? environmentName;
-    if ((targetId === undefined) === (targetName === undefined)) {
-      throw new Error(
-        "provide exactly one of variableSetId or variableSetName; deprecated aliases must provide exactly one of environmentId or environmentName",
-      );
-    }
-    const trimmedVariableSetName = targetName?.trim();
-    if (targetName !== undefined && !trimmedVariableSetName) {
-      throw new Error("variable set name is required");
-    }
-    let created = false;
-    let variableSet =
-      targetId !== undefined
-        ? await getVariableSet(deps.db, grant.workspaceId, targetId)
-        : await getVariableSetByName(deps.db, grant.workspaceId, trimmedVariableSetName!);
-    if (!variableSet && targetId !== undefined) {
-      throw new Error("variable set/environment not found");
-    }
-    if (!variableSet) {
-      if ((await countVariableSets(deps.db, grant.workspaceId)) >= MAX_ENVIRONMENTS_PER_WORKSPACE) {
+  const setVariableHandler =
+    (operation: "variable_set_set_variable" | "environment_set_variable") =>
+    async ({
+      variableSetId,
+      variableSetName,
+      environmentId,
+      environmentName,
+      name,
+      value,
+    }: {
+      variableSetId?: string | undefined;
+      variableSetName?: string | undefined;
+      environmentId?: string | undefined;
+      environmentName?: string | undefined;
+      name: string;
+      value: string;
+    }) => {
+      const key = requireVariableSetEncryption(deps.settings);
+      const parsedName = VariableSetVariableName.safeParse(name);
+      if (!parsedName.success) {
+        throw new Error("variable set/environment variable names must match ^[A-Z][A-Z0-9_]*$");
+      }
+      assertAllowedVariableSetVariableName(parsedName.data);
+      const targetId = variableSetId ?? environmentId;
+      const targetName = variableSetName ?? environmentName;
+      if ((targetId === undefined) === (targetName === undefined)) {
         throw new Error(
-          `a workspace supports at most ${MAX_ENVIRONMENTS_PER_WORKSPACE} variable sets`,
+          "provide exactly one of variableSetId or variableSetName; deprecated aliases must provide exactly one of environmentId or environmentName",
         );
       }
-      variableSet = await createVariableSet(deps.db, {
+      const trimmedVariableSetName = targetName?.trim();
+      if (targetName !== undefined && !trimmedVariableSetName) {
+        throw new Error("variable set name is required");
+      }
+      let created = false;
+      let variableSet =
+        targetId !== undefined
+          ? await getVariableSet(deps.db, grant.workspaceId, targetId)
+          : await getVariableSetByName(deps.db, grant.workspaceId, trimmedVariableSetName!);
+      if (!variableSet && targetId !== undefined) {
+        throw new Error("variable set/environment not found");
+      }
+      if (!variableSet) {
+        if (
+          (await countVariableSets(deps.db, grant.workspaceId)) >= MAX_ENVIRONMENTS_PER_WORKSPACE
+        ) {
+          throw new Error(
+            `a workspace supports at most ${MAX_ENVIRONMENTS_PER_WORKSPACE} variable sets`,
+          );
+        }
+        variableSet = await createVariableSet(deps.db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          name: trimmedVariableSetName!,
+        });
+        created = true;
+        await recordVariableSetAuditEvent(deps.db, {
+          grant,
+          action: "variable_set.created",
+          variableSetId: variableSet.id,
+        });
+      }
+      const exists = variableSet.variables.some((variable) => variable.name === parsedName.data);
+      if (!exists && variableSet.variables.length >= MAX_VARIABLES_PER_ENVIRONMENT) {
+        throw new Error(
+          `a variable set supports at most ${MAX_VARIABLES_PER_ENVIRONMENT} variables`,
+        );
+      }
+      const metadata = await setVariableSetVariable(deps.db, {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
-        name: trimmedVariableSetName!,
+        variableSetId: variableSet.id,
+        name: parsedName.data,
+        valueEncrypted: encryptVariableSetValue(key, value),
       });
-      created = true;
       await recordVariableSetAuditEvent(deps.db, {
         grant,
-        action: "variable_set.created",
+        action: "variable_set.variable.set",
         variableSetId: variableSet.id,
+        variableName: parsedName.data,
       });
-    }
-    const exists = variableSet.variables.some((variable) => variable.name === parsedName.data);
-    if (!exists && variableSet.variables.length >= MAX_VARIABLES_PER_ENVIRONMENT) {
-      throw new Error(`a variable set supports at most ${MAX_VARIABLES_PER_ENVIRONMENT} variables`);
-    }
-    const metadata = await setVariableSetVariable(deps.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      variableSetId: variableSet.id,
-      name: parsedName.data,
-      valueEncrypted: encryptVariableSetValue(key, value),
-    });
-    await recordVariableSetAuditEvent(deps.db, {
-      grant,
-      action: "variable_set.variable.set",
-      variableSetId: variableSet.id,
-      variableName: parsedName.data,
-    });
-    const responseVariableSet = {
-      id: variableSet.id,
-      name: variableSet.name,
-      created,
+      return json(
+        mcpMutationReceipt({
+          operation,
+          committed: true,
+          outcome: exists ? "updated" : "created",
+          changed: true,
+          resource: {
+            type: "variable_set",
+            id: variableSet.id,
+            version: metadata.version,
+            state: "variable_written",
+          },
+          timestamp: metadata.updatedAt,
+          idempotency: { status: "not_supported" },
+          facts: {
+            variableCreated: !exists,
+            variableSetCreated: created,
+            deprecatedAlias: operation === "environment_set_variable",
+          },
+          nextAction: { tool: "variable_set_list", arguments: {} },
+        }),
+      );
     };
-    return json({
-      variableSet: responseVariableSet,
-      environment: responseVariableSet,
-      variable: metadata,
-    });
-  };
-  const registerSetTool = (name: string, description: string): void => {
+  const registerSetTool = (
+    name: "variable_set_set_variable" | "environment_set_variable",
+    description: string,
+  ): void => {
     server.registerTool(
       name,
       {
@@ -1867,7 +2520,7 @@ function registerVariableSetTools(
           value: z4.string().min(1).max(32768),
         },
       },
-      setVariableHandler,
+      setVariableHandler(name),
     );
   };
   if (can("variable-sets:use")) {

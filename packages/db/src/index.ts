@@ -5353,6 +5353,7 @@ export async function listScheduledTasks(
   db: Database,
   workspaceId: string,
   limit = 100,
+  offset = 0,
 ): Promise<ScheduledTask[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const rows = await scopedDb
@@ -5360,7 +5361,8 @@ export async function listScheduledTasks(
       .from(schema.scheduledTasks)
       .where(eq(schema.scheduledTasks.workspaceId, workspaceId))
       .orderBy(desc(schema.scheduledTasks.createdAt))
-      .limit(limit);
+      .limit(limit)
+      .offset(offset);
     return rows.map(mapScheduledTask);
   });
 }
