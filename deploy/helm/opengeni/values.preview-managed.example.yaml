@@ -4,6 +4,10 @@
 
 api:
   replicaCount: 1
+  # Preview accepts brief maintenance downtime. A minAvailable: 1 PDB on a
+  # single replica prevents AKS upgrades and node drains from ever completing.
+  podDisruptionBudget:
+    enabled: false
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -13,6 +17,8 @@ api:
 worker:
   control:
     replicaCount: 1
+    podDisruptionBudget:
+      enabled: false
     strategy:
       type: RollingUpdate
       rollingUpdate:
@@ -20,6 +26,8 @@ worker:
         maxUnavailable: 1
   turns:
     replicaCount: 1
+    podDisruptionBudget:
+      enabled: false
     strategy:
       type: RollingUpdate
       rollingUpdate:
@@ -28,6 +36,8 @@ worker:
 
 web:
   replicaCount: 1
+  podDisruptionBudget:
+    enabled: false
   strategy:
     type: RollingUpdate
     rollingUpdate:

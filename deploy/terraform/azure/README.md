@@ -67,7 +67,33 @@ managed_aks_capacity = {
 ```
 
 When set, this policy is authoritative for the managed AKS system-pool node
-count. When omitted, the existing `aks.node_count` behavior is unchanged.
+count. Existing automation that supplies only `node_count` retains the fixed
+pool behavior and all existing `aks` settings.
+
+For a right-sized non-production pool, the same override can pin the complete
+capacity and safe-rotation contract without copying credential-bearing tfvars:
+
+```hcl
+managed_aks_capacity = {
+  node_count                  = 1
+  vm_size                    = "Standard_E4as_v6"
+  auto_scaling_enabled        = true
+  min_count                   = 1
+  max_count                   = 3
+  max_pods                    = 60
+  os_disk_size_gb             = 128
+  os_disk_type                = "Managed"
+  temporary_name_for_rotation = "systemtemp"
+}
+```
+
+`temporary_name_for_rotation` lets the AzureRM provider create a temporary
+pool before replacing a default pool for a SKU, pod-density, or disk change.
+It does not make a one-node pool highly available: a pool with `min_count = 1`
+accepts brief staging downtime during maintenance. Verify workload requests,
+PDBs, persistent-volume behavior, subnet IP capacity, regional SKU/quota, and a
+reviewed rollback before applying such a policy. When the override is omitted,
+the equivalent optional fields on `aks` provide the same controls.
 
 ## Managed PostgreSQL Capacity
 

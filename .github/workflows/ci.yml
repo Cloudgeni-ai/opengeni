@@ -278,12 +278,28 @@ jobs:
             --namespace opengeni \
             -f deploy/helm/opengeni/values.gcp-managed.example.yaml \
             >/tmp/opengeni-gcp-rendered.yaml
+          helm template opengeni-preview deploy/helm/opengeni \
+            --namespace opengeni-preview \
+            -f deploy/helm/opengeni/values.preview-managed.example.yaml \
+            >/tmp/opengeni-preview-rendered.yaml
+          for component in api worker-control worker-turns web; do
+            if awk -v name="opengeni-preview-$component" '
+              $1 == "kind:" && $2 == "PodDisruptionBudget" { pdb = 1; next }
+              pdb && $1 == "name:" && $2 == name { found = 1 }
+              /^---$/ { pdb = 0 }
+              END { exit(found ? 0 : 1) }
+            ' /tmp/opengeni-preview-rendered.yaml; then
+              echo "single-replica preview component unexpectedly rendered a blocking PDB: $component" >&2
+              exit 1
+            fi
+          done
 
       - name: Validate Terraform
         run: |
           terraform -chdir=deploy/terraform/azure fmt -check
           terraform -chdir=deploy/terraform/azure init -backend=false
           terraform -chdir=deploy/terraform/azure validate
+          terraform -chdir=deploy/terraform/azure test
           terraform -chdir=deploy/terraform/aws fmt -check
           terraform -chdir=deploy/terraform/aws init -backend=false
           terraform -chdir=deploy/terraform/aws validate
