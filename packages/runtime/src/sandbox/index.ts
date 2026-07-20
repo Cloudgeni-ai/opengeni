@@ -103,6 +103,7 @@ export {
   type LiveModalSandboxInstanceAttribution,
   type LiveModalSandboxLeaseAttribution,
   type ModalModuleLoader,
+  type ModalOrphanSweepOptions,
   type ModalOrphanSweepResult,
   type ModalSandboxAttribution,
   type ModalSandboxEphemeralOwnerAttribution,

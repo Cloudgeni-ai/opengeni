@@ -13975,6 +13975,47 @@ export type LiveModalSandboxInstanceAttribution =
       expiresAt: Date;
     };
 
+type LiveModalSandboxInstanceAttributionRow = {
+  owner_kind: "lease" | SandboxEphemeralOwnerKind;
+  owner_id: string;
+  workspace_id: string;
+  instance_id: string | null;
+  sandbox_group_id: string | null;
+  liveness: SandboxLeaseLiveness | null;
+  expires_at: Date | string | null;
+};
+
+function mapLiveModalSandboxInstanceAttribution(
+  row: LiveModalSandboxInstanceAttributionRow,
+): LiveModalSandboxInstanceAttribution {
+  if (row.owner_kind === "lease") {
+    if (!row.sandbox_group_id || !row.liveness) {
+      throw new Error(`Live Modal lease ${row.owner_id} is missing lease attribution`);
+    }
+    return {
+      ownerKind: "lease",
+      ownerId: row.owner_id,
+      workspaceId: row.workspace_id,
+      instanceId: row.instance_id,
+      sandboxGroupId: row.sandbox_group_id,
+      liveness: row.liveness,
+      expiresAt: null,
+    };
+  }
+  if (!row.instance_id || !row.expires_at) {
+    throw new Error(`Live Modal verifier ${row.owner_id} is missing exact attribution`);
+  }
+  return {
+    ownerKind: "rig_verification",
+    ownerId: row.owner_id,
+    workspaceId: row.workspace_id,
+    instanceId: row.instance_id,
+    sandboxGroupId: null,
+    liveness: null,
+    expiresAt: new Date(row.expires_at),
+  };
+}
+
 export interface AcquireLeaseInput {
   accountId: string;
   workspaceId: string;
@@ -16086,15 +16127,7 @@ export async function deactivateSandboxEphemeralOwner(
 export async function listLiveModalSandboxInstanceAttributions(
   db: Database,
 ): Promise<LiveModalSandboxInstanceAttribution[]> {
-  const rows = await rawRows<{
-    owner_kind: "lease" | SandboxEphemeralOwnerKind;
-    owner_id: string;
-    workspace_id: string;
-    instance_id: string | null;
-    sandbox_group_id: string | null;
-    liveness: SandboxLeaseLiveness | null;
-    expires_at: Date | string | null;
-  }>(
+  const rows = await rawRows<LiveModalSandboxInstanceAttributionRow>(
     db,
     sql`
       select owner_kind, owner_id, workspace_id, instance_id,
@@ -16102,34 +16135,34 @@ export async function listLiveModalSandboxInstanceAttributions(
       from opengeni_private.list_live_modal_sandbox_instances()
     `,
   );
-  return rows.map((row) => {
-    if (row.owner_kind === "lease") {
-      if (!row.sandbox_group_id || !row.liveness) {
-        throw new Error(`Live Modal lease ${row.owner_id} is missing lease attribution`);
-      }
-      return {
-        ownerKind: "lease",
-        ownerId: row.owner_id,
-        workspaceId: row.workspace_id,
-        instanceId: row.instance_id,
-        sandboxGroupId: row.sandbox_group_id,
-        liveness: row.liveness,
-        expiresAt: null,
-      };
-    }
-    if (!row.instance_id || !row.expires_at) {
-      throw new Error(`Live Modal verifier ${row.owner_id} is missing exact attribution`);
-    }
-    return {
-      ownerKind: "rig_verification",
-      ownerId: row.owner_id,
-      workspaceId: row.workspace_id,
-      instanceId: row.instance_id,
-      sandboxGroupId: null,
-      liveness: null,
-      expiresAt: new Date(row.expires_at),
-    };
-  });
+  return rows.map(mapLiveModalSandboxInstanceAttribution);
+}
+
+/**
+ * Revalidate one exact provider instance immediately before an orphan sweep
+ * terminates it. This deliberately queries the same pinned cross-workspace
+ * projection as the full sweep snapshot rather than trusting diagnostic tags
+ * or a stale in-memory list.
+ */
+export async function findLiveModalSandboxInstanceAttribution(
+  db: Database,
+  instanceId: string,
+): Promise<LiveModalSandboxInstanceAttribution | null> {
+  if (!instanceId) {
+    return null;
+  }
+  const rows = await rawRows<LiveModalSandboxInstanceAttributionRow>(
+    db,
+    sql`
+      select owner_kind, owner_id, workspace_id, instance_id,
+        sandbox_group_id, liveness, expires_at
+      from opengeni_private.list_live_modal_sandbox_instances()
+      where instance_id = ${instanceId}
+      limit 1
+    `,
+  );
+  const row = rows[0];
+  return row ? mapLiveModalSandboxInstanceAttribution(row) : null;
 }
 
 // §4.7 — explicit re-arm seam (D1). acquireLease already re-arms a draining
