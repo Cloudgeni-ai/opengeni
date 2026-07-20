@@ -69,6 +69,8 @@ export function capabilitySourceLabel(source: CapabilitySource | string): string
   switch (source) {
     case "built_in":
       return "Built in";
+    case "library":
+      return "Curated library";
     case "configured":
       return "Configured";
     case "public_registry":

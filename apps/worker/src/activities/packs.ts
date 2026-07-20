@@ -1,7 +1,18 @@
 import type { Settings } from "@opengeni/config";
 import { CapabilityPack } from "@opengeni/contracts";
-import { getWorkspace, getWorkspacePack, listPackInstallations, type Database } from "@opengeni/db";
-import type { PackSkill } from "@opengeni/runtime";
+import {
+  getWorkspace,
+  getWorkspacePack,
+  listCapabilityInstallations,
+  listPackInstallations,
+  type Database,
+} from "@opengeni/db";
+import {
+  isSkillLibraryEntryId,
+  loadSkillLibrarySkill,
+  type EffectiveSkillSelection,
+  type PackSkill,
+} from "@opengeni/runtime";
 
 /**
  * The pack-scoped runtime for a workspace: the sandbox image its sessions run
@@ -14,6 +25,19 @@ export type WorkspacePackRuntime = {
 };
 
 const emptyPackRuntime: WorkspacePackRuntime = { sandboxImage: null, skills: [] };
+
+export type WorkspaceSkillLibraryRuntime = {
+  skillLibrarySkills: PackSkill[];
+  skillLibrarySelections: EffectiveSkillSelection[];
+};
+
+type SkillLibraryInstallationMetadata = {
+  libraryId: string;
+  libraryVersion: string;
+  contentSha256: string;
+  sourceCommit: string;
+  provenance: string;
+};
 
 /**
  * Resolves the pack-scoped runtime from the workspace's active pack
@@ -43,6 +67,95 @@ export async function resolveWorkspacePackRuntime(
     }
   }
   return workspacePackRuntimeFromPacks(packs);
+}
+
+/**
+ * Resolves active immutable curated skills separately from pack skills. The
+ * capability installation is the workspace selection boundary; it carries
+ * only secret-free exact identity metadata, and the runtime loader verifies
+ * the pinned artifact hash before any content is materialized.
+ */
+export async function resolveWorkspaceSkillLibraryRuntime(
+  db: Database,
+  workspaceId: string,
+): Promise<WorkspaceSkillLibraryRuntime> {
+  const installations = await listCapabilityInstallations(db, workspaceId);
+  const activeSkills = installations
+    .filter(
+      (installation) =>
+        installation.status === "active" &&
+        installation.kind === "skill" &&
+        installation.capabilityId.startsWith("skill:") &&
+        isSkillLibraryEntryId(installation.capabilityId.slice("skill:".length)),
+    )
+    .sort((a, b) => a.capabilityId.localeCompare(b.capabilityId));
+  const skillLibrarySkills: PackSkill[] = [];
+  const skillLibrarySelections: EffectiveSkillSelection[] = [];
+  for (const installation of activeSkills) {
+    const metadata = parseSkillLibraryInstallationMetadata(
+      installation.metadata,
+      installation.capabilityId,
+    );
+    if (installation.capabilityId !== `skill:${metadata.libraryId}`) {
+      throw new Error(
+        `Skill installation id does not match its library entry: ${installation.capabilityId} -> ${metadata.libraryId}`,
+      );
+    }
+    const loaded = loadSkillLibrarySkill(metadata.libraryId, metadata.libraryVersion);
+    if (installation.config.version !== metadata.libraryVersion) {
+      throw new Error(
+        `Skill installation version mismatch for ${metadata.libraryId}@${metadata.libraryVersion}: config has ${String(installation.config.version)}`,
+      );
+    }
+    if (loaded.entry.contentSha256 !== metadata.contentSha256) {
+      throw new Error(
+        `Skill installation hash mismatch for ${metadata.libraryId}@${metadata.libraryVersion}: expected ${metadata.contentSha256}, catalog has ${loaded.entry.contentSha256}`,
+      );
+    }
+    if (
+      loaded.entry.sourceCommit !== metadata.sourceCommit ||
+      loaded.entry.provenance !== metadata.provenance
+    ) {
+      throw new Error(
+        `Skill installation provenance mismatch for ${metadata.libraryId}@${metadata.libraryVersion}; re-enable the skill from the current catalog`,
+      );
+    }
+    skillLibrarySkills.push({
+      name: loaded.skill.name,
+      description: loaded.skill.description,
+      files: loaded.skill.files.map((file) => ({ path: file.path, content: file.content })),
+    });
+    skillLibrarySelections.push({
+      id: loaded.entry.id,
+      name: loaded.entry.name,
+      source: "library",
+      version: loaded.entry.version,
+      contentSha256: loaded.entry.contentSha256,
+      reason: "enabled workspace capability installation",
+    });
+  }
+  return { skillLibrarySkills, skillLibrarySelections };
+}
+
+function parseSkillLibraryInstallationMetadata(
+  metadata: Record<string, unknown>,
+  capabilityId: string,
+): SkillLibraryInstallationMetadata {
+  const libraryId = stringMetadata(metadata.libraryId);
+  const libraryVersion = stringMetadata(metadata.libraryVersion);
+  const contentSha256 = stringMetadata(metadata.contentSha256);
+  const sourceCommit = stringMetadata(metadata.sourceCommit);
+  const provenance = stringMetadata(metadata.provenance);
+  if (!libraryId || !libraryVersion || !contentSha256 || !sourceCommit || !provenance) {
+    throw new Error(
+      `Skill installation ${capabilityId} is missing immutable library metadata; re-enable the skill from the current catalog`,
+    );
+  }
+  return { libraryId, libraryVersion, contentSha256, sourceCommit, provenance };
+}
+
+function stringMetadata(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
 }
 
 /**

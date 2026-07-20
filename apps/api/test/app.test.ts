@@ -862,6 +862,67 @@ describe("catalog connectionRef exposure", () => {
   });
 });
 
+describe("curated skill catalog enablement", () => {
+  const librarySkill = (): CapabilityCatalogItem =>
+    capabilityItem({
+      id: "skill:azure-verified-modules",
+      kind: "skill",
+      source: "library",
+      name: "azure-verified-modules",
+      runtime: { available: true, notes: "available" },
+      metadata: {
+        libraryId: "azure-verified-modules",
+        version: "1.0.0",
+        contentSha256: "f17d1e7d909797042d71ae1ccfee04a2f5a3d96f4972db8ca005f1173cd40564",
+        sourceCommit: "de4323afdfbc30d1387f287b55062fa8d82b62e8",
+        provenance: "Vendored from hashicorp/agent-skills; reviewed OpenGeni curated entry.",
+      },
+    });
+
+  test("is discoverable but disabled until an active installation exists", () => {
+    const item = applyCapabilityEnablement(librarySkill(), undefined, new Set());
+    expect(item.enabled).toBe(false);
+    expect(item.enabledReason).toBeNull();
+  });
+
+  test("an active installation enables it without exposing a connection", () => {
+    const item = applyCapabilityEnablement(
+      librarySkill(),
+      {
+        ...installation({ version: "1.0.0" }),
+        capabilityId: "skill:azure-verified-modules",
+        kind: "skill",
+        metadata: {
+          libraryId: "azure-verified-modules",
+          libraryVersion: "1.0.0",
+          contentSha256:
+            "f17d1e7d909797042d71ae1ccfee04a2f5a3d96f4972db8ca005f1173cd40564",
+          sourceCommit: "de4323afdfbc30d1387f287b55062fa8d82b62e8",
+          provenance: "Vendored from hashicorp/agent-skills; reviewed OpenGeni curated entry.",
+        },
+      },
+      new Set(),
+    );
+    expect(item.enabled).toBe(true);
+    expect(item.enabledReason).toBe("explicitly selected");
+    expect(item.connectionRef).toBeNull();
+  });
+
+  test("a malformed active installation stays disabled", () => {
+    const item = applyCapabilityEnablement(
+      librarySkill(),
+      {
+        ...installation({ version: "1.0.0" }),
+        capabilityId: "skill:azure-verified-modules",
+        kind: "skill",
+      },
+      new Set(),
+    );
+    expect(item.enabled).toBe(false);
+    expect(item.enabledReason).toBeNull();
+  });
+});
+
 describe("GET /v1/config/client", () => {
   // The route only reads settings (+ the storage derived from them); db / bus /
   // workflowClient are never touched, so we stub them. managedAuth is forced to

@@ -3301,6 +3301,7 @@ export type CapabilityKind = z.infer<typeof CapabilityKind>;
 
 export const CapabilitySource = z.enum([
   "built_in",
+  "library",
   "configured",
   "public_registry",
   "registry",

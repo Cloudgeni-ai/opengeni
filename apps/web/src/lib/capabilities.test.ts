@@ -123,6 +123,7 @@ describe("human labels", () => {
 
   test("source labels are human", () => {
     expect(capabilitySourceLabel("built_in")).toBe("Built in");
+    expect(capabilitySourceLabel("library")).toBe("Curated library");
     expect(capabilitySourceLabel("public_registry")).toBe("Public registry");
     expect(capabilitySourceLabel("manual")).toBe("Added");
   });
