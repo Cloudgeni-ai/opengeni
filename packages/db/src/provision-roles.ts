@@ -3,6 +3,7 @@ import type { RlsStrategy } from "./index";
 
 export type ProvisionResult = {
   appRole: string | null;
+  hostExportRole: string | null;
   temporalRole: string | null;
   temporalDatabases: string[];
   schema: string;
@@ -27,6 +28,13 @@ export type ProvisionRolesOptions = {
   rlsStrategy?: RlsStrategy;
   appRole?: string;
   appPassword?: string;
+  /**
+   * Optional cross-workspace projection role. It receives schema USAGE and
+   * EXECUTE only on the host-export API; it receives no table privileges.
+   * Provision it after migrations so the function grants are present.
+   */
+  hostExportRole?: string;
+  hostExportPassword?: string;
   temporalRole?: string;
   temporalPassword?: string;
   temporalDatabases?: string[];
@@ -59,6 +67,13 @@ export async function provisionRoles(
     options.appRole ?? (process.env.OPENGENI_APP_DATABASE_USER?.trim() || "opengeni_app"),
   );
   const appPassword = options.appPassword ?? process.env.OPENGENI_APP_DATABASE_PASSWORD;
+  const hostExportRole = validateIdentifier(
+    "hostExportRole",
+    options.hostExportRole ??
+      (process.env.OPENGENI_HOST_EXPORT_DATABASE_USER?.trim() || "opengeni_host_exporter"),
+  );
+  const hostExportPassword =
+    options.hostExportPassword ?? process.env.OPENGENI_HOST_EXPORT_DATABASE_PASSWORD;
   const temporalRole = validateIdentifier(
     "temporalRole",
     options.temporalRole ??
@@ -95,12 +110,18 @@ export async function provisionRoles(
       }
     }
 
+    if (hostExportPassword) {
+      await ensureLoginRole(sql, hostExportRole, hostExportPassword);
+      await grantHostExportRoleIfSchemaExists(sql, hostExportRole);
+    }
+
     if (rlsStrategy === "force") {
       await grantAppRoleIfSchemaExists(sql, appRole, schema);
     }
 
     return {
       appRole: provisionedAppRole,
+      hostExportRole: hostExportPassword ? hostExportRole : null,
       temporalRole: temporalPassword ? temporalRole : null,
       temporalDatabases: temporalPassword ? temporalDatabases : [],
       schema,
@@ -109,6 +130,23 @@ export async function provisionRoles(
   } finally {
     await sql.end();
   }
+}
+
+/**
+ * The exporter is intentionally separate from `opengeni_app`: its functions
+ * project every workspace into a host-owned sink and therefore cannot be made
+ * available to the tenant-scoped application role.
+ */
+async function grantHostExportRoleIfSchemaExists(sql: postgres.Sql, role: string): Promise<void> {
+  await sql.unsafe(`
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'opengeni_host_export') THEN
+    EXECUTE format('GRANT USAGE ON SCHEMA opengeni_host_export TO %I', ${literal(role)});
+    EXECUTE format('GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA opengeni_host_export TO %I', ${literal(role)});
+  END IF;
+END $$;
+`);
 }
 
 async function ensureLoginRole(sql: postgres.Sql, role: string, password: string): Promise<void> {

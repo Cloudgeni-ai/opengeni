@@ -11,8 +11,8 @@ The contract is simple: **all ports unset means standalone**. The defaults in `a
 **V2: call core directly.** Import from `@opengeni/core` and call domain helpers without HTTP. The main session surface is:
 
 ```ts
-createSessionForRequest(deps, grant, workspaceId, rawPayload)
-acceptSessionUserMessage(deps, grant, workspaceId, sessionId, input)
+createSessionForRequest(deps, grant, workspaceId, rawPayload);
+acceptSessionUserMessage(deps, grant, workspaceId, sessionId, input);
 ```
 
 Both live in `packages/core/src/domain/sessions.ts` and expect `ApiRouteDeps` plus an `AccessGrant`. Scheduled-task validation/sync helpers live in `packages/core/src/domain/scheduled-tasks.ts`. V2 skips Hono parsing/routing, but it does not skip Postgres, EventBus, Temporal wakeups, or worker execution.
@@ -21,8 +21,8 @@ Both live in `packages/core/src/domain/sessions.ts` and expect `ApiRouteDeps` pl
 
 A host that runs multiple agent personas has two composable, system-level instruction levers. Both ride the same authoritative instructions channel the agent obeys — neither is ever rendered as a user/timeline message — and they compose in a fixed order: **deployment default template → workspace persona → per-session instructions** (session-specific last), with the non-bypassable CORE (goal-loop ownership + variable set block) always substituted in.
 
-- **Workspace `agentInstructions`** (`Workspace.agentInstructions`, set at workspace create/update) — the white-label persona for *every* session in a workspace. Use it for stable, tenant-wide branding/behavior. It may embed the `{{core}}` marker to place the non-bypassable CORE; if it omits the marker, CORE is appended.
-- **Per-session `instructions`** (`CreateSessionRequest.instructions`) — an optional, per-*session* refinement layered after the workspace persona. Use it to deliver a **per-agent-type prompt** (reviewer vs. planner vs. fixer) when many personas share one workspace, without minting a workspace per persona. It is org-visible metadata (returned on the session record, exposed like `title`/`goal`), **never** a timeline event, so internal prompt content does not leak to shared-session readers and carries full system-level authority.
+- **Workspace `agentInstructions`** (`Workspace.agentInstructions`, set at workspace create/update) — the white-label persona for _every_ session in a workspace. Use it for stable, tenant-wide branding/behavior. It may embed the `{{core}}` marker to place the non-bypassable CORE; if it omits the marker, CORE is appended.
+- **Per-session `instructions`** (`CreateSessionRequest.instructions`) — an optional, per-_session_ refinement layered after the workspace persona. Use it to deliver a **per-agent-type prompt** (reviewer vs. planner vs. fixer) when many personas share one workspace, without minting a workspace per persona. It is org-visible metadata (returned on the session record, exposed like `title`/`goal`), **never** a timeline event, so internal prompt content does not leak to shared-session readers and carries full system-level authority.
 
 Prefer `instructions` over stuffing persona text into `initialMessage`: `initialMessage` renders as visible timeline content, has weaker instruction authority, and is readable by anyone with the session. Reach for workspace `agentInstructions` when the persona is the same for the whole tenant; reach for session `instructions` when it varies per session. Omitting `instructions` is byte-identical to today's composition. It is trimmed, non-empty, and capped at 32768 characters.
 
@@ -168,13 +168,95 @@ The worker is always a separate durable process for real agent turns. A host run
 
 ```ts
 type WorkerOptions = {
+  role: "control" | "turn";
   settings?: Settings;
-  activities?: ReturnType<typeof createActivities>;
+  activities?:
+    | ReturnType<typeof createControlActivities>
+    | ReturnType<typeof createTurnActivities>;
   activityDependencies?: ActivityDependencies;
+  workflowsPath?: string;
 };
 ```
 
 `ActivityDependencies` can inject `settings`, `db`, `bus`, `runtime`, `objectStorage`, `documentServices`, `observability`, `wakeSessionWorkflow`, `entitlements`, and `connectionCredentials`. If omitted, `createActivities` builds the standalone defaults from settings.
+
+### Durable host event and usage export
+
+Canonical sources: the `HostEventSink` / `HostUsageSink` contracts in
+`packages/contracts/src/index.ts`, the host-export repository API in
+`packages/db/src/index.ts`, migration `0097_host_export_outbox.sql`, and
+`createHostExportPump(options)` in `apps/worker/src/host-export-pump.ts`.
+
+An embedded host can project OpenGeni's bounded durable session events and exact usage facts into
+its own business store without polling tenant routes or treating NATS as a durable log. This surface
+is optional. With no registered consumer, both export gates default to false and source transactions
+write zero outbox rows, preserving standalone behavior.
+
+Provision the projection identity **after migrations**. It is deliberately not the normal
+`opengeni_app` role: an exporter reads a cross-workspace stream, while the app role is tenant-scoped.
+Run role provisioning again after any later migration that adds host-export functions; grants cover
+the functions present when provisioning runs. One OpenGeni installation per database is supported:
+dedicated data schemas do not make the shared private/export function schemas multi-installation-safe.
+
+```ts
+await provisionRoles(adminDatabaseUrl, {
+  targetSchema: "opengeni",
+  rlsStrategy: "force",
+  appPassword,
+  hostExportRole: "opengeni_host_exporter",
+  hostExportPassword,
+});
+
+const exporter = createDb(hostExportDatabaseUrl, { max: 2 });
+const pump = createHostExportPump({
+  db: exporter.db,
+  eventSink: {
+    consumerId: "host-business-events",
+    deliverEvents: async (batch) => hostStore.applyEvents(batch),
+  },
+  usageSink: {
+    consumerId: "host-business-usage",
+    deliverUsage: async (batch) => hostStore.applyUsage(batch),
+  },
+});
+await pump.start();
+```
+
+The exporter role receives `USAGE` and function `EXECUTE` on the isolated
+`opengeni_host_export` schema and no table privileges. The normal app role cannot register, claim,
+rewind, prune, or inspect a host consumer. Each sink has a named checkpoint and one renewable batch
+lease. Cursors are decimal strings so they remain exact past JavaScript's safe-integer range.
+
+Delivery is **at least once**. If a process dies after the sink commits but before OpenGeni advances
+the checkpoint, the identical idempotency keys are delivered again. A sink must transactionally
+deduplicate those keys. Session ordering is authoritative by `event.sequence`; cursor order is
+stable across sessions but deliberately not claimed to be causal. High-volume raw delta event types
+are excluded from the host stream; their completed semantic events remain. Event types are bounded
+but forward-tolerant so an older consumer can carry a newer writer's event during a rolling upgrade.
+Execution IDs on usage rows are validated soft references: deletion never rewrites the frozen fact.
+Usage field limits are enforced only when the optional usage export is enabled; an unrepresentable
+new fact fails its source transaction instead of committing a poison export row, while standalone
+mode retains its prior input behavior.
+
+Transient sink failures release the lease with exponential backoff and eventually block the named
+consumer visibly instead of dropping rows. `resumeHostExportConsumer` is explicit. A genuinely
+poisonous head record can be moved with `deadLetterHostExportHead`; only the exact leased head can be
+disposed, so a bad record cannot skip an unseen prefix. Schema failures are counted and block like
+sink failures; `HostExportPayloadError` reports the bounded head cursor needed for an explicit
+operator disposition without copying its payload into logs. `rewindHostExportConsumer` rejects
+pruned or future cursors. The pump runs bounded retention housekeeping after successful checkpoints;
+`pruneHostExportOutbox` deletes only below every named consumer checkpoint and keeps the configured
+grace window available for replay. A disabled consumer deliberately keeps that retention floor;
+after quiescing it, `retireHostExportConsumer` (or `pump.retire(kind)` after `pump.stop()`) permanently
+removes the checkpoint so the remaining consumers can advance retention. Re-registering a retired
+name starts at the then-retained floor, not its former checkpoint; calling `pump.start()` again after
+`pump.retire(kind)` performs exactly that explicit re-registration.
+
+`pump.stop()` only drains the current sink call and stops polling; it intentionally keeps capture
+enabled across deploy restarts. `pump.disable(kind)` retains that consumer and its checkpoint (so it
+continues to hold the pruning floor); when it disables the last consumer of a kind, capture stops and
+events in that interval are deliberately not recoverable. Normal deploys must use `stop()`, not
+`disable()`.
 
 ### EventBus
 
@@ -218,6 +300,6 @@ pointless coupling (host ownership of engine internals), so it is a contract:
 **API-side admission is local by design.** The API validates structure,
 permissions, and workspace scoping; host-specific admission (may this tenant
 run another turn?) is enforced where the work actually starts — the worker's
-entitlements port. A request can therefore be *accepted* by the API and still
-be *declined* at run admission; hosts that want earlier rejection should gate
+entitlements port. A request can therefore be _accepted_ by the API and still
+be _declined_ at run admission; hosts that want earlier rejection should gate
 at their own perimeter, which they control.

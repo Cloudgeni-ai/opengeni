@@ -1204,6 +1204,10 @@ export async function createSessionForRequest(
     unit: "run",
     sourceResourceType: "session",
     sourceResourceId: session.id,
+    sessionId: session.id,
+    initiator: session.createdBy,
+    initiatorContext: session.createdByContext,
+    origin: creationInitiator.actor ? "system" : "user",
     idempotencyKey: `agent_run.created:${workspaceId}:${session.id}`,
   });
   return session;
@@ -1309,6 +1313,11 @@ export async function acceptSessionUserMessage(
     unit: "run",
     sourceResourceType: "session_turn",
     sourceResourceId: turn.id,
+    sessionId,
+    turnId: turn.id,
+    initiator: turn.initiator,
+    initiatorContext: turn.initiatorContext,
+    origin: turn.source,
     idempotencyKey: `agent_run.created:${workspaceId}:${turn.id}`,
   });
   return { accepted, turn };
