@@ -214,6 +214,8 @@ describe("Codex fleet deterministic replay", () => {
     const child = Bun.spawn(
       [
         nodeExecutable,
+        "--no-warnings",
+        "--experimental-strip-types",
         "--input-type=module",
         "-e",
         `

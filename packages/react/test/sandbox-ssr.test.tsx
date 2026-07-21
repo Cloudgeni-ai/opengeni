@@ -18,8 +18,44 @@ import {
 } from "@opengeni/sdk";
 import { DesktopViewer } from "../src/components/desktop-viewer";
 import { SandboxTerminal } from "../src/components/sandbox-terminal";
+import { WorkspaceDock } from "../src/components/workspace-dock";
+import * as Composer from "../src/composer";
 
 describe("SSR safety (no DOM / no window)", () => {
+  test("the compound chat composer renders without browser globals", () => {
+    function ServerComposer() {
+      const controller = Composer.useChatComposerController({
+        delivery: {
+          value: "server draft",
+          setValue: () => {},
+          send: async () => true,
+          steer: async () => true,
+          sending: false,
+          canSend: true,
+          error: null,
+          clearError: () => {},
+        },
+      });
+      return (
+        <Composer.Root controller={controller}>
+          <Composer.Surface>
+            <Composer.Input />
+            <Composer.Footer>
+              <Composer.Actions>
+                <Composer.SendButton />
+              </Composer.Actions>
+            </Composer.Footer>
+          </Composer.Surface>
+        </Composer.Root>
+      );
+    }
+
+    expect(typeof window).toBe("undefined");
+    const html = renderToString(<ServerComposer />);
+    expect(html).toContain("data-og-composer-id");
+    expect(html).toContain("server draft");
+  });
+
   test("SandboxTerminal renders to a string on the server (placeholder, no xterm import)", () => {
     const html = renderToString(
       <SandboxTerminal
@@ -57,6 +93,21 @@ describe("SSR safety (no DOM / no window)", () => {
     };
     const html = renderToString(<DesktopViewer capability={cap} />);
     expect(html).toContain("data-opengeni-desktop");
+  });
+
+  test("WorkspaceDock renders without an ambient localStorage during SSR", () => {
+    expect(typeof window).toBe("undefined");
+    expect(typeof localStorage).toBe("undefined");
+
+    const html = renderToString(
+      <WorkspaceDock
+        primary={<main>Server-rendered primary pane</main>}
+        tabs={[{ id: "files", label: "Files", content: <div>Captured files</div> }]}
+        collapsed
+      />,
+    );
+
+    expect(html).toContain("Server-rendered primary pane");
   });
 });
 

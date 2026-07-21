@@ -1,5 +1,5 @@
 /**
- * OPE-32 adaptive Codex fleet policy, replay contract, and shadow evaluator.
+ * Adaptive Codex fleet policy, replay contract, and shadow evaluator.
  *
  * This module is deliberately pure and browser-safe. It accepts only bounded,
  * metadata-only snapshots whose candidate keys are opaque aliases assigned by

@@ -331,6 +331,8 @@
         "@dnd-kit/core": "6.3.1",
         "@dnd-kit/sortable": "10.0.0",
         "@dnd-kit/utilities": "3.2.2",
+        "@fontsource-variable/noto-sans-arabic": "5.2.10",
+        "@fontsource-variable/noto-sans-jp": "5.2.10",
         "@opengeni/sdk": "workspace:*",
         "clsx": "^2.1.1",
         "lucide-react": "^1.8.0",
@@ -820,6 +822,10 @@
     "@fontsource-variable/inter": ["@fontsource-variable/inter@5.2.8", "", {}, "sha512-kOfP2D+ykbcX/P3IFnokOhVRNoTozo5/JxhAIVYLpea/UBmCQ/YWPBfWIDuBImXX/15KH+eKh4xpEUyS2sQQGQ=="],
 
     "@fontsource-variable/jetbrains-mono": ["@fontsource-variable/jetbrains-mono@5.2.8", "", {}, "sha512-WBA9elru6Jdp5df2mES55wuOO0WIrn3kpXnI4+W2ek5u3ZgLS9XS4gmIlcQhiZOWEKl95meYdvK7xI+ETLCq/Q=="],
+
+    "@fontsource-variable/noto-sans-arabic": ["@fontsource-variable/noto-sans-arabic@5.2.10", "", {}, "sha512-6vP9gU5yQQE/4ClrVoS92rjwc3qUnSkoxaw/Hkrha1Nqn9UEwuh3WVxT2+DMlMdV49uxvxUKVauSd2nwLu/WBA=="],
+
+    "@fontsource-variable/noto-sans-jp": ["@fontsource-variable/noto-sans-jp@5.2.10", "", {}, "sha512-m0XfZ38rZtCaGAuAQL0cBPQ6fc/RguYEOqw66zvuLOV9vNRUBf9MFqyoazTu2JVCRIcnkrxbwF29UUaHHgTKdg=="],
 
     "@google-cloud/paginator": ["@google-cloud/paginator@5.0.2", "", { "dependencies": { "arrify": "^2.0.0", "extend": "^3.0.2" } }, "sha512-DJS3s0OVH4zFDB1PzjxAsHqJT6sKVbRwwML0ZBP9PbU7Yebtu/7SWMRzvO2J3nUi9pRNITCfu4LJeooM2w4pjg=="],
 

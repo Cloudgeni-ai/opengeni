@@ -1,5 +1,27 @@
 # @opengeni/db
 
+## 0.7.5
+
+### Patch Changes
+
+- 28290a0: Make context compaction and pending tool-call recovery converge without reactivating superseded history or repeating failed internal turns.
+
+## 0.7.4
+
+### Patch Changes
+
+- 14ce2e3: Bound model-facing textual tool output with Codex-compatible, replay-idempotent semantics, account
+  for complete current model input, make compaction failure/progress transitions
+  durable and convergent, and replace recursive session discovery with a compact
+  paginated projection.
+- 053c5df: The codex rotation strategy picker is gone: rotation-enabled always behaves as sticky-sharded (sharded-rotation policy). Sessions stick to one subscription each for maximum prompt-cache reuse, spread across all connected accounts, rebalancing only when a plan caps. The legacy strategies (most-remaining, round-robin, drain-then-next) are all strictly dominated post-cache-affinity and are now normalized to sharded at every worker read site; their branch code is kept but unreachable (rollback safety). The API accepts-but-ignores `rotationStrategy` writes (deprecated no-op, no caller breaks) and reports `sharded` as the effective truth; migration 0064 backfills stored legacy values and flips the column default. The web settings surface drops the strategy dropdown for honest copy. Remaining user controls are the real intents: rotation on/off, manual per-session pins, and (with account eligibility policy) per-account allocator include/exclude.
+- ec0697a: Ship the production-hardened captured workspace workbench, physically verified Steer/Pause cancellation across cloud, local, and self-hosted model tools, pre-model preparation, sandbox provisioning, and lifecycle/setup commands, durable quiescence admission fencing, cancellation-aware SDK reads and turn cleanup, single-round-trip pruned workspace indexing, truthful shutdown states, a responsive and accessible review dock, Unicode coverage, and package-safe CSS/SSR integration.
+- Updated dependencies [14ce2e3]
+- Updated dependencies [ec0697a]
+  - @opengeni/codex@0.2.4
+  - @opengeni/config@0.5.2
+  - @opengeni/contracts@0.11.0
+
 ## 0.7.3
 
 ### Patch Changes

@@ -155,7 +155,7 @@ export type FleetDecisionScoreItem = {
 };
 
 /**
- * One OPE-32 production-vs-shadow placement explanation. Candidate keys are
+ * One production-vs-shadow placement explanation. Candidate keys are
  * event-local aliases only; no credential/account identity reaches this item.
  */
 export type FleetDecisionItem = {

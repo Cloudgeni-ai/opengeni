@@ -387,6 +387,41 @@ export function screenshotDataUrl(out: unknown): string | null {
   return null;
 }
 
+export type TimelineMediaPreview = {
+  type: "media_preview";
+  mediaType: string;
+  inlineBytes: number | null;
+  fullOutputAvailable: false;
+  preview: string;
+};
+
+/** Find the explicit non-retained inline-media fact in a tool output. */
+export function mediaPreviewFact(out: unknown): TimelineMediaPreview | null {
+  if (typeof out === "string" && (out.startsWith("{") || out.startsWith("["))) {
+    const parsed = tryParseJson(out);
+    if (parsed !== undefined && parsed !== out) return mediaPreviewFact(parsed);
+  }
+  if (Array.isArray(out)) {
+    for (const entry of out) {
+      const preview = mediaPreviewFact(entry);
+      if (preview) return preview;
+    }
+    return null;
+  }
+  if (!out || typeof out !== "object") return null;
+  const record = out as Record<string, unknown>;
+  if (
+    record.type !== "media_preview" ||
+    typeof record.mediaType !== "string" ||
+    record.fullOutputAvailable !== false ||
+    typeof record.preview !== "string" ||
+    (record.inlineBytes !== null && typeof record.inlineBytes !== "number")
+  ) {
+    return null;
+  }
+  return record as TimelineMediaPreview;
+}
+
 /** Serialize whatever a Uint8Array became in JSON (number[], {"0":n,…} index
  *  map, or Buffer-JSON {type:"Buffer",data:[…]}) back into base64. */
 function bytesToBase64(data: unknown): string | null {

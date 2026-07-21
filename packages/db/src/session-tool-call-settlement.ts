@@ -130,14 +130,17 @@ export async function closePendingSessionToolCallsInTransaction(
   if (pending.length === 0) return { sequence: input.sequence, events: [], closed: 0 };
 
   const history = await tx
-    .select({ item: schema.sessionHistoryItems.item })
+    .select({
+      position: schema.sessionHistoryItems.position,
+      item: schema.sessionHistoryItems.item,
+      active: schema.sessionHistoryItems.active,
+    })
     .from(schema.sessionHistoryItems)
     .where(
       and(
         eq(schema.sessionHistoryItems.workspaceId, input.workspaceId),
         eq(schema.sessionHistoryItems.sessionId, input.sessionId),
         eq(schema.sessionHistoryItems.turnId, input.turnId),
-        eq(schema.sessionHistoryItems.active, true),
       ),
     )
     .orderBy(asc(schema.sessionHistoryItems.position));
@@ -150,6 +153,20 @@ export async function closePendingSessionToolCallsInTransaction(
         eq(schema.sessionHistoryItems.sessionId, input.sessionId),
       ),
     );
+  const existingOutputEvents = await tx
+    .select({ callId: sql<string | null>`${schema.sessionEvents.payload} ->> 'id'` })
+    .from(schema.sessionEvents)
+    .where(
+      and(
+        eq(schema.sessionEvents.workspaceId, input.workspaceId),
+        eq(schema.sessionEvents.sessionId, input.sessionId),
+        eq(schema.sessionEvents.turnId, input.turnId),
+        eq(schema.sessionEvents.type, "agent.toolCall.output"),
+      ),
+    );
+  const projectedCallIds = new Set(
+    existingOutputEvents.flatMap(({ callId }) => (callId ? [callId] : [])),
+  );
   let nextPosition = Math.floor(Number(maxPosition)) + 1;
   let sequence = input.sequence;
   const historyValues: Array<typeof schema.sessionHistoryItems.$inferInsert> = [];
@@ -161,7 +178,23 @@ export async function closePendingSessionToolCallsInTransaction(
     );
     const existingResult = resultType
       ? history.find(
-          ({ item }) => historyItemType(item) === resultType && historyCallId(item) === call.callId,
+          ({ item, position }) =>
+            position > (existingCall?.position ?? Number.MAX_SAFE_INTEGER) &&
+            historyItemType(item) === resultType &&
+            historyCallId(item) === call.callId,
+        )
+      : undefined;
+    const activeCall = history.find(
+      ({ item, active }) =>
+        active && historyItemType(item) === call.callType && historyCallId(item) === call.callId,
+    );
+    const activeResult = resultType
+      ? history.find(
+          ({ item, active, position }) =>
+            active &&
+            position > (activeCall?.position ?? Number.MAX_SAFE_INTEGER) &&
+            historyItemType(item) === resultType &&
+            historyCallId(item) === call.callId,
         )
       : undefined;
     const interruptedResult = interruptedToolCallResult({
@@ -174,6 +207,12 @@ export async function closePendingSessionToolCallsInTransaction(
       call,
       existingCall,
       existingResult,
+      activeCall,
+      activeResult,
+      completeDurablePair: Boolean(existingCall && existingResult),
+      supersededDurablePair: Boolean(
+        existingCall && existingResult && (!existingCall.active || !existingResult.active),
+      ),
       rawCallIsValid: historyItemType(call.callItem) === call.callType,
       result: existingResult?.item ?? call.resultItem ?? interruptedResult,
       interrupted: !existingResult && !call.resultItem,
@@ -182,8 +221,8 @@ export async function closePendingSessionToolCallsInTransaction(
 
   for (const resolution of resolutions) {
     if (
-      !resolution.existingResult &&
-      !resolution.existingCall &&
+      !resolution.completeDurablePair &&
+      !resolution.activeCall &&
       resolution.result &&
       resolution.rawCallIsValid
     ) {
@@ -204,7 +243,12 @@ export async function closePendingSessionToolCallsInTransaction(
       (right.call.resultRecordedAt?.getTime() ?? Number.MAX_SAFE_INTEGER),
   );
   for (const resolution of orderedResults) {
-    if (!resolution.existingResult && resolution.result && resolution.rawCallIsValid) {
+    if (
+      !resolution.completeDurablePair &&
+      !resolution.activeResult &&
+      resolution.result &&
+      resolution.rawCallIsValid
+    ) {
       historyValues.push({
         accountId: input.accountId,
         workspaceId: input.workspaceId,
@@ -215,6 +259,12 @@ export async function closePendingSessionToolCallsInTransaction(
         active: true,
       });
     }
+    // A pair superseded by compaction was already projected during its live
+    // response. Reactivating or re-emitting it would undo the checkpoint and
+    // duplicate the UI output. An active complete pair is different: it can be
+    // the crash point after model-memory persistence but before event publish,
+    // so it keeps the existing durable recovery projection below.
+    if (resolution.supersededDurablePair || projectedCallIds.has(resolution.call.callId)) continue;
     eventValues.push({
       accountId: input.accountId,
       workspaceId: input.workspaceId,

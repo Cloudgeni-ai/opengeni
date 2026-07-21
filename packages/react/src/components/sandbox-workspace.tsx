@@ -12,7 +12,7 @@
 // (never an app context), notifications flow through an optional `onNotify` prop
 // (no `sonner` import), and every surface renders with package primitives + og
 // tokens only. `apps/web` consumes this through the exact public surface an
-// external embedder (cloudgeni #1577) uses — that is criterion F1.
+// external embedder uses — that is criterion F1.
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Popover } from "radix-ui";
 import type { SessionEvent } from "@opengeni/sdk";
@@ -28,6 +28,7 @@ import {
 import { type ClientOverride, useOpenGeni } from "../provider";
 import { cn } from "../lib/cn";
 import { xtermThemeFromTokens } from "../lib/xterm-theme";
+import { usePortalTokenStyle } from "../lib/use-portal-token-style";
 import { useSessionCapabilities } from "../hooks/use-session-capabilities";
 import { useSandboxFiles } from "../hooks/use-sandbox-files";
 import { useSandboxGit, type UseSandboxGitResult } from "../hooks/use-sandbox-git";
@@ -122,7 +123,7 @@ function sandboxProvisionInFlight(events: SessionEvent[]): boolean {
 }
 
 export type WorkspaceMachine = {
-  /** The derived live/waking/offline chip model (dossier §3 #10). */
+  /** The derived live/waking/offline chip model. */
   chip: MachineChip;
   /** The machine these surfaces are bound to (the Modal group box or a
    *  self-hosted machine), or null while the fleet is still resolving. */
@@ -239,11 +240,15 @@ export function useSandboxWorkspaceTabs(
   // The FS is writable only when it's live AND not read-only. A self-hosted box
   // that's offline (or any read-only advertisement) or a capture-served cold tree
   // must not offer create/rename/delete/edit affordances — you cannot mutate a
-  // machine you can't reach (dossier §12-A2/C3). Tree-structure ops need a warm
+  // machine you can't reach (C3). Tree-structure ops need a warm
   // writable box; content editing on a cold CLOUD box is the wake-on-edit path in
   // the editor, not tree mutation.
   const fsReadOnly = capabilities?.FileSystem.readOnly ?? false;
-  const filesEditable = fileSystemOn && !fsReadOnly;
+  // Mutations are live-only. A capture is a review artifact, never a writable
+  // surrogate for a sleeping machine; the user must deliberately open the live
+  // workspace before create/rename/delete/edit controls appear.
+  const filesEditable =
+    fileSystemOn && !fsReadOnly && (liveness === "warm" || liveness === "draining");
   const gitOn = capabilities?.Git.available ?? false;
   const terminalOn = (capabilities?.Terminal.transport ?? null) !== null;
   // The REAL interactive terminal is the ttyd pty-ws stream. When it's live the
@@ -280,9 +285,24 @@ export function useSandboxWorkspaceTabs(
 
   // The cold-paint data source: the latest turn-end capture, fetched with a single
   // api round-trip on mount (no machine). Feeds the Files tree + the Changes/Git
-  // diff when the box is not warm; a warm box always wins (live path unchanged).
+  // diff immediately; a warm box reconciles live without discarding the capture
+  // when that provider read is temporarily unavailable.
   const captureState = useWorkspaceCapture(sessionId, { events });
   const captureAvailable = captureState.available;
+  const liveWorkspaceExpected = liveness === "warm" || liveness === "draining";
+  // Capability negotiation and capture resolution are independent requests. A
+  // cold capability document can win that race by a few milliseconds; enabling
+  // the leaf hooks in that window would make them interpret `capture: null` as a
+  // real miss and issue Channel-A reads, waking the very box the capture exists
+  // to avoid. Wait until the capture request has conclusively resolved. A warm
+  // workspace never waits on this server-side snapshot.
+  const capturePending =
+    !liveWorkspaceExpected && (captureState.fileCount === null || captureState.loading);
+  const repoPaths = useMemo(() => {
+    const advertised = capabilities?.Git.repos ?? [];
+    if (advertised.length > 0) return advertised;
+    return captureState.capture?.repos.map((repo) => repo.root) ?? [];
+  }, [capabilities?.Git.repos, captureState.capture]);
   const notifiedCaptureDegradedReason = useRef<{
     sessionId: string;
     reason: string | null;
@@ -302,7 +322,9 @@ export function useSandboxWorkspaceTabs(
 
   const files = useSandboxFiles(sessionId, {
     events,
-    enabled: fileSystemOn || captureAvailable,
+    // No passive Channel-A reads while cold, even after a conclusive capture
+    // miss. A missing capture gets an explicit "Open live workspace" gate.
+    enabled: captureAvailable || (fileSystemOn && liveWorkspaceExpected),
     liveness,
     capture: captureState.capture,
     // A reverted optimistic mutation (e.g. a 409 rename collision) surfaces as a
@@ -315,14 +337,18 @@ export function useSandboxWorkspaceTabs(
   });
   const git = useSandboxGit(sessionId, {
     events,
-    enabled: gitOn || captureAvailable,
+    enabled: captureAvailable || (gitOn && liveWorkspaceExpected),
+    repoPaths,
     liveness,
     capture: captureState.capture,
   });
   const stagedGit = useSandboxGit(sessionId, {
     events,
-    enabled: gitOn,
+    // Captures intentionally expose one combined review diff, not a staged
+    // index. Never probe the live index while the lease is cold.
+    enabled: gitOn && liveWorkspaceExpected,
     staged: true,
+    repoPaths,
     liveness,
     capture: captureState.capture,
   });
@@ -378,6 +404,7 @@ export function useSandboxWorkspaceTabs(
     wantsWarm: warmTerminal || watchDesktop || warmFiles,
     capturedAt: captureState.capturedAt,
   });
+  const workspaceWaking = chip.state === "waking";
 
   // The pre-paint default tab is decided from the first AUTHORITATIVE workspace
   // source. A capture wins immediately on the cold/offline fast path; a warm box
@@ -394,7 +421,6 @@ export function useSandboxWorkspaceTabs(
   if (defaultTabRef.current.sessionId !== sessionId) {
     defaultTabRef.current = { sessionId, value: null };
   }
-  const liveWorkspaceExpected = liveness === "warm" || liveness === "draining";
   const captureIsAuthoritative =
     !liveWorkspaceExpected && (liveness !== undefined || caps.error !== null);
   const captureUnavailable = captureState.fileCount === 0 || captureState.error !== null;
@@ -417,15 +443,20 @@ export function useSandboxWorkspaceTabs(
       initialWorkspaceTab(events) === WORKBENCH_TAB_CHANGES
     ) {
       defaultTabRef.current.value = WORKBENCH_TAB_CHANGES;
+    } else if (captureUnavailable && caps.error) {
+      // The Changes surface owns the truthful sandbox-unavailable state + retry.
+      // Files would misleadingly describe this as a missing filesystem.
+      defaultTabRef.current.value = WORKBENCH_TAB_CHANGES;
+    } else if (captureIsAuthoritative && captureState.fileCount !== null && captureUnavailable) {
+      // No durable review surface exists and the machine is resting. Files owns
+      // the explicit wake gate; do not issue a live Git probe merely to choose a
+      // tab.
+      defaultTabRef.current.value = WORKBENCH_TAB_FILES;
     } else if (captureState.available && git.error && captureState.fileCount !== null) {
       // A warm live read failed but the durable capture is intact: retain an
       // immediate, deterministic review surface instead of hanging unresolved.
       defaultTabRef.current.value =
         captureState.fileCount > 0 ? WORKBENCH_TAB_CHANGES : WORKBENCH_TAB_FILES;
-    } else if (captureUnavailable && caps.error) {
-      // The Changes surface owns the truthful sandbox-unavailable state + retry.
-      // Files would misleadingly describe this as a missing filesystem.
-      defaultTabRef.current.value = WORKBENCH_TAB_CHANGES;
     } else if (captureUnavailable && git.error) {
       // No capture and live Git failed: Files is the least surprising fallback
       // and preserves the established no-capture degraded behavior.
@@ -450,9 +481,13 @@ export function useSandboxWorkspaceTabs(
           git={git}
           captureAvailable={captureAvailable}
           captureRevision={captureState.revision}
+          capturePending={capturePending}
+          liveWorkspaceExpected={liveWorkspaceExpected}
+          workspaceWaking={workspaceWaking}
           capabilitiesState={caps.state}
           capabilitiesError={caps.error}
           onRetry={caps.renegotiate}
+          onWake={() => requestWarmIntent("warmFiles")}
           {...(onOpenFile
             ? {
                 onOpenFile: (path: string) => {
@@ -476,7 +511,19 @@ export function useSandboxWorkspaceTabs(
           git={git}
           stagedGit={stagedGit}
           fileSystemAvailable={fileSystemOn || captureAvailable}
-          editable={filesEditable}
+          editable={
+            filesEditable && files.source === "live" && files.error === null && !files.loading
+          }
+          workspaceResting={
+            !liveWorkspaceExpected &&
+            liveness !== undefined &&
+            !capturePending &&
+            !captureAvailable &&
+            !workspaceWaking
+          }
+          workspaceWaking={!liveWorkspaceExpected && !captureAvailable && workspaceWaking}
+          liveWorkspaceReady={liveWorkspaceExpected}
+          onWakeWorkspace={() => requestWarmIntent("warmFiles")}
           {...(requestedFilePath
             ? {
                 requestedPath: requestedFilePath,
@@ -521,7 +568,7 @@ export function useSandboxWorkspaceTabs(
         id: "desktop",
         label: "Desktop",
         badge: watchDesktop ? (
-          <span className="rounded-og-xs bg-og-status-running/20 px-1 text-2xs text-og-status-running">
+          <span className="rounded-og-xs bg-og-status-running/20 px-1 text-og-xs text-og-status-running">
             Live
           </span>
         ) : undefined,
@@ -559,6 +606,7 @@ export function useSandboxWorkspaceTabs(
     terminal,
     xtermTheme,
     capabilities,
+    workspaceWaking,
     caps.state,
     caps.error,
     caps.viewerCapReached,
@@ -710,7 +758,9 @@ export type { WorkspaceDockProps };
 
 function DirtyBadge({ count }: { count: number }) {
   return (
-    <span className="rounded-og-xs bg-og-accent-soft px-1 text-2xs text-og-fg-muted">{count}</span>
+    <span className="rounded-og-xs bg-og-accent-soft px-1 text-og-xs text-og-fg-muted">
+      {count}
+    </span>
   );
 }
 
@@ -737,7 +787,7 @@ function chipDotClass(state: MachineChip["state"]): string {
  * with a popover carrying the machine identity, connection state, the "shown as
  * of <time>" staleness note, the shared-session disclosure, and a retry when the
  * fleet failed to resolve (the old per-surface machine bar + Sandbox info tab,
- * folded into one header affordance — dossier §10.6 recommendation).
+ * folded into one header affordance — recommendation).
  */
 function MachineStateChip({
   chip,
@@ -750,10 +800,13 @@ function MachineStateChip({
   error: Error | null;
   onRetry: () => void;
 }) {
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const portalStyle = usePortalTokenStyle(triggerRef);
   return (
     <Popover.Root>
       <Popover.Trigger asChild>
         <button
+          ref={triggerRef}
           type="button"
           aria-label={`Machine: ${chip.label}`}
           className="inline-flex min-h-7 items-center gap-1.5 rounded-og-sm px-2 py-1 text-og-xs font-medium text-og-fg-muted transition-colors hover:bg-og-surface-2 hover:text-og-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-og-accent max-[1023px]:min-h-11 pointer-coarse:min-h-11"
@@ -768,9 +821,12 @@ function MachineStateChip({
       <Popover.Portal forceMount>
         <Popover.Content
           forceMount
+          data-machine-state-popover
           align="end"
           sideOffset={6}
-          className="z-50 w-64 rounded-og-md border border-og-border bg-og-surface-1 p-3 text-og-sm text-og-fg shadow-lg outline-none data-[state=closed]:hidden"
+          collisionPadding={8}
+          className="og-root z-50 w-64 max-w-[calc(100vw-1rem)] rounded-og-md border border-og-border bg-og-surface-1 p-3 text-og-sm text-og-fg shadow-lg outline-none"
+          style={portalStyle}
         >
           <div className="flex min-w-0 items-center gap-1.5">
             <MachineKindIcon kind={activeMachine?.kind} />
@@ -802,7 +858,7 @@ function MachineStateChip({
           ) : null}
           {error ? (
             <div className="mt-2.5 space-y-1.5 border-t border-og-border pt-2.5">
-              <p className="text-og-xs leading-4 text-og-status-danger">
+              <p className="text-og-xs leading-4 text-og-danger">
                 Couldn't reach the sandbox for this session.
               </p>
               <DockActionButton onClick={onRetry}>
@@ -840,30 +896,69 @@ function ChangesTabBody({
   git,
   captureAvailable,
   captureRevision,
+  capturePending,
+  liveWorkspaceExpected,
+  workspaceWaking,
   capabilitiesState,
   capabilitiesError,
   onRetry,
+  onWake,
   onOpenFile,
 }: {
   git: UseSandboxGitResult;
   captureAvailable: boolean;
   captureRevision: number | null;
+  capturePending: boolean;
+  liveWorkspaceExpected: boolean;
+  workspaceWaking: boolean;
   capabilitiesState: string;
   capabilitiesError: Error | null;
   onRetry: () => void;
+  onWake: () => void;
   onOpenFile?: ((path: string) => void) | undefined;
 }) {
   const diff = git.diff;
 
   if (diff.length > 0) {
     return (
-      <WorkbenchChanges
-        diff={diff}
-        source={git.source}
-        capturedAt={git.capturedAt}
-        captureRevision={captureRevision}
-        {...(onOpenFile ? { onOpenFile } : {})}
-      />
+      <div className="flex h-full min-h-0 flex-col">
+        {git.error ? (
+          <div
+            role="status"
+            aria-live="polite"
+            data-opengeni-changes-degraded
+            className="flex shrink-0 items-center gap-2 border-b border-og-status-running/30 bg-og-status-running/10 px-2 py-1.5 text-og-xs text-og-fg-muted"
+          >
+            <TriangleAlertIcon className="size-3.5 shrink-0 text-og-status-running" aria-hidden />
+            <span className="min-w-0 flex-1">
+              {git.source === "capture"
+                ? "Live changes are temporarily unavailable. Showing the latest captured revision."
+                : "Live refresh failed. Showing the last loaded changes."}
+            </span>
+            <button
+              type="button"
+              onClick={() => void git.refresh()}
+              disabled={git.loading}
+              className="inline-flex min-h-7 shrink-0 items-center gap-1 rounded-og-sm border border-og-border bg-og-surface-1 px-2 font-medium text-og-fg transition-colors hover:border-og-border-strong focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-og-accent disabled:cursor-not-allowed disabled:opacity-50 pointer-coarse:min-h-11"
+            >
+              <RefreshCwIcon
+                className={cn("size-3", git.loading && "animate-spin motion-reduce:animate-none")}
+                aria-hidden
+              />
+              Retry
+            </button>
+          </div>
+        ) : null}
+        <div className="min-h-0 flex-1">
+          <WorkbenchChanges
+            diff={diff}
+            source={git.source}
+            capturedAt={git.capturedAt}
+            captureRevision={captureRevision}
+            {...(onOpenFile ? { onOpenFile } : {})}
+          />
+        </div>
+      </div>
     );
   }
 
@@ -871,7 +966,7 @@ function ChangesTabBody({
     return (
       <CenteredState icon={<TriangleAlertIcon className="size-5" aria-hidden />} tone="danger">
         <p className="text-og-sm font-medium text-og-fg">Sandbox unavailable</p>
-        <p className="text-og-sm leading-5 text-og-fg-muted">
+        <p data-contrast-audited className="text-og-sm leading-5 text-og-fg-muted">
           {capabilitiesError.message || "Couldn't reach the sandbox for this session."}
         </p>
         <DockActionButton onClick={onRetry}>
@@ -882,7 +977,11 @@ function ChangesTabBody({
     );
   }
 
-  if ((capabilitiesState === "negotiating" || capabilitiesState === "cold") && !captureAvailable) {
+  if (
+    (capturePending || capabilitiesState === "negotiating") &&
+    !captureAvailable &&
+    !workspaceWaking
+  ) {
     return (
       <CenteredState
         icon={
@@ -896,6 +995,38 @@ function ChangesTabBody({
         <p className="text-og-sm leading-5 text-og-fg-subtle">
           Looking for the latest files and changes…
         </p>
+      </CenteredState>
+    );
+  }
+
+  if (!liveWorkspaceExpected && !captureAvailable) {
+    return (
+      <CenteredState
+        icon={
+          workspaceWaking ? (
+            <LoaderCircleIcon
+              className="size-5 animate-spin motion-reduce:animate-none"
+              aria-hidden
+            />
+          ) : (
+            <CpuIcon className="size-5" aria-hidden />
+          )
+        }
+      >
+        <p className="text-og-sm font-medium text-og-fg">
+          {workspaceWaking ? "Waking workspace" : "Workspace is resting"}
+        </p>
+        <p className="text-og-sm leading-5 text-og-fg-subtle">
+          {workspaceWaking
+            ? "Connecting to the live working tree…"
+            : "No captured revision is available yet. Wake the sandbox to inspect current changes."}
+        </p>
+        {!workspaceWaking ? (
+          <DockActionButton onClick={onWake}>
+            <CpuIcon className="size-3" />
+            Open live workspace
+          </DockActionButton>
+        ) : null}
       </CenteredState>
     );
   }
@@ -936,7 +1067,12 @@ function CenteredState({
   tone?: "neutral" | "success" | "danger";
 }) {
   return (
-    <div className="grid h-full place-items-center p-6 text-center">
+    <div
+      role={tone === "danger" ? "alert" : "status"}
+      aria-atomic="true"
+      aria-live={tone === "danger" ? "assertive" : "polite"}
+      className="grid h-full place-items-center p-6 text-center"
+    >
       <div className="flex max-w-sm flex-col items-center gap-2.5">
         {icon ? (
           <span

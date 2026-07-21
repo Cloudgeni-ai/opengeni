@@ -9,12 +9,12 @@ const theme = params.get("theme") === "light" ? "light" : "dark";
 
 declare global {
   interface Window {
-    __OPE32_CANONICAL_PROOF__?: ReturnType<typeof createFleetPolicyCanonicalProof>;
+    __FLEET_POLICY_CANONICAL_PROOF__?: ReturnType<typeof createFleetPolicyCanonicalProof>;
   }
 }
 
-window.__OPE32_CANONICAL_PROOF__ = createFleetPolicyCanonicalProof();
-document.documentElement.dataset.ope32CanonicalProofReady = "true";
+window.__FLEET_POLICY_CANONICAL_PROOF__ = createFleetPolicyCanonicalProof();
+document.documentElement.dataset.fleetPolicyCanonicalProofReady = "true";
 
 const events: SessionEvent[] = [
   {
@@ -111,7 +111,7 @@ function FleetPolicyHarness() {
       <main className="mx-auto w-full max-w-3xl px-4 py-8 sm:px-8 sm:py-12">
         <header className="mb-8">
           <p className="text-og-xs font-medium uppercase tracking-[0.1em] text-og-fg-subtle">
-            OPE-32 acceptance fixture
+            Fleet policy acceptance fixture
           </p>
           <h1 className="mt-2 text-xl font-semibold text-og-fg sm:text-2xl">
             Adaptive Codex fleet observability

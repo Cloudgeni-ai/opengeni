@@ -1,6 +1,6 @@
 // M7 — the RoutingSandboxSession proxy (the hot-swap dispatch core).
 //
-// The load-bearing SDK finding (dossier §10.3): the SDK binds to ONE session
+// The load-bearing SDK finding: the SDK binds to ONE session
 // object and calls its methods per tool call WITHOUT re-resolving. So the proxy
 // must be ONE stable object that re-reads the active pointer per op and
 // dispatches to the currently-active backend. These tests drive that contract

@@ -6,9 +6,9 @@ import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
 import { createFleetPolicyCanonicalProof } from "../../packages/react/demo/fleet-policy-canonical-proof";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
-const evidenceDirectory = "/tmp/ope32-browser-evidence";
+const evidenceDirectory = "/tmp/fleet-policy-browser-evidence";
 
-describe("OPE-32 fleet policy browser acceptance", () => {
+describe("fleet policy browser acceptance", () => {
   let browser: Browser;
   let demo: StartedProcess;
   let baseUrl: string;
@@ -88,14 +88,14 @@ describe("OPE-32 fleet policy browser acceptance", () => {
       const response = await page.goto(`${baseUrl}/fleet-policy.html?theme=${fixture.theme}`, {
         waitUntil: "networkidle",
       });
-      await page.locator('html[data-ope32-canonical-proof-ready="true"]').waitFor();
+      await page.locator('html[data-fleet-policy-canonical-proof-ready="true"]').waitFor();
       const browserCanonicalProof = await page.evaluate(
         () =>
           (
             window as Window & {
-              __OPE32_CANONICAL_PROOF__?: ReturnType<typeof createFleetPolicyCanonicalProof>;
+              __FLEET_POLICY_CANONICAL_PROOF__?: ReturnType<typeof createFleetPolicyCanonicalProof>;
             }
-          ).__OPE32_CANONICAL_PROOF__,
+          ).__FLEET_POLICY_CANONICAL_PROOF__,
       );
       expect(browserCanonicalProof).toEqual(bunCanonicalProof);
       expect(browserCanonicalProof).toMatchObject({

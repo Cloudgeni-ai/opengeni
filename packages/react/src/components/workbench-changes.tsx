@@ -12,25 +12,28 @@ import {
 } from "react";
 import { VList } from "virtua";
 import { cn } from "../lib/cn";
+import { useUnicodeFallbackFonts } from "../lib/use-unicode-fonts";
 import { useThemeType } from "../lib/use-theme-type";
 import { formatAsOf } from "../hooks/use-machine-chip";
+import type { SandboxGitFileDiff } from "../hooks/use-sandbox-git";
 import { useWindowedSections } from "../hooks/use-windowed-sections";
 import { PierreDiff } from "./pierre-diff";
 
 /* ----------------------------------------------------------------------------
    Changes tab — a PR-review surface.
 
-   A file rail (status glyph, ±counts, grouped by top-level dir when the change
-   set is large) on the left; a stacked, WINDOWED diff pane on the right. Only
+   A file rail (status glyph, ±counts, grouped by repository when metadata is
+   available, otherwise by top-level directory for a large legacy input) on the
+   left; a stacked, WINDOWED diff pane on the right. Only
    the file sections inside the visible window ± overscan mount a Pierre/Shiki
    highlighter (the one renderer), so a 40- or 400-file change set never mounts N
-   highlighters at once (dossier §10.7, D2). A per-file >guard (binary / diff too
+   highlighters at once (D2). A per-file size guard (binary / diff too
    large) degrades to an "open live" affordance instead of a diff body.
 
-   `git.diff` is a single flat scope, so "group by repo then directory" here means
-   "group by top-level directory" — which is exactly the repo dir in a multi-repo
-   workspace and the top folder otherwise. Grouping only kicks in past the
-   threshold; a small change set stays a flat list.
+   Workspace-wide Git results carry an explicit `repoRoot`, so grouping never
+   guesses repository ownership from a directory name. Multi-repo results group
+   at every size; legacy unscoped inputs group by top-level directory only past
+   the threshold.
    -------------------------------------------------------------------------- */
 
 /** Group the rail (and reorder the pane) once the change set is larger than this. */
@@ -67,9 +70,16 @@ const STATUS_LETTER: Record<GitFileDiff["status"], string> = {
   typechange: "T",
 };
 
+function compactFileLabel(file: SandboxGitFileDiff): string {
+  const slash = file.path.lastIndexOf("/");
+  const basename = slash >= 0 ? file.path.slice(slash + 1) : file.path;
+  const parent = slash >= 0 ? file.path.slice(0, slash + 1) : "";
+  return `${STATUS_LETTER[file.status]} · ${basename}${parent ? ` — ${parent}` : ""}`;
+}
+
 export type WorkbenchChangesProps = {
   /** The changed files (`useSandboxGit().diff`). Assumed non-empty by the caller. */
-  diff: GitFileDiff[];
+  diff: SandboxGitFileDiff[];
   /** Which source the diff came from — drives the "live" vs "as of turn" badge. */
   source: "live" | "capture" | null;
   /** When the served capture was taken (ISO), when `source === "capture"`. */
@@ -84,28 +94,41 @@ export type WorkbenchChangesProps = {
 
 type RailRow =
   | { kind: "group"; label: string; count: number }
-  | { kind: "file"; file: GitFileDiff; index: number };
+  | { kind: "file"; file: SandboxGitFileDiff; index: number };
 
 /** Order the files and build the rail rows (grouped past the threshold). The
  *  returned `orderedFiles` drives BOTH the rail and the diff pane so a rail row's
  *  `index` addresses the matching pane section. Exported for tests. */
-export function buildRail(files: GitFileDiff[]): { orderedFiles: GitFileDiff[]; rows: RailRow[] } {
-  if (files.length <= GROUP_THRESHOLD) {
+export function buildRail(files: SandboxGitFileDiff[]): {
+  orderedFiles: SandboxGitFileDiff[];
+  rows: RailRow[];
+  grouped: boolean;
+} {
+  const roots = new Set(
+    files.flatMap((file) => (file.repoRoot === undefined ? [] : [file.repoRoot])),
+  );
+  const groupByRepo = roots.size > 1;
+  if (!groupByRepo && files.length <= GROUP_THRESHOLD) {
     return {
       orderedFiles: files,
       rows: files.map((file, index) => ({ kind: "file", file, index })),
+      grouped: false,
     };
   }
-  const groups = new Map<string, GitFileDiff[]>();
+  const groups = new Map<string, SandboxGitFileDiff[]>();
   for (const file of files) {
     const slash = file.path.indexOf("/");
-    const key = slash > 0 ? file.path.slice(0, slash) : "(root)";
+    const key = groupByRepo
+      ? file.repoRoot || "(workspace)"
+      : slash > 0
+        ? file.path.slice(0, slash)
+        : "(root)";
     const bucket = groups.get(key);
     if (bucket) bucket.push(file);
     else groups.set(key, [file]);
   }
   const labels = [...groups.keys()].sort((a, b) => a.localeCompare(b));
-  const orderedFiles: GitFileDiff[] = [];
+  const orderedFiles: SandboxGitFileDiff[] = [];
   const rows: RailRow[] = [];
   for (const label of labels) {
     const bucket = (groups.get(label) ?? []).slice().sort((a, b) => a.path.localeCompare(b.path));
@@ -115,7 +138,7 @@ export function buildRail(files: GitFileDiff[]): { orderedFiles: GitFileDiff[]; 
       orderedFiles.push(file);
     }
   }
-  return { orderedFiles, rows };
+  return { orderedFiles, rows, grouped: true };
 }
 
 /** A file's diff body is "too large to inline" when it's binary or the diff guard
@@ -150,8 +173,13 @@ export function WorkbenchChanges({
   const [activePath, setActivePath] = useState<string | null>(null);
   const pickerId = useId();
 
-  const { orderedFiles, rows } = useMemo(() => buildRail(diff), [diff]);
-  const grouped = diff.length > GROUP_THRESHOLD;
+  const unicodeFontPaths = useMemo(
+    () => diff.flatMap((file) => (file.oldPath ? [file.path, file.oldPath] : [file.path])),
+    [diff],
+  );
+  useUnicodeFallbackFonts(unicodeFontPaths);
+
+  const { orderedFiles, rows, grouped } = useMemo(() => buildRail(diff), [diff]);
   const selectedIndex = orderedFiles.findIndex((file) => file.path === activePath);
   const activeIndex = selectedIndex >= 0 ? selectedIndex : 0;
 
@@ -251,10 +279,20 @@ export function WorkbenchChanges({
           compact && source === "capture" && "flex-col items-stretch gap-1.5 py-2",
         )}
       >
-        <span data-contrast-audited className="min-w-0 text-og-xs text-og-fg-muted">
+        <span
+          role="status"
+          aria-atomic="true"
+          aria-live="polite"
+          data-contrast-audited
+          className="min-w-0 text-og-xs text-og-fg-muted"
+        >
           {diff.length} {diff.length === 1 ? "file" : "files"} changed
-          <span className="ml-2 text-og-status-idle">+{additions}</span>
-          <span className="ml-1 text-og-status-failed">−{deletions}</span>
+          <span data-contrast-audited className="ml-2 text-og-status-idle">
+            +{additions}
+          </span>
+          <span data-contrast-audited className="ml-1 text-og-status-failed">
+            −{deletions}
+          </span>
         </span>
         <div
           className={cn(
@@ -281,12 +319,13 @@ export function WorkbenchChanges({
                 const index = Number(event.currentTarget.value);
                 setActivePath(orderedFiles[index]?.path ?? null);
               }}
+              title={activeFile?.path}
               data-compact-file-picker
               className="h-11 w-full rounded-og-md border border-og-border bg-og-bg px-3 font-og-mono text-og-sm text-og-fg outline-none transition-colors focus:border-og-accent focus:ring-2 focus:ring-og-accent-soft"
             >
               {orderedFiles.map((file, index) => (
                 <option key={file.path} value={index}>
-                  {STATUS_LETTER[file.status]} · {file.path}
+                  {compactFileLabel(file)}
                 </option>
               ))}
             </select>
@@ -316,7 +355,7 @@ export function WorkbenchChanges({
                   <div
                     key={`g:${row.label}`}
                     data-rail-group
-                    className="flex items-center gap-1.5 px-2 pb-0.5 pt-2 text-2xs font-medium uppercase tracking-wide text-og-fg-subtle"
+                    className="flex items-center gap-1.5 px-2 pb-0.5 pt-2 text-og-xs font-medium uppercase tracking-wide text-og-fg-subtle"
                   >
                     <span className="min-w-0 truncate">{row.label}</span>
                     <span className="shrink-0">{row.count}</span>
@@ -387,7 +426,7 @@ function SourceBadge({
   if (source === "capture" && capturedAt) {
     return (
       <span
-        className="inline-flex items-center gap-1 rounded-og-xs border border-og-border px-1.5 py-px text-2xs text-og-fg-muted"
+        className="inline-flex items-center gap-1 rounded-og-xs border border-og-border px-1.5 py-px text-og-xs text-og-fg-muted"
         title={new Date(capturedAt).toLocaleString()}
       >
         <HistoryIcon className="size-3 shrink-0 text-og-status-running" aria-hidden />
@@ -396,7 +435,7 @@ function SourceBadge({
     );
   }
   return (
-    <span className="rounded-og-xs bg-og-surface-2 px-1.5 py-px text-2xs text-og-fg-subtle">
+    <span className="rounded-og-xs bg-og-surface-2 px-1.5 py-px text-og-xs text-og-fg-subtle">
       {label}
     </span>
   );
@@ -419,14 +458,21 @@ function RailFileRow({
   active,
   onClick,
 }: {
-  file: GitFileDiff;
+  file: SandboxGitFileDiff;
   grouped: boolean;
   active: boolean;
   onClick: () => void;
 }) {
-  // In a grouped rail the top-level dir is the group header, so show the path
-  // beneath it; otherwise show the whole path.
-  const shown = grouped ? file.path.slice(file.path.indexOf("/") + 1) || file.path : file.path;
+  // A real repository group strips the exact repo root. Legacy top-directory
+  // grouping strips only that first segment.
+  const repoPrefix = file.repoRoot ? `${file.repoRoot}/` : null;
+  const shown = grouped
+    ? file.repoRoot !== undefined
+      ? repoPrefix && file.path.startsWith(repoPrefix)
+        ? file.path.slice(repoPrefix.length)
+        : file.path
+      : file.path.slice(file.path.indexOf("/") + 1) || file.path
+    : file.path;
   return (
     <button
       type="button"
@@ -441,14 +487,19 @@ function RailFileRow({
       )}
     >
       <span
+        data-contrast-audited
         className={cn("w-3 shrink-0 text-center font-og-mono text-og-xs", STATUS_TINT[file.status])}
       >
         {STATUS_LETTER[file.status]}
       </span>
       <span className="min-w-0 flex-1 truncate">{shown}</span>
-      <span className="ml-auto flex shrink-0 items-center gap-1 pl-1 font-og-mono text-2xs">
-        <span className="text-og-status-idle">+{file.additions}</span>
-        <span className="text-og-status-failed">−{file.deletions}</span>
+      <span className="ml-auto flex shrink-0 items-center gap-1 pl-1 font-og-mono text-og-xs">
+        <span data-contrast-audited className="text-og-status-idle">
+          +{file.additions}
+        </span>
+        <span data-contrast-audited className="text-og-status-failed">
+          −{file.deletions}
+        </span>
       </span>
     </button>
   );
@@ -512,7 +563,7 @@ function DiffSection({
           <span className="min-w-0 truncate font-og-mono text-og-xs">
             {renamed ? `${file.oldPath} → ${file.path}` : file.path}
           </span>
-          <span className="flex shrink-0 items-center gap-2 font-og-mono text-2xs">
+          <span className="flex shrink-0 items-center gap-2 font-og-mono text-og-xs">
             <span className="text-og-status-idle">+{file.additions}</span>
             <span className="text-og-status-failed">−{file.deletions}</span>
           </span>
@@ -571,7 +622,7 @@ function LayoutToggle({
           type="button"
           onClick={() => onChange(value)}
           className={cn(
-            "min-h-7 rounded-og-xs px-1.5 py-0.5 text-2xs capitalize focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-og-accent pointer-coarse:min-h-11",
+            "min-h-7 rounded-og-xs px-1.5 py-0.5 text-og-xs capitalize focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-og-accent max-[1023px]:min-w-11 pointer-coarse:min-h-11 pointer-coarse:min-w-11",
             layout === value
               ? "bg-og-accent-soft text-og-fg"
               : "text-og-fg-subtle hover:text-og-fg",

@@ -222,7 +222,7 @@ afterAll(async () => {
   await shared?.release();
 }, 60_000);
 
-describe("OPE-32 durable Codex fleet shadow decisions", () => {
+describe("durable Codex fleet shadow decisions", () => {
   test("multi-replica writes stay ordered, replayable, and fenced across recovery", async () => {
     if (!available) return;
     const grant = await createWorkspace(replicaA.db, "fleet-a");

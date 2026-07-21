@@ -8,6 +8,7 @@ import {
   createSession,
   evaluateSessionControl,
   listWorkspaceControlEvents,
+  markSessionAttemptQuiesced,
   mutateSessionControlInTransaction,
   mutateWorkspaceControlInTransaction,
   SessionCommandIdempotencyError,
@@ -210,14 +211,32 @@ describe("recursive session control algebra", () => {
 
     await control(value, value.child.id, "resume");
     const resumedAttemptId = crypto.randomUUID();
-    const resumed = await claimSessionWorkForAttempt(client.db, value.grant.workspaceId!, {
+    const claimInput = {
       sessionId: value.child.id,
       workflowId: `session-${value.child.id}`,
       workflowRunId: crypto.randomUUID(),
       attemptId: resumedAttemptId,
       dispatchId: crypto.randomUUID(),
-      trigger: { kind: "next" },
+      trigger: { kind: "next" as const },
+    };
+    const blocked = await claimSessionWorkForAttempt(
+      client.db,
+      value.grant.workspaceId!,
+      claimInput,
+    );
+    expect(blocked).toEqual({ action: "unclaimed", reason: "control-pending" });
+
+    await markSessionAttemptQuiesced(client.db, {
+      workspaceId: value.grant.workspaceId!,
+      sessionId: value.child.id,
+      attemptId,
+      temporalWorkflowId: `session-${value.child.id}`,
     });
+    const resumed = await claimSessionWorkForAttempt(
+      client.db,
+      value.grant.workspaceId!,
+      claimInput,
+    );
     expect(resumed).toMatchObject({ action: "claimed", turn: { id: settled.turnId } });
   });
 

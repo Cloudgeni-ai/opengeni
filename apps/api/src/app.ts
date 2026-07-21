@@ -122,8 +122,11 @@ export function createApp(deps: AppDependencies): Hono {
   // concrete for routes; it throws SandboxResumeError when sandboxBackend=none.
   const sandboxClient = deps.sandboxClient ?? createApiSandboxClient(deps.settings);
   const resumeBoxById = deps.resumeBoxById ?? makeResumeBoxById(sandboxClient);
+  const observability =
+    deps.observability ?? createObservability(deps.settings, { component: "api" });
   const routeDeps: ApiRouteDeps = {
     ...deps,
+    observability,
     githubStateSecret:
       deps.githubStateSecret ?? deps.settings.githubAppManifestStateSecret ?? crypto.randomUUID(),
     managedAuth,
@@ -134,8 +137,6 @@ export function createApp(deps: AppDependencies): Hono {
     resumeBoxById,
   };
   const app = new Hono();
-  const observability =
-    deps.observability ?? createObservability(deps.settings, { component: "api" });
 
   app.use(
     "*",
@@ -710,6 +711,18 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/github\/repositories\/sync$/,
     label: "/v1/workspaces/:workspaceId/github/repositories/sync",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/github\/connect$/,
+    label: "/v1/workspaces/:workspaceId/github/connect",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/github\/installations$/,
+    label: "/v1/workspaces/:workspaceId/github/installations",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/github\/installations\/[^/]+$/,
+    label: "/v1/workspaces/:workspaceId/github/installations/:installationId",
   },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/github\/app-manifest$/,

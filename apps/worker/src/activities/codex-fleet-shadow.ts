@@ -87,7 +87,7 @@ export function codexFleetShadowErrorMetricLabelsV1(
  * The typed result intentionally carries no error message: provider, database,
  * or transport errors can include private metadata. Callers may count/log only
  * the bounded stage, reason, name, and size fields returned here. A failure can
- * never replace or clear the credential already selected by OPE-21.
+ * never replace or clear the credential already selected by the allocator.
  */
 export async function publishCodexFleetShadowDecisionV1(input: {
   enabled: boolean;
@@ -165,7 +165,7 @@ export function buildCodexFleetShadowPayloadV1(
       overlayMode: "none",
     },
     admission: {
-      // OPE-32 does not invent hard capacity from account count. A later typed
+      // The shadow policy does not invent hard capacity from account count. A later typed
       // admission snapshot supplies dynamic capacity; shadow v1 records unknown.
       dynamicCapacityUnits: null,
       inUseUnits: input.accounts.reduce((sum, account) => sum + account.activeLeaseCount, 0),
@@ -200,13 +200,13 @@ export function buildCodexFleetShadowPayloadV1(
         state: "unknown",
         thresholdObservedForMs: null,
       },
-      // OPE-32 has no typed workspace-local burn feed at this boundary yet.
+      // The shadow policy has no typed workspace-local burn feed at this boundary yet.
       observedBurn: {
         primaryPercentPerHour: null,
         secondaryPercentPerHour: null,
         confidence: "unknown",
       },
-      // OPE-24/provider accounting has not supplied a typed burn observation yet.
+      // Provider accounting has not supplied a typed burn observation yet.
       // Unknown inference is explicit and contributes no fabricated tenant truth.
       inferredUnexplainedBurn: {
         primaryPercentPerHour: null,

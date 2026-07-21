@@ -194,6 +194,10 @@ export function useSlashCommands(options: UseSlashCommandsOptions): UseSlashComm
     }
   }, [items, clampedHighlight, autocomplete]);
 
+  // Pointer and keyboard activation share this synchronous fence. React state
+  // cannot disable a command row before a second same-tick activation arrives.
+  const runningRef = useRef(false);
+
   // Resolve a SPECIFIC, already-chosen command against the current draft, then
   // either autocomplete (name-only / required arg missing) or execute. This is
   // the shared core for both Enter (which first resolves WHICH command via the
@@ -201,39 +205,44 @@ export function useSlashCommands(options: UseSlashCommandsOptions): UseSlashComm
   // command — the clicked row — and must not re-resolve to a near-match).
   const runResolved = useCallback(
     async (command: SlashCommand, executionOptions?: { explicit?: boolean }): Promise<void> => {
-      if (!parsed) {
+      if (!parsed || runningRef.current) {
         return;
       }
-      const explicit = executionOptions?.explicit ?? false;
-      // Token-vs-command equality is case-insensitive (matching the registry's
-      // matchCommand/filterCommands), so a fully-typed "/Clear" counts as having
-      // named `clear` and runs rather than autocompleting.
-      const nameMatchesToken =
-        command.name === parsed.name.toLowerCase() ||
-        (command.aliases?.includes(parsed.name.toLowerCase()) ?? false);
-      // A name-only token whose name doesn't yet equal the resolved command (e.g.
-      // "/cl" -> clear) first autocompletes so the operator sees the full name.
-      // An EXPLICIT pointer click skips this: the operator already chose the row,
-      // so clicking "/clear-view" (while the token is "clear") runs it outright
-      // rather than merely filling the name and waiting for a second Enter.
-      if (!explicit && !activeCommand && !nameMatchesToken && !parsed.hasTrailingSpace) {
-        autocomplete(command);
-        return;
-      }
-      // When the click resolves a different command than the typed token, the
-      // typed token's tail isn't this command's args — run with no positional
-      // args and let the required-arg guard below prompt for them via autocomplete.
-      const args = nameMatchesToken || parsed.hasTrailingSpace ? parsed.args : [];
-      const missing = firstMissingRequiredArg(command, args);
-      if (missing) {
-        // A required arg is absent: keep the palette open at the arg hint rather
-        // than firing a half-formed command.
-        if (!parsed.hasTrailingSpace) {
+      runningRef.current = true;
+      try {
+        const explicit = executionOptions?.explicit ?? false;
+        // Token-vs-command equality is case-insensitive (matching the registry's
+        // matchCommand/filterCommands), so a fully-typed "/Clear" counts as having
+        // named `clear` and runs rather than autocompleting.
+        const nameMatchesToken =
+          command.name === parsed.name.toLowerCase() ||
+          (command.aliases?.includes(parsed.name.toLowerCase()) ?? false);
+        // A name-only token whose name doesn't yet equal the resolved command (e.g.
+        // "/cl" -> clear) first autocompletes so the operator sees the full name.
+        // An EXPLICIT pointer click skips this: the operator already chose the row,
+        // so clicking "/clear-view" (while the token is "clear") runs it outright
+        // rather than merely filling the name and waiting for a second Enter.
+        if (!explicit && !activeCommand && !nameMatchesToken && !parsed.hasTrailingSpace) {
           autocomplete(command);
+          return;
         }
-        return;
+        // When the click resolves a different command than the typed token, the
+        // typed token's tail isn't this command's args — run with no positional
+        // args and let the required-arg guard below prompt for them via autocomplete.
+        const args = nameMatchesToken || parsed.hasTrailingSpace ? parsed.args : [];
+        const missing = firstMissingRequiredArg(command, args);
+        if (missing) {
+          // A required arg is absent: keep the palette open at the arg hint rather
+          // than firing a half-formed command.
+          if (!parsed.hasTrailingSpace) {
+            autocomplete(command);
+          }
+          return;
+        }
+        await execute(command, args);
+      } finally {
+        runningRef.current = false;
       }
-      await execute(command, args);
     },
     [parsed, activeCommand, autocomplete, execute],
   );
@@ -286,9 +295,6 @@ export function useSlashCommands(options: UseSlashCommandsOptions): UseSlashComm
     [items, runResolved],
   );
 
-  // Track an in-flight run so Enter can't double-fire.
-  const runningRef = useRef(false);
-
   const onKeyDown = useCallback(
     (event: KeyboardEvent<HTMLTextAreaElement>): boolean => {
       if (!open) {
@@ -322,13 +328,7 @@ export function useSlashCommands(options: UseSlashCommandsOptions): UseSlashComm
             return false;
           }
           event.preventDefault();
-          if (runningRef.current) {
-            return true;
-          }
-          runningRef.current = true;
-          void runHighlighted().finally(() => {
-            runningRef.current = false;
-          });
+          void runHighlighted();
           return true;
         }
         case "Escape": {

@@ -29,8 +29,8 @@ export {
   type WorkspaceEnvironmentForRun,
 };
 
-// §7.6 P4a — the run's workspace identity, threaded so the connection-credential
-// provider can be called with the run's tenant context AND so the FORK-7
+// §7.6 connection-credential provider — the run's workspace identity, threaded so the connection-credential
+// provider can be called with the run's tenant context AND so the workspace-scope cross-check
 // cross-check has the run's workspace to assert the provider's echo against.
 export type ConnectionScope = {
   accountId: string;
@@ -44,7 +44,18 @@ export type MintedRunGitCredentials = {
   expiresAt: GitTokenExpiries;
 };
 
-// §7.6 P4a — load the run's workspace environment, delegating the DECRYPT to a
+export type GitHubTokenMintAuthorization = (selection: {
+  installationId: number;
+  repositoryIds: number[];
+}) => Promise<void>;
+
+type RunGitCredentialOptions = {
+  scope?: ConnectionScope;
+  gitCredentials?: ConnectionCredentialsPort["gitCredentials"];
+  authorizeGitHubTokenMint?: GitHubTokenMintAuthorization;
+};
+
+// §7.6 connection-credential provider — load the run's workspace environment, delegating the DECRYPT to a
 // host `sandboxSecrets` provider when one is bound (the host owns the secret
 // vault + encryption key in embedded/separate topologies) and otherwise running
 // today's local `environmentsEncryptionKeyBytes`-keyed decrypt byte-for-byte.
@@ -72,7 +83,7 @@ export async function loadWorkspaceEnvironmentForRunWithCredentials(
     workspaceId: scope.workspaceId,
     variableSetId: environmentId,
   });
-  // FORK-7: the provider must echo THIS run's workspace before we apply its
+  // workspace-scope cross-check: the provider must echo THIS run's workspace before we apply its
   // decrypted values into the sandbox.
   assertWorkspaceEcho("sandboxSecrets", scope, secrets.workspaceId);
   return {
@@ -83,7 +94,7 @@ export async function loadWorkspaceEnvironmentForRunWithCredentials(
   };
 }
 
-// §7.6 FORK-7 cross-check. A credential provider echoes the workspace it scoped
+// Workspace-scope cross-check. A credential provider echoes the workspace it scoped
 // the credential to; we ASSERT it equals the run's workspace BEFORE the caller
 // injects the credential. A host mapping bug returning tenant B's creds for a
 // tenant-A run hard-throws here instead of landing tenant B's token in tenant
@@ -104,17 +115,15 @@ export async function sandboxEnvironmentForRun(
   settings: Settings,
   resources: ResourceRef[],
   workspaceEnvironment: Record<string, string> = {},
-  // §7.6 P4a - optional host git-credential provider + the run scope it needs
+  // §7.6 connection-credential provider - optional host git-credential provider + the run scope it needs
   // (unset, the standalone default → self-mint from `settings` byte-for-byte).
   // `skipGitHubToken` (Stage D): a connected-machine turn skips the inert platform
   // token mint entirely and returns the stable base env unchanged. `deferGitHubToken`
   // is the lazy CLOUD path: apply stable git-auth pointers now, mint only the token
   // value later. `= {}` default so the non-optional reads below are safe.
-  options: {
+  options: RunGitCredentialOptions & {
     skipGitHubToken?: boolean;
     deferGitHubToken?: boolean;
-    scope?: ConnectionScope;
-    gitCredentials?: ConnectionCredentialsPort["gitCredentials"];
     sessionId?: string;
     runId?: string;
   } = {},
@@ -222,10 +231,7 @@ export async function sandboxEnvironmentForRun(
 export async function mintRunGitCredentials(
   settings: Settings,
   resources: ResourceRef[],
-  options: {
-    scope?: ConnectionScope;
-    gitCredentials?: ConnectionCredentialsPort["gitCredentials"];
-  } = {},
+  options: RunGitCredentialOptions = {},
 ): Promise<MintedRunGitCredentials | undefined> {
   const selections = gitCredentialSelections(resources);
   if (selections.length === 0) {
@@ -240,10 +246,7 @@ export async function mintRunGitCredentials(
 export async function mintRunGitTokens(
   settings: Settings,
   resources: ResourceRef[],
-  options: {
-    scope?: ConnectionScope;
-    gitCredentials?: ConnectionCredentialsPort["gitCredentials"];
-  } = {},
+  options: RunGitCredentialOptions = {},
 ): Promise<GitTokenSeeds | undefined> {
   return (await mintRunGitCredentials(settings, resources, options))?.gitTokens;
 }
@@ -251,10 +254,7 @@ export async function mintRunGitTokens(
 export async function mintRunGitToken(
   settings: Settings,
   resources: ResourceRef[],
-  options: {
-    scope?: ConnectionScope;
-    gitCredentials?: ConnectionCredentialsPort["gitCredentials"];
-  } = {},
+  options: RunGitCredentialOptions = {},
 ): Promise<string | undefined> {
   return (await mintRunGitTokens(settings, resources, options))?.github;
 }
@@ -277,10 +277,7 @@ export async function resolveRunGitIdentity(
 async function mintRunGitTokensWithIdentity(
   settings: Settings,
   selections: GitCredentialSelection[],
-  options: {
-    scope?: ConnectionScope;
-    gitCredentials?: ConnectionCredentialsPort["gitCredentials"];
-  },
+  options: RunGitCredentialOptions,
 ): Promise<{
   gitTokens: GitTokenSeeds;
   expiresAt: GitTokenExpiries;
@@ -291,10 +288,25 @@ async function mintRunGitTokensWithIdentity(
   let identity: { name: string; email: string } | null = null;
   for (const selection of selections) {
     let token: string | null = null;
+    if (
+      selection.provider === "github" &&
+      selection.installationId > 0 &&
+      selection.repositoryIds.length > 0
+    ) {
+      // This callback belongs immediately next to the side effect. Turn startup
+      // performs its own admission check, but lazy provisioning and proactive
+      // renewal can happen much later in an intentionally unbounded run. Recheck
+      // the current workspace binding before every host-brokered or built-in
+      // GitHub installation-token mint.
+      await options.authorizeGitHubTokenMint?.({
+        installationId: selection.installationId,
+        repositoryIds: selection.repositoryIds,
+      });
+    }
     if (options?.gitCredentials && options.scope) {
       const request = gitCredentialsRequestForSelection(options.scope, selection, "token");
       const minted: GitCredentials = await options.gitCredentials(request);
-      // FORK-7: assert the provider scoped the token to THIS run's workspace
+      // workspace-scope cross-check: assert the provider scoped the token to THIS run's workspace
       // before accepting the token for clone seeding.
       assertWorkspaceEcho("gitCredentials", options.scope, minted.workspaceId);
       if (!minted.token) {
@@ -397,6 +409,26 @@ function gitCredentialsRequestForSelection(
     provider: selection.provider,
     repositoryRefs: selection.repositoryRefs,
   };
+}
+
+/**
+ * The GitHub App installation + repository ids a run's git-credential mint
+ * would use for these resources, or null when no GitHub token would be minted.
+ * Derived from gitCredentialSelections so workspace-authorization rechecks
+ * cover exactly the ids that reach createGitHubAppInstallationToken —
+ * including legacy string-typed installationId/repositoryId refs, which the
+ * mint path coerces via positiveInteger.
+ */
+export function gitHubTokenMintSelection(
+  resources: ResourceRef[],
+): { installationId: number; repositoryIds: number[] } | null {
+  const selection = gitCredentialSelections(resources).find(
+    (candidate) => candidate.provider === "github",
+  );
+  if (!selection || selection.installationId <= 0 || selection.repositoryIds.length === 0) {
+    return null;
+  }
+  return { installationId: selection.installationId, repositoryIds: selection.repositoryIds };
 }
 
 function gitCredentialSelections(resources: ResourceRef[]): GitCredentialSelection[] {

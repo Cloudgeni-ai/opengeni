@@ -1,5 +1,5 @@
 /**
- * Cross-stack round-trip test (TypeScript side) — the M0 acceptance (dossier V11).
+ * Cross-stack protobuf round-trip test (TypeScript side).
  *
  * Proves the Rust (`prost`) and TypeScript (`ts-proto`) wire stacks, both
  * generated from the one `agent/proto/opengeni_agent.proto`, agree on the wire:

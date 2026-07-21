@@ -73,7 +73,7 @@ same-turn holder is reused before either pin policy or future membership
 filtering, so cache policy never moves in-flight work. `rotation_enabled=false`
 and `drain_then_next` remain explicit sticky product policies.
 
-Named pool membership is intentionally not an OPE-21 concept. The generic
+Named pool membership is intentionally not a credential allocator concept. The generic
 `CodexCredentialLeasePolicyScopeResolver<TPolicyScope>`,
 `CodexCredentialLeaseCandidateFilter<TPolicyScope, TUnavailableDiagnostic>`,
 and `CodexCredentialLeaseCandidateFilterResult<TUnavailableDiagnostic>` seams
@@ -81,7 +81,7 @@ let a downstream accepted-turn policy pass a private scope such as
 `{primaryPoolId,fallbackPoolIds,policyHash}` into the existing rotation-row
 transaction. The filter chooses candidates from exactly one resolved primary or
 fallback scope and may return downstream-owned per-pool unavailable/reset
-diagnostics; OPE-21 never union-ranks memberships and stores no pool table or
+diagnostics; credential allocator never union-ranks memberships and stores no pool table or
 membership rule. `CodexCredentialLeaseResult<T, TUnavailableDiagnostic>` returns
 those diagnostics. The new-allocation filter runs only after exact live/frozen
 same-turn reuse, so a later membership/default change cannot move an already
@@ -93,7 +93,7 @@ false excludes the row from new automatic, pinned, proactive, and reactive
 selection without changing `status`, encrypted credentials, refresh behavior,
 or quota history. An exact same-turn live lease or frozen approval/preemption
 checkpoint may continue on that healthy row; reconnect and token refresh never
-flip allocator eligibility. OPE-24 owns toggle OCC/audit and product controls.
+flip allocator eligibility. account eligibility policy owns toggle OCC/audit and product controls.
 
 The unique same-turn lease is idempotent. A one-minute heartbeat renews its
 five-minute TTL throughout long tool/model runs; normal completion releases it
@@ -119,8 +119,11 @@ If no healthy candidate exists for an active goal, `armCodexCapacityWait`
 atomically marks the blocked turn failed once, releases its credential lease,
 idles the session with reason `codex_capacity`, writes the audit events, and
 creates or advances one `codex_capacity_waiters` row. The common lock order is
-workspace rotation row → session → goal → blocked turn → live credential lease
-(when reactive) → waiter. A reactive arm must still own the exact
+workspace rotation row → `workspace_inference_controls FOR SHARE` → actual
+workspace `FOR KEY SHARE` → session → exact turn → exact attempt → goal → live
+credential lease (when reactive) → waiter. Arming re-evaluates effective control
+under that shared control lock and becomes an event-free stale no-op if Pause or
+an unsettled control interruption won. A reactive arm must still own the exact
 holder/generation and worker-redispatch fence. The row records goal/control
 generation, accepted `policyHash`, the earliest authoritative reset (when known),
 bounded-refresh state, and `wakeRevision`/`observedWakeRevision`; it stores no
@@ -151,11 +154,13 @@ is authoritative. The workflow snapshots its wake counters before dispatching a
 turn, so a signal delivered after waiter commit but before the activity result
 returns causes immediate reconciliation instead of being baselined away. It
 reconstructs pending timers on worker/Temporal restart and `continueAsNew`.
-`reconcileCodexCapacityWait` atomically rechecks human queue, effective Pause,
-goal, policy, blocked-turn identity, and duplicate-work fences before recording
-the typed capacity-resume update; ordinary attempt claim repeats admission before
-provider/model/tool/billing work starts. Reset/boost entitlement redemption is
-never automatic.
+`reconcileCodexCapacityWait` takes the same shared control/workspace prefix and
+atomically rechecks human queue, effective Pause or unsettled control, goal,
+policy, blocked-turn identity, and duplicate-work fences before recording the
+typed capacity-resume update. If Pause committed first, the waiter is superseded
+without a continuation; if reconciliation committed first, a later Pause still
+fences ordinary attempt claim before provider/model/tool/billing work starts.
+Reset/boost entitlement redemption is never automatic.
 
 Only a **definitive credential/account refusal** can move the same durable turn to
 another credential:
@@ -251,9 +256,9 @@ correlate those alerts with `codex.credential.selected`,
 
 ### Adaptive-fleet shadow and deterministic replay
 
-OPE-32 adds a second, deliberately more private decision-observability path. It
+The adaptive fleet shadow adds a second, deliberately more private decision-observability path. It
 is independently default-off behind
-`OPENGENI_CODEX_FLEET_POLICY_SHADOW_ENABLED=false` and runs **after** OPE-21 has
+`OPENGENI_CODEX_FLEET_POLICY_SHADOW_ENABLED=false` and runs **after** the allocator has
 authoritatively selected or reused a lease. Shadow v1 cannot filter candidates,
 change the selected credential, move a fenced turn, pace live work, alter a
 capacity waiter, or trigger failover. Disabling the switch produces no shadow
@@ -262,7 +267,7 @@ payload or event and requires no schema rollback.
 When enabled, `publishCodexFleetShadowDecisionV1` builds one bounded
 `codex.fleet.decision` session event and appends it through the exact current
 turn-attempt fence. Ordinary build/size/append faults return a bounded,
-secret-safe failure classification and the turn continues on OPE-21's existing
+secret-safe failure classification and the turn continues on the allocator's existing
 lease. `TurnAttemptFencedError` and Temporal cancellation are authoritative
 lifecycle signals and are rethrown; swallowing either could let a superseded
 activity continue mutating after the observer returned.
@@ -294,7 +299,7 @@ The durable replay record is designed for offline shadow simulation:
   support, freshness, collapse/recovery dwell, and a higher recovery threshold.
   A single low sample cannot collapse affinity. The worker currently records
   cache input as unknown rather than deriving account truth from aggregate
-  OPE-31 metrics.
+  existing metrics.
 
 The pure evaluator models later rollout phases without activating them. Default
 policy keeps admission pacing, manager priority, the emergency fuse, and named
@@ -310,8 +315,8 @@ Named `prefer` overlays apply a bounded score benefit and always allow healthy
 outside capacity to be borrowed. Explicit `isolate` is the only non-borrowing
 mode: it is opt-in, reversible, reports the count of otherwise-eligible stranded
 candidates, and never changes an in-flight fenced turn. These evaluator
-semantics are not authorization or OPE-21 lease/wait/failover state; a future
-live integration must use OPE-21's accepted-turn scope/filter seams and OPE-24's
+semantics are not authorization or allocator lease/wait/failover state; a future
+live integration must use the accepted-turn scope/filter seams and provider accounting's
 read-only quota/freshness observations rather than mutating either owner's
 state.
 
@@ -329,13 +334,13 @@ the presence of shadow records alone is not evidence of adaptive benefit.
 - Pure unit/property coverage:
   `apps/worker/test/codex-rotation.test.ts`,
   `apps/worker/test/codex-usage-limit.test.ts`, and
-  `packages/codex/test/fetch.test.ts`. OPE-32 replay/policy and worker privacy,
+  `packages/codex/test/fetch.test.ts`. Adaptive replay/policy and worker privacy,
   lifecycle, payload, and metric bounds are covered by
   `packages/contracts/test/codex-fleet-policy.test.ts` and
   `apps/worker/test/codex-fleet-shadow.test.ts`.
 - Real Postgres concurrency/RLS/failure injection:
   `packages/db/test/codex-credential-leases.test.ts` and
-  `packages/db/test/codex-capacity-waiters.test.ts`; OPE-32 event ordering,
+  `packages/db/test/codex-capacity-waiters.test.ts`; fleet event ordering,
   multi-replica attempt fencing, replay, and FORCE RLS are covered by
   `packages/db/test/codex-fleet-shadow-events.test.ts`.
 - Browser desktop/mobile overflow, keyboard, secret-safety, and WCAG-AA

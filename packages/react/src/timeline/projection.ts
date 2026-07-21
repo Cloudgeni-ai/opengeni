@@ -1255,7 +1255,7 @@ const FLEET_MAX_CANDIDATES = 32;
 const FLEET_MAX_COUNT = 1_000_000;
 
 /**
- * Project the identity-free OPE-32 event into the deliberately smaller UI
+ * Project the identity-free fleet event into the deliberately smaller UI
  * contract. This is a trust boundary: session event payloads are untyped, so
  * arbitrary strings (fingerprints, provider errors, future metadata) must never
  * become renderable copy. Only fixed enums and event-local aliases cross it.
