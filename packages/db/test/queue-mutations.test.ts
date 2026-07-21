@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { and, asc, eq, inArray } from "drizzle-orm";
+import { readTurnExecutionPolicyV1, TurnExecutionPolicyV1 } from "@opengeni/contracts";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import {
   applySessionTurnSettlement,
@@ -548,6 +549,118 @@ describe("canonical queue commands", () => {
       (db) => db.transaction((tx) => submitHumanPromptInTransaction(tx as typeof db, command)),
     );
     expect(replay).toMatchObject({ replay: true, turnId: submitted.turnId });
+  });
+
+  test("Send and Steer persist canonical execution identity and replay its original evidence", async () => {
+    for (const delivery of ["send", "steer"] as const) {
+      const value = await fixture();
+      const operationKey = crypto.randomUUID();
+      const turnExecutionPolicy = TurnExecutionPolicyV1.parse({
+        schemaVersion: 1,
+        productModelId: "xai/grok-4.5",
+        requestedModelId: "grok-4.5",
+        modelSource: "explicit",
+        reasoningEffort: "high",
+        reasoningSource: "explicit",
+        providerId: "xai",
+        upstreamModelId: "grok-4.5",
+        wireApi: "responses",
+        credentialSource: { kind: "workspace_connection", mechanism: "api_key" },
+        billing: { upstreamPayer: "workspace", metering: "external" },
+        definitionVersion: `sha256:${"b".repeat(64)}`,
+      });
+      const command = {
+        accountId: value.grant.accountId,
+        workspaceId: value.grant.workspaceId!,
+        sessionId: value.session.id,
+        subjectId: value.grant.subjectId,
+        actor: value.actor,
+        operationKey,
+        delivery,
+        text: `${delivery} with explicit alias`,
+        resources: [],
+        tools: [],
+        // Core canonicalizes the requested alias before this DB transaction;
+        // the frozen policy intentionally retains the raw accepted alias.
+        model: "xai/grok-4.5",
+        reasoningEffort: "high" as const,
+        reasoningEffortFallback: "medium" as const,
+        turnExecutionPolicy,
+        source: "user" as const,
+      };
+      const submitted = await withWorkspaceSubjectRls(
+        client.db,
+        value.grant.workspaceId!,
+        value.grant.subjectId,
+        (db) => db.transaction((tx) => submitHumanPromptInTransaction(tx as typeof db, command)),
+      );
+      expect(submitted.replay).toBe(false);
+
+      const [storedTurn, audit] = await withWorkspaceRls(
+        client.db,
+        value.grant.workspaceId!,
+        async (db) => {
+          const [turn] = await db
+            .select()
+            .from(schema.sessionTurns)
+            .where(eq(schema.sessionTurns.id, submitted.turnId));
+          const [auditRow] = await db
+            .select()
+            .from(schema.auditEvents)
+            .where(eq(schema.auditEvents.targetId, submitted.turnId));
+          return [turn!, auditRow!] as const;
+        },
+      );
+      expect(storedTurn).toMatchObject({
+        model: "xai/grok-4.5",
+        reasoningEffort: "high",
+      });
+      expect(readTurnExecutionPolicyV1(storedTurn.metadata)).toEqual({
+        kind: "valid",
+        policy: turnExecutionPolicy,
+      });
+      const expectedEvidence = expect.objectContaining({
+        turnId: submitted.turnId,
+        requestedModelId: "grok-4.5",
+        effectiveModelId: "xai/grok-4.5",
+        modelSource: "explicit",
+        effectiveReasoningEffort: "high",
+        reasoningSource: "explicit",
+        providerId: "xai",
+        credentialSourceKind: "workspace_connection",
+        credentialSourceMechanism: "api_key",
+        billingOwner: "workspace",
+        billingMetering: "external",
+        definitionVersion: turnExecutionPolicy.definitionVersion,
+      });
+      expect(audit.metadata).toEqual(expectedEvidence);
+      expect(submitted.receipt.result.executionPolicy).toEqual(expectedEvidence);
+
+      const retryPolicy = TurnExecutionPolicyV1.parse({
+        ...turnExecutionPolicy,
+        definitionVersion: `sha256:${"c".repeat(64)}`,
+      });
+      const replay = await withWorkspaceSubjectRls(
+        client.db,
+        value.grant.workspaceId!,
+        value.grant.subjectId,
+        (db) =>
+          db.transaction((tx) =>
+            submitHumanPromptInTransaction(tx as typeof db, {
+              ...command,
+              turnExecutionPolicy: retryPolicy,
+            }),
+          ),
+      );
+      expect(replay).toMatchObject({ replay: true, turnId: submitted.turnId });
+      expect(replay.receipt.result.executionPolicy).toEqual(
+        submitted.receipt.result.executionPolicy,
+      );
+      expect(readTurnExecutionPolicyV1(storedTurn.metadata)).toEqual({
+        kind: "valid",
+        policy: turnExecutionPolicy,
+      });
+    }
   });
 
   test("an observing Send loses to an unseen newer Pause without consuming the draft", async () => {

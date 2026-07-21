@@ -264,6 +264,32 @@ describe("OpenGeniClient access + workspaces", () => {
       "fireworks:accounts/fireworks/models/glm-5p2:chat",
     ]);
   });
+
+  test("getWorkspaceModelCatalog fetches authenticated selectability", async () => {
+    const catalog = {
+      models: [
+        {
+          id: "gpt-5.6-sol",
+          label: "GPT-5.6 Sol",
+          provider: "openai",
+          providerLabel: "OpenAI",
+          api: "responses",
+          availability: {
+            status: "unknown",
+            selectable: true,
+            reason: null,
+            checkedAt: null,
+          },
+        },
+      ],
+    } as const;
+    const { client, requests } = makeClient(() => jsonResponse(catalog));
+    const result = await client.getWorkspaceModelCatalog(WORKSPACE_ID);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.method).toBe("GET");
+    expect(new URL(requests[0]!.url).pathname).toBe(`/v1/workspaces/${WORKSPACE_ID}/model-catalog`);
+    expect(result.models[0]?.availability.selectable).toBe(true);
+  });
 });
 
 describe("OpenGeniClient scheduled tasks", () => {

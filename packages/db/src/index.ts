@@ -76,11 +76,14 @@ import type {
   RigCheck,
 } from "@opengeni/contracts";
 import {
+  metadataWithTurnExecutionPolicyV1,
+  readTurnExecutionPolicyV1,
   reasoningEffortForMetadata,
   resolveWorkspaceMemoryEnabled,
   RigChange as RigChangeContract,
   SessionGoal as SessionGoalContract,
   SessionSystemUpdatePayload,
+  TurnExecutionPolicyV1,
 } from "@opengeni/contracts";
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
 import { boundModelToolOutputItem, isCodexBilledModel } from "@opengeni/codex";
@@ -12223,6 +12226,93 @@ async function lockTurnAttemptWriteFenceTx(
   return { allowed: true, workspace, session, turn };
 }
 
+export type InstallOrReadTurnExecutionPolicyForAttemptResult =
+  | {
+      accepted: true;
+      installed: boolean;
+      policy: TurnExecutionPolicyV1;
+      turn: SessionTurn;
+    }
+  | {
+      accepted: false;
+      reason: TurnAttemptFenceRejectReason;
+    };
+
+/**
+ * Freeze a legacy turn's execution identity at its first admitted attempt, or
+ * return the policy already accepted for this logical turn. The exact active
+ * attempt owns this mutation; malformed present metadata fails closed and a
+ * replay never replaces an existing valid policy.
+ */
+export async function installOrReadTurnExecutionPolicyForAttempt(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    executionGeneration: number;
+    attemptId: string;
+    policyForAbsent: TurnExecutionPolicyV1;
+  },
+): Promise<InstallOrReadTurnExecutionPolicyForAttemptResult> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        const fence = await lockTurnAttemptWriteFenceTx(tx, {
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+          executionGeneration: input.executionGeneration,
+          attemptId: input.attemptId,
+        });
+        if (!fence.allowed) {
+          return { accepted: false as const, reason: fence.reason };
+        }
+
+        const existing = readTurnExecutionPolicyV1(fence.turn.metadata);
+        if (existing.kind === "valid") {
+          return {
+            accepted: true as const,
+            installed: false,
+            policy: existing.policy,
+            turn: mapSessionTurn(fence.turn),
+          };
+        }
+
+        const policy = TurnExecutionPolicyV1.parse(input.policyForAbsent);
+        const [updated] = await tx
+          .update(schema.sessionTurns)
+          .set({
+            metadata: metadataWithTurnExecutionPolicyV1(fence.turn.metadata, policy),
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(schema.sessionTurns.workspaceId, input.workspaceId),
+              eq(schema.sessionTurns.sessionId, input.sessionId),
+              eq(schema.sessionTurns.id, input.turnId),
+              eq(schema.sessionTurns.status, "running"),
+              eq(schema.sessionTurns.executionGeneration, input.executionGeneration),
+              eq(schema.sessionTurns.activeAttemptId, input.attemptId),
+            ),
+          )
+          .returning();
+        if (!updated) {
+          throw new Error("Turn execution policy owner changed while its row was locked");
+        }
+        return {
+          accepted: true as const,
+          installed: true,
+          policy,
+          turn: mapSessionTurn(updated),
+        };
+      }),
+  );
+}
+
 /**
  * Append conversation items (verbatim SDK AgentInputItems) to the session's
  * history. Idempotent on (workspace, session, position): concurrent or
@@ -19346,6 +19436,8 @@ export type InitializeSessionStartInput = {
   sessionId: string;
   clientEventId?: string;
   reasoningEffortFallback: ReasoningEffort;
+  /** Trusted create-session policy. Omitted only by legacy low-level callers. */
+  turnExecutionPolicy?: TurnExecutionPolicyV1;
   createdEventPayload: Record<string, unknown>;
   goal?: {
     text: string;
@@ -19556,7 +19648,9 @@ export async function initializeSessionStartAtomically(
               ),
               sandboxBackend: session.sandboxBackend,
               sandboxOs: session.sandboxOs,
-              metadata: {},
+              metadata: input.turnExecutionPolicy
+                ? metadataWithTurnExecutionPolicyV1({}, input.turnExecutionPolicy)
+                : {},
               lineage: {},
             })
             .returning();

@@ -49,7 +49,11 @@ import {
   type Database,
 } from "@opengeni/db";
 import { submitTestHumanPrompt } from "./helpers/session-control";
-import type { AccessGrant, SessionStatus } from "@opengeni/contracts";
+import {
+  TURN_EXECUTION_POLICY_METADATA_KEY,
+  type AccessGrant,
+  type SessionStatus,
+} from "@opengeni/contracts";
 import { createNatsEventBus, type EventBus } from "@opengeni/events";
 import { createObservability } from "@opengeni/observability";
 import {
@@ -762,6 +766,153 @@ describe("worker activities integration", () => {
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
     expect(events.some((event) => event.type === "turn.failed")).toBe(true);
     expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("failed");
+  });
+
+  test("rejects malformed nested execution policy before allocator, compaction, or model work", async () => {
+    const sensitiveMarkers = [
+      "nested-api-key-do-not-reflect",
+      "nested-token-do-not-reflect",
+      "nested-credential-id-do-not-reflect",
+      "nested-account-id-do-not-reflect",
+      "nested-account-label-do-not-reflect",
+      "nested-private-label-do-not-reflect",
+    ];
+    const grant = await testGrant(dbClient.db);
+    const session = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "reject malformed provider policy",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    await appendOwnedEvents(dbClient.db, grant, session.id, [
+      { type: "user.message", payload: { text: "reject malformed provider policy" } },
+    ]);
+    const [turn] = await listSessionTurns(dbClient.db, grant.workspaceId, session.id, 1);
+    if (!turn) throw new Error("expected queued turn");
+    await withWorkspaceRls(dbClient.db, grant.workspaceId, async (db) => {
+      await db
+        .update(dbSchema.sessionTurns)
+        .set({
+          metadata: {
+            [TURN_EXECUTION_POLICY_METADATA_KEY]: {
+              schemaVersion: 1,
+              productModelId: "codex/gpt-5.6-sol",
+              requestedModelId: "codex/gpt-5.6-sol",
+              modelSource: "explicit",
+              reasoningEffort: "xhigh",
+              reasoningSource: "explicit",
+              providerId: "codex-subscription",
+              upstreamModelId: "gpt-5.6-sol",
+              wireApi: "responses",
+              credentialSource: {
+                kind: "connected_subscription",
+                provider: "codex",
+                apiKey: sensitiveMarkers[0],
+                token: sensitiveMarkers[1],
+                credentialId: sensitiveMarkers[2],
+              },
+              billing: {
+                upstreamPayer: "connected_subscription",
+                metering: "external",
+                accountId: sensitiveMarkers[3],
+                accountLabel: sensitiveMarkers[4],
+                labels: [sensitiveMarkers[5]],
+              },
+              definitionVersion: `sha256:${"a".repeat(64)}`,
+            },
+          },
+        })
+        .where(dbSql`${dbSchema.sessionTurns.id} = ${turn.id}`);
+    });
+
+    const model = new ScriptedModel([{ outputText: "must not run" }]);
+    const baseRuntime = createProductionAgentRuntime({ model });
+    const downstreamCalls = {
+      resolveTurnModel: 0,
+      buildAgent: 0,
+      prepareTools: 0,
+      prepareInput: 0,
+      runStream: 0,
+    };
+    const runtime: OpenGeniRuntime = {
+      ...baseRuntime,
+      resolveTurnModel: (...args) => {
+        downstreamCalls.resolveTurnModel += 1;
+        return baseRuntime.resolveTurnModel(...args);
+      },
+      buildAgent: (...args) => {
+        downstreamCalls.buildAgent += 1;
+        return baseRuntime.buildAgent(...args);
+      },
+      prepareTools: (...args) => {
+        downstreamCalls.prepareTools += 1;
+        return baseRuntime.prepareTools(...args);
+      },
+      prepareInput: (...args) => {
+        downstreamCalls.prepareInput += 1;
+        return baseRuntime.prepareInput(...args);
+      },
+      runStream: (...args) => {
+        downstreamCalls.runStream += 1;
+        return baseRuntime.runStream(...args);
+      },
+    };
+    const activities = createWorkerActivities({
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        natsUrl: services.natsUrl,
+        codexCredentialLeasingEnabled: true,
+      }),
+      db: dbClient.db,
+      bus,
+      runtime,
+    });
+
+    let message = "";
+    try {
+      await activities.runAgentTurn({
+        attemptId: crypto.randomUUID(),
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        trigger: { kind: "next" },
+        workflowId: "workflow-malformed-nested-provider-policy",
+        workflowRunId: crypto.randomUUID(),
+      });
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+
+    expect(message).toContain("Malformed turn execution policy metadata");
+    expect(message).toContain("policy.credentialSource");
+    expect(message).toContain("policy.billing");
+    expect(downstreamCalls).toEqual({
+      resolveTurnModel: 0,
+      buildAgent: 0,
+      prepareTools: 0,
+      prepareInput: 0,
+      runStream: 0,
+    });
+    expect(model.calls).toBe(0);
+    const leaseRows = await withWorkspaceRls(dbClient.db, grant.workspaceId, async (db) =>
+      db.execute<{ count: number }>(dbSql`
+        select count(*)::int as count
+        from codex_credential_leases
+        where workspace_id = ${grant.workspaceId}
+          and turn_id = ${turn.id}
+      `),
+    );
+    expect(leaseRows[0]?.count).toBe(0);
+
+    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
+    expect(events.some((event) => event.type === "turn.started")).toBe(false);
+    expect(events.some((event) => event.type === "turn.failed")).toBe(false);
+    const serializedEvents = JSON.stringify(events);
+    for (const marker of sensitiveMarkers) {
+      expect(message).not.toContain(marker);
+      expect(serializedEvents).not.toContain(marker);
+    }
   });
 
   test("max turns exceeded idles the session instead of failing it", async () => {

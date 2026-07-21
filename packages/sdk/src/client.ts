@@ -28,6 +28,7 @@ import type {
   CapabilityInstallation,
   AddDocumentRequest,
   ClientConfig,
+  WorkspaceModelCatalogResponse,
   ClientSessionEventInput,
   CompactSessionContextResult,
   CompleteFileUploadResponse,
@@ -1226,6 +1227,14 @@ export class OpenGeniClient {
       );
     }
     return config;
+  }
+
+  /** Authenticated model definitions plus workspace-specific selectability. */
+  async getWorkspaceModelCatalog(workspaceId: string): Promise<WorkspaceModelCatalogResponse> {
+    return await this.requestJson<WorkspaceModelCatalogResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/model-catalog`,
+    );
   }
 
   /** The caller's access context: subject, account + workspace grants, defaults. */

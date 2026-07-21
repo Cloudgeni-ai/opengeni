@@ -138,6 +138,33 @@ describe("resolveTurnModel", () => {
     expect(resolveTurnModel(multiProviderSettings(), "model-that-does-not-exist")).toBeNull();
   });
 
+  test("keeps the canonical product id in configuration while binding the provider model to the upstream slug", () => {
+    const settings = multiProviderSettings({
+      modelProvidersJson: JSON.stringify([
+        {
+          id: "acme",
+          api: "responses",
+          baseUrl: "https://api.acme.test/v1",
+          apiKey: "acme-test-key",
+          models: [
+            {
+              id: "acme/product-model",
+              upstreamModelId: "provider-deployment-slug",
+            },
+          ],
+        },
+      ]),
+    });
+
+    const resolved = resolveTurnModel(settings, "acme/product-model");
+    expect(resolved).not.toBeNull();
+    expect(resolved!.configured.id).toBe("acme/product-model");
+    expect(resolved!.configured.upstreamModelId).toBe("provider-deployment-slug");
+    expect((resolved!.model as unknown as { _model: string })._model).toBe(
+      "provider-deployment-slug",
+    );
+  });
+
   test("resolves a registry model to its provider, client, chat Model, and configured shape", () => {
     const resolved = resolveTurnModel(multiProviderSettings(), FIREWORKS_MODEL);
     expect(resolved).not.toBeNull();
@@ -507,9 +534,9 @@ describe("registry model shadowing is closed — the built-in never claims a nam
     expect(model).toBeInstanceOf(OpenAIChatCompletionsModel);
   });
 
-  test("a BARE id a registry merely redeclares (e.g. the built-in default) still resolves to the built-in — precedence preserved", () => {
-    // The registry below redeclares "gpt-5.6-sol"; the built-in must still win it
-    // (only namespaced `<provider>/<model>` ids are ceded to the registry).
+  test("fails loud when a registry redeclares a bare built-in product id", () => {
+    // Ambiguous canonical ownership must never depend on declaration order or
+    // silently choose a provider/billing path.
     const settings = multiProviderSettings({
       openaiProvider: "azure",
       azureOpenaiBaseUrl: "https://example.openai.azure.com/openai/v1",
@@ -524,8 +551,8 @@ describe("registry model shadowing is closed — the built-in never claims a nam
         },
       ]),
     });
-    const resolved = resolveTurnModel(settings, "gpt-5.6-sol")!;
-    expect(resolved.provider.builtin).toBe(true);
-    expect(resolved.provider.id).toBe("azure");
+    expect(() => resolveTurnModel(settings, "gpt-5.6-sol")).toThrow(
+      'model id "gpt-5.6-sol" is declared by both azure and shadow',
+    );
   });
 });

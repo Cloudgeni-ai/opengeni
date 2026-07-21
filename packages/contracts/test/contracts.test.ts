@@ -6,6 +6,7 @@ import {
   CapabilityPack,
   ClientConfig,
   ClientModel,
+  WorkspaceModelCatalogResponse,
   ClientSessionEvent,
   CreateCapabilityCatalogItemRequest,
   CreateKnowledgeMemoryRequest,
@@ -20,8 +21,11 @@ import {
   KnowledgeMemorySearchRequest,
   MarketingDailyAnalysisTaskRequest,
   mergeToolRefs,
+  ModelBillingAttributionV1,
+  ModelCredentialSourceV1,
   OAuthStartRequest,
   OPENGENI_API_CONTRACT_REVISION,
+  TURN_EXECUTION_POLICY_METADATA_KEY,
   ResourceRef,
   SessionBusMessage,
   SessionGoal,
@@ -29,9 +33,179 @@ import {
   CLEARED_RUN_STATE_BLOB,
   CLEARED_RUN_STATE_MARKER,
   isClearedRunStateBlob,
+  metadataWithTurnExecutionPolicyV1,
+  readTurnExecutionPolicyV1,
+  turnExecutionPolicyAuditMetadata,
+  TurnExecutionPolicyV1,
 } from "../src";
 
 describe("contracts", () => {
+  const turnExecutionPolicy = TurnExecutionPolicyV1.parse({
+    schemaVersion: 1,
+    productModelId: "xai/grok-4.5",
+    requestedModelId: "grok-4.5",
+    modelSource: "explicit",
+    reasoningEffort: "high",
+    reasoningSource: "explicit",
+    providerId: "xai",
+    upstreamModelId: "grok-4.5",
+    wireApi: "responses",
+    credentialSource: { kind: "deployment", mechanism: "api_key" },
+    billing: { upstreamPayer: "deployment", metering: "opengeni_credits" },
+    definitionVersion: `sha256:${"a".repeat(64)}`,
+  });
+
+  test("reads and merges a strict secret-safe turn execution policy without disturbing metadata", () => {
+    expect(readTurnExecutionPolicyV1(null)).toEqual({ kind: "absent" });
+    expect(readTurnExecutionPolicyV1({ dispatchRevision: 3 })).toEqual({ kind: "absent" });
+
+    const metadata = metadataWithTurnExecutionPolicyV1(
+      { dispatchRevision: 3, recovery: { generation: 2 } },
+      turnExecutionPolicy,
+    );
+    expect(metadata.dispatchRevision).toBe(3);
+    expect(metadata.recovery).toEqual({ generation: 2 });
+    expect(readTurnExecutionPolicyV1(metadata)).toEqual({
+      kind: "valid",
+      policy: turnExecutionPolicy,
+    });
+    expect(metadata[TURN_EXECUTION_POLICY_METADATA_KEY]).toEqual(turnExecutionPolicy);
+  });
+
+  test("treats only an absent policy key as legacy and reports malformed paths without values", () => {
+    for (const malformed of [null, undefined, { ...turnExecutionPolicy, extra: true }]) {
+      expect(() =>
+        readTurnExecutionPolicyV1({
+          [TURN_EXECUTION_POLICY_METADATA_KEY]: malformed,
+        }),
+      ).toThrow("Malformed turn execution policy metadata");
+    }
+
+    const sensitiveMarker = "do-not-reflect-this-value";
+    let message = "";
+    try {
+      readTurnExecutionPolicyV1({
+        [TURN_EXECUTION_POLICY_METADATA_KEY]: {
+          ...turnExecutionPolicy,
+          definitionVersion: sensitiveMarker,
+        },
+      });
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    expect(message).toContain("policy.definitionVersion");
+    expect(message).not.toContain(sensitiveMarker);
+  });
+
+  test("rejects unknown nested execution-policy identity without reflecting sensitive values", () => {
+    const adversarialCases = [
+      {
+        directSchema: ModelCredentialSourceV1,
+        nestedPath: "credentialSource" as const,
+        nestedValue: {
+          kind: "deployment",
+          mechanism: "api_key",
+          apiKey: "api-key-do-not-reflect",
+        },
+        sensitiveMarkers: ["api-key-do-not-reflect"],
+      },
+      {
+        directSchema: ModelCredentialSourceV1,
+        nestedPath: "credentialSource" as const,
+        nestedValue: {
+          kind: "connected_subscription",
+          provider: "codex",
+          token: "subscription-token-do-not-reflect",
+        },
+        sensitiveMarkers: ["subscription-token-do-not-reflect"],
+      },
+      {
+        directSchema: ModelCredentialSourceV1,
+        nestedPath: "credentialSource" as const,
+        nestedValue: {
+          kind: "workspace_connection",
+          mechanism: "api_key",
+          credentialId: "credential-id-do-not-reflect",
+        },
+        sensitiveMarkers: ["credential-id-do-not-reflect"],
+      },
+      {
+        directSchema: ModelBillingAttributionV1,
+        nestedPath: "billing" as const,
+        nestedValue: {
+          upstreamPayer: "connected_subscription",
+          metering: "external",
+          accountId: "account-id-do-not-reflect",
+        },
+        sensitiveMarkers: ["account-id-do-not-reflect"],
+      },
+      {
+        directSchema: ModelBillingAttributionV1,
+        nestedPath: "billing" as const,
+        nestedValue: {
+          upstreamPayer: "connected_subscription",
+          metering: "external",
+          accountLabel: "account-label-do-not-reflect",
+          labels: ["private-label-do-not-reflect"],
+        },
+        sensitiveMarkers: ["account-label-do-not-reflect", "private-label-do-not-reflect"],
+      },
+    ];
+
+    for (const testCase of adversarialCases) {
+      expect(testCase.directSchema.safeParse(testCase.nestedValue).success).toBe(false);
+      const malformedPolicy = {
+        ...turnExecutionPolicy,
+        [testCase.nestedPath]: testCase.nestedValue,
+      };
+      expect(TurnExecutionPolicyV1.safeParse(malformedPolicy).success).toBe(false);
+
+      let message = "";
+      try {
+        readTurnExecutionPolicyV1({
+          [TURN_EXECUTION_POLICY_METADATA_KEY]: malformedPolicy,
+        });
+      } catch (error) {
+        message = error instanceof Error ? error.message : String(error);
+      }
+      expect(message).toContain(`policy.${testCase.nestedPath}`);
+      for (const marker of testCase.sensitiveMarkers) {
+        expect(message).not.toContain(marker);
+      }
+    }
+  });
+
+  test("enforces requested-model/source consistency and emits explicit audit identity", () => {
+    expect(() =>
+      TurnExecutionPolicyV1.parse({
+        ...turnExecutionPolicy,
+        requestedModelId: null,
+      }),
+    ).toThrow();
+    expect(() =>
+      TurnExecutionPolicyV1.parse({
+        ...turnExecutionPolicy,
+        modelSource: "session",
+      }),
+    ).toThrow();
+
+    expect(
+      turnExecutionPolicyAuditMetadata(turnExecutionPolicy, crypto.randomUUID()),
+    ).toMatchObject({
+      requestedModelId: "grok-4.5",
+      effectiveModelId: "xai/grok-4.5",
+      modelSource: "explicit",
+      effectiveReasoningEffort: "high",
+      reasoningSource: "explicit",
+      providerId: "xai",
+      credentialSourceKind: "deployment",
+      credentialSourceMechanism: "api_key",
+      billingOwner: "deployment",
+      billingMetering: "opengeni_credits",
+      definitionVersion: turnExecutionPolicy.definitionVersion,
+    });
+  });
+
   test("accepts the truthful goal continuation projection and keeps it source-compatible", () => {
     const baseGoal = {
       id: "00000000-0000-4000-8000-000000000001",
@@ -333,6 +507,86 @@ describe("contracts", () => {
         api: "grpc",
       }),
     ).toThrow();
+  });
+
+  test("accepts additive normalized model definitions and authenticated availability", () => {
+    const normalized = ClientModel.parse({
+      id: "xai/grok-4.5",
+      label: "Grok 4.5",
+      provider: "xai",
+      providerLabel: "xAI",
+      api: "responses",
+      contextWindowTokens: 500_000,
+      schemaVersion: 1,
+      aliases: ["grok-4.5"],
+      deployment: { upstreamModelId: "grok-4.5", wireApi: "responses" },
+      executionLimits: {
+        contextWindowTokens: 500_000,
+        effectiveContextWindowTokens: null,
+        autoCompactTokenLimit: null,
+        toolOutputTruncationTokens: 10_000,
+      },
+      credentialSource: { kind: "deployment", mechanism: "api_key" },
+      billing: { upstreamPayer: "deployment", metering: "opengeni_credits" },
+      capabilities: {
+        reasoning: {
+          upstream: "supported",
+          runnable: true,
+          efforts: ["low", "medium", "high"],
+          defaultEffort: "high",
+          required: true,
+        },
+        functionCalling: { upstream: "supported", runnable: true },
+        structuredOutput: { upstream: "supported", runnable: true },
+        hostedTools: {
+          webSearch: { upstream: "supported", runnable: true },
+          xSearch: { upstream: "supported", runnable: false },
+          codeExecution: { upstream: "supported", runnable: false },
+        },
+        inputModalities: ["text", "image"],
+        outputModalities: ["text"],
+        transports: {
+          sse: { upstream: "supported", runnable: true },
+          responsesWebSocket: { upstream: "supported", runnable: false },
+          realtimeAudio: { upstream: "unsupported", runnable: false },
+        },
+        latencyModes: [{ id: "standard", upstream: "supported", runnable: true }],
+      },
+      pricing: {
+        default: {
+          inputMicrosPerMillionTokens: 2_000_000,
+          cachedInputMicrosPerMillionTokens: 300_000,
+          outputMicrosPerMillionTokens: 6_000_000,
+        },
+        inputTokenTiers: [
+          {
+            minimumInputTokens: 200_000,
+            pricing: {
+              inputMicrosPerMillionTokens: 4_000_000,
+              cachedInputMicrosPerMillionTokens: 600_000,
+              outputMicrosPerMillionTokens: 12_000_000,
+            },
+          },
+        ],
+      },
+      definitionVersion: `sha256:${"a".repeat(64)}`,
+    });
+    expect(normalized.deployment?.upstreamModelId).toBe("grok-4.5");
+
+    const catalog = WorkspaceModelCatalogResponse.parse({
+      models: [
+        {
+          ...normalized,
+          availability: {
+            status: "unknown",
+            selectable: true,
+            reason: null,
+            checkedAt: null,
+          },
+        },
+      ],
+    });
+    expect(catalog.models[0]?.availability.selectable).toBe(true);
   });
 
   test("accepts checkout requests that use the caller default account", () => {

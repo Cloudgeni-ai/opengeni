@@ -173,7 +173,7 @@ describe("session queue delete lookup", () => {
       initialMessage: "queue invalidation",
       resources: [],
       metadata: {},
-      model: "test-model",
+      model: settings.openaiModel,
       sandboxBackend: "none",
     });
     const authorization = await bearer(owner.accountId, owner.workspaceId);

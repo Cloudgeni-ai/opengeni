@@ -2,6 +2,7 @@ import { describe, expect, mock, test } from "bun:test";
 import { CancelledFailure } from "@temporalio/activity";
 import { ModelItem } from "@openai/agents-core/types";
 import type { Settings } from "@opengeni/config";
+import { TurnExecutionPolicyV1 } from "@opengeni/contracts";
 import {
   interruptedToolCallResult,
   SandboxImageConflictError,
@@ -28,6 +29,7 @@ import {
   isLazySandboxProvisionRetryable,
   isTransientProviderError,
   isWorkerShutdownCancellation,
+  legacyTurnExecutionPolicyInput,
   recordCompletedModelCallBeforeOwnershipFences,
   modelUsageSourceKey,
   pointerReconcileReason,
@@ -36,6 +38,7 @@ import {
   resolveActiveSandboxBackend,
   shouldRecoverCompactionProviderFailure,
   shouldStartOnTurnRecording,
+  turnExecutionPolicyBillingIdentity,
 } from "../src/activities/agent-turn";
 import { sandboxLeaseHolderIdForAttempt } from "../src/sandbox-resume";
 import { settingsWithPackSandboxImage } from "../src/activities/packs";
@@ -84,6 +87,75 @@ function persistAcrossReconciles(snapshots: Array<Array<Record<string, unknown>>
   }
   return [...persistedByPosition.entries()].sort((a, b) => a[0] - b[0]).map(([, item]) => item);
 }
+
+describe("accepted turn execution identity", () => {
+  test("separates external billing from the exact Codex allocator identity", () => {
+    const base = TurnExecutionPolicyV1.parse({
+      schemaVersion: 1,
+      productModelId: "xai/grok-4.5",
+      requestedModelId: null,
+      modelSource: "session",
+      reasoningEffort: "high",
+      reasoningSource: "session",
+      providerId: "xai",
+      upstreamModelId: "grok-4.5",
+      wireApi: "responses",
+      credentialSource: { kind: "workspace_connection", mechanism: "api_key" },
+      billing: { upstreamPayer: "workspace", metering: "external" },
+      definitionVersion: `sha256:${"a".repeat(64)}`,
+    });
+    expect(turnExecutionPolicyBillingIdentity(base)).toEqual({
+      externallyBilled: true,
+      codexSubscription: false,
+    });
+    expect(
+      turnExecutionPolicyBillingIdentity({
+        ...base,
+        productModelId: "codex/gpt-5.6-sol",
+        providerId: "codex-subscription",
+        upstreamModelId: "gpt-5.6-sol",
+        credentialSource: { kind: "connected_subscription", provider: "codex" },
+        billing: { upstreamPayer: "connected_subscription", metering: "external" },
+      }),
+    ).toEqual({ externallyBilled: true, codexSubscription: true });
+    expect(
+      turnExecutionPolicyBillingIdentity({
+        ...base,
+        credentialSource: { kind: "deployment", mechanism: "api_key" },
+        billing: { upstreamPayer: "deployment", metering: "opengeni_credits" },
+      }),
+    ).toEqual({ externallyBilled: false, codexSubscription: false });
+  });
+
+  test("classifies only legacy user/API turns as explicit policy requests", () => {
+    for (const source of ["user", "api"] as const) {
+      expect(
+        legacyTurnExecutionPolicyInput({
+          source,
+          model: "xai/grok-4.5",
+          reasoningEffort: "high",
+        }),
+      ).toMatchObject({
+        requestedModelId: "xai/grok-4.5",
+        modelSource: "explicit",
+        reasoningSource: "explicit",
+      });
+    }
+    for (const source of ["goal", "system", "compaction"] as const) {
+      expect(
+        legacyTurnExecutionPolicyInput({
+          source,
+          model: "codex/gpt-5.6-sol",
+          reasoningEffort: "xhigh",
+        }),
+      ).toMatchObject({
+        requestedModelId: null,
+        modelSource: "continuation",
+        reasoningSource: "continuation",
+      });
+    }
+  });
+});
 
 describe("conversation-truth reconcile (orphaned tool output guard)", () => {
   test("does not treat a reverse-completing parallel call batch as an append-only history", () => {

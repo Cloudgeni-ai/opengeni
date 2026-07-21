@@ -13,7 +13,7 @@ import {
   getSessionEvent,
   getSessionGoal,
   getLatestRunState,
-  isCodexBilledTurn,
+  installOrReadTurnExecutionPolicyForAttempt,
   workspaceCodexSubscriptionActive,
   acquireCodexCredentialLease,
   armCodexCapacityWait,
@@ -104,12 +104,13 @@ import {
   stopRecording as stopRecordingOnBox,
 } from "@opengeni/runtime";
 import {
-  builtinProviderId,
+  assertTurnExecutionPolicyMatchesConfigV1,
   calculateModelUsageCostMicros,
   configuredModelPricing,
   configuredStaticUsageLimits,
   sandboxWarmRateMicrosPerSecond,
   settingsWithResolvedModelContext,
+  resolveTurnExecutionPolicyV1,
   type ModelUsageInput,
   type ModelProviderApi,
   type RegistryProviderKind,
@@ -236,11 +237,14 @@ import {
 import {
   CAPABILITY_DESCRIPTORS,
   evaluateWorkspaceModelPolicy,
+  readTurnExecutionPolicyV1,
   type GitCredentialProvider,
   type ResourceRef,
   type SessionEvent,
   type SessionEventType,
   type SessionStatus,
+  type SessionTurn,
+  type TurnExecutionPolicyV1,
 } from "@opengeni/contracts";
 import { createHash, randomUUID } from "node:crypto";
 
@@ -249,6 +253,32 @@ import { createHash, randomUUID } from "node:crypto";
 // throttling is minute-granular; anything shorter mostly burns continuation
 // budget against the same window.
 export const PROVIDER_BACKPRESSURE_DELAY_MS = 60_000;
+
+export function turnExecutionPolicyBillingIdentity(policy: TurnExecutionPolicyV1): {
+  externallyBilled: boolean;
+  codexSubscription: boolean;
+} {
+  return {
+    externallyBilled: policy.billing.metering === "external",
+    codexSubscription:
+      policy.providerId === "codex-subscription" &&
+      policy.credentialSource.kind === "connected_subscription" &&
+      policy.credentialSource.provider === "codex",
+  };
+}
+
+export function legacyTurnExecutionPolicyInput(
+  turn: Pick<SessionTurn, "source" | "model" | "reasoningEffort">,
+): Parameters<typeof resolveTurnExecutionPolicyV1>[1] {
+  const explicit = turn.source === "user" || turn.source === "api";
+  return {
+    modelId: turn.model,
+    requestedModelId: explicit ? turn.model : null,
+    modelSource: explicit ? "explicit" : "continuation",
+    reasoningEffort: turn.reasoningEffort,
+    reasoningSource: explicit ? "explicit" : "continuation",
+  };
+}
 
 /** A retryable provider fault recovers the accepted turn itself. Goal state is
  * irrelevant: autonomous continuation and infrastructure recovery are separate
@@ -1189,6 +1219,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       runtimeMetricsHooksForObservability(observability),
     );
     let isCodexTurn = false;
+    let isExternallyBilledTurn = false;
     let executionGeneration = 0;
     // Still required by credential-loss/capacity settlements, whose own
     // recovery transactions fence against worker-death redispatches.
@@ -1743,10 +1774,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         input.workspaceId,
         settings,
       );
-      // Read the active-credential flag ONCE (P2-b) and thread it through both the
-      // routing overlay (settingsWithCodexCredential) and the billed-turn predicate
-      // (isCodexBilledTurn below), so a concurrent disconnect/reconnect cannot make
-      // provider-injection and billing disagree about whether this is a codex turn.
+      // Read the active-credential flag once for the runtime capability overlay.
+      // Accepted billing/provider identity comes from the turn policy below,
+      // never from this mutable health snapshot.
       const codexSubscriptionActive = await workspaceCodexSubscriptionActive(
         db,
         mcpSettings,
@@ -1774,13 +1804,44 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       }
       const turn = claim.turn;
       turnId = turn.id;
+      executionGeneration = turn.executionGeneration;
+      const claimedPolicy = readTurnExecutionPolicyV1(turn.metadata);
+      const policyForAbsent =
+        claimedPolicy.kind === "valid"
+          ? claimedPolicy.policy
+          : resolveTurnExecutionPolicyV1(capabilitySettings, legacyTurnExecutionPolicyInput(turn));
+      const installedPolicy = await installOrReadTurnExecutionPolicyForAttempt(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId,
+        executionGeneration,
+        attemptId: input.attemptId,
+        policyForAbsent,
+      });
+      if (!installedPolicy.accepted) {
+        throw new TurnAttemptFencedError(
+          `turn execution policy was fenced: ${installedPolicy.reason}`,
+        );
+      }
+      const verifiedExecutionPolicy = assertTurnExecutionPolicyMatchesConfigV1(
+        capabilitySettings,
+        installedPolicy.policy,
+        {
+          modelId: turn.model,
+          reasoningEffort: turn.reasoningEffort,
+        },
+      );
+      const turnExecutionPolicy = verifiedExecutionPolicy.policy;
+      const billingIdentity = turnExecutionPolicyBillingIdentity(turnExecutionPolicy);
+      isExternallyBilledTurn = billingIdentity.externallyBilled;
+      isCodexTurn = billingIdentity.codexSubscription;
       triggerEventId = turn.triggerEventId;
       const trigger = await getSessionEvent(db, input.workspaceId, triggerEventId);
       if (!trigger) {
         throw new Error(`Trigger event not found: ${triggerEventId}`);
       }
       triggerType = trigger.type;
-      executionGeneration = turn.executionGeneration;
       const latestTurnState = await getLatestRunState(db, input.workspaceId, input.sessionId);
       const continuationCodexCredentialId =
         latestTurnState?.turnId === turnId ? latestTurnState.frozenCodexCredentialId : null;
@@ -1789,21 +1850,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           0,
       );
       turnLifecycleMetricsFor(observability).start(turnId);
-      // Canonical codex-billed predicate (codex/<slug> + feature enabled + active
-      // workspace credential). Computed once and threaded through every billing
-      // gate + the usage recorder so a turn paid by the user's ChatGPT/Codex plan
-      // consumes ZERO OpenGeni credits and never feeds an OpenGeni cap. Resolved
-      // here (before resolvedModel at the routing step) because the pre-turn gate
-      // below needs it; mirrors the same active-credential read the codex provider
-      // overlay uses, so billing and routing agree on what "codex" is.
-      isCodexTurn = await isCodexBilledTurn({
-        db,
-        settings,
-        workspaceId: input.workspaceId,
-        model: turn.model,
-        active: codexSubscriptionActive,
-      });
-      // §7.5 P3 — pass BOTH the codex predicate (codex-plan turns bypass the gate)
+      // §7.5 P3 — pass the accepted billing attribution (externally funded turns
+      // bypass OpenGeni credit/token gates)
       // AND the optional host `entitlements` port (when bound, its admitRun replaces
       // the local credit read). Unset port → today's local-ledger path.
       await ensureRunAllowed(
@@ -1811,7 +1859,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         db,
         input.accountId,
         input.workspaceId,
-        isCodexTurn,
+        isExternallyBilledTurn,
         entitlements,
       );
       // Setup (variableSet load, MCP connects, sandbox restore) does not
@@ -2611,7 +2659,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // a chat-only Fireworks model. Resolving against the default-model settings
       // keeps gating consistent with the router. Cost accounting covers registry
       // models via configuredModelPricing.
-      const resolvedModel = runtime.resolveTurnModel(capabilitySettings, turn.model);
+      const resolvedModel = runtime.resolveTurnModel(
+        capabilitySettings,
+        turnExecutionPolicy.productModelId,
+      );
       // Bind the provider/model catalog's context policy to every model-facing
       // path for this turn. In particular, Codex subscription turns must not
       // inherit the deployment's OpenAI/Azure mode or 1.05M context defaults:
@@ -2626,25 +2677,20 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // and the main run both come later in this scope), so a blocked
       // provider/model can never be reached through ANY stamp path: explicit
       // turn model, inherited session default, goal-continuation inheritance,
-      // or the legacy null-resolution fallback (null → the built-in
-      // OpenAI/Azure client, attributed here via builtinProviderId so a policy
-      // blocking the built-in also blocks that fallback — this exact path is
-      // how bare-model turns silently spent real Azure money in a
-      // codex-intended workspace). Fail-loud, never a silent remap.
+      // or the legacy null-resolution fallback. The frozen execution policy is
+      // the attribution source even if an injected test runtime returns no
+      // concrete resolved model. Fail-loud, never a silent remap.
       {
         const workspaceModelPolicy = await getWorkspaceModelPolicy(db, input.workspaceId);
         if (workspaceModelPolicy) {
-          const effectiveProviderId = resolvedModel
-            ? resolvedModel.provider.id
-            : builtinProviderId(capabilitySettings);
           const verdict = evaluateWorkspaceModelPolicy(workspaceModelPolicy, {
-            providerId: effectiveProviderId,
-            modelId: turn.model,
+            providerId: turnExecutionPolicy.providerId,
+            modelId: turnExecutionPolicy.productModelId,
           });
           if (!verdict.allowed) {
             throw new WorkspaceModelPolicyBlockedError(
-              turn.model,
-              effectiveProviderId,
+              turnExecutionPolicy.productModelId,
+              turnExecutionPolicy.providerId,
               verdict.reason,
             );
           }
@@ -2720,7 +2766,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               sessionId: input.sessionId,
               turnId: turn.id,
               model: resolvedModel?.configured.id ?? turn.model,
-              isCodexTurn,
+              externallyBilled: isExternallyBilledTurn,
               usage: usage.usage,
               sourceKey,
               observability,
@@ -2751,7 +2797,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 summarizeForCompaction(s, m, {
                   client: resolvedModel.client,
                   api: resolvedModel.provider.api,
-                  model: resolvedModel.configured.id,
+                  model: turnExecutionPolicy.upstreamModelId,
                   maxOutputTokens: SUMMARY_BUFFER_TOKENS,
                   onUsage: recordCompactionUsage,
                   ...(systemInstructions ? { systemInstructions } : {}),
@@ -2760,6 +2806,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               )
           : (s: Settings, m: Array<Record<string, unknown>>) =>
               summarizeForCompaction(s, m, {
+                model: turnExecutionPolicy.upstreamModelId,
                 maxOutputTokens: SUMMARY_BUFFER_TOKENS,
                 onUsage: recordCompactionUsage,
                 ...(systemInstructions ? { systemInstructions } : {}),
@@ -4033,7 +4080,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                     sessionId: input.sessionId,
                     turnId: activeTurnId,
                     model: turn.model,
-                    isCodexTurn,
+                    externallyBilled: isExternallyBilledTurn,
                     usage: responseUsage.usage,
                     sourceKey: responseSourceKey,
                     observability,
@@ -4084,7 +4131,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   db,
                   input.accountId,
                   input.workspaceId,
-                  isCodexTurn,
+                  isExternallyBilledTurn,
                   entitlements,
                 );
               } catch (limitError) {
@@ -4232,7 +4279,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 sessionId: input.sessionId,
                 turnId: activeTurnId,
                 model: turn.model,
-                isCodexTurn,
+                externallyBilled: isExternallyBilledTurn,
                 usage: aggregateUsage,
                 sourceKey: aggregateSourceKey,
                 observability,
@@ -5897,21 +5944,21 @@ class BudgetExhaustedError extends Error {
   }
 }
 
-// Exported for unit testing the codex-billed bypass (codex-billing.test.ts); not part
-// of the activity surface. Takes BOTH `isCodexTurn` (codex-plan turns bypass the credit
-// and token gates) and the optional §7.5 P3 host `entitlements` port (when bound, its
-// `admitRun` REPLACES the local credit read for a non-codex turn; unset → local ledger).
+// Exported for unit testing the external-billing bypass (codex-billing.test.ts); not
+// part of the activity surface. Takes the accepted policy's billing attribution and
+// the optional §7.5 P3 host `entitlements` port (when bound, its `admitRun` REPLACES
+// the local credit read for an OpenGeni-metered turn; unset → local ledger).
 export async function ensureRunAllowed(
   settings: Settings,
   db: ActivityServices["db"],
   accountId: string,
   workspaceId: string,
-  isCodexTurn: boolean,
+  isExternallyBilledTurn: boolean,
   entitlements?: ActivityServices["entitlements"],
 ): Promise<void> {
-  // Codex-billed turns are paid by the user's ChatGPT/Codex plan: skip the
-  // credit-balance gate and the monthly token cap. The agent-run COUNT cap below
-  // is a volume/fairness quota (not a credit/cost gate) and is intentionally kept.
+  // Externally billed turns are paid outside OpenGeni: skip the credit-balance
+  // gate and monthly token cap. The agent-run COUNT cap below is a
+  // volume/fairness quota (not a credit/cost gate) and is intentionally kept.
   //
   // §7.5 P3 — host-entitlements DELEGATION (the worker half of the same seam the
   // API edge exposes). For a non-codex turn, when the host binds `entitlements`, its
@@ -5925,7 +5972,7 @@ export async function ensureRunAllowed(
   // idempotency-keyed writer at recordModelUsageAndDebitCredits), so a PULL host meter
   // is consulted without ever double-charging.
   if (
-    !isCodexTurn &&
+    !isExternallyBilledTurn &&
     entitlements &&
     (settings.billingMode === "stripe" || settings.usageLimitsMode === "managed")
   ) {
@@ -5939,7 +5986,7 @@ export async function ensureRunAllowed(
       throw new Error(decision.reason || "insufficient OpenGeni credits");
     }
   } else if (
-    !isCodexTurn &&
+    !isExternallyBilledTurn &&
     (settings.billingMode === "stripe" || settings.usageLimitsMode === "managed")
   ) {
     const balance = await getBillingBalance(db, accountId);
@@ -5964,7 +6011,7 @@ export async function ensureRunAllowed(
         );
       }
     }
-    if (!isCodexTurn && limits.maxMonthlyTokensPerWorkspace) {
+    if (!isExternallyBilledTurn && limits.maxMonthlyTokensPerWorkspace) {
       const used = await sumUsageQuantity(db, {
         workspaceId,
         eventType: "model.tokens",
@@ -5977,7 +6024,7 @@ export async function ensureRunAllowed(
   }
 }
 
-// Exported for unit testing the codex-billed bypass; not part of the activity surface.
+// Exported for unit testing the external-billing bypass; not part of the activity surface.
 export async function recordModelUsageAndDebitCredits(
   settings: Settings,
   db: ActivityServices["db"],
@@ -5987,7 +6034,7 @@ export async function recordModelUsageAndDebitCredits(
     sessionId: string;
     turnId: string;
     model: string;
-    isCodexTurn: boolean;
+    externallyBilled: boolean;
     usage?: ModelUsageInput | null;
     sourceKey: string;
     observability?: ActivityServices["observability"];
@@ -5999,7 +6046,7 @@ export async function recordModelUsageAndDebitCredits(
   const inputTokens = positiveInt(input.usage.inputTokens);
   const outputTokens = positiveInt(input.usage.outputTokens);
   const totalTokens = positiveInt(input.usage.totalTokens) || inputTokens + outputTokens;
-  // A codex-subscription turn is paid by the user's ChatGPT/Codex plan, so it
+  // An externally billed turn is paid outside OpenGeni, so it
   // consumes ZERO OpenGeni credits and must never feed an OpenGeni cap. A
   // codex/<slug> model has no entry in configuredModelPricing, so the normal path
   // below would throw "Missing model pricing". We:
@@ -6008,7 +6055,7 @@ export async function recordModelUsageAndDebitCredits(
   //     any row would count against maxMonthlyTokensPerWorkspace);
   //   - record a `model.cost = 0` audit marker (harmless to the monthly cost cap);
   //   - never look up pricing and never debit credits.
-  if (input.isCodexTurn) {
+  if (input.externallyBilled) {
     await recordUsageEvent(db, {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
