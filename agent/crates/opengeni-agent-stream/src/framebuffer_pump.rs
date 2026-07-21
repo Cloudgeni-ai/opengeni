@@ -27,8 +27,8 @@ use crate::codec::RelayMessage;
 use crate::error::{StreamError, StreamResult};
 
 /// The default desktop frame interval (~10 fps). A real codec / damage-tracking
-/// upgrade is a pump change, not a protocol change (dossier §10.5). Kept modest so
-/// a PNG-per-frame stream does not saturate the relay; M12 tunes it live.
+/// upgrade is a pump change, not a protocol change. Kept modest so
+/// a PNG-per-frame stream does not saturate the relay; native desktop milestone tunes it live.
 const DEFAULT_FRAME_INTERVAL: Duration = Duration::from_millis(100);
 
 /// How many times the pump retries the FIRST `capture()` before it gives up. Xvfb /

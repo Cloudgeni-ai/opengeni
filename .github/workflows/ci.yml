@@ -89,7 +89,7 @@ jobs:
 
       - name: Test
         env:
-          # OPE-26's per-subject FORCE-RLS/OCC suite is a required security gate.
+          # The per-subject FORCE-RLS/OCC suite is a required security gate.
           # Never turn a missing Docker/PostgreSQL runner into green skipped tests.
           OPENGENI_REQUIRE_REAL_DB: "1"
         run: bun run test:unit
@@ -100,7 +100,11 @@ jobs:
       - name: Install pinned Playwright Chromium runtime
         run: bunx playwright install --with-deps chromium
 
-      - name: OPE-26 session pin browser acceptance
+      - name: Queue surface browser acceptance
+        id: queue_surface_browser
+        run: bun scripts/run-browser-e2e.ts ./test/e2e/queue-surface.browser.e2e.ts
+
+      - name: Session pin browser acceptance
         id: session_pin_browser
         env:
           # This browser gate must fail when its real PostgreSQL boundary is unavailable.
@@ -118,21 +122,21 @@ jobs:
           'captures a real turn-end multi-repository workspace through the public API'
           ./test/e2e/sandbox.e2e.ts
 
-      - name: Upload OPE-26 visual evidence
+      - name: Upload session pin visual evidence
         if: >-
           ${{ always() &&
           (steps.session_pin_browser.outcome == 'success' ||
           steps.session_pin_browser.outcome == 'failure') }}
         uses: actions/upload-artifact@v7.0.1
         with:
-          name: ope26-session-pin-visual-evidence
+          name: sessionpin-session-pin-visual-evidence
           if-no-files-found: error
           retention-days: 14
           path: |
-            /tmp/ope26-session-pin-desktop-light.png
-            /tmp/ope26-session-pin-desktop-dark.png
-            /tmp/ope26-session-pin-mobile-light.png
-            /tmp/ope26-session-pin-mobile-dark.png
+            /tmp/sessionpin-session-pin-desktop-light.png
+            /tmp/sessionpin-session-pin-desktop-dark.png
+            /tmp/sessionpin-session-pin-mobile-light.png
+            /tmp/sessionpin-session-pin-mobile-dark.png
 
       - name: Upload workbench visual evidence
         if: >-
@@ -150,11 +154,11 @@ jobs:
             /tmp/workbench-desktop-dark-changes.png
             /tmp/workbench-desktop-light-files.png
 
-      # OPE-22's escaped MCP timeout and stale-input-token regressions cross the
+      # The escaped MCP timeout and stale-input-token regressions cross the
       # activity/DB/event boundary. Keep both explicit incident gates so a future
       # suite split cannot silently drop either the exactly-once/active-goal proof
       # or the real-Postgres shrink proof.
-      - name: OPE-22 recovery integration regressions
+      - name: Recovery integration regressions
         run: |
           bun test --timeout 30000 \
             --test-name-pattern \
@@ -170,6 +174,9 @@ jobs:
 
       - name: Docs reference freshness guard
         run: bun scripts/check-docs-refs.ts
+
+      - name: Public repository hygiene guard
+        run: bun run check:public-hygiene
 
       - name: Build client packages (contracts + SDK + React)
         run: bun run build:packages

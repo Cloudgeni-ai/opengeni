@@ -1080,7 +1080,7 @@ describe("buildAgentCapabilities computer-use gating (P4.3)", () => {
     expect(t).not.toContain("computer-use");
   });
 
-  test("a non-desktop backend never gets computer-use (F18: honest gate)", () => {
+  test("a non-desktop backend never gets computer-use (runtime contract: honest gate)", () => {
     const t = types(
       testSettings({
         sandboxBackend: "none",

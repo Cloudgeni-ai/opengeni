@@ -109,6 +109,27 @@ describe("FileBrowser", () => {
     await r.unmount();
   });
 
+  test("keeps captured files visible with an accessible retry state and no mutations", async () => {
+    const r = await renderComponent(
+      <FileBrowser
+        result={filesResult({
+          source: "capture",
+          capturedAt: "2026-07-19T10:44:52.383Z",
+          error: new Error("OpenGeni API 503: Workspace files are temporarily unavailable"),
+        })}
+      />,
+    );
+    await flush();
+
+    const degraded = r.container.querySelector("[data-opengeni-files-degraded]");
+    expect(degraded?.getAttribute("role")).toBe("status");
+    expect(degraded?.textContent).toContain("Showing the latest captured revision");
+    expect(r.container.textContent).toContain("README.md");
+    expect(r.container.querySelector('button[aria-label="New file"]')).toBeNull();
+    expect(r.container.querySelector('button[aria-label="Delete"]')).toBeNull();
+    await r.unmount();
+  });
+
   test("an empty tree shows the empty state (no crash)", async () => {
     const r = await renderComponent(
       <FileBrowser result={filesResult({ tree: [] })} emptyState="nothing here" />,
@@ -199,6 +220,43 @@ describe("SandboxFiles guarded-file routing", () => {
     await actRun(() => openLive!.click());
     expect(wakeCalls).toBe(1);
     expect(r.container.textContent).toContain("Waking workspace");
+    await r.unmount();
+  });
+
+  test("an already-warm capture fallback retries the live list instead of issuing a no-op wake", async () => {
+    let refreshCalls = 0;
+    let wakeCalls = 0;
+    const files = filesResult({
+      source: "capture",
+      error: new Error("OpenGeni API 503: Workspace files are temporarily unavailable"),
+      readFile: async (path) => {
+        throw new CapturedFileUnavailableError(path, "not-captured");
+      },
+      refresh: async () => {
+        refreshCalls += 1;
+      },
+    });
+    const r = await renderComponent(
+      <SandboxFiles
+        files={files}
+        git={gitResult()}
+        liveWorkspaceReady
+        onWakeWorkspace={() => {
+          wakeCalls += 1;
+        }}
+      />,
+    );
+    await flush();
+    await actRun(() => fileButton(r.container, "README.md").click());
+    await flush();
+
+    const retry = Array.from(r.container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("Retry live file"),
+    );
+    expect(retry).toBeDefined();
+    await actRun(() => retry!.click());
+    expect(refreshCalls).toBe(1);
+    expect(wakeCalls).toBe(0);
     await r.unmount();
   });
 

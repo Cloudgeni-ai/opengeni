@@ -1,7 +1,7 @@
 // @opengeni/runtime/sandbox — scoped stream-token mint/verify (P3.1).
 //
 // The agent-loop-free home for the scoped data-plane stream token used by the
-// desktop pixel plane (Channel B, master-spine §C.3 / crosscut PART 1.3). It is
+// desktop pixel plane (Channel B, sandbox contract §C.3 / crosscut PART 1.3). It is
 // a THIN wrapper over the contracts HMAC envelope (signStreamToken /
 // verifyStreamToken) — NOT a second crypto: it REUSES the exact base64Url +
 // hmacSha256 construction that backs signDelegatedAccessToken, with the distinct

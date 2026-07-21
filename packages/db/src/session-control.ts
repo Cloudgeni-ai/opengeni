@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { and, eq, sql } from "drizzle-orm";
+import { boundWorkspaceControlEvent, workspaceControlUtf8Bytes } from "@opengeni/contracts";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import type { Database } from "./index";
 import * as schema from "./schema";
 
@@ -57,6 +58,26 @@ export type EffectiveSessionControl = {
   settlement: { state: "stopping"; attemptCount: number } | null;
 };
 
+export const SESSION_DISCOVERY_CONTROL_TITLE_MAX_CHARS = 200;
+export const SESSION_DISCOVERY_CONTROL_TARGET_LIMIT = 100;
+
+/**
+ * Purpose-built control projection for session discovery. Full blocker evidence,
+ * actors/reasons, resume options, etags, and settlement state remain available
+ * from the ordinary session detail APIs; this shape is intentionally only what
+ * `sessions_list` renders.
+ */
+export type SessionDiscoveryControl = {
+  state: EffectiveControlState;
+  primaryBlocker: {
+    kind: "session" | "workspace";
+    sessionId?: string;
+    displayName: string;
+    displayNameOriginalChars: number;
+  } | null;
+  additionalBlockerCount: number;
+};
+
 export function serializeEffectiveSessionControl(control: EffectiveSessionControl) {
   const blocker = (
     value: EffectiveControlBlocker,
@@ -79,7 +100,7 @@ export function serializeEffectiveSessionControl(control: EffectiveSessionContro
   };
 }
 
-type WorkspaceControlRow = {
+export type WorkspaceControlRow = {
   workspaceId: string;
   accountId: string;
   revision: number | string;
@@ -156,17 +177,18 @@ export async function assertAgentCommandAuthorityInTransaction(
     action: "pause" | "resume" | "steer" | "message";
   },
 ): Promise<void> {
-  const lockedSessions = await db
-    .select({ id: schema.sessions.id })
-    .from(schema.sessions)
-    .where(
-      and(
-        eq(schema.sessions.workspaceId, input.workspaceId),
-        sql`${schema.sessions.id} in (${input.actor.sessionId}::uuid, ${input.targetSessionId}::uuid)`,
-      ),
-    )
-    .orderBy(schema.sessions.id)
-    .for("update");
+  // Every command caller establishes the control/workspace prefix first.
+  // Reusing the event-write helper here keeps cross-session actor authority on
+  // the same UUID-ordered session -> exact turn -> exact attempt suffix.
+  const authorityLocks = await lockSessionEventWriteRows(db, {
+    workspaceId: input.workspaceId,
+    controlLock: "already_locked",
+    workspaceLock: "already_locked",
+    sessionIds: [input.actor.sessionId, input.targetSessionId],
+    turnIds: [input.actor.turnId],
+    attemptIds: [input.actor.attemptId],
+  });
+  const lockedSessions = authorityLocks.sessions;
   if (!lockedSessions.some((row) => row.id === input.actor.sessionId)) {
     throw new AgentCommandAuthorityError("CALLER_STALE", "The calling session no longer exists");
   }
@@ -207,7 +229,6 @@ export async function assertAgentCommandAuthorityInTransaction(
       on session.workspace_id = attempt.workspace_id and session.id = attempt.session_id
     where attempt.workspace_id = ${input.workspaceId}
       and attempt.id = ${input.actor.attemptId}
-    for update of attempt, turn
   `);
   const caller = rows[0];
   if (
@@ -335,6 +356,120 @@ export async function lockWorkspaceInferenceControl(
     );
   }
   return row;
+}
+
+export type SessionEventWriteLockInput = {
+  workspaceId: string;
+  /**
+   * Control-aware writes take this lock first. Callers that already hold the
+   * workspace control row (for example a Pause mutation under FOR UPDATE) say
+   * `already_locked`; ordinary audit/title appends use `none`.
+   */
+  controlLock?: WorkspaceControlLockMode | "already_locked" | "none";
+  /** Used only when a staged caller already established the workspace prefix. */
+  workspaceLock?: "key_share" | "already_locked";
+  sessionIds?: string[];
+  turnIds?: string[];
+  attemptIds?: string[];
+};
+
+export type SessionEventWriteLocks = {
+  control: WorkspaceControlRow | null;
+  workspace: typeof schema.workspaces.$inferSelect | null;
+  sessions: Array<typeof schema.sessions.$inferSelect>;
+  turns: Array<typeof schema.sessionTurns.$inferSelect>;
+  attempts: Array<typeof schema.sessionTurnAttempts.$inferSelect>;
+};
+
+/**
+ * Establish the one canonical lock prefix for every `session_events` writer:
+ *
+ *   workspace_inference_controls (when control-aware)
+ *     -> actual workspaces row FOR KEY SHARE
+ *     -> session rows FOR UPDATE, UUID ordered
+ *     -> exact turn rows FOR UPDATE, UUID ordered
+ *     -> exact attempt rows FOR UPDATE, UUID ordered
+ *
+ * `FOR KEY SHARE` is deliberate. Event inserts need the workspace key to remain
+ * stable for their FK, but they do not mutate the workspace. The old generic
+ * `FOR UPDATE` lock serialized unrelated sessions and inverted the activity
+ * path's session -> implicit workspace-FK edge.
+ *
+ * Complex lifecycle transactions may acquire allocator/control locks before
+ * this helper and may discover exact turn IDs only after locking the session.
+ * They use the explicit `already_locked` stages, while retaining the same
+ * monotonic table order. New event writers should prefer one complete call.
+ */
+export async function lockSessionEventWriteRows(
+  db: Database,
+  input: SessionEventWriteLockInput,
+): Promise<SessionEventWriteLocks> {
+  const controlLock = input.controlLock ?? "none";
+  const control =
+    controlLock === "share" || controlLock === "update"
+      ? await lockWorkspaceInferenceControl(db, input.workspaceId, controlLock)
+      : null;
+
+  let workspace: typeof schema.workspaces.$inferSelect | null = null;
+  if ((input.workspaceLock ?? "key_share") === "key_share") {
+    const [lockedWorkspace] = await db
+      .select()
+      .from(schema.workspaces)
+      .where(eq(schema.workspaces.id, input.workspaceId))
+      .for("key share")
+      .limit(1);
+    workspace = lockedWorkspace ?? null;
+  }
+
+  const sessionIds = [...new Set(input.sessionIds ?? [])].sort();
+  const sessions =
+    sessionIds.length > 0
+      ? await db
+          .select()
+          .from(schema.sessions)
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, input.workspaceId),
+              inArray(schema.sessions.id, sessionIds),
+            ),
+          )
+          .orderBy(schema.sessions.id)
+          .for("update")
+      : [];
+
+  const turnIds = [...new Set(input.turnIds ?? [])].sort();
+  const turns =
+    turnIds.length > 0
+      ? await db
+          .select()
+          .from(schema.sessionTurns)
+          .where(
+            and(
+              eq(schema.sessionTurns.workspaceId, input.workspaceId),
+              inArray(schema.sessionTurns.id, turnIds),
+            ),
+          )
+          .orderBy(schema.sessionTurns.id)
+          .for("update")
+      : [];
+
+  const attemptIds = [...new Set(input.attemptIds ?? [])].sort();
+  const attempts =
+    attemptIds.length > 0
+      ? await db
+          .select()
+          .from(schema.sessionTurnAttempts)
+          .where(
+            and(
+              eq(schema.sessionTurnAttempts.workspaceId, input.workspaceId),
+              inArray(schema.sessionTurnAttempts.id, attemptIds),
+            ),
+          )
+          .orderBy(schema.sessionTurnAttempts.id)
+          .for("update")
+      : [];
+
+  return { control, workspace, sessions, turns, attempts };
 }
 
 export async function registerSessionTurnAttemptClaim(
@@ -833,13 +968,24 @@ export async function evaluateSessionControls(
   db: Database,
   workspaceId: string,
   sessionIds: string[],
-  options: { lock?: WorkspaceControlLockMode } = {},
+  options: {
+    lock?: WorkspaceControlLockMode;
+    /** Reuse a control row already locked before workspace/session/turn rows. */
+    workspaceControl?: WorkspaceControlRow | undefined;
+  } = {},
 ): Promise<Map<string, EffectiveSessionControl>> {
   const uniqueIds = [...new Set(sessionIds)];
   if (uniqueIds.length === 0) {
     return new Map();
   }
-  const workspace = await lockWorkspaceInferenceControl(db, workspaceId, options.lock ?? "share");
+  if (options.workspaceControl && options.workspaceControl.workspaceId !== workspaceId) {
+    throw new SessionControlInvariantError(
+      `Locked workspace control ${options.workspaceControl.workspaceId} does not match ${workspaceId}`,
+    );
+  }
+  const workspace =
+    options.workspaceControl ??
+    (await lockWorkspaceInferenceControl(db, workspaceId, options.lock ?? "share"));
   const stopping = await unsettledAttemptCounts(db, workspaceId, uniqueIds);
   const result = new Map<string, EffectiveSessionControl>();
   if (uniqueIds.length <= TARGET_PATH_PROJECTION_LIMIT) {
@@ -884,11 +1030,229 @@ export async function evaluateSessionControls(
   return result;
 }
 
+type SessionDiscoveryControlRow = {
+  targetId: string;
+  ancestryCount: number | string;
+  reachedRoot: boolean;
+  maxDepth: number | string | null;
+  blockerCount: number | string;
+  primaryKind: "session" | "workspace" | null;
+  primarySessionId: string | null;
+  primaryDisplayName: string | null;
+  primaryDisplayNameOriginalChars: number | string | null;
+};
+
+/**
+ * Return one compact aggregate row per target for `sessions_list`.
+ *
+ * Unlike `evaluateSessionControls`, the database boundary never returns a row
+ * per blocker/ancestor, nor does application code construct blocker or resume
+ * option arrays. The recursive walk carries no growing visited-path array: a
+ * missing ancestor stops below the limit, while a cycle cannot reach a root and
+ * therefore runs into the hard `SESSION_ANCESTRY_LIMIT`. The externally
+ * supplied target set is capped by `SESSION_DISCOVERY_CONTROL_TARGET_LIMIT`.
+ */
+export async function evaluateSessionDiscoveryControls(
+  db: Database,
+  workspaceId: string,
+  sessionIds: string[],
+): Promise<Map<string, SessionDiscoveryControl>> {
+  const uniqueIds = [...new Set(sessionIds)];
+  if (uniqueIds.length === 0) return new Map();
+  if (uniqueIds.length > SESSION_DISCOVERY_CONTROL_TARGET_LIMIT) {
+    throw new SessionControlInvariantError(
+      `Session discovery control projection exceeds ${SESSION_DISCOVERY_CONTROL_TARGET_LIMIT} targets`,
+    );
+  }
+
+  const workspace = await lockWorkspaceInferenceControl(db, workspaceId, "share");
+  const workspacePauseRevision = asSafeRevision(
+    workspace.workspacePauseRevision,
+    "workspace pause revision",
+  );
+  if (workspace.workspaceState === "paused" && workspacePauseRevision === null) {
+    throw new SessionControlInvariantError("Paused workspace is missing its pause revision");
+  }
+
+  const rows = await db.execute<SessionDiscoveryControlRow>(sql`
+    with recursive targets(id) as (values ${targetValues(uniqueIds)}),
+    ancestry as (
+      select
+        target.id as target_id,
+        session.id as session_id,
+        session.parent_session_id,
+        left(coalesce(nullif(btrim(session.title), ''), 'Untitled session'), ${SESSION_DISCOVERY_CONTROL_TITLE_MAX_CHARS}) as display_name,
+        char_length(coalesce(nullif(btrim(session.title), ''), 'Untitled session'))::integer as display_name_original_chars,
+        session.direct_control_state,
+        session.direct_pause_revision,
+        session.subtree_run_override_revision,
+        0::integer as depth
+      from targets target
+      join ${schema.sessions} session
+        on session.workspace_id = ${workspaceId} and session.id = target.id
+      union all
+      select
+        child.target_id,
+        parent.id,
+        parent.parent_session_id,
+        left(coalesce(nullif(btrim(parent.title), ''), 'Untitled session'), ${SESSION_DISCOVERY_CONTROL_TITLE_MAX_CHARS}),
+        char_length(coalesce(nullif(btrim(parent.title), ''), 'Untitled session'))::integer,
+        parent.direct_control_state,
+        parent.direct_pause_revision,
+        parent.subtree_run_override_revision,
+        child.depth + 1
+      from ancestry child
+      join ${schema.sessions} parent
+        on parent.workspace_id = ${workspaceId} and parent.id = child.parent_session_id
+      where child.parent_session_id is not null
+        and child.depth < ${SESSION_ANCESTRY_LIMIT}
+    ),
+    path as (
+      select
+        ancestry.*,
+        max(ancestry.subtree_run_override_revision) over (
+          partition by ancestry.target_id
+          order by ancestry.depth
+          rows between unbounded preceding and 1 preceding
+        ) as descendant_override_revision
+      from ancestry
+    ),
+    session_blockers as (
+      select
+        path.target_id,
+        'session'::text as kind,
+        path.session_id,
+        path.display_name,
+        path.display_name_original_chars,
+        path.depth
+      from path
+      where path.direct_control_state = 'paused'
+        and path.direct_pause_revision is not null
+        and (
+          path.descendant_override_revision is null
+          or path.descendant_override_revision <= path.direct_pause_revision
+        )
+    ),
+    workspace_blockers as (
+      select
+        target.id as target_id,
+        'workspace'::text as kind,
+        null::uuid as session_id,
+        'Workspace'::text as display_name,
+        9::integer as display_name_original_chars,
+        ${SESSION_ANCESTRY_LIMIT + 1}::integer as depth
+      from targets target
+      where ${workspace.workspaceState === "paused"}
+        and not exists (
+          select 1
+          from path
+          where path.target_id = target.id
+            and path.subtree_run_override_revision is not null
+            and path.subtree_run_override_revision > ${workspacePauseRevision}
+        )
+    ),
+    blockers as (
+      select * from session_blockers
+      union all
+      select * from workspace_blockers
+    ),
+    primary_blockers as (
+      select distinct on (blockers.target_id)
+        blockers.target_id,
+        blockers.kind,
+        blockers.session_id,
+        blockers.display_name,
+        blockers.display_name_original_chars
+      from blockers
+      order by blockers.target_id, blockers.depth
+    ),
+    blocker_counts as (
+      select blockers.target_id, count(*)::integer as blocker_count
+      from blockers
+      group by blockers.target_id
+    ),
+    ancestry_metadata as (
+      select
+        ancestry.target_id,
+        count(*)::integer as ancestry_count,
+        bool_or(ancestry.parent_session_id is null) as reached_root,
+        max(ancestry.depth)::integer as max_depth
+      from ancestry
+      group by ancestry.target_id
+    )
+    select
+      target.id as "targetId",
+      coalesce(metadata.ancestry_count, 0)::integer as "ancestryCount",
+      coalesce(metadata.reached_root, false) as "reachedRoot",
+      metadata.max_depth as "maxDepth",
+      coalesce(counts.blocker_count, 0)::integer as "blockerCount",
+      primary_blocker.kind as "primaryKind",
+      primary_blocker.session_id as "primarySessionId",
+      primary_blocker.display_name as "primaryDisplayName",
+      primary_blocker.display_name_original_chars as "primaryDisplayNameOriginalChars"
+    from targets target
+    left join ancestry_metadata metadata on metadata.target_id = target.id
+    left join blocker_counts counts on counts.target_id = target.id
+    left join primary_blockers primary_blocker on primary_blocker.target_id = target.id
+    order by target.id
+  `);
+
+  const result = new Map<string, SessionDiscoveryControl>();
+  for (const row of rows) {
+    const ancestryCount = Number(row.ancestryCount);
+    const maxDepth = row.maxDepth === null ? null : Number(row.maxDepth);
+    if (ancestryCount === 0) {
+      throw new SessionControlInvariantError(
+        `Session ${row.targetId} does not exist in its workspace`,
+      );
+    }
+    if (!row.reachedRoot) {
+      throw new SessionControlInvariantError(
+        maxDepth !== null && maxDepth >= SESSION_ANCESTRY_LIMIT
+          ? `Session ${row.targetId} ancestry exceeds ${SESSION_ANCESTRY_LIMIT}`
+          : `Session ${row.targetId} has a missing ancestor`,
+      );
+    }
+
+    const blockerCount = Number(row.blockerCount);
+    const primaryBlocker = row.primaryKind
+      ? {
+          kind: row.primaryKind,
+          ...(row.primarySessionId ? { sessionId: row.primarySessionId } : {}),
+          displayName:
+            row.primaryDisplayName ??
+            (row.primaryKind === "workspace" ? "Workspace" : "Untitled session"),
+          displayNameOriginalChars: Number(
+            row.primaryDisplayNameOriginalChars ??
+              (row.primaryKind === "workspace" ? 9 : "Untitled session".length),
+          ),
+        }
+      : null;
+    if (blockerCount > 0 !== (primaryBlocker !== null)) {
+      throw new SessionControlInvariantError(
+        `Session ${row.targetId} discovery blocker aggregate is inconsistent`,
+      );
+    }
+    result.set(row.targetId, {
+      state: blockerCount > 0 ? "paused" : "active",
+      primaryBlocker,
+      additionalBlockerCount: Math.max(0, blockerCount - 1),
+    });
+  }
+  if (result.size !== uniqueIds.length) {
+    throw new SessionControlInvariantError("Session discovery control projection is incomplete");
+  }
+  return result;
+}
+
 export async function evaluateSessionControl(
   db: Database,
   workspaceId: string,
   sessionId: string,
-  options: { lock?: WorkspaceControlLockMode } = {},
+  options: {
+    lock?: WorkspaceControlLockMode;
+    workspaceControl?: WorkspaceControlRow | undefined;
+  } = {},
 ): Promise<EffectiveSessionControl> {
   return (await evaluateSessionControls(db, workspaceId, [sessionId], options)).get(sessionId)!;
 }
@@ -1332,6 +1696,16 @@ export async function mutateSessionControlInTransaction(
   },
 ): Promise<SessionControlMutationResult> {
   const workspace = await lockWorkspaceInferenceControl(db, input.workspaceId, "update");
+  await lockSessionEventWriteRows(db, {
+    workspaceId: input.workspaceId,
+    controlLock: "already_locked",
+    sessionIds:
+      input.actor.type === "agent_attempt"
+        ? [input.actor.sessionId, input.sessionId]
+        : [input.sessionId],
+    turnIds: input.actor.type === "agent_attempt" ? [input.actor.turnId] : [],
+    attemptIds: input.actor.type === "agent_attempt" ? [input.actor.attemptId] : [],
+  });
   const hash = canonicalSessionCommandHash({
     action: input.action,
     reason: input.reason ?? null,
@@ -1361,7 +1735,7 @@ export async function mutateSessionControlInTransaction(
     return {
       receipt: reserved.receipt,
       control: await evaluateSessionControl(db, input.workspaceId, input.sessionId, {
-        lock: "share",
+        workspaceControl: workspace,
       }),
       sessionControlEventId,
       workspaceControlEventId,
@@ -1379,7 +1753,7 @@ export async function mutateSessionControlInTransaction(
     });
   }
   const before = await evaluateSessionControl(db, input.workspaceId, input.sessionId, {
-    lock: "share",
+    workspaceControl: workspace,
   });
   if (input.expectedControlEtag && input.expectedControlEtag !== before.controlEtag) {
     throw new SessionControlConflictError();
@@ -1748,9 +2122,38 @@ async function insertWorkspaceControlEventInTransaction(
     actor: string;
   },
 ): Promise<string> {
+  const projected = boundWorkspaceControlEvent(
+    {
+      id: crypto.randomUUID(),
+      workspaceId: input.workspaceId,
+      sequence: input.revision,
+      revision: input.revision,
+      type: "workspace.control.changed",
+      scope: input.scope,
+      rootSessionId: input.rootSessionId,
+      action: input.action,
+      automatic: input.automatic,
+      reason: input.reason,
+      actor: input.actor,
+      occurredAt: new Date(0).toISOString(),
+    },
+    { surface: "durable_control" },
+  );
+  const field = (name: "reason" | "actor") =>
+    projected.truncation?.fields.find((candidate) => candidate.field === name);
   const [event] = await db
     .insert(schema.workspaceControlEvents)
-    .values(input)
+    .values({
+      ...input,
+      reason: projected.reason,
+      reasonOriginalBytes:
+        input.reason === null
+          ? null
+          : (field("reason")?.originalBytes ?? workspaceControlUtf8Bytes(projected.reason!)),
+      actor: projected.actor,
+      actorOriginalBytes:
+        field("actor")?.originalBytes ?? workspaceControlUtf8Bytes(projected.actor),
+    })
     .returning({ id: schema.workspaceControlEvents.id });
   if (!event) {
     throw new SessionControlInvariantError("Workspace control event was not inserted");

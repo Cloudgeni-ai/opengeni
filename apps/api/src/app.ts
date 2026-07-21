@@ -122,8 +122,11 @@ export function createApp(deps: AppDependencies): Hono {
   // concrete for routes; it throws SandboxResumeError when sandboxBackend=none.
   const sandboxClient = deps.sandboxClient ?? createApiSandboxClient(deps.settings);
   const resumeBoxById = deps.resumeBoxById ?? makeResumeBoxById(sandboxClient);
+  const observability =
+    deps.observability ?? createObservability(deps.settings, { component: "api" });
   const routeDeps: ApiRouteDeps = {
     ...deps,
+    observability,
     githubStateSecret:
       deps.githubStateSecret ?? deps.settings.githubAppManifestStateSecret ?? crypto.randomUUID(),
     managedAuth,
@@ -134,8 +137,6 @@ export function createApp(deps: AppDependencies): Hono {
     resumeBoxById,
   };
   const app = new Hono();
-  const observability =
-    deps.observability ?? createObservability(deps.settings, { component: "api" });
 
   app.use(
     "*",

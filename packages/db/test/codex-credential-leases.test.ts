@@ -205,7 +205,7 @@ afterAll(async () => {
   await shared?.release();
 }, 180_000);
 
-describe("OPE-21 atomic Codex credential allocation", () => {
+describe("credential allocator atomic Codex credential allocation", () => {
   test("legacy and lease defaults stay off until an explicit settings cutover", async () => {
     if (!available) return;
     const [ws] = await freshAccount();
@@ -322,7 +322,7 @@ describe("OPE-21 atomic Codex credential allocation", () => {
     const alternateCredential = await connectCredential(ws!, "temporary-alternate");
     expect(await setActiveCodexCredential(dbA, ws!.workspaceId, toggledCredential)).toBe(true);
 
-    // Start a real holder before the future OPE-24 allocator transition. Temporary
+    // Start a real holder before the future account eligibility policy allocator transition. Temporary
     // disable is an eligibility-only state: it must not delete credentials or
     // revoke/terminate a turn that already owns a fenced lease.
     const inFlightTurn = await seedTurn(ws!, 1);
@@ -349,7 +349,7 @@ describe("OPE-21 atomic Codex credential allocation", () => {
     expect(beforeDisable?.status).toBe("active");
     expect(beforeDisable?.allocator_enabled).toBe(true);
 
-    // OPE-24 owns the eventual OCC/audit write/API. OPE-21 owns only this
+    // account eligibility policy owns the eventual OCC/audit write/API. credential allocator owns only this
     // additive field and allocator behavior; health status remains active.
     await admin`
       update codex_subscription_credentials
@@ -426,7 +426,7 @@ describe("OPE-21 atomic Codex credential allocation", () => {
 
     // A redispatch of the same still-live durable turn keeps its exact
     // credential even though the row is no longer available to new turns. The
-    // downstream scope is intentionally private/opaque to OPE-21, and its
+    // downstream scope is intentionally private/opaque to credential allocator, and its
     // candidate filter excludes the live credential. The filter must never run:
     // exact live holder reuse is structurally resolved first.
     await admin`
@@ -543,7 +543,7 @@ describe("OPE-21 atomic Codex credential allocation", () => {
         advanceActivePointer: true,
         resolvePolicyScope: resolvePrivateAcceptedScope,
         filterNewAllocationCandidates: ({ accounts, policyScope }) => ({
-          // OPE-32 privately resolves primary then fallbacks; OPE-21 receives
+          // policy filter privately resolves primary then fallbacks; credential allocator receives
           // only the chosen scope's rows and does not understand pool ids.
           accounts: accounts.filter((account) => account.id === alternateCredential),
           unavailableDiagnostics: [

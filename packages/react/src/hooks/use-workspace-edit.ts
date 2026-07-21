@@ -2,8 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useOpenGeni, type ClientOverride } from "../provider";
 
 /**
- * The wake-on-edit state machine (dossier §3 #5 / §10.4 / §12-C). M3 OWNS this
- * logic; M5 renders it. States are explicit and exhaustive:
+ * The wake-on-edit state machine. This hook owns the logic and the UI renders
+ * its result. States are explicit and exhaustive:
  *
  *   viewing-cold      — cold snapshot open, no local edits (editable, cloud).
  *   buffering         — local edits buffered; the box is not warm and no warm is
@@ -80,11 +80,11 @@ function isLive(liveness: string | undefined): boolean {
  * Cold-editing without a spinner: the editor opens instantly from the capture,
  * the first keystroke buffers locally AND signals the host to warm the box, and on
  * warm the buffer flushes IF the live file still matches the captured base — else a
- * non-blocking conflict is surfaced and nothing is overwritten (dossier §12-C2).
+ * non-blocking conflict is surfaced and nothing is overwritten.
  *
  * The base guard compares the live content at flush time against `baseContent`
  * (the exact bytes the editor loaded). This is equivalent to the sha256 compare
- * the dossier describes — M1 leaves `baseHash` null, so the loaded content IS the
+ * the design specifies — M1 leaves `baseHash` null, so the loaded content IS the
  * authoritative base — and avoids async Web Crypto in the render path.
  */
 export function useWorkspaceEdit(

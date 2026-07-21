@@ -6,8 +6,8 @@ import "./styles.css";
 /* ----------------------------------------------------------------------------
    M7 full-dock harness — mounts the real `<SandboxWorkspace>` (dock frame +
    header + machine chip + tabs + surfaces) against a state-driven mock client,
-   so a screenshot runner can capture every dossier §13 matrix cell through the
-   exact public surface an embedder (cloudgeni #1577) mounts.
+   so a screenshot runner can capture every matrix cell through the
+   exact public surface an embedder mounts.
 
    Query params:
      ?state=<key>   one of DOCK_STATES (warm-live, cold-instant, waking, …)

@@ -13,7 +13,7 @@ members = [
 ]
 
 # Shared metadata + lint posture for every crate in the agent workspace.
-# Idiomatic, well-documented Rust is a first-class requirement (dossier §3/§10.4):
+# Idiomatic, well-documented Rust is a first-class requirement:
 # we lean on clippy::pedantic at the workspace level and silence only the few
 # lints that fight generated code or add no value here.
 [workspace.package]
@@ -45,10 +45,10 @@ async-trait = "0.1"
 command-group = { version = "5.0.1", features = ["with-tokio"] }
 
 # Control-plane transport. async-nats is the official Rust NATS client; the agent
-# subscribes to `agent.<ws>.<id>.rpc` and answers ControlRequests (dossier §10.1).
+# subscribes to `agent.<ws>.<id>.rpc` and answers ControlRequests.
 async-nats = "0.49"
 
-# Structured logging (never log secret values — dossier §10.6).
+# Structured logging; never log secret values.
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
@@ -73,7 +73,7 @@ hostname = "0.4"
 nix = { version = "0.29", default-features = false, features = ["fs", "process", "signal"] }
 
 # M8 stream plane.
-# A real PTY (openpty/ConPTY) via a SAFE binding — no unsafe (dossier §10.4).
+# A real PTY (openpty/ConPTY) via a SAFE binding — no unsafe.
 portable-pty = "0.9"
 # Desktop frame encoding (capture → PNG chunk over a StreamFrame).
 image = { version = "0.25", default-features = false, features = ["png"] }
@@ -81,7 +81,7 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 # (keeps unsafe_code = forbid; no FFI of our own).
 x11rb = { version = "0.13", features = ["xtest", "randr", "image"] }
 # The relay-dial wss fallback transport (the QUIC/WebTransport preferred path is
-# structured behind a trait; wss is the concrete day-1 impl, dossier §10.1/§10.5).
+# structured behind a trait; wss is the concrete day-1 impl).
 tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
 # Stream byte buffers (prost re-exports bytes, but the stream pumps use it directly).
 bytes = "1"

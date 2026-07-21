@@ -1,7 +1,11 @@
 import type { Computer, Editor, Tool } from "@openai/agents";
 
 import { runWithToolCallCorrelation, sanitizeOpIdToken } from "./op-correlation";
-import { parseExecBannerExitCode, parseExecBannerSessionId } from "./channel-a";
+import {
+  isExecSessionLostBanner,
+  parseExecBannerExitCode,
+  parseExecBannerSessionId,
+} from "./channel-a";
 
 const TURN_EXEC_YIELD_MS = 250;
 const TURN_WRITE_YIELD_MS = 250;
@@ -264,7 +268,10 @@ function identityGuardScript(
     `__opengeni_pid=${identity.pid}`,
     `__opengeni_pgid=${identity.processGroupId}`,
     `__opengeni_token=${token}`,
-    '__opengeni_args="$(command ps -o args= -p "$__opengeni_pid" 2>/dev/null)"',
+    // The randomized token lands late in the wrapped command line. Procps
+    // otherwise truncates `args` to the terminal width, which can make a live
+    // group look stale and open the quiescence fence without signalling it.
+    '__opengeni_args="$(command ps -ww -o args= -p "$__opengeni_pid" 2>/dev/null)"',
     'case "$__opengeni_args" in *"$__opengeni_token"*) ;; *) exit 0 ;; esac',
     '__opengeni_live_pgid="$(command ps -o pgid= -p "$__opengeni_pid" 2>/dev/null | command tr -d \'[:space:]\')"',
     '[ "$__opengeni_live_pgid" = "$__opengeni_pgid" ] || exit 0',
@@ -583,7 +590,13 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
               : input;
             const output = await tool.invoke(runContext, cappedInput, details);
             if (sessionId !== null && typeof output === "string") {
-              if (parseExecBannerSessionId(output) === sessionId) {
+              if (isExecSessionLostBanner(output, sessionId)) {
+                // Modal reports a vanished exec session as a non-throwing
+                // string. The matching provider banner is positive evidence
+                // that this exact tracked PTY no longer exists; a different id
+                // or an ambiguous error must leave the registration fenced.
+                this.shellSessions.delete(sessionId);
+              } else if (parseExecBannerSessionId(output) === sessionId) {
                 if (!this.shellSessions.has(sessionId)) {
                   this.shellSessions.set(sessionId, {
                     sessionId,
@@ -838,6 +851,10 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
         undefined,
       );
       if (typeof output !== "string") return false;
+      // Marker files can already be gone when a process exited outside the
+      // model-facing write path. Modal's exact matching lost-session banner is
+      // then the only positive provider proof that this tracked PTY is absent.
+      if (isExecSessionLostBanner(output, state.sessionId)) return true;
       if (parseExecBannerSessionId(output) === state.sessionId) return false;
       if (parseExecBannerExitCode(output) !== null) return true;
     } catch {
@@ -866,12 +883,12 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     const script = state.identityValidated
       ? [
           `__opengeni_pgid=${state.identity?.processGroupId ?? 0}`,
-          'command kill -0 -- "-$__opengeni_pgid" 2>/dev/null && exit 75',
+          'command kill -0 "-$__opengeni_pgid" 2>/dev/null && exit 75',
           "exit 0",
         ].join("\n")
       : identityGuardScript(
           state,
-          'command kill -0 -- "-$__opengeni_pgid" 2>/dev/null && exit 75\nexit 0',
+          'command kill -0 "-$__opengeni_pgid" 2>/dev/null && exit 75\nexit 0',
           76,
         );
     try {
@@ -890,10 +907,10 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
 
   private async signalIdentity(state: ActiveShellSession, signal: "TERM" | "KILL"): Promise<void> {
     const script = state.identityValidated
-      ? `command kill -${signal} -- "-${state.identity?.processGroupId ?? 0}" 2>/dev/null || exit 76`
+      ? `command kill -${signal} "-${state.identity?.processGroupId ?? 0}" 2>/dev/null || exit 76`
       : identityGuardScript(
           state,
-          `command kill -${signal} -- "-$__opengeni_pgid" 2>/dev/null || exit 76\nexit 0`,
+          `command kill -${signal} "-$__opengeni_pgid" 2>/dev/null || exit 76\nexit 0`,
           76,
         );
     try {

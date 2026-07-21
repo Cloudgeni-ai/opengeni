@@ -67,7 +67,7 @@ export function SessionHeader({
     // needs its own surface + a crisp divider to look intentional (and it lifts
     // the dark bar a touch above the canvas too).
     <header
-      data-ope26-session-header
+      data-sessionpin-session-header
       className="flex h-14 min-w-0 shrink-0 items-center gap-1.5 overflow-hidden border-b border-border bg-surface/80 px-2 backdrop-blur supports-[backdrop-filter]:bg-surface/65 sm:gap-3 sm:px-5"
     >
       {leading}
