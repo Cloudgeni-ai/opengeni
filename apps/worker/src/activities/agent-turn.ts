@@ -1509,7 +1509,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       }
     };
     let heartbeatTimer: ReturnType<typeof startActivityHeartbeat> | undefined;
-    // OPE-21: one workspace-local idempotent credential holder per running
+    // credential allocator: one workspace-local idempotent credential holder per running
     // Codex turn. The DB row is the cross-replica fairness primitive; this timer
     // only extends its short TTL. A killed worker stops heartbeating and the
     // holder self-expires. Other workspaces never see or share this holder.
@@ -1640,7 +1640,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // runs it refreshes expires_at epoch-fenced so a legit multi-day turn is
     // never TTL-reaped. Cleared in finally. Only set when the flag resolved a box.
     let leaseHeartbeatTimer: ReturnType<typeof setInterval> | undefined;
-    // OPE-41: the worker, not the model, owns renewal of run-scoped Git
+    // credential-renewal policy: the worker, not the model, owns renewal of run-scoped Git
     // credentials for a multi-day turn. The controller is attached only after
     // the initial seed reached a real cloud box and is drained before capture.
     let gitCredentialRenewal: GitCredentialRenewalController | null = null;
@@ -2457,7 +2457,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           strategy: leased.rotationStrategy as CodexRotationStrategy,
           rotationEnabled: leased.rotationEnabled,
         });
-        // OPE-31 pin persistence follows the atomic OPE-21 selection. The selector
+        // pin policy pin persistence follows the atomic credential allocator selection. The selector
         // already ran exact-turn reuse before policy filtering and vetoed pointer
         // movement for manual/policy homes; this write only records the NEXT turn's
         // policy home (or clears a policy pin whose strategy is no longer active).
@@ -3220,7 +3220,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         runSettings,
         withFirstPartyTools(runSettings, mergeToolRefs(session.tools, turn.tools)),
       );
-      // §7.6 P4a — load (and decrypt) the variable set via the host
+      // §7.6 connection-credential provider — load (and decrypt) the variable set via the host
       // `sandboxSecrets` provider when bound; unset → today's local decrypt.
       const connectionScope = {
         accountId: input.accountId,
@@ -6016,7 +6016,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           );
           codexLeaseHeld = false;
         }
-        // Workbench v2 turn-end workspace capture (dossier §10.1) — runs FIRST in
+        // Workbench v2 turn-end workspace capture — runs FIRST in
         // the turn-end finally, while the box is MAXIMALLY ALIVE. The agent's last
         // tool ran before this finally, so /workspace is already final; capture is
         // FS-equivalent to the already-settled recording preparation and the warm
@@ -6159,7 +6159,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 },
               ]).catch(() => undefined);
             }
-            // NB workspace capture (dossier §10.1) no longer runs here — it moved to
+            // NB workspace capture no longer runs here — it moved to
             // the TOP of this finally (before preparedTools.close) so it completes
             // while the box is still solidly alive, instead of racing the turn-end
             // teardown that was killing 100% of captures on real Modal desktop boxes.

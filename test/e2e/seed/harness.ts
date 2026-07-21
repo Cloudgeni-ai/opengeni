@@ -1,4 +1,4 @@
-// Shared seed harness (Workbench v2, dossier §16).
+// Shared seed harness (Workbench v2).
 //
 // Every seed script builds a persisted session on the LOCAL dev stack (docker
 // sandbox backend) via the public SDK, then drives one or more real agent turns.

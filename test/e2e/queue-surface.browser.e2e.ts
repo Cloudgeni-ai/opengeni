@@ -25,7 +25,7 @@ import {
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const evidenceDir =
-  process.env.OPENGENI_OPE9_EVIDENCE_DIR ?? "/tmp/opengeni-ope9-queue-evidence-grapheme";
+  process.env.OPENGENI_QUEUE_EVIDENCE_DIR ?? "/tmp/opengeni-queue-queue-evidence-grapheme";
 const viewports = [
   { width: 320, height: 800 },
   { width: 360, height: 800 },
@@ -1727,11 +1727,11 @@ function assertBoundedQueueError(
 }
 
 async function refreshQueue(page: Page): Promise<void> {
-  await page.evaluate(() => window.__ope9SetQueueLoading?.(true));
+  await page.evaluate(() => window.__queueSetQueueLoading?.(true));
   await page.locator('[data-testid="queue-surface"] .animate-spin').waitFor();
-  await page.evaluate(() => window.__ope9AppendQueuePrompt?.());
+  await page.evaluate(() => window.__queueAppendQueuePrompt?.());
   await page.getByRole("button", { name: "101 queued prompts" }).waitFor();
-  await page.evaluate(() => window.__ope9SetQueueLoading?.(false));
+  await page.evaluate(() => window.__queueSetQueueLoading?.(false));
 }
 
 async function capture(

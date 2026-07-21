@@ -316,7 +316,7 @@ export const codexSubscriptionCredentials = pgTable(
     // and this cursor deterministically breaks equal-load/equal-capacity ties.
     // This flag controls NEW automatic allocations only. Credential health,
     // refresh, encrypted material, and already-frozen/in-flight turns are
-    // intentionally independent. OPE-24 owns toggle OCC/audit and product UI.
+    // intentionally independent. account eligibility policy owns toggle OCC/audit and product UI.
     allocatorEnabled: boolean("allocator_enabled").notNull().default(true),
     selectionCount: integer("selection_count").notNull().default(0),
     lastSelectedAt: timestamp("last_selected_at", { withTimezone: true }),
@@ -462,7 +462,7 @@ export const codexRotationSettings = pgTable(
     // code reads this bit; old binaries safely ignore it and keep the legacy
     // pin/rotation policy.
     leaseRotationEnabled: boolean("lease_rotation_enabled").notNull().default(false),
-    rotationStrategy: text("rotation_strategy").notNull().default("sharded"), // OPE-36: legacy residue; behavior is always sharded
+    rotationStrategy: text("rotation_strategy").notNull().default("sharded"), // sharded-rotation policy: legacy residue; behavior is always sharded
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -584,8 +584,8 @@ export const sessions = pgTable(
     // The app generates the uuid and uses it for both id and sandbox_group_id in
     // one insert — it cannot SQL-default to id (id is defaultRandom()).
     sandboxGroupId: uuid("sandbox_group_id").notNull(),
-    // The first-class swappable-sandbox POINTER (bring-your-own-compute M2,
-    // dossier §10.3). NULL == "use the session's own group sandbox" (the
+    // The first-class swappable-sandbox POINTER (bring-your-own-compute M2).
+    // NULL == "use the session's own group sandbox" (the
     // backward-compat default — every existing/new row is a behavior-preserving
     // no-op). The routing proxy re-reads (active_sandbox_id, active_epoch) PER
     // TOOL CALL to make a Modal<->selfhosted hot-swap seamless. The FK
@@ -1705,7 +1705,7 @@ export const sessionGoals = pgTable(
   }),
 );
 
-// OPE-21: one durable, coalescing capacity waiter per session. The row is both
+// credential allocator: one durable, coalescing capacity waiter per session. The row is both
 // the wait state and the commit->signal outbox: capacity mutations increment
 // wakeRevision in the SAME transaction as the mutation, while the session
 // workflow advances observedWakeRevision only after it has re-evaluated the
@@ -1715,7 +1715,7 @@ export const sessionGoals = pgTable(
 // The session/goal/turn foreign keys are declared in migration 0053 so the
 // table keeps the same composite workspace-integrity posture as credential
 // leases. Control is evaluated independently at admission and never changes a
-// capacity waiter's identity. OPE-32 supplies policyHash when accepted-turn
+// capacity waiter's identity. policy filter supplies policyHash when accepted-turn
 // pool routing lands.
 export const codexCapacityWaiters = pgTable(
   "codex_capacity_waiters",
@@ -2206,7 +2206,7 @@ export const sessionRecordings = pgTable(
   }),
 );
 
-// Workbench v2 turn-end workspace capture (dossier §10.2; model: sessionRecordings).
+// Workbench v2 turn-end workspace capture (model: sessionRecordings).
 // One row per capture revision — a point-in-time snapshot of a session's changed
 // files, probed off the live box at turn end. The manifest (tree index + per-repo
 // status/diff + file index) and each after-image blob live in @opengeni/storage;
@@ -2267,8 +2267,8 @@ export const workspaceCaptures = pgTable(
   }),
 );
 
-// Channel-A interactive PTY sessions (P4.4 / modules/08-channel-a.md §3.1). The
-// ONLY new persistent state Channel A needs — FS/Git reads are stateless point
+// Interactive PTY sessions. This is the persistent state needed for a live
+// terminal; file and Git reads remain stateless point
 // queries; an interactive PTY is a live in-box process keyed by the SDK's numeric
 // exec-session id (writeStdin({sessionId})). We map our UUID ptyId <-> that id,
 // the owning workspace/session, the lease_epoch that fences it to the box it was
@@ -2313,7 +2313,7 @@ export const sandboxPtySessions = pgTable(
 
 // ============================================================================
 // Bring-your-own-compute (M2): first-class swappable sandboxes + enrollment +
-// metrics (migration 0024 / dossier §10.3 + §10.7 + §23). The session→box
+// metrics (migration 0024). The session→box
 // binding becomes a per-session mutable, epoch-fenced active_sandbox_id pointer
 // (declared on sessions above) that the routing proxy resolves PER TOOL CALL.
 
@@ -2387,7 +2387,7 @@ export const enrollments = pgTable(
 );
 
 // The OAuth 2.0 device-authorization (RFC 8628) PENDING request (M5, migration
-// 0025 / dossier §10.2 enrollment + §18 LOUD consent). An agent's `enroll` starts
+// 0025 / enrollment + §18 LOUD consent). An agent's `enroll` starts
 // a flow (POST /enrollments/device/start) → one short-TTL, single-use row keyed by
 // an opaque `device_code` (the agent polls with) + a short `user_code` (the user
 // types at the approve page). The user (workspace-membership / workspace:admin

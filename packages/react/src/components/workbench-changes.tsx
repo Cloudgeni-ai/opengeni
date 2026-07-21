@@ -27,7 +27,7 @@ import { PierreDiff } from "./pierre-diff";
    left; a stacked, WINDOWED diff pane on the right. Only
    the file sections inside the visible window ± overscan mount a Pierre/Shiki
    highlighter (the one renderer), so a 40- or 400-file change set never mounts N
-   highlighters at once (dossier §10.7, D2). A per-file >guard (binary / diff too
+   highlighters at once (D2). A per-file size guard (binary / diff too
    large) degrades to an "open live" affordance instead of a diff body.
 
    Workspace-wide Git results carry an explicit `repoRoot`, so grouping never

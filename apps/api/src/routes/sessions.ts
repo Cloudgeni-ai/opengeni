@@ -1036,7 +1036,7 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       // tracks the desktop tier + a desktop-capable backend.
       computerUseEnabled: settings.computerUseEnabled,
       computerUseReadOnly: settings.computerUseReadOnly,
-      // Graceful degrade (I8/OD-8): if desktop is enabled but no stream-token
+      // Graceful degrade (stream-token availability contract): if desktop is enabled but no stream-token
       // secret is resolvable, the desktop cell reports transport:null rather
       // than advertising a plane we can never authorize.
       streamTokenSecretAvailable: !streamTokenDegraded(settings),

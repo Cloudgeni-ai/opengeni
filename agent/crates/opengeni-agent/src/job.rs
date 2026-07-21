@@ -1,7 +1,7 @@
 //! The op-stream job pump: one tokio task per job, streaming a contained
 //! child's output through the pure op engine to an injected frame sink.
 //!
-//! This module is TRANSPORT-FREE (`.agent/ENGINE-INTEGRATION.md` §"The job
+//! This module is TRANSPORT-FREE (the engine integration contract §"The job
 //! runner"): it emits engine [`Frame`]s through a send hook and receives
 //! [`JobCommand`]s through a mailbox. NATS subjects, protobuf encoding, and
 //! publish failures are the supervisor's business; the pump never blocks on the

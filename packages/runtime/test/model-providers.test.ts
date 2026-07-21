@@ -57,7 +57,7 @@ function codexTestContext(): CodexRequestContext {
     isFedramp: false,
   };
   return {
-    clientVersion: "ope64-test",
+    clientVersion: "largeoutput-test",
     getToken: async () => token,
     refresh: async () => token,
     resolveModel: (model) => model,

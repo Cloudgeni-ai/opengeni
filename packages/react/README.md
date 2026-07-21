@@ -4,13 +4,13 @@ React hooks and styled components for OpenGeni, built on
 [`@opengeni/sdk`](../sdk): live session streaming, a chat composer, a message
 timeline that renders streaming deltas / tool calls / spawned-worker status,
 session status badges, and fleet tiles for workspace overviews. Two opt-in
-surfaces layer on top: a **sandbox-surfacing** workbench (files, terminal, diff,
+surfaces layer on top: a **sandbox workspace** workbench (files, terminal, diff,
 and an optional desktop stream) and, at the
 [`@opengeni/react/machines`](#connected-machines-opengenireactmachines) subpath,
 the **Connected Machines** dashboard + enrollment flow.
 
 The default root import (`@opengeni/react`) is the clean sandbox-agnostic
-surface — the chat/timeline hooks and components plus the sandbox-surfacing
+surface — the chat/timeline hooks and components plus the sandbox workspace
 suite. Advanced chat-composer composition lives under
 `@opengeni/react/composer`; Connected-Machine UI lives under
 `@opengeni/react/machines`. (The root barrel still re-exports the machines
@@ -331,7 +331,7 @@ end-to-end embedder story (create-on-machine, discover, swap, enroll, revoke).
 
 ## Optional peer dependencies
 
-The chat/timeline surface has none. The sandbox-surfacing and diff surfaces pull
+The chat/timeline surface has none. The sandbox workspace and diff surfaces pull
 their heavy libraries from **optional** `peerDependencies`, so you install only
 what the surfaces you mount need:
 

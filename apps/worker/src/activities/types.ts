@@ -79,7 +79,7 @@ export type ActivityServices = {
   // admission and metering are separate operations, and only metering carries
   // the idempotency key.
   entitlements?: EntitlementsPort | null;
-  // §7.6 P4a — host connection-credential provider, the WORKER half of the
+  // §7.6 connection-credential provider — host connection-credential provider, the WORKER half of the
   // federated-connection boundary. When set, the run's per-run credential mint
   // delegates to the host instead of self-minting from `settings`:
   //   - `gitCredentials` REPLACES `createGitHubAppInstallationToken(settings,…)`
@@ -90,7 +90,7 @@ export type ActivityServices = {
   // self-mint for THAT leg. null/undefined (standalone default) → both legs
   // self-mint byte-for-byte as today.
   //
-  // FORK-7 CROSS-CHECK: a provider echoes the `workspaceId` it scoped the
+  // workspace-scope cross-check CROSS-CHECK: a provider echoes the `workspaceId` it scoped the
   // credential to; the consuming activity ASSERTS agreement with the run's
   // workspace BEFORE injecting `GH_TOKEN` (or applying decrypted values). A host
   // mapping bug returning tenant B's creds for a tenant-A run is caught here.

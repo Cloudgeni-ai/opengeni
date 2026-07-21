@@ -52,7 +52,7 @@ config:
   OPENGENI_USAGE_LIMITS_MODE: managed
   OPENGENI_SANDBOX_BACKEND: modal
   OPENGENI_SANDBOX_PREPARATION_PROFILES: none
-  # Sandbox-surfacing (the desktop/Channel-A giga-PR) is ON for preview. The
+  # sandbox workspace (the desktop/Channel-A feature rollout) is ON for preview. The
   # HMAC secret OPENGENI_STREAM_TOKEN_SECRET lives in the opengeni-runtime
   # secret (preview GitHub env), and OPENGENI_MODAL_IMAGE_REF is injected at
   # deploy time via --set to the desktop image ref built by build-preview.

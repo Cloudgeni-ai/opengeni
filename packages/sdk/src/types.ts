@@ -593,9 +593,9 @@ export const SESSION_EVENT_TYPES = [
   "session.title_set",
   // Multi-account Codex (P1): the session's inference account changed.
   "codex.account.switched",
-  // OPE-21 metadata-only per-turn credential selection audit.
+  // credential allocator metadata-only per-turn credential selection audit.
   "codex.credential.selected",
-  // OPE-21 durable zero-capacity wait lifecycle. These are system/runtime
+  // credential allocator durable zero-capacity wait lifecycle. These are system/runtime
   // events, never synthetic user messages.
   "codex.capacity.waiting",
   "codex.capacity.resumed",
@@ -994,7 +994,7 @@ export type GitShowResponse = {
 };
 
 // Workbench v2 turn-end capture (mirror of `@opengeni/contracts` WorkspaceCapture*
-// + the M2 read-API response shapes, dossier §10.3). Reuses FsTreeNode /
+// + the M2 read-API response shapes). Reuses FsTreeNode /
 // GitFileStatus / GitFileDiff / GitFileStatusCode / FsEncoding above.
 export type WorkspaceCaptureFile = {
   path: string;
@@ -1253,7 +1253,7 @@ export const KNOWN_PERMISSIONS = [
   "sessions:create",
   "sessions:read",
   "sessions:control",
-  // Sandbox-surfacing (mirror of @opengeni/contracts Permission). stream:view is
+  // sandbox workspace (mirror of @opengeni/contracts Permission). stream:view is
   // strictly broader than sessions:read (un-redacted pixels); stream:control is
   // the never-granted-v1 raw-input plane; stream:acknowledge is the secret-leak
   // consent gate.

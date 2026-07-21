@@ -125,7 +125,7 @@ export const DESKTOP_STREAM_PORT = 6080;
 // Terminal cell's `url` is the tunnel address resolved against this port.
 export const TERMINAL_STREAM_PORT = 7681;
 
-// The Part-D matrix (master-spine PART D + module 03-providers). One row per
+// The provider capability matrix (sandbox contract PART D + module 03-providers). One row per
 // backend (10 rows). v1 reachable cells are all Linux; macos/windows are seam
 // placeholders (no enum members shipped). Reading rule: a capability cell is
 // `available:false` + a reason in the negotiated doc, never absent.
@@ -472,7 +472,7 @@ export const Permission = z.enum([
   "sessions:create",
   "sessions:read",
   "sessions:control",
-  // Sandbox-surfacing (master-spine §C.3 / crosscut PART 1.2). stream:view is a
+  // sandbox workspace (sandbox contract §C.3 / crosscut PART 1.2). stream:view is a
   // REAL, distinct permission — strictly BROADER than sessions:read — because the
   // pixel plane (Channel B) is UN-REDACTED: a viewer of raw pixels can see cloud
   // creds the agent cat's into a terminal, which the redacted Channel-A event log
@@ -729,7 +729,7 @@ export async function verifyDelegatedAccessToken(
   return payload.data;
 }
 
-// --- Enrollment bearer credential (bring-your-own-compute M5, dossier §10.2) ---
+// --- Enrollment bearer credential (bring-your-own-compute M5) ---
 //
 // The signed bearer the agent presents to the control plane after enrollment (the
 // EnrollmentCredentials.bearer the poll returns). REUSES the SAME HMAC envelope as
@@ -862,7 +862,7 @@ export async function verifyEnrollToken(
   return payload.data;
 }
 
-// --- Scoped data-plane stream token (master-spine §C.3 / crosscut PART 1.3) ---
+// --- Scoped data-plane stream token (sandbox contract §C.3 / crosscut PART 1.3) ---
 //
 // REUSES the existing HMAC envelope (sign/verifyDelegatedAccessToken's
 // base64Url + hmacSha256Base64Url) — NOT a second crypto — but with a distinct
@@ -947,7 +947,7 @@ export async function verifyStreamToken(
   return payload.data;
 }
 
-// --- Relay PRODUCER token (bring-your-own-compute M8b, dossier §10.5) ---
+// --- Relay PRODUCER token (bring-your-own-compute M8b) ---
 //
 // The token the AGENT presents to the relay edge when it registers a pty/desktop
 // stream channel (role=AGENT) — distinct from the viewer's `ogs_` token. It is
@@ -1246,7 +1246,7 @@ export const GitCredentialRepositoryRef = z.object({
 });
 export type GitCredentialRepositoryRef = z.infer<typeof GitCredentialRepositoryRef>;
 
-// ============ P4a — Connection-credential provider (§7.6) ============
+// ============ connection-credential provider — Connection-credential provider (§7.6) ============
 //
 // The host-providable per-run credential-mint seam over OpenGeni's TWO
 // run-scoped credential sites in the worker:
@@ -1264,7 +1264,7 @@ export type GitCredentialRepositoryRef = z.infer<typeof GitCredentialRepositoryR
 // from `settings`. Unset (standalone default) → byte-for-byte today's
 // self-mint.
 //
-// FORK-7 CROSS-CHECK (the host-mapping safety guardrail): a credential
+// Workspace-scope cross-check (the host-mapping safety guardrail): a credential
 // provider returns the `workspaceId` it scoped the credential to, and the
 // activity ASSERTS it agrees with the run's workspace BEFORE injecting
 // any git provider token seed (or applying decrypted environment values). A host mapping bug that
@@ -1295,7 +1295,7 @@ export type GitCredentials = {
   // purpose="identity" so hosts can return only stable git identity before lazy
   // sandbox provision. The value never enters the manifest.
   token?: string;
-  // FORK-7 echo: the workspace the provider scoped this token to. The activity
+  // workspace-scope cross-check echo: the workspace the provider scoped this token to. The activity
   // asserts `workspaceId === request.workspaceId` before injecting.
   workspaceId: string;
   // Optional provider expiry for host-managed proactive renewal. ISO-8601;
@@ -1320,7 +1320,7 @@ export type SandboxSecrets = {
   // `environmentsEncryptionKeyBytes` decrypt. Same shape the self-mint path
   // produces (plaintext name→value).
   values: Record<string, string>;
-  // FORK-7 echo: the workspace the provider scoped these secrets to.
+  // workspace-scope cross-check echo: the workspace the provider scoped these secrets to.
   workspaceId: string;
   // Optional variableSet metadata; when omitted the activity uses the
   // variableSetId as both id and name (the local decrypt carries the row's
@@ -1338,9 +1338,9 @@ export type ConnectionCredentialsPort = {
   sandboxSecrets?(input: SandboxSecretsRequest): Promise<SandboxSecrets>;
 };
 
-// ============ P4a — GitHub App API port (BYO-App, §7.6 / SPIKE-2 remainder) ===
+// ============ connection-credential provider — GitHub App API port (BYO-App, §7.6 / GitHub credential prototype remainder) ===
 //
-// The host-driven GitHub-API credential leg. SPIKE-2 closed the establishment +
+// The host-driven GitHub-API credential leg. GitHub credential prototype closed the establishment +
 // gate (storage) axis; this closes the credential leg by making the two live
 // GitHub-API calls host-PROVIDABLE so a BYO-GitHub-App host drives its OWN App
 // credentials (its own JWT-signing key, its own OAuth client) instead of
@@ -3650,15 +3650,15 @@ export const SessionEventType = z.enum([
   "stream.opened", // a viewer attached (audit + refcount visibility)
   "stream.closed", // a viewer detached / was reaped
   "stream.revoked", // a grant was revoked → connected clients MUST disconnect now
-  // Channel-B recording signals (P4.3 / module 05 §3.4). The "agent films itself
-  // proving the fix" loop: ffmpeg x11grab of the SAME :0 humans watch → artifact
+  // Desktop recording signals. The capture loop records the same display humans
+  // watch, then stores the finalized artifact for replay.
   // → storage. The artifact ref rides the AVAILABLE event (storageKey, NOT a
   // long-lived URL — clients mint a short-TTL signed GET via the route).
   "recording.started", // ffmpeg launched on :0 (mode/codec/dimensions)
   "recording.available", // finalized: bytes PUT to storage, replayable
   "recording.failed", // ffmpeg/box-death/rollover/upload error — no artifact
-  // Channel-A structured-service notifications (P4.4 / modules/08-channel-a.md
-  // §2.2). The A2 reads (fs/git/terminal exec) are SYNCHRONOUS API-direct point
+  // Structured-service notifications. File, Git, and terminal reads are
+  // synchronous API-direct point
   // queries (their result is the HTTP response, NEVER an event). What rides A1
   // here are the side-effect NOTIFICATIONS — a path changed, git state changed,
   // a pty opened/printed/exited — durable, sequenced, gap-filled like every
@@ -3675,10 +3675,10 @@ export const SessionEventType = z.enum([
   // (manual switch in P1; failover/rotation in P3 reuse the same event). Drives
   // the in-session "Running on:" indicator's live flip.
   "codex.account.switched",
-  // OPE-21 per-turn selection audit. Payload is metadata only: credential row
+  // credential allocator per-turn selection audit. Payload is metadata only: credential row
   // id, bounded strategy/reason, and pool counts — never token material.
   "codex.credential.selected",
-  // OPE-21 durable zero-capacity wait lifecycle. Runtime/system events only;
+  // credential allocator durable zero-capacity wait lifecycle. Runtime/system events only;
   // no synthetic user message is created when capacity returns.
   "codex.capacity.waiting",
   "codex.capacity.resumed",
@@ -3703,12 +3703,12 @@ export const SessionEventType = z.enum([
   // target id or command content. Announce-only; hits the timeline projection default
   // (no rendered item) like the other sandbox.* diagnostics.
   "session.route.reconciled",
-  // Workbench v2 turn-end workspace capture (dossier §10.1). ANNOUNCE-ONLY: a new
+  // Workbench v2 turn-end workspace capture. ANNOUNCE-ONLY: a new
   // capture revision was persisted at turn end; the client refetches the latest
   // capture. It carries metadata only (revision/turnId/capturedAt/leaseEpoch/stats),
   // never file content. Hits the timeline projection default case (ignored) — it
   // must NEVER gain a rendered timeline item without regenerating the golden
-  // snapshots (dossier §7.3 golden-grammar gate).
+  // snapshots (golden-grammar gate).
   "workspace.revision.captured",
   // Repository discovery could not prove a complete capture. The worker
   // persisted a failed/degraded revision marker and clients must fall back to
@@ -4015,7 +4015,7 @@ export const RecordingFailedPayload = z.object({
 });
 export type RecordingFailedPayload = z.infer<typeof RecordingFailedPayload>;
 
-// ── Channel-A structured services (P4.4 / modules/08-channel-a.md) ───────────
+// ── Structured sandbox services ─────────────────────────────────────────────
 // Two transports on one spine: the A2 request/response shapes (FsNode tree,
 // GitDiff hunks, terminal exec) are returned INLINE on synchronous API-direct
 // routes (never the bus); the A1 notification payloads below ride the durable
@@ -4306,7 +4306,7 @@ export const GitDiffResponse = z.object({
 });
 export type GitDiffResponse = z.infer<typeof GitDiffResponse>;
 
-// ─── Workbench v2 turn-end workspace capture (dossier §10.1/§10.2) ────────────
+// ─── Workbench v2 turn-end workspace capture ────────────
 // A capture is a point-in-time snapshot of the session workspace's CHANGES,
 // probed live off the box at turn end (detectRepos → gitStatus/gitDiff → fsRead
 // after-images → fsList tree index). It is the cold/offline read source that
@@ -4323,7 +4323,7 @@ export const WorkspaceCaptureFile = z.object({
   status: GitFileStatusCode,
   // sha256 of the captured after-image bytes; null when deleted / tooLarge.
   hash: z.string().nullable(),
-  // git blob sha of the HEAD version — the wake-on-edit flush guard (dossier
+  // git blob sha of the HEAD version — the wake-on-edit flush guard (design
   // §10.1). null when the path is new/untracked (no HEAD blob).
   baseHash: z.string().nullable(),
   // Content-addressed storage key of the after-image; null when deleted /
@@ -4361,7 +4361,7 @@ export const WorkspaceCaptureDegradedReason = z.enum([
 export type WorkspaceCaptureDegradedReason = z.infer<typeof WorkspaceCaptureDegradedReason>;
 
 // Rollup counters — carried on the row (jsonb) and the announce event so the UI
-// can reserve layout (dossier §12 no-layout-shift) before fetching the manifest.
+// can reserve layout (no layout shift) before fetching the manifest.
 export const WorkspaceCaptureStats = z.object({
   repoCount: z.number().int().nonnegative(),
   fileCount: z.number().int().nonnegative(),
@@ -4398,7 +4398,7 @@ export const WorkspaceCaptureManifest = z.object({
 });
 export type WorkspaceCaptureManifest = z.infer<typeof WorkspaceCaptureManifest>;
 
-// Announce-only event payload (dossier §10.1). Metadata only — never content.
+// Announce-only event payload. Metadata only — never content.
 export const WorkspaceRevisionCapturedPayload = z.object({
   revision: z.number().int().nonnegative(),
   turnId: z.string().nullable(),
@@ -4417,7 +4417,7 @@ export const WorkspaceRevisionDegradedPayload = z.object({
 });
 export type WorkspaceRevisionDegradedPayload = z.infer<typeof WorkspaceRevisionDegradedPayload>;
 
-// --- M2 capture READ API (dossier §10.3) -------------------------------------
+// --- M2 capture READ API -------------------------------------
 // A short-TTL signed GET URL minted PER REQUEST (never stored). The manifest is
 // served inline for the ≤2MB common case (the <200ms one-round-trip paint); a
 // >2MB manifest and a >256KB single-file after-image fall back to one of these.
@@ -5270,7 +5270,7 @@ export const ClientAuthConfig = z.discriminatedUnion("mode", [
 ]);
 export type ClientAuthConfig = z.infer<typeof ClientAuthConfig>;
 
-// The negotiated capability handshake document (master-spine C.3). ONE shape;
+// The negotiated capability handshake document (sandbox contract C.3). ONE shape;
 // collapses the parallel per-module definitions. A capability cell is always
 // present with `available`/`transport` + a `reason` when unavailable — never
 // absent.
@@ -5403,14 +5403,14 @@ export const ViewerHolder = z.object({
   leaseEpoch: z.number().int().nonnegative(),
   viewerHeartbeatIntervalMs: z.number().int().positive(),
   // The desktop pixel tunnel URL the viewer connects to directly; null until
-  // P4 mints it (gated until then).
+  // a viewer grant is minted (gated until then).
   dataPlaneUrl: z.string().nullable(),
 });
 export type ViewerHolder = z.infer<typeof ViewerHolder>;
 
 // POST .../stream-capabilities/acknowledge — record the calling principal's
-// acknowledgment of the un-redacted pixel plane (P3.2; modules/07-channel-b.md
-// §6 + addendum E.1). Reuses the acknowledgment machinery — no new endpoint
+// acknowledgment of the un-redacted pixel plane. Reuses the acknowledgment
+// machinery — no new endpoint
 // shape beyond this body, no new permission beyond stream:acknowledge.
 //
 // `acknowledgeShared` MUST be true when the box is shared (the group has >1
@@ -5454,7 +5454,7 @@ export type ViewerHeartbeatResponse = z.infer<typeof ViewerHeartbeatResponse>;
 // (DeviceAuthStart*, DeviceAuthPoll*, EnrollmentCredentials) so the Rust agent's
 // `enroll` command (which runs the flow over HTTP before it has NATS creds)
 // decodes the SAME field names (the proto's ts-proto JSON is camelCase). The
-// request bodies additionally carry the consent-relevant fields the dossier brief
+// request bodies additionally carry the consent-relevant fields the design brief
 // mandates (the agent ed25519 pubkey + can-offer-display + requests-screen-control).
 // =============================================================================
 
@@ -5700,7 +5700,7 @@ export const EnrollTokenExchangeResponse = z.object({
 });
 export type EnrollTokenExchangeResponse = z.infer<typeof EnrollTokenExchangeResponse>;
 
-// ── Machines dashboard + per-machine metrics (M10, dossier §10.7) ────────────
+// ── Machines dashboard + per-machine metrics (M10) ────────────
 //
 // The SHARED data contract M10 (backend) implements + M9 (UI) renders. THE
 // orchestrator owns this shape; M9 imports these types so the dashboard never

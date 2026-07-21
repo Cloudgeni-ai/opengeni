@@ -267,7 +267,7 @@ export type CreateDbOptions = {
    * it as a per-session startup parameter (the supported, query-param-free way;
    * URL `?search_path=` is IGNORED by postgres-js). Keep `public` LAST so the
    * `vector` type and `gen_random_uuid()` (which live in `public` on the
-   * pgvector image) still resolve — the SPIKE-1 live footgun.
+   * pgvector image) still resolve — the schema-isolation contract live footgun.
    */
   searchPath?: string;
   /** RLS posture; defaults to `"force"` (today's standalone). */
@@ -3311,6 +3311,7 @@ export async function listEnabledMcpCapabilityServers(
             eq(schema.capabilityInstallations.workspaceId, workspaceId),
             eq(schema.capabilityInstallations.kind, "mcp"),
             eq(schema.capabilityInstallations.status, "active"),
+            eq(schema.capabilityCatalogItems.stale, false),
           ),
         )
         .orderBy(asc(schema.capabilityCatalogItems.name)),
@@ -7896,8 +7897,8 @@ export type CodexLeaseAccountStatus = CodexAccountStatus & {
 /**
  * Opaque accepted-turn policy scope resolved while the durable turn is locked.
  *
- * OPE-21 deliberately does not know the shape of named pools. A downstream
- * allocator policy (OPE-32) owns its private scope type and supplies a pure
+ * This API deliberately does not know the shape of named pools. A downstream
+ * allocator policy owns its private scope type and supplies a pure
  * metadata resolver. The resolved value is handed to the selector in the same
  * workspace rotation-row transaction as lease acquisition, so future pool
  * membership filtering cannot race the accepted turn's frozen policy.
@@ -8137,7 +8138,7 @@ export async function acquireCodexCredentialLease<
     /**
      * Optional downstream parser for private accepted-turn policy metadata.
      * It is pure, runs under the turn/rotation transaction, and must not query
-     * pool membership itself. OPE-21 stores or interprets no pool identifiers.
+     * pool membership itself. This module stores or interprets no pool identifiers.
      */
     resolvePolicyScope?: CodexCredentialLeasePolicyScopeResolver<TPolicyScope>;
     /**
@@ -8433,7 +8434,7 @@ export async function acquireCodexCredentialLease<
 }
 
 // ---------------------------------------------------------------------------
-// OPE-21 durable zero-capacity wait / wake state machine.
+// Durable zero-capacity wait / wake state machine.
 // ---------------------------------------------------------------------------
 
 export type CodexCapacityWaitStatus = "waiting" | "resumed" | "superseded";
@@ -8965,8 +8966,8 @@ export async function getCodexCapacityWaitForSession(
 }
 
 /**
- * Same-transaction capacity-mutation/outbox seam for OPE-24 eligibility and
- * OPE-32 membership/default changes. The allocator rotation row is always the
+ * Same-transaction capacity-mutation/outbox seam for account eligibility and
+ * policy-scope membership/default changes. The allocator rotation row is always the
  * first lock. Mutations report whether capacity truth changed; only then are
  * matching waiter wake revisions advanced and returned for best-effort signal.
  */
@@ -14113,7 +14114,7 @@ export async function getSandboxSessionEnvelope(
 
 // ============================================================================
 // Session recordings — the durable index for the "agent films itself proving
-// the fix" loop (P4.3). One row per recording; insert at start, update at
+// the fix" loop. One row per recording; insert at start, update at
 // finalize (available with the storage_key) or failure. Read-side feeds the
 // list route + the signed-URL replay route (storage_key is the source of truth).
 // ============================================================================
@@ -16271,7 +16272,7 @@ export async function markSandboxFileResourcesMaterialized(
   );
 }
 
-// ═══════════════ Workbench v2 turn-end workspace capture (dossier §10.2) ═══════
+// ═══════════════ Workbench v2 turn-end workspace capture ═══════
 // The durable index for turn-end workspace captures. `insertWorkspaceCapture`
 // mirrors persistWarmSnapshot's epoch-CAS discipline and also requires the exact
 // closed, uninterrupted turn attempt. A cancelled attempt or superseded lease
@@ -16801,7 +16802,7 @@ export async function recordLeaseTerminalDataPlaneUrl(
 // ============================================================================
 // Bring-your-own-compute (M2): first-class swappable sandboxes + enrollment +
 // per-machine metrics + the per-session epoch-fenced active-sandbox pointer
-// (migration 0024 / dossier §10.3 + §10.7 + §23). All workspace-scoped behind
+// (migration 0024). All workspace-scoped behind
 // the same RLS the lease DAOs use.
 // ============================================================================
 
@@ -17241,7 +17242,7 @@ export async function setEnrollmentOpStreamState(
 // single-use row per in-flight enrollment. The agent starts a flow (gets a
 // device_code + user_code), the user approves it (LOUD consent capture +
 // createEnrollment + createSandbox), and the agent polls the device_code for the
-// resulting EnrollmentCredentials. Dossier §10.2 + §18.
+// resulting EnrollmentCredentials.
 
 export type DeviceEnrollmentStatus = (typeof schema.deviceEnrollmentStatusValues)[number];
 
@@ -18045,7 +18046,7 @@ export async function insertMachineMetricsSeries(
 }
 
 // The target spacing between series rows: the agent heartbeats ~every 5s, but we
-// downsample the long-term history to ~1/min (dossier §10.7). A new series row is
+// downsample the long-term history to ~1/min. A new series row is
 // appended only when >= this much time has elapsed since the last one.
 export const MACHINE_METRICS_SERIES_INTERVAL_MS = 60_000;
 

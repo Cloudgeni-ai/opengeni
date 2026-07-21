@@ -8,7 +8,7 @@ import postgres from "postgres";
 const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../drizzle");
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const claimFunction = "opengeni_private.claim_session_workflow_wakes(integer)";
-const unrelatedFunction = "opengeni_private.ope75_unrelated_acl_probe()";
+const unrelatedFunction = "opengeni_private.unrelated_acl_probe()";
 
 let blank: BlankTestDatabase | null = null;
 let available = true;
@@ -62,9 +62,9 @@ describe("migration 0076 (workflow-wake claimer ACL)", () => {
           // Create a denied sentinel after 0001's historical blanket grant;
           // later migrations must not accidentally grant it to the app role.
           await admin.unsafe(`
-            CREATE FUNCTION opengeni_private.ope75_unrelated_acl_probe()
+            CREATE FUNCTION opengeni_private.unrelated_acl_probe()
             RETURNS integer LANGUAGE sql AS 'SELECT 1';
-            REVOKE ALL ON FUNCTION opengeni_private.ope75_unrelated_acl_probe() FROM PUBLIC;
+            REVOKE ALL ON FUNCTION opengeni_private.unrelated_acl_probe() FROM PUBLIC;
           `);
         }
       }
@@ -117,7 +117,7 @@ describe("migration 0076 (workflow-wake claimer ACL)", () => {
         }
         expect(denied).toBeInstanceOf(Error);
         expect((denied as Error).message).toMatch(
-          /permission denied for function ope75_unrelated_acl_probe/,
+          /permission denied for function unrelated_acl_probe/,
         );
       } finally {
         await admin.unsafe("RESET ROLE");

@@ -628,7 +628,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     // Deliberately NO grantMember for this subject: a workspace-scoped API key
     // is authorized by requireAccessGrant from its api_keys row, never through
     // a workspace_memberships row. Listing must work anyway (this is the geni
-    // fleet-view regression: OPE-26's membership gate 403'd every api_key
+    // fleet-view regression: session-list implementation's membership gate 403'd every api_key
     // principal platform-wide).
     const apiKeySubject = "api_key:00000000-0000-4000-8000-000000000001";
     const first = await session({ ...workspace, message: "api key first" });
@@ -889,9 +889,9 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     const barrierClass = 81326026;
     const listingLock = 1;
     const removalLock = 2;
-    const triggerFunction = "ope26_test_lock_barrier";
-    const snapshotTrigger = "ope26_test_snapshot_lock_barrier";
-    const membershipTrigger = "ope26_test_membership_lock_barrier";
+    const triggerFunction = "sessionpin_test_lock_barrier";
+    const snapshotTrigger = "sessionpin_test_snapshot_lock_barrier";
+    const membershipTrigger = "sessionpin_test_membership_lock_barrier";
     const listingClient = createDb(shared.appUrl, { max: 1 });
     const removalClient = createDb(shared.appUrl, { max: 1 });
     let listingPromise: Promise<Awaited<ReturnType<typeof listSessionsForSubject>>> | null = null;
@@ -1047,8 +1047,8 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     const listingClient = createDb(shared.appUrl, { max: 1 });
     const barrierClass = 81326027;
     const removalLock = 1;
-    const triggerFunction = "ope26_test_removal_first_barrier";
-    const triggerName = "ope26_test_removal_first_membership_barrier";
+    const triggerFunction = "sessionpin_test_removal_first_barrier";
+    const triggerName = "sessionpin_test_removal_first_membership_barrier";
     let removalPromise: Promise<boolean> | null = null;
     let listingPromise: Promise<Awaited<ReturnType<typeof listSessionsForSubject>>> | null = null;
     try {
@@ -1151,8 +1151,8 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     const pinClient = createDb(shared.appUrl, { max: 1 });
     const barrierClass = 81326029;
     const removalLock = 1;
-    const triggerFunction = "ope26_test_pin_removal_first_barrier";
-    const triggerName = "ope26_test_pin_removal_first_membership_barrier";
+    const triggerFunction = "sessionpin_test_pin_removal_first_barrier";
+    const triggerName = "sessionpin_test_pin_removal_first_membership_barrier";
     let removalPromise: Promise<boolean> | null = null;
     let pinPromise: Promise<Awaited<ReturnType<typeof setSessionPin>>> | null = null;
     try {
@@ -1249,8 +1249,8 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     const pinClient = createDb(shared.appUrl, { max: 1 });
     const barrierClass = 81326030;
     const pinInsertLock = 1;
-    const triggerFunction = "ope26_test_pin_mutation_first_barrier";
-    const triggerName = "ope26_test_pin_mutation_first_insert_barrier";
+    const triggerFunction = "sessionpin_test_pin_mutation_first_barrier";
+    const triggerName = "sessionpin_test_pin_mutation_first_insert_barrier";
     let removalPromise: Promise<boolean> | null = null;
     let pinPromise: Promise<Awaited<ReturnType<typeof setSessionPin>>> | null = null;
     try {

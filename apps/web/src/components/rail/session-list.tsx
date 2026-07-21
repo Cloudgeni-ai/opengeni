@@ -804,7 +804,7 @@ export function SessionList() {
         ref={listRef}
         role="region"
         aria-label={hierarchyMode ? "Workstreams" : "Session search results"}
-        data-ope26-session-list
+        data-sessionpin-session-list
         onKeyDown={onKeyDown}
         className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto px-2 pb-2"
       >
