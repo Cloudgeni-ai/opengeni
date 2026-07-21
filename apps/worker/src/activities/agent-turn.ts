@@ -55,6 +55,7 @@ import {
   accrueWarmSeconds,
   getMaterializedSandboxFileResources,
   markSandboxFileResourcesMaterialized,
+  areGitHubRepositoriesAllowedForWorkspace,
   SandboxLeaseSupersededError,
   SandboxImageConflictError,
   isSessionEventPersistenceError,
@@ -3368,6 +3369,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // provider may supply it; unset still self-mints GitHub from settings.
       // gitToken/gitTokens are undefined on the selfhosted skip path (the machine
       // uses its own git creds).
+      if (activeSandboxBackend !== "selfhosted") {
+        await assertGitHubResourcesRemainAuthorized(db, input.workspaceId, turnResources);
+      }
       const {
         environment: sandboxEnvironment,
         gitToken: sandboxGitToken,
@@ -6229,6 +6233,45 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       }
     }
   };
+}
+
+async function assertGitHubResourcesRemainAuthorized(
+  db: Parameters<typeof areGitHubRepositoriesAllowedForWorkspace>[0],
+  workspaceId: string,
+  resources: import("@opengeni/contracts").ResourceRef[],
+): Promise<void> {
+  const selected = resources.flatMap((resource) => {
+    if (resource.kind !== "repository") {
+      return [];
+    }
+    const installationId =
+      resource.githubInstallationId ??
+      (resource.provider === "github" ? resource.installationId : undefined);
+    const repositoryId =
+      resource.githubRepositoryId ??
+      (resource.provider === "github" ? resource.repositoryId : undefined);
+    if (typeof installationId !== "number" || typeof repositoryId !== "number") {
+      return [];
+    }
+    return [{ installationId, repositoryId }];
+  });
+  if (selected.length === 0) {
+    return;
+  }
+  const installationId = selected[0]!.installationId;
+  if (
+    selected.some((repository) => repository.installationId !== installationId) ||
+    !(await areGitHubRepositoriesAllowedForWorkspace(
+      db,
+      workspaceId,
+      installationId,
+      selected.map((repository) => repository.repositoryId),
+    ))
+  ) {
+    throw new Error(
+      "This workspace no longer authorizes one or more GitHub repositories attached to the session",
+    );
+  }
 }
 
 /**

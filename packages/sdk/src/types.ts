@@ -2661,6 +2661,18 @@ export type GitHubRepository = {
   accountType: string | null;
 };
 
+export type GitHubRepositoryScope = "all" | "selected";
+
+export type GitHubInstallationBinding = {
+  installationId: number;
+  accountLogin: string | null;
+  accountType: string | null;
+  repositoryScope: GitHubRepositoryScope;
+  repositoryCount: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type GitHubAppInfo = {
   configured: boolean;
   appId: string | null;
@@ -2668,6 +2680,10 @@ export type GitHubAppInfo = {
   appSlug: string | null;
   /** Ready-to-open GitHub install URL (carries the signed state), if configured. */
   installUrl: string | null;
+  /** Ready-to-open OAuth URL for linking an installation that already exists. */
+  linkUrl: string | null;
+  /** Installation bindings owned independently by this workspace. */
+  installations: GitHubInstallationBinding[];
   /** Setting names still missing when `configured` is false. */
   missing: string[];
 };

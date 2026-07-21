@@ -27,6 +27,7 @@ import {
   getScheduledTask,
   getSessionGoal,
   getWorkspaceEnvironmentValuesForRun,
+  listGitHubInstallationAccessForWorkspace,
   listSessionEvents,
   listScheduledTasks,
   listOutstandingSessionSystemUpdates,
@@ -4287,6 +4288,32 @@ describe("API component integration", () => {
       bus: new MemoryEventBus(),
       workflowClient: new FakeWorkflowClient(),
       githubStateSecret: stateSecret,
+      githubAppApi: {
+        authorizeUser: async () => [
+          {
+            installationId: 138826628,
+            accountLogin: "acme",
+            accountType: "Organization",
+            suspended: false,
+            repositories: [
+              {
+                id: 1001,
+                installationId: 138826628,
+                fullName: "acme/repository",
+                name: "repository",
+                private: true,
+                htmlUrl: "https://github.com/acme/repository",
+                cloneUrl: "https://github.com/acme/repository.git",
+                defaultBranch: "main",
+                accountLogin: "acme",
+                accountType: "Organization",
+                permissions: { admin: true, maintain: true, push: true, triage: true, pull: true },
+              },
+            ],
+          },
+        ],
+        listRepositories: async () => [],
+      },
     });
     const context = await defaultAccessContext(app);
     const state = createSignedState(stateSecret, {
@@ -4327,6 +4354,239 @@ describe("API component integration", () => {
       workspaceId: context.defaultWorkspaceId,
       installationId: 138826628,
     });
+
+    // request_oauth_on_install can send a newly installed id directly to the
+    // configured OAuth callback; the original install-intent state does not
+    // carry that id yet, so the callback must accept GitHub's query value.
+    const directState = createSignedState(stateSecret, {
+      accountId: context.defaultAccountId,
+      workspaceId: context.defaultWorkspaceId,
+      intent: "install",
+    });
+    const directCallback = await app.request(
+      `/v1/github/oauth/callback?code=test-code&installation_id=138826628&state=${encodeURIComponent(directState)}`,
+      {
+        headers: { cookie: `opengeni_github_state=${directState}` },
+      },
+    );
+    expect(directCallback.status).toBe(200);
+    expect(await directCallback.text()).toContain("GitHub App connected");
+  });
+
+  test("links one existing GitHub installation to multiple workspaces with independent repository access", async () => {
+    const stateSecret = "test-existing-github-installation-state-secret";
+    const installationId = 138826628;
+    const adminRepository = {
+      id: 1001,
+      installationId,
+      fullName: "acme/admin-repository",
+      name: "admin-repository",
+      private: true,
+      htmlUrl: "https://github.com/acme/admin-repository",
+      cloneUrl: "https://github.com/acme/admin-repository.git",
+      defaultBranch: "main",
+      accountLogin: "acme",
+      accountType: "Organization",
+    };
+    const readOnlyRepository = {
+      id: 1002,
+      installationId,
+      fullName: "acme/read-only-repository",
+      name: "read-only-repository",
+      private: true,
+      htmlUrl: "https://github.com/acme/read-only-repository",
+      cloneUrl: "https://github.com/acme/read-only-repository.git",
+      defaultBranch: "main",
+      accountLogin: "acme",
+      accountType: "Organization",
+    };
+    const githubAppApi = {
+      authorizeUser: async () => [
+        {
+          installationId,
+          accountLogin: "acme",
+          accountType: "Organization",
+          suspended: false,
+          repositories: [
+            {
+              ...adminRepository,
+              permissions: { admin: true, maintain: true, push: true, triage: true, pull: true },
+            },
+            {
+              ...readOnlyRepository,
+              permissions: {
+                admin: false,
+                maintain: false,
+                push: false,
+                triage: false,
+                pull: true,
+              },
+            },
+          ],
+        },
+      ],
+      getInstallation: async () => ({
+        installationId,
+        accountLogin: "acme",
+        accountType: "Organization",
+        suspended: false,
+      }),
+      listRepositories: async () => [adminRepository, readOnlyRepository],
+    };
+    const app = createApp({
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        publicBaseUrl: "https://api.opengeni.test",
+        githubAppId: "12345",
+        githubClientId: "test-client-id",
+        githubClientSecret: "test-client-secret",
+        githubAppSlug: "opengeni-test-app",
+        githubAppPrivateKey: "test-private-key",
+      }),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+      githubStateSecret: stateSecret,
+      githubAppApi,
+    });
+    const context = await defaultAccessContext(app);
+    const firstWorkspaceId = context.defaultWorkspaceId!;
+    const secondWorkspaceResponse = await app.request("/v1/workspaces", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        accountId: context.defaultAccountId,
+        name: "Second GitHub workspace",
+      }),
+    });
+    expect(secondWorkspaceResponse.status).toBe(201);
+    const secondWorkspace = (await secondWorkspaceResponse.json()) as { id: string };
+
+    const linkExistingInstallation = async (workspaceId: string) => {
+      const appInfoResponse = await app.request(workspacePath(workspaceId, "/github/app"));
+      expect(appInfoResponse.status).toBe(200);
+      const appInfo = (await appInfoResponse.json()) as { linkUrl: string };
+      const linkUrl = new URL(appInfo.linkUrl);
+      const oauthRedirect = await app.request(`${linkUrl.pathname}${linkUrl.search}`);
+      expect(oauthRedirect.status).toBe(302);
+      const stateCookie = oauthRedirect.headers.get("set-cookie")?.split(";", 1)[0];
+      expect(stateCookie).toBeTruthy();
+      const oauthUrl = new URL(oauthRedirect.headers.get("location")!);
+      expect(`${oauthUrl.origin}${oauthUrl.pathname}`).toBe(
+        "https://github.com/login/oauth/authorize",
+      );
+      const oauthState = oauthUrl.searchParams.get("state")!;
+
+      const chooserResponse = await app.request(
+        `/v1/github/oauth/callback?code=test-code&state=${encodeURIComponent(oauthState)}`,
+        {
+          headers: { cookie: stateCookie! },
+        },
+      );
+      expect(chooserResponse.status).toBe(200);
+      const chooserHtml = await chooserResponse.text();
+      expect(chooserHtml).toContain(adminRepository.fullName);
+      expect(chooserHtml).not.toContain(readOnlyRepository.fullName);
+      const installationTicket = htmlInputValues(chooserHtml, "installation_ticket")[0];
+      const repositoryTickets = htmlInputValues(chooserHtml, "repository_ticket");
+      expect(installationTicket).toBeTruthy();
+      expect(repositoryTickets).toHaveLength(1);
+
+      const form = new URLSearchParams({
+        oauth_state: oauthState,
+        installation_ticket: installationTicket!,
+      });
+      form.append("repository_ticket", repositoryTickets[0]!);
+      const bindResponse = await app.request(workspacePath(workspaceId, "/github/installations"), {
+        method: "POST",
+        headers: {
+          "content-type": "application/x-www-form-urlencoded",
+          cookie: stateCookie!,
+        },
+        body: form.toString(),
+      });
+      expect(bindResponse.status).toBe(200);
+    };
+
+    await linkExistingInstallation(firstWorkspaceId);
+    await linkExistingInstallation(secondWorkspace.id);
+
+    const [firstAccess, secondAccess] = await Promise.all([
+      listGitHubInstallationAccessForWorkspace(dbClient.db, firstWorkspaceId),
+      listGitHubInstallationAccessForWorkspace(dbClient.db, secondWorkspace.id),
+    ]);
+    expect(firstAccess).toMatchObject([
+      { installationId, repositoryScope: "selected", repositoryIds: [adminRepository.id] },
+    ]);
+    expect(secondAccess).toMatchObject([
+      { installationId, repositoryScope: "selected", repositoryIds: [adminRepository.id] },
+    ]);
+
+    const firstRepositories = await app.request(
+      workspacePath(firstWorkspaceId, "/github/repositories"),
+    );
+    const secondRepositories = await app.request(
+      workspacePath(secondWorkspace.id, "/github/repositories"),
+    );
+    expect(
+      (
+        (await firstRepositories.json()) as { repositories: Array<{ id: number }> }
+      ).repositories.map(({ id }) => id),
+    ).toEqual([adminRepository.id]);
+    expect(
+      (
+        (await secondRepositories.json()) as { repositories: Array<{ id: number }> }
+      ).repositories.map(({ id }) => id),
+    ).toEqual([adminRepository.id]);
+
+    const unlink = await app.request(
+      workspacePath(firstWorkspaceId, `/github/installations/${installationId}`),
+      {
+        method: "DELETE",
+      },
+    );
+    expect(unlink.status).toBe(204);
+    expect(await listGitHubInstallationAccessForWorkspace(dbClient.db, firstWorkspaceId)).toEqual(
+      [],
+    );
+    expect(
+      await listGitHubInstallationAccessForWorkspace(dbClient.db, secondWorkspace.id),
+    ).toMatchObject([{ installationId, repositoryIds: [adminRepository.id] }]);
+
+    const disconnectedSession = await app.request(workspacePath(firstWorkspaceId, "/sessions"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        initialMessage: "This repository is no longer authorized",
+        resources: [
+          {
+            kind: "repository",
+            uri: adminRepository.cloneUrl,
+            ref: adminRepository.defaultBranch,
+            githubInstallationId: installationId,
+            githubRepositoryId: adminRepository.id,
+          },
+        ],
+      }),
+    });
+    expect(disconnectedSession.status).toBe(422);
+    const connectedSession = await app.request(workspacePath(secondWorkspace.id, "/sessions"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        initialMessage: "This repository remains authorized",
+        resources: [
+          {
+            kind: "repository",
+            uri: adminRepository.cloneUrl,
+            ref: adminRepository.defaultBranch,
+            githubInstallationId: installationId,
+            githubRepositoryId: adminRepository.id,
+          },
+        ],
+      }),
+    });
+    expect(connectedSession.status).toBe(202);
   });
 
   test("indexes uploaded files into document bases and searches them", async () => {
@@ -7792,6 +8052,7 @@ describe("API component integration", () => {
       configured: boolean;
       appSlug: string;
       installUrl: string;
+      linkUrl: string;
       expiresInSeconds: number;
     }>(mcp, "github_connect_link", {});
     expect(link.configured).toBe(true);
@@ -7804,6 +8065,14 @@ describe("API component integration", () => {
     expect(readSignedState(state!, stateSecret)).toMatchObject({
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
+      intent: "install",
+    });
+    const existingLinkUrl = new URL(link.linkUrl);
+    expect(existingLinkUrl.pathname).toBe(`/v1/workspaces/${grant.workspaceId}/github/connect`);
+    expect(readSignedState(existingLinkUrl.searchParams.get("state")!, stateSecret)).toMatchObject({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      intent: "link_existing",
     });
 
     // Opening the link plants the CSRF state cookie the install/OAuth
@@ -8140,6 +8409,13 @@ async function hmacSha256Hex(secret: string, message: string): Promise<string> {
   return Array.from(new Uint8Array(signature))
     .map((byte) => byte.toString(16).padStart(2, "0"))
     .join("");
+}
+
+function htmlInputValues(html: string, name: string): string[] {
+  const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return [...html.matchAll(new RegExp(`name="${escapedName}" value="([^"]+)"`, "g"))]
+    .map((match) => match[1]!)
+    .map((value) => value.replaceAll("&amp;", "&"));
 }
 
 function workspacePath(workspaceId: string, path: string): string {
