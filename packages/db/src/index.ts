@@ -20,6 +20,7 @@ import type {
   KnowledgeMemoryKind,
   KnowledgeMemoryStatus,
   KnowledgeSourceRef,
+  GitHubRepositoryScope,
   ManagedAccount,
   Permission,
   PackInstallation,
@@ -1386,8 +1387,14 @@ export type GitHubInstallation = {
   installationId: number;
   accountLogin: string | null;
   accountType: string | null;
+  repositoryScope: GitHubRepositoryScope;
+  linkedBySubjectId: string | null;
   createdAt: string;
   updatedAt: string;
+};
+
+export type GitHubInstallationAccess = GitHubInstallation & {
+  repositoryIds: number[];
 };
 
 export async function upsertGitHubInstallation(
@@ -1398,6 +1405,7 @@ export async function upsertGitHubInstallation(
     installationId: number;
     accountLogin?: string | null;
     accountType?: string | null;
+    linkedBySubjectId?: string | null;
   },
 ): Promise<GitHubInstallation> {
   return await withRlsContext(
@@ -1412,6 +1420,7 @@ export async function upsertGitHubInstallation(
           installationId: input.installationId,
           accountLogin: input.accountLogin ?? null,
           accountType: input.accountType ?? null,
+          linkedBySubjectId: input.linkedBySubjectId ?? null,
         })
         .onConflictDoUpdate({
           target: [
@@ -1422,6 +1431,9 @@ export async function upsertGitHubInstallation(
             accountId: input.accountId,
             accountLogin: input.accountLogin ?? null,
             accountType: input.accountType ?? null,
+            ...(input.linkedBySubjectId !== undefined
+              ? { linkedBySubjectId: input.linkedBySubjectId }
+              : {}),
             updatedAt: new Date(),
           },
         })
@@ -1431,6 +1443,85 @@ export async function upsertGitHubInstallation(
       }
       return mapGitHubInstallation(row);
     },
+  );
+}
+
+export async function bindGitHubInstallationRepositories(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    installationId: number;
+    accountLogin?: string | null;
+    accountType?: string | null;
+    linkedBySubjectId: string;
+    repositoryIds: number[];
+  },
+): Promise<GitHubInstallationAccess> {
+  if (!Number.isSafeInteger(input.installationId) || input.installationId <= 0) {
+    throw new Error("GitHub installation id must be a positive safe integer");
+  }
+  const repositoryIds = [...new Set(input.repositoryIds)];
+  if (
+    repositoryIds.length === 0 ||
+    repositoryIds.some((id) => !Number.isSafeInteger(id) || id <= 0)
+  ) {
+    throw new Error("GitHub repository ids must contain at least one positive safe integer");
+  }
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        const [row] = await tx
+          .insert(schema.githubInstallations)
+          .values({
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            installationId: input.installationId,
+            accountLogin: input.accountLogin ?? null,
+            accountType: input.accountType ?? null,
+            repositoryScope: "selected",
+            linkedBySubjectId: input.linkedBySubjectId,
+          })
+          .onConflictDoUpdate({
+            target: [
+              schema.githubInstallations.workspaceId,
+              schema.githubInstallations.installationId,
+            ],
+            set: {
+              accountId: input.accountId,
+              accountLogin: input.accountLogin ?? null,
+              accountType: input.accountType ?? null,
+              repositoryScope: "selected",
+              linkedBySubjectId: input.linkedBySubjectId,
+              updatedAt: new Date(),
+            },
+          })
+          .returning();
+        if (!row) {
+          throw new Error("Failed to bind GitHub installation");
+        }
+        await tx
+          .delete(schema.githubInstallationRepositories)
+          .where(
+            and(
+              eq(schema.githubInstallationRepositories.workspaceId, input.workspaceId),
+              eq(schema.githubInstallationRepositories.installationId, input.installationId),
+            ),
+          );
+        for (let offset = 0; offset < repositoryIds.length; offset += 1_000) {
+          await tx.insert(schema.githubInstallationRepositories).values(
+            repositoryIds.slice(offset, offset + 1_000).map((repositoryId) => ({
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              installationId: input.installationId,
+              repositoryId,
+            })),
+          );
+        }
+        return { ...mapGitHubInstallation(row), repositoryIds };
+      }),
   );
 }
 
@@ -1460,6 +1551,101 @@ export async function listGitHubInstallationIdsForWorkspace(
       .orderBy(desc(schema.githubInstallations.updatedAt));
     return rows.map((row) => row.installationId);
   });
+}
+
+export async function listGitHubInstallationAccessForWorkspace(
+  db: Database,
+  workspaceId: string,
+): Promise<GitHubInstallationAccess[]> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [installations, repositories] = await Promise.all([
+      scopedDb
+        .select()
+        .from(schema.githubInstallations)
+        .where(eq(schema.githubInstallations.workspaceId, workspaceId))
+        .orderBy(desc(schema.githubInstallations.updatedAt)),
+      scopedDb
+        .select({
+          installationId: schema.githubInstallationRepositories.installationId,
+          repositoryId: schema.githubInstallationRepositories.repositoryId,
+        })
+        .from(schema.githubInstallationRepositories)
+        .where(eq(schema.githubInstallationRepositories.workspaceId, workspaceId)),
+    ]);
+    const repositoriesByInstallation = new Map<number, number[]>();
+    for (const repository of repositories) {
+      const ids = repositoriesByInstallation.get(repository.installationId) ?? [];
+      ids.push(repository.repositoryId);
+      repositoriesByInstallation.set(repository.installationId, ids);
+    }
+    return installations.map((installation) => ({
+      ...mapGitHubInstallation(installation),
+      repositoryIds: repositoriesByInstallation.get(installation.installationId) ?? [],
+    }));
+  });
+}
+
+export async function areGitHubRepositoriesAllowedForWorkspace(
+  db: Database,
+  workspaceId: string,
+  installationId: number,
+  repositoryIds: number[],
+): Promise<boolean> {
+  const requestedIds = [...new Set(repositoryIds)];
+  if (requestedIds.length === 0) {
+    return false;
+  }
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [installation] = await scopedDb
+      .select({ repositoryScope: schema.githubInstallations.repositoryScope })
+      .from(schema.githubInstallations)
+      .where(
+        and(
+          eq(schema.githubInstallations.workspaceId, workspaceId),
+          eq(schema.githubInstallations.installationId, installationId),
+        ),
+      )
+      .limit(1);
+    if (!installation) {
+      return false;
+    }
+    if (installation.repositoryScope === "all") {
+      return true;
+    }
+    const allowed = await scopedDb
+      .select({ repositoryId: schema.githubInstallationRepositories.repositoryId })
+      .from(schema.githubInstallationRepositories)
+      .where(
+        and(
+          eq(schema.githubInstallationRepositories.workspaceId, workspaceId),
+          eq(schema.githubInstallationRepositories.installationId, installationId),
+          inArray(schema.githubInstallationRepositories.repositoryId, requestedIds),
+        ),
+      );
+    return allowed.length === requestedIds.length;
+  });
+}
+
+export async function deleteGitHubInstallationBinding(
+  db: Database,
+  input: { accountId: string; workspaceId: string; installationId: number },
+): Promise<boolean> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await scopedDb
+        .delete(schema.githubInstallations)
+        .where(
+          and(
+            eq(schema.githubInstallations.workspaceId, input.workspaceId),
+            eq(schema.githubInstallations.installationId, input.installationId),
+          ),
+        )
+        .returning({ id: schema.githubInstallations.id });
+      return rows.length > 0;
+    },
+  );
 }
 
 export async function recordUsageEvent(
@@ -26765,6 +26951,8 @@ function mapGitHubInstallation(
     installationId: row.installationId,
     accountLogin: row.accountLogin,
     accountType: row.accountType,
+    repositoryScope: row.repositoryScope as GitHubRepositoryScope,
+    linkedBySubjectId: row.linkedBySubjectId,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
