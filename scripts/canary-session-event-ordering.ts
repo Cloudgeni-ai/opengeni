@@ -117,7 +117,7 @@ async function runCanary(): Promise<void> {
   const timeoutSeconds = positiveInteger("OPENGENI_CANARY_TIMEOUT_SECONDS", 180);
   const pollMilliseconds = positiveInteger("OPENGENI_CANARY_POLL_MS", 1_000);
   const runId = crypto.randomUUID();
-  const title = `OPE-63 event-order canary ${runId.slice(0, 8)}`;
+  const title = `event-ordering invariant event-order canary ${runId.slice(0, 8)}`;
   const headers: Record<string, string> = {
     "content-type": "application/json",
     ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}),
@@ -128,14 +128,14 @@ async function runCanary(): Promise<void> {
     method: "POST",
     body: {
       initialMessage:
-        "Return exactly OPE63_CANARY_OK in one response. Do not call tools and do not create external effects.",
+        "Return exactly EVENTORDER_CANARY_OK in one response. Do not call tools and do not create external effects.",
       resources: [],
       tools: [],
-      metadata: { ope63EventOrderingCanary: true, runId },
+      metadata: { eventorderEventOrderingCanary: true, runId },
       model,
       reasoningEffort: "low",
       sandboxBackend: "none",
-      idempotencyKey: `ope63-event-ordering-${runId}`,
+      idempotencyKey: `eventorder-event-ordering-${runId}`,
     },
   });
   if (!isUuid(session.id)) throw new Error("Canary create response has no valid session ID");

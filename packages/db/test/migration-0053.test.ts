@@ -225,7 +225,7 @@ describe("migration 0053 (Codex credential leases)", () => {
         nearExhaustionPct: 90,
         now: selectionNow,
       });
-      // OPE-36: rotation-enabled always behaves as sticky-sharded, so the
+      // sharded-rotation policy: rotation-enabled always behaves as sticky-sharded, so the
       // rollback selection is the session's deterministic sharded home (the
       // stored legacy strategy is normalized) — what matters for old-binary
       // compatibility is that selection WORKS and never touches the lease table.
@@ -273,7 +273,7 @@ describe("migration 0053 (Codex credential leases)", () => {
             now: selectionNow,
           }),
       );
-      // OPE-36: unpinned + rotation-enabled selects the session's sharded home
+      // sharded-rotation policy: unpinned + rotation-enabled selects the session's sharded home
       // (stored strategy normalized), not the workspace active pointer.
       expect(beforeWorkspaceCutover.credentialId).toBe(
         expectedHome.kind === "home" ? expectedHome.credentialId : null,
@@ -349,7 +349,7 @@ describe("migration 0053 (Codex credential leases)", () => {
         nearExhaustionPct: 90,
         now: selectionNow,
       });
-      // Rotation OFF is untouched by OPE-36: the selector returns the workspace
+      // Rotation OFF is untouched by sharded-rotation policy: the selector returns the workspace
       // active pointer, exactly as before.
       expect(featureOffAgain.credentialId).toBe(oldWorkerAfterCutover!.active_credential_id);
       await migrate(databaseUrl);

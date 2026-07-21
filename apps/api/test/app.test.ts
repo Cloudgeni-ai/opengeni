@@ -719,6 +719,40 @@ describe("API helpers", () => {
     ).rejects.toThrow("could not be enabled");
   });
 
+  test("does not echo credentials from MCP probe errors", async () => {
+    const item = capabilityItem({
+      id: "mcp:redacted-error",
+      kind: "mcp",
+      name: "Redacted MCP",
+      endpointUrl: "https://configured.example/mcp",
+      runtime: {
+        available: true,
+        mcpServerId: "cap-redacted-error",
+        transport: "streamable-http",
+        notes: null,
+      },
+    });
+    const fixtureSecret = "fixture-secret-value";
+    const fixturePassword = "fixture-password-value";
+
+    let message = "";
+    try {
+      await validateMcpCapabilityConnection(item, async () => {
+        throw new Error(
+          `HTTP 401 for https://fixture-user:${fixturePassword}@provider.example/mcp?token=${fixtureSecret}`,
+        );
+      });
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+
+    expect(message).toContain("OpenGeni could not initialize configured.example");
+    expect(message).not.toContain(fixturePassword);
+    expect(message).not.toContain(fixtureSecret);
+    expect(message).not.toContain("fixture-user");
+    expect(message).not.toContain("?");
+  });
+
   test("reports invalid MCP catalog endpoints with human copy", async () => {
     const item = capabilityItem({
       id: "mcp:gmail",
@@ -738,7 +772,7 @@ describe("API helpers", () => {
         throw new Error("Streamable HTTP error: POSTing to endpoint: HTTP 404 Not Found");
       }),
     ).rejects.toThrow(
-      'MCP capability "Gmail" could not be enabled because OpenGeni could not reach a valid Streamable HTTP MCP server at https://gmail.googleapis.com/mcp. Check the endpoint URL or choose a different catalog entry.',
+      'MCP capability "Gmail" could not be enabled because OpenGeni could not reach a valid Streamable HTTP MCP server at gmail.googleapis.com. Check the endpoint URL or choose a different catalog entry.',
     );
   });
 

@@ -75,7 +75,7 @@ function createActivityServices(
         // broker binding (the same `createNatsEventBus(natsUrl)`) here AND on
         // the mounted API, so the two SEPARATE processes share one broker and
         // derive the IDENTICAL `sessionSubject` — the only way live fanout
-        // (worker emit → API SSE) works cross-process (SPIKE-1 F5/F6, proven).
+        // (worker emit → API SSE) works cross-process (schema-isolation contract F5/F6, proven).
         // NEVER default to an in-memory bus: it fans out intra-process only and
         // would silently break live SSE. unset → today's NATS default,
         // byte-for-byte. The bus is live-fanout ONLY — the durable Postgres
@@ -106,7 +106,7 @@ function createActivityServices(
         // local ledger exactly as today (mirrors `wakeSessionWorkflow`'s
         // null-degrades-gracefully shape, not a `createX(settings)` default).
         entitlements: dependencies.entitlements ?? null,
-        // §7.6 P4a — host connection-credential provider. No constructed
+        // §7.6 connection-credential provider — host connection-credential provider. No constructed
         // default: standalone owns its own GitHub App + encryption key, so unset
         // → null → the per-run credential mint self-mints from `settings`
         // (createGitHubAppInstallationToken + environmentsEncryptionKeyBytes)

@@ -148,7 +148,7 @@ failure surfaces as sanitized typed truth with SQLSTATE, stage, one correlation
 ID, an equally sanitized typed cause, and allowlisted catalog identifiers—never
 raw SQL text, a raw driver cause, or bound parameters.
 
-After a reviewed release reaches staging, run the dry-by-default OPE-63 canary
+After a reviewed release reaches staging, run the dry-by-default event-ordering invariant canary
 with `bun run canary:session-event-ordering`. Execution requires
 `OPENGENI_CANARY_EXECUTE=1`, the API base URL, workspace ID, and exactly one
 canary API credential. It creates one isolated `sandboxBackend=none` session on

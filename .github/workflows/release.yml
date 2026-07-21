@@ -531,7 +531,7 @@ jobs:
             ghcr.io/cloudgeni-ai/opengeni-web:sha-${{ steps.meta.outputs.sha }}
             ghcr.io/cloudgeni-ai/opengeni-web:latest
 
-      # The bring-your-own-compute stream relay (dossier §17). A single-stage
+      # The bring-your-own-compute stream relay. A single-stage
       # distroless image built from the Rust agent workspace — its build context is
       # agent/ (NOT the repo root) because the relay shares the agent-stream codec
       # and the Dockerfile COPYs the whole `agent/` Cargo workspace. The digest is

@@ -1,4 +1,4 @@
-//! Per-token leaky-bucket rate limiting (dossier §10.5/§18).
+//! Per-token leaky-bucket rate limiting.
 //!
 //! Each splice direction is metered by a [`LeakyBucket`] keyed by the presenting
 //! token's scope, so one noisy stream can never starve the relay or another tenant

@@ -1,4 +1,4 @@
-// M1 B-suite integration (dossier §12 B1–B7, §14). Drives REAL agent bash turns
+// Workspace-capture integration suite. Drives REAL agent bash turns
 // on the docker sandbox backend through the running dev stack (API :8001 +
 // worker + docker box) via the public SDK seed harness, then inspects the
 // persisted capture: the DB rows (postgres, superuser bypasses RLS) and the

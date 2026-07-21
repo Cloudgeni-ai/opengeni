@@ -1,7 +1,7 @@
 //! The resiliency supervisor: dial → serve → reconnect, forever, with full-jitter
 //! backoff, fast heartbeats, and a clean SIGINT/SIGTERM going-offline.
 //!
-//! This is the runtime heart of the FOREGROUND run model (dossier §23.0) and the
+//! This is the runtime heart of the FOREGROUND run model and the
 //! headline resiliency pillar (§10.6). The supervisor:
 //!
 //! 1. **Dials** the control plane over NATS with the enrollment Account creds and
@@ -68,7 +68,7 @@ type BulkLane = Arc<std::sync::RwLock<Option<tokio::sync::mpsc::Sender<(String, 
 
 /// Errors that abort the supervisor's *current connection* (it then backs off and
 /// retries). Both variants are transient — a deliberate stop is a clean shutdown,
-/// not an error (dossier §23.0).
+/// not an error.
 #[derive(Debug, Error)]
 pub enum SupervisorError {
     /// The NATS connection could not be established or was lost. Transient — the
@@ -79,8 +79,7 @@ pub enum SupervisorError {
     /// responder denied it: a revoked/expired enrollment, or an unconfigured
     /// credential plane). A CLEAR, typed authentication failure — NOT a panic. It is
     /// still treated as a (slow) retry by the supervise loop because a re-enroll can
-    /// rotate the bearer in place (dossier M-AUTH: "a rotated bearer on re-enroll
-    /// works"); the agent loudly logs the auth denial each attempt so the operator
+    /// rotate the bearer in place; the agent loudly logs the auth denial each attempt so the operator
     /// knows to re-enroll rather than wait on a transient blip.
     #[error("control plane rejected the enrollment bearer (re-enroll may be required): {0}")]
     Authentication(String),
@@ -343,7 +342,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                 // A CLEAR auth denial (not a panic): log it loudly so the operator
                 // knows a re-enroll may be needed, then treat it as a (slow) retry —
                 // a re-enroll can rotate the bearer in place and the next attempt
-                // re-presents it (dossier M-AUTH).
+                // re-presents it.
                 error!(error = %e, "control plane rejected the enrollment bearer; will keep retrying — re-enroll if this persists");
                 return ConnectionOutcome::Disconnected(e.to_string());
             }
@@ -720,7 +719,7 @@ impl<P: Platform + 'static> Supervisor<P> {
     }
 
     /// Dials NATS presenting the enrollment BEARER as the connect auth-token (the
-    /// AUTH-CALLOUT model, dossier §10.1 / M-AUTH): the server delegates to the
+    /// AUTH-CALLOUT model, / M-AUTH): the server delegates to the
     /// control-plane callout responder, which validates the bearer and returns a
     /// workspace-scoped user JWT — so this connection can pub/sub ONLY
     /// `agent.<ws>.>` (+ `_INBOX.>`). The URL(s) are `wss://` (the relay-symmetric
@@ -1586,10 +1585,7 @@ mod tests {
                 }
                 match tokio::time::timeout(remaining, sub.next()).await {
                     Ok(Some(msg)) => {
-                        if AgentEvent::decode(msg.payload.as_ref())
-                            .ok()
-                            .is_some_and(|e| pred(&e))
-                        {
+                        if AgentEvent::decode(msg.payload.as_ref()).is_ok_and(|e| pred(&e)) {
                             return true;
                         }
                     }

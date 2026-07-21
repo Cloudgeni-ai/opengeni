@@ -1,5 +1,4 @@
-// packages/runtime/src/sandbox/channel-a.ts — the Channel-A structured services
-// (P4.4 / modules/08-channel-a.md §4), provider-agnostic, called API-DIRECT.
+// Provider-agnostic structured sandbox services, called API-direct.
 //
 // THE NON-PIXEL SURFACE: file tree + read/write (the Pierre tree), git
 // status/diff hunks (the Pierre diff), and a terminal exec + interactive PTY.
@@ -8,10 +7,9 @@
 // op, returns inline JSON, and drops the handle. There is NO ownership/singleton
 // here — the live handle is whatever the caller resumed; it is non-owned and
 // dropped when the call returns. The same module is importable by the worker's
-// agent-turn for the A1 fs.changed side-effect it produces in-process.
+// agent turn for the fs.changed side effect it produces in-process.
 //
-// SDK GROUNDING (the load-bearing reality — see the adversarial review in the
-// module spec). Built on `session.exec(args): Promise<SandboxExecResult>` which
+// Built on `session.exec(args): Promise<SandboxExecResult>`, which
 // returns RAW {stdout,stderr,exitCode} on the agents-core local/docker sessions
 // (and Modal/the extensions providers expose the equivalent). `execCommand`
 // returns a BANNER-DECORATED string (formatExecResponse) — NEVER used for

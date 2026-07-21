@@ -21,9 +21,9 @@ import "./queue-harness.css";
 
 declare global {
   interface Window {
-    __OPE9_PROMPT__: string;
-    __ope9AppendQueuePrompt?: () => void;
-    __ope9SetQueueLoading?: (loading: boolean) => void;
+    __queuePrompt: string;
+    __queueAppendQueuePrompt?: () => void;
+    __queueSetQueueLoading?: (loading: boolean) => void;
   }
 }
 
@@ -61,7 +61,7 @@ function makeTurn(index: number): SessionTurn {
     workspaceId: "11111111-1111-4111-8111-111111111111",
     sessionId: "22222222-2222-4222-8222-222222222222",
     triggerEventId: `${String(index + 1).padStart(8, "0")}-3333-4333-8333-${suffix}`,
-    temporalWorkflowId: "ope-9-queue-browser-harness",
+    temporalWorkflowId: "queue-queue-browser-harness",
     status: "queued",
     source: "user",
     position: index + 1,
@@ -171,13 +171,13 @@ function QueueHarness() {
   const [clearMutationErrorCount, setClearMutationErrorCount] = useState(0);
 
   useEffect(() => {
-    window.__OPE9_PROMPT__ = turns[0]?.prompt ?? "";
-    window.__ope9AppendQueuePrompt = () =>
+    window.__queuePrompt = turns[0]?.prompt ?? "";
+    window.__queueAppendQueuePrompt = () =>
       setTurns((current) => [...current, makeTurn(current.length)]);
-    window.__ope9SetQueueLoading = setLoading;
+    window.__queueSetQueueLoading = setLoading;
     return () => {
-      delete window.__ope9AppendQueuePrompt;
-      delete window.__ope9SetQueueLoading;
+      delete window.__queueAppendQueuePrompt;
+      delete window.__queueSetQueueLoading;
     };
   }, [turns]);
 
@@ -226,7 +226,7 @@ function QueueHarness() {
         <header className="flex h-12 shrink-0 items-center justify-between border-b border-border px-4">
           <div>
             <h1 className="text-xs font-semibold">Queued prompt presentation</h1>
-            <p className="text-2xs text-fg-subtle">Deterministic OPE-9 browser fixture</p>
+            <p className="text-2xs text-fg-subtle">Deterministic queue UX browser fixture</p>
           </div>
           <span className="rounded-md border border-border px-2 py-1 text-2xs text-fg-muted">
             {theme} · {readOnly ? "read-only" : "interactive"}

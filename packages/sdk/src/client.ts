@@ -135,7 +135,7 @@ import type {
   GitLogResponse,
   GitShowRequest,
   GitShowResponse,
-  // Workbench v2 turn-end capture reads (M2, dossier §10.3).
+  // Workbench v2 turn-end capture reads (M2).
   GetWorkspaceCaptureResponse,
   GetWorkspaceCaptureFileResponse,
   TerminalExecRequest,

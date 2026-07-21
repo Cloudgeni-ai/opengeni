@@ -1,5 +1,5 @@
 // packages/events/src/nats-jwt.ts — NATS JWT v2 signing for the auth-callout
-// responder (bring-your-own-compute M-AUTH; dossier §10.1 NATS Accounts per
+// responder (bring-your-own-compute M-AUTH; NATS Accounts per
 // workspace + §17 the isolation smoke).
 //
 // This is the cryptographic core of the auth-callout tenancy boundary. When an

@@ -175,7 +175,7 @@ describe("P1.2 establishSandboxSessionFromEnvelope (unix_local)", () => {
   });
 
   test("the box is created with the SAME manifest environment the agent declares (no provided-session env delta)", async () => {
-    // BUG-1 regression (the turn-killer). The box is injected NON-OWNED and the
+    // Ownership regression (the turn-killer). The box is injected NON-OWNED and the
     // SDK then applies the AGENT's declared manifest to it as a provided-session
     // delta; applyManifestToProvidedSession throws on ANY environment delta. So
     // the box's manifest environment MUST equal the agent's declared environment.

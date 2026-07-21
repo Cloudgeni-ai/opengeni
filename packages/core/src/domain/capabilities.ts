@@ -568,14 +568,23 @@ async function probeStreamableHttpMcpServer(
 function mcpProbeErrorMessage(error: unknown, endpointUrl: string): string {
   const message = error instanceof Error ? error.message : String(error);
   const normalized = message.replace(/\s+/g, " ").trim();
+  const endpoint = safeEndpointLabel(endpointUrl);
   if (
     /404|405|not found|unexpected token|not valid json|invalid json|failed to parse|streamable http error|unable to connect|fetch failed|econnrefused|enotfound|timeout|aborted/i.test(
       normalized,
     )
   ) {
-    return `OpenGeni could not reach a valid Streamable HTTP MCP server at ${endpointUrl}. Check the endpoint URL or choose a different catalog entry.`;
+    return `OpenGeni could not reach a valid Streamable HTTP MCP server at ${endpoint}. Check the endpoint URL or choose a different catalog entry.`;
   }
-  return `OpenGeni could not initialize ${endpointUrl}: ${normalized.slice(0, 500) || "unknown error"}`;
+  return `OpenGeni could not initialize ${endpoint}. Check the endpoint configuration or try again.`;
+}
+
+function safeEndpointLabel(endpointUrl: string): string {
+  try {
+    return new URL(endpointUrl).hostname || "the configured endpoint";
+  } catch {
+    return "the configured endpoint";
+  }
 }
 
 export async function disableCapability(input: {

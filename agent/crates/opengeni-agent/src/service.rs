@@ -1,7 +1,7 @@
 //! The opt-in service install/uninstall/start/stop/status handlers.
 //!
-//! The default supported model is FOREGROUND `run`; this is the explicit opt-in
-//! (dossier §23.0/§23.1). The cross-platform service mechanism lives in
+//! The default supported model is FOREGROUND `run`; this module provides the
+//! explicit opt-in service path. The cross-platform service mechanism lives in
 //! [`opengeni_agent_platform::service`] (one trait, cargo-unit-tested); this module
 //! is the thin binary-side glue that resolves the installed binary path, writes the
 //! rendered unit/plist, and drives the platform service tool (`systemctl` /

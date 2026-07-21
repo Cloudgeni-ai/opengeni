@@ -1020,9 +1020,9 @@ async function installQuiescenceReceiptFault(
   failures: number,
 ): Promise<{ attempts: () => Promise<number>; drop: () => Promise<void> }> {
   const suffix = crypto.randomUUID().replaceAll("-", "").slice(0, 16);
-  const sequence = `ope75_quiescence_fault_seq_${suffix}`;
-  const triggerFunction = `ope75_quiescence_fault_fn_${suffix}`;
-  const trigger = `ope75_quiescence_fault_tr_${suffix}`;
+  const sequence = `quiescence_fault_seq_${suffix}`;
+  const triggerFunction = `quiescence_fault_fn_${suffix}`;
+  const trigger = `quiescence_fault_tr_${suffix}`;
   await admin.unsafe(`
     create sequence public.${sequence};
     create function public.${triggerFunction}()
@@ -1041,7 +1041,7 @@ async function installQuiescenceReceiptFault(
         if fault_attempt <= ${failures} then
           raise exception using
             errcode = '40001',
-            message = 'OPE-75 injected quiescence receipt serialization failure';
+            message = 'injected quiescence receipt serialization failure';
         end if;
       end if;
       return new;

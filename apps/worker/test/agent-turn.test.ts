@@ -91,7 +91,7 @@ async function actualCodexStreamingFailure(event: Record<string, unknown>): Prom
     isFedramp: false,
   };
   const context: CodexRequestContext = {
-    clientVersion: "ope64-worker-test",
+    clientVersion: "largeoutput-worker-test",
     getToken: async () => token,
     refresh: async () => token,
     resolveModel: (model) => model,
@@ -134,7 +134,7 @@ async function actualCodexNullBodyFailure(): Promise<{ calls: number; error: unk
     isFedramp: false,
   };
   const context: CodexRequestContext = {
-    clientVersion: "ope64-worker-test",
+    clientVersion: "largeoutput-worker-test",
     getToken: async () => token,
     refresh: async () => token,
     resolveModel: (model) => model,

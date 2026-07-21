@@ -211,7 +211,7 @@ describe("ChatComposer delivery and lifecycle controls", () => {
     const workspaceBlocker = {
       kind: "workspace" as const,
       displayName: "Cloudgeni",
-      actor: "Jorge",
+      actor: "Example User",
       reason: "Maintenance",
       changedAt: "2026-07-16T12:00:00.000Z",
       revision: 8,
