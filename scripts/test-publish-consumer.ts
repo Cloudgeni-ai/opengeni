@@ -159,6 +159,21 @@ try {
   const versions = await workspaceVersions();
   const sdk = await stageTarball("packages/sdk", stagingRoot, tarballRoot, versions);
   const react = await stageTarball("packages/react", stagingRoot, tarballRoot, versions);
+  const runtime = await stageTarball("packages/runtime", stagingRoot, tarballRoot, versions);
+  const runtimeLocalDependencies = await Promise.all(
+    ["packages/agent-proto", "packages/codex", "packages/config", "packages/contracts"].map(
+      (directory) => stageTarball(directory, stagingRoot, tarballRoot, versions),
+    ),
+  );
+  const runtimeLocalDependencyFiles = Object.fromEntries(
+    runtimeLocalDependencies.map(({ manifest, tarball }) => [manifest.name, `file:${tarball}`]),
+  );
+  const runtimeTarballContents = await run(["tar", "-tzf", runtime.tarball], consumerRoot, true);
+  for (const artifact of ["package/dist/skill-library.js", "package/dist/skill-library.d.ts"]) {
+    if (!runtimeTarballContents.split("\n").includes(artifact)) {
+      throw new Error(`runtime tarball is missing ${artifact}`);
+    }
+  }
   const rootManifest = JSON.parse(
     await readFile(join(repoRoot, "package.json"), "utf8"),
   ) as PackageManifest;
@@ -181,6 +196,7 @@ try {
       ...(reactSource.peerDependencies ?? {}),
       "@opengeni/react": `file:${react.tarball}`,
       "@opengeni/sdk": sdkFile,
+      "@opengeni/runtime": `file:${runtime.tarball}`,
     },
     devDependencies: {
       "@tailwindcss/vite": reactSource.devDependencies?.["@tailwindcss/vite"],
@@ -192,7 +208,10 @@ try {
       tailwindcss: reactSource.devDependencies?.tailwindcss,
       vite: reactSource.devDependencies?.vite,
     },
-    overrides: { "@opengeni/sdk": sdkFile },
+    overrides: {
+      "@opengeni/sdk": sdkFile,
+      ...runtimeLocalDependencyFiles,
+    },
   };
 
   await Promise.all([
@@ -212,7 +231,7 @@ try {
             noEmit: true,
             types: ["node", "vite/client"],
           },
-          include: ["browser.tsx", "ssr.tsx", "vite.config.ts"],
+          include: ["browser.tsx", "runtime-proof.ts", "ssr.tsx", "vite.config.ts"],
         },
         null,
         2,
@@ -238,6 +257,10 @@ try {
       join(consumerRoot, "ssr.tsx"),
       'import { OpenGeniProvider, SandboxWorkspace } from "@opengeni/react";\nimport { OpenGeniClient } from "@opengeni/sdk";\nimport { renderToStaticMarkup } from "react-dom/server";\nconst client = new OpenGeniClient({ baseUrl: "https://api.example.invalid" });\nconst markup = renderToStaticMarkup(<OpenGeniProvider client={client} workspaceId="clean-consumer"><SandboxWorkspace sessionId="package-proof" events={[]} primary={<main>Clean consumer SSR proof</main>} collapsed /></OpenGeniProvider>);\nif (!markup.includes("Clean consumer SSR proof")) throw new Error("SSR output lost the primary pane");\nconsole.log(`SSR_OK bytes=${new TextEncoder().encode(markup).byteLength}`);\n',
     ),
+    writeFile(
+      join(consumerRoot, "runtime-proof.ts"),
+      'import { getSkillLibraryEntry, listSkillLibraryEntries } from "@opengeni/runtime/skill-library";\nconst entry = getSkillLibraryEntry("azure-verified-modules", "1.0.0");\nif (!entry) throw new Error("packed runtime skill-library entry was not available");\nif (!listSkillLibraryEntries().some((candidate) => candidate.id === entry.id && candidate.version === entry.version)) throw new Error("packed runtime skill-library list did not include the entry");\nconsole.log(`RUNTIME_SKILL_LIBRARY_OK version=${entry.version} hash=${entry.contentSha256}`);\n',
+    ),
   ]);
 
   process.stdout.write("[publish-consumer] installing release-shaped tarballs\n");
@@ -248,6 +271,7 @@ try {
   await run(["bun", "run", "typecheck"], consumerRoot);
   await run(["bun", "run", "build"], consumerRoot);
   await run(["bun", "run", "ssr"], consumerRoot);
+  await run(["bun", "run", "runtime-proof.ts"], consumerRoot);
 
   const assetRoot = join(consumerRoot, "dist", "assets");
   const cssFiles = (await readdir(assetRoot)).filter((file) => file.endsWith(".css"));
@@ -260,7 +284,7 @@ try {
 
   passed = true;
   process.stdout.write(
-    `[publish-consumer] PASS ${sdk.manifest.name}@${sdk.manifest.version} + ${react.manifest.name}@${react.manifest.version}; strict types, browser CSS, and SSR are clean.\n`,
+    `[publish-consumer] PASS ${sdk.manifest.name}@${sdk.manifest.version} + ${react.manifest.name}@${react.manifest.version} + ${runtime.manifest.name}@${runtime.manifest.version}; strict types, browser CSS, SSR, and packed skill-library imports are clean.\n`,
   );
 } finally {
   if (passed && !keepArtifacts) {

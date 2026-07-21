@@ -1,5 +1,13 @@
 import { ExternalLinkIcon, Loader2Icon, PlugIcon, RefreshCwIcon, TrashIcon } from "lucide-react";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+  type RefObject,
+} from "react";
 
 import { CapabilityLogo } from "@/components/capabilities/capability-logo";
 import { Button } from "@/components/ui/button";
@@ -19,6 +27,7 @@ import {
   capabilityKindLabel,
   capabilityReconnectPlan,
   capabilitySourceLabel,
+  curatedSkillProvenance,
   GENERIC_API_KEY_FIELD,
   type ConnectionHealth,
 } from "@/lib/capabilities";
@@ -54,6 +63,7 @@ export function CapabilityDetailSheet({
   logoSrc,
   open,
   onOpenChange,
+  restoreFocusRef,
   busy,
   errorMessage,
   onAction,
@@ -63,13 +73,39 @@ export function CapabilityDetailSheet({
   logoSrc: string | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  restoreFocusRef?: RefObject<HTMLElement | null>;
   busy: boolean;
   errorMessage: string | null;
   onAction: (action: ConnectAction) => void;
 }) {
+  const localRestoreFocusRef = useRef<HTMLElement | null>(null);
+  const focusRef = restoreFocusRef ?? localRestoreFocusRef;
+
+  // Capture before Radix's focus scope moves focus into the sheet. Routes pass
+  // a synchronously captured opener for click/keyboard activation; this local
+  // fallback keeps the controlled sheet safe for other callers too.
+  useLayoutEffect(() => {
+    if (!open) return;
+    if (focusRef.current) return;
+    const active = document.activeElement;
+    if (active instanceof HTMLElement && active !== document.body) {
+      focusRef.current = active;
+    }
+  }, [focusRef, open]);
+
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
-      <SheetContent className="w-full gap-0 border-border bg-bg p-0 sm:max-w-[30rem]">
+      <SheetContent
+        className="w-full gap-0 border-border bg-bg p-0 sm:max-w-[30rem]"
+        onCloseAutoFocus={(event) => {
+          const opener = focusRef.current;
+          focusRef.current = null;
+          if (opener?.isConnected) {
+            event.preventDefault();
+            opener.focus();
+          }
+        }}
+      >
         {item ? (
           <DetailBody
             item={item}
@@ -167,6 +203,8 @@ function DetailBody({
           ) : null}
         </dl>
 
+        <CuratedSkillProvenanceSection item={item} />
+
         {/* Action — flows directly after the content so a sparse item stays a
             compact top-flowing column, with no dead void before a bottom-pinned
             button. The whole body scrolls only when content actually overflows. */}
@@ -228,7 +266,7 @@ function DetailBody({
                 <Button
                   type="button"
                   variant="outline"
-                  className="w-full text-status-failed hover:bg-status-failed/10 hover:text-status-failed"
+                  className="w-full text-status-failed hover:bg-status-failed/10 hover:text-status-failed pointer-coarse:min-h-11"
                   disabled={busy}
                   onClick={() => onAction({ type: "disable", item })}
                 >
@@ -286,13 +324,80 @@ function DetailBody({
               onClick={() => onAction({ type: "enable", item })}
             >
               {busy ? <Loader2Icon className="animate-spin" /> : <PlugIcon />}
-              {item.kind === "mcp" || item.kind === "pack" ? "Enable" : "Track"}
+              Enable
             </Button>
           )}
         </div>
       </div>
     </div>
   );
+}
+
+function CuratedSkillProvenanceSection({ item }: { item: CapabilityCatalogItem }) {
+  const metadata = curatedSkillProvenance(item);
+  if (!metadata) return null;
+
+  return (
+    <section
+      aria-labelledby="curated-skill-provenance-heading"
+      className="space-y-2.5 border-t border-border pt-5"
+    >
+      <div>
+        <h3 id="curated-skill-provenance-heading" className="text-sm font-medium text-fg">
+          Curated skill provenance
+        </h3>
+        <p className="mt-1 text-xs leading-5 text-fg-subtle">
+          Immutable reviewed metadata for the exact artifact selected by this workspace.
+        </p>
+      </div>
+      <dl className="grid gap-2.5 text-xs">
+        <MetaRow label="Status">
+          <span className="font-medium text-fg">
+            {metadata.status === "enabled" ? "Enabled" : "Not enabled"}
+          </span>
+        </MetaRow>
+        <MetaRow label="Effective selection">
+          <span className="min-w-0 break-words text-right">
+            {humanizeSelection(metadata.effectiveSelection)}
+          </span>
+        </MetaRow>
+        <MetaRow label="Version (immutable)">
+          <span className="font-mono text-fg-muted">{metadata.version ?? "Unavailable"}</span>
+        </MetaRow>
+        <MetaRow label="Artifact SHA-256">
+          <span className="min-w-0 break-all font-mono text-fg-muted">
+            {metadata.contentSha256 ?? "Unavailable"}
+          </span>
+        </MetaRow>
+        <MetaRow label="Source commit">
+          <span className="min-w-0 break-all font-mono text-fg-muted">
+            {metadata.sourceCommit ?? "Unavailable"}
+          </span>
+        </MetaRow>
+        <MetaRow label="Provenance">
+          <span className="min-w-0 break-words text-right text-fg-muted">
+            {metadata.provenance ?? "Unavailable"}
+          </span>
+        </MetaRow>
+        {metadata.sourceUrl ? (
+          <MetaRow label="Source">
+            <ExternalMetaLink href={metadata.sourceUrl} />
+          </MetaRow>
+        ) : null}
+        {metadata.documentationUrl ? (
+          <MetaRow label="Documentation">
+            <ExternalMetaLink href={metadata.documentationUrl} />
+          </MetaRow>
+        ) : null}
+        {metadata.license ? <MetaRow label="License">{metadata.license}</MetaRow> : null}
+      </dl>
+    </section>
+  );
+}
+
+function humanizeSelection(value: string): string {
+  const normalized = value.replaceAll("_", " ").trim();
+  return normalized ? normalized.charAt(0).toUpperCase() + normalized.slice(1) : "Unknown";
 }
 
 function OAuthClientForm({

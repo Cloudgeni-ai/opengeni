@@ -94,6 +94,7 @@ export function CapabilitiesRoute({
   // (strip disable, pack disable, background reload) re-derives the sheet instead
   // of leaving it on a stale snapshot that could re-enable what was just disabled.
   const [selected, setSelected] = useState<SheetSelection | null>(null);
+  const sheetOpenerRef = useRef<HTMLElement | null>(null);
   const [sheetError, setSheetError] = useState<string | null>(null);
   const [addOpen, setAddOpen] = useState(false);
 
@@ -202,6 +203,9 @@ export function CapabilitiesRoute({
   // snapshot until persisted); the add-custom flow passes it explicitly for a
   // just-created item whose row may not be in `items` yet.
   function openItem(item: CapabilityCatalogItem, registry = false, snapshotFallback = registry) {
+    const active = document.activeElement;
+    sheetOpenerRef.current =
+      active instanceof HTMLElement && active !== document.body ? active : null;
     setSheetError(null);
     setSelected({ id: item.id, registry, snapshotFallback, snapshot: item });
   }
@@ -358,13 +362,11 @@ export function CapabilitiesRoute({
         return;
       }
 
-      // Plain enable / track (no credentials).
+      // Plain enable (no credentials).
       await client.enableCapability(workspaceId, persisted.id);
       await refresh();
       if (persisted.kind === "mcp") onRuntimeChanged();
-      toast.success(
-        persisted.kind === "mcp" ? `Enabled ${persisted.name}` : `Tracking ${persisted.name}`,
-      );
+      toast.success(`Enabled ${persisted.name}`);
       setSelected(null);
     } catch (error) {
       const copy = capabilityErrorToast(error, "Something went wrong");
@@ -560,7 +562,7 @@ export function CapabilitiesRoute({
           toast.success(
             created.kind === "mcp"
               ? `Added and enabled ${created.name}`
-              : `Added and tracking ${created.name}`,
+              : `Added and enabled ${created.name}`,
           );
         } else {
           toast.success(`Added ${created.name}`);
@@ -861,6 +863,7 @@ export function CapabilitiesRoute({
         health={selectedHealth}
         logoSrc={selectedItem ? logoUrl(selectedItem) : null}
         open={selectedItem !== null}
+        restoreFocusRef={sheetOpenerRef}
         onOpenChange={(open) => {
           if (!open) {
             setSelected(null);

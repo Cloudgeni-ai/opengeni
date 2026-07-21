@@ -31,7 +31,7 @@ The probe runs with those headers, and on success the values are stored encrypte
 
 Registry entries that declare required headers are tagged `requires-credentials` and cannot be enabled until the declared headers are supplied.
 
-APIs, skills, and plugins are tracked in the same catalog and install table so operators can build a role-oriented workspace inventory. Built-in APIs and bundled skills are already available. Custom APIs, skills, and plugins need their own adapter or runtime implementation before tracking them changes agent execution.
+APIs, skills, and plugins use the same catalog and enablement table so operators can build a role-oriented workspace inventory. Built-in APIs and bundled skills are already available. Custom APIs, skills, and plugins need their own adapter or runtime implementation before enabling them changes agent execution.
 
 ## Curated skill library
 
@@ -118,7 +118,7 @@ Open the **Capabilities** view in the web app to:
 - filter and search the local catalog
 - enable role packs
 - add and enable public MCP Registry results
-- add manual MCP entries and track API/skill/plugin entries
+- add manual MCP entries and enable API/skill/plugin entries
 - select enabled custom MCPs in the agent composer
 
 The official MCP Registry is public metadata. Evaluate any server and its endpoint before enabling it in a workspace with sensitive data.

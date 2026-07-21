@@ -10,6 +10,7 @@ export default defineConfig({
   entry: {
     index: "src/index.ts",
     "sandbox/index": "src/sandbox/index.ts",
+    "skill-library": "src/skill-library.ts",
   },
   format: ["esm"],
   target: "es2022",

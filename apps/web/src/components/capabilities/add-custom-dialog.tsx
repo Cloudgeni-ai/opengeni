@@ -26,7 +26,7 @@ const KINDS: AddableKind[] = ["mcp", "api", "skill", "plugin"];
 
 /**
  * "Add custom" — kind-aware so only MCP servers ask for an endpoint URL. APIs,
- * skills, and plugins are tracked by name (the user's complaint was being asked
+ * skills, and plugins are enabled by name (the user's complaint was being asked
  * for an endpoint when adding a skill). Packs keep their manifest flow in the
  * Packs section, so they are not offered here.
  */
@@ -58,7 +58,7 @@ export function AddCustomDialog({
         <DialogHeader>
           <DialogTitle>Add a custom capability</DialogTitle>
           <DialogDescription>
-            Connect a remote MCP server, or track an API, skill, or plugin your team uses.
+            Connect a remote MCP server, or enable an API, skill, or plugin your team uses.
           </DialogDescription>
         </DialogHeader>
 
@@ -155,7 +155,7 @@ export function AddCustomDialog({
               onChange={(event) => update({ enableAfterAdd: event.target.checked })}
               className="size-4 accent-brand"
             />
-            {isMcp ? "Enable after adding" : "Track after adding"}
+            Enable after adding
           </label>
 
           <DialogFooter>
