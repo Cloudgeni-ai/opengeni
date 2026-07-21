@@ -5,7 +5,7 @@
 //! subscribes to a subject that IS its identity (`agent.<ws>.<id>.rpc`), and
 //! answers control RPCs (exec / filesystem / git today; terminal + desktop
 //! streams in M8) against the host — all with bulletproof, full-jitter reconnect
-//! resiliency (dossier §10.6) and a clean SIGINT/SIGTERM going-offline (§23.0).
+//! resiliency and a clean SIGINT/SIGTERM going-offline (§23.0).
 //!
 //! # Architecture (M6)
 //!
@@ -96,7 +96,7 @@ fn main() -> std::process::ExitCode {
 }
 
 /// Initializes structured `tracing` from `$RUST_LOG` (default `info`). Secret
-/// values are NEVER logged (dossier §10.6); only op labels, counts, and timings.
+/// values are NEVER logged; only op labels, counts, and timings.
 fn init_tracing() {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info,opengeni_agent=info"));
@@ -142,8 +142,8 @@ async fn dispatch_command(cli: Cli) -> anyhow_lite::Result {
 }
 
 /// Handles a bare `opengeni-agent` invocation (no subcommand) so a GUI launch of
-/// the .app bundle NEVER hangs as a headless zombie (dossier §23.0; the
-/// REPLACE_APP incident). Finder/Raycast/`open` exec the binary with no args and
+/// the `.app` bundle NEVER hangs as a headless zombie. Finder/Raycast/`open`
+/// execute the binary with no args and
 /// no TTY:
 ///   * already enrolled → behave exactly like `run` (a double-click starts the
 ///     agent — the nicest outcome; it serves deliberately until stopped);
@@ -401,7 +401,7 @@ async fn enroll_command(
     }
 
     // Non-interactive (CI/automation) enroll: a workspace-scoped token short-circuits
-    // the device flow (dossier §23.1). The token→credentials exchange is the M5
+    // the device flow. The token→credentials exchange is the M5
     // enrollment endpoint; until that endpoint accepts a token here we refuse loudly
     // rather than fall back to a device flow that would hang an unattended install.
     if args.non_interactive || args.token.is_some() {
@@ -479,7 +479,7 @@ async fn enroll_command(
     Ok(stored)
 }
 
-/// Non-interactive token enrollment (the CI/automation / fleet path, dossier
+/// Non-interactive token enrollment (the CI/automation / fleet path, design
 /// §23.1, spec §A2.4). A workspace-scoped enroll token IS the grant — there is no
 /// human approve step — so this exchanges it directly at the control plane's
 /// `POST /v1/enrollments/token/exchange` for the SAME credentials the device flow

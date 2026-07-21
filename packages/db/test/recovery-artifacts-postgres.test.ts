@@ -75,12 +75,12 @@ async function withAppTransaction<T>(
 async function fixture(initialMessage = "recovery fixture"): Promise<Fixture> {
   const suffix = crypto.randomUUID();
   const access = await bootstrapWorkspace(client.db, {
-    accountExternalSource: "ope62-test",
+    accountExternalSource: "recovery_artifact-test",
     accountExternalId: `account-${suffix}`,
-    accountName: "OPE-62 recovery artifact test",
-    workspaceExternalSource: "ope62-test",
+    accountName: "Recovery artifact recovery artifact test",
+    workspaceExternalSource: "recovery_artifact-test",
     workspaceExternalId: `workspace-${suffix}`,
-    workspaceName: "OPE-62 recovery artifact test",
+    workspaceName: "Recovery artifact recovery artifact test",
     subjectId: `subject-${suffix}`,
   });
   const grant = access.workspaceGrants[0]!;
@@ -196,18 +196,18 @@ beforeAll(async () => {
   }
   client = createDb(shared.appUrl);
   await shared.admin.unsafe(`
-    CREATE OR REPLACE FUNCTION public.ope62_admission_test_gate()
+    CREATE OR REPLACE FUNCTION public.recovery_artifact_admission_test_gate()
     RETURNS trigger LANGUAGE plpgsql AS $$
     BEGIN
-      IF current_setting('application_name', true) = 'ope62-gated-admit' THEN
+      IF current_setting('application_name', true) = 'recovery_artifact-gated-admit' THEN
         PERFORM pg_advisory_xact_lock(620062);
       END IF;
       RETURN NEW;
     END $$;
-    DROP TRIGGER IF EXISTS ope62_admission_test_gate ON recovery_history_admissions;
-    CREATE TRIGGER ope62_admission_test_gate
+    DROP TRIGGER IF EXISTS recovery_artifact_admission_test_gate ON recovery_history_admissions;
+    CREATE TRIGGER recovery_artifact_admission_test_gate
       BEFORE INSERT ON recovery_history_admissions
-      FOR EACH ROW EXECUTE FUNCTION public.ope62_admission_test_gate();
+      FOR EACH ROW EXECUTE FUNCTION public.recovery_artifact_admission_test_gate();
   `);
 }, 180_000);
 
@@ -409,7 +409,7 @@ describe("recovery revision fence mutation coverage", () => {
               (account_id, workspace_id, session_id, kind, classification,
                source_id, dedupe_key, summary, payload, lineage)
               values (${value.accountId}, ${value.workspaceId}, ${value.rootSessionId},
-                      'agent_steer_instruction', 'info', 'ope62-test',
+                      'agent_steer_instruction', 'info', 'recovery_artifact-test',
                       ${crypto.randomUUID()}, 'steer instruction',
                       '{"type":"agent_steer_instruction","instruction":"turn"}'::jsonb,
                       '{}'::jsonb)`;
@@ -435,7 +435,7 @@ describe("recovery revision fence mutation coverage", () => {
               (account_id, workspace_id, session_id, temporal_workflow_id,
                wake_revision, delivered_revision, reason)
               values (${value.accountId}, ${value.workspaceId}, ${value.rootSessionId},
-                      'ope62-workflow', 1, 0, 'goal_continuation')`;
+                      'recovery_artifact-workflow', 1, 0, 'goal_continuation')`;
           });
         },
       },
@@ -468,7 +468,7 @@ describe("recovery revision fence mutation coverage", () => {
             actor: { type: "human", subjectId: value.subjectId },
             operationKey: crypto.randomUUID(),
             action,
-            reason: "OPE-62 deterministic race",
+            reason: "Recovery artifact deterministic race",
           }),
         ),
       );
@@ -504,7 +504,7 @@ describe("recovery revision fence mutation coverage", () => {
           actor: { type: "human", subjectId: value.subjectId },
           operationKey: crypto.randomUUID(),
           action: "pause",
-          reason: "OPE-62 workspace fence",
+          reason: "Recovery artifact workspace fence",
         }),
       ),
     );
@@ -655,8 +655,8 @@ describe("recovery admission deterministic barrier races", () => {
   test("a committed writer holding the compatible barrier makes admission wait and reject stale input", async () => {
     const value = await fixture();
     const artifact = await precomputeAndPersist(value);
-    const writer = postgres(namedAppUrl("ope62-held-writer"), { max: 1 });
-    const admitClient = createDb(namedAppUrl("ope62-waiting-admit"));
+    const writer = postgres(namedAppUrl("recovery_artifact-held-writer"), { max: 1 });
+    const admitClient = createDb(namedAppUrl("recovery_artifact-waiting-admit"));
     const writerReady = deferred();
     const releaseWriter = deferred();
     const writerRun = withAppTransaction(writer, value, async (tx) => {
@@ -674,7 +674,7 @@ describe("recovery admission deterministic barrier races", () => {
       artifact,
       idempotencyKey: crypto.randomUUID(),
     });
-    await waitForDatabaseLock("ope62-waiting-admit");
+    await waitForDatabaseLock("recovery_artifact-waiting-admit");
     releaseWriter.resolve();
     await writerRun;
     expect(await admission).toEqual({ kind: "retry", reason: "session_tree_changed" });
@@ -687,15 +687,15 @@ describe("recovery admission deterministic barrier races", () => {
     const artifact = await precomputeAndPersist(value);
     const advisory = await shared.admin.reserve();
     await advisory`select pg_advisory_lock(620062)`;
-    const admitClient = createDb(namedAppUrl("ope62-gated-admit"));
-    const writer = postgres(namedAppUrl("ope62-late-writer"), { max: 1 });
+    const admitClient = createDb(namedAppUrl("recovery_artifact-gated-admit"));
+    const writer = postgres(namedAppUrl("recovery_artifact-late-writer"), { max: 1 });
     try {
       const admission = admitRecoveryArtifact(admitClient.db, {
         accountId: value.accountId,
         artifact,
         idempotencyKey: crypto.randomUUID(),
       });
-      await waitForDatabaseLock("ope62-gated-admit", "advisory");
+      await waitForDatabaseLock("recovery_artifact-gated-admit", "advisory");
 
       let writerSettled = false;
       const writerRun = withAppTransaction(writer, value, async (tx) => {
@@ -703,7 +703,7 @@ describe("recovery admission deterministic barrier races", () => {
       }).finally(() => {
         writerSettled = true;
       });
-      await waitForDatabaseLock("ope62-late-writer");
+      await waitForDatabaseLock("recovery_artifact-late-writer");
       expect(writerSettled).toBe(false);
 
       await advisory`select pg_advisory_unlock(620062)`;
@@ -723,20 +723,20 @@ describe("recovery admission deterministic barrier races", () => {
     const artifact = await precomputeAndPersist(value);
     const advisory = await shared.admin.reserve();
     await advisory`select pg_advisory_lock(620062)`;
-    const admitClient = createDb(namedAppUrl("ope62-gated-admit"));
-    const deletion = postgres(namedAdminUrl("ope62-delete-after-final-lock"), { max: 1 });
+    const admitClient = createDb(namedAppUrl("recovery_artifact-gated-admit"));
+    const deletion = postgres(namedAdminUrl("recovery_artifact-delete-after-final-lock"), { max: 1 });
     try {
       const admission = admitRecoveryArtifact(admitClient.db, {
         accountId: value.accountId,
         artifact,
         idempotencyKey: crypto.randomUUID(),
       });
-      await waitForDatabaseLock("ope62-gated-admit", "advisory");
+      await waitForDatabaseLock("recovery_artifact-gated-admit", "advisory");
 
       const deleteRun = Promise.resolve(
         deletion`delete from workspaces where id = ${value.workspaceId}`,
       );
-      await waitForDatabaseLock("ope62-delete-after-final-lock");
+      await waitForDatabaseLock("recovery_artifact-delete-after-final-lock");
 
       await advisory`select pg_advisory_unlock(620062)`;
       expect(await admission).toMatchObject({ kind: "admitted", reused: false });

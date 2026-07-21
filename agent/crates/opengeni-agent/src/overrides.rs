@@ -1,6 +1,6 @@
 //! Harness-only runtime overrides (`$OPENGENI_RUNNER_TEST_OVERRIDES`).
 //!
-//! The engine-era harness scenarios (`.agent/ENGINE-SCENARIOS.md`, open
+//! The engine-era harness scenarios (the engine scenario contract, open
 //! question 2) need to shrink derived budgets and cadences so bounds-and-
 //! eviction behavior is testable in seconds instead of gigabytes/hours:
 //! retention quotas (E4), the completed-op cap + TTLs (E9/E10), the

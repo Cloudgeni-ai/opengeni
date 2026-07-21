@@ -1,5 +1,5 @@
 // apps/api/src/sandbox/metrics-ingestion.ts — the M10 metrics INGESTION consumer
-// (dossier §10.7 + §10.6) + the connect-Hello DISPLAY-REFRESH consumer. The
+// + the connect-Hello DISPLAY-REFRESH consumer. The
 // enrolled agent piggybacks a `MetricsSample` on its ~5s heartbeat (an
 // `AgentEvent` published one-way on `agent.<ws>.<id>.events`) and publishes a
 // `Hello` (its live self-description) on `agent.<ws>.<id>.hello` on every connect

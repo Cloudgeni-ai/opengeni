@@ -79,6 +79,7 @@ describe("useWorkspaceSessions", () => {
     const client = fakeClient({
       listSessionPage: async () => ({
         pinned: [pinned],
+        pinnedTruncated: true,
         sessions: [ordinary],
         nextCursor: "next-page",
       }),
@@ -94,6 +95,7 @@ describe("useWorkspaceSessions", () => {
       "ordinary",
     ]);
     expect(hook.result.current.pinned.map((session) => session.id)).toEqual(["pinned"]);
+    expect(hook.result.current.pinnedTruncated).toBe(true);
     expect(hook.result.current.nextCursor).toBe("next-page");
     await hook.unmount();
   });

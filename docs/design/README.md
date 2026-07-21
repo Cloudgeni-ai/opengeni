@@ -4,4 +4,4 @@
 
 # Design Records
 
-Design files under `docs/design/` are historical records. Keep them for context, but do not treat their paths, package names, commands, or implementation status as current truth.
+Design files under `docs/design/` are public-safe historical records. Keep architecture and product rationale for context, but do not treat paths, package names, commands, or implementation status as current truth. Raw operator evidence, screenshots/video, reviewer transcripts, private issue links, production identifiers/metrics, personal paths, and credentials belong in private artifact storage.

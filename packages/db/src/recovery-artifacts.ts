@@ -972,7 +972,7 @@ export async function admitRecoveryArtifact(
   }
 }
 
-/** Called by OPE-63's persistence-only SQLSTATE retry seam; never wraps effects. */
+/** Called by the persistence-only SQLSTATE retry seam; never wraps effects. */
 export function recordRecoveryArtifactPersistenceRetry(
   observability: RecoveryArtifactObservability | undefined,
   phase: RecoveryArtifactRetryPhase,

@@ -38,12 +38,12 @@ let workspaceId: string | null = null;
 try {
   const suffix = crypto.randomUUID();
   const access = await bootstrapWorkspace(client.db, {
-    accountExternalSource: "ope62-benchmark",
+    accountExternalSource: "recovery-artifact-benchmark",
     accountExternalId: `account-${suffix}`,
-    accountName: "OPE-62 recovery artifact benchmark",
-    workspaceExternalSource: "ope62-benchmark",
+    accountName: "Recovery artifact benchmark",
+    workspaceExternalSource: "recovery-artifact-benchmark",
     workspaceExternalId: `workspace-${suffix}`,
-    workspaceName: "OPE-62 recovery artifact benchmark",
+    workspaceName: "Recovery artifact benchmark",
     subjectId: `benchmark-${suffix}`,
   });
   const grant = access.workspaceGrants[0];
@@ -105,7 +105,7 @@ try {
         ${workspaceId}::uuid,
         session.id,
         1,
-        'ope62.benchmark',
+        'recovery-artifact.benchmark',
         jsonb_build_object(
           'index', (session.metadata ->> 'bench_index')::integer,
           'padding', repeat('x', 128)

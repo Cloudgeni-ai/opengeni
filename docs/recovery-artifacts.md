@@ -5,7 +5,7 @@ persisting, and admitting an exact recovery-session history artifact. The
 canonical implementation is
 [`packages/db/src/recovery-artifacts.ts`](../packages/db/src/recovery-artifacts.ts);
 the database fence is migration
-[`0076_recovery_artifact_fence.sql`](../packages/db/drizzle/0076_recovery_artifact_fence.sql).
+[`0095_recovery_artifact_fence.sql`](../packages/db/drizzle/0095_recovery_artifact_fence.sql).
 
 ## Safety contract
 
@@ -155,9 +155,9 @@ precomputes plus persistence/admission, and recomputes the checksum in an
 independent Bun process:
 
 ```bash
-bun scripts/bench-recovery-artifacts.ts --sessions 1000 --output /tmp/ope62-1000.json
-bun scripts/bench-recovery-artifacts.ts --sessions 4000 --output /tmp/ope62-4000.json
-bun scripts/bench-recovery-artifacts.ts --sessions 10000 --output /tmp/ope62-10000.json
+bun scripts/bench-recovery-artifacts.ts --sessions 1000 --output /tmp/recovery-artifacts-1000.json
+bun scripts/bench-recovery-artifacts.ts --sessions 4000 --output /tmp/recovery-artifacts-4000.json
+bun scripts/bench-recovery-artifacts.ts --sessions 10000 --output /tmp/recovery-artifacts-10000.json
 ```
 
 With external PostgreSQL, set `OPENGENI_TEST_DATABASE_ADMIN_URL` and

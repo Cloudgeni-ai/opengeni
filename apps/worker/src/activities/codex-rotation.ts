@@ -540,7 +540,7 @@ export function chooseRotationActive(args: {
   // The active pointer is a cursor/manual preference, NOT a sticky lease. In
   // particular, most_remaining must rank the whole eligible pool every turn;
   // keeping a healthy active account until 90% was the production monopolization
-  // defect fixed by OPE-21. drain_then_next remains the one explicitly sticky
+  // defect fixed by credential allocator. drain_then_next remains the one explicitly sticky
   // strategy, and a manual pin is handled by the caller as explicit policy.
   const decide = (chosen: CodexRotationAccount | undefined): RotationDecision => {
     if (!chosen) {
@@ -759,8 +759,8 @@ export function selectCodexCredentialLeaseForTurn(args: {
     };
   }
 
-  // OPE-31 policy homes compose with OPE-21 by sharding only the candidate list
-  // handed to this selector. A future OPE-32 filter may therefore choose one
+  // Pin-policy homes compose with the credential allocator by sharding only the candidate list
+  // handed to this selector. A future policy filter may therefore choose one
   // primary/fallback pool before this ranker runs; accounts from different pools
   // are never union-ranked here.
   if (pinDisposition === "sharded") {

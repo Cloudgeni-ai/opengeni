@@ -1,4 +1,4 @@
-//! A bounded replay ring buffer for stream-frame resume (dossier §10.5/§10.6).
+//! A bounded replay ring buffer for stream-frame resume.
 //!
 //! When a peer reconnects with `resume_from_seq`, the relay replays the frames it
 //! still holds from that seq so a relay-pod death (or a transient transport blip)

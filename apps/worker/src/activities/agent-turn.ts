@@ -57,6 +57,7 @@ import {
   markSandboxFileResourcesMaterialized,
   SandboxLeaseSupersededError,
   SandboxImageConflictError,
+  isSessionEventPersistenceError,
   buildConnectionTokenResolver,
   getEnrollment,
   abandonRecordingForTurnAttempt,
@@ -184,7 +185,12 @@ import {
   nextStreamEvent,
   startActivityHeartbeat,
 } from "./streaming";
-import type { ActivityServices, RunAgentTurnInput, RunAgentTurnResult } from "./types";
+import type {
+  ActivityServices,
+  RunAgentTurnInput,
+  RunAgentTurnResult,
+  SessionAttemptQuiescenceProof,
+} from "./types";
 import {
   resumeBoxForTurn,
   acquireSelfhostedLeaseForTurn,
@@ -319,11 +325,11 @@ export function shouldRunTurnEndWorkspacePersistence(input: {
 }
 
 /**
- * A Temporal cancellation is accepted by the workflow as proof that the dying
- * activity crossed its mandatory sandbox-tool fence. Never let a fence failure
- * retain that cancellation shape: the workflow would otherwise publish its
- * fallback quiescence receipt and admit a replacement while a remote side
- * effect may still be alive.
+ * Temporal cancellation is delivery/transport state, never proof that the
+ * dying activity crossed its mandatory sandbox-tool fence. If that fence
+ * fails, surface the fence failure instead of retaining a misleading typed
+ * cancellation; replacement admission remains closed because no durable
+ * quiescence receipt was written.
  */
 export function assertPhysicalToolQuiescenceForCancellation(input: {
   acknowledgeQuiescence: boolean;
@@ -337,12 +343,94 @@ export function assertPhysicalToolQuiescenceForCancellation(input: {
   });
 }
 
+/** A physically drained attempt must leave one durable recovery producer. The
+ * direct Postgres receipt is preferred; after its bounded retries exhaust, an
+ * exact Temporal proof signal is sufficient because the workflow persists it
+ * through an independently retrying DB-only control activity. */
+export function assertSessionAttemptQuiescenceRecoveryDurable(input: {
+  acknowledgeQuiescence: boolean;
+  physicalToolQuiescenceConfirmed: boolean;
+  receiptOrProofDurable: boolean;
+  failure: unknown;
+}): void {
+  if (
+    !input.acknowledgeQuiescence ||
+    !input.physicalToolQuiescenceConfirmed ||
+    input.receiptOrProofDurable
+  ) {
+    return;
+  }
+  if (input.failure instanceof Error) throw input.failure;
+  throw new Error("Physical quiescence had no durable receipt or recovery proof", {
+    cause: input.failure,
+  });
+}
+
+const QUIESCENCE_PROOF_SIGNAL_INITIAL_RETRY_MS = 250;
+const QUIESCENCE_PROOF_SIGNAL_MAX_RETRY_MS = 5_000;
+
+/** Persist the authoritative receipt or durably hand the exact physical proof
+ * to Temporal. This retries signal delivery, not DB eligibility or workflow
+ * state. The proof object never changes between attempts. */
+export async function persistOrSignalSessionAttemptQuiescence(input: {
+  proof: SessionAttemptQuiescenceProof;
+  persistReceipt: () => Promise<SessionEvent[]>;
+  publishEvents: (events: SessionEvent[]) => Promise<unknown>;
+  signalProof: ActivityServices["signalSessionAttemptQuiesced"];
+  sleep?: (ms: number) => Promise<void>;
+  heartbeat?: (attempt: number, delayMs: number) => void;
+  onReceiptFailure?: (error: unknown) => void;
+  onPublishFailure?: (error: unknown) => void;
+  onSignalFailure?: (error: unknown, attempt: number, delayMs: number) => void;
+}): Promise<"receipt" | "signal"> {
+  let events: SessionEvent[];
+  try {
+    events = await input.persistReceipt();
+  } catch (receiptError) {
+    input.onReceiptFailure?.(receiptError);
+    if (!input.signalProof) {
+      throw new Error("Session-attempt quiescence proof signaler is unavailable", {
+        cause: receiptError,
+      });
+    }
+    const delay = input.sleep ?? sleep;
+    let retryMs = QUIESCENCE_PROOF_SIGNAL_INITIAL_RETRY_MS;
+    let attempt = 1;
+    for (;;) {
+      try {
+        await input.signalProof(input.proof);
+        return "signal";
+      } catch (signalError) {
+        input.onSignalFailure?.(signalError, attempt, retryMs);
+        try {
+          input.heartbeat?.(attempt, retryMs);
+        } catch {
+          // Heartbeat telemetry is not proof delivery and cannot replace or
+          // interrupt the exact signal retry loop.
+        }
+        await delay(retryMs);
+        retryMs = Math.min(retryMs * 2, QUIESCENCE_PROOF_SIGNAL_MAX_RETRY_MS);
+        attempt += 1;
+      }
+    }
+  }
+
+  try {
+    await input.publishEvents(events);
+  } catch (publishError) {
+    // Postgres already committed quiesced_at, the queue event, and the wake.
+    // NATS is live fanout only; never misclassify its failure as receipt loss.
+    input.onPublishFailure?.(publishError);
+  }
+  return "receipt";
+}
+
 /**
  * Await a finalizer operation only while this Temporal activity still owns its
  * execution window. Once Pause/Steer cancellation arrives, the operation keeps
  * its own rejection handler and may finish its idempotent, attempt-scoped
- * cleanup in the background, but it cannot hold the replacement dispatch
- * behind WAIT_CANCELLATION_COMPLETED.
+ * cleanup in the background, but it cannot pin activity terminalization or
+ * delay the separately receipt-gated replacement dispatch.
  */
 export async function waitForTurnFinalizerStep<T>(
   operation: Promise<T>,
@@ -368,6 +456,21 @@ export async function waitForTurnFinalizerStep<T>(
   } finally {
     signal.removeEventListener("abort", cancel);
   }
+}
+
+/**
+ * Flush provider-facing stream state while the attempt still owns its activity
+ * window. On Pause/Steer, both promises are detached with rejection handlers:
+ * neither a runtime batcher nor an uncooperative provider completion promise
+ * may pin the activity behind cancellation after durable writes are fenced.
+ */
+export async function waitForTurnStreamCleanup(
+  batcherFlush: Promise<unknown>,
+  providerCompleted: Promise<unknown>,
+  signal: AbortSignal | undefined,
+): Promise<void> {
+  await waitForTurnFinalizerStep(batcherFlush, signal);
+  await waitForTurnFinalizerStep(providerCompleted, signal);
 }
 
 function turnFinalizerCancellationSignal(
@@ -1320,6 +1423,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       objectStorage,
       observability,
       wakeSessionWorkflow,
+      signalSessionAttemptQuiesced,
       signalCodexCapacityWorkflow,
       entitlements,
       connectionCredentials,
@@ -1344,6 +1448,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     let turnMetricOutcome: TurnOutcome | null = null;
     let activityError: unknown;
     let acknowledgeQuiescence = false;
+    const acknowledgeLostAttemptOwnership = (): void => {
+      // A stale terminal/recovery settlement can lose either to a benign
+      // successor or to Pause/Steer closing this exact attempt. Only the
+      // receipt transaction can distinguish those cases after the hard tool
+      // fence: allowUninterrupted makes the benign case an event-free no-op.
+      acknowledgeQuiescence = true;
+      noteCancellationRequested();
+    };
     let turnId: string | undefined;
     let triggerEventId: string | undefined;
     const claimedResult = (
@@ -1396,7 +1508,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       }
     };
     let heartbeatTimer: ReturnType<typeof startActivityHeartbeat> | undefined;
-    // OPE-21: one workspace-local idempotent credential holder per running
+    // credential allocator: one workspace-local idempotent credential holder per running
     // Codex turn. The DB row is the cross-replica fairness primitive; this timer
     // only extends its short TTL. A killed worker stops heartbeating and the
     // holder self-expires. Other workspaces never see or share this holder.
@@ -1527,7 +1639,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // runs it refreshes expires_at epoch-fenced so a legit multi-day turn is
     // never TTL-reaped. Cleared in finally. Only set when the flag resolved a box.
     let leaseHeartbeatTimer: ReturnType<typeof setInterval> | undefined;
-    // OPE-41: the worker, not the model, owns renewal of run-scoped Git
+    // credential-renewal policy: the worker, not the model, owns renewal of run-scoped Git
     // credentials for a multi-day turn. The controller is attached only after
     // the initial seed reached a real cloud box and is drained before capture.
     let gitCredentialRenewal: GitCredentialRenewalController | null = null;
@@ -2137,6 +2249,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           ...(compactionRequestFailure ? { compactionRequestFailure } : {}),
         });
         if (result.action === "stale") {
+          // The terminal write can lose to a control transaction before the
+          // workflow delivers Temporal cancellation. That control may settle
+          // the already-closed attempt as rejected_stale, so returning without
+          // this flag would strand its replacement behind quiesced_at forever.
+          // Enter the same hard tool-fence/receipt path as an explicit
+          // TurnAttemptFencedError. If ownership was lost for an unrelated
+          // reason, allowUninterrupted makes the receipt transaction a no-op.
+          acknowledgeLostAttemptOwnership();
           if (recordingForSettlement) {
             await abandonActiveRecording(
               "recording settlement lost attempt ownership",
@@ -2336,7 +2456,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           strategy: leased.rotationStrategy as CodexRotationStrategy,
           rotationEnabled: leased.rotationEnabled,
         });
-        // OPE-31 pin persistence follows the atomic OPE-21 selection. The selector
+        // pin policy pin persistence follows the atomic credential allocator selection. The selector
         // already ran exact-turn reuse before policy filtering and vetoed pointer
         // movement for manual/policy homes; this write only records the NEXT turn's
         // policy home (or clears a policy pin whose strategy is no longer active).
@@ -3096,7 +3216,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         runSettings,
         withFirstPartyTools(runSettings, mergeToolRefs(session.tools, turn.tools)),
       );
-      // §7.6 P4a — load (and decrypt) the variable set via the host
+      // §7.6 connection-credential provider — load (and decrypt) the variable set via the host
       // `sandboxSecrets` provider when bound; unset → today's local decrypt.
       const connectionScope = {
         accountId: input.accountId,
@@ -4494,8 +4614,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             void iterator.return?.().catch(() => undefined);
           }
         }
-        await batcher.flush();
-        await stream.completed.catch(() => undefined);
+        await waitForTurnStreamCleanup(
+          batcher.flush(),
+          stream.completed.catch(() => undefined),
+          cancellationSignal,
+        );
         if (responseUsageCount === 0) {
           const aggregateUsage = stream.state.usage;
           const aggregateInput = (aggregateUsage as { inputTokens?: unknown } | undefined)
@@ -4755,7 +4878,15 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             turnMetricOutcome = "failed";
             activityStatus = "idle";
             activityError = attemptError;
-            return claimedResult({ status: "idle" });
+            // The failed turn settlement already defers ordinary internal
+            // updates and makes the delivered goal-continuation receipt
+            // terminal. End this workflow run as well: returning plain idle
+            // would immediately synthesize another goal continuation against
+            // the unchanged active history and repeat the same failed
+            // compaction. A new human/API prompt, Steer, or explicitly requested
+            // Compact remains a durable explicit wake and may retry; ordinary
+            // machine updates stay pending for that actionable wake.
+            return claimedResult({ status: "idle", deferredUntilWake: true });
           }
           // Codex parity: compaction remains inside the same logical turn and
           // the same activity. Rebuild the model-visible history from the
@@ -4798,6 +4929,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             reason: "sandbox_lease_superseded",
           });
           if (recovery.action === "stale") {
+            acknowledgeLostAttemptOwnership();
             activityStatus = "cancelled";
             turnMetricOutcome = "cancelled";
             return claimedResult({ status: "cancelled" });
@@ -4840,6 +4972,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             reason: "worker_shutdown",
           });
           if (recovery.action === "stale") {
+            acknowledgeLostAttemptOwnership();
             activityStatus = "cancelled";
             turnMetricOutcome = "cancelled";
             return claimedResult({ status: "cancelled" });
@@ -4871,11 +5004,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           turnFinalizerCancellationSignal(cancellationSignal, activityStatus),
         );
         // Ownership already moved to a newer attempt or an authoritative
-        // control transaction. Surface a transport cancellation instead of a
-        // normal activity result: with WAIT_CANCELLATION_COMPLETED, Temporal
-        // must observe a terminal cancellation before the session workflow may
-        // close. Returning normally after a cancel request is rejected by the
-        // server and leaves the worker task detached indefinitely.
+        // control transaction. Surface the exact transport cancellation rather
+        // than a normal result. Temporal terminalization remains diagnostic
+        // only; replacement admission waits for the activity-owned durable
+        // quiescence receipt written from the hard tool fence below.
         turnMetricOutcome = "cancelled";
         throw new CancelledFailure("TURN_ATTEMPT_FENCED", [], error);
       }
@@ -5212,9 +5344,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             if (settlement.action === "stale") {
               // One transaction proves both exact-holder recovery (including a
               // just-expired or reaped lease row) and successor/control-gate
-              // rejection. A stale activity performs no second settlement.
-              activityStatus = "recovering";
-              turnMetricOutcome = "recovering";
+              // rejection. Cross the hard tool fence so a control-gate loss can
+              // write its quiescence receipt; a successor-only loss is a no-op.
+              acknowledgeLostAttemptOwnership();
+              activityStatus = "cancelled";
+              turnMetricOutcome = "cancelled";
               return claimedResult({ status: "recovering" });
             }
           }
@@ -5593,6 +5727,34 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // it after a pacing delay. This is independent of goal state and never
       // relies on a synthetic continuation prompt.
       const failure = agentRunFailurePayload(error);
+      if (isSessionEventPersistenceError(error)) {
+        // Never pass the original Drizzle/postgres-js error to telemetry: its
+        // nested cause may contain raw SQL and bound parameters. The typed DB
+        // boundary retains only SQLSTATE, stage, correlation, and safe catalog
+        // identifiers. Provider inference has already happened and is NOT
+        // retried by this terminal classification.
+        observability.error("session event persistence failed", {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId,
+          attemptId: input.attemptId,
+          code: error.details.code,
+          sqlState: error.details.sqlState ?? "unknown",
+          stage: error.details.stage,
+          eventTypes: error.details.eventTypes.join(","),
+          correlationId: error.details.correlationId,
+          attempts: error.details.attempts,
+          retryOutcome: error.details.retryOutcome,
+          dbSeverity: error.details.database.severity,
+          dbSchema: error.details.database.schema,
+          dbTable: error.details.database.table,
+          dbColumn: error.details.database.column,
+          dbDataType: error.details.database.dataType,
+          dbConstraint: error.details.database.constraint,
+          dbRoutine: error.details.database.routine,
+        });
+      }
       if (failure.retryable && publish && turnId && turnStartedPublished) {
         const recoveryResult = providerRecoveryResult();
         await flushRuntimeBatcher();
@@ -5609,6 +5771,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           },
         });
         if (recovery.action === "stale") {
+          acknowledgeLostAttemptOwnership();
           activityStatus = "cancelled";
           turnMetricOutcome = "cancelled";
           return claimedResult({ status: "cancelled" });
@@ -5663,6 +5826,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       const finalizationStarted = performance.now();
       let finalizationError: unknown;
       let physicalToolQuiescenceConfirmed = !acknowledgeQuiescence;
+      let quiescenceReceiptOrProofDurable = !acknowledgeQuiescence;
       const finalizerSignal = turnFinalizerCancellationSignal(cancellationSignal, activityStatus);
       try {
         const toolCancellationFence = toolCancellationFenceRef.current;
@@ -5683,6 +5847,75 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // construction itself fails closed when a backend is present but no
           // controller was installed.
           physicalToolQuiescenceConfirmed = true;
+        }
+        if (acknowledgeQuiescence && physicalToolQuiescenceConfirmed) {
+          // This receipt is part of the hard cancellation boundary, not
+          // housekeeping. Persist it immediately after the sandbox/tool fence
+          // and before lease, cache, recording, or provider cleanup. Its
+          // transaction also enqueues the exact workflow wake that will admit
+          // the replacement; Temporal activity terminalization does neither.
+          const proof: SessionAttemptQuiescenceProof = {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            attemptId: input.attemptId,
+            workflowId: input.workflowId,
+            workflowRunId: input.workflowRunId,
+            activityId: dispatchId,
+          };
+          const recoveryMode = await persistOrSignalSessionAttemptQuiescence({
+            proof,
+            persistReceipt: async () =>
+              await markSessionAttemptQuiesced(db, {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                attemptId: input.attemptId,
+                temporalWorkflowId: input.workflowId,
+                temporalWorkflowRunId: input.workflowRunId,
+                temporalActivityId: dispatchId,
+                allowUninterrupted: true,
+              }),
+            publishEvents: async (events) => {
+              await waitForTurnFinalizerStep(
+                publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, events),
+                finalizerSignal,
+              );
+            },
+            signalProof: signalSessionAttemptQuiesced,
+            heartbeat: (attempt, retryMs) => {
+              activityContext?.heartbeat({
+                phase: "quiescence-proof-delivery",
+                sessionId: input.sessionId,
+                attemptId: input.attemptId,
+                deliveryAttempt: attempt,
+                retryMs,
+                at: new Date().toISOString(),
+              });
+            },
+            onReceiptFailure: (error) => {
+              console.error("agent turn quiescence receipt exhausted; signalling proof", error);
+            },
+            onPublishFailure: (error) => {
+              console.error("agent turn quiescence event fanout failed", error);
+            },
+            onSignalFailure: (error, attempt, retryMs) => {
+              console.error("agent turn quiescence proof signal failed; retrying", {
+                error,
+                attempt,
+                retryMs,
+              });
+            },
+          });
+          quiescenceReceiptOrProofDurable = true;
+          if (recoveryMode === "signal") {
+            observability.info("agent turn quiescence proof handed to workflow recovery", {
+              "opengeni.session_id": input.sessionId,
+              "opengeni.attempt_id": input.attemptId,
+              "opengeni.workflow_run_id": input.workflowRunId,
+              "opengeni.activity_id": dispatchId,
+            });
+          }
         }
         gitCredentialRenewalClosed = true;
         const renewalToStop = gitCredentialRenewal as GitCredentialRenewalController | null;
@@ -5773,7 +6006,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           );
           codexLeaseHeld = false;
         }
-        // Workbench v2 turn-end workspace capture (dossier §10.1) — runs FIRST in
+        // Workbench v2 turn-end workspace capture — runs FIRST in
         // the turn-end finally, while the box is MAXIMALLY ALIVE. The agent's last
         // tool ran before this finally, so /workspace is already final; capture is
         // FS-equivalent to the already-settled recording preparation and the warm
@@ -5916,7 +6149,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 },
               ]).catch(() => undefined);
             }
-            // NB workspace capture (dossier §10.1) no longer runs here — it moved to
+            // NB workspace capture no longer runs here — it moved to
             // the TOP of this finally (before preparedTools.close) so it completes
             // while the box is still solidly alive, instead of racing the turn-end
             // teardown that was killing 100% of captures on real Modal desktop boxes.
@@ -5931,24 +6164,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           );
         }
       } catch (error) {
-        finalizationError = error;
+        finalizationError ??= error;
         console.error("agent turn finalization failed (turn outcome unaffected)", error);
       } finally {
-        if (acknowledgeQuiescence && physicalToolQuiescenceConfirmed) {
-          try {
-            const events = await markSessionAttemptQuiesced(db, {
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-              attemptId: input.attemptId,
-              temporalWorkflowId: input.workflowId,
-              allowUninterrupted: true,
-            });
-            await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, events);
-          } catch (error) {
-            finalizationError ??= error;
-            console.error("agent turn quiescence receipt failed", error);
-          }
-        }
         cancellationSignal?.removeEventListener("abort", noteCancellationRequested);
         const completedAt = performance.now();
         const durationSeconds = (completedAt - activityStarted) / 1000;
@@ -6000,6 +6218,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         assertPhysicalToolQuiescenceForCancellation({
           acknowledgeQuiescence,
           physicalToolQuiescenceConfirmed,
+          failure: finalizationError,
+        });
+        assertSessionAttemptQuiescenceRecoveryDurable({
+          acknowledgeQuiescence,
+          physicalToolQuiescenceConfirmed,
+          receiptOrProofDurable: quiescenceReceiptOrProofDurable,
           failure: finalizationError,
         });
       }
@@ -6058,6 +6282,12 @@ export function agentRunFailurePayload(error: unknown): {
   code?: string;
   retryable?: boolean;
   detail?: string;
+  correlationId?: string;
+  stage?: string;
+  sqlState?: string | null;
+  attempts?: number;
+  retryOutcome?: string;
+  database?: Record<string, string>;
 } {
   const message = error instanceof Error ? error.message : String(error);
   const status =
@@ -6068,6 +6298,41 @@ export function agentRunFailurePayload(error: unknown): {
     typeof error === "object" && error !== null && "code" in error
       ? String((error as { code?: unknown }).code)
       : undefined;
+  // An accepted Codex stream with no terminal response is malformed/partial,
+  // not provider backpressure. Replaying the same accepted turn could repeat
+  // model or tool effects, so this marked transport failure must outrank the
+  // generic 5xx retry classifier (CodexStreamingTerminalError uses status 502).
+  if (isCodexTransportError(error) && code === "invalid_sse_terminal") {
+    return {
+      error: "The Codex response stream ended without a terminal response",
+      code: "invalid_sse_terminal",
+      retryable: false,
+    };
+  }
+  if (isSessionEventPersistenceError(error)) {
+    const { details } = error;
+    const eventLabel = details.eventTypes.join(", ") || "session events";
+    const failureLabel =
+      details.code === "db_deadlock"
+        ? "Database deadlock"
+        : details.code === "db_serialization_failure"
+          ? "Database serialization failure"
+          : "Database failure";
+    return {
+      error: `${failureLabel} while persisting ${eventLabel}. The completed provider call and external effects were not retried.`,
+      code: details.code,
+      detail:
+        details.retryOutcome === "exhausted"
+          ? `The idempotent persistence transaction failed after ${details.attempts} attempts.`
+          : "The database rejected the idempotent persistence transaction.",
+      correlationId: details.correlationId,
+      stage: details.stage,
+      sqlState: details.sqlState,
+      attempts: details.attempts,
+      retryOutcome: details.retryOutcome,
+      ...(Object.keys(details.database).length > 0 ? { database: details.database } : {}),
+    };
+  }
   // A ChatGPT/Codex usage cap is a HARD limit, not transient backpressure: it
   // must NOT be reported as a generic, retryable rate-limit (which would loop a
   // goal against a capped backend). Surface a precise, actionable message with
