@@ -29,6 +29,7 @@ import {
   getSessionTurn,
   getVariableSet,
   getVariableSetByName,
+  areGitHubRepositoriesAllowedForWorkspace,
   listGitHubInstallationIdsForWorkspace,
   listScheduledTaskRuns,
   listScheduledTasks,
@@ -63,7 +64,6 @@ import {
   createSignedState,
   GitHubAppConfigurationError,
   githubAppMissingSettings,
-  listGitHubAppRepositories,
   stateMaxAgeSeconds,
 } from "@opengeni/github";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -71,6 +71,8 @@ import * as z4 from "zod/v4";
 import { hasPermission } from "@opengeni/core";
 import { recordWorkspaceUsage, requireLimit } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
+import { githubBrowserBaseUrl, githubBrowserGrantClaims } from "../github-browser-flow";
+import { listWorkspaceGitHubRepositories } from "../github-access";
 import {
   promoteVerifiedDefinitionEditChangeForApi,
   proposeRigChangeForApi,
@@ -269,13 +271,7 @@ export function buildOpenGeniMcpServer(
       },
       async ({ limit }) => {
         try {
-          const installationIds = await listGitHubInstallationIdsForWorkspace(
-            deps.db,
-            grant.workspaceId,
-          );
-          const repositories = await listGitHubAppRepositories(deps.settings, {
-            installationIds,
-          });
+          const repositories = await listWorkspaceGitHubRepositories(deps, grant.workspaceId);
           const visible = typeof limit === "number" ? repositories.slice(0, limit) : repositories;
           return json({
             repositories: visible.map((repository) =>
@@ -1924,7 +1920,7 @@ function registerGitHubConnectTool(
     "github_connect_link",
     {
       description:
-        "Create a workspace-bound GitHub App install link to share with a human. Opening it redirects to GitHub to install the app and select repositories for this workspace; completing the connection requires the person to be signed in to this OpenGeni deployment with github:manage. The link expires.",
+        "Create workspace-bound links for connecting GitHub. linkUrl authorizes and links an existing installation; installUrl installs the app on another GitHub account. Completion requires github:manage through a signed-in browser or configured-token handoff. The links expire.",
       inputSchema: {},
     },
     async () => {
@@ -1936,28 +1932,33 @@ function registerGitHubConnectTool(
           configured: false,
           appSlug: slug,
           installUrl: null,
+          linkUrl: null,
           missing,
         });
       }
-      const base = (
-        settings.publicBaseUrl ??
-        settings.githubAppManifestBaseUrl ??
-        options.requestOrigin ??
-        ""
-      ).replace(/\/+$/, "");
+      const base = githubBrowserBaseUrl(settings, options.requestOrigin);
       if (!base) {
         throw new Error(
           "github_connect_link requires OPENGENI_PUBLIC_BASE_URL (or OPENGENI_GITHUB_APP_MANIFEST_BASE_URL) so the install link can route through this deployment",
         );
       }
-      const state = createSignedState(deps.githubStateSecret, {
+      const installState = createSignedState(deps.githubStateSecret, {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
+        intent: "install",
+        ...githubBrowserGrantClaims(settings, grant),
+      });
+      const linkState = createSignedState(deps.githubStateSecret, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        intent: "link_existing",
+        ...githubBrowserGrantClaims(settings, grant),
       });
       return json({
         configured: true,
         appSlug: slug,
-        installUrl: `${base}/v1/workspaces/${grant.workspaceId}/github/connect?state=${encodeURIComponent(state)}`,
+        installUrl: `${base}/v1/workspaces/${grant.workspaceId}/github/connect?state=${encodeURIComponent(installState)}`,
+        linkUrl: `${base}/v1/workspaces/${grant.workspaceId}/github/connect?state=${encodeURIComponent(linkState)}`,
         expiresInSeconds: stateMaxAgeSeconds,
         missing: [],
       });
@@ -2002,11 +2003,28 @@ function registerGitHubCredentialStatusTool(
       const workspaceInstallationCount = configured
         ? (await listGitHubInstallationIdsForWorkspace(deps.db, grant.workspaceId)).length
         : 0;
-      const health = githubCredentialHealthForBindings({
+      let health = githubCredentialHealthForBindings({
         configured,
         workspaceInstallationCount,
         sessionInstallationIds: selected.map((item) => item.installationId),
       });
+      if (health.reason === "unknown") {
+        const installationId = selected[0]!.installationId;
+        const authorized = await areGitHubRepositoriesAllowedForWorkspace(
+          deps.db,
+          grant.workspaceId,
+          installationId,
+          selected.map((item) => item.repositoryId),
+        );
+        if (!authorized) {
+          health = {
+            state: "unavailable",
+            reason: "session_repository_binding_required",
+            action: "rebind",
+            renewal: "inactive",
+          };
+        }
+      }
       return json({
         provider: "github",
         credentialDelivery: "host_managed",

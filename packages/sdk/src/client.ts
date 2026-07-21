@@ -2218,6 +2218,14 @@ export class OpenGeniClient {
     );
   }
 
+  /** Remove one workspace binding without uninstalling the GitHub App itself. */
+  async unlinkGitHubInstallation(workspaceId: string, installationId: number): Promise<void> {
+    await this.requestVoid(
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/github/installations/${installationId}`,
+    );
+  }
+
   /** Build a GitHub App manifest + the GitHub URL to submit it to. */
   async createGitHubAppManifest(
     workspaceId: string,

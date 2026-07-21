@@ -66,6 +66,7 @@ import type {
   ClientConfig,
   CreateWorkspaceRequest,
   GitHubCapabilityHealth,
+  GitHubAppInfo,
   GitHubRepository,
   ResourceRef,
   Session,
@@ -110,12 +111,7 @@ export type AppContextValue = {
   selectedRepoRefs: Record<number, string>;
   setSelectedRepoRefs: Dispatch<SetStateAction<Record<number, string>>>;
   githubRepos: GitHubRepository[];
-  githubStatus: {
-    configured: boolean;
-    missing: string[];
-    installUrl: string | null;
-    health: GitHubCapabilityHealth;
-  } | null;
+  githubStatus: (GitHubAppInfo & { health: GitHubCapabilityHealth }) | null;
   githubAppOpen: boolean;
   setGithubAppOpen: Dispatch<SetStateAction<boolean>>;
   githubOrg: string;
@@ -166,6 +162,7 @@ export type AppContextValue = {
   ) => Promise<void>;
   refreshWorkspaceMcpServers: (workspaceId: string, signal?: AbortSignal) => Promise<void>;
   startGitHubAppManifestFlow: (workspaceId: string) => Promise<void>;
+  disconnectGitHubInstallation: (workspaceId: string, installationId: number) => Promise<void>;
   toggleGitHubRepository: (repo: GitHubRepository) => void;
   startSession: (
     workspaceId: string,
@@ -241,12 +238,9 @@ export function RootRouteComponent() {
   const [selectedRepoIds, setSelectedRepoIds] = useState<Set<number>>(() => new Set());
   const [selectedRepoRefs, setSelectedRepoRefs] = useState<Record<number, string>>({});
   const [githubRepos, setGithubRepos] = useState<GitHubRepository[]>([]);
-  const [githubStatus, setGithubStatus] = useState<{
-    configured: boolean;
-    missing: string[];
-    installUrl: string | null;
-    health: GitHubCapabilityHealth;
-  } | null>(null);
+  const [githubStatus, setGithubStatus] = useState<
+    (GitHubAppInfo & { health: GitHubCapabilityHealth }) | null
+  >(null);
   const [githubAppOpen, setGithubAppOpen] = useState(false);
   const [githubOrg, setGithubOrg] = useState("");
   const [workspaceMcpServers, setWorkspaceMcpServers] = useState<McpServerOption[]>([]);
@@ -692,12 +686,7 @@ export function RootRouteComponent() {
                 action: "configure" as const,
                 renewal: "inactive" as const,
               });
-        const nextStatus = {
-          configured: status.configured,
-          missing: status.missing,
-          installUrl: status.installUrl,
-          health: statusHealth,
-        };
+        const nextStatus = { ...status, health: statusHealth };
         setGithubStatus(nextStatus);
         setGithubAppOpen(!status.configured);
         if (status.configured) {
@@ -746,9 +735,16 @@ export function RootRouteComponent() {
           return;
         }
         setGithubStatus((current) => ({
-          configured: current?.configured ?? false,
-          missing: current?.missing ?? [],
-          installUrl: current?.installUrl ?? null,
+          ...(current ?? {
+            configured: false,
+            appId: null,
+            clientId: null,
+            appSlug: null,
+            installUrl: null,
+            linkUrl: null,
+            installations: [],
+            missing: [],
+          }),
           health: githubCapabilityHealthForError(error),
         }));
         setGithubRepos([]);
@@ -857,6 +853,37 @@ export function RootRouteComponent() {
         description: error instanceof Error ? error.message : String(error),
       });
       setGithubAppBusy(false);
+    }
+  }
+
+  async function disconnectGitHubInstallation(
+    workspaceId: string,
+    installationId: number,
+  ): Promise<void> {
+    try {
+      await client.unlinkGitHubInstallation(workspaceId, installationId);
+      const removedRepositoryIds = new Set(
+        githubRepos
+          .filter((repository) => repository.installationId === installationId)
+          .map((repository) => repository.id),
+      );
+      setSelectedRepoIds(
+        (current) =>
+          new Set([...current].filter((repositoryId) => !removedRepositoryIds.has(repositoryId))),
+      );
+      setSelectedRepoRefs((current) =>
+        Object.fromEntries(
+          Object.entries(current).filter(
+            ([repositoryId]) => !removedRepositoryIds.has(Number(repositoryId)),
+          ),
+        ),
+      );
+      await refreshGitHub(workspaceId, undefined, { sync: true });
+      toast.success("GitHub installation unlinked from this workspace");
+    } catch (error) {
+      toast.error("Failed to unlink GitHub installation", {
+        description: error instanceof Error ? error.message : String(error),
+      });
     }
   }
 
@@ -981,6 +1008,7 @@ export function RootRouteComponent() {
   const contextUpdateSessionPin = useLatestCallback(updateSessionPin);
   const contextDeleteWorkspace = useLatestCallback(deleteWorkspace);
   const contextStartGitHubAppManifestFlow = useLatestCallback(startGitHubAppManifestFlow);
+  const contextDisconnectGitHubInstallation = useLatestCallback(disconnectGitHubInstallation);
   const contextToggleGitHubRepository = useLatestCallback(toggleGitHubRepository);
   const contextStartSession = useLatestCallback(startSession);
 
@@ -1045,6 +1073,7 @@ export function RootRouteComponent() {
           refreshGitHub,
           refreshWorkspaceMcpServers,
           startGitHubAppManifestFlow: contextStartGitHubAppManifestFlow,
+          disconnectGitHubInstallation: contextDisconnectGitHubInstallation,
           toggleGitHubRepository: contextToggleGitHubRepository,
           startSession: contextStartSession,
           resetSessionView,
@@ -1067,6 +1096,7 @@ export function RootRouteComponent() {
     contextRenameWorkspace,
     contextSetWorkspaceInferenceControl,
     contextSetWorkspaceDefaultRig,
+    contextDisconnectGitHubInstallation,
     contextStartGitHubAppManifestFlow,
     contextStartSession,
     contextToggleGitHubRepository,

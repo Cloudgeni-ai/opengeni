@@ -55,6 +55,7 @@ import {
   accrueWarmSeconds,
   getMaterializedSandboxFileResources,
   markSandboxFileResourcesMaterialized,
+  areGitHubRepositoriesAllowedForWorkspace,
   SandboxLeaseSupersededError,
   SandboxImageConflictError,
   isSessionEventPersistenceError,
@@ -160,9 +161,11 @@ import { enabledCapabilityMcpToolRefs, resolveSessionToolPolicy } from "@opengen
 import { maybeCompactContext } from "./context-compaction";
 import { TurnAttemptFencedError } from "./turn-attempt-fenced";
 import {
+  gitHubTokenMintSelection,
   loadWorkspaceEnvironmentForRunWithCredentials,
   mintRunGitCredentials,
   sandboxEnvironmentForRun,
+  type GitHubTokenMintAuthorization,
   type MintedRunGitCredentials,
 } from "./environment";
 import {
@@ -3385,6 +3388,17 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // provider may supply it; unset still self-mints GitHub from settings.
       // gitToken/gitTokens are undefined on the selfhosted skip path (the machine
       // uses its own git creds).
+      if (activeSandboxBackend !== "selfhosted") {
+        await assertGitHubResourcesRemainAuthorized(db, input.workspaceId, turnResources);
+      }
+      const authorizeGitHubTokenMint: GitHubTokenMintAuthorization = async (selection) => {
+        await assertGitHubTokenMintSelectionAuthorized(
+          db,
+          input.workspaceId,
+          selection.installationId,
+          selection.repositoryIds,
+        );
+      };
       const {
         environment: sandboxEnvironment,
         gitToken: sandboxGitToken,
@@ -3404,6 +3418,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               activeSandboxBackend !== "selfhosted" && establishPolicy === "on-demand",
             scope: connectionScope,
             gitCredentials: connectionCredentials?.gitCredentials,
+            authorizeGitHubTokenMint,
             sessionId: input.sessionId,
             turnId,
             attemptId: input.attemptId,
@@ -3438,6 +3453,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             await mintRunGitCredentials(runSettings, turnResources, {
               scope: connectionScope,
               gitCredentials: connectionCredentials?.gitCredentials,
+              authorizeGitHubTokenMint,
             }),
           write: async (tokens) => {
             const runAs = sandboxRunAs(runSettings);
@@ -3925,6 +3941,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 : await mintRunGitCredentials(runSettings, turnResources, {
                     scope: connectionScope,
                     gitCredentials: connectionCredentials?.gitCredentials,
+                    authorizeGitHubTokenMint,
                   });
             const lazyGitTokens = lazyGitCredentials?.gitTokens;
             const provisioned = await resumeBoxForTurn(
@@ -6248,6 +6265,45 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       }
     }
   };
+}
+
+async function assertGitHubResourcesRemainAuthorized(
+  db: Parameters<typeof areGitHubRepositoriesAllowedForWorkspace>[0],
+  workspaceId: string,
+  resources: import("@opengeni/contracts").ResourceRef[],
+): Promise<void> {
+  // Must check exactly what sandboxEnvironmentForRun would mint a token for,
+  // so the selection is derived from the same extraction as the mint path.
+  const selection = gitHubTokenMintSelection(resources);
+  if (!selection) {
+    return;
+  }
+  await assertGitHubTokenMintSelectionAuthorized(
+    db,
+    workspaceId,
+    selection.installationId,
+    selection.repositoryIds,
+  );
+}
+
+async function assertGitHubTokenMintSelectionAuthorized(
+  db: Parameters<typeof areGitHubRepositoriesAllowedForWorkspace>[0],
+  workspaceId: string,
+  installationId: number,
+  repositoryIds: number[],
+): Promise<void> {
+  if (
+    !(await areGitHubRepositoriesAllowedForWorkspace(
+      db,
+      workspaceId,
+      installationId,
+      repositoryIds,
+    ))
+  ) {
+    throw new Error(
+      "This workspace no longer authorizes one or more GitHub repositories attached to the session",
+    );
+  }
 }
 
 /**

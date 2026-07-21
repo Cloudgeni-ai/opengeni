@@ -338,6 +338,8 @@ function WorkspaceRepositoryPicker({
         }
       }
       installUrl={context.githubStatus?.installUrl ?? null}
+      linkUrl={context.githubStatus?.linkUrl ?? null}
+      installations={context.githubStatus?.installations ?? []}
       repositories={context.githubRepos}
       groups={context.repositoryGroups}
       selectedRepoIds={context.selectedRepoIds}
@@ -368,6 +370,9 @@ function WorkspaceRepositoryPicker({
       onGitHubAppOpenChange={context.setGithubAppOpen}
       onOrgChange={context.setGithubOrg}
       onStartGitHubApp={() => void context.startGitHubAppManifestFlow(workspaceId)}
+      onDisconnectInstallation={(installationId) =>
+        context.disconnectGitHubInstallation(workspaceId, installationId)
+      }
     />
   );
 }

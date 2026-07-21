@@ -38,6 +38,7 @@ export type {
   FileDownloadUrlResponse,
   GitHubAppInfo,
   GitHubCapabilityHealth,
+  GitHubInstallationBinding,
   GitHubRepository,
   GoalSpec,
   CreateKnowledgeMemoryRequest,
