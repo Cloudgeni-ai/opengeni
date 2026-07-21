@@ -16,7 +16,7 @@
  * Wired into the release gate and safe to run locally without publishing.
  */
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import {
   PUBLISHED_DEP_FIELDS,
@@ -217,18 +217,26 @@ for (const { dir: pkgDir } of publishable) {
   ensureBuilt(pkgDir);
 }
 
+function builtContractFiles(dir: string): string[] {
+  const files: string[] = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) files.push(...builtContractFiles(path));
+    else if (entry.name.endsWith(".js") || entry.name.endsWith(".d.ts")) files.push(path);
+  }
+  return files;
+}
+
 for (const pkgDir of ["packages/sdk", "packages/react"]) {
-  for (const file of ["dist/index.js", "dist/index.d.ts"]) {
-    const path = join(repoRoot, pkgDir, file);
-    if (!existsSync(path)) {
-      continue;
-    }
+  const distDir = join(repoRoot, pkgDir, "dist");
+  if (!existsSync(distDir)) continue;
+  for (const path of builtContractFiles(distDir)) {
     const text = readFileSync(path, "utf8");
     const match = text.match(serverInternalPattern);
     if (match) {
       const leaked = match[1] ? `@opengeni/${match[1]}` : "<unknown>";
       failures.push(
-        `${pkgDir}/${file} references a server/embed package (${leaked}). ` +
+        `${path.slice(repoRoot.length + 1)} references a server/embed package (${leaked}). ` +
           `A server import leaked into a published client bundle.`,
       );
     }

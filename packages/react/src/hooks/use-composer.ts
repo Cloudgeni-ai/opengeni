@@ -8,12 +8,12 @@ import type {
   SessionEvent,
 } from "@opengeni/sdk";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useOpenGeni, type ClientOverride } from "../provider";
+import { useEmbeddedSession, type EmbeddedSessionClientOverride } from "../provider";
 import { useSessionEventTrigger, type SessionEventFeedOptions } from "./internal";
 
 export type ComposerSendExtras = Omit<SendMessageInput, "text" | "clientEventId">;
 
-export type UseComposerOptions = ClientOverride &
+export type UseComposerOptions = EmbeddedSessionClientOverride &
   SessionEventFeedOptions & {
     /** Called with the accepted text after a successful send. */
     onSent?: ((text: string) => void) | undefined;
@@ -69,7 +69,7 @@ export function useComposer(
   sessionId: string | null | undefined,
   options: UseComposerOptions = {},
 ): ComposerState {
-  const { client, workspaceId, registerSessionReconciler } = useOpenGeni(options);
+  const { client, workspaceId, registerSessionReconciler } = useEmbeddedSession(options);
   const [value, setValue] = useState("");
   const [sending, setSending] = useState(false);
   const [pausing, setPausing] = useState(false);
@@ -175,6 +175,7 @@ export function useComposer(
     () => void loadDraft(false),
     {
       enabled: Boolean(sessionId),
+      beforeLive: async () => await loadDraft(false),
       ...(options.events !== undefined ? { events: options.events } : {}),
     },
   );
@@ -394,6 +395,9 @@ export function useComposer(
       setError(null);
       try {
         if (option.scope === "workspace") {
+          if (!client.setWorkspaceInferenceState) {
+            throw new Error("Workspace-level resume is not available through this client");
+          }
           const workspaceBlocker = options.effectiveControl?.blockers.find(
             (blocker) => blocker.kind === "workspace",
           );

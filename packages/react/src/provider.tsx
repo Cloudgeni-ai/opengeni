@@ -14,7 +14,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import type { SessionClientLike } from "./client";
+import type { EmbeddedSessionClientLike, SessionClientLike } from "./client";
 
 export type OpenGeniContextValue = {
   client: SessionClientLike;
@@ -208,8 +208,43 @@ export type ClientOverride = {
   workspaceId?: string | undefined;
 };
 
+export type EmbeddedSessionClientOverride = {
+  client?: EmbeddedSessionClientLike | undefined;
+  workspaceId?: string | undefined;
+};
+
+export type EmbeddedSessionContextValue = Omit<OpenGeniContextValue, "client"> & {
+  client: EmbeddedSessionClientLike;
+};
+
 /** Resolve client + workspace from explicit overrides or the provider. */
 export function useOpenGeni(override: ClientOverride = {}): OpenGeniContextValue {
+  const context = useContext(OpenGeniContext);
+  const client = override.client ?? context?.client;
+  const workspaceId = override.workspaceId ?? context?.workspaceId;
+  if (!client || !workspaceId) {
+    throw new Error(
+      "@opengeni/react: no OpenGeni client/workspace available. Wrap the tree in <OpenGeniProvider> or pass { client, workspaceId } to the hook.",
+    );
+  }
+  return {
+    client,
+    workspaceId,
+    workspaceControlEvent: context?.workspaceControlEvent ?? null,
+    workspaceControlConnectionState: context?.workspaceControlConnectionState ?? "idle",
+    registerSessionReconciler: context?.registerSessionReconciler ?? NOOP_REGISTER_RECONCILER,
+    reconcileSession: context?.reconcileSession ?? NOOP_RECONCILE_SESSION,
+  };
+}
+
+/**
+ * Resolve the narrow client required by the session-only hooks. The full
+ * provider client is structurally compatible, while an explicit host proxy
+ * only needs to expose session/event/composer/queue/control operations.
+ */
+export function useEmbeddedSession(
+  override: EmbeddedSessionClientOverride = {},
+): EmbeddedSessionContextValue {
   const context = useContext(OpenGeniContext);
   const client = override.client ?? context?.client;
   const workspaceId = override.workspaceId ?? context?.workspaceId;

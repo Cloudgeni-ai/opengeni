@@ -190,6 +190,7 @@ describe("useTurnQueue", () => {
       streamEvents: (_ws, _session, options) => {
         streamedAfter.value = options?.after ?? null;
         return (async function* () {
+          await options?.beforeLive?.();
           while (true) {
             const event = await new Promise<SessionEvent | null>((resolve) => {
               push = resolve;
@@ -208,13 +209,17 @@ describe("useTurnQueue", () => {
       undefined,
     );
     await flush();
-    expect(listCalls).toBe(1);
+    // The authoritative queue is loaded once for first paint, then once more
+    // after the SSE connection opens. An update included in lastSequence but
+    // missed by the first GET therefore cannot leave providerless hooks stale.
+    expect(listCalls).toBe(2);
     expect(streamedAfter.value).toBe(41);
+    expect(hook.result.current.queue[0]?.id).toBe("turn-2");
     await flushing(async () => {
       push!(makeEvent(42, "turn.queued"));
     });
     await flush(250);
-    expect(listCalls).toBe(2);
+    expect(listCalls).toBe(3);
     await hook.unmount();
   });
 
@@ -760,6 +765,51 @@ describe("useComposer queue-vs-steer", () => {
 });
 
 describe("useComposer durable draft and control binding", () => {
+  test("providerless stream handoff reconciles a draft update already covered by lastSequence", async () => {
+    const draft = (revision: number, text: string): ComposerDraft => ({
+      revision,
+      text,
+      resources: [],
+      tools: [],
+      model: "model-x",
+      reasoningEffort: "medium",
+      sourceTurnId: null,
+      sourceTurnVersion: null,
+      updatedAt: new Date().toISOString(),
+    });
+    let current = draft(1, "stale first read");
+    let reads = 0;
+    const client = fakeClient({
+      getComposerDraft: async () => {
+        reads += 1;
+        return current;
+      },
+      getSession: async () => {
+        current = draft(2, "authoritative handoff state");
+        return { lastSequence: 42 } as never;
+      },
+      streamEvents: (_workspaceId, _sessionId, options) =>
+        (async function* () {
+          await options?.beforeLive?.();
+          const event = await new Promise<SessionEvent | null>((resolve) => {
+            options?.signal?.addEventListener("abort", () => resolve(null), { once: true });
+          });
+          if (event) yield event;
+        })(),
+    });
+
+    const hook = await renderHook(
+      () => useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush();
+
+    expect(reads).toBe(2);
+    expect(hook.result.current.draft?.revision).toBe(2);
+    expect(hook.result.current.value).toBe("authoritative handoff state");
+    await hook.unmount();
+  });
+
   test("a live queue mutation reloads the authoritative draft in another tab", async () => {
     let current: ComposerDraft = {
       revision: 1,

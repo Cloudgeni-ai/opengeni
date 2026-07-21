@@ -27,6 +27,10 @@
       "types": "./src/composer.ts",
       "default": "./src/composer.ts"
     },
+    "./session": {
+      "types": "./src/session.ts",
+      "default": "./src/session.ts"
+    },
     "./machines": {
       "types": "./src/machines.ts",
       "default": "./src/machines.ts"

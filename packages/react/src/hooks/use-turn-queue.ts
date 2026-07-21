@@ -7,7 +7,7 @@ import type {
   SessionTurn,
 } from "@opengeni/sdk";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useOpenGeni, type ClientOverride } from "../provider";
+import { useEmbeddedSession, type EmbeddedSessionClientOverride } from "../provider";
 import {
   useDebouncedCallback,
   useSessionEventTrigger,
@@ -26,7 +26,7 @@ export function isTurnQueueEvent(event: Pick<SessionEvent, "type">): boolean {
 
 export type QueueMutationKind = "move" | "edit" | "steer" | "delete";
 
-export type UseTurnQueueOptions = ClientOverride &
+export type UseTurnQueueOptions = EmbeddedSessionClientOverride &
   SessionEventFeedOptions & {
     pollIntervalMs?: number | undefined;
   };
@@ -67,7 +67,7 @@ export function useTurnQueue(
   options: UseTurnQueueOptions = {},
 ): UseTurnQueueResult {
   const { client, workspaceId, workspaceControlEvent, registerSessionReconciler } =
-    useOpenGeni(options);
+    useEmbeddedSession(options);
   const enabled = (options.enabled ?? true) && Boolean(sessionId);
   const [snapshot, setSnapshot] = useState<SessionQueueSnapshot | null>(null);
   const [loading, setLoading] = useState(enabled);
@@ -153,6 +153,7 @@ export function useTurnQueue(
   const scheduleRefresh = useDebouncedCallback(() => void load());
   useSessionEventTrigger(client, workspaceId, sessionId, isTurnQueueEvent, scheduleRefresh, {
     enabled,
+    beforeLive: load,
     ...(options.events !== undefined ? { events: options.events } : {}),
   });
 

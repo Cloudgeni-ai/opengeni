@@ -30,6 +30,7 @@ import {
   Session as ContractSessionSchema,
   SessionCapabilities as ContractSessionCapabilities,
   SessionEvent as ContractSessionEventSchema,
+  SessionMcpServerInput as ContractSessionMcpServerInput,
   SessionEventType as ContractSessionEventType,
   SessionStatus as ContractSessionStatus,
   SessionTurn as ContractSessionTurn,
@@ -99,6 +100,7 @@ import type {
   Session,
   SessionCapabilities,
   SessionEvent,
+  SessionMcpServerInput,
   SessionStatus,
   SessionTurn,
   SessionTurnSource,
@@ -180,6 +182,14 @@ describe("SDK / contracts parity", () => {
     const acceptClientEvent = (
       value: ClientSessionEventInput,
     ): z.input<typeof ClientSessionEvent> => value;
+    const acceptMcpServer = (
+      value: z.infer<typeof ContractSessionMcpServerInput>,
+    ): SessionMcpServerInput => value;
+    const sdkMcpServer: SessionMcpServerInput = {
+      id: "host_tools",
+      url: "https://example.com/mcp",
+      requireApproval: ["write_record"],
+    };
     const checks = [
       acceptSession,
       acceptEvent,
@@ -188,8 +198,10 @@ describe("SDK / contracts parity", () => {
       acceptTurnSource,
       acceptCreateRequest,
       acceptClientEvent,
+      acceptMcpServer,
     ];
     expect(checks.every((fn) => typeof fn === "function")).toBe(true);
+    expect(ContractSessionMcpServerInput.parse(sdkMcpServer)).toEqual(sdkMcpServer);
   });
 
   test("scheduled task literals and shapes match the contracts", () => {
