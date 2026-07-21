@@ -1,6 +1,6 @@
 //! Relay runtime configuration (env / CLI).
 //!
-//! Every value here is injected by the deploy IaC (dossier §17/§25) — the relay
+//! Every value here is injected by the deploy IaC — the relay
 //! holds NO hardcoded secret or endpoint. The two HMAC secrets are the load-bearing
 //! ones: the `ogs_` viewer-token secret (the relay verifies the viewer's stream
 //! token) and the `ogr_` producer-token secret (the relay verifies the agent's

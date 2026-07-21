@@ -269,6 +269,38 @@ describe("useSlashCommands", () => {
     await h.unmount();
   });
 
+  test("pointer activation cannot execute an asynchronous command twice in one tick", async () => {
+    let runs = 0;
+    let resolveRun: (() => void) | undefined;
+    const slowCommand: SlashCommand = {
+      name: "slow",
+      description: "Slow side effect",
+      run: async () => {
+        runs += 1;
+        await new Promise<void>((resolve) => {
+          resolveRun = resolve;
+        });
+        return { status: "ok", keepDraft: true };
+      },
+    };
+    const h = await setup({ initialValue: "/slow", context: sessionCtx, commands: [slowCommand] });
+    let first: Promise<void> | undefined;
+    let second: Promise<void> | undefined;
+
+    await actRun(() => {
+      first = h.result.current.command.runAt(0);
+      second = h.result.current.command.runAt(0);
+    });
+    expect(runs).toBe(1);
+
+    await actRun(async () => {
+      resolveRun?.();
+      await Promise.all([first, second]);
+    });
+    expect(runs).toBe(1);
+    await h.unmount();
+  });
+
   test("ArrowDown to /clear-view + Enter runs clear-view, not the exact-match /clear", async () => {
     // Draft "/clear": items[0] is clear-view, and clear exact-matches the token.
     // Without navigation Enter resolves to the destructive clear (exact match).

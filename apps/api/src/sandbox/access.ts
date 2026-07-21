@@ -1,7 +1,7 @@
 // apps/api/src/sandbox/access.ts — the API-tier sandbox access seam.
 //
 // This is the foundation of the API-DIRECT control plane
-// (docs/design/sandbox-surfacing): the apps/api process constructs its OWN
+// (docs/connected-machines.md): the apps/api process constructs its OWN
 // sandbox client and resumes boxes by id IN-PROCESS, so non-turn ops (viewer
 // attach, FS/git reads, tunnel URL mint) never touch Temporal or a worker.
 //

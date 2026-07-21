@@ -238,6 +238,7 @@ export class MockOpenGeniClient implements SessionClientLike {
   async listSessionPage(): Promise<SessionListResponse> {
     return {
       pinned: [],
+      pinnedTruncated: false,
       sessions: FLEET.map((spec) =>
         this.fabricateSession(spec.id, spec.status, spec.title, spec.agoMinutes),
       ),
@@ -997,8 +998,12 @@ export class MockOpenGeniClient implements SessionClientLike {
     return { ...workspace };
   }
 
-  async listWorkspaceControlEvents(): Promise<WorkspaceControlEvent[]> {
+  async listWorkspaceControlEvents() {
     return [];
+  }
+
+  async listWorkspaceControlEventPage() {
+    return { events: [], bytes: 2, truncated: false, nextAfter: null };
   }
 
   async *streamWorkspaceControlEvents(

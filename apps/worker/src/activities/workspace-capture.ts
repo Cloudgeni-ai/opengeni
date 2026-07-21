@@ -1,4 +1,4 @@
-// Workbench v2 — turn-end workspace capture (dossier §10.1).
+// Workbench v2 — turn-end workspace capture.
 //
 // The universal spine that makes the session workspace paint instantly on cold /
 // offline reads: at TURN END, while the box is still guaranteed live and the
@@ -10,7 +10,7 @@
 // this when the machine is cold/offline; a warm box always wins (capture is a
 // labelled cache, never a replacement).
 //
-// SAFETY INVARIANTS (non-negotiable — see dossier §7.3 / §19):
+// SAFETY INVARIANTS (non-negotiable — see):
 //   • This module NEVER calls close()/terminate()/kill() on the session handle.
 //     session.close() == terminate() on Modal and would kill the user's box.
 //     Only the reaper terminates. We drop references, nothing more.
@@ -24,7 +24,7 @@
 //     BEFORE any GC delete runs.
 //
 // It is deliberately an EXTERNAL module with a SINGLE call-site line in
-// agent-turn.ts's finally (dossier "Accepted warts" #2 — do not grow the turn
+// agent-turn.ts's finally (the accepted design tradeoff — do not grow the turn
 // activity). The emitted `workspace.revision.captured` event is ANNOUNCE-ONLY
 // (metadata, never content) and must never gain a rendered timeline item.
 
@@ -43,7 +43,7 @@ import type { Observability } from "@opengeni/observability";
 // The un-agent-loop leaf. Constructing the Channel-A service over the un-proxied
 // setupBoxSession here (NOT the routing veneer) guarantees a mid-turn
 // sandbox_swap can never re-route capture execs onto a user's machine — the same
-// reason the snapshot uses setupBoxSession (dossier §7.3).
+// reason the snapshot uses setupBoxSession.
 import {
   SandboxChannelAService,
   type ChannelASession,
@@ -61,7 +61,7 @@ import type {
   WorkspaceCaptureStats,
 } from "@opengeni/contracts";
 
-// ─── Guards & constants (dossier §10.1 — pathological-only; configurable) ─────
+// ─── Guards & constants for pathological cases; configurable ─────
 export const CAPTURE_TIMEOUT_MS = 60_000;
 export const PER_FILE_CONTENT_GUARD_BYTES = 5 * 1024 * 1024; // after-image; over → tooLarge marker
 export const PER_FILE_DIFF_GUARD_BYTES = 10 * 1024 * 1024; // per-file diff; over → truncated marker
@@ -470,8 +470,8 @@ async function runCapture(
   // dirty tree on every read-only turn. Instead we skip when the change surface
   // is byte-identical to the previous revision — "no new revision when nothing
   // changed" holds even with a persistently dirty tree, and content-addressed
-  // blobs already dedupe storage. (Deviation from the dossier's literal "clean"
-  // wording — same intent, strictly better; recorded in PROGRESS.)
+  // blobs already dedupe storage. This preserves the intended empty-turn behavior
+  // while correctly handling a persistently dirty tree.
   // ── 3. after-images of touched files (size-gated), content-addressed ───────
   const files: WorkspaceCaptureFile[] = [];
   const blobKeys = new Set<string>();
@@ -570,7 +570,7 @@ async function runCapture(
     });
   }
 
-  // ── 4. empty-turn gate (dossier §10.1 / B3) ───────────────────────────────
+  // ── 4. empty-turn gate (B3) ───────────────────────────────
   // Skip when the change surface is byte-identical to the previous revision.
   // Fires BEFORE the tree BFS + storage PUTs (the expensive parts) so a no-op
   // read-only turn on a persistently dirty tree costs only the (small) status/

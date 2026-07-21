@@ -6,12 +6,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
    The Changes tab stacks N file diffs in one scroll pane. Mounting N Shiki
    highlighters (Pierre's `PatchDiff`) at once is the exact wart this replaces,
    so we mount only the sections inside the visible window ± overscan and reserve
-   the rest as empty space (dossier §10.7, D2).
+   the rest as empty space (D2).
 
    Why NOT `virtua` here (unlike the file tree/rail): Pierre renders each diff in
    a shadow DOM with its own internal overflow/virtualization, so an outer
    measuring virtualizer can read a collapsed or fixed height and lay sections
-   out wrong (dossier risk #6). This hook windows by mounting/unmounting whole
+   out wrong (known layout risk). This hook windows by mounting/unmounting whole
    file sections off a scroll offset and a per-section height ESTIMATE (refined
    by measurement when a real browser provides it), which never depends on
    Pierre reporting its own height — and the math is pure + deterministic, so

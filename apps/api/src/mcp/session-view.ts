@@ -1,89 +1,32 @@
 /**
- * Byte/token caps for the cross-session read tools (`session_events`,
- * `session_get`) exposed to manager-style agents over MCP.
+ * Model-facing projections for cross-session monitoring tools.
  *
- * A long-lived manager session monitors its spawned workers by reading their
- * event timeline. A worker's events carry verbatim model output and, worse,
- * verbatim TOOL OUTPUTS (`agent.toolCall.output.payload.output`) and raw tool
- * call items (`agent.toolCall.created.payload.raw` / `.arguments`). Those are
- * sized for the worker's own context, not the manager's: a single
- * `session_events` page (the DB limit caps event COUNT, not BYTES) can return
- * tens of thousands of characters, and a manager that pages a busy worker piles
- * hundreds of thousands of characters into its own context in one monitoring
- * turn — the exact "parent ingests child" blow-up that bricks the manager.
- *
- * The manager rarely needs a worker's full message deltas / tool outputs
- * verbatim; it needs status + recent progress. So these tools cap what they
- * hand back in two stages, both pure and exhaustively testable here:
- *
- *  1. PER-EVENT FIELD TRIM (`capEventPayload` / `capPayloadValue`): walk each
- *     event's payload and clamp any over-long string (and any over-large nested
- *     object, by serializing then clamping) to a per-field budget, leaving an
- *     explicit `…N chars truncated…` marker. Type-agnostic: it targets whatever
- *     field is fat (`text`, `output`, `arguments`, `raw`, `delta`, …) without
- *     enumerating event types, so a new fat event type is capped automatically.
- *
- *  2. HEAD+TAIL PAGE BUDGET (`capEventPage`): after per-event trim, if the page
- *     still exceeds the total token budget, keep a HEAD (oldest, for entry
- *     context) and a TAIL (newest, for recent progress) of events and drop the
- *     middle, inserting one synthetic marker event that says how many were
- *     dropped and how to get them (page with `after`/`limit`, or read the
- *     notebook). Pagination semantics are preserved: `nextAfter` is still the
- *     real highest `sequence` returned, so the next page starts exactly where
- *     this one ended.
- *
- * Worker-side and UI consumers never go through here — they call the DB
- * functions or the REST routes directly. This module only shapes the MCP tool
- * result a manager model reads, and it is intentionally dependency-free (no DB)
- * so the cap logic can be unit-tested in isolation.
+ * `session_events` reads are selected tail/forward and filtered in PostgreSQL;
+ * this module is the independent final guard before JSON enters a manager
+ * model's context. It measures the exact pretty-printed MCP text, trims fat
+ * payload fields, and—only if still required—removes rows from the pagination
+ * edge while preserving a usable cursor. It never manufactures an event or
+ * advances across an event it did not return.
  */
 
-import type { SessionEvent } from "@opengeni/contracts";
+import type {
+  Rig,
+  Session,
+  SessionEvent,
+  SessionEventPayloadMode,
+  SessionEventReadDirection,
+  SessionEventReadMode,
+} from "@opengeni/contracts";
+import { measureSessionEventJson } from "@opengeni/contracts";
 
-// ~4 chars per token is the same coarse estimate the runtime compaction path
-// uses; we only need an order-of-magnitude budget, not exact tokenization.
-const CHARS_PER_TOKEN = 4;
-
-export function estimateTokensFromChars(chars: number): number {
-  return Math.ceil(chars / CHARS_PER_TOKEN);
-}
-
-function estimateValueTokens(value: unknown): number {
-  return estimateTokensFromChars(safeStringify(value).length);
-}
-
-export type EventCapConfig = {
-  // Per-event cap: max characters any single string field (or serialized
-  // nested object) inside an event payload may contribute before it is clamped
-  // with a truncation marker.
-  perFieldChars: number;
-  // Total page cap: max estimated tokens the whole returned event array may
-  // occupy. When the per-event-trimmed page still exceeds this, head+tail
-  // selection drops the middle.
-  pageTokenBudget: number;
-  // When head+tail selection kicks in, how many events to keep at each end.
-  headEvents: number;
-  tailEvents: number;
-};
-
-// ~2k chars (~500 tokens) per fat field keeps a status glance readable without
-// shipping a worker's whole tool output. ~10k-token page budget sits in the
-// 8–12k target band; head/tail of 8 keeps entry context plus recent progress.
-export const DEFAULT_EVENT_CAP: EventCapConfig = {
-  perFieldChars: 2_000,
-  pageTokenBudget: 10_000,
-  headEvents: 8,
-  tailEvents: 8,
-};
-
-// ~6k chars (~1.5k tokens) for a single session detail blob: resources/tools/
-// metadata are normally tiny, but agent-set metadata is unbounded, so clamp it.
+export const SESSION_EVENT_MCP_MAX_BYTES = 64 * 1024;
+export const SESSION_EVENT_MCP_FIELD_MAX_CHARS = 4_000;
 export const DEFAULT_SESSION_DETAIL_CHARS = 6_000;
+export const SESSION_DETAIL_MCP_MAX_BYTES = 64 * 1024;
+export const RIG_DETAIL_MCP_MAX_BYTES = 64 * 1024;
 
 function safeStringify(value: unknown): string {
-  if (typeof value === "string") {
-    return value;
-  }
+  if (typeof value === "string") return value;
   try {
     return JSON.stringify(value) ?? String(value);
   } catch {
@@ -92,177 +35,488 @@ function safeStringify(value: unknown): string {
 }
 
 function truncationMarker(droppedChars: number): string {
-  return `…[${droppedChars} chars truncated — page with after/limit on session_events, or read the session notebook for the full content]`;
+  return `…[${droppedChars} chars omitted from this model monitoring projection; request explicit forensic full mode for any retained audit preview; original source output may not have been retained]`;
 }
 
 function clampString(value: string, maxChars: number): string {
-  if (value.length <= maxChars) {
-    return value;
-  }
-  // Keep a head and a small tail of the field so both the start and the end
-  // (often the most diagnostic part of a tool output / error) survive.
+  if (value.length <= maxChars) return value;
   const dropped = value.length - maxChars;
   const headChars = Math.max(0, Math.floor(maxChars * 0.7));
   const tailChars = Math.max(0, maxChars - headChars);
-  const head = value.slice(0, headChars);
   const tail = tailChars > 0 ? value.slice(value.length - tailChars) : "";
-  return `${head}${truncationMarker(dropped)}${tail}`;
+  return `${value.slice(0, headChars)}${truncationMarker(dropped)}${tail}`;
 }
 
-/**
- * Recursively clamp any over-budget string or nested value inside a payload.
- * Strings longer than `perFieldChars` are head+tail clamped. Nested objects /
- * arrays whose serialized form exceeds `perFieldChars` are recursed into so the
- * clamp lands on the actual fat leaf; if recursion cannot shrink them enough
- * (e.g. thousands of tiny fields), the whole branch is replaced by its clamped
- * serialization. Plain scalars pass through untouched. A depth guard makes the
- * walk safe against pathological / cyclic structures.
- */
+/** Recursively clamp fat leaves and collapse pathological containers. */
 export function capPayloadValue(value: unknown, perFieldChars: number, depth = 0): unknown {
-  if (typeof value === "string") {
-    return clampString(value, perFieldChars);
-  }
-  if (value === null || typeof value !== "object") {
-    return value;
-  }
-  // Guard against pathological / cyclic structures: past a reasonable depth,
-  // collapse to a clamped serialization.
-  if (depth >= 8) {
-    return clampString(safeStringify(value), perFieldChars);
-  }
+  if (typeof value === "string") return clampString(value, perFieldChars);
+  if (value === null || typeof value !== "object") return value;
+  if (depth >= 8) return clampString(safeStringify(value), perFieldChars);
   const serializedLength = safeStringify(value).length;
-  if (serializedLength <= perFieldChars) {
-    return value;
-  }
+  if (serializedLength <= perFieldChars) return value;
   if (Array.isArray(value)) {
     const mapped = value.map((entry) => capPayloadValue(entry, perFieldChars, depth + 1));
-    if (safeStringify(mapped).length <= perFieldChars * 2) {
-      return mapped;
-    }
-    return clampString(safeStringify(value), perFieldChars);
+    return safeStringify(mapped).length <= perFieldChars * 2
+      ? mapped
+      : clampString(safeStringify(value), perFieldChars);
   }
   const out: Record<string, unknown> = {};
   for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
     out[key] = capPayloadValue(entry, perFieldChars, depth + 1);
   }
-  // If recursion still left the object fat (many small fields), fall back to a
-  // clamped serialization so the page budget is respected.
-  if (safeStringify(out).length <= perFieldChars * 4) {
-    return out;
-  }
-  return clampString(safeStringify(value), perFieldChars);
+  return safeStringify(out).length <= perFieldChars * 4
+    ? out
+    : clampString(safeStringify(value), perFieldChars);
 }
 
 export function capEventPayload(event: SessionEvent, perFieldChars: number): SessionEvent {
   const cappedPayload = capPayloadValue(event.payload, perFieldChars);
-  if (cappedPayload === event.payload) {
-    return event;
-  }
-  return { ...event, payload: cappedPayload };
+  return cappedPayload === event.payload ? event : { ...event, payload: cappedPayload };
 }
 
-export type CappedEventPage = {
-  events: SessionEvent[];
-  // The real highest `sequence` among the events the DB returned, so the caller
-  // can advance the cursor correctly even when the middle was dropped. Null
-  // when the page was empty.
-  nextAfter: number | null;
-  truncated: boolean;
+export type SessionEventMcpPageInput = {
+  events: readonly SessionEvent[];
+  mode: SessionEventReadMode;
+  payloadMode: SessionEventPayloadMode;
+  direction: SessionEventReadDirection;
+  sourceHasMore: boolean;
+  sourceTruncatedBy: "count" | "bytes" | null;
+  after: number;
+  before: number | null;
+  maxBytes?: number | undefined;
 };
 
-/**
- * Build a synthetic marker event that stands in for the dropped middle. It is
- * NOT a real persisted event; its `id` is the zero UUID and its sequence sits
- * between the kept head and tail so ordering by sequence stays monotonic. It
- * never participates in pagination (the caller derives `nextAfter` from the
- * real events, not this marker). Typed `session.status.changed` so the
- * synthetic event still validates against the `SessionEvent` contract.
- */
-function buildTruncationEvent(
-  template: SessionEvent,
-  droppedCount: number,
-  firstDroppedSequence: number,
-  lastDroppedSequence: number,
-  markerSequence: number,
-): SessionEvent {
-  return {
-    id: "00000000-0000-0000-0000-000000000000",
-    workspaceId: template.workspaceId,
-    sessionId: template.sessionId,
-    sequence: markerSequence,
-    type: "session.status.changed",
-    payload: {
-      _truncated: true,
-      note: `${droppedCount} event(s) (sequence ${firstDroppedSequence}–${lastDroppedSequence}) omitted from this monitoring view to keep the response bounded. Page the gap with session_events after=${firstDroppedSequence - 1} limit=… if you need them verbatim, or read the worker's session notebook.`,
-      droppedCount,
-      omittedSequenceRange: [firstDroppedSequence, lastDroppedSequence],
-    },
-    occurredAt: template.occurredAt,
-    clientEventId: null,
-    turnId: null,
+export type SessionEventMcpPage = {
+  mode: SessionEventReadMode;
+  payloadMode: SessionEventPayloadMode;
+  direction: SessionEventReadDirection;
+  events: SessionEvent[];
+  coveredSequence: { first: number; last: number } | null;
+  nextAfter: number | null;
+  nextBefore: number | null;
+  hasMore: boolean;
+  truncated: boolean;
+  truncation?: {
+    reasons: Array<"source_count" | "source_bytes" | "model_payload" | "model_bytes">;
+    omittedSide: "before" | "after";
+    resumeCursor: number | null;
   };
+  bytes: number;
+  maxBytes: number;
+};
+
+function prettyJsonBytes(value: unknown): number {
+  return Buffer.byteLength(JSON.stringify(value, null, 2), "utf8");
+}
+
+function setMeasuredBytes(page: SessionEventMcpPage): number {
+  let measured = page.bytes;
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    page.bytes = measured;
+    const next = prettyJsonBytes(page);
+    if (next === measured) return next;
+    measured = next;
+  }
+  page.bytes = measured;
+  return prettyJsonBytes(page);
 }
 
 /**
- * Apply per-event field trim then, if the page is still over budget, keep a
- * head and a tail of events and drop the middle behind a marker. `events` is
- * assumed oldest-first (as `listSessionEvents` returns).
+ * Build the exact model-visible page. Returned `bytes` includes all metadata
+ * and pretty-printing used by the MCP JSON adapter.
  */
-export function capEventPage(
-  events: SessionEvent[],
-  config: EventCapConfig = DEFAULT_EVENT_CAP,
-): CappedEventPage {
-  const realLast = events[events.length - 1];
-  const nextAfter = realLast ? realLast.sequence : null;
+export function boundSessionEventMcpPage(input: SessionEventMcpPageInput): SessionEventMcpPage {
+  const maxBytes = Math.max(8 * 1024, input.maxBytes ?? SESSION_EVENT_MCP_MAX_BYTES);
+  let payloadTrimmed = false;
+  const events = input.events.map((event) => {
+    const capped = capEventPayload(event, SESSION_EVENT_MCP_FIELD_MAX_CHARS);
+    if (capped !== event) payloadTrimmed = true;
+    return capped;
+  });
+  let modelRowsDropped = false;
 
-  const trimmed = events.map((event) => capEventPayload(event, config.perFieldChars));
+  const build = (): SessionEventMcpPage => {
+    const first = events[0]?.sequence ?? null;
+    const last = events.at(-1)?.sequence ?? null;
+    const reasons: NonNullable<SessionEventMcpPage["truncation"]>["reasons"] = [];
+    if (input.sourceHasMore) {
+      reasons.push(input.sourceTruncatedBy === "bytes" ? "source_bytes" : "source_count");
+    }
+    if (payloadTrimmed) reasons.push("model_payload");
+    if (modelRowsDropped) reasons.push("model_bytes");
+    const nextAfter = input.direction === "after" ? (last ?? input.after) : null;
+    const nextBefore = input.direction === "before" ? (first ?? input.before) : null;
+    const page: SessionEventMcpPage = {
+      mode: input.mode,
+      payloadMode: input.payloadMode,
+      direction: input.direction,
+      events: [...events],
+      coveredSequence: first === null || last === null ? null : { first, last },
+      nextAfter,
+      nextBefore,
+      hasMore: input.sourceHasMore || modelRowsDropped,
+      truncated: reasons.length > 0,
+      ...(reasons.length > 0
+        ? {
+            truncation: {
+              reasons,
+              omittedSide: input.direction,
+              resumeCursor: input.direction === "after" ? nextAfter : nextBefore,
+            },
+          }
+        : {}),
+      bytes: 0,
+      maxBytes,
+    };
+    setMeasuredBytes(page);
+    return page;
+  };
 
-  let runningTokens = 0;
-  let overBudget = false;
-  for (const event of trimmed) {
-    runningTokens += estimateValueTokens(event);
-    if (runningTokens > config.pageTokenBudget) {
-      overBudget = true;
-      break;
+  let page = build();
+  while (page.bytes > maxBytes && events.length > 0) {
+    if (input.direction === "before") events.shift();
+    else events.pop();
+    modelRowsDropped = true;
+    page = build();
+  }
+  if (page.bytes > maxBytes) {
+    throw new RangeError(`Session-event MCP metadata exceeds its ${maxBytes}-byte envelope`);
+  }
+  return page;
+}
+
+type MonitoringPreviewState = {
+  remainingStringBytes: number;
+  remainingNodes: number;
+  truncated: boolean;
+  details: string[];
+};
+
+type SessionDetailFieldFact = {
+  truncated: boolean;
+  originalBytes: number | null;
+  deliveredBytes: number;
+  originalCount?: number;
+  deliveredCount?: number;
+  measurementBounded?: boolean;
+};
+
+function modelStringProjection(
+  value: string,
+  maxBytes: number,
+): {
+  value: string;
+  fact: SessionDetailFieldFact & { originalChars: number };
+} {
+  const originalBytes = Buffer.byteLength(value, "utf8");
+  if (originalBytes <= maxBytes) {
+    return {
+      value,
+      fact: {
+        truncated: false,
+        originalBytes,
+        deliveredBytes: originalBytes,
+        originalChars: value.length,
+      },
+    };
+  }
+  let omittedBytes = originalBytes - maxBytes;
+  let head = "";
+  let tail = "";
+  let marker = "";
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    marker = `…[${omittedBytes} UTF-8 bytes omitted from model monitoring projection]…`;
+    const contentBudget = Math.max(0, maxBytes - Buffer.byteLength(marker, "utf8"));
+    head = utf8Prefix(value, Math.floor(contentBudget * 0.7));
+    tail = utf8Suffix(value, contentBudget - Buffer.byteLength(head, "utf8"));
+    const exact = Math.max(
+      0,
+      originalBytes - Buffer.byteLength(head, "utf8") - Buffer.byteLength(tail, "utf8"),
+    );
+    if (exact === omittedBytes) break;
+    omittedBytes = exact;
+  }
+  const projected = `${head}${marker}${tail}`;
+  return {
+    value: projected,
+    fact: {
+      truncated: true,
+      originalBytes,
+      deliveredBytes: Buffer.byteLength(projected, "utf8"),
+      originalChars: value.length,
+    },
+  };
+}
+
+function utf8Prefix(value: string, maxBytes: number): string {
+  let index = 0;
+  let bytes = 0;
+  while (index < value.length) {
+    const codePoint = value.codePointAt(index)!;
+    const character = String.fromCodePoint(codePoint);
+    const nextBytes = Buffer.byteLength(character, "utf8");
+    if (bytes + nextBytes > maxBytes) break;
+    bytes += nextBytes;
+    index += character.length;
+  }
+  return value.slice(0, index);
+}
+
+function utf8Suffix(value: string, maxBytes: number): string {
+  let index = value.length;
+  let bytes = 0;
+  while (index > 0) {
+    const last = value.charCodeAt(index - 1);
+    const width = last >= 0xdc00 && last <= 0xdfff && index > 1 ? 2 : 1;
+    const character = value.slice(index - width, index);
+    const nextBytes = Buffer.byteLength(character, "utf8");
+    if (bytes + nextBytes > maxBytes) break;
+    bytes += nextBytes;
+    index -= width;
+  }
+  return value.slice(index);
+}
+
+function previewMonitoringValue(
+  value: unknown,
+  state: MonitoringPreviewState,
+  path = "$",
+  depth = 0,
+): unknown {
+  if (state.remainingNodes <= 0 || depth >= 8) {
+    state.truncated = true;
+    if (state.details.length < 24) state.details.push(`${path}: traversal boundary`);
+    return "[nested value omitted from model monitoring projection]";
+  }
+  state.remainingNodes -= 1;
+  if (typeof value === "string") {
+    const projected = modelStringProjection(value, Math.min(1_000, state.remainingStringBytes));
+    state.remainingStringBytes = Math.max(
+      0,
+      state.remainingStringBytes - projected.fact.deliveredBytes,
+    );
+    if (projected.fact.truncated) {
+      state.truncated = true;
+      if (state.details.length < 24) state.details.push(`${path}: string truncated`);
+    }
+    return projected.value;
+  }
+  if (value === null || typeof value === "boolean" || typeof value === "number") return value;
+  if (typeof value !== "object") {
+    state.truncated = true;
+    if (state.details.length < 24) state.details.push(`${path}: non-JSON value omitted`);
+    return `[${typeof value} value omitted from model monitoring projection]`;
+  }
+  if (Array.isArray(value)) {
+    const keep = Math.min(24, value.length);
+    const out = value
+      .slice(0, keep)
+      .map((entry, index) => previewMonitoringValue(entry, state, `${path}[${index}]`, depth + 1));
+    if (keep < value.length) {
+      state.truncated = true;
+      if (state.details.length < 24) {
+        state.details.push(`${path}: ${value.length - keep} array entries omitted`);
+      }
+      out.push({ omittedEntries: value.length - keep });
+    }
+    return out;
+  }
+  const out: Record<string, unknown> = {};
+  const entries = Object.entries(value as Record<string, unknown>);
+  const keep = Math.min(24, entries.length);
+  for (let index = 0; index < keep; index += 1) {
+    const [rawKey, entry] = entries[index]!;
+    const keyProjection = modelStringProjection(rawKey, 128).value;
+    const key = Object.prototype.hasOwnProperty.call(out, keyProjection)
+      ? `${keyProjection}#${index}`
+      : keyProjection;
+    out[key] = previewMonitoringValue(entry, state, `${path}.${keyProjection}`, depth + 1);
+  }
+  if (keep < entries.length) {
+    state.truncated = true;
+    if (state.details.length < 24) {
+      state.details.push(`${path}: ${entries.length - keep} object fields omitted`);
+    }
+    out.omittedFields = entries.length - keep;
+  }
+  return out;
+}
+
+function projectMonitoringContainer(
+  value: unknown,
+  stringBytes: number,
+): { value: unknown; fact: SessionDetailFieldFact; details: string[] } {
+  const measurement = measureSessionEventJson(value);
+  const state: MonitoringPreviewState = {
+    remainingStringBytes: stringBytes,
+    remainingNodes: 128,
+    truncated: false,
+    details: [],
+  };
+  const preview = previewMonitoringValue(value, state);
+  const deliveredBytes = Buffer.byteLength(JSON.stringify(preview), "utf8");
+  const originalCount = Array.isArray(value)
+    ? value.length
+    : value !== null && typeof value === "object"
+      ? Object.keys(value).length
+      : undefined;
+  const deliveredCount = originalCount === undefined ? undefined : Math.min(24, originalCount);
+  const originalBytes = measurement.bytes;
+  const truncated =
+    state.truncated || originalBytes === null || (originalBytes ?? 0) !== deliveredBytes;
+  return {
+    value: preview,
+    fact: {
+      truncated,
+      originalBytes,
+      deliveredBytes,
+      ...(originalCount === undefined ? {} : { originalCount }),
+      ...(deliveredCount === undefined ? {} : { deliveredCount }),
+      ...(measurement.bytes === null ? { measurementBounded: true } : {}),
+    },
+    details: state.details,
+  };
+}
+
+/** Purpose-built, flat, model-facing detail projection for `session_get`. */
+export function boundSessionDetailMcp(
+  session: Session,
+  effectiveControl: unknown = session.effectiveControl,
+  maxBytes = SESSION_DETAIL_MCP_MAX_BYTES,
+) {
+  const title = session.title === null ? null : modelStringProjection(session.title, 512);
+  const initialMessage = modelStringProjection(session.initialMessage, 4_000);
+  const instructions =
+    session.instructions === null ? null : modelStringProjection(session.instructions, 4_000);
+  const metadata = projectMonitoringContainer(session.metadata, 3_000);
+  const resources = projectMonitoringContainer(session.resources, 3_000);
+  const tools = projectMonitoringContainer(session.tools, 4_000);
+  const mcpServers = projectMonitoringContainer(session.mcpServers, 3_000);
+  const permissions = projectMonitoringContainer(session.firstPartyMcpPermissions, 1_500);
+  const control = projectMonitoringContainer(effectiveControl, 2_000);
+  const fieldFacts: Record<string, SessionDetailFieldFact> = {
+    title: title?.fact ?? {
+      truncated: false,
+      originalBytes: 0,
+      deliveredBytes: 0,
+    },
+    initialMessage: initialMessage.fact,
+    instructions: instructions?.fact ?? {
+      truncated: false,
+      originalBytes: 0,
+      deliveredBytes: 0,
+    },
+    metadata: metadata.fact,
+    resources: resources.fact,
+    tools: tools.fact,
+    mcpServers: mcpServers.fact,
+    firstPartyMcpPermissions: permissions.fact,
+    effectiveControl: control.fact,
+  };
+  const details = [
+    ...metadata.details,
+    ...resources.details,
+    ...tools.details,
+    ...mcpServers.details,
+    ...permissions.details,
+    ...control.details,
+  ].slice(0, 32);
+  const result = {
+    id: session.id,
+    workspaceId: session.workspaceId,
+    accountId: session.accountId,
+    status: session.status,
+    title: title?.value ?? null,
+    titleSource: session.titleSource,
+    initialMessage: initialMessage.value,
+    instructions: instructions?.value ?? null,
+    resources: resources.value,
+    tools: tools.value,
+    metadata: metadata.value,
+    model: modelStringProjection(session.model, 512).value,
+    sandboxBackend: modelStringProjection(session.sandboxBackend, 128).value,
+    sandboxOs: session.sandboxOs,
+    sandboxGroupId: session.sandboxGroupId,
+    activeSandboxId: session.activeSandboxId,
+    activeEpoch: session.activeEpoch,
+    variableSetId: session.variableSetId,
+    environmentId: session.environmentId,
+    rigId: session.rigId,
+    rigVersionId: session.rigVersionId,
+    firstPartyMcpPermissions: permissions.value,
+    mcpServers: mcpServers.value,
+    parentSessionId: session.parentSessionId,
+    createIdempotencyKey:
+      session.createIdempotencyKey === null
+        ? null
+        : modelStringProjection(session.createIdempotencyKey, 512).value,
+    temporalWorkflowId:
+      session.temporalWorkflowId === null
+        ? null
+        : modelStringProjection(session.temporalWorkflowId, 512).value,
+    activeTurnId: session.activeTurnId,
+    lastInputTokens: session.lastInputTokens,
+    queueVersion: session.queueVersion,
+    queueHeadPosition: session.queueHeadPosition,
+    queueTailPosition: session.queueTailPosition,
+    effectiveControl: control.value,
+    lastSequence: session.lastSequence,
+    codexPinnedCredentialId: session.codexPinnedCredentialId,
+    codexLastCredentialId: session.codexLastCredentialId,
+    pinned: session.pinned,
+    pinnedAt: session.pinnedAt,
+    pinVersion: session.pinVersion,
+    ...(session.treeStats === undefined ? {} : { treeStats: session.treeStats }),
+    createdAt: session.createdAt,
+    updatedAt: session.updatedAt,
+    projection: {
+      truncated: Object.values(fieldFacts).some((fact) => fact.truncated),
+      fields: fieldFacts,
+      details,
+      bytes: 0,
+      maxBytes,
+    },
+  };
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const measured = prettyJsonBytes(result);
+    if (result.projection.bytes === measured) break;
+    result.projection.bytes = measured;
+  }
+  const mutable = result as Record<string, any> & {
+    projection: typeof result.projection;
+  };
+  const fallbackContainers: Array<[string, SessionDetailFieldFact]> = [
+    ["tools", fieldFacts.tools!],
+    ["resources", fieldFacts.resources!],
+    ["metadata", fieldFacts.metadata!],
+    ["mcpServers", fieldFacts.mcpServers!],
+    ["effectiveControl", fieldFacts.effectiveControl!],
+    ["firstPartyMcpPermissions", fieldFacts.firstPartyMcpPermissions!],
+  ];
+  for (const [field, fact] of fallbackContainers) {
+    if (result.projection.bytes <= maxBytes) break;
+    const omission = {
+      preview: `[${field} preview omitted at final session_get byte boundary]`,
+      ...(fact.originalCount === undefined ? {} : { originalCount: fact.originalCount }),
+    };
+    mutable[field] = omission;
+    fact.truncated = true;
+    fact.deliveredBytes = Buffer.byteLength(JSON.stringify(omission), "utf8");
+    fact.deliveredCount = 0;
+    result.projection.truncated = true;
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const measured = prettyJsonBytes(result);
+      if (result.projection.bytes === measured) break;
+      result.projection.bytes = measured;
     }
   }
-
-  const keepCount = config.headEvents + config.tailEvents;
-  if (!overBudget || trimmed.length <= keepCount + 1) {
-    return { events: trimmed, nextAfter, truncated: overBudget && trimmed.length > keepCount + 1 };
+  if (result.projection.bytes > maxBytes) {
+    throw new RangeError(`session_get projection exceeds its ${maxBytes}-byte envelope`);
   }
-
-  const head = trimmed.slice(0, config.headEvents);
-  const tail = trimmed.slice(trimmed.length - config.tailEvents);
-  const droppedStart = config.headEvents;
-  const droppedEnd = trimmed.length - config.tailEvents - 1;
-  const droppedCount = droppedEnd - droppedStart + 1;
-  const firstDroppedSequence = trimmed[droppedStart]!.sequence;
-  const lastDroppedSequence = trimmed[droppedEnd]!.sequence;
-  // Marker sequence sits between the kept head and tail; reusing the last head
-  // sequence keeps the returned page monotonic non-decreasing by sequence.
-  const markerSequence = head[head.length - 1]!.sequence;
-  const marker = buildTruncationEvent(
-    realLast!,
-    droppedCount,
-    firstDroppedSequence,
-    lastDroppedSequence,
-    markerSequence,
-  );
-
-  return {
-    events: [...head, marker, ...tail],
-    nextAfter,
-    truncated: true,
-  };
+  return result;
 }
 
-/**
- * Clamp a single session-detail object for `session_get`. Only the unbounded
- * agent-controlled fields (`metadata`, and defensively `initialMessage`) can
- * grow large; everything else is small and structural. Returns a shallow copy
- * with those fields capped when over budget, otherwise the original reference.
- */
+/** @deprecated use boundSessionDetailMcp for the actual MCP response. */
 export function capSessionDetail<T extends { metadata?: unknown; initialMessage?: unknown }>(
   session: T,
   perFieldChars: number = DEFAULT_SESSION_DETAIL_CHARS,
@@ -284,4 +538,169 @@ export function capSessionDetail<T extends { metadata?: unknown; initialMessage?
     changed = true;
   }
   return changed ? out : session;
+}
+
+/** Bounded current definition plus compact-by-query historical rig summaries. */
+export function boundRigDetailMcp(
+  rig: Rig,
+  versionsPage: { versions: unknown[]; total: number; hasMore: boolean },
+  changesPage: { changes: unknown[]; total: number; hasMore: boolean },
+  maxBytes = RIG_DETAIL_MCP_MAX_BYTES,
+) {
+  const name = modelStringProjection(rig.name, 512);
+  const description =
+    rig.description === null ? null : modelStringProjection(rig.description, 2_000);
+  const active = rig.activeVersion;
+  const activeSetup =
+    active?.setupScript === null || active?.setupScript === undefined
+      ? null
+      : modelStringProjection(active.setupScript, 8_000);
+  const activeImage =
+    active?.image === null || active?.image === undefined
+      ? null
+      : modelStringProjection(active.image, 1_000);
+  const activeChangelog =
+    active?.changelog === null || active?.changelog === undefined
+      ? null
+      : modelStringProjection(active.changelog, 2_000);
+  const activeChecks = projectMonitoringContainer(active?.checks ?? [], 5_000);
+  const activeHooks = projectMonitoringContainer(active?.credentialHooks ?? [], 1_500);
+  const activeVariableSets = projectMonitoringContainer(active?.defaultVariableSetIds ?? [], 1_500);
+  const versions = projectMonitoringContainer(versionsPage.versions, 4_000);
+  const changes = projectMonitoringContainer(changesPage.changes, 4_000);
+  const fieldFacts: Record<string, SessionDetailFieldFact> = {
+    name: name.fact,
+    description: description?.fact ?? {
+      truncated: false,
+      originalBytes: 0,
+      deliveredBytes: 0,
+    },
+    activeSetupScript: activeSetup?.fact ?? {
+      truncated: false,
+      originalBytes: 0,
+      deliveredBytes: 0,
+    },
+    activeImage: activeImage?.fact ?? {
+      truncated: false,
+      originalBytes: 0,
+      deliveredBytes: 0,
+    },
+    activeChangelog: activeChangelog?.fact ?? {
+      truncated: false,
+      originalBytes: 0,
+      deliveredBytes: 0,
+    },
+    activeChecks: activeChecks.fact,
+    activeCredentialHooks: activeHooks.fact,
+    activeDefaultVariableSetIds: activeVariableSets.fact,
+    versions: versions.fact,
+    changes: changes.fact,
+  };
+  const result = {
+    rig: {
+      id: rig.id,
+      accountId: rig.accountId,
+      workspaceId: rig.workspaceId,
+      name: name.value,
+      description: description?.value ?? null,
+      createdBy: rig.createdBy === null ? null : modelStringProjection(rig.createdBy, 512).value,
+      activeVersion: active
+        ? {
+            id: active.id,
+            rigId: active.rigId,
+            version: active.version,
+            image: activeImage?.value ?? null,
+            setupScript: activeSetup?.value ?? null,
+            checks: activeChecks.value,
+            credentialHooks: activeHooks.value,
+            defaultVariableSetIds: activeVariableSets.value,
+            changelog: activeChangelog?.value ?? null,
+            createdBy:
+              active.createdBy === null ? null : modelStringProjection(active.createdBy, 512).value,
+            active: active.active,
+            createdAt: active.createdAt,
+          }
+        : null,
+      activeVersionHealth: rig.activeVersionHealth,
+      versionCount: rig.versionCount,
+      createdAt: rig.createdAt,
+      updatedAt: rig.updatedAt,
+    },
+    versions: versions.value,
+    versionsTotal: versionsPage.total,
+    versionsTruncated: versionsPage.hasMore || versions.fact.truncated,
+    changes: changes.value,
+    changesTotal: changesPage.total,
+    changesTruncated: changesPage.hasMore || changes.fact.truncated,
+    projection: {
+      truncated:
+        versionsPage.hasMore ||
+        changesPage.hasMore ||
+        Object.values(fieldFacts).some((fact) => fact.truncated),
+      fields: fieldFacts,
+      details: [
+        ...activeChecks.details,
+        ...activeHooks.details,
+        ...activeVariableSets.details,
+        ...versions.details,
+        ...changes.details,
+      ].slice(0, 32),
+      bytes: 0,
+      maxBytes,
+    },
+  };
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const measured = prettyJsonBytes(result);
+    if (result.projection.bytes === measured) break;
+    result.projection.bytes = measured;
+  }
+  const mutable = result as Record<string, any> & {
+    projection: typeof result.projection;
+  };
+  const rigFallbacks: Array<{
+    target: Record<string, unknown>;
+    field: string;
+    fact: SessionDetailFieldFact;
+  }> = [
+    {
+      target: mutable.rig.activeVersion ?? {},
+      field: "checks",
+      fact: fieldFacts.activeChecks!,
+    },
+    { target: mutable, field: "versions", fact: fieldFacts.versions! },
+    { target: mutable, field: "changes", fact: fieldFacts.changes! },
+    {
+      target: mutable.rig.activeVersion ?? {},
+      field: "credentialHooks",
+      fact: fieldFacts.activeCredentialHooks!,
+    },
+    {
+      target: mutable.rig.activeVersion ?? {},
+      field: "defaultVariableSetIds",
+      fact: fieldFacts.activeDefaultVariableSetIds!,
+    },
+  ];
+  for (const fallback of rigFallbacks) {
+    if (result.projection.bytes <= maxBytes) break;
+    const omission = {
+      preview: `[${fallback.field} preview omitted at final rig_get byte boundary]`,
+      ...(fallback.fact.originalCount === undefined
+        ? {}
+        : { originalCount: fallback.fact.originalCount }),
+    };
+    fallback.target[fallback.field] = omission;
+    fallback.fact.truncated = true;
+    fallback.fact.deliveredBytes = Buffer.byteLength(JSON.stringify(omission), "utf8");
+    fallback.fact.deliveredCount = 0;
+    result.projection.truncated = true;
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const measured = prettyJsonBytes(result);
+      if (result.projection.bytes === measured) break;
+      result.projection.bytes = measured;
+    }
+  }
+  if (result.projection.bytes > maxBytes) {
+    throw new RangeError(`rig_get projection exceeds its ${maxBytes}-byte envelope`);
+  }
+  return result;
 }
