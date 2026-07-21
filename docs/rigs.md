@@ -7,14 +7,14 @@ A workspace owns named **rigs**: versioned sandbox machine definitions (a base i
 1. **Versions are append-only and content-immutable.** `rig_versions` rows are never updated in place; only the `active` flag flips. Exactly one version per rig can be active at a time (a partial unique index on `(rig_id) WHERE active`).
 2. **A session's rig binding is frozen at creation.** `sessions.rig_id`/`sessions.rig_version_id` are set once, from the explicit `rigId` on create or the workspace's default rig, and never move — even if the rig is promoted to a new active version mid-session. A shared box (`sandbox: 'shared'` or an explicit group) must carry the same frozen `rig_version_id` as the rest of its group; a mismatch 422s at create.
 3. **Two change kinds, two trust levels.** `setup_append` is additive (one already-verified-in-a-live-box shell command) and **auto-merges into a new active version on a green clean-replay run** — no `rigs:manage` needed. `definition_edit` is a full next-version edit (image/script/checks/credential hooks/default variable sets) that still runs the same clean-replay verification but always lands `proposed`; promoting it to a new active version requires `rigs:manage`.
-4. **Bounded verifier ownership requires a two-phase shared-queue rollout.** A rig verifier is a standalone throwaway sandbox, not a turn/viewer lease. This Phase A revision installs the tenant-consistent `rig_verification` owner registry and teaches the reaper to recognize active exact owner rows, but intentionally leaves verifier creation on the legacy unowned path. Rig-verification dispatches must remain paused throughout Phase A and until Phase B is deployed everywhere with its activation gate still false. Phase B may register owners only after live worker-revision evidence proves no lease-only predecessor can receive the shared reaper activity.
+4. **Bounded verifier ownership requires a two-phase shared-queue rollout.** A rig verifier is a standalone throwaway sandbox, not a turn/viewer lease. Phase A installs the tenant-consistent `rig_verification` owner registry and teaches the reaper to recognize active exact owner rows while leaving verifier creation on the legacy path. This Phase B revision adds exact owner registration behind a strict default-off gate and rejects before provider creation while the gate is false. Rig-verification dispatches remain paused until Phase B is deployed everywhere and live worker-revision evidence proves no lease-only predecessor can receive the shared reaper activity.
 5. **Workspace isolation.** `rigs`, `rig_versions`, and `rig_changes` are all FORCE-RLS workspace-scoped tables, same as every other workspace table.
 6. **Rig setup never touches selfhosted.** The rig-setup hook is part of the same owned-hooks block as the repository-clone and credential hooks, which is skipped entirely when the turn's effective sandbox backend is `selfhosted` (a [Connected Machine](connected-machines.md) is the user's own computer; the platform never runs setup against it). A machine-targeted turn therefore always behaves as if rig-less for setup purposes, even when the session carries a rig binding.
 
 ## Configuration
 
 - `OPENGENI_RIG_SETUP_TIMEOUT_MS` — the budget for the rig's own setup script, separate from the general 120s sandbox-lifecycle-hook default. Defaults to 600000 (10 minutes). Applies to both a live turn's setup hook and a rig-CI verification run.
-- `OPENGENI_RIG_VERIFICATION_EPHEMERAL_OWNERS_ENABLED` — strict boolean Phase-B activation gate, default `false`. Phase A parses this setting but intentionally does not consume it or create verifier owner rows. Keep it false through both code rollouts; Phase B must fail closed before provider creation while false. Enable it only after every shared-queue worker is proven to run the Phase-B revision and the owner-aware reaper.
+- `OPENGENI_RIG_VERIFICATION_EPHEMERAL_OWNERS_ENABLED` — strict boolean Phase-B activation gate, default `false`. Phase A parses this setting but does not consume it. Phase B consumes it and fails closed before provider creation while false; there is no legacy unowned fallback. Keep it false through both code rollouts and enable it only after every shared-queue worker is proven to run the Phase-B revision and the owner-aware reaper.
 - No dedicated encryption key: a rig's `setupScript`/`image`/`checks` are not secret material — secrets are attached only via the rig's `defaultVariableSetIds`, which reference workspace variable-sets and are subject to their own encryption (see [`variable-sets.md`](variable-sets.md)).
 
 ## Rig setup at runtime
@@ -75,15 +75,17 @@ A session's rig binding resolves at create as: the explicit `rigId` on the creat
 
 ## Verification and change promotion (rig CI)
 
-> **Phase A dispatch freeze:** this revision still executes the legacy unowned verifier path. Do not enqueue or re-run rig verification while Phase A is rolling out or resident. Resume only after completing the Phase-B activation procedure in [Bounded verifier ownership rollout](#bounded-verifier-ownership-rollout). Existing business-outcome behavior below is unchanged, but provider lifetime is not considered safe until that procedure completes.
+> **Phase B activation freeze:** this revision rejects before provider creation while `OPENGENI_RIG_VERIFICATION_EPHEMERAL_OWNERS_ENABLED=false`. Do not enable the flag or resume rig verification until completing the shared-queue convergence proof in [Bounded verifier ownership rollout](#bounded-verifier-ownership-rollout). Existing business-outcome behavior below is unchanged once safely activated.
 
 Every proposed change is verified the same way, in a throwaway sandbox with no attached secrets:
 
-1. Establish a fresh sandbox session (`rig-verification-<changeId>` or `rig-version-verification-<versionId>`), applying the candidate version's image via the same `rig > pack > deployment` precedence as a live turn.
-2. If the candidate version has a non-empty `setupScript`, run the rig-setup hook against it.
-3. For a `setup_append` change, run the proposed command; a nonzero exit rejects the change immediately without running the declared checks.
-4. Run every declared check (`RigCheck.command`), recording `exitCode`/`output` per check.
-5. Classify the outcome and terminate the throwaway provider session in `finally`.
+1. Require the Phase-B activation gate; while false, reject before any provider create.
+2. Establish a fresh sandbox session (`rig-verification-<changeId>` or `rig-version-verification-<versionId>`), applying the candidate version's image via the same `rig > pack > deployment` precedence as a live turn.
+3. On every exact provider create/replacement callback, record the identity locally before awaiting durable owner registration. Provider ownership tags are written only after registration and remain diagnostic.
+4. If the candidate version has a non-empty `setupScript`, run the rig-setup hook against it.
+5. For a `setup_append` change, run the proposed command; a nonzero exit rejects the change immediately without running the declared checks.
+6. Run every declared check (`RigCheck.command`), recording `exitCode`/`output` per check.
+7. Classify the outcome, then independently settle idempotent exact deactivation for every candidate identity and provider termination with `Promise.allSettled`. This also handles a registration commit whose response was lost; expiry remains the process-death/database-failure backstop.
 
 | Kind | Checks passed? | Infra error? | Outcome |
 |---|---|---|---|
@@ -112,6 +114,20 @@ The worker replicas share one Temporal control task queue. Any compatible worker
 
 Provider tags remain best-effort diagnostics throughout. Missing or copied tags never establish ownership. The initial unified database projection is only a sweep classifier, not destruction authority: registration can commit after that snapshot, so the reaper performs a second exact current-instance lookup immediately before terminating each candidate. Lookup failure or an inconsistent result preserves the candidate for a later pass. The common two-minute create/registration grace covers fresh stale-tagged boxes as well as unattributed boxes, while older wrong-instance, expired, stale, and unattributed boxes remain eligible for cleanup.
 The runtime app role has tenant-scoped `SELECT` on the owner registry but no direct table mutation privilege. Register/rebind and exact deactivation run only through pinned `SECURITY DEFINER` functions that verify the transaction's account/workspace scope; role provisioning reapplies this protected-table exception after every ordinary schema-wide DML grant.
+
+### Cancellation, deadline, and delayed-cleanup bounds
+
+The production Temporal activity has a 15-minute start-to-close timeout, a 10-second heartbeat timeout, one attempt, and `WAIT_CANCELLATION_COMPLETED`. It heartbeats immediately and then at one-third of the server heartbeat window, continuing through cancellation/deadline cleanup until the activity settles. Temporal cancellation and an activity-local 13-minute work deadline feed one abort signal into the same process-group/remote-op cancellation controller used by turn setup. Rig setup, a `setup_append` command, and every check execute through that controller. Command quiescence is awaited before provider termination, and the remaining two-minute server window is reserved for exact owner deactivation and throwaway-provider termination.
+
+Cleanup operations all start independently, retain rejection handlers, and wait at most 60 seconds and never past the activity's reserved cleanup boundary. A sibling database failure or hang cannot suppress provider termination, and a provider failure or hang cannot suppress exact deactivation. A provider create that returns after outer cancellation enters its create callback, registers/deactivates the exact instance, starts provider termination, and fails establishment closed. The activity reports cancellation or its named local-deadline failure only after this bounded immediate cleanup path; the workflow cannot close early while the activity keeps mutating the verifier box.
+
+This immediate contract does **not** claim that JavaScript `finally` runs after process death or the server's hard start-to-close timeout. If the worker dies, registration never returns, a provider create never returns to its callback, or a cleanup RPC remains unresolved past the reserve, cleanup is delayed and observable rather than falsely reported complete:
+
+- a registered verifier owner expires 20 minutes after registration and becomes collectible on the next global reaper sweep;
+- a create that exists at the provider but never reached durable registration is protected only by the common two-minute fresh-create grace and becomes collectible on the next provider-orphan sweep;
+- a timed-out cleanup emits a warning naming the unresolved phase while every sibling cleanup already remains in flight with an attached rejection handler.
+
+Those TTL/grace-plus-reaper bounds are crash/hang backstops, never the normal cancellation path.
 
 ### Partial rollout, rollback, and downgrade
 

@@ -53,6 +53,7 @@
   "devDependencies": {
     "@openai/agents-core": "0.13.3",
     "@opengeni/testing": "workspace:*",
+    "@temporalio/testing": "1.20.2",
     "postgres": "^3.4.9",
     "tsup": "^8.5.0",
     "typescript": "^6.0.3"
