@@ -1584,10 +1584,24 @@ describe("P4.4 parsers — porcelain/numstat/unified-diff", () => {
   test("isExecSessionLostBanner classifies the lost-PTY writeStdin banner", () => {
     // The Modal writeStdin non-throwing banner when the exec-session is gone.
     expect(isExecSessionLostBanner("write_stdin failed: session not found: 1", 1)).toBe(true);
-    // A generic 'session not found' (no id) still classifies — never legit output.
-    expect(isExecSessionLostBanner("session not found", 1)).toBe(true);
-    // A different id present means it's not OUR session's loss banner.
+    expect(isExecSessionLostBanner("session not found: 1", 1)).toBe(true);
+    // The hard fence requires the exact tracked numeric id and known complete
+    // banner. Generic, malformed, mismatched, and ambiguous text fails closed.
+    expect(isExecSessionLostBanner("session not found", 1)).toBe(false);
+    expect(isExecSessionLostBanner("write_stdin failed: session not found: nope", 1)).toBe(false);
     expect(isExecSessionLostBanner("write_stdin failed: session not found: 9", 1)).toBe(false);
+    expect(isExecSessionLostBanner("write_stdin failed: session not found: 10", 1)).toBe(false);
+    expect(isExecSessionLostBanner("write_stdin failed: session not found: 1 or 2", 1)).toBe(false);
+    expect(isExecSessionLostBanner("write_stdin failed: session not found: 1x", 1)).toBe(false);
+    expect(isExecSessionLostBanner("write_stdin failed: session not found: 01", 1)).toBe(false);
+    expect(isExecSessionLostBanner("write_stdin failed:  session not found: 1", 1)).toBe(false);
+    expect(isExecSessionLostBanner("write_stdin failed: session not found:\n1", 1)).toBe(false);
+    expect(isExecSessionLostBanner(" write_stdin failed: session not found: 1", 1)).toBe(false);
+    expect(isExecSessionLostBanner("write_stdin failed: session not found: 1 ", 1)).toBe(false);
+    expect(isExecSessionLostBanner("write_stdin failed: session not found: 1\n", 1)).toBe(false);
+    expect(
+      isExecSessionLostBanner("write_stdin failed: session not found: 9007199254740993", 1),
+    ).toBe(false);
     // Real PTY output is never misclassified.
     expect(isExecSessionLostBanner("root@box:~# echo hi\nhi\n", 1)).toBe(false);
     expect(isExecSessionLostBanner("", 1)).toBe(false);

@@ -68,11 +68,11 @@ function safePosture(): RuntimeDatabasePosture {
 }
 
 describe("runtime database posture evaluator", () => {
-  test("freezes unique, sorted 64-table RLS and 74-table runtime DML contracts", () => {
-    expect(FORCE_RLS_TABLES).toHaveLength(64);
+  test("freezes unique, sorted 65-table RLS and 75-table runtime DML contracts", () => {
+    expect(FORCE_RLS_TABLES).toHaveLength(65);
     expect(new Set(FORCE_RLS_TABLES).size).toBe(FORCE_RLS_TABLES.length);
     expect([...FORCE_RLS_TABLES].sort()).toEqual([...FORCE_RLS_TABLES]);
-    expect(RUNTIME_DML_TABLES).toHaveLength(74);
+    expect(RUNTIME_DML_TABLES).toHaveLength(75);
     expect(new Set(RUNTIME_DML_TABLES).size).toBe(RUNTIME_DML_TABLES.length);
     expect([...RUNTIME_DML_TABLES].sort()).toEqual([...RUNTIME_DML_TABLES]);
     expect(FORCE_RLS_TABLES.every((table) => RUNTIME_DML_TABLES.includes(table))).toBe(true);

@@ -1,7 +1,7 @@
 //! The transport-agnostic op engine for the Connected-Machine RUNNER (the machine-resident daemon; "agent" is reserved for the AI in a session — naming ruling 2026-07-10).
 //!
 //! This crate is the durable heart of the runner's op-stream protocol
-//! (`.agent/PROTOCOL.md`): every host operation is a *journaled job* whose
+//! (the engine protocol): every host operation is a *journaled job* whose
 //! state — identity, sequenced output frames, replay retention, credit flow,
 //! lifecycle — lives HERE, at supervisor scope, decoupled from any connection
 //! generation. The NATS (or future) transport binds to this engine through

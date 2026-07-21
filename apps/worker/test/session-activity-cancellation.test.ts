@@ -5,7 +5,7 @@ import {
   CancelledFailure,
   TimeoutFailure,
 } from "@temporalio/workflow";
-import { isConfirmedTurnActivityCancellation } from "../src/workflows/session";
+import { isTurnActivityFenceCancellation } from "../src/workflows/session";
 
 function activityFailure(cause: Error): ActivityFailure {
   return new ActivityFailure(
@@ -18,11 +18,11 @@ function activityFailure(cause: Error): ActivityFailure {
   );
 }
 
-describe("turn activity physical-cancellation classification", () => {
+describe("turn activity fence-cancellation arbitration", () => {
   test("accepts both direct and Temporal ActivityFailure-wrapped cancellation", () => {
     const cancelled = new CancelledFailure("TURN_ATTEMPT_FENCED");
-    expect(isConfirmedTurnActivityCancellation(cancelled)).toBe(true);
-    expect(isConfirmedTurnActivityCancellation(activityFailure(cancelled))).toBe(true);
+    expect(isTurnActivityFenceCancellation(cancelled)).toBe(true);
+    expect(isTurnActivityFenceCancellation(activityFailure(cancelled))).toBe(true);
   });
 
   test("accepts the Temporal 1.20 fence-before-cancel wire shape only for runAgentTurn", () => {
@@ -30,9 +30,9 @@ describe("turn activity physical-cancellation classification", () => {
       message: "TURN_ATTEMPT_FENCED",
       type: "CancelledFailure",
     });
-    expect(isConfirmedTurnActivityCancellation(activityFailure(preRequestCancellation))).toBe(true);
+    expect(isTurnActivityFenceCancellation(activityFailure(preRequestCancellation))).toBe(true);
     expect(
-      isConfirmedTurnActivityCancellation(
+      isTurnActivityFenceCancellation(
         new ActivityFailure(
           "Activity task failed",
           "someOtherActivity",
@@ -44,7 +44,7 @@ describe("turn activity physical-cancellation classification", () => {
       ),
     ).toBe(false);
     expect(
-      isConfirmedTurnActivityCancellation(
+      isTurnActivityFenceCancellation(
         activityFailure(
           ApplicationFailure.create({
             message: "some other cancellation",
@@ -55,12 +55,12 @@ describe("turn activity physical-cancellation classification", () => {
     ).toBe(false);
   });
 
-  test("rejects timeout and arbitrary cause chains as physical-stop proof", () => {
+  test("rejects timeout and arbitrary cause chains as control-race protocol shapes", () => {
     const timeout = new TimeoutFailure("heartbeat expired", null, "HEARTBEAT");
-    expect(isConfirmedTurnActivityCancellation(activityFailure(timeout))).toBe(false);
-    expect(isConfirmedTurnActivityCancellation(new Error("cancelled by message only"))).toBe(false);
+    expect(isTurnActivityFenceCancellation(activityFailure(timeout))).toBe(false);
+    expect(isTurnActivityFenceCancellation(new Error("cancelled by message only"))).toBe(false);
     expect(
-      isConfirmedTurnActivityCancellation(
+      isTurnActivityFenceCancellation(
         activityFailure(new Error("wrapper", { cause: new CancelledFailure("hidden") })),
       ),
     ).toBe(false);

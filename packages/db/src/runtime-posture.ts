@@ -69,6 +69,7 @@ export const FORCE_RLS_TABLES = [
   "workspace_inference_controls",
   "workspace_model_policies",
   "workspace_packs",
+  "workspace_session_activity_revisions",
   "workspace_variable_set_variables",
   "workspace_variable_sets",
 ] as const;

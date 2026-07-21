@@ -90,7 +90,7 @@ repository refs can carry `provider`, `repositoryId`, `installationId`,
 optional fields while retaining the existing `githubInstallationId` and
 `githubRepositoryId` aliases. `GitCredentials` may also return an ISO-8601
 `expiresAt`; when absent OpenGeni uses a conservative bounded refresh cadence.
-The returned token plus scoped `workspaceId` is checked by the FORK-7
+The returned token plus scoped `workspaceId` is checked by the workspace-scope cross-check
 workspace-echo assert before the worker injects anything. A mismatch hard-fails
 before tenant B's credential can land in tenant A's run.
 

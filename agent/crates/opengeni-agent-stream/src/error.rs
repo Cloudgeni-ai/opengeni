@@ -2,7 +2,7 @@
 //!
 //! The relay dial, channel registration, and pump loops surface a single
 //! [`StreamError`]. Transport-level errors are retryable (the channel
-//! auto-reconnects + resumes, dossier §10.6); a protocol or rejected-open error is
+//! auto-reconnects + resumes); a protocol or rejected-open error is
 //! terminal for that channel.
 
 use thiserror::Error;

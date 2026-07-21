@@ -31,7 +31,7 @@ const ALL_STATUSES: SessionStatusValue[] = [
 function Harness() {
   const [theme, setTheme] = useState<"dark" | "light">("dark");
   // Mount the whole workbench through its public `<SandboxWorkspace>` surface —
-  // the exact integration an external embedder (cloudgeni #1577) uses. This is
+  // the exact integration an external embedder uses. This is
   // the F2 embedder proof: provider + styles + mock client, no app plumbing.
   const { events } = useSessionEvents(MANAGER_SESSION_ID);
   return (

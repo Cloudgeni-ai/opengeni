@@ -1,4 +1,4 @@
-// seed-live — STUB (dossier §16). A long-running / mid-turn session that stays
+// seed-live — STUB. A long-running / mid-turn session that stays
 // WARM, for the warm-live UI path (live reads, live writes, fs.changed reconcile,
 // machine chip = "live"; acceptance A3). Wired at M3 when the capture-vs-live
 // source selection exists and the warm no-flicker reconcile is under test. Unlike

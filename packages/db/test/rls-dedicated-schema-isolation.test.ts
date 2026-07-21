@@ -16,7 +16,7 @@ import {
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 
-// VERIFIER (Step I, Fork-6) — the decisive RLS isolation proof that the existing
+// The decisive migration-replay and RLS-isolation proof that the existing
 // suites do NOT cover: a NON-OWNER role (`opengeni_app`) under FORCE RLS, in a
 // DEDICATED schema (NOT public), reading through the REAL packages/db query path
 // (createDb searchPath + withWorkspaceRls GUCs + provisionRoles grants).
@@ -25,7 +25,7 @@ import { provisionRoles } from "../src/provision-roles";
 // tenant-scoped query actually ISOLATE, or does it silently hit `public`/leak
 // across tenants? We prove:
 //   (A) the embedded migrate+provision SDK path lands tables/policies in the
-//       dedicated schema only (0 in public) — re-confirms SPIKE-1 F1 idempotently.
+//       dedicated schema only (0 in public), confirming idempotent schema isolation.
 //   (B) rows written under workspace A's RLS context LAND IN THE DEDICATED SCHEMA
 //       (verified by a superuser read of <schema>.api_keys), NOT silently in public.
 //   (C) a cross-tenant read under workspace B's RLS context returns ZERO of A's
@@ -168,7 +168,7 @@ afterAll(async () => {
   }
 });
 
-describe("Step I Fork-6 — RLS isolation under a DEDICATED schema + NON-OWNER role", () => {
+describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNER role", () => {
   test("runtime identity and every declared tenant table satisfy the exact FORCE-RLS posture", async () => {
     if (!available) return;
     const posture = await assertRuntimeDatabasePosture(db, {
@@ -193,8 +193,8 @@ describe("Step I Fork-6 — RLS isolation under a DEDICATED schema + NON-OWNER r
     expect(posture.memberships).toEqual([]);
     expect(posture.ownedSchemas).toEqual([]);
     expect(posture.ownedRelations).toEqual([]);
-    expect(posture.tables.filter((table) => table.rlsEnabled)).toHaveLength(64);
-    expect(posture.tables.filter((table) => table.rlsActive)).toHaveLength(64);
+    expect(posture.tables.filter((table) => table.rlsEnabled)).toHaveLength(65);
+    expect(posture.tables.filter((table) => table.rlsActive)).toHaveLength(65);
     expect(
       posture.tables.filter(
         (table) => table.select && table.insert && table.update && table.delete,

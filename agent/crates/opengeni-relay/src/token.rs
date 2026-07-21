@@ -68,7 +68,7 @@ pub struct StreamTokenClaims {
     #[serde(rename = "viewerId")]
     pub viewer_id: String,
     /// The lease/active epoch the token is fenced to — the relay's stale-viewer
-    /// fence (dossier §10.6/§18).
+    /// fence.
     #[serde(rename = "leaseEpoch")]
     pub lease_epoch: u64,
     /// `"view"` (always, v1) or `"control"` (the never-granted raw-input plane).

@@ -11,14 +11,20 @@ import {
   createDb,
   createSession,
   createWorkspace,
+  migrate,
   type Database,
   type DbClient,
 } from "@opengeni/db";
-import { signDelegatedAccessToken } from "@opengeni/contracts";
+import {
+  signDelegatedAccessToken,
+  WORKSPACE_CONTROL_ACTOR_MAX_BYTES,
+  WORKSPACE_CONTROL_REASON_MAX_BYTES,
+} from "@opengeni/contracts";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
 import { registerSessionRoutes } from "../src/routes/sessions";
 
 const DELEGATION_SECRET = "session-queue-delete-test-secret";
+const explicitDatabaseUrl = process.env.OPENGENI_SESSION_CONTROL_TEST_DATABASE_URL;
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
 let available = true;
@@ -80,11 +86,15 @@ function deps(): ApiRouteDeps {
   } as unknown as ApiRouteDeps;
 }
 
-async function bearer(accountId: string, workspaceId: string): Promise<string> {
+async function bearer(
+  accountId: string,
+  workspaceId: string,
+  subjectId = "queue-controller",
+): Promise<string> {
   const token = await signDelegatedAccessToken(DELEGATION_SECRET, {
     accountId,
     workspaceId,
-    subjectId: "queue-controller",
+    subjectId,
     permissions: ["sessions:read", "sessions:control"],
     exp: Math.floor(Date.now() / 1000) + 3_600,
   });
@@ -112,18 +122,24 @@ async function deletePrompt(
 }
 
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("session-queue-delete");
-  if (!shared) {
-    if (requireRealDatabase) {
-      throw new Error("PostgreSQL test database unavailable while OPENGENI_REQUIRE_REAL_DB=1");
+  if (explicitDatabaseUrl) {
+    await migrate(explicitDatabaseUrl);
+    admin = postgres(explicitDatabaseUrl, { max: 4 });
+    client = createDb(explicitDatabaseUrl);
+  } else {
+    shared = await acquireSharedTestDatabase("session-queue-delete");
+    if (!shared) {
+      if (requireRealDatabase) {
+        throw new Error("PostgreSQL test database unavailable while OPENGENI_REQUIRE_REAL_DB=1");
+      }
+      available = false;
+      // eslint-disable-next-line no-console
+      console.warn("[session-queue-delete] docker unavailable, skipping");
+      return;
     }
-    available = false;
-    // eslint-disable-next-line no-console
-    console.warn("[session-queue-delete] docker unavailable, skipping");
-    return;
+    admin = shared.admin;
+    client = createDb(shared.appUrl);
   }
-  admin = shared.admin;
-  client = createDb(shared.appUrl);
   db = client.db;
   app = new Hono();
   registerSessionRoutes(app, deps());
@@ -135,10 +151,58 @@ afterAll(async () => {
   } catch {
     /* noop */
   }
+  if (explicitDatabaseUrl) await admin?.end().catch(() => undefined);
   await shared?.release();
 }, 180_000);
 
 describe("session queue delete lookup", () => {
+  test("session control rejects oversized reason and actor before mutation", async () => {
+    if (!available) return;
+    const owner = await freshWorkspace();
+    const sessionId = "00000000-0000-4000-8000-000000000009";
+    const publishedBefore = published;
+    const wakesBefore = wakes;
+
+    const oversizedReason = await app.request(
+      `http://x/v1/workspaces/${owner.workspaceId}/sessions/${sessionId}/control`,
+      {
+        method: "POST",
+        headers: {
+          authorization: await bearer(owner.accountId, owner.workspaceId),
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          action: "pause",
+          reason: "x".repeat(WORKSPACE_CONTROL_REASON_MAX_BYTES + 1),
+          clientEventId: crypto.randomUUID(),
+        }),
+      },
+    );
+    expect(oversizedReason.status).toBe(400);
+
+    const oversizedActor = await app.request(
+      `http://x/v1/workspaces/${owner.workspaceId}/sessions/${sessionId}/control`,
+      {
+        method: "POST",
+        headers: {
+          authorization: await bearer(
+            owner.accountId,
+            owner.workspaceId,
+            "x".repeat(WORKSPACE_CONTROL_ACTOR_MAX_BYTES + 1),
+          ),
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          action: "pause",
+          clientEventId: crypto.randomUUID(),
+        }),
+      },
+    );
+    expect(oversizedActor.status).toBe(400);
+    expect(published).toBe(publishedBefore);
+    expect(wakes).toBe(wakesBefore);
+  });
+
   test("returns 404 without side effects for missing and cross-workspace sessions", async () => {
     if (!available) return;
     const owner = await freshWorkspace();

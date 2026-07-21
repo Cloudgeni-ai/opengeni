@@ -1,4 +1,4 @@
-//! End-to-end self-update FLOW tests (dossier §13 V10 / §24 Vd2).
+//! End-to-end self-update flow tests.
 //!
 //! These drive the REAL `check_update` orchestrator against a local mock release
 //! tree (`tests/fixtures/release/`) signed with a THROWAWAY test key (committed

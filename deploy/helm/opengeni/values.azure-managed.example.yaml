@@ -18,7 +18,7 @@ worker:
     replicaCount: 4
     # Turn pods hold the in-flight model history and sandbox clients. The
     # worker process enforces an explicit activity cap; these requests and
-    # limits provide headroom for the temporary 16-turn density while OPE-52
+    # limits provide headroom for the temporary 16-turn density while density rollout
     # measures the final concurrency/resource optimum.
     resources:
       requests:
@@ -182,7 +182,7 @@ ingress:
           pathType: Exact
           service: api
         # get.<domain> install-script + device-enrollment routes served by the
-        # API (same origin / single trust root; dossier §23.1). These ride the
+        # API (same origin / single trust root). These ride the
         # SAME app host here; point the get.<domain> DNS record at this ingress —
         # OR add a dedicated `get.opengeni.example.com` host block routing the
         # same /install.sh|/install.ps1|/uninstall.sh|/opengeni-agent-minisign.pub|

@@ -1,7 +1,7 @@
 // `relayDialBaseFromSettings` — the canonical relay dial-BASE URL handed to the
 // agent PRODUCER. The agent appends only its routing query and assumes the base
 // already carries the relay's `/stream` route; a path-less base 400s the dial and
-// makes the terminal/desktop streams unreachable (dossier §V5/§V6). These lock the
+// makes the terminal/desktop streams unreachable. These lock the
 // normalization: pathless → `/stream`, explicit path honored, non-default port kept,
 // unconfigured → "" (graceful no-relay degrade), and producer/consumer agreement.
 import { describe, expect, test } from "bun:test";

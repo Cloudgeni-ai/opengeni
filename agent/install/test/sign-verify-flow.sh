@@ -1,7 +1,7 @@
 #!/bin/sh
 # shellcheck shell=sh
 #
-# minisign sign -> install-script verify FLOW test (dossier §17/§24, M11 gate).
+# minisign sign -> install-script verify FLOW test (M11 gate).
 #
 # Proves end-to-end that:
 #   1. an artifact signed with the release PRIVATE key is ACCEPTED by install.sh's

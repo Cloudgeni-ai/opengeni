@@ -31,7 +31,11 @@ import {
   createTurnActivities,
   type ActivityDependencies,
 } from "./activities";
-import type { SignalCodexCapacityWorkflow, WakeSessionWorkflowSignal } from "./activities/types";
+import type {
+  SignalCodexCapacityWorkflow,
+  SignalSessionAttemptQuiesced,
+  WakeSessionWorkflowSignal,
+} from "./activities/types";
 import { turnTaskQueue } from "./workflows/activities";
 import { dbReadyCheck, natsReadyCheck, startWorkerHttpServer } from "./http";
 import { observabilityEventLogger } from "./observability-metrics";
@@ -124,6 +128,13 @@ export async function createOpenGeniWorker(options: WorkerOptions): Promise<{
       options.role === "turn"
         ? TURN_WORKER_MAX_CONCURRENT_TURNS
         : CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES,
+    // Cancellation is delivered through an activity heartbeat. The SDK would
+    // otherwise throttle a two-minute heartbeat timeout to its 60-second cap,
+    // making Pause/Steer take roughly a minute even though runAgentTurn emits a
+    // heartbeat every ten seconds. Keep delivery bounded independently of the
+    // heartbeat timeout and local timer cadence.
+    maxHeartbeatThrottleInterval: "5s",
+    defaultHeartbeatThrottleInterval: "5s",
     // GRACEFUL DEPLOY SHUTDOWN (with the SIGTERM handler in startWorker):
     // after shutdown() stops polling, in-flight activities get this long to
     // finish naturally; the rest are then CANCELLED with WORKER_SHUTDOWN —
@@ -149,6 +160,7 @@ export async function createWorkerWorkflowSignaler(
   db: Database,
 ): Promise<{
   wakeSessionWorkflow: WakeSessionWorkflowSignal;
+  signalSessionAttemptQuiesced: SignalSessionAttemptQuiesced;
   signalCodexCapacityWorkflow: SignalCodexCapacityWorkflow;
   check: () => Promise<void>;
   close: () => Promise<void>;
@@ -189,6 +201,25 @@ export async function createWorkerWorkflowSignaler(
         temporalWorkflowId: workflowId,
         wakeRevision,
       });
+    },
+    signalSessionAttemptQuiesced: async (proof) => {
+      await temporal.workflow.signalWithStart("sessionWorkflow", {
+        taskQueue: settings.temporalTaskQueue,
+        workflowId: proof.workflowId,
+        workflowIdReusePolicy: "ALLOW_DUPLICATE",
+        args: [
+          {
+            accountId: proof.accountId,
+            workspaceId: proof.workspaceId,
+            sessionId: proof.sessionId,
+          },
+        ],
+        signal: "sessionAttemptQuiesced",
+        signalArgs: [proof],
+      });
+      // No wake-outbox row exists yet: the direct receipt transaction failed.
+      // The signalled workflow's DB-only control activity owns committing the
+      // receipt and its exact wake revision atomically.
     },
     signalCodexCapacityWorkflow: async ({
       accountId,
@@ -444,6 +475,7 @@ export async function startWorker() {
       activityDependencies: {
         observability,
         wakeSessionWorkflow: signaler.wakeSessionWorkflow,
+        signalSessionAttemptQuiesced: signaler.signalSessionAttemptQuiesced,
         signalCodexCapacityWorkflow: signaler.signalCodexCapacityWorkflow,
         db: dbClient.db,
         bus,

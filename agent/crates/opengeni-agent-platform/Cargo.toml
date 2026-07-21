@@ -28,7 +28,7 @@ tracing = { workspace = true }
 prost = { workspace = true }
 
 # Interactive terminal: a real PTY (openpty / ConPTY) via the safe portable-pty
-# crate — no unsafe, cross-platform (dossier §10.4, the M8 terminal seam).
+# crate — no unsafe, cross-platform (the M8 terminal seam).
 portable-pty = { workspace = true }
 
 # Desktop frame encoding (capture → PNG chunk for the relay framebuffer pump).

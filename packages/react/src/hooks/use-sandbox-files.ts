@@ -437,7 +437,7 @@ export function useSandboxFiles(
   // Overlay the git-status tint onto the tree. IDENTITY-PRESERVING: a node whose
   // tint and children are unchanged is returned by reference (not rebuilt), so a
   // re-tint or a cold→warm reconcile does NOT remount unchanged rows — the
-  // no-flicker constraint (dossier §3 #6 / §12-D1). An empty overlay is still
+  // no-flicker constraint. An empty overlay is still
   // meaningful: it strips stale tints after the repository becomes clean.
   const applyStatus = useCallback((nodes: FileTreeNode[]): FileTreeNode[] => {
     const overlay = statusRef.current;
@@ -902,7 +902,7 @@ export function useSandboxFiles(
     [client, workspaceId, sessionId, runOptimistic],
   );
 
-  // Initial paint + reset on identity change. Source selection (dossier §10.4):
+  // Initial paint + reset on identity change. Source selection:
   //   • any box WITH a capture → paint instantly from the durable capture index;
   //     a warm/draining box then reconciles live in place.
   //   • if that live reconciliation fails, keep the capture visible and read-only.
