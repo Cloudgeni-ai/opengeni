@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { screenshotDataUrl } from "../src/timeline/parsers";
+import { mediaPreviewFact, screenshotDataUrl } from "../src/timeline/parsers";
 
 // A 1x1 PNG's first bytes are enough for the extractor (it never decodes).
 const BYTES = [137, 80, 78, 71, 13, 10, 26, 10];
@@ -47,5 +47,27 @@ describe("screenshotDataUrl — every computer-use transport shape", () => {
   test("JSON-stringified structured output", () => {
     const out = JSON.stringify({ type: "image", image: { data: BYTES, mediaType: "image/png" } });
     expect(screenshotDataUrl(out)).toBe(`data:image/png;base64,${B64}`);
+  });
+});
+
+describe("mediaPreviewFact", () => {
+  const preview = {
+    type: "media_preview" as const,
+    mediaType: "image/png",
+    inlineBytes: 2_000_000,
+    fullOutputAvailable: false as const,
+    preview: "Inline media omitted from the audit timeline; source bytes were not retained.",
+  };
+
+  test("finds direct, mixed-array, and JSON-encoded non-retained media facts", () => {
+    expect(mediaPreviewFact(preview)).toEqual(preview);
+    expect(mediaPreviewFact([{ type: "text", text: "visible" }, preview])).toEqual(preview);
+    expect(mediaPreviewFact(JSON.stringify(preview))).toEqual(preview);
+  });
+
+  test("does not treat legacy renderable image data or malformed facts as omitted media", () => {
+    expect(mediaPreviewFact("data:image/png;base64,AAAA")).toBeNull();
+    expect(mediaPreviewFact({ ...preview, fullOutputAvailable: true })).toBeNull();
+    expect(screenshotDataUrl(preview)).toBeNull();
   });
 });

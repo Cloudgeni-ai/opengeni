@@ -66,7 +66,7 @@ function isAuthExempt(c: Context, settings: Settings): boolean {
   }
   // The get.<domain> install-serving routes (install.sh/.ps1/uninstall.sh/
   // minisign pub + the release-binary redirects). Reached by a fresh machine
-  // with no credentials; the bodies carry no secrets (dossier §23.1).
+  // with no credentials; the bodies carry no secrets.
   if (installExactPaths.has(path) || isInstallRedirectPath(path)) {
     return true;
   }

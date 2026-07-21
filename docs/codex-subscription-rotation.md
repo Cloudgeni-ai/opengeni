@@ -73,7 +73,7 @@ same-turn holder is reused before either pin policy or future membership
 filtering, so cache policy never moves in-flight work. `rotation_enabled=false`
 and `drain_then_next` remain explicit sticky product policies.
 
-Named pool membership is intentionally not an OPE-21 concept. The generic
+Named pool membership is intentionally not a credential allocator concept. The generic
 `CodexCredentialLeasePolicyScopeResolver<TPolicyScope>`,
 `CodexCredentialLeaseCandidateFilter<TPolicyScope, TUnavailableDiagnostic>`,
 and `CodexCredentialLeaseCandidateFilterResult<TUnavailableDiagnostic>` seams
@@ -81,7 +81,7 @@ let a downstream accepted-turn policy pass a private scope such as
 `{primaryPoolId,fallbackPoolIds,policyHash}` into the existing rotation-row
 transaction. The filter chooses candidates from exactly one resolved primary or
 fallback scope and may return downstream-owned per-pool unavailable/reset
-diagnostics; OPE-21 never union-ranks memberships and stores no pool table or
+diagnostics; credential allocator never union-ranks memberships and stores no pool table or
 membership rule. `CodexCredentialLeaseResult<T, TUnavailableDiagnostic>` returns
 those diagnostics. The new-allocation filter runs only after exact live/frozen
 same-turn reuse, so a later membership/default change cannot move an already
@@ -93,7 +93,7 @@ false excludes the row from new automatic, pinned, proactive, and reactive
 selection without changing `status`, encrypted credentials, refresh behavior,
 or quota history. An exact same-turn live lease or frozen approval/preemption
 checkpoint may continue on that healthy row; reconnect and token refresh never
-flip allocator eligibility. OPE-24 owns toggle OCC/audit and product controls.
+flip allocator eligibility. account eligibility policy owns toggle OCC/audit and product controls.
 
 The unique same-turn lease is idempotent. A one-minute heartbeat renews its
 five-minute TTL throughout long tool/model runs; normal completion releases it

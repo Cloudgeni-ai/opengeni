@@ -14,8 +14,17 @@ export type { ClientOverride, OpenGeniContextValue, OpenGeniProviderProps } from
 // Hooks
 export { useSession, isTitleEvent } from "./hooks/use-session";
 export type { UseSessionOptions, UseSessionResult } from "./hooks/use-session";
-export { useSessionEvents } from "./hooks/use-session-events";
+export {
+  SESSION_EVENT_BROWSER_MAX_BYTES,
+  SESSION_EVENT_BROWSER_MAX_COUNT,
+  SESSION_EVENT_BROWSER_PENDING_MAX_BYTES,
+  SESSION_EVENT_BROWSER_PENDING_MAX_COUNT,
+  SESSION_EVENT_BROWSER_SINGLE_EVENT_MAX_BYTES,
+  boundBrowserSessionEventWindow,
+  useSessionEvents,
+} from "./hooks/use-session-events";
 export type {
+  BrowserSessionEventWindow,
   SessionEventsConnectionState,
   UseSessionEventsOptions,
   UseSessionEventsResult,
@@ -34,25 +43,6 @@ export type {
   UseFileAttachmentsOptions,
   UseFileAttachmentsResult,
 } from "./hooks/use-file-attachments";
-export { useTranscription, appendFinalTranscript } from "./hooks/use-transcription";
-export type { UseTranscriptionOptions, UseTranscriptionResult } from "./hooks/use-transcription";
-export { initialTranscriptionState, transcriptionReducer } from "./transcription/reducer";
-export type {
-  TranscriptionCommit,
-  TranscriptionError,
-  TranscriptionEvent,
-  TranscriptionEventSink,
-  TranscriptionPartial,
-  TranscriptionPhase,
-  TranscriptionPrivacyRequest,
-  TranscriptionProvider,
-  TranscriptionReducerAction,
-  TranscriptionSession,
-  TranscriptionSessionRequest,
-  TranscriptionState,
-  TranscriptionUsage,
-  TranscriptionWord,
-} from "./transcription/types";
 export { useTurnQueue, isTurnQueueEvent } from "./hooks/use-turn-queue";
 export type {
   QueueMutationKind,
@@ -304,6 +294,8 @@ export type { CommandPaletteProps } from "./components/command-palette";
 // Components
 export { ChatComposer } from "./components/chat-composer";
 export type { ChatComposerProps } from "./components/chat-composer";
+export { defaultChatComposerMessages } from "./components/composer";
+export type { ChatComposerMessages } from "./components/composer";
 export { VoiceDictationControl } from "./components/voice-dictation-control";
 export type { VoiceDictationControlProps } from "./components/voice-dictation-control";
 export { ModelPicker } from "./components/model-picker";

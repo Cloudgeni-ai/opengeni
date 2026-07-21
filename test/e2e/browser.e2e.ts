@@ -340,7 +340,7 @@ describe("browser e2e", () => {
     expect(
       await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
     ).toBe(true);
-    await captureEvidence(page, "ope19-mobile-light.png");
+    await captureEvidence(page, "fileupload-mobile-light.png");
 
     // Three independent clients complete the required 2×2 matrix. Each one
     // reloads metadata + a fresh signed GET from the real backend; no blob URL
@@ -379,7 +379,7 @@ describe("browser e2e", () => {
         await client.getByRole("button", { name: "Close" }).click();
         await dialog.waitFor({ state: "hidden" });
       }
-      await captureEvidence(client, `ope19-${variant.name}.png`);
+      await captureEvidence(client, `fileupload-${variant.name}.png`);
       await client.close();
     }
     page.off("request", observeProviderRequest);

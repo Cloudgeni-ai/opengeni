@@ -6,7 +6,6 @@ import { existsSync } from "node:fs";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const evidenceDir = `${repoRoot}/docs/design/evidence/transcription`;
-const captureEvidence = process.env.OPE11_CAPTURE_EVIDENCE === "1";
 
 function systemChromium(): string | undefined {
   return [

@@ -32,8 +32,8 @@ import {
   registerFileUploadReaperSchedule,
 } from "../../apps/worker/src/index";
 
-const APP_ROLE_PASSWORD = "ope19-app-role-password";
-const DELEGATION_SECRET = "ope19-file-upload-delegation-secret";
+const APP_ROLE_PASSWORD = "fileupload-app-role-password";
+const DELEGATION_SECRET = "fileupload-file-upload-delegation-secret";
 
 describe("file upload crash, concurrency, RLS, and object cleanup", () => {
   let services: UploadTestServices;
@@ -211,8 +211,8 @@ describe("file upload crash, concurrency, RLS, and object cleanup", () => {
       type: "credit_topup",
       amountMicros: 1_000_000,
       sourceType: "test",
-      sourceId: `ope19:${crashed.fileId}`,
-      idempotencyKey: `ope19-credit:${crashed.fileId}`,
+      sourceId: `fileupload:${crashed.fileId}`,
+      idempotencyKey: `fileupload-credit:${crashed.fileId}`,
     });
     const retried = await app.request(workspacePath(fixture.workspaceId, "/sessions"), {
       method: "POST",
@@ -491,7 +491,7 @@ describe("file upload crash, concurrency, RLS, and object cleanup", () => {
   }, 60_000);
 
   test("registers one SKIP Temporal schedule and dispatches one activity under overlapping fires", async () => {
-    const taskQueue = `ope19-file-upload-reaper-${crypto.randomUUID()}`;
+    const taskQueue = `fileupload-file-upload-reaper-${crypto.randomUUID()}`;
     const temporalSettings = {
       ...settings,
       temporalHost: services.temporalHost,
@@ -531,7 +531,7 @@ describe("file upload crash, concurrency, RLS, and object cleanup", () => {
     });
     const run = worker.run();
     const observability = createObservability(temporalSettings, {
-      component: "ope19-file-schedule-test",
+      component: "fileupload-file-schedule-test",
     });
     let registration: Awaited<ReturnType<typeof registerFileUploadReaperSchedule>> | undefined;
     try {
@@ -596,7 +596,7 @@ describe("file upload crash, concurrency, RLS, and object cleanup", () => {
   }
 
   function reaperServices(appSettings: ReturnType<typeof uploadSettings>) {
-    const observability = createObservability(appSettings, { component: "ope19-file-test" });
+    const observability = createObservability(appSettings, { component: "fileupload-file-test" });
     return async (): Promise<ActivityServices> => ({
       settings: appSettings,
       db: appDb.db,
@@ -657,13 +657,13 @@ async function workspaceFixture(
   settings: ReturnType<typeof uploadSettings>,
 ): Promise<WorkspaceFixture> {
   const access = await bootstrapWorkspace(appDb.db, {
-    accountExternalSource: "test:ope19-file",
+    accountExternalSource: "test:fileupload-file",
     accountExternalId: crypto.randomUUID(),
-    accountName: "OPE-19 file account",
-    workspaceExternalSource: "test:ope19-file",
+    accountName: "file-upload fixture file account",
+    workspaceExternalSource: "test:fileupload-file",
     workspaceExternalId: crypto.randomUUID(),
-    workspaceName: "OPE-19 file workspace",
-    subjectId: `test:ope19:${crypto.randomUUID()}`,
+    workspaceName: "file-upload fixture file workspace",
+    subjectId: `test:fileupload:${crypto.randomUUID()}`,
     accountPermissions: allAccountPermissions,
     workspacePermissions: allWorkspacePermissions,
   });
@@ -690,7 +690,7 @@ function uploadSettings(databaseUrl: string, endpoint: string) {
     productAccessMode: "managed",
     usageLimitsMode: "managed",
     delegationSecret: DELEGATION_SECRET,
-    betterAuthSecret: "ope19-better-auth-secret-at-least-32-bytes",
+    betterAuthSecret: "fileupload-better-auth-secret-at-least-32-bytes",
     publicBaseUrl: "http://127.0.0.1:3000",
     objectStorageBackend: "s3-compatible",
     objectStorageEndpoint: endpoint,

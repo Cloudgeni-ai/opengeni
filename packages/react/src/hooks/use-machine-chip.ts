@@ -2,7 +2,7 @@ import { useMemo } from "react";
 import type { MachineState } from "@opengeni/sdk";
 import type { SessionCapabilitiesState } from "./use-session-capabilities";
 
-/** The one truthful machine indicator (dossier §3 #10). Honest staleness beats
+/** The one truthful machine indicator. Honest staleness beats
  *  fake liveness: a cold/asleep box reads "offline — as of <time>", never "live". */
 export type MachineChipState = "live" | "waking" | "offline";
 
@@ -70,7 +70,7 @@ export function deriveMachineChip(input: DeriveMachineChipInput): MachineChip {
   }
 
   // A self-hosted machine that reports offline cannot be woken remotely — honest
-  // "offline", never "waking" (dossier §3 #5 / #10).
+  // "offline", never "waking".
   const selfhostedOffline =
     input.activeIsSelfhosted === true && input.activeMachineState === "offline";
 

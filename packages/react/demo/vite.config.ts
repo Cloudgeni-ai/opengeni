@@ -13,11 +13,13 @@ export default defineConfig({
     chunkSizeWarningLimit: 800,
     rollupOptions: {
       // Pages: the full component harness (index.html), the timeline tool-call
-      // renderer harness (timeline.html), and the Machines / enrollment UI
-      // screenshot harness (machines.html — M9 / V12), all static.
+      // renderer harness (timeline.html), the queue presentation browser
+      // regression (queue.html), and the Machines / enrollment UI screenshot
+      // harness (machines.html — M9 / V12), all static.
       input: {
         main: resolve(__dirname, "index.html"),
         timeline: resolve(__dirname, "timeline.html"),
+        queue: resolve(__dirname, "queue.html"),
         machines: resolve(__dirname, "machines.html"),
         workbench: resolve(__dirname, "workbench.html"),
         workbenchDock: resolve(__dirname, "workbench-dock.html"),

@@ -148,7 +148,7 @@ describe("reaper terminate envelope→resume round-trip preserves sandboxId", ()
   });
 
   test("CRITICAL: a selfhosted lease is NEVER provider-stopped by the reaper (drain-to-cold only)", async () => {
-    // The catastrophic-if-violated invariant (dossier §19/§21): a selfhosted box is
+    // The catastrophic-if-violated invariant: a selfhosted box is
     // a user's PHYSICAL machine. The reaper must drain its lease to cold WITHOUT
     // building a provider client, resuming, snapshotting, or calling delete()/kill().
     // We inject a spy client that records EVERY call; for a selfhosted lease the spy

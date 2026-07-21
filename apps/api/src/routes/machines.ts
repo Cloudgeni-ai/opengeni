@@ -1,5 +1,5 @@
 // apps/api/src/routes/machines.ts — the M10 Machines-dashboard + per-machine
-// metrics-series ROUTES (dossier §10.7). Mirrors registerEnrollmentRoutes: thin
+// metrics-series ROUTES. Mirrors registerEnrollmentRoutes: thin
 // routes over a focused service (../sandbox/machines.ts), requireAccessGrant
 // BEFORE any work, the whole router gated behind sandboxSelfhostedEnabled
 // (default OFF → 404, invisible). Both routes need perm enrollments:read.
@@ -28,7 +28,7 @@ import { buildFleetContextForSession, swapActiveSandbox } from "@opengeni/core";
 import { listMachines, metricRowToSample } from "../sandbox/machines";
 
 // The supported series windows → milliseconds. An unknown/absent window defaults
-// to 1h (the dossier default). Bounded so a caller cannot request an unbounded
+// to 1h (the default). Bounded so a caller cannot request an unbounded
 // scan; longer ranges are a later concern (retention is ~N days).
 const SERIES_WINDOWS_MS: Record<string, number> = {
   "15m": 15 * 60_000,

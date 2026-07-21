@@ -23,6 +23,10 @@
       "types": "./src/index.ts",
       "default": "./src/index.ts"
     },
+    "./composer": {
+      "types": "./src/composer.ts",
+      "default": "./src/composer.ts"
+    },
     "./machines": {
       "types": "./src/machines.ts",
       "default": "./src/machines.ts"

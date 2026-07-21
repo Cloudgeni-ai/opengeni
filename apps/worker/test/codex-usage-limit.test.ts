@@ -33,7 +33,7 @@ describe("humanizeResetWindow", () => {
   });
 });
 
-describe("OPE-21 definitive credential failure classification", () => {
+describe("credential allocator definitive credential failure classification", () => {
   test("classifies second 401, 403, generic 429, and quota shapes", () => {
     expect(
       classifyCodexCredentialFailure(

@@ -3,7 +3,7 @@ import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import type { ApiRouteDeps } from "@opengeni/core";
 
-// The get.<domain> install-serving routes (dossier §23.1). These are
+// The get.<domain> install-serving routes. These are
 // UNAUTHENTICATED (see http/auth.ts isAuthExempt — the `installExemptPaths` set)
 // so a fresh machine with no credentials can `curl -fsSL https://get.<domain>/install.sh`,
 // read it first, then pipe to sh. They serve the IN-REPO committed script bodies

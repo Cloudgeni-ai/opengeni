@@ -29,8 +29,8 @@ export {
   type WorkspaceEnvironmentForRun,
 };
 
-// §7.6 P4a — the run's workspace identity, threaded so the connection-credential
-// provider can be called with the run's tenant context AND so the FORK-7
+// §7.6 connection-credential provider — the run's workspace identity, threaded so the connection-credential
+// provider can be called with the run's tenant context AND so the workspace-scope cross-check
 // cross-check has the run's workspace to assert the provider's echo against.
 export type ConnectionScope = {
   accountId: string;
@@ -44,7 +44,7 @@ export type MintedRunGitCredentials = {
   expiresAt: GitTokenExpiries;
 };
 
-// §7.6 P4a — load the run's workspace environment, delegating the DECRYPT to a
+// §7.6 connection-credential provider — load the run's workspace environment, delegating the DECRYPT to a
 // host `sandboxSecrets` provider when one is bound (the host owns the secret
 // vault + encryption key in embedded/separate topologies) and otherwise running
 // today's local `environmentsEncryptionKeyBytes`-keyed decrypt byte-for-byte.
@@ -72,7 +72,7 @@ export async function loadWorkspaceEnvironmentForRunWithCredentials(
     workspaceId: scope.workspaceId,
     variableSetId: environmentId,
   });
-  // FORK-7: the provider must echo THIS run's workspace before we apply its
+  // workspace-scope cross-check: the provider must echo THIS run's workspace before we apply its
   // decrypted values into the sandbox.
   assertWorkspaceEcho("sandboxSecrets", scope, secrets.workspaceId);
   return {
@@ -83,7 +83,7 @@ export async function loadWorkspaceEnvironmentForRunWithCredentials(
   };
 }
 
-// §7.6 FORK-7 cross-check. A credential provider echoes the workspace it scoped
+// Workspace-scope cross-check. A credential provider echoes the workspace it scoped
 // the credential to; we ASSERT it equals the run's workspace BEFORE the caller
 // injects the credential. A host mapping bug returning tenant B's creds for a
 // tenant-A run hard-throws here instead of landing tenant B's token in tenant
@@ -104,7 +104,7 @@ export async function sandboxEnvironmentForRun(
   settings: Settings,
   resources: ResourceRef[],
   workspaceEnvironment: Record<string, string> = {},
-  // §7.6 P4a - optional host git-credential provider + the run scope it needs
+  // §7.6 connection-credential provider - optional host git-credential provider + the run scope it needs
   // (unset, the standalone default → self-mint from `settings` byte-for-byte).
   // `skipGitHubToken` (Stage D): a connected-machine turn skips the inert platform
   // token mint entirely and returns the stable base env unchanged. `deferGitHubToken`
@@ -294,7 +294,7 @@ async function mintRunGitTokensWithIdentity(
     if (options?.gitCredentials && options.scope) {
       const request = gitCredentialsRequestForSelection(options.scope, selection, "token");
       const minted: GitCredentials = await options.gitCredentials(request);
-      // FORK-7: assert the provider scoped the token to THIS run's workspace
+      // workspace-scope cross-check: assert the provider scoped the token to THIS run's workspace
       // before accepting the token for clone seeding.
       assertWorkspaceEcho("gitCredentials", options.scope, minted.workspaceId);
       if (!minted.token) {

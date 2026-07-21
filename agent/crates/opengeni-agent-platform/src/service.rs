@@ -1,4 +1,4 @@
-//! The opt-in always-on service manager (dossier §23.0/§23.1).
+//! The opt-in always-on service manager.
 //!
 //! FOREGROUND `opengeni-agent run` is the DEFAULT (the machine is online while it
 //! runs). A service is an EXPLICIT OPT-IN (`opengeni-agent service install`) for a
@@ -344,10 +344,10 @@ mod tests {
 
     #[test]
     fn systemd_unit_path_is_scope_aware() {
-        let home = std::path::Path::new("/home/u");
+        let home = std::path::Path::new("/home/user");
         assert_eq!(
             systemd_unit_path(ServiceScope::User, home),
-            PathBuf::from("/home/u/.config/systemd/user/opengeni-agent.service")
+            PathBuf::from("/home/user/.config/systemd/user/opengeni-agent.service")
         );
         assert_eq!(
             systemd_unit_path(ServiceScope::System, home),
@@ -367,10 +367,10 @@ mod tests {
 
     #[test]
     fn launchd_plist_path_is_a_user_launchagent() {
-        let p = launchd_plist_path(std::path::Path::new("/Users/u"));
+        let p = launchd_plist_path(std::path::Path::new("/Users/runner"));
         assert_eq!(
             p,
-            PathBuf::from("/Users/u/Library/LaunchAgents/ai.opengeni.agent.plist")
+            PathBuf::from("/Users/runner/Library/LaunchAgents/ai.opengeni.agent.plist")
         );
     }
 

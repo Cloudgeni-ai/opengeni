@@ -125,7 +125,7 @@ const SettingsSchema = z.object({
   // topology. Default "" → standalone: no search_path scoping, server default
   // (`public`). When set (e.g. "opengeni"), the db handle + the managed-auth
   // pool send `search_path = "<dbSchema>","opengeni_private","public"` so every
-  // query resolves into the dedicated schema with NO query rewrite (SPIKE-1 F1).
+  // query resolves into the dedicated schema with NO query rewrite (schema-isolation contract F1).
   dbSchema: z.string().default(""),
   // Step I (§7.7). RLS posture. "force" (default) = today's FORCE-RLS via the
   // non-owner `opengeni_app` role. "scoped" = the embedded owner-role path (the
@@ -157,11 +157,11 @@ const SettingsSchema = z.object({
   staticEntitlementsJson: z.string().default("{}"),
   staticUsageLimitsJson: z.string().default("{}"),
   delegationSecret: z.string().optional(),
-  // Sandbox-surfacing scoped stream-token HMAC secret (master-spine §C.3 / I8).
+  // sandbox workspace scoped stream-token HMAC secret (sandbox contract §C.3 / stream-token availability contract).
   // When unset, the API falls back to `delegationSecret` (the same HMAC envelope
   // family, `ogs_` vs `ogd_` prefix). REQUIRED-WHEN-DESKTOP, but the absence of
   // BOTH while sandboxDesktopEnabled=true is a GRACEFUL DEGRADE (DesktopStream
-  // transport:null + a loud boot warning), NOT a hard boot-fail (I8/OD-8).
+  // transport:null + a loud boot warning), NOT a hard boot-fail (stream-token availability contract).
   streamTokenSecret: z.string().optional(),
   // The desktop input plane (raw stream:control writes) is OFF in v1: even a
   // holder of stream:control gets 403 until this flips. Keeps stream:control a
@@ -256,7 +256,7 @@ const SettingsSchema = z.object({
   // tool that BM25-discloses only the matching connectors. Default OFF — a codex
   // turn is byte-for-byte unchanged until enabled. OPENGENI_CODEX_TOOL_SEARCH_ENABLED
   codexToolSearchEnabled: EnvBoolean.default(false),
-  // OPE-21 atomic, workspace-local credential allocation. Default OFF is a
+  // credential allocator atomic, workspace-local credential allocation. Default OFF is a
   // deliberate rolling-deploy fence: migrate + roll every worker first, then
   // enable. Turning it off restores the legacy sticky selector without a schema
   // rollback; the additive lease table/cursor columns become inert.
@@ -405,7 +405,7 @@ const SettingsSchema = z.object({
   // recordingMaxSeconds is the ffmpeg -t hard ceiling (bounds a multi-day turn).
   recordingEnabled: EnvBoolean.default(true),
   recordingDefaultCodec: z.enum(["h264-mp4", "vp9-webm"]).default("h264-mp4"),
-  // Workbench v2 turn-end workspace capture (dossier §10.1). When on, the turn
+  // Workbench v2 turn-end workspace capture. When on, the turn
   // activity probes the box's changed files off the live box at turn end and
   // persists a capture revision (blobs in @opengeni/storage) so the workbench
   // paints cold/offline sessions with zero machine round-trips. Best-effort and
@@ -484,7 +484,7 @@ const SettingsSchema = z.object({
   // 404 (invisible — the surface does not exist for this deployment) and the
   // selfhosted backend is inert; boot is unaffected. EnvBoolean (NOT
   // z.coerce.boolean(), which coerces "false" -> true). Flipped per-environment via
-  // the deploy-staging IaC secret/configmap pattern (dossier §17/§25.1).
+  // the deploy-staging IaC secret/configmap pattern.
   sandboxSelfhostedEnabled: EnvBoolean.default(false),
   // Gates the op-stream (streaming exec) transport to Connected Machines. The
   // runner must ALSO advertise Capabilities.op_stream; default off, and legacy
@@ -504,7 +504,7 @@ const SettingsSchema = z.object({
   selfhostedNatsUrl: z.string().optional(),
   selfhostedRelayUrl: z.string().optional(),
   // The HMAC secret the control plane signs the agent's relay PRODUCER token with
-  // (the `ogr_` envelope threaded into EnrollmentCredentials.relayToken; M8b/dossier
+  // (the `ogr_` envelope threaded into EnrollmentCredentials.relayToken; M8b/design
   // §10.5). The relay verifies the producer token with the SAME secret. Optional:
   // when ABSENT the poll returns an empty relayToken (graceful degrade — the stream
   // plane is simply unavailable until configured). Falls back to streamTokenSecret /
@@ -514,7 +514,7 @@ const SettingsSchema = z.object({
   // The minisign PUBLIC key the agent pins for self-update verification (handed to
   // the agent in EnrollmentCredentials; the SECRET key lives only in CI).
   agentUpdatePublicKey: z.string().optional(),
-  // --- NATS auth-callout tenancy boundary (bring-your-own-compute M-AUTH; dossier
+  // --- NATS auth-callout tenancy boundary (bring-your-own-compute M-AUTH; design
   //     §10.1 NATS Accounts per workspace + §17 the isolation smoke) -------------
   // nats-server is configured with AUTH CALLOUT: an external agent connects
   // presenting its `oge_` enrollment bearer as the connect auth-token; the server
@@ -1603,7 +1603,7 @@ export function environmentsEncryptionKeyBytes(settings: Settings): Uint8Array |
  * default (`public`) applies — byte-for-byte today's behavior. When `dbSchema`
  * is set (embedded), returns `"<schema>,opengeni_private,public"` — `public`
  * stays LAST so `gen_random_uuid()` (pgcrypto) and the `vector` type still
- * resolve (the SPIKE-1 live footgun). `opengeni_private` is on the path so the
+ * resolve (the schema-isolation contract live footgun). `opengeni_private` is on the path so the
  * RLS GUC-reader helpers resolve when referenced unqualified.
  */
 export function dbSearchPath(settings: Pick<Settings, "dbSchema">): string | undefined {
@@ -2530,7 +2530,7 @@ function validateSettings(settings: Settings): void {
       );
     }
   }
-  // --- stream-token secret: required-when-desktop, but GRACEFULLY DEGRADE (I8) ---
+  // --- stream-token secret: required-when-desktop, but GRACEFULLY DEGRADE (stream-token availability contract) ---
   // The desktop pixel plane needs an HMAC secret to mint scoped stream tokens.
   // It is REQUIRED when desktop is enabled — but per OD-8 a missing secret is NOT
   // a hard boot-fail: we emit a LOUD warning and the deployment ships with
@@ -2577,7 +2577,7 @@ function validateSettings(settings: Settings): void {
 }
 
 /**
- * Resolve the secret used to sign/verify scoped stream tokens (master-spine
+ * Resolve the secret used to sign/verify scoped stream tokens (sandbox contract
  * §C.3). Falls back to `delegationSecret` (the same HMAC envelope family —
  * `ogs_` vs `ogd_` prefix) so a deployment that already carries a delegation
  * secret does not need a second one. Returns undefined when neither is set,
@@ -2594,7 +2594,7 @@ export function resolveStreamTokenSecret(settings: Settings): string | undefined
 
 /**
  * True iff the desktop pixel plane must GRACEFULLY DEGRADE because desktop is
- * enabled but no stream-token secret is resolvable (I8/OD-8). When true,
+ * enabled but no stream-token secret is resolvable (stream-token availability contract). When true,
  * negotiateCapabilities forces DesktopStream.transport:null.
  */
 export function streamTokenDegraded(settings: Settings): boolean {
@@ -2603,7 +2603,7 @@ export function streamTokenDegraded(settings: Settings): boolean {
 
 /**
  * Resolve the secret the control plane signs the enrollment bearer credential
- * with (the `oge_` envelope the agent presents back — M5/dossier §10.2). Falls
+ * with (the `oge_` envelope the agent presents back — M5). Falls
  * back to `delegationSecret` (the same HMAC envelope family) so a deployment that
  * already carries a delegation secret needs no second one. Returns undefined when
  * neither is set; when selfhosted is enabled but this is undefined, the poll route
@@ -2621,7 +2621,7 @@ export function resolveEnrollmentSigningSecret(settings: Settings): string | und
 
 /**
  * Resolve the HMAC secret the control plane signs the agent's relay PRODUCER token
- * with (the `ogr_` envelope; M8b/dossier §10.5). The RELAY verifies the producer
+ * with (the `ogr_` envelope; M8b). The RELAY verifies the producer
  * token with the SAME secret (injected into the relay via env). Prefers an explicit
  * `selfhostedRelayTokenSecret`, then the `streamTokenSecret` (the relay already
  * needs that one to verify the viewer's `ogs_` token, so a single secret can back

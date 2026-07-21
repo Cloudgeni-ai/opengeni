@@ -25,9 +25,7 @@ import { attachViewer } from "../src/sandbox/viewer";
 import { registerSessionRoutes } from "../src/routes/sessions";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
 
-// P3.2 — the un-redacted/shared CONSENT GATE + viewer REVOCATION (Phase 3 close).
-// Design-of-record 08-implementation-plan.md P3.2 + modules/07-channel-b.md §6 +
-// 05-addendum-shared-sandboxes.md E.1 (shared-exposure) + stress (g).
+// The un-redacted/shared consent gate and viewer revocation contract.
 //
 //   CONSENT GATE (the desktop-stream / viewer-attach path):
 //   - 409 stream_acknowledgment_required until the principal acks the un-redacted

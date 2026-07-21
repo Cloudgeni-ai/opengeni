@@ -22,6 +22,12 @@ import {
   PtyResizeRequest,
   PtyWriteRequest,
   SessionControlRequest,
+  SESSION_EVENT_RAW_DELTA_TYPES,
+  SessionEventPayloadMode,
+  SessionEventReadDirection,
+  SessionEventReadMode,
+  SessionEventSemanticClass,
+  SessionEventType,
   SaveComposerDraftRequest,
   SteerSessionQueueItemRequest,
   SteerSessionMessageRequest,
@@ -30,6 +36,8 @@ import {
   UpdateSessionGoalRequest,
   UpdateSessionRequest,
   ViewerHeartbeatRequest,
+  WORKSPACE_CONTROL_ACTOR_MAX_BYTES,
+  workspaceControlUtf8Bytes,
   type SandboxBackend,
   type Session,
   type TerminalPtyExitedPayload,
@@ -50,7 +58,7 @@ import {
   getSessionQueueSnapshot,
   getStreamAcknowledgment,
   insertPtySession,
-  listSessionEvents,
+  listSessionEventPage,
   listSessionIdsInGroup,
   listSessionsForSubject,
   listSessionTurns,
@@ -77,6 +85,7 @@ import {
 } from "@opengeni/db";
 import {
   appendAndPublishEvents,
+  boundSessionEventHttpPage,
   coalesceSessionEventDeltas,
   publishDurableSessionEvents,
 } from "@opengeni/events";
@@ -150,6 +159,10 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       }
       throw error;
     }
+    // The page body carries this fact directly. Preserve the historical array
+    // body for older clients while still making its older-pin omission visible
+    // to raw HTTP consumers without changing that response shape.
+    c.header("x-opengeni-pinned-truncated", page.pinnedTruncated === true ? "true" : "false");
     if (pageView) {
       return c.json(page);
     }
@@ -206,7 +219,10 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       }
       if (error instanceof SessionPinVersionConflictError) {
         return c.json(
-          { message: "session pin changed in another client", current: error.current },
+          {
+            message: "session pin changed in another client",
+            current: error.current,
+          },
           409,
         );
       }
@@ -232,7 +248,9 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const body = (await c.req.json()) as { target?: string };
     const target = typeof body.target === "string" ? body.target : "";
     if (!target) {
-      throw new HTTPException(400, { message: 'target is required ("auto" or an account id)' });
+      throw new HTTPException(400, {
+        message: 'target is required ("auto" or an account id)',
+      });
     }
     const pinned = target === "auto" ? null : target;
     const mutation = await withCodexCapacityMutation(
@@ -245,7 +263,9 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     );
     const ok = mutation.result;
     if (!ok) {
-      throw new HTTPException(404, { message: "session or codex account not found" });
+      throw new HTTPException(404, {
+        message: "session or codex account not found",
+      });
     }
     await Promise.allSettled(
       mutation.wakeTargets.map((wake) =>
@@ -464,7 +484,10 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       workflowId: requested.temporalWorkflowId,
       wakeRevision: requested.wakeRevision,
     });
-    return c.json({ status: "pending", message: "Compaction will run at the next safe boundary." });
+    return c.json({
+      status: "pending",
+      message: "Compaction will run at the next safe boundary.",
+    });
   });
 
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/events", async (c) => {
@@ -472,16 +495,120 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     await requireAccessGrant(c, deps, workspaceId, "sessions:read");
     const sessionId = c.req.param("sessionId");
     await assertSessionExists(db, workspaceId, sessionId);
-    const after = eventSequence(c.req.query("after"), 0);
-    const before = optionalEventSequence(c.req.query("before"));
+    const rawAfter = c.req.query("after");
+    const rawBefore = c.req.query("before");
+    const after = eventSequence(rawAfter, 0);
+    const before = optionalEventSequence(rawBefore);
     const compact = compactEvents(c.req.query("compact"));
-    const limit = eventListLimit(c.req.query("limit"), compact ? 5000 : 2000);
-    const events = await listSessionEvents(db, workspaceId, sessionId, {
+    const explicitReplay = rawAfter !== undefined || rawBefore !== undefined || compact;
+    const mode = eventEnumValue(
+      c.req.query("mode"),
+      SessionEventReadMode,
+      "mode",
+      explicitReplay ? "forensic" : "monitoring",
+    );
+    const latestClass = eventEnumValue(
+      c.req.query("latest"),
+      SessionEventSemanticClass,
+      "latest",
+      undefined,
+    );
+    if (
+      latestClass &&
+      ["includeTypes", "excludeTypes", "includeClasses", "excludeClasses"].some(
+        (name) => c.req.query(name) !== undefined,
+      )
+    ) {
+      throw new HTTPException(400, {
+        message: "latest cannot be combined with event filters",
+      });
+    }
+    const direction = latestClass
+      ? "before"
+      : eventEnumValue(
+          c.req.query("direction"),
+          SessionEventReadDirection,
+          "direction",
+          before !== undefined
+            ? "before"
+            : rawAfter !== undefined
+              ? "after"
+              : mode === "monitoring"
+                ? "before"
+                : "after",
+        );
+    const payloadMode = eventEnumValue(
+      c.req.query("payloadMode"),
+      SessionEventPayloadMode,
+      "payloadMode",
+      mode === "monitoring" ? "summary" : "full",
+    );
+    const includeTypes = eventEnumList(
+      c.req.query("includeTypes"),
+      SessionEventType,
+      "includeTypes",
+    );
+    const excludeTypes = eventEnumList(
+      c.req.query("excludeTypes"),
+      SessionEventType,
+      "excludeTypes",
+    );
+    const includeClasses = eventEnumList(
+      c.req.query("includeClasses"),
+      SessionEventSemanticClass,
+      "includeClasses",
+    );
+    const excludeClasses = eventEnumList(
+      c.req.query("excludeClasses"),
+      SessionEventSemanticClass,
+      "excludeClasses",
+    );
+    const limit = latestClass
+      ? 1
+      : eventListLimit(
+          c.req.query("limit"),
+          compact ? 5000 : mode === "monitoring" ? 250 : 2000,
+          mode === "monitoring" ? 40 : 500,
+        );
+    const dbPage = await listSessionEventPage(db, workspaceId, sessionId, {
       after,
       ...(before !== undefined ? { before } : {}),
       limit,
+      direction,
+      payloadMode,
+      includeTypes,
+      excludeTypes,
+      includeClasses: latestClass ? [latestClass] : includeClasses,
+      excludeClasses,
+      ...(mode === "monitoring" ? { defaultExcludeTypes: SESSION_EVENT_RAW_DELTA_TYPES } : {}),
     });
-    return c.json(compact ? coalesceSessionEventDeltas(events) : events);
+    const events = dbPage.events;
+    const projected = compact ? coalesceSessionEventDeltas(events) : events;
+    const page = boundSessionEventHttpPage(projected, {
+      direction,
+    });
+    const hasMore = dbPage.hasMore || page.truncated;
+    c.header("X-OpenGeni-Page-Bytes", String(page.bytes));
+    c.header("X-OpenGeni-Page-Max-Bytes", String(1024 * 1024));
+    c.header("X-OpenGeni-Page-Truncated", String(hasMore));
+    c.header("X-OpenGeni-Has-More", String(hasMore));
+    c.header("X-OpenGeni-Event-Mode", mode);
+    c.header("X-OpenGeni-Event-Direction", direction);
+    c.header("X-OpenGeni-Payload-Mode", payloadMode);
+    c.header("X-OpenGeni-Forensic-Exact", String(mode === "forensic" && payloadMode === "full"));
+    const coveredFirst = page.events[0]?.sequence;
+    const coveredLast = page.events.at(-1)?.sequence;
+    if (coveredFirst !== undefined) c.header("X-OpenGeni-Covered-First", String(coveredFirst));
+    if (coveredLast !== undefined) c.header("X-OpenGeni-Covered-Last", String(coveredLast));
+    const truncatedBy = page.truncated ? "http_bytes" : dbPage.truncatedBy;
+    if (truncatedBy) c.header("X-OpenGeni-Truncated-By", truncatedBy);
+    if (page.nextSequence !== null) {
+      c.header(
+        direction === "before" ? "X-OpenGeni-Next-Before" : "X-OpenGeni-Next-After",
+        String(page.nextSequence),
+      );
+    }
+    return c.json(page.events);
   });
 
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/events/stream", async (c) => {
@@ -497,6 +624,7 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       sessionId,
       Number.isFinite(after) ? after : 0,
       c.req.raw.signal,
+      { observability: deps.observability },
     );
   });
 
@@ -529,7 +657,12 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       return c.json(
         await moveHumanQueuePrompt(
           { db, bus },
-          { accountId: grant.accountId, workspaceId, sessionId, subjectId: grant.subjectId },
+          {
+            accountId: grant.accountId,
+            workspaceId,
+            sessionId,
+            subjectId: grant.subjectId,
+          },
           c.req.param("turnId"),
           payload,
         ),
@@ -549,7 +682,12 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       return c.json(
         await editHumanQueuePrompt(
           { db, bus },
-          { accountId: grant.accountId, workspaceId, sessionId, subjectId: grant.subjectId },
+          {
+            accountId: grant.accountId,
+            workspaceId,
+            sessionId,
+            subjectId: grant.subjectId,
+          },
           c.req.param("turnId"),
           payload,
         ),
@@ -569,7 +707,12 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       return c.json(
         await steerHumanQueuePrompt(
           { db, bus },
-          { accountId: grant.accountId, workspaceId, sessionId, subjectId: grant.subjectId },
+          {
+            accountId: grant.accountId,
+            workspaceId,
+            sessionId,
+            subjectId: grant.subjectId,
+          },
           c.req.param("turnId"),
           payload,
         ),
@@ -589,7 +732,12 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       return c.json(
         await deleteHumanQueuePrompt(
           { db, bus },
-          { accountId: grant.accountId, workspaceId, sessionId, subjectId: grant.subjectId },
+          {
+            accountId: grant.accountId,
+            workspaceId,
+            sessionId,
+            subjectId: grant.subjectId,
+          },
           c.req.param("turnId"),
           payload,
         ),
@@ -622,7 +770,12 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       return c.json(
         await saveHumanComposerDraft(
           db,
-          { accountId: grant.accountId, workspaceId, sessionId, subjectId: grant.subjectId },
+          {
+            accountId: grant.accountId,
+            workspaceId,
+            sessionId,
+            subjectId: grant.subjectId,
+          },
           payload,
         ),
       );
@@ -634,14 +787,25 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/control", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    if (workspaceControlUtf8Bytes(grant.subjectId) > WORKSPACE_CONTROL_ACTOR_MAX_BYTES) {
+      throw new HTTPException(400, { message: "workspace-control actor is too large" });
+    }
     const sessionId = c.req.param("sessionId");
-    const payload = SessionControlRequest.parse(await c.req.json());
+    const parsed = SessionControlRequest.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      throw new HTTPException(400, { message: "invalid session control request" });
+    }
     try {
       return c.json(
         await controlHumanSessionWorkstream(
           { db, bus, workflowClient },
-          { accountId: grant.accountId, workspaceId, sessionId, subjectId: grant.subjectId },
-          payload,
+          {
+            accountId: grant.accountId,
+            workspaceId,
+            sessionId,
+            subjectId: grant.subjectId,
+          },
+          parsed.data,
         ),
       );
     } catch (error) {
@@ -872,7 +1036,7 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       // tracks the desktop tier + a desktop-capable backend.
       computerUseEnabled: settings.computerUseEnabled,
       computerUseReadOnly: settings.computerUseReadOnly,
-      // Graceful degrade (I8/OD-8): if desktop is enabled but no stream-token
+      // Graceful degrade (stream-token availability contract): if desktop is enabled but no stream-token
       // secret is resolvable, the desktop cell reports transport:null rather
       // than advertising a plane we can never authorize.
       streamTokenSecretAvailable: !streamTokenDegraded(settings),
@@ -960,7 +1124,9 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       }
       const parsed = AcknowledgeStreamRequest.safeParse(await c.req.json().catch(() => ({})));
       if (!parsed.success) {
-        throw new HTTPException(400, { message: "invalid stream acknowledgment request" });
+        throw new HTTPException(400, {
+          message: "invalid stream acknowledgment request",
+        });
       }
       const recorded = await recordStreamAcknowledgment(db, {
         accountId: grant.accountId,
@@ -996,7 +1162,9 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
     const parsed = AttachViewerRequest.safeParse(await c.req.json().catch(() => ({})));
     if (!parsed.success) {
-      throw new HTTPException(400, { message: "invalid viewer attach request" });
+      throw new HTTPException(400, {
+        message: "invalid viewer attach request",
+      });
     }
     // Consent gate (P3.2 / addendum E.1): ONLY the un-redacted DESKTOP pixel plane
     // requires the calling principal's acknowledgment (recorded per group+subject;
@@ -1017,10 +1185,14 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
         subjectId: grant.subjectId,
       });
       if (!ack?.acknowledgedUnredacted) {
-        throw new HTTPException(409, { message: "stream_acknowledgment_required" });
+        throw new HTTPException(409, {
+          message: "stream_acknowledgment_required",
+        });
       }
       if (shared && !ack.acknowledgedShared) {
-        throw new HTTPException(409, { message: "shared_acknowledgment_required" });
+        throw new HTTPException(409, {
+          message: "shared_acknowledgment_required",
+        });
       }
     }
     // SELFHOSTED ACTIVE: when the session's active sandbox is selfhosted, skip
@@ -1177,7 +1349,9 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       }
       const parsed = ViewerHeartbeatRequest.safeParse(await c.req.json().catch(() => ({})));
       if (!parsed.success) {
-        throw new HTTPException(400, { message: "viewer heartbeat requires { leaseEpoch }" });
+        throw new HTTPException(400, {
+          message: "viewer heartbeat requires { leaseEpoch }",
+        });
       }
       const alive = await heartbeatViewer(
         { db, settings },
@@ -1240,7 +1414,10 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
         idleGraceMs: settings.sandboxIdleGraceMs,
       });
       // null ⇒ the lease was already cold-and-reaped (revoke is an idempotent no-op).
-      return c.json({ liveness: result?.liveness ?? null, refcount: result?.refcount ?? null });
+      return c.json({
+        liveness: result?.liveness ?? null,
+        refcount: result?.refcount ?? null,
+      });
     },
   );
 
@@ -1281,12 +1458,19 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!session) {
       throw new HTTPException(404, { message: "session not found" });
     }
-    return { accountId: grant.accountId, workspaceId, session, subjectId: grant.subjectId };
+    return {
+      accountId: grant.accountId,
+      workspaceId,
+      session,
+      subjectId: grant.subjectId,
+    };
   }
 
   async function parseChannelABody<T>(
     c: Context,
-    schema: { safeParse: (v: unknown) => { success: true; data: T } | { success: false } },
+    schema: {
+      safeParse: (v: unknown) => { success: true; data: T } | { success: false };
+    },
   ): Promise<T> {
     const raw = await c.req.json().catch(() => undefined);
     const result = schema.safeParse(raw ?? {});
@@ -1416,7 +1600,9 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const sessionId = c.req.param("sessionId") ?? "";
     const path = c.req.query("path");
     if (!path) {
-      throw new HTTPException(400, { message: "path query parameter is required" });
+      throw new HTTPException(400, {
+        message: "path query parameter is required",
+      });
     }
     const session = await getSession(db, workspaceId, sessionId);
     if (!session) {
@@ -1431,7 +1617,9 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (revisionParam !== undefined && revisionParam !== "") {
       const revision = Number(revisionParam);
       if (!Number.isInteger(revision) || revision < 0) {
-        throw new HTTPException(400, { message: "revision must be a non-negative integer" });
+        throw new HTTPException(400, {
+          message: "revision must be a non-negative integer",
+        });
       }
       row = await workspaceCaptureAtRevision(db, workspaceId, sessionId, revision);
     } else {
@@ -1503,7 +1691,9 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw new HTTPException(404, { message: "pty not found or closed" });
     }
     if (pty.execSessionId === null) {
-      throw new HTTPException(409, { message: "interactive terminal unsupported on this backend" });
+      throw new HTTPException(409, {
+        message: "interactive terminal unsupported on this backend",
+      });
     }
     let seq = 1;
     await withChannelA({ db, settings, bus }, ctx, async ({ service }) => {
@@ -1565,7 +1755,11 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
         workspaceId: ctx.workspaceId,
         ptyId: req.ptyId,
       });
-      const exited: TerminalPtyExitedPayload = { ptyId: req.ptyId, exitCode: 0, reason: "exit" };
+      const exited: TerminalPtyExitedPayload = {
+        ptyId: req.ptyId,
+        exitCode: 0,
+        reason: "exit",
+      };
       await appendAndPublishEvents(db, bus, ctx.workspaceId, ctx.session.id, [
         { type: "terminal.pty.exited", payload: exited },
       ]);
@@ -1574,12 +1768,60 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
   });
 }
 
-function eventListLimit(raw: string | undefined, max = 2000): number {
-  const limit = Number(raw ?? 500);
+function eventListLimit(raw: string | undefined, max = 2000, fallback = 500): number {
+  const limit = Number(raw ?? fallback);
   if (!Number.isFinite(limit)) {
-    return 500;
+    return fallback;
   }
   return Math.min(max, Math.max(1, Math.floor(limit)));
+}
+
+function eventEnumValue<T extends string>(
+  raw: string | undefined,
+  schema: { safeParse(value: unknown): { success: boolean; data?: T } },
+  name: string,
+  fallback: T,
+): T;
+function eventEnumValue<T extends string>(
+  raw: string | undefined,
+  schema: { safeParse(value: unknown): { success: boolean; data?: T } },
+  name: string,
+  fallback: undefined,
+): T | undefined;
+function eventEnumValue<T extends string>(
+  raw: string | undefined,
+  schema: { safeParse(value: unknown): { success: boolean; data?: T } },
+  name: string,
+  fallback: T | undefined,
+): T | undefined {
+  if (raw === undefined) return fallback;
+  const parsed = schema.safeParse(raw);
+  if (!parsed.success) {
+    throw new HTTPException(400, { message: `${name} is invalid` });
+  }
+  return parsed.data as T;
+}
+
+function eventEnumList<T extends string>(
+  raw: string | undefined,
+  schema: { safeParse(value: unknown): { success: boolean; data?: T } },
+  name: string,
+): T[] {
+  if (raw === undefined || raw.trim() === "") return [];
+  const values = raw
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  if (values.length > 100) {
+    throw new HTTPException(400, { message: `${name} accepts at most 100 values` });
+  }
+  return values.map((value) => {
+    const parsed = schema.safeParse(value);
+    if (!parsed.success) {
+      throw new HTTPException(400, { message: `${name} contains an invalid value` });
+    }
+    return parsed.data as T;
+  });
 }
 
 function sessionListQuery(
@@ -1611,7 +1853,9 @@ function sessionListQuery(
   }
   const search = query.search?.trim();
   if (search && search.length > 200) {
-    throw new HTTPException(400, { message: "search must be at most 200 characters" });
+    throw new HTTPException(400, {
+      message: "search must be at most 200 characters",
+    });
   }
   return {
     limit: query.limit,
