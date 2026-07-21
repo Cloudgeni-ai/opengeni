@@ -24,6 +24,17 @@ export function isTurnQueueEvent(event: Pick<SessionEvent, "type">): boolean {
   );
 }
 
+function queueSnapshotCovers(
+  candidate: SessionQueueSnapshot | null,
+  observed: SessionQueueSnapshot,
+): boolean {
+  return Boolean(
+    candidate &&
+    candidate.version >= observed.version &&
+    candidate.effectiveControl.controlVersion >= observed.effectiveControl.controlVersion,
+  );
+}
+
 export type QueueMutationKind = "move" | "edit" | "steer" | "delete";
 
 export type UseTurnQueueOptions = EmbeddedSessionClientOverride &
@@ -97,18 +108,31 @@ export function useTurnQueue(
   const load = useCallback(
     async (rejectOnFailure = false): Promise<void> => {
       if (!sessionId) return;
+      const targetKey = `${workspaceId}\u0000${sessionId}`;
       const ticket = ++readGeneration.current;
       try {
         const fetched = await client.getQueue(workspaceId, sessionId);
-        if (ticket === readGeneration.current) {
+        if (targetKeyRef.current !== targetKey) return;
+        const ownsLatestRead = ticket === readGeneration.current;
+        if (rejectOnFailure) {
+          const committed = acceptSnapshot(fetched);
+          if (!committed && !queueSnapshotCovers(snapshotRef.current, fetched)) {
+            throw new TypeError("Queue reconciliation did not commit authoritative state");
+          }
+          setError(null);
+          if (ownsLatestRead) setLoading(false);
+        } else if (ownsLatestRead) {
           acceptSnapshot(fetched);
           setError(null);
           setLoading(false);
         }
       } catch (cause) {
-        if (ticket === readGeneration.current) {
+        if (
+          targetKeyRef.current === targetKey &&
+          (ticket === readGeneration.current || rejectOnFailure)
+        ) {
           setError(asError(cause));
-          setLoading(false);
+          if (ticket === readGeneration.current) setLoading(false);
         }
         if (rejectOnFailure) throw cause;
       }

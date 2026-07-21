@@ -270,6 +270,77 @@ describe("useTurnQueue", () => {
     await hook.unmount();
   });
 
+  test("the queue handoff commits before a superseding ordinary read can fail", async () => {
+    let reads = 0;
+    let resolveHandoffRead: ((snapshot: SessionQueueSnapshot) => void) | null = null;
+    let rejectSupersedingRead: ((cause: Error) => void) | null = null;
+    let markHandoffComplete: (() => void) | null = null;
+    const handoffRead = new Promise<SessionQueueSnapshot>((resolve) => {
+      resolveHandoffRead = resolve;
+    });
+    const supersedingRead = new Promise<SessionQueueSnapshot>((_resolve, reject) => {
+      rejectSupersedingRead = reject;
+    });
+    const handoffComplete = new Promise<void>((resolve) => {
+      markHandoffComplete = resolve;
+    });
+    const client = fakeClient({
+      getQueue: async () => {
+        reads += 1;
+        if (reads === 1) return queueSnapshot([fakeTurn({ id: "stale" })], { version: 1 });
+        if (reads === 2) return await handoffRead;
+        return await supersedingRead;
+      },
+      getSession: async () => ({ lastSequence: 41 }) as never,
+      streamEvents: (_workspaceId, _sessionId, options) =>
+        (async function* () {
+          await options?.beforeLive?.();
+          markHandoffComplete?.();
+          const event = await new Promise<SessionEvent | null>((resolve) => {
+            options?.signal?.addEventListener("abort", () => resolve(null), { once: true });
+          });
+          if (event) yield event;
+        })(),
+    });
+    const hook = await renderHook(
+      () => useTurnQueue(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush();
+    expect(reads).toBe(2);
+    expect(hook.result.current.queue[0]?.id).toBe("stale");
+
+    let laterRefresh: Promise<void> | null = null;
+    await flushing(() => {
+      laterRefresh = hook.result.current.refresh();
+    });
+    expect(reads).toBe(3);
+
+    await flushing(async () => {
+      resolveHandoffRead?.(
+        queueSnapshot([fakeTurn({ id: "handoff" })], {
+          version: 2,
+          effectiveControl: {
+            ...queueSnapshot([]).effectiveControl,
+            controlVersion: 4,
+          },
+        }),
+      );
+      await handoffComplete;
+    });
+    expect(hook.result.current.queue[0]?.id).toBe("handoff");
+    expect(hook.result.current.snapshot?.version).toBe(2);
+
+    await flushing(async () => {
+      rejectSupersedingRead?.(new TypeError("later ordinary read failed"));
+      await laterRefresh;
+    });
+    expect(hook.result.current.error?.message).toContain("later ordinary read failed");
+    expect(hook.result.current.queue[0]?.id).toBe("handoff");
+    expect(hook.result.current.snapshot?.version).toBe(2);
+    await hook.unmount();
+  });
+
   test("move, Edit, Steer, and Delete bind the displayed versions and accept server order", async () => {
     const first = fakeTurn({ id: "11111111-aaaa-4aaa-8aaa-111111111111", version: 2 });
     const second = fakeTurn({ id: "22222222-bbbb-4bbb-8bbb-222222222222", version: 4 });
@@ -854,6 +925,59 @@ describe("useComposer durable draft and control binding", () => {
     expect(reads).toBe(2);
     expect(hook.result.current.draft?.revision).toBe(2);
     expect(hook.result.current.value).toBe("authoritative handoff state");
+    await hook.unmount();
+  });
+
+  test("a delayed initial draft read cannot overwrite the newer handoff revision", async () => {
+    const draft = (revision: number, text: string): ComposerDraft => ({
+      revision,
+      text,
+      resources: [],
+      tools: [],
+      model: "model-x",
+      reasoningEffort: "medium",
+      sourceTurnId: null,
+      sourceTurnVersion: null,
+      updatedAt: new Date().toISOString(),
+    });
+    let reads = 0;
+    let resolveInitialRead: ((value: ComposerDraft) => void) | null = null;
+    let markHandoffComplete: (() => void) | null = null;
+    const initialRead = new Promise<ComposerDraft>((resolve) => {
+      resolveInitialRead = resolve;
+    });
+    const handoffComplete = new Promise<void>((resolve) => {
+      markHandoffComplete = resolve;
+    });
+    const client = fakeClient({
+      getComposerDraft: async () => {
+        reads += 1;
+        return reads === 1 ? await initialRead : draft(2, "authoritative handoff");
+      },
+      getSession: async () => ({ lastSequence: 42 }) as never,
+      streamEvents: (_workspaceId, _sessionId, options) =>
+        (async function* () {
+          await options?.beforeLive?.();
+          markHandoffComplete?.();
+          const event = await new Promise<SessionEvent | null>((resolve) => {
+            options?.signal?.addEventListener("abort", () => resolve(null), { once: true });
+          });
+          if (event) yield event;
+        })(),
+    });
+    const hook = await renderHook(
+      () => useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flushing(async () => await handoffComplete);
+
+    expect(reads).toBe(2);
+    expect(hook.result.current.draft?.revision).toBe(2);
+    expect(hook.result.current.value).toBe("authoritative handoff");
+
+    await flushing(() => resolveInitialRead?.(draft(1, "obsolete initial read")));
+    expect(hook.result.current.draft?.revision).toBe(2);
+    expect(hook.result.current.value).toBe("authoritative handoff");
     await hook.unmount();
   });
 
