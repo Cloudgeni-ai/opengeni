@@ -31,7 +31,7 @@ afterAll(async () => {
   await blank?.release();
 });
 
-describe("migration 0067 (durable goal wake)", () => {
+describe("migration 0095 (durable goal wake)", () => {
   test("arms only idle legacy goals and preserves existing or blocked work", async () => {
     if (!available || !blank) return;
     const admin = postgres(blank.databaseUrl, { max: 1 });
