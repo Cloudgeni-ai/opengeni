@@ -255,7 +255,12 @@ export async function closePendingSessionToolCallsInTransaction(
         sessionId: input.sessionId,
         turnId: input.turnId,
         position: nextPosition++,
-        item: sanitizeModelPayload(boundModelToolOutputItem(resolution.result)),
+        item: sanitizeModelPayload(
+          boundModelToolOutputItem(
+            resolution.result,
+            resolution.call.modelToolOutputTruncationTokens ?? undefined,
+          ),
+        ),
         active: true,
       });
     }

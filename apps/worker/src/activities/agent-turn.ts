@@ -5019,6 +5019,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 turnId: activeTurnId,
                 executionGeneration,
                 attemptId: input.attemptId,
+                modelToolOutputTruncationTokens: modelRunSettings.modelToolOutputTruncationTokens,
                 ...pendingToolCall,
               });
               if (!registered.accepted) {
@@ -5043,6 +5044,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 executionGeneration,
                 attemptId: input.attemptId,
                 callId: completedToolCall.callId,
+                modelToolOutputTruncationTokens: modelRunSettings.modelToolOutputTruncationTokens,
                 resultItem: completedToolCall.resultItem,
               });
               if (!recorded.accepted) {

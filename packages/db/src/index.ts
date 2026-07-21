@@ -15028,7 +15028,20 @@ export type PendingSessionToolCallInput = {
   callId: string;
   callType: string;
   callItem: Record<string, unknown>;
+  modelToolOutputTruncationTokens?: number;
 };
+
+function assertPendingToolOutputPolicyMatches(
+  stored: number | null,
+  supplied: number | undefined,
+  callId: string,
+): void {
+  if (stored !== null && supplied !== undefined && stored !== supplied) {
+    throw new Error(
+      `SDK tool call ${callId} changed model tool-output policy from ${stored} to ${supplied}`,
+    );
+  }
+}
 
 /**
  * Durably capture the raw SDK call item at the exact attempt boundary. This is
@@ -15066,6 +15079,7 @@ export async function registerPendingSessionToolCall(
             callId: input.callId,
             callType: input.callType,
             callItem: sanitizeModelPayload(input.callItem),
+            modelToolOutputTruncationTokens: input.modelToolOutputTruncationTokens ?? null,
           })
           .onConflictDoNothing({
             target: [
@@ -15075,6 +15089,46 @@ export async function registerPendingSessionToolCall(
             ],
           })
           .returning({ id: schema.sessionPendingToolCalls.id });
+        if (inserted.length === 0) {
+          const [pending] = await tx
+            .select({
+              id: schema.sessionPendingToolCalls.id,
+              modelToolOutputTruncationTokens:
+                schema.sessionPendingToolCalls.modelToolOutputTruncationTokens,
+            })
+            .from(schema.sessionPendingToolCalls)
+            .where(
+              and(
+                eq(schema.sessionPendingToolCalls.workspaceId, input.workspaceId),
+                eq(schema.sessionPendingToolCalls.sessionId, input.sessionId),
+                eq(schema.sessionPendingToolCalls.turnId, input.turnId),
+                eq(schema.sessionPendingToolCalls.callId, input.callId),
+              ),
+            )
+            .for("update")
+            .limit(1);
+          if (!pending) {
+            throw new Error(
+              `Pending SDK tool call disappeared during registration: ${input.callId}`,
+            );
+          }
+          assertPendingToolOutputPolicyMatches(
+            pending.modelToolOutputTruncationTokens,
+            input.modelToolOutputTruncationTokens,
+            input.callId,
+          );
+          if (
+            pending.modelToolOutputTruncationTokens === null &&
+            input.modelToolOutputTruncationTokens !== undefined
+          ) {
+            await tx
+              .update(schema.sessionPendingToolCalls)
+              .set({
+                modelToolOutputTruncationTokens: input.modelToolOutputTruncationTokens,
+              })
+              .where(eq(schema.sessionPendingToolCalls.id, pending.id));
+          }
+        }
         return { accepted: true, registered: inserted.length === 1 };
       }),
   );
@@ -15154,8 +15208,23 @@ export async function recordPendingSessionToolCallResult(
               eq(schema.sessionPendingToolCalls.callId, input.callId),
             ),
           )
+          .for("update")
           .limit(1);
         if (!pending) return { accepted: true, recorded: false };
+        assertPendingToolOutputPolicyMatches(
+          pending.modelToolOutputTruncationTokens,
+          input.modelToolOutputTruncationTokens,
+          input.callId,
+        );
+        if (
+          pending.modelToolOutputTruncationTokens === null &&
+          input.modelToolOutputTruncationTokens !== undefined
+        ) {
+          await tx
+            .update(schema.sessionPendingToolCalls)
+            .set({ modelToolOutputTruncationTokens: input.modelToolOutputTruncationTokens })
+            .where(eq(schema.sessionPendingToolCalls.id, pending.id));
+        }
         const resultType = TOOL_RESULT_TYPE_BY_CALL_TYPE[pending.callType];
         if (
           !resultType ||
