@@ -1310,7 +1310,7 @@ function registerWorkspaceOrchestrationTools(
     server.registerTool(
       "sessions_list",
       {
-        description: `List compact high-level session status in this workspace. Defaults to creation order; use orderBy=updatedAt with decimal activity-revision updatedAfter/updatedThrough tokens for gap-free indexed incremental monitoring independent of application clocks. Cursors are opaque revision-fenced keysets. includeLastMessage is opt-in; its rendered previews share a deterministic ${SESSION_DISCOVERY_PREVIEW_MAX_BYTES}-byte UTF-8 aggregate budget, and omitted previews include a session_get drill-down route. Use session_get for exact known targets and detailed resources/tools/settings. The list never returns full session objects or history.`,
+        description: `List compact high-level session status in this workspace. Defaults to creation order; use orderBy=updatedAt with decimal activity-revision updatedAfter/updatedThrough tokens for gap-free indexed incremental monitoring independent of application clocks. Cursors are opaque revision-fenced keysets. includeLastMessage is opt-in; its rendered previews share a deterministic ${SESSION_DISCOVERY_PREVIEW_MAX_BYTES}-byte UTF-8 aggregate budget, and omitted previews include a bounded session_events drill-down input (exact message type, direction=before, limit=1, monitoring summary). Use session_get for exact known targets and detailed resources/tools/settings. The list never returns full session objects or history.`,
         inputSchema: {
           limit: z4.number().int().positive().max(100).optional(),
           cursor: z4.string().max(512).optional(),
@@ -2073,6 +2073,21 @@ const SESSION_DISCOVERY_TEXT_CHARS = 600;
 const SESSION_DISCOVERY_PREVIEW_MAX_BYTES = 16_384;
 const SESSION_DISCOVERY_PREVIEW_OMISSION_REASON = "aggregatePreviewBudget" as const;
 const SESSION_DISCOVERY_PAGE_MAX_BYTES = 128_000;
+const SESSION_DISCOVERY_PREVIEW_DRILL_DOWN_TOOL = "session_events" as const;
+const SESSION_DISCOVERY_PREVIEW_DRILL_DOWN_BASE_INPUT = {
+  direction: "before",
+  limit: 1,
+  mode: "monitoring",
+  payloadMode: "summary",
+} as const;
+
+function sessionDiscoveryPreviewDrillDownInput(sessionId: string, type: SessionEventType) {
+  return {
+    sessionId,
+    includeTypes: [type],
+    ...SESSION_DISCOVERY_PREVIEW_DRILL_DOWN_BASE_INPUT,
+  };
+}
 
 function boundedSessionDiscoveryLimit(limit: number | undefined): number {
   if (!limit || !Number.isFinite(limit)) return SESSION_DISCOVERY_DEFAULT_LIMIT;
@@ -2343,7 +2358,11 @@ export function capSessionDiscoveryPage(
             preview: null,
             previewOmitted: true,
             previewOmissionReason: SESSION_DISCOVERY_PREVIEW_OMISSION_REASON,
-            previewDrillDownTool: "session_get" as const,
+            previewDrillDownTool: SESSION_DISCOVERY_PREVIEW_DRILL_DOWN_TOOL,
+            previewDrillDownInput: sessionDiscoveryPreviewDrillDownInput(
+              session.id,
+              latestMessage.type,
+            ),
           },
         };
       })
@@ -2410,7 +2429,11 @@ export function capSessionDiscoveryPage(
               truncated: previewOmittedCount > 0,
               omissionReason:
                 previewOmittedCount > 0 ? SESSION_DISCOVERY_PREVIEW_OMISSION_REASON : null,
-              drillDownTool: "session_get" as const,
+              drillDownTool: SESSION_DISCOVERY_PREVIEW_DRILL_DOWN_TOOL,
+              drillDownInput: {
+                includeTypes: ["user.message", "agent.message.completed"] as const,
+                ...SESSION_DISCOVERY_PREVIEW_DRILL_DOWN_BASE_INPUT,
+              },
             },
           }
         : {}),

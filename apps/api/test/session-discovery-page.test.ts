@@ -209,7 +209,14 @@ describe("sessions_list compact discovery projection", () => {
       omittedCount: 87,
       truncated: true,
       omissionReason: "aggregatePreviewBudget",
-      drillDownTool: "session_get",
+      drillDownTool: "session_events",
+      drillDownInput: {
+        includeTypes: ["user.message", "agent.message.completed"],
+        direction: "before",
+        limit: 1,
+        mode: "monitoring",
+        payloadMode: "summary",
+      },
     });
     expect(previewBudget.bytes).toBe(15_600);
     expect(Math.ceil(previewBudget.bytes / 4)).toBe(3_900);
@@ -225,7 +232,15 @@ describe("sessions_list compact discovery projection", () => {
       previewTruncated: false,
       previewOmitted: true,
       previewOmissionReason: "aggregatePreviewBudget",
-      previewDrillDownTool: "session_get",
+      previewDrillDownTool: "session_events",
+      previewDrillDownInput: {
+        sessionId: uuid(14),
+        includeTypes: ["agent.message.completed"],
+        direction: "before",
+        limit: 1,
+        mode: "monitoring",
+        payloadMode: "summary",
+      },
     });
     expect(result.sessions[13]!.latestMessage).not.toHaveProperty("text");
     expect(result.responseTruncated).toBeFalse();
