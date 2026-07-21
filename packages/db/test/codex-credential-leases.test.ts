@@ -155,7 +155,6 @@ function selector(context: CodexCredentialLeaseSelectionContext): {
     activeCredentialId: context.activeCredentialId,
     priorCredentialId: context.activeCredentialId,
     accounts: context.accounts,
-    nearExhaustionPct: 90,
     now: new Date(),
   });
   return {
@@ -268,7 +267,7 @@ describe("OPE-21 atomic Codex credential allocation", () => {
     await connectCredential(wsB!, "shared-quota");
     const reset = new Date(Date.now() + 5 * 60 * 60_000);
     await recordCodexAccountUsage(dbA, wsA!.workspaceId, credentialA, {
-      primaryUsedPercent: 99,
+      primaryUsedPercent: 100,
       primaryResetAt: reset,
       secondaryUsedPercent: 10,
       secondaryResetAt: new Date(Date.now() + 7 * 24 * 60 * 60_000),
@@ -666,7 +665,6 @@ describe("OPE-21 atomic Codex credential allocation", () => {
           sessionPinnedCredentialId: null,
           sessionLastCredentialId: toggledCredential,
           continuationCredentialId: toggledCredential,
-          nearExhaustionPct: 90,
           now: new Date(),
         }),
     );

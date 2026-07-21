@@ -124,7 +124,6 @@ describe("OPE-21 definitive credential failure classification", () => {
       codexCredentialCooldownUntil(
         { kind: "rate_limit", cooldownSeconds: 31 },
         null,
-        90,
         now,
       )?.getTime(),
     ).toBe(now.getTime() + 31_000);
@@ -139,7 +138,6 @@ describe("OPE-21 definitive credential failure classification", () => {
           secondaryUsedPercent: 100,
           secondaryResetAt: weeklyReset,
         },
-        90,
         now,
       )?.getTime(),
     ).toBe(weeklyReset.getTime());
@@ -152,20 +150,14 @@ describe("OPE-21 definitive credential failure classification", () => {
           secondaryUsedPercent: 100,
           secondaryResetAt: weeklyReset,
         },
-        90,
         now,
       )?.getTime(),
     ).toBe(weeklyReset.getTime());
     expect(
-      codexCredentialCooldownUntil(
-        { kind: "quota", cooldownSeconds: null },
-        null,
-        90,
-        now,
-      )?.getTime(),
+      codexCredentialCooldownUntil({ kind: "quota", cooldownSeconds: null }, null, now)?.getTime(),
     ).toBe(now.getTime() + CODEX_ALLOWANCE_FALLBACK_MS);
     expect(
-      codexCredentialCooldownUntil({ kind: "auth", cooldownSeconds: null }, null, 90, now),
+      codexCredentialCooldownUntil({ kind: "auth", cooldownSeconds: null }, null, now),
     ).toBeNull();
   });
 });
