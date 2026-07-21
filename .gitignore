@@ -21,6 +21,7 @@ bun.lockb
 terraform.tfvars
 terraform.tfvars.json
 .agent/
+/result
 # Staged bundled-skills copy created at runtime (packages/runtime bundledSkillsDir)
 .opengeni/
 .claude/

@@ -71,12 +71,12 @@ let nextSessionPairId = 1;
 async function freshWorkspace(): Promise<WorkspaceFixture> {
   const [account] = await admin<{ id: string }[]>`
     insert into managed_accounts (name)
-    values ('OPE-63 event lock account')
+    values ('event-ordering invariant event lock account')
     returning id
   `;
   const [workspace] = await admin<{ id: string }[]>`
     insert into workspaces (account_id, name)
-    values (${account!.id}, 'OPE-63 event lock workspace')
+    values (${account!.id}, 'event-ordering invariant event lock workspace')
     returning id
   `;
   await admin`
@@ -111,7 +111,7 @@ async function seedRunningSession(
       sandbox_backend, sandbox_group_id, status, temporal_workflow_id,
       parent_session_id
     ) values (
-      ${sessionId}, ${owner.accountId}, ${owner.workspaceId}, 'OPE-63 race',
+      ${sessionId}, ${owner.accountId}, ${owner.workspaceId}, 'event-ordering invariant race',
       'codex/gpt-5.6-sol', 'modal', ${sandboxGroupId}, 'running', ${workflowId},
       ${options.parentSessionId ?? null}
     )
@@ -125,7 +125,7 @@ async function seedRunningSession(
         execution_generation, active_attempt_id
       ) values (
         ${turnId}, ${owner.accountId}, ${owner.workspaceId}, ${sessionId}, ${triggerEventId},
-        ${workflowId}, 'running', 1, 'OPE-63 race', 'codex/gpt-5.6-sol',
+        ${workflowId}, 'running', 1, 'event-ordering invariant race', 'codex/gpt-5.6-sol',
         'xhigh', 'modal', '[]'::jsonb, '[]'::jsonb, ${JSON.stringify(metadata)}::jsonb,
         1, ${attemptId}
       )
@@ -163,7 +163,7 @@ async function seedIdleChild(
       sandbox_backend, sandbox_group_id, status, temporal_workflow_id,
       parent_session_id
     ) values (
-      ${sessionId}, ${workspace.accountId}, ${workspace.workspaceId}, 'OPE-63 idle child',
+      ${sessionId}, ${workspace.accountId}, ${workspace.workspaceId}, 'event-ordering invariant idle child',
       'codex/gpt-5.6-sol', 'modal', ${sessionId}, 'running', ${`session-${sessionId}`},
       ${parentSessionId}
     )
@@ -192,7 +192,7 @@ async function seedSandboxGroupMember(
       id, account_id, workspace_id, initial_message, model,
       sandbox_backend, sandbox_group_id, status, temporal_workflow_id
     ) values (
-      ${sessionId}, ${fixture.accountId}, ${fixture.workspaceId}, 'OPE-63 group join',
+      ${sessionId}, ${fixture.accountId}, ${fixture.workspaceId}, 'event-ordering invariant group join',
       'codex/gpt-5.6-sol', 'modal', ${fixture.sandboxGroupId}, 'idle',
       ${`session-${sessionId}`}
     )
@@ -207,7 +207,7 @@ async function seedGoal(fixture: RunningFixture): Promise<string> {
       success_criteria, version, max_auto_continuations
     ) values (
       ${fixture.accountId}, ${fixture.workspaceId}, ${fixture.sessionId}, 'active',
-      'Initial OPE-63 goal', 'Persist every event exactly once', 1, 20
+      'Initial event-ordering invariant goal', 'Persist every event exactly once', 1, 20
     )
     returning id
   `;
@@ -235,9 +235,9 @@ async function seedPendingInterruption(fixture: RunningFixture): Promise<void> {
       account_id, workspace_id, actor_type, actor_subject_id, action,
       target_session_id, target_turn_id, operation_key, canonical_request_hash
     ) values (
-      ${fixture.accountId}, ${fixture.workspaceId}, 'human', 'ope-63-race',
+      ${fixture.accountId}, ${fixture.workspaceId}, 'human', 'event-order-race',
       'session.queue.steer', ${fixture.sessionId}, ${fixture.turnId},
-      ${crypto.randomUUID()}, 'ope-63-quiescence-race'
+      ${crypto.randomUUID()}, 'event-order-quiescence-race'
     )
     returning id
   `;
@@ -291,10 +291,10 @@ async function pauseSession(fixture: RunningFixture): Promise<unknown> {
             accountId: fixture.accountId,
             workspaceId: fixture.workspaceId,
             sessionId: fixture.sessionId,
-            actor: { type: "human", subjectId: "ope63-capacity-pause-race" },
+            actor: { type: "human", subjectId: "eventorder-capacity-pause-race" },
             operationKey: crypto.randomUUID(),
             action: "pause",
-            reason: "OPE-63 capacity control barrier",
+            reason: "event-ordering invariant capacity control barrier",
           }),
       ),
   );
@@ -360,7 +360,7 @@ async function sendAgentMessage(
               executionGeneration: 1,
             },
             operationKey,
-            text: `OPE-63 pair-lock message ${operationKey}`,
+            text: `event-ordering invariant pair-lock message ${operationKey}`,
           }),
       ),
   );
@@ -394,7 +394,7 @@ async function sendPublishedAgentMessage(
     },
     {
       targetSessionId: target.sessionId,
-      text: `OPE-63 published pair-lock message ${operationKey}`,
+      text: `event-ordering invariant published pair-lock message ${operationKey}`,
       idempotencyKey: operationKey,
     },
   );
@@ -427,7 +427,7 @@ async function steerPublishedAgentSession(
     },
     {
       targetSessionId: target.sessionId,
-      instruction: `OPE-63 published steer ${operationKey}`,
+      instruction: `event-ordering invariant published steer ${operationKey}`,
       idempotencyKey: operationKey,
     },
   );
@@ -570,7 +570,7 @@ async function raceInOrder(
   const lockId = nextBarrierId++;
   await barrier`select pg_advisory_lock(${BARRIER_CLASS}, ${lockId})`;
   await admin`
-    insert into ope63_event_barriers (event_type, lock_class, lock_id)
+    insert into eventorder_event_barriers (event_type, lock_class, lock_id)
     values (${firstEventType}, ${BARRIER_CLASS}, ${lockId})
   `;
   let released = false;
@@ -579,7 +579,7 @@ async function raceInOrder(
   try {
     first = firstWriter();
     await waitForAdvisoryWaiter();
-    await admin`delete from ope63_event_barriers where event_type = ${firstEventType}`;
+    await admin`delete from eventorder_event_barriers where event_type = ${firstEventType}`;
     second = secondWriter();
     await waitForTwoAppLockWaiters();
     await barrier`select pg_advisory_unlock(${BARRIER_CLASS}, ${lockId})`;
@@ -589,7 +589,7 @@ async function raceInOrder(
       unknown,
     ];
   } finally {
-    await admin`delete from ope63_event_barriers where event_type = ${firstEventType}`.catch(
+    await admin`delete from eventorder_event_barriers where event_type = ${firstEventType}`.catch(
       () => undefined,
     );
     if (!released) {
@@ -609,7 +609,7 @@ async function raceLifecycleOutboxAgainstAgentCommand(input: {
   const lockId = nextBarrierId++;
   await barrier`select pg_advisory_lock(${BARRIER_CLASS}, ${lockId})`;
   await admin`
-    insert into ope63_event_barriers (event_type, lock_class, lock_id)
+    insert into eventorder_event_barriers (event_type, lock_class, lock_id)
     values (${barrierKey}, ${BARRIER_CLASS}, ${lockId})
   `;
   let released = false;
@@ -618,7 +618,7 @@ async function raceLifecycleOutboxAgainstAgentCommand(input: {
   try {
     lifecycle = input.lifecycleWriter();
     await waitForAdvisoryWaiter();
-    await admin`delete from ope63_event_barriers where event_type = ${barrierKey}`;
+    await admin`delete from eventorder_event_barriers where event_type = ${barrierKey}`;
     command = sendAgentMessage(input.parent, input.child, crypto.randomUUID());
     await waitForTwoAppLockWaiters();
     await barrier`select pg_advisory_unlock(${BARRIER_CLASS}, ${lockId})`;
@@ -628,7 +628,7 @@ async function raceLifecycleOutboxAgainstAgentCommand(input: {
       "the lifecycle outbox and parent-to-child command to commit",
     );
   } finally {
-    await admin`delete from ope63_event_barriers where event_type = ${barrierKey}`.catch(
+    await admin`delete from eventorder_event_barriers where event_type = ${barrierKey}`.catch(
       () => undefined,
     );
     if (!released) {
@@ -676,7 +676,7 @@ const genericWriters: GenericWriter[] = [
     write: async (fixture) =>
       await appendSessionEventToSandboxGroup(db, fixture.workspaceId, fixture.sandboxGroupId, {
         type: "sandbox.box.snapshot",
-        payload: { trigger: "OPE-63 race" },
+        payload: { trigger: "event-ordering invariant race" },
       }),
   },
   {
@@ -687,7 +687,7 @@ const genericWriters: GenericWriter[] = [
         db,
         fixture.workspaceId,
         fixture.sessionId,
-        [{ type: "agent.updated", payload: { source: "OPE-63 race" } }],
+        [{ type: "agent.updated", payload: { source: "event-ordering invariant race" } }],
         { metadata: { race: "generic-and-update" } },
       ),
   },
@@ -703,7 +703,7 @@ const genericWriters: GenericWriter[] = [
           events: [
             {
               type: "session.context.compaction.requested",
-              payload: { source: "OPE-63 race" },
+              payload: { source: "event-ordering invariant race" },
             },
           ],
           update: { metadata: { race: "locked-update" } },
@@ -721,12 +721,12 @@ const genericWriters: GenericWriter[] = [
         sessionId: fixture.sessionId,
         kind: "agent_message",
         classification: "info",
-        sourceId: "ope-63-race",
-        dedupeKey: `ope-63-${operationId}`,
-        summary: "OPE-63 internal update race",
+        sourceId: "event-order-race",
+        dedupeKey: `event-order-${operationId}`,
+        summary: "event-ordering invariant internal update race",
         payload: {
           type: "agent_message",
-          text: "OPE-63 internal update race",
+          text: "event-ordering invariant internal update race",
           operationId,
         },
       });
@@ -745,23 +745,23 @@ beforeAll(async () => {
   db = appClient.db;
 
   await admin`
-    create table ope63_event_barriers (
+    create table eventorder_event_barriers (
       event_type text primary key,
       lock_class integer not null,
       lock_id integer not null
     )
   `;
   await admin`
-    create table ope63_command_faults (
+    create table eventorder_command_faults (
       action text primary key,
       sql_state text not null,
       always_fault boolean not null default false
     )
   `;
-  await admin`create sequence ope63_fault_attempt_seq`;
-  await admin`create sequence ope63_rollback_candidate_seq`;
+  await admin`create sequence eventorder_fault_attempt_seq`;
+  await admin`create sequence eventorder_rollback_candidate_seq`;
   await admin.unsafe(`
-    create function ope63_session_event_test_trigger()
+    create function eventorder_session_event_test_trigger()
     returns trigger
     language plpgsql
     security definer
@@ -775,46 +775,46 @@ beforeAll(async () => {
     begin
       select lock_class, lock_id
       into configured
-      from public.ope63_event_barriers
+      from public.eventorder_event_barriers
       where event_type = new.type;
       if found then
         perform pg_catalog.pg_advisory_xact_lock(configured.lock_class, configured.lock_id);
       end if;
 
-      fault_state := new.payload ->> 'ope63FaultSqlState';
+      fault_state := new.payload ->> 'eventorderFaultSqlState';
       if fault_state in ('40P01', '40001') then
-        fault_attempt := nextval('public.ope63_fault_attempt_seq');
+        fault_attempt := nextval('public.eventorder_fault_attempt_seq');
         if fault_attempt = 1 then
           raise exception using
             errcode = fault_state,
-            message = 'OPE-63 injected persistence fault';
+            message = 'event-ordering invariant injected persistence fault';
         end if;
       end if;
 
-      always_fault_state := new.payload ->> 'ope63AlwaysFaultSqlState';
+      always_fault_state := new.payload ->> 'eventorderAlwaysFaultSqlState';
       if always_fault_state in ('40P01', '40001') then
         raise exception using
           errcode = always_fault_state,
-          message = 'OPE-63 injected persistence fault with private-token',
+          message = 'event-ordering invariant injected persistence fault with private-token',
           detail = 'Failed query: insert into session_events values ($1) private-token',
           table = 'session_events';
       end if;
 
-      if new.payload ->> 'ope63RollbackCandidate' = 'true' then
-        perform setval('public.ope63_rollback_candidate_seq', new.sequence, false);
+      if new.payload ->> 'eventorderRollbackCandidate' = 'true' then
+        perform setval('public.eventorder_rollback_candidate_seq', new.sequence, false);
         raise exception using
           errcode = '23514',
-          message = 'OPE-63 injected non-retryable rollback';
+          message = 'event-ordering invariant injected non-retryable rollback';
       end if;
       return new;
     end
     $function$;
 
-    create trigger ope63_session_event_test_trigger
+    create trigger eventorder_session_event_test_trigger
     before insert on session_events
-    for each row execute function ope63_session_event_test_trigger();
+    for each row execute function eventorder_session_event_test_trigger();
 
-    create function ope63_command_receipt_test_trigger()
+    create function eventorder_command_receipt_test_trigger()
     returns trigger
     language plpgsql
     security definer
@@ -827,7 +827,7 @@ beforeAll(async () => {
     begin
       select lock_class, lock_id
       into configured
-      from public.ope63_event_barriers
+      from public.eventorder_event_barriers
       where event_type = 'receipt:' || new.action;
       if found then
         perform pg_catalog.pg_advisory_xact_lock(configured.lock_class, configured.lock_id);
@@ -835,14 +835,14 @@ beforeAll(async () => {
 
       select sql_state, always_fault
       into configured_fault
-      from public.ope63_command_faults
+      from public.eventorder_command_faults
       where action = new.action;
       if found and configured_fault.sql_state in ('40P01', '40001') then
-        fault_attempt := nextval('public.ope63_fault_attempt_seq');
+        fault_attempt := nextval('public.eventorder_fault_attempt_seq');
         if configured_fault.always_fault or fault_attempt = 1 then
           raise exception using
             errcode = configured_fault.sql_state,
-            message = 'OPE-63 injected command persistence fault with private-token',
+            message = 'event-ordering invariant injected command persistence fault with private-token',
             detail = 'Failed query: insert into session_command_receipts values ($1) private-token',
             table = 'session_command_receipts';
         end if;
@@ -851,11 +851,11 @@ beforeAll(async () => {
     end
     $function$;
 
-    create trigger zz_ope63_command_receipt_test_trigger
+    create trigger zz_eventorder_command_receipt_test_trigger
     after insert on session_command_receipts
-    for each row execute function ope63_command_receipt_test_trigger();
+    for each row execute function eventorder_command_receipt_test_trigger();
 
-    create function ope63_system_update_outbox_test_trigger()
+    create function eventorder_system_update_outbox_test_trigger()
     returns trigger
     language plpgsql
     security definer
@@ -866,7 +866,7 @@ beforeAll(async () => {
     begin
       select lock_class, lock_id
       into configured
-      from public.ope63_event_barriers
+      from public.eventorder_event_barriers
       where event_type = 'outbox:' || new.dedupe_key;
       if found then
         perform pg_catalog.pg_advisory_xact_lock(configured.lock_class, configured.lock_id);
@@ -875,9 +875,9 @@ beforeAll(async () => {
     end
     $function$;
 
-    create trigger ope63_system_update_outbox_test_trigger
+    create trigger eventorder_system_update_outbox_test_trigger
     before insert on session_system_update_outbox
-    for each row execute function ope63_system_update_outbox_test_trigger();
+    for each row execute function eventorder_system_update_outbox_test_trigger();
   `);
 }, 180_000);
 
@@ -888,7 +888,7 @@ afterAll(async () => {
   await shared?.release();
 }, 60_000);
 
-describe("OPE-63 canonical session-event lock order", () => {
+describe("event-ordering invariant canonical session-event lock order", () => {
   test("serializes every generic writer with usage and streamed activity in both arrival orders", async () => {
     for (const generic of genericWriters) {
       for (const activityType of ["agent.model.usage", "agent.message.delta"] as const) {
@@ -943,14 +943,14 @@ describe("OPE-63 canonical session-event lock order", () => {
           await updateSessionTitle(db, {
             workspaceId: titleFixture.workspaceId,
             sessionId: titleFixture.sessionId,
-            title: "OPE-63 first-turn canary",
+            title: "event-ordering invariant first-turn canary",
             source: "agent",
           }),
-        ).toMatchObject({ updated: true, title: "OPE-63 first-turn canary" });
+        ).toMatchObject({ updated: true, title: "event-ordering invariant first-turn canary" });
         return await appendSessionEvents(db, titleFixture.workspaceId, titleFixture.sessionId, [
           {
             type: "session.title_set",
-            payload: { title: "OPE-63 first-turn canary", source: "agent" },
+            payload: { title: "event-ordering invariant first-turn canary", source: "agent" },
           },
         ]);
       };
@@ -967,13 +967,13 @@ describe("OPE-63 canonical session-event lock order", () => {
       const [title] = await admin<{ title: string | null }[]>`
           select title from sessions where id = ${titleFixture.sessionId}
         `;
-      expect(title?.title).toBe("OPE-63 first-turn canary");
+      expect(title?.title).toBe("event-ordering invariant first-turn canary");
 
       const goalFixture = await seedRunningSession();
       await seedGoal(goalFixture);
       const goalWriter = async () => {
         const goal = await updateSessionGoal(db, goalFixture.workspaceId, goalFixture.sessionId, {
-          text: "Updated OPE-63 goal",
+          text: "Updated event-ordering invariant goal",
         });
         return await appendSessionEvents(db, goalFixture.workspaceId, goalFixture.sessionId, [
           {
@@ -1120,7 +1120,7 @@ describe("OPE-63 canonical session-event lock order", () => {
       const goalWriter = async () => {
         goalMutations += 1;
         const goal = await updateSessionGoal(db, root.workspaceId, root.sessionId, {
-          text: "OPE-63 live root fixture",
+          text: "event-ordering invariant live root fixture",
         });
         return await appendAndPublishEvents(db, bus, root.workspaceId, root.sessionId, [
           {
@@ -1213,12 +1213,12 @@ describe("OPE-63 canonical session-event lock order", () => {
       appendSessionEvents(db, fixture.workspaceId, fixture.sessionId, [
         {
           type: "goal.updated",
-          payload: { ope63RollbackCandidate: true },
+          payload: { eventorderRollbackCandidate: true },
         },
       ]),
     ).rejects.toBeDefined();
     const [attempted] = await admin<{ last_value: string }[]>`
-      select last_value::text from ope63_rollback_candidate_seq
+      select last_value::text from eventorder_rollback_candidate_seq
     `;
     expect(Number(attempted?.last_value)).toBe(1);
     expect(await assertCommittedSequence(fixture, 0)).toEqual([]);
@@ -1235,7 +1235,7 @@ describe("OPE-63 canonical session-event lock order", () => {
     const lockId = nextBarrierId++;
     await barrier`select pg_advisory_lock(${BARRIER_CLASS}, ${lockId})`;
     await admin`
-      insert into ope63_event_barriers (event_type, lock_class, lock_id)
+      insert into eventorder_event_barriers (event_type, lock_class, lock_id)
       values ('sandbox.box.snapshot', ${BARRIER_CLASS}, ${lockId})
     `;
     let released = false;
@@ -1252,12 +1252,12 @@ describe("OPE-63 canonical session-event lock order", () => {
         "a new sandbox-group member to commit while fanout is blocked",
         2_000,
       );
-      await admin`delete from ope63_event_barriers where event_type = 'sandbox.box.snapshot'`;
+      await admin`delete from eventorder_event_barriers where event_type = 'sandbox.box.snapshot'`;
       await barrier`select pg_advisory_unlock(${BARRIER_CLASS}, ${lockId})`;
       released = true;
       await within(fanout, "the membership-snapshot fanout to commit");
     } finally {
-      await admin`delete from ope63_event_barriers where event_type = 'sandbox.box.snapshot'`.catch(
+      await admin`delete from eventorder_event_barriers where event_type = 'sandbox.box.snapshot'`.catch(
         () => undefined,
       );
       if (!released) {
@@ -1300,7 +1300,7 @@ describe("OPE-63 canonical session-event lock order", () => {
     const lockId = nextBarrierId++;
     await barrier`select pg_advisory_lock(${BARRIER_CLASS}, ${lockId})`;
     await admin`
-      insert into ope63_event_barriers (event_type, lock_class, lock_id)
+      insert into eventorder_event_barriers (event_type, lock_class, lock_id)
       values ('session.title_set', ${BARRIER_CLASS}, ${lockId})
     `;
     let released = false;
@@ -1320,7 +1320,7 @@ describe("OPE-63 canonical session-event lock order", () => {
         { sequence: 1, type: "goal.updated" },
       ]);
     } finally {
-      await admin`delete from ope63_event_barriers where event_type = 'session.title_set'`;
+      await admin`delete from eventorder_event_barriers where event_type = 'session.title_set'`;
       if (!released) {
         await barrier`select pg_advisory_unlock(${BARRIER_CLASS}, ${lockId})`;
         released = true;
@@ -1338,7 +1338,7 @@ describe("OPE-63 canonical session-event lock order", () => {
     const lockId = nextBarrierId++;
     await barrier`select pg_advisory_lock(${BARRIER_CLASS}, ${lockId})`;
     await admin`
-      insert into ope63_event_barriers (event_type, lock_class, lock_id)
+      insert into eventorder_event_barriers (event_type, lock_class, lock_id)
       values ('receipt:agent.message', ${BARRIER_CLASS}, ${lockId})
     `;
     let released = false;
@@ -1347,14 +1347,14 @@ describe("OPE-63 canonical session-event lock order", () => {
     try {
       first = sendAgentMessage(actor, firstTarget, crypto.randomUUID());
       await waitForAdvisoryWaiter();
-      await admin`delete from ope63_event_barriers where event_type = 'receipt:agent.message'`;
+      await admin`delete from eventorder_event_barriers where event_type = 'receipt:agent.message'`;
       second = sendAgentMessage(actor, secondTarget, crypto.randomUUID());
       await waitForTwoAppLockWaiters();
       await barrier`select pg_advisory_unlock(${BARRIER_CLASS}, ${lockId})`;
       released = true;
       await within(Promise.all([first, second]), "both pair-locked Agent messages to commit");
     } finally {
-      await admin`delete from ope63_event_barriers where event_type = 'receipt:agent.message'`.catch(
+      await admin`delete from eventorder_event_barriers where event_type = 'receipt:agent.message'`.catch(
         () => undefined,
       );
       if (!released) {
@@ -1387,9 +1387,9 @@ describe("OPE-63 canonical session-event lock order", () => {
       let wakes = 0;
       inferenceCalls += 1;
       toolEffects += 1;
-      await admin`select setval('ope63_fault_attempt_seq', 1, false)`;
+      await admin`select setval('eventorder_fault_attempt_seq', 1, false)`;
       await admin`
-        insert into ope63_command_faults (action, sql_state)
+        insert into eventorder_command_faults (action, sql_state)
         values ('agent.message', ${sqlState})
       `;
       let delivered: unknown;
@@ -1398,7 +1398,7 @@ describe("OPE-63 canonical session-event lock order", () => {
           wakes += 1;
         });
       } finally {
-        await admin`delete from ope63_command_faults where action = 'agent.message'`;
+        await admin`delete from eventorder_command_faults where action = 'agent.message'`;
       }
 
       expect(delivered).toMatchObject({ replay: false });
@@ -1408,7 +1408,7 @@ describe("OPE-63 canonical session-event lock order", () => {
       expect(bus.published).toHaveLength(1);
       expect(bus.published[0]).toMatchObject([{ type: "system.update.pending", sequence: 1 }]);
       const [attempts] = await admin<{ last_value: string }[]>`
-        select last_value::text from ope63_fault_attempt_seq
+        select last_value::text from eventorder_fault_attempt_seq
       `;
       expect(Number(attempts?.last_value)).toBe(2);
       const [persisted] = await admin<Array<{ receipts: number; updates: number; events: number }>>`
@@ -1473,7 +1473,7 @@ describe("OPE-63 canonical session-event lock order", () => {
                 accountId: workspace.accountId,
                 workspaceId: workspace.workspaceId,
                 sessionId: actor.sessionId,
-                actor: { type: "human", subjectId: "ope63-domain-conflict" },
+                actor: { type: "human", subjectId: "eventorder-domain-conflict" },
                 operationKey: crypto.randomUUID(),
                 action: "pause",
               }),
@@ -1645,9 +1645,9 @@ describe("OPE-63 canonical session-event lock order", () => {
     const target = await seedIdleChild(workspace, ids.childSessionId, ids.parentSessionId);
     const bus = new MemoryEventBus();
     let wakes = 0;
-    await admin`select setval('ope63_fault_attempt_seq', 1, false)`;
+    await admin`select setval('eventorder_fault_attempt_seq', 1, false)`;
     await admin`
-      insert into ope63_command_faults (action, sql_state, always_fault)
+      insert into eventorder_command_faults (action, sql_state, always_fault)
       values ('agent.message', '40P01', true)
     `;
     const error = await sendPublishedAgentMessage(actor, target, crypto.randomUUID(), bus, () => {
@@ -1655,7 +1655,7 @@ describe("OPE-63 canonical session-event lock order", () => {
     })
       .catch((caught) => caught)
       .finally(async () => {
-        await admin`delete from ope63_command_faults where action = 'agent.message'`;
+        await admin`delete from eventorder_command_faults where action = 'agent.message'`;
       });
 
     expect(error).toBeInstanceOf(SessionEventPersistenceError);
@@ -1726,7 +1726,7 @@ describe("OPE-63 canonical session-event lock order", () => {
                 sessionStatus: "failed",
                 activeTurnId: null,
                 events: [
-                  { type: "turn.failed", payload: { code: "ope63_test_failure" } },
+                  { type: "turn.failed", payload: { code: "eventorder_test_failure" } },
                   { type: "session.status.changed", payload: { status: "failed" } },
                 ],
               });
@@ -1747,7 +1747,7 @@ describe("OPE-63 canonical session-event lock order", () => {
                 kind: "child_terminal_result",
                 classification: "success",
                 sourceId: child.sessionId,
-                summary: "OPE-63 fallback outbox race",
+                summary: "event-ordering invariant fallback outbox race",
                 payload: {
                   type: "child_terminal_result",
                   childSessionId: child.sessionId,
@@ -1823,7 +1823,7 @@ describe("OPE-63 canonical session-event lock order", () => {
       const workspace = await freshWorkspace();
       const parent = await seedRunningSession(workspace);
       const child = await seedRunningSession(workspace, { parentSessionId: parent.sessionId });
-      await admin`select setval('ope63_fault_attempt_seq', 1, false)`;
+      await admin`select setval('eventorder_fault_attempt_seq', 1, false)`;
       let providerCalls = 0;
       let toolEffects = 0;
       let externalEffects = 0;
@@ -1843,9 +1843,9 @@ describe("OPE-63 canonical session-event lock order", () => {
         events: [
           {
             type: "agent.model.usage",
-            payload: { sourceKey, ope63FaultSqlState: sqlState, totalTokens: 42 },
+            payload: { sourceKey, eventorderFaultSqlState: sqlState, totalTokens: 42 },
           },
-          { type: "turn.failed", payload: { code: "ope63_test_failure" } },
+          { type: "turn.failed", payload: { code: "eventorder_test_failure" } },
         ],
       });
       expect(settled).toMatchObject({ action: "settled" });
@@ -1853,7 +1853,7 @@ describe("OPE-63 canonical session-event lock order", () => {
       expect(toolEffects).toBe(1);
       expect(externalEffects).toBe(1);
       const [attempts] = await admin<{ last_value: string }[]>`
-        select last_value::text from ope63_fault_attempt_seq
+        select last_value::text from eventorder_fault_attempt_seq
       `;
       expect(Number(attempts?.last_value)).toBe(2);
       const rows = await assertCommittedSequence(child, 2);
@@ -1885,7 +1885,7 @@ describe("OPE-63 canonical session-event lock order", () => {
       events: [
         {
           type: "turn.failed",
-          payload: { ope63AlwaysFaultSqlState: "40P01", private: "private-token" },
+          payload: { eventorderAlwaysFaultSqlState: "40P01", private: "private-token" },
         },
       ],
     }).catch((caught) => caught);
@@ -1913,7 +1913,7 @@ describe("OPE-63 canonical session-event lock order", () => {
   test("retries only idempotent persistence for real 40P01 and 40001 faults", async () => {
     for (const sqlState of ["40P01", "40001"] as const) {
       const fixture = await seedRunningSession();
-      await admin`select setval('ope63_fault_attempt_seq', 1, false)`;
+      await admin`select setval('eventorder_fault_attempt_seq', 1, false)`;
       let providerCalls = 0;
       let toolEffects = 0;
       let externalEffects = 0;
@@ -1932,7 +1932,7 @@ describe("OPE-63 canonical session-event lock order", () => {
         [
           {
             type: "agent.model.usage",
-            payload: { sourceKey, ope63FaultSqlState: sqlState, totalTokens: 42 },
+            payload: { sourceKey, eventorderFaultSqlState: sqlState, totalTokens: 42 },
           },
         ],
       );
@@ -1941,7 +1941,7 @@ describe("OPE-63 canonical session-event lock order", () => {
       expect(toolEffects).toBe(1);
       expect(externalEffects).toBe(1);
       const [attempts] = await admin<{ last_value: string }[]>`
-          select last_value::text from ope63_fault_attempt_seq
+          select last_value::text from eventorder_fault_attempt_seq
         `;
       expect(Number(attempts?.last_value)).toBe(2);
       const rows = await assertCommittedSequence(fixture, 1);
@@ -1956,14 +1956,14 @@ describe("OPE-63 canonical session-event lock order", () => {
     for (const sqlState of ["40P01", "40001"] as const) {
       const fixture = await seedRunningSession();
       await seedGoal(fixture);
-      await admin`select setval('ope63_fault_attempt_seq', 1, false)`;
+      await admin`select setval('eventorder_fault_attempt_seq', 1, false)`;
       const bus = new MemoryEventBus();
       let inferenceCalls = 0;
       let goalMutations = 0;
       inferenceCalls += 1;
       goalMutations += 1;
       const goal = await updateSessionGoal(db, fixture.workspaceId, fixture.sessionId, {
-        text: `OPE-63 retried generic append ${sqlState}`,
+        text: `event-ordering invariant retried generic append ${sqlState}`,
       });
 
       await appendAndPublishEvents(db, bus, fixture.workspaceId, fixture.sessionId, [
@@ -1972,7 +1972,7 @@ describe("OPE-63 canonical session-event lock order", () => {
           payload: {
             goalId: goal.id,
             version: goal.version,
-            ope63FaultSqlState: sqlState,
+            eventorderFaultSqlState: sqlState,
           },
         },
       ]);
@@ -1982,7 +1982,7 @@ describe("OPE-63 canonical session-event lock order", () => {
       expect(bus.published).toHaveLength(1);
       expect(bus.published[0]).toMatchObject([{ sequence: 1, type: "goal.updated" }]);
       const [attempts] = await admin<{ last_value: string }[]>`
-        select last_value::text from ope63_fault_attempt_seq
+        select last_value::text from eventorder_fault_attempt_seq
       `;
       expect(Number(attempts?.last_value)).toBe(2);
       const [persistedGoal] = await admin<{ version: number; text: string }[]>`
@@ -1990,7 +1990,7 @@ describe("OPE-63 canonical session-event lock order", () => {
       `;
       expect(persistedGoal).toEqual({
         version: 2,
-        text: `OPE-63 retried generic append ${sqlState}`,
+        text: `event-ordering invariant retried generic append ${sqlState}`,
       });
       await assertCommittedSequence(fixture, 1);
     }
@@ -2001,7 +2001,7 @@ describe("OPE-63 canonical session-event lock order", () => {
     const error = await appendSessionEvents(db, fixture.workspaceId, fixture.sessionId, [
       {
         type: "goal.updated",
-        payload: { ope63AlwaysFaultSqlState: "40001", private: "private-token" },
+        payload: { eventorderAlwaysFaultSqlState: "40001", private: "private-token" },
       },
     ]).catch((caught) => caught);
 

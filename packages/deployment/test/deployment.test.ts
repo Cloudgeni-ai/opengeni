@@ -782,7 +782,7 @@ describe("deployment contract", () => {
     );
 
     expect(artifacts.missingEnvVars).toEqual([]);
-    // The sandbox-surfacing HMAC secret is NEVER required (graceful-degrade /
+    // The sandbox workspace HMAC secret is NEVER required (graceful-degrade /
     // delegation-secret fallback) — it must not enter missingEnvVars.
     expect(artifacts.missingEnvVars).not.toContain("OPENGENI_STREAM_TOKEN_SECRET");
     expect(artifacts.runtimeEnv).not.toContain("OPENGENI_DATABASE_URL=");
@@ -792,7 +792,7 @@ describe("deployment contract", () => {
       "OPENGENI_PUBLIC_BASE_URL=https://preview-123.app.opengeni.ai",
     );
     expect(artifacts.runtimeEnv).toContain("OPENGENI_SANDBOX_BACKEND=modal");
-    // Recognized sandbox-surfacing passthroughs reach the runtime secret when set.
+    // Recognized sandbox workspace passthroughs reach the runtime secret when set.
     expect(artifacts.runtimeEnv).toContain(
       "OPENGENI_STREAM_TOKEN_SECRET=ogs_preview_stream_secret",
     );

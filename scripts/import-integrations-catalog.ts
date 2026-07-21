@@ -18,6 +18,11 @@ const SOURCE = "integrations.sh";
 const MIT_ATTRIBUTION =
   "Seed catalog metadata imported from integrations.sh / UsefulSoftwareCo integrationsdotsh (MIT License, Copyright (c) 2026 Rhys Sullivan).";
 const MAX_LOGO_BYTES = 512 * 1024;
+// Catalog endpoints are committed and probed without an operator present. Query
+// strings, fragments, and opaque path segments are rejected because URL-borne
+// credentials cannot be proven public.
+// Credential setup navigation in credentialFacts is metadata, never probed or
+// sent to an MCP server, so ordinary public dashboard query/fragment links remain.
 
 export const deadDemoDomains = new Set([
   "auto-calculator.onrender.com",
@@ -85,7 +90,7 @@ export type CatalogIntegrationRow = {
 export type NormalizedCatalogSnapshot = {
   generatedAt: string | null;
   rows: CatalogIntegrationRow[];
-  skipped: Array<{ domain: string | null; mcpUrl: string | null; reason: string }>;
+  skipped: Array<{ domain: string | null; mcpUrl: null; reason: string }>;
   quarantined: Array<{ row: CatalogIntegrationRow; reason: string }>;
   cleaning: {
     inputRows: number;
@@ -163,30 +168,34 @@ export function normalizeCatalogSnapshot(snapshot: unknown): NormalizedCatalogSn
     const domain = normalizeDomain(candidate.domain);
     const mcpUrl = stringValue(candidate.mcpUrl);
     if (!domain) {
-      skipped.push({ domain: null, mcpUrl: mcpUrl ?? null, reason: "missing_domain" });
+      skipped.push({ domain: null, mcpUrl: null, reason: "missing_domain" });
       continue;
     }
     if (deadDemoDomains.has(domain)) {
-      skipped.push({ domain, mcpUrl: mcpUrl ?? null, reason: "dead_demo_domain" });
+      skipped.push({ domain, mcpUrl: null, reason: "dead_demo_domain" });
       continue;
     }
     if (!mcpUrl) {
       skipped.push({ domain, mcpUrl: null, reason: "missing_url" });
       continue;
     }
-    const importable = importableMcpUrl(mcpUrl);
-    if (!importable.ok) {
-      skipped.push({ domain, mcpUrl: mcpUrl ?? null, reason: importable.reason });
+    const rejectionReason = catalogMcpUrlRejection(mcpUrl);
+    if (rejectionReason) {
+      skipped.push({
+        domain,
+        mcpUrl: null,
+        reason: rejectionReason,
+      });
       continue;
     }
     const transport = normalizeTransport(candidate.transport ?? candidate.transports);
     if (!transport) {
-      skipped.push({ domain, mcpUrl, reason: "transport_not_streamable_http" });
+      skipped.push({ domain, mcpUrl: null, reason: "transport_not_streamable_http" });
       continue;
     }
     const key = `${domain}\n${mcpUrl}`;
     if (seen.has(key)) {
-      skipped.push({ domain, mcpUrl, reason: "duplicate_surface" });
+      skipped.push({ domain, mcpUrl: null, reason: "duplicate_surface" });
       continue;
     }
     seen.add(key);
@@ -221,7 +230,7 @@ export function normalizeCatalogSnapshot(snapshot: unknown): NormalizedCatalogSn
     const winner = bestCatalogRow(existing, row);
     const loser = winner === existing ? row : existing;
     candidatesByDomainName.set(domainNameKey, winner);
-    skipped.push({ domain: loser.domain, mcpUrl: loser.mcpUrl, reason: "duplicate_domain_name" });
+    skipped.push({ domain: loser.domain, mcpUrl: null, reason: "duplicate_domain_name" });
   }
 
   const rows = [...candidatesByDomainName.values()].sort(
@@ -588,23 +597,33 @@ function deriveAuthKind(
   return "unknown";
 }
 
-function importableMcpUrl(
-  value: string | null | undefined,
-): { ok: true } | { ok: false; reason: string } {
+export function catalogMcpUrlRejection(value: string | null | undefined): string | null {
   if (!value) {
-    return { ok: false, reason: "missing_url" };
+    return "missing_url";
   }
   if (/\{[^}]+\}|<[^>]+>|YOUR[-_A-Z0-9]*|REDACTED/i.test(value)) {
-    return { ok: false, reason: "templated_url" };
+    return "templated_url";
   }
   try {
     const parsed = new URL(value);
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-      return { ok: false, reason: "non_http_url" };
+      return "non_http_url";
     }
-    return { ok: true };
+    if (parsed.username || parsed.password) {
+      return "credential_in_url";
+    }
+    if (parsed.hash) {
+      return "url_fragment";
+    }
+    if (parsed.search) {
+      return "credential_query_parameter";
+    }
+    if (parsed.pathname.split("/").some((segment) => segment.length >= 24)) {
+      return "opaque_path_segment";
+    }
+    return null;
   } catch {
-    return { ok: false, reason: "invalid_url" };
+    return "invalid_url";
   }
 }
 

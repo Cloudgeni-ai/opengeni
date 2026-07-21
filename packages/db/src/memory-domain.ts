@@ -54,7 +54,7 @@ export const MEMORY_KIND_SECTION_TITLES: Record<KnowledgeMemoryKind, string> = {
 };
 
 // ---------------------------------------------------------------------------
-// Canonical prompt surface (dossier §10b) — the prompts ARE the product.
+// Canonical prompt surface — the prompts ARE the product.
 // ---------------------------------------------------------------------------
 
 export const WORKSPACE_MEMORY_BLOCK_HEADER_POPULATED = `## Workspace memory

@@ -15,6 +15,8 @@ import {
   CAPABILITY_DESCRIPTORS,
   isClearedRunStateBlob,
   prefixedMcpToolName as sharedPrefixedMcpToolName,
+  sessionEventMediaPreview,
+  sessionEventMediaPreviewFromDataUrl,
   signDelegatedAccessToken,
   type GitCredentialProvider,
   type McpServerConnectionRef,
@@ -22,6 +24,7 @@ import {
   type ReasoningEffort,
   type ResourceRef,
   type SessionEventType,
+  type SessionEventMediaPreview,
   type ToolAuthNeededPayload,
   type ToolRef,
 } from "@opengeni/contracts";
@@ -937,12 +940,15 @@ export function compactionProviderFailureDiagnostics(error: unknown): Record<str
   let code: string | null = null;
   let type: string | null = null;
   let requestId: string | null = null;
+  let eventType: string | null = null;
   const seen = new Set<object>();
   for (let depth = 0; depth < 6 && current && typeof current === "object"; depth += 1) {
     if (seen.has(current)) break;
     seen.add(current);
     const record = current as Record<string, unknown>;
-    if (!errorName && current instanceof Error) errorName = current.name;
+    if (!errorName && current instanceof Error) {
+      errorName = boundCompactionDiagnosticField(current.name);
+    }
     if (
       httpStatus === null &&
       typeof record.status === "number" &&
@@ -951,28 +957,63 @@ export function compactionProviderFailureDiagnostics(error: unknown): Record<str
       httpStatus = record.status;
     }
     if (responseStatus === null && typeof record.status === "string") {
-      responseStatus = record.status;
+      responseStatus = boundCompactionDiagnosticField(record.status);
     }
-    if (responseId === null && typeof record.id === "string") responseId = record.id;
-    if (code === null && typeof record.code === "string") code = record.code;
-    if (type === null && typeof record.type === "string") type = record.type;
+    const directResponseStatus = record.response_status ?? record.responseStatus;
+    if (responseStatus === null && typeof directResponseStatus === "string") {
+      responseStatus = boundCompactionDiagnosticField(directResponseStatus);
+    }
+    const directResponseId = record.response_id ?? record.responseId ?? record.id;
+    if (responseId === null && typeof directResponseId === "string") {
+      responseId = boundCompactionDiagnosticField(directResponseId);
+    }
+    if (code === null && typeof record.code === "string") {
+      code = boundCompactionDiagnosticField(record.code);
+    }
+    if (type === null && typeof record.type === "string") {
+      type = boundCompactionDiagnosticField(record.type);
+    }
+    const directEventType = record.event_type ?? record.eventType;
+    if (eventType === null && typeof directEventType === "string") {
+      eventType = boundCompactionDiagnosticField(directEventType);
+    }
     if (requestId === null) {
       const directRequestId = record.request_id ?? record.requestId ?? record._request_id;
-      if (typeof directRequestId === "string") requestId = directRequestId;
+      if (typeof directRequestId === "string") {
+        requestId = boundCompactionDiagnosticField(directRequestId);
+      }
       const headers = record.headers;
       if (!requestId && headers && typeof headers === "object") {
         const get = (headers as { get?: unknown }).get;
         if (typeof get === "function") {
           const headerId = get.call(headers, "x-request-id");
-          if (typeof headerId === "string") requestId = headerId;
+          if (typeof headerId === "string") {
+            requestId = boundCompactionDiagnosticField(headerId);
+          }
         }
       }
     }
     const nestedError = record.error;
     if (nestedError && typeof nestedError === "object" && !seen.has(nestedError)) {
       const nested = nestedError as Record<string, unknown>;
-      if (code === null && typeof nested.code === "string") code = nested.code;
-      if (type === null && typeof nested.type === "string") type = nested.type;
+      if (code === null && typeof nested.code === "string") {
+        code = boundCompactionDiagnosticField(nested.code);
+      }
+      if (type === null && typeof nested.type === "string") {
+        type = boundCompactionDiagnosticField(nested.type);
+      }
+      const nestedResponseStatus = nested.response_status ?? nested.responseStatus;
+      if (responseStatus === null && typeof nestedResponseStatus === "string") {
+        responseStatus = boundCompactionDiagnosticField(nestedResponseStatus);
+      }
+      const nestedResponseId = nested.response_id ?? nested.responseId ?? nested.id;
+      if (responseId === null && typeof nestedResponseId === "string") {
+        responseId = boundCompactionDiagnosticField(nestedResponseId);
+      }
+      const nestedEventType = nested.event_type ?? nested.eventType;
+      if (eventType === null && typeof nestedEventType === "string") {
+        eventType = boundCompactionDiagnosticField(nestedEventType);
+      }
     }
     current = record.cause;
   }
@@ -984,7 +1025,24 @@ export function compactionProviderFailureDiagnostics(error: unknown): Record<str
     code,
     type,
     requestId,
+    ...(eventType ? { eventType } : {}),
   };
+}
+
+const COMPACTION_DIAGNOSTIC_FIELD_MAX_BYTES = 256;
+const COMPACTION_DIAGNOSTIC_TRUNCATION_MARKER = "…[truncated]";
+
+function boundCompactionDiagnosticField(value: string): string {
+  const bytes = Buffer.from(value, "utf8");
+  if (bytes.length <= COMPACTION_DIAGNOSTIC_FIELD_MAX_BYTES) return value;
+  const markerBytes = Buffer.byteLength(COMPACTION_DIAGNOSTIC_TRUNCATION_MARKER, "utf8");
+  let end = COMPACTION_DIAGNOSTIC_FIELD_MAX_BYTES - markerBytes;
+  while (end > 0 && isUtf8ContinuationByte(bytes[end]!)) end -= 1;
+  return `${bytes.subarray(0, end).toString("utf8")}${COMPACTION_DIAGNOSTIC_TRUNCATION_MARKER}`;
+}
+
+function isUtf8ContinuationByte(value: number): boolean {
+  return (value & 0xc0) === 0x80;
 }
 
 /** Bounded, content-free diagnostics for a semantically empty checkpoint. */
@@ -4279,86 +4337,87 @@ function ensureManifest(
   });
 }
 
-/** Coerce the various binary shapes a tool-output image `data` field can take into
- *  a Uint8Array. Handles a live `Uint8Array`, a plain number[] , and the
- *  object-of-numbers (`{"0":137,"1":80,…}`) that a `Uint8Array` degrades into after
- *  a JSON round-trip — the exact 10x-bloat shape this normalizer exists to kill. */
-function toImageBytes(data: unknown): Uint8Array | null {
-  if (data instanceof Uint8Array) {
-    return data;
-  }
-  if (Array.isArray(data)) {
-    return data.every((n) => typeof n === "number") ? Uint8Array.from(data as number[]) : null;
-  }
-  if (data && typeof data === "object") {
-    const values = Object.values(data as Record<string, unknown>);
-    if (values.length > 0 && values.every((n) => typeof n === "number")) {
-      return Uint8Array.from(values as number[]);
-    }
-  }
-  return null;
+function base64DecodedByteLength(value: string): number {
+  const padding = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0;
+  return Math.max(0, Math.floor((value.length * 3) / 4) - padding);
 }
 
-/** Compact a structured image tool output — the SDK's `{type:'image', image:{data,mediaType}}`
- *  shape (produced by the codex-path `computer_screenshot` function tool) OR the already-
- *  normalized protocol `{type:'input_image', image:'data:…'}` item — into a `data:<mt>;base64,…`
- *  string. Returns null when `value` is not an image output. */
-function structuredImageToDataUrl(value: unknown): string | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return null;
+/** Determine image byte length without allocating another binary/base64 copy. */
+function imageDataByteLength(data: unknown): number | null {
+  if (ArrayBuffer.isView(data)) return data.byteLength;
+  if (data instanceof ArrayBuffer) return data.byteLength;
+  if (Array.isArray(data)) {
+    return data.every((value) => typeof value === "number") ? data.length : null;
   }
-  const v = value as { type?: unknown; image?: unknown };
-  if (v.type === "input_image") {
-    // Protocol item: `image` is already a `data:…` (or plain URL) string.
-    return typeof v.image === "string" && v.image.length > 0 ? v.image : null;
+  if (!data || typeof data !== "object") return null;
+  const record = data as Record<string, unknown>;
+  if (record.type === "Buffer" && Array.isArray(record.data)) {
+    return record.data.every((value) => typeof value === "number") ? record.data.length : null;
   }
-  if (v.type !== "image" || !v.image || typeof v.image !== "object") {
-    return null;
+  const keys = Object.keys(record);
+  return keys.length > 0 &&
+    keys.every((key) => /^\d+$/.test(key) && typeof record[key] === "number")
+    ? keys.length
+    : null;
+}
+
+/**
+ * Convert one image-shaped tool result into a content-free audit fact. This is
+ * intentionally different from model history: the model keeps its structured
+ * image item, while `session_events` never becomes an implicit image blob store.
+ */
+function toolOutputMediaPreview(value: unknown): SessionEventMediaPreview | null {
+  if (typeof value === "string") {
+    return sessionEventMediaPreviewFromDataUrl(value);
   }
-  const image = v.image as {
-    data?: unknown;
-    mediaType?: unknown;
-    url?: unknown;
-  };
-  if (typeof image.url === "string" && image.url.length > 0) {
-    return image.url;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  if (record.type === "input_image") {
+    const source = record.image ?? record.image_url ?? record.imageUrl;
+    const url =
+      typeof source === "string"
+        ? source
+        : source && typeof source === "object"
+          ? (source as Record<string, unknown>).url
+          : null;
+    if (typeof url !== "string" || url.length === 0) return null;
+    return sessionEventMediaPreviewFromDataUrl(url) ?? sessionEventMediaPreview("image/*", null);
   }
+  if (record.type !== "image" || !record.image || typeof record.image !== "object") return null;
+  const image = record.image as Record<string, unknown>;
   const mediaType =
     typeof image.mediaType === "string" && image.mediaType.length > 0
       ? image.mediaType
       : "image/png";
-  if (typeof image.data === "string") {
-    return image.data.startsWith("data:") ? image.data : `data:${mediaType};base64,${image.data}`;
+  if (typeof image.url === "string" && image.url.length > 0) {
+    return (
+      sessionEventMediaPreviewFromDataUrl(image.url) ?? sessionEventMediaPreview(mediaType, null)
+    );
   }
-  const bytes = toImageBytes(image.data);
-  return bytes ? `data:${mediaType};base64,${Buffer.from(bytes).toString("base64")}` : null;
+  if (typeof image.data === "string") {
+    return (
+      sessionEventMediaPreviewFromDataUrl(image.data) ??
+      sessionEventMediaPreview(mediaType, base64DecodedByteLength(image.data))
+    );
+  }
+  const byteLength = imageDataByteLength(image.data);
+  return byteLength === null ? null : sessionEventMediaPreview(mediaType, byteLength);
 }
 
 /**
- * Compact a tool-call output for the `agent.toolCall.output` SESSION EVENT so it
- * never carries a raw binary payload. The codex-path `computer_screenshot` function
- * tool returns a structured `{type:'image', image:{data: Uint8Array, mediaType}}`;
- * captured verbatim its `Uint8Array` JSON-serializes as an object-of-numbers (~12.7MB
- * per screenshot in session_events — ~10x the base64 form). This mirrors the desktop
- * screenshot to the SAME compact `data:<mediaType>;base64,…` STRING the HOSTED
- * `computer_call` event already carries (agents-core sets its output to that data-URL),
- * so both computer-use transports emit one representation. The full data-URL is kept
- * (not truncated) because the web timeline RENDERS the screenshot from this event
- * payload — packages/react/src/timeline/tool-renderers.tsx ComputerCallRenderer
- * (`out.startsWith("data:image")` → <ScreenshotFigure src={out}/>) and ViewImageRenderer.
- * Non-image outputs (text strings, MCP `{isError,content}` objects, hosted computer_call
- * data-URL strings) pass through unchanged.
+ * Normalize a tool-call output for the lossy `agent.toolCall.output` audit event.
+ * Inline image bytes/data URLs become a compact `media_preview` with exact byte
+ * length where knowable and `fullOutputAvailable:false`. The model-facing output
+ * is not changed here, and mixed arrays retain their non-image text/error facts.
  */
 export function normalizeToolOutputForEvent(output: unknown): unknown {
-  const single = structuredImageToDataUrl(output);
+  const single = toolOutputMediaPreview(output);
   if (single !== null) {
     return single;
   }
   if (Array.isArray(output)) {
-    const normalized = output.map((el) => structuredImageToDataUrl(el) ?? el);
-    // A lone image content item unwraps to the bare data-URL string the timeline
-    // image renderers expect; a mixed/multi array keeps its (now-compact) shape.
-    if (normalized.length === 1 && typeof normalized[0] === "string") {
+    const normalized = output.map((el) => toolOutputMediaPreview(el) ?? el);
+    if (normalized.length === 1 && normalized[0]?.type === "media_preview") {
       return normalized[0];
     }
     return normalized;
@@ -4415,8 +4474,8 @@ export function normalizeSdkEvent(event: RunStreamEvent): NormalizedRuntimeEvent
       type: "agent.toolCall.output",
       payload: {
         id: item.rawItem?.callId ?? item.id ?? null,
-        // Compact any structured/binary image output to a data-URL string so a
-        // screenshot never bloats session_events ~10x as an object-of-numbers.
+        // Inline media becomes a content-free audit fact. Model history keeps
+        // the provider's real structured image output on its separate path.
         output: normalizeToolOutputForEvent(item.output),
       },
     });

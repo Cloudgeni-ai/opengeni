@@ -1,5 +1,5 @@
 /* ----------------------------------------------------------------------------
-   Phase 5 sandbox-surfacing hook tests: capability negotiation drives gated
+   Phase 5 sandbox workspace hook tests: capability negotiation drives gated
    rendering; 409 (consent) and 429 (viewer cap) surface as typed signals; the
    terminal/files/git hooks project Channel-A data; stream.url.rotated folds in.
    -------------------------------------------------------------------------- */

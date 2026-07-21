@@ -128,7 +128,7 @@ describe("RelayTokenPayload sign/verify (the agent producer token, M8b)", () => 
   });
 });
 
-describe("sandbox-surfacing permissions", () => {
+describe("sandbox workspace permissions", () => {
   test("stream:* + files:write + terminal:attach + toolspace:call are in the Permission enum", () => {
     for (const perm of [
       "stream:view",

@@ -1,5 +1,11 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import {
+  SESSION_EVENT_RAW_DELTA_TYPES,
+  SESSION_EVENT_PAYLOAD_MAX_BYTES,
+  sessionEventJsonBytes,
+  sessionEventPayloadTruncation,
+} from "@opengeni/contracts";
+import {
   addSessionSystemUpdate,
   acceptSessionApprovalDecision,
   applyCreditDebitUpToBalance,
@@ -7,9 +13,12 @@ import {
   applyContextCompaction,
   applySessionTurnSettlement,
   abandonRecordingForTurnAttempt,
+  appendSessionEventToSandboxGroup,
   appendSessionEvents,
+  appendSessionEventsAndUpdateSession,
   appendSessionHistoryItems,
   appendSessionEventsForTurnAttempt,
+  appendSessionEventsWithLockedSessionUpdate,
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
   clearDurablePendingSessionToolCalls,
@@ -18,6 +27,7 @@ import {
   createSessionGoal,
   evaluateSessionControl,
   evaluateSessionControls,
+  evaluateSessionDiscoveryControls,
   evaluateGoalContinuation,
   getSessionQueueSnapshot,
   getBillingBalance,
@@ -55,6 +65,8 @@ import {
 import * as schema from "../src/schema";
 import { and, eq } from "drizzle-orm";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { boundModelToolOutputItem } from "@opengeni/codex";
+import postgres from "postgres";
 
 let shared: SharedTestDatabase;
 let client: ReturnType<typeof createDb>;
@@ -180,13 +192,14 @@ async function claimTestSessionWork(
   options: {
     attemptId?: string;
     dispatchId?: string;
+    workflowRunId?: string;
     trigger?: Parameters<typeof claimSessionWorkForAttempt>[2]["trigger"];
   } = {},
 ) {
   const result = await claimSessionWorkForAttempt(db, workspaceId, {
     sessionId,
     workflowId,
-    workflowRunId: crypto.randomUUID(),
+    workflowRunId: options.workflowRunId ?? crypto.randomUUID(),
     attemptId: options.attemptId ?? crypto.randomUUID(),
     dispatchId: options.dispatchId ?? `dispatch-${crypto.randomUUID()}`,
     trigger: options.trigger ?? { kind: "next" },
@@ -197,6 +210,8 @@ async function claimTestSessionWork(
 describe("clean session control plane", () => {
   test("session discovery is compact-by-query and cursor-stable", async () => {
     const { grant, session: first } = await fixture();
+    const hugeTitle = "界😀".repeat(100_000);
+    const hugeGoal = "goal-😀".repeat(100_000);
     const second = await createSession(client.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId!,
@@ -214,7 +229,36 @@ describe("clean session control plane", () => {
       metadata: {},
       model: "scripted-model",
       sandboxBackend: "none",
+      parentSessionId: second.id,
     });
+    await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
+      await db
+        .update(schema.sessions)
+        .set({ title: hugeTitle })
+        .where(
+          and(
+            eq(schema.sessions.workspaceId, grant.workspaceId!),
+            eq(schema.sessions.id, second.id),
+          ),
+        );
+      await db
+        .update(schema.sessions)
+        .set({ title: hugeTitle })
+        .where(
+          and(
+            eq(schema.sessions.workspaceId, grant.workspaceId!),
+            eq(schema.sessions.id, third.id),
+          ),
+        );
+    });
+    await createSessionGoal(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: third.id,
+      text: hugeGoal,
+      createdBy: "api",
+    });
+    await controlSession(grant, second.id, "pause");
     await appendSessionEvents(client.db, grant.workspaceId!, second.id, [
       { type: "user.message", payload: { text: "p".repeat(20_000) } },
     ]);
@@ -224,7 +268,27 @@ describe("clean session control plane", () => {
       includeLastMessage: true,
     });
     const projectedSecond = all.sessions.find((entry) => entry.id === second.id)!;
-    expect(projectedSecond.latestMessage?.preview).toHaveLength(1_200);
+    const projectedThird = all.sessions.find((entry) => entry.id === third.id)!;
+    expect(projectedSecond.latestMessage?.preview).toHaveLength(600);
+    expect(projectedSecond.latestMessage?.previewOriginalChars).toBeGreaterThan(600);
+    expect(projectedSecond.latestMessage?.previewOriginalChars).toBeLessThan(20_000);
+    expect(Array.from(projectedSecond.title!)).toHaveLength(200);
+    expect(projectedSecond.titleOriginalChars).toBe(200_000);
+    expect(Array.from(projectedThird.goal!.text)).toHaveLength(600);
+    expect(projectedThird.goal?.textOriginalChars).toBe(600_000);
+    expect(projectedThird.effectiveControl).toEqual({
+      state: "paused",
+      primaryBlocker: {
+        kind: "session",
+        sessionId: second.id,
+        displayName: projectedSecond.title!,
+        displayNameOriginalChars: 200_000,
+      },
+      additionalBlockerCount: 0,
+    });
+    expect(projectedThird.effectiveControl).not.toHaveProperty("blockers");
+    expect(projectedThird.effectiveControl).not.toHaveProperty("resumeOptions");
+    expect(Buffer.byteLength(JSON.stringify(all), "utf8")).toBeLessThan(10_000);
     expect(JSON.stringify(projectedSecond)).not.toContain("mustNeverLeak");
 
     const pageOne = await listSessionDiscoverySummaries(client.db, grant.workspaceId!, {
@@ -245,7 +309,612 @@ describe("clean session control plane", () => {
     );
   });
 
-  test("canonical history bounds tool output while the pending receipt keeps raw recovery evidence", async () => {
+  test("session discovery preserves exact keysets and hands concurrent changes to the next scan", async () => {
+    const { grant, session: first } = await fixture();
+    const sessions = [first];
+    for (let index = 1; index < 5; index += 1) {
+      sessions.push(
+        await createSession(client.db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          initialMessage: `equal-timestamp-${index}`,
+          resources: [],
+          metadata: {},
+          model: "scripted-model",
+          sandboxBackend: "none",
+        }),
+      );
+    }
+    const exactEqualTimestamp = "2020-01-02T03:04:05.123456Z";
+    // Preserve a representative legacy revision-zero bucket so the timestamp/id
+    // suffix remains fully covered after the rolling migration.
+    await shared.admin.unsafe(
+      "alter table sessions disable trigger sessions_assign_activity_revision",
+    );
+    try {
+      await shared.admin`
+        update sessions
+        set created_at = ${exactEqualTimestamp}::text::timestamptz,
+            updated_at = ${exactEqualTimestamp}::text::timestamptz,
+            activity_revision = 0
+        where workspace_id = ${grant.workspaceId!}`;
+    } finally {
+      await shared.admin.unsafe(
+        "alter table sessions enable trigger sessions_assign_activity_revision",
+      );
+    }
+
+    const expectedEqualOrder = sessions
+      .map((session) => session.id)
+      .sort()
+      .reverse();
+    const createdIds: string[] = [];
+    let createdCursor: Parameters<typeof listSessionDiscoverySummaries>[2]["cursor"];
+    do {
+      const page = await listSessionDiscoverySummaries(client.db, grant.workspaceId!, {
+        limit: 2,
+        orderBy: "createdAt",
+        ...(createdCursor ? { cursor: createdCursor } : {}),
+      });
+      expect(page.orderBy).toBe("createdAt");
+      expect(page.sessions.map((session) => session.sortAt)).toEqual(
+        page.sessions.map(() => exactEqualTimestamp),
+      );
+      for (const session of page.sessions) {
+        expect(createdIds).not.toContain(session.id);
+        createdIds.push(session.id);
+      }
+      createdCursor = page.nextCursor ?? undefined;
+      if (createdCursor) {
+        expect(createdCursor.sortAt).toBe(exactEqualTimestamp);
+        expect(createdCursor.sortRevision).toBe("0");
+        expect(createdCursor.snapshotAt).toBe(page.snapshotAt);
+        expect(createdCursor.snapshotRevision).toBe("0");
+      }
+    } while (createdCursor);
+    expect(createdIds).toEqual(expectedEqualOrder);
+
+    const firstUpdatedPage = await listSessionDiscoverySummaries(client.db, grant.workspaceId!, {
+      limit: 2,
+      orderBy: "updatedAt",
+    });
+    expect(firstUpdatedPage.sessions.map((session) => session.id)).toEqual(
+      expectedEqualOrder.slice(0, 2),
+    );
+    expect(firstUpdatedPage.nextCursor?.sortAt).toBe(exactEqualTimestamp);
+    expect(firstUpdatedPage.nextCursor?.sortRevision).toBe("0");
+    const movedId = expectedEqualOrder.at(-1)!;
+    const newcomer = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      initialMessage: "inserted-after-snapshot",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    await shared.admin`
+      update sessions
+      set updated_at = ${firstUpdatedPage.snapshotAt}::text::timestamptz + interval '1 microsecond'
+      where workspace_id = ${grant.workspaceId!} and id = ${movedId}`;
+    await shared.admin`
+      update sessions
+      set updated_at = ${firstUpdatedPage.snapshotAt}::text::timestamptz + interval '2 microseconds'
+      where workspace_id = ${grant.workspaceId!} and id = ${newcomer.id}`;
+
+    const oldTraversalIds = firstUpdatedPage.sessions.map((session) => session.id);
+    let oldCursor = firstUpdatedPage.nextCursor ?? undefined;
+    while (oldCursor) {
+      const page = await listSessionDiscoverySummaries(client.db, grant.workspaceId!, {
+        limit: 2,
+        orderBy: "updatedAt",
+        cursor: oldCursor,
+      });
+      expect(page.snapshotAt).toBe(firstUpdatedPage.snapshotAt);
+      expect(page.snapshotRevision).toBe(firstUpdatedPage.snapshotRevision);
+      for (const session of page.sessions) {
+        expect(oldTraversalIds).not.toContain(session.id);
+        oldTraversalIds.push(session.id);
+      }
+      oldCursor = page.nextCursor ?? undefined;
+    }
+    expect(new Set(oldTraversalIds)).toEqual(
+      new Set(expectedEqualOrder.filter((id) => id !== movedId)),
+    );
+    expect(oldTraversalIds).not.toContain(newcomer.id);
+
+    const changedIds: string[] = [];
+    let changedCursor: Parameters<typeof listSessionDiscoverySummaries>[2]["cursor"];
+    do {
+      const page = await listSessionDiscoverySummaries(client.db, grant.workspaceId!, {
+        limit: 1,
+        orderBy: "updatedAt",
+        updatedAfter: firstUpdatedPage.updatedThrough!,
+        ...(changedCursor ? { cursor: changedCursor } : {}),
+      });
+      expect(page.updatedAfter).toBe(firstUpdatedPage.updatedThrough);
+      for (const session of page.sessions) {
+        expect(changedIds).not.toContain(session.id);
+        changedIds.push(session.id);
+      }
+      changedCursor = page.nextCursor ?? undefined;
+    } while (changedCursor);
+    expect(changedIds).toEqual([newcomer.id, movedId]);
+    expect(new Set([...oldTraversalIds, ...changedIds])).toEqual(
+      new Set([...expectedEqualOrder, newcomer.id]),
+    );
+    await expect(
+      listSessionDiscoverySummaries(client.db, grant.workspaceId!, {
+        limit: 1,
+        orderBy: "createdAt",
+        updatedAfter: firstUpdatedPage.updatedThrough!,
+      }),
+    ).rejects.toThrow("updatedAfter requires orderBy=updatedAt");
+  });
+
+  test("session discovery cannot lose rows that cross a timestamp cursor below the returned watermark", async () => {
+    const { grant, session: newest } = await fixture();
+    const second = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      initialMessage: "revision-second",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    const third = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      initialMessage: "revision-third",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    const moved = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      initialMessage: "revision-moved",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+
+    // A revision-aware schema installs this trigger. Disable it only while
+    // constructing the reviewer's historical 10/9/8/5 ordering; the actual
+    // concurrent writes below run through the production trigger.
+    const [activityTrigger] = await shared.admin<Array<{ present: boolean }>>`
+      select exists (
+        select 1 from pg_trigger
+        where tgrelid = 'sessions'::regclass
+          and tgname = 'sessions_assign_activity_revision'
+          and not tgisinternal
+      ) as present`;
+    if (activityTrigger?.present) {
+      await shared.admin.unsafe(
+        "alter table sessions disable trigger sessions_assign_activity_revision",
+      );
+    }
+    try {
+      const [activityColumn] = await shared.admin<Array<{ present: boolean }>>`
+        select exists (
+          select 1 from information_schema.columns
+          where table_schema = current_schema()
+            and table_name = 'sessions'
+            and column_name = 'activity_revision'
+        ) as present`;
+      if (activityColumn?.present) {
+        await shared.admin`
+          update sessions
+          set updated_at = case id
+                when ${newest.id} then '2020-01-01T00:00:10Z'::timestamptz
+                when ${second.id} then '2020-01-01T00:00:09Z'::timestamptz
+                when ${third.id} then '2020-01-01T00:00:08Z'::timestamptz
+                when ${moved.id} then '2020-01-01T00:00:05Z'::timestamptz
+              end,
+              activity_revision = 0
+          where workspace_id = ${grant.workspaceId!}`;
+      } else {
+        await shared.admin`
+          update sessions
+          set updated_at = case id
+                when ${newest.id} then '2020-01-01T00:00:10Z'::timestamptz
+                when ${second.id} then '2020-01-01T00:00:09Z'::timestamptz
+                when ${third.id} then '2020-01-01T00:00:08Z'::timestamptz
+                when ${moved.id} then '2020-01-01T00:00:05Z'::timestamptz
+              end
+          where workspace_id = ${grant.workspaceId!}`;
+      }
+    } finally {
+      if (activityTrigger?.present) {
+        await shared.admin.unsafe(
+          "alter table sessions enable trigger sessions_assign_activity_revision",
+        );
+      }
+    }
+
+    const firstPage = await listSessionDiscoverySummaries(client.db, grant.workspaceId!, {
+      limit: 2,
+      orderBy: "updatedAt",
+    });
+    expect(firstPage.sessions.map((session) => session.id)).toEqual([newest.id, second.id]);
+
+    // This is the exact missed-row shape from the independent review: an
+    // unvisited 5 moves above the 9 cursor but remains far below the old
+    // timestamp watermark. Repeat the same timestamp to prove equal clocks do
+    // not collapse two semantic updates into one ordering fact.
+    const [firstMove] = await shared.admin<Array<{ activityRevision: string }>>`
+      update sessions set updated_at = '2020-01-01T00:00:09.5Z'::timestamptz
+      where workspace_id = ${grant.workspaceId!} and id = ${moved.id}
+      returning activity_revision::text as "activityRevision"`;
+    const [repeatedMove] = await shared.admin<Array<{ activityRevision: string }>>`
+      update sessions set updated_at = '2020-01-01T00:00:09.5Z'::timestamptz
+      where workspace_id = ${grant.workspaceId!} and id = ${moved.id}
+      returning activity_revision::text as "activityRevision"`;
+    expect(BigInt(repeatedMove!.activityRevision)).toBeGreaterThan(
+      BigInt(firstMove!.activityRevision),
+    );
+    await shared.admin`
+      update sessions set updated_at = '2020-01-01T00:00:09.5Z'::timestamptz
+      where workspace_id = ${grant.workspaceId!} and id = ${third.id}`;
+    const inserted = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      initialMessage: "revision-inserted",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    await shared.admin`
+      update sessions set updated_at = '2020-01-01T00:00:09.5Z'::timestamptz
+      where workspace_id = ${grant.workspaceId!} and id = ${inserted.id}`;
+
+    const oldTraversalIds = firstPage.sessions.map((session) => session.id);
+    let oldCursor = firstPage.nextCursor ?? undefined;
+    while (oldCursor) {
+      const page = await listSessionDiscoverySummaries(client.db, grant.workspaceId!, {
+        limit: 2,
+        orderBy: "updatedAt",
+        cursor: oldCursor,
+      });
+      oldTraversalIds.push(...page.sessions.map((session) => session.id));
+      oldCursor = page.nextCursor ?? undefined;
+    }
+
+    const changedIds: string[] = [];
+    let changedCursor: Parameters<typeof listSessionDiscoverySummaries>[2]["cursor"];
+    do {
+      const page = await listSessionDiscoverySummaries(client.db, grant.workspaceId!, {
+        limit: 1,
+        orderBy: "updatedAt",
+        updatedAfter: firstPage.updatedThrough!,
+        ...(changedCursor ? { cursor: changedCursor } : {}),
+      });
+      changedIds.push(...page.sessions.map((session) => session.id));
+      changedCursor = page.nextCursor ?? undefined;
+    } while (changedCursor);
+
+    const allSeen = [...oldTraversalIds, ...changedIds];
+    expect(new Set(allSeen)).toEqual(
+      new Set([newest.id, second.id, third.id, moved.id, inserted.id]),
+    );
+    expect(allSeen).toHaveLength(new Set(allSeen).size);
+    expect(new Set(changedIds)).toEqual(new Set([third.id, moved.id, inserted.id]));
+  });
+
+  test("the first-page revision fence blocks semantic activity without blocking raw deltas", async () => {
+    const { grant, session } = await fixture();
+    const reader = postgres(shared.adminUrl, { max: 1 });
+    const writer = postgres(shared.adminUrl, { max: 1 });
+    let readerTransactionOpen = true;
+    await reader.unsafe("begin");
+    try {
+      // This is the exact lock prefix used by an updated-order first page.
+      await reader`
+        select workspace_id
+        from workspace_inference_controls
+        where workspace_id = ${grant.workspaceId!}
+        for share`;
+      await reader`
+        insert into workspace_session_activity_revisions (
+          workspace_id, account_id, revision
+        ) values (${grant.workspaceId!}, ${grant.accountId}, 0)
+        on conflict (workspace_id) do nothing`;
+      const [fence] = await reader<Array<{ revision: string }>>`
+        select revision::text as revision
+        from workspace_session_activity_revisions
+        where workspace_id = ${grant.workspaceId!}
+        for share`;
+      expect(fence).toBeDefined();
+
+      // Raw stream volume omits updated_at/activity_revision, so it never
+      // contends on the activity counter even while the snapshot fence is held.
+      const [rawDelta] = await writer<Array<{ lastSequence: number }>>`
+        update sessions
+        set last_sequence = last_sequence + 1
+        where workspace_id = ${grant.workspaceId!} and id = ${session.id}
+        returning last_sequence as "lastSequence"`;
+      expect(rawDelta?.lastSequence).toBe(1);
+
+      // A semantic/direct writer mentions updated_at, reaches the trigger after
+      // locking the session, and must wait rather than committing at or below
+      // the already returned fence.
+      await writer.unsafe("set lock_timeout = '100ms'");
+      let lockError: unknown;
+      try {
+        await writer`
+          update sessions
+          set updated_at = clock_timestamp()
+          where workspace_id = ${grant.workspaceId!} and id = ${session.id}`;
+      } catch (error) {
+        lockError = error;
+      }
+      expect((lockError as { code?: string } | undefined)?.code).toBe("55P03");
+
+      await reader.unsafe("commit");
+      readerTransactionOpen = false;
+      await writer.unsafe("set lock_timeout = '0'");
+      const [semantic] = await writer<Array<{ activityRevision: string }>>`
+        update sessions
+        set updated_at = clock_timestamp()
+        where workspace_id = ${grant.workspaceId!} and id = ${session.id}
+        returning activity_revision::text as "activityRevision"`;
+      expect(BigInt(semantic!.activityRevision)).toBeGreaterThan(BigInt(fence!.revision));
+    } finally {
+      if (readerTransactionOpen) {
+        await reader.unsafe("rollback").catch(() => undefined);
+      }
+      await Promise.all([reader.end().catch(() => undefined), writer.end().catch(() => undefined)]);
+    }
+  });
+
+  test("workspace activity counters remain tenant-isolated under forced RLS", async () => {
+    const first = await fixture();
+    const second = await fixture();
+    await listSessionDiscoverySummaries(client.db, first.grant.workspaceId!, {
+      limit: 1,
+      orderBy: "updatedAt",
+    });
+    await listSessionDiscoverySummaries(client.db, second.grant.workspaceId!, {
+      limit: 1,
+      orderBy: "updatedAt",
+    });
+
+    const visible = await withWorkspaceRls(client.db, first.grant.workspaceId!, (scopedDb) =>
+      scopedDb
+        .select({ workspaceId: schema.workspaceSessionActivityRevisions.workspaceId })
+        .from(schema.workspaceSessionActivityRevisions),
+    );
+    expect(visible).toEqual([{ workspaceId: first.grant.workspaceId! }]);
+  });
+
+  test("session monitoring traversal uses both composite keyset indexes", async () => {
+    const { grant } = await fixture();
+    await shared.admin`
+      insert into sessions (
+        account_id, workspace_id, initial_message, resources, tools, metadata,
+        model, sandbox_backend, sandbox_group_id, created_at, updated_at
+      )
+      select ${grant.accountId}, ${grant.workspaceId!}, 'plan-' || n::text,
+        '[]'::jsonb, '[]'::jsonb, '{}'::jsonb, 'scripted-model', 'none',
+        gen_random_uuid(),
+        statement_timestamp() - make_interval(secs => n),
+        statement_timestamp() - make_interval(secs => 5001 - n)
+      from generate_series(1, 5000) as generated(n)`;
+    await shared.admin`analyze sessions`;
+    const [cursor] = await shared.admin<
+      Array<{ id: string; createdAt: Date; updatedAt: Date; activityRevision: string }>
+    >`
+      select id, created_at as "createdAt", updated_at as "updatedAt",
+        activity_revision::text as "activityRevision"
+      from sessions where workspace_id = ${grant.workspaceId!}
+      order by created_at desc, id desc offset 2500 limit 1`;
+    expect(cursor).toBeDefined();
+    const plans = await shared.admin.begin(async (transaction) => {
+      await transaction`set local enable_seqscan = off`;
+      await transaction`set local enable_bitmapscan = off`;
+      const created = await transaction`
+        explain (format json, costs off)
+        select id from sessions
+        where workspace_id = ${grant.workspaceId!}
+          and created_at <= statement_timestamp()
+          and (
+            created_at < ${cursor!.createdAt}
+            or (created_at = ${cursor!.createdAt} and id < ${cursor!.id})
+          )
+        order by created_at desc, id desc limit 20`;
+      const updated = await transaction`
+        explain (format json, costs off)
+        select id from sessions
+        where workspace_id = ${grant.workspaceId!}
+          and activity_revision > 0
+          and activity_revision <= 1000000
+          and (
+            activity_revision < ${cursor!.activityRevision}::text::bigint
+            or (
+              activity_revision = ${cursor!.activityRevision}::text::bigint
+              and (
+                updated_at < ${cursor!.updatedAt}
+                or (updated_at = ${cursor!.updatedAt} and id < ${cursor!.id})
+              )
+            )
+          )
+        order by activity_revision desc, updated_at desc, id desc limit 20`;
+      return { created, updated };
+    });
+    expect(JSON.stringify(plans.created)).toContain("sessions_workspace_created_id_idx");
+    expect(JSON.stringify(plans.updated)).toContain("sessions_workspace_activity_revision_idx");
+  });
+
+  test("raw delta writers advance sequence without advancing monitoring activity", async () => {
+    const baseline = "2020-01-02T03:04:05.123000Z";
+    const rawDeltas = () =>
+      SESSION_EVENT_RAW_DELTA_TYPES.map((type, index) => ({
+        type,
+        payload: { text: `fragment-${index}` },
+      }));
+    const setBaseline = async (workspaceId: string, sessionId: string) => {
+      await shared.admin`
+        update sessions set updated_at = ${baseline}::timestamptz
+        where workspace_id = ${workspaceId} and id = ${sessionId}`;
+    };
+    const activity = async (workspaceId: string, sessionId: string) => {
+      const [row] = await shared.admin<
+        Array<{ lastSequence: number; updatedAt: string; activityRevision: string }>
+      >`
+        select last_sequence as "lastSequence",
+          to_char(updated_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "updatedAt",
+          activity_revision::text as "activityRevision"
+        from sessions where workspace_id = ${workspaceId} and id = ${sessionId}`;
+      return row!;
+    };
+
+    const generic = await fixture();
+    await setBaseline(generic.grant.workspaceId!, generic.session.id);
+    const genericBefore = await activity(generic.grant.workspaceId!, generic.session.id);
+    await appendSessionEvents(
+      client.db,
+      generic.grant.workspaceId!,
+      generic.session.id,
+      rawDeltas(),
+    );
+    expect(await activity(generic.grant.workspaceId!, generic.session.id)).toEqual({
+      lastSequence: genericBefore.lastSequence + SESSION_EVENT_RAW_DELTA_TYPES.length,
+      updatedAt: baseline,
+      activityRevision: genericBefore.activityRevision,
+    });
+    await appendSessionEvents(client.db, generic.grant.workspaceId!, generic.session.id, [
+      { type: "agent.message.completed", payload: { text: "semantic" } },
+    ]);
+    const genericSemantic = await activity(generic.grant.workspaceId!, generic.session.id);
+    expect(genericSemantic.updatedAt).not.toBe(baseline);
+    expect(BigInt(genericSemantic.activityRevision)).toBeGreaterThan(
+      BigInt(genericBefore.activityRevision),
+    );
+
+    const attempt = await fixture();
+    await send(attempt.grant, attempt.session.id, "attempt activity");
+    const attemptId = crypto.randomUUID();
+    const turn = await claimTestSessionWork(
+      client.db,
+      attempt.grant.workspaceId!,
+      attempt.session.id,
+      `session-${attempt.session.id}`,
+      { attemptId },
+    );
+    expect(turn).not.toBeNull();
+    await setBaseline(attempt.grant.workspaceId!, attempt.session.id);
+    const attemptBefore = await activity(attempt.grant.workspaceId!, attempt.session.id);
+    expect(
+      (
+        await appendSessionEventsForTurnAttempt(
+          client.db,
+          attempt.grant.workspaceId!,
+          attempt.session.id,
+          turn!.id,
+          turn!.executionGeneration,
+          attemptId,
+          rawDeltas(),
+        )
+      ).accepted,
+    ).toBeTrue();
+    expect(await activity(attempt.grant.workspaceId!, attempt.session.id)).toEqual({
+      lastSequence: attemptBefore.lastSequence + SESSION_EVENT_RAW_DELTA_TYPES.length,
+      updatedAt: baseline,
+      activityRevision: attemptBefore.activityRevision,
+    });
+    await appendSessionEventsForTurnAttempt(
+      client.db,
+      attempt.grant.workspaceId!,
+      attempt.session.id,
+      turn!.id,
+      turn!.executionGeneration,
+      attemptId,
+      [{ type: "agent.message.completed", payload: { text: "semantic" } }],
+    );
+    const attemptSemantic = await activity(attempt.grant.workspaceId!, attempt.session.id);
+    expect(attemptSemantic.updatedAt).not.toBe(baseline);
+    expect(BigInt(attemptSemantic.activityRevision)).toBeGreaterThan(
+      BigInt(attemptBefore.activityRevision),
+    );
+
+    const grouped = await fixture();
+    await setBaseline(grouped.grant.workspaceId!, grouped.session.id);
+    const groupedBefore = await activity(grouped.grant.workspaceId!, grouped.session.id);
+    await appendSessionEventToSandboxGroup(
+      client.db,
+      grouped.grant.workspaceId!,
+      grouped.session.sandboxGroupId,
+      rawDeltas()[0]!,
+    );
+    expect(await activity(grouped.grant.workspaceId!, grouped.session.id)).toEqual({
+      lastSequence: groupedBefore.lastSequence + 1,
+      updatedAt: baseline,
+      activityRevision: groupedBefore.activityRevision,
+    });
+
+    const updated = await fixture();
+    await setBaseline(updated.grant.workspaceId!, updated.session.id);
+    const updatedBefore = await activity(updated.grant.workspaceId!, updated.session.id);
+    await appendSessionEventsAndUpdateSession(
+      client.db,
+      updated.grant.workspaceId!,
+      updated.session.id,
+      [rawDeltas()[0]!],
+      {},
+    );
+    expect(await activity(updated.grant.workspaceId!, updated.session.id)).toEqual({
+      lastSequence: updatedBefore.lastSequence + 1,
+      updatedAt: baseline,
+      activityRevision: updatedBefore.activityRevision,
+    });
+    await appendSessionEventsAndUpdateSession(
+      client.db,
+      updated.grant.workspaceId!,
+      updated.session.id,
+      [rawDeltas()[0]!],
+      { metadata: { activity: "explicit mutation" } },
+    );
+    const updatedSemantic = await activity(updated.grant.workspaceId!, updated.session.id);
+    expect(updatedSemantic.updatedAt).not.toBe(baseline);
+    expect(BigInt(updatedSemantic.activityRevision)).toBeGreaterThan(
+      BigInt(updatedBefore.activityRevision),
+    );
+
+    const locked = await fixture();
+    await setBaseline(locked.grant.workspaceId!, locked.session.id);
+    const lockedBefore = await activity(locked.grant.workspaceId!, locked.session.id);
+    await appendSessionEventsWithLockedSessionUpdate(
+      client.db,
+      locked.grant.workspaceId!,
+      locked.session.id,
+      () => ({ events: [rawDeltas()[0]!] }),
+    );
+    expect(await activity(locked.grant.workspaceId!, locked.session.id)).toEqual({
+      lastSequence: lockedBefore.lastSequence + 1,
+      updatedAt: baseline,
+      activityRevision: lockedBefore.activityRevision,
+    });
+    await appendSessionEventsWithLockedSessionUpdate(
+      client.db,
+      locked.grant.workspaceId!,
+      locked.session.id,
+      () => ({
+        events: [rawDeltas()[0]!],
+        update: { metadata: { activity: "explicit locked mutation" } },
+      }),
+    );
+    const lockedSemantic = await activity(locked.grant.workspaceId!, locked.session.id);
+    expect(lockedSemantic.updatedAt).not.toBe(baseline);
+    expect(BigInt(lockedSemantic.activityRevision)).toBeGreaterThan(
+      BigInt(lockedBefore.activityRevision),
+    );
+  });
+
+  test("history, pending receipt, and recovery audit keep distinct truthful output representations", async () => {
     const { grant, session } = await fixture();
     await send(grant, session.id, "inspect a very large result");
     const attemptId = crypto.randomUUID();
@@ -257,6 +926,41 @@ describe("clean session control plane", () => {
       { attemptId },
     );
     const huge = "x".repeat(500_000);
+    const structuredOutput: Record<string, unknown> = {
+      type: "界😀".repeat(100_000),
+      name: "n".repeat(500_000),
+      id: "i".repeat(500_000),
+      detail: "d".repeat(500_000),
+    };
+    let structuredCursor = structuredOutput;
+    for (let depth = 0; depth < 14; depth += 1) {
+      const child: Record<string, unknown> = {};
+      structuredCursor.child = child;
+      structuredCursor = child;
+    }
+    structuredCursor.payload = huge;
+    const structuredItem = {
+      type: "function_call_result",
+      callId: "structured-call",
+      output: structuredOutput,
+    };
+    const mixedOutput = Array.from({ length: 360 }, (_, index): Record<string, unknown> => {
+      if (index % 3 === 0) return { type: "input_text", text: `text-${index}` };
+      if (index % 3 === 1) {
+        return { type: "input_image", image: `data:image/png;base64,a${index}` };
+      }
+      return {
+        type: "input_file",
+        file: { id: `file_${index}` },
+        filename: `${index}.txt`,
+      };
+    });
+    const canonicalMixedItem = {
+      type: "function_call_result",
+      callId: "canonical-mixed-call",
+      status: "completed",
+      output: mixedOutput,
+    };
     expect(
       await appendSessionHistoryItems(client.db, {
         accountId: grant.accountId,
@@ -284,6 +988,30 @@ describe("clean session control plane", () => {
               output: { type: "text", text: huge },
             },
           },
+          { position: 2, item: structuredItem },
+        ],
+      }),
+    ).toBe(true);
+    expect(
+      await appendSessionHistoryItems(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn!.id,
+        expectedExecutionGeneration: turn!.executionGeneration,
+        expectedAttemptId: attemptId,
+        items: [
+          {
+            position: 3,
+            item: {
+              type: "function_call",
+              callId: "canonical-mixed-call",
+              name: "mixed_tool",
+              arguments: "{}",
+              status: "completed",
+            },
+          },
+          { position: 4, item: canonicalMixedItem },
         ],
       }),
     ).toBe(true);
@@ -291,6 +1019,28 @@ describe("clean session control plane", () => {
     const canonicalText = (canonical[1]!.item.output as { text: string }).text;
     expect(canonicalText).toContain("tokens truncated");
     expect(canonicalText.length).toBeLessThan(1_000);
+    expect(canonical[2]!.item).toEqual(boundModelToolOutputItem(structuredItem, 100));
+    expect(JSON.stringify(canonical[2]!.item)).toContain(
+      "maximum structured tool-output depth exceeded",
+    );
+    expect(Buffer.byteLength(JSON.stringify(canonical[2]!.item), "utf8")).toBeLessThan(10_000);
+    const canonicalMixed = canonical[4]!.item;
+    const canonicalMixedOutput = canonicalMixed.output as Array<Record<string, unknown>>;
+    expect(canonicalMixed).toEqual(boundModelToolOutputItem(canonicalMixedItem));
+    expect(canonicalMixedOutput.length).toBeLessThanOrEqual(256);
+    expect(
+      canonicalMixedOutput.every(
+        (part) =>
+          part.type === "input_text" || part.type === "input_image" || part.type === "input_file",
+      ),
+    ).toBe(true);
+    expect(canonicalMixedOutput.at(-1)).toEqual({
+      type: "input_text",
+      text: "[OpenGeni omitted 105 structured array items]",
+    });
+    expect(JSON.stringify(boundModelToolOutputItem(canonicalMixed))).toBe(
+      JSON.stringify(canonicalMixed),
+    );
 
     expect(
       await registerPendingSessionToolCall(client.db, {
@@ -324,6 +1074,40 @@ describe("clean session control plane", () => {
         output: { type: "text", text: huge },
       },
     });
+    expect(
+      await registerPendingSessionToolCall(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn!.id,
+        executionGeneration: turn!.executionGeneration,
+        attemptId,
+        callId: "pending-mixed-call",
+        callType: "function_call",
+        callItem: {
+          type: "function_call",
+          callId: "pending-mixed-call",
+          name: "mixed_tool",
+          arguments: "{}",
+          status: "completed",
+        },
+      }),
+    ).toEqual({ accepted: true, registered: true });
+    await recordPendingSessionToolCallResult(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      turnId: turn!.id,
+      executionGeneration: turn!.executionGeneration,
+      attemptId,
+      callId: "pending-mixed-call",
+      resultItem: {
+        type: "function_call_result",
+        callId: "pending-mixed-call",
+        status: "completed",
+        output: mixedOutput,
+      },
+    });
     const [pending] = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
       db
         .select({ resultItem: schema.sessionPendingToolCalls.resultItem })
@@ -331,6 +1115,13 @@ describe("clean session control plane", () => {
         .where(eq(schema.sessionPendingToolCalls.callId, "pending-call")),
     );
     expect(((pending!.resultItem as any).output as { text: string }).text).toBe(huge);
+    const [pendingMixed] = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      db
+        .select({ resultItem: schema.sessionPendingToolCalls.resultItem })
+        .from(schema.sessionPendingToolCalls)
+        .where(eq(schema.sessionPendingToolCalls.callId, "pending-mixed-call")),
+    );
+    expect((pendingMixed!.resultItem as { output: unknown[] }).output).toHaveLength(360);
 
     const recovery = await requestSessionTurnRecovery(client.db, grant.workspaceId!, {
       sessionId: session.id,
@@ -354,12 +1145,69 @@ describe("clean session control plane", () => {
       ) as { output: { text: string } };
     expect(recoveredResult.output.text).toContain("tokens truncated");
     expect(recoveredResult.output.text.length).toBeLessThan(50_000);
+    const recoveredMixedResult = recoveredHistory
+      .map((row) => row.item)
+      .find(
+        (item) =>
+          item.type === "function_call_result" &&
+          (item as { callId?: unknown }).callId === "pending-mixed-call",
+      ) as { output: Array<Record<string, unknown>> };
+    expect(recoveredMixedResult.output).toEqual(canonicalMixedOutput);
+    expect(JSON.stringify(boundModelToolOutputItem(recoveredMixedResult))).toBe(
+      JSON.stringify(recoveredMixedResult),
+    );
     const recoveryOutput = recovery.events.find(
       (event) =>
         event.type === "agent.toolCall.output" &&
         (event.payload as { id?: unknown }).id === "pending-call",
-    )?.payload as { output: { text: string } };
-    expect(recoveryOutput.output.text).toBe(huge);
+    )?.payload as { output: { text: string }; truncation: unknown };
+    expect(recoveryOutput.output.text).toContain("bytes omitted");
+    expect(recoveryOutput.output.text.length).toBeLessThan(50_000);
+    expect(sessionEventJsonBytes(recoveryOutput)).toBeLessThanOrEqual(
+      SESSION_EVENT_PAYLOAD_MAX_BYTES,
+    );
+    expect(sessionEventPayloadTruncation(recoveryOutput)).toMatchObject({
+      truncated: true,
+      surface: "durable_audit",
+      reason: "payload_bytes_exceeded",
+      fullEvidence: { available: false, reason: "not_retained" },
+      details: expect.arrayContaining([
+        expect.objectContaining({ path: "$.output.text", kind: "string" }),
+      ]),
+    });
+    const mixedRecoveryOutput = recovery.events.find(
+      (event) =>
+        event.type === "agent.toolCall.output" &&
+        (event.payload as { id?: unknown }).id === "pending-mixed-call",
+    )?.payload as {
+      output: Array<Record<string, unknown>>;
+      recovery: { outcome: string };
+    };
+    expect(mixedRecoveryOutput.output.length).toBeLessThan(360);
+    expect(mixedRecoveryOutput.recovery.outcome).toBe("durable_result_found");
+    expect(sessionEventJsonBytes(mixedRecoveryOutput)).toBeLessThanOrEqual(
+      SESSION_EVENT_PAYLOAD_MAX_BYTES,
+    );
+    expect(sessionEventPayloadTruncation(mixedRecoveryOutput)).toMatchObject({
+      truncated: true,
+      surface: "durable_audit",
+      fullEvidence: { available: false, reason: "not_retained" },
+      details: expect.arrayContaining([
+        expect.objectContaining({
+          path: "$.output",
+          kind: "array",
+          omittedEntries: expect.any(Number),
+        }),
+      ]),
+    });
+    expect(
+      await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+        db
+          .select({ id: schema.sessionPendingToolCalls.id })
+          .from(schema.sessionPendingToolCalls)
+          .where(eq(schema.sessionPendingToolCalls.sessionId, session.id)),
+      ),
+    ).toEqual([]);
   });
 
   test("bulk control projection accepts an empty session page", async () => {
@@ -405,6 +1253,73 @@ describe("clean session control plane", () => {
       state: "paused",
       primaryBlocker: { kind: "session", sessionId: root.id },
     });
+  });
+
+  test("compact discovery control matches full blocker truth across pause overrides", async () => {
+    const { grant, session: root } = await fixture();
+    const child = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      initialMessage: "child",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+      parentSessionId: root.id,
+    });
+    await controlSession(grant, root.id, "pause");
+    await controlSession(grant, child.id, "pause");
+    await controlWorkspace(grant, "pause", "aggregate parity");
+
+    const expectCompactParity = async (ids: string[]) => {
+      const { compact, full } = await withWorkspaceRls(
+        client.db,
+        grant.workspaceId!,
+        async (db) => ({
+          compact: await evaluateSessionDiscoveryControls(db, grant.workspaceId!, ids),
+          full: await evaluateSessionControls(db, grant.workspaceId!, ids, { lock: "share" }),
+        }),
+      );
+      for (const id of ids) {
+        const detailed = full.get(id)!;
+        const blocker = detailed.primaryBlocker;
+        expect(compact.get(id)).toEqual({
+          state: detailed.state,
+          primaryBlocker: blocker
+            ? {
+                kind: blocker.kind,
+                ...(blocker.sessionId ? { sessionId: blocker.sessionId } : {}),
+                displayName: blocker.displayName,
+                displayNameOriginalChars: Array.from(blocker.displayName).length,
+              }
+            : null,
+          additionalBlockerCount: detailed.additionalBlockerCount,
+        });
+      }
+    };
+
+    await expectCompactParity([root.id, child.id]);
+    expect(
+      (
+        await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+          evaluateSessionDiscoveryControls(db, grant.workspaceId!, [child.id]),
+        )
+      ).get(child.id),
+    ).toMatchObject({
+      state: "paused",
+      primaryBlocker: { kind: "session", sessionId: child.id },
+      additionalBlockerCount: 2,
+    });
+
+    await controlSession(grant, child.id, "resume");
+    await expectCompactParity([root.id, child.id]);
+    expect(
+      (
+        await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+          evaluateSessionDiscoveryControls(db, grant.workspaceId!, [child.id]),
+        )
+      ).get(child.id),
+    ).toEqual({ state: "active", primaryBlocker: null, additionalBlockerCount: 0 });
   });
 
   test("recovery closes an in-flight tool call with explicit unknown outcome exactly once", async () => {
@@ -1837,6 +2752,72 @@ describe("clean session control plane", () => {
     expect(await isSessionCompactionRequested(client.db, grant.workspaceId!, session.id)).toBe(
       true,
     );
+  });
+
+  test("activity-owned quiescence proof requires the exact persisted Temporal dispatch", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "run the predecessor");
+    const attemptId = crypto.randomUUID();
+    const workflowId = `session-${session.id}`;
+    const workflowRunId = crypto.randomUUID();
+    const dispatchId = `dispatch-${crypto.randomUUID()}`;
+    const predecessor = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      workflowId,
+      { attemptId, workflowRunId, dispatchId },
+    );
+    expect(predecessor).not.toBeNull();
+    await send(grant, session.id, "replace it", "steer");
+
+    await expect(
+      markSessionAttemptQuiesced(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        attemptId,
+        temporalWorkflowId: workflowId,
+        temporalWorkflowRunId: workflowRunId,
+        temporalActivityId: `${dispatchId}-wrong`,
+        allowUninterrupted: true,
+      }),
+    ).rejects.toThrow(/without its session ownership/);
+    expect(
+      (await getSessionQueueSnapshot(client.db, grant.workspaceId!, session.id))
+        ?.stoppingPreviousAttempt,
+    ).toBe(true);
+
+    const events = await markSessionAttemptQuiesced(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      attemptId,
+      temporalWorkflowId: workflowId,
+      temporalWorkflowRunId: workflowRunId,
+      temporalActivityId: dispatchId,
+      allowUninterrupted: true,
+    });
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: "session.queue.changed",
+        turnId: predecessor!.id,
+        turnAttemptId: attemptId,
+        payload: expect.objectContaining({ operation: "attempt_quiesced", attemptId }),
+      }),
+    ]);
+    expect(
+      await markSessionAttemptQuiesced(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        attemptId,
+        temporalWorkflowId: workflowId,
+        temporalWorkflowRunId: workflowRunId,
+        temporalActivityId: dispatchId,
+        allowUninterrupted: true,
+      }),
+    ).toEqual(events);
   });
 
   test("worker death recovers the same compaction execution without entering the queue", async () => {

@@ -1,6 +1,6 @@
 // `RoutingSandboxSession` — the per-session hot-swap routing proxy (M7).
 //
-// THE load-bearing SDK finding (dossier §10.3 / §20-M7): when a box is injected
+// THE load-bearing SDK finding: when a box is injected
 // NON-OWNED into a turn (`ownedSandbox.session`), the agent SDK's sandbox
 // capabilities bind to that ONE session OBJECT ONCE and call ITS methods
 // (`exec`/`execCommand`/`readFile`/`listDir`/`resolveExposedPort`/…) per tool
@@ -10,7 +10,7 @@
 // per-session active pointer `(active_sandbox_id, active_epoch)` and DISPATCHES
 // to the CURRENTLY-active backend session (Modal or selfhosted).
 //
-// The contract (dossier §10.3):
+// The contract:
 //   - ONE stable object implementing the `SandboxSessionLike` structural surface.
 //   - On EVERY op, re-read `(activeSandboxId, activeEpoch)` via `readPointer`.
 //   - Cache the resolved backend session keyed by `activeEpoch`; when the epoch
