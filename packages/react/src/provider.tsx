@@ -6,7 +6,7 @@ import {
 } from "@opengeni/sdk";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { SessionClientLike } from "./client";
-import { OpenGeniContext, type OpenGeniContextValue } from "./session-context";
+import { OpenGeniContext } from "./session-context";
 
 export { useOpenGeni, useOpenGeniClient } from "./session-context";
 export type { ClientOverride, OpenGeniContextValue } from "./session-context";
