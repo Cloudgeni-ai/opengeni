@@ -98,6 +98,13 @@ describe("public repository hygiene", () => {
     ).toEqual(["internal issue reference"]);
   });
 
+  test("reports an underscored issue identifier on its exact source line", () => {
+    const identifierIssue = ["__ope", "9SetQueueLoading"].join("");
+    expect(auditPublicText("fixture.ts", `safe line\n${identifierIssue}`)).toEqual([
+      { file: "fixture.ts", line: 2, reason: "internal issue reference" },
+    ]);
+  });
+
   test("rejects more personal exposure shapes", () => {
     const source = [
       ["person", "@proton.me"].join(""),
