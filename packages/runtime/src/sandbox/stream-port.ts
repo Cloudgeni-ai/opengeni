@@ -15,7 +15,7 @@
 // (Modal raw-TLS host:port, Daytona signed preview, Blaxel preview-token query)
 // carries the reach-the-port boundary; the OpenGeni stream token is RECORDED
 // against the viewer holder and is the in-box websockify edge boundary (P3/P5).
-// Per the master-spine ruling, exposeStreamPort returns the token alongside the
+// Per the sandbox contract ruling, exposeStreamPort returns the token alongside the
 // URL so the caller records it; it does NOT append it to `url`.
 
 import { DESKTOP_STREAM_PORT } from "@opengeni/contracts";

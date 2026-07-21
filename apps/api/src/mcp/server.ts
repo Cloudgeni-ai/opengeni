@@ -1,5 +1,11 @@
 import {
   CreateScheduledTaskRequest,
+  SESSION_EVENT_RAW_DELTA_TYPES,
+  SessionEventPayloadMode,
+  SessionEventReadDirection,
+  SessionEventReadMode,
+  SessionEventSemanticClass,
+  SessionEventType,
   SessionMcpCredentialUpdateInput,
   VariableSetVariableName,
   type AccessGrant,
@@ -24,9 +30,13 @@ import {
   listGitHubInstallationIdsForWorkspace,
   listScheduledTaskRuns,
   listScheduledTasks,
-  listSessionEvents,
+  listSessionEventPage,
   listSessionDiscoverySummaries,
+  type SessionDiscoveryCursor,
+  type SessionDiscoveryOrderBy,
   listRigs,
+  listRigChangeMonitoringSummaries,
+  listRigVersionMonitoringSummaries,
   listSocialConnections,
   listSocialPosts,
   listVariableSets,
@@ -61,8 +71,6 @@ import { hasPermission } from "@opengeni/core";
 import { recordWorkspaceUsage, requireLimit } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
-  listRigChangesForApi,
-  listRigVersionsForApi,
   promoteVerifiedDefinitionEditChangeForApi,
   proposeRigChangeForApi,
   requireRigChangeForApi,
@@ -103,7 +111,12 @@ import {
   type FleetServices,
   type RunOnOp,
 } from "@opengeni/core";
-import { capEventPage, capSessionDetail } from "./session-view";
+import {
+  boundSessionEventMcpPage,
+  boundSessionDetailMcp,
+  boundRigDetailMcp,
+  SESSION_EVENT_MCP_MAX_BYTES,
+} from "./session-view";
 import type { ToolspaceMcpSurface } from "./toolspace";
 
 export type McpServerOptions = {
@@ -149,7 +162,11 @@ export function buildOpenGeniMcpServer(
       },
       async ({ title }) => {
         const result = await updateSessionTitle(deps, grant.workspaceId, sessionId, title, "agent");
-        return json({ ok: true, updated: result.updated, title: result.title ?? title });
+        return json({
+          ok: true,
+          updated: result.updated,
+          title: result.title ?? title,
+        });
       },
     );
   }
@@ -214,7 +231,9 @@ export function buildOpenGeniMcpServer(
         if (file.status !== "ready") {
           throw new Error(`file is ${file.status}`);
         }
-        const signed = await deps.objectStorage.createGetUrl({ key: file.objectKey });
+        const signed = await deps.objectStorage.createGetUrl({
+          key: file.objectKey,
+        });
         return json({
           file: {
             id: file.id,
@@ -250,7 +269,9 @@ export function buildOpenGeniMcpServer(
             deps.db,
             grant.workspaceId,
           );
-          const repositories = await listGitHubAppRepositories(deps.settings, { installationIds });
+          const repositories = await listGitHubAppRepositories(deps.settings, {
+            installationIds,
+          });
           const visible = typeof limit === "number" ? repositories.slice(0, limit) : repositories;
           return json({
             repositories: visible.map((repository) =>
@@ -380,7 +401,9 @@ export function buildOpenGeniMcpServer(
         inputSchema: { limit: z4.number().int().positive().optional() },
       },
       async ({ limit }) =>
-        json({ tasks: await listScheduledTasks(deps.db, grant.workspaceId, limit ?? 100) }),
+        json({
+          tasks: await listScheduledTasks(deps.db, grant.workspaceId, limit ?? 100),
+        }),
     );
 
     server.registerTool(
@@ -429,7 +452,11 @@ export function buildOpenGeniMcpServer(
           payload,
           toolsProvided: scheduledTaskToolsProvided(args),
         });
-        await syncCreatedScheduledTask({ db: deps.db, workflowClient: deps.workflowClient, task });
+        await syncCreatedScheduledTask({
+          db: deps.db,
+          workflowClient: deps.workflowClient,
+          task,
+        });
         return json(task);
       },
     );
@@ -526,7 +553,10 @@ export function buildOpenGeniMcpServer(
       {
         description:
           "Trigger a scheduled task immediately. Pass a stable triggerId to make a retried trigger idempotent (one charge, one run).",
-        inputSchema: { id: z4.string().uuid(), triggerId: z4.string().min(1).max(128).optional() },
+        inputSchema: {
+          id: z4.string().uuid(),
+          triggerId: z4.string().min(1).max(128).optional(),
+        },
       },
       async ({ id, triggerId }) => {
         const task = await requireScheduledTask(deps.db, grant.workspaceId, id);
@@ -584,7 +614,10 @@ export function buildOpenGeniMcpServer(
       "scheduled_task_runs_list",
       {
         description: "List runs for a scheduled task.",
-        inputSchema: { taskId: z4.string().uuid(), limit: z4.number().int().positive().optional() },
+        inputSchema: {
+          taskId: z4.string().uuid(),
+          limit: z4.number().int().positive().optional(),
+        },
       },
       async ({ taskId, limit }) =>
         json({
@@ -817,7 +850,9 @@ function registerGoalTools(
   );
 }
 
-type JsonResult = (value: unknown) => { content: Array<{ type: "text"; text: string }> };
+type JsonResult = (value: unknown) => {
+  content: Array<{ type: "text"; text: string }>;
+};
 
 const MemoryKindSchema = z4.enum(["preference", "semantic", "procedural", "decision", "episodic"]);
 
@@ -960,7 +995,11 @@ function registerFleetTools(
   sessionId: string,
   json: JsonResult,
 ): void {
-  const services: FleetServices = { db: deps.db, settings: deps.settings, bus: deps.bus };
+  const services: FleetServices = {
+    db: deps.db,
+    settings: deps.settings,
+    bus: deps.bus,
+  };
 
   // Resolve the session's group sandbox (the default/home fleet member) at
   // call-time via the shared helper (same context the user-authenticated swap
@@ -1017,7 +1056,11 @@ function registerFleetTools(
             workdir: z4.string().optional(),
           }),
           z4.object({ kind: z4.literal("read"), path: z4.string().min(1) }),
-          z4.object({ kind: z4.literal("write"), path: z4.string().min(1), content: z4.string() }),
+          z4.object({
+            kind: z4.literal("write"),
+            path: z4.string().min(1),
+            content: z4.string(),
+          }),
         ]),
       },
     },
@@ -1037,7 +1080,10 @@ function registerFleetTools(
     },
     async ({ kind, name }) =>
       json(
-        await provisionSandbox(services, await fleetContext(), { kind, ...(name ? { name } : {}) }),
+        await provisionSandbox(services, await fleetContext(), {
+          kind,
+          ...(name ? { name } : {}),
+        }),
       ),
   );
 }
@@ -1091,24 +1137,31 @@ function registerRigTools(
     server.registerTool(
       "rig_get",
       {
-        description: "Get a rig, its versions, and recent changes.",
+        description:
+          "Get one rig's bounded active definition plus compact historical version/change summaries. Historical setup scripts, checks, payloads, and verification logs are represented by counts/byte facts rather than copied into model context; use the access-controlled REST detail endpoints for exact retained definitions.",
         inputSchema: {
           rigId: z4.string().uuid(),
+          versionLimit: z4.number().int().positive().optional(),
           changeLimit: z4.number().int().positive().optional(),
         },
       },
-      async ({ rigId, changeLimit }) => {
+      async ({ rigId, versionLimit, changeLimit }) => {
         const rig = await requireRigForApi(deps.db, grant.workspaceId, rigId);
-        return json({
-          rig,
-          versions: await listRigVersionsForApi({ db: deps.db }, grant.workspaceId, rig.id),
-          changes: await listRigChangesForApi(
-            { db: deps.db },
+        const [versions, changes] = await Promise.all([
+          listRigVersionMonitoringSummaries(
+            deps.db,
             grant.workspaceId,
             rig.id,
-            boundedMcpLimit(changeLimit),
+            boundedRigHistoryLimit(versionLimit),
           ),
-        });
+          listRigChangeMonitoringSummaries(
+            deps.db,
+            grant.workspaceId,
+            rig.id,
+            boundedRigHistoryLimit(changeLimit),
+          ),
+        ]);
+        return json(boundRigDetailMcp(rig, versions, changes));
       },
     );
 
@@ -1249,18 +1302,38 @@ function registerWorkspaceOrchestrationTools(
       "sessions_list",
       {
         description:
-          "List compact high-level session status in this workspace, newest first. Use session_get for one session's detailed resources/tools/settings. The list never returns full session objects or history.",
+          "List compact high-level session status in this workspace. Defaults to creation order; use orderBy=updatedAt with decimal activity-revision updatedAfter/updatedThrough tokens for gap-free indexed incremental monitoring independent of application clocks. Cursors are opaque revision-fenced keysets. Use session_get for exact known targets and detailed resources/tools/settings. The list never returns full session objects or history.",
         inputSchema: {
           limit: z4.number().int().positive().max(100).optional(),
           cursor: z4.string().max(512).optional(),
           includeLastMessage: z4.boolean().optional(),
+          orderBy: z4.enum(["createdAt", "updatedAt"]).optional(),
+          updatedAfter: z4.string().max(64).optional(),
         },
       },
-      async ({ limit, cursor, includeLastMessage }) => {
+      async ({ limit, cursor, includeLastMessage, orderBy: requestedOrderBy, updatedAfter }) => {
+        const decodedCursor = cursor ? decodeSessionDiscoveryCursor(cursor) : undefined;
+        const orderBy: SessionDiscoveryOrderBy =
+          requestedOrderBy ?? decodedCursor?.orderBy ?? "createdAt";
+        if (decodedCursor && decodedCursor.orderBy !== orderBy) {
+          throw new Error("sessions_list cursor order does not match orderBy");
+        }
+        const normalizedUpdatedAfter =
+          updatedAfter !== undefined
+            ? normalizeSessionDiscoveryRevision(updatedAfter, "updatedAfter")
+            : (decodedCursor?.updatedAfter ?? undefined);
+        if (normalizedUpdatedAfter !== undefined && orderBy !== "updatedAt") {
+          throw new Error("sessions_list updatedAfter requires orderBy=updatedAt");
+        }
+        if (decodedCursor && decodedCursor.updatedAfter !== (normalizedUpdatedAfter ?? null)) {
+          throw new Error("sessions_list cursor does not match updatedAfter");
+        }
         const page = await listSessionDiscoverySummaries(deps.db, grant.workspaceId, {
           limit: boundedSessionDiscoveryLimit(limit),
-          ...(cursor ? { cursor: decodeSessionDiscoveryCursor(cursor) } : {}),
+          ...(decodedCursor ? { cursor: decodedCursor } : {}),
           includeLastMessage: includeLastMessage === true,
+          orderBy,
+          ...(normalizedUpdatedAfter ? { updatedAfter: normalizedUpdatedAfter } : {}),
         });
         return json(capSessionDiscoveryPage(page, includeLastMessage === true));
       },
@@ -1279,10 +1352,7 @@ function registerWorkspaceOrchestrationTools(
           throw new Error("session not found");
         }
         const queue = await getSessionQueueSnapshot(deps.db, grant.workspaceId, sessionId);
-        return json({
-          ...capSessionDetail(session),
-          effectiveControl: queue?.effectiveControl ?? null,
-        });
+        return json(boundSessionDetailMcp(session, queue?.effectiveControl ?? null));
       },
     );
 
@@ -1290,28 +1360,82 @@ function registerWorkspaceOrchestrationTools(
       "session_events",
       {
         description:
-          "Read a session's event timeline (oldest first), to monitor another session's progress. Pass `after` = the highest event `sequence` already seen to page forward; the response's `nextAfter` is that cursor. The response is BYTE-CAPPED for a monitoring glance: fat per-event payloads (a worker's verbatim tool outputs, message/reasoning bodies) are clamped, and an over-budget page is reduced to its head + tail with a marker — page the gap with `after`/`limit`, or read the worker's session notebook, if you need omitted content verbatim. `nextAfter` always advances past every event the page covered, so paging never skips real events.",
+          "Read a compact semantic tail only when session_get status is insufficient. With no cursor, this returns the newest matching events and excludes raw message/reasoning/command/PTY deltas. Use `latest` as an exclusive lookup for the newest event in exactly one semantic class; it cannot be combined with type or class filters. Use nextBefore to page older or explicit after/nextAfter to page forward. Type/class filters run in the RLS-scoped database query. payloadMode none|summary|full controls retained audit payload projection, but every model result is independently byte-capped with explicit truncation and exact covered sequence bounds. Exact retained forensic payloads require the access-controlled REST/SDK events API with mode=forensic&payloadMode=full; generic source bytes never retained by the audit boundary remain unavailable.",
         inputSchema: {
           sessionId: z4.string().uuid(),
           after: z4.number().int().nonnegative().optional(),
+          before: z4.number().int().positive().optional(),
           limit: z4.number().int().positive().optional(),
+          direction: z4.enum(SessionEventReadDirection.options).optional(),
+          mode: z4.enum(SessionEventReadMode.options).optional(),
+          payloadMode: z4.enum(SessionEventPayloadMode.options).optional(),
+          includeTypes: z4.array(z4.enum(SessionEventType.options)).max(100).optional(),
+          excludeTypes: z4.array(z4.enum(SessionEventType.options)).max(100).optional(),
+          includeClasses: z4
+            .array(z4.enum(SessionEventSemanticClass.options))
+            .max(SessionEventSemanticClass.options.length)
+            .optional(),
+          excludeClasses: z4
+            .array(z4.enum(SessionEventSemanticClass.options))
+            .max(SessionEventSemanticClass.options.length)
+            .optional(),
+          latest: z4.enum(SessionEventSemanticClass.options).optional(),
         },
       },
-      async ({ sessionId, after, limit }) => {
+      async ({
+        sessionId,
+        after,
+        before,
+        limit,
+        direction: requestedDirection,
+        mode: requestedMode,
+        payloadMode: requestedPayloadMode,
+        includeTypes,
+        excludeTypes,
+        includeClasses,
+        excludeClasses,
+        latest,
+      }) => {
         await requireSession(deps.db, grant.workspaceId, sessionId);
-        const events = await listSessionEvents(
-          deps.db,
-          grant.workspaceId,
-          sessionId,
-          after ?? 0,
-          boundedMcpLimit(limit),
-        );
-        const capped = capEventPage(events);
-        return json({
-          events: capped.events,
-          nextAfter: capped.nextAfter ?? after ?? 0,
-          ...(capped.truncated ? { truncated: true } : {}),
+        if (
+          latest &&
+          [includeTypes, excludeTypes, includeClasses, excludeClasses].some(
+            (filter) => filter !== undefined,
+          )
+        ) {
+          throw new Error("latest cannot be combined with event filters");
+        }
+        const mode = requestedMode ?? (after !== undefined ? "forensic" : "monitoring");
+        const direction = latest
+          ? "before"
+          : (requestedDirection ??
+            (before !== undefined ? "before" : after !== undefined ? "after" : "before"));
+        const payloadMode = requestedPayloadMode ?? (mode === "monitoring" ? "summary" : "full");
+        const dbPage = await listSessionEventPage(deps.db, grant.workspaceId, sessionId, {
+          after: after ?? 0,
+          ...(before !== undefined ? { before } : {}),
+          direction,
+          limit: latest ? 1 : boundedSessionEventMcpLimit(limit),
+          payloadMode,
+          includeTypes: includeTypes ?? [],
+          excludeTypes: excludeTypes ?? [],
+          includeClasses: latest ? [latest] : (includeClasses ?? []),
+          excludeClasses: excludeClasses ?? [],
+          ...(mode === "monitoring" ? { defaultExcludeTypes: SESSION_EVENT_RAW_DELTA_TYPES } : {}),
+          maxBytes: SESSION_EVENT_MCP_MAX_BYTES * 4,
         });
+        return json(
+          boundSessionEventMcpPage({
+            events: dbPage.events,
+            mode,
+            payloadMode,
+            direction,
+            sourceHasMore: dbPage.hasMore,
+            sourceTruncatedBy: dbPage.truncatedBy,
+            after: after ?? 0,
+            before: before ?? null,
+          }),
+        );
       },
     );
   }
@@ -1600,7 +1724,11 @@ function registerWorkspaceOrchestrationTools(
           title,
           "agent",
         );
-        return json({ ok: true, updated: result.updated, title: result.title ?? title });
+        return json({
+          ok: true,
+          updated: result.updated,
+          title: result.title ?? title,
+        });
       },
     );
   }
@@ -1705,7 +1833,11 @@ function registerVariableSetTools(
       variableSetId: variableSet.id,
       variableName: parsedName.data,
     });
-    const responseVariableSet = { id: variableSet.id, name: variableSet.name, created };
+    const responseVariableSet = {
+      id: variableSet.id,
+      name: variableSet.name,
+      created,
+    };
     return json({
       variableSet: responseVariableSet,
       environment: responseVariableSet,
@@ -1775,7 +1907,12 @@ function registerGitHubConnectTool(
       const missing = githubAppMissingSettings(settings);
       const slug = settings.githubAppSlug?.trim() || null;
       if (missing.length > 0 || !slug) {
-        return json({ configured: false, appSlug: slug, installUrl: null, missing });
+        return json({
+          configured: false,
+          appSlug: slug,
+          installUrl: null,
+          missing,
+        });
       }
       const base = (
         settings.publicBaseUrl ??
@@ -1885,7 +2022,10 @@ function repositoryWithScheduledTaskResource(
       ref: repository.defaultBranch,
       mountPath: repositoryMountPath(uri),
       ...(repository.private
-        ? { githubInstallationId: repository.installationId, githubRepositoryId: repository.id }
+        ? {
+            githubInstallationId: repository.installationId,
+            githubRepositoryId: repository.id,
+          }
         : {}),
     },
   };
@@ -1909,6 +2049,16 @@ function boundedMcpLimit(limit: number | undefined): number {
   return Math.min(500, Math.max(1, Math.floor(limit)));
 }
 
+function boundedRigHistoryLimit(limit: number | undefined): number {
+  if (!limit || !Number.isFinite(limit)) return 20;
+  return Math.min(100, Math.max(1, Math.floor(limit)));
+}
+
+function boundedSessionEventMcpLimit(limit: number | undefined): number {
+  if (!limit || !Number.isFinite(limit)) return 40;
+  return Math.min(250, Math.max(1, Math.floor(limit)));
+}
+
 const SESSION_DISCOVERY_DEFAULT_LIMIT = 20;
 const SESSION_DISCOVERY_MAX_LIMIT = 100;
 const SESSION_DISCOVERY_TEXT_CHARS = 600;
@@ -1919,48 +2069,178 @@ function boundedSessionDiscoveryLimit(limit: number | undefined): number {
   return Math.min(SESSION_DISCOVERY_MAX_LIMIT, Math.max(1, Math.floor(limit)));
 }
 
-function encodeSessionDiscoveryCursor(cursor: { createdAt: Date | string; id: string }): string {
+export function encodeSessionDiscoveryCursor(cursor: SessionDiscoveryCursor): string {
   return Buffer.from(
     JSON.stringify({
-      createdAt:
-        cursor.createdAt instanceof Date ? cursor.createdAt.toISOString() : cursor.createdAt,
+      v: 2,
+      orderBy: cursor.orderBy,
+      sortRevision: cursor.sortRevision,
+      sortAt: cursor.sortAt,
       id: cursor.id,
+      snapshotAt: cursor.snapshotAt,
+      snapshotRevision: cursor.snapshotRevision,
+      updatedAfter: cursor.updatedAfter,
     }),
     "utf8",
   ).toString("base64url");
 }
 
-function decodeSessionDiscoveryCursor(value: string): { createdAt: Date; id: string } {
+const SESSION_DISCOVERY_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$/;
+const SESSION_DISCOVERY_REVISION = /^(?:0|[1-9]\d*)$/;
+const SESSION_DISCOVERY_REVISION_MAX = 9_223_372_036_854_775_807n;
+const SESSION_DISCOVERY_UUID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function normalizeSessionDiscoveryTimestamp(value: string, label: string): string {
+  if (!SESSION_DISCOVERY_TIMESTAMP.test(value) || Number.isNaN(new Date(value).getTime())) {
+    throw new Error(`sessions_list ${label} must be an ISO UTC date-time`);
+  }
+  // Preserve up to six fractional digits. Converting through JS Date would
+  // discard PostgreSQL microseconds and can skip equal-millisecond rows.
+  return value;
+}
+
+function normalizeSessionDiscoveryRevision(value: string, label: string): string {
+  if (!SESSION_DISCOVERY_REVISION.test(value)) {
+    throw new Error(`sessions_list ${label} must be a decimal activity revision`);
+  }
+  const revision = BigInt(value);
+  if (revision > SESSION_DISCOVERY_REVISION_MAX) {
+    throw new Error(`sessions_list ${label} exceeds the database activity revision range`);
+  }
+  return revision.toString();
+}
+
+export function decodeSessionDiscoveryCursor(value: string): SessionDiscoveryCursor {
   try {
     const parsed = JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as {
+      v?: unknown;
+      orderBy?: unknown;
+      sortRevision?: unknown;
+      sortAt?: unknown;
       createdAt?: unknown;
       id?: unknown;
+      snapshotAt?: unknown;
+      snapshotRevision?: unknown;
+      updatedAfter?: unknown;
     };
-    const createdAt = typeof parsed.createdAt === "string" ? new Date(parsed.createdAt) : null;
     if (
-      !createdAt ||
-      Number.isNaN(createdAt.getTime()) ||
+      parsed.v === undefined &&
+      typeof parsed.createdAt === "string" &&
+      typeof parsed.id === "string" &&
+      SESSION_DISCOVERY_UUID.test(parsed.id)
+    ) {
+      const createdAt = normalizeSessionDiscoveryTimestamp(
+        parsed.createdAt,
+        "legacy cursor createdAt",
+      );
+      return {
+        orderBy: "createdAt",
+        sortRevision: "0",
+        sortAt: createdAt,
+        id: parsed.id,
+        snapshotAt: createdAt,
+        snapshotRevision: "0",
+        updatedAfter: null,
+      };
+    }
+    // The timestamp-fenced v1 format was never safe for updated-order
+    // continuation. Preserve rolling compatibility only for creation cursors,
+    // whose immutable ordering does not need an activity revision.
+    if (
+      parsed.v === 1 &&
+      parsed.orderBy === "createdAt" &&
+      typeof parsed.sortAt === "string" &&
+      typeof parsed.snapshotAt === "string" &&
+      parsed.updatedAfter === null &&
+      typeof parsed.id === "string" &&
+      SESSION_DISCOVERY_UUID.test(parsed.id)
+    ) {
+      return {
+        orderBy: "createdAt",
+        sortRevision: "0",
+        sortAt: normalizeSessionDiscoveryTimestamp(parsed.sortAt, "cursor sortAt"),
+        id: parsed.id,
+        snapshotAt: normalizeSessionDiscoveryTimestamp(parsed.snapshotAt, "cursor snapshotAt"),
+        snapshotRevision: "0",
+        updatedAfter: null,
+      };
+    }
+    if (
+      parsed.v !== 2 ||
+      (parsed.orderBy !== "createdAt" && parsed.orderBy !== "updatedAt") ||
+      typeof parsed.sortRevision !== "string" ||
+      typeof parsed.sortAt !== "string" ||
+      typeof parsed.snapshotAt !== "string" ||
+      typeof parsed.snapshotRevision !== "string" ||
+      (parsed.updatedAfter !== null && typeof parsed.updatedAfter !== "string") ||
       typeof parsed.id !== "string" ||
-      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(parsed.id)
+      !SESSION_DISCOVERY_UUID.test(parsed.id)
     ) {
       throw new Error("invalid cursor fields");
     }
-    return { createdAt, id: parsed.id };
+    const sortAt = normalizeSessionDiscoveryTimestamp(parsed.sortAt, "cursor sortAt");
+    const snapshotAt = normalizeSessionDiscoveryTimestamp(parsed.snapshotAt, "cursor snapshotAt");
+    const sortRevision = normalizeSessionDiscoveryRevision(
+      parsed.sortRevision,
+      "cursor sortRevision",
+    );
+    const snapshotRevision = normalizeSessionDiscoveryRevision(
+      parsed.snapshotRevision,
+      "cursor snapshotRevision",
+    );
+    const normalizedUpdatedAfter =
+      parsed.updatedAfter === null
+        ? null
+        : normalizeSessionDiscoveryRevision(parsed.updatedAfter, "cursor updatedAfter");
+    if (normalizedUpdatedAfter !== null && parsed.orderBy !== "updatedAt") {
+      throw new Error("incremental cursor requires updatedAt order");
+    }
+    if (parsed.orderBy === "createdAt" && (sortRevision !== "0" || snapshotRevision !== "0")) {
+      throw new Error("creation cursor cannot carry activity revisions");
+    }
+    return {
+      orderBy: parsed.orderBy,
+      sortRevision,
+      sortAt,
+      id: parsed.id,
+      snapshotAt,
+      snapshotRevision,
+      updatedAfter: normalizedUpdatedAfter,
+    };
   } catch {
     throw new Error("sessions_list cursor is invalid");
   }
 }
 
-function capSessionDiscoveryText(value: string | null, maxChars = SESSION_DISCOVERY_TEXT_CHARS) {
-  if (value === null || value.length <= maxChars) {
+function capSessionDiscoveryText(
+  value: string | null,
+  maxChars = SESSION_DISCOVERY_TEXT_CHARS,
+  originalChars?: number | null,
+) {
+  if (value === null) {
     return { text: value, truncated: false };
   }
-  const marker = `…[${value.length - maxChars} chars truncated]…`;
-  const body = Math.max(0, maxChars - marker.length);
-  const head = Math.ceil(body * 0.7);
-  const tail = body - head;
+  const projectedChars = Array.from(value);
+  const sourceChars = Math.max(projectedChars.length, originalChars ?? projectedChars.length);
+  if (sourceChars <= maxChars) {
+    return { text: value, truncated: false };
+  }
+
+  // The database supplies only a bounded prefix plus the original character
+  // count. Iterate to a stable marker width so the reported omission includes
+  // the characters replaced by the marker itself.
+  let bodyChars = maxChars;
+  let marker = "";
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const omittedChars = Math.max(0, sourceChars - bodyChars);
+    marker = `…[${omittedChars} chars truncated]…`;
+    const nextBodyChars = Math.max(0, maxChars - Array.from(marker).length);
+    if (nextBodyChars === bodyChars) break;
+    bodyChars = nextBodyChars;
+  }
   return {
-    text: `${value.slice(0, head)}${marker}${tail > 0 ? value.slice(-tail) : ""}`,
+    text: `${projectedChars.slice(0, bodyChars).join("")}${marker}`,
     truncated: true,
   };
 }
@@ -1970,12 +2250,25 @@ export function capSessionDiscoveryPage(
   includeLastMessage: boolean,
 ) {
   const projected = page.sessions.map((session) => {
-    const title = capSessionDiscoveryText(session.title, 200);
-    const goal = session.goal ? capSessionDiscoveryText(session.goal.text) : null;
+    const title = capSessionDiscoveryText(session.title, 200, session.titleOriginalChars);
+    const goal = session.goal
+      ? capSessionDiscoveryText(
+          session.goal.text,
+          SESSION_DISCOVERY_TEXT_CHARS,
+          session.goal.textOriginalChars,
+        )
+      : null;
     const preview = includeLastMessage
-      ? capSessionDiscoveryText(session.latestMessage?.preview ?? null)
+      ? capSessionDiscoveryText(
+          session.latestMessage?.preview ?? null,
+          SESSION_DISCOVERY_TEXT_CHARS,
+          session.latestMessage?.previewOriginalChars,
+        )
       : null;
     const blocker = session.effectiveControl.primaryBlocker;
+    const blockerDisplayName = blocker
+      ? capSessionDiscoveryText(blocker.displayName, 200, blocker.displayNameOriginalChars)
+      : null;
     return {
       id: session.id,
       title: title.text,
@@ -1985,11 +2278,13 @@ export function capSessionDiscoveryPage(
       status: session.status,
       pause: {
         state: session.effectiveControl.state,
+        additionalBlockerCount: session.effectiveControl.additionalBlockerCount,
         source: blocker
           ? {
               kind: blocker.kind,
               ...(blocker.sessionId ? { sessionId: blocker.sessionId } : {}),
-              displayName: capSessionDiscoveryText(blocker.displayName, 200).text,
+              displayName: blockerDisplayName!.text,
+              displayNameTruncated: blockerDisplayName!.truncated,
             }
           : null,
       },
@@ -2019,36 +2314,65 @@ export function capSessionDiscoveryPage(
   });
 
   let kept = projected;
-  let responseTruncated = false;
-  while (
-    kept.length > 1 &&
-    Buffer.byteLength(JSON.stringify({ sessions: kept }), "utf8") >
-      SESSION_DISCOVERY_PAGE_MAX_BYTES - 2_048
-  ) {
-    kept = kept.slice(0, -1);
-    responseTruncated = true;
-  }
-  const lastKept = kept.at(-1);
-  const droppedForByteCap = kept.length < projected.length;
-  const nextCursor = droppedForByteCap
-    ? lastKept
-      ? encodeSessionDiscoveryCursor({ createdAt: lastKept.createdAt, id: lastKept.id })
-      : null
-    : page.nextCursor
-      ? encodeSessionDiscoveryCursor(page.nextCursor)
-      : null;
-  return {
-    sessions: kept,
-    total: page.total,
-    hasMore: page.hasMore || droppedForByteCap,
-    nextCursor,
-    responseTruncated,
-    ...(responseTruncated
-      ? {
-          truncationReason: `response exceeded ${SESSION_DISCOVERY_PAGE_MAX_BYTES} bytes; continue with nextCursor`,
-        }
-      : {}),
+  const build = () => {
+    const lastKept = kept.at(-1);
+    const droppedForByteCap = kept.length < projected.length;
+    const sourceLast = lastKept
+      ? page.sessions.find((session) => session.id === lastKept.id)
+      : undefined;
+    const nextCursor = droppedForByteCap
+      ? sourceLast
+        ? encodeSessionDiscoveryCursor({
+            orderBy: page.orderBy,
+            sortRevision: sourceLast.sortRevision,
+            sortAt: sourceLast.sortAt,
+            id: sourceLast.id,
+            snapshotAt: page.snapshotAt,
+            snapshotRevision: page.snapshotRevision,
+            updatedAfter: page.updatedAfter,
+          })
+        : null
+      : page.nextCursor
+        ? encodeSessionDiscoveryCursor(page.nextCursor)
+        : null;
+    const result = {
+      sessions: kept,
+      total: page.total,
+      hasMore: page.hasMore || droppedForByteCap,
+      nextCursor,
+      orderBy: page.orderBy,
+      snapshotAt: page.snapshotAt,
+      snapshotRevision: page.snapshotRevision,
+      updatedAfter: page.updatedAfter,
+      updatedThrough: page.updatedThrough,
+      responseTruncated: droppedForByteCap,
+      ...(droppedForByteCap
+        ? {
+            truncationReason: `response exceeded ${SESSION_DISCOVERY_PAGE_MAX_BYTES} bytes; continue with nextCursor`,
+          }
+        : {}),
+      bytes: 0,
+      maxBytes: SESSION_DISCOVERY_PAGE_MAX_BYTES,
+    };
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const measured = Buffer.byteLength(JSON.stringify(result, null, 2), "utf8");
+      if (result.bytes === measured) break;
+      result.bytes = measured;
+    }
+    return result;
   };
+
+  let result = build();
+  while (result.bytes > SESSION_DISCOVERY_PAGE_MAX_BYTES && kept.length > 1) {
+    kept = kept.slice(0, -1);
+    result = build();
+  }
+  if (result.bytes > SESSION_DISCOVERY_PAGE_MAX_BYTES) {
+    throw new RangeError(
+      `sessions_list metadata exceeds its ${SESSION_DISCOVERY_PAGE_MAX_BYTES}-byte envelope`,
+    );
+  }
+  return result;
 }
 
 function parseMcpDate(raw: string, label: string): Date {

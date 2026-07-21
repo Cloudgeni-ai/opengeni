@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { proveFirstTurnEventOrdering } from "./canary-session-event-ordering";
 
-describe("OPE-63 first-turn production canary proof", () => {
+describe("event-ordering invariant first-turn production canary proof", () => {
   test("accepts one title, one usage, and one terminal event on a contiguous timeline", () => {
     const events = [
       { id: crypto.randomUUID(), sequence: 1, type: "session.created" },

@@ -7,7 +7,7 @@
 //
 // It is shipped from the runtime package (a testing util, not test-only-private)
 // because the API/worker integration suites (M4+) reuse it to drive
-// `withChannelA`/viewer/swap end-to-end without a real machine (dossier §16).
+// `withChannelA`/viewer/swap end-to-end without a real machine.
 
 import {
   AgentError,

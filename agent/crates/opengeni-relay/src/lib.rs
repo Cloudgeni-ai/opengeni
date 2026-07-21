@@ -1,4 +1,4 @@
-//! `opengeni-relay` — the stateless stream-relay edge (dossier §10.1/§10.5).
+//! `opengeni-relay` — the stateless stream-relay edge.
 //!
 //! The relay is a **dumb byte-pump** on its own fate-isolated tier: it pairs a
 //! self-hosted agent (the PRODUCER of pty/desktop frames) with a browser viewer

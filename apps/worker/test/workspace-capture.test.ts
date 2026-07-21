@@ -1,4 +1,4 @@
-// M1 unit tests (dossier §12 B-suite unit portion + §15). The pure logic:
+// Workspace-capture unit tests. The pure logic:
 // GC key-math, manifest serialization, guard constants, path/key helpers, the
 // pre-service skip gates (flag off / storage null), and the B7 static safety
 // grep (no close/terminate/kill; sandbox access only via the un-agent-loop
@@ -179,7 +179,7 @@ describe("workspace-capture — path & key helpers", () => {
   });
 });
 
-describe("workspace-capture — GC key-math (dossier B5)", () => {
+describe("workspace-capture — GC key-math", () => {
   const row = (id: string, blobKeys: string[]) => ({
     id,
     manifestKey: `m/${id}`,

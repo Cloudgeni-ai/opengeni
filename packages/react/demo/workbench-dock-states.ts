@@ -3,7 +3,7 @@
 
    The M5/M6 harnesses render sub-components (WorkbenchChanges, FileBrowser,
    SandboxTerminal) in isolation. M7 reviews the WHOLE dock — frame + header +
-   machine chip + tab strip + every surface — in each state of the dossier §13
+   machine chip + tab strip + every surface — in each state of the
    matrix. This module drives the real `<SandboxWorkspace>` through a mock client
    whose capability / capture / machine / git responses are chosen by a state key,
    so one harness + one screenshot runner covers every matrix cell.
@@ -609,7 +609,7 @@ export const DOCK_STATES: Record<string, DockState> = {
     machines: fleet(
       machine({
         kind: "selfhosted",
-        name: "jorgen-mbp",
+        name: "dev-mbp",
         state: "offline",
         active: true,
         isSessionGroup: false,

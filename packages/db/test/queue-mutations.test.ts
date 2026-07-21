@@ -14,6 +14,7 @@ import {
   markSessionAttemptQuiesced,
   moveQueuedTurnInTransaction,
   mutateSessionControlInTransaction,
+  peekSessionWork,
   QueueCommandConflictError,
   SessionCommandIdempotencyError,
   SessionControlConflictError,
@@ -385,16 +386,16 @@ describe("canonical queue commands", () => {
       ...validSteerMetadata,
       replacedAttemptId: crypto.randomUUID(),
     });
-    await expect(
-      getSessionQueueSnapshot(client.db, value.grant.workspaceId!, value.session.id),
-    ).rejects.toThrow(/missing predecessor attempt/);
+    expect(
+      await getSessionQueueSnapshot(client.db, value.grant.workspaceId!, value.session.id),
+    ).toMatchObject({ stoppingPreviousAttempt: true });
     await setTargetMetadata({
       ...validSteerMetadata,
       interruptionCount: 0,
     });
-    await expect(
-      getSessionQueueSnapshot(client.db, value.grant.workspaceId!, value.session.id),
-    ).rejects.toThrow(/malformed predecessor metadata/);
+    expect(
+      await getSessionQueueSnapshot(client.db, value.grant.workspaceId!, value.session.id),
+    ).toMatchObject({ stoppingPreviousAttempt: true });
     await setTargetMetadata(validSteerMetadata);
     const [superseded, interruption, session] = await withWorkspaceRls(
       client.db,
@@ -460,6 +461,10 @@ describe("canonical queue commands", () => {
       "turn.superseded",
       "session.status.changed",
     ]);
+    expect(await peekSessionWork(client.db, value.grant.workspaceId!, value.session.id)).toEqual({
+      kind: "cancellation-wait",
+      attemptId,
+    });
     const claimBeforeQuiescence = await claimSessionWorkForAttempt(
       client.db,
       value.grant.workspaceId!,
@@ -507,12 +512,52 @@ describe("canonical queue commands", () => {
         .set({ status: "queued" })
         .where(eq(schema.sessionTurns.id, target.id));
     });
-    await markSessionAttemptQuiesced(client.db, {
+    const wakeBeforeQuiescence = await withWorkspaceRls(
+      client.db,
+      value.grant.workspaceId!,
+      async (db) => {
+        const [row] = await db
+          .select({ wakeRevision: schema.sessionWorkflowWakeOutbox.wakeRevision })
+          .from(schema.sessionWorkflowWakeOutbox)
+          .where(eq(schema.sessionWorkflowWakeOutbox.sessionId, value.session.id));
+        return row?.wakeRevision ?? 0;
+      },
+    );
+    const quiescenceEvents = await markSessionAttemptQuiesced(client.db, {
       workspaceId: value.grant.workspaceId!,
       sessionId: value.session.id,
       attemptId,
       temporalWorkflowId: `session-${value.session.id}`,
     });
+    const wakeAfterQuiescence = await withWorkspaceRls(
+      client.db,
+      value.grant.workspaceId!,
+      async (db) => {
+        const [row] = await db
+          .select({ wakeRevision: schema.sessionWorkflowWakeOutbox.wakeRevision })
+          .from(schema.sessionWorkflowWakeOutbox)
+          .where(eq(schema.sessionWorkflowWakeOutbox.sessionId, value.session.id));
+        return row?.wakeRevision ?? 0;
+      },
+    );
+    expect(wakeAfterQuiescence).toBe(wakeBeforeQuiescence + 1);
+    expect(
+      await markSessionAttemptQuiesced(client.db, {
+        workspaceId: value.grant.workspaceId!,
+        sessionId: value.session.id,
+        attemptId,
+        temporalWorkflowId: `session-${value.session.id}`,
+      }),
+    ).toEqual(quiescenceEvents);
+    expect(
+      await withWorkspaceRls(client.db, value.grant.workspaceId!, async (db) => {
+        const [row] = await db
+          .select({ wakeRevision: schema.sessionWorkflowWakeOutbox.wakeRevision })
+          .from(schema.sessionWorkflowWakeOutbox)
+          .where(eq(schema.sessionWorkflowWakeOutbox.sessionId, value.session.id));
+        return row?.wakeRevision ?? 0;
+      }),
+    ).toBe(wakeAfterQuiescence);
     const nextAttemptId = crypto.randomUUID();
     const claimAfterSettlement = await claimSessionWorkForAttempt(
       client.db,
