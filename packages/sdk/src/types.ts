@@ -1215,6 +1215,10 @@ export type ScheduledTask = {
 };
 
 export type CreateSessionRequest = {
+  // Optional UUID preallocated by an embedding host so it can durably link its
+  // projection before OpenGeni admits the initial turn. Replays must retain the
+  // same UUID and idempotency key.
+  requestedSessionId?: string | undefined;
   initialMessage: string;
   // Per-session agent persona/system instructions (org-visible metadata, not a
   // secret). Delivered system-level, composed AFTER the per-workspace persona —

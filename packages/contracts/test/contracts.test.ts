@@ -59,6 +59,22 @@ describe("contracts", () => {
     expect(payload.metadata).toEqual({});
   });
 
+  test("accepts only a UUID as a caller-preallocated session id", () => {
+    const requestedSessionId = "00000000-0000-4000-8000-000000000042";
+    expect(
+      CreateSessionRequest.parse({
+        initialMessage: "inspect repo",
+        requestedSessionId,
+      }).requestedSessionId,
+    ).toBe(requestedSessionId);
+    expect(() =>
+      CreateSessionRequest.parse({
+        initialMessage: "inspect repo",
+        requestedSessionId: "host-session-42",
+      }),
+    ).toThrow();
+  });
+
   test("accepts MCP tool refs on create session", () => {
     const payload = CreateSessionRequest.parse({
       initialMessage: "inspect repo",

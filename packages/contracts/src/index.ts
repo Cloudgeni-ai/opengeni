@@ -5346,6 +5346,13 @@ export const SessionControlResponse = z.object({
 export type SessionControlResponse = z.infer<typeof SessionControlResponse>;
 
 export const CreateSessionRequest = withVariableSetIdAlias({
+  /**
+   * Optional UUID preallocated by an embedding host. This lets the host durably
+   * link its own projection before OpenGeni admits the initial turn. Replays
+   * must pair it with the same idempotency key; OpenGeni never derives host
+   * identity or authorization from the UUID.
+   */
+  requestedSessionId: z.string().uuid().optional(),
   initialMessage: z.string().min(1),
   // Per-session agent persona/system instructions (org-visible metadata, NOT a
   // secret). Rides the SAME system-level instructions channel the per-workspace
