@@ -558,7 +558,7 @@ export const DOCK_STATES: Record<string, DockState> = {
     machines: fleet(
       machine({
         kind: "selfhosted",
-        name: "jorgen-mbp",
+        name: "dev-mbp",
         state: "offline",
         active: true,
         isSessionGroup: false,
