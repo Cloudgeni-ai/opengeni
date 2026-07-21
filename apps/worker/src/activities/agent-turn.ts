@@ -164,6 +164,7 @@ import {
   loadWorkspaceEnvironmentForRunWithCredentials,
   mintRunGitCredentials,
   sandboxEnvironmentForRun,
+  type GitHubTokenMintAuthorization,
   type MintedRunGitCredentials,
 } from "./environment";
 import {
@@ -3373,6 +3374,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       if (activeSandboxBackend !== "selfhosted") {
         await assertGitHubResourcesRemainAuthorized(db, input.workspaceId, turnResources);
       }
+      const authorizeGitHubTokenMint: GitHubTokenMintAuthorization = async (selection) => {
+        await assertGitHubTokenMintSelectionAuthorized(
+          db,
+          input.workspaceId,
+          selection.installationId,
+          selection.repositoryIds,
+        );
+      };
       const {
         environment: sandboxEnvironment,
         gitToken: sandboxGitToken,
@@ -3392,6 +3401,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               activeSandboxBackend !== "selfhosted" && establishPolicy === "on-demand",
             scope: connectionScope,
             gitCredentials: connectionCredentials?.gitCredentials,
+            authorizeGitHubTokenMint,
             sessionId: input.sessionId,
             runId: turnId,
           },
@@ -3424,6 +3434,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             await mintRunGitCredentials(runSettings, turnResources, {
               scope: connectionScope,
               gitCredentials: connectionCredentials?.gitCredentials,
+              authorizeGitHubTokenMint,
             }),
           write: async (tokens) => {
             const runAs = sandboxRunAs(runSettings);
@@ -3911,6 +3922,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 : await mintRunGitCredentials(runSettings, turnResources, {
                     scope: connectionScope,
                     gitCredentials: connectionCredentials?.gitCredentials,
+                    authorizeGitHubTokenMint,
                   });
             const lazyGitTokens = lazyGitCredentials?.gitTokens;
             const provisioned = await resumeBoxForTurn(
@@ -6247,12 +6259,26 @@ async function assertGitHubResourcesRemainAuthorized(
   if (!selection) {
     return;
   }
+  await assertGitHubTokenMintSelectionAuthorized(
+    db,
+    workspaceId,
+    selection.installationId,
+    selection.repositoryIds,
+  );
+}
+
+async function assertGitHubTokenMintSelectionAuthorized(
+  db: Parameters<typeof areGitHubRepositoriesAllowedForWorkspace>[0],
+  workspaceId: string,
+  installationId: number,
+  repositoryIds: number[],
+): Promise<void> {
   if (
     !(await areGitHubRepositoriesAllowedForWorkspace(
       db,
       workspaceId,
-      selection.installationId,
-      selection.repositoryIds,
+      installationId,
+      repositoryIds,
     ))
   ) {
     throw new Error(

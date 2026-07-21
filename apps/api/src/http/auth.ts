@@ -68,7 +68,8 @@ function isAuthExempt(c: Context, settings: Settings): boolean {
   // The OAuth callback renders a same-origin POST form for choosing an existing
   // installation's repositories. The signed OAuth state + per-installation and
   // per-repository tickets are the coarse-boundary credential; the route still
-  // requires an authenticated github:manage workspace grant before binding.
+  // requires github:manage from the ordinary access resolver or a bounded
+  // configured-token browser handoff before binding.
   if (c.req.method === "POST" && githubInstallationLinkPathPattern.test(path)) {
     return true;
   }

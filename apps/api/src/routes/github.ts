@@ -1,4 +1,8 @@
-import { GitHubAppManifestCreate, type GitHubUserInstallationAccess } from "@opengeni/contracts";
+import {
+  GitHubAppManifestCreate,
+  type AccessGrant,
+  type GitHubUserInstallationAccess,
+} from "@opengeni/contracts";
 import { bindGitHubInstallationRepositories, deleteGitHubInstallationBinding } from "@opengeni/db";
 import {
   authorizeGitHubAppUser,
@@ -15,6 +19,7 @@ import {
   personalAppManifestUrl,
   readSignedState,
   stateMaxAgeSeconds,
+  type GitHubSignedStatePayload,
   verifySignedState,
 } from "@opengeni/github";
 import type { Context, Hono } from "hono";
@@ -22,6 +27,12 @@ import { deleteCookie, setCookie } from "hono/cookie";
 import { HTTPException } from "hono/http-exception";
 import { requireAccessGrant } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
+import {
+  continuedGitHubBrowserGrantClaims,
+  githubBrowserBaseUrl,
+  githubBrowserGrantClaims,
+  githubBrowserGrantFromState,
+} from "../github-browser-flow";
 import {
   listWorkspaceGitHubInstallationBindings,
   listWorkspaceGitHubRepositories,
@@ -42,11 +53,13 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       intent: "install",
+      ...githubBrowserGrantClaims(settings, grant),
     });
     const linkState = createSignedState(githubStateSecret, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       intent: "link_existing",
+      ...githubBrowserGrantClaims(settings, grant),
     });
     const baseUrl = openGeniBaseUrl(settings, c);
     const connectBase = `${baseUrl}/v1/workspaces/${grant.workspaceId}/github/connect`;
@@ -70,8 +83,9 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
   // cookie the install/OAuth callbacks require and forwards to GitHub.
   // Deliberately unauthenticated: the signed state is only ever minted for
   // grants holding github:use, expires after stateMaxAgeSeconds, and is bound
-  // to this workspace; completing the installation binding still requires an
-  // authenticated github:manage grant in the same browser at the callback.
+  // to this workspace; completing the installation binding still requires
+  // github:manage from the ordinary browser session or the bounded configured-
+  // token handoff embedded only for a manager.
   app.get("/v1/workspaces/:workspaceId/github/connect", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const state = c.req.query("state");
@@ -179,6 +193,7 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
     const state = createSignedState(githubStateSecret, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
+      ...githubBrowserGrantClaims(settings, grant),
     });
     setGitHubStateCookie(c, deps, state);
     const appName = payload.appName?.trim() || "OpenGeni";
@@ -240,7 +255,7 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw new HTTPException(400, { message: "invalid or expired GitHub installation state" });
     }
     requireGitHubStateCookie(c, state);
-    const grant = await requireAccessGrant(c, deps, statePayload.workspaceId, "github:manage");
+    const grant = await requireGitHubManageGrant(c, deps, statePayload.workspaceId, statePayload);
     if (grant.accountId !== statePayload.accountId) {
       throw new HTTPException(403, {
         message: "GitHub installation state does not match this workspace",
@@ -267,6 +282,7 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
         installationId,
+        ...continuedGitHubBrowserGrantClaims(statePayload),
       });
       const baseUrl = openGeniBaseUrl(settings, c);
       setGitHubStateCookie(c, deps, oauthState);
@@ -307,7 +323,7 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
     requireGitHubStateCookie(c, state);
     if (statePayload.intent === "link_existing") {
-      const grant = await requireAccessGrant(c, deps, statePayload.workspaceId, "github:manage");
+      const grant = await requireGitHubManageGrant(c, deps, statePayload.workspaceId, statePayload);
       if (grant.accountId !== statePayload.accountId) {
         throw new HTTPException(403, {
           message: "GitHub installation state does not match this workspace",
@@ -350,7 +366,11 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.post("/v1/workspaces/:workspaceId/github/installations", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "github:manage");
+    // A configured-token browser cannot retain its Authorization header across
+    // GitHub's redirects. The signed, short-lived state cookie is the browser
+    // handoff and lets us authenticate before parsing the form; managed/local
+    // modes continue through the ordinary access resolver.
+    const grant = await requireGitHubManageGrant(c, deps, workspaceId);
     const form = new URLSearchParams(await c.req.text());
     const oauthState = form.get("oauth_state");
     const installationTicket = form.get("installation_ticket");
@@ -377,7 +397,8 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw new HTTPException(400, { message: "invalid or expired GitHub installation selection" });
     }
     const installationId = parsePositiveInteger(String(installationPayload.installationId ?? ""));
-    if (installationId === null) {
+    const suspended = installationPayload.suspended;
+    if (installationId === null || typeof suspended !== "boolean") {
       throw new HTTPException(400, { message: "invalid GitHub installation selection" });
     }
     const repositoryIds = repositoryTickets.map((ticket) => {
@@ -406,6 +427,7 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
           typeof installationPayload.accountType === "string"
             ? installationPayload.accountType
             : null,
+        suspended,
       });
     } catch (error) {
       throw githubHttpError(error);
@@ -442,7 +464,7 @@ async function completeGitHubInstallationBinding(
   c: Context,
   input: {
     code: string;
-    statePayload: { accountId?: string; workspaceId?: string };
+    statePayload: GitHubSignedStatePayload;
     installationId: number;
   },
 ) {
@@ -450,7 +472,12 @@ async function completeGitHubInstallationBinding(
   if (!input.statePayload.workspaceId || !input.statePayload.accountId) {
     throw new HTTPException(400, { message: "invalid or expired GitHub installation state" });
   }
-  const grant = await requireAccessGrant(c, deps, input.statePayload.workspaceId, "github:manage");
+  const grant = await requireGitHubManageGrant(
+    c,
+    deps,
+    input.statePayload.workspaceId,
+    input.statePayload,
+  );
   if (grant.accountId !== input.statePayload.accountId) {
     throw new HTTPException(403, {
       message: "GitHub installation state does not match this workspace",
@@ -558,13 +585,18 @@ async function authorizeGitHubInstallationForBinding(
 
 async function getLiveGitHubInstallation(
   deps: ApiRouteDeps,
-  fallback: { installationId: number; accountLogin: string | null; accountType: string | null },
+  fallback: {
+    installationId: number;
+    accountLogin: string | null;
+    accountType: string | null;
+    suspended: boolean;
+  },
 ) {
   if (deps.githubAppApi?.getInstallation) {
     return await deps.githubAppApi.getInstallation({ installationId: fallback.installationId });
   }
   if (deps.githubAppApi) {
-    return { ...fallback, suspended: false };
+    return fallback;
   }
   return await getGitHubAppInstallationSummary(deps.settings, fallback.installationId);
 }
@@ -618,6 +650,7 @@ function githubExistingInstallationsHtml(input: {
         installationId: installation.installationId,
         accountLogin: installation.accountLogin,
         accountType: installation.accountType,
+        suspended: installation.suspended,
       });
       const repositoryInputs = repositories
         .map((repository) => {
@@ -673,6 +706,33 @@ function requireGitHubStateCookie(c: Context, state: string): void {
     throw new HTTPException(400, {
       message: "invalid or expired GitHub installation browser state",
     });
+  }
+}
+
+async function requireGitHubManageGrant(
+  c: Context,
+  deps: ApiRouteDeps,
+  workspaceId: string,
+  expectedState?: GitHubSignedStatePayload,
+): Promise<AccessGrant> {
+  try {
+    return await requireAccessGrant(c, deps, workspaceId, "github:manage");
+  } catch (error) {
+    if (!(error instanceof HTTPException) || error.status !== 401) {
+      throw error;
+    }
+    const candidates = expectedState
+      ? [expectedState]
+      : allCookieValues(c, githubStateCookie)
+          .map((state) => readSignedState(state, deps.githubStateSecret))
+          .filter((payload): payload is GitHubSignedStatePayload => payload !== null);
+    for (const payload of candidates) {
+      const grant = githubBrowserGrantFromState(deps.settings, payload, workspaceId);
+      if (grant) {
+        return grant;
+      }
+    }
+    throw error;
   }
 }
 
@@ -753,9 +813,5 @@ function openGeniReturnUrl(
 }
 
 function openGeniBaseUrl(settings: ApiRouteDeps["settings"], c: Context): string {
-  return (
-    settings.githubAppManifestBaseUrl ??
-    settings.publicBaseUrl ??
-    new URL(c.req.url).origin
-  ).replace(/\/+$/, "");
+  return githubBrowserBaseUrl(settings, new URL(c.req.url).origin);
 }

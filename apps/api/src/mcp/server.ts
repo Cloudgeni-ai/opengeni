@@ -69,6 +69,7 @@ import * as z4 from "zod/v4";
 import { hasPermission } from "@opengeni/core";
 import { recordWorkspaceUsage, requireLimit } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
+import { githubBrowserBaseUrl, githubBrowserGrantClaims } from "../github-browser-flow";
 import { listWorkspaceGitHubRepositories } from "../github-access";
 import {
   promoteVerifiedDefinitionEditChangeForApi,
@@ -1902,7 +1903,7 @@ function registerGitHubConnectTool(
     "github_connect_link",
     {
       description:
-        "Create workspace-bound links for connecting GitHub. linkUrl authorizes and links an existing installation; installUrl installs the app on another GitHub account. Completion requires a signed-in human with github:manage. The links expire.",
+        "Create workspace-bound links for connecting GitHub. linkUrl authorizes and links an existing installation; installUrl installs the app on another GitHub account. Completion requires github:manage through a signed-in browser or configured-token handoff. The links expire.",
       inputSchema: {},
     },
     async () => {
@@ -1918,12 +1919,7 @@ function registerGitHubConnectTool(
           missing,
         });
       }
-      const base = (
-        settings.publicBaseUrl ??
-        settings.githubAppManifestBaseUrl ??
-        options.requestOrigin ??
-        ""
-      ).replace(/\/+$/, "");
+      const base = githubBrowserBaseUrl(settings, options.requestOrigin);
       if (!base) {
         throw new Error(
           "github_connect_link requires OPENGENI_PUBLIC_BASE_URL (or OPENGENI_GITHUB_APP_MANIFEST_BASE_URL) so the install link can route through this deployment",
@@ -1933,11 +1929,13 @@ function registerGitHubConnectTool(
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
         intent: "install",
+        ...githubBrowserGrantClaims(settings, grant),
       });
       const linkState = createSignedState(deps.githubStateSecret, {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
         intent: "link_existing",
+        ...githubBrowserGrantClaims(settings, grant),
       });
       return json({
         configured: true,
