@@ -1341,13 +1341,17 @@ export type ConnectionCredentialsPort = {
 // ============ connection-credential provider — GitHub App API port (BYO-App, §7.6 / GitHub credential prototype remainder) ===
 //
 // The host-driven GitHub-API credential leg. GitHub credential prototype closed the establishment +
-// gate (storage) axis; this closes the credential leg by making the two live
+// gate (storage) axis; this closes the credential leg by making the live
 // GitHub-API calls host-PROVIDABLE so a BYO-GitHub-App host drives its OWN App
 // credentials (its own JWT-signing key, its own OAuth client) instead of
 // OpenGeni self-minting from `settings`:
+//   - authorizeUser: OAuth code exchange + discovery of every existing
+//     installation/repository the user may link, including permission bits.
 //   - verifyInstallationAccessForUser: the OAuth code→token + installation
-//     lookup that PROVES the install is real (today
+//     lookup retained for compatibility with install-only hosts (today
 //     `verifyGitHubInstallationAccessForUser(settings, …)`).
+//   - getInstallation: a live belongs-to-this-App/suspension check before an
+//     existing installation selection is persisted.
 //   - listRepositories: the installation-scoped repo listing behind
 //     `GET /v1/workspaces/:id/github/repositories` (today
 //     `listGitHubAppRepositories(settings, …)`).
@@ -1362,11 +1366,31 @@ export type GitHubInstallationSummary = {
   suspended: boolean;
 };
 
+export type GitHubRepositoryPermissions = {
+  admin: boolean;
+  maintain: boolean;
+  push: boolean;
+  triage: boolean;
+  pull: boolean;
+};
+
+export type GitHubUserRepositoryAccess = GitHubRepository & {
+  permissions: GitHubRepositoryPermissions;
+};
+
+export type GitHubUserInstallationAccess = GitHubInstallationSummary & {
+  repositories: GitHubUserRepositoryAccess[];
+};
+
 export type GitHubAppApiPort = {
+  authorizeUser?: (input: { code: string }) => Promise<GitHubUserInstallationAccess[]>;
   verifyInstallationAccessForUser?: (input: {
     code: string;
     installationId: number;
   }) => Promise<GitHubInstallationSummary>;
+  getInstallation?: (input: {
+    installationId: number;
+  }) => Promise<GitHubInstallationSummary | null>;
   listRepositories?: (input: { installationIds?: number[] }) => Promise<GitHubRepository[]>;
 };
 
@@ -5248,6 +5272,37 @@ export const GitHubRepository = z.object({
   accountType: z.string().nullable(),
 });
 export type GitHubRepository = z.infer<typeof GitHubRepository>;
+
+export const GitHubRepositoryScope = z.enum(["all", "selected"]);
+export type GitHubRepositoryScope = z.infer<typeof GitHubRepositoryScope>;
+
+export const GitHubInstallationBinding = z.object({
+  installationId: z.number().int().positive(),
+  accountLogin: z.string().nullable(),
+  accountType: z.string().nullable(),
+  repositoryScope: GitHubRepositoryScope,
+  repositoryCount: z.number().int().nonnegative(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type GitHubInstallationBinding = z.infer<typeof GitHubInstallationBinding>;
+
+export const GitHubAppInfo = z.object({
+  configured: z.boolean(),
+  appId: z.string().nullable(),
+  clientId: z.string().nullable(),
+  appSlug: z.string().nullable(),
+  installUrl: z.string().nullable(),
+  linkUrl: z.string().nullable(),
+  installations: z.array(GitHubInstallationBinding),
+  missing: z.array(z.string()),
+});
+export type GitHubAppInfo = z.infer<typeof GitHubAppInfo>;
+
+export const GitHubRepositoriesResponse = z.object({
+  repositories: z.array(GitHubRepository),
+});
+export type GitHubRepositoriesResponse = z.infer<typeof GitHubRepositoriesResponse>;
 
 export const ClientAuthConfig = z.discriminatedUnion("mode", [
   z.object({
