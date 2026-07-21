@@ -24,6 +24,7 @@ import {
   moveQueuedTurnInTransaction,
   mutateSessionControlInTransaction,
   mutateWorkspaceControlInTransaction,
+  runIdempotentPersistenceTransaction,
   saveComposerDraftInTransaction,
   sendAgentMessageInTransaction,
   serializeEffectiveSessionControl,
@@ -65,6 +66,33 @@ function agentActor(context: AgentSessionCommandContext) {
     attemptId: context.callerAttemptId,
     executionGeneration: context.callerExecutionGeneration,
   };
+}
+
+/**
+ * Retry only one operation-keyed Agent command transaction. The caller keeps
+ * event publication and Temporal wake delivery after this returns, so a
+ * deadlock/serialization retry can never replay an external effect.
+ */
+async function runAgentCommandPersistenceTransaction<T>(
+  deps: { db: Database },
+  context: AgentSessionCommandContext,
+  input: {
+    stage: string;
+    eventTypes: string[];
+    transaction: (tx: Database) => Promise<T>;
+  },
+): Promise<T> {
+  return await runIdempotentPersistenceTransaction(
+    {
+      stage: input.stage,
+      eventTypes: input.eventTypes,
+      maxAttempts: 3,
+    },
+    async () =>
+      await withWorkspaceRls(deps.db, context.workspaceId, async (scoped) =>
+        scoped.transaction(async (tx) => await input.transaction(tx as unknown as Database)),
+      ),
+  );
 }
 
 async function publishAndWakeAgentCommand(
@@ -165,9 +193,11 @@ export async function sendAgentSessionMessage(
   context: AgentSessionCommandContext,
   input: { targetSessionId: string; text: string; idempotencyKey: string },
 ) {
-  const result = await withWorkspaceRls(deps.db, context.workspaceId, (scoped) =>
-    scoped.transaction((tx) =>
-      sendAgentMessageInTransaction(tx as unknown as Database, {
+  const result = await runAgentCommandPersistenceTransaction(deps, context, {
+    stage: "session_commands.agent_message",
+    eventTypes: ["system.update.pending"],
+    transaction: async (tx) =>
+      await sendAgentMessageInTransaction(tx, {
         accountId: context.accountId,
         workspaceId: context.workspaceId,
         targetSessionId: input.targetSessionId,
@@ -175,8 +205,7 @@ export async function sendAgentSessionMessage(
         operationKey: input.idempotencyKey,
         text: input.text,
       }),
-    ),
-  );
+  });
   await publishAndWakeAgentCommand(deps, {
     accountId: context.accountId,
     workspaceId: context.workspaceId,
@@ -200,9 +229,11 @@ export async function steerAgentSession(
   context: AgentSessionCommandContext,
   input: { targetSessionId: string; instruction: string; idempotencyKey: string },
 ) {
-  const result = await withWorkspaceRls(deps.db, context.workspaceId, (scoped) =>
-    scoped.transaction((tx) =>
-      steerAgentSessionInTransaction(tx as unknown as Database, {
+  const result = await runAgentCommandPersistenceTransaction(deps, context, {
+    stage: "session_commands.agent_steer",
+    eventTypes: ["session.control.steer_requested", "system.update.pending", "turn.superseded"],
+    transaction: async (tx) =>
+      await steerAgentSessionInTransaction(tx, {
         accountId: context.accountId,
         workspaceId: context.workspaceId,
         targetSessionId: input.targetSessionId,
@@ -210,8 +241,7 @@ export async function steerAgentSession(
         operationKey: input.idempotencyKey,
         instruction: input.instruction,
       }),
-    ),
-  );
+  });
   await publishAndWakeAgentCommand(deps, {
     accountId: context.accountId,
     workspaceId: context.workspaceId,

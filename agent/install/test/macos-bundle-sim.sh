@@ -1,7 +1,7 @@
 #!/bin/sh
 # shellcheck shell=sh
 #
-# macOS app-bundle assembly SIMULATION (dossier §23; the REPLACE_APP incident).
+# macOS app-bundle assembly SIMULATION (the REPLACE_APP incident).
 #
 # install.sh's darwin bundle path signs + verifies + atomically installs an app
 # bundle around the verified binary. This test SOURCES install.sh as a library
@@ -94,7 +94,7 @@ run_local_install() {
 
 echo "SIM 1: a Developer ID Application identity is present -> signed with it"
 DEVID_HASH="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-printf '  1) %s "Developer ID Application: Jorgen (TEAM123)"\n     1 valid identities found\n' \
+printf '  1) %s "Developer ID Application: Example User (TEAM123)"\n     1 valid identities found\n' \
   "$DEVID_HASH" > "$WORK/sec-one"
 MOCK_SECURITY_FILE="$WORK/sec-one" run_local_install one
 if grep -q -- "--sign $DEVID_HASH" "$WORK/codesign-one.log"; then
@@ -102,7 +102,7 @@ if grep -q -- "--sign $DEVID_HASH" "$WORK/codesign-one.log"; then
 else
   bad "codesign was NOT invoked with the Developer ID hash"; cat "$WORK/codesign-one.log"
 fi
-if grep -q 'signed with Developer ID "Developer ID Application: Jorgen (TEAM123)"' "$WORK/log-one"; then
+if grep -q 'signed with Developer ID "Developer ID Application: Example User (TEAM123)"' "$WORK/log-one"; then
   ok "logged the Developer ID signing line"
 else
   bad "missing the Developer ID signing log line"; cat "$WORK/log-one"

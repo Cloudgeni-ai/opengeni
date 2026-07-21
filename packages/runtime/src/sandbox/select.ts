@@ -3,7 +3,7 @@
 // negotiateCapabilities() turns a static CapabilityDescriptor + runtime context
 // (the selected OS, the lease liveness/epoch, and the deployment's desktop
 // policy) into a coherent SessionCapabilities document. The load-bearing rule
-// (master-spine Part D): a capability cell is ALWAYS present — when unavailable
+// (sandbox contract Part D): a capability cell is ALWAYS present — when unavailable
 // it is `available:false` + a typed `reason`, NEVER absent. Degradation is a
 // value, not a silent drop.
 
@@ -45,7 +45,7 @@ export interface NegotiationContext {
    *  (settings.computerUseReadOnly). v1 default false (the agent clicks/types). */
   computerUseReadOnly?: boolean;
   /**
-   * Whether a scoped-stream-token secret is resolvable (I8/OD-8). When desktop
+   * Whether a scoped-stream-token secret is resolvable (stream-token availability contract). When desktop
    * is enabled but this is false (no streamTokenSecret AND no delegationSecret),
    * the desktop plane GRACEFULLY DEGRADES to transport:null — the deployment
    * boots, but the pixel plane cannot mint scoped tokens. Defaults to true so a
@@ -279,7 +279,7 @@ export function negotiateCapabilities(ctx: NegotiationContext): SessionCapabilit
       available = false;
       reason = "disabled_by_policy";
     } else if (ctx.streamTokenSecretAvailable === false) {
-      // Graceful degrade (I8/OD-8): desktop is enabled + backend-capable, but no
+      // Graceful degrade (stream-token availability contract): desktop is enabled + backend-capable, but no
       // stream-token secret is resolvable, so no scoped token can be minted. The
       // deployment boots; the desktop cell reports transport:null + a typed
       // reason rather than crashing the API.

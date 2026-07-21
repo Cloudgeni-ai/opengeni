@@ -118,7 +118,7 @@ export async function probeCatalogSnapshot(
         .filter((item) => item.outcome.status === "junk")
         .map((item) => ({
           domain: item.domain,
-          mcpUrl: item.mcpUrl,
+          mcpUrl: null,
           reason: `probe_${item.outcome.reason}`,
         })),
     ],

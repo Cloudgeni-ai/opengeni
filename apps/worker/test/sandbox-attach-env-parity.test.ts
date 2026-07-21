@@ -37,7 +37,7 @@ const baseSettings = () =>
   testSettings({
     // A provisioned cloud backend so the backend-aware HOME default applies (the
     // exact key an attach-warmed box used to be missing). Desktop-capable so this
-    // mirrors the sandbox-surfacing deployment (ns opengeni-preview).
+    // mirrors the sandbox workspace deployment (ns opengeni-preview).
     sandboxBackend: "modal",
     gitAuthorName: "OpenGeni Bot",
     gitAuthorEmail: "bot@opengeni.dev",

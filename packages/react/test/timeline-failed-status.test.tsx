@@ -434,6 +434,55 @@ describe("ComputerCallRenderer — failed status (flagged fix)", () => {
     expect(text.toLowerCase()).not.toContain("fail");
     await r.unmount();
   });
+
+  test("complete screenshot with omitted media says not retained instead of empty or success image", async () => {
+    const item = toolItem({
+      name: "computer_call",
+      raw: { type: "computer_call", action: { type: "screenshot" } },
+      output: {
+        type: "media_preview",
+        mediaType: "image/png",
+        inlineBytes: 2_000_000,
+        fullOutputAvailable: false,
+        preview: "Inline media omitted from the audit timeline; source bytes were not retained.",
+      },
+      status: "complete",
+    });
+    const Renderer = defaultToolRegistry.resolve(item);
+    const r = await renderComponent(<Renderer item={item} />);
+    await flush();
+
+    expect(r.container.textContent).toContain("not retained");
+    expect(r.container.querySelector("img")).toBeNull();
+    const trigger = r.container.querySelector('[role="button"]') as HTMLElement | null;
+    await actRun(() => trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    await flush();
+    expect(r.container.textContent).toContain("source bytes were not retained");
+    expect(r.container.textContent).not.toContain("empty screenshot");
+    await r.unmount();
+  });
+
+  test("view_image with omitted media renders the same truthful non-retention state", async () => {
+    const item = toolItem({
+      name: "view_image",
+      arguments: JSON.stringify({ path: "/tmp/large.png" }),
+      output: {
+        type: "media_preview",
+        mediaType: "image/png",
+        inlineBytes: null,
+        fullOutputAvailable: false,
+        preview: "Inline media omitted from the audit timeline; source bytes were not retained.",
+      },
+      status: "complete",
+    });
+    const Renderer = defaultToolRegistry.resolve(item);
+    const r = await renderComponent(<Renderer item={item} />);
+    await flush();
+
+    expect(r.container.textContent).toContain("not retained");
+    expect(r.container.querySelector("img")).toBeNull();
+    await r.unmount();
+  });
 });
 
 /* ---- Regression: read-only and rejected paths are unaffected -------------- */

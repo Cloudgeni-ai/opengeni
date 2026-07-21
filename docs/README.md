@@ -11,7 +11,7 @@ This map defines who each doc tier serves and where volatile facts belong.
 | Repo agent | `AGENTS.md`, `.agents/skills/opengeni/SKILL.md`, this map | Coding agents working in this repository. |
 | Product agent | Bundled skills in `packages/runtime/src/bundled_hashicorp_terraform_skills` | Versioned product content; not covered by this freshness system. |
 | Operator | `docs/deployment.md`, deployment contracts and chart docs | People deploying and operating OpenGeni. |
-| Record | `docs/design/**`, historical results, design dossiers | Point-in-time records; banner-label, never "fix" them. |
+| Record | `docs/design/**` | Public-safe point-in-time architecture and product-design records; never raw operator evidence. |
 
 ## Canonical Homes
 
@@ -20,7 +20,7 @@ This map defines who each doc tier serves and where volatile facts belong.
 | Architecture & package layout | `docs/architecture.md` | `README.md`, `AGENTS.md`, package READMEs should link or summarize lightly. |
 | Embedding & ports | `docs/embedding.md` | `README.md`, `CONTRIBUTING.md`, SDK/client examples should link. |
 | Run lifecycle | `docs/run-lifecycle.md` | `AGENTS.md`, `.agents/skills/opengeni/SKILL.md`, architecture summaries should link. |
-| Workspace knowledge memory | `docs/architecture.md` §3.5, `docs/run-lifecycle.md` § Memory; code contracts in `packages/contracts/src/index.ts` and `packages/db/src/schema.ts` | The OPE-29 ADR under `docs/design/hierarchical-role-aware-memory.md` is the point-in-time rationale, not a second live schema/API source. |
+| Workspace knowledge memory | `docs/architecture.md` §3.5, `docs/run-lifecycle.md` § Memory; code contracts in `packages/contracts/src/index.ts` and `packages/db/src/schema.ts` | The memory-design ADR under `docs/design/hierarchical-role-aware-memory.md` is the point-in-time rationale, not a second live schema/API source. |
 | Codex subscription rotation | `docs/codex-subscription-rotation.md` | `docs/run-lifecycle.md`, `docs/architecture.md`, and operator notes should link instead of restating allocator/failure semantics. |
 | Per-session MCP servers | `docs/session-mcp-servers.md` | `docs/architecture.md`, SDK/client examples should link instead of restating credential semantics. |
 | Connected machines | `docs/connected-machines.md` | `README.md`, `AGENTS.md`, client docs and skills should link. |
@@ -38,5 +38,6 @@ This map defines who each doc tier serves and where volatile facts belong.
 ## Rules
 
 1. Volatile facts such as paths, package names, commands, and env vars live in the canonical home; other docs link instead of restating.
-2. `docs/design/**` is record tier. Add the point-in-time banner and `<!-- docs-refs: record -->` marker; do not "freshen" those docs.
+2. `docs/design/**` is a public record tier. Add the point-in-time banner and `<!-- docs-refs: record -->` marker; do not "freshen" those docs. Raw run logs, screenshots/video, reviewer transcripts, private issue links, production identifiers/metrics, personal paths, and credentials belong in private artifact storage, never this repository.
 3. Current-tier freshness is enforced in CI by `scripts/check-docs-refs.ts`.
+

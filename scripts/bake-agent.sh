@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # bake-agent.sh — compile, sign, and stage the per-SHA opengeni-agent binaries the
 # API image serves from /agent/* (the "agent ships inside the control-plane"
-# decision; dossier §23.x agent-distribution).
+# decision; agent-distribution).
 #
 # Run this as a CI STEP in the deployed-env API image build (release.yml here, and
 # the ops-repo per-SHA preview/staging/prod image builds) BEFORE `docker build`.

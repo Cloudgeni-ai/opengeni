@@ -71,7 +71,7 @@ afterAll(async () => {
     /* noop */
   }
   await shared?.release();
-});
+}, 180_000);
 
 describe("codex_pin_source (AM-2)", () => {
   test("a fresh (never-pinned) session reads pin=null, source=null", async () => {

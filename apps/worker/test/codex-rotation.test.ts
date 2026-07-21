@@ -372,7 +372,7 @@ describe("P3 self-heal + bounded reactive walk (invariant 4)", () => {
   });
 });
 
-describe("effectiveRotationStrategy (OPE-36)", () => {
+describe("effectiveRotationStrategy (sharded-rotation policy)", () => {
   test("every stored value — legacy, sharded, or unknown — normalizes to sharded", () => {
     for (const stored of [
       "most_remaining",
@@ -387,7 +387,7 @@ describe("effectiveRotationStrategy (OPE-36)", () => {
   });
 });
 
-describe("chooseRotationActive — legacy strategies normalize to sharded ranking (OPE-36)", () => {
+describe("chooseRotationActive — legacy strategies normalize to sharded ranking (sharded-rotation policy)", () => {
   // The strategy picker is gone: rotation-enabled ALWAYS behaves as sticky-sharded
   // (effectiveRotationStrategy normalizes every stored value). A stored legacy
   // strategy must NOT reproduce its old behavior — it ranks by load like sharded.
@@ -884,7 +884,7 @@ describe("chooseShardedHome — proactive home decision (AM-4/AM-7)", () => {
   });
 });
 
-describe("OPE-21 deterministic fairness properties", () => {
+describe("credential allocator deterministic fairness properties", () => {
   test("concurrent reservation simulation chooses every idle identity before reusing one", () => {
     const accounts = [leasedAcct("a"), leasedAcct("b"), leasedAcct("c"), leasedAcct("d")];
     const selected: string[] = [];
@@ -997,8 +997,8 @@ describe("classifyCodexPin — pin lifecycle (manual sacrosanct, policy meaningf
     }
   });
 
-  test("OPE-36: a POLICY pin with rotation ENABLED → sharded under EVERY stored strategy (normalized)", () => {
-    // Pre-OPE-36 a stored legacy strategy made policy pins "clearStale" — that
+  test("sharded-rotation policy: a POLICY pin with rotation ENABLED → sharded under EVERY stored strategy (normalized)", () => {
+    // Before the sharded-rotation policy a stored legacy strategy made policy pins "clearStale" — that
     // path is gone: rotation-enabled IS the sharded regime, pins are kept.
     for (const strategy of ALL) {
       expect(
@@ -1076,7 +1076,7 @@ describe("classifyCodexPin — pin lifecycle (manual sacrosanct, policy meaningf
   });
 });
 
-describe("OPE-21 pin and rollout policy", () => {
+describe("credential allocator pin and rollout policy", () => {
   const context = (
     accounts: CodexLeaseAccountStatus[],
     existingCredentialId: string | null = null,
@@ -1271,7 +1271,7 @@ describe("OPE-21 pin and rollout policy", () => {
     expect(selected.credentialId).toBe("a");
   });
 
-  test("OPE-36: stored round_robin behaves EXACTLY as sharded in the lease selector (sticky, never advancing)", () => {
+  test("sharded-rotation policy: stored round_robin behaves EXACTLY as sharded in the lease selector (sticky, never advancing)", () => {
     const args = (rotationStrategy: string) => ({
       context: {
         accounts: [acct("a"), acct("b"), acct("c")].map((candidate) => ({

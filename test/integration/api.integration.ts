@@ -7086,7 +7086,9 @@ describe("API component integration", () => {
 
     const timeline = await callMcpTool<{
       events: Array<{ type: string; sequence: number }>;
-      nextAfter: number;
+      direction: "before";
+      nextBefore: number;
+      nextAfter: null;
     }>(mcp, "session_events", { sessionId: created.id });
     expect(timeline.events.map((event) => event.type)).toEqual([
       "session.created",
@@ -7095,16 +7097,86 @@ describe("API component integration", () => {
       "session.status.changed",
       "turn.queued",
     ]);
-    expect(timeline.nextAfter).toBe(timeline.events[timeline.events.length - 1]!.sequence);
+    expect(timeline.direction).toBe("before");
+    expect(timeline.nextBefore).toBe(timeline.events[0]!.sequence);
+    expect(timeline.nextAfter).toBeNull();
+    const lastTimelineSequence = timeline.events[timeline.events.length - 1]!.sequence;
     const caughtUp = await callMcpTool<{
       events: unknown[];
+      direction: "after";
       nextAfter: number;
     }>(mcp, "session_events", {
       sessionId: created.id,
-      after: timeline.nextAfter,
+      after: lastTimelineSequence,
     });
     expect(caughtUp.events).toHaveLength(0);
-    expect(caughtUp.nextAfter).toBe(timeline.nextAfter);
+    expect(caughtUp.direction).toBe("after");
+    expect(caughtUp.nextAfter).toBe(lastTimelineSequence);
+
+    const appended = await appendSessionEvents(dbClient.db, grant.workspaceId, created.id, [
+      ...Array.from({ length: 30 }, (_, index) => ({
+        type: "agent.message.completed" as const,
+        payload: { index, text: "x".repeat(7_000) },
+      })),
+      {
+        type: "turn.completed" as const,
+        payload: { result: "stale" },
+        turnGeneration: 1,
+      },
+      {
+        type: "turn.completed" as const,
+        payload: { result: "authoritative" },
+        turnGeneration: 2,
+      },
+    ]);
+    const latestTerminal = await callMcpTool<{
+      events: Array<{
+        sequence: number;
+        type: string;
+        turnGeneration: number | null;
+        payload: { result: string };
+      }>;
+    }>(mcp, "session_events", { sessionId: created.id, latest: "terminal" });
+    expect(latestTerminal.events).toEqual([
+      expect.objectContaining({
+        sequence: appended.at(-1)!.sequence,
+        type: "turn.completed",
+        turnGeneration: 2,
+        payload: { result: "authoritative" },
+      }),
+    ]);
+
+    const boundedForensic = await callMcpTool<{
+      events: Array<{ id: string; sequence: number }>;
+      direction: "after";
+      nextAfter: number;
+      hasMore: boolean;
+      truncated: boolean;
+      truncation: { reasons: string[]; resumeCursor: number };
+      bytes: number;
+      maxBytes: number;
+    }>(mcp, "session_events", {
+      sessionId: created.id,
+      after: lastTimelineSequence,
+      mode: "forensic",
+      payloadMode: "full",
+      limit: 40,
+    });
+    expect(boundedForensic.bytes).toBe(
+      Buffer.byteLength(JSON.stringify(boundedForensic, null, 2), "utf8"),
+    );
+    expect(boundedForensic.bytes).toBeLessThanOrEqual(boundedForensic.maxBytes);
+    expect(boundedForensic.maxBytes).toBe(64 * 1024);
+    expect(boundedForensic.hasMore).toBeTrue();
+    expect(boundedForensic.truncated).toBeTrue();
+    expect(boundedForensic.truncation.reasons).toEqual(
+      expect.arrayContaining(["model_payload", "model_bytes"]),
+    );
+    expect(boundedForensic.nextAfter).toBe(boundedForensic.events.at(-1)!.sequence);
+    expect(boundedForensic.truncation.resumeCursor).toBe(boundedForensic.nextAfter);
+    expect(
+      boundedForensic.events.every((event) => event.id !== "00000000-0000-0000-0000-000000000000"),
+    ).toBeTrue();
 
     const sent = await callMcpTool<{
       event: { type: string; payload: { text: string } };

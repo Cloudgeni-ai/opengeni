@@ -2,14 +2,14 @@
 
 > **Point-in-time design record.** Baseline audited against `origin/main` at
 > `a906a06881036b7d005ab33940f5ec6c91938482` on 2026-07-18; implementation
-> checkpoint updated on the OPE-29 branch on 2026-07-19. Paths, names, and final
+> checkpoint updated on the memory-design branch on 2026-07-19. Paths, names, and final
 > merge status may move; code and migrations win.
 
 # ADR: Labeled, hierarchical, role-aware memory
 
-Status: implemented and rebased on the OPE-29 branch; pending exact-head CI, browser evidence, and independent review
-Owners: OPE-29 (semantics/data contract); OPE-15 (responsive presentation)
-Related: OPE-17 (product concept map), OPE-16 (capability discovery)
+Status: implemented and rebased on the memory-design branch; pending exact-head CI, browser evidence, and independent review
+Owners: memory-design (semantics/data contract); memory-design (responsive presentation)
+Related: memory-design (product concept map), memory-design (capability discovery)
 
 ## Context
 
@@ -35,10 +35,10 @@ audited operations.
 ## Audited baseline: shipped versus open
 
 The baseline was reconciled from current source, merged PRs #16, #313 and #320,
-production aggregates, and OPE-29/OPE-17/OPE-15. Historical branches and sessions
+production aggregates, and memory-design/memory-design/memory-design. Historical branches and sessions
 were read-only.
 
-| Area | Shipped at the audited SHA | Open before OPE-29 |
+| Area | Shipped at the audited SHA | Open before memory-design |
 | --- | --- | --- |
 | Storage | `knowledge_memories`; five kinds; six lifecycle states; source refs; confidence; session provenance; embeddings; pins; usage; validity window; supersession links; text hash | Typed/composable scope; labels; general relationships; creator subject for runtime user context |
 | Isolation | Account/workspace composite ownership; `ENABLE` + `FORCE ROW LEVEL SECURITY`; `workspace_isolation` policy | Subject-level protection for user-scoped records; relationship/audit RLS; principal-persona tests |
@@ -57,11 +57,11 @@ actively written and corrected, but standing injection—not explicit search—w
 the dominant consumption path. The deployed API/web/worker/relay revision matched
 the audited SHA. These values are a point-in-time observation, not a live SLO.
 
-### OPE-29 implementation checkpoint
+### memory-design implementation checkpoint
 
 Implemented on the focused branch after the audited baseline:
 
-- maintenance/drain-only migration `0065_hierarchical_role_aware_memory.sql` adds trusted session
+- maintenance/drain-only migration `0095_hierarchical_role_aware_memory.sql` adds trusted session
   creator provenance, typed scopes, bounded labels, relationships, reversible
   maintenance operations, and text-free deletion/private-export audit tables;
   all five memory tables are FORCE RLS;
@@ -86,18 +86,18 @@ Still open at this checkpoint:
 
 - rebase onto current `origin/main`, exact-head CI, and independent Sol/xhigh
   privacy/product review;
-- OPE-15-owned `/memory` presentation and real desktop/mobile browser evidence
+- memory-design-owned `/memory` presentation and real desktop/mobile browser evidence
   against the additive SDK contract;
 - policy-configured scheduling or autonomous consolidation beyond the explicit,
   audited primitives. No opaque background rewriting has been introduced;
-- merge/release/production acceptance, owned by the root delivery lane and OPE-25,
-  not OPE-29.
+- merge/release/production acceptance, owned by the root delivery lane and memory-design,
+  not memory-design.
 
 ## Decisions
 
 ### 1. Keep `knowledge_memories`; do not create an Agent or graph database
 
-OPE-29 evolves the existing PostgreSQL record. It does not add an `agents` table,
+memory-design evolves the existing PostgreSQL record. It does not add an `agents` table,
 a durable profile identity, or an external graph store. Hierarchy is represented
 with typed relationships between records. A summary is an ordinary memory with
 `derived_from` edges to its sources, so provenance and rollback remain visible.
@@ -140,7 +140,7 @@ exists.
 
 The first-party MCP principal is `worker:first-party-mcp`, not the human that
 created the session. Session rows at the audited SHA do not persist their creator.
-Therefore OPE-29 adds nullable, immutable `sessions.created_by_subject_id`:
+Therefore memory-design adds nullable, immutable `sessions.created_by_subject_id`:
 
 - direct creation records `grant.subjectId`;
 - child creation inherits the parent session's creator subject;
@@ -302,8 +302,8 @@ Consolidation creates a normal memory plus `derived_from` edges. It does not del
 sources. Purge/hard delete is intentionally outside the reversible operation class.
 Audit rows contain ids, enums, counts, hashes, and timestamps—not memory/query text.
 
-Current memory tools remain capability-first. OPE-16 owns how capabilities are
-discovered; OPE-29 owns their scope-safe semantics. Applying maintenance requires an
+Current memory tools remain capability-first. memory-design owns how capabilities are
+discovered; memory-design owns their scope-safe semantics. Applying maintenance requires an
 explicit management capability/permission and is not silently granted with search.
 
 ### 9. Additive API/UI contract
@@ -325,7 +325,7 @@ queries, replacement text, reasons, sources, and metadata. Unredacted calls and
 results remain only in authorized `session_history_items` for model continuity.
 React readers continue accepting historical preview-bearing replay events.
 
-OPE-15 owns layout and interaction. OPE-29 supplies data semantics and only minimal
+memory-design owns layout and interaction. memory-design supplies data semantics and only minimal
 compatibility rendering if necessary. Browser acceptance covers desktop/mobile,
 keyboard/touch, dark/light, long text, many labels, loading/empty/error, provenance,
 conflicts, and visible retrieval reasons while preserving `?memory=<id>` deep links.
@@ -354,7 +354,7 @@ Required database evidence uses a non-owner app role and at least:
 
 ## Migration and rollout
 
-The implementation uses maintenance/drain-only migration `0065` after `0064`.
+The implementation uses maintenance/drain-only migration `0095` after the retained migrations.
 Although its storage changes are additive, it is not safe for mixed worker
 versions: an old worker ignores typed applicability and can over-read role-,
 session-, or ephemeral-scoped rows written by a new worker during overlap.
@@ -363,11 +363,11 @@ The cutover sequence is therefore:
 
 1. stop new session/turn admission;
 2. drain and terminate every old worker and in-flight session execution;
-3. apply `0065` with no old application process reading memory;
+3. apply `0095` with no old application process reading memory;
 4. start only compatible API and worker versions;
 5. verify health and reopen admission.
 
-Within that fenced cutover, `0065`:
+Within that fenced cutover, `0095`:
 
 1. add nullable session creator provenance and typed memory columns with safe
    defaults;
@@ -398,11 +398,11 @@ Reviewed readiness requires all of the following at the exact PR head:
 - API/MCP tests for all principal personas and scope-safe tool behavior;
 - deterministic export snapshots and secret-safe audit assertions;
 - SDK contract parity, typecheck, lint, format, architecture/docs checks;
-- real-backend browser evidence through the OPE-15-compatible surface;
+- real-backend browser evidence through the memory-design-compatible surface;
 - independent Sol/xhigh privacy/product review after exact-head CI.
 
-No OPE-29 owner or leaf merges, dispatches, deploys, or releases. Root serializes
-delivery lanes; OPE-25 alone owns release/production acceptance.
+No memory-design owner or leaf merges, dispatches, deploys, or releases. Root serializes
+delivery lanes; memory-design alone owns release/production acceptance.
 
 ## Alternatives rejected
 
@@ -423,21 +423,22 @@ delivery lanes; OPE-25 alone owns release/production acceptance.
 
 - Generative Agents demonstrates a useful separation between a raw memory stream,
   retrieval by recency/relevance/importance, and explicit reflection into higher-level
-  observations. OPE-29 adopts explainable components and source-traceable summaries,
+  observations. memory-design adopts explainable components and source-traceable summaries,
   but not autonomous hidden rewriting.
 - MemGPT/Letta demonstrates tiered working versus archival context and explicit memory
-  operations. OPE-29 keeps bounded standing context plus search, but does not adopt a
+  operations. memory-design keeps bounded standing context plus search, but does not adopt a
   monolithic persistent agent identity.
 - LangGraph's store namespaces demonstrate that hierarchical namespace selection can
   compose across threads/users without making the thread itself the durable identity.
-  OPE-29 uses typed indexed columns instead of arbitrary tuple namespaces because RLS,
+  memory-design uses typed indexed columns instead of arbitrary tuple namespaces because RLS,
   lifecycle constraints, and UI explanation are first-class requirements.
 - W3C PROV's entity/activity/agent separation supports source references and audited
   operations rather than overwriting provenance. “Agent” there is a provenance role,
   not a reason to create an OpenGeni Agent product primitive.
 - Bitemporal/valid-time database practice supports retaining correction history with
-  explicit validity intervals instead of mutating past truth in place. OPE-29 uses the
+  explicit validity intervals instead of mutating past truth in place. memory-design uses the
   already-shipped validity/supersession fields and keeps system-time in audit records.
 
 The research informs the small composable model above; it is not a mandate to import
 another framework's identity, graph, or background-reflection architecture.
+

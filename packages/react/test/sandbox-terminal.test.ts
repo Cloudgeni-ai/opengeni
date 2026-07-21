@@ -1,10 +1,9 @@
 /* ----------------------------------------------------------------------------
-   M6 terminal overhaul — unit probes of the pure cores that back the acceptance
-   criteria (no DOM / no WebGL context needed):
+   Terminal renderer unit probes of the pure cores behind the browser surface
+   (no DOM / no WebGL context needed):
      E1  renderer fallback ladder (WebGL → …→ DOM), incl. context-loss downgrade
      E2  font resolution to a CONCRETE family (never `var(`)
      E3  full 16-color ANSI theme for BOTH modes (no default xterm palette)
-   E4/E5/E6 are behavioral and proven in the real browser (scripts/m6-evidence.mjs).
    -------------------------------------------------------------------------- */
 import { describe, expect, test } from "bun:test";
 import {
