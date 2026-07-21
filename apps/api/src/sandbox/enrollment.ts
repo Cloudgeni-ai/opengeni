@@ -1,5 +1,5 @@
 // apps/api/src/sandbox/enrollment.ts — the API-DIRECT enrollment device-flow seam
-// (M5 of the bring-your-own-compute mega-PR; dossier §10.2 enrollment + §18 LOUD
+// (M5 of the bring-your-own-compute mega-PR; enrollment + §18 LOUD
 // consent). This is the service layer the routes (routes/enrollments.ts) call — it
 // mirrors the channel-a.ts / viewer.ts split (a thin route over a focused service).
 //
@@ -20,7 +20,7 @@
 //      placeholder for the per-workspace NATS Account creds [infra-deferred]);
 //      denied/expired/disabled → the typed state.
 //
-// SECURITY (dossier §18): device_code/user_code are CSPRNG-unguessable + short-TTL +
+// SECURITY: device_code/user_code are CSPRNG-unguessable + short-TTL +
 // single-use; approve is strictly workspace-gated (the route asserts the grant); the
 // signing secret value is NEVER logged. Rate-limiting of start/poll is enforced at
 // the route. The consent record (who/when/what) lives on the request row.
@@ -78,7 +78,7 @@ export const DEVICE_POLL_INTERVAL_SECONDS = 5;
 // enrollment status on every (re)connect (auth-callout.ts) — a revoked machine is
 // denied regardless of bearer life — exactly as the long-lived relay token relies on.
 export const ENROLLMENT_BEARER_TTL_SECONDS = 30 * 24 * 3600;
-// The relay PRODUCER token (the `ogr_` token; M8b/dossier §10.5) is ENROLLMENT-scoped,
+// The relay PRODUCER token (the `ogr_` token; M8b) is ENROLLMENT-scoped,
 // NOT per-stream: the agent presents it on every channel registration for the life
 // of its run, and the producer side has no per-viewer epoch fence (that is the
 // VIEWER's `ogs_` token's job). So it is long-lived — 30 days — re-minted on every
@@ -492,7 +492,7 @@ async function buildEnrollmentCredentials(
     // Hand the agent the canonical `/stream` dial base, NOT the raw configured URL.
     // The agent's relay producer appends only its routing query and assumes the base
     // already carries the relay's `/stream` route; a path-less base 400s the dial and
-    // makes the terminal/desktop streams unreachable (dossier §V5/§V6).
+    // makes the terminal/desktop streams unreachable.
     relayUrl: relayDialBaseFromSettings(settings),
     relayToken,
     // M-AUTH closes the placeholder: there is NO per-machine NATS Account creds

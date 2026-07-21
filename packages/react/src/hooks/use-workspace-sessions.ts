@@ -23,6 +23,8 @@ export type UseWorkspaceSessionsResult = {
   sessions: Session[];
   /** The complete personal pinned section, also present in `sessions`. */
   pinned: Session[];
+  /** True when the server omitted older pins from its bounded pinned section. */
+  pinnedTruncated: boolean;
   nextCursor: string | null;
   loading: boolean;
   error: Error | null;
@@ -82,6 +84,7 @@ export function useWorkspaceSessions(
     // itself continues to paginate only `ordinary` rows via nextCursor.
     sessions: [...pinned, ...ordinary],
     pinned,
+    pinnedTruncated: page?.pinnedTruncated ?? false,
     nextCursor: page?.nextCursor ?? null,
     // `usePolledValue` clears the old data and starts the new request in an
     // effect. During that query-key transition render, its old loading flag

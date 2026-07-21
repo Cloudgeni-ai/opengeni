@@ -148,7 +148,7 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
 
     // The SAME env object the agent will declare for this run. Threaded into
     // resumeBoxForTurn so the box manifest matches the agent manifest (no
-    // provided-session env delta — the BUG-1 turn-killer fix).
+    // provided-session env delta — the ownership regression turn-killer fix).
     const sandboxEnvironment = {
       GIT_AUTHOR_NAME: "OpenGeni Bot",
       HOME: "/workspace",

@@ -364,6 +364,7 @@ function prunePinnedSubtreesWithCounts(
           attentionDescendants: Math.max(0, stats.attentionDescendants - removed.attention),
           pausedDescendants: Math.max(0, stats.pausedDescendants - removed.paused),
           failedDescendants: Math.max(0, stats.failedDescendants - removed.failed),
+          truncated: stats.truncated,
         },
       }
     : node.session;

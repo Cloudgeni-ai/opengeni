@@ -203,7 +203,7 @@ Config additions in `packages/config/src/index.ts`: `integrationsEnabled` (`EnvB
 | Site | Plan |
 |---|---|
 | `capability_installations.config.headersEncrypted` | Kept for legacy/static header installs. New installs set `config.connectionRef` (validated against workspace + subject policy in `packages/core/src/domain/capabilities.ts`, stripped from untrusted caller config like the reserved header keys). `EnabledMcpCapabilityServer` + `listEnabledMcpCapabilityServers` + `settingsWithMcpCapabilityServers` in `packages/db/src/index.ts` pass the ref through without decrypting; an item with `authModel` satisfies its requirement with either headers or a ref. Backfill decided in I6 with reasons logged. |
-| `github_installations` | Becomes `kind: 'app_install'` in I6; installation-token minting moves behind the broker. Unchanged until then. |
+| `github_installations` + `github_installation_repositories` | The current workspace binding plus repository allowlist becomes `kind: 'app_install'` in I6; installation-token minting moves behind the broker. One GitHub installation may have independent bindings in multiple workspaces. Unchanged until then. |
 | `codex_subscription_credentials` | Stays separate (account-level rotation semantics, own resolver). Not a goal of this program. |
 | First-party delegated bearer | Unchanged — identity plumbing, not an external credential. |
 | `social_connections` | Superseded for future use; existing rows untouched until a consumer needs migration. |

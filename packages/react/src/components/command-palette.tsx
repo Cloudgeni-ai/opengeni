@@ -15,6 +15,10 @@ export type CommandPaletteProps = {
   argHintText: string;
   /** id used for aria-activedescendant wiring from the textarea. */
   listboxId: string;
+  /** Accessible list label. Defaults to "Slash commands". */
+  label?: string | undefined;
+  /** Badge shown for destructive commands. Defaults to "danger". */
+  dangerLabel?: string | undefined;
 };
 
 /**
@@ -31,6 +35,8 @@ export function CommandPalette({
   onRun,
   argHintText,
   listboxId,
+  label = "Slash commands",
+  dangerLabel = "danger",
 }: CommandPaletteProps) {
   return (
     <AnimatePresence>
@@ -48,7 +54,7 @@ export function CommandPalette({
           <ul
             id={listboxId}
             role="listbox"
-            aria-label="Slash commands"
+            aria-label={label}
             className="max-h-72 overflow-y-auto py-1"
           >
             {items.map((command, index) => {
@@ -92,7 +98,7 @@ export function CommandPalette({
                   <span className="ml-auto flex items-center gap-1.5">
                     {command.danger ? (
                       <span className="rounded-og-xs bg-og-status-failed/15 px-1 text-[10px] uppercase tracking-wide text-og-status-failed">
-                        danger
+                        {dangerLabel}
                       </span>
                     ) : null}
                     <span className="truncate text-[12px] text-og-fg-subtle max-sm:hidden">

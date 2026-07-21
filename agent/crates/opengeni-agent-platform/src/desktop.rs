@@ -6,7 +6,7 @@
 //! [`Display`](opengeni_agent_proto::v1::Display) only when a backend can probe
 //! one (a real X11 screen, an Xvfb virtual framebuffer, or — on macOS/Windows — a
 //! native session); otherwise the control plane degrades the desktop cell to
-//! `display_unavailable` (a value, never a crash, dossier §5/§10.6).
+//! `display_unavailable` (a value, never a crash).
 //!
 //! # Safety posture
 //!
@@ -15,9 +15,9 @@
 //! extensions) for both capture and synthetic input, so no `unsafe` is needed.
 //! The macОS/Windows backends are compile-only structured seams that return
 //! [`PlatformError::Unsupported`] until their native (CGEvent/ScreenCaptureKit,
-//! SendInput/DXGI) code lands and is live-verified (dossier §10.4, deferred to
-//! M12). Wiring them through safe crates (or a narrowly-scoped `allow(unsafe_code)`
-//! module) is the M12 task; the trait shape is fixed now so nothing reshapes.
+//! SendInput/DXGI) code lands and is live-verified (deferred to
+//! native desktop milestone). Wiring them through safe crates (or a narrowly-scoped `allow(unsafe_code)`
+//! module) is the native desktop milestone task; the trait shape is fixed now so nothing reshapes.
 //!
 //! # Frame encoding
 //!
@@ -246,7 +246,7 @@ impl DesktopBackend for NoDesktop {
 /// an Xvfb virtual framebuffer the caller spawned via [`crate::virtual_desktop`]);
 /// if none is reachable, falls back to [`NoDesktop`] (the host reports
 /// `display_unavailable`). On macOS/Windows, returns the structured native backend
-/// (which is `Unsupported` until M12). Other targets get [`NoDesktop`].
+/// (which is `Unsupported` until native desktop milestone). Other targets get [`NoDesktop`].
 #[must_use]
 pub fn resolve_desktop() -> Box<dyn DesktopBackend> {
     #[cfg(target_os = "linux")]

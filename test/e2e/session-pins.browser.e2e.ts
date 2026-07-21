@@ -24,8 +24,8 @@ import {
 import postgres from "postgres";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
-const ownerHeaders = { "x-opengeni-subject": "ope26-owner" };
-const otherMemberHeaders = { "x-opengeni-subject": "ope26-other-member" };
+const ownerHeaders = { "x-opengeni-subject": "sessionpin-owner" };
+const otherMemberHeaders = { "x-opengeni-subject": "sessionpin-other-member" };
 const workflowClient: SessionWorkflowClient = {
   signalUserMessage: async () => undefined,
   wakeSessionWorkflow: async () => undefined,
@@ -316,11 +316,11 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await setTheme(pageB, theme);
       await expectNoPageOverflow(pageB);
       await expectNoAxeViolations(pageB, [
-        "[data-ope26-session-header]",
-        "[data-ope26-session-list]",
+        "[data-sessionpin-session-header]",
+        "[data-sessionpin-session-list]",
       ]);
       await pageB.screenshot({
-        path: `/tmp/ope26-session-pin-desktop-${theme}.png`,
+        path: `/tmp/sessionpin-session-pin-desktop-${theme}.png`,
         fullPage: true,
       });
     }
@@ -482,7 +482,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       expect(secondPage.sessions).toHaveLength(50);
       expect(secondPage.nextCursor).toBeTruthy();
       const retainedId = secondPage.sessions[0]!.id;
-      const visibleRows = page.locator("[data-ope26-session-list] button[data-session-row]");
+      const visibleRows = page.locator("[data-sessionpin-session-list] button[data-session-row]");
       await page.locator(`button[data-session-row="${retainedId}"]`).waitFor();
       expect(await visibleRows.count()).toBe(100);
 
@@ -747,7 +747,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         .locator("button[data-session-row]")
         .evaluateAll((rows) => rows.map((row) => row.getAttribute("data-session-row")));
       expect(new Set(visiblePinIds).size).toBe(visiblePinIds.length);
-      await expectNoAxeViolations(page, ["[data-ope26-session-list]"]);
+      await expectNoAxeViolations(page, ["[data-sessionpin-session-list]"]);
 
       // Unpin from a different device/API context while the manager—not the
       // descendant—is the active route. Focus reconciliation refreshes the
@@ -1147,11 +1147,11 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         await expectContainedInViewport(navigation, viewport.width);
         await expectNoPageOverflow(page);
         await expectNoAxeViolations(page, [
-          "[data-ope26-session-header]",
-          "[data-ope26-session-list]",
+          "[data-sessionpin-session-header]",
+          "[data-sessionpin-session-list]",
         ]);
         await page.screenshot({
-          path: `/tmp/ope26-session-pin-mobile${viewport.artifactSuffix}-${theme}.png`,
+          path: `/tmp/sessionpin-session-pin-mobile${viewport.artifactSuffix}-${theme}.png`,
           fullPage: true,
         });
 
@@ -1178,12 +1178,12 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     const page = await context.newPage();
     const barrier = postgres(shared.adminUrl, { max: 1 });
     const removalClient = createDb(shared.appUrl, { max: 1 });
-    const raceSecret = "ope26-browser-race-secret";
-    const raceSubject = "configured:ope26-browser-race";
+    const raceSecret = "sessionpin-browser-race-secret";
+    const raceSubject = "configured:sessionpin-browser-race";
     const barrierClass = 81326028;
     const removalLock = 1;
-    const triggerFunction = "ope26_browser_removal_first_barrier";
-    const triggerName = "ope26_browser_removal_first_membership_barrier";
+    const triggerFunction = "sessionpin_browser_removal_first_barrier";
+    const triggerName = "sessionpin_browser_removal_first_membership_barrier";
     let removalPromise: Promise<boolean> | null = null;
     try {
       await page.goto(webBaseUrl);
@@ -1295,12 +1295,12 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     const page = await context.newPage();
     const barrier = postgres(shared.adminUrl, { max: 1 });
     const removalClient = createDb(shared.appUrl, { max: 1 });
-    const raceSecret = "ope26-browser-pin-race-secret";
-    const raceSubject = "configured:ope26-browser-pin-race";
+    const raceSecret = "sessionpin-browser-pin-race-secret";
+    const raceSubject = "configured:sessionpin-browser-pin-race";
     const barrierClass = 81326031;
     const removalLock = 1;
-    const triggerFunction = "ope26_browser_pin_removal_first_barrier";
-    const triggerName = "ope26_browser_pin_removal_first_membership_barrier";
+    const triggerFunction = "sessionpin_browser_pin_removal_first_barrier";
+    const triggerName = "sessionpin_browser_pin_removal_first_membership_barrier";
     let removalPromise: Promise<boolean> | null = null;
     try {
       await page.goto(webBaseUrl);

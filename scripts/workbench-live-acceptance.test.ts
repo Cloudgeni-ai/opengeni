@@ -1,10 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import type { WorkspaceCaptureManifest } from "@opengeni/sdk";
+import type { AccessContext, WorkspaceCaptureManifest } from "@opengeni/sdk";
 
 import {
   assertFixtureCapture,
   assertDedicatedCanaryEmail,
+  assertAcceptancePrincipalScopes,
   controlCancellationDurationMs,
   fixturePrompt,
   parseCookieHeader,
@@ -87,6 +88,48 @@ describe("workbench live acceptance preflight", () => {
     expect(() => controlCancellationDurationMs(Number.NaN, 1_000)).toThrow("must be finite");
   });
 
+  test("requires interactive scopes only from the dedicated canary principal", () => {
+    const workspaceId = "10000000-0000-4000-8000-000000000001";
+    const canary = accessContext(workspaceId, [
+      "workspace:read",
+      "sessions:create",
+      "sessions:read",
+      "sessions:control",
+      "files:read",
+      "files:write",
+      "stream:view",
+      "stream:acknowledge",
+      "terminal:attach",
+    ]);
+    const probe = accessContext(workspaceId, [
+      "workspace:read",
+      "sessions:create",
+      "sessions:read",
+      "sessions:control",
+    ]);
+
+    expect(() => assertAcceptancePrincipalScopes(canary, probe, workspaceId)).not.toThrow();
+    expect(() =>
+      assertAcceptancePrincipalScopes(
+        accessContext(workspaceId, [
+          "workspace:read",
+          "sessions:create",
+          "sessions:read",
+          "sessions:control",
+        ]),
+        probe,
+        workspaceId,
+      ),
+    ).toThrow("acceptance workbench canary lacks: files:read");
+    expect(() =>
+      assertAcceptancePrincipalScopes(
+        canary,
+        accessContext(workspaceId, ["workspace:read", "sessions:create"]),
+        workspaceId,
+      ),
+    ).toThrow("acceptance observability probe lacks: sessions:read");
+  });
+
   test("the fixture and its verifier fail closed across the documented boundary matrix", () => {
     const marker = "OPENGENI_WORKBENCH_ACCEPTANCE_001";
     const prompt = fixturePrompt(marker);
@@ -112,6 +155,27 @@ describe("workbench live acceptance preflight", () => {
     expect(() => assertFixtureCapture(manifest, marker)).toThrow("renamed fixture status drifted");
   });
 });
+
+function accessContext(
+  workspaceId: string,
+  permissions: AccessContext["workspaceGrants"][number]["permissions"],
+): AccessContext {
+  return {
+    mode: "managed",
+    subjectId: "acceptance:test",
+    accountGrants: [],
+    workspaceGrants: [
+      {
+        workspaceId,
+        accountId: "20000000-0000-4000-8000-000000000002",
+        subjectId: "acceptance:test",
+        permissions,
+      },
+    ],
+    defaultAccountId: "20000000-0000-4000-8000-000000000002",
+    defaultWorkspaceId: workspaceId,
+  };
+}
 
 function fixtureManifest(marker: string): WorkspaceCaptureManifest {
   const content = new Map<string, Uint8Array>([

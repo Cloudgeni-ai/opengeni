@@ -130,9 +130,11 @@ export function SessionList() {
     pinned: globalPinned,
     loading: globalPinsLoading,
     error: globalPinsError,
+    pinnedTruncated: globalPinsTruncated,
     refresh: refreshGlobalPins,
   } = globalPinPage;
   const pinned = hierarchyMode ? globalPinned : rootPage.pinned;
+  const pinnedTruncated = hierarchyMode ? globalPinsTruncated : rootPage.pinnedTruncated;
   // The hierarchy and its global pinned shortcuts come from separate queries.
   // Every invalidation must refresh both or a pin changed in another tab/device
   // can disappear from the shortcut section until the next polling interval.
@@ -910,7 +912,7 @@ export function SessionList() {
         ref={listRef}
         role="region"
         aria-label={hierarchyMode ? "Workstreams" : "Session search results"}
-        data-ope26-session-list
+        data-sessionpin-session-list
         onKeyDown={onKeyDown}
         className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto px-2 pb-2"
       >
@@ -946,22 +948,29 @@ export function SessionList() {
         ) : (
           <>
             {pinnedNodes.length > 0 ? (
-              <SessionGroup
-                label="Pinned"
-                nodes={pinnedNodes}
-                flat={flat}
-                activeSessionId={activeSessionId}
-                focusIndex={focusIndex}
-                onFocusSession={setFocusedSessionId}
-                expanded={expanded}
-                onToggleExpand={toggleExpand}
-                onRevealActivePath={revealActivePath}
-                childPages={childPages}
-                onLoadMoreChildren={loadChildPage}
-                onSelect={rail.openSession}
-                onRename={context.updateSessionTitle}
-                onPin={onPin}
-              />
+              <>
+                <SessionGroup
+                  label="Pinned"
+                  nodes={pinnedNodes}
+                  flat={flat}
+                  activeSessionId={activeSessionId}
+                  focusIndex={focusIndex}
+                  onFocusSession={setFocusedSessionId}
+                  expanded={expanded}
+                  onToggleExpand={toggleExpand}
+                  onRevealActivePath={revealActivePath}
+                  childPages={childPages}
+                  onLoadMoreChildren={loadChildPage}
+                  onSelect={rail.openSession}
+                  onRename={context.updateSessionTitle}
+                  onPin={onPin}
+                />
+                {pinnedTruncated ? (
+                  <p className="px-2 pb-2 text-[11px] text-fg-subtle" role="status">
+                    Showing the 100 most recently pinned sessions. Older pins are omitted.
+                  </p>
+                ) : null}
+              </>
             ) : null}
             {forest.running.length > 0 ? (
               <SessionGroup
@@ -1481,11 +1490,12 @@ function sessionDescendantLabel(session: Session): string | null {
   const stats = session.treeStats;
   if (!stats || stats.totalDescendants === 0) return null;
   const live = stats.runningDescendants + stats.queuedDescendants;
+  const total = `${stats.totalDescendants}${stats.truncated ? "+" : ""}`;
   if (stats.attentionDescendants > 0) {
-    return `${stats.attentionDescendants} need you · ${stats.totalDescendants} total`;
+    return `${stats.attentionDescendants} need you · ${total} total`;
   }
-  if (live > 0) return `${live} active · ${stats.totalDescendants} total`;
-  return `${stats.totalDescendants} session${stats.totalDescendants === 1 ? "" : "s"}`;
+  if (live > 0) return `${live} active · ${total} total`;
+  return `${total} session${stats.totalDescendants === 1 && !stats.truncated ? "" : "s"}`;
 }
 
 /** The active-session accent bar shared by the row's display and edit modes. */

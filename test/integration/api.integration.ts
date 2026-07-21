@@ -29,6 +29,7 @@ import {
   getScheduledTask,
   getSessionGoal,
   getWorkspaceEnvironmentValuesForRun,
+  listGitHubInstallationAccessForWorkspace,
   listSessionEvents,
   listScheduledTasks,
   listOutstandingSessionSystemUpdates,
@@ -4337,6 +4338,32 @@ describe("API component integration", () => {
       bus: new MemoryEventBus(),
       workflowClient: new FakeWorkflowClient(),
       githubStateSecret: stateSecret,
+      githubAppApi: {
+        authorizeUser: async () => [
+          {
+            installationId: 138826628,
+            accountLogin: "acme",
+            accountType: "Organization",
+            suspended: false,
+            repositories: [
+              {
+                id: 1001,
+                installationId: 138826628,
+                fullName: "acme/repository",
+                name: "repository",
+                private: true,
+                htmlUrl: "https://github.com/acme/repository",
+                cloneUrl: "https://github.com/acme/repository.git",
+                defaultBranch: "main",
+                accountLogin: "acme",
+                accountType: "Organization",
+                permissions: { admin: true, maintain: true, push: true, triage: true, pull: true },
+              },
+            ],
+          },
+        ],
+        listRepositories: async () => [],
+      },
     });
     const context = await defaultAccessContext(app);
     const state = createSignedState(stateSecret, {
@@ -4377,6 +4404,405 @@ describe("API component integration", () => {
       workspaceId: context.defaultWorkspaceId,
       installationId: 138826628,
     });
+
+    // request_oauth_on_install can send a newly installed id directly to the
+    // configured OAuth callback; the original install-intent state does not
+    // carry that id yet, so the callback must accept GitHub's query value.
+    const directState = createSignedState(stateSecret, {
+      accountId: context.defaultAccountId,
+      workspaceId: context.defaultWorkspaceId,
+      intent: "install",
+    });
+    const directCallback = await app.request(
+      `/v1/github/oauth/callback?code=test-code&installation_id=138826628&state=${encodeURIComponent(directState)}`,
+      {
+        headers: { cookie: `opengeni_github_state=${directState}` },
+      },
+    );
+    expect(directCallback.status).toBe(200);
+    expect(await directCallback.text()).toContain("GitHub App connected");
+
+    // The state cookie moved from path /v1/github to /v1. Until it expires, a
+    // stale pre-move cookie is sent ahead of the current one (more specific
+    // path first); the flow must accept the state when ANY same-name cookie
+    // carries it instead of reading only the first.
+    const shadowedCallback = await app.request(
+      `/v1/github/oauth/callback?code=test-code&installation_id=138826628&state=${encodeURIComponent(directState)}`,
+      {
+        headers: {
+          cookie: `opengeni_github_state=stale-legacy-path-state; opengeni_github_state=${directState}`,
+        },
+      },
+    );
+    expect(shadowedCallback.status).toBe(200);
+    expect(await shadowedCallback.text()).toContain("GitHub App connected");
+  });
+
+  test("links one existing GitHub installation to multiple workspaces with independent repository access", async () => {
+    const stateSecret = "test-existing-github-installation-state-secret";
+    const installationId = 138826628;
+    const adminRepository = {
+      id: 1001,
+      installationId,
+      fullName: "acme/admin-repository",
+      name: "admin-repository",
+      private: true,
+      htmlUrl: "https://github.com/acme/admin-repository",
+      cloneUrl: "https://github.com/acme/admin-repository.git",
+      defaultBranch: "main",
+      accountLogin: "acme",
+      accountType: "Organization",
+    };
+    const readOnlyRepository = {
+      id: 1002,
+      installationId,
+      fullName: "acme/read-only-repository",
+      name: "read-only-repository",
+      private: true,
+      htmlUrl: "https://github.com/acme/read-only-repository",
+      cloneUrl: "https://github.com/acme/read-only-repository.git",
+      defaultBranch: "main",
+      accountLogin: "acme",
+      accountType: "Organization",
+    };
+    const githubAppApi = {
+      authorizeUser: async () => [
+        {
+          installationId,
+          accountLogin: "acme",
+          accountType: "Organization",
+          suspended: false,
+          repositories: [
+            {
+              ...adminRepository,
+              permissions: { admin: true, maintain: true, push: true, triage: true, pull: true },
+            },
+            {
+              ...readOnlyRepository,
+              permissions: {
+                admin: false,
+                maintain: false,
+                push: false,
+                triage: false,
+                pull: true,
+              },
+            },
+          ],
+        },
+      ],
+      getInstallation: async () => ({
+        installationId,
+        accountLogin: "acme",
+        accountType: "Organization",
+        suspended: false,
+      }),
+      listRepositories: async () => [adminRepository, readOnlyRepository],
+    };
+    const app = createApp({
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        publicBaseUrl: "https://api.opengeni.test",
+        githubAppId: "12345",
+        githubClientId: "test-client-id",
+        githubClientSecret: "test-client-secret",
+        githubAppSlug: "opengeni-test-app",
+        githubAppPrivateKey: "test-private-key",
+      }),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+      githubStateSecret: stateSecret,
+      githubAppApi,
+    });
+    const context = await defaultAccessContext(app);
+    const firstWorkspaceId = context.defaultWorkspaceId!;
+    const secondWorkspaceResponse = await app.request("/v1/workspaces", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        accountId: context.defaultAccountId,
+        name: "Second GitHub workspace",
+      }),
+    });
+    expect(secondWorkspaceResponse.status).toBe(201);
+    const secondWorkspace = (await secondWorkspaceResponse.json()) as { id: string };
+
+    const linkExistingInstallation = async (workspaceId: string) => {
+      const appInfoResponse = await app.request(workspacePath(workspaceId, "/github/app"));
+      expect(appInfoResponse.status).toBe(200);
+      const appInfo = (await appInfoResponse.json()) as { linkUrl: string };
+      const linkUrl = new URL(appInfo.linkUrl);
+      const oauthRedirect = await app.request(`${linkUrl.pathname}${linkUrl.search}`);
+      expect(oauthRedirect.status).toBe(302);
+      const stateCookie = oauthRedirect.headers.get("set-cookie")?.split(";", 1)[0];
+      expect(stateCookie).toBeTruthy();
+      const oauthUrl = new URL(oauthRedirect.headers.get("location")!);
+      expect(`${oauthUrl.origin}${oauthUrl.pathname}`).toBe(
+        "https://github.com/login/oauth/authorize",
+      );
+      const oauthState = oauthUrl.searchParams.get("state")!;
+
+      const chooserResponse = await app.request(
+        `/v1/github/oauth/callback?code=test-code&state=${encodeURIComponent(oauthState)}`,
+        {
+          headers: { cookie: stateCookie! },
+        },
+      );
+      expect(chooserResponse.status).toBe(200);
+      const chooserHtml = await chooserResponse.text();
+      expect(chooserHtml).toContain(adminRepository.fullName);
+      expect(chooserHtml).not.toContain(readOnlyRepository.fullName);
+      const installationTicket = htmlInputValues(chooserHtml, "installation_ticket")[0];
+      const repositoryTickets = htmlInputValues(chooserHtml, "repository_ticket");
+      expect(installationTicket).toBeTruthy();
+      expect(repositoryTickets).toHaveLength(1);
+
+      const form = new URLSearchParams({
+        oauth_state: oauthState,
+        installation_ticket: installationTicket!,
+      });
+      form.append("repository_ticket", repositoryTickets[0]!);
+      const bindResponse = await app.request(workspacePath(workspaceId, "/github/installations"), {
+        method: "POST",
+        headers: {
+          "content-type": "application/x-www-form-urlencoded",
+          cookie: stateCookie!,
+        },
+        body: form.toString(),
+      });
+      expect(bindResponse.status).toBe(200);
+    };
+
+    await linkExistingInstallation(firstWorkspaceId);
+    await linkExistingInstallation(secondWorkspace.id);
+
+    const [firstAccess, secondAccess] = await Promise.all([
+      listGitHubInstallationAccessForWorkspace(dbClient.db, firstWorkspaceId),
+      listGitHubInstallationAccessForWorkspace(dbClient.db, secondWorkspace.id),
+    ]);
+    expect(firstAccess).toMatchObject([
+      { installationId, repositoryScope: "selected", repositoryIds: [adminRepository.id] },
+    ]);
+    expect(secondAccess).toMatchObject([
+      { installationId, repositoryScope: "selected", repositoryIds: [adminRepository.id] },
+    ]);
+
+    const firstRepositories = await app.request(
+      workspacePath(firstWorkspaceId, "/github/repositories"),
+    );
+    const secondRepositories = await app.request(
+      workspacePath(secondWorkspace.id, "/github/repositories"),
+    );
+    expect(
+      (
+        (await firstRepositories.json()) as { repositories: Array<{ id: number }> }
+      ).repositories.map(({ id }) => id),
+    ).toEqual([adminRepository.id]);
+    expect(
+      (
+        (await secondRepositories.json()) as { repositories: Array<{ id: number }> }
+      ).repositories.map(({ id }) => id),
+    ).toEqual([adminRepository.id]);
+
+    const unlink = await app.request(
+      workspacePath(firstWorkspaceId, `/github/installations/${installationId}`),
+      {
+        method: "DELETE",
+      },
+    );
+    expect(unlink.status).toBe(204);
+    expect(await listGitHubInstallationAccessForWorkspace(dbClient.db, firstWorkspaceId)).toEqual(
+      [],
+    );
+    expect(
+      await listGitHubInstallationAccessForWorkspace(dbClient.db, secondWorkspace.id),
+    ).toMatchObject([{ installationId, repositoryIds: [adminRepository.id] }]);
+
+    const disconnectedSession = await app.request(workspacePath(firstWorkspaceId, "/sessions"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        initialMessage: "This repository is no longer authorized",
+        resources: [
+          {
+            kind: "repository",
+            uri: adminRepository.cloneUrl,
+            ref: adminRepository.defaultBranch,
+            githubInstallationId: installationId,
+            githubRepositoryId: adminRepository.id,
+          },
+        ],
+      }),
+    });
+    expect(disconnectedSession.status).toBe(422);
+    const connectedSession = await app.request(workspacePath(secondWorkspace.id, "/sessions"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        initialMessage: "This repository remains authorized",
+        resources: [
+          {
+            kind: "repository",
+            uri: adminRepository.cloneUrl,
+            ref: adminRepository.defaultBranch,
+            githubInstallationId: installationId,
+            githubRepositoryId: adminRepository.id,
+          },
+        ],
+      }),
+    });
+    expect(connectedSession.status).toBe(202);
+  });
+
+  test("carries configured-token GitHub manage authority through the browser flow and preserves BYO suspension", async () => {
+    const stateSecret = "test-configured-github-browser-state-secret";
+    const delegationSecret = "test-configured-github-browser-delegation-secret";
+    const grant = await bootstrapMcpGrant(dbClient.db);
+    const authorization = await signDelegatedBearer(delegationSecret, grant, {
+      subjectId: grant.subjectId,
+      permissions: grant.permissions,
+    });
+    const installationId = 238826628;
+    const repository = {
+      id: 2001,
+      installationId,
+      fullName: "configured/private-repository",
+      name: "private-repository",
+      private: true,
+      htmlUrl: "https://github.com/configured/private-repository",
+      cloneUrl: "https://github.com/configured/private-repository.git",
+      defaultBranch: "main",
+      accountLogin: "configured",
+      accountType: "Organization",
+    };
+    let suspended = false;
+    const settings = testSettings({
+      databaseUrl: services.databaseUrl,
+      productAccessMode: "configured",
+      delegationSecret,
+      publicBaseUrl: "https://api.opengeni.test",
+      githubAppId: "12345",
+      githubClientId: "test-client-id",
+      githubClientSecret: "test-client-secret",
+      githubAppSlug: "opengeni-test-app",
+      githubAppPrivateKey: "test-private-key",
+    });
+    const app = createApp({
+      settings,
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+      githubStateSecret: stateSecret,
+      // Deliberately omit getInstallation: this exercises the BYO adapter's
+      // signed OAuth snapshot fallback instead of a live installation lookup.
+      githubAppApi: {
+        authorizeUser: async () => [
+          {
+            installationId,
+            accountLogin: repository.accountLogin,
+            accountType: repository.accountType,
+            suspended,
+            repositories: [
+              {
+                ...repository,
+                permissions: { admin: true, maintain: true, push: true, triage: true, pull: true },
+              },
+            ],
+          },
+        ],
+        listRepositories: async () => [repository],
+      },
+    });
+
+    const beginBrowserFlow = async () => {
+      const appInfoResponse = await app.request(workspacePath(grant.workspaceId, "/github/app"), {
+        headers: { authorization },
+      });
+      expect(appInfoResponse.status).toBe(200);
+      const appInfo = (await appInfoResponse.json()) as { linkUrl: string };
+      const linkUrl = new URL(appInfo.linkUrl);
+      const statePayload = readSignedState(linkUrl.searchParams.get("state")!, stateSecret);
+      expect(statePayload).toMatchObject({
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        browserGrantSubjectId: grant.subjectId,
+      });
+
+      const oauthRedirect = await app.request(`${linkUrl.pathname}${linkUrl.search}`);
+      expect(oauthRedirect.status).toBe(302);
+      const stateCookie = oauthRedirect.headers.get("set-cookie")?.split(";", 1)[0];
+      expect(stateCookie).toBeTruthy();
+      const oauthUrl = new URL(oauthRedirect.headers.get("location")!);
+      const oauthState = oauthUrl.searchParams.get("state")!;
+
+      // Neither GitHub's redirect nor the generated HTML form can carry the
+      // configured Authorization header; the short-lived signed state does.
+      const chooserResponse = await app.request(
+        `/v1/github/oauth/callback?code=test-code&state=${encodeURIComponent(oauthState)}`,
+        { headers: { cookie: stateCookie! } },
+      );
+      expect(chooserResponse.status).toBe(200);
+      const chooserHtml = await chooserResponse.text();
+      const form = new URLSearchParams({
+        oauth_state: oauthState,
+        installation_ticket: htmlInputValues(chooserHtml, "installation_ticket")[0]!,
+      });
+      form.append("repository_ticket", htmlInputValues(chooserHtml, "repository_ticket")[0]!);
+      return { form, stateCookie: stateCookie! };
+    };
+
+    const activeFlow = await beginBrowserFlow();
+    const activeBind = await app.request(
+      workspacePath(grant.workspaceId, "/github/installations"),
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/x-www-form-urlencoded",
+          cookie: activeFlow.stateCookie,
+        },
+        body: activeFlow.form.toString(),
+      },
+    );
+    expect(activeBind.status).toBe(200);
+
+    suspended = true;
+    const suspendedFlow = await beginBrowserFlow();
+    const suspendedBind = await app.request(
+      workspacePath(grant.workspaceId, "/github/installations"),
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/x-www-form-urlencoded",
+          cookie: suspendedFlow.stateCookie,
+        },
+        body: suspendedFlow.form.toString(),
+      },
+    );
+    expect(suspendedBind.status).toBe(409);
+    expect(await suspendedBind.text()).toContain("GitHub App installation is suspended");
+
+    const useOnlyAuthorization = await signDelegatedBearer(delegationSecret, grant, {
+      subjectId: `${grant.subjectId}:use-only`,
+      permissions: ["github:use"],
+    });
+    const useOnlyInfo = await app.request(workspacePath(grant.workspaceId, "/github/app"), {
+      headers: { authorization: useOnlyAuthorization },
+    });
+    expect(useOnlyInfo.status).toBe(200);
+    const useOnlyLink = new URL(((await useOnlyInfo.json()) as { linkUrl: string }).linkUrl);
+    expect(readSignedState(useOnlyLink.searchParams.get("state")!, stateSecret)).not.toHaveProperty(
+      "browserGrantSubjectId",
+    );
+    const useOnlyRedirect = await app.request(`${useOnlyLink.pathname}${useOnlyLink.search}`);
+    const useOnlyCookie = useOnlyRedirect.headers.get("set-cookie")?.split(";", 1)[0];
+    const useOnlyOAuthState = new URL(useOnlyRedirect.headers.get("location")!).searchParams.get(
+      "state",
+    )!;
+    const deniedCallback = await app.request(
+      `/v1/github/oauth/callback?code=test-code&state=${encodeURIComponent(useOnlyOAuthState)}`,
+      { headers: { cookie: useOnlyCookie! } },
+    );
+    expect(deniedCallback.status).toBe(401);
   });
 
   test("indexes uploaded files into document bases and searches them", async () => {
@@ -6246,7 +6672,9 @@ describe("API component integration", () => {
 
     const timeline = await callMcpTool<{
       events: Array<{ type: string; sequence: number }>;
-      nextAfter: number;
+      direction: "before";
+      nextBefore: number;
+      nextAfter: null;
     }>(mcp, "session_events", { sessionId: created.id });
     expect(timeline.events.map((event) => event.type)).toEqual([
       "session.created",
@@ -6255,16 +6683,86 @@ describe("API component integration", () => {
       "session.status.changed",
       "turn.queued",
     ]);
-    expect(timeline.nextAfter).toBe(timeline.events[timeline.events.length - 1]!.sequence);
+    expect(timeline.direction).toBe("before");
+    expect(timeline.nextBefore).toBe(timeline.events[0]!.sequence);
+    expect(timeline.nextAfter).toBeNull();
+    const lastTimelineSequence = timeline.events[timeline.events.length - 1]!.sequence;
     const caughtUp = await callMcpTool<{
       events: unknown[];
+      direction: "after";
       nextAfter: number;
     }>(mcp, "session_events", {
       sessionId: created.id,
-      after: timeline.nextAfter,
+      after: lastTimelineSequence,
     });
     expect(caughtUp.events).toHaveLength(0);
-    expect(caughtUp.nextAfter).toBe(timeline.nextAfter);
+    expect(caughtUp.direction).toBe("after");
+    expect(caughtUp.nextAfter).toBe(lastTimelineSequence);
+
+    const appended = await appendSessionEvents(dbClient.db, grant.workspaceId, created.id, [
+      ...Array.from({ length: 30 }, (_, index) => ({
+        type: "agent.message.completed" as const,
+        payload: { index, text: "x".repeat(7_000) },
+      })),
+      {
+        type: "turn.completed" as const,
+        payload: { result: "stale" },
+        turnGeneration: 1,
+      },
+      {
+        type: "turn.completed" as const,
+        payload: { result: "authoritative" },
+        turnGeneration: 2,
+      },
+    ]);
+    const latestTerminal = await callMcpTool<{
+      events: Array<{
+        sequence: number;
+        type: string;
+        turnGeneration: number | null;
+        payload: { result: string };
+      }>;
+    }>(mcp, "session_events", { sessionId: created.id, latest: "terminal" });
+    expect(latestTerminal.events).toEqual([
+      expect.objectContaining({
+        sequence: appended.at(-1)!.sequence,
+        type: "turn.completed",
+        turnGeneration: 2,
+        payload: { result: "authoritative" },
+      }),
+    ]);
+
+    const boundedForensic = await callMcpTool<{
+      events: Array<{ id: string; sequence: number }>;
+      direction: "after";
+      nextAfter: number;
+      hasMore: boolean;
+      truncated: boolean;
+      truncation: { reasons: string[]; resumeCursor: number };
+      bytes: number;
+      maxBytes: number;
+    }>(mcp, "session_events", {
+      sessionId: created.id,
+      after: lastTimelineSequence,
+      mode: "forensic",
+      payloadMode: "full",
+      limit: 40,
+    });
+    expect(boundedForensic.bytes).toBe(
+      Buffer.byteLength(JSON.stringify(boundedForensic, null, 2), "utf8"),
+    );
+    expect(boundedForensic.bytes).toBeLessThanOrEqual(boundedForensic.maxBytes);
+    expect(boundedForensic.maxBytes).toBe(64 * 1024);
+    expect(boundedForensic.hasMore).toBeTrue();
+    expect(boundedForensic.truncated).toBeTrue();
+    expect(boundedForensic.truncation.reasons).toEqual(
+      expect.arrayContaining(["model_payload", "model_bytes"]),
+    );
+    expect(boundedForensic.nextAfter).toBe(boundedForensic.events.at(-1)!.sequence);
+    expect(boundedForensic.truncation.resumeCursor).toBe(boundedForensic.nextAfter);
+    expect(
+      boundedForensic.events.every((event) => event.id !== "00000000-0000-0000-0000-000000000000"),
+    ).toBeTrue();
 
     const sent = await callMcpTool<{
       event: { type: string; payload: { text: string } };
@@ -7750,6 +8248,7 @@ describe("API component integration", () => {
     const settings = testSettings({
       databaseUrl: services.databaseUrl,
       publicBaseUrl: "https://api.opengeni.test",
+      githubAppManifestBaseUrl: "https://github.opengeni.test",
       ...configuredGitHub,
     });
     const mcpDeps = {
@@ -7770,18 +8269,27 @@ describe("API component integration", () => {
       configured: boolean;
       appSlug: string;
       installUrl: string;
+      linkUrl: string;
       expiresInSeconds: number;
     }>(mcp, "github_connect_link", {});
     expect(link.configured).toBe(true);
     expect(link.appSlug).toBe("opengeni-test-app");
     expect(link.expiresInSeconds).toBeGreaterThan(0);
     const installUrl = new URL(link.installUrl);
-    expect(installUrl.origin).toBe("https://api.opengeni.test");
+    expect(installUrl.origin).toBe("https://github.opengeni.test");
     expect(installUrl.pathname).toBe(`/v1/workspaces/${grant.workspaceId}/github/connect`);
     const state = installUrl.searchParams.get("state");
     expect(readSignedState(state!, stateSecret)).toMatchObject({
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
+      intent: "install",
+    });
+    const existingLinkUrl = new URL(link.linkUrl);
+    expect(existingLinkUrl.pathname).toBe(`/v1/workspaces/${grant.workspaceId}/github/connect`);
+    expect(readSignedState(existingLinkUrl.searchParams.get("state")!, stateSecret)).toMatchObject({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      intent: "link_existing",
     });
 
     // Opening the link plants the CSRF state cookie the install/OAuth
@@ -8118,6 +8626,13 @@ async function hmacSha256Hex(secret: string, message: string): Promise<string> {
   return Array.from(new Uint8Array(signature))
     .map((byte) => byte.toString(16).padStart(2, "0"))
     .join("");
+}
+
+function htmlInputValues(html: string, name: string): string[] {
+  const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return [...html.matchAll(new RegExp(`name="${escapedName}" value="([^"]+)"`, "g"))]
+    .map((match) => match[1]!)
+    .map((value) => value.replaceAll("&amp;", "&"));
 }
 
 function workspacePath(workspaceId: string, path: string): string {
