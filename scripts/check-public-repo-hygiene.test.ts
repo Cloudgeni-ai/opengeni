@@ -30,6 +30,7 @@ describe("public repository hygiene", () => {
     const retiredDesignTerm = ["dos", "sier"].join("");
     const internalIssue = ["OPE", "-123"].join("");
     const compactIssue = ["ope", "123Fixture"].join("");
+    const identifierIssue = ["__ope", "9SetQueueLoading"].join("");
     const workLabel = ["SPIKE", "-7"].join("");
     const milestone = ["M", "12"].join("");
     const privateCodename = ["pelo", "ton"].join("");
@@ -47,6 +48,7 @@ describe("public repository hygiene", () => {
         `const retiredTerm = '${retiredDesignTerm}';`,
         `const issue = '${internalIssue}';`,
         `const compactIssue = '${compactIssue}';`,
+        `const identifierIssue = '${identifierIssue}';`,
         `const workLabel = '${workLabel}';`,
         `const milestone = '${milestone}';`,
         `const codename = '${privateCodename}';`,
@@ -58,6 +60,7 @@ describe("public repository hygiene", () => {
     expect(findings.map((finding) => finding.reason).sort()).toEqual(
       [
         "non-generic home path",
+        "internal issue reference",
         "internal issue reference",
         "internal issue reference",
         "internal work label",
