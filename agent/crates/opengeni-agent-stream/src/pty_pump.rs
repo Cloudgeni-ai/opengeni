@@ -4,7 +4,7 @@
 //!   chunks over a bounded channel to the relay-send loop, which ships each as a
 //!   [`StreamFrame`](opengeni_agent_proto::v1::StreamFrame). The bounded channel is
 //!   the backpressure point — a slow viewer cannot make the agent buffer
-//! unboundedly.
+//!   unboundedly.
 //! * **Input** (relay → tty): inbound [`StreamFrame`]s are raw keystrokes written
 //!   to the PTY writer. A [`DesktopInput`] on a PTY channel is ignored (it belongs
 //!   to a desktop channel).

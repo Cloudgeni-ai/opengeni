@@ -6,17 +6,17 @@ import { acquireBlankTestDatabase, type BlankTestDatabase } from "@opengeni/test
 import postgres from "postgres";
 
 const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../drizzle");
-const migration = "0078_quarantine_credential_bearing_catalog_urls.sql";
+const migration = "0094_quarantine_credential_bearing_catalog_urls.sql";
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
 let blank: BlankTestDatabase | null = null;
 let available = true;
 
 beforeAll(async () => {
-  blank = await acquireBlankTestDatabase("migration-0078-catalog-url-hygiene");
+  blank = await acquireBlankTestDatabase("migration-0094-catalog-url-hygiene");
   if (!blank) {
     if (requireRealDatabase) {
-      throw new Error("[migration-0078] real PostgreSQL harness is unavailable");
+      throw new Error("[migration-0094] real PostgreSQL harness is unavailable");
     }
     available = false;
   }
@@ -26,7 +26,7 @@ afterAll(async () => {
   await blank?.release();
 });
 
-describe("0078 catalog URL hygiene (real PostgreSQL)", () => {
+describe("0094 catalog URL hygiene (real PostgreSQL)", () => {
   test("scrubs unsafe imported endpoints and batch diagnostics while retaining safe rows", async () => {
     if (!available || !blank) return;
     const sql = postgres(blank.databaseUrl, { max: 1 });
