@@ -12,9 +12,18 @@ does not send a message by itself.
 - Partial transcripts are ephemeral UI state. They are cleared on reconnect, cancellation, error,
   close, policy replacement, or component unmount and are never inserted into the message draft.
 - Each accepted final is deduplicated by the adapter's stable acceptance ID and appended to the
-  draft exactly once. The user can edit or delete it before using the ordinary Send action.
+  draft exactly once. An empty/whitespace final is not an acceptance and does not consume its ID,
+  so a later non-empty correction with the same ID can still be inserted once. The user can edit or
+  delete accepted text before using the ordinary Send action.
+- Partial and final events may carry provider-neutral detected-language, result-span, confidence,
+  speaker, and word-span metadata. Unsupported fields are omitted; provider-specific payload bags
+  and display strings are not part of the event contract.
 - Escape cancels an active session. Cancellation and policy replacement locally fence late adapter
-  callbacks even if remote cleanup fails.
+  callbacks even if remote cleanup fails. Pending starts receive an abort signal, start has a local
+  deadline, and detached `cancel`/`close` cleanup is invoked independently under bounded waits.
+- Adapter errors reach the composer only as controlled error codes mapped to local UI copy. Raw
+  adapter detail is never rendered; an optional diagnostic callback receives only bounded,
+  redacted non-UI detail.
 - Transcription is disabled and unaccepted by default. Missing, malformed, or mismatched policy and
   adapter state fails closed.
 
@@ -32,9 +41,13 @@ workspace.settings.transcription
 ```
 
 The workspace policy and adapter descriptor must match on provider, model, credential mode, and
-region. The session request also carries the exact accepted policy identity, language, retention,
-privacy, cost, target selection, and sequence floor. Changing any accepted policy field revokes the
-active session; a new session must bind the new acceptance ID.
+region. The session request also carries the exact accepted policy identity; fixed-language or
+explicit automatic-language acceptance; diarization acceptance and optional speaker limit;
+retention, privacy, and cost commitments; target selection; and sequence floor. An enabled policy
+must accept exactly one of a fixed BCP 47 language or automatic detection. Speaker diarization is
+off unless explicitly accepted, and a maximum-speaker value is valid only when diarization is on.
+Changing any accepted policy field revokes the active session; a new session must bind the new
+acceptance ID.
 
 This authorization is intentionally separate from workspace turn-model policy and from the model
 chosen for an agent turn. A transcription target cannot inherit OPE-35/model-routing permission,
@@ -68,18 +81,34 @@ credential. The demo/e2e adapter is local deterministic fixture code only.
 
 ## Lifecycle requirements for host adapters
 
-1. `start` receives an already-authorized, immutable session request and an event listener.
+1. `start` receives an already-authorized, immutable session request, an event listener, and a
+   `TranscriptionAdapterStartContext`. The context's `AbortSignal` is aborted on local cancellation,
+   policy replacement, start timeout, or component unmount. Adapters must stop microphone/audio and
+   network acquisition promptly when it aborts and must consume any later provider settlement.
 2. Events use one `localSessionId` and a strictly increasing safe-integer `sequence`, including
    reconnects. Replayed or stale sequences are ignored.
-3. Partials are replaceable hints. Finals need a stable `providerAcceptanceId`; replaying a final
-   with that ID must not create a second insertion.
-4. Recoverable errors enter reconnecting state. Non-recoverable errors and closed sessions are
-   terminal and release the stored session handle.
-5. `cancel` and `close` must be idempotent. The UI treats cancellation as a local privacy fence even
-   when provider cleanup rejects.
-6. A fallback is never selected silently. The workspace must accept explicit fallback targets and
+3. Partials are replaceable hints. Finals need a stable `providerAcceptanceId`; replaying a
+   non-empty final with that ID must not create a second insertion. Empty/whitespace finals do not
+   reserve the ID.
+4. Optional `metadata` on partials and finals uses only neutral structures: `detectedLanguage`, a
+   nonnegative ordered result `span`, confidence in the inclusive 0–1 range, a session-local
+   `speaker`, and ordered `words` whose spans fit inside the result span. Metadata is informational
+   and does not change final acceptance or draft insertion semantics.
+5. Recoverable errors enter reconnecting state. Non-recoverable errors and closed sessions are
+   terminal and release the stored session handle. Events carry a controlled error code and
+   recoverability only, never adapter-owned display text.
+6. `cancel` and `close` must be idempotent. React invokes them independently, does not await them to
+   restore idle UI/focus, and bounds each detached cleanup observation (2 seconds by default). A
+   hanging or rejected method must not prevent the other from being invoked.
+7. React bounds `start` locally (15 seconds by default). A timeout aborts the start context, fences
+   late callbacks, and maps to controlled retry UI. A handle that resolves after a timeout,
+   cancellation, policy replacement, or unmount is detached and cleaned rather than retained.
+8. `reportDiagnostic` is an observability seam, not a UI channel. React strips control characters,
+   redacts bearer/token/key/secret patterns, caps detail at 512 characters, and contains callback
+   failures. Hosts must still avoid submitting unnecessary provider payloads or credentials.
+9. A fallback is never selected silently. The workspace must accept explicit fallback targets and
    the host must request one exact accepted index.
-7. The host adapter is responsible for enforcing provider-specific retention/privacy commitments
+10. The host adapter is responsible for enforcing provider-specific retention/privacy commitments
    and cost ceilings before and during capture. The generic SDK passes these values through but has
    no provider meter or billing integration of its own.
 

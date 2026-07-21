@@ -22,7 +22,15 @@ export type WorkspaceTranscriptionPolicy = {
   /** Exact admin-accepted policy identity; required whenever enabled. */
   acceptanceId: string | null;
   primary: WorkspaceTranscriptionTarget | null;
+  /** Explicit language preference. Required when automatic detection is not accepted. */
   language: string | null;
+  /** Whether the accepted adapter may automatically detect the spoken language. */
+  autoDetectLanguage: boolean;
+  /** Whether the accepted adapter may identify distinct speakers. */
+  diarization: {
+    enabled: boolean;
+    maxSpeakers: number | null;
+  };
   retention: {
     mode: "none" | "provider-policy";
     maxDays: number | null;
@@ -47,6 +55,8 @@ export const DEFAULT_WORKSPACE_TRANSCRIPTION_POLICY: WorkspaceTranscriptionPolic
   acceptanceId: null,
   primary: null,
   language: null,
+  autoDetectLanguage: false,
+  diarization: { enabled: false, maxSpeakers: null },
   retention: { mode: "none", maxDays: null },
   privacy: { allowProviderLogging: false, allowProviderTraining: false },
   fallback: { mode: "disabled", targets: [] },
@@ -99,8 +109,43 @@ export type TranscriptionErrorCode =
   | "network"
   | "provider"
   | "policy_blocked"
+  | "timeout"
   | "cancelled"
   | "unknown";
+
+export type TranscriptionTimeSpan = {
+  startMilliseconds: number;
+  endMilliseconds: number;
+};
+
+export type TranscriptionSpeaker = {
+  /** Provider-neutral identity stable within the local transcription session. */
+  id: string;
+  label?: string | undefined;
+};
+
+export type TranscriptionWord = {
+  text: string;
+  span: TranscriptionTimeSpan;
+  confidence?: number | undefined;
+  speaker?: TranscriptionSpeaker | undefined;
+};
+
+/** Optional result detail; adapters omit fields their provider cannot supply. */
+export type TranscriptionResultMetadata = {
+  detectedLanguage?: string | undefined;
+  span?: TranscriptionTimeSpan | undefined;
+  confidence?: number | undefined;
+  speaker?: TranscriptionSpeaker | undefined;
+  words?: TranscriptionWord[] | undefined;
+};
+
+export type TranscriptionDiagnostic = {
+  operation: "start" | "session" | "cancel" | "close";
+  code: TranscriptionErrorCode;
+  /** Diagnostic-only detail. React sanitizes and bounds this before forwarding it. */
+  detail: string;
+};
 
 type TranscriptionEventBase = {
   /** Stable across reconnects and explicitly accepted fallback attempts. */
@@ -120,6 +165,7 @@ export type TranscriptionEvent =
       type: "transcript.partial";
       segmentId: string;
       text: string;
+      metadata?: TranscriptionResultMetadata | undefined;
     })
   | (TranscriptionEventBase & {
       type: "transcript.final";
@@ -127,6 +173,7 @@ export type TranscriptionEvent =
       text: string;
       /** Stable provider/coordinator acceptance identity used for dedupe. */
       providerAcceptanceId: string;
+      metadata?: TranscriptionResultMetadata | undefined;
     })
   | (TranscriptionEventBase & {
       type: "usage";
@@ -141,7 +188,6 @@ export type TranscriptionEvent =
   | (TranscriptionEventBase & {
       type: "session.error";
       code: TranscriptionErrorCode;
-      message: string;
       recoverable: boolean;
     })
   | (TranscriptionEventBase & {
@@ -155,6 +201,8 @@ export type TranscriptionSessionRequest = {
   selection: TranscriptionTargetSelection;
   target: WorkspaceTranscriptionTarget;
   language: string | null;
+  autoDetectLanguage: boolean;
+  diarization: WorkspaceTranscriptionPolicy["diarization"];
   retention: WorkspaceTranscriptionPolicy["retention"];
   privacy: WorkspaceTranscriptionPolicy["privacy"];
   cost: WorkspaceTranscriptionPolicy["cost"];
@@ -163,6 +211,13 @@ export type TranscriptionSessionRequest = {
 };
 
 export type TranscriptionEventListener = (event: TranscriptionEvent) => void;
+
+export type TranscriptionAdapterStartContext = {
+  /** Aborted on local cancellation, policy replacement, timeout, or unmount. */
+  signal: AbortSignal;
+  /** Non-UI observability seam; callers receive only bounded, redacted detail. */
+  reportDiagnostic: (diagnostic: TranscriptionDiagnostic) => void;
+};
 
 export type TranscriptionSession = {
   readonly localSessionId: string;
@@ -175,6 +230,7 @@ export type TranscriptionAdapter = {
   start(
     request: TranscriptionSessionRequest,
     listener: TranscriptionEventListener,
+    context: TranscriptionAdapterStartContext,
   ): Promise<TranscriptionSession>;
 };
 
@@ -189,6 +245,7 @@ export function resolveWorkspaceTranscriptionPolicy(
     ...candidate,
     primary: candidate.primary ? normalizeTarget(candidate.primary) : null,
     language: candidate.language?.trim() ?? null,
+    diarization: { ...candidate.diarization },
     retention: { ...candidate.retention },
     privacy: { ...candidate.privacy },
     fallback: {
@@ -266,6 +323,8 @@ export function createTranscriptionSessionRequest(input: {
     selection: authorization.selection,
     target: { ...authorization.target },
     language: input.policy.language?.trim() ?? null,
+    autoDetectLanguage: input.policy.autoDetectLanguage,
+    diarization: { ...input.policy.diarization },
     retention: { ...input.policy.retention },
     privacy: { ...input.policy.privacy },
     cost: { ...input.policy.cost },
@@ -276,6 +335,7 @@ export function createTranscriptionSessionRequest(input: {
 function cloneDefaultPolicy(): WorkspaceTranscriptionPolicy {
   return {
     ...DEFAULT_WORKSPACE_TRANSCRIPTION_POLICY,
+    diarization: { ...DEFAULT_WORKSPACE_TRANSCRIPTION_POLICY.diarization },
     retention: { ...DEFAULT_WORKSPACE_TRANSCRIPTION_POLICY.retention },
     privacy: { ...DEFAULT_WORKSPACE_TRANSCRIPTION_POLICY.privacy },
     fallback: { mode: "disabled", targets: [] },
@@ -291,6 +351,8 @@ function isWorkspaceTranscriptionPolicy(value: unknown): value is WorkspaceTrans
       "acceptanceId",
       "primary",
       "language",
+      "autoDetectLanguage",
+      "diarization",
       "retention",
       "privacy",
       "fallback",
@@ -302,6 +364,19 @@ function isWorkspaceTranscriptionPolicy(value: unknown): value is WorkspaceTrans
   if (!(value.acceptanceId === null || isUuid(value.acceptanceId))) return false;
   if (!(value.primary === null || isTarget(value.primary))) return false;
   if (!(value.language === null || isBoundedString(value.language, 64))) return false;
+  if (typeof value.autoDetectLanguage !== "boolean") return false;
+  if (
+    !isRecord(value.diarization) ||
+    !hasOnlyKeys(value.diarization, ["enabled", "maxSpeakers"]) ||
+    typeof value.diarization.enabled !== "boolean" ||
+    !(
+      value.diarization.maxSpeakers === null ||
+      (isBoundedInteger(value.diarization.maxSpeakers, 100) && value.diarization.maxSpeakers >= 2)
+    )
+  ) {
+    return false;
+  }
+  if (!value.diarization.enabled && value.diarization.maxSpeakers !== null) return false;
   if (!isRecord(value.retention) || !hasOnlyKeys(value.retention, ["mode", "maxDays"])) {
     return false;
   }
@@ -340,6 +415,8 @@ function isWorkspaceTranscriptionPolicy(value: unknown): value is WorkspaceTrans
   if (!isNullableBoundedNumber(value.cost.maxPerHour, 10_000)) return false;
   if (!isNullableBoundedNumber(value.cost.maxPerMonth, 1_000_000)) return false;
   if (value.enabled && (!value.acceptanceId || !value.primary)) return false;
+  if (value.enabled && !value.autoDetectLanguage && value.language === null) return false;
+  if (value.autoDetectLanguage && value.language !== null) return false;
   const targets = [value.primary, ...value.fallback.targets].filter(
     (target): target is WorkspaceTranscriptionTarget => target !== null,
   );

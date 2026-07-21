@@ -2,6 +2,7 @@ import {
   authorizeTranscriptionAdapter,
   createTranscriptionSessionRequest,
   type TranscriptionAdapter,
+  type TranscriptionDiagnostic,
   type TranscriptionErrorCode,
   type TranscriptionEvent,
   type TranscriptionLifecycleStatus,
@@ -19,7 +20,7 @@ export type TranscriptionControlState = {
   providerSessionId: string | null;
   lastSequence: number;
   partial: string;
-  error: { code: TranscriptionErrorCode; message: string; recoverable: boolean } | null;
+  error: { code: TranscriptionErrorCode; recoverable: boolean } | null;
   acceptedFinalIds: string[];
   audioMilliseconds: number;
   costUsd: number | null;
@@ -45,7 +46,6 @@ export type TranscriptionControlAction =
       type: "start.failed";
       generation: number;
       code: TranscriptionErrorCode;
-      message: string;
     }
   | { type: "cancel"; generation: number }
   | { type: "cancel.settled"; generation: number }
@@ -87,7 +87,7 @@ export function transitionTranscriptionControl(
         ...state,
         status: "error",
         partial: "",
-        error: { code: action.code, message: action.message, recoverable: false },
+        error: { code: normalizeTranscriptionErrorCode(action.code), recoverable: false },
       },
       commit: null,
     };
@@ -143,15 +143,17 @@ export function transitionTranscriptionControl(
     case "transcript.final": {
       const text = event.text.trim();
       const duplicate = state.acceptedFinalIds.includes(event.providerAcceptanceId);
+      const acceptedFinalIds =
+        duplicate || text.length === 0
+          ? state.acceptedFinalIds
+          : [...state.acceptedFinalIds, event.providerAcceptanceId];
       return {
         state: {
           ...sequenced,
           status: "listening",
           partial: "",
           error: null,
-          acceptedFinalIds: duplicate
-            ? state.acceptedFinalIds
-            : [...state.acceptedFinalIds, event.providerAcceptanceId],
+          acceptedFinalIds,
         },
         commit: duplicate || text.length === 0 ? null : text,
       };
@@ -177,8 +179,7 @@ export function transitionTranscriptionControl(
           status: event.recoverable ? "reconnecting" : "error",
           partial: "",
           error: {
-            code: event.code,
-            message: event.message,
+            code: normalizeTranscriptionErrorCode(event.code),
             recoverable: event.recoverable,
           },
         },
@@ -212,6 +213,19 @@ export type UseTranscriptionOptions = {
   focusInput: () => void;
   disabled?: boolean | undefined;
   createLocalSessionId?: (() => string) | undefined;
+  lifecycleTimeouts?: Partial<TranscriptionLifecycleTimeouts> | undefined;
+  /** Receives bounded, redacted diagnostics; this detail is never rendered by the hook. */
+  onDiagnostic?: ((diagnostic: TranscriptionDiagnostic) => void) | undefined;
+};
+
+export type TranscriptionLifecycleTimeouts = {
+  startMs: number;
+  cleanupMs: number;
+};
+
+const DEFAULT_TRANSCRIPTION_LIFECYCLE_TIMEOUTS: TranscriptionLifecycleTimeouts = {
+  startMs: 15_000,
+  cleanupMs: 2_000,
 };
 
 export type UseTranscriptionResult = {
@@ -236,13 +250,45 @@ export function useTranscription({
   focusInput,
   disabled = false,
   createLocalSessionId = defaultLocalSessionId,
+  lifecycleTimeouts,
+  onDiagnostic,
 }: UseTranscriptionOptions): UseTranscriptionResult {
   const [state, setState] = useState(INITIAL_TRANSCRIPTION_CONTROL_STATE);
   const stateRef = useRef(state);
   const valueRef = useRef(value);
   const sessionRef = useRef<{ generation: number; session: TranscriptionSession } | null>(null);
+  const pendingStartRef = useRef<{
+    generation: number;
+    controller: AbortController;
+  } | null>(null);
   const activePolicyRef = useRef<{ generation: number; revision: string } | null>(null);
   valueRef.current = value;
+
+  const startTimeoutMs = normalizeTimeout(
+    lifecycleTimeouts?.startMs,
+    DEFAULT_TRANSCRIPTION_LIFECYCLE_TIMEOUTS.startMs,
+  );
+  const cleanupTimeoutMs = normalizeTimeout(
+    lifecycleTimeouts?.cleanupMs,
+    DEFAULT_TRANSCRIPTION_LIFECYCLE_TIMEOUTS.cleanupMs,
+  );
+
+  const reportDiagnostic = useCallback(
+    (diagnostic: unknown) => {
+      if (!onDiagnostic) return;
+      try {
+        onDiagnostic(sanitizeTranscriptionDiagnostic(diagnostic));
+      } catch {
+        // Observability must never break the local privacy or UI lifecycle.
+      }
+    },
+    [onDiagnostic],
+  );
+  const cleanupRuntimeRef = useRef({ cleanupTimeoutMs, reportDiagnostic });
+
+  useEffect(() => {
+    cleanupRuntimeRef.current = { cleanupTimeoutMs, reportDiagnostic };
+  }, [cleanupTimeoutMs, reportDiagnostic]);
 
   const policyRevision = useMemo(
     () => transcriptionPolicyRevision(policy, selection),
@@ -284,13 +330,19 @@ export function useTranscription({
     [focusInput, setValue],
   );
 
-  const releaseTerminalSession = useCallback((generation: number) => {
-    const active = sessionRef.current;
-    if (!active || active.generation !== generation) return;
-    sessionRef.current = null;
-    if (activePolicyRef.current?.generation === generation) activePolicyRef.current = null;
-    void active.session.close().catch(() => undefined);
-  }, []);
+  const releaseTerminalSession = useCallback(
+    (generation: number) => {
+      const active = sessionRef.current;
+      if (!active || active.generation !== generation) return;
+      sessionRef.current = null;
+      if (activePolicyRef.current?.generation === generation) activePolicyRef.current = null;
+      detachSessionCleanup(active.session, {
+        cleanupTimeoutMs,
+        reportDiagnostic,
+      });
+    },
+    [cleanupTimeoutMs, reportDiagnostic],
+  );
 
   const start = useCallback(async (): Promise<boolean> => {
     if (
@@ -315,55 +367,131 @@ export function useTranscription({
         type: "start.failed",
         generation,
         code: "policy_blocked",
-        message: "Transcription is not authorized by the accepted workspace policy.",
       });
       return false;
     }
     activePolicyRef.current = { generation, revision: policyRevision };
-    try {
-      const session = await adapter.start(request, (event) => {
-        apply({ type: "event", generation, event });
-        if (event.type === "session.error" && !event.recoverable) {
-          releaseTerminalSession(generation);
-        } else if (event.type === "session.closed") {
-          releaseTerminalSession(generation);
-        }
-      });
-      const current = stateRef.current;
-      if (
-        current.generation !== generation ||
-        current.localSessionId !== localSessionId ||
-        current.status === "cancelling" ||
-        !isActiveTranscriptionStatus(current.status)
-      ) {
-        const locallyRevoked = activePolicyRef.current?.generation !== generation;
-        if (activePolicyRef.current?.generation === generation) activePolicyRef.current = null;
-        if (locallyRevoked || (current.status !== "error" && current.status !== "closed")) {
-          await session.cancel("stale-generation").catch(() => undefined);
-        }
-        await session.close().catch(() => undefined);
-        return false;
+    const controller = new AbortController();
+    pendingStartRef.current = { generation, controller };
+    let boundarySettled = false;
+    let accepted = false;
+    const observedStart = Promise.resolve()
+      .then(() =>
+        adapter.start(
+          request,
+          (event) => {
+            apply({ type: "event", generation, event });
+            if (event.type === "session.error" && !event.recoverable) {
+              releaseTerminalSession(generation);
+            } else if (event.type === "session.closed") {
+              releaseTerminalSession(generation);
+            }
+          },
+          {
+            signal: controller.signal,
+            reportDiagnostic,
+          },
+        ),
+      )
+      .then(
+        (session) => {
+          if (boundarySettled && !accepted) {
+            detachSessionCleanup(session, {
+              cancelReason: "stale-generation",
+              cleanupTimeoutMs,
+              reportDiagnostic,
+            });
+          }
+          return { kind: "session" as const, session };
+        },
+        (error: unknown) => {
+          if (boundarySettled) {
+            reportDiagnostic({
+              operation: "start",
+              code: classifyStartError(error),
+              detail: diagnosticDetail(error),
+            });
+          }
+          return { kind: "error" as const, error };
+        },
+      );
+
+    let abortListener: (() => void) | null = null;
+    const aborted = new Promise<{ kind: "aborted" }>((resolve) => {
+      if (controller.signal.aborted) {
+        resolve({ kind: "aborted" });
+        return;
       }
-      sessionRef.current = { generation, session };
-      return true;
-    } catch (error) {
+      abortListener = () => resolve({ kind: "aborted" });
+      controller.signal.addEventListener("abort", abortListener, { once: true });
+    });
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+    const timedOut = new Promise<{ kind: "timeout" }>((resolve) => {
+      timeoutId = setTimeout(() => resolve({ kind: "timeout" }), startTimeoutMs);
+    });
+    const outcome = await Promise.race([observedStart, aborted, timedOut]);
+    boundarySettled = true;
+    if (timeoutId !== null) clearTimeout(timeoutId);
+    if (abortListener) controller.signal.removeEventListener("abort", abortListener);
+    if (pendingStartRef.current?.generation === generation) pendingStartRef.current = null;
+
+    if (outcome.kind === "aborted") return false;
+
+    if (outcome.kind === "timeout") {
+      controller.abort("transcription-start-timeout");
       if (activePolicyRef.current?.generation === generation) activePolicyRef.current = null;
-      apply({
-        type: "start.failed",
-        generation,
-        code: classifyStartError(error),
-        message: error instanceof Error ? error.message : "Unable to start voice input.",
+      reportDiagnostic({
+        operation: "start",
+        code: "timeout",
+        detail: `Transcription adapter start exceeded ${startTimeoutMs}ms.`,
+      });
+      apply({ type: "start.failed", generation, code: "timeout" });
+      return false;
+    }
+
+    if (outcome.kind === "error") {
+      if (activePolicyRef.current?.generation === generation) activePolicyRef.current = null;
+      const code = classifyStartError(outcome.error);
+      reportDiagnostic({
+        operation: "start",
+        code,
+        detail: diagnosticDetail(outcome.error),
+      });
+      if (!controller.signal.aborted) {
+        apply({ type: "start.failed", generation, code });
+      }
+      return false;
+    }
+
+    const current = stateRef.current;
+    if (
+      current.generation !== generation ||
+      current.localSessionId !== localSessionId ||
+      current.status === "cancelling" ||
+      !isActiveTranscriptionStatus(current.status)
+    ) {
+      if (activePolicyRef.current?.generation === generation) activePolicyRef.current = null;
+      detachSessionCleanup(outcome.session, {
+        ...(current.status === "error" ? {} : { cancelReason: "stale-generation" }),
+        cleanupTimeoutMs,
+        reportDiagnostic,
       });
       return false;
     }
+    accepted = true;
+    sessionRef.current = { generation, session: outcome.session };
+    return true;
   }, [
     adapter,
     apply,
     createLocalSessionId,
+    cleanupTimeoutMs,
     policy,
     policyRevision,
     releaseTerminalSession,
+    reportDiagnostic,
     selection,
+    startTimeoutMs,
     unavailableReason,
   ]);
 
@@ -372,22 +500,25 @@ export function useTranscription({
     if (!isActiveTranscriptionStatus(current.status)) return false;
     const generation = current.generation;
     apply({ type: "cancel", generation });
+    const pending = pendingStartRef.current;
+    if (pending?.generation === generation) {
+      pendingStartRef.current = null;
+      pending.controller.abort("transcription-locally-cancelled");
+    }
     const active = sessionRef.current;
     sessionRef.current = null;
     if (activePolicyRef.current?.generation === generation) activePolicyRef.current = null;
-    try {
-      if (active?.generation === generation) {
-        await active.session.cancel("user-cancelled");
-        await active.session.close();
-      }
-    } catch {
-      // Cancellation is a local privacy fence even when provider cleanup fails.
-    } finally {
-      apply({ type: "cancel.settled", generation });
-      focusInput();
+    apply({ type: "cancel.settled", generation });
+    focusInput();
+    if (active?.generation === generation) {
+      detachSessionCleanup(active.session, {
+        cancelReason: "user-cancelled",
+        cleanupTimeoutMs,
+        reportDiagnostic,
+      });
     }
     return true;
-  }, [apply, focusInput]);
+  }, [apply, cleanupTimeoutMs, focusInput, reportDiagnostic]);
 
   const reset = useCallback(() => apply({ type: "reset" }), [apply]);
 
@@ -417,6 +548,9 @@ export function useTranscription({
 
   useEffect(
     () => () => {
+      const pending = pendingStartRef.current;
+      pendingStartRef.current = null;
+      pending?.controller.abort("transcription-component-unmounted");
       const active = sessionRef.current;
       sessionRef.current = null;
       activePolicyRef.current = null;
@@ -427,8 +561,12 @@ export function useTranscription({
         partial: "",
       };
       if (active) {
-        void active.session.cancel("component-unmounted").catch(() => undefined);
-        void active.session.close().catch(() => undefined);
+        const runtime = cleanupRuntimeRef.current;
+        detachSessionCleanup(active.session, {
+          cancelReason: "component-unmounted",
+          cleanupTimeoutMs: runtime.cleanupTimeoutMs,
+          reportDiagnostic: runtime.reportDiagnostic,
+        });
       }
     },
     [],
@@ -458,9 +596,128 @@ function defaultLocalSessionId(): string {
 }
 
 function classifyStartError(error: unknown): TranscriptionErrorCode {
-  if (error instanceof DOMException && error.name === "NotAllowedError") return "permission_denied";
-  if (error instanceof DOMException && error.name === "NotSupportedError") return "not_supported";
+  if (isRecord(error)) {
+    const normalized = normalizeTranscriptionErrorCode(error.code);
+    if (normalized !== "unknown") return normalized;
+  }
+  if (typeof DOMException !== "undefined" && error instanceof DOMException) {
+    if (error.name === "NotAllowedError") return "permission_denied";
+    if (error.name === "NotSupportedError") return "not_supported";
+    if (error.name === "TimeoutError") return "timeout";
+    if (error.name === "AbortError") return "cancelled";
+  }
   return "unknown";
+}
+
+export function normalizeTranscriptionErrorCode(code: unknown): TranscriptionErrorCode {
+  switch (code) {
+    case "permission_denied":
+    case "not_supported":
+    case "network":
+    case "provider":
+    case "policy_blocked":
+    case "timeout":
+    case "cancelled":
+    case "unknown":
+      return code;
+    default:
+      return "unknown";
+  }
+}
+
+export function sanitizeTranscriptionDiagnostic(diagnostic: unknown): TranscriptionDiagnostic {
+  const source = isRecord(diagnostic) ? diagnostic : {};
+  const operation =
+    source.operation === "start" ||
+    source.operation === "session" ||
+    source.operation === "cancel" ||
+    source.operation === "close"
+      ? source.operation
+      : "session";
+  const rawDetail = typeof source.detail === "string" ? source.detail : "No diagnostic detail.";
+  const detail = rawDetail
+    .replace(/[\u0000-\u001f\u007f]+/gu, " ")
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/giu, "Bearer [REDACTED]")
+    .replace(/\bsk-[A-Za-z0-9_-]{4,}\b/gu, "[REDACTED]")
+    .replace(
+      /\b(api[-_ ]?key|authorization|access[-_ ]?token|refresh[-_ ]?token|token|secret)\b\s*[:=]\s*[^\s,;]+/giu,
+      "$1=[REDACTED]",
+    )
+    .trim()
+    .slice(0, 512);
+  return {
+    operation,
+    code: normalizeTranscriptionErrorCode(source.code),
+    detail: detail || "No diagnostic detail.",
+  };
+}
+
+function detachSessionCleanup(
+  session: TranscriptionSession,
+  options: {
+    cancelReason?: string | undefined;
+    cleanupTimeoutMs: number;
+    reportDiagnostic: (diagnostic: unknown) => void;
+  },
+): void {
+  if (options.cancelReason) {
+    void runBoundedCleanup(
+      "cancel",
+      () => session.cancel(options.cancelReason),
+      options.cleanupTimeoutMs,
+      options.reportDiagnostic,
+    );
+  }
+  void runBoundedCleanup(
+    "close",
+    () => session.close(),
+    options.cleanupTimeoutMs,
+    options.reportDiagnostic,
+  );
+}
+
+async function runBoundedCleanup(
+  operation: "cancel" | "close",
+  invoke: () => Promise<void>,
+  timeoutMs: number,
+  reportDiagnostic: (diagnostic: unknown) => void,
+): Promise<void> {
+  let timeoutId: ReturnType<typeof setTimeout> | null = null;
+  const result = Promise.resolve()
+    .then(invoke)
+    .then(
+      () => ({ kind: "settled" as const }),
+      (error: unknown) => ({ kind: "rejected" as const, error }),
+    );
+  const timeout = new Promise<{ kind: "timeout" }>((resolve) => {
+    timeoutId = setTimeout(() => resolve({ kind: "timeout" }), timeoutMs);
+  });
+  const outcome = await Promise.race([result, timeout]);
+  if (timeoutId !== null) clearTimeout(timeoutId);
+  if (outcome.kind === "settled") return;
+  reportDiagnostic({
+    operation,
+    code: outcome.kind === "timeout" ? "timeout" : "provider",
+    detail:
+      outcome.kind === "timeout"
+        ? `Transcription ${operation} exceeded ${timeoutMs}ms.`
+        : diagnosticDetail(outcome.error),
+  });
+}
+
+function diagnosticDetail(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  return typeof error === "string" ? error : "Unknown transcription adapter failure.";
+}
+
+function normalizeTimeout(value: number | undefined, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 1
+    ? Math.min(Math.floor(value), 60_000)
+    : fallback;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
 function transcriptionPolicyRevision(
@@ -482,6 +739,9 @@ function transcriptionPolicyRevision(
     policy.acceptanceId ?? "",
     targetKey(policy.primary),
     policy.language ?? "",
+    policy.autoDetectLanguage ? "1" : "0",
+    policy.diarization.enabled ? "1" : "0",
+    policy.diarization.maxSpeakers?.toString() ?? "",
     policy.retention.mode,
     policy.retention.maxDays?.toString() ?? "",
     policy.privacy.allowProviderLogging ? "1" : "0",

@@ -27,6 +27,9 @@ type PolicyDraft = {
   enabled: boolean;
   primary: TargetDraft;
   language: string;
+  autoDetectLanguage: boolean;
+  diarizationEnabled: boolean;
+  maxSpeakers: string;
   retentionMode: WorkspaceTranscriptionPolicy["retention"]["mode"];
   retentionDays: string;
   allowProviderLogging: boolean;
@@ -140,10 +143,13 @@ export function TranscriptionSettingsSection({
           />
 
           <div className="grid gap-3 sm:grid-cols-2">
-            <Field label="Language" hint="BCP 47 tag; blank lets the target choose.">
+            <Field
+              label="Language"
+              hint="Required BCP 47 tag unless automatic detection is explicitly accepted."
+            >
               <Input
                 value={draft.language}
-                disabled={!canManage || saving}
+                disabled={!canManage || saving || draft.autoDetectLanguage}
                 placeholder="en-US"
                 onChange={(event) =>
                   setDraft((current) => ({ ...current, language: event.target.value }))
@@ -183,6 +189,53 @@ export function TranscriptionSettingsSection({
               </Field>
             ) : null}
           </div>
+
+          <fieldset className="grid gap-3 rounded-md border border-border p-3 sm:grid-cols-2">
+            <legend className="px-1 text-xs font-medium">Recognition features</legend>
+            <Checkbox
+              checked={draft.autoDetectLanguage}
+              disabled={!canManage || saving}
+              label="Allow automatic spoken-language detection"
+              onChange={(checked) =>
+                setDraft((current) => ({
+                  ...current,
+                  autoDetectLanguage: checked,
+                  ...(checked ? { language: "" } : {}),
+                }))
+              }
+            />
+            <Checkbox
+              checked={draft.diarizationEnabled}
+              disabled={!canManage || saving}
+              label="Allow speaker diarization"
+              onChange={(checked) =>
+                setDraft((current) => ({
+                  ...current,
+                  diarizationEnabled: checked,
+                  ...(!checked ? { maxSpeakers: "" } : {}),
+                }))
+              }
+            />
+            {draft.diarizationEnabled ? (
+              <Field
+                label="Maximum speakers"
+                hint="Optional accepted limit from 2 to 100 speakers."
+              >
+                <Input
+                  type="number"
+                  min="2"
+                  max="100"
+                  step="1"
+                  value={draft.maxSpeakers}
+                  disabled={!canManage || saving}
+                  placeholder="Provider default"
+                  onChange={(event) =>
+                    setDraft((current) => ({ ...current, maxSpeakers: event.target.value }))
+                  }
+                />
+              </Field>
+            ) : null}
+          </fieldset>
 
           <fieldset className="grid gap-2 rounded-md border border-border p-3">
             <legend className="px-1 text-xs font-medium">Privacy acceptance</legend>
@@ -401,6 +454,9 @@ function draftFromPolicy(policy: WorkspaceTranscriptionPolicy): PolicyDraft {
     enabled: policy.enabled,
     primary: targetDraft(policy.primary),
     language: policy.language ?? "",
+    autoDetectLanguage: policy.autoDetectLanguage,
+    diarizationEnabled: policy.diarization.enabled,
+    maxSpeakers: policy.diarization.maxSpeakers?.toString() ?? "",
     retentionMode: policy.retention.mode,
     retentionDays: policy.retention.maxDays?.toString() ?? "",
     allowProviderLogging: policy.privacy.allowProviderLogging,
@@ -431,6 +487,8 @@ function policyFromDraft(draft: PolicyDraft): WorkspaceTranscriptionPolicy {
       acceptanceId: null,
       primary: null,
       language: null,
+      autoDetectLanguage: false,
+      diarization: { enabled: false, maxSpeakers: null },
       retention: { mode: "none", maxDays: null },
       privacy: { allowProviderLogging: false, allowProviderTraining: false },
       fallback: { mode: "disabled", targets: [] },
@@ -439,11 +497,22 @@ function policyFromDraft(draft: PolicyDraft): WorkspaceTranscriptionPolicy {
   }
   const primary = targetFromDraft(draft.primary, "Primary");
   const fallback = draft.fallbackEnabled ? [targetFromDraft(draft.fallback, "Fallback")] : [];
+  const language = emptyToNull(draft.language);
+  if (!draft.autoDetectLanguage && language === null) {
+    throw new Error("Language is required unless automatic detection is accepted.");
+  }
   return {
     enabled: true,
     acceptanceId: crypto.randomUUID(),
     primary,
-    language: emptyToNull(draft.language),
+    language: draft.autoDetectLanguage ? null : language,
+    autoDetectLanguage: draft.autoDetectLanguage,
+    diarization: {
+      enabled: draft.diarizationEnabled,
+      maxSpeakers: draft.diarizationEnabled
+        ? boundedInteger(draft.maxSpeakers, "Maximum speakers", 2, 100, true)
+        : null,
+    },
     retention: {
       mode: draft.retentionMode,
       maxDays:
@@ -503,6 +572,21 @@ function boundedNumber(
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed < 0 || parsed > maximum) {
     throw new Error(`${label} must be between 0 and ${maximum}.`);
+  }
+  return parsed;
+}
+
+function boundedInteger(
+  value: string,
+  label: string,
+  minimum: number,
+  maximum: number,
+  nullable: true,
+): number | null {
+  if (!value.trim() && nullable) return null;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < minimum || parsed > maximum) {
+    throw new Error(`${label} must be a whole number between ${minimum} and ${maximum}.`);
   }
   return parsed;
 }

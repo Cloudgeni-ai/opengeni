@@ -206,13 +206,100 @@ describe("provider-agnostic composer transcription browser acceptance", () => {
     await failed.goto(`${baseUrl}/transcription.html?theme=light`, { waitUntil: "networkidle" });
     await failed.getByRole("button", { name: "Start voice input" }).click();
     await failed.getByRole("button", { name: "Fail stream" }).click();
-    await failed
+    const providerAlert = failed
       .getByRole("alert")
-      .filter({ hasText: "Fixture provider failed. Your draft was not changed." })
-      .waitFor();
+      .filter({ hasText: "The transcription service could not continue." });
+    await providerAlert.waitFor();
     expect(await failed.getByRole("textbox", { name: "Message the agent" }).inputValue()).toBe(
       "Existing editable draft",
     );
+    expect(await providerAlert.innerText()).not.toMatch(
+      /FixtureProvider|fixture-secret|opaque-token|Bearer/i,
+    );
+    expect(await failed.locator("body").innerText()).not.toMatch(
+      /FixtureProvider|fixture-secret|opaque-token|Bearer/i,
+    );
+    await context.close();
+  });
+
+  test("secret-bearing start failures render only controlled local copy", async () => {
+    const context = await browser.newContext({ viewport: { width: 375, height: 812 } });
+    const page = await context.newPage();
+    const failures = observePageFailures(page);
+    await page.goto(`${baseUrl}/transcription.html?theme=dark&mode=start-secret`, {
+      waitUntil: "networkidle",
+    });
+    await page.getByRole("button", { name: "Start voice input" }).click();
+    const alert = page
+      .getByRole("alert")
+      .filter({ hasText: "Voice input could not start. Try again." });
+    await alert.waitFor();
+    expect(await alert.innerText()).not.toMatch(
+      /FixtureProvider|fixture-secret|opaque-token|Bearer|sk-fixture/i,
+    );
+    expect(await page.locator("body").innerText()).not.toMatch(
+      /FixtureProvider|fixture-secret|opaque-token|Bearer|sk-fixture/i,
+    );
+    expect(await page.getByRole("button", { name: "Retry voice input" }).count()).toBe(1);
+    expect(failures).toEqual([]);
+    await context.close();
+  });
+
+  test("empty finals remain correctable and the same accepted correction inserts once", async () => {
+    const context = await browser.newContext({ viewport: { width: 768, height: 960 } });
+    const page = await context.newPage();
+    await page.goto(`${baseUrl}/transcription.html?theme=light`, { waitUntil: "networkidle" });
+    const textarea = page.getByRole("textbox", { name: "Message the agent" });
+    await page.getByRole("button", { name: "Start voice input" }).click();
+    const correction = page.getByRole("button", { name: "Emit empty then corrected final" });
+    await correction.click();
+    expect(await textarea.inputValue()).toBe(
+      "Existing editable draft Corrected final is inserted once",
+    );
+    await correction.click();
+    expect(await textarea.inputValue()).toBe(
+      "Existing editable draft Corrected final is inserted once",
+    );
+    await context.close();
+  });
+
+  test("a hanging start is aborted at the local deadline and becomes retryable", async () => {
+    const context = await browser.newContext({ viewport: { width: 375, height: 812 } });
+    const page = await context.newPage();
+    await page.goto(`${baseUrl}/transcription.html?theme=dark&mode=hanging`, {
+      waitUntil: "networkidle",
+    });
+    await page.getByRole("button", { name: "Start voice input" }).click();
+    await page
+      .getByRole("alert")
+      .filter({ hasText: "Voice input took too long to start. Try again." })
+      .waitFor();
+    expect(
+      await page.evaluate(() => document.documentElement.dataset.transcriptionStartAborted),
+    ).toBe("true");
+    expect(await page.getByRole("button", { name: "Retry voice input" }).count()).toBe(1);
+    await context.close();
+  });
+
+  test("Escape restores idle focus while hanging cancel and close run independently", async () => {
+    const context = await browser.newContext({ viewport: { width: 768, height: 960 } });
+    const page = await context.newPage();
+    await page.goto(`${baseUrl}/transcription.html?theme=light&mode=cleanup-hangs`, {
+      waitUntil: "networkidle",
+    });
+    await page.getByRole("button", { name: "Start voice input" }).click();
+    await page.getByRole("button", { name: "Stop voice input" }).waitFor();
+    await page.keyboard.press("Escape");
+    await page.getByRole("button", { name: "Start voice input" }).waitFor();
+    expect(await page.evaluate(() => document.activeElement?.getAttribute("aria-label"))).toBe(
+      "Message the agent",
+    );
+    expect(
+      await page.evaluate(() => document.documentElement.dataset.transcriptionCancelInvoked),
+    ).toBe("true");
+    expect(
+      await page.evaluate(() => document.documentElement.dataset.transcriptionCloseInvoked),
+    ).toBe("true");
     await context.close();
   });
 

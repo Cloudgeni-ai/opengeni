@@ -183,8 +183,15 @@ draft. Its authorization comes only from a full, exact
 `WorkspaceTranscriptionPolicy` accepted in Workspace settings; it never inherits
 turn-model policy or the current turn's provider/model. A host-injected adapter
 owns microphone access, audio transport, provider credentials, and provider
-privacy/cost enforcement. Partials remain ephemeral UI state; each accepted
-final appends to the draft exactly once and is sent only through ordinary Send.
+privacy/cost enforcement. Policies explicitly accept fixed versus automatic
+language recognition and whether speaker diarization is allowed. The strict
+event surface permits optional neutral language, span, confidence, speaker, and
+word metadata but no provider payload bags or error display strings. The React
+lifecycle aborts and bounds pending starts, independently bounds detached
+cancel/close cleanup, fences ordered callbacks, keeps partials ephemeral, and
+appends each non-empty accepted final to the draft exactly once. Raw adapter
+failures are redacted into non-UI diagnostics while the composer renders only
+controlled local copy. Text is sent only through ordinary Send.
 The web bundle ships no production adapter and therefore fails closed.
 
 > Canonical: [`transcription.md`](transcription.md),
@@ -400,7 +407,7 @@ after provider deletion succeeds.
 
 ### 7.3 `apps/web` — operator console
 
-Bootstraps `/v1/config/client`, resolves the auth mode, gates, then loads access context + workspaces. The only bespoke HTTP it owns is client-config bootstrap + Better Auth `/v1/auth/*`; everything else goes through the SDK. Routes are **hand-written** in `App.tsx` (TanStack Router generation is OFF). `context.tsx` is the cross-route hub. Almost all session/streaming logic lives in `@opengeni/react`, not here. Workspace settings owns transcription provider/model/BYOK/region/retention/privacy/fallback/cost acceptance; the ordinary composer receives only the resolved policy and an optional host adapter, never provider controls. The web bundle ships no adapter. Watch-outs: `/clear-view` is local/this-device-only; stale-bundle auto-reload on revision mismatch; one GitHub installation per session.
+Bootstraps `/v1/config/client`, resolves the auth mode, gates, then loads access context + workspaces. The only bespoke HTTP it owns is client-config bootstrap + Better Auth `/v1/auth/*`; everything else goes through the SDK. Routes are **hand-written** in `App.tsx` (TanStack Router generation is OFF). `context.tsx` is the cross-route hub. Almost all session/streaming logic lives in `@opengeni/react`, not here. Workspace settings owns transcription provider/model/BYOK/region/language/diarization/retention/privacy/fallback/cost acceptance; the ordinary composer receives only the resolved policy and an optional host adapter, never provider controls. The web bundle ships no adapter. Watch-outs: `/clear-view` is local/this-device-only; stale-bundle auto-reload on revision mismatch; one GitHub installation per session.
 
 ### 7.4 `contracts` + `config` — the foundation
 
@@ -428,7 +435,7 @@ The barrel (`index.ts`, 2600+ lines) drives the SDK run: instruction composition
 
 ### 7.10 `sdk` + `react` — published clients
 
-`sdk` must carry **zero runtime deps** (hand-mirrors contract types; pinned by `contract-parity.test.ts`). Streaming is exactly-once/in-order/gap-free anchored on `sequence` (backfill **throws** rather than skip). `SessionEvent.type`/`Permission`/`UsageEventType` are **open unions** — do not narrow. Its transcription module is browser-global-free: hosts inject adapters, while exact policy/descriptor matching and immutable session requests fail closed independently of model routing. `react`'s optional DOM-only peers (noVNC, xterm, Pierre diffs, CodeMirror) **must be lazily imported** so SSR/non-desktop bundles stay clean. Its transcription hook fences generations and sequences, keeps partials ephemeral, and inserts deduplicated finals into the editable composer draft. Connected-machine UI (dashboard, enrollment, status pills, metrics) is carved into the **`@opengeni/react/machines`** subpath (`src/machines.ts`) so the root import is the clean sandbox-only default and machine surfaces are opt-in (the root still re-exports them deprecated for back-compat, #144). The two are version-linked via changesets; the desktop pixel plane is consent-gated (409 until acknowledged).
+`sdk` must carry **zero runtime deps** (hand-mirrors contract types; pinned by `contract-parity.test.ts`). Streaming is exactly-once/in-order/gap-free anchored on `sequence` (backfill **throws** rather than skip). `SessionEvent.type`/`Permission`/`UsageEventType` are **open unions** — do not narrow. Its transcription module is browser-global-free: hosts inject adapters, while exact policy/descriptor matching and immutable session requests fail closed independently of model routing; adapter start receives an `AbortSignal` plus a diagnostic seam, and events expose only controlled errors and optional provider-neutral result metadata. `react`'s optional DOM-only peers (noVNC, xterm, Pierre diffs, CodeMirror) **must be lazily imported** so SSR/non-desktop bundles stay clean. Its transcription hook aborts/bounds pending starts, independently bounds detached cleanup, fences generations and sequences, keeps partials ephemeral, forwards only bounded redacted diagnostics, and inserts deduplicated non-empty finals into the editable composer draft. Connected-machine UI (dashboard, enrollment, status pills, metrics) is carved into the **`@opengeni/react/machines`** subpath (`src/machines.ts`) so the root import is the clean sandbox-only default and machine surfaces are opt-in (the root still re-exports them deprecated for back-compat, #144). The two are version-linked via changesets; the desktop pixel plane is consent-gated (409 until acknowledged).
 
 ### 7.11 `agent/` (Rust) + `agent-proto` + the relay
 

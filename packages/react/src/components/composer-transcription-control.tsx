@@ -1,12 +1,14 @@
 import type {
   TranscriptionAdapter,
+  TranscriptionDiagnostic,
+  TranscriptionErrorCode,
   TranscriptionTargetSelection,
   WorkspaceTranscriptionPolicy,
 } from "@opengeni/sdk";
 import { LoaderCircleIcon, MicIcon, RotateCwIcon, SquareIcon } from "lucide-react";
 import { type MouseEvent } from "react";
 import { cn } from "../lib/cn";
-import { useTranscription } from "../hooks/use-transcription";
+import { useTranscription, type TranscriptionLifecycleTimeouts } from "../hooks/use-transcription";
 import { useChatComposer } from "./composer";
 
 export type ComposerTranscriptionMessages = {
@@ -20,6 +22,14 @@ export type ComposerTranscriptionMessages = {
   unavailableDisabled: string;
   unavailableAdapter: string;
   unavailablePolicy: string;
+  errorPermissionDenied: string;
+  errorNotSupported: string;
+  errorNetwork: string;
+  errorProvider: string;
+  errorPolicyBlocked: string;
+  errorTimeout: string;
+  errorCancelled: string;
+  errorUnknown: string;
 };
 
 const defaultMessages: ComposerTranscriptionMessages = {
@@ -33,6 +43,14 @@ const defaultMessages: ComposerTranscriptionMessages = {
   unavailableDisabled: "Voice input is unavailable while the composer is disabled.",
   unavailableAdapter: "Voice input needs an approved transcription adapter.",
   unavailablePolicy: "Enable and accept transcription in Workspace settings.",
+  errorPermissionDenied: "Microphone permission was denied. Your draft was not changed.",
+  errorNotSupported: "Voice input is not supported on this device.",
+  errorNetwork: "Voice input lost its network connection.",
+  errorProvider: "The transcription service could not continue.",
+  errorPolicyBlocked: "Workspace policy does not authorize voice input.",
+  errorTimeout: "Voice input took too long to start. Try again.",
+  errorCancelled: "Voice input was cancelled.",
+  errorUnknown: "Voice input could not start. Try again.",
 };
 
 export type ComposerTranscriptionControlProps = {
@@ -41,6 +59,8 @@ export type ComposerTranscriptionControlProps = {
   selection?: TranscriptionTargetSelection | undefined;
   messages?: Partial<ComposerTranscriptionMessages> | undefined;
   className?: string | undefined;
+  lifecycleTimeouts?: Partial<TranscriptionLifecycleTimeouts> | undefined;
+  onDiagnostic?: ((diagnostic: TranscriptionDiagnostic) => void) | undefined;
 };
 
 /** One provider-neutral microphone control for the nearest editable composer. */
@@ -50,6 +70,8 @@ export function ComposerTranscriptionControl({
   selection,
   messages: overrides,
   className,
+  lifecycleTimeouts,
+  onDiagnostic,
 }: ComposerTranscriptionControlProps) {
   const composer = useChatComposer();
   const messages = { ...defaultMessages, ...overrides };
@@ -61,6 +83,8 @@ export function ComposerTranscriptionControl({
     setValue: composer.setValue,
     focusInput: composer.focusInput,
     disabled: composer.disabled,
+    lifecycleTimeouts,
+    onDiagnostic,
   });
   const status = transcription.state.status;
   const active =
@@ -83,6 +107,9 @@ export function ComposerTranscriptionControl({
       : active
         ? messages.stop
         : messages.start;
+  const errorMessage = transcription.state.error
+    ? transcriptionErrorMessage(transcription.state.error.code, messages)
+    : null;
   const announcement =
     transcription.state.partial ||
     (status === "requesting-permission"
@@ -90,11 +117,11 @@ export function ComposerTranscriptionControl({
       : status === "listening"
         ? messages.listening
         : status === "reconnecting"
-          ? (transcription.state.error?.message ?? messages.reconnecting)
+          ? (errorMessage ?? messages.reconnecting)
           : status === "cancelling"
             ? messages.cancelling
             : status === "error"
-              ? (transcription.state.error?.message ?? messages.retry)
+              ? (errorMessage ?? messages.errorUnknown)
               : unavailableMessage);
 
   function activate(event: MouseEvent<HTMLButtonElement>) {
@@ -157,4 +184,28 @@ export function ComposerTranscriptionControl({
       </span>
     </span>
   );
+}
+
+function transcriptionErrorMessage(
+  code: TranscriptionErrorCode,
+  messages: ComposerTranscriptionMessages,
+): string {
+  switch (code) {
+    case "permission_denied":
+      return messages.errorPermissionDenied;
+    case "not_supported":
+      return messages.errorNotSupported;
+    case "network":
+      return messages.errorNetwork;
+    case "provider":
+      return messages.errorProvider;
+    case "policy_blocked":
+      return messages.errorPolicyBlocked;
+    case "timeout":
+      return messages.errorTimeout;
+    case "cancelled":
+      return messages.errorCancelled;
+    case "unknown":
+      return messages.errorUnknown;
+  }
 }

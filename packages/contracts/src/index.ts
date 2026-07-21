@@ -630,6 +630,138 @@ export const WorkspaceTranscriptionTarget = z
   });
 export type WorkspaceTranscriptionTarget = z.infer<typeof WorkspaceTranscriptionTarget>;
 
+export const TranscriptionErrorCode = z.enum([
+  "permission_denied",
+  "not_supported",
+  "network",
+  "provider",
+  "policy_blocked",
+  "timeout",
+  "cancelled",
+  "unknown",
+]);
+export type TranscriptionErrorCode = z.infer<typeof TranscriptionErrorCode>;
+
+export const TranscriptionTimeSpan = z
+  .object({
+    startMilliseconds: z.number().finite().nonnegative(),
+    endMilliseconds: z.number().finite().nonnegative(),
+  })
+  .strict()
+  .superRefine((span, context) => {
+    if (span.endMilliseconds < span.startMilliseconds) {
+      context.addIssue({
+        code: "custom",
+        path: ["endMilliseconds"],
+        message: "transcription spans must not end before they start",
+      });
+    }
+  });
+export type TranscriptionTimeSpan = z.infer<typeof TranscriptionTimeSpan>;
+
+export const TranscriptionSpeaker = z
+  .object({
+    id: z.string().trim().min(1).max(128),
+    label: z.string().trim().min(1).max(128).optional(),
+  })
+  .strict();
+export type TranscriptionSpeaker = z.infer<typeof TranscriptionSpeaker>;
+
+export const TranscriptionWord = z
+  .object({
+    text: z.string().min(1).max(4096),
+    span: TranscriptionTimeSpan,
+    confidence: z.number().finite().min(0).max(1).optional(),
+    speaker: TranscriptionSpeaker.optional(),
+  })
+  .strict();
+export type TranscriptionWord = z.infer<typeof TranscriptionWord>;
+
+export const TranscriptionResultMetadata = z
+  .object({
+    detectedLanguage: z.string().trim().min(1).max(64).optional(),
+    span: TranscriptionTimeSpan.optional(),
+    confidence: z.number().finite().min(0).max(1).optional(),
+    speaker: TranscriptionSpeaker.optional(),
+    words: z.array(TranscriptionWord).max(10_000).optional(),
+  })
+  .strict()
+  .superRefine((metadata, context) => {
+    let previousStart = -1;
+    for (const [index, word] of (metadata.words ?? []).entries()) {
+      if (word.span.startMilliseconds < previousStart) {
+        context.addIssue({
+          code: "custom",
+          path: ["words", index, "span", "startMilliseconds"],
+          message: "transcription words must be ordered by start time",
+        });
+      }
+      previousStart = word.span.startMilliseconds;
+      if (
+        metadata.span &&
+        (word.span.startMilliseconds < metadata.span.startMilliseconds ||
+          word.span.endMilliseconds > metadata.span.endMilliseconds)
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: ["words", index, "span"],
+          message: "transcription word spans must fall within the result span",
+        });
+      }
+    }
+  });
+export type TranscriptionResultMetadata = z.infer<typeof TranscriptionResultMetadata>;
+
+const TranscriptionEventBase = z
+  .object({
+    localSessionId: z.string().min(1).max(256),
+    sequence: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    occurredAt: z.string().datetime({ offset: true }),
+  })
+  .strict();
+
+/** Strict provider-neutral event surface; provider payload bags are rejected. */
+export const TranscriptionEvent = z.discriminatedUnion("type", [
+  TranscriptionEventBase.extend({ type: z.literal("permission.requested") }),
+  TranscriptionEventBase.extend({
+    type: z.literal("session.opened"),
+    providerSessionId: z.string().min(1).max(512),
+  }),
+  TranscriptionEventBase.extend({
+    type: z.literal("transcript.partial"),
+    segmentId: z.string().min(1).max(512),
+    text: z.string().max(1_000_000),
+    metadata: TranscriptionResultMetadata.optional(),
+  }),
+  TranscriptionEventBase.extend({
+    type: z.literal("transcript.final"),
+    segmentId: z.string().min(1).max(512),
+    text: z.string().max(1_000_000),
+    providerAcceptanceId: z.string().min(1).max(512),
+    metadata: TranscriptionResultMetadata.optional(),
+  }),
+  TranscriptionEventBase.extend({
+    type: z.literal("usage"),
+    audioMilliseconds: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    costUsd: z.number().finite().nonnegative().max(1_000_000_000).nullable(),
+  }),
+  TranscriptionEventBase.extend({
+    type: z.literal("session.reconnecting"),
+    attempt: z.number().int().nonnegative().max(10_000),
+    reason: z.string().min(1).max(256),
+  }),
+  TranscriptionEventBase.extend({
+    type: z.literal("session.error"),
+    code: TranscriptionErrorCode,
+    recoverable: z.boolean(),
+  }),
+  TranscriptionEventBase.extend({
+    type: z.literal("session.closed"),
+    reason: z.enum(["completed", "cancelled", "error", "replaced"]),
+  }),
+]);
+export type TranscriptionEvent = z.infer<typeof TranscriptionEvent>;
+
 /**
  * Workspace-only policy for the distinct speech-to-text capability. It never
  * authorizes a turn model/provider and contains connection references rather
@@ -642,6 +774,13 @@ export const WorkspaceTranscriptionPolicy = z
     acceptanceId: z.string().uuid().nullable(),
     primary: WorkspaceTranscriptionTarget.nullable(),
     language: z.string().trim().min(1).max(64).nullable(),
+    autoDetectLanguage: z.boolean(),
+    diarization: z
+      .object({
+        enabled: z.boolean(),
+        maxSpeakers: z.number().int().min(2).max(100).nullable(),
+      })
+      .strict(),
     retention: z
       .object({
         mode: z.enum(["none", "provider-policy"]),
@@ -682,6 +821,27 @@ export const WorkspaceTranscriptionPolicy = z
         code: "custom",
         path: ["primary"],
         message: "enabled transcription requires a primary target",
+      });
+    }
+    if (policy.enabled && !policy.autoDetectLanguage && policy.language === null) {
+      context.addIssue({
+        code: "custom",
+        path: ["language"],
+        message: "enabled transcription requires a language or accepted automatic detection",
+      });
+    }
+    if (policy.autoDetectLanguage && policy.language !== null) {
+      context.addIssue({
+        code: "custom",
+        path: ["language"],
+        message: "automatic language detection and a fixed language are mutually exclusive",
+      });
+    }
+    if (!policy.diarization.enabled && policy.diarization.maxSpeakers !== null) {
+      context.addIssue({
+        code: "custom",
+        path: ["diarization", "maxSpeakers"],
+        message: "disabled diarization cannot retain a speaker limit",
       });
     }
     if (policy.fallback.mode === "disabled" && policy.fallback.targets.length > 0) {

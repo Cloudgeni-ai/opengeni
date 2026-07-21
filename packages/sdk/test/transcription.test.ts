@@ -19,6 +19,8 @@ const acceptedPolicy: WorkspaceTranscriptionPolicy = {
     region: "eu-test-1",
   },
   language: "en-US",
+  autoDetectLanguage: false,
+  diarization: { enabled: false, maxSpeakers: null },
   retention: { mode: "none", maxDays: null },
   privacy: { allowProviderLogging: false, allowProviderTraining: false },
   fallback: {
@@ -147,6 +149,8 @@ describe("provider-agnostic transcription policy", () => {
       selection: { kind: "primary" },
       target: acceptedPolicy.primary!,
       language: "en-US",
+      autoDetectLanguage: false,
+      diarization: acceptedPolicy.diarization,
       retention: acceptedPolicy.retention,
       privacy: acceptedPolicy.privacy,
       cost: acceptedPolicy.cost,

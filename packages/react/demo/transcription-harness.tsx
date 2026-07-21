@@ -1,5 +1,6 @@
 import type {
   TranscriptionAdapter,
+  TranscriptionAdapterStartContext,
   TranscriptionEvent,
   TranscriptionEventListener,
   TranscriptionSession,
@@ -11,9 +12,18 @@ import { createRoot } from "react-dom/client";
 import { ChatComposer, type ComposerState } from "../src/index";
 import "../../../apps/web/src/styles.css";
 
+type FixtureMode = "normal" | "denied" | "hanging" | "cleanup-hangs" | "start-secret";
+
 const params = new URLSearchParams(window.location.search);
 const theme = params.get("theme") === "light" ? "light" : "dark";
-const initialMode = params.get("mode") === "denied" ? "denied" : "normal";
+const requestedMode = params.get("mode");
+const initialMode: FixtureMode =
+  requestedMode === "denied" ||
+  requestedMode === "hanging" ||
+  requestedMode === "cleanup-hangs" ||
+  requestedMode === "start-secret"
+    ? requestedMode
+    : "normal";
 if (theme === "light") document.documentElement.dataset.ogTheme = "light";
 else delete document.documentElement.dataset.ogTheme;
 
@@ -28,6 +38,8 @@ const policy: WorkspaceTranscriptionPolicy = {
     region: null,
   },
   language: "en-US",
+  autoDetectLanguage: false,
+  diarization: { enabled: false, maxSpeakers: null },
   retention: { mode: "none", maxDays: null },
   privacy: { allowProviderLogging: false, allowProviderTraining: false },
   fallback: { mode: "disabled", targets: [] },
@@ -43,22 +55,43 @@ class FixtureTranscriptionAdapter implements TranscriptionAdapter {
   };
   private listener: TranscriptionEventListener | null = null;
   private request: TranscriptionSessionRequest | null = null;
+  private context: TranscriptionAdapterStartContext | null = null;
   private sequence = 0;
-  mode: "normal" | "denied" = initialMode;
+
+  constructor(readonly mode: FixtureMode) {}
 
   async start(
     request: TranscriptionSessionRequest,
     listener: TranscriptionEventListener,
+    context: TranscriptionAdapterStartContext,
   ): Promise<TranscriptionSession> {
     this.request = request;
     this.listener = listener;
+    this.context = context;
     this.sequence = 0;
+    document.documentElement.dataset.transcriptionStartAborted = String(context.signal.aborted);
+    context.signal.addEventListener(
+      "abort",
+      () => {
+        document.documentElement.dataset.transcriptionStartAborted = "true";
+      },
+      { once: true },
+    );
     this.emit({ type: "permission.requested" });
+
+    if (this.mode === "hanging") {
+      return await new Promise<TranscriptionSession>(() => {});
+    }
+    if (this.mode === "start-secret") {
+      const detail =
+        "FixtureProvider start failed api-key=fixture-secret Bearer opaque-token sk-fixture123";
+      context.reportDiagnostic({ operation: "start", code: "provider", detail });
+      throw new Error(detail);
+    }
     if (this.mode === "denied") {
       this.emit({
         type: "session.error",
         code: "permission_denied",
-        message: "Microphone permission was denied. Your draft was not changed.",
         recoverable: false,
       });
     } else {
@@ -67,14 +100,29 @@ class FixtureTranscriptionAdapter implements TranscriptionAdapter {
     return {
       localSessionId: request.localSessionId,
       cancel: async () => {
+        document.documentElement.dataset.transcriptionCancelInvoked = "true";
+        if (this.mode === "cleanup-hangs") return await new Promise<void>(() => {});
         this.emit({ type: "session.closed", reason: "cancelled" });
       },
-      close: async () => {},
+      close: async () => {
+        document.documentElement.dataset.transcriptionCloseInvoked = "true";
+        if (this.mode === "cleanup-hangs") return await new Promise<void>(() => {});
+      },
     };
   }
 
   partial(text = "This partial stays ephemeral"): void {
-    this.emit({ type: "transcript.partial", segmentId: "fixture-segment", text });
+    this.emit({
+      type: "transcript.partial",
+      segmentId: "fixture-segment",
+      text,
+      metadata: {
+        detectedLanguage: "en-US",
+        span: { startMilliseconds: 0, endMilliseconds: 800 },
+        confidence: 0.82,
+        speaker: { id: "speaker-1", label: "Speaker 1" },
+      },
+    });
   }
 
   final(text = "Final transcript remains editable"): void {
@@ -83,6 +131,35 @@ class FixtureTranscriptionAdapter implements TranscriptionAdapter {
       segmentId: "fixture-segment",
       text,
       providerAcceptanceId: "fixture-acceptance-1",
+      metadata: {
+        detectedLanguage: "en-US",
+        span: { startMilliseconds: 0, endMilliseconds: 1_200 },
+        confidence: 0.96,
+        speaker: { id: "speaker-1", label: "Speaker 1" },
+        words: [
+          {
+            text: "Final transcript remains editable",
+            span: { startMilliseconds: 0, endMilliseconds: 1_200 },
+            confidence: 0.96,
+            speaker: { id: "speaker-1" },
+          },
+        ],
+      },
+    });
+  }
+
+  emptyThenCorrectedFinal(): void {
+    this.emit({
+      type: "transcript.final",
+      segmentId: "fixture-correctable",
+      text: "  \n ",
+      providerAcceptanceId: "fixture-correctable-acceptance",
+    });
+    this.emit({
+      type: "transcript.final",
+      segmentId: "fixture-correctable",
+      text: "Corrected final is inserted once",
+      providerAcceptanceId: "fixture-correctable-acceptance",
     });
   }
 
@@ -99,10 +176,14 @@ class FixtureTranscriptionAdapter implements TranscriptionAdapter {
   }
 
   fail(): void {
+    this.context?.reportDiagnostic({
+      operation: "session",
+      code: "provider",
+      detail: "FixtureProvider stream failed secret=fixture-secret Bearer opaque-token",
+    });
     this.emit({
       type: "session.error",
       code: "provider",
-      message: "Fixture provider failed. Your draft was not changed.",
       recoverable: false,
     });
   }
@@ -126,7 +207,7 @@ type EventPayload = TranscriptionEvent extends infer Event
   : never;
 
 function Harness() {
-  const adapter = useMemo(() => new FixtureTranscriptionAdapter(), []);
+  const adapter = useMemo(() => new FixtureTranscriptionAdapter(initialMode), []);
   const [value, setValue] = useState("Existing editable draft");
   const [sent, setSent] = useState<Array<{ id: number; message: string }>>([]);
   const composer: ComposerState = {
@@ -182,11 +263,22 @@ function Harness() {
             </ol>
           ) : null}
         </div>
-        <ChatComposer composer={composer} transcription={{ adapter, policy }} />
+        <ChatComposer
+          composer={composer}
+          transcription={{
+            adapter,
+            policy,
+            lifecycleTimeouts: { startMs: 80, cleanupMs: 40 },
+            onDiagnostic: () => {},
+          }}
+        />
         <fieldset className="flex flex-wrap gap-2 rounded-og-md border border-og-border p-3">
           <legend className="px-1 text-xs text-og-fg-muted">Deterministic adapter events</legend>
           <FixtureButton onClick={() => adapter.partial()}>Emit partial</FixtureButton>
           <FixtureButton onClick={() => adapter.final()}>Emit final</FixtureButton>
+          <FixtureButton onClick={() => adapter.emptyThenCorrectedFinal()}>
+            Emit empty then corrected final
+          </FixtureButton>
           <FixtureButton onClick={() => adapter.reconnect()}>Interrupt stream</FixtureButton>
           <FixtureButton onClick={() => adapter.restore()}>Restore stream</FixtureButton>
           <FixtureButton onClick={() => adapter.fail()}>Fail stream</FixtureButton>
