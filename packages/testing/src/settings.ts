@@ -194,6 +194,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     sandboxLeaseWarmingTtlMs: 120_000,
     sandboxWarmingTimeoutMs: 600_000,
     rigSetupTimeoutMs: 600_000,
+    rigVerificationEphemeralOwnersEnabled: false,
     sandboxWarmRateMicrosPerSecondJson: "{}",
     sandboxMaxWarmSecondsPerWorkspace: 0,
     sandboxPreparationProfiles: "none",

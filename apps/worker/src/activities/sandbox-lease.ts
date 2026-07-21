@@ -37,9 +37,10 @@ import {
   countQueuedTurns,
   countSandboxLeasesByLiveness,
   forceDrainOverLimitViewerOnlyBoxes,
+  findLiveModalSandboxInstanceAttribution,
   getBillingBalance,
   listCreditBalancesByAccount,
-  listLiveModalSandboxLeaseAttributions,
+  listLiveModalSandboxInstanceAttributions,
   listMeterableWarmLeases,
   persistDrainSnapshot,
   readLease,
@@ -65,6 +66,7 @@ import {
   sweepModalOrphanSandboxes,
   terminateModalSandboxById,
   type WorkspaceArchiveDescriptor,
+  type LiveModalSandboxInstanceAttribution as RuntimeLiveModalSandboxInstanceAttribution,
 } from "@opengeni/runtime";
 import type { ActivityServices } from "./types";
 import { reconcilePendingParentSystemUpdates } from "./parent-wake";
@@ -170,6 +172,8 @@ export type SweepModalOrphansFn = (
   observability: ActivityServices["observability"],
 ) => Promise<number>;
 
+export type SweepModalSandboxesFn = typeof sweepModalOrphanSandboxes;
+
 export type SandboxLeaseActivityOptions = {
   /** Override the provider terminate (tests spy this; defaults to the real
    *  resume-by-id + provider stop()). */
@@ -177,6 +181,10 @@ export type SandboxLeaseActivityOptions = {
   /** Override the provider-side Modal orphan sweep (tests spy this; defaults to
    *  Modal list+tag comparison when Modal is configured). */
   sweepModalOrphans?: SweepModalOrphansFn;
+  /** Lower-level Modal list/classify/terminate seam. Tests inject a fake
+   * provider while retaining the production DB snapshot + exact revalidation
+   * ordering. */
+  sweepModalSandboxes?: SweepModalSandboxesFn;
 };
 
 export function createSandboxLeaseActivities(
@@ -185,7 +193,14 @@ export function createSandboxLeaseActivities(
 ) {
   const terminateBox: TerminateBoxFn = options.terminateBox ?? terminateProviderBox;
   const sweepModalOrphans: SweepModalOrphansFn =
-    options.sweepModalOrphans ?? sweepModalOrphansForConfiguredBackend;
+    options.sweepModalOrphans ??
+    ((settings, db, observability) =>
+      sweepModalOrphansForConfiguredBackend(
+        settings,
+        db,
+        observability,
+        options.sweepModalSandboxes,
+      ));
   /**
    * The one global reaper sweep. Idempotent; concurrency-safe with itself.
    * Gated by the caller (the Schedule is only registered when
@@ -468,6 +483,7 @@ async function sweepModalOrphansForConfiguredBackend(
   settings: ActivityServices["settings"],
   db: ActivityServices["db"],
   observability: ActivityServices["observability"],
+  sweepModalSandboxes: SweepModalSandboxesFn = sweepModalOrphanSandboxes,
 ): Promise<number> {
   // Keep the provider-side sweep tightly scoped to deployments that have a Modal
   // app path configured. Local/docker-only workers should not attempt Modal API
@@ -475,17 +491,41 @@ async function sweepModalOrphansForConfiguredBackend(
   if (settings.sandboxBackend !== "modal" && !settings.modalTokenId && !settings.modalTokenSecret) {
     return 0;
   }
-  let liveLeases: Awaited<ReturnType<typeof listLiveModalSandboxLeaseAttributions>>;
+  let liveAttributions: Awaited<ReturnType<typeof listLiveModalSandboxInstanceAttributions>>;
   try {
-    liveLeases = await listLiveModalSandboxLeaseAttributions(db);
+    liveAttributions = await listLiveModalSandboxInstanceAttributions(db);
   } catch (error) {
-    observability.warn("sandbox reaper: live Modal lease attribution read failed", {
+    observability.warn("sandbox reaper: live Modal instance attribution read failed", {
       error: error instanceof Error ? error.message : String(error),
     });
     return 0;
   }
 
-  const result = await sweepModalOrphanSandboxes(settings, liveLeases);
+  const toRuntimeAttribution = (
+    attribution: Awaited<ReturnType<typeof listLiveModalSandboxInstanceAttributions>>[number],
+  ): RuntimeLiveModalSandboxInstanceAttribution =>
+    attribution.ownerKind === "lease"
+      ? {
+          leaseId: attribution.ownerId,
+          workspaceId: attribution.workspaceId,
+          sandboxGroupId: attribution.sandboxGroupId,
+          instanceId: attribution.instanceId,
+          liveness: attribution.liveness,
+        }
+      : {
+          ownerKind: attribution.ownerKind,
+          ownerId: attribution.ownerId,
+          workspaceId: attribution.workspaceId,
+          instanceId: attribution.instanceId,
+          expiresAt: attribution.expiresAt,
+        };
+
+  const result = await sweepModalSandboxes(settings, liveAttributions.map(toRuntimeAttribution), {
+    revalidateLiveAttribution: async (instanceId) => {
+      const current = await findLiveModalSandboxInstanceAttribution(db, instanceId);
+      return current ? toRuntimeAttribution(current) : null;
+    },
+  });
   for (const terminated of result.terminated) {
     observability.warn("sandbox reaper: terminated Modal orphan sandbox", {
       sandboxId: terminated.sandboxId,
@@ -493,11 +533,21 @@ async function sweepModalOrphansForConfiguredBackend(
       tags: JSON.stringify(terminated.tags),
     });
   }
+  if (result.revalidationFailures > 0) {
+    observability.warn(
+      "sandbox reaper: exact Modal ownership revalidation failed closed; sandboxes preserved",
+      {
+        failures: result.revalidationFailures,
+        appName: settings.modalAppName,
+      },
+    );
+  }
   if (result.examined > 0) {
     observability.info("sandbox reaper: Modal orphan sweep completed", {
       examined: result.examined,
       terminated: result.terminated.length,
       skipped: result.skipped,
+      revalidationFailures: result.revalidationFailures,
       appName: settings.modalAppName,
     });
   }

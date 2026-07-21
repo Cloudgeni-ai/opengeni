@@ -165,6 +165,18 @@ describe("sandbox preparation profiles", () => {
     ).toBe(2_000);
   });
 
+  test("rig verifier ephemeral ownership activation is strict and defaults off", () => {
+    expect(withEnv({}, () => getSettings()).rigVerificationEphemeralOwnersEnabled).toBe(false);
+    expect(
+      withEnv({ OPENGENI_RIG_VERIFICATION_EPHEMERAL_OWNERS_ENABLED: "true" }, () => getSettings())
+        .rigVerificationEphemeralOwnersEnabled,
+    ).toBe(true);
+    expect(
+      withEnv({ OPENGENI_RIG_VERIFICATION_EPHEMERAL_OWNERS_ENABLED: "false" }, () => getSettings())
+        .rigVerificationEphemeralOwnersEnabled,
+    ).toBe(false);
+  });
+
   test("selfhosted exec/control timeouts default to 2min/30s and parse their env vars", () => {
     const defaults = withEnv({}, () => getSettings());
     expect(defaults.sandboxSelfhostedExecTimeoutMs).toBe(120_000);
