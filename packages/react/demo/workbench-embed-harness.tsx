@@ -5,7 +5,7 @@ import { OpenGeniProvider, SandboxWorkspace, useSessionEvents } from "../src/ind
 import "./styles.css";
 
 /* ----------------------------------------------------------------------------
-   M8 real-client embedder harness — the EXACT integration cloudgeni #1577 uses:
+   M8 real-client embedder harness — the EXACT integration tracked issue uses:
    `<OpenGeniProvider>` + `<SandboxWorkspace>` wired to a real `@opengeni/sdk`
    client, with NO host-injected tabs and NO host `initialTab`. This isolates
    the WORKBENCH's own behavior from apps/web's warm-on-open session chrome, so
