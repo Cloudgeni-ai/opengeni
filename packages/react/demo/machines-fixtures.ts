@@ -86,7 +86,7 @@ export const modalBox: MachineView = machine({
 // A selfhosted machine, online + idle (the swap TARGET — heterogeneous swap).
 export const onlineMachine: MachineView = machine({
   sandboxId: "sh-online",
-  name: "jorgen-desktop",
+  name: "dev-desktop",
   state: "online",
   metrics: idleMetrics,
 });
@@ -191,7 +191,7 @@ export const swappedMachinesResponse: MachinesResponse = {
 
 // Consent-screen seed: a machine offering a display + requesting screen control.
 export const consentMachine: EnrollmentConsentMachine = {
-  machineName: "jorgen-desktop",
+  machineName: "dev-desktop",
   os: "linux",
   arch: "x86_64",
   canOfferDisplay: true,
